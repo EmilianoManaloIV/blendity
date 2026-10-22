@@ -20,8 +20,8 @@ rising, and so the complaint has a number.
   summed per submission (busy = the card's clock, wait = the submission's wall time less it); `FrameProfile`'s
   `ms_gpu_shadow / ms_gpu_gbuffer / ms_gpu_lighting / ms_gpu_readback` filled from the raster device's existing
   `times()` by `gpu_views.cpp`, and `gpu_busy_ms()` as their sum; a GPU block in the Profiler window (`Editor::
-  draw_profiler_gpu`): the GPU path's wall time, the views' busy and its three passes, read-back (the CPU's timer)
-  and wait, "GPU busy in the frame" as a share
+  draw_profiler_gpu`): the GPU path's wall time, the views' busy and its three passes, read-back (the CPU's timer
+  around the copy; since task 0160 the copies out and the fence wait of the one submission) and wait, "GPU busy in the frame" as a share
   of the frame time, and for a running F12 or Camera Preview the path tracer's busy / wait inside its submissions and the busy share
   over the render so far (F12, `render_time_`) or the frame (Camera Preview), since the card is idle between
   submissions; "Render finished" logs the F12 share;
@@ -51,12 +51,7 @@ share is taken over the render's wall time, which is what tasks 0160-0162 raise.
    tasks 0160-0163.
 
 ## Results
-Measured on the RTX 4070 SUPER (a quiet machine; docs/PERFORMANCE.md Pass 13):
-
-- The views on the GPU, moving an object (stress editor_render): the card worked 0.28 ms of the 4.09 ms GPU path a frame (7 %; shadow 0.09, g-buffer 0.14, lighting 0.06), the read-back 0.85 ms, the rest waiting.
-- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): 122.9 samples/s, the card busy 99.8 % (1034.1 of 1035.9 ms) inside its submissions (busy + wait).
-- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): 821.0 samples/s, the card busy 99.5 % (149.6 of 150.5 ms) inside its submissions (busy + wait).
-- F12 of the default scene from the editor's frame loop (40 ms slices, headless): the card busy 21 % (256 samples of the default scene in 0.4 s on GPU Compute with both cards, their busy summed) of the render's wall time - the idle time is between submissions (uploads, merges, the UI), which tasks 0160-0162 remove.
+RESULTS179
 
 ## Tests
 - "GPU time in the Profiler: the views' pass times ... sum to at most the GPU path's time" (tests/test_gpu.cpp).

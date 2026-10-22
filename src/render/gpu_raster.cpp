@@ -1158,6 +1158,26 @@ class VulkanRaster final : public Raster {
   }
 
   bool render(const RasterFrame &fr, std::string *err) override {
+    if (!record_frame(fr, err) || !submit_wait(err)) return false;
+    read_times();
+    return true;
+  }
+
+  /* Task 0160: the frame's passes and the copies out in one command buffer, one wait. */
+  bool render_read(const RasterFrame &fr, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
+    const size_t px = (size_t)fr.width * fr.height;
+    if (!readback_buffer(px, err)) return false;  // (before the frame is recorded: record_frame takes the queued mesh copies)
+    if (!record_frame(fr, err)) return false;
+    const Slot &sl = slots_[fr.slot];
+    record_planes(sl, px, color != nullptr, depth != nullptr, ids != nullptr);
+    if (!submit_wait(err)) return false;
+    read_times();
+    unpack_planes(px, color, depth, ids);
+    return true;
+  }
+
+  /* The frame's three passes recorded into the command buffer (begun here), the timestamps around them; not submitted. */
+  bool record_frame(const RasterFrame &fr, std::string *err) {
     if (fr.slot < 0 || fr.slot >= kSlots) return fail(err, "no such view slot");
     for (const RasterInstance &in : instances_)
       if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
@@ -1191,35 +1211,50 @@ class VulkanRaster final : public Raster {
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
     stamp(3);
-    if (!submit_wait(err)) return false;
-    read_times();
     return true;
   }
 
   RasterTimes times() const override { return times_; }
+  uint64_t submits() const override { return submits_; }
 
   bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
     if (slot < 0 || slot >= kSlots) return fail(err, "no such view slot");
     const Slot &sl = slots_[slot];
     const size_t px = (size_t)sl.color.w * sl.color.h;
     if (!px) return fail(err, "nothing rendered yet");
-    if (!readback_.buf || readback_.size < px * 12) {
-      free_buffer(readback_);
-      if (!make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
-          !make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props()))
-        return fail(err, info_.name + ": out of memory for a read-back");
-    }
+    if (!readback_buffer(px, err)) return false;
     begin();
+    record_planes(sl, px, color != nullptr, depth != nullptr, ids != nullptr);
+    if (!submit_wait(err)) return false;
+    unpack_planes(px, color, depth, ids);
+    return true;
+  }
+
+  /* The host buffer the planes are copied into: colour, depth and ids of `px` pixels, cached memory when the card has it. */
+  bool readback_buffer(size_t px, std::string *err) {
+    if (readback_.buf && readback_.size >= px * 12) return true;
+    free_buffer(readback_);
+    if (make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+      return true;
+    if (make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props())) return true;
+    return fail(err, info_.name + ": out of memory for a read-back");
+  }
+  /* The copies out of a slot's planes, recorded into the open command buffer (after the frame's last barrier). */
+  void record_planes(const Slot &sl, size_t px, bool color, bool depth, bool ids) {
     if (color) copy_out(sl.color, VK_IMAGE_ASPECT_COLOR_BIT, 0);
     if (depth) copy_out(sl.depth, VK_IMAGE_ASPECT_DEPTH_BIT, px * 4);
     if (ids) copy_out(sl.ids, VK_IMAGE_ASPECT_COLOR_BIT, px * 8);
-    if (!submit_wait(err)) return false;
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};  // (the copies visible to the host before the fence)
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+  }
+  void unpack_planes(size_t px, uint32_t *color, float *depth, uint32_t *ids) {
     const uint8_t *m = (const uint8_t *)readback_.mapped;
     if (color) std::memcpy(color, m, px * 4);
     if (depth) std::memcpy(depth, m + px * 4, px * 4);
     if (ids) std::memcpy(ids, m + px * 8, px * 4);
-    return true;
   }
 
   bool attach_window(void *native, std::string *err) override {
@@ -1300,6 +1335,7 @@ class VulkanRaster final : public Raster {
    * have taken the last one yet), and waits for the copies. The present's own work (the compositor's blit) is the
    * system's, after the fence: not timed here. */
   bool submit_present(uint32_t image, std::string *err) {
+    submits_++;
     f_.vkEndCommandBuffer(cmd_);
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1334,6 +1370,7 @@ class VulkanRaster final : public Raster {
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
   VkQueryPool queries_ = VK_NULL_HANDLE;
+  uint64_t submits_ = 0;  // (task 0160: queue submissions, each waited for)
   bool timestamps_ = false;
   float ts_period_ns_ = 1.0f;
   RasterTimes times_;
@@ -1480,6 +1517,8 @@ class VulkanRaster final : public Raster {
     f_.vkBeginCommandBuffer(cmd_, &bi);
   }
   bool submit_wait(std::string *err) {
+    submits_++;
+    ScopedTimer wall;
     f_.vkEndCommandBuffer(cmd_);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -1488,6 +1527,7 @@ class VulkanRaster final : public Raster {
     if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS ||
         f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS)
       return fail(err, info_.name + ": the GPU stopped responding");
+    times_.submit_wall = wall.ms();
     return true;
   }
   bool upload(Buf &dst, const void *data, size_t bytes, std::string *err) {

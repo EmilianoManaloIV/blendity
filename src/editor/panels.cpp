@@ -1831,7 +1831,7 @@ void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function
   const bool stamps = busy > 0.0 || fp.ms_gpu == 0.0;
   stat("GPU views: the GPU path (wall)", strprintf("%.2f ms", fp.ms_gpu));
   stat("GPU views: busy (shadow / g-buffer / lighting)", stamps ? strprintf("%.2f ms (%.2f / %.2f / %.2f)", busy, fp.ms_gpu_shadow, fp.ms_gpu_gbuffer, fp.ms_gpu_lighting) : std::string("n/a (no timestamps)"));
-  stat("GPU views: read-back / wait", strprintf("%.2f ms / %.2f ms", fp.ms_gpu_readback, wait));
+  stat("GPU views: copies out + fence / wait", strprintf("%.2f ms / %.2f ms", fp.ms_gpu_readback, wait));  // (the wait: the GPU path's rest - gathering, uploads, the CPU's recording)
   stat("GPU busy in the frame", stamps && frame_ms_ > 0.0 ? strprintf("%.0f %% of %.2f ms", 100.0 * busy / frame_ms_, frame_ms_) : std::string("n/a"));
 }
 

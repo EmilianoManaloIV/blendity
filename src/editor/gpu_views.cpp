@@ -563,13 +563,15 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   uint32_t *color = contiguous ? rt.color : gpu_color_.data();
   const bool dof = cam && cam->dof && !cam->orthographic;
   const bool want_depth = !rt.depth.empty() && (planes_wanted_ || dof), want_ids = !rt.ids.empty() && planes_wanted_;
-  ok = ok && g->render(fr, &err);
+  float *depth = want_depth ? rt.depth.data() : nullptr;
+  uint32_t *ids = want_ids ? rt.ids.data() : nullptr;
+  /* Task 0160 (ADR 0051): the frame and its copies out in one submission, one wait (the split path kept for the test
+   * that checks the picture is the same). */
+  if (ok) ok = gpu_split_readback_for_test_ ? g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err) : g->render_read(fr, color, depth, ids, &err);
   if (ok) {
     const gpu::RasterTimes t = g->times();  // (task 0159: the card's own time in each pass, for the Profiler)
     prof_.ms_gpu_shadow += t.shadow, prof_.ms_gpu_gbuffer += t.gbuffer, prof_.ms_gpu_lighting += t.lighting;
-    ScopedTimer rb;
-    ok = g->read_back(slot, color, want_depth ? rt.depth.data() : nullptr, want_ids ? rt.ids.data() : nullptr, &err);
-    prof_.ms_gpu_readback += rb.ms();
+    prof_.ms_gpu_readback += std::max(0.0, t.submit_wall - t.total);  // (the submission's wall time beyond the passes: the copies out and the fence wait; without timestamps the whole submission)
   }
   gpu_forget_meshes();
   if (!ok) {

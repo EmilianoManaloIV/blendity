@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 180): a GPU view in one submission (task 0160, ADR 0051)
+
+**Asked:** the roadmap's "views in one submission, read-back double-buffered", after task 0159 showed the card busy
+for 7 % of the frame's GPU path.
+
+**Changed**
+- A view on the card is one submission and one fence wait: `Raster::render_read()` records the planes' copies
+  behind the frame's passes (after their last barrier) and submits once; before, `render()` and `read_back()` were
+  two submissions each waited for, six round trips for three views. `render()` / `read_back()` stay for tests,
+  stress and route B, sharing `record_frame` / `readback_buffer` / `record_planes` / `unpack_planes`;
+  `Raster::submits()` counts the queue's submissions. The Profiler's "read-back" row becomes "copies out + fence":
+  the submission's wall time beyond the card's passes (the device reports `submit_wall`); the lesson, the stress
+  note and `bench` say so, and the round-179 wording that called it the CPU's timer around the copy is amended.
+- Not done, and why (ADR 0051): the deferred flush (every view recorded, one submission a frame, two frames in
+  flight). Each view's planes are needed the moment its window draws (the overlays are depth-tested against
+  them, the camera's filters and depth of field read the depth, the upscale and the view cache copy the pixels),
+  so one flush a frame without a frame of latency means splitting the frame into a record phase before the
+  windows draw and a resolve phase inside them - a real restructure of the immediate-mode views, with the
+  rasteriser's per-device uniform, instance and read-back buffers made per slot. And during a drag the other
+  views are held (`hold_other_views`), so one view renders a frame in the plan's target case and batching views
+  would save nothing there. The plan's "50k-face drag ≤ 10 ms on the laptop setting" is measured as the stress
+  rows below, not promised; "read_back before a flush returns false" has no meaning without a flush.
+
+**Measured (RTX 4070 SUPER, stress editor_render, docs/PERFORMANCE.md Pass 13)**
+- Moving an object with the views on the GPU (stress editor_render, the RTX 4070 SUPER): the GPU path a frame 3.70 ms, was 4.09 ms; the card's own work 0.29 ms (8 % of the path, was 7 %); the copies out and the fence wait 0.52 ms, where the read-back was its own submission of 0.85 ms.
+- The frame's view count and the picture are unchanged (33 views on the card over the row, 0 on the CPU).
+
+**Checked**
+- A frame with the Scene and Game views on the card costs two submissions (was four) and the picture is bit for bit
+  the two-submission path's (a test switch keeps that path; tests/test_gpu.cpp).
+- Unit checks (round 180): Windows 11,158, 0 failed (910 tests); render-cache verify mode 11,159, 1 failed, 0 stale
+  pictures (the pipeline-cache test: a spare opening in the background rewrote its file under it; it passes alone three
+  times, and round 182 makes it wait for the spare). Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 179): GPU time in the Profiler (task 0159)
 
 **Asked:** "CPU and GPU usage look low" when rendering - and until now nothing in Blendity could say what the card

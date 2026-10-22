@@ -139,7 +139,7 @@ struct FrameProfile {
   double ms_gpu = 0;
   /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
    * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
-  double ms_gpu_shadow = 0, ms_gpu_gbuffer = 0, ms_gpu_lighting = 0, ms_gpu_readback = 0;
+  double ms_gpu_shadow = 0, ms_gpu_gbuffer = 0, ms_gpu_lighting = 0, ms_gpu_readback = 0;  // (readback since task 0160: the submission's wall time beyond the passes - the copies out and the fence wait)
   double gpu_busy_ms() const { return ms_gpu_shadow + ms_gpu_gbuffer + ms_gpu_lighting; }
   FrameProfile operator-(const FrameProfile &o) const {  // (task 0159: the GPU fields over a span of frames; `bench`)
     FrameProfile d;
@@ -660,6 +660,8 @@ class Editor {
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
   double gpu_view_open_ms() const { return gpu_view_open_ms_; }  // opening the GPU view took (device, pipelines, shaders)
+  uint64_t gpu_submits_for_test() const { return gpu_view_ ? gpu_view_->submits() : 0; }  // task 0160: the card's submissions so far
+  void gpu_split_readback_for_test(bool split) { gpu_split_readback_for_test_ = split; }  // the old render-then-read path
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
@@ -2551,6 +2553,7 @@ class Editor {
   std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
   std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
   double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)
+  bool gpu_split_readback_for_test_ = false;  // (task 0160: render and read back as two submissions, for the test)
   ShadowMap gpu_shadow_;             // the shadow map's frame for the GPU views (no depth: they render it)
   std::vector<uint32_t> gpu_color_;  // a view's colour when its rows aren't contiguous in the canvas
   uint64_t gpu_mesh_bytes_ = 0;      // what the meshes on the card take

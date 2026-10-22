@@ -1140,7 +1140,7 @@ static void test_editor_render(Report &rep, const Options &o) {
     /* Task 0159: of that path, what the card itself worked (its timestamps) and the read-back. */
     const double busy = (g1.gpu_busy_ms() - g0.gpu_busy_ms()) / (n + 1), path = (g1.ms_gpu - g0.ms_gpu) / (n + 1);
     const double readback = (g1.ms_gpu_readback - g0.ms_gpu_readback) / (n + 1);
-    if (busy > 0.0) rep.note(strprintf("GPU busy (task 0159): the card worked %.2f ms of the %.2f ms GPU path a frame (%.0f %%; shadow %.2f, g-buffer %.2f, lighting %.2f), the read-back %.2f ms, the rest waiting.",
+    if (busy > 0.0) rep.note(strprintf("GPU busy (task 0159): the card worked %.2f ms of the %.2f ms GPU path a frame (%.0f %%; shadow %.2f, g-buffer %.2f, lighting %.2f), the copies out and the fence %.2f ms, the rest gathering and uploading.",
                                        busy, path, 100.0 * busy / std::max(1e-6, path), (g1.ms_gpu_shadow - g0.ms_gpu_shadow) / (n + 1), (g1.ms_gpu_gbuffer - g0.ms_gpu_gbuffer) / (n + 1), (g1.ms_gpu_lighting - g0.ms_gpu_lighting) / (n + 1), readback));
     else rep.note("GPU busy (task 0159): this card reports no timestamps.");
     ed.viewport_device_for_test(1);

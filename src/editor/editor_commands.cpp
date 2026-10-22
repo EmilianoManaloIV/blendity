@@ -1652,7 +1652,7 @@ void Editor::run_console_command(const std::string &line) {
     raster_opt_ = saved;
     /* Task 0159: what the card did over the bench's own frames (the Scene view on the GPU), per frame. */
     const FrameProfile fp = prof_ - before;
-    if (fp.ms_gpu > 0.0) Log::info("bench GPU busy %.2f ms of %.2f ms a frame in the GPU path (read-back %.2f ms, the card busy %.0f %% of the path)", fp.gpu_busy_ms() / frames, fp.ms_gpu / frames, fp.ms_gpu_readback / frames, 100.0 * fp.gpu_busy_ms() / fp.ms_gpu);
+    if (fp.ms_gpu > 0.0) Log::info("bench GPU busy %.2f ms of %.2f ms a frame in the GPU path (copies out and fence %.2f ms, the card busy %.0f %% of the path)", fp.gpu_busy_ms() / frames, fp.ms_gpu / frames, fp.ms_gpu_readback / frames, 100.0 * fp.gpu_busy_ms() / fp.ms_gpu);
     else Log::info("bench GPU busy: the views are on the CPU (Preferences > Viewport Device: GPU to measure the card)");
   }
   else Log::warn("Unknown command '%s' (type help)", c.c_str());

@@ -1323,6 +1323,48 @@ static void tests_round179() {
   });
 }
 
+static void tests_round180() {
+  test("gpu views: a view costs the card one submission - its render and read-back together (was two) - and the picture is exactly the two-submission path's (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(2);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    auto draw_at = [&](float x) {  // (a change: every view draws again)
+      cube->set_local_position({x, 0.5f, 0.0f});
+      ed.step_frame_headless();
+    };
+    draw_at(0.05f);
+    draw_at(0.1f);
+    /* One submission a view. */
+    const uint64_t s0 = ed.gpu_submits_for_test();
+    draw_at(0.2f);
+    const uint64_t joined = ed.gpu_submits_for_test() - s0, views = ed.frame_profile().gpu_views;
+    std::printf("    %llu views on the card in the frame, %llu submissions\n", (unsigned long long)views, (unsigned long long)joined);
+    CHECK(views >= 2 && joined == views);
+    std::vector<uint32_t> a = r34_crop(ed, ed.scene_view_rect()), ga = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    a.insert(a.end(), ga.begin(), ga.end());
+    /* The old path - render, then read back - draws the same scene again: two submissions a view, the same pixels. */
+    ed.gpu_split_readback_for_test(true);
+    draw_at(0.3f);
+    const uint64_t s1 = ed.gpu_submits_for_test();
+    draw_at(0.2f);
+    const uint64_t split = ed.gpu_submits_for_test() - s1, views2 = ed.frame_profile().gpu_views;
+    std::printf("    the split path: %llu views, %llu submissions\n", (unsigned long long)views2, (unsigned long long)split);
+    CHECK(views2 == views && split == 2 * views2);
+    std::vector<uint32_t> b = r34_crop(ed, ed.scene_view_rect()), gb = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    b.insert(b.end(), gb.begin(), gb.end());
+    CHECK(a.size() == b.size() && a.size() > 1000 && a == b);
+    ed.gpu_split_readback_for_test(false);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -1330,4 +1372,5 @@ void run_gpu_tests() {
   tests_round126_to_round127();
   tests_round130();
   tests_round179();
+  tests_round180();
 }

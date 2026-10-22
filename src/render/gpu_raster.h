@@ -138,9 +138,10 @@ struct RasterFrame {
   float cage_bias = 0.0f, cage_point_radius = 0.0f;
 };
 
-/* GPU time of the last render() (timestamps), in ms. */
+/* GPU time of the last render() (timestamps), in ms; submit_wall is the last submission's wall time from the queue
+ * submit to the fence (task 0160: the copies out and the wait are submit_wall - total). */
 struct RasterTimes {
-  double shadow = 0, gbuffer = 0, lighting = 0, total = 0;
+  double shadow = 0, gbuffer = 0, lighting = 0, total = 0, submit_wall = 0;
 };
 
 /* A GPU picture against the CPU's, scored where it says something: covered pixels (id not 0: the background is the
@@ -195,6 +196,11 @@ class Raster {
   virtual RasterTimes times() const = 0;
   /* (A): a slot's last frame into CPU memory; any pointer may be null (not read back then). */
   virtual bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
+  /* Task 0160 (ADR 0051): render() and read_back() as one submission - the copies out are recorded behind the frame's
+   * passes, so the card is waited for once; what the editor's views use. */
+  virtual bool render_read(const RasterFrame &frame, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
+  /* How many times the queue was submitted to and waited for (tests: a view costs one, plus any uploads). */
+  virtual uint64_t submits() const = 0;
   /* (B): a swapchain on the window (Win32 HWND), then each present: the UI canvas's changed rows go up, slot 0's view
    * (its last render) is copied to (view_x, view_y), and the frame is shown and its copies waited for. */
   virtual bool attach_window(void *native, std::string *error) = 0;
