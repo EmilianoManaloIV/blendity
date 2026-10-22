@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the gpu tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include <cstring>
 
 static void round59_tests() {
   test("GPU opening: a device that doesn't exist is refused at once (nothing pending, an error)", [] {
@@ -702,19 +703,19 @@ static void tests_round122_to_round125() {
 }
 
 static void tests_round123() {
-  /* ---------------------------------------------------------------- round 123: the OptiX spike (task 0097) */
-  test("optix: a build without OptiX, or a machine without NVIDIA's driver, says so instead of failing (the picture is stress gpu_optix's)", [] {
+  /* ---------------------------------------------------------------- round 123: OptiX (task 0097's spike; the device since task 0170) */
+  test("optix: a build without OptiX, or a machine without NVIDIA's driver, says so instead of failing; a card that isn't there is refused", [] {
     std::string err;
-    const std::vector<std::string> devs = gpu::OptixTracer::devices(&err);
-    if (!gpu::OptixTracer::compiled_in()) {
+    const std::vector<std::string> devs = gpu::optix_devices(&err);
+    if (!gpu::optix_compiled_in()) {
       CHECK(devs.empty() && !err.empty());
-      CHECK(gpu::OptixTracer::create(0, &err) == nullptr && !err.empty());
-      std::printf("    built without OptiX: %s\n", err.c_str());
+      CHECK(gpu::create_optix_renderer(0, &err) == nullptr && !err.empty());
+      std::printf("    without OptiX: %s\n", err.c_str());
       return;
     }
     std::printf("    OptiX built in; CUDA devices: %zu%s\n", devs.size(), devs.empty() ? (" (" + err + ")").c_str() : "");
     err.clear();
-    CHECK(gpu::OptixTracer::create(1000, &err) == nullptr && !err.empty());
+    CHECK(gpu::create_optix_renderer(1000, &err) == nullptr && !err.empty());
   });
 }
 
@@ -1856,18 +1857,23 @@ static bool r189_hash(const std::string &path, uint64_t &h) {
   return true;
 }
 static void tests_round189() {
-  test("OptiX ships as committed PTX: its header's hash matches optix_kernel.cu and optix_params.h (run tools/optix_ptx_embed.bat after changing them)", [&] {
+  test("OptiX ships as committed PTX: its header's hash matches what it is made from - optix_kernel.cu, optix_params.h, glsl.cuh, the GPU kernel's GLSL and its translator (run tools/optix_ptx_embed.bat after changing them)", [&] {
 #if defined(R189_HAVE_PTX)
     uint64_t h = 0xcbf29ce484222325ull;
-    const bool read = r189_hash("src/render/optix_kernel.cu", h) && r189_hash("src/render/optix_params.h", h);
+    bool read = true;  // (what tools/optix_ptx_embed.bat hashes, in its order)
+    for (const char *f : {"src/render/optix_kernel.cu", "src/render/optix_params.h", "src/render/optix/glsl.cuh", "src/render/gpu_kernel.h",
+                          "src/render/gpu_glsl.h", "tools/glsl_to_cuda.py"})
+      read = read && r189_hash(f, h);
     if (!read) {
       std::printf("    (the sources aren't beside the tests: run from the blendity folder)\n");
       return;
     }
-    std::printf("    the committed PTX: %zu bytes from OptiX %d; its hash %016llx, the sources' %016llx\n", sizeof(optix_kernel_ptx), (int)BL_OPTIX_PTX_OPTIX_VERSION,
+    std::printf("    the committed PTX: %zu bytes from OptiX %d; its hash %016llx, the sources' %016llx\n", (size_t)BL_OPTIX_PTX_BYTES, (int)BL_OPTIX_PTX_OPTIX_VERSION,
                 (unsigned long long)BL_OPTIX_PTX_SOURCE_HASH, (unsigned long long)h);
     CHECK(h == BL_OPTIX_PTX_SOURCE_HASH);
-    CHECK(sizeof(optix_kernel_ptx) > 1000 && BL_OPTIX_PTX_OPTIX_VERSION >= 70000);
+    size_t joined = 0;
+    for (const char *part : optix_kernel_ptx_parts) joined += std::strlen(part);
+    CHECK(joined == (size_t)BL_OPTIX_PTX_BYTES && BL_OPTIX_PTX_BYTES > 1000 && BL_OPTIX_PTX_OPTIX_VERSION >= 70000);
 #else
     CHECK(false);  // (the header is committed: src/render/optix/optix_kernel_ptx.h)
 #endif
@@ -1883,14 +1889,123 @@ static void tests_round189() {
     const std::string before = was ? was : "";
     set_env("BLENDITY_NO_OPTIX", "1");
     const std::string off = gpu::optix_status();
-    const bool compiled = gpu::OptixTracer::compiled_in();
+    const bool compiled = gpu::optix_compiled_in();
     std::string why;
-    const bool made = gpu::OptixTracer::create(0, &why) != nullptr;
+    const bool made = gpu::create_optix_renderer(0, &why) != nullptr;
     set_env("BLENDITY_NO_OPTIX", before);
     CHECK(!made);
     std::printf("    with BLENDITY_NO_OPTIX=1: %s; compiled in: %s\n", off.c_str(), compiled ? "yes" : "no");
     CHECK(!compiled);
     CHECK(off == "OptiX: turned off (BLENDITY_NO_OPTIX=1)" || off == "OptiX: not in this build");
+  });
+}
+
+/* Round 190 (task 0170, ADR 0054): the OptiX device. */
+static void tests_round190() {
+  test("the OptiX device renders the picture GPU Compute renders: one integrator (the GLSL translated), the same samples - spheres, a glass ball, a toon ball (task 0171), a checker floor, a sun and a point light at 64 samples within 0.01 a channel on average", [&] {
+    if (!gpu::available() || !gpu::optix_compiled_in() || gpu::optix_device_of(0) < 0) {
+      std::printf("    (no OptiX card here)\n");
+      return;
+    }
+    auto ball = primitives::uv_sphere(0.5f, 32, 16);
+    auto floor = primitives::plane(10.0f, 1);
+    MaterialPtr red = make_material("red", {0.8f, 0.2f, 0.15f}), glass = make_material("glass", {0.95f, 0.95f, 0.95f}), chk = make_material("floor", {0.8f, 0.8f, 0.8f});
+    red->roughness = 0.4f;
+    glass->surface = (int)MaterialSurface::Glass;
+    glass->roughness = 0.05f;
+    chk->procedural = 1;  // (Checker)
+    chk->procedural_color2 = {0.2f, 0.2f, 0.25f};
+    MaterialPtr toon = make_material("toon", {0.9f, 0.6f, 0.5f});  // (task 0171: the toon shading, three bands and a rim)
+    toon->shading_model = 1;
+    toon->toon_bands = 3;
+    toon->toon_rim_strength = 0.6f;
+    std::vector<MaterialPtr> mr = {red}, mg = {glass}, mf = {chk}, mt = {toon};
+    std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::translate({0, -0.5f, 0}), &mf},
+                                  {&ball->render_mesh_tangents(), Mat4::translate({-0.7f, 0, 0}), &mr},
+                                  {&ball->render_mesh_tangents(), Mat4::translate({0.7f, 0, 0.3f}), &mg},
+                                  {&ball->render_mesh_tangents(), Mat4::translate({0.0f, 0.1f, 1.0f}) * Mat4::scale(Vec3(0.6f)), &mt}};
+    RenderLight sun, lamp;
+    sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+    lamp.type = RenderLight::Point;
+    lamp.position = {0.0f, 1.5f, -1.0f};
+    lamp.intensity = 4.0f;
+    Environment env;
+    const int W = 160, H = 120;
+    const Mat4 v = Mat4::look_at({0, 1.2f, -3.5f}, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 100.0f);
+    auto render = [&](const char *backend, std::string &device) {
+      set_env("BLENDITY_GPU_BACKEND", backend);
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = false;
+      st.gpus = {0};
+      st.gpu_hardware_rt = true;
+      st.max_bounces = 4;
+      st.denoise = false;
+      st.use_guiding = false;
+      pt.set_settings(st);
+      pt.build(objs, {sun, lamp}, env);
+      pt.set_camera(v, p, W, H);
+      pt.render(1e9, 64);
+      device = pt.gpu_error().empty() ? pt.device_summary() : pt.gpu_error();
+      return pt.linear_rgb(false);
+    };
+    std::string dv, dx;
+    const std::vector<float> vk = render("vulkan", dv), ox = render("optix", dx);
+    set_env("BLENDITY_GPU_BACKEND", "vulkan");
+    double diff = 0, worst = 0, sum = 0;
+    size_t differ = 0;
+    for (size_t i = 0; i < vk.size() && i < ox.size(); i++) {
+      const double d = std::fabs((double)vk[i] - ox[i]);
+      diff += d, worst = std::max(worst, d), sum += vk[i], differ += d > 0.0;
+    }
+    std::printf("    %zu of %zu channels differ at all\n", differ, vk.size());
+    diff /= std::max<size_t>(1, vk.size());
+    std::printf("    GPU Compute: %s\n    OptiX: %s\n    mean difference %.5f a channel (the picture's mean %.3f), the largest %.3f\n", dv.c_str(), dx.c_str(), diff,
+                sum / std::max<size_t>(1, vk.size()), worst);
+    CHECK(vk.size() == ox.size() && !vk.empty());
+    /* (Two empty pictures would match too: the objects must be in it - the pixels' spread, and a darker share.) */
+    float lo = 1e30f, hi = -1e30f;
+    size_t dark = 0;
+    for (size_t i = 0; i + 2 < vk.size(); i += 3) {
+      const float l = 0.2126f * vk[i] + 0.7152f * vk[i + 1] + 0.0722f * vk[i + 2];
+      lo = std::min(lo, l), hi = std::max(hi, l), dark += l < 0.5f;
+    }
+    std::printf("    the picture's luminance from %.3f to %.3f, %zu of %zu pixels under 0.5\n", lo, hi, dark, vk.size() / 3);
+    CHECK(hi - lo > 0.2f && dark > vk.size() / 3 / 20);
+    CHECK(dx.find("(OptiX)") != std::string::npos && dv.find("(OptiX)") == std::string::npos);
+    CHECK(diff < 0.01);
+  });
+  test("GPU Backend from the settings: OptiX opens the OptiX device on the card and a second build keeps it; Vulkan reopens the card as GPU Compute; a card OptiX can't take keeps GPU Compute without reopening", [&] {
+    if (!gpu::available() || !gpu::optix_compiled_in() || gpu::optix_device_of(0) < 0) {
+      std::printf("    (no OptiX card here)\n");
+      return;
+    }
+    set_env("BLENDITY_GPU_BACKEND", "");  // (the setting's path, not the tests' pin)
+    auto ball = primitives::uv_sphere(0.5f, 16, 8);
+    MaterialPtr m = make_material("m", {0.7f, 0.7f, 0.7f});
+    std::vector<MaterialPtr> ms = {m};
+    std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4(), &ms}};
+    RenderLight sun;
+    Environment env;
+    PathTracer pt;
+    auto run = [&](int backend) {
+      PTSettings st;
+      st.use_cpu = false;
+      st.gpus = {0};
+      st.gpu_hardware_rt = true;
+      st.gpu_backend = backend;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 0, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(0.8f, 1.0f, 0.1f, 10.0f), 32, 32);
+      pt.render(1e9, 2);
+      return pt.device_summary();
+    };
+    const std::string a = run(2), b = run(2), c = run(1);
+    gpu::set_backend(0);
+    set_env("BLENDITY_GPU_BACKEND", "vulkan");
+    std::printf("    OptiX: %s; again: %s; Vulkan: %s\n", a.c_str(), b.c_str(), c.c_str());
+    CHECK(a.find("(OptiX)") != std::string::npos && b == a);
+    CHECK(c.find("(OptiX)") == std::string::npos && c.find("RT hardware") != std::string::npos);
   });
 }
 
@@ -1907,4 +2022,5 @@ void run_gpu_tests() {
   tests_round183();
   tests_round186();
   tests_round189();
+  tests_round190();
 }

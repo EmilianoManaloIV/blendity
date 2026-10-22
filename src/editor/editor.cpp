@@ -4,6 +4,7 @@
 #include "learn.h"
 #include "../texture/procedural_texture.h"
 #include "../render/texture_bake.h"
+#include "../render/optix_device.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -456,6 +457,7 @@ void Editor::frame(std::vector<Event> &events) {
     invalidate_material_textures();
     texture_touch_pending_ = false;
   }
+  if (scene_) gpu::set_backend(scene_->render.gpu_backend);  // (task 0170: before the prewarm, so its spares are the right kind)
   if (scene_ && scene_->render.device >= 1) gpu::prewarm(!headless_, scene_->render.hardware_rt);  // once; the GPU kernel and devices off the UI thread
   /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
    * mesh instead, or leave Edit Mode for anything without one. */

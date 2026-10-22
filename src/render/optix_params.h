@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* Task 0097 (spike): the launch parameters the OptiX kernel (optix_kernel.cu) and its host (optix_spike.cpp) share.
- * Plain C types only: NVRTC compiles it for the device, the C++ compiler for the host. */
+/* Task 0170 (ADR 0054): the launch parameters the OptiX device's kernel (optix_kernel.cu) and its host
+ * (optix_device.cpp) share: the device addresses of the buffers the GPU path tracer's kernel reads (gpu_kernel.h's
+ * bindings, the same layouts), the scene's top-level structure and the dispatch's samples (the kernel's push
+ * constants). Plain integers: NVRTC and the host compiler read the same bytes. */
 #pragma once
 
-namespace bl::gpu {
-
-struct OptixParams {
-  float *accum;                // width x height x 4: rgb summed, the 4th the samples
-  unsigned long long handle;   // the scene's OptixTraversableHandle
-  const float *albedo;         // 4 floats per object (its instance id)
-  float inv_view_proj[16];     // column-major, the CPU's convention (depth 0..1, y up)
-  float sun_dir[4], sun_color[4];
-  float sky[4], equator[4], ground[4];
-  int width, height, first_sample, samples, max_bounces;
+struct OptixLaunchParams {
+  unsigned long long params;   // GParams (binding 0)
+  unsigned long long accum;    // vec4 per pixel (binding 1)
+  unsigned long long aux;      // albedo, normal + depth, coverage (binding 2)
+  unsigned long long insts;    // GInstance (binding 5)
+  unsigned long long verts;    // GVertex (binding 6)
+  unsigned long long idx;      // uvec4 per triangle (binding 7)
+  unsigned long long mats;     // GMaterial (binding 8)
+  unsigned long long lights;   // GLight (binding 9)
+  unsigned long long mlights;  // GMeshLight (binding 10)
+  unsigned long long mcdf;     // float (binding 11)
+  unsigned long long tex8;     // uint (binding 12)
+  unsigned long long texf;     // vec4 (binding 13)
+  unsigned long long texinfo;  // GTexInfo (binding 14)
+  unsigned long long handle;   // OptixTraversableHandle: the instances over every mesh's triangles
+  int sample_index, sample_count;
 };
-
-}  // namespace bl::gpu

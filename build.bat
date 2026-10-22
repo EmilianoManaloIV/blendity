@@ -87,39 +87,17 @@ if "%OPTIX_ROOT_DIR%"=="" for /f "delims=" %%o in ('dir /b /ad /o-d "%ProgramDat
 if "%OPTIX_ROOT_DIR%"=="" if "%BLENDITY_FETCH_OPTIX%"=="1" if not exist build\optix\sdk\include\optix.h git clone --quiet --depth 1 --branch %OPTIX_DEV_TAG% https://github.com/NVIDIA/optix-dev.git build\optix\sdk || echo [blendity] Fetching NVIDIA's OptiX headers %OPTIX_DEV_TAG% failed
 if "%OPTIX_ROOT_DIR%"=="" if exist build\optix\sdk\include\optix.h set "OPTIX_ROOT_DIR=%CD%\build\optix\sdk"
 if not exist "%OPTIX_ROOT_DIR%\include\optix.h" goto optix_done
-if exist src\render\optix\optix_kernel_ptx.h (
-  set "OPTIX_PTX_DIR=src\render\optix"
-  goto optix_on
-)
-if not exist "%CUDA_PATH%\bin\bin2c.exe" goto optix_done
-if not exist "%CUDA_PATH%\lib\x64\nvrtc.lib" goto optix_done
-if not exist "%OPTIX_ROOT_DIR%\include\optix.h" goto optix_done
-if not exist build\optix mkdir build\optix
-if not exist build\optix\ptx_compile.exe cl /nologo /EHsc /O2 /I"%CUDA_PATH%\include" tools\ptx_compile.cpp /Fo:build\optix\ /Fe:build\optix\ptx_compile.exe /link /LIBPATH:"%CUDA_PATH%\lib\x64" nvrtc.lib
-if not exist build\optix\ptx_compile.exe (
-  echo [blendity] The OptiX kernel's compiler didn't build: building without OptiX
+if not exist src\render\optix\optix_kernel_ptx.h (
+  echo [blendity] No committed OptiX kernel ^(src\render\optix\optix_kernel_ptx.h: tools\optix_ptx_embed.bat writes it^): building without OptiX
   goto optix_done
 )
-set "PATH=%CUDA_PATH%\bin;%PATH%"
-rem compute_75 (Turing, the first RT cores): the cards the spike measured; older ones keep GPU Compute.
-build\optix\ptx_compile.exe src\render\optix_kernel.cu build\optix\optix_kernel.ptx --gpu-architecture=compute_75 -use_fast_math -std=c++17 -default-device -rdc=true -I"%OPTIX_ROOT_DIR%\include" -I"%CUDA_PATH%\include" -Isrc\render
-if errorlevel 1 (
-  echo [blendity] The OptiX kernel didn't compile: building without OptiX
-  goto optix_done
-)
-"%CUDA_PATH%\bin\bin2c.exe" -c --name optix_kernel_ptx build\optix\optix_kernel.ptx > build\optix\optix_kernel_ptx.h
-if errorlevel 1 (
-  echo [blendity] bin2c couldn't embed the OptiX kernel: building without OptiX
-  goto optix_done
-)
-set "OPTIX_PTX_DIR=build\optix"
 :optix_on
 set USE_OPTIX=1
 set LIBDEFS=%LIBDEFS% /DBL_WITH_OPTIX
 rem (optixInit finds the driver's OptiX through the registry and the device manager)
 set LIBLINK=%LIBLINK% advapi32.lib cfgmgr32.lib
-set LIBINC=%LIBINC% /I"%OPTIX_ROOT_DIR%\include" /I%OPTIX_PTX_DIR% /Iextern\cuew\include
-echo [blendity] With NVIDIA OptiX: its headers from %OPTIX_ROOT_DIR%, the kernel from %OPTIX_PTX_DIR%
+set LIBINC=%LIBINC% /I"%OPTIX_ROOT_DIR%\include" /Isrc\render\optix /Iextern\cuew\include
+echo [blendity] With NVIDIA OptiX: its headers from %OPTIX_ROOT_DIR%, the kernel from src\render\optix
 :optix_done
 rem A build that asked for the fetch (CI, the release) must have OptiX: else it would ship without it, quietly.
 if "%BLENDITY_FETCH_OPTIX%"=="1" if not "%USE_OPTIX%"=="1" if not "%BLENDITY_NO_OPTIX%"=="1" (

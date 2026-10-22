@@ -52,3 +52,18 @@ public and pinned.
 - The committed PTX is ~110 KB of text; it changes only when the kernel does.
 - macOS never builds OptiX (no NVIDIA driver).
 - Task 0170 turns the spike into the render device on this footing.
+
+## Amendment (task 0170, with 0171): the device - one integrator, opt-in until it is faster
+- **One integrator.** The OptiX kernel is the GPU path tracer's GLSL translated to CUDA at embed time
+  (`tools/glsl_to_cuda.py`, `src/render/optix/glsl.cuh`), not a port: the pictures are the same within 1e-5 a channel on
+  the same card (two-thirds of the channels differ in the last digits: the two compilers' fast math), and a change to the GLSL is a change to both devices (the hash test names the translator and the GLSL
+  among the PTX's sources). Only `intersect()` differs: optixTrace.
+- **Opt-in.** Measured on the stress gpu_optix scene, OptiX is a third of GPU Compute's speed on the RTX 4070 SUPER and a fifth on the RTX 3060 Ti (the
+  task doc has the table). As one kernel round optixTrace, every value live across a trace is saved on OptiX's
+  continuation stack; Vulkan's ray queries trace inline on the same RT cores. The spike's 1.7x came from a Lambert kernel
+  with almost nothing live. Inlining everything and 255 registers took it from 0.09x to 0.32x on the 4070 SUPER. Render Settings >
+  GPU Backend offers OptiX; Auto stays GPU Compute.
+- **What would change it:** a wavefront integrator (Cycles' shape - intersect, shade and queue kernels, the path state
+  in memory between them), so that nothing is live across a trace. It changes both devices and is its own task.
+- **The first open** compiles the 3.6 MB PTX (about 20 seconds per card without the driver's cache): in the background,
+  as GPU Compute's pipelines open.

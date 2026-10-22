@@ -23,6 +23,9 @@ if errorlevel 1 exit /b 1
 set "PATH=%CUDA_PATH%\bin;%PATH%"
 if not exist src\render\optix mkdir src\render\optix
 rem compute_75 (Turing, the first RT cores): older cards keep GPU Compute.
-build\optix\ptx_compile.exe src\render\optix_kernel.cu build\optix\optix_kernel.ptx --gpu-architecture=compute_75 -use_fast_math -std=c++17 -default-device -rdc=true -I"%OPTIX_ROOT_DIR%\include" -I"%CUDA_PATH%\include" -Isrc\render --header=src\render\optix\optix_kernel_ptx.h --hash-file=src\render\optix_kernel.cu --hash-file=src\render\optix_params.h "--optix-h=%OPTIX_ROOT_DIR%\include\optix.h"
+rem Task 0170: the GPU path tracer's GLSL (gpu_kernel.h, gpu_glsl.h) translated to CUDA first: one integrator for both devices.
+py -3 tools\glsl_to_cuda.py . build\optix\glsl_kernel.cuh
+if errorlevel 1 exit /b 1
+build\optix\ptx_compile.exe src\render\optix_kernel.cu build\optix\optix_kernel.ptx --gpu-architecture=compute_75 -use_fast_math -std=c++17 -default-device -rdc=true -I"%OPTIX_ROOT_DIR%\include" -I"%CUDA_PATH%\include" -Isrc\render -Isrc\render\optix -Ibuild\optix --header=src\render\optix\optix_kernel_ptx.h --hash-file=src\render\optix_kernel.cu --hash-file=src\render\optix_params.h --hash-file=src\render\optix\glsl.cuh --hash-file=src\render\gpu_kernel.h --hash-file=src\render\gpu_glsl.h --hash-file=tools\glsl_to_cuda.py "--optix-h=%OPTIX_ROOT_DIR%\include\optix.h"
 if errorlevel 1 exit /b 1
 echo [optix] wrote src\render\optix\optix_kernel_ptx.h from %OPTIX_ROOT_DIR%

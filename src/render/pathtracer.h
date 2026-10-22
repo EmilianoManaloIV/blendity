@@ -91,6 +91,7 @@ struct PTSettings {
   bool use_cpu = true;
   std::vector<int> gpus;         // gpu::devices() indices (empty = CPU only)
   bool gpu_hardware_rt = true;   // use ray tracing hardware where a GPU has it
+  int gpu_backend = -1;          // task 0170: 0 Auto (GPU Compute for now), 1 Vulkan, 2 OptiX; -1 leave gpu::backend() as it is
   double merge_interval_ms = 100.0;  // how often GPU results are read back for display
   float guiding_probability = 0.5f;  // Cycles' "Surface Guiding Probability"
   int guiding_training_samples = 128;
@@ -301,6 +302,7 @@ class PathTracer {
     std::unique_ptr<gpu::Renderer> r;
     int index = 0;
     bool hw_rt = false;
+    bool optix = false;      // task 0170: the OptiX device (its info().type)
     /* Task 0161 (ADR 0052): the card's worker thread and its state. Under work_mutex_: samples, ms_per_sample,
      * failed, error, active, merge_wanted, quit and the timing sums; under host_mutex: the host copy of the sums. */
     int samples = 0;         // finished on the card

@@ -175,6 +175,7 @@ bool renderers_opening();         // a background open is running
 /* Tests: slow every background open down, and drop the ready renderers (a cold start). */
 void set_open_delay_for_test(int ms);
 void drop_ready_renderers_for_test();
+void drop_ready_renderers();  // (task 0170: the backend changed - the spares were opened for the other one)
 /* The pipeline cache file of a device (task 0037): a Vulkan VkPipelineCache kept on disk. */
 std::string pipeline_cache_file(int index, bool hardware_rt);
 

@@ -20,7 +20,7 @@
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
 #include "../src/render/gpu_raster.h"
-#include "../src/render/optix_spike.h"
+#include "../src/render/optix_device.h"
 #include "../src/render/realtime_lightmap.h"
 #include "../src/render/voxel_gi_gpu.h"
 #include "../src/core/cpu.h"
@@ -5149,141 +5149,95 @@ static void test_gpu_raster(Report &rep, const Options &o) {
            "setting.");
 }
 
-/* Task 0097 (spike, ADR 0037): an OptiX path tracer against the Vulkan one (GPU Compute with ray tracing hardware), the
- * same scene and settings, samples a second at 1080p. The OptiX kernel is simpler (Lambert, flat normals), so its
- * number is an upper bound of what OptiX would gain. */
+/* Task 0170 (ADR 0054; task 0097's spike before it): the OptiX device against GPU Compute (Vulkan with ray tracing
+ * hardware) - the same scene through PathTracer on each card, each backend in turn, samples a second at 1080p, the
+ * scene's upload, and how far the two pictures differ (one integrator: they should be the same). */
+static void set_backend_env(const char *b) {
+#ifdef _WIN32
+  _putenv_s("BLENDITY_GPU_BACKEND", b);
+#else
+  setenv("BLENDITY_GPU_BACKEND", b, 1);
+#endif
+}
 static void test_gpu_optix(Report &rep, const Options &o) {
-  rep.title("OptiX spike (task 0097): an OptiX path tracer vs GPU Compute (Vulkan, ray tracing hardware)",
-            "1920x1080, 256 icospheres and a floor (Lambert-like materials: roughness 1, no specular), a sun with a shadow ray per "
-            "bounce, the gradient sky, 4 bounces. Samples a second over 64 samples, each device's best of two runs. The OptiX "
-            "kernel is deliberately simpler than GPU Compute's (Lambert with flat normals, no textures or MIS): its speed is the "
-            "most OptiX could gain.");
+  rep.title("OptiX device (task 0170): OptiX vs GPU Compute (Vulkan, ray tracing hardware)",
+            "1920x1080, 256 icospheres and a floor (principled materials), a sun, 4 bounces. Samples a second over 64 samples, each "
+            "backend's best of two runs on each card; the scene's upload (build) time; the pictures' mean difference. Both run the "
+            "same integrator (gpu_kernel.h's GLSL; OptiX's translated to CUDA).");
   const int W = 1920, H = 1080, spp = o.quick ? 16 : 64, bounces = 4;
   auto mesh = primitives::ico_sphere(0.5f, 3);
   Scene s = make_grid_scene(256, mesh, 1.3f);
   auto floor = primitives::plane(40.0f, 1);
   MaterialPtr bench = make_material("bench", {0.7f, 0.5f, 0.3f}), mfl = make_material("floor", {0.8f, 0.8f, 0.8f});
-  for (MaterialPtr &m : {std::ref(bench), std::ref(mfl)}) m->roughness = 1.0f, m->metallic = 0.0f, m->specular = 0.0f;
   std::vector<MaterialPtr> mats = {bench}, mfloor = {mfl};
   std::vector<PTObject> objs;
-  std::vector<gpu::OptixObjectIn> oobjs;
-  const Mat4 floor_model = Mat4::translate({0, -0.6f, 0});
-  objs.push_back({&floor->render_mesh_tangents(), floor_model, &mfloor});
-  gpu::OptixObjectIn fo;
-  fo.mesh = 0;
-  std::memcpy(fo.model, floor_model.m, 64);
-  fo.albedo[0] = fo.albedo[1] = fo.albedo[2] = 0.8f;
-  oobjs.push_back(fo);
-  s.for_each([&](GameObject &g) {
-    objs.push_back({&g.get<MeshFilter>()->mesh->render_mesh_tangents(), g.world_matrix(), &mats});
-    gpu::OptixObjectIn oo;
-    oo.mesh = 1;
-    std::memcpy(oo.model, g.world_matrix().m, 64);
-    oo.albedo[0] = 0.7f, oo.albedo[1] = 0.5f, oo.albedo[2] = 0.3f;
-    oobjs.push_back(oo);
-  });
+  objs.push_back({&floor->render_mesh_tangents(), Mat4::translate({0, -0.6f, 0}), &mfloor});
+  s.for_each([&](GameObject &g) { objs.push_back({&g.get<MeshFilter>()->mesh->render_mesh_tangents(), g.world_matrix(), &mats}); });
   RenderLight sun;
   sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
-  Environment env;  // (the gradient sky)
+  Environment env;
   const Vec3 eye(10.0f, 8.0f, -14.0f);
   const Mat4 v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 1000.0f);
-  rep.table({"device", "scene build ms", "samples / s", "ms per sample", "vs GPU Compute"});
+  rep.table({"device", "first open + upload ms", "samples / s", "ms per sample", "vs GPU Compute", "picture difference"});
+  const char *user_backend = std::getenv("BLENDITY_GPU_BACKEND");
+  const std::string restore = user_backend ? user_backend : "vulkan";
   if (!gpu::available()) {
     rep.note("No Vulkan GPU here: nothing to compare.");
     return;
   }
-  /* GPU Compute, each Vulkan GPU with its ray tracing hardware (merging its samples only at the end). */
-  std::map<std::string, double> vulkan_sps;
-  std::vector<float> vulkan_rgb;
-  for (const gpu::DeviceInfo &d : gpu::devices()) {
-    PathTracer pt;
-    PTSettings st;
-    st.use_cpu = false;
-    st.gpus = {d.index};
-    st.gpu_hardware_rt = true;
-    st.max_bounces = bounces;
-    st.denoise = false;
-    st.use_guiding = false;
-    st.merge_interval_ms = 1e9;
-    pt.set_settings(st);
-    ScopedTimer tb;
-    pt.build(objs, {sun}, env);
-    const double build_ms = tb.ms();
-    pt.set_camera(v, p, W, H);
-    pt.render(1e9, 2);  // warm-up (the kernel's pipeline)
-    double best = 1e30;
-    for (int run = 0; run < 2; run++) {
-      pt.set_camera(v, p, W, H);
-      ScopedTimer t;
-      pt.render(1e9, spp);
-      best = std::min(best, t.ms());
-    }
-    if (!pt.gpu_error().empty()) rep.note(d.name + ": " + pt.gpu_error());
-    const double sps = spp / (best / 1000.0);
-    vulkan_sps[d.name] = sps;
-    if (vulkan_rgb.empty()) vulkan_rgb = pt.linear_rgb(false);
-    rep.row({d.name + " - GPU Compute (Vulkan, RT cores)", f1(build_ms), f1(sps), f2(best / spp), "1.00x"});
-  }
-  std::string err;
-  if (!gpu::OptixTracer::compiled_in()) {
-    rep.note("This build has no OptiX (built without the CUDA Toolkit and the OptiX SDK): nothing to compare.");
-    return;
-  }
-  const std::vector<std::string> cuda = gpu::OptixTracer::devices(&err);
-  if (cuda.empty()) rep.note("OptiX: no CUDA device (" + err + ").");
-  /* The meshes as OptiX takes them. */
-  std::vector<std::vector<float>> pos(2);
-  const RenderMesh *rms[2] = {&floor->render_mesh(), &mesh->render_mesh()};
-  std::vector<gpu::OptixMeshIn> omeshes(2);
-  for (int i = 0; i < 2; i++) {
-    for (const Vec3 &q : rms[i]->positions) pos[(size_t)i].insert(pos[(size_t)i].end(), {q.x, q.y, q.z});
-    omeshes[(size_t)i] = {pos[(size_t)i].data(), rms[i]->positions.size(), rms[i]->indices.data(), rms[i]->indices.size()};
-  }
-  gpu::OptixFrameIn fr;
-  fr.width = W, fr.height = H, fr.max_bounces = bounces, fr.samples = 8;
-  const Mat4 inv = (p * v).inverse();
-  std::memcpy(fr.inv_view_proj, inv.m, 64);
-  fr.sun_dir[0] = sun.direction.x, fr.sun_dir[1] = sun.direction.y, fr.sun_dir[2] = sun.direction.z;
+  if (!gpu::optix_compiled_in()) rep.note("This build has no OptiX (its headers weren't there): GPU Compute only.");
   double worst = 1e30;
-  for (size_t i = 0; i < cuda.size(); i++) {
-    std::unique_ptr<gpu::OptixTracer> t = gpu::OptixTracer::create((int)i, &err);
-    double build_ms = 0;
-    if (!t || !t->build(omeshes, oobjs, build_ms, &err) || !t->clear(W, H, &err) || !t->render(fr, 0, &err)) {
-      rep.row({cuda[i] + " - OptiX (" + err + ")", "-", "-", "-", "-"});
-      worst = 0;
-      continue;
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    double sps[2] = {0, 0};
+    std::vector<float> rgb[2];
+    for (int k = 0; k < 2; k++) {
+      if (k == 1 && gpu::optix_device_of(d.index) < 0) continue;
+      set_backend_env(k ? "optix" : "vulkan");
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = false;
+      st.gpus = {d.index};
+      st.gpu_hardware_rt = true;
+      st.max_bounces = bounces;
+      st.denoise = false;
+      st.use_guiding = false;
+      st.merge_interval_ms = 1e9;
+      pt.set_settings(st);
+      pt.set_camera(v, p, W, H);
+      ScopedTimer tb;  // (the card opens in build(): its pipeline - for OptiX the PTX's compile, cold about 20 s - is in this time)
+      pt.build(objs, {sun}, env);
+      pt.set_camera(v, p, W, H);
+      pt.render(1e9, 1);
+      const double build_ms = tb.ms();
+      double best = 1e30;
+      for (int run = 0; run < 2; run++) {
+        pt.set_camera(v, p, W, H);
+        ScopedTimer t;
+        pt.render(1e9, spp);
+        best = std::min(best, t.ms());
+      }
+      if (!pt.gpu_error().empty()) rep.note(d.name + ": " + pt.gpu_error());
+      sps[k] = spp / (best / 1000.0);
+      rgb[k] = pt.linear_rgb(false);
+      std::string diff = "-";
+      const bool is_optix = pt.device_summary().find("(OptiX)") != std::string::npos;
+      if (k == 1 && !is_optix) {
+        rep.row({d.name + " - OptiX asked for, GPU Compute opened (" + pt.device_summary() + ")", f1(build_ms), f1(sps[k]), f2(best / spp), "-", "-"});
+        continue;
+      }
+      if (k == 1) {
+        double sum = 0;
+        for (size_t i = 0; i < rgb[0].size() && i < rgb[1].size(); i++) sum += std::fabs(rgb[0][i] - rgb[1][i]);
+        diff = strprintf("%.5f", sum / std::max<size_t>(1, rgb[0].size()));
+        worst = std::min(worst, sps[1] / std::max(1e-9, sps[0]));
+      }
+      rep.row({d.name + (k ? " - OptiX (" : " - GPU Compute (") + pt.device_summary() + ")", f1(build_ms), f1(sps[k]), f2(best / spp),
+               k ? f2(sps[1] / std::max(1e-9, sps[0])) + "x" : "1.00x", diff});
     }
-    double best = 1e30;
-    bool ok = true;
-    std::vector<float> rgb;
-    for (int run = 0; run < 2 && ok; run++) {
-      ok = t->clear(W, H, &err);
-      ScopedTimer tt;
-      for (int k = 0; k < spp && ok; k += fr.samples) ok = t->render(fr, k, &err);
-      ok = ok && t->read(rgb, &err);  // (inside the time, as GPU Compute's render merges its samples back at the end)
-      best = std::min(best, tt.ms());
-    }
-    if (!ok) {
-      rep.row({cuda[i] + " - OptiX (" + err + ")", "-", "-", "-", "-"});
-      worst = 0;
-      continue;
-    }
-    const double sps = spp / (best / 1000.0);
-    const auto vk = vulkan_sps.find(cuda[i]);
-    const double ratio = vk != vulkan_sps.end() ? sps / vk->second : 0.0;
-    worst = std::min(worst, ratio);
-    /* A sanity check that it rendered the same scene: the mean brightness against GPU Compute's picture. */
-    double a = 0, b = 0;
-    for (size_t k = 0; k < rgb.size() && k < vulkan_rgb.size(); k++) a += rgb[k], b += vulkan_rgb[k];
-    rep.row({cuda[i] + " - OptiX", f1(build_ms), f1(sps), f2(best / spp), ratio > 0 ? f2(ratio) + "x" : "-"});
-    rep.note(strprintf("%s: the OptiX picture's mean brightness is %.1f %% of GPU Compute's (a simpler shader: close, not equal).", cuda[i].c_str(),
-                       b > 0 ? 100.0 * a / b : 0.0));
   }
-  if (worst <= 0 || worst > 1e29) rep.note("Verdict: none - not every card could be measured.");
-  else
-    rep.note(strprintf("Verdict (ADR 0037: go if OptiX gives at least 1.5x GPU Compute's samples a second on every card): the slowest card "
-                       "%.2fx, %s. The OptiX kernel does less per sample than GPU Compute's, so this is the most it could gain.",
-                       worst, worst >= 1.5 ? "go" : "no-go"));
+  set_backend_env(restore.c_str());
+  if (worst > 1e29) rep.note("Verdict: none - no card has OptiX here.");
+  else rep.note(strprintf("OptiX vs GPU Compute, the slowest card: %.2fx (task 0170's target: 1.4x on the 4070 SUPER, 1.8x on the 3060 Ti).", worst));
 }
 
 /* Task 0083: what headless runs can't see - putting a frame on a real window, and how evenly a frame-rate cap holds.
@@ -5419,6 +5373,13 @@ int main(int argc, char **argv) {
 #endif
     /* The editor sections measure the CPU's views, as every pass before (task 0096's GPU views are measured by
      * name, with Viewport Device GPU asked for). */
+    if (!std::getenv("BLENDITY_GPU_BACKEND")) {  // (task 0170: GPU Compute's numbers stay GPU Compute's; gpu_optix asks for OptiX)
+#ifdef _WIN32
+      _putenv_s("BLENDITY_GPU_BACKEND", "vulkan");
+#else
+      setenv("BLENDITY_GPU_BACKEND", "vulkan", 1);
+#endif
+    }
     if (!std::getenv("BLENDITY_VIEWPORT_DEVICE")) {
 #ifdef _WIN32
       _putenv_s("BLENDITY_VIEWPORT_DEVICE", "cpu");

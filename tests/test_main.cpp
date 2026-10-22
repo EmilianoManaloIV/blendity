@@ -109,6 +109,8 @@ int main(int argc, char **argv) {
   if (!std::getenv("BLENDITY_DENOISE_DEVICE")) set_env("BLENDITY_DENOISE_DEVICE", "cpu");
   /* And Viewport Device Auto draws the views on the CPU (task 0096); the GPU view's own tests ask for it. */
   if (!std::getenv("BLENDITY_VIEWPORT_DEVICE")) set_env("BLENDITY_VIEWPORT_DEVICE", "cpu");
+  /* And the path tracer's cards run GPU Compute (task 0170): the OptiX device's tests ask for it by name. */
+  if (!std::getenv("BLENDITY_GPU_BACKEND")) set_env("BLENDITY_GPU_BACKEND", "vulkan");
   /* Scenes default to Automatic lighting updates here (the behaviour the tests before task 0020 were written
    * for); Manual's own tests ask for it. */
   if (!std::getenv("BLENDITY_LIGHTING_UPDATES")) set_env("BLENDITY_LIGHTING_UPDATES", "automatic");

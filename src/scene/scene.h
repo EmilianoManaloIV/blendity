@@ -1442,6 +1442,7 @@ struct RenderSettings {
   int device = 0;             // 0 CPU, 1 GPU Compute, 2 GPU + CPU by speed (Cycles: Render Properties > Device)
   bool gpu_with_cpu = false;  // GPU Compute: the CPU renders samples too (combined)
   bool hardware_rt = true;    // GPU Compute: ray tracing hardware (RT cores) when a GPU has it
+  int gpu_backend = 0;        // task 0170: 0 Auto (GPU Compute for now: OptiX measured slower), 1 Vulkan (GPU Compute), 2 OptiX
   int raster_aa = 2;          // supersampling factor for the rasterized engine
   bool shadows = true;
   int shadow_resolution = 2048;

@@ -12,7 +12,7 @@
 #include "../core/releases.h"
 #include "../deps/deps.h"
 #include "../render/gpu_device.h"
-#include "../render/optix_spike.h"
+#include "../render/optix_device.h"
 #include "../research/research.h"
 #include <algorithm>
 #include <cmath>

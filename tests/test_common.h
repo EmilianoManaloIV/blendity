@@ -21,7 +21,7 @@
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
 #include "../src/render/gpu_raster.h"
-#include "../src/render/optix_spike.h"
+#include "../src/render/optix_device.h"
 #include "../src/render/lightmapper.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/shading.h"

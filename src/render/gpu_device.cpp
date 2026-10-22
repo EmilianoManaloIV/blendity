@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gpu_device.h"
+#include "optix_device.h"
 
 #include "../core/core.h"
 
@@ -51,6 +52,10 @@ std::string status() { return "GPU rendering: not built (needs Blender's vulkan 
 void prewarm(bool, bool) {}
 std::string pipeline_cache_file(int, bool) { return ""; }
 std::unique_ptr<Renderer> Renderer::create(int, bool, std::string *error) {
+  if (error) *error = "this build has no GPU rendering";
+  return nullptr;
+}
+std::unique_ptr<Renderer> create_renderer(int, bool, bool, std::string *error) {  // (task 0170's pool calls this form)
   if (error) *error = "this build has no GPU rendering";
   return nullptr;
 }
@@ -1303,6 +1308,7 @@ std::string status() {
 void prewarm(bool open_devices, bool hardware_rt) {
   static std::atomic<bool> started{false};
   if (started.exchange(true) || !available()) return;
+  if (backend() == 2) optix_list_async();  // (task 0170: CUDA's devices listed off the UI thread)
   bool rt = false, sw = false;
   for (const DeviceInfo &d : G().infos) (d.hardware_rt ? rt : sw) = true;
   /* Detached: compile_kernel keeps its results in leaked statics, so quitting
@@ -1327,14 +1333,26 @@ std::string pipeline_cache_file(int index, bool hardware_rt) {
   return fs::join(dir, strprintf("pipeline_%04x_%04x_%s.bin", props.vendorID, props.deviceID, hardware_rt && G().infos[(size_t)index].hardware_rt ? "rt" : "bvh"));
 }
 
-std::unique_ptr<Renderer> Renderer::create(int index, bool hardware_rt, std::string *error) {
+/* Task 0170: the OptiX device when `optix` (decided once by the caller: the backend, the card), GPU Compute otherwise or
+ * when OptiX can't open - the failure remembered, so the card isn't offered OptiX again this run. */
+std::unique_ptr<Renderer> create_renderer(int index, bool hardware_rt, bool optix, std::string *error) {
   if (!available() || index < 0 || index >= (int)G().infos.size()) {
     if (error) *error = "no such GPU";
     return nullptr;
   }
+  if (optix) {
+    std::string why;
+    if (std::unique_ptr<Renderer> o = create_optix_renderer(index, &why)) return o;
+    optix_failed(index);
+    Log::warn("OptiX on %s unavailable (%s): GPU Compute instead", G().infos[(size_t)index].name.c_str(), why.c_str());
+  }
   auto r = std::make_unique<VulkanRenderer>();
   if (!r->init(index, hardware_rt, error)) return nullptr;
   return r;
+}
+
+std::unique_ptr<Renderer> Renderer::create(int index, bool hardware_rt, std::string *error) {
+  return create_renderer(index, hardware_rt, hardware_rt && use_optix(index), error);
 }
 
 /* ===================================================================== */
@@ -1687,6 +1705,8 @@ std::unique_ptr<Compute> Compute::create(int index, const std::string &glsl, std
 
 #endif
 
+std::unique_ptr<Renderer> create_renderer(int index, bool hardware_rt, bool optix, std::string *error);
+
 /* ===================================================================== */
 /* Renderers opened in the background (task 0037, ADR 0021)              */
 /* ===================================================================== */
@@ -1695,7 +1715,7 @@ namespace {
 
 struct RendererPool {
   std::mutex m;
-  std::map<int, std::unique_ptr<Renderer>> ready;  // key: device index * 2 + hardware ray tracing
+  std::map<int, std::unique_ptr<Renderer>> ready;  // key: device index * 4 + hardware ray tracing + OptiX (pool_key)
   std::map<int, std::pair<std::string, double>> failed;  // an open that failed (its error and when): retried after 30 s
   std::set<int> opening;
   std::atomic<uint64_t> generation{1};
@@ -1706,12 +1726,16 @@ RendererPool &pool() {
   static RendererPool *p = new RendererPool;
   return *p;
 }
-int pool_key(int index, bool rt) { return index * 2 + (rt ? 1 : 0); }
+/* Task 0170: the backend is in the key too - a renderer opened for GPU Compute isn't handed out when OptiX is asked
+ * for (BLENDITY_GPU_BACKEND or Render Settings changed). A ready renderer is filed by what it is. */
+int pool_key_of(int index, bool rt, bool optix) { return index * 4 + (rt ? 1 : 0) + (optix ? 2 : 0); }
+int pool_key(int index, bool rt) { return pool_key_of(index, rt, rt && use_optix(index)); }
 bool device_rt(int index) { return index >= 0 && index < (int)devices().size() && devices()[(size_t)index].hardware_rt; }
 
 /* Starts opening one on a detached thread, unless one is ready or opening. The pool is locked. */
 void start_open(RendererPool &p, int index, bool rt) {
-  const int key = pool_key(index, rt);
+  const bool optix = rt && use_optix(index);  // (decided once: the open makes what its key says)
+  const int key = pool_key_of(index, rt, optix);
   if (p.ready.count(key) || p.opening.count(key)) return;
   auto f = p.failed.find(key);
   if (f != p.failed.end()) {
@@ -1720,18 +1744,18 @@ void start_open(RendererPool &p, int index, bool rt) {
   }
   p.opening.insert(key);
   const std::string name = devices()[(size_t)index].name;  // copied: nothing global is read after the open
-  std::thread([index, rt, key, name] {
+  std::thread([index, rt, optix, key, name] {
     RendererPool &p = pool();
     if (const int d = p.delay_ms.load()) std::this_thread::sleep_for(std::chrono::milliseconds(d));
     std::string err;
     ScopedTimer t;
-    std::unique_ptr<Renderer> r = Renderer::create(index, rt, &err);
+    std::unique_ptr<Renderer> r = create_renderer(index, rt, optix, &err);
     const double ms = t.ms();
     const bool ok = r != nullptr;
     {
       std::lock_guard<std::mutex> lock(p.m);
       p.opening.erase(key);
-      if (ok) p.ready[key] = std::move(r);
+      if (ok) p.ready[pool_key_of(index, rt, r->info().type == "OptiX")] = std::move(r);  // (an OptiX open that fell back is filed as GPU Compute)
       else p.failed[key] = {err.empty() ? std::string("could not open the GPU") : err, now_seconds()};
     }
     p.generation++;
@@ -1812,6 +1836,8 @@ bool renderers_opening() {
 }
 
 void set_open_delay_for_test(int ms) { pool().delay_ms = std::max(0, ms); }
+
+void drop_ready_renderers() { drop_ready_renderers_for_test(); }
 
 void drop_ready_renderers_for_test() {
   RendererPool &p = pool();

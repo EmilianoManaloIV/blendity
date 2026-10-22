@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "pathtracer.h"
+#include "optix_device.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -1840,6 +1841,7 @@ bool PathTracer::gpu_available() { return gpu::available(); }
 
 void PathTracer::sync_gpus() {
   const auto &devs = gpu::devices();
+  if (settings_.gpu_backend >= 0) gpu::set_backend(settings_.gpu_backend);  // (task 0170: before any card is kept or opened)
   std::vector<int> want;
   for (int i : settings_.gpus)
     if (i >= 0 && i < (int)devs.size() && std::find(want.begin(), want.end(), i) == want.end()) want.push_back(i);
@@ -1852,7 +1854,8 @@ void PathTracer::sync_gpus() {
   for (size_t k = 0; k < gpus_.size();) {
     GpuSlot &s = *gpus_[k];
     bool keep = std::find(want.begin(), want.end(), s.index) != want.end() &&
-                s.hw_rt == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt);
+                s.hw_rt == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt) &&
+                s.optix == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt && gpu::use_optix(s.index));  // (task 0170: the backend changed)
     if (keep) k++;
     else {
       stop_worker(s);
@@ -1881,6 +1884,7 @@ void PathTracer::sync_gpus() {
         auto slot = std::make_unique<GpuSlot>();
         slot->index = i;
         slot->hw_rt = r->using_hardware_rt();
+        slot->optix = r->info().type == "OptiX";
         slot->r = std::move(r);
         gpus_.push_back(std::move(slot));
       }
@@ -1909,6 +1913,7 @@ void PathTracer::sync_gpus() {
     auto slot = std::make_unique<GpuSlot>();
     slot->index = i;
     slot->hw_rt = made[k]->using_hardware_rt();
+    slot->optix = made[k]->info().type == "OptiX";
     slot->r = std::move(made[k]);
     gpus_.push_back(std::move(slot));
   }
@@ -2525,7 +2530,7 @@ std::string PathTracer::device_summary() const {
   if (settings_.use_cpu || gpus_.empty()) s = std::string("CPU (") + ray_backend() + ")";
   if (gpus_.empty() && gpu_starting_) s += ", GPU starting...";
   for (const auto &g : gpus_)
-    s += (s.empty() ? "" : " + ") + g->r->info().name + (g->hw_rt ? " (RT hardware)" : " (GPU compute)");
+    s += (s.empty() ? "" : " + ") + g->r->info().name + (g->optix ? " (OptiX)" : g->hw_rt ? " (RT hardware)" : " (GPU compute)");
   return s;
 }
 

@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 190): the OptiX render device - the same picture as GPU Compute, opt-in (tasks 0170-0171, ADR 0054 amended)
+
+**Asked:** an OptiX render device with PBR parity (a picture within 0.01 of GPU Compute's, 1.4x its samples a second on
+the RTX 4070 SUPER and 1.8x on the 3060 Ti), and the toon shading on it (task 0171).
+
+**Changed**
+- One integrator for both devices: `tools/glsl_to_cuda.py` translates the GPU path tracer's own GLSL (gpu_kernel.h,
+  gpu_glsl.h) to CUDA when the PTX is embedded - buffers as launch-parameter pointers, `out` parameters as references,
+  GLSL's constructors as braces, every function inlined, the kernel a struct over `src/render/optix/glsl.cuh`'s GLSL
+  types and built-ins. Only the rays differ: optixTrace through structures the driver builds, where GPU Compute walks its
+  BVH or uses Vulkan's ray queries. Toon shading (task 0171), the lods of 0164 and the area lights of 0163 come with it.
+- The OptiX device (`src/render/optix_device.cpp`, in place of task 0097's spike): a `gpu::Renderer` with the Vulkan
+  device's buffers, a triangle structure per mesh, the objects as instances, eight samples a launch, the card's time from
+  events, the bake points. The committed PTX is now text in pieces (3.6 MB).
+- Render Settings > GPU Backend: Auto, Vulkan, OptiX. **OptiX is opt-in: Auto keeps GPU Compute** - measured slower,
+  below. The renderer pool keys on the backend, the tracer reopens a card when it changes, the device summary says
+  "(OptiX)"; `BLENDITY_GPU_BACKEND` overrides it (the tests and the stress run pin Vulkan; the OptiX tests ask for it).
+
+**Measured**
+- The stress gpu_optix scene (1920x1080, 256 icospheres and a floor, a sun, 4 bounces, 64 samples, each backend's best of two runs, a quiet machine):
+  - NVIDIA GeForce RTX 4070 SUPER - GPU Compute: 568.5 samples a second (1.76 ms a sample), its upload 406.4 ms.
+  - NVIDIA GeForce RTX 4070 SUPER - OptiX: 182.9 samples a second (5.47 ms a sample), its upload 352.6 ms, 0.32x GPU Compute's, the pictures 0.00000 apart.
+  - NVIDIA GeForce RTX 3060 Ti - GPU Compute: 351.8 samples a second (2.84 ms a sample), its upload 206.5 ms.
+  - NVIDIA GeForce RTX 3060 Ti - OptiX: 70.1 samples a second (14.28 ms a sample), its upload 12922.0 ms, 0.20x GPU Compute's, the pictures 0.00000 apart.
+- Before the inlining and the register limit: 0.09x on both cards; the first open of a card compiles the 3.6 MB PTX in about 20 s without the driver's cache.
+
+**Checked**
+- OptiX and GPU Compute render the same picture at 64 samples - spheres, a glass ball, a toon ball, a checker floor, a
+  sun and a point light - mean difference 0.00000 a channel, with content in it (luminance 0.09 to 3.2); a build
+  without OptiX or a card that isn't there is refused with the reason (tests/test_gpu.cpp).
+- Unit checks (round 190): Windows 11,305, 0 failed (933 tests); render-cache verify mode 11,306, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,961, 0 failed. Sanitizer build: 10,841, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 189): OptiX ships - committed PTX, NVIDIA's headers at build, the driver at run time (task 0169, ADR 0054)
 
 **Asked:** OptiX "as seamless as Blender's Cycles", shipped by embedding PTX compiled on the user's PC.

@@ -268,6 +268,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Undoing an extrude in Edit Mode left the extruded faces' selection on the restored mesh. | Undo gives back the selection as it was before the operator, redo the operator's, as in Blender (task 0167). |
 | Hair felt stiff and jello-like: pinned to the pose, then ringing against it. | Strands are mass-weighted XPBD rods: a lag that doesn't ring, a sag by their weight, air drag always on, the same at any frame rate (task 0168, ADR 0049 amended). |
 | OptiX existed only in builds made on a PC with the CUDA Toolkit; the installers never had it. | The kernel's PTX is committed; any build with OptiX's headers (CI fetches NVIDIA's) has it, and `gpu list` says what the card and driver offer (task 0169, ADR 0054). |
+| There was no OptiX render device (only task 0097's spike). | Render Settings > GPU Backend: OptiX renders the same picture as GPU Compute (one integrator); opt-in, as it measured slower (tasks 0170-0171, ADR 0054 amended). |
 
 ## Still worth doing
 

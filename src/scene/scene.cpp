@@ -355,6 +355,11 @@ void RenderSettings::reflect(Reflector &r) {
       r.field("Hardware Ray Tracing", hardware_rt);
       r.help("Use the GPU's ray tracing hardware (NVIDIA RT cores, AMD ray accelerators, Intel RTUs) when it has it,\n"
              "instead of traversing Blendity's BVH in a compute shader (Blender: OptiX vs CUDA, HIP RT vs HIP).");
+      static const char *const kBackends[3] = {"Auto", "Vulkan", "OptiX"};
+      r.enumeration("GPU Backend", gpu_backend, kBackends, 3);
+      r.help("Which API drives an NVIDIA card (task 0170): OptiX or Vulkan (GPU Compute); Auto is GPU Compute for now. The\n"
+             "two run one integrator and render the same picture; OptiX measured about three times slower (its rays leave\n"
+             "the kernel and come back). OptiX needs Hardware Ray Tracing. Blender: Preferences > System > Cycles Render Devices.");
     }
     r.samples("Samples", samples, 1, 65536);
     r.help("Samples per pixel for the final render. Noise falls as 1/sqrt(samples): each doubling cuts it by ~30%.\nBlender: Sampling > Render > Max Samples.");
