@@ -1597,6 +1597,10 @@ uint64_t hash_component(Component &c);
 /* Hash of every field a reflect function visits (settings change detection). A template rather than a
  * std::function: the views hash the settings blocks every frame. */
 uint64_t hash_reflect_fn(void (*fn)(void *, Reflector &), void *ctx);
+/* What a reflect function shows as one JSON object on one line, {"Field Name": value, ...} (task 0172: Live Link's
+ * lights, cameras and toon materials): numbers, booleans, colours and vectors as [x,y,z], enumerations as their index,
+ * text and texture paths as strings; every field, as files see them. */
+std::string reflect_to_json(const std::function<void(Reflector &)> &fn);
 template<class F> uint64_t hash_reflect(F &&fn) {
   using Fn = std::remove_reference_t<F>;
   return hash_reflect_fn([](void *ctx, Reflector &r) { (*static_cast<Fn *>(ctx))(r); }, (void *)&fn);

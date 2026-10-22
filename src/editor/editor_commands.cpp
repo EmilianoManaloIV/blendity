@@ -661,6 +661,10 @@ void Editor::run_console_command(const std::string &line) {
     gpu_list();
     return;
   }
+  if (c == "livelink") {  // livelink start [port] | stop | status (task 0172)
+    livelink_command(t);
+    return;
+  }
   if (c == "layout") {
     /* layout <name> | layout save <name> | layout delete <name> (task 0055); a raw dock string still works */
     const std::string rest = line.substr(line.find(' ') + 1);
@@ -820,6 +824,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
+    Log::info("  livelink start [port]|stop|status (send the scene live to Blender, Unity, Godot or Unreal: docs/LIVELINK.md)");
     Log::info("  overlay list | all|bones|controls|icons|points|origins|footprints|outline|grid|gizmos|stats [on|off] (the Scene view's layers)");
     Log::info("  matset <Field> <value> (the selected materials, where the field applies: matset ToonThreshold 0.4)");
     Log::info("  toonstyle <Classic|Guilty Gear|Soft Anime|Painterly|Manga> (the selected materials' toon preset)");

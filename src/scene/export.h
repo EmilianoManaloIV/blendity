@@ -52,6 +52,9 @@ struct ExportOptions {
   bool embed_textures = false;  // FBX (binary): the images inside the file (Blender: Path Mode Copy + Embed Textures)
   int bake_size = 1024;         // texels per side
   std::string texture_dir;      // (not reflected) the exported file's folder: textures in it are written by name
+  /* (not reflected; task 0172, Live Link) glTF: each vertex's index in the mesh as an attribute _VERT (a float),
+   * so a client can move the file's split vertices from the mesh's positions alone. */
+  bool vertex_ids = false;
   void reflect(Reflector &r);
 };
 
@@ -74,5 +77,9 @@ std::string export_usda(const std::vector<ExportItem> &items, const ExportOption
 /* glTF: binary .glb, or the .gltf JSON with its buffer in bin_out (written as bin_name). */
 std::string export_gltf(const std::vector<ExportItem> &items, const ExportOptions &o, bool binary, const std::string &bin_name,
                         std::string *bin_out, std::vector<std::pair<std::string, std::string>> *copy_textures = nullptr);
+/* A material as glTF writes it (one object on one line, no textures: Live Link sends their paths beside it), with
+ * the BLENDITY_toon extension on a Toon material (every field by its Inspector name). Each primitive glTF writes
+ * names its material slot in extras.slot (an empty slot has no primitive). */
+std::string gltf_material_json(const Material &m);
 
 }  // namespace bl

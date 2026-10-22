@@ -38,6 +38,7 @@
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
 #include "ui.h"
+#include "livelink.h"
 
 #include <atomic>
 #include <mutex>
@@ -112,7 +113,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -463,6 +464,10 @@ class Editor {
 
   /* Headless entry points used by tests and --screenshot. */
   void init_headless(int width, int height);
+  /* Live Link (task 0172): start on a port (0: any free one), stop; the link for tests. */
+  bool livelink_start(int port);
+  void livelink_stop();
+  livelink::Link *livelink_for_test() { return livelink_.get(); }
   void step_frame_headless(std::vector<platform::Event> events = {});
   const Image &framebuffer() const { return fb_; }
   Scene &scene() { return *scene_; }
@@ -1299,6 +1304,11 @@ class Editor {
   void draw_seq_details(Sequence &s, const Recti &r);
   void draw_seq_triggers(Sequence &s, const Recti &r);
   void draw_sequencer_window(const Recti &r);
+  /* ---- Live Link (task 0172, ADR 0055: livelink.cpp, livelink_window.cpp) ---- */
+  void draw_livelink_window(const Recti &r);
+  void livelink_command(const std::vector<std::string> &t);
+  void livelink_status();
+  void livelink_tick();  // once a frame, after the scene's changes
   bool seq_drop_clip(const std::string &abs_path, int mx, int my);
   void seq_command(const std::vector<std::string> &t);
   void seq_jump_command(const std::string &name, float blend);
@@ -2150,6 +2160,11 @@ class Editor {
   void note_edit_selection_before();          // before an Edit Mode operator changes the mesh
   void restore_edit_selection(const EditSelection &e);
   std::string pending_label_;
+
+  /* ---- Live Link (task 0172) ---- */
+  std::unique_ptr<livelink::Link> livelink_;
+  int livelink_port_ = livelink::kDefaultPort;
+  std::string livelink_error_;
 
   /* ---- play mode ---- */
   bool playing_ = false, paused_ = false, step_requested_ = false;

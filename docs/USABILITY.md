@@ -269,6 +269,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Hair felt stiff and jello-like: pinned to the pose, then ringing against it. | Strands are mass-weighted XPBD rods: a lag that doesn't ring, a sag by their weight, air drag always on, the same at any frame rate (task 0168, ADR 0049 amended). |
 | OptiX existed only in builds made on a PC with the CUDA Toolkit; the installers never had it. | The kernel's PTX is committed; any build with OptiX's headers (CI fetches NVIDIA's) has it, and `gpu list` says what the card and driver offer (task 0169, ADR 0054). |
 | There was no OptiX render device (only task 0097's spike). | Render Settings > GPU Backend: OptiX renders the same picture as GPU Compute (one integrator); opt-in, as it measured slower (tasks 0170-0171, ADR 0054 amended). |
+| Getting a scene into Blender or Unity meant exporting and importing again after every change. | Window > Live Link sends the scene and every change as it happens to bridges on the same computer (task 0172, ADR 0055; the bridges are tasks 0173-0175). |
 
 ## Still worth doing
 

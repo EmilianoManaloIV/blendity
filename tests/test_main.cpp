@@ -78,6 +78,7 @@ void run_assets_tests();
 void run_animation_tests();
 void run_physics_tests();
 void run_editor_tests();
+void run_livelink_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -88,6 +89,7 @@ static const TestGroup kTestGroups[] = {
     {"animation", run_animation_tests},
     {"physics", run_physics_tests},
     {"editor", run_editor_tests},
+    {"livelink", run_livelink_tests},
 };
 
 int main(int argc, char **argv) {

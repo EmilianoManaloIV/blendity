@@ -2,6 +2,58 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 191): Live Link - the scene sent live to Blender, Unity, Godot or Unreal (task 0172, ADR 0055)
+
+**Asked:** "bridges" in Blender, Unity, Godot and Unreal applying Blendity's changes in real time, Blender and Unity
+first, one way. This round is the editor's side and the protocol; the Blender bridge is next (task 0173).
+
+**Changed**
+- Window > Live Link and the console's `livelink start [port] | stop | status`: a TCP server on 127.0.0.1 (port
+  40100 by default; `src/core/net_server.*`, WinSock or BSD sockets, no library). A client gets the whole scene, then
+  every change as it happens: objects and their hierarchy, transforms, a rig's pose, meshes as glTF binaries (built on
+  a worker thread), vertices that moved as a `deform` (float32 positions: an Edit Mode drag, skinning, physics),
+  materials (glTF's object, the toon fields, texture paths), lights, cameras, deletes, Play. The protocol,
+  `blendity-livelink/1`, is in `docs/LIVELINK.md`; `tools/livelink_dump.py` is a 50-line client that prints it.
+- What changed is found by comparing the scene with what was sent, at most 60 times a second and only while a client
+  is connected (the roadmap had planned a diff at each undo step: comparing carries a drag while it happens, and undo,
+  Stop and reloads need nothing of their own; ADR 0055).
+- Each client has its own queue and thread; a newer transform, pose, deform, material, light or camera replaces one
+  still queued (never past an object, mesh or delete), so a slow client skips to the present; a slow client is waited
+  for, never timed out; one past 256 MB queued is closed. Sockets aren't inherited by programs the editor starts.
+- glTF export: each primitive names its material slot (`extras.slot`), an optional `_VERT` attribute (each vertex's
+  mesh vertex), and a Toon material carries the extension `BLENDITY_toon` with every field by its Inspector name (in
+  exported files too: other readers ignore it). `JsonWriter` in json.h; `reflect_to_json`.
+- `tests/fixtures/livelink_stream.bin`: a recorded session (the sync, a move, a recolour, moved vertices, a pose, a
+  delete, Play and Stop) that the suite records again and compares message by message, and the bridges replay.
+- The check chain, faster: `build.bat check` compiles every source once and links the unit and stress tests from the
+  same objects (92 s against 112 s for the two builds); the unit suite runs once, in render-cache verify mode (the
+  plain run checked nothing verify mode doesn't), its groups as parallel processes with a failed group run again
+  alone; the Linux and sanitizer legs start with the Windows build and run their groups in parallel too, and their
+  copy of the sources skips tools/inbetween's Python environment (24k files: the sync's 4 minutes). The stress
+  sections still run on a quiet machine, after the Linux legs. `BLENDITY_NO_LTCG=1` builds without whole-program
+  optimization for quick local runs only: with /fp:fast, MSVC then compiles two code paths differently that two
+  tests compare bit for bit.
+
+**Measured** (stress `livelink`, the RTX 4070 SUPER PC, 1,000 cubes moved every frame)
+- A frame (mean / most, ms) with the link off 11.49 / 13.14, on without a client 11.46 / 12.93, with one client draining 12.50 / 14.16, with two 13.10 / 31.04.
+- Comparing the scene with what was sent (1,000 moved objects: 1,000 transforms) 1.23 / 1.50 ms mean / most with one client, 1.42 / 3.50 with two; 60240 and 120491 messages, 5.49 and 10.98 MB in the 120 frames.
+- A client's sync with a 95232-face mesh: the frames at most 11.42 ms; the worker built 1005 glTF binaries in 182 ms; the sync took 777 ms of frames.
+- A vertex of the 95232-face mesh moved every frame: 14.57 ms a frame, 64 deforms, 69.76 MB (95234 vertices: 1.09 MB a deform).
+- A client that leaves while a mesh is going out: the frames at most 2.17 ms over the next 30 frames; 0 client(s) left connected.
+- One client cost the frame 1.00 ms on average against the link off (12.50 vs 11.49 ms; the views' rendering is most of a frame).
+
+**Checked**
+- A client gets hello, the sync with the scene's object count and every mesh as a valid glTF binary (indices 3 x the
+  triangles, `_VERT` for every vertex); a move is one transform in glTF's axes, a recolour one material, moved vertices
+  one deform, new faces one mesh, a posed rig one pose with every bone, a deletion one delete, no change nothing; in
+  Play at most 60 transforms a second, in order, the last where the object ended; two clients get the same stream; a
+  client that leaves mid-send is dropped and a new one syncs; held queues replace a keyed message only after the last
+  barrier (tests/test_livelink.cpp). Play then Stop sends only the two play messages.
+- Unit checks (round 191): Windows, in render-cache verify mode, 11,417, 0 failed (943 tests), 0 stale
+  pictures. Linux with libraries: 11,064, 0 failed. Sanitizer build: 10,944, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `livelink`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 190): the OptiX render device - the same picture as GPU Compute, opt-in (tasks 0170-0171, ADR 0054 amended)
 
 **Asked:** an OptiX render device with PBR parity (a picture within 0.01 of GPU Compute's, 1.4x its samples a second on

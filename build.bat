@@ -1,6 +1,9 @@
 @echo off
 rem Blendity - Windows build without CMake. Needs only Visual Studio (or Build Tools) with C++.
-rem Usage: build.bat [release|debug] [app|stress|tests|all|installer]
+rem Usage: build.bat [release|debug] [app|stress|tests|check|all|installer]
+rem   check: the unit and stress tests from one compile (every source once, both linked from the same objects).
+rem   BLENDITY_NO_LTCG=1: no whole-program optimization (/GL, /LTCG) - a faster build for quick local runs, not for checks:
+rem   with /fp:fast, MSVC then compiles two code paths differently that some tests compare bit for bit.
 rem   installer: the app, then dist\installers\Blendity-Setup-<VERSION>.exe with Inno Setup 6 (task 0076).
 setlocal enabledelayedexpansion
 
@@ -133,8 +136,10 @@ set SRCRSP=%OBJ%\sources.rsp
   if "%USE_OPTIX%"=="1" echo extern\cuew\src\cuew.c
 )
 set LIBSRC=@%SRCRSP%
-set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib %LIBLINK%
-if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib %LIBLINK%
+set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib ws2_32.lib %LIBLINK%
+if "%BLENDITY_NO_LTCG%"=="1" set FLAGS=!FLAGS:/GL=!
+if "%BLENDITY_NO_LTCG%"=="1" set LINKFLAGS=!LINKFLAGS:/LTCG=!
+if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto app
@@ -142,6 +147,7 @@ if /i "%TARGET%"=="app" goto app
 if /i "%TARGET%"=="installer" goto app
 if /i "%TARGET%"=="stress" goto stress
 if /i "%TARGET%"=="tests" goto tests
+if /i "%TARGET%"=="check" goto check
 
 :app
 echo [blendity] Building editor (%CONFIG%)...
@@ -161,6 +167,27 @@ if /i not "%TARGET%"=="all" goto done
 :tests
 echo [blendity] Building unit tests (%CONFIG%)...
 cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_tests.exe %LIBSRC% tests\*.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
+if errorlevel 1 exit /b 1
+goto done
+
+:check
+echo [blendity] Building unit and stress tests (%CONFIG%, one compile)...
+cl /c %FLAGS% /Fo%OBJ%\ %LIBSRC% stress\stress_main.cpp tests\*.cpp
+if errorlevel 1 exit /b 1
+rem The objects in response files, as the sources are (the command line has an 8191-character limit).
+set TESTRSP=%OBJ%\tests_objects.rsp
+set STRESSRSP=%OBJ%\stress_objects.rsp
+> "%TESTRSP%" (
+  for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
+  for %%f in (tests\*.cpp) do echo %OBJ%\%%~nf.obj
+)
+> "%STRESSRSP%" (
+  for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
+  echo %OBJ%\stress_main.obj
+)
+cl %FLAGS% /Fe:dist\windows\blendity_tests.exe @%TESTRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
+if errorlevel 1 exit /b 1
+cl %FLAGS% /Fe:dist\windows\blendity_stress.exe @%STRESSRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 goto done
 

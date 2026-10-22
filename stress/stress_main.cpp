@@ -5240,6 +5240,155 @@ static void test_gpu_optix(Report &rep, const Options &o) {
   else rep.note(strprintf("OptiX vs GPU Compute, the slowest card: %.2fx (task 0170's target: 1.4x on the 4070 SUPER, 1.8x on the 3060 Ti).", worst));
 }
 
+/* Task 0172 (ADR 0055): what Live Link costs the editor's frame - the link off, on with nobody listening, one and two
+ * clients draining as fast as they can, while 1,000 objects move every frame; a 50k-face mesh built for a client
+ * (on the worker: the frames meanwhile), its vertices moved every frame (deforms), and a client that leaves mid-send. */
+struct LinkReader {
+  net::LineClient c;
+  std::thread th;
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> messages{0}, bytes{0};
+  bool open(int port) {
+    if (!c.connect(port)) return false;
+    th = std::thread([this] {
+      std::string line, bin;
+      while (!stop)
+        if (c.read(line, bin, 50)) messages++, bytes += line.size() + 1 + bin.size();
+    });
+    return true;
+  }
+  void close() {
+    stop = true;
+    if (th.joinable()) th.join();
+    c.close();
+  }
+  ~LinkReader() { close(); }
+};
+
+static void test_livelink(Report &rep, const Options &o) {
+  rep.title("Live Link (task 0172): what the link costs the editor's frame",
+            "Headless editor at 1280x720, 1,000 cubes moved every frame (each one a transform message), 120 frames a case; the "
+            "link compares the scene at most 60 times a second; the clients are threads reading as fast as they can on 127.0.0.1.");
+  const int frames = o.quick ? 40 : 120;
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.command("stress 1000 Cube");
+  std::vector<GameObject *> movers;
+  ed.scene().for_each([&](GameObject &g) {
+    if (g.mesh_filter()) movers.push_back(&g);
+  });
+  auto run = [&](int n) {
+    double sum = 0, most = 0;
+    for (int f = 0; f < n; f++) {
+      for (size_t i = 0; i < movers.size(); i++) movers[i]->set_local_position(movers[i]->local().position + Vec3(0, 0.001f, 0));
+      ScopedTimer t;
+      ed.step_frame_headless();
+      sum += t.ms();
+      most = std::max(most, t.ms());
+    }
+    return std::make_pair(sum / n, most);
+  };
+  rep.table({"case", "frame ms (mean / most)", "comparing the scene ms (mean / most)", "messages", "MB sent", "note"});
+  auto compare_ms = [&](const livelink::Stats &before) {
+    const livelink::Stats &s = ed.livelink_for_test()->stats();
+    const uint64_t n = s.ticks - before.ticks;
+    return n ? strprintf("%.2f / %.2f", (s.tick_ms_total - before.tick_ms_total) / n, s.tick_ms_max) : std::string("-");
+  };
+  run(10);  // (warm: the views' caches)
+  auto off = run(frames);
+  rep.row({"link off", strprintf("%.2f / %.2f", off.first, off.second), "-", "-", "-", ""});
+  ed.livelink_start(0);
+  livelink::Link *link = ed.livelink_for_test();
+  if (!link || !link->running()) {
+    rep.note("The link didn't start (no sockets here): nothing to measure.");
+    return;
+  }
+  auto idle = run(frames);
+  rep.row({"link on, no client", strprintf("%.2f / %.2f", idle.first, idle.second), "-", "0", "0", "nothing is compared without a client"});
+  auto with_clients = [&](int count, const char *label) {
+    std::vector<std::unique_ptr<LinkReader>> rs;
+    for (int i = 0; i < count; i++) {
+      rs.push_back(std::make_unique<LinkReader>());
+      rs.back()->open(link->port());
+    }
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();  // (the syncs)
+    link->wait_meshes_for_test();
+    const livelink::Stats before = link->stats();
+    const net::Server::Stats nb = link->net_stats();
+    auto r = run(frames);
+    const net::Server::Stats na = link->net_stats();
+    rep.row({label, strprintf("%.2f / %.2f", r.first, r.second), compare_ms(before), strprintf("%llu", (unsigned long long)(na.messages - nb.messages)),
+             strprintf("%.2f", (na.bytes - nb.bytes) / 1048576.0), strprintf("%llu replaced before sending", (unsigned long long)(na.coalesced - nb.coalesced))});
+    for (auto &x : rs) x->close();
+    for (int i = 0; i < 20 && link->clients() > 0; i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return r;
+  };
+  auto one = with_clients(1, "1 client");
+  with_clients(2, "2 clients");
+  /* A 50k-face mesh: built for a new client on the worker while the frames go on. */
+  ed.command("create Sphere");
+  ed.command("subdivide 4");
+  GameObject *big = ed.active_object_for_test();
+  for (int i = 0; i < 5; i++) ed.step_frame_headless();
+  const size_t faces = big && big->evaluated_mesh(0) ? big->evaluated_mesh(0)->face_count() : 0;
+  {
+    LinkReader r;
+    r.open(link->port());
+    const double enc0 = link->stats().mesh_encode_ms;
+    const uint64_t built0 = link->stats().meshes;
+    double most = 0;
+    ScopedTimer wall;
+    for (int f = 0; f < 600 && link->stats().meshes < built0 + movers.size() + 3; f++) {
+      ScopedTimer t;
+      ed.step_frame_headless();
+      most = std::max(most, t.ms());
+    }
+    link->wait_meshes_for_test();
+    rep.row({strprintf("a client's sync with a %zu-face mesh", faces), strprintf("most %.2f", most), "-", "-", strprintf("%.2f", r.bytes / 1048576.0),
+             strprintf("the worker built %llu glTF binaries in %.0f ms; the sync took %.0f ms of frames", (unsigned long long)(link->stats().meshes - built0),
+                       link->stats().mesh_encode_ms - enc0, wall.ms())});
+    /* Its vertices moved every frame: one deform a comparison. */
+    const Mesh *em = big ? big->evaluated_mesh(0) : nullptr;
+    if (em && big->mesh_filter()) {
+      const livelink::Stats before = link->stats();
+      const net::Server::Stats nb = link->net_stats();
+      double sum = 0;
+      for (int f = 0; f < frames; f++) {
+        MeshPtr m = mesh_make_mutable(big->mesh_filter()->mesh);
+        m->positions[f % m->positions.size()].y += 0.001f;
+        m->touch();
+        ScopedTimer t;
+        ed.step_frame_headless();
+        sum += t.ms();
+      }
+      const net::Server::Stats na = link->net_stats();
+      rep.row({strprintf("a vertex of the %zu-face mesh moved every frame", faces), strprintf("%.2f", sum / frames), compare_ms(before),
+               strprintf("%llu deforms", (unsigned long long)(link->stats().deforms - before.deforms)), strprintf("%.2f", (na.bytes - nb.bytes) / 1048576.0),
+               strprintf("%zu vertices: %.2f MB a deform", em->positions.size(), em->positions.size() * 12 / 1048576.0)});
+    }
+    /* The client leaves while a big message is going out. */
+    big->mesh_filter()->mesh = std::make_shared<Mesh>(*big->mesh_filter()->mesh);
+    ed.command("subdivide 1");
+    ed.step_frame_headless();
+    r.close();
+    double after = 0;
+    for (int f = 0; f < 30; f++) {
+      ScopedTimer t;
+      ed.step_frame_headless();
+      after = std::max(after, t.ms());
+    }
+    link->wait_meshes_for_test();
+    rep.row({"a client leaves mid-send", strprintf("most %.2f over the next 30 frames", after), "-", "-", "-",
+             strprintf("%d client(s) left connected", link->clients())});
+  }
+  rep.note(strprintf("One client cost the frame %.2f ms on average against the link off (%.2f vs %.2f ms; the views' rendering is most of a frame).",
+                     one.first - off.first, one.first, off.first));
+  ed.livelink_stop();
+}
+
 /* Task 0083: what headless runs can't see - putting a frame on a real window, and how evenly a frame-rate cap holds.
  * Opens a window, so it runs only when asked for by name (--only present); without a display it says so. */
 static void test_present(Report &rep, const Options &o) {
@@ -5407,7 +5556,7 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

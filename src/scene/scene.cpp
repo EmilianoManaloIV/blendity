@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "../core/json.h"
 #include "animation.h"
 #include "sequence.h"
 #include "curve.h"
@@ -1924,6 +1925,31 @@ struct HashReflector : Reflector {
   }
 };
 }  // namespace
+
+namespace {
+struct JsonReflector : Reflector {
+  JsonWriter w;
+  bool all_fields() const override { return true; }
+  bool serializing() const override { return true; }
+  void field(const char *n, float &v, float, float, float) override { w.key(n).num(v); }
+  void field(const char *n, int &v, int, int) override { w.key(n).integer(v); }
+  void field(const char *n, bool &v) override { w.key(n).boolean(v); }
+  void field(const char *n, Vec3 &v) override { w.key(n).nums(&v.x, 3); }
+  void color(const char *n, Vec3 &v) override { w.key(n).nums(&v.x, 3); }
+  void enumeration(const char *n, int &v, const char *const *, int) override { w.key(n).integer(v); }
+  void text(const char *n, std::string &v) override { w.key(n).str(v); }
+  void mesh(const char *, MeshPtr &) override {}
+  void texture(const char *n, TextureRef &t) override { w.key(n).str(t.path); }
+};
+}  // namespace
+
+std::string reflect_to_json(const std::function<void(Reflector &)> &fn) {
+  JsonReflector jr;
+  jr.w.obj();
+  fn(jr);
+  jr.w.end();
+  return jr.w.out;
+}
 
 uint64_t hash_component(Component &c) {
   HashReflector hr;

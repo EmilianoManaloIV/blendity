@@ -605,6 +605,19 @@ Blendity's .scene format writes each shared mesh once and has objects reference 
 The Project, Materials and Textures windows select like the Hierarchy and Unity's Project window: a click selects one, Ctrl+click adds or removes one, Shift+click selects everything from the last click to this one, and Ctrl+A (with the mouse over the list) selects everything shown; a search narrows what "everything" means. Delete (or Backspace) asks once for all of them ("Delete 7 materials?") and sends their files to the Recycle Bin / Trash, where they can be restored. Deleted from the Materials window, a material leaves its slots to the default material (one undo step brings them back); deleted as a file from the Project window, objects keep it as a scene material. Console: `matdelete Bricks, Wood Floor` (names separated by commas).
 ! cmd:newmat Practice1; newmat Practice2; newmat Practice3; window Materials | Make three materials to practise on (Ctrl+click two, then press Delete over the window)
 ? Where do deleted assets go? | To the Recycle Bin (Windows) or the Trash, so a mistake can be put back. From the Materials window the slots fall back to the default material (Undo restores them); from the Project window objects keep the material as a scene material.
+# Live Link: the scene in Blender or Unity as you work
+Window > Live Link (or the console's livelink start) opens a connection that other programs on this computer can listen to. A bridge in Blender, Unity, Godot or Unreal connects and gets the whole scene, then every change as you make it: a moved object, a posed rig, vertices dragged in Edit Mode, a material's colour, a light, Play starting. It goes one way: Blendity is the source, and what you change on the other side stays there. Meshes travel as glTF binaries, the format Blender's and Unity's importers already read; everything else is one line of JSON each (docs/LIVELINK.md has the protocol). Only programs on this computer can connect.
+| | Export | Live Link
+| When | once, to a file | every change, as it happens
+| What goes | meshes and materials | objects and their hierarchy, meshes, materials, lights, cameras, poses, Play
+| Axes | the file's (glTF: right-handed, Y up) | glTF's too, in metres
+@ blender/scripts/addons_core/io_scene_gltf2/blender/imp/blender_gltf.py
+@ blender/source/blender/python/intern/bpy_app_timers.cc
+? You drag a vertex in Edit Mode with a bridge connected. Does the whole mesh go out again every frame? | No. Only the positions go, as one deform message (12 bytes a vertex). A whole mesh goes only when its faces, UVs or materials change, and it is built on a worker thread, so the frame doesn't wait for it.
+? A bridge is slow and falls behind while you drag an object. Does it get every position in between? | No. A newer transform for the same object replaces one still waiting to be sent, so the bridge catches up with where the object is now. At most 60 comparisons a second go out.
+! cmd:livelink start; window Live Link | Start Live Link and open its window
+! cmd:livelink status | What has gone out so far (in the Console)
+! cmd:livelink stop | Stop it
 )"},
     {"Undo, Selection and Memory", "Snapshots and copy-on-write", R"(
 Unity records undo per object (Undo.RecordObject). Blender's global undo stores snapshots of the whole file ("memfile undo") and only writes the parts that changed. Edit Mode has its own mesh undo.
