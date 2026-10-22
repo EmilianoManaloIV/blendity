@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 183): fewer CPU fallbacks for the GPU views - area lights and cutouts on the card (task 0163)
+
+**Asked:** the roadmap's "fewer CPU fallbacks for the GPU views": a view with an area light or a cutout material
+drew on the CPU.
+
+**Changed**
+- Area lights on the card: `area_light_irradiance` (the Gauss quadrature over the panel with the horizon clipped)
+  and `area_light_specular_dir` (the representative point, Karis 2013) ported line for line into the lighting
+  pass; the light block grows to six vec4s (right / width, up / height, the disc flag); the toon branch takes an
+  area light at its centre as the CPU's `light_falloff` does. `gpu_view_unsupported` no longer refuses them.
+- Cutout materials on the card: the instance carries the threshold and the material's alpha, the surface
+  evaluation carries the base map's alpha, and the G-buffer discards under the threshold - no colour, depth or id,
+  so what is behind shows and picks, as the CPU's rasteriser punches its holes.
+- The Profiler's GPU block lists each view slot's fallback reason ("View slot N on the CPU: a camera filter").
+- Still on the CPU, named: see-through and glass materials, toon materials with painted maps, camera filters, GI
+  and probes, lightmaps, vertex colours, live procedurals, more than 16 lights.
+
+**Measured**
+- The g-buffer pass with the cutout test and the area lights in the lighting shader (stress editor_render, the
+  views on the card, a quiet machine, RTX 4070 SUPER): g-buffer 0.15 ms a frame (was 0.14), lighting 0.07 (was
+  0.06), the GPU path 3.50 ms a frame (was 3.58): the discard and the area-light loop cost nothing measurable on a
+  scene without them.
+- The tests' own numbers: an area-lit room on the card against the CPU, mean difference 0.110 / 255 per channel;
+  turning the light's panel off changes about 160,000 pixels (the card draws it, not a fallback). A cutout wall's
+  hole: the pixel at its centre 0x5771A5 on both devices (the sphere behind), beside it 0x892D1D (the wall); a click
+  through the hole picks the object behind.
+
+**Checked**
+- An area-light scene (a rectangle, then a disc) draws on the card with no fallback and matches the CPU within the
+  views' threshold; a cutout's holes show the cube behind and a click through one picks it on the card; the
+  Profiler names a Game view's filter fallback by its slot (tests/test_gpu.cpp).
+- Unit checks (round 183): Windows 11,201, 0 failed (917 tests); render-cache verify mode 11,202, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 182): incremental scene uploads, one submission per upload (task 0162)
 
 **Asked:** the roadmap's "incremental scene uploads, one submission per upload" - every build re-uploaded the whole

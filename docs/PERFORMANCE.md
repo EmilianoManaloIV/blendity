@@ -144,9 +144,9 @@ The user asked "What should be more optimization gains?" and chose all four area
   device is the user's call (ADR 0037's note).
 - **Costs:** the Scene view on the card draws at full size (Play about 1 ms dearer); vertices on the card are 48 bytes;
   a mesh with several materials or a normal map sends the whole mesh during a drag.
-- **Still on the CPU:** realtime GI, probes and lightmaps, area lights, axis, see-through and cutout materials, live
+- **Still on the CPU:** realtime GI, probes and lightmaps, axis and see-through materials (area lights and cutouts on the card since task 0163), live
   procedural textures, camera filters.
-- **Next candidates:** realtime GI and probes on the card (the last big reason a view falls back); area lights;
+- **Next candidates:** realtime GI and probes on the card (the last big reason a view falls back); area lights (done, task 0163);
   route (B) of ADR 0036 (the views straight to a swapchain: spike 2 read back a 1080p view in 2.7-5.7 ms, a swapchain
   showed it in 0.5-2.2); the cage's
   overlay drawing for the CPU path (still 4 ms of a CPU drag); an OptiX device if the user wants one.

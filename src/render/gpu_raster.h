@@ -47,7 +47,7 @@ struct RasterInstance {
   enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64 };
   float model[16];
   float albedo_rough[4];  // albedo rgb, roughness
-  float metal_spec[4];    // metallic, specular (Principled's IOR Level), 0, 0
+  float metal_spec[4];    // metallic, specular (Principled's IOR Level), the cutout threshold (-1: not a cutout; task 0163), the material's alpha
   float emission[3] = {0, 0, 0};
   uint32_t flags = ReceiveShadows | CastShadows;
   uint32_t mesh = 0;
@@ -100,6 +100,10 @@ struct RasterLight {
   float intensity = 1.0f;
   float range = 10.0f;
   float spot_cos_outer = 0.0f, spot_cos_inner = 0.0f;
+  /* Task 0163: an area light's panel (RenderLight's right, width, height, disk), lit on the card as on the CPU. */
+  float right[3] = {1, 0, 0};
+  float width = 1.0f, height = 1.0f;
+  bool disk = false;
 };
 
 struct RasterFrame {

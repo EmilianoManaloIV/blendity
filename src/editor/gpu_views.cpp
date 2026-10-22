@@ -45,7 +45,7 @@ std::vector<uint32_t> mesh_slots(const RenderMesh &rm) {
 /* Why a material can't be drawn on the GPU yet, or null. Textures, procedurals and Box / Generated mapping are drawn
  * there since task 0101 (ADR 0038). */
 const char *material_unsupported(const Material &m) {
-  if (!m.opaque()) return "a see-through material";
+  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) return "a see-through material";  // (a cutout draws on the card since task 0163)
   if (m.axis_mode != 0) return "an axis material";
   const Material::Resolved &tx = m.textures();
   for (int k = 0; k < 5; k++)
@@ -111,6 +111,10 @@ gpu::RasterLight raster_light(const RenderLight &l) {
   g.range = l.range;
   g.spot_cos_outer = l.cos_outer;
   g.spot_cos_inner = l.cos_inner;
+  g.right[0] = l.right.x, g.right[1] = l.right.y, g.right[2] = l.right.z;  // (task 0163: an area light's panel)
+  g.width = l.width;
+  g.height = l.height;
+  g.disk = l.disk;
   return g;
 }
 
@@ -176,6 +180,8 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   in.albedo_rough[3] = s.roughness;
   in.metal_spec[0] = s.metallic;
   in.metal_spec[1] = s.specular;
+  in.metal_spec[2] = m.surface == (int)MaterialSurface::Cutout ? m.alpha_clip : -1.0f;  // (task 0163: the card punches the holes)
+  in.metal_spec[3] = m.alpha;
   set3(in.emission, s.emission);
   if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
   if (m.shading_model == 1) {
@@ -339,8 +345,6 @@ const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingE
   if (render_clear_override_on_) return "a transparent render";
   if (rt.want_hdr) return "a picture kept in linear light";
   if (env.gi || env.probes) return "realtime GI or probes";
-  for (const RenderLight &l : env.lights)
-    if (l.type == RenderLight::Area) return "an area light";
   if (env.lights.size() > 16) return "more than 16 lights";
   for (const DrawItem &it : items)
     if (const char *why = item_unsupported(it, env)) return why;

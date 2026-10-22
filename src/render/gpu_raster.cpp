@@ -106,7 +106,7 @@ struct Fns {
 /* Shared by every stage: the frame's constants and the instances. */
 const char *kCommon = R"(
 #version 450
-struct Light { vec4 pos_type; vec4 dir_range; vec4 color; vec4 spot; };
+struct Light { vec4 pos_type; vec4 dir_range; vec4 color; vec4 spot; vec4 right_w; vec4 up_h; };  // (spot.z: an area light's disk; right_w / up_h: its panel, task 0163)
 layout(std140, set = 0, binding = 0) uniform Frame {
   mat4 view_proj;      // with Vulkan's y flip
   mat4 inv_view_proj;
@@ -251,13 +251,14 @@ float texture_lod(int t, vec2 ddx, vec2 ddy) {
 
 /* evaluate_surface's material, after kGlslProcedurals. */
 const char *kMaterialEval = R"(
-struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; };
+struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; float alpha; };
 /* evaluate_surface (shading.cpp) for a pixel: uv / ddx / ddy as the deferred shader's (forward differences). */
 Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor, vec4 tangent, bool has_tangent) {
   Surf s;
   s.albedo = I.albedo_rough.rgb;
   s.metallic = I.metal_spec.x;
   s.rough = I.albedo_rough.w;
+  s.alpha = I.metal_spec.w;
   s.n = n;
   vec2 uv = uv0 * I.tiling.xy + I.offset.xy;
   vec2 ddx = dux * I.tiling.xy, ddy = duy * I.tiling.xy;
@@ -297,6 +298,7 @@ Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor
   else if (I.tex0.x >= 0) {
     SAMPLE(I.tex0.x, c);
     s.albedo *= c.rgb;
+    s.alpha *= c.a;  // (a cutout's holes come from the base map's alpha, as evaluate_surface takes it)
   }
   if (I.tex0.y >= 0) { SAMPLE(I.tex0.y, c); s.metallic *= c.x; }
   if (I.tex0.z >= 0) { SAMPLE(I.tex0.z, c); s.rough *= c.x; }
@@ -341,7 +343,7 @@ void main() {
   if (dot(g, n) < 0.0) g = -g;
   Inst I = inst[ii];
   vec3 albedo = I.albedo_rough.rgb, emission = I.emission.rgb;
-  float rough = I.albedo_rough.w, metallic = I.metal_spec.x;
+  float rough = I.albedo_rough.w, metallic = I.metal_spec.x, alpha = I.metal_spec.w;
   if (I.tex2.w != 0) {
     /* The back side's normals turned first, as the CPU turns them before evaluate_material (a normal map's result
      * depends on it); the light pass then finds them facing. */
@@ -365,7 +367,9 @@ void main() {
     metallic = s.metallic;
     rough = s.rough;
     emission = s.emission;
+    alpha = s.alpha;
   }
+  if (I.metal_spec.z >= 0.0 && alpha < I.metal_spec.z) discard;  // (task 0163: a cutout's hole - no colour, depth or id, so what is behind shows and picks)
   o_normal = vec4(n, rough);
   o_albedo = vec4(albedo, metallic);
   o_geo = vec4(g, I.metal_spec.y);
@@ -563,9 +567,242 @@ vec3 brdf_eval(vec3 albedo, float rough, float metallic, float specular, vec3 n,
   vec3 F = f0 + (vec3(1.0) - f0) * fw;
   return (albedo * ((1.0 - metallic) / PI) * (vec3(1.0) - F) + F * (D * vis)) * nl;
 }
+
+/* ---- area lights (task 0163): area_light_irradiance and area_light_specular_dir (raster.h / raster.cpp) line for line.
+ * A light's block: pos_type, dir_range, color (rgb, intensity), spot (cos outer, cos inner, disk, 0), right_w (right,
+ * width), up_h (up, height). */
+const float GX5[8] = float[8](0.0000000000, -0.2692346551, 0.2692346551, -0.4530899230, 0.4530899230, 0.0000000000, 0.0000000000, 0.0000000000);
+const float GW5[8] = float[8](0.2844444444, 0.2393143352, 0.2393143352, 0.1184634425, 0.1184634425, 0.0000000000, 0.0000000000, 0.0000000000);
+const float GX6[8] = float[8](-0.1193095930, 0.1193095930, -0.3306046932, 0.3306046932, -0.4662347571, 0.4662347571, 0.0000000000, 0.0000000000);
+const float GW6[8] = float[8](0.2339569673, 0.2339569673, 0.1803807865, 0.1803807865, 0.0856622462, 0.0856622462, 0.0000000000, 0.0000000000);
+const float GX8[8] = float[8](-0.0917173212, 0.0917173212, -0.2627662050, 0.2627662050, -0.3983332387, 0.3983332387, -0.4801449282, 0.4801449282);
+const float GW8[8] = float[8](0.1813418917, 0.1813418917, 0.1568533229, 0.1568533229, 0.1111905172, 0.1111905172, 0.0506142681, 0.0506142681);
+
+float gx(int k, int a) { return k == 8 ? GX8[a] : k == 6 ? GX6[a] : GX5[a]; }
+float gw(int k, int a) { return k == 8 ? GW8[a] : k == 6 ? GW6[a] : GW5[a]; }
+float quad_atan(float x) {
+  bool inv = abs(x) > 1.0;
+  float z = inv ? 1.0 / x : x, z2 = z * z;
+  float a = z * (0.99997726 + z2 * (-0.33262347 + z2 * (0.19354346 + z2 * (-0.11643287 + z2 * (0.05265332 + z2 * -0.01172120)))));
+  return inv ? (x > 0.0 ? 0.5 * PI : -0.5 * PI) - a : a;
+}
+void quad_tan(float t, out float tan_t, out float sec2) {
+  float t2 = t * t;
+  float s = t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0 + t2 * (-1.0 / 39916800.0))))));
+  float c = 1.0 + t2 * (-0.5 + t2 * (1.0 / 24.0 + t2 * (-1.0 / 720.0 + t2 * (1.0 / 40320.0 + t2 * (-1.0 / 3628800.0 + t2 * (1.0 / 479001600.0))))));
+  float rc = 1.0 / max(c, 1e-6);
+  tan_t = s * rc;
+  sec2 = rc * rc;
+}
+float area_area(Light l) {
+  float a = abs(l.right_w.w * l.up_h.w) * (l.spot.z > 0.5 ? 0.25 * PI : 1.0);
+  return a > 1e-4 ? a : 1e-4;
+}
+float area_falloff(Light l, vec3 q, vec3 p) {
+  vec3 d = p - q;
+  float r2 = dot(d, d);
+  float c = dot(l.dir_range.xyz, d);
+  if (!(c > 0.0)) return 0.0;
+  float r = sqrt(r2), rr = r / max(l.dir_range.w, 1e-3), rr2 = rr * rr;
+  float w = 1.0 - rr2 * rr2;
+  w = w > 0.0 ? w * w : 0.0;
+  return (c / r) * w / (r2 > 1e-4 ? r2 : 1e-4);
+}
+/* The integrand over the light's own metres U (along right) and V (along up): max(0, n.d) h w / |d|^4. */
+float area_f(float U, float V, float c0, float al, float be, float fu, float fv, float h, float h2, float inv_range2) {
+  float g = c0 + al * U + be * V;
+  if (!(g > 0.0)) return 0.0;
+  float u = U - fu, v = V - fv;
+  float r2 = h2 + u * u + v * v, rr = r2 * inv_range2;
+  float w = 1.0 - rr * rr;
+  w = w > 0.0 ? w * w : 0.0;
+  return g * h * w / (r2 * (r2 > 1e-4 ? r2 : 1e-4));
+}
+/* The integrand's fixed terms for one pixel and light: n.d = c0 + al U + be V, the foot (fu, fv), the facing distance. */
+struct AreaPt { float c0, al, be, fu, fv, h, h2, inv_range2; };
+/* A rectangle: the horizon n.d = 0 is a line across it - only the side in front is integrated, the outer axis split where
+ * that line crosses a corner, each axis through x = foot + h tan(t) (the integrand's 1 / (h^2 + x^2) flattened). */
+float area_rect(AreaPt a, float W, float H, bool near) {
+    float c0 = a.c0, al = a.al, be = a.be, fu = a.fu, fv = a.fv, h = a.h, h2 = a.h2, inv_range2 = a.inv_range2;
+    float sum = 0.0;
+    bool outer_u = abs(be) >= abs(al);
+    float Wo = outer_u ? W : H, Wi = outer_u ? H : W;
+    float ao = outer_u ? al : be, ai = outer_u ? be : al;
+    float foot_o = outer_u ? fu : fv, foot_i = outer_u ? fv : fu;
+    float ht = max(h, 1e-3 * max(W, H));
+    int k = near ? 8 : 5;
+    float rht = 1.0 / ht;
+    float in_lo = 1.0, in_hi = -1.0;
+    float in_x[8], in_w[8];
+    float cuts[4];
+    cuts[0] = -0.5 * Wo;
+    int nc = 1;
+    if (abs(ai) > 1e-12 && abs(ao) > 1e-12) {
+      for (int e = 0; e < 2; e++) {
+        float iv = e == 0 ? -0.5 * Wi : 0.5 * Wi;
+        float o = -(c0 + ai * iv) / ao;
+        if (o > -0.5 * Wo && o < 0.5 * Wo) cuts[nc++] = o;
+      }
+    }
+    cuts[nc++] = 0.5 * Wo;
+    for (int i = 1; i < nc; i++) {  // (sorted: at most four)
+      float v = cuts[i];
+      int j = i - 1;
+      while (j >= 0 && cuts[j] > v) { cuts[j + 1] = cuts[j]; j--; }
+      cuts[j + 1] = v;
+    }
+    for (int piece = 0; piece + 1 < nc; piece++) {
+      float t0 = quad_atan((cuts[piece] - foot_o) * rht), t1 = quad_atan((cuts[piece + 1] - foot_o) * rht);
+      if (!(t1 > t0)) continue;
+      for (int a = 0; a < k; a++) {
+        float tn, sec2;
+        quad_tan(0.5 * (t0 + t1) + (t1 - t0) * gx(k, a), tn, sec2);
+        float o = foot_o + ht * tn, wo = (t1 - t0) * gw(k, a) * ht * sec2;
+        float lo = -0.5 * Wi, hi = 0.5 * Wi;
+        float base = c0 + ao * o;
+        if (abs(ai) > 1e-12) {
+          float edge = -base / ai;
+          if (ai > 0.0) lo = max(lo, edge);
+          else hi = min(hi, edge);
+        }
+        else if (!(base > 0.0)) continue;
+        if (!(hi > lo)) continue;
+        if (lo != in_lo || hi != in_hi) {
+          in_lo = lo;
+          in_hi = hi;
+          float s0 = quad_atan((lo - foot_i) * rht), s1 = quad_atan((hi - foot_i) * rht);
+          for (int b = 0; b < k; b++) {
+            float tn2, sec22;
+            quad_tan(0.5 * (s0 + s1) + (s1 - s0) * gx(k, b), tn2, sec22);
+            in_x[b] = foot_i + ht * tn2;
+            in_w[b] = (s1 - s0) * gw(k, b) * ht * sec22;
+          }
+        }
+        float row = 0.0;
+        for (int b = 0; b < k; b++)
+          row += in_w[b] * (outer_u ? area_f(o, in_x[b], c0, al, be, fu, fv, h, h2, inv_range2) : area_f(in_x[b], o, c0, al, be, fu, fv, h, h2, inv_range2));
+        sum += wo * row;
+      }
+    }
+    return sum;
+}
+/* An ellipse: rays from its centre at evenly spaced angles, each ray's part in front of the horizon integrated by Gauss
+ * in the area fraction r^2; the mean times the area. */
+float area_disc(AreaPt a, float W, float H, bool near, float area) {
+  float c0 = a.c0, al = a.al, be = a.be, fu = a.fu, fv = a.fv, h = a.h, h2 = a.h2, inv_range2 = a.inv_range2;
+  float sum = 0.0;
+  int k = near ? 6 : 5, na = near ? 20 : 12;
+  for (int j = 0; j < na; j++) {
+    float th = 2.0 * PI * (float(j) + 0.5) / float(na);
+    float du = 0.5 * W * cos(th), dv = 0.5 * H * sin(th);
+    float r1 = 1.0, r0 = 0.0;
+    float slope = al * du + be * dv;
+    if (abs(slope) > 1e-12) {
+      float edge = -c0 / slope;
+      if (slope > 0.0) r0 = max(r0, edge);
+      else r1 = min(r1, edge);
+    }
+    else if (!(c0 > 0.0)) continue;
+    if (!(r1 > r0)) continue;
+    float s0 = r0 * r0, s1 = r1 * r1;
+    for (int q = 0; q < k; q++) {
+      float r = sqrt(0.5 * (s0 + s1) + (s1 - s0) * gx(k, q));
+      sum += (s1 - s0) * gw(k, q) * area_f(r * du, r * dv, c0, al, be, fu, fv, h, h2, inv_range2);
+    }
+  }
+  return sum / float(na) * area;
+}
+float area_irradiance(Light l, vec3 p, vec3 n) {
+  vec3 dir = l.dir_range.xyz, right = l.right_w.xyz, up = l.up_h.xyz;
+  float W = abs(l.right_w.w), H = abs(l.up_h.w);
+  bool disk = l.spot.z > 0.5;
+  vec3 rel = p - l.pos_type.xyz;
+  float h = dot(dir, rel);
+  if (!(h > 0.0)) return 0.0;
+  float c0 = -dot(n, rel), al = dot(n, right), be = dot(n, up);
+  if (!(W * H * (disk ? 0.25 * PI : 1.0) > 1e-4)) {
+    float dl = length(rel);
+    return dl > 1e-6 ? area_area(l) * max(0.0, c0 / dl) * area_falloff(l, l.pos_type.xyz, p) : 0.0;
+  }
+  float range = max(l.dir_range.w, 1e-3);
+  AreaPt a = AreaPt(c0, al, be, dot(right, rel), dot(up, rel), h, h * h, 1.0 / (range * range));
+  bool near = h < 0.25 * max(W, H);
+  return disk ? area_disc(a, W, H, near, area_area(l)) : area_rect(a, W, H, near);
+}
+vec3 area_specular_dir(Light l, vec3 p, vec3 R, out float facing, out vec3 point) {
+  vec3 dir = l.dir_range.xyz, right = l.right_w.xyz, up = l.up_h.xyz, pos = l.pos_type.xyz;
+  vec3 q = p - dir * dot(p - pos, dir);
+  float denom = dot(R, dir);
+  if (denom < -1e-6) {
+    float t = dot(pos - p, dir) / denom;
+    if (t > 0.0) q = p + R * t;
+  }
+  float x = dot(q - pos, right), y = dot(q - pos, up);
+  float hw = 0.5 * abs(l.right_w.w), hh = 0.5 * abs(l.up_h.w);
+  if (l.spot.z > 0.5) {
+    if (!(hw > 0.0)) x = 0.0;
+    if (!(hh > 0.0)) y = 0.0;
+    float e = (hw > 0.0 ? x * x / (hw * hw) : 0.0) + (hh > 0.0 ? y * y / (hh * hh) : 0.0);
+    if (e > 1.0) {
+      float s = 1.0 / sqrt(e);
+      x *= s;
+      y *= s;
+    }
+  }
+  else {
+    x = clamp(x, -hw, hw);
+    y = clamp(y, -hh, hh);
+  }
+  vec3 rep = pos + right * x + up * y;
+  point = rep;
+  vec3 L = rep - p;
+  float dl = length(L);
+  L = dl > 1e-6 ? L / dl : -dir;
+  facing = max(0.0, -dot(dir, L));
+  return L;
+}
+/* brdf_eval_parts (shading.cpp): the diffuse without the cosine (an irradiance brings its own), the specular with it. */
+void brdf_parts(vec3 albedo, float rough, float metallic, float specular, vec3 n, vec3 v, vec3 l, out vec3 diffuse, out vec3 spec) {
+  vec3 f0 = fresnel_f0(albedo, metallic, specular);
+  vec3 diff = albedo * ((1.0 - metallic) / PI);
+  float nl = dot(n, l);
+  if (nl <= 0.0) {
+    diffuse = diff * (vec3(1.0) - f0);
+    spec = vec3(0.0);
+    return;
+  }
+  float nv = max(dot(n, v), 1e-4);
+  vec3 h = normalize(v + l);
+  float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
+  float a = max(rough * rough, 0.002), a2 = a * a;
+  float d = nh * nh * (a2 - 1.0) + 1.0;
+  float D = a2 / (PI * d * d);
+  float vis = 0.5 / (nl * sqrt(nv * nv * (1.0 - a2) + a2) + nv * sqrt(nl * nl * (1.0 - a2) + a2));
+  float fw = (1.0 - vh) * (1.0 - vh);
+  fw = fw * fw * (1.0 - vh);
+  vec3 F = f0 + (vec3(1.0) - f0) * fw;
+  diffuse = diff * (vec3(1.0) - F);
+  spec = F * (D * vis * nl);
+}
+/* The deferred shader's area branch (Renderer3D's light loop): the diffuse from the light's whole surface, the specular
+ * from its representative point with the lobe widened by the light's size and renormalised (Karis 2013). */
+vec3 area_light_lo(Light l, vec3 P, vec3 n, vec3 V, vec3 albedo, float rough, float metallic, float specular, float atten) {
+  float dcos = area_irradiance(l, P, n);
+  float c;
+  vec3 q;
+  vec3 Lr = area_specular_dir(l, P, n * (2.0 * dot(n, V)) - V, c, q);
+  float cfall = min(2.0 * PI, area_area(l) * area_falloff(l, q, P));
+  float a = max(rough * rough, 0.002);
+  float radius = sqrt(abs(l.right_w.w * l.up_h.w) / PI);
+  float a2 = min(1.0, a + radius / (2.0 * max(1e-3, length(q - P))));
+  vec3 dpart, spart;
+  brdf_parts(albedo, rough, metallic, specular, n, V, Lr, dpart, spart);
+  return (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color.rgb * atten;
+}
 float falloff(Light l, vec3 p, vec3 L) {
   int type = int(l.pos_type.w);
   if (type == 0) return 1.0;
+  if (type == 3) return area_area(l) * area_falloff(l, l.pos_type.xyz, p);  // (light_falloff: an area light at its centre - the toon branch)
   float f = 1.0 - length(l.pos_type.xyz - p) / max(l.dir_range.w, 1e-3);
   f = f > 0.0 ? f * f : 0.0;
   if (type == 2) {
@@ -836,6 +1073,10 @@ void main() {
     Light l = lights[li];
     vec3 L;
     float atten = l.color.w * PI;
+    if (int(l.pos_type.w) == 3) {  // (task 0163: an area light, from its whole surface)
+      if (atten > 0.0) lo += area_light_lo(l, P, n, V, albedo, rough, metallic, specular, atten);
+      continue;
+    }
     if (int(l.pos_type.w) == 0) L = -l.dir_range.xyz;
     else {
       vec3 dd = l.pos_type.xyz - P;
@@ -889,7 +1130,7 @@ struct FrameUbo {
   float view_proj[16], inv_view_proj[16], sun_vp[16];
   float eye[4], sky[4], equator[4], ground[4], view[4], shadow[4], background[4];
   float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4], env_map[4], sh[9][4], cage[4];
-  float lights[16][16];
+  float lights[16][24];
 };
 struct InstGpu {
   float model[16], albedo_rough[4], metal_spec[4], emission[4];
@@ -1911,7 +2152,13 @@ class VulkanRaster final : public Raster {
       o[0] = l.position[0], o[1] = l.position[1], o[2] = l.position[2], o[3] = (float)l.type;
       o[4] = l.direction[0], o[5] = l.direction[1], o[6] = l.direction[2], o[7] = l.range;
       o[8] = l.color[0], o[9] = l.color[1], o[10] = l.color[2], o[11] = l.intensity;
-      o[12] = l.spot_cos_outer, o[13] = l.spot_cos_inner;
+      o[12] = l.spot_cos_outer, o[13] = l.spot_cos_inner, o[14] = l.disk ? 1.0f : 0.0f, o[15] = 0.0f;
+      /* Task 0163: the panel's frame - right, up (the CPU's normalize(cross(direction, right))), its size. */
+      const float ux = l.direction[1] * l.right[2] - l.direction[2] * l.right[1], uy = l.direction[2] * l.right[0] - l.direction[0] * l.right[2],
+                  uz = l.direction[0] * l.right[1] - l.direction[1] * l.right[0];
+      const float ul = std::sqrt(ux * ux + uy * uy + uz * uz), inv = ul > 1e-12f ? 1.0f / ul : 0.0f;
+      o[16] = l.right[0], o[17] = l.right[1], o[18] = l.right[2], o[19] = l.width;
+      o[20] = ux * inv, o[21] = uy * inv, o[22] = uz * inv, o[23] = l.height;
     }
     std::memcpy(ubo_.mapped, &u, sizeof(u));
     return true;

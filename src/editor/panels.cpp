@@ -1833,6 +1833,12 @@ void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function
   stat("GPU views: busy (shadow / g-buffer / lighting)", stamps ? strprintf("%.2f ms (%.2f / %.2f / %.2f)", busy, fp.ms_gpu_shadow, fp.ms_gpu_gbuffer, fp.ms_gpu_lighting) : std::string("n/a (no timestamps)"));
   stat("GPU views: copies out + fence / wait", strprintf("%.2f ms / %.2f ms", fp.ms_gpu_readback, wait));  // (the wait: the GPU path's rest - gathering, uploads, the CPU's recording)
   stat("GPU busy in the frame", stamps && frame_ms_ > 0.0 ? strprintf("%.0f %% of %.2f ms", 100.0 * busy / frame_ms_, frame_ms_) : std::string("n/a"));
+  for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (task 0163: why a view drew on the CPU instead; a slot's last view keeps its reason until the device is chosen again)
+    if (gpu_slot_reason_[k].empty()) continue;
+    const RenderTarget *rt = gpu_slot_rt_[k];
+    const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
+    stat(strprintf("%s on the CPU", view), gpu_slot_reason_[k]);
+  }
 }
 
 /* A path tracer's card time: busy and wait inside its submissions, and the busy share of `wall_ms` (the whole render

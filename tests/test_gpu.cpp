@@ -873,7 +873,7 @@ static void tests_round126_to_round127() {
     std::printf("    the normal map changes %zu pixels of the plain sphere\n", bumped);
     CHECK(bumped > 10000);
   });
-  test("gpu views: an axis material, a live procedural texture or a cutout still send the view to the CPU, saying why", [&] {
+  test("gpu views: an axis material, a live procedural texture or a see-through material still send the view to the CPU, saying why (a cutout draws on the card since task 0163)", [&] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
@@ -881,8 +881,9 @@ static void tests_round126_to_round127() {
     MaterialPtr axis = make_material("axis", {0.5f, 0.5f, 0.5f});
     axis->axis_mode = 1;
     axis->touch();
-    MaterialPtr cut = make_material("cut", {0.5f, 0.5f, 0.5f});
-    cut->surface = (int)MaterialSurface::Cutout;
+    MaterialPtr cut = make_material("see-through", {0.5f, 0.5f, 0.5f});
+    cut->surface = (int)MaterialSurface::Transparent;
+    cut->alpha = 0.5f;
     cut->touch();
     Editor maker;  // (a Brick texture asset with Live Shading, read by the material through its path)
     maker.init_headless(320, 240);
@@ -1582,6 +1583,202 @@ static void tests_round182() {
   });
 }
 
+static void tests_round183() {
+  /* The Scene view's picture on the CPU and on the card for the scene `setup` builds, and the card's fallbacks. */
+  struct R183 {
+    double mean = 0, within3 = 0;
+    size_t pixels = 0;
+    uint64_t gpu_views = 0, fallbacks = 0;
+    std::string reason;
+  };
+  auto r183_compare = [](Editor &ed, GameObject *mover, Vec3 base, R183 &r) {
+    auto draw = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {  // (a change, then back: the view draws again)
+        mover->set_local_position(base + Vec3(0.0f, k ? 0.0f : 0.0001f, 0.0f));
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    const std::vector<uint32_t> cpu = draw(1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = draw(2);
+    const FrameProfile after = ed.frame_profile_totals();
+    r.gpu_views = after.gpu_views - before.gpu_views;
+    r.fallbacks = after.gpu_fallbacks - before.gpu_fallbacks;
+    r.reason = ed.gpu_view_reason();
+    double sum = 0;
+    size_t within = 0;
+    r.pixels = std::min(cpu.size(), gpu.size());
+    for (size_t i = 0; i < r.pixels; i++) {
+      int worst = 0;
+      for (int c = 0; c < 3; c++) worst = std::max(worst, std::abs((int)((cpu[i] >> (c * 8)) & 255) - (int)((gpu[i] >> (c * 8)) & 255)));
+      sum += worst;
+      within += worst <= 3 ? 1 : 0;
+    }
+    r.mean = r.pixels ? sum / r.pixels : 0.0;
+    r.within3 = r.pixels ? (double)within / r.pixels : 0.0;
+    ed.viewport_device_for_test(1);
+  };
+
+  test("gpu views: an area light lights the view on the card as on the CPU - a rectangle over a floor and a sphere, then a disc - with no fallback (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    for (int disc = 0; disc < 2; disc++) {
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Cube");
+      ed.command("delete");  // (the default cube sits at the pivot)
+      ed.command("select Main Camera");
+      GameObject *panel = ed.scene().create("Panel");
+      Light *l = panel->add<Light>();
+      l->type = 3;
+      l->area_shape = disc;
+      l->area_width = 2.0f;
+      l->area_height = 1.0f;
+      l->intensity = 3.0f;
+      panel->set_local_position({0.5f, 2.2f, 0.0f});
+      panel->set_local_rotation(Quat::euler({90, 0, 0}));  // (facing down: +Z turned to -Y)
+      GameObject *ball = ed.scene().create("Ball");
+      ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 24, 12);
+      ball->add<MeshRenderer>()->materials = {make_material("Glossy", Vec3(0.7f, 0.5f, 0.3f))};
+      ball->get<MeshRenderer>()->materials[0]->roughness = 0.3f;
+      ball->set_local_position({1.2f, 0.5f, 0.0f});
+      ed.command("camera 0 20 5 0.3 0.6 0");  // (yaw, pitch, distance, the pivot)
+      r34_steps(ed, 3);
+      R183 r;
+      r183_compare(ed, ball, {1.2f, 0.5f, 0.0f}, r);
+      std::printf("    %s: %llu views on the card, %llu on the CPU%s%s; %zu pixels: mean difference %.3f / 255, %.2f %% within 3\n", disc ? "a disc" : "a rectangle",
+                  (unsigned long long)r.gpu_views, (unsigned long long)r.fallbacks, r.reason.empty() ? "" : " - ", r.reason.c_str(), r.pixels, r.mean, r.within3 * 100);
+      CHECK(r.gpu_views > 0 && r.fallbacks == 0);
+      CHECK(r.pixels > 3000 && r.mean < 1.0 && r.within3 >= 0.99);
+      /* The panel lights the picture: with it off, many pixels change (on the card). */
+      ed.viewport_device_for_test(2);
+      ball->set_local_position({1.2f, 0.5001f, 0.0f});
+      r34_steps(ed, 2);
+      const std::vector<uint32_t> lit = r34_crop(ed, ed.scene_view_rect());
+      l->enabled = false;
+      ball->set_local_position({1.2f, 0.5f, 0.0f});
+      r34_steps(ed, 2);
+      const std::vector<uint32_t> dark = r34_crop(ed, ed.scene_view_rect());
+      l->enabled = true;
+      size_t changed = 0;
+      for (size_t i = 0; i < lit.size() && i < dark.size(); i++) changed += lit[i] != dark[i] ? 1 : 0;
+      std::printf("    the panel off changes %zu pixels\n", changed);
+      CHECK(changed > 2000);
+    }
+  });
+
+  test("gpu views: a cutout material's holes show what is behind and pick it, on the card as on the CPU, with no fallback (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("delete");  // (the default cube sits at the pivot, where the wall goes)
+    ed.command("select Main Camera");
+    /* A 64 x 64 texture: opaque with a 32 x 32 hole in the middle (alpha 0). */
+    const std::string png = fs::join(test_dir(), "cutout_hole.png");
+    std::vector<uint32_t> px(64 * 64);
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) {
+        const bool hole = x >= 16 && x < 48 && y >= 16 && y < 48;
+        px[(size_t)y * 64 + x] = hole ? 0u : 0xFFC83C28u;
+      }
+    CHECK(write_png(png, px.data(), 64, 64, 64, true));  // (with its alpha: without it the hole is opaque black)
+    MaterialPtr cut = make_material("Holed", Vec3(1.0f));
+    cut->surface = (int)MaterialSurface::Cutout;
+    cut->alpha_clip = 0.5f;
+    cut->base_map.path = png;
+    cut->touch();
+    GameObject *wall = ed.scene().create("Wall");
+    wall->add<MeshFilter>()->mesh = primitives::plane(2.0f, 1);
+    wall->add<MeshRenderer>()->materials = {cut};
+    wall->set_local_position({0.0f, 1.0f, 0.0f});
+    wall->set_local_rotation(Quat::euler({-90, 0, 0}));  // (upright, its front toward the camera at -Z: the view culls back faces)
+    GameObject *behind = ed.scene().create("Behind");
+    behind->add<MeshFilter>()->mesh = primitives::cube(0.6f);
+    behind->add<MeshRenderer>()->materials = {make_material("Blue", Vec3(0.2f, 0.3f, 0.9f))};
+    behind->set_local_position({0.0f, 1.0f, 2.0f});
+    ed.command("camera 0 0 3 0 1 0");  // (yaw, pitch, distance, the pivot: the eye 3 m before the wall)
+    r34_steps(ed, 3);
+    R183 r;
+    r183_compare(ed, behind, {0.0f, 1.0f, 2.0f}, r);
+    std::printf("    %llu views on the card, %llu on the CPU%s%s; %zu pixels: mean difference %.3f / 255, %.2f %% within 3\n",
+                (unsigned long long)r.gpu_views, (unsigned long long)r.fallbacks, r.reason.empty() ? "" : " - ", r.reason.c_str(), r.pixels, r.mean, r.within3 * 100);
+    CHECK(r.gpu_views > 0 && r.fallbacks == 0);
+    CHECK(r.pixels > 3000 && r.mean < 1.0 && r.within3 >= 0.99);
+    /* The hole shows the blue cube at the view's centre and the red wall beside it, on both devices. */
+    for (int device : {1, 2}) {
+      ed.viewport_device_for_test(device);
+      behind->set_local_position({0.0f, 1.0f, device == 1 ? 2.0001f : 2.0f});
+      r34_steps(ed, 2);
+      const Recti v = ed.scene_view_rect();
+      const std::vector<uint32_t> px2 = r34_crop(ed, v);
+      auto at = [&](int x, int y) { return px2[(size_t)y * v.w + x]; };
+      const uint32_t centre = at(v.w / 2, v.h / 2), beside = at(v.w / 2 + v.w / 12, v.h / 2);  // (a twelfth of the view: past the hole, on the wall)
+      auto r_ = [](uint32_t p) { return (int)((p >> 16) & 255); };
+      auto b_ = [](uint32_t p) { return (int)(p & 255); };
+      std::printf("    %s: the centre pixel %02x%02x%02x (the cube through the hole), beside it %02x%02x%02x (the wall)\n", device == 2 ? "the card" : "the CPU",
+                  r_(centre), (int)((centre >> 8) & 255), b_(centre), r_(beside), (int)((beside >> 8) & 255), b_(beside));
+      CHECK(b_(centre) > r_(centre) + 40);  // (blue through the hole)
+      CHECK(r_(beside) > b_(beside) + 40);  // (the red wall around it: the wall faces the camera)
+    }
+    /* A click through the hole, with the views on the card, picks the cube behind. */
+    ed.viewport_device_for_test(2);
+    behind->set_local_position({0.0f, 1.0f, 2.0001f});
+    r34_steps(ed, 2);
+    const Recti v = ed.scene_view_rect();
+    r34_click(ed, v.x + v.w / 2, v.y + v.h / 2);
+    r34_steps(ed, 1);
+    const GameObject *picked = ed.active_object_for_test();
+    std::printf("    clicked through the hole on the card: %s\n", picked ? picked->name.c_str() : "nothing");
+    CHECK(picked && picked->name == "Behind");
+    ed.viewport_device_for_test(1);
+  });
+
+  test("gpu views: the Profiler names why a view drew on the CPU (a camera filter), by the view (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(2);
+    ed.record_buttons_for_test(true);
+    ed.command("window Profiler");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    for (int i = 0; i < 3; i++) {
+      cube->set_local_position({0.1f * (float)i, 0.5f, 0.0f});
+      ed.step_frame_headless();
+    }
+    Recti row;
+    auto any_named = [&] {
+      for (const char *v : {"Scene view on the CPU", "Game view on the CPU", "Camera Preview on the CPU", "A view on the CPU"})
+        if (ed.button_rect_for_test(v, row)) return true;
+      return false;
+    };
+    bool named = any_named();
+    CHECK(!named);  // (every view on the card: no such row)
+    ed.command("select Main Camera");
+    ed.command("filter add Vignette");  // (a camera filter: the Game view falls back)
+    for (int i = 0; i < 3; i++) {
+      cube->set_local_position({0.1f * (float)i, 0.5f, 0.0f});
+      ed.step_frame_headless();
+    }
+    named = any_named();
+    std::printf("    the Game view with a filter: %s\n", named ? "named in the Profiler" : "not named");
+    CHECK(named);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -1592,4 +1789,5 @@ void run_gpu_tests() {
   tests_round180();
   tests_round181();
   tests_round182();
+  tests_round183();
 }

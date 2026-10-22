@@ -1047,6 +1047,9 @@ The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (P
 ? Why does an Edit Mode drag on a 50,000-face mesh only send a few bytes to the card each frame? | The drag works out normals only around the faces that moved, and only those vertices and triangles go up: the rest of the mesh on the card is already right.
 ? Why does a Sky world cost the GPU almost nothing extra? | Its picture is one texture the card keeps: the background and the reflections read it, and the diffuse light comes from nine numbers (spherical harmonics) worked out once on the CPU.
 ! cmd:set World.Source Sky; viewport device gpu | A Sky world, drawn on the GPU
+? A scene has an area light and a cutout fence. Do the views still draw on the card? | Yes since task 0163: the lighting pass integrates the panel as the CPU does, and the G-buffer discards a cutout's pixels under its threshold, so the fence's holes show and pick what is behind. The Profiler's GPU block names whatever still sends a view to the CPU - a camera filter, GI, a see-through material.
+! cmd:select Main Camera; filter add Vignette; viewport device gpu; window Profiler | A camera filter sends the Game view to the CPU: the Profiler names it
+! cmd:select Main Camera; filter add Vignette; viewport device gpu; window Profiler | A camera filter sends the Game view to the CPU: the Profiler names it
 ? Why does the GPU read textures from storage buffers instead of using its texture units? | The texture units filter, choose mip levels and decode sRGB in their own slightly different ways. Reading the CPU's own mip chain and filtering it with the CPU's formulas keeps the two pictures within a step of 255.
 ! cmd:viewport device gpu | Draw the views on the GPU
 ! cmd:viewport device cpu | Draw the views on the CPU again
