@@ -65,6 +65,9 @@ struct RasterInstance {
   bool has_uv = false, has_tangent = false;
   /* The part of the mesh drawn (a material's triangles, grouped on the card): count 0 is all of it. */
   uint32_t first_index = 0, index_count = 0;
+  /* Task 0166: Edit Mode's face highlight - 1 + the index in RasterFrame::highlight_bits of this draw's first
+   * triangle's bit (0: none); the g-buffer pass mixes the highlight colour into a set triangle's albedo. */
+  uint32_t highlight = 0;
   /* Task 0102: a toon material's settings (Material's toon_*), as shade_toon, toon_rim and light_finish read them. */
   int toon_bands = 1;
   float toon_softness = 0.02f, toon_threshold = 0.15f, toon_specular_size = 0.0f, toon_specular_smooth = 0.05f;
@@ -118,6 +121,7 @@ struct RasterFrame {
   bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
   bool cull_backfaces = true; // (double-sided instances never are)
   std::vector<RasterLight> lights;
+  std::vector<uint32_t> highlight_bits;  // task 0166: a bit per triangle of the highlighted meshes (see RasterInstance::highlight)
   /* The world's light (Environment Gradient or Color, times its strength). */
   int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
   /* Task 0102: a Sky or HDRI world (env_mode 2): its equirectangular map (add_texture's id; -1: none yet, the
@@ -180,6 +184,9 @@ class Raster {
   virtual void remove_mesh(int mesh) = 0;
   /* Whether its cage pipelines were made (task 0100: else the CPU draws the cage). */
   virtual bool can_draw_cage() const = 0;
+  /* Whether the g-buffer pass can tint Edit Mode's selected faces (task 0166: it needs gl_PrimitiveID, which Vulkan
+   * ties to the geometryShader feature); without it the edit object draws on the CPU as before. */
+  virtual bool can_highlight_faces() const { return false; }
   /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;

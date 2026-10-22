@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 186): a selection changes the selection, not the mesh (task 0166)
+
+**Asked:** the roadmap's "selection changes redraw flags, not the view" (Select More on 50k faces 55-68 ms against
+Blender's 15.5 ms).
+
+**Measured first** (the task doc has the probe): Select More's frame after an undo copied the mesh (the selection-only
+operators ran inside the operator path, after the mutable copy), so every view saw a "new" mesh - two render meshes
+updated in place, the shadow map and the Game view drawn again - and the command itself built a vertex adjacency on
+each call (8 ms). With the views on the card, a face selection sent the whole edit object to the CPU ("Edit Mode's
+face highlight" was a fallback reason). A plain selection change's frame is 9 ms, of which the Scene view's 3D layer
+about 3 ms and its cage overlay 4 ms: the overlays are part of the cached layer, so the planned "selection out of
+the cache key" would save the 3 ms and cost the cage every idle frame, or a second cached layer. Not done; the
+frame's cost is the cage, which is already drawn in parallel.
+
+**Changed**
+- The selection-only operators (Select Similar / By Material / Sharp / Z-Fighting / Coplanar / Linked / More / Less /
+  Invert / Non-Manifold / Ring / Loop) run before any copy, on the mesh the undo step shares, as `const Mesh &`
+  (`Editor::select_op`): no copy, no "new" mesh, only the Scene view - whose cage shows the selection - draws again.
+  Loop Cut and Select Loop share `selected_edge`.
+- Select More / Less are one pass over the cached edge table (`grow_selection` built an adjacency per call).
+- The card draws Edit Mode's face highlight: a bit per triangle of the edited mesh (`RasterFrame::highlight_bits`,
+  `RasterInstance::highlight`, binding 16) that the g-buffer pass mixes into a set triangle's albedo as the CPU
+  raster does (in the card's triangle order, grouped by slot with several materials); a face selection is no
+  longer a reason to draw the edit object on the CPU where the card has Vulkan's geometryShader feature
+  (`gl_PrimitiveID` needs it; without it the fallback stays). A selection operator ends the F9 panel as before.
+
+**Measured**
+- The stress row "A selection operator after the undo (Select More)" with the views on the CPU: 15.4 ms a frame, was 32.2 (mesh copies in the frame 0.0; the frame after 1.7 ms).
+- The stress row "A selection operator after the undo (Select More)" with the views on the GPU: 7.9 ms a frame, was 32.5 (mesh copies in the frame 0.0; the frame after 1.6 ms).
+- Blender 5.2.2's row: 15.5 ms (PERFORMANCE.md Pass 13). The probe before this task: a plain selection change's frame 9 ms (the 3D layer about 3 ms, the cage overlay 4 ms), Select More's command 8 ms (the adjacency built per call), its frame after an undo a mesh copy, two in-place render-mesh updates, the shadow map and the Game view drawn again.
+
+**Checked**
+- Select More on the 50k-face sphere keeps the very mesh pointer, copies nothing, draws no shadow map or Game view
+  again and renders one view; Select Less takes it back; Select Loop, Linked and Invert copy nothing
+  (tests/test_editor.cpp). `grow_selection` matches the adjacency walk growing and shrinking (tests/test_modeling.cpp).
+  A cube with its top face selected draws on the card without a fallback, its tint (the orange pixels beyond the
+  picture with nothing selected) within 20 % of the CPU's, with one material and with two (tests/test_gpu.cpp);
+  Select Loop from one edge and grow / shrink with a loose edge and an isolated vertex covered.
+- Unit checks (round 186): Windows 11,280, 0 failed (925 tests); render-cache verify mode 11,281, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,942, 0 failed. Sanitizer build: 10,822, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 185): Edit Mode operators without the wasted work (task 0165, ADR 0053)
 
 **Asked:** the roadmap's "Edit Mode operators without a whole-mesh copy" (Extrude on 50k faces 96-118 ms against

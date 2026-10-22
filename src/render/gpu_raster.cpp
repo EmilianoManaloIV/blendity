@@ -69,7 +69,7 @@ std::unique_ptr<Raster> Raster::create(int, std::string *error) {
 namespace {
 
 #define BL_RV_INSTANCE(X)                                                                                                   \
-  X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceQueueFamilyProperties)       \
+  X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceFeatures) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceQueueFamilyProperties)       \
   X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) X(vkDestroySurfaceKHR)                  \
   X(vkGetPhysicalDeviceSurfaceSupportKHR)                                                                                   \
   X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR)
@@ -143,6 +143,7 @@ struct Inst {
   ivec4 toon5;   // task 0148: the Toon Ramp's texture (-1: the bands)
 };
 layout(std430, set = 0, binding = 1) readonly buffer Instances { Inst inst[]; };
+layout(std430, set = 0, binding = 16) readonly buffer Highlight { uint hl[]; };  // task 0166: Edit Mode's face highlight, a bit a triangle
 const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u, F_TOON = 64u;
 )";
 
@@ -393,6 +394,12 @@ void main() {
     alpha = s.alpha;
   }
   if (I.metal_spec.z >= 0.0 && alpha < I.metal_spec.z) discard;  // (task 0163: a cutout's hole - no colour, depth or id, so what is behind shows and picks)
+#ifdef BL_HIGHLIGHT
+  if (I.id.z != 0u) {  // task 0166: a selected face's tint, as the CPU raster mixes it before lighting
+    uint t = I.id.z - 1u + uint(gl_PrimitiveID);
+    if (t < uint(hl.length()) * 32u && ((hl[t >> 5u] >> (t & 31u)) & 1u) != 0u) albedo = mix(albedo, vec3(1.0, 0.55, 0.1), 0.45);
+  }
+#endif
   o_normal = vec4(n, rough);
   o_albedo = vec4(albedo, metallic);
   o_geo = vec4(g, I.metal_spec.y);
@@ -1229,7 +1236,15 @@ class VulkanRaster final : public Raster {
     qci.pQueuePriorities = &prio;
     const char *swapchain_ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     swapchain_ok_ = wants_swapchain();
+    /* The g-buffer shader reads gl_PrimitiveID for Edit Mode's face highlight (task 0166), which Vulkan ties to the
+     * geometryShader feature: enabled where the card has it; elsewhere the highlight stays on the CPU. */
+    VkPhysicalDeviceFeatures have{};
+    f_.vkGetPhysicalDeviceFeatures(pd_, &have);
+    VkPhysicalDeviceFeatures want{};
+    want.geometryShader = have.geometryShader;
+    geometry_ = have.geometryShader != 0;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pEnabledFeatures = &want;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = swapchain_ok_ ? 1 : 0;
@@ -1258,6 +1273,7 @@ class VulkanRaster final : public Raster {
     f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_);
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
+    if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
      * arena's, which is copied over when it grows.) */
@@ -1355,6 +1371,7 @@ class VulkanRaster final : public Raster {
   }
 
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
+  bool can_highlight_faces() const override { return geometry_; }
 
   int add_texture(const Texture &t, std::string *err) override {
     if (t.levels.empty()) {
@@ -1659,6 +1676,8 @@ class VulkanRaster final : public Raster {
   float ts_period_ns_ = 1.0f;
   RasterTimes times_;
   Buf ubo_, inst_buf_, staging_, readback_, ui_staging_, lut_buf_;
+  Buf hl_buf_;  // the face highlight's bits (task 0166)
+  bool geometry_ = false;  // the geometryShader feature: gl_PrimitiveID in the g-buffer pass (task 0166)
   Buf cage_v_, cage_e_;  // the Edit Mode cage (task 0100)
   /* Task 0101: the textures. Their texels in two arenas (8-bit as stored, float), each texture's levels one after
    * another; the tables of textures and levels mirrored here and sent when they change. */
@@ -2124,6 +2143,19 @@ class VulkanRaster final : public Raster {
     std::memcpy(d.toon0, t0, 16), std::memcpy(d.toon1, t1, 16), std::memcpy(d.toon2, t2, 16), std::memcpy(d.toon3, t3, 16), std::memcpy(d.toon4, t4, 16);
     d.toon5[0] = s.toon_ramp, d.toon5[1] = d.toon5[2] = d.toon5[3] = 0;
   }
+  /* The face highlight's bits into their buffer (grown when a bigger mesh is edited; one zero word when none). */
+  bool write_highlight(const RasterFrame &fr, std::string *err) {
+    const size_t bytes = std::max<size_t>(4, fr.highlight_bits.size() * 4);
+    if (bytes > hl_buf_.size) {
+      f_.vkDeviceWaitIdle(dev_);
+      free_buffer(hl_buf_);
+      if (!make_buffer(hl_buf_, bytes * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory for the face highlight");
+      for (Slot &sl : slots_) bind_buffers(sl.set);
+    }
+    if (fr.highlight_bits.empty()) std::memset(hl_buf_.mapped, 0, 4);
+    else std::memcpy(hl_buf_.mapped, fr.highlight_bits.data(), fr.highlight_bits.size() * 4);
+    return true;
+  }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {
     if (instances_.size() * sizeof(InstGpu) > inst_buf_.size) {
@@ -2143,8 +2175,10 @@ class VulkanRaster final : public Raster {
       dst[i].emission[3] = 0.0f;
       dst[i].id[0] = s.id;
       dst[i].id[1] = s.flags;
+      dst[i].id[2] = s.highlight;
       write_material(s, dst[i]);
     }
+    if (!write_highlight(fr, err)) return false;
     FrameUbo u{};
     const Mat4 vp = vulkan_clip(fr.view_proj), sun = vulkan_clip(fr.sun_view_proj), inv = vp.inverse();
     std::memcpy(u.view_proj, vp.m, 64);
@@ -2223,6 +2257,7 @@ class VulkanRaster final : public Raster {
     for (uint32_t i = 11; i <= 14; i++)  // the textures: 8-bit texels, float texels, textures, levels (task 0101)
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // each pixel's instance (task 0102)
+    b.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // the face highlight's bits (task 0166)
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
@@ -2232,7 +2267,7 @@ class VulkanRaster final : public Raster {
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
     VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9 * kSlots},
                                   {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
@@ -2255,7 +2290,8 @@ class VulkanRaster final : public Raster {
     const VkDescriptorBufferInfo more[6] = {{cage_v_.buf, 0, VK_WHOLE_SIZE},    {cage_e_.buf, 0, VK_WHOLE_SIZE},
                                             {tex8_.buf, 0, VK_WHOLE_SIZE},      {texf_.buf, 0, VK_WHOLE_SIZE},
                                             {texinfo_buf_.buf, 0, VK_WHOLE_SIZE}, {texlevel_buf_.buf, 0, VK_WHOLE_SIZE}};
-    VkWriteDescriptorSet w[9];
+    const VkDescriptorBufferInfo hb{hl_buf_.buf, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet w[10];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
     for (int i = 3; i < 9; i++) {
@@ -2276,7 +2312,11 @@ class VulkanRaster final : public Raster {
     w[1].descriptorCount = 1;
     w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[1].pBufferInfo = &sb;
-    f_.vkUpdateDescriptorSets(dev_, 9, w, 0, nullptr);
+    w[9].dstBinding = 16;
+    w[9].descriptorCount = 1;
+    w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[9].pBufferInfo = &hb;
+    f_.vkUpdateDescriptorSets(dev_, 10, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
     const Img *im[7] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst};
@@ -2444,7 +2484,7 @@ class VulkanRaster final : public Raster {
   }
   bool make_pipelines(std::string *err) {
     VkShaderModule sv = module(kShadowVert, shaderc_vertex_shader, err), gv = module(kGbufVert, shaderc_vertex_shader, err),
-                   gf = module(std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
+                   gf = module(std::string(geometry_ ? "#define BL_HIGHLIGHT 1\n" : "") + kMaterialFrag + kGlslProcedurals + kMaterialEval + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
                    lf = module(std::string(kMaterialFrag) + kLightFrag, shaderc_fragment_shader, err);
     const std::string cc = kCageCommon;
     const std::string cv = cc + kCageVertCommon;
@@ -2581,7 +2621,7 @@ class VulkanRaster final : public Raster {
     free_image(ui_img_);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);

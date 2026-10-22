@@ -7444,6 +7444,62 @@ static void tests_round185() {
   });
 }
 
+/* Round 186 (task 0166): Select More / Less over the edge table match the adjacency walk. */
+static void r186_grow_reference(const Mesh &m, std::vector<uint8_t> &vert_sel, bool grow) {
+  vert_sel.resize(m.vert_count(), 0);
+  std::vector<std::vector<uint32_t>> nb(m.vert_count());
+  for (auto &e : m.edge_cache()) {
+    nb[e.first].push_back(e.second);
+    nb[e.second].push_back(e.first);
+  }
+  std::vector<uint8_t> out = vert_sel;
+  for (uint32_t v = 0; v < m.vert_count(); v++)
+    for (uint32_t w : nb[v]) {
+      if (grow && vert_sel[v]) out[w] = 1;
+      if (!grow && vert_sel[v] && !vert_sel[w]) out[v] = 0;
+    }
+  vert_sel = out;
+}
+
+static void tests_round186() {
+  test("grow_selection over the edge table (no adjacency built) gives the adjacency walk's selection, growing and shrinking, on a sphere from one vertex and from a ring", [&] {
+    const MeshPtr ball = primitives::uv_sphere(0.5f, 24, 16);
+    std::vector<uint8_t> a(ball->vert_count(), 0), b;
+    a[ball->vert_count() / 2] = 1;
+    b = a;
+    for (int k = 0; k < 4; k++) {
+      meshops::grow_selection(*ball, a, true);
+      r186_grow_reference(*ball, b, true);
+      CHECK(a == b);
+    }
+    const size_t grown = (size_t)std::count(a.begin(), a.end(), 1);
+    for (int k = 0; k < 2; k++) {
+      meshops::grow_selection(*ball, a, false);
+      r186_grow_reference(*ball, b, false);
+      CHECK(a == b);
+    }
+    std::printf("    from one vertex: %zu after four grows, %zu after two shrinks (of %zu)\n", grown, (size_t)std::count(a.begin(), a.end(), 1), ball->vert_count());
+    CHECK(grown > 20 && (size_t)std::count(a.begin(), a.end(), 1) < grown);
+    /* A triangle, a loose edge hanging off it and an isolated vertex: the loose edge grows, the lone vertex never. */
+    Mesh m;
+    for (int k = 0; k < 5; k++) m.add_vert({(float)k, 0, 0});
+    m.add_face({0, 1, 2});
+    m.add_loose_edge(2, 3);
+    std::vector<uint8_t> s(5, 0), s2;
+    s[0] = 1;
+    s2 = s;
+    for (int k = 0; k < 3; k++) {
+      meshops::grow_selection(m, s, true);
+      r186_grow_reference(m, s2, true);
+      CHECK(s == s2);
+    }
+    CHECK(s[3] == 1 && s[4] == 0);
+    meshops::grow_selection(m, s, false);
+    r186_grow_reference(m, s2, false);
+    CHECK(s == s2);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -7473,4 +7529,5 @@ void run_modeling_tests() {
   tests_round116();
   tests_round132();
   tests_round185();
+  tests_round186();
 }

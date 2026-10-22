@@ -1403,6 +1403,15 @@ void Editor::auto_smooth_after(Mesh *m, size_t before) {
   Log::info("Auto Smooth: curved surface shaded smooth (edges sharper than %.0f degrees stay hard)", auto_smooth_angle_);
 }
 
+/* The operators that change the selection and nothing else (task 0166): they read the mesh the undo step shares -
+ * no copy, so the views don't see a "new" mesh and only the Scene view's picture, whose cage shows the selection,
+ * draws again. */
+static bool selection_only_op(const std::string &op) {
+  return op == "select_similar_normal" || op == "select_similar_area" || op == "select_by_material" || op == "select_sharp" ||
+         op == "select_overlapping" || op == "select_coplanar" || op == "select_linked" || op == "select_more" || op == "select_less" ||
+         op == "select_invert" || op == "select_non_manifold" || op == "select_ring" || op == "select_loop";
+}
+
 void Editor::edit_op(const std::string &op_in) {
   /* Extrude with Individual on is Extrude Individual Faces (one button, one switch). */
   const std::string op = op_in == "extrude" && extrude_individual_ && elem_ == EditElement::Face ? std::string("extrude_individual") : op_in;
@@ -1419,6 +1428,10 @@ void Editor::edit_op(const std::string &op_in) {
   MeshPtr &mp = *edit_mesh_ptr();
   if (edit_op_redoable(op)) {
     begin_redoable_op(op, *g, mp);
+    return;
+  }
+  if (selection_only_op(op)) {
+    select_op(op, *g, *mp);
     return;
   }
   edit_op_rest(op, *g, mp);
@@ -1528,6 +1541,184 @@ void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
   else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
   else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
   else if (op == "draft") L.amount = draft_angle_;
+}
+
+/* The one selected edge (exactly two adjacent selected vertices) Loop Cut and Select Loop start from; false when
+ * there is none or more than one (the caller says so). */
+bool Editor::selected_edge(const Mesh &m, uint32_t &a, uint32_t &b) const {
+  a = b = UINT32_MAX;
+  for (auto &e : m.edge_cache())
+    if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
+      if (a != UINT32_MAX) { a = UINT32_MAX; break; }
+      a = e.first;
+      b = e.second;
+    }
+  return a != UINT32_MAX;
+}
+
+/* Select Similar Normal / Area, Select By Material: the faces like the selected ones. */
+void Editor::select_similar_op(const std::string &op, const Mesh &m) {
+  std::vector<size_t> sel;
+  for (size_t f = 0; f < face_sel_.size() && f < m.face_count(); f++)
+    if (face_sel_[f]) sel.push_back(f);
+  if (sel.empty()) {
+    Log::warn("Select a face first");
+    return;
+  }
+  auto area = [&](size_t f) {  /* half the Newell vector's length */
+    Vec3 s(0.0f);
+    const uint32_t *v = m.face_verts(f);
+    for (uint32_t i = 0; i < m.face_size(f); i++) s += cross(m.positions[v[i]], m.positions[v[(i + 1) % m.face_size(f)]]);
+    return 0.5f * length(s);
+  };
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (size_t s : sel) {
+      bool same = false;
+      if (op == "select_similar_normal") same = dot(m.face_normal(f), m.face_normal(s)) > std::cos(5.0f * kDeg2Rad);
+      else if (op == "select_similar_area") {
+        const float a = area(f), b = area(s);
+        same = std::fabs(a - b) <= 0.05f * std::max(a, b) + 1e-9f;
+      }
+      else same = m.material_of(f) == m.material_of(s);
+      if (same) {
+        face_sel_[f] = 1;
+        break;
+      }
+    }
+  sync_vert_face_selection(true);
+  return;
+}
+
+/* Select Sharp Edges (Blender's): edge mode with them selected. */
+void Editor::select_sharp_op(const Mesh &m) {
+  /* Blender's Select Sharp Edges: switches to edge mode with them selected. */
+  if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
+  edge_sel_.clear();
+  for (uint64_t k : meshops::sharp_edges_by_angle(m, seam_angle_, true)) edge_sel_.insert(k);
+  verts_from_edges();
+  Log::info("Selected %zu sharp edge(s) (> %.0f deg)", edge_sel_.size(), seam_angle_);
+  return;
+}
+
+/* Select Z-Fighting: the faces the check finds on top of each other. */
+void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
+  /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
+  const size_t n = zfight_scan(false);
+  zfight_from_panel_ = false;  // outlines only while editing this mesh
+  set_edit_element(EditElement::Face);
+  face_sel_.assign(m.face_count(), 0);
+  for (const ZFightIssue &z : zfight_) {
+    if (z.obj_a == g.id && z.face_a < face_sel_.size()) face_sel_[z.face_a] = 1;
+    if (z.obj_b == g.id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
+  }
+  sync_vert_face_selection(true);
+  Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
+  return;
+}
+
+/* Select Coplanar: the flat regions around the selected faces. */
+void Editor::select_coplanar_op(const Mesh &m) {
+  /* Selection only, and it only adds. In vertex or edge mode, the faces whose corners are all selected are
+   * the start, and the faces found add their corners (and edges) to what is selected. */
+  vert_sel_.resize(m.vert_count(), 0);
+  if (elem_ != EditElement::Face) {
+    face_sel_.assign(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool all = m.face_size(f) > 0;
+      for (uint32_t k = 0; k < m.face_size(f); k++) all = all && vert_sel_[m.face_verts(f)[k]];
+      face_sel_[f] = all;
+    }
+  }
+  bool any = false;
+  for (uint8_t f : face_sel_) any = any || f;
+  if (!any) {
+    Log::warn("Select Coplanar: select a face first (or all the corners of one)");
+    return;
+  }
+  const size_t added = meshops::select_coplanar(m, face_sel_);
+  if (elem_ == EditElement::Face) sync_vert_face_selection(true);
+  else
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (!face_sel_[f]) continue;
+      const uint32_t *fv = m.face_verts(f);
+      const uint32_t ns = m.face_size(f);
+      for (uint32_t k = 0; k < ns; k++) {
+        vert_sel_[fv[k]] = 1;
+        if (elem_ == EditElement::Edge) edge_sel_.insert(Mesh::edge_key(fv[k], fv[(k + 1) % ns]));
+      }
+    }
+  Log::info("Select Coplanar: %zu face%s added", added, added == 1 ? "" : "s");
+  return;
+}
+
+/* Select Linked / More / Less / Invert / Non-Manifold / Edge Ring: through the vertices. */
+void Editor::select_grow_op(const std::string &op, const Mesh &m) {
+  /* Selection only: no undo step, nothing touched. */
+  if (op == "select_ring") {
+    std::vector<uint64_t> sel(edge_sel_.begin(), edge_sel_.end());
+    if (elem_ != EditElement::Edge || sel.empty()) {
+      Log::warn("Select Edge Ring: select an edge first (press 2 for edge mode)");
+      return;
+    }
+    for (uint64_t k : sel)
+      for (auto &e : meshops::edge_ring_edges(m, (uint32_t)(k >> 32), (uint32_t)(k & 0xFFFFFFFF))) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
+    verts_from_edges();
+    return;
+  }
+  if (elem_ == EditElement::Face && op != "select_non_manifold") {
+    /* Faces: through the vertices, then back to whole faces. */
+    sync_vert_face_selection(true);
+  }
+  if (op == "select_linked") meshops::select_linked(m, vert_sel_);
+  else if (op == "select_more") meshops::grow_selection(m, vert_sel_, true);
+  else if (op == "select_less") meshops::grow_selection(m, vert_sel_, false);
+  else if (op == "select_invert") {
+    if (elem_ == EditElement::Face) {
+      for (auto &f : face_sel_) f = !f;
+      sync_vert_face_selection(true);
+      return;
+    }
+    if (elem_ == EditElement::Edge) {
+      std::unordered_set<uint64_t> inv;
+      for (auto &e : m.edge_cache())
+        if (!edge_sel_.count(Mesh::edge_key(e.first, e.second))) inv.insert(Mesh::edge_key(e.first, e.second));
+      edge_sel_ = inv;
+      verts_from_edges();
+      return;
+    }
+    for (auto &v : vert_sel_) v = !v;
+  }
+  else meshops::select_non_manifold(m, vert_sel_);
+  sync_vert_face_selection(false);  // faces: those whose corners are all selected
+  return;
+}
+
+/* Select Edge Loop from the one selected edge. */
+void Editor::select_loop_op(const Mesh &m) {
+  uint32_t a, b;
+  if (!selected_edge(m, a, b)) {
+    Log::warn("Select exactly one edge (press 2 for edge mode)");
+    return;
+  }
+  auto loop = meshops::edge_loop(m, a, b);
+  for (uint32_t v : loop) vert_sel_[v] = 1;
+  sync_vert_face_selection(false);
+  Log::info("Edge loop: %zu vertices", loop.size());
+}
+
+/* The operators that change the selection and nothing else (selection_only_op lists them): they read the mesh the
+ * undo step shares. The F9 panel ends here as it did before task 0166 (its operator's result is no longer the
+ * latest edit), and the Profiler's operator row counts them. */
+void Editor::select_op(const std::string &op, GameObject &g, const Mesh &m) {
+  ProfileScope prof{prof_.ms_edit_op, {}};
+  edit_selection_faces(m);  // (faces from the vertices or the edges, as every operator starts)
+  last_op_.result = nullptr;
+  if (op == "select_similar_normal" || op == "select_similar_area" || op == "select_by_material") return select_similar_op(op, m);
+  if (op == "select_sharp") return select_sharp_op(m);
+  if (op == "select_overlapping") return select_overlapping_op(g, m);
+  if (op == "select_coplanar") return select_coplanar_op(m);
+  if (op == "select_loop") return select_loop_op(m);
+  select_grow_op(op, m);
 }
 
 /* The operators that aren't redoable: on a mutable copy of the mesh (shared with the undo step until now). */
@@ -1666,46 +1857,6 @@ void Editor::edit_op_rest(const std::string &op, GameObject &g_ref, MeshPtr &mp)
     edge_sel_.clear();
     Log::info("Slice: %zu cut(s)", n_cut);
   }
-  else if (op == "select_similar_normal" || op == "select_similar_area" || op == "select_by_material") {
-    std::vector<size_t> sel;
-    for (size_t f = 0; f < face_sel_.size() && f < m.face_count(); f++)
-      if (face_sel_[f]) sel.push_back(f);
-    if (sel.empty()) {
-      Log::warn("Select a face first");
-      return;
-    }
-    auto area = [&](size_t f) {  /* half the Newell vector's length */
-      Vec3 s(0.0f);
-      const uint32_t *v = m.face_verts(f);
-      for (uint32_t i = 0; i < m.face_size(f); i++) s += cross(m.positions[v[i]], m.positions[v[(i + 1) % m.face_size(f)]]);
-      return 0.5f * length(s);
-    };
-    for (size_t f = 0; f < m.face_count(); f++)
-      for (size_t s : sel) {
-        bool same = false;
-        if (op == "select_similar_normal") same = dot(m.face_normal(f), m.face_normal(s)) > std::cos(5.0f * kDeg2Rad);
-        else if (op == "select_similar_area") {
-          const float a = area(f), b = area(s);
-          same = std::fabs(a - b) <= 0.05f * std::max(a, b) + 1e-9f;
-        }
-        else same = m.material_of(f) == m.material_of(s);
-        if (same) {
-          face_sel_[f] = 1;
-          break;
-        }
-      }
-    sync_vert_face_selection(true);
-    return;
-  }
-  else if (op == "select_sharp") {
-    /* Blender's Select Sharp Edges: switches to edge mode with them selected. */
-    if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
-    edge_sel_.clear();
-    for (uint64_t k : meshops::sharp_edges_by_angle(m, seam_angle_, true)) edge_sel_.insert(k);
-    verts_from_edges();
-    Log::info("Selected %zu sharp edge(s) (> %.0f deg)", edge_sel_.size(), seam_angle_);
-    return;
-  }
   else if (op == "dissolve_limited") {
     /* The selected faces only (any mode: faces whose corners are all selected), else the whole mesh. */
     const bool only_sel = nsel > 0;
@@ -1750,20 +1901,6 @@ void Editor::edit_op_rest(const std::string &op, GameObject &g_ref, MeshPtr &mp)
     face_sel_.assign(m.face_count(), 0);
     if (elem_ == EditElement::Edge) edges_from_verts();
     Log::info("Extruded %zu %s", n, elem_ == EditElement::Edge ? "edge(s)" : "edge(s) / vertices");
-  }
-  else if (op == "select_overlapping") {
-    /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
-    const size_t n = zfight_scan(false);
-    zfight_from_panel_ = false;  // outlines only while editing this mesh
-    set_edit_element(EditElement::Face);
-    face_sel_.assign(m.face_count(), 0);
-    for (const ZFightIssue &z : zfight_) {
-      if (z.obj_a == g->id && z.face_a < face_sel_.size()) face_sel_[z.face_a] = 1;
-      if (z.obj_b == g->id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
-    }
-    sync_vert_face_selection(true);
-    Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
-    return;
   }
   else if (op == "delete_loose") {
     const bool any = std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end();
@@ -1897,107 +2034,6 @@ void Editor::edit_op_rest(const std::string &op, GameObject &g_ref, MeshPtr &mp)
     face_sel_.assign(m.face_count(), 0);
     sync_vert_face_selection(false);
     Log::info("Edge Split");
-  }
-  else if (op == "select_coplanar") {
-    /* Selection only, and it only adds. In vertex or edge mode, the faces whose corners are all selected are
-     * the start, and the faces found add their corners (and edges) to what is selected. */
-    vert_sel_.resize(m.vert_count(), 0);
-    if (elem_ != EditElement::Face) {
-      face_sel_.assign(m.face_count(), 0);
-      for (size_t f = 0; f < m.face_count(); f++) {
-        bool all = m.face_size(f) > 0;
-        for (uint32_t k = 0; k < m.face_size(f); k++) all = all && vert_sel_[m.face_verts(f)[k]];
-        face_sel_[f] = all;
-      }
-    }
-    bool any = false;
-    for (uint8_t f : face_sel_) any = any || f;
-    if (!any) {
-      Log::warn("Select Coplanar: select a face first (or all the corners of one)");
-      return;
-    }
-    const size_t added = meshops::select_coplanar(m, face_sel_);
-    if (elem_ == EditElement::Face) sync_vert_face_selection(true);
-    else
-      for (size_t f = 0; f < m.face_count(); f++) {
-        if (!face_sel_[f]) continue;
-        const uint32_t *fv = m.face_verts(f);
-        const uint32_t ns = m.face_size(f);
-        for (uint32_t k = 0; k < ns; k++) {
-          vert_sel_[fv[k]] = 1;
-          if (elem_ == EditElement::Edge) edge_sel_.insert(Mesh::edge_key(fv[k], fv[(k + 1) % ns]));
-        }
-      }
-    Log::info("Select Coplanar: %zu face%s added", added, added == 1 ? "" : "s");
-    return;
-  }
-  else if (op == "select_linked" || op == "select_more" || op == "select_less" || op == "select_invert" ||
-           op == "select_non_manifold" || op == "select_ring") {
-    /* Selection only: no undo step, nothing touched. */
-    if (op == "select_ring") {
-      std::vector<uint64_t> sel(edge_sel_.begin(), edge_sel_.end());
-      if (elem_ != EditElement::Edge || sel.empty()) {
-        Log::warn("Select Edge Ring: select an edge first (press 2 for edge mode)");
-        return;
-      }
-      for (uint64_t k : sel)
-        for (auto &e : meshops::edge_ring_edges(m, (uint32_t)(k >> 32), (uint32_t)(k & 0xFFFFFFFF))) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
-      verts_from_edges();
-      return;
-    }
-    if (elem_ == EditElement::Face && op != "select_non_manifold") {
-      /* Faces: through the vertices, then back to whole faces. */
-      sync_vert_face_selection(true);
-    }
-    if (op == "select_linked") meshops::select_linked(m, vert_sel_);
-    else if (op == "select_more") meshops::grow_selection(m, vert_sel_, true);
-    else if (op == "select_less") meshops::grow_selection(m, vert_sel_, false);
-    else if (op == "select_invert") {
-      if (elem_ == EditElement::Face) {
-        for (auto &f : face_sel_) f = !f;
-        sync_vert_face_selection(true);
-        return;
-      }
-      if (elem_ == EditElement::Edge) {
-        std::unordered_set<uint64_t> inv;
-        for (auto &e : m.edge_cache())
-          if (!edge_sel_.count(Mesh::edge_key(e.first, e.second))) inv.insert(Mesh::edge_key(e.first, e.second));
-        edge_sel_ = inv;
-        verts_from_edges();
-        return;
-      }
-      for (auto &v : vert_sel_) v = !v;
-    }
-    else meshops::select_non_manifold(m, vert_sel_);
-    sync_vert_face_selection(false);  // faces: those whose corners are all selected
-    return;
-  }
-  else if (op == "loopcut" || op == "select_loop") {
-    /* Uses the selected edge (exactly two adjacent selected vertices). */
-    uint32_t a = UINT32_MAX, b = UINT32_MAX;
-    for (auto &e : m.edge_cache())
-      if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
-        if (a != UINT32_MAX) { a = UINT32_MAX; break; }
-        a = e.first;
-        b = e.second;
-      }
-    if (a == UINT32_MAX) { Log::warn("Select exactly one edge (press 2 for edge mode)"); return; }
-    if (op == "loopcut") {
-      auto made = meshops::loop_cut(m, a, b, loop_cuts_, loop_slide_);
-      if (made.empty()) { Log::warn("Loop Cut needs quads around the edge"); return; }
-      vert_sel_.assign(m.vert_count(), 0);
-      for (uint32_t v : made) vert_sel_[v] = 1;
-      Log::info("Loop Cut: %zu new vertices", made.size());
-    }
-    else {
-      auto loop = meshops::edge_loop(m, a, b);
-      for (uint32_t v : loop) vert_sel_[v] = 1;
-      sync_vert_face_selection(false);
-      Log::info("Edge loop: %zu vertices", loop.size());
-      return;  // selection only
-    }
-    face_sel_.assign(m.face_count(), 0);
-    sync_vert_face_selection(false);
   }
   m.touch();
   mark_changed("Edit: " + op);
@@ -2587,20 +2623,12 @@ void Editor::run_last_op(bool first) {
     sync_vert_face_selection(false);
   }
   else if (op == "loopcut") {
-    uint32_t a = UINT32_MAX, b = UINT32_MAX;
-    for (auto &e : m.edge_cache())
-      if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
-        if (a != UINT32_MAX) {
-          a = UINT32_MAX;
-          break;
-        }
-        a = e.first;
-        b = e.second;
-      }
+    uint32_t a, b;
+    const bool one = selected_edge(m, a, b);
     std::vector<uint32_t> made;
-    if (a != UINT32_MAX) made = meshops::loop_cut(m, a, b, L.segments, L.amount);
+    if (one) made = meshops::loop_cut(m, a, b, L.segments, L.amount);
     ok = !made.empty();
-    if (!ok) err = a == UINT32_MAX ? "Select exactly one edge (press 2 for edge mode)" : "Loop Cut needs quads around the edge";
+    if (!ok) err = one ? "Loop Cut needs quads around the edge" : "Select exactly one edge (press 2 for edge mode)";
     vert_sel_.assign(m.vert_count(), 0);
     for (uint32_t v : made) vert_sel_[v] = 1;
     face_sel_.assign(m.face_count(), 0);

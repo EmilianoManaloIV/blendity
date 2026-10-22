@@ -264,6 +264,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A scene with an area light, or an object with a cutout material, drew its views on the CPU even with the card chosen, and nothing said why. | Area lights and cutouts draw on the card as on the CPU; the Profiler's GPU block names each view slot's remaining fallback reason (task 0163). |
 | Backing away from a Toon material with painted maps showed moire in the hatching, a sparkling face shadow and band edges, a dotted outline. | Every map reads at the pixel's lod, a band edge is one antialiased pixel at any distance, procedurals fade under a pixel, a new outline keeps a pixel (task 0164, ADR 0048 amended). |
 | An Extrude, Inset or Bevel on a 50k-face mesh took a tenth of a second before anything drew. | The operator itself is under 10 ms (was 60): one mesh copy instead of three, Auto Smooth's count taken once and only when it can matter, from a sorted edge table (task 0165, ADR 0053). |
+| Select More on a 50k-face mesh stalled for 55-68 ms, and with the views on the card a face selection drew the edited object on the CPU. | A selection operator copies nothing and only the Scene view draws again; the card draws the face highlight itself (task 0166). |
 
 ## Still worth doing
 

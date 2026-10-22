@@ -1779,6 +1779,66 @@ static void tests_round183() {
   });
 }
 
+/* Round 186 (task 0166): the card draws Edit Mode's face highlight. */
+static void tests_round186() {
+  test("the card draws Edit Mode's face highlight: a cube with its top face selected drawn on the card and on the CPU - no fallback, the highlighted face tinted on both, the pictures alike", [&] {
+    if (!gpu::available()) { std::printf("    (no GPU)\n"); return; }
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("edit face");
+    ed.command("fsel facing 0 1 0");
+    ed.command("camera 30 35 4");  // (pitch 35 down: the top face in view)
+    r34_steps(ed, 3);
+    auto orange = [](const std::vector<uint32_t> &px) {
+      size_t n = 0;
+      for (uint32_t p : px) {
+        const int r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+        n += r > 140 && r > g + 30 && g > b + 20;
+      }
+      return n;
+    };
+    /* The tint alone: the orange pixels with the top face selected less those with nothing selected (the selected
+     * face's cage edges are orange too, on both devices alike). */
+    auto tint = [&](int device) {
+      ed.viewport_device_for_test(device);
+      ed.command("vsel");  // (nothing selected)
+      r34_steps(ed, 2);
+      const size_t none = orange(r34_crop(ed, ed.scene_view_rect()));
+      ed.command("fsel facing 0 1 0");
+      r34_steps(ed, 2);
+      const size_t sel = orange(r34_crop(ed, ed.scene_view_rect()));
+      return std::make_pair(none, sel > none ? sel - none : 0);
+    };
+    const auto cpu = tint(1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const auto gpu = tint(2);
+    const FrameProfile after = ed.frame_profile_totals();
+    std::printf("    the top face's tint: %zu orange pixels on the CPU (%zu with nothing selected), %zu on the card (%zu); %llu views on the GPU, %llu on the CPU instead (%s)\n",
+                cpu.second, cpu.first, gpu.second, gpu.first, (unsigned long long)(after.gpu_views - before.gpu_views),
+                (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks), ed.gpu_view_reason().c_str());
+    CHECK(after.gpu_views - before.gpu_views >= 1);
+    CHECK(after.gpu_fallbacks - before.gpu_fallbacks == 0);
+    CHECK(cpu.second > 300 && gpu.second > 300);  // (the scene has orange of its own: the tint is what selecting adds)
+    CHECK(gpu.second * 10 >= cpu.second * 8 && cpu.second * 10 >= gpu.second * 8);
+    /* Two materials: the card draws the mesh as two parts in its own triangle order, and the bits must follow it. */
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    MeshRenderer *mr = cube->get<MeshRenderer>();
+    const MaterialPtr first = mr->materials.empty() ? make_material("first", Vec3(0.8f, 0.8f, 0.8f)) : mr->materials[0];
+    mr->materials = {first, make_material("second", Vec3(0.4f, 0.4f, 0.9f))};
+    Mesh &cm = *mesh_make_mutable(cube->get<MeshFilter>()->mesh);
+    cm.face_material.assign(cm.face_count(), 0);
+    for (size_t f = 0; f < cm.face_count(); f += 2) cm.face_material[f] = 1;
+    cm.touch();
+    ed.mark_changed_for_test("two materials");
+    const auto cpu2 = tint(1), gpu2 = tint(2);
+    std::printf("    two materials: the tint %zu pixels on the CPU, %zu on the card\n", cpu2.second, gpu2.second);
+    CHECK(cpu2.second > 300 && gpu2.second > 300);
+    CHECK(gpu2.second * 10 >= cpu2.second * 8 && cpu2.second * 10 >= gpu2.second * 8);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -1790,4 +1850,5 @@ void run_gpu_tests() {
   tests_round181();
   tests_round182();
   tests_round183();
+  tests_round186();
 }

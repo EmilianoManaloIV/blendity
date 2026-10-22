@@ -1892,6 +1892,64 @@ static void tests_round185() {
   });
 }
 
+/* Round 186 (task 0166): a selection changes the selection, not the mesh. */
+static void tests_round186() {
+  test("a selection operator copies nothing: Select More on the 50k-face sphere keeps the very mesh (no copy, no shadow map or Game view drawn again, the Scene view alone), Select Less takes it back, and Select Loop, Linked and Invert work on the shared mesh too", [&] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    ed.set_render_cache_verify(false);  // (it counts renders: verify mode would re-render every hit)
+    ed.command("layout 2 by 3");
+    GameObject *big = ed.scene().create("Big Sphere");
+    big->set_local_position({0, 2, -8});
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 256, 196);
+    big->add<MeshRenderer>();
+    ed.mark_changed_for_test("Big Sphere");
+    ed.command("select Big Sphere");
+    ed.command("edit face");
+    ed.command("fsel 100");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Mesh *mesh = big->get<MeshFilter>()->mesh.get();
+    auto selected = [&] { return (size_t)std::count(ed.face_sel_for_test().begin(), ed.face_sel_for_test().end(), 1); };
+    const size_t one = selected();
+    CHECK(one == 1);
+    const MeshCounts c0 = mesh_counts();
+    const FrameProfile p0 = ed.frame_profile_totals();
+    ed.command("edittool select_more");
+    ed.step_frame_headless();
+    const MeshCounts c1 = mesh_counts() - c0;
+    const FrameProfile p1 = ed.frame_profile_totals();
+    const size_t more = selected();
+    std::printf("    Select More: %zu faces selected (was 1), %llu mesh copies, %llu view renders, %llu shadow renders, Game view %.2f ms\n", more,
+                (unsigned long long)c1.copies, (unsigned long long)(p1.view_renders - p0.view_renders),
+                (unsigned long long)(p1.shadow_renders - p0.shadow_renders), p1.ms_game - p0.ms_game);
+    CHECK(more > one);
+    CHECK(c1.copies == 0);
+    CHECK(big->get<MeshFilter>()->mesh.get() == mesh);
+    CHECK(p1.view_renders - p0.view_renders == 1);
+    CHECK(p1.shadow_renders - p0.shadow_renders == 0);
+    ed.command("edittool select_less");
+    ed.step_frame_headless();
+    CHECK(selected() == one);
+    CHECK(big->get<MeshFilter>()->mesh.get() == mesh);
+    ed.command("edittool select_invert");
+    CHECK(selected() == mesh->face_count() - one);
+    ed.command("edittool select_invert");
+    ed.command("edittool select_linked");
+    CHECK(selected() == mesh->face_count());  // (one connected sphere)
+    ed.command("edit edge");
+    const auto &edge = mesh->edge_cache()[mesh->edge_cache().size() / 2];
+    ed.command(strprintf("vsel %u %u", edge.first, edge.second));  // (one edge: its two vertices)
+    CHECK(ed.elem_for_test() == EditElement::Edge);
+    ed.command("edittool select_loop");
+    const size_t loop = (size_t)std::count(ed.vert_sel_for_test().begin(), ed.vert_sel_for_test().end(), 1);
+    std::printf("    Select Loop from one edge: %zu vertices\n", loop);
+    CHECK(loop > 2);
+    CHECK(big->get<MeshFilter>()->mesh.get() == mesh);
+    const MeshCounts c2 = mesh_counts() - c0;
+    CHECK(c2.copies == 0);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -1910,5 +1968,6 @@ void run_editor_tests() {
   tests_round165();
   tests_round165_208();
   tests_round185();
+  tests_round186();
   coverage_tests();
 }

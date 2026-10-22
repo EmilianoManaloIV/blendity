@@ -490,6 +490,8 @@ class Editor {
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
   std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
+  std::vector<uint8_t> &face_sel_for_test() { return face_sel_; }
+  EditElement elem_for_test() const { return elem_; }
   bool weight_paint_for_test() const { return weight_paint_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
@@ -1595,6 +1597,14 @@ class Editor {
   void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
   void edit_op(const std::string &op);
   void edit_op_rest(const std::string &op, GameObject &g, MeshPtr &mp);  // the operators that aren't redoable (task 0165)
+  void select_op(const std::string &op, GameObject &g, const Mesh &m);   // the selection-only operators, on the shared mesh (task 0166)
+  void select_similar_op(const std::string &op, const Mesh &m);
+  void select_sharp_op(const Mesh &m);
+  void select_overlapping_op(GameObject &g, const Mesh &m);
+  void select_coplanar_op(const Mesh &m);
+  void select_grow_op(const std::string &op, const Mesh &m);
+  void select_loop_op(const Mesh &m);
+  bool selected_edge(const Mesh &m, uint32_t &a, uint32_t &b) const;
   void edit_tool(const std::string &op);  // edit_op, if the current selection mode offers it
   bool edit_op_available(const std::string &op) const;
   /* Nearest visible edge to the mouse (edge mode / loop select / loop cut). */

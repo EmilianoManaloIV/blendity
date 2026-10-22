@@ -60,7 +60,6 @@ const char *material_unsupported(const Material &m) {
 /* Why an object can't be drawn on the GPU yet, or null. */
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
-  if (it.face_highlight) return "Edit Mode's face highlight";
   if (it.vertex_colors) return "vertex colours (Weight Paint)";
   if (it.lightmap || it.rt_bounce || (it.use_probes && env.probes)) return "lightmaps, probes or realtime GI";
   for (uint32_t slot : mesh_slots(*it.mesh))
@@ -346,8 +345,11 @@ const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingE
   if (rt.want_hdr) return "a picture kept in linear light";
   if (env.gi || env.probes) return "realtime GI or probes";
   if (env.lights.size() > 16) return "more than 16 lights";
-  for (const DrawItem &it : items)
+  const bool highlight = gpu_view_ && gpu_view_->can_highlight_faces();
+  for (const DrawItem &it : items) {
+    if (it.face_highlight && !highlight) return "Edit Mode's face highlight (the card has no geometry shaders)";
     if (const char *why = item_unsupported(it, env)) return why;
+  }
   return nullptr;
 }
 
@@ -510,6 +512,29 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   std::string err;
   std::vector<gpu::RasterInstance> inst;
   inst.reserve(items.size());
+  std::vector<uint32_t> hl_bits;  // task 0166: Edit Mode's face highlight, a bit a triangle of the edited mesh
+  auto highlight_base = [&](const DrawItem &it, const GpuMesh &e) {
+    /* One bit per triangle in the card's order: the mesh's own with one material, grouped by slot (card_indices)
+     * with several. */
+    const RenderMesh &rm = *it.mesh;
+    const std::vector<uint8_t> &fh = *it.face_highlight;
+    const uint32_t base = (uint32_t)hl_bits.size() * 32;
+    hl_bits.resize(hl_bits.size() + (rm.tri_count() + 31) / 32, 0);
+    uint32_t pos = base;
+    auto set_bit = [&](size_t t) {
+      const uint32_t f = rm.tri_face[t];
+      if (f < fh.size() && fh[f]) hl_bits[pos / 32] |= 1u << (pos & 31);
+      pos++;
+    };
+    if (e.parts.empty() || rm.tri_material.size() != rm.tri_count()) {
+      for (size_t t = 0; t < rm.tri_count() && t < rm.tri_face.size(); t++) set_bit(t);
+      return base;
+    }
+    for (const auto &part : e.parts)
+      for (size_t t = 0; t < rm.tri_count() && t < rm.tri_face.size(); t++)
+        if (rm.tri_material[t] == part[0]) set_bit(t);
+    return base;
+  };
   bool ok = true;
   std::string tex_err;  // (a texture the card can't hold: this view on the CPU, the card kept)
   auto tex = [&](const TexturePtr &t) { return gpu_texture(t, tex_err); };
@@ -519,19 +544,23 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     ok = ok && mesh >= 0;
     if (mesh < 0) continue;
     const GpuMesh &e = gpu_meshes_[it.mesh];
+    const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
     if (e.parts.empty()) {
       inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), tex));
+      inst.back().highlight = hl;
       continue;
     }
     for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
       gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), tex);
       in.first_index = part[1];
       in.index_count = part[2];
+      in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
       inst.push_back(in);
     }
   }
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
   gpu::RasterFrame fr;
+  fr.highlight_bits = std::move(hl_bits);
   fr.slot = slot;
   fr.width = rt.width;
   fr.height = rt.height;
