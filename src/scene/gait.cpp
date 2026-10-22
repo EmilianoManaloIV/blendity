@@ -524,6 +524,10 @@ void apply(Scene &scene, const Rig &rig, const Pose &p, float elbow, const Drive
     const Leg &l = rig.legs[i];
     if (i >= d.leg_ik.size() || !d.leg_ik[i]) two_bone(*l.upper, *l.lower, *l.foot, p.ankle[i], d.turn.rotate(l.rest_bend));
     l.foot->set_world_rotation(p.foot_turn[i]);
+    /* An IK whose handle turns the foot (Rotate End, task 0156): the handle takes the turn that gives this foot pose,
+     * so the solve reproduces the roll from the keyed handle instead of undoing it. */
+    const IKConstraint *ik = l.lower ? l.lower->get<IKConstraint>() : nullptr;
+    if (ik && ik->enabled && ik->rotate_end && l.ik_target && i < d.leg_ik.size() && d.leg_ik[i]) l.ik_target->set_world_rotation(normalize(p.foot_turn[i] * ik->end_offset.conjugate()));
   }
 }
 

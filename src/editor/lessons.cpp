@@ -449,6 +449,11 @@ Animators grab controls, not bones. Add IK to Bone makes the target a box and th
 ? Why are a left leg's controls blue and the right's red? | The convention of Maya and Blender rigs: you can tell the sides apart at a glance, even from behind.
 ? What happens to the target and pole when you remove an IK? | They go with it, unless another IK uses them.
 ! cmd:create Armature; bone add Bone 1; ik add Bone.001 | Two bones with IK: a box target and a diamond pole
+# IK handles: size and turn
+A handle is drawn at its Size in metres round its position, whatever the rig's scale (task 0156): a centimetre import's handles are no longer a hundred times too big. Preferences > Rig Control Size scales every handle at once, and Rigging > Fit Control Sizes sizes them from their bones again (a fifth of the shin for a foot target). Turn a handle and the foot or hand below the chain turns with it: Rotate End on the IK (on for new IK, whose handle starts world-aligned; ik orient <bone> turns it on for an old one, keeping the bone as it is).
+? A character imported from FBX shows handles the size of the room. What fixes them? | They're drawn in metres now; if the file still holds old sizes, Rigging > Fit Control Sizes (ik fitsizes).
+? You turn a foot's handle but the foot stays flat on the floor. Why? | The IK's Rotate End is off: turn it on in the Inspector, or ik orient <shin>.
+! cmd:rig humanoid; select RightFootIK; tool rotate | A humanoid's foot handle under the rotate gizmo: turn it and the foot follows
 # Auto-rig colours and views
 The auto-rig's markers are coloured by the part of the body they are on: left blue, right red, the middle (chin, spine, hips) yellow and a tail purple; a mirrored twin is lighter, a marker not yet placed is dark, and the next one is ringed. Front, Left, Right, Back and Top under the diagram switch the orthographic view while you place them. A new marker goes to the middle of the body part the click hits; a marker you drag in a side or top view slides on the plane facing you, keeping its depth, so dragging a knee in the side view fixes how far forward it sits. Console: autorig view front|left|right|back|top.
 ? Why place some markers in the side view? | The front view says where a joint is left to right and up and down; the side view fixes its depth (a knee in front of the hip line, an elbow behind).

@@ -841,6 +841,10 @@ class Editor {
   bool remove_ik(GameObject *bone);
   bool ik_names_object(const std::string &name) const;
   int add_fk_controls(const std::vector<GameObject *> &bones);
+  int fit_control_sizes(GameObject *root);  // every control under root sized from its bone, in metres (task 0156)
+  float fitted_control_size(const GameObject &g, const RigControl &rc) const;
+  GameObject *ik_owner_of_control(const GameObject &control, bool pole) const;
+  static Mat4 unscaled_frame(const Mat4 &m);  // the matrix's axes unit and orthogonal, its mirroring and position kept
   GameObject *fk_control_of(const GameObject &bone) const;
   int remove_fk_controls(const std::vector<GameObject *> &bones);
   void fk_controls_follow_bones(GameObject *root);  // the FK controls of bones below `root` turned to their bones
@@ -1987,6 +1991,7 @@ class Editor {
   ui::Context ui_;
   float dpi_ = 1.0f;
   float ui_scale_pref_ = 0.0f;  // 0 = follow OS DPI
+  float rig_control_scale_ = 1.0f;  // Preferences > Rig Control Size: every control's wire and pick distance, times this (task 0156)
   double frame_start_ = 0;
   float frame_ms_ = 0, ui_ms_ = 0;
   std::vector<float> frame_history_, raster_history_;

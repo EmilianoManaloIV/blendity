@@ -24,10 +24,12 @@ void circle(std::vector<std::pair<Vec3, Vec3>> &out, Vec3 c, Vec3 a, Vec3 b, flo
 
 }  // namespace
 
-/* The control's wire, as segments in world space. */
+/* The control's wire, as segments in world space: `size` metres round the control's position and rotation, with no
+ * scale from the control or its parents (a centimetre rig's root drew its handles a hundred times too big, task
+ * 0156), times the Rig Control Size preference. */
 void Editor::rig_control_segments(const GameObject &g, const RigControl &rc, std::vector<std::pair<Vec3, Vec3>> &out) const {
   std::vector<std::pair<Vec3, Vec3>> local;
-  const float s = std::isfinite(rc.size) && rc.size > 0.0f ? rc.size : 0.25f;
+  const float s = (std::isfinite(rc.size) && rc.size > 0.0f ? rc.size : 0.25f) * rig_control_scale_;
   const Vec3 X(1, 0, 0), Y(0, 1, 0), Z(0, 0, 1), O(0.0f);
   switch (rc.shape) {
     case RigControl::Square:
@@ -78,9 +80,92 @@ void Editor::rig_control_segments(const GameObject &g, const RigControl &rc, std
       circle(local, O, X, Z, s, 28);
       break;
   }
-  const Mat4 &w = g.world_matrix();
+  const Mat4 w = unscaled_frame(g.world_matrix());
   out.clear();
   for (auto &[a, b] : local) out.push_back({w.point(a), w.point(b)});
+}
+
+/* The matrix's axes made unit and orthogonal (Gram-Schmidt), its mirroring kept (a parent with a negative scale
+ * mirrors the wire as it mirrors the object), its position kept. */
+Mat4 Editor::unscaled_frame(const Mat4 &m) {
+  Vec3 x = m.column(0), y = m.column(1), z = m.column(2);
+  const bool mirrored = dot(cross(x, y), z) < 0.0f;
+  x = length(x) > 1e-12f ? normalize(x) : Vec3(1, 0, 0);
+  y = y - x * dot(y, x);
+  if (!(length(y) > 1e-12f)) y = std::fabs(x.y) < 0.9f ? Vec3(0, 1, 0) - x * x.y : Vec3(1, 0, 0) - x * x.x;  // (a collapsed axis: any perpendicular)
+  y = normalize(y);
+  z = cross(x, y);
+  if (mirrored) z = z * -1.0f;
+  Mat4 out = Mat4::identity();
+  out.m[0] = x.x, out.m[1] = x.y, out.m[2] = x.z;
+  out.m[4] = y.x, out.m[5] = y.y, out.m[6] = y.z;
+  out.m[8] = z.x, out.m[9] = z.y, out.m[10] = z.z;
+  out.m[12] = m.m[12], out.m[13] = m.m[13], out.m[14] = m.m[14];
+  return out;
+}
+
+/* A bone's length in metres (its own units times its scale), for the controls' sizes. */
+static float bone_world_length(const GameObject &b) {
+  const Bone *bn = b.get<Bone>();
+  const float len = bn && std::isfinite(bn->length) ? bn->length : 1.0f;
+  return length(b.world_matrix().point(Vec3(0.0f, len, 0.0f)) - b.world_position());
+}
+
+namespace {
+const GameObject *top_of(const GameObject &g) {
+  const GameObject *t = &g;
+  while (t->parent) t = t->parent;
+  return t;
+}
+bool under(const GameObject &g, const GameObject *root) {
+  for (const GameObject *p = &g; p; p = p->parent)
+    if (p == root) return true;
+  return false;
+}
+}  // namespace
+
+/* The IK whose target (or pole) is this control, on the same top object (two copies of a character share their
+ * names: each copy's controls belong to its own bones). */
+GameObject *Editor::ik_owner_of_control(const GameObject &control, bool pole) const {
+  GameObject *found = nullptr;
+  const GameObject *top = top_of(control);
+  scene_->for_each([&](GameObject &g) {
+    const IKConstraint *ik = g.get<IKConstraint>();
+    if (found || !ik || top_of(g) != top) return;
+    if ((pole ? ik->pole : ik->target) == control.name) found = &g;
+  });
+  return found;
+}
+
+/* A control's size from its bone, in metres: an IK target a fifth of the chain's lower bone, its pole 0.12 of it, an
+ * FK circle 0.3 of its bone; -1 for a plain control or a bone not found. */
+float Editor::fitted_control_size(const GameObject &g, const RigControl &rc) const {
+  if (rc.role == RigControl::IKTarget || rc.role == RigControl::IKPole) {
+    const GameObject *lower = ik_owner_of_control(g, rc.role == RigControl::IKPole);
+    if (!lower) return -1.0f;
+    return std::max(0.001f, bone_world_length(*lower)) * (rc.role == RigControl::IKPole ? 0.12f : 0.2f);
+  }
+  if (rc.role != RigControl::FK) return -1.0f;
+  const GameObject *b = rc.drives_id ? scene_->find(rc.drives_id) : nullptr;  // (where the FK solve last found it; else by name on this rig)
+  if (!b) b = scene_->find_by_name(rc.drives);
+  if (!b || !b->get<Bone>()) return -1.0f;
+  return std::max(0.001f, bone_world_length(*b) * 0.3f);
+}
+
+/* Fit Control Sizes (task 0156): every control under `root` (the whole scene without one) sized from its bone in
+ * metres, as Add IK and Add FK make them now; loaded rigs whose sizes were in another unit come right. */
+int Editor::fit_control_sizes(GameObject *root) {
+  int n = 0;
+  scene_->for_each([&](GameObject &g) {
+    RigControl *rc = g.get<RigControl>();
+    if (!rc || (root && !under(g, root))) return;
+    const float size = fitted_control_size(g, *rc);
+    if (size <= 0.0f || std::fabs(size - rc->size) < 1e-6f) return;
+    rc->size = size;
+    n++;
+  });
+  if (n) mark_changed("Fit Control Sizes");
+  return n;
 }
 
 /* Maya's and Blender's convention: left blue, right red, the middle yellow; a pole lighter. */
@@ -145,7 +230,7 @@ std::unordered_set<uint64_t> Editor::ik_driven_bones() const {
   scene_->for_each([&](GameObject &g) {
     const IKConstraint *ik = g.get<IKConstraint>();
     if (!ik || !ik->enabled || ik->target.empty()) return;
-    for (GameObject *b : ik_chain(g, ik->chain_length)) out.insert(b->id);
+    for (GameObject *b : ik_turned_bones(g, *ik)) out.insert(b->id);
   });
   return out;
 }
@@ -204,7 +289,7 @@ int Editor::add_fk_controls(const std::vector<GameObject *> &bones) {
     c->set_world_rotation(b->world_rotation());
     RigControl *rc = c->add<RigControl>();
     rc->shape = RigControl::Circle, rc->role = RigControl::FK, rc->drives = b->name;
-    rc->size = std::max(0.03f, (std::isfinite(bn->length) ? bn->length : 1.0f) * 0.3f);
+    rc->size = std::max(0.001f, bone_world_length(*b) * 0.3f);  // (metres, task 0156)
     n++;
   }
   if (n) mark_changed("Add FK Controls");
@@ -256,7 +341,7 @@ void Editor::fk_controls_follow_bones(GameObject *root) {
   }
 }
 
-/* ik remove <bone> | fk add|remove <bone...> (task 0067). */
+/* ik remove <bone> | ik fitsizes [root] | ik orient <bone> | fk add|remove <bone...> (tasks 0067, 0156). */
 bool Editor::rig_control_command(const std::vector<std::string> &t) {
   auto bones = [&](size_t from) {
     std::vector<GameObject *> out;
@@ -271,6 +356,26 @@ bool Editor::rig_control_command(const std::vector<std::string> &t) {
   const std::string verb = t.size() > 1 ? to_lower(t[1]) : "";
   if (t[0] == "ik" && verb == "remove") {
     remove_ik(t.size() > 2 ? scene_->find_by_name(t[2]) : active_object());
+    return true;
+  }
+  if (t[0] == "ik" && verb == "fitsizes") {
+    GameObject *root = t.size() > 2 ? scene_->find_by_name(t[2]) : rig_root();
+    if (t.size() > 2 && !root) {
+      Log::warn("ik fitsizes: no object named '%s'", t[2].c_str());
+      return true;
+    }
+    Log::info("Fit Control Sizes: %d control(s) resized%s", fit_control_sizes(root), root ? (" under " + root->name).c_str() : "");
+    return true;
+  }
+  if (t[0] == "ik" && verb == "orient") {
+    GameObject *b = t.size() > 2 ? scene_->find_by_name(t[2]) : active_object();
+    if (!b || !ik_orient_end(*scene_, *b)) {
+      Log::warn("ik orient <bone>: a bone with IK, a target and a bone below it");
+      return true;
+    }
+    solve_constraints(*scene_);
+    mark_changed("IK Rotate End");
+    Log::info("IK on '%s': the bone below it turns with '%s'", b->name.c_str(), b->get<IKConstraint>()->target.c_str());
     return true;
   }
   if (t[0] != "fk") return false;

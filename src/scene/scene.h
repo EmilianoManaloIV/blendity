@@ -1110,12 +1110,17 @@ struct IKConstraint : ComponentBase<IKConstraint> {
   int chain_length = 2;
   int iterations = 20;
   float weight = 1.0f;
+  /* Task 0156: the end bone (the foot below a shin, the hand below a forearm) takes the target's rotation times the
+   * offset captured when the IK was made - Blender's IK "Rotation", Maya's orient constraint on the handle. */
+  bool rotate_end = false;
+  Quat end_offset;
+  bool end_set = false;  // the offset captured (Add IK, ik orient, or the first solve after Rotate End is ticked)
   uint64_t last_key = 0;               // the inputs of the last solve (unchanged: nothing to do)
   uint64_t target_id = 0, pole_id = 0;  // where the names were last found
   static std::atomic<int> live;        // constraints in existence: none, and the per-frame solve walks nothing
   IKConstraint() { live.fetch_add(1, std::memory_order_relaxed); }
   IKConstraint(const IKConstraint &o) : ComponentBase<IKConstraint>(o), target(o.target), pole(o.pole), chain_length(o.chain_length),
-                                         iterations(o.iterations), weight(o.weight) {
+                                         iterations(o.iterations), weight(o.weight), rotate_end(o.rotate_end), end_offset(o.end_offset), end_set(o.end_set) {
     live.fetch_add(1, std::memory_order_relaxed);
   }
   IKConstraint &operator=(const IKConstraint &) = default;
@@ -1155,6 +1160,15 @@ int rig_control_side(const GameObject &g, const RigControl &c);
  * when bones turned. The solved rotations are a pose, not an edit: they make no undo step of their own. */
 bool solve_constraints(Scene &scene);
 bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK chain turns this bone (the gizmo refuses it)
+/* The bone below an IK chain's end (the foot, the hand: the child bone whose head sits at the end's tip - a twist
+ * bone beside it starts elsewhere), or null (task 0156). */
+GameObject *ik_end_bone(GameObject &end);
+/* The bones an enabled IK constraint turns: its chain, and the end bone when Rotate End is on (task 0156). */
+std::vector<GameObject *> ik_turned_bones(GameObject &owner, const IKConstraint &ik);
+/* True when `bone` is the end bone a Rotate End IK turns (the gizmo says to turn the handle, not move it). */
+bool ik_end_driven(const Scene &scene, const GameObject &bone);
+/* Rotate End on, with the offset that keeps the end bone as it is now against the target's rotation (task 0156). */
+bool ik_orient_end(Scene &scene, GameObject &bone);
 /* Rig presets: a skeleton with an Armature, IK on its limbs with target and pole objects. Its root is returned. */
 GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
 /* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */

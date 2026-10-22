@@ -237,8 +237,11 @@ void Editor::draw_rigging_window(const Recti &r) {
            }}},
          2);
     grid({{"Remove IK", "The selected bone's IK goes, with its target and pole (when no other IK uses them). Console: ik remove <bone>.",
-           a && a->get<IKConstraint>(), [this, a] { remove_ik(a); }}},
-         1);
+           a && a->get<IKConstraint>(), [this, a] { remove_ik(a); }},
+          {"Fit Control Sizes", "Every IK and FK handle of this rig sized from its bone again, in metres (a fifth of the bone for a target):\n"
+                                "handles a scaled rig made too big or too small come right (task 0156). Console: ik fitsizes.",
+           root != nullptr, [this, root] { Log::info("Fit Control Sizes: %d control(s) resized", fit_control_sizes(root)); }}},
+         2);
     if (a)
       if (IKConstraint *ik = a->get<IKConstraint>()) {
         u.push_id((ui::Id)(uintptr_t)ik);

@@ -4851,6 +4851,14 @@ void Editor::draw_dialogs() {
           if (u.combo(u.id("pref_import_shading"), {ri.x + u.px(360), ri.y + u.px(2), u.px(150), ri.h - u.px(4)}, import_shading_pref_, names.data(), (int)names.size())) save_prefs();
           u.tooltip("The shading the preview opens with.");
         }
+        Recti rcs = u.popup_row(u.row_h() + u.px(4));  // (after the keymap, as the Import row: task 0156)
+        u.label({rcs.x + u.px(12), rcs.y, u.px(140), rcs.h}, "Rig Control Size");
+        float cs = rig_control_scale_;
+        if (u.float_field(u.id("pref_control_size"), {rcs.x + u.px(160), rcs.y + u.px(2), u.px(80), rcs.h - u.px(4)}, cs, 0.05f, 0.1f, 5.0f, "%.2f")) {
+          rig_control_scale_ = cs;
+          save_prefs();
+        }
+        u.tooltip("How big the rig's IK and FK handles are drawn, times their own size (1: a fifth of the bone). Console: overlay controls size <x>.");
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -4888,6 +4896,7 @@ void Editor::load_prefs() {
     if (assist_pref(k, v)) continue;
     if (ai_pref(k, v)) continue;
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
+    else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
@@ -4986,12 +4995,12 @@ void Editor::save_prefs() {
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
                             "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\nauto_smooth=%d\nauto_smooth_angle=%g\n"
                             "keymap_preset=%s\nkeymap=%s\ndraw_axes=%s\ncamera_filters=%d\nquality_tier=%d\nview_scale=%g\n"
-                            "cpu_threads=%d\ntier_caps=%d %d %d\n",
+                            "cpu_threads=%d\ntier_caps=%d %d %d\nrig_control_scale=%g\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
                             show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0, max_fps_,
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
-                            view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
+                            view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_, rig_control_scale_);
   std::string overlays_off;
   for (const OverlayLayer &l : overlay_layers())
     if (!*l.flag) overlays_off += std::string(overlays_off.empty() ? "" : " ") + l.key;

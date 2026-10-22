@@ -250,6 +250,11 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
 void Editor::overlay_command(const std::vector<std::string> &t) {
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
   const std::string what = to_lower(arg(1, "list")), v = to_lower(arg(2, "toggle"));
+  if (what == "controls" && v == "size") {  // overlay controls size <x>: the handles' size preference (task 0156)
+    rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(arg(3, "1").c_str())));
+    Log::info("Rig control size: %.2f", rig_control_scale_);
+    return;
+  }
   std::vector<OverlayLayer> layers = overlay_layers();
   if (what == "list") {
     for (const OverlayLayer &l : layers) Log::info("  %-10s %s  %s", l.key, *l.flag ? "on " : "off", l.label);
@@ -268,7 +273,7 @@ void Editor::overlay_command(const std::vector<std::string> &t) {
       *l.flag = on ? true : off_ ? false : what == "all" ? !every : !*l.flag;
       set += std::string(set.empty() ? "" : ", ") + l.key + (*l.flag ? " on" : " off");
     }
-  if (set.empty()) Log::warn("overlay: all, bones, controls, icons, points, origins, footprints, outline, grid, gizmos, stats or list");
+  if (set.empty()) Log::warn("overlay: all, bones, controls, icons, points, origins, footprints, outline, grid, gizmos, stats or list; controls size <x>");
   else Log::info("Overlays: %s", set.c_str());
 }
 
@@ -1712,7 +1717,7 @@ bool Editor::gizmo_update(const Recti &view) {
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt() && !eo && !co)
     for (GameObject *g : objs)
       if (g->get<Bone>() && ik_drives(*scene_, *g)) {
-        Log::warn("'%s' is turned by IK: move its target instead", g->name.c_str());
+        Log::warn("'%s' is turned by IK: %s its target instead", g->name.c_str(), ik_end_driven(*scene_, *g) ? "turn" : "move");
         gizmo_hot_ = -1;
         break;
       }

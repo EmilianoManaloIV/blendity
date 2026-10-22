@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 174): IK handles in metres, a size preference, rotatable targets (task 0156, ADR 0031)
+
+**Asked:** "the IK handles are way too big"; "I should be able to rotate the handles".
+
+**Fixed**
+- A rig control's wire is drawn at its Size in metres round its position and rotation, with no scale from the
+  control or its parents: a centimetre import (root scale 100) drew its handles a hundred times too big, a 0.01
+  rig a hundred times too small. FK circles are sized from the bone's world length (they were in the bone's own
+  units).
+
+**Added**
+- **Preferences > Rig Control Size** (0.1-5, `overlay controls size <x>`): every handle's wire and pick distance
+  scaled at once. **Rigging > Fit Control Sizes** (`ik fitsizes [root]`): every handle sized from its bone again
+  (a target a fifth of the lower bone, a pole 0.12, an FK circle 0.3) - loaded rigs whose handles were in another
+  unit come right.
+- **Rotate End** on an IK constraint: the foot or hand below the chain takes the handle's rotation (times an
+  offset captured when the IK was made). New IK starts a world-aligned target with Rotate End on (the offset
+  carries the foot's rotation, so the handle's keyed angles stay clear of the gimbal);
+  `ik orient <bone>` turns it on for an existing IK, keeping the bone as it is. The end bone counts as driven:
+  the gizmo says to turn its handle instead.
+- The lesson "IK handles: size and turn".
+
+**Changed after the review**
+- An FK control on the foot fought Rotate End every frame: the bones IK turns (the chain and the end bone) come
+  from one helper, used by the FK solve, Add FK, the tint and the gizmo. Rotate End ticked in the Inspector
+  captures its offset on the first solve (it snapped the foot to the handle); Weight blends the foot; the end bone
+  is the child at the chain's tip (not a twist bone beside it); Fit Control Sizes matches a control's IK on its own
+  rig and warns on a mistyped name; the floors are a millimetre, so a rig at 0.01 keeps a fifth of its shin; the
+  wire keeps a mirrored parent's mirroring; the gizmo says "turn its target instead" for the foot. The walk and
+  footstep generators turn the handle to the foot's roll (Rotate End overrode the keyed foot: 43 mm of sliding,
+  then 1.7 mm from the handle's Euler keys near the gimbal; 0.001 mm now).
+
+**Checked**
+- New tests (round 174): a humanoid rig at scale 1, 100 and 10 draws the foot target's box at 0.4 of the shin's
+  world length; an FK circle at 0.3 of its bone, an old-style size on a scaled rig at 0.003 until Fit Control
+  Sizes; the preference doubling the wire, a control's own scale not changing it; a fresh target starting with the
+  rotation through its offset, the foot turning 30 degrees with the handle while the knee stays, Rotate End off leaving the
+  rest, `ik orient` keeping a pitched foot through a turn, the foot refusing the gizmo, the fields saved; IK added
+  on a rig already at scale 100 sized at once; Rotate End ticked later keeping the foot, Weight 0 leaving it at
+  rest, a twist bone beside the foot not taken for it, FK on the foot refused and the solve settling, a file
+  without the field loading with it off.
+- Unit checks (round 174): Windows 11,395, 0 failed (908 tests); render-cache verify mode 11,396, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,126, 0 failed. Sanitizer build: 11,002, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 173): the anime pass written up (task 0151)
 
 **Asked:** the anime pass (tasks 0145-0155) documented in one place.

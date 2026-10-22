@@ -58,7 +58,7 @@ bool Editor::transform_begin(int mode) {
   else {
     for (GameObject *g : selected_objects(true))
       if (g->get<Bone>() && ik_drives(*scene_, *g)) {  // IK would turn it straight back (task 0048)
-        Log::warn("%s: '%s' is turned by IK: move its target instead", kModeNames[mode], g->name.c_str());
+        Log::warn("%s: '%s' is turned by IK: %s its target instead", kModeNames[mode], g->name.c_str(), ik_end_driven(*scene_, *g) ? "turn" : "move");
         return false;
       }
     for (GameObject *g : selected_objects(true)) {
