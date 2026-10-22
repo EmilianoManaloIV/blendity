@@ -5,6 +5,7 @@ What is here, and what is local-only.
 | Tool | What it does | Run |
 |---|---|---|
 | `test_coverage_map.py` | Every console command, keymap action and window against the tests that exercise it (task 0177, ADR 0056); `--check` fails on an empty entry | `python tools/test_coverage_map.py` from `blendity/` |
+| `bench.bat`, `bench_blender.py`, `bench_table.py` | Pass 13's table (task 0178): Blendity's stress rows beside Blender 5.2's, run headless on the same scenes, written into `docs/PERFORMANCE.md`; `BLENDER=path` overrides where Blender is, `BENCH_GPU=name part` which card | `tools\bench.bat [--quick]` on a quiet machine |
 | `clean.bat` | Removes `build\`, the stress reports a run wrote (restoring `latest.md`), the inbetweening model's `.venv`; `--all` removes `dist\` and the model's training runs too | `tools\clean.bat` |
 | `ptx_compile.cpp` | NVRTC driver that compiles the OptiX kernel to PTX (`build.bat` builds and runs it when `CUDA_PATH` and `OPTIX_ROOT_DIR` are set; task 0097) | by `build.bat` |
 | `inbetween/` | The AI inbetweening model's training and export (task 0128): `train.py`, `export_onnx.py`; `.venv/` and `runs/` are local-only (in `.gitignore`) | see `inbetween/README.md` |

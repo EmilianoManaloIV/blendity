@@ -2,6 +2,63 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 178): Blender 5.2 as the benchmark - a headless harness and Pass 13's reference column (task 0178)
+
+**Asked:** "Always refer to Blender's rendering and editor performance as a benchmark" - with Blender 5.2 run headless
+on this machine for the numbers, not estimates.
+
+**Added**
+- `tools/bench_blender.py`, run inside the installed Blender (`blender -b --python tools/bench_blender.py -- --out
+  <json> [--quick] [--gpu 4070]`): the scenes and operations Blendity's stress rows time, in Blender's Python API with
+  `perf_counter`, the mean of three runs after a warm call - entering Edit Mode on the 50k-face sphere (the exit
+  outside the timer), the extrude operator on faces 100-102 with its undo step, Select More, undo of the extrude;
+  Cycles on the stress gpu scene (400 textured spheres, every 7th glass, a checker floor, a sun) at 1280x720 on
+  OptiX, CUDA and the CPU, one card, samples a second from the slope of time over three sample counts (a render's
+  fixed cost drops out as Blendity's row leaves out its upload), the picture's coverage checked; Smart UV Project and
+  Pack Islands by bounding box on the sphere; the stress bake's 100-object scene (each object its own mesh: Blender's
+  lightmap_pack packs unique meshes only) packed into one 1024 atlas and baked with Cycles on the CPU, texels a
+  second over the texels its charts cover; a GLB export of 256 icospheres of 1,280 faces, smooth-shaded with their
+  own mesh data, both file sizes in the table. Headless Blender's operators push no undo step, so the harness pushes
+  them and checks the face count comes back; the Cycles rows check the picture's coverage over a transparent film. Blendity's left-handed
+  Y-up scenes are mirrored into Blender's Z-up ((x, y, z) to (x, z, y)). Headless Blender draws no viewport, so there
+  is no playback row.
+- `tools/bench.bat` runs Blendity's stress sections on the same scenes and Blender, and `tools/bench_table.py`
+  writes both into `docs/PERFORMANCE.md`'s Pass 13 table (between its markers) with a method column per row; the
+  Edit Mode rows take Blendity's operator alone (its frame less the frame after); `BLENDER=path` overrides where
+  Blender is, `BENCH_GPU` which card; a `--quick` run never writes the doc.
+- Stress rows for the comparison: Smart UV Project and Pack Islands on the 50k-face sphere (`uv`), a GLB export of
+  the 256-icosphere scene (`serialization`), each the mean of three after a warm call.
+
+**Fixed**
+- The `bake` stress section had reported 0 texels since the probe volumes (task 0037) added `want_lightmap` to
+  `BakeObject`: its positional initialisers' trailing 0 (meant for the hash) had been turning every chart off, in the
+  odd-settings fuzz too. A `bake_object()` helper sets the fields by name at every site; it bakes again (100 objects:
+  122k texels in 0.22 s, 562k texels/s, 56 Mrays/s).
+
+**Measured (Pass 13's first table, this machine: Ryzen 9 5900XT, one card used, the RTX 4070 SUPER, Blender 5.2.2)**
+| row | Blendity | Blender 5.2.2 LTS | ratio | the method's difference |
+|---|---|---|---|---|
+| Entering Edit Mode, 50k faces, caches cold (Blendity: the frame it costs less the frame after) | 24.7 ms | 17.9 ms | Blendity 1.4x behind | mode_set(EDIT) + the depsgraph update, mean of 3 (the exit, Mesh <- BMesh, outside the timer); headless Blender builds no draw cache; Blendity's row: entering with its cage cache cold, the frame that draws it included, less the frame after |
+| Extrude three faces, 50k faces (Blendity: its frame less the frame after) | 96.5 ms | 32.6 ms | Blendity 3.0x behind | bpy.ops.mesh.extrude_region_move on faces 100-102 + its undo step pushed (as Blendity's editop records one) + the depsgraph update, mean of 3, undone outside the timer; Blendity's row: editop extrude on the same three faces, the frame that draws it included, less the frame after |
+| Select More, 50k faces (Blendity: its frame less the frame after) | 51.0 ms | 15.5 ms | Blendity 3.3x behind | bpy.ops.mesh.select_more from face 100 + the depsgraph update, mean of 3; Blendity's row: edittool select_more after the undo, the frame that draws it included, less the frame after |
+| Undo of the extrude (the frame that restores the mesh; the cage rebuilt in the frame after, about 14 ms more, is not counted) | 23.8 ms | 16.4 ms | Blendity 1.5x behind | ed.undo of the extrude's step (pushed by hand: headless Blender's operators push none) + the depsgraph update, mean of 3, the face count checked to come back; Blendity's row: undo of the extrude (a whole-mesh copy restored), the frame that restores it; the cage rebuilt in the frame after (about 14 ms more) not counted |
+| Path tracing the stress gpu scene at 1280x720 on the card's ray-tracing hardware (Cycles: OptiX) | 823.8 samples/s | 115.9 samples/s | Blendity 7.1x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 311 ms, drops out as Blendity's row leaves out its upload; worst fit residual 8 ms); the card's ray-tracing hardware, like Blendity's ray-query row; one card: the 4070. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Path tracing the same scene with a software BVH (Blendity: a compute shader; Cycles: CUDA) | 122.0 samples/s | 87.0 samples/s | Blendity 1.4x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 272 ms, drops out as Blendity's row leaves out its upload; worst fit residual 15 ms); Cycles' BVH2 in CUDA, a software BVH like Blendity's compute row; one card: the 4070. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Path tracing the same scene on the CPU (Blendity: Embree; Cycles: its CPU kernels) | 19.0 samples/s | 8.1 samples/s | Blendity 2.4x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 192 ms, drops out as Blendity's row leaves out its upload; worst fit residual 23 ms); Cycles' CPU kernels, like Blendity's CPU row (Embree); the CPU, no card. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Smart UV Project, 50k faces | 42.1 ms | 50.1 ms | Blendity 1.2x ahead | bpy.ops.uv.smart_project at 66 degrees on the sphere in Edit Mode, mean of 3 after a warm call (its own pack is by bounding box); Blendity's row: uvops::smart_project on the same sphere, mean of 3 after a warm call |
+| Pack Islands, 50k faces (both by bounding box) | 21.8 ms | 35.9 ms | Blendity 1.6x ahead | bpy.ops.uv.pack_islands after the project with shape_method AABB (bounding boxes, as Blendity packs) and rotation on, mean of 3; Blendity's row: uvops::pack_islands, mean of 3 |
+| Lightmap bake, texels a second, both on the CPU (100 objects; Blendity: 122k texels in its charts; Blender: the same objects in one 1024 atlas, its charts' texels) | 561968.0 texels/s | 32030.8 texels/s | Blendity 17.5x ahead | bpy.ops.object.bake DIFFUSE direct + indirect, Cycles on the CPU (Blendity bakes on the CPU too), 64 samples, 2 bounces, under a sun and a constant sky, the floor and 100 cubes and spheres (each its own mesh) packed together into one 1024x1024 atlas by lightmap_pack outside the timer, after a warm 1-sample bake: 22.2 s for the 710,272 texels the charts cover (the atlas is 1,048,576), baked object by object; Blendity's row: stress bake's 100-object scene at 10 texels/m (122k texels), 64 indirect samples, 2 bounces, its UV generation and packing inside the timer |
+| GLB export, 256 icospheres of 1,280 faces | 307.3 ms | 707.7 ms | Blendity 2.3x ahead | bpy.ops.export_scene.gltf GLB of 256 icospheres of 1,280 faces, smooth-shaded, each its own mesh data as Blendity's export writes them (6.2 MB written, with UVs), mean of 3 after a warm call; Blendity's row: export_file GLB of the same scene, mean of 3 after a warm call; Blendity wrote 13.2 MB |
+
+**Checked**
+- The harness runs end to end (`tools\bench.bat`), every Blendity row has a Blender number, each row's method is
+  in the table and in docs/tasks/0178; the numbers above are from a quiet machine (a build and a WSL test run beside
+  a trial run made Blender's Select More 112 ms instead of 12).
+- Unit checks (round 178): Windows 11,144, 0 failed (908 tests); render-cache verify mode 11,145, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 177): one test per behaviour, timings to stress; the suite in files; dead code out (task 0177, ADR 0056)
 
 **Asked:** "check on unneeded tests and remove them. Compact the code-base as needed" (and chose: one test per

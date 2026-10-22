@@ -36,6 +36,7 @@
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
+#include "../src/scene/export.h"
 #include "../src/scene/autophysics.h"
 #include "../tests/fixtures/synthetic_mmd.h"
 
@@ -454,6 +455,37 @@ static void test_serialization(Report &rep, const Options &o) {
     for (float v : vals) append_float(sink, v);
   });
   rep.note(strprintf("Formatting 1M floats: printf %%.9g %.1f ms vs to_chars %.1f ms (%.1fx). The writer now uses to_chars.", pf, tc, pf / tc));
+  /* Blender's benchmark row (task 0178): a GLB export of the 256-icosphere scene (bpy.ops.export_scene.gltf in
+   * tools/bench_blender.py). */
+  {
+    Scene s = make_grid_scene(256, primitives::ico_sphere(0.5f, 3), 1.3f);
+    std::vector<ExportItem> items;
+    std::vector<MaterialPtr> none;
+    s.for_each([&](GameObject &g) {
+      ExportItem it;
+      it.name = g.name;
+      it.mesh = g.get<MeshFilter>()->mesh.get();
+      it.world = g.world_matrix();
+      items.push_back(it);
+    });
+    std::error_code tmp_ec;
+    const std::filesystem::path tmp = std::filesystem::temp_directory_path(tmp_ec);
+    if (tmp_ec) {
+      rep.note("GLB export skipped: no temp folder (" + tmp_ec.message() + ")");
+      return;
+    }
+    const std::string path = (tmp / "blendity_stress_export.glb").string();
+    const ExportOptions eo = export_defaults((int)ExportFormat::GLB);
+    std::string err;
+    bool ok = export_file(path, items, eo, &err);  // (warm, as Blender's first call is outside its timer)
+    const double ms = time_ms([&] { ok = ok && export_file(path, items, eo, &err); }, 3);
+    std::error_code size_ec;
+    const uintmax_t bytes = ok ? std::filesystem::file_size(path, size_ec) : 0;
+    rep.table({"GLB export (task 0178)", "objects", "triangles", "file size", "ms"});
+    rep.row({"256 icospheres", std::to_string(items.size()), num(256.0 * (double)primitives::ico_sphere(0.5f, 3)->face_count()), format_bytes(size_ec ? 0 : (size_t)bytes), ok ? f1(ms) : "failed"});
+    if (!ok) rep.note("export error: " + err);
+    std::remove(path.c_str());
+  }
 }
 
 static void test_undo(Report &rep, const Options &o) {
@@ -2131,6 +2163,19 @@ static void test_probes(Report &rep, const Options &o) {
 }
 
 /* Baked lighting (task 0012): what a bake costs as the scene grows, and what a lightmap costs to shade. */
+/* A BakeObject with its fields set by name (task 0178: a positional initialiser had been giving want_lightmap the 0
+ * meant for the hash since the field came, and the bake rows baked nothing). */
+static BakeObject bake_object(uint64_t id, MeshPtr mesh, const Mat4 &model, const std::vector<MaterialPtr> &materials, float scale = 1.0f, bool generate_uvs = true) {
+  BakeObject o;
+  o.id = id;
+  o.mesh = mesh;
+  o.model = model;
+  o.materials = materials;
+  o.scale = scale;
+  o.generate_uvs = generate_uvs;
+  return o;
+}
+
 static void test_bake(Report &rep, const Options &o) {
   rep.title("Baked lighting (Generate Lighting)",
             "Static spheres and cubes on a floor under the sky with a Baked sun, Lightmap Resolution 10, 64 indirect samples, "
@@ -2143,13 +2188,13 @@ static void test_bake(Report &rep, const Options &o) {
     auto floor = primitives::plane(std::max(10.0f, std::sqrt((float)n) * 3.0f));
     keep.push_back(floor);
     std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
-    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
+    objs.push_back(bake_object(1, floor, Mat4::identity(), white));
     const int side = (int)std::ceil(std::sqrt((double)n));
     auto sphere = primitives::uv_sphere(0.5f, 24, 12);
     auto cube = primitives::cube();
     for (int i = 0; i < n; i++) {
       const float x = (i % side - side * 0.5f) * 2.5f, z = (i / side - side * 0.5f) * 2.5f;
-      objs.push_back({(uint64_t)i + 2, i % 2 ? sphere : cube, Mat4::translate({x, 0.5f, z}), white, 1.0f, true, 0});
+      objs.push_back(bake_object((uint64_t)i + 2, i % 2 ? sphere : cube, Mat4::translate({x, 0.5f, z}), white));
     }
     BakeLight sun;
     sun.light.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
@@ -2178,8 +2223,8 @@ static void test_bake(Report &rep, const Options &o) {
     auto sphere = primitives::uv_sphere(0.5f, 32, 16);
     auto floor = primitives::plane(20.0f);
     std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
-    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
-    for (int i = 0; i < 64; i++) objs.push_back({(uint64_t)i + 2, sphere, Mat4::translate({(i % 8 - 4) * 1.5f, 0.5f, (i / 8 - 4) * 1.5f}), white, 1.0f, true, 0});
+    objs.push_back(bake_object(1, floor, Mat4::identity(), white));
+    for (int i = 0; i < 64; i++) objs.push_back(bake_object((uint64_t)i + 2, sphere, Mat4::translate({(i % 8 - 4) * 1.5f, 0.5f, (i / 8 - 4) * 1.5f}), white));
     Lightmapper lm;
     BakeSettings bs;
     bs.texels_per_unit = 8.0f;
@@ -2239,8 +2284,8 @@ static void test_bake(Report &rep, const Options &o) {
     bs.indirect_intensity = odd[(int)(rnd() * 6) % 6];
     if (std::isfinite(bs.texels_per_unit) && bs.texels_per_unit > 50.0f) bs.texels_per_unit = 50.0f;  // keep the run short
     std::vector<MaterialPtr> none;
-    std::vector<BakeObject> objs = {{1, cube, Mat4::identity(), none, odd[(int)(rnd() * 6) % 6], rnd() < 0.5f, 0},
-                                    {2, empty, Mat4::identity(), none, 1.0f, true, 0}};
+    std::vector<BakeObject> objs = {bake_object(1, cube, Mat4::identity(), none, odd[(int)(rnd() * 6) % 6], rnd() < 0.5f),
+                                    bake_object(2, empty, Mat4::identity(), none)};
     Lightmapper lm;
     lm.begin(objs, {}, Environment{}, bs);
     int guard = 0;
@@ -2996,6 +3041,17 @@ static void test_uv_unwrap(Report &rep, const Options &o) {
     int islands = 0;
     double ms = time_ms([&] { islands = uvops::smart_project(m, nullptr); });
     rep.row({strprintf("Smart UV torus (subdiv %d)", lv), num((double)m.face_count()), std::to_string(islands), f1(ms)});
+  }
+  /* Blender's benchmark rows (task 0178): Smart UV Project at Blender's 66 degrees, then Pack Islands, on the 50k-face
+   * UV sphere the editor rows use (bpy.ops.uv.smart_project and uv.pack_islands in tools/bench_blender.py). */
+  {
+    Mesh m = *primitives::uv_sphere(1.0f, 256, 196);
+    int islands = 0;
+    islands = uvops::smart_project(m, nullptr, 66.0f, 0.0f);  // (warm, as Blender's first call is outside its timer)
+    const double project_ms = time_ms([&] { islands = uvops::smart_project(m, nullptr, 66.0f, 0.0f); }, 3);
+    const double pack_ms = time_ms([&] { uvops::pack_islands(m, nullptr, 0.001f, true); }, 3);
+    rep.table({"Blender's rows (task 0178)", "faces", "islands", "Smart UV Project ms", "Pack Islands ms"});
+    rep.row({"50k-face UV sphere", num((double)m.face_count()), std::to_string(islands), f1(project_ms), f1(pack_ms)});
   }
 }
 
