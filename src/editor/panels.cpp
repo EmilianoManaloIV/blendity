@@ -1973,11 +1973,11 @@ void Editor::draw_lighting_window(const Recti &r) {
     const bool pv = scene_->lighting.preview;
     if (u.button({r2.x + bw + u.px(4), r2.y, bw, r2.h}, pv ? "Preview Lighting: On" : "Preview Lighting: Off", pv, Icon::Lightbulb))
       command(pv ? "lighting preview off" : "lighting preview on");
-    u.tooltip("A rough bake while you edit, refining 16 -> 64 -> 256 samples half a second after changes stop;\n"
+    u.tooltip("A rough bake while you edit, refining 32 -> 64 -> 256 samples half a second after changes stop;\n"
               "shown instead of the bake and never saved (like Bakery's Realtime Preview).");
     std::string mode = lighting_manual() ? "Lighting Updates: Manual (lighting stays as last computed until you update)"
                                          : "Lighting Updates: Automatic (Realtime GI follows every change)";
-    if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 16 : preview_stage_ == 1 ? 64 : 256,
+    if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 32 : preview_stage_ == 1 ? 64 : 256,
                                                   preview_baker_.progress() * 100.0)
                                      : preview_samples_ ? strprintf("  -  Preview: %d samples", preview_samples_) : std::string("  -  Preview: waiting");
     u.label(lay.row(), mode, u.theme.text_dim);
@@ -2017,6 +2017,7 @@ void Editor::draw_lighting_window(const Recti &r) {
     scene_->lighting.reflect(ir);
     u.pop_id();
     if (ir.changed) mark_changed("Lighting Settings");
+    u.label(lay.row(), "Emissive meshes: sampled at every texel, like lights (task 0157)", u.theme.text_dim);
   }
   lay.space(u.px(6));
   header("Environment");

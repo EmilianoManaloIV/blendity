@@ -770,6 +770,13 @@ Each row was a measurable bottleneck in the first stress run. The old implementa
 - **Flat hierarchies** gain little from dirty flags (1.6–1.8×). The benefit grows with depth.
 - Object-heavy scene loading is now limited by per-object work (component creation, a `std::map` per component), not parsing: ~3.7 µs per object.
 
+## The kernel's id bound (task 0157)
+shaderc's optimiser inlines every function of the megakernel exhaustively, so each call of `trace` from `main`
+costs a whole copy of the integrator. With two call sites (the camera's samples, a bake's) the software-BVH
+variant reached 4,191,309 ids of SPIR-V's 4,194,303 and two more lines overflowed it - the compile failed and the
+path tracer fell back to the CPU in silence. One call site: 2,216,807 ids (ray queries 2,197,372), the optimiser
+19 s instead of 57-83 s, the same pictures. The "every device" test checks the GPU did the work now.
+
 ## GPU first use (task 0037)
 The first GPU render of a session builds the kernel's pipeline (2.4 MB of SPIR-V). On the user's machine a cold
 driver cache took about 80 s, on the editor's thread. Now it opens in the background: with the open slowed to 3 s

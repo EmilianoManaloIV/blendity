@@ -165,13 +165,24 @@ class PathTracer {
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false); }
+  /* The same with the solid-angle pdf of r's direction (a cosine gather's cos / pi): an emissive surface the ray hits
+   * first is weighted against sample_mesh_light (MIS), so a bake that samples emitters at the texel counts each
+   * once (task 0157). */
+  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays, float first_pdf) const {
+    return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false, first_pdf);
+  }
+  /* One emissive triangle by power and a uniform point on it, seen from `origin` with normal `n`: the direction, the
+   * distance, the emitted radiance and the solid-angle pdf (the texel's next-event estimation of emissive meshes,
+   * task 0157). False when there are none or the point is behind the surface or the emitter. */
+  bool has_mesh_lights() const { return !mesh_lights_.empty(); }
+  bool sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u = -1.0f) const;  // light_u in [0,1): the emitter choice given (stratified), else random
   bool occluded(const Ray &r, float tmax) const;
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
    * cosine-weighted around dirs[i] as a normal (the mean is irradiance / pi, as incoming_radiance's
    * cosine gather), mode 2: along dirs[i]. `hit` (optional) gets the share of paths whose first ray hit
    * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
-                  std::vector<float> *hit, std::string *error) const;
+                  std::vector<float> *hit, std::string *error, bool mis_first_hit = false) const;
   /* Light passing along a shadow ray: 0 when blocked, partial through
    * transparent surfaces, full through cutout holes. */
   Vec3 transmittance(const Ray &r, float tmax) const;
@@ -255,7 +266,7 @@ class PathTracer {
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
   /* camera: a camera's ray (the bakes' gathers are not: toon tones, outlines and the Retro stages are for the eye). */
   Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint32_t *id, uint64_t &rays, PTGuidingThread *guide,
-             bool camera = true) const;
+             bool camera = true, float first_pdf = 0.0f) const;
   /* The Retro stages (task 0032): where p lands on the filter's internal image; a triangle's UVs interpolated
    * there in screen space. */
   bool retro_screen(Vec3 p, Vec2 &s) const;

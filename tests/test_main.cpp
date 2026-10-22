@@ -2610,6 +2610,10 @@ static void render_tests() {
       pt.set_camera(Mat4::look_at({0, 1.5f, -3.5f}, {0, 0.4f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 50), W, H);
       int done = pt.render(1e9, SPP);
       CHECK(done == SPP);
+      /* A GPU that failed (a kernel over SPIR-V's id bound: task 0157 found the software-BVH variant there) hands its
+       * samples to the CPU and the picture still matches: the device must have done the work itself. */
+      if (!cpu && !pt.gpu_error().empty()) std::printf("    GPU error: %s\n", pt.gpu_error().c_str());
+      if (!cpu) CHECK(pt.gpu_error().empty() && pt.stats().cpu_samples == 0);
       if (cpu_samples) *cpu_samples = pt.stats().cpu_samples;
       return pt.linear_rgb(false);
     };
@@ -17220,7 +17224,7 @@ static void round41_tests() {
     CHECK(autom_baked);  // (the same wait does start it in Automatic: the check above can fail)
   });
 
-  test("lighting preview: refines 16 -> 64 -> 256 samples into preview lightmaps that are shown, never saved, and gone when turned off", [] {
+  test("lighting preview: refines 32 -> 64 -> 256 samples into preview lightmaps that are shown, never saved, and gone when turned off", [] {
     Editor ed;
     p37_world(ed, false, 2, 1.0f, true);  // a Baked sun: the preview shows its light
     r36_cmd(ed, "lighting mode manual");
@@ -17239,7 +17243,7 @@ static void round41_tests() {
     for (int v : seen) std::printf(" %d", v);
     std::printf("\n");
     CHECK(ed.preview_samples_for_test() == 256);
-    CHECK(std::find(seen.begin(), seen.end(), 16) != seen.end() && std::find(seen.begin(), seen.end(), 64) != seen.end());
+    CHECK(std::find(seen.begin(), seen.end(), 32) != seen.end() && std::find(seen.begin(), seen.end(), 64) != seen.end());
     CHECK(!ed.preview_data_for_test().empty());
     CHECK(ed.lighting_data_for_test().empty());  // the real bake is untouched
     r34_steps(ed, 2);
@@ -17654,7 +17658,7 @@ static void round44_tests() {
     r36_cmd(ed, "lighting mode manual");
     ed.command("lighting preview on");
     ed.step_frame_headless();  // the first pass (16 samples) in one headless frame
-    CHECK(ed.preview_samples_for_test() == 16);
+    CHECK(ed.preview_samples_for_test() == 32);
     const LightingData &pd = ed.preview_data_for_test();
     auto e = pd.entries.find(w.ball->id);
     CHECK(e != pd.entries.end() && !pd.pages.empty());
@@ -39694,6 +39698,145 @@ static void round81_tests() {
     CHECK(load_scene_text(stripped, back, err));
     const IKConstraint *bk = back.find_by_name("RightLowerLeg") ? back.find_by_name("RightLowerLeg")->get<IKConstraint>() : nullptr;
     CHECK(bk && !bk->rotate_end && !bk->end_set);
+  });
+
+  /* ---------------------------------------------------------------- round 175: baked emission sampled at the texel (task 0157) */
+  test("baked emission: Preview Lighting's first pass under a small lamp shows no texel over three times its lit neighbours", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *lamp = r35_add(ed, "Cube", "Lamp", {0, 0.5f, 0}, {0.1f, 0.1f, 0.1f}, Vec3(1.0f));  // (in the bake, so it is a light in it)
+    lamp->get<MeshRenderer>()->materials[0]->emission = Vec3(1.0f);
+    lamp->get<MeshRenderer>()->materials[0]->emission_strength = 20.0f;
+    r35_sun_mode(ed, 0);  // (no sun: the lamp lights the floor)
+    ed.commit_change("lamp");
+    r34_steps(ed, 2);
+    const auto t0 = std::chrono::steady_clock::now();
+    ed.command("lighting preview on");
+    for (int i = 0; i < 200 && ed.preview_samples_for_test() < 32; i++) ed.step_frame_headless();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const LightingData &pd = ed.preview_data_for_test();
+    float worst = 0.0f, peak = 0.0f;
+    int lit = 0;
+    for (const Lightmap &lm : pd.pages) {
+      auto lum = [&](int x, int y) { const Vec3 &c = lm.texels[(size_t)y * lm.width + x]; return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; };
+      for (int y = 1; y + 1 < lm.height; y++)
+        for (int x = 1; x + 1 < lm.width; x++) {
+          const float me = lum(x, y);
+          if (me < 0.01f) continue;
+          float sum = 0.0f;
+          int n = 0;
+          for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+              const float l = (dx || dy) ? lum(x + dx, y + dy) : 0.0f;
+              if ((dx || dy) && l > 0.01f) sum += l, n++;
+            }
+          if (n < 4) continue;
+          lit++, peak = std::max(peak, me), worst = std::max(worst, me / (sum / (float)n));
+        }
+    }
+    std::printf("    the preview's first pass (32 rays) in %.0f ms: %d lit texels, the brightest %.3f, the worst texel %.2fx its neighbours' mean (blocks would be 5-20x)\n", ms, lit,
+                peak, worst);
+    CHECK(ed.preview_samples_for_test() >= 32 && lit > 50 && peak > 0.35f && worst < 3.0f);  // (the lamp adds about 0.28 under it on top of the sky: a glow, no blocks)
+  });
+
+  test("baked emission: a small emissive cube lights the floor as the analytic irradiance says, four times smoother than the hemisphere alone, the same twice, and on the GPU gather", [] {
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    env.strength = 0.0f;
+    const MeshPtr plane = primitives::plane(4.0f, 4), cube = primitives::cube();
+    BakeObject floor_o = r35_object(1, plane, Mat4());
+    const Mat4 cube_m = Mat4::trs({0, 0.5f, 0}, Quat(), Vec3(0.1f));
+    BakeObject lamp = r35_object(2, cube, cube_m);
+    lamp.materials[0]->emission = Vec3(1.0f);
+    lamp.materials[0]->emission_strength = 20.0f;
+    BakeSettings s = r35_small(12.0f, 64);
+    s.denoise = false;
+    s.bounces = 2;
+    /* The reference: the cube's faces integrated (a convex emitter of radiance 20: each face point that faces the
+     * floor point sends L cos_l cos_p / d^2 per area; the lightmap holds irradiance / pi). A hemisphere gather would
+     * need a million rays to see a 10 cm lamp this steadily. */
+    auto reference = [&](float x) {
+      const Vec3 p(x, 0.0f, 0.2f), c(0, 0.5f, 0);
+      const float h = 0.05f, L = 20.0f;
+      double E = 0.0;
+      const int G = 40;
+      const Vec3 axes[3] = {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+      for (int a = 0; a < 3; a++)
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+          const Vec3 nrm = axes[a] * (float)sgn, u = axes[(a + 1) % 3], v = axes[(a + 2) % 3];
+          const double dA = (2.0 * h / G) * (2.0 * h / G);
+          for (int i = 0; i < G; i++)
+            for (int j = 0; j < G; j++) {
+              const Vec3 q = c + nrm * h + u * (h * (2.0f * (i + 0.5f) / G - 1.0f)) + v * (h * (2.0f * (j + 0.5f) / G - 1.0f));
+              const Vec3 d = p - q;
+              const float dist = length(d);
+              const Vec3 dir = d / dist;
+              const float cos_l = dot(nrm, dir), cos_p = -dir.y;
+              if (cos_l <= 0.0f || cos_p <= 0.0f) continue;
+              E += L * cos_l * cos_p / (dist * dist) * dA;
+            }
+        }
+      return (float)(E / kPi);
+    };
+    auto bake = [&](bool sampled, int gpu) {
+      BakeSettings bs = s;
+      bs.sample_emissive = sampled;
+      bs.gpu_device = gpu;
+      Lightmapper lm;
+      return r35_run(lm, {floor_o, lamp}, {}, env, bs);
+    };
+    auto line = [&](const LightingData &ld, std::vector<float> &out, float x0, float x1, int n) {
+      out.clear();
+      for (int i = 0; i < n; i++) {
+        Vec3 v;
+        const float x = x0 + (x1 - x0) * i / (float)(n - 1);
+        out.push_back(r35_sample(ld, 1, *plane, Mat4(), {x, 0, 0.2f}, v) ? v.x : -1.0f);
+      }
+    };
+    const LightingData sampled = bake(true, -1), hemi = bake(false, -1), again = bake(true, -1);
+    /* (a) Against the reference: within 5 % RMS of it along the line under the lamp. */
+    double err = 0.0, scale = 0.0;
+    std::vector<float> vs;
+    line(sampled, vs, 0.0f, 1.2f, 7);
+    for (int i = 0; i < 7; i++) {
+      const float ref = reference(1.2f * i / 6.0f);
+      err += (vs[(size_t)i] - ref) * (vs[(size_t)i] - ref), scale += ref * ref;
+    }
+    const double rms = std::sqrt(err / std::max(1e-12, scale));
+    /* (b) Smoothness: the mean squared second difference along a line of texels, hemisphere-only against sampled. */
+    auto roughness = [&](const LightingData &ld) {
+      std::vector<float> t;
+      line(ld, t, 0.15f, 1.35f, 48);
+      double r = 0.0;
+      for (size_t i = 1; i + 1 < t.size(); i++) r += (t[i - 1] - 2.0f * t[i] + t[i + 1]) * (t[i - 1] - 2.0f * t[i] + t[i + 1]);
+      return r / (double)(t.size() - 2);
+    };
+    const double rough_hemi = roughness(hemi), rough_sampled = roughness(sampled);
+    /* (c) The same twice. */
+    std::vector<float> a, b;
+    line(sampled, a, 0.0f, 1.5f, 40), line(again, b, 0.0f, 1.5f, 40);
+    float twice = 0.0f;
+    for (size_t i = 0; i < a.size(); i++) twice = std::max(twice, std::fabs(a[i] - b[i]));
+    std::printf("    a 10 cm lamp 0.5 m over the floor: the sampled bake %.1f %% RMS from the analytic irradiance (under it %.3f vs %.3f); roughness hemisphere-only %.2e, "
+                "sampled %.2e (%.1fx smoother); baked twice within %.2e\n",
+                rms * 100.0, vs[0], reference(0.0f), rough_hemi, rough_sampled, rough_hemi / std::max(1e-12, rough_sampled), twice);
+    CHECK(rms < 0.05 && rough_hemi > 4.0 * rough_sampled && twice < 1e-5f);
+    /* (d) The GPU gather, when there is one: the first emissive hit weighted the same way, so the result agrees. */
+    if (PathTracer::gpu_available() && !gpu::devices().empty()) {
+      const LightingData gpu_ld = bake(true, gpu::devices()[0].index);
+      std::vector<float> g;
+      line(gpu_ld, g, 0.0f, 1.2f, 7);
+      float worst = 0.0f;
+      std::string row;
+      for (int i = 0; i < 7; i++) {
+        worst = std::max(worst, std::fabs(g[(size_t)i] - vs[(size_t)i]) / std::max(0.05f, vs[(size_t)i]));
+        row += strprintf(" %.3f/%.3f", vs[(size_t)i], g[(size_t)i]);
+      }
+      std::printf("    the GPU gather's bake within %.1f %% of the CPU's along the line (CPU/GPU:%s)\n", worst * 100.0f, row.c_str());
+      CHECK(worst < 0.06f);
+    }
   });
 
   test("IK handles: a new target starts with the foot's rotation and turning it turns the foot while the knee stays; Rotate End off keeps the old pose; ik orient captures the offset; a driven foot refuses the gizmo", [&] {

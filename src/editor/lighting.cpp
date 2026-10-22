@@ -703,7 +703,7 @@ void Editor::lighting_update_step() {
 }
 
 /* Task 0020: Preview Lighting, like Bakery's Realtime Preview. Half a second after the scene stops changing,
- * a rough bake (a quarter of the resolution, 16, then 64, then 256 samples) runs a slice a frame and is
+ * a rough bake (half the resolution, 32, then 64, then 256 samples) runs a slice a frame and is
  * shown instead of the real lightmaps; any change starts over. Never saved. */
 void Editor::preview_step() {
   const LightingSettings &ls = scene_->lighting;
@@ -752,7 +752,7 @@ void Editor::preview_step() {
     ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, preview_settle_ + 0.5) : preview_settle_ + 0.5;
     return;
   }
-  static const int kSamples[3] = {16, 64, 256};
+  static const int kSamples[3] = {32, 64, 256};  // (task 0157: 16 showed a small emitter as blocks)
   if (!preview_running_) {
     if (preview_stage_ >= 3) return;  // refined
     std::vector<BakeObject> objects;
@@ -760,7 +760,7 @@ void Editor::preview_step() {
     collect_bake_scene(objects, lights);
     update_environment();
     BakeSettings s;
-    s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.25f);
+    s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.5f);  // (half the density: a quarter showed blocks, task 0157)
     s.min_chart = 32;  // a small object still gets a few hundred texels, or it looks blocky at a quarter of the resolution
     s.max_size = std::min(ls.max_size, 1024);
     s.padding = ls.padding;

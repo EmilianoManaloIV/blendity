@@ -215,7 +215,7 @@ void LightingSettings::reflect(Reflector &r) {
   r.enumeration("Lighting Mode", lighting_mode, modes, 1);
   r.help("Baked Indirect: Mixed lights keep their realtime light and shadows; only their bounced light is baked.");
   r.field("Lightmap Resolution", texels_per_unit, 0.5f, 0.01f, 1000.0f);
-  r.help("Texels per unit (metre) of surface (Unity's default is 40).");
+  r.help("Texels per unit (metre) of surface (Unity's default is 40; 80 shows a small emissive object's glow in detail).");
   r.field("Max Lightmap Size", max_size, 16, 4096);
   r.field("Lightmap Padding", padding, 0, 32);
   r.help("Texels kept between charts so they don't bleed into each other.");

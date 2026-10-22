@@ -43,8 +43,10 @@ soft, and one key light.
   Ramp (read by how lit in its lighting pass); a material with painted maps or a hair highlight draws on the CPU,
   saying so in Preferences, because the lighting pass has neither UVs nor tangents - a VRM avatar whose MToon shade
   texture came in draws on the CPU, an MMD model's ramps on the card. The GPU path tracer draws everything, reading
-  the toon maps and the ramp by their nearest texel: its kernel sits at SPIR-V's id bound, so the key light is found
-  on the CPU and every new read is one fetch.
+  the toon maps and the ramp by their nearest texel: its kernel sat at SPIR-V's id bound (4,191,309 of 4,194,303
+  after round 174), so the key light is found on the CPU and every new read is one fetch. Task 0157 halved the
+  bound (`trace` inlined once, not twice: 2,216,807), so the kernel can grow again; the number is measured with a
+  shaderc checker before a kernel change lands (docs/tasks/0157).
 - **Light wrap** remaps the signed N.L before the clamp and the shadow test, so the terminator moves while a cast
   shadow and the far side stay dark; MMD's ramps, read at half N.L plus half, are a full wrap.
 

@@ -720,11 +720,33 @@ float PathTracer::mesh_light_pdf(uint32_t li, float dist, float cos_light) const
   return cos_light > 1e-6f ? (l.power / light_power_) * dist * dist / (l.area * cos_light) : 0.0f;
 }
 
+bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u) const {
+  if (mesh_lights_.empty() || !(light_power_ > 0.0f)) return false;
+  const float r = (light_u >= 0.0f && light_u < 1.0f ? light_u : rnd(rng)) * light_power_;
+  const uint32_t li = (uint32_t)std::min<size_t>(std::upper_bound(light_cdf_.begin(), light_cdf_.end(), r) - light_cdf_.begin(), mesh_lights_.size() - 1);
+  float su = rnd(rng), sv = rnd(rng);
+  if (su + sv > 1.0f) su = 1.0f - su, sv = 1.0f - sv;
+  SurfacePoint lp;
+  const Material *lmat = surface_at(mesh_lights_[li].object, mesh_lights_[li].prim, su, sv, lp);
+  const Vec3 d = lp.position - origin;
+  dist = length(d);
+  if (!(dist > 1e-5f) || !lmat) return false;
+  dir = d / dist;
+  const float cos_l = std::fabs(dot(lp.geo_normal, dir));
+  pdf = mesh_light_pdf(li, dist, cos_l);
+  if (!(pdf > 0.0f) || dot(n, dir) <= 0.0f) return false;
+  const SurfaceSample ls = evaluate_material(*lmat, lp);
+  if (lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip) return false;  // (a hole: the gather passes through it too)
+  Le = ls.emission * (lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
+  return std::isfinite(Le.x) && std::isfinite(Le.y) && std::isfinite(Le.z);
+}
+
 Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint32_t *id_out, uint64_t &rays,
-                       PTGuidingThread *guide, bool camera) const {
+                       PTGuidingThread *guide, bool camera, float first_pdf) const {
   Vec3 L(0.0f), beta(1.0f);
   const float clamp = settings_.clamp_indirect;
-  float last_pdf = 0.0f;  // solid-angle pdf of the direction that led here (0 = camera ray)
+  float last_pdf = first_pdf;  // solid-angle pdf of the direction that led here (0 = camera ray; a bake's gather gives its cosine pdf)
+  float since_scatter = 0.0f;  // the distance travelled since that direction was chosen: see-through passes add to it (the emitter's pdf is by that distance, task 0157)
   int see_through_hits = 0, glass_hits = 0;  // these get their own budgets (Cycles: transparent / transmission bounces)
   bool camera_path = camera;  // still the camera ray (see-through passes keep it; glass and BSDF bounces end it)
 #ifdef BL_WITH_OPENPGL
@@ -777,6 +799,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (mat->outline_hull && !(bounce == 0 && camera_path && dot(sp.geo_normal, ray.dir) < 0.0f) && see_through_hits < 64) {
       see_through_hits++;
       ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      since_scatter += h.t;
       bounce--;
       continue;
     }
@@ -792,6 +815,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
           if ((((int)std::floor(scr.x) + (int)std::floor(scr.y)) & 1) != 0) {  // the checkerboard's holes
             see_through_hits++;
             ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+            since_scatter += h.t;
             bounce--;
             continue;
           }
@@ -808,6 +832,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (door_solid && saturate(s.alpha) < 0.1f) {  // the rasterizer's door: nearly clear surfaces vanish
       see_through_hits++;
       ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      since_scatter += h.t;
       bounce--;
       continue;
     }
@@ -818,6 +843,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       if (pass) {
         see_through_hits++;
         ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+        since_scatter += h.t;
         bounce--;
         continue;
       }
@@ -843,7 +869,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (last_pdf > 0.0f && !mesh_lights_.empty() && luminance(s.emission) > 0.0f) {
       auto it = light_of_.find(((uint64_t)h.object << 32) | h.tri);
       if (it != light_of_.end()) {
-        float pl = mesh_light_pdf(it->second, h.t, cos_hit);
+        float pl = mesh_light_pdf(it->second, since_scatter + h.t, cos_hit);  // (the whole way from the scatter, not the last segment)
         w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
       }
     }
@@ -1056,7 +1082,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
           rays++;
           const Vec3 Tr = transmittance({origin, dir}, dist * (1.0f - 1e-4f));
           if (std::max({Tr.x, Tr.y, Tr.z}) > 0.0f) {
-            const Vec3 Le = evaluate_material(*lmat, lp).emission * Tr;
+            const SurfaceSample ls = evaluate_material(*lmat, lp);
+            const bool hole = lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip;  // (as sample_mesh_light: a cutout's hole emits nothing)
+            const Vec3 Le = ls.emission * Tr * (hole ? 0.0f : lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
             float pb = sampling_pdf(dir);
             float w = pl * pl / (pl * pl + pb * pb);
             const Vec3 Lo = bsdf(dir) * Le * (w / pl);
@@ -1093,6 +1121,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     const Vec3 f = bsdf(dir);
     beta = beta * f / pdf;
     last_pdf = pdf;
+    since_scatter = 0.0f;
 #ifdef BL_WITH_OPENPGL
     if (record && seg) {
       openpgl::cpp::SetDirectionIn(seg, pgl_v(dir));
@@ -2288,7 +2317,7 @@ void PathTracer::upload_gpus() {
 }
 
 bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
-                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error) const {
+                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, bool mis_first_hit) const {
   std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
   out.clear();
   if (hit) hit->clear();
@@ -2341,6 +2370,7 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
     p.size[1] = H;
     p.env_i[2] = mode;
     p.env_i[3] = (int32_t)n;
+    p.misc[1] = mis_first_hit ? 1.0f : 0.0f;  // (task 0157: the gather's first emissive hit weighted against the texel's own emitter sampling)
     p.cam_pos[3] = (float)first;  // each point's own random sequence, whatever the batch (exact below 2^24)
     bake_gpu_->set_params(p);
     const size_t cells = (size_t)W * H;

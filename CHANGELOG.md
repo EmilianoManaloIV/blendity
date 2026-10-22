@@ -2,6 +2,50 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 175): baked emission without blocks (task 0157)
+
+**Asked:** "Emissions off some objects when baked under the lighting tab still look blocky or pixelated."
+
+**Fixed**
+- A bake found emissive meshes only when a hemisphere ray chanced on them (a 10 cm lamp: one ray in sixty), so a
+  small bright object came out as a scatter of blocks. Each texel samples the emitters directly now (one emitter
+  point a ray, the emitter choice stratified over the rays, a shadow ray each), weighted against the hemisphere
+  gather by the power heuristic - the gather's own emitter hits are weighted the other way, on the CPU and in the
+  GPU kernel's bake entry - so nothing is counted twice. A 10 cm lamp over a floor: 1.4 % RMS from the analytic
+  irradiance (was noise-limited), 274x smoother than the hemisphere alone, the GPU gather within 4 % of the CPU.
+- A firefly clamp before the lightmap's filter (a texel over eight times its chart neighbours' mean), so a lone
+  bright hit is no longer spread into a blotch.
+- Preview Lighting bakes at half the density (a quarter showed blocks) and 32 rays first (was 16).
+
+**Changed after the review**
+- The emitter-hit weight carries the distance through see-through passes (a cutout leaf between a texel and a lamp
+  made the hit weigh too much); a sampled emitter point respects its alpha (a cutout's hole emits nothing, a
+  transparent emitter by its alpha), in the path tracer's own light sampling too; the firefly clamp touches the
+  hemisphere gather only, with the filter's facing test (a one-texel sun spot or a lamp's contact peak is real
+  light); the emitter rays are capped at 64 on the GPU path; the Lighting window says emitters are sampled; the
+  preview's status says 32.
+- The chain found the GPU's software-BVH kernel no longer compiling: shaderc's optimiser stopped with "ID overflow"
+  (SPIR-V allows 4,194,303 ids; round 174's kernel used 4,191,309, and the two lines above took it over), and the
+  path tracer handed the GPU's samples to the CPU without a word - the "every device" test took 70 s and passed on
+  the CPU's pixels. The kernel's `main` now calls `trace` from one place (the camera's samples and a bake's share
+  the loop), so the optimiser inlines the integrator once: 2,216,807 ids (2,197,372 with ray queries), the
+  optimiser in 19 s instead of 57-83, the same pictures (the seeds and the maths are unchanged), and room for
+  the kernel to grow again. The test now checks the device did the work (no GPU error, no CPU samples): 2.0 s.
+
+**Added**
+- `BakeSettings::sample_emissive` (on); the Lightmap Resolution help names 80 texels/m for small emitters; the
+  lesson "Baked emission: a small lamp without blocks".
+
+**Checked**
+- New test (round 175): a 10 cm emissive cube 0.5 m over a floor baked at 12 texels/m with 64 rays: 1.4 % RMS from
+  the cube's faces integrated analytically, 274x smoother than the hemisphere-only bake, the same twice, the GPU
+  gather's bake within 3.5 % of the CPU's; the preview tests expect 32 rays first, and the preview's first pass on
+  the lamp scene shows no texel over 3x its lit neighbours' mean.
+- Unit checks (round 175): Windows 11,406, 0 failed (910 tests); render-cache verify mode 11,407, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,131, 0 failed. Sanitizer build: 11,007, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 174): IK handles in metres, a size preference, rotatable targets (task 0156, ADR 0031)
 
 **Asked:** "the IK handles are way too big"; "I should be able to rotate the handles".

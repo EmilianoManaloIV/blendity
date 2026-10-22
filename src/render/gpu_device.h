@@ -52,7 +52,7 @@ struct GParams {
   float retro_vp[16];   // a camera filter's view-projection (task 0032)
   float retro[4];       // affine UVs, screen door, internal width, height (0: off)
   float key_light[4];   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
-  float misc[4];        // task 0149: x the toon map reads (8)
+  float misc[4];        // task 0149: x the toon map reads (8); task 0157: y a bake gather weights its first emissive hit
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };

@@ -659,11 +659,13 @@ int find_mesh_light(uint obj, uint prim) {
 )GLSL",
 R"GLSL(
 /* ----------------------------------------------------------- integrator */
+float g_first_pdf = 0.0;  // a bake gather's cosine pdf: its first emissive hit is weighted against the texel's emitter sampling (task 0157; a file-scope value, not a parameter: the kernel is at SPIR-V's id bound)
 vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 normal_out, out float depth_out, out float id_out, bool camera) {
   id_out = 0.0;
   vec3 L = vec3(0.0), beta = vec3(1.0);
   float clamp_ind = P.settings.x;
-  float last_pdf = 0.0;
+  float last_pdf = g_first_pdf;
+  float since_scatter = 0.0;  // the distance since that direction was chosen (see-through passes add to it)
   int see_through_hits = 0, glass_hits = 0;
   bool camera_path = camera;  // the camera ray (see-through passes keep it; glass ends it; a bake's gather isn't one)
   albedo_out = vec3(0.0);
@@ -688,6 +690,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if ((m.flags.w & 2) != 0 && !(bounce == 0 && camera_path && dot(sp.geo_normal, rd) < 0.0) && see_through_hits < 64) {
       see_through_hits++;
       ro = sp.position + rd * (1e-4 + h.t * 1e-5);
+      since_scatter += h.t;
       bounce--;
       continue;
     }
@@ -703,15 +706,15 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if (bounce == 0 && camera_path && P.retro.z > 0.0 && retro_screen(sp.position, scr)) {
       if (P.retro.x > 0.5) retro_affine_uv(h.obj, h.prim, scr, sp);
       if (P.retro.y > 0.5 && surf == 2 && see_through_hits < 64) {
-        if (((int(floor(scr.x)) + int(floor(scr.y))) & 1) != 0) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+        if (((int(floor(scr.x)) + int(floor(scr.y))) & 1) != 0) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); since_scatter += h.t; bounce--; continue; }
         door_solid = true;
       }
     }
     Sample s = evaluate_material(m, sp);
-    if (door_solid && clamp(s.alpha, 0.0, 1.0) < 0.1) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+    if (door_solid && clamp(s.alpha, 0.0, 1.0) < 0.1) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); since_scatter += h.t; bounce--; continue; }
     if ((surf == 1 || surf == 2) && see_through_hits < 64 && !door_solid) {
       bool pass = surf == 1 ? s.alpha < m.tiling.w : rnd(rng) >= s.alpha;
-      if (pass) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+      if (pass) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); since_scatter += h.t; bounce--; continue; }
     }
     vec3 n = s.normal;
     if (dot(n, V) < 0.0) n = normalize(n + sp.geo_normal * (-dot(n, V) + 0.01));
@@ -720,7 +723,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     float w_emit = 1.0;
     if (last_pdf > 0.0 && P.counts.y > 0 && luminance(s.emission) > 0.0) {
       int li = find_mesh_light(h.obj, h.prim);
-      if (li >= 0) { float pl = mesh_light_pdf(uint(li), h.t, cos_hit); w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl); }
+      if (li >= 0) { float pl = mesh_light_pdf(uint(li), since_scatter + h.t, cos_hit); w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl); }
     }
     c0 = beta * s.emission * w_emit;
     if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c0.x, max(c0.y, c0.z)); if (mx > clamp_ind) c0 *= clamp_ind / mx; }
@@ -908,6 +911,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if (pdf < 1e-8) break;
     beta *= bsdf_any(toon, s, n, V, dir) / pdf;
     last_pdf = pdf;
+    since_scatter = 0.0;
     if (bounce >= 3) {
       float q = min(0.95, max(beta.x, max(beta.y, beta.z)));
       if (rnd(rng) > q) break;
@@ -926,60 +930,64 @@ void main() {
   int W = P.size.x, H = P.size.y;
   if (px.x >= W || px.y >= H) return;
   int count = max(PC.sample_count, 1);
-  if (P.env_i.z != 0) {
-    /* Baking (task 0018): one point per invocation, its origin in Aux [0, n) and its normal (mode 1:
-     * cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
-     * arriving there adds up in Accum; w counts the paths whose first ray hit something. */
-    int i = px.y * W + px.x;
-    if (i >= P.env_i.w) return;
-    vec3 o = aux[i].xyz, nd = aux[W * H + i].xyz;
-    vec4 sum = vec4(0.0);
-    for (int k = 0; k < count; k++) {
-      int s = PC.sample_index + k;
-      uint brng = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + uint(s) * 6271u + 7u);  // cam_pos.w: the batch's first point
-      vec3 d = nd;
-      if (P.env_i.z == 1) {
-        float r1 = rnd(brng), r2 = rnd(brng), r = sqrt(r1), phi = 6.28318530718 * r2;
-        vec3 t, b;
-        onb(nd, t, b);
-        d = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
-      }
-      vec3 balb, bnrm;
-      float bdep;
-      float bid;
-      vec3 bc = trace(o, d, brng, balb, bnrm, bdep, bid, false);
-      if (any(isnan(bc)) || any(isinf(bc))) bc = vec3(0.0);
-      sum += vec4(bc, dot(bnrm, bnrm) > 0.25 ? 1.0 : 0.0);
-    }
-    accum[i] += sum;
-    return;
-  }
+  /* The camera's samples and a bake's share one loop and one call of trace(): the optimiser inlines the integrator
+   * once, not twice (task 0157: the software-BVH variant had reached SPIR-V's id bound, 4,194,303, and a second copy
+   * no longer fit; one copy leaves room). Baking (task 0018): one point per invocation, its origin in Aux [0, n) and
+   * its normal (mode 1: cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
+   * arriving there adds up in Accum; w counts the paths whose first ray hit something. */
+  const bool bake = P.env_i.z != 0;
   int i = px.y * W + px.x;
+  if (bake && i >= P.env_i.w) return;
+  vec3 o = vec3(0.0), nd = vec3(0.0);
+  if (bake) { o = aux[i].xyz; nd = aux[W * H + i].xyz; }
+  vec4 sum = vec4(0.0);
   vec3 csum = vec3(0.0), asum = vec3(0.0);
   vec4 nsum = vec4(0.0);
   float cover = 0.0, last_dep = -1.0, last_id = 0.0;
   bool any_hit = false;
   for (int k = 0; k < count; k++) {
     int s = PC.sample_index + k;
-    uint rng = pcg_hash(uint(px.y * W + px.x) * 9781u + uint(s) * 6271u + 1u);
-    float jx = rnd(rng), jy = rnd(rng);
-    float nx = 2.0 * (float(px.x) + jx) / float(W) - 1.0, ny = 1.0 - 2.0 * (float(px.y) + jy) / float(H);
-    vec4 a = P.inv_vp * vec4(nx, ny, 0.0, 1.0), b = P.inv_vp * vec4(nx, ny, 1.0, 1.0);
-    vec3 pa = a.xyz / a.w, pb = b.xyz / b.w;
-    vec3 ro = pa, rd = normalize(pb - pa);
-    if (P.lens.x > 0.0) {
-      /* Thin lens, as PathTracer::render: start on the aperture, aim at the focus plane. */
-      float lu = rnd(rng), lv = rnd(rng);
-      vec2 l = sample_aperture(lu, lv, int(P.lens.z), P.lens.w) * P.lens.x;
-      float t = (P.lens.y - dot(pa - P.cam_pos.xyz, P.cam_fwd.xyz)) / max(1e-6, dot(rd, P.cam_fwd.xyz));
-      vec3 focus = pa + rd * t;
-      ro = pa + P.cam_right.xyz * l.x + P.cam_up.xyz * l.y;
-      rd = normalize(focus - ro);
+    uint rng;
+    vec3 ro, rd;
+    if (bake) {
+      rng = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + uint(s) * 6271u + 7u);  // cam_pos.w: the batch's first point
+      ro = o;
+      rd = nd;
+      if (P.env_i.z == 1) {
+        float r1 = rnd(rng), r2 = rnd(rng), r = sqrt(r1), phi = 6.28318530718 * r2;
+        vec3 t, b;
+        onb(nd, t, b);
+        rd = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
+      }
+      g_first_pdf = (P.env_i.z == 1 && P.misc.y > 0.5) ? max(dot(nd, rd), 0.0) / 3.14159265 : 0.0;
+    }
+    else {
+      rng = pcg_hash(uint(i) * 9781u + uint(s) * 6271u + 1u);
+      float jx = rnd(rng), jy = rnd(rng);
+      float nx = 2.0 * (float(px.x) + jx) / float(W) - 1.0, ny = 1.0 - 2.0 * (float(px.y) + jy) / float(H);
+      vec4 a = P.inv_vp * vec4(nx, ny, 0.0, 1.0), b = P.inv_vp * vec4(nx, ny, 1.0, 1.0);
+      vec3 pa = a.xyz / a.w, pb = b.xyz / b.w;
+      ro = pa;
+      rd = normalize(pb - pa);
+      if (P.lens.x > 0.0) {
+        /* Thin lens, as PathTracer::render: start on the aperture, aim at the focus plane. */
+        float lu = rnd(rng), lv = rnd(rng);
+        vec2 l = sample_aperture(lu, lv, int(P.lens.z), P.lens.w) * P.lens.x;
+        float t = (P.lens.y - dot(pa - P.cam_pos.xyz, P.cam_fwd.xyz)) / max(1e-6, dot(rd, P.cam_fwd.xyz));
+        vec3 focus = pa + rd * t;
+        ro = pa + P.cam_right.xyz * l.x + P.cam_up.xyz * l.y;
+        rd = normalize(focus - ro);
+      }
+      g_first_pdf = 0.0;
     }
     vec3 alb, nrm;
     float dep, hit_id;
-    vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, true);
+    vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, !bake);
     if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+    if (bake) {
+      sum += vec4(c, dot(nrm, nrm) > 0.25 ? 1.0 : 0.0);
+      continue;
+    }
     csum += c;
     asum += alb;
     nsum += vec4(nrm, dep);
@@ -989,6 +997,10 @@ void main() {
       last_dep = dep;
     }
     last_id = hit_id;
+  }
+  if (bake) {
+    accum[i] += sum;
+    return;
   }
   /* One read and write of each plane for the dispatch's samples. */
   vec4 acc = accum[i];
