@@ -563,7 +563,14 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   uint32_t *color = contiguous ? rt.color : gpu_color_.data();
   const bool dof = cam && cam->dof && !cam->orthographic;
   const bool want_depth = !rt.depth.empty() && (planes_wanted_ || dof), want_ids = !rt.ids.empty() && planes_wanted_;
-  ok = ok && g->render(fr, &err) && g->read_back(slot, color, want_depth ? rt.depth.data() : nullptr, want_ids ? rt.ids.data() : nullptr, &err);
+  ok = ok && g->render(fr, &err);
+  if (ok) {
+    const gpu::RasterTimes t = g->times();  // (task 0159: the card's own time in each pass, for the Profiler)
+    prof_.ms_gpu_shadow += t.shadow, prof_.ms_gpu_gbuffer += t.gbuffer, prof_.ms_gpu_lighting += t.lighting;
+    ScopedTimer rb;
+    ok = g->read_back(slot, color, want_depth ? rt.depth.data() : nullptr, want_ids ? rt.ids.data() : nullptr, &err);
+    prof_.ms_gpu_readback += rb.ms();
+  }
   gpu_forget_meshes();
   if (!ok) {
     /* Any error: this frame on the CPU, and the GPU set aside until Viewport Device is chosen again. */

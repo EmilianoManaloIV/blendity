@@ -137,6 +137,17 @@ struct FrameProfile {
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
   double ms_gpu = 0;
+  /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
+   * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
+  double ms_gpu_shadow = 0, ms_gpu_gbuffer = 0, ms_gpu_lighting = 0, ms_gpu_readback = 0;
+  double gpu_busy_ms() const { return ms_gpu_shadow + ms_gpu_gbuffer + ms_gpu_lighting; }
+  FrameProfile operator-(const FrameProfile &o) const {  // (task 0159: the GPU fields over a span of frames; `bench`)
+    FrameProfile d;
+    d.ms_gpu = ms_gpu - o.ms_gpu, d.ms_gpu_readback = ms_gpu_readback - o.ms_gpu_readback;
+    d.ms_gpu_shadow = ms_gpu_shadow - o.ms_gpu_shadow, d.ms_gpu_gbuffer = ms_gpu_gbuffer - o.ms_gpu_gbuffer, d.ms_gpu_lighting = ms_gpu_lighting - o.ms_gpu_lighting;
+    d.gpu_views = gpu_views - o.gpu_views;
+    return d;
+  }
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
     ms_ui += o.ms_ui, ms_present += o.ms_present;
@@ -154,6 +165,7 @@ struct FrameProfile {
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
     ms_gpu += o.ms_gpu;
+    ms_gpu_shadow += o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
   }
 };
 /* Adds the time to the end of its scope to a FrameProfile field. */
@@ -936,6 +948,10 @@ class Editor {
   void draw_learn(const Recti &r);
   void open_references();  // Learn > References (the papers behind features; the Research window is retired)
   void draw_profiler(const Recti &r);
+  void draw_profiler_gpu(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat);  // task 0159
+  void draw_profiler_gpu_views(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat);
+  void draw_profiler_gpu_tracer(const char *what, const PTStats &s, double wall_ms, const char *of_what, const std::function<void(const std::string &, const std::string &)> &stat);
+  std::string render_gpu_busy_text() const;  // task 0159
   void draw_render_window(const Recti &r);
   void draw_uv_editor(const Recti &r);
   void draw_dialogs();

@@ -1137,6 +1137,12 @@ static void test_editor_render(Report &rep, const Options &o) {
                        "%llu on the CPU instead, %.2f ms a frame in the GPU path (rendering and reading back).",
                        ed.gpu_view_status().c_str(), ed.gpu_view_open_ms(), (unsigned long long)(g1.gpu_views - g0.gpu_views),
                        (unsigned long long)(g1.gpu_fallbacks - g0.gpu_fallbacks), (g1.ms_gpu - g0.ms_gpu) / (n + 1)));
+    /* Task 0159: of that path, what the card itself worked (its timestamps) and the read-back. */
+    const double busy = (g1.gpu_busy_ms() - g0.gpu_busy_ms()) / (n + 1), path = (g1.ms_gpu - g0.ms_gpu) / (n + 1);
+    const double readback = (g1.ms_gpu_readback - g0.ms_gpu_readback) / (n + 1);
+    if (busy > 0.0) rep.note(strprintf("GPU busy (task 0159): the card worked %.2f ms of the %.2f ms GPU path a frame (%.0f %%; shadow %.2f, g-buffer %.2f, lighting %.2f), the read-back %.2f ms, the rest waiting.",
+                                       busy, path, 100.0 * busy / std::max(1e-6, path), (g1.ms_gpu_shadow - g0.ms_gpu_shadow) / (n + 1), (g1.ms_gpu_gbuffer - g0.ms_gpu_gbuffer) / (n + 1), (g1.ms_gpu_lighting - g0.ms_gpu_lighting) / (n + 1), readback));
+    else rep.note("GPU busy (task 0159): this card reports no timestamps.");
     ed.viewport_device_for_test(1);
   }
   {
@@ -3256,7 +3262,7 @@ static void test_gpu_devices(Report &rep, const Options &o) {
   }
   if (all.size() > 1) runs.push_back({"All GPUs", false, all, true});
   runs.push_back({"CPU + all GPUs", true, all, true});
-  rep.table({"device", "samples/s", "ms / sample", "vs CPU", "samples per device", "longest submission ms"});
+  rep.table({"device", "samples/s", "ms / sample", "vs CPU", "samples per device", "longest submission ms", "GPU busy % (task 0159)"});
   double cpu_rate = 0;
   for (const Run &r : runs) {
     PathTracer pt;
@@ -3280,8 +3286,10 @@ static void test_gpu_devices(Report &rep, const Options &o) {
       share = r.cpu ? strprintf("CPU %d", pt.stats().cpu_samples) : "";
       for (size_t g = 0; g < pt.stats().gpu_samples.size(); g++) share += strprintf("%sGPU%zu %d", share.empty() ? "" : ", ", g + 1, pt.stats().gpu_samples[g]);
     }
+    const PTStats &ps = pt.stats();
+    const std::string busy = ps.gpu_busy_ms < 0.0 ? std::string("-") : f1(100.0 * ps.gpu_busy_ms / std::max(1e-6, ps.gpu_busy_ms + ps.gpu_wait_ms)) + " % (" + f1(ps.gpu_busy_ms) + " of " + f1(ps.gpu_busy_ms + ps.gpu_wait_ms) + " ms)";
     rep.row({r.name, f1(rate), f2(ms / done), f2(rate / std::max(cpu_rate, 1e-9)) + "x", share,
-             r.gpus.empty() ? std::string("-") : f1(pt.stats().max_submit_ms)});
+             r.gpus.empty() ? std::string("-") : f1(ps.max_submit_ms), busy});
   }
   rep.note("Task 0051: a GPU submission stays near 100 ms (the first of a frame is one sample) so a slow card can't pass "
            "Windows' 2 s driver timeout; a GTX 1050 Ti traces with the compute kernel (no ray tracing hardware).");

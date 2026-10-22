@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 179): GPU time in the Profiler (task 0159)
+
+**Asked:** "CPU and GPU usage look low" when rendering - and until now nothing in Blendity could say what the card
+was doing. The frame profile held how long a frame spent in the GPU path (upload, dispatch, wait, read-back) as one
+wall-time number the Profiler never showed, and the path tracer's stats had no GPU time at all.
+
+**Added**
+- The card's own clock: two timestamp queries around every path-tracer submission (`Renderer::last_gpu_ms()`, -1
+  where the queue has none), summed into `PTStats::gpu_busy_ms` and `gpu_wait_ms` (the submission's wall time less
+  the busy); the views' pass times (shadow, g-buffer, lighting, read-back) from the raster device's existing
+  timestamps into the frame profile (`FrameProfile::ms_gpu_shadow / gbuffer / lighting / readback`, `gpu_busy_ms()`).
+- The Profiler window's GPU block: the GPU path's wall time, the views' busy time and its three passes, read-back
+  (the CPU's timer) and wait, "GPU busy in the frame" as a share of the frame, and for a running F12 or Camera
+  Preview the path tracer's busy / wait inside its submissions and its busy share over the render so far (F12) or
+  the frame (Camera Preview) - the card is idle between submissions, which the submissions' own wait never shows;
+  a card without timestamps shows "n/a". `bench` prints "bench GPU busy ... a frame in the GPU path" over its own
+  frames, "Render finished" logs the busy share over the render.
+- The lesson "The views on the GPU" gains "The Profiler's GPU block".
+
+**Measured (the baseline for tasks 0160-0163, RTX 4070 SUPER, docs/PERFORMANCE.md Pass 13)**
+- The views on the GPU, moving an object (stress editor_render): the card worked 0.28 ms of the 4.09 ms GPU path a frame (7 %; shadow 0.09, g-buffer 0.14, lighting 0.06), the read-back 0.85 ms, the rest waiting.
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): 122.9 samples/s, the card busy 99.8 % (1034.1 of 1035.9 ms) inside its submissions (busy + wait).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): 821.0 samples/s, the card busy 99.5 % (149.6 of 150.5 ms) inside its submissions (busy + wait).
+- F12 of the default scene from the editor's frame loop (40 ms slices, headless): the card busy 21 % (256 samples of the default scene in 0.4 s on GPU Compute with both cards, their busy summed) of the render's wall time - the idle time is between submissions (uploads, merges, the UI), which tasks 0160-0162 remove.
+
+**Checked**
+- The views' three pass times are positive where the card has timestamps and busy plus read-back stays inside
+  the GPU path's wall time; a path tracer on the card reports busy and wait within its wall time, on the CPU -1 / 0;
+  the Profiler's rows are there and `bench` prints the line (two tests in tests/test_gpu.cpp).
+- Unit checks (round 179): Windows 11,154, 0 failed (910 tests); render-cache verify mode 11,155, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 178): Blender 5.2 as the benchmark - a headless harness and Pass 13's reference column (task 0178)
 
 **Asked:** "Always refer to Blender's rendering and editor performance as a benchmark" - with Blender 5.2 run headless

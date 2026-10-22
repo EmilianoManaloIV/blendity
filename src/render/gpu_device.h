@@ -133,6 +133,9 @@ class Renderer {
   virtual bool set_points(const float *data, size_t floats, std::string *error) = 0;
   virtual const DeviceInfo &info() const = 0;
   virtual bool using_hardware_rt() const = 0;
+  /* The GPU's own time in the last render() (timestamp queries round its dispatches, task 0159): what the card was
+   * busy, against the wall time the call took; -1 on a device without timestamps. */
+  virtual double last_gpu_ms() const { return -1.0; }
 };
 
 /* A general compute kernel on one GPU (task 0018: voxel GI's gathers): GLSL compiled once per run (and

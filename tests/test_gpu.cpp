@@ -1241,10 +1241,93 @@ static void tests_round130() {
   });
 }
 
+static void tests_round179() {
+  test("GPU time in the Profiler: the views' pass times (shadow, g-buffer, lighting) sum to at most the GPU path's time and are positive where the card has timestamps; the read-back is inside it too (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(2);  // (2: the GPU)
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    for (int i = 0; i < 6 && cube; i++) {
+      cube->set_local_position({0.1f * (float)i, 0.5f, 0.0f});  // (a change a frame: every view drawn on the card)
+      ed.step_frame_headless();
+    }
+    const FrameProfile &fp = ed.frame_profile();
+    const double busy = fp.gpu_busy_ms();
+    std::printf("    the last frame: GPU path %.2f ms, of it busy %.2f ms (shadow %.2f, g-buffer %.2f, lighting %.2f), read-back %.2f ms; %llu views on the card\n",
+                fp.ms_gpu, busy, fp.ms_gpu_shadow, fp.ms_gpu_gbuffer, fp.ms_gpu_lighting, fp.ms_gpu_readback, (unsigned long long)fp.gpu_views);
+    if (fp.gpu_views == 0) std::printf("    (no view on the card: %s)\n", ed.gpu_view_reason().c_str());
+    CHECK(fp.gpu_views > 0 && fp.ms_gpu > 0.0);
+    CHECK(busy + fp.ms_gpu_readback <= fp.ms_gpu + 1.0);  // (the passes and the read-back are inside the path's time; a millisecond for the timers' edges)
+    if (busy > 0.0) CHECK(fp.ms_gpu_shadow >= 0.0 && fp.ms_gpu_gbuffer > 0.0 && fp.ms_gpu_lighting > 0.0);
+    else {
+      std::printf("    (this card reports no timestamps: n/a)\n");
+      CHECK(fp.ms_gpu_shadow == 0.0 && fp.ms_gpu_gbuffer == 0.0 && fp.ms_gpu_lighting == 0.0);  // (0, and the Profiler's row says n/a)
+    }
+    /* The Profiler window draws the block: its rows are there. */
+    ed.record_buttons_for_test(true);
+    ed.command("window Profiler");
+    ed.step_frame_headless();
+    Recti row;
+    CHECK(ed.button_rect_for_test("GPU views: the GPU path (wall)", row) && ed.button_rect_for_test("GPU views: busy (shadow / g-buffer / lighting)", row) && ed.button_rect_for_test("GPU busy in the frame", row));
+    /* bench says what the card did over its own frames (the views are on the card, so never the CPU line). */
+    std::vector<LogEntry> lines;
+    const size_t mark = Log::fetch(0, lines);
+    ed.command("bench 2");
+    lines.clear();
+    Log::fetch(mark, lines);
+    bool said = false;
+    for (const LogEntry &l : lines) said = said || l.text.find("bench GPU busy") != std::string::npos && l.text.find("a frame in the GPU path") != std::string::npos;
+    CHECK(said);
+  });
+
+  test("GPU time in the Profiler: a path tracer on the card reports its busy and wait time, which add up to its submissions; on the CPU it reports none (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    auto sphere = primitives::uv_sphere(0.5f, 16, 8);
+    std::vector<MaterialPtr> mats = {make_material("Grey", Vec3(0.5f))};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0.5f, 0.5f, 0.5f};
+    for (bool on_gpu : {true, false}) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = !on_gpu;
+      if (on_gpu) st.gpus = {0};
+      st.denoise = false;
+      pt.set_settings(st);
+      pt.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+      pt.set_camera(Mat4::look_at({0, 1, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 50), 64, 64);
+      ScopedTimer t;
+      const int done = pt.render(1e9, 32);
+      const double wall = t.ms();
+      const PTStats &s = pt.stats();
+      std::printf("    %s: %d samples in %.1f ms; GPU busy %.2f ms, wait %.2f ms\n", on_gpu ? "the card" : "the CPU", done, wall, s.gpu_busy_ms, s.gpu_wait_ms);
+      CHECK(done == 32);
+      if (!on_gpu) {
+        CHECK(s.gpu_busy_ms < 0.0 && s.gpu_wait_ms == 0.0);
+        continue;
+      }
+      if (s.gpu_busy_ms < 0.0) {
+        std::printf("    (no timestamps on this card: n/a)\n");
+        continue;
+      }
+      CHECK(s.gpu_busy_ms > 0.0 && s.gpu_busy_ms + s.gpu_wait_ms <= wall + 1.0);
+    }
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
   tests_round123();
   tests_round126_to_round127();
   tests_round130();
+  tests_round179();
 }

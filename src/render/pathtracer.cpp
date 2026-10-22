@@ -561,6 +561,7 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
 void PathTracer::reset() {
   samples_ = 0;
   stats_.max_submit_ms = 0;
+  stats_.gpu_busy_ms = -1, stats_.gpu_wait_ms = 0;
   size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
   accum_.assign(n, Vec3(0.0f));
   albedo_.assign(n, Vec3(0.0f));
@@ -2508,10 +2509,14 @@ int PathTracer::render(double budget_ms, int max_samples) {
           failed.push_back(k);
           break;
         }
-        const double submit_ms = bt.ms();
+        const double submit_ms = bt.ms(), busy_ms = g.r->last_gpu_ms();
         {
           std::lock_guard<std::mutex> lock(err_mutex);
           stats_.max_submit_ms = std::max(stats_.max_submit_ms, submit_ms);
+          if (busy_ms >= 0.0) {  // (task 0159: the card's own time, and the call's rest as the wait)
+            stats_.gpu_busy_ms = std::max(0.0, stats_.gpu_busy_ms) + busy_ms;
+            stats_.gpu_wait_ms += std::max(0.0, submit_ms - busy_ms);
+          }
         }
         double ms = submit_ms / n;
         g.ms_per_sample = g.ms_per_sample > 0 ? g.ms_per_sample * 0.5 + ms * 0.5 : ms;

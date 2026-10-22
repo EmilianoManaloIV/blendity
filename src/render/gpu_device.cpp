@@ -82,7 +82,8 @@ namespace {
   X(vkDestroyDescriptorSetLayout) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkCreateComputePipelines)            \
   X(vkDestroyPipeline) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkAllocateDescriptorSets)                      \
   X(vkUpdateDescriptorSets) X(vkDeviceWaitIdle) X(vkInvalidateMappedMemoryRanges) X(vkCreatePipelineCache)                \
-  X(vkDestroyPipelineCache) X(vkGetPipelineCacheData)
+  X(vkDestroyPipelineCache) X(vkGetPipelineCacheData) X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkCmdResetQueryPool)   \
+  X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults)
 #define BL_VK_DEVICE_RT(X)                                                                                                    \
   X(vkGetBufferDeviceAddressKHR) X(vkCreateAccelerationStructureKHR) X(vkDestroyAccelerationStructureKHR)                     \
   X(vkGetAccelerationStructureBuildSizesKHR) X(vkCmdBuildAccelerationStructuresKHR)                                           \
@@ -435,8 +436,37 @@ class VulkanRenderer final : public Renderer {
     f_.vkAllocateCommandBuffers(dev_, &cai, &cmd_);
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     f_.vkCreateFence(dev_, &fci, nullptr, &fence_);
+    create_timestamps(g);
     stats_.device_ms = open_timer.ms();
     return create_pipeline(err);
+  }
+
+  /* Timestamp queries round a render's dispatches (task 0159): the card's own time, which the Profiler shows
+   * against the wall time; a queue without timestamps leaves last_gpu_ms at -1. */
+  void create_timestamps(VkGlobal &g) {
+    VkPhysicalDeviceProperties props;
+    g.f.vkGetPhysicalDeviceProperties(pd_, &props);
+    ts_period_ns_ = props.limits.timestampPeriod;
+    uint32_t qn = 0;
+    g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
+    std::vector<VkQueueFamilyProperties> qs(qn);
+    g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, qs.data());
+    timestamps_ = qfam_ < qn && qs[qfam_].timestampValidBits > 0 && ts_period_ns_ > 0.0f;
+    if (!timestamps_) return;
+    ts_mask_ = qs[qfam_].timestampValidBits >= 64 ? ~0ull : (1ull << qs[qfam_].timestampValidBits) - 1;  // (a shorter counter wraps: the difference is taken in its width)
+    VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qpi.queryCount = 2;
+    if (f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_) != VK_SUCCESS) timestamps_ = false;
+  }
+  void stamp(uint32_t i, VkPipelineStageFlagBits stage) {
+    if (timestamps_) f_.vkCmdWriteTimestamp(cmd_, stage, queries_, i);
+  }
+  void read_gpu_time() {
+    last_gpu_ms_ = -1.0;
+    uint64_t t[2] = {0, 0};
+    if (!timestamps_ || f_.vkGetQueryPoolResults(dev_, queries_, 0, 2, sizeof(t), t, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+    last_gpu_ms_ = (double)((t[1] - t[0]) & ts_mask_) * ts_period_ns_ * 1e-6;
   }
 
   bool upload(const Scene &s, std::string *err) override {
@@ -503,6 +533,8 @@ class VulkanRenderer final : public Renderer {
       return false;
     }
     begin();
+    if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 2);
+    stamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
     const uint32_t gx = (uint32_t)(scene_params_.size[0] + 7) / 8, gy = (uint32_t)(scene_params_.size[1] + 7) / 8;
@@ -518,12 +550,15 @@ class VulkanRenderer final : public Renderer {
       mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
       f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
     }
+    stamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     if (!submit_wait()) {
       if (err) *err = info_.name + ": the GPU stopped responding (device lost)";
       return false;
     }
+    read_gpu_time();
     return true;
   }
+  double last_gpu_ms() const override { return last_gpu_ms_; }
 
   void download_accum(std::vector<float> &accum) override {
     begin();
@@ -581,6 +616,11 @@ class VulkanRenderer final : public Renderer {
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
+  VkQueryPool queries_ = VK_NULL_HANDLE;  // task 0159: two timestamps round a render's dispatches
+  bool timestamps_ = false;
+  float ts_period_ns_ = 0.0f;
+  double last_gpu_ms_ = -1.0;
+  uint64_t ts_mask_ = ~0ull;
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout layout_ = VK_NULL_HANDLE;
   VkPipeline pipeline_ = VK_NULL_HANDLE;
@@ -965,6 +1005,7 @@ class VulkanRenderer final : public Renderer {
     if (set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, set_layout_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
     if (fence_) f_.vkDestroyFence(dev_, fence_, nullptr);
+    if (queries_) f_.vkDestroyQueryPool(dev_, queries_, nullptr);
     if (pool_) f_.vkDestroyCommandPool(dev_, pool_, nullptr);
     f_.vkDestroyDevice(dev_, nullptr);
     dev_ = VK_NULL_HANDLE;

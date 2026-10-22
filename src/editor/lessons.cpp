@@ -1043,6 +1043,13 @@ The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (P
 ? Why does the GPU read textures from storage buffers instead of using its texture units? | The texture units filter, choose mip levels and decode sRGB in their own slightly different ways. Reading the CPU's own mip chain and filtering it with the CPU's formulas keeps the two pictures within a step of 255.
 ! cmd:viewport device gpu | Draw the views on the GPU
 ! cmd:viewport device cpu | Draw the views on the CPU again
+# The Profiler's GPU block
+The Profiler window (Window > Profiler) shows how long a frame spent in the GPU path: the time from handing the card its work to getting the picture back. That is wall time, and most of it can be waiting. The GPU block puts the card's own clock beside it: how long the shadow, g-buffer and lighting passes ran (timestamp queries on the card), how long the read-back took (the CPU's timer around the copy), and "GPU busy in the frame" as a share of the whole frame. While F12 or the Camera Preview is running, two rows show the path tracer's busy and wait time inside its submissions and its busy share over the whole render (F12) or the frame (Camera Preview): the card sits idle between submissions, and that is where the time goes. A card without timestamp queries shows n/a beside the wall time. Blender reads the same GPU timestamps for its own debug timings.
+@ blender/source/blender/gpu/opengl/gl_debug.cc
+? The frame spent 8 ms in the GPU path and the block says the card was busy for 1 ms. Where did the other 7 go? | Waiting: uploads, the fence after the submission and the read-back of the picture. The card was idle for them; that is what tasks 0160-0163 cut.
+? Why does the block say n/a on some cards? | Their queue reports no timestamp support, so there is no clock to read. The wall time row is still there.
+! cmd:viewport device gpu; window Profiler | The views on the GPU, the Profiler open
+! cmd:bench 3 | bench prints "GPU busy" for the last frame
 # Drags that stay quick
 While you drag something in the Scene view, the Game view and the Camera Preview keep the picture they had and draw once when you let go, as Blender's sculpt mode updates its other views when the stroke ends. Play always draws every frame. Preferences > Other Views Follow Drags makes them follow every frame instead. On the CPU, the Scene view also draws more cheaply while you drag or orbit: the sun's shadow map at half size with a softer filter. The frame after you stop is exact again, as Blender's viewport is after it lowers its quality while you navigate (Preferences > Simpler While Moving).
 @ blender/source/blender/editors/sculpt_paint/mesh/sculpt.cc, blender/source/blender/draw/engines/eevee/eevee_instance.cc

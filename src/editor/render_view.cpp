@@ -1160,6 +1160,13 @@ void Editor::start_final_render(bool preview, bool open_window) {
   if (!preview) Log::info("%s", render_status_.c_str());
 }
 
+/* Task 0159: the card's busy share over the whole F12 render ("" on the CPU or without timestamps). */
+std::string Editor::render_gpu_busy_text() const {
+  const PTStats &s = final_pt_.stats();
+  if (s.gpu_busy_ms < 0.0 || render_time_ <= 0.0) return "";
+  return strprintf("; GPU busy %.0f %% of the render's wall time", 100.0 * std::min(1.0, s.gpu_busy_ms / (render_time_ * 1000.0)));
+}
+
 void Editor::step_final_render() {
   if (!rendering_) return;
   if (mr_job_ || mr_waiting_render_) return step_moonray_render();
@@ -1186,7 +1193,7 @@ void Editor::step_final_render() {
                              finished && rs.denoise ? strprintf("  |  denoised (%s)", final_pt_.denoise_backend()).c_str() : "");
   if (finished) {
     rendering_ = false;
-    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.device_summary().c_str());
+    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)%s", done, render_time_, final_pt_.device_summary().c_str(), render_gpu_busy_text().c_str());
   }
 }
 

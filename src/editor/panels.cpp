@@ -1815,6 +1815,39 @@ void Editor::draw_console(const Recti &r) {
 /* Profiler                                                               */
 /* ===================================================================== */
 
+/* Task 0159: what the card itself did in the frame, against the time the frame spent in the GPU path. The views'
+ * pass times come from the raster device's timestamp queries, F12's and the Camera Preview's from the path tracer's;
+ * the read-back is the CPU's timer around the copy. A card without timestamps shows "n/a" beside the wall time. */
+void Editor::draw_profiler_gpu(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat) {
+  const bool views_on_card = fp.gpu_views > 0 || scene_on_gpu_;  // (a frame whose views were all reused still shows the block)
+  if (!views_on_card && !rendering_ && !cam_preview_rendered_) return;
+  if (views_on_card) draw_profiler_gpu_views(fp, stat);
+  if (rendering_) draw_profiler_gpu_tracer("F12 render", final_pt_.stats(), render_time_ * 1000.0, "the render so far", stat);
+  if (cam_preview_rendered_) draw_profiler_gpu_tracer("Camera Preview", cam_preview_pt_.stats(), frame_ms_, "the frame", stat);
+}
+
+void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat) {
+  const double busy = fp.gpu_busy_ms(), wait = std::max(0.0, fp.ms_gpu - busy - fp.ms_gpu_readback);
+  const bool stamps = busy > 0.0 || fp.ms_gpu == 0.0;
+  stat("GPU views: the GPU path (wall)", strprintf("%.2f ms", fp.ms_gpu));
+  stat("GPU views: busy (shadow / g-buffer / lighting)", stamps ? strprintf("%.2f ms (%.2f / %.2f / %.2f)", busy, fp.ms_gpu_shadow, fp.ms_gpu_gbuffer, fp.ms_gpu_lighting) : std::string("n/a (no timestamps)"));
+  stat("GPU views: read-back / wait", strprintf("%.2f ms / %.2f ms", fp.ms_gpu_readback, wait));
+  stat("GPU busy in the frame", stamps && frame_ms_ > 0.0 ? strprintf("%.0f %% of %.2f ms", 100.0 * busy / frame_ms_, frame_ms_) : std::string("n/a"));
+}
+
+/* A path tracer's card time: busy and wait inside its submissions, and the busy share of `wall_ms` (the whole render
+ * for F12, the frame for the Camera Preview) - the card sits idle between submissions, which the submissions' own
+ * wait never shows. */
+void Editor::draw_profiler_gpu_tracer(const char *what, const PTStats &s, double wall_ms, const char *of_what, const std::function<void(const std::string &, const std::string &)> &stat) {
+  const std::string key = strprintf("%s: GPU busy / wait in its submissions", what);
+  if (s.gpu_busy_ms < 0.0) {
+    stat(key, s.render_ms > 0.0 ? "n/a (the CPU, or no timestamps)" : "-");
+    return;
+  }
+  stat(key, strprintf("%.0f ms / %.0f ms", s.gpu_busy_ms, s.gpu_wait_ms));
+  if (wall_ms > 0.0) stat(strprintf("%s: GPU busy over %s", what, of_what), strprintf("%.0f %% of %.0f ms", 100.0 * std::min(1.0, s.gpu_busy_ms / wall_ms), wall_ms));
+}
+
 void Editor::draw_profiler(const Recti &r) {
   auto &u = ui_;
   ui::Id sid = u.id("prof_scroll");
@@ -1872,6 +1905,7 @@ void Editor::draw_profiler(const Recti &r) {
   stat("Shadow map", fp.shadow_renders ? strprintf("%.2f ms (rendered)", fp.ms_shadow) : std::string("reused"));
   stat("UI / present", strprintf("%.2f ms / %.2f ms", fp.ms_ui, fp.ms_present));
   stat("Views rendered / reused", strprintf("%llu / %llu", (unsigned long long)fp.view_renders, (unsigned long long)fp.view_cache_hits));
+  draw_profiler_gpu(fp, stat);
   /* Task 0083: what the frames are really apart (the rate the screen sees, cap and timer included), and the parts
    * an Edit Mode drag pays for. */
   if (frame_stamps_.size() >= 2) {

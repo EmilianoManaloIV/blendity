@@ -116,6 +116,10 @@ struct PTStats {
   int cpu_samples = 0;             // samples per device (combined rendering)
   std::vector<int> gpu_samples;
   double max_submit_ms = 0;        // the longest single GPU submission (task 0051: under 100 ms after the first)
+  /* Task 0159: over the GPUs' submissions since the last reset, the cards' own time (timestamp queries) and the rest
+   * of the calls' wall time - the wait on the CPU side: submitting, the fence, the driver. busy stays -1 while no
+   * device reported a time (no timestamps). */
+  double gpu_busy_ms = -1, gpu_wait_ms = 0;
 };
 
 class PathTracer {
