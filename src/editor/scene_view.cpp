@@ -280,7 +280,7 @@ void Editor::overlay_command(const std::vector<std::string> &t) {
 std::vector<Editor::OverlayLayer> Editor::overlay_layers() {
   return {{"bones", "Bones", "The armatures' bones (an Armature's own Show Bones hides one rig). Hidden bones can't be clicked or dragged.", &show_bones_},
           {"controls", "Rig Controls (IK / FK handles)", "The rig's control shapes: IK targets, poles and FK handles, posed by dragging.", &show_rig_controls_},
-          {"icons", "Light & Camera Icons", "The icons that stand for lights and cameras (clicked to select them).", &show_icons_},
+          {"icons", "Light, Camera & Effector Icons", "The icons that stand for lights, cameras, winds and the Play-mode movers (clicked to select them); a selected Wind shows its arrow.", &show_icons_},
           {"points", "Curve & Lattice Points", "Curves, lattices and the active one's control points.", &show_points_},
           {"origins", "Object Origins", "The dot at each selected object's origin.", &show_origins_},
           {"footprints", "Footprints & Contacts", "The Footsteps tool's soles and frames, and where feet touch the ground.", &show_footprints_},
@@ -906,6 +906,24 @@ void Editor::draw_bone(const GameObject &g, const Bone &b) {
   }
 }
 
+/* The icon an object shows in the Scene view (task 0146's layer; task 0158: the effectors too), None for none. One
+ * role lookup an object (a virtual call per component); the effectors' casts run only on an Effector. */
+ui::Icon Editor::scene_icon_of(const GameObject &g) {
+  if (g.light()) return Icon::Light;
+  if (g.camera()) return Icon::Camera;
+  if (!g.find_role(Component::RenderRole::Effector)) return Icon::None;
+  if (g.get<Wind>()) return Icon::Wind;
+  if (g.get<Rotator>()) return Icon::Spin;
+  return g.get<Oscillator>() ? Icon::Wave : Icon::None;
+}
+
+/* A selected Wind's wire in the selection's orange (task 0158). */
+void Editor::draw_wind_gizmo(const GameObject &g, const Wind &w) {
+  std::vector<std::pair<Vec3, Vec3>> segs;
+  wind_gizmo_segments(g, w, segs);
+  for (auto &sg : segs) scene_r3d_.line(sg.first, sg.second, kSelectOrange, false);
+}
+
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
   ik_bones_frame_ = ik_driven_bones();
@@ -920,17 +938,20 @@ void Editor::draw_scene_icons(const Recti &view) {
       if (g.id == active_ && !edit_mode_) draw_control_points(view, g, *pc);
     }
     if (!show_icons_) return;
-    auto *l = g.light();  // (the role lookups first: every object, every frame)
-    auto *c = g.camera();
-    if ((!l && !c) || !g.active_in_hierarchy()) return;
+    const ui::Icon icon = scene_icon_of(g);  // (the role lookups first: every object, every frame)
+    if (icon == Icon::None || !g.active_in_hierarchy()) return;
+    auto *l = icon == Icon::Light ? g.light() : nullptr;
+    auto *c = icon == Icon::Camera ? g.camera() : nullptr;
+    bool sel = is_selected(g.id);
+    if (const Wind *w = sel && icon == Icon::Wind ? g.get<Wind>() : nullptr) draw_wind_gizmo(g, *w);  // (before the icon's projection: an arrow can show with its origin off screen)
     Vec2 sp;
     float z;
     if (!scene_r3d_.project(g.world_position(), sp, z)) return;
     float x = view.x + sp.x, y = view.y + sp.y;
-    bool sel = is_selected(g.id);
     int s = u.px(22);
     u.canvas.fill_circle(x, y, s * 0.62f, Color::hex(sel ? 0x6A4A1A : 0x202020, 170));
-    u.draw_icon(l ? Icon::Light : Icon::Camera, {(int)x - s / 2, (int)y - s / 2, s, s}, sel ? kSelectOrange : (l ? Color::hex(0xFFE27A) : Color::hex(0xDDDDDD)));
+    const uint32_t tint = l ? Color::hex(0xFFE27A) : c ? Color::hex(0xDDDDDD) : Color::hex(0x8FD8FF);  // (effectors: a sky blue)
+    u.draw_icon(icon, {(int)x - s / 2, (int)y - s / 2, s, s}, sel ? kSelectOrange : tint);
     if (sel && l && l->type == 0) {
       Vec3 p = g.world_position(), d = g.world_rotation().rotate({0, 0, 1});
       scene_r3d_.line(p, p + d * 2.0f, Color::hex(0xFFE27A), false);
@@ -1372,7 +1393,7 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
   uint64_t hit = 0;
   float best = (float)ui_.px(14);
   scene_->for_each([&](GameObject &g) {
-    if (!show_icons_ || !g.active_in_hierarchy() || (!g.get<Light>() && !g.get<Camera>())) return;
+    if (!show_icons_ || !g.active_in_hierarchy() || scene_icon_of(g) == Icon::None) return;
     Vec2 sp;
     float z;
     if (!scene_r3d_.project(g.world_position(), sp, z)) return;

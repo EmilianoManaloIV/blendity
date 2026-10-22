@@ -1405,6 +1405,15 @@ void Context::rasterize_icon(Canvas &canvas, Icon icon, const Recti &r, uint32_t
     case Icon::Flask: L(6, 2, 10, 2); L(6.5f, 2, 6.5f, 7); L(9.5f, 2, 9.5f, 7); L(6.5f, 7, 2, 14); L(9.5f, 7, 14, 14); L(2, 14, 14, 14); T(4, 11, 12, 11, 13.5f, 13.5f); T(4, 11, 13.5f, 13.5f, 2.5f, 13.5f); break;
     case Icon::Search: C(6.5f, 6.5f, 4.5f, false); L(10, 10, 14, 14, 2); break;
     case Icon::Menu: R(2, 3, 12, 2); R(2, 7, 12, 2); R(2, 11, 12, 2); break;
+    case Icon::Wind:  /* three gusts, the middle one longest (task 0158) */
+      L(2, 5, 10, 5); L(10, 5, 12, 3.5f); L(2, 8.5f, 13, 8.5f); L(13, 8.5f, 15, 7); L(2, 12, 9, 12); L(9, 12, 11, 13.5f);
+      break;
+    case Icon::Spin:  /* a ring with an arrowhead: a Rotator */
+      C(8, 8, 5, false); L(13, 8, 13, 4.5f); L(13, 4.5f, 9.8f, 5.5f);
+      break;
+    case Icon::Wave:  /* a wave: an Oscillator */
+      L(1.5f, 8, 4, 4); L(4, 4, 6.5f, 8); L(6.5f, 8, 9, 12); L(9, 12, 11.5f, 8); L(11.5f, 8, 14.5f, 4);
+      break;
     case Icon::PushPull:  /* a slab with a face lifted off it (SketchUp's Push/Pull) */
       L(2, 11, 9, 14); L(9, 14, 14, 11); L(2, 11, 2, 13); L(14, 11, 14, 13); L(2, 13, 9, 15.5f); L(9, 15.5f, 14, 13);
       L(2, 7, 9, 10); L(9, 10, 14, 7); L(14, 7, 7, 4); L(7, 4, 2, 7);

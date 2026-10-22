@@ -64,6 +64,7 @@ struct Wind : ComponentBase<Wind> {
   float turbulence = 0.3f;  // 0..1: eddies as a share of the strength
   float gusts = 0.3f;       // 0..1: the strength rising and falling by this share
   bool spherical = false;   // away from the object (a fan) instead of along its forward; no falloff with distance
+  RenderRole render_role() const override { return RenderRole::Effector; }
   void reflect(Reflector &r) override;
 };
 
@@ -83,6 +84,11 @@ GameObject *chain_armature(GameObject &bone);
 extern const char *const kLabels[5];  // "Hair", "Ear", "Tail", "Cloth", "Soft"
 /* A label's settings (stiffness, damping, gravity, radius; bend, root to tip, separate; lag, limit, volume - task 0153). */
 void apply_defaults(SpringBone &s, int label);
+/* A Wind object's direction: its forward (+Z) in the world; its strength and turbulence made finite and in range.
+ * The simulation and the gizmo read these, so they can't drift apart (task 0158). */
+Vec3 wind_direction(const GameObject &g);
+float wind_strength(const Wind &w);
+float wind_turbulence(const Wind &w);
 /* The scene's simulated seconds since Play started (what the wind's noise and the Jiggle modifier read; task 0153);
  * `tick` advances it without stepping the springs (Play with the Physics assistant off: the Jiggle modifier still
  * runs). */

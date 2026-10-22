@@ -832,6 +832,11 @@ class Editor {
   bool autorig_set_view(const std::string &view);
   /* Task 0067 (rig_controls.cpp): rig controls drawn and picked, IK and FK added and removed. */
   void rig_control_segments(const GameObject &g, const RigControl &rc, std::vector<std::pair<Vec3, Vec3>> &out) const;
+  /* Task 0158 (rig_controls.cpp): a Wind's arrow, streamlines or rings as segments; the Scene view draws them in the
+   * selection's orange. */
+  static void wind_gizmo_segments(const GameObject &g, const Wind &w, std::vector<std::pair<Vec3, Vec3>> &out);
+  void draw_wind_gizmo(const GameObject &g, const Wind &w);
+  static ui::Icon scene_icon_of(const GameObject &g);  // the Scene view's icon for an object (lights, cameras, effectors), None for none (task 0158)
   uint32_t rig_control_color(const GameObject &g, const RigControl &rc) const;
   void draw_rig_control(const GameObject &g, const RigControl &rc);
   const GameObject *pole_joint(const GameObject &pole) const;

@@ -39740,6 +39740,77 @@ static void round81_tests() {
     CHECK(ed.preview_samples_for_test() >= 32 && lit > 50 && peak > 0.35f && worst < 3.0f);  // (the lamp adds about 0.28 under it on top of the sky: a glow, no blocks)
   });
 
+  /* ---------------------------------------------------------------- round 176: the Wind gizmo and the effectors' icons (task 0158) */
+  test("wind gizmo: a selected Wind draws an arrow along its direction as long as its strength says, three streamlines with turbulence, and rings when spherical", [&] {
+    Scene s;
+    GameObject *b = s.create("Breeze");
+    Wind *w = b->add<Wind>();
+    w->strength = 3.0f, w->turbulence = 0.0f;
+    b->set_local_rotation(Quat::euler({0, 90, 0}));  // (forward +Z turned to +X)
+    std::vector<std::pair<Vec3, Vec3>> segs;
+    Editor::wind_gizmo_segments(*b, *w, segs);
+    const Vec3 dir = spring::wind_direction(*b);
+    float reach = 0.0f;
+    for (auto &sg : segs) reach = std::max(reach, std::max(length(sg.first), length(sg.second)));
+    std::printf("    a 3 m/s wind turned to +X: direction (%.2f %.2f %.2f), %zu segments, the arrow reaching %.4f m (0.5 + 0.25 x 3)\n", dir.x, dir.y, dir.z, segs.size(), reach);
+    CHECK(length(dir - Vec3(1, 0, 0)) < 1e-4f);  // (winds_of reads the same wind_direction: one function, spring_bones.cpp)
+    CHECK(segs.size() == 3 && std::fabs(reach - 1.25f) < 1e-4f && length(segs[0].second - Vec3(1.25f, 0, 0)) < 1e-4f);
+    w->turbulence = 0.5f;
+    Editor::wind_gizmo_segments(*b, *w, segs);
+    CHECK(segs.size() == 3 + 36);  // (three streamlines of twelve pieces)
+    w->spherical = true;
+    Editor::wind_gizmo_segments(*b, *w, segs);
+    float ring = 0.0f;
+    for (auto &sg : segs) ring = std::max(ring, std::fabs(length(sg.first) - 1.25f));
+    CHECK(segs.size() == 72 && ring < 1e-4f);  // (three rings, no arrow)
+    /* A wind pitched 80 degrees (nearly vertical: the basis's other reference): the rings still true circles. */
+    b->set_local_rotation(Quat::euler({-80, 0, 0}));
+    Editor::wind_gizmo_segments(*b, *w, segs);
+    ring = 0.0f;
+    for (auto &sg : segs) ring = std::max(ring, std::fabs(length(sg.first) - 1.25f));
+    CHECK(ring < 1e-4f);
+    w->spherical = false;
+    Editor::wind_gizmo_segments(*b, *w, segs);
+    const Vec3 d80 = spring::wind_direction(*b), barb = segs[1].second - segs[1].first;  // (the barbs at right angles to the shaft, off it by a tenth of the length)
+    const float along = dot(barb, d80), across = length(barb - d80 * along);
+    std::printf("    pitched 80 degrees: a barb %.4f along the shaft (0.25) and %.4f across it (0.125)\n", -along, across);
+    CHECK(std::fabs(-along - 0.25f) < 1e-4f && std::fabs(across - 0.125f) < 1e-4f);
+  });
+
+  test("effector icons: a Wind, a Rotator and an Oscillator have Scene view icons, a plain object none, and the Wind's icon is clicked like a light's", [&] {
+    Scene s;
+    GameObject *b = s.create("Breeze");
+    b->add<Wind>();
+    /* The icons: a Wind, a Rotator and an Oscillator have one; a plain object has none. */
+    GameObject *r = s.create("Spinner"), *o = s.create("Bob"), *plain = s.create("Plain");
+    r->add<Rotator>(), o->add<Oscillator>();
+    CHECK(Editor::scene_icon_of(*b) == ui::Icon::Wind && Editor::scene_icon_of(*r) == ui::Icon::Spin && Editor::scene_icon_of(*o) == ui::Icon::Wave &&
+          Editor::scene_icon_of(*plain) == ui::Icon::None);
+    /* Clicked in the Scene view like a light's icon; not when the icons layer is off. */
+    Editor ed;
+    r34_open(ed);
+    ed.command("camera 0 1.2 9 0 0.8 3");
+    GameObject *wind = ed.scene().create("Gust");
+    wind->add<Wind>();
+    wind->set_local_position({0, 0.8f, 3});
+    ed.mark_changed_for_test("a wind");
+    r34_steps(ed, 2);
+    int x = 0, y = 0;
+    CHECK(ed.screen_of_for_test(wind->world_position(), x, y));
+    ed.command("select Main Camera");
+    r34_steps(ed, 1);
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.active_object_for_test() == wind);
+    ed.command("overlay icons off");
+    ed.command("select Main Camera");
+    r34_steps(ed, 1);
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    std::printf("    the wind's icon clicked: selected with the layer on, %s with it off\n", ed.active_object_for_test() == wind ? "SELECTED" : "not");
+    CHECK(ed.active_object_for_test() != wind);
+  });
+
   test("baked emission: a small emissive cube lights the floor as the analytic irradiance says, four times smoother than the hemisphere alone, the same twice, and on the GPU gather", [] {
     Environment env;
     env.mode = Environment::Color;

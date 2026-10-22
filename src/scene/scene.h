@@ -161,7 +161,8 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector };
+  // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
@@ -590,6 +591,7 @@ struct Outline : ComponentBase<Outline> {
 struct Rotator : ComponentBase<Rotator> {
   static constexpr const char *kName = "Rotator";
   Vec3 degrees_per_second{0, 45, 0};
+  RenderRole render_role() const override { return RenderRole::Effector; }
   void reflect(Reflector &r) override;
   void update(PlayContext &ctx) override;
 };
@@ -600,6 +602,7 @@ struct Oscillator : ComponentBase<Oscillator> {
   float amplitude = 0.5f;
   float frequency = 0.5f;
   Vec3 origin;
+  RenderRole render_role() const override { return RenderRole::Effector; }
   void reflect(Reflector &r) override;
   void start(PlayContext &ctx) override;
   void update(PlayContext &ctx) override;

@@ -168,6 +168,44 @@ int Editor::fit_control_sizes(GameObject *root) {
   return n;
 }
 
+/* A direction's two perpendicular axes (the world's up kept upright where it can be). */
+static void basis_of(Vec3 d, Vec3 &side, Vec3 &up) {
+  const Vec3 ref = std::fabs(d.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
+  side = normalize(cross(d, ref));
+  up = normalize(cross(side, d));
+}
+
+/* A wavy streamline beside a Wind's arrow (task 0158): twelve pieces along the direction, offset sideways and
+ * upward, its waves as deep as the turbulence. */
+static void streamline(std::vector<std::pair<Vec3, Vec3>> &out, Vec3 p, Vec3 d, Vec3 side, Vec3 up, float len, float turb, float side_off, float up_off) {
+  auto at = [&](float t) { return p + d * (len * t) + side * (len * side_off) + up * (len * up_off + std::sin(t * 4.0f * kPi) * len * 0.08f * turb); };
+  for (int k = 0; k < 12; k++) out.push_back({at(k / 12.0f), at((k + 1) / 12.0f)});
+}
+
+/* A Wind's wire (task 0158): an arrow along its direction, longer for a stronger wind (half a metre plus a quarter
+ * metre per m/s); three wavy streamlines beside it when it has turbulence; three rings instead of the arrow when it
+ * blows away from its object (spherical). Segments in world space. */
+void Editor::wind_gizmo_segments(const GameObject &g, const Wind &w, std::vector<std::pair<Vec3, Vec3>> &out) {
+  out.clear();
+  const Vec3 p = g.world_position(), d = spring::wind_direction(g);
+  const float len = 0.5f + 0.25f * spring::wind_strength(w);
+  Vec3 side, up;
+  basis_of(d, side, up);
+  if (w.spherical) {
+    circle(out, p, side, up, len), circle(out, p, up, d, len), circle(out, p, side, d, len);
+    return;
+  }
+  const Vec3 tip = p + d * len;
+  out.push_back({p, tip});
+  out.push_back({tip, tip - d * (len * 0.2f) + side * (len * 0.1f)});
+  out.push_back({tip, tip - d * (len * 0.2f) - side * (len * 0.1f)});
+  const float turb = spring::wind_turbulence(w);
+  if (turb <= 0.0f) return;
+  streamline(out, p, d, side, up, len, turb, -0.25f, 0.0f);
+  streamline(out, p, d, side, up, len, turb, 0.25f, 0.0f);
+  streamline(out, p, d, side, up, len, turb, 0.0f, 0.25f);
+}
+
 /* Maya's and Blender's convention: left blue, right red, the middle yellow; a pole lighter. */
 uint32_t Editor::rig_control_color(const GameObject &g, const RigControl &rc) const {
   const bool pole = rc.role == RigControl::IKPole;

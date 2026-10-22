@@ -353,9 +353,8 @@ std::vector<WindField> winds_of(Scene &scene) {
   for (const auto &o : scene.objects()) {
     const Wind *w = o->get<Wind>();
     if (!w || !w->enabled || !o->active_in_hierarchy()) continue;
-    const Vec3 fwd = o->world_rotation().rotate(Vec3(0, 0, 1));
-    out.push_back({o->world_position(), length(fwd) > 1e-6f ? normalize(fwd) : Vec3(0, 0, 1), std::max(0.0f, finite_bits(w->strength) ? w->strength : 0.0f),
-                   std::max(0.0f, std::min(1.0f, finite_bits(w->turbulence) ? w->turbulence : 0.0f)), std::max(0.0f, std::min(1.0f, finite_bits(w->gusts) ? w->gusts : 0.0f)), w->spherical});
+    out.push_back({o->world_position(), wind_direction(*o), wind_strength(*w), wind_turbulence(*w), std::max(0.0f, std::min(1.0f, finite_bits(w->gusts) ? w->gusts : 0.0f)),
+                   w->spherical});
   }
   return out;
 }
@@ -898,6 +897,13 @@ void tick(Scene &scene, float dt) {
 }
 
 std::vector<std::string> name_words(const std::string &raw) { return words(raw); }
+
+Vec3 wind_direction(const GameObject &g) {
+  const Vec3 fwd = g.world_rotation().rotate(Vec3(0, 0, 1));
+  return length(fwd) > 1e-6f ? normalize(fwd) : Vec3(0, 0, 1);
+}
+float wind_strength(const Wind &w) { return std::max(0.0f, finite_bits(w.strength) ? w.strength : 0.0f); }  // (finite_bits: /fp:fast folds isfinite away)
+float wind_turbulence(const Wind &w) { return std::max(0.0f, std::min(1.0f, finite_bits(w.turbulence) ? w.turbulence : 0.0f)); }
 
 GameObject *chain_armature(GameObject &bone) { return armature_of(bone); }
 

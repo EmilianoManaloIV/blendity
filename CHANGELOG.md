@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 176): the Wind gizmo and icons for the effectors (task 0158)
+
+**Asked:** a gizmo for the Wind component, as task 0153's spec left out.
+
+**Added**
+- A Wind, a Rotator and an Oscillator show an icon in the Scene view (the icons layer, now "Light, Camera &
+  Effector Icons"), clicked to select them like a light's. A selected Wind draws its arrow along its forward,
+  half a metre plus a quarter metre per m/s of Strength, wavy streamlines beside it with Turbulence, three rings
+  instead when Spherical; the gizmo and the simulation read one `wind_direction`.
+- The lesson "Winds you can see".
+
+**Changed after the review**
+- A true orthonormal basis for a near-vertical wind (the barbs and rings came out skewed), the strength and
+  turbulence read through the simulation's own finite, clamped accessors (`std::isfinite` folds away under
+  `/fp:fast`), three streamlines, the gizmo beside the rig controls' shape helpers, and an Effector render role
+  so the icon pass costs one virtual call an object instead of three casts.
+
+**Checked**
+- New tests (round 176): a 3 m/s wind turned to +X draws its arrow to 1.25 m along X in three segments,
+  turbulence adds three streamlines, spherical three rings of 1.25 m, a wind pitched 80 degrees keeps true rings
+  and square barbs; the three effectors have icons and a plain object none; a click on the wind's icon selects
+  it and selects nothing with the layer off.
+- Unit checks (round 176): Windows 11,416, 0 failed (912 tests); render-cache verify mode 11,417, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,141, 0 failed. Sanitizer build: 11,017, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 175): baked emission without blocks (task 0157)
 
 **Asked:** "Emissions off some objects when baked under the lighting tab still look blocky or pixelated."
