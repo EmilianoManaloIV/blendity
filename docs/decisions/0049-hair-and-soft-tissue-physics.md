@@ -76,3 +76,26 @@ following the root - is had more cheaply.
 - Watch: a bend of 1 with a stiff pose pull fights the pull (both want the tip somewhere); the label defaults keep
   them moderate. A Wind with gusts changes a bake when the clip's length changes (the gust noise is in simulated
   seconds): bake once the clip is cut.
+
+## Amendment (task 0168): strands as mass-weighted XPBD rods
+The user found hair "stiff and jello-like". Measured: the per-substep blend toward the pose was a spring of about
+5 Hz at hair's stiffness that pinned the strand (a horizontal 40 cm strand sagged 1.6 cm) and rang against it (14
+wiggles of over 2 mm while settling). Every label but Soft now steps as an XPBD rod (Macklin et al. 2016; small
+steps, Macklin 2019):
+- **Mass** per tip from its bone's length and the chain's Density (kg/m; hair 0.01, an ear 0.02, cloth 0.05, a
+  tail 0.1); the root fixed.
+- **Substeps at 240 Hz**, one iteration each, velocities from positions; the multipliers start at zero each
+  substep (with one iteration they need no carrying over).
+- **Compliant constraints** for the pull toward the pose and the bend: a slider s is a spring of 20 Hz x s^1.5 for
+  hair's mass, applied as w / (w + alpha / h^2) - the frame rate drops out, and a heavier strand is pulled less by
+  the same slider (k is in hair's mass, the inverse mass is the strand's).
+- **Damping** decays the motion relative to the root's (Damping x (4 omega + 20) per second: about critical for
+  hair's defaults), **air drag** always on toward the air's velocity (Air for hair's density, divided by the mass
+  ratio; a Wind adds its 4 x Wind and its velocity).
+- **Lengths** as mass-weighted distance constraints (three sweeps), then the bend toward its goal, then the exact
+  root-first pass and the body's capsules - the bend after the sweeps, so the lower bones' weight doesn't open a
+  curl's upper joints.
+- **Soft tissue keeps its verlet spring** (the acceleration-driven model above was tuned with it).
+The old scenes' sliders keep their values and mean the new spring; Density and Air load at hair's values. With no
+pull and a free root a curl now turns about its root until its weight hangs below (Bend keeps its joints' angles):
+the round 153 test measures the angles.

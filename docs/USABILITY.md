@@ -266,6 +266,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | An Extrude, Inset or Bevel on a 50k-face mesh took a tenth of a second before anything drew. | The operator itself is under 10 ms (was 60): one mesh copy instead of three, Auto Smooth's count taken once and only when it can matter, from a sorted edge table (task 0165, ADR 0053). |
 | Select More on a 50k-face mesh stalled for 55-68 ms, and with the views on the card a face selection drew the edited object on the CPU. | A selection operator copies nothing and only the Scene view draws again; the card draws the face highlight itself (task 0166). |
 | Undoing an extrude in Edit Mode left the extruded faces' selection on the restored mesh. | Undo gives back the selection as it was before the operator, redo the operator's, as in Blender (task 0167). |
+| Hair felt stiff and jello-like: pinned to the pose, then ringing against it. | Strands are mass-weighted XPBD rods: a lag that doesn't ring, a sag by their weight, air drag always on, the same at any frame rate (task 0168, ADR 0049 amended). |
 
 ## Still worth doing
 

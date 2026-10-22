@@ -4,6 +4,7 @@
 // (blender/source/blender/blenloader/intern/writefile.cc) and
 // blender/source/blender/io/wavefront_obj.
 #include "scene.h"
+#include "spring_bones.h"
 #include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
@@ -464,6 +465,8 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
         /* Task 0164: an outline saved before Min Pixels existed draws as it did then (0); the file writes the key with
          * underscores, as key_of makes it. */
         if (comp && std::string(comp->type_name()) == "Outline" && !rr->values.count(key_of("Min Pixels"))) static_cast<Outline *>(comp)->min_pixels = 0.0f;
+        /* Task 0168: a spring chain saved before Density and Air takes its label's (a tail is heavier than hair). */
+        if (comp && std::string(comp->type_name()) == "SpringBone" && !rr->values.count(key_of("Density"))) spring::label_mass_defaults(*static_cast<SpringBone *>(comp));
         comp = nullptr;
         pending_mat = nullptr;
         pending_block = nullptr;

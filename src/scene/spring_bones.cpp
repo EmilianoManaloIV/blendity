@@ -19,7 +19,8 @@ void SpringBone::reflect(Reflector &r) {
   r.field("Stiffness", stiffness, 0.01f, 0.0f, 1.0f);
   r.help("How strongly each bone returns to where the animation puts it: 0 swings freely, 1 follows rigidly.");
   r.field("Damping", damping, 0.01f, 0.0f, 1.0f);
-  r.help("How quickly a swing dies down: 0 swings on, 1 stops at once.");
+  r.help("How quickly a swing dies down, relative to where the animation is going: 0 swings on, 1 past critical\n"
+         "(the lag settles without swinging back; task 0168).");
   r.field("Gravity", gravity, 0.05f, 0.0f, 4.0f);
   r.help("How strongly the chain hangs down, in g.");
   r.field("Radius", radius, 0.005f, 0.0f, 1.0f);
@@ -35,6 +36,14 @@ void SpringBone::reflect(Reflector &r) {
          "swing while the root follows (long hair). Nothing on a chain of one bone.");
   r.field("Wind", wind, 0.05f, 0.0f, 4.0f);
   r.help("How much a Wind component in the scene moves this chain (0: not at all).");
+  if (label != 4) {
+    r.field("Density", density, 0.001f, 0.001f, 1.0f);
+    r.help("The chain's mass per metre (kg/m; task 0168): a heavier chain sags further under the same Stiffness and\n"
+           "settles more slowly in the air - hair 0.01, cloth 0.05, a tail 0.1.");
+    r.field("Air", air, 0.05f, 0.0f, 10.0f);
+    r.help("How strongly the air holds the chain back (1/s for hair's density; a heavier chain feels less of it): always\n"
+           "on, so a swing in still air dies down too; a Wind moves the air.");
+  }
   r.field("Separate", separate);
   r.help("Kept apart from other chains (another character's too) by its Radius - the one the body collision uses - but\n"
          "never further apart than the animation puts them: the strands of a ponytail or the pleats of a skirt don't pass\n"
@@ -80,19 +89,29 @@ namespace spring {
 
 const char *const kLabels[5] = {"Hair", "Ear", "Tail", "Cloth", "Soft"};
 
+/* A label's Density and Air alone (task 0168: a chain saved before them takes its label's). */
+void label_mass_defaults(SpringBone &s) {
+  static const float density[5] = {0.01f, 0.02f, 0.1f, 0.05f, 0.01f}, air[5] = {0.5f, 0.5f, 0.5f, 1.0f, 0.5f};
+  const int l = std::max(0, std::min(4, s.label));
+  s.density = density[l], s.air = air[l];
+}
+
 void apply_defaults(SpringBone &s, int label) {
   struct D {
     float stiffness, damping, gravity, radius, bend, root_to_tip;
     bool separate;
+    float density, air;
   };
-  /* Hair: a curl held a little, the tips free, strands apart; an ear: stiff; a tail: its curve held; cloth: free;
-   * soft tissue: springy, a little gravity, no wind. */
-  static const D d[5] = {{0.15f, 0.15f, 1.0f, 0.02f, 0.2f, 0.6f, true}, {0.6f, 0.3f, 0.2f, 0.01f, 0.5f, 0.0f, false},
-                         {0.35f, 0.2f, 0.6f, 0.04f, 0.3f, 0.3f, false}, {0.1f, 0.25f, 1.0f, 0.03f, 0.1f, 0.4f, true},
-                         {0.5f, 0.3f, 0.2f, 0.03f, 0.0f, 0.0f, false}};
+  /* Hair: light, a curl held a little, the tips free, strands apart, damped toward critical (task 0168: the film
+   * look, a lag that doesn't ring); an ear: stiff; a tail: heavy, its curve held; cloth: free; soft tissue: springy,
+   * a little gravity, no wind (its own spring: density and air unused). */
+  static const D d[5] = {{0.3f, 0.5f, 1.0f, 0.02f, 0.2f, 0.6f, true, 0.01f, 0.5f}, {0.6f, 0.3f, 0.2f, 0.01f, 0.5f, 0.0f, false, 0.02f, 0.5f},
+                         {0.35f, 0.2f, 0.6f, 0.04f, 0.3f, 0.3f, false, 0.1f, 0.5f}, {0.1f, 0.25f, 1.0f, 0.03f, 0.1f, 0.4f, true, 0.05f, 1.0f},
+                         {0.5f, 0.3f, 0.2f, 0.03f, 0.0f, 0.0f, false, 0.01f, 0.5f}};
   s.label = std::max(0, std::min(4, label));
   s.stiffness = d[s.label].stiffness, s.damping = d[s.label].damping, s.gravity = d[s.label].gravity, s.radius = d[s.label].radius;
   s.bend = d[s.label].bend, s.root_to_tip = d[s.label].root_to_tip, s.separate = d[s.label].separate;
+  s.density = d[s.label].density, s.air = d[s.label].air;
   s.wind = s.label == 4 ? 0.0f : 1.0f;
   s.collide = s.label != 4;  // (soft tissue sits on the body: the torso's capsule would push it off its pose)
   s.lag = 0.5f, s.limit = 25.0f, s.volume = 1.0f;
@@ -479,6 +498,217 @@ void soft_acceleration(SpringBone &s, const std::vector<Vec3> &target, float dt,
   s.soft_primed = 2;
 }
 
+/* What a chain's step knows before its substeps (task 0168: the soft spring and the rods share it). */
+struct ChainFrame {
+  SpringBone &s;
+  size_t n;
+  float dt;
+  double clock;
+  Vec3 anchor, moved;
+  float reach;
+  const std::vector<float> &len;
+  const std::vector<Vec3> &target;
+  const std::vector<Collider> &caps;
+  const std::vector<WindField> &winds;
+};
+float clamp01(float v) { return std::min(1.0f, std::max(0.0f, finite_bits(v) ? v : 0.0f)); }
+/* The pull toward the animation fades from the root to the tip by Root To Tip (by the length along the chain, so a
+ * short last bone isn't freed like a long one): each bone's share of Stiffness. */
+std::vector<float> pull_fade(const ChainFrame &f) {
+  const float r2t = clamp01(f.s.root_to_tip);
+  std::vector<float> fade(f.n, 1.0f);
+  float along = 0.0f;
+  for (size_t i = 0; i < f.n; i++) {
+    along += f.len[i];
+    if (f.reach > 1e-9f && f.n > 1) fade[i] = std::max(0.0f, 1.0f - r2t * (along - f.len[i]) / std::max(1e-9f, f.reach - f.len[f.n - 1]));
+  }
+  return fade;
+}
+/* The animated directions of bone i-1 and bone i: the bend carries their relation onto the simulated bone i-1 by the
+ * turn from its animated direction to its simulated one, so a curl keeps its shape whichever way the chain swings. */
+std::vector<Vec3> animated_dirs(const ChainFrame &f) {
+  std::vector<Vec3> adir(f.n, Vec3(0.0f));
+  for (size_t i = 0; i < f.n; i++) {
+    const Vec3 d = f.target[i] - (i >= 1 ? f.target[i - 1] : f.anchor);
+    adir[i] = length(d) > 1e-9f ? normalize(d) : Vec3(0.0f);
+  }
+  return adir;
+}
+/* Where bone i's tip would be with its animated angle to bone i-1 (the bend's goal), or false. */
+bool bend_goal(const ChainFrame &f, const std::vector<Vec3> &adir, size_t i, Vec3 head0, Vec3 &want) {
+  if (f.len[i - 1] <= 1e-6f || length(adir[i - 1]) < 0.5f || length(adir[i]) < 0.5f) return false;  // (no direction to hold after a bone of no length)
+  const Vec3 prev_head = i >= 2 ? f.s.tip[i - 2] : head0, d = f.s.tip[i - 1] - prev_head;
+  if (length(d) <= 1e-9f) return false;
+  const Quat swing = rotation_between(adir[i - 1], normalize(d));  // (how the simulated bone before turned from its animated direction)
+  want = f.s.tip[i - 1] + swing.rotate(adir[i]) * f.len[i];
+  return true;
+}
+/* Lengths and the body's bones in turn, a few times (each undoes a little of the other); collision last. */
+void lengths_and_body(const ChainFrame &f, Vec3 head0) {
+  for (int it = 0; it < (f.caps.empty() ? 1 : 4); it++) {
+    enforce_lengths(f.s, head0, f.len, f.target);
+    for (size_t i = 0; i < f.n; i++) push_out_of_capsules(f.s.tip[i], f.caps, f.s.radius);
+  }
+}
+
+/* Soft tissue (task 0153): the verlet spring with per-substep blends it was tuned with - the tips trail the
+ * animation's acceleration by Lag, within the cone of Limit; a chain just started trails nothing. */
+void soft_substeps(const ChainFrame &f) {
+  SpringBone &s = f.s;
+  const size_t n = f.n;
+  const int subs = std::max(1, std::min(16, (int)std::ceil(f.dt * 120.0f)));
+  const float h = f.dt / (float)subs;
+  const float keep = std::pow(1.0f - std::min(0.999f, std::max(0.0f, s.damping)), h * 60.0f);
+  const std::vector<float> fade = pull_fade(f);
+  std::vector<float> pull(n);
+  for (size_t i = 0; i < n; i++) pull[i] = 1.0f - std::pow(1.0f - clamp01(s.stiffness) * fade[i], h * 60.0f);
+  const float bend_pull = 1.0f - std::pow(1.0f - clamp01(s.bend), h * 60.0f);
+  const std::vector<Vec3> adir = animated_dirs(f);
+  std::vector<Vec3> acc;
+  soft_acceleration(s, f.target, f.dt, acc);
+  const float lag = clamp01(s.lag);
+  const Vec3 g(0.0f, -9.81f * s.gravity, 0.0f);
+  const float wind_k = std::max(0.0f, finite_bits(s.wind) ? s.wind : 0.0f);
+  const bool windy = wind_k > 0.0f && !f.winds.empty();
+  const float drag = 1.0f - std::exp(-4.0f * wind_k * h);  // (the air's share of the tip's motion a substep, as before task 0168)
+  for (int k = 0; k < subs && f.dt > 0.0f; k++) {
+    const Vec3 shift = f.moved * ((float)(k + 1) / (float)subs - 1.0f);  // (zero by the last substep)
+    const Vec3 head0 = f.anchor + shift;
+    const double t = f.clock + (double)h * (k + 1);
+    const std::vector<float> gusts = windy ? wind_gusts(f.winds, t) : std::vector<float>();
+    for (size_t i = 0; i < n; i++) {
+      Vec3 v = (s.tip[i] - s.prev[i]) * keep;
+      s.prev[i] = s.tip[i];
+      if (windy) v += (wind_velocity(f.winds, gusts, s.tip[i], t) * h - v) * drag;
+      s.tip[i] = s.tip[i] + v + g * (h * h);
+      if (i < acc.size()) s.tip[i] = s.tip[i] - acc[i] * (lag * h * h);
+      s.tip[i] = s.tip[i] + (f.target[i] + shift - s.tip[i]) * pull[i];
+    }
+    for (size_t i = 0; i < n; i++) limit_swing(s.tip[i], i >= 1 ? s.tip[i - 1] : head0, adir[i], s.limit);
+    for (size_t i = 1; i < n && bend_pull > 0.0f; i++) {
+      Vec3 want;
+      if (bend_goal(f, adir, i, head0, want)) s.tip[i] = s.tip[i] + (want - s.tip[i]) * bend_pull;
+    }
+    lengths_and_body(f, head0);
+  }
+}
+
+/* Task 0168 (ADR 0049 amended): the rod's constants. Hair's density is the reference the springs are measured in. */
+constexpr float kHairDensity = 0.01f;   // kg/m
+constexpr float kRodHz = 240.0f;        // substeps a second (Macklin 2019: small steps, one iteration each)
+constexpr float kMaxStiffHz = 20.0f;    // Stiffness 1's spring (just below it: 1 itself is rigid)
+/* A 0..1 slider as a spring's angular frequency (rad/s) for hair's density: 20 Hz times s^1.5, so the low end - where
+ * hair lives - is spread out; 1 is rigid (handled by the caller). */
+float slider_omega(float s) { return 2.0f * kPi * kMaxStiffHz * std::pow(clamp01(s), 1.5f); }
+/* An XPBD compliant constraint's share of the way to its goal in one substep with one iteration (Macklin et al. 2016):
+ * w / (w + alpha / h^2) with alpha = 1 / k, k = hair's mass x omega^2, w = 1 / the bone's mass - so a heavier strand
+ * (mass ratio `heavy`) is pulled less far by the same slider. */
+float compliant_share(float omega, float h, float heavy) {
+  const float wh = omega * omega * h * h;
+  return wh / (wh + std::max(1e-6f, heavy));
+}
+/* The chain's lengths as mass-weighted distance constraints (each tip's mass from its bone's length; the root fixed),
+ * a few Gauss-Seidel sweeps; enforce_lengths' exact root-first pass then removes what is left. */
+void rod_lengths(SpringBone &s, Vec3 head0, const std::vector<float> &len) {
+  const size_t n = s.tip.size();
+  for (int sweep = 0; sweep < 3; sweep++) {
+    for (size_t i = 0; i < n && i < len.size(); i++) {
+      const Vec3 head = i ? s.tip[i - 1] : head0;
+      const Vec3 d = s.tip[i] - head;
+      const float l = length(d);
+      if (l <= 1e-9f || len[i] <= 1e-6f) continue;
+      const float wi = 1.0f / len[i], wh = i ? 1.0f / std::max(1e-6f, len[i - 1]) : 0.0f;  // (masses by length: the density cancels)
+      const Vec3 corr = d * ((l - len[i]) / l);
+      s.tip[i] = s.tip[i] - corr * (wi / (wi + wh));
+      if (i) s.tip[i - 1] = s.tip[i - 1] + corr * (wh / (wi + wh));
+    }
+  }
+}
+/* Each tip's animated velocity this frame (where its target went since the last step), the root's move for a chain
+ * just started. */
+std::vector<Vec3> animated_velocities(const ChainFrame &f) {
+  const Vec3 root_v = f.dt > 1e-6f ? f.moved * (1.0f / f.dt) : Vec3(0.0f);
+  std::vector<Vec3> v(f.n, root_v);
+  if (f.s.rod_target.size() != f.n || !(f.dt > 1e-6f)) return v;
+  for (size_t i = 0; i < f.n; i++) v[i] = (f.target[i] - f.s.rod_target[i]) * (1.0f / f.dt);
+  return v;
+}
+/* The velocity is the last substep's displacement: when this frame's substeps are another length (60 fps drifting
+ * between four and five), the displacement is rescaled to it, else the change would kick the chain. */
+void rescale_velocity(SpringBone &s, float h) {
+  if (!(s.rod_h > 0.0f) || std::fabs(s.rod_h - h) <= 1e-9f) return;
+  const float r = h / s.rod_h;
+  for (size_t i = 0; i < s.tip.size() && i < s.prev.size(); i++) s.prev[i] = s.tip[i] - (s.tip[i] - s.prev[i]) * r;
+}
+/* The bend after the mass-weighted sweeps (they would let the lower bones' weight open the curl's upper joints); the
+ * root-first pass after it only moves what hangs below. */
+void rod_bend(const ChainFrame &f, const std::vector<Vec3> &adir, Vec3 head0, float share) {
+  if (share <= 0.0f) return;
+  for (size_t i = 1; i < f.n; i++) {
+    Vec3 want;
+    if (bend_goal(f, adir, i, head0, want)) f.s.tip[i] = f.s.tip[i] + (want - f.s.tip[i]) * share;
+  }
+}
+/* Strands (hair, ears, tails, cloth) as XPBD rods (task 0168, ADR 0049 amended): each substep the tips move with their
+ * velocity - decayed by Damping relative to the root's motion (a lag that doesn't ring) and dragged toward the air's
+ * motion by Air (and a Wind) - and gravity; then the pull toward the animated pose and the bend toward the animated
+ * angles as compliant constraints, the lengths, the body. Velocities come from the positions (PBD), so frame rate and
+ * substep count don't change the feel; a heavier chain is pulled less and dragged less. */
+void rod_substeps(const ChainFrame &f) {
+  SpringBone &s = f.s;
+  const size_t n = f.n;
+  const int subs = std::max(1, std::min(32, (int)std::ceil(f.dt * kRodHz)));
+  const float h = f.dt / (float)subs;
+  const float heavy = std::max(0.01f, (finite_bits(s.density) ? s.density : kHairDensity) / kHairDensity);
+  const std::vector<float> fade = pull_fade(f);
+  std::vector<float> pull(n);
+  for (size_t i = 0; i < n; i++) {
+    const float st = clamp01(s.stiffness) * fade[i];
+    pull[i] = st >= 0.999f ? 1.0f : compliant_share(slider_omega(st), h, heavy);
+  }
+  const float bend_share = clamp01(s.bend) >= 0.999f ? 1.0f : compliant_share(slider_omega(s.bend), h, heavy);
+  /* Damping: each tip's motion relative to where its animation is going (a move or a turn alike) decays at a rate
+   * from its own effective spring - the fade along the chain and the mass in it - so a free tip isn't overdamped
+   * and a heavy chain isn't held back more than a light one: past critical at Damping 1, a free swing's 20 / s at
+   * Damping 1 with no spring. */
+  std::vector<float> keep(n);
+  for (size_t i = 0; i < n; i++) {
+    const float omega = slider_omega(clamp01(s.stiffness) * fade[i]) / std::sqrt(heavy);
+    keep[i] = std::exp(-clamp01(s.damping) * (4.0f * omega + 20.0f) * h);
+  }
+  const std::vector<Vec3> target_v = animated_velocities(f);
+  const float wind_k = std::max(0.0f, finite_bits(s.wind) ? s.wind : 0.0f);
+  const bool windy = wind_k > 0.0f && !f.winds.empty();
+  /* Still air holds a heavier chain back less (its drag over its mass); a Wind pulls every chain toward its motion as
+   * it did before task 0168, by the chain's Wind. */
+  const float air_rate = std::max(0.0f, finite_bits(s.air) ? s.air : 0.0f) / heavy + (windy ? 4.0f * wind_k : 0.0f);
+  const float air_keep = std::exp(-air_rate * h);
+  const std::vector<Vec3> adir = animated_dirs(f);
+  const Vec3 g(0.0f, -9.81f * s.gravity, 0.0f);
+  rescale_velocity(s, h);
+  for (int k = 0; k < subs && f.dt > 0.0f; k++) {
+    const Vec3 shift = f.moved * ((float)(k + 1) / (float)subs - 1.0f);  // (zero by the last substep)
+    const Vec3 head0 = f.anchor + shift;
+    const double t = f.clock + (double)h * (k + 1);
+    const std::vector<float> gusts = windy ? wind_gusts(f.winds, t) : std::vector<float>();
+    for (size_t i = 0; i < n; i++) {
+      Vec3 v = (s.tip[i] - s.prev[i]) * (1.0f / h);
+      v = target_v[i] + (v - target_v[i]) * keep[i];
+      const Vec3 air_v = windy ? wind_velocity(f.winds, gusts, s.tip[i], t) : Vec3(0.0f);
+      v = air_v + (v - air_v) * air_keep;
+      v += g * h;
+      s.prev[i] = s.tip[i];
+      s.tip[i] = s.tip[i] + v * h;
+    }
+    for (size_t i = 0; i < n; i++) s.tip[i] = s.tip[i] + (f.target[i] + shift - s.tip[i]) * pull[i];
+    rod_lengths(s, head0, f.len);
+    rod_bend(f, adir, head0, bend_share);
+    lengths_and_body(f, head0);
+  }
+  s.rod_target = f.target;
+  s.rod_h = h;
+}
+
 /* A spring's chain stepped by dt: the animation's pose read first (its base rotations, kept unless something else set
  * them since the last step), its tips moved. The bones are turned afterwards by write_chain (strand separation runs
  * between, over every chain at once). */
@@ -520,73 +750,13 @@ ChainStep step_chain(SpringBone &s, GameObject &first, const std::vector<GameObj
    * once would kick the chain differently from a 144 fps one's). */
   const Vec3 moved = s.tip.empty() ? Vec3(0.0f) : anchor - s.anchor;
   s.anchor = anchor;
-  if (s.tip.size() != n) s.tip = target, s.prev = target;
+  if (s.tip.size() != n) s.tip = target, s.prev = target, s.rod_target.clear(), s.rod_h = 0.0f;  // (afresh: no velocity carried)
   static const std::vector<Collider> none;
   const std::vector<Collider> &caps = s.collide ? body : none;
   step.len = len, step.target = target, step.caps = &caps;
-  const int subs = std::max(1, std::min(16, (int)std::ceil(dt * 120.0f)));
-  const float h = dt / (float)subs;
-  const float keep = std::pow(1.0f - std::min(0.999f, std::max(0.0f, s.damping)), h * 60.0f);
-  /* The pull toward the animation fades from the root to the tip (task 0153); the bend holds each bone's animated angle
-   * to the one before it (the rest relation taken from the animated pose this step). */
-  const float r2t = std::min(1.0f, std::max(0.0f, finite_bits(s.root_to_tip) ? s.root_to_tip : 0.0f));
-  std::vector<float> pull(n);
-  {
-    float along = 0.0f;  // (the fade by the length along the chain, so a short last bone isn't freed like a long one)
-    for (size_t i = 0; i < n; i++) {
-      along += len[i];
-      const float fade = reach > 1e-9f && n > 1 ? 1.0f - r2t * (along - len[i]) / std::max(1e-9f, reach - len[n - 1]) : 1.0f;
-      pull[i] = 1.0f - std::pow(1.0f - std::min(1.0f, std::max(0.0f, s.stiffness)) * std::max(0.0f, fade), h * 60.0f);
-    }
-  }
-  const float bend_pull = 1.0f - std::pow(1.0f - std::min(1.0f, std::max(0.0f, finite_bits(s.bend) ? s.bend : 0.0f)), h * 60.0f);
-  /* The animated directions of bone i-1 and bone i: the bend carries their relation onto the simulated bone i-1 by the
-   * turn from its animated direction to its simulated one, so a curl keeps its shape whichever way the chain swings. */
-  std::vector<Vec3> adir(n, Vec3(0.0f));
-  for (size_t i = 0; i < n; i++) {
-    const Vec3 d = target[i] - (i >= 1 ? target[i - 1] : anchor);
-    adir[i] = length(d) > 1e-9f ? normalize(d) : Vec3(0.0f);
-  }
-  const float wind_k = std::max(0.0f, finite_bits(s.wind) ? s.wind : 0.0f);
-  const bool windy = wind_k > 0.0f && !winds.empty();
-  const float drag = 1.0f - std::exp(-4.0f * wind_k * h);  // (the air's share of the tip's motion a substep: a quarter second to follow it, at any step)
-  /* Soft tissue: the tips trail the animation's acceleration by Lag (a landing throws them down, a step up), within
-   * the cone of Limit; a chain just started trails nothing. */
-  std::vector<Vec3> acc;
-  if (soft) soft_acceleration(s, target, dt, acc);
-  const float lag = soft ? std::min(1.0f, std::max(0.0f, finite_bits(s.lag) ? s.lag : 0.0f)) : 0.0f;
-  const Vec3 g(0.0f, -9.81f * s.gravity, 0.0f);
-  Vec3 head0 = anchor;  // (where the chain starts this substep)
-  for (int k = 0; k < subs && dt > 0.0f; k++) {
-    const Vec3 shift = moved * ((float)(k + 1) / (float)subs - 1.0f);  // (zero by the last substep)
-    head0 = anchor + shift;
-    const double t = clock + (double)h * (k + 1);
-    const std::vector<float> gusts = windy ? wind_gusts(winds, t) : std::vector<float>();
-    for (size_t i = 0; i < n; i++) {
-      Vec3 v = (s.tip[i] - s.prev[i]) * keep;
-      s.prev[i] = s.tip[i];
-      if (windy) v += (wind_velocity(winds, gusts, s.tip[i], t) * h - v) * drag;  // (the air drags the tip toward the air's motion, task 0153)
-      s.tip[i] = s.tip[i] + v + g * (h * h);
-      if (lag > 0.0f && i < acc.size()) s.tip[i] = s.tip[i] - acc[i] * (lag * h * h);
-      s.tip[i] = s.tip[i] + (target[i] + shift - s.tip[i]) * pull[i];
-    }
-    if (soft)
-      for (size_t i = 0; i < n; i++) limit_swing(s.tip[i], i >= 1 ? s.tip[i - 1] : head0, adir[i], s.limit);
-    if (bend_pull > 0.0f)
-      for (size_t i = 1; i < n; i++) {
-        if (len[i - 1] <= 1e-6f || length(adir[i - 1]) < 0.5f || length(adir[i]) < 0.5f) continue;  // (no direction to hold after a bone of no length)
-        const Vec3 prev_head = i >= 2 ? s.tip[i - 2] : head0, d = s.tip[i - 1] - prev_head;
-        if (length(d) <= 1e-9f) continue;
-        const Quat swing = rotation_between(adir[i - 1], normalize(d));  // (how the simulated bone before turned from its animated direction)
-        const Vec3 want = s.tip[i - 1] + swing.rotate(adir[i]) * len[i];
-        s.tip[i] = s.tip[i] + (want - s.tip[i]) * bend_pull;
-      }
-    /* Lengths and the body's bones in turn, a few times (each undoes a little of the other); collision last. */
-    for (int it = 0; it < (caps.empty() ? 1 : 4); it++) {
-      enforce_lengths(s, head0, len, target);
-      for (size_t i = 0; i < n; i++) push_out_of_capsules(s.tip[i], caps, s.radius);
-    }
-  }
+  ChainFrame fr{s, n, dt, clock, anchor, moved, reach, len, target, caps, winds};
+  if (soft) soft_substeps(fr);
+  else rod_substeps(fr);
   return step;
 }
 

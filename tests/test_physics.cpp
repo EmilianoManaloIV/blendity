@@ -1326,7 +1326,9 @@ static void tests_round139_to_round172() {
     return tip;
   };
   test("strands: Bend holds a curled chain's shape under gravity while 0 lets it hang straight; Root To Tip frees the tip while the root keeps following", [&] {
-    /* A chain curled 40 degrees at each joint: with bend 1 and no pull it keeps the curl; with bend 0 it hangs straight. */
+    /* A chain curled 40 degrees at each joint: with bend 1 and no pull it keeps the curl (its joints' angles: with a free
+     * root the curl may turn about it until its weight hangs below, task 0168); with bend 0 it hangs straight. */
+    float joint[2] = {0, 0};
     auto curled = [&](float bend, Vec3 &curled_tip, Vec3 &straight_tip) {
       R139Tail t;
       r139_tail(t);
@@ -1336,13 +1338,19 @@ static void tests_round139_to_round172() {
       SpringBone &sb = *t.tail1->get<SpringBone>();
       sb.stiffness = 0.0f, sb.bend = bend, sb.damping = 0.3f, sb.gravity = 1.0f, sb.collide = false;
       for (int f = 0; f < 240; f++) spring::step(t.s, 1.0f / 60.0f);
+      const Vec3 p[4] = {t.tail1->world_position(), tip_world(t.tail1), tip_world(t.s.find_by_name("Tail2")), tip_world(t.tip)};
+      for (int i = 0; i < 2; i++)
+        joint[i] = std::acos(std::max(-1.0f, std::min(1.0f, dot(normalize(p[i + 1] - p[i]), normalize(p[i + 2] - p[i + 1]))))) * 180.0f / kPi;
       return tip_world(t.tip);
     };
     Vec3 ct, st;
-    const Vec3 held = curled(1.0f, ct, st), hung = curled(0.0f, ct, st);
+    curled(1.0f, ct, st);
+    const float held0 = joint[0], held1 = joint[1];
+    const Vec3 hung = curled(0.0f, ct, st);
     const float apart = length(ct - st);
-    std::printf("    curled chain: bend 1 ends %.3f m from the curl's tip, bend 0 %.3f m from straight down (the two %.3f m apart)\n", length(held - ct), length(hung - st), apart);
-    CHECK(apart > 0.1f && length(held - ct) < 0.1f * apart && length(hung - st) < 0.02f * 0.6f);
+    std::printf("    curled chain: bend 1 keeps its joints at %.1f and %.1f degrees (the curl's 40), bend 0 ends %.3f m from straight down (the curl's tip %.3f m from it)\n",
+                held0, held1, length(hung - st), apart);
+    CHECK(apart > 0.1f && std::fabs(held0 - 40.0f) < 4.0f && std::fabs(held1 - 40.0f) < 4.0f && length(hung - st) < 0.02f * 0.6f);
     /* Root To Tip: the tip lags more with 1 than with 0 under the same move; the first bone's tip lags alike. */
     auto lag_of = [&](float r2t, float &first_bone_lag) {
       R139Tail t;
@@ -2178,9 +2186,189 @@ static void tests_round176() {
   });
 }
 
+/* Round 188 (task 0168, ADR 0049 amended): the strands' feel, measured. */
+static void tests_round188() {
+  auto bone = [](Scene &s, const std::string &name, GameObject *parent, Vec3 pos, Quat rot, float len) {
+    GameObject *g = s.create(name, parent);
+    g->set_local_position(pos);
+    g->set_local_rotation(rot);
+    Bone *b = g->add<Bone>();
+    b->length = len;
+    b->rest_position = pos;
+    b->rest_rotation = rot;
+    return g;
+  };
+  auto tip_world = [](GameObject *g) { return g->world_matrix().point(Vec3(0, g->get<Bone>()->length, 0)); };
+  /* A head bone at 1.6 m and a strand of `n` bones `total` long from 10 cm behind it, along `rot` (the rest and the
+   * animation's pose), labelled hair. */
+  struct Strand {
+    Scene s;
+    GameObject *head = nullptr, *first = nullptr, *tip = nullptr;
+  };
+  auto strand = [&](Strand &st, int n, float total, Quat rot) {
+    GameObject *root = st.s.create("Rig");
+    root->add<Armature>();
+    st.head = bone(st.s, "Head", root, {0, 1.6f, 0}, Quat(), 0.1f);
+    GameObject *g = st.head;
+    for (int i = 1; i <= n; i++) g = bone(st.s, "Hair" + std::to_string(i), g, i == 1 ? Vec3(0, 0, -0.1f) : Vec3(0, total / n, 0), i == 1 ? rot : Quat(), total / n);
+    st.tip = g;
+    st.first = st.s.find_by_name("Hair1");
+    spring::add(*st.first, 0);
+  };
+  /* A run's settle time (the first time from which the tip stays within `tol` of where it ends) and its overshoots
+   * (the tip's distance to its end rising again by more than 2 mm after falling: a ring). */
+  struct Settle {
+    float time = 0.0f;
+    int overshoots = 0;
+  };
+  auto settle_of = [](const std::vector<Vec3> &path, float dt, float tol) {
+    Settle r;
+    const Vec3 end = path.back();
+    size_t last_out = 0;
+    for (size_t i = 0; i < path.size(); i++)
+      if (length(path[i] - end) > tol) last_out = i + 1;
+    r.time = last_out ? (last_out + 1) * dt : 0.0f;  // (path[i] is the frame after step i + 1: settled from the next one)
+    float ext = length(path[0] - end);
+    bool down = true;
+    for (const Vec3 &p : path) {
+      const float d = length(p - end);
+      if (down && d < ext) ext = d;
+      else if (down && d > ext + 2e-3f) r.overshoots++, down = false, ext = d;
+      else if (!down && d > ext) ext = d;
+      else if (!down && d < ext - 2e-3f) down = true, ext = d;
+    }
+    return r;
+  };
+
+  test("strands feel like film hair (task 0168): a 40 cm strand of eight bones released horizontally settles under gravity within 1.5 s with at most one overshoot; a head turned 90 degrees in 0.3 s brings the tip round within 1.0 s of the turn's end with at most one overshoot", [&] {
+    const float dt = 1.0f / 60.0f;
+    Strand a;
+    strand(a, 8, 0.4f, Quat::euler({-90.0f, 0, 0}));  // (straight back, horizontal)
+    std::vector<Vec3> path;
+    for (int f = 0; f < 300; f++) {
+      spring::step(a.s, dt);
+      path.push_back(tip_world(a.tip));
+    }
+    const Settle sa = settle_of(path, dt, 0.01f);
+    const Vec3 hang = path.back();
+    std::printf("    released horizontally: settled within 1 cm after %.2f s, %d overshoot(s); the tip ends %.3f m below the head\n", sa.time, sa.overshoots,
+                1.6f - hang.y);
+    CHECK(sa.time <= 1.5f && sa.overshoots <= 1);
+    /* The head turns 90 degrees about Y over 0.3 s with the strand pointing back from it (settled first): the strand
+     * swings through a quarter circle, lagging the turn, then comes round. */
+    Strand b;
+    strand(b, 8, 0.4f, Quat::euler({-90.0f, 0, 0}));
+    for (int f = 0; f < 120; f++) spring::step(b.s, dt);
+    std::vector<Vec3> turn;
+    float lag = 0.0f;
+    for (int f = 0; f < 240; f++) {
+      const float t = std::min(1.0f, (f + 1) * dt / 0.3f);
+      b.head->set_local_rotation(Quat::euler({0.0f, 90.0f * t, 0.0f}));
+      spring::step(b.s, dt);
+      const Vec3 d = tip_world(b.tip) - b.head->world_position();
+      const float yaw = std::atan2(-d.x, -d.z) * 180.0f / kPi;  // (0 straight back, 90 once turned)
+      lag = std::max(lag, 90.0f * t - yaw);
+      if ((f + 1) * dt >= 0.3f) turn.push_back(tip_world(b.tip));
+    }
+    const Settle sb = settle_of(turn, dt, 0.01f);
+    std::printf("    head turned 90 degrees in 0.3 s: the tip lagged the turn by up to %.1f degrees, within 1 cm of its rest %.2f s after it, %d overshoot(s)\n", lag, sb.time,
+                sb.overshoots);
+    CHECK(sb.time <= 1.0f && sb.overshoots <= 1 && lag > 5.0f);
+  });
+
+  test("strands: the same motion at 30, 60 and 144 frames a second and with the frame time wavering (the tip 0.25 s after a horizontal strand is let go, within 1 cm), and a curl with Bend 0.5 keeps a share of its curl hanging under its own weight", [&] {
+    /* The tip a quarter second after release, mid-fall: the dynamics, not only where it ends. */
+    auto fall = [&](const std::vector<float> &dts) {
+      Strand a;
+      strand(a, 8, 0.4f, Quat::euler({-90.0f, 0, 0}));
+      float time = 0.0f;
+      for (size_t k = 0; time < 0.25f - 1e-4f; k++) {
+        const float dt = dts[k % dts.size()];
+        spring::step(a.s, dt);
+        time += dt;
+      }
+      return tip_world(a.tip);
+    };
+    const Vec3 p60 = fall({1.0f / 60.0f}), p30 = fall({1.0f / 30.0f}), p144 = fall({1.0f / 144.0f}), pw = fall({1.0f / 60.0f, 1.0f / 59.0f});
+    std::printf("    0.25 s after release, the tip at 30 / 144 / a wavering 59-60 frames a second against 60: %.4f / %.4f / %.4f m apart (it has fallen %.3f m)\n",
+                length(p30 - p60), length(p144 - p60), length(pw - p60), 1.6f - p60.y);
+    CHECK(length(p30 - p60) < 0.01f && length(p144 - p60) < 0.01f && length(pw - p60) < 0.01f && 1.6f - p60.y > 0.02f);
+    /* A curl: the strand's bones turned 30 degrees each about X from horizontal, Bend 0.5, no pull: how far its tip
+     * drops under gravity, as a share of the curl's height. */
+    Strand c;
+    strand(c, 6, 0.36f, Quat::euler({-90.0f, 0, 0}));
+    for (int i = 2; i <= 6; i++) c.s.find_by_name("Hair" + std::to_string(i))->set_local_rotation(Quat::euler({-30.0f, 0, 0}));
+    SpringBone &sb = *c.first->get<SpringBone>();
+    sb.stiffness = 0.0f, sb.bend = 0.5f, sb.root_to_tip = 0.0f, sb.collide = false;
+    /* How much of the curl's 30 degrees at each joint is left after four seconds hanging (the chain swings down about
+     * its root with no pull: the joints' angles are what Bend holds). */
+    auto joint_angles = [&] {
+      std::vector<Vec3> p{c.first->world_position()};
+      for (GameObject *g = c.first; g; g = g->children.empty() ? nullptr : g->children[0]) p.push_back(tip_world(g));
+      float sum = 0.0f;
+      for (size_t i = 1; i + 1 < p.size(); i++) {
+        const Vec3 d0 = normalize(p[i] - p[i - 1]), d1 = normalize(p[i + 1] - p[i]);
+        sum += std::acos(std::max(-1.0f, std::min(1.0f, dot(d0, d1)))) * 180.0f / kPi;
+      }
+      return sum / (float)(p.size() - 2);
+    };
+    const float curl0 = joint_angles();
+    for (int f = 0; f < 240; f++) spring::step(c.s, 1.0f / 60.0f);
+    const float kept = joint_angles() / std::max(1e-3f, curl0);
+    std::printf("    a curl of %.1f degrees a joint with Bend 0.5, hanging from its root for 4 s: %.0f %% of it kept\n", curl0, 100.0f * kept);
+    CHECK(kept > 0.1f && kept < 0.97f);
+  });
+
+  test("strands: a heavier chain (ten times hair's density) sags further and settles more slowly under the same Stiffness, and Density and Air survive saving", [&] {
+    auto run = [&](float density, float &sag, float &settle) {
+      Strand a;
+      strand(a, 8, 0.4f, Quat::euler({-90.0f, 0, 0}));
+      a.first->get<SpringBone>()->density = density;
+      std::vector<Vec3> path;
+      for (int f = 0; f < 300; f++) {
+        spring::step(a.s, 1.0f / 60.0f);
+        path.push_back(tip_world(a.tip));
+      }
+      sag = 1.6f - path.back().y;
+      settle = settle_of(path, 1.0f / 60.0f, 0.01f).time;
+    };
+    float sag1, set1, sag10, set10;
+    run(0.01f, sag1, set1);
+    run(0.1f, sag10, set10);
+    std::printf("    hair's density: the tip sags %.3f m, settled after %.2f s; ten times it: %.3f m, %.2f s\n", sag1, set1, sag10, set10);
+    CHECK(sag10 > sag1 * 1.2f && set10 > set1);
+    Strand b;
+    strand(b, 2, 0.2f, Quat());
+    SpringBone &sb = *b.first->get<SpringBone>();
+    sb.density = 0.07f, sb.air = 1.5f;
+    Scene back;
+    std::string error;
+    CHECK(load_scene_text(save_scene_text(b.s), back, error));
+    const GameObject *h1 = back.find_by_name("Hair1");
+    const SpringBone *bs = h1 ? h1->get<SpringBone>() : nullptr;
+    CHECK(bs && std::fabs(bs->density - 0.07f) < 1e-6f && std::fabs(bs->air - 1.5f) < 1e-6f);
+    SpringBone tail;
+    spring::apply_defaults(tail, 2);
+    CHECK(std::fabs(tail.density - 0.1f) < 1e-6f);
+    /* A tail saved before the fields: its lines taken out, it loads the Tail label's Density and Air, not hair's. */
+    b.first->get<SpringBone>()->label = 2;
+    std::string text = save_scene_text(b.s), old;
+    std::istringstream in(text);
+    for (std::string line; std::getline(in, line);)
+      if (line.find("Density") == std::string::npos && line.find("Air ") == std::string::npos && line.find("Air\t") == std::string::npos) old += line + "\n";
+    Scene was;
+    CHECK(load_scene_text(old, was, error));
+    const GameObject *w1 = was.find_by_name("Hair1");
+    const SpringBone *ws = w1 ? w1->get<SpringBone>() : nullptr;
+    std::printf("    a tail saved before Density and Air: loads density %.3f, air %.2f\n", ws ? ws->density : -1.0f, ws ? ws->air : -1.0f);
+    CHECK(ws && std::fabs(ws->density - 0.1f) < 1e-6f && std::fabs(ws->air - 0.5f) < 1e-6f);
+  });
+}
+
 void run_physics_tests() {
   physics_tests();
   tests_round137_to_round140();
   tests_round139_to_round172();
   tests_round176();
+  tests_round188();
 }

@@ -40,17 +40,23 @@ struct SpringBone : ComponentBase<SpringBone> {
   float lag = 0.5f;      // 0..1: how much of the body's acceleration the tissue trails
   float limit = 25.0f;   // degrees: how far the bone may swing from where the animation puts it
   float volume = 1.0f;   // 0..1: as the bone stretches along its length it narrows across it, keeping its volume
+  /* Task 0168 (ADR 0049 amended): strands as XPBD rods - their mass and the air around them. */
+  float density = 0.01f;  // kg per metre of chain: a heavier strand sags further and settles slower under the same stiffness
+  float air = 0.5f;       // 1/s: the air's drag on a strand of hair's density (a heavier one feels less of it); always on
   /* Runtime (not saved): each bone's tip and where it was a step ago; the pose the animation last gave. */
   std::vector<Vec3> tip, prev;
   std::vector<Quat> base;   // each bone's local rotation as the animation (or the rest) has it
   std::vector<Quat> wrote;  // what the last step set (unchanged since: the animation didn't touch it)
   std::vector<Vec3> base_scale, wrote_scale;  // each bone's local scale before the soft tissue's stretch, and the stretch last written (soft)
   std::vector<Vec3> tprev, tvel;   // the animated tips a step ago and their speed (soft: the acceleration they trail)
+  std::vector<Vec3> rod_target;    // the animated tips a step ago (task 0168: the rods damp toward their motion)
+  float rod_h = 0.0f;              // the last substep's length (its displacement is the velocity: rescaled when it changes)
   int soft_primed = 0;             // 0 nothing known, 1 the tips' places, 2 their speed too (soft: no kick on the first steps)
   Vec3 anchor;              // where the chain started last step (a jump far past it: started afresh)
   void reflect(Reflector &r) override;
   void reset_state() {
     tip.clear(), prev.clear(), base.clear(), wrote.clear(), base_scale.clear(), wrote_scale.clear(), tprev.clear(), tvel.clear();
+    rod_target.clear(), rod_h = 0.0f;
     soft_primed = 0;
   }
 };
@@ -84,6 +90,7 @@ GameObject *chain_armature(GameObject &bone);
 extern const char *const kLabels[5];  // "Hair", "Ear", "Tail", "Cloth", "Soft"
 /* A label's settings (stiffness, damping, gravity, radius; bend, root to tip, separate; lag, limit, volume - task 0153). */
 void apply_defaults(SpringBone &s, int label);
+void label_mass_defaults(SpringBone &s);  // the label's Density and Air alone (a chain saved before them, task 0168)
 /* A Wind object's direction: its forward (+Z) in the world; its strength and turbulence made finite and in range.
  * The simulation and the gizmo read these, so they can't drift apart (task 0158). */
 Vec3 wind_direction(const GameObject &g);

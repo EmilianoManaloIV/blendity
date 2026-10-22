@@ -2,6 +2,64 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 188): hair as mass-weighted XPBD rods - film feel, not jello (task 0168, ADR 0049 amended)
+
+**Asked:** hair physics "stiff and jello-like"; Blender-hair-dynamics / film feel, research based, for hair and other
+dynamic parts.
+
+**Why it felt that way (measured):** each substep blended a tip toward the animated pose by a stiff per-substep
+factor - about a 5 Hz spring at hair's 0.15 - which pinned a strand to the pose (a 40 cm strand held horizontal
+sagged 1.6 cm) and rang against it (14 wiggles of over 2 mm before it settled, 15 after a head turn).
+
+**Changed** (Macklin et al. 2016 and 2019, Müller et al. 2007, Kugelstadt & Schömer 2016, Blender's hair dynamics)
+- Strands (hair, ears, tails, cloth) are mass-weighted XPBD rods: each tip a mass from its bone's length and the
+  chain's new **Density** (kg/m: hair 0.01, an ear 0.02, cloth 0.05, a tail 0.1), substeps at 240 Hz with one
+  iteration each, velocities from positions.
+- Stiffness and Bend are compliant constraints: a slider is a spring of 20 Hz x s^1.5 for hair's mass (1 rigid),
+  applied as XPBD's w / (w + alpha / h^2), so the feel doesn't change with the frame rate and a heavier strand is
+  pulled less by the same slider.
+- Damping is a decay of the motion relative to where each tip's animation is going (a move or a turn alike; per
+  bone from its effective spring, so free tips aren't overdamped): a lag that doesn't ring. The air's drag is always
+  on (new **Air**, 1/s for hair's density; a heavier chain feels less); a Wind pulls every chain toward its motion
+  by the chain's Wind, as before. The velocity is rescaled when a frame's substeps change length.
+- Old scenes keep their sliders (which now mean the new spring) and load their label's Density and Air.
+- The lengths are mass-weighted distance constraints before the exact root-first pass; the bend is applied after
+  them, so the lower bones' weight doesn't open a curl's upper joints.
+- Hair's defaults: Stiffness 0.3 and Damping 0.5 (were 0.15 / 0.15), near critical damping for the new spring. A
+  scene saved before keeps its sliders, which now mean the new spring.
+- Soft tissue keeps its own spring (the verlet code it was tuned with, its wind included).
+
+**Measured**
+- A 40 cm strand of eight bones (hair's defaults) released horizontally: settled within 1 cm after 0.75 s with no
+  overshoot, its tip hanging 0.177 m below the head; before: 0.80 s with 14 overshoots of over 2 mm, the tip held at
+  0.016 m (pinned to the pose).
+- A head turned 90 degrees in 0.3 s with the strand pointing back: the tip lagged the turn by up to 9.3 degrees and
+  came within 1 cm of its rest 0.73 s after it, one overshoot. (Before, measured with the strand hanging down: 0.88 s,
+  15 overshoots.)
+- The tip 0.25 s after release, mid-fall: 0.0060 / 0.0006 / 0.0004 m from 60 fps's at 30 / 144 / a frame time
+  wavering between 1/60 and 1/59 s; the hanging tip after 4 s: 0.0000 m apart at all three (before 0.0027 at 144).
+- Ten times hair's density: the tip sags 0.386 m (0.177 at hair's) and settles after 0.98 s (0.75).
+- A curl of 30 degrees a joint with Bend 0.5 hanging from its root for 4 s keeps 89 % of it; Bend 1 keeps its joints
+  at 40.0 degrees.
+- 100 spring chains of 3 bones, ms a frame (stress physics): 0.366 plain, 0.454 with collision, 0.559 with separation too; was 0.548, 0.485, 0.730.
+- 100 spring chains of 10 bones, ms a frame (stress physics): 1.445 plain, 1.752 with collision, 2.276 with separation too; was 2.020, 2.175, 2.862.
+- 100 spring chains of AutoPhysics clip (100 frames), ms a frame (stress physics): solved plain, passes with collision, steps with separation too; was solved, passes, steps.
+- 100 spring chains of a jump, ms a frame (stress physics): yes plain, 5 with collision, 4230 with separation too; was yes, 5, 4230.
+- 100 spring chains of a run, ms a frame (stress physics): yes plain, 5 with collision, 8040 with separation too; was yes, 5, 8040.
+
+**Checked**
+- A 40 cm strand released horizontally settles within 1 cm in 1.5 s with at most one overshoot; a head turned 90
+  degrees in 0.3 s swings a strand pointing back through its arc, lagging the turn, and brings it round within 1 s
+  with at most one overshoot; the same motion at 30, 60 and 144 frames a second and with the frame time wavering;
+  a curl with Bend 0.5 keeps a share of its curl hanging under its weight; ten times hair's density sags further and
+  settles more slowly; Density and Air are saved, an old scene's chain loads its label's (tests/test_physics.cpp). The
+  round 153 Bend test measures the joints' angles now (40.0 and 40.0 degrees held with Bend 1): with no pull and a
+  free root the curl turns about its root until its weight hangs below, as a real one does.
+- Unit checks (round 188): Windows 11,293, 0 failed (929 tests); render-cache verify mode 11,294, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,955, 0 failed. Sanitizer build: 10,835, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 187): undo measured honestly, and it gives back Edit Mode's selection (task 0167, ADR 0053 amended)
 
 **Asked:** the roadmap's "undo steps sharing unchanged arrays" (each undo ≤ 10 ms, was 30-38).
