@@ -461,6 +461,9 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
         if (comp) comp->reflect(*rr);
         else if (pending_mat) pending_mat->reflect(*rr);
         else pending_block(*rr);
+        /* Task 0164: an outline saved before Min Pixels existed draws as it did then (0); the file writes the key with
+         * underscores, as key_of makes it. */
+        if (comp && std::string(comp->type_name()) == "Outline" && !rr->values.count(key_of("Min Pixels"))) static_cast<Outline *>(comp)->min_pixels = 0.0f;
         comp = nullptr;
         pending_mat = nullptr;
         pending_block = nullptr;

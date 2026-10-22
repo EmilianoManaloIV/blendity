@@ -1,6 +1,6 @@
 # 0161: the path tracer off the main thread, two submissions in flight
 
-- **Status:** in progress (round 181)
+- **Status:** done (round 181)
 - **Requirements:** R-03 (rendering), Q-01 (responsiveness)
 - **Decisions:** ADR 0052
 - **Model:** main session

@@ -252,6 +252,10 @@ float texture_lod(int t, vec2 ddx, vec2 ddy) {
 /* evaluate_surface's material, after kGlslProcedurals. */
 const char *kMaterialEval = R"(
 struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; float alpha; };
+/* A Box projection's lod on one face from the pixel's object-space footprint times the face's tiling (task 0164). */
+float box_lod(int t, float ta, float tb, float fp) {
+  return fp > 0.0 ? texture_lod(t, vec2(fp * abs(ta), 0.0), vec2(0.0, fp * abs(tb))) : 0.0;
+}
 /* evaluate_surface (shading.cpp) for a pixel: uv / ddx / ddy as the deferred shader's (forward differences). */
 Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor, vec4 tangent, bool has_tangent) {
   Surf s;
@@ -278,13 +282,23 @@ Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor
     bw = an / max(an.x + an.y + an.z, 1e-6);
   }
   bool no_d = ddx.x == 0.0 && ddx.y == 0.0 && ddy.x == 0.0 && ddy.y == 0.0;
+  /* Task 0164: the pixel's footprint in object space - the larger of its two forward differences, as the CPU's deferred
+   * pass measures it - gives a Generated mapping its derivatives over the bounds and a Box projection its lod from the
+   * footprint times the tiling (both were level 0 at any distance). */
+  float fp = max(length(dFdxFine(lpos)), length(dFdyFine(lpos)));
+  vec3 ext = max(I.bmax.xyz - I.bmin.xyz, vec3(1e-6));
+  if (mapping == 2 && fp > 0.0 && I.bmin.x <= I.bmax.x) {
+    ddx = vec2(fp / ext.x * abs(I.tiling.x), 0.0);
+    ddy = vec2(0.0, fp / ext.y * abs(I.tiling.y));
+    no_d = false;
+  }
 #define SAMPLE(t, out_) { \
     if (!box) out_ = tex_sample(t, uv, no_d ? 0.0 : texture_lod(t, ddx, ddy), wrap, filt); \
     else { \
       out_ = vec4(0.0); \
-      if (bw.x > 0.001) out_ += tex_sample(t, vec2(bp.z, bp.y), 0.0, wrap, filt) * bw.x; \
-      if (bw.y > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.z), 0.0, wrap, filt) * bw.y; \
-      if (bw.z > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.y), 0.0, wrap, filt) * bw.z; \
+      if (bw.x > 0.001) out_ += tex_sample(t, vec2(bp.z, bp.y), box_lod(t, I.tiling.z, I.tiling.y, fp), wrap, filt) * bw.x; \
+      if (bw.y > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.z), box_lod(t, I.tiling.x, I.tiling.z, fp), wrap, filt) * bw.y; \
+      if (bw.z > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.y), box_lod(t, I.tiling.x, I.tiling.y, fp), wrap, filt) * bw.z; \
     } }
   int proc = I.tex1.z;
   vec4 c;
@@ -293,6 +307,15 @@ Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor
     float t;  // (a branch, not a select: the noise is forty hashes a pixel, not paid for a checker)
     if (proc == 1) t = checker(pp);
     else t = clamp(0.5 + 0.5 * fbm_noise(pp, 5, 0.5) * 1.4, 0.0, 1.0);
+    /* Task 0164: cells across one pixel - from the UV derivatives, or the footprint in the pattern's units (as the CPU);
+     * under a pixel the pattern fades to its mean. */
+    float cells = 0.0;
+    if (mapping == 0) cells = max(max(abs(ddx.x), abs(ddx.y)), max(abs(ddy.x), abs(ddy.y))) * abs(I.offset.w);
+    else if (fp > 0.0) {
+      float size = I.bmin.x <= I.bmax.x ? max(1e-6, min(ext.x, min(ext.y, ext.z))) : 1.0;
+      cells = fp / size * abs(I.offset.w);
+    }
+    if (cells > 0.5) t = mix(t, 0.5, clamp((cells - 0.5) * 2.0, 0.0, 1.0));
     s.albedo = mix(I.color2.rgb, I.albedo_rough.rgb, t);
   }
   else if (I.tex0.x >= 0) {
@@ -899,9 +922,20 @@ float axis_step(float e0, float e1, float x) {
   float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
 }
-float toon_level(Inst I, float lit) {
+/* The shading normal's change from px to a neighbouring pixel of the same object (zero where the neighbour is the
+ * background or another object), the neighbour turned as this pixel's normal was for a back side. */
+vec3 toon_neighbour(ivec2 q, uint my_inst, bool flipped, vec3 n) {
+  ivec2 gsz = textureSize(g_normal, 0);
+  q = min(q, gsz - 1);
+  if (texelFetch(g_inst, q, 0).r != my_inst) return vec3(0.0);
+  vec3 nb = texelFetch(g_normal, q, 0).xyz;
+  if (dot(nb, nb) < 0.5) return vec3(0.0);
+  nb = normalize(nb);
+  return (flipped ? -nb : nb) - n;
+}
+float toon_level(Inst I, float lit, float edge) {
   int bands = clamp(int(I.toon0.x), 1, 8);
-  float th = clamp(I.toon0.z, 0.0, 0.95), w = clamp(I.toon0.y, 0.0, 0.5);
+  float th = clamp(I.toon0.z, 0.0, 0.95), w = max(clamp(I.toon0.y, 0.0, 0.5), clamp(edge, 0.0, 0.5));  // (task 0164: never narrower than a pixel's span)
   if (isnan(lit) || isinf(lit)) lit = 0.0;
   float q = 0.0;
   for (int k = 0; k < bands; k++) {
@@ -910,16 +944,17 @@ float toon_level(Inst I, float lit) {
   }
   return q / float(bands);
 }
-vec3 shade_toon(Inst I, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit) {
+vec3 shade_toon(Inst I, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit, float edge) {
   float q;
   vec3 c;
-  if (I.toon5.x >= 0) {  // task 0148: the ramp, read at (lit, lit) with v up (its nearest texel)
-    vec3 tone = tex_sample(I.toon5.x, vec2(lit, lit), 0.0, 1, 1).rgb;  // (Extend, Linear)
+  if (I.toon5.x >= 0) {  // task 0148: the ramp, read at (lit, lit) with v up; at a distance over the pixel's span of lit (task 0164)
+    float lod = edge > 0.0 ? texture_lod(I.toon5.x, vec2(edge * 2.0, 0.0), vec2(0.0, edge * 2.0)) : 0.0;
+    vec3 tone = tex_sample(I.toon5.x, vec2(lit, lit), lod, 1, 2).rgb;  // (Extend, Trilinear)
     q = clamp(dot(tone, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
     c = albedo * tone;
   }
   else {
-    q = toon_level(I, lit);
+    q = toon_level(I, lit, edge);
     c = albedo * mix(I.toon1.rgb, vec3(1.0), q);
   }
   if (I.toon1.w > 0.0 && q > 0.0) {
@@ -1045,6 +1080,13 @@ void main() {
       float p = l.color.w * dot(l.color.rgb, vec3(0.2126, 0.7152, 0.0722));
       if (p > key_power && p > 0.0) { key_power = p; key = li; keyL = -l.dir_range.xyz; }
     }
+    /* Task 0164: the normal at the next pixel right and below (the G-buffer's), for one-pixel band edges - of this
+     * object only (the background's normal is zero, another object's is no continuation), turned as this pixel's
+     * was for a back side. */
+    uint my_inst = texelFetch(g_inst, px, 0).r;
+    bool flipped = dot(gs.xyz, V) < 0.0;
+    vec3 n_dx = toon_neighbour(px + ivec2(1, 0), my_inst, flipped, n);
+    vec3 n_dy = toon_neighbour(px + ivec2(0, 1), my_inst, flipped, n);
     for (int li = 0; li < count; li++) {
       Light l = lights[li];
       vec3 L;
@@ -1063,7 +1105,8 @@ void main() {
       if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
       float lit = max(ndl, 0.0) * vis * min(fall, 1.0);
       bool fill = I.toon3.w > 0.5 && key >= 0 && li != key;
-      lo += (fill ? albedo * lit : shade_toon(I, albedo, metallic, specular, n, V, L, lit)) * l.color.rgb * l.color.w;
+      float edge = 0.5 * (abs(dot(n_dx, L)) + abs(dot(n_dy, L)));
+      lo += (fill ? albedo * lit : shade_toon(I, albedo, metallic, specular, n, V, L, lit, edge)) * l.color.rgb * l.color.w;
     }
     vec3 amb = I.toon3.y > 0.5 ? (irradiance(vec3(0.0, 1.0, 0.0)) + irradiance(vec3(0.0, -1.0, 0.0))) * 0.5 : irradiance(n);
     o_color = display(lo + amb * albedo + toon_rim(I, n, V, keyL) + emission);

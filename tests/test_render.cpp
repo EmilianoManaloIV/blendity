@@ -10082,6 +10082,247 @@ static void tests_round168() {
 
 }
 
+static void tests_round184() {
+  /* The Scene view's crop of an object seen from `dist` metres, straight on, with the views on `device`. */
+  struct R184 {
+    std::vector<uint32_t> px;
+    std::vector<uint8_t> mask;  // 1 where the object is
+    Recti rect;
+  };
+  /* The picture, and which of its pixels are the object's: those that differ from the same view with the object
+   * moved away (a 1 m object at 60 m is nine pixels wide; the view's background would swamp any measure). */
+  auto r184_view = [](Editor &ed, GameObject *obj, float dist, int device) {
+    ed.viewport_device_for_test(device);
+    ed.command(strprintf("camera 0 0 %g 0 1 0", dist));  // (yaw, pitch, distance, the pivot: straight on from `dist` metres)
+    obj->set_local_position({1000.0f, 1.0f, 0.0f});
+    r34_steps(ed, 2);
+    R184 r;
+    r.rect = ed.scene_view_rect();
+    const std::vector<uint32_t> empty = r34_crop(ed, r.rect);
+    obj->set_local_position({0.0f, 1.0f, 0.0f});
+    r34_steps(ed, 2);
+    r.px = r34_crop(ed, r.rect);
+    r.mask.assign(r.px.size(), 0);
+    for (size_t i = 0; i < r.px.size() && i < empty.size(); i++) r.mask[i] = r.px[i] != empty[i] ? 1 : 0;
+    return r;
+  };
+  auto luma = [](uint32_t p) { return 0.2126f * ((p >> 16) & 255) + 0.7152f * ((p >> 8) & 255) + 0.0722f * (p & 255); };
+  /* The mean absolute Laplacian over the object's interior pixels (those whose four neighbours are the object's too:
+   * the silhouette against the background is not the texture's doing). */
+  auto energy = [&](const std::vector<float> &l, const std::vector<uint8_t> &mask, int w, int h) {
+    double sum = 0;
+    size_t n = 0;
+    for (int y = 1; y + 1 < h; y++)
+      for (int x = 1; x + 1 < w; x++) {
+        const size_t i = (size_t)y * w + x;
+        if (!mask[i] || !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) continue;
+        const float c = l[(size_t)y * w + x];
+        sum += std::fabs(4.0f * c - l[(size_t)y * w + x - 1] - l[(size_t)y * w + x + 1] - l[(size_t)(y - 1) * w + x] - l[(size_t)(y + 1) * w + x]);
+        n++;
+      }
+    return n ? sum / n : 0.0;
+  };
+  auto lumas = [&](const std::vector<uint32_t> &px) {
+    std::vector<float> l(px.size());
+    for (size_t i = 0; i < px.size(); i++) l[i] = luma(px[i]);
+    return l;
+  };
+  /* The near picture box-filtered by `f` x `f`: the far picture's reference (what a filtered texture should give). */
+  auto downsample = [](const std::vector<float> &l, const std::vector<uint8_t> &mask, int w, int h, int f, int &ow, int &oh, std::vector<uint8_t> &omask) {
+    ow = w / f, oh = h / f;
+    std::vector<float> o((size_t)ow * oh, 0.0f);
+    omask.assign((size_t)ow * oh, 0);
+    for (int y = 0; y < oh; y++)
+      for (int x = 0; x < ow; x++) {
+        double s = 0;
+        int m = 0;
+        for (int j = 0; j < f; j++)
+          for (int i = 0; i < f; i++) {
+            s += l[(size_t)(y * f + j) * w + x * f + i];
+            m += mask[(size_t)(y * f + j) * w + x * f + i];
+          }
+        o[(size_t)y * ow + x] = (float)(s / (f * f));
+        omask[(size_t)y * ow + x] = m * 2 >= f * f ? 1 : 0;  // (an object pixel where the object covered half the block)
+      }
+    return o;
+  };
+  auto far_vs_near = [&](const char *what, Editor &ed, GameObject *obj, float near_m, float far_m, int device, double &e_far, double &e_ref) {
+    const R184 near = r184_view(ed, obj, near_m, device), far = r184_view(ed, obj, far_m, device);
+    const int f = (int)std::lround(far_m / near_m);
+    const std::vector<float> ln = lumas(near.px), lf = lumas(far.px);
+    int ow, oh;
+    std::vector<uint8_t> rmask;
+    const std::vector<float> ref = downsample(ln, near.mask, near.rect.w, near.rect.h, f, ow, oh, rmask);
+    size_t far_px = 0, near_px = 0;
+    for (uint8_t m : far.mask) far_px += m;
+    for (uint8_t m : near.mask) near_px += m;
+    e_far = energy(lf, far.mask, far.rect.w, far.rect.h);
+    e_ref = energy(ref, rmask, ow, oh);
+    std::printf("    %s (%s): %zu object pixels at %g m, %zu at %g m; high-frequency energy at %g m %.2f, the %g m picture downsampled %d x %.2f\n", what,
+                device == 2 ? "the card" : "the CPU", near_px, near_m, far_px, far_m, far_m, e_far, near_m, f, e_ref);
+    CHECK(far_px > 200 && near_px > 2000);  // (a 1 m object at 20 m: about 27 pixels wide)
+  };
+  /* A PNG of w x h pixels from a function (an 8-bit grey with alpha 255). */
+  auto grey_png = [](const std::string &path, int w, int h, const std::function<float(int, int)> &fn) {
+    std::vector<uint32_t> px((size_t)w * h);
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        const uint8_t g = (uint8_t)std::lround(255.0f * clampf(fn(x, y), 0.0f, 1.0f));
+        px[(size_t)y * w + x] = 0xFF000000u | ((uint32_t)g << 16) | ((uint32_t)g << 8) | g;
+      }
+    return write_png(path, px.data(), w, h, w);
+  };
+
+  test("toon at a distance: a hatched plane, a face-shadow sphere at softness 0 and a box-mapped cube seen from 20 m carry no more high-frequency energy inside them than their 2 m pictures downsampled (the maps read at the pixel's lod), on the CPU and on the card", [&] {
+    const std::string hatch = fs::join(test_dir(), "hatch_lines.png"), face = fs::join(test_dir(), "face_sdf.png"), check = fs::join(test_dir(), "box_checker.png");
+    CHECK(grey_png(hatch, 64, 64, [](int x, int) { return (x / 4) % 2 ? 1.0f : 0.0f; }));             // (vertical lines, 8 per tile)
+    CHECK(grey_png(face, 128, 128, [](int x, int y) { return 0.5f + 0.5f * std::sin(x * 0.4f) * std::sin(y * 0.4f); }));  // (a wavy field: a hard threshold sparkles)
+    CHECK(grey_png(check, 64, 64, [](int x, int y) { return ((x / 8) + (y / 8)) % 2 ? 1.0f : 0.0f; }));
+    for (int device : {1, 2}) {
+      if (device == 2 && !gpu::available()) continue;
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Main Camera");
+      ed.command("select Cube");
+      ed.command("delete");
+      GameObject *plane = ed.scene().create("Hatched");
+      plane->add<MeshFilter>()->mesh = primitives::plane(1.0f, 1);
+      MaterialPtr hm = make_material("hatched", Vec3(0.9f));
+      hm->shading_model = 1;
+      hm->toon_bands = 1;
+      hm->hatch_map.path = hatch;
+      hm->hatch_scale = 8.0f;
+      plane->add<MeshRenderer>()->materials = {hm};
+      plane->set_local_position({0.0f, 1.0f, 0.0f});
+      plane->set_local_rotation(Quat::euler({-90, 0, 0}));  // (upright, facing the camera; lit from behind the camera: in the shadow tone where the hatching shows)
+      ed.command("set Directional Light.Transform.rotation 20 160 0");
+      r34_steps(ed, 2);
+      double e_far, e_ref;
+      far_vs_near("the hatched plane", ed, plane, 2.0f, 20.0f, device, e_far, e_ref);
+      CHECK(e_far <= 2.0 * e_ref + 2.0);
+      /* The face shadow map at softness 0. */
+      GameObject *head = ed.scene().create("Head");
+      head->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 48, 24);
+      MaterialPtr fm = make_material("face", Vec3(0.9f, 0.8f, 0.7f));
+      fm->shading_model = 1;
+      fm->face_shadow_map.path = face;
+      fm->face_shadow_softness = 0.0f;
+      head->add<MeshRenderer>()->materials = {fm};
+      head->set_local_position({0.0f, 1.0f, 0.0f});
+      plane->set_local_position({100.0f, 1.0f, 0.0f});  // (out of the way)
+      far_vs_near("the face-shadow sphere", ed, head, 2.0f, 20.0f, device, e_far, e_ref);
+      CHECK(e_far <= 2.0 * e_ref + 2.0);
+      /* Box mapping. */
+      GameObject *box = ed.scene().create("Boxed");
+      box->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+      MaterialPtr bm = make_material("boxed", Vec3(1.0f));
+      bm->base_map.path = check;
+      bm->mapping = (int)MaterialMapping::Box;
+      bm->tiling = {4, 4, 4};
+      box->add<MeshRenderer>()->materials = {bm};
+      box->set_local_position({0.0f, 1.0f, 0.0f});
+      box->set_local_rotation(Quat::euler({20, 30, 0}));
+      head->set_local_position({100.0f, 1.0f, 0.0f});
+      far_vs_near("the box-mapped cube", ed, box, 2.0f, 20.0f, device, e_far, e_ref);
+      CHECK(e_far <= 2.0 * e_ref + 2.0);
+      ed.viewport_device_for_test(1);
+    }
+  });
+
+  test("toon at a distance: a two-tone sphere seen from 20 m carries no more high-frequency energy inside it than its 2 m picture downsampled (its cel edge is one antialiased pixel, not a sparkle), on the CPU and on the card", [&] {
+    for (int device : {1, 2}) {
+      if (device == 2 && !gpu::available()) continue;
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Main Camera");
+      ed.command("select Cube");
+      ed.command("delete");
+      GameObject *ball = ed.scene().create("Cel");
+      ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 64, 32);
+      MaterialPtr cm = make_material("cel", Vec3(0.9f, 0.3f, 0.3f));
+      cm->shading_model = 1;
+      cm->toon_bands = 1;
+      cm->toon_softness = 0.0f;
+      ball->add<MeshRenderer>()->materials = {cm};
+      ball->set_local_position({0.0f, 1.0f, 0.0f});
+      ed.command("set Directional Light.Transform.rotation 30 -60 0");
+      r34_steps(ed, 2);
+      double e_far, e_ref;
+      far_vs_near("the two-tone sphere", ed, ball, 2.0f, 20.0f, device, e_far, e_ref);
+      CHECK(e_far <= 2.0 * e_ref + 2.0);
+      /* The edge is there: with softness 0 the sphere at 2 m is the two tones (a few edge pixels aside), and at 20 m
+       * the band edge is one antialiased pixel - mid tones between the two, which a hard edge never gives. */
+      const R184 near = r184_view(ed, ball, 2.0f, device), far = r184_view(ed, ball, 20.0f, device);
+      auto tones = [&](const R184 &r, size_t &lit_n, size_t &shade_n, size_t &mid_n) {
+        std::vector<float> l;
+        for (size_t i = 0; i < r.px.size(); i++)
+          if (r.mask[i]) l.push_back(luma(r.px[i]));
+        std::sort(l.begin(), l.end());
+        const float lo = l[l.size() / 10], hi = l[l.size() * 9 / 10];  // (the shade tone and the lit tone: the deciles)
+        const float margin = (hi - lo) * 0.25f;  // (a tone is the lit or the shade one within a quarter of their contrast; the middle half is "between")
+        lit_n = shade_n = mid_n = 0;
+        for (float v : l) {
+          if (v >= hi - margin) lit_n++;
+          else if (v <= lo + margin) shade_n++;
+          else mid_n++;
+        }
+        return hi - lo;
+      };
+      size_t ln2, sn2, mn2, lnf, snf, mnf;
+      const float contrast2 = tones(near, ln2, sn2, mn2), contrastf = tones(far, lnf, snf, mnf);
+      std::printf("    %s: at 2 m the tones %.0f apart, %zu lit / %zu shade / %zu between of %zu; at 20 m %.0f apart, %zu / %zu / %zu of %zu\n", device == 2 ? "the card" : "the CPU",
+                  contrast2, ln2, sn2, mn2, ln2 + sn2 + mn2, contrastf, lnf, snf, mnf, lnf + snf + mnf);
+      CHECK(contrast2 > 15.0f && mnf > 0 && mnf * 20 >= lnf + snf);  // (a clear step between the tones; at 20 m a one-pixel edge over a 27-pixel sphere is a twentieth of it or more)
+      ed.viewport_device_for_test(1);
+    }
+  });
+
+  test("outlines at a distance: an outlined sphere at 60 m keeps a one-pixel silhouette (Min Pixels 1 for a new outline), and a scene saved before the field loads with 0", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    ed.command("select Cube");
+      ed.command("delete");
+    GameObject *ball = ed.scene().create("Lined");
+    ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 48, 24);
+    ball->add<MeshRenderer>()->materials = {make_material("plain", Vec3(0.8f))};
+    Outline *ol = ball->add<Outline>();
+    CHECK(ol->min_pixels == 1.0f);
+    ol->thickness = 0.02f;
+    ol->color = {0.0f, 0.0f, 0.0f};
+    ball->set_local_position({0.0f, 1.0f, 0.0f});
+    r34_steps(ed, 2);
+    auto dark = [&](const R184 &r) {  // (the object's pixels that are the outline's black)
+      size_t n = 0;
+      for (size_t i = 0; i < r.px.size(); i++) n += r.mask[i] && luma(r.px[i]) < 40.0f ? 1 : 0;
+      return n;
+    };
+    const R184 near = r184_view(ed, ball, 2.0f, 1), far = r184_view(ed, ball, 60.0f, 1);
+    const size_t dn = dark(near), df = dark(far);
+    size_t far_px = 0;
+    for (uint8_t m : far.mask) far_px += m;
+    std::printf("    outline pixels: %zu at 2 m; at 60 m %zu of the object's %zu pixels (a nine-pixel sphere's one-pixel ring is about 28)\n", dn, df, far_px);
+    CHECK(dn > 200 && df > 15 && df * 3 >= far_px);
+    /* A scene text without the field: the outline loads with Min Pixels 0 (as it drew when it was saved). */
+    const std::string text = "blendity_scene 1\nobject 7 0 \"Old\" 1\ntransform 0 0 0 0 0 0 1 1 1 1 0 0 0\ncomponent Outline 1\nThickness 0.02\nend\nend\n";
+    Scene old;
+    std::string err;
+    const bool loaded = load_scene_text(text, old, err);
+    const GameObject *g = loaded ? old.find_by_name("Old") : nullptr;
+    const Outline *o = g ? g->get<Outline>() : nullptr;
+    std::printf("    an old scene's outline: %s, Min Pixels %g\n", o ? "loaded" : err.c_str(), o ? o->min_pixels : -1.0f);
+    CHECK(o && o->min_pixels == 0.0f);
+    /* And a saved one keeps its own: Min Pixels 3 round-trips. */
+    ol->min_pixels = 3.0f;
+    Scene back;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const GameObject *gb = back.find_by_name("Lined");
+    const Outline *ob = gb ? gb->get<Outline>() : nullptr;
+    std::printf("    a saved outline's Min Pixels after a round trip: %g\n", ob ? ob->min_pixels : -1.0f);
+    CHECK(ob && ob->min_pixels == 3.0f);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10118,4 +10359,5 @@ void run_render_tests() {
   tests_round165();
   tests_round167();
   tests_round168();
+  tests_round184();
 }

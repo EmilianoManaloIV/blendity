@@ -100,3 +100,15 @@ soft, and one key light.
     Edit Mode drags and skinned frames stay cheap. The GPU kernel's `Material` struct did not grow: the new map ids
     and flags are packed into `tex3` bits and `color2.w`, because every by-value copy of the struct costs SPIR-V ids
     and the kernel sits at the bound.
+
+## Amendment (task 0164): the maps filtered by their footprint; cel edges one pixel wide
+- **Every painted map reads at the pixel's lod** in the rasterizers: the hatching at the UV derivatives scaled by
+  its Hatch Scale, the face shadow map at its own lod, the toon ramp over the pixel's span of lit, a Generated
+  mapping from the pixel's footprint over the bounds, a Box projection from the footprint times the tiling. The
+  path tracers keep level 0: their samples average the pixel, and the GPU kernel's `Material` must not grow.
+- **A band's edge is never narrower than a pixel.** The deferred pass hands `shade_toon` the shading normal's
+  change to the next pixel (`SurfacePoint::normal_dx / dy`; the GPU raster reads its neighbours' G-buffer normals),
+  and the edge's softness is at least half the pixel's span of lit along the light. Up close, where the painted
+  softness already covers that, nothing changes; far away the edge is one antialiased pixel instead of a sparkle.
+- **Procedurals fade to their mean under a pixel** (Checker, Noise), and **a new outline keeps a pixel** (Min
+  Pixels 1 by default; an outline saved before the field keeps 0), with a hysteresis on the shell's 2 % steps.

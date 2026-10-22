@@ -47,6 +47,20 @@ static inline float axis_step(float e0, float e1, float x) {  // smoothstep that
 
 static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp);
 
+/* Task 0164: a procedural's cells across one pixel - from the UV derivatives for a UV mapping, else the pixel's
+ * footprint in the pattern's units (over the bounds for a Generated mapping, in metres for an axis part). */
+static float procedural_cells(const Material &m, const SurfacePoint &sp, Vec2 ddx, Vec2 ddy, bool force_box) {
+  const float scale = std::fabs(m.procedural_scale);
+  if (m.mapping == (int)MaterialMapping::UV && !force_box) return std::max({std::fabs(ddx.x), std::fabs(ddx.y), std::fabs(ddy.x), std::fabs(ddy.y)}) * scale;
+  if (!(sp.footprint > 0.0f)) return 0.0f;
+  float size = 1.0f;  // the object-space size the pattern's unit spans (Generated: the bounds)
+  if (!force_box && sp.local_bounds.valid()) {
+    const Vec3 ext = sp.local_bounds.max - sp.local_bounds.min;
+    size = std::max(1e-6f, std::min({std::max(ext.x, 1e-6f), std::max(ext.y, 1e-6f), std::max(ext.z, 1e-6f)}));
+  }
+  return sp.footprint / size * scale;
+}
+
 bool material_uniform(const Material &m, const Material::Resolved &tx) {
   if (m.axis_mode != 0 || m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) return false;
   /* The painted toon maps and the hair's strands vary over the surface too (task 0148); the ramp alone doesn't. */
@@ -61,9 +75,11 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
   return s;
 }
 
-float toon_level(const Material &m, float lit) {
+float toon_level(const Material &m, float lit, float edge) {
   const int bands = std::max(1, std::min(8, m.toon_bands));
-  const float th = clampf(m.toon_threshold, 0.0f, 0.95f), w = clampf(m.toon_softness, 0.0f, 0.5f);
+  /* Task 0164: the softness never narrower than what one pixel spans in `lit`, so a far band edge is one antialiased
+   * pixel rather than the on-off of whichever side the pixel centre fell. */
+  const float th = clampf(m.toon_threshold, 0.0f, 0.95f), w = std::max(clampf(m.toon_softness, 0.0f, 0.5f), clampf(edge, 0.0f, 0.5f));
   if (!finite_bits(lit)) lit = 0.0f;
   float q = 0.0f;
   for (int k = 0; k < bands; k++) {
@@ -81,14 +97,20 @@ Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit) {
   if (!finite_bits(lit)) lit = 0.0f;
   float q;
   Vec3 tone;
+  /* Task 0164: how far `lit` moves across one pixel (the normal's change along the light): the half-width a band
+   * edge or a ramp step is softened by, so cel edges stay one pixel wide at any distance. */
+  const float edge = 0.5f * (std::fabs(dot(s.toon_n_dx, L)) + std::fabs(dot(s.toon_n_dy, L)));
   if (s.toon_ramp) {
-    /* The ramp: its colour at how lit (U; V the same, up: a vertical ramp with its shadow at the bottom reads too). */
-    const Vec4 r = s.toon_ramp->sample({lit, lit}, 0.0f, TexWrap::Extend, TexFilter::Linear);
+    /* The ramp: its colour at how lit (U; V the same, up: a vertical ramp with its shadow at the bottom reads too);
+     * at a distance the ramp is read over the pixel's span of `lit` (its lod from that span: a hard ramp step
+     * becomes one pixel's blend). */
+    const float lod = edge > 0.0f ? texture_lod(*s.toon_ramp, {edge * 2.0f, 0.0f}, {0.0f, edge * 2.0f}) : 0.0f;
+    const Vec4 r = s.toon_ramp->sample({lit, lit}, lod, TexWrap::Extend, TexFilter::Trilinear);
     tone = r.xyz();
     q = clampf(0.2126f * tone.x + 0.7152f * tone.y + 0.0722f * tone.z, 0.0f, 1.0f);
   }
   else {
-    q = toon_level(m, lit);
+    q = toon_level(m, lit, edge);
     tone = lerp(m.toon_shadow, Vec3(1.0f), q);
   }
   /* The shade map is the shadow side's own picture, tinted by the shadow colour (MToon's shade colour x shade texture;
@@ -291,7 +313,15 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
   }
   if (m.mapping == (int)MaterialMapping::Generated && !force_box) {
     uv = {gen.x * m.tiling.x + m.offset.x, gen.y * m.tiling.y + m.offset.y};
+    /* Task 0164: the pixel's footprint in the bounds' units gives the derivatives (level 0 at any distance made a far
+     * Generated map sparkle); unknown footprint: level 0, as before. */
     ddx = ddy = Vec2(0, 0);
+    if (sp.footprint > 0.0f && sp.local_bounds.valid()) {
+      const Vec3 ext = sp.local_bounds.max - sp.local_bounds.min;
+      const float du = sp.footprint / std::max(ext.x, 1e-6f) * std::fabs(m.tiling.x), dv = sp.footprint / std::max(ext.y, 1e-6f) * std::fabs(m.tiling.y);
+      ddx = {du, 0.0f};
+      ddy = {0.0f, dv};
+    }
   }
   const bool box = force_box || m.mapping == (int)MaterialMapping::Box;
   Vec3 bw;  // triplanar weights
@@ -303,15 +333,21 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     float sum = std::max(an.x + an.y + an.z, 1e-6f);
     bw = an / sum;
   }
+  /* Task 0164: a Box projection's lod from the footprint in the projection's units (one pixel spans footprint x tiling
+   * of the texture's space on every face). */
+  auto box_lod = [&](const TexturePtr &t, float tile_a, float tile_b) {
+    if (!(sp.footprint > 0.0f)) return 0.0f;
+    return texture_lod(*t, {sp.footprint * std::fabs(tile_a), 0.0f}, {0.0f, sp.footprint * std::fabs(tile_b)});
+  };
   auto sample_image = [&](const TexturePtr &t) -> Vec4 {
     if (!box) {
       float lod = (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) ? 0.0f : texture_lod(*t, ddx, ddy);
       return tex_sample(t, uv, lod, m, sp.tex);
     }
     Vec4 r(0, 0, 0, 0);
-    if (bw.x > 0.001f) r = r + tex_sample(t, {bp.z, bp.y}, 0, m, sp.tex) * bw.x;
-    if (bw.y > 0.001f) r = r + tex_sample(t, {bp.x, bp.z}, 0, m, sp.tex) * bw.y;
-    if (bw.z > 0.001f) r = r + tex_sample(t, {bp.x, bp.y}, 0, m, sp.tex) * bw.z;
+    if (bw.x > 0.001f) r = r + tex_sample(t, {bp.z, bp.y}, box_lod(t, m.tiling.z, m.tiling.y), m, sp.tex) * bw.x;
+    if (bw.y > 0.001f) r = r + tex_sample(t, {bp.x, bp.z}, box_lod(t, m.tiling.x, m.tiling.z), m, sp.tex) * bw.y;
+    if (bw.z > 0.001f) r = r + tex_sample(t, {bp.x, bp.y}, box_lod(t, m.tiling.x, m.tiling.y), m, sp.tex) * bw.z;
     return r;
   };
   /* Live procedural textures (task 0031): the stack evaluated at this point where the image would be
@@ -364,6 +400,10 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     /* (An axis material's part: the projected position, like its maps.) */
     Vec3 pp = (force_box ? sp.local_position : m.mapping == (int)MaterialMapping::UV ? Vec3(uv.x, uv.y, 0.0f) : gen) * m.procedural_scale;
     float t = m.procedural == (int)Procedural::Checker ? checker(pp) : saturate(0.5f + 0.5f * fbm_noise(pp, 5, 0.5f) * 1.4f);
+    /* Task 0164: once a cell is under a pixel the pattern fades to its mean (a filtered checker), as Blender's Checker
+     * does under a pixel. */
+    const float cells = procedural_cells(m, sp, ddx, ddy, force_box);
+    if (finite_bits(cells) && cells > 0.5f) t += (0.5f - t) * clampf((cells - 0.5f) * 2.0f, 0.0f, 1.0f);
     s.albedo = lerp(m.procedural_color2, m.base_color, t);
   }
   else if (tx.base) {
@@ -389,8 +429,10 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     /* The 2D look (task 0149): the face shadow map at the UV and at its mirror (the light's side picks one), the inner
      * lines into the colour (or the shadow tones), the hatching tiled over the UVs into the shadow tones. */
     if (tx.face_shadow) {
-      s.face_sdf = tex_sample(tx.face_shadow, uv, 0.0f, m, sp.tex).x;
-      s.face_sdf_mirror = tex_sample(tx.face_shadow, {1.0f - uv.x, uv.y}, 0.0f, m, sp.tex).x;
+      /* Task 0164: at the pixel's lod (it was level 0 at any distance: a far face map's threshold sparkled). */
+      const float flod = (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) ? 0.0f : texture_lod(*tx.face_shadow, ddx, ddy);
+      s.face_sdf = tex_sample(tx.face_shadow, uv, flod, m, sp.tex).x;
+      s.face_sdf_mirror = tex_sample(tx.face_shadow, {1.0f - uv.x, uv.y}, flod, m, sp.tex).x;
       if (!finite_bits(s.face_sdf)) s.face_sdf = 0.0f;
       if (!finite_bits(s.face_sdf_mirror)) s.face_sdf_mirror = 0.0f;
     }
@@ -401,8 +443,13 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     }
     if (tx.hatch) {
       const float sc = finite_bits(m.hatch_scale) && m.hatch_scale > 0.0f ? m.hatch_scale : 1.0f;
-      s.toon_shadow_mul = s.toon_shadow_mul * tx.hatch->sample({uv.x * sc, uv.y * sc}, 0.0f, TexWrap::Repeat, TexFilter::Linear).x;
+      /* Task 0164: the hatching's lod from the UV derivatives scaled as its UVs are (level 0 at any distance made a
+       * far hatched surface a moire). */
+      const float hlod = (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) ? 0.0f : texture_lod(*tx.hatch, ddx * sc, ddy * sc);
+      s.toon_shadow_mul = s.toon_shadow_mul * tx.hatch->sample({uv.x * sc, uv.y * sc}, hlod, TexWrap::Repeat, TexFilter::Trilinear).x;
     }
+    s.toon_n_dx = sp.normal_dx;
+    s.toon_n_dy = sp.normal_dy;
     /* The strands run along V (hair cards and unwraps are laid out that way): the bitangent. */
     s.toon_strand = cross(sp.normal, sp.tangent.xyz()) * sp.tangent.w;
     s.toon_has_tangent = sp.has_tangent;

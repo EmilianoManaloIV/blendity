@@ -49,6 +49,9 @@ struct SurfacePoint {
    * always live). */
   bool live_textures = false;
   float footprint = 0.0f, world_footprint = 0.0f;  // the same in world metres (an axis material's World mode)
+  /* Task 0164: how the shading normal changes to the next pixel right and below (the deferred pass's forward
+   * differences; zero where unknown), so a toon band's edge can be one pixel wide wherever it falls. */
+  Vec3 normal_dx, normal_dy;
   /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
   bool has_lightmap = false;
   Vec3 lightmap;
@@ -82,6 +85,7 @@ struct SurfaceSample {
   /* The 2D look (task 0149): what multiplies the shadow tones (the inner lines when only in shadow, the hatching), and
    * the face shadow map at the point and at its mirror (-1: no map). */
   Vec3 toon_shadow_mul{1.0f, 1.0f, 1.0f};
+  Vec3 toon_n_dx, toon_n_dy;  // task 0164: the normal's change across the pixel (sp.normal_dx / dy), for the band edges
   float face_sdf = -1.0f, face_sdf_mirror = -1.0f;
 };
 
@@ -97,7 +101,7 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
 
 /* --- Toon (ADR 0020) --- */
 /* How lit a toon surface is, 0 (the shadow tone) to 1, in `toon_bands` steps: lit = N.L x visibility. */
-float toon_level(const Material &m, float lit);
+float toon_level(const Material &m, float lit, float edge = 0.0f);  // edge: a screen-space half-width added to the softness (task 0164)
 /* A toon surface's light toward the eye from one light, per unit of the light's colour x intensity (Unity's
  * convention: intensity 1 lights a white surface white): the albedo from the shadow colour (or the shade map) to
  * full by the tone - the bands, or the ramp - after the light wrap and the painted bias, plus the highlight spot

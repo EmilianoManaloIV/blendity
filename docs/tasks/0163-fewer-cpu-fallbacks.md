@@ -1,6 +1,6 @@
 # 0163: fewer CPU fallbacks for the GPU views
 
-- **Status:** in progress (round 183)
+- **Status:** done (round 183)
 - **Requirements:** R-05 (the views on the GPU), Q-01 (responsiveness)
 - **Decisions:** none (ADR 0036's rule: the CPU renderer is the reference, the card matches it)
 - **Model:** main session

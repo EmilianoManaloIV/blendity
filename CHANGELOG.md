@@ -2,6 +2,53 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 184): no artifacts at distance for Toon materials (task 0164, ADR 0048 amended)
+
+**Asked:** "artifacts when backing away from a Toon material with painted maps".
+
+**Fixed**
+- Every toon map was read at level 0 whatever the distance: the hatching now reads at the lod of the UV
+  derivatives scaled by its Hatch Scale, the face shadow map at its own lod (its hard threshold at softness 0 no
+  longer sparkles far away), the toon ramp over the pixel's span of lit; a Generated mapping takes its derivatives
+  from the pixel's footprint over the bounds and a Box projection its lod from the footprint times the tiling (both
+  were level 0); the built-in Checker and Noise fade to their mean once a cell is under a pixel (the derivatives,
+  or the footprint, say when), as Blender's Checker does.
+- A cel edge fell on whichever side the pixel centre landed, so a far band edge sparkled: the deferred pass now
+  hands the shading normal's change to the next pixel right and below (`SurfacePoint::normal_dx / dy`), and
+  `shade_toon` softens each band edge by half the pixel's span of lit along the light (the GPU raster takes the
+  same from the neighbouring G-buffer normals), so the edge is one antialiased pixel at any distance and the 2 m
+  look is unchanged where the softness already covers it.
+- An outline shrank below a pixel far away and the silhouette went dotted: a new Outline has Min Pixels 1 (a loaded
+  one saved before the field keeps 0, as it drew), and the shell's 2 % steps get a hysteresis of a third of a step
+  so a dolly on a boundary doesn't pop.
+- Reversed-Z measured and declined for now: the D32 buffer resolves about 2 mm at 100 m with near 0.3 / far 1000,
+  well under a shell's offset; the task doc records the calculation.
+- The path tracers keep level 0: their samples average the pixel, and the GPU kernel's Material must not grow.
+
+**Measured**
+- High-frequency energy inside the object (the mean absolute Laplacian over its interior pixels) at 20 m against
+  its 2 m picture downsampled ten times: the hatched plane 0.00 against 4.72, the box-mapped cube 12.3 against
+  17.7, the face-shadow sphere at softness 0 24.4 against 13.2 (1.8 times: inside the factor of 2, the sphere's
+  shading itself is most of it at 300 pixels), the two-tone sphere 2.8 against 4.3 on the CPU and 2.8 against 3.9 on
+  the card. The hatched plane and the face-shadow sphere draw on the CPU in the card's views too (ADR 0048), so
+  their numbers are the same on both.
+- The two-tone sphere's band edge: at 2 m 848 of 48,714 pixels between the two tones (the edge's own pixels), at 20 m
+  139 of 295 - the edge one antialiased pixel wide, where a hard edge gives none.
+- The outlined sphere at 60 m, nine pixels wide: 27 outline pixels around its 48 (2,284 at 2 m); a saved Outline
+  keeps its Min Pixels through a round trip (3), a scene saved before the field loads it as 0.
+
+**Checked**
+- A hatched plane, a face-shadow sphere at softness 0 and a box-mapped cube at 20 m carry no more high-frequency
+  energy inside them than their 2 m pictures downsampled ten times (the box-mapped cube and the sphere on the card
+  as well; a hatched or face-shadowed toon material still draws on the CPU, ADR 0048), and so does a two-tone
+  sphere, whose far band edge shows the mid tones of one antialiased pixel; an outlined sphere at 60 m - nine
+  pixels wide - keeps a one-pixel ring of 27 pixels, an old scene's outline loads with Min Pixels 0 and a saved one
+  keeps its own (tests/test_render.cpp); the anime picture tests at 2 m unchanged.
+- Unit checks (round 184): Windows 11,227, 0 failed (920 tests); render-cache verify mode 11,228, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,895, 0 failed. Sanitizer build: 10,775, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 183): fewer CPU fallbacks for the GPU views - area lights and cutouts on the card (task 0163)
 
 **Asked:** the roadmap's "fewer CPU fallbacks for the GPU views": a view with an area light or a cutout material

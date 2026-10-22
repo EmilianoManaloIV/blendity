@@ -1281,7 +1281,7 @@ void Outline::reflect(Reflector &r) {
          "whatever the zoom, in the views and raster renders.");
 }
 
-float Outline::outline_distance_scale(float distance, float px_per_m, float world_scale) const {
+float Outline::outline_distance_scale(float distance, float px_per_m, float world_scale, int view) const {
   if (!finite_bits(distance) || !(distance > 1e-4f) || !finite_bits(px_per_m) || !(px_per_m > 0.0f)) return 1.0f;
   float scale = 1.0f;
   const float fade = finite_bits(distance_fade) ? std::max(0.0f, distance_fade) : 0.0f;
@@ -1297,8 +1297,15 @@ float Outline::outline_distance_scale(float distance, float px_per_m, float worl
   if (hi > 0.0f) want = std::min(want, hi);  // (the maximum wins when the two cross)
   if (want != px && px > 0.0f) scale *= want / px;
   if (!finite_bits(scale) || !(scale > 0.0f)) return 1.0f;
-  /* In 2 % steps, so an orbiting camera doesn't rebuild the shell every frame (a rebuild frees the last one). */
-  return std::exp(std::round(std::log(scale) / std::log(1.02f)) * std::log(1.02f));
+  /* In 2 % steps, so an orbiting camera doesn't rebuild the shell every frame (a rebuild frees the last one); with a
+   * hysteresis (task 0164): the step only changes once the scale has moved a third of a step past the last one, so a
+   * dolly that hovers on a boundary doesn't pop between two shells. */
+  const float step = std::log(1.02f), raw = std::log(scale) / step;
+  float idx = std::round(raw);
+  int &last = last_step_[view == 0 ? 0 : 1];
+  if (last != kNoStep && std::fabs(raw - (float)last) < 0.5f + 1.0f / 3.0f) idx = (float)last;
+  last = (int)idx;
+  return std::exp(idx * step);
 }
 
 const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float thickness_scale) const {

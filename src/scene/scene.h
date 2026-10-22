@@ -559,7 +559,9 @@ struct Outline : ComponentBase<Outline> {
    * line's width on screen kept between min and max pixels (0: no limit) - by the object's distance, in the views. */
   std::string thickness_group;
   float distance_fade = 0.0f;
-  float min_pixels = 0.0f, max_pixels = 0.0f;
+  static constexpr int kNoStep = -1000000;
+  mutable int last_step_[2] = {kNoStep, kNoStep};  // (task 0164: the last 2 % step each view chose - the Scene view's, the Game view's and Camera Preview's - for the hysteresis)
+  float min_pixels = 1.0f, max_pixels = 0.0f;  // (task 0164: a new outline keeps a pixel; a loaded one without the field gets 0, as it was)
   void reflect(Reflector &r) override;
   RenderRole render_role() const override { return RenderRole::Outline; }
   /* The shell of this (evaluated) mesh for an object of this world scale, cached; null when nothing to draw. slot:
@@ -572,7 +574,7 @@ struct Outline : ComponentBase<Outline> {
    * one metre (half the view's height times the projection's focal term; an orthographic view passes distance 1):
    * the fade, then the pixel limits, in 2 % steps. `world_scale`: the object's, for a thickness in its own units.
    * 1 with no eye (exports, bakes). */
-  float outline_distance_scale(float distance, float px_per_m, float world_scale = 1.0f) const;
+  float outline_distance_scale(float distance, float px_per_m, float world_scale = 1.0f, int view = 0) const;  // view: 0 the Scene view, 1 the Game view / Camera Preview (task 0164: its own hysteresis)
   /* Its one material: unlit, the colour, casts no shadow, an outline hull. */
   const std::vector<MaterialPtr> &materials() const;
 

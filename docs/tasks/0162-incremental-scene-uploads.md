@@ -1,6 +1,6 @@
 # 0162: incremental scene uploads, one submission per upload
 
-- **Status:** in progress (round 182)
+- **Status:** done (round 182)
 - **Requirements:** R-03 (rendering), Q-01 (responsiveness)
 - **Decisions:** none (ADR 0052's device model; the sections are a cache keyed by hashes)
 - **Model:** main session

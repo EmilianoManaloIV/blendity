@@ -1465,6 +1465,7 @@ void Renderer3D::shade_deferred() {
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
+    bool footprint = false;  // (task 0164) the footprint is read: a live texture, a Box / Generated mapping, a procedural
     /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
      * with its own normal - what evaluate_material would give it - and skips the texture-space work nothing reads. */
     bool uniform = false;
@@ -1539,6 +1540,8 @@ void Renderer3D::shade_deferred() {
     for (int a = 0; a < 4; a++)
       if (const Material::Resolved *at = T.tex->axis_tx[a])
         for (int k = 0; k < 5; k++) T.live = T.live || at->live[k] != nullptr;
+    /* Task 0164: a Box or Generated mapping and the procedurals read the pixel's footprint too (their lod, the fade). */
+    T.footprint = T.live || T.mat->mapping != (int)MaterialMapping::UV || T.mat->procedural != 0 || T.mat->axis_mode != 0;
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
@@ -1735,8 +1738,8 @@ void Renderer3D::shade_deferred() {
         if (opt_.tex.active()) sp.tex = &opt_.tex;
         /* Live procedural textures (task 0031): the object-space size of this pixel, so a texture whose texel
          * is larger is evaluated here instead of magnified. Not for the reflective shadow map. */
-        if (!rsm_out_ && T.live && !T.uniform) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
-          sp.live_textures = true;
+        if (!rsm_out_ && T.footprint && !T.uniform) {  // (only a material that reads it: a pixel spared four lengths and two divisions)
+          sp.live_textures = T.live;
           auto lp = [&](Vec3 b) { return T.p[0] * b.x + T.p[1] * b.y + T.p[2] * b.z; };
           auto wp = [&](Vec3 b) { return T.wp[0] * b.x + T.wp[1] * b.y + T.wp[2] * b.z; };
           const Vec3 bx = ratio(N + T.na, S + T.sa), by = ratio(N + T.nb, S + T.sb);
@@ -1747,6 +1750,12 @@ void Renderer3D::shade_deferred() {
         if (T.has_lm) {
           sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
           sp.has_lightmap = true;
+        }
+        if (T.mat->shading_model == 1) {  // (task 0164: the normal at the next pixel right and below, for the band edges; painted toon materials are not uniform, so the material decides)
+          auto wn_at = [&](Vec3 b) { return normalize(T.wn[0] * b.x + T.wn[1] * b.y + T.wn[2] * b.z); };
+          sp.normal_dx = wn_at(ratio(N + T.na, S + T.sa)) - sp.normal;
+          sp.normal_dy = wn_at(ratio(N + T.nb, S + T.sb)) - sp.normal;
+          if (!finite_bits(dot(sp.normal_dx, sp.normal_dx)) || !finite_bits(dot(sp.normal_dy, sp.normal_dy))) sp.normal_dx = sp.normal_dy = Vec3(0.0f);
         }
         if (T.has_tangent && !T.uniform) {  // (a normal map's: a uniform material has none)
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
@@ -1811,7 +1820,11 @@ void Renderer3D::shade_deferred() {
           }
         }
         SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
-        if (T.uniform) s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
+        if (T.uniform) {
+          s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
+          s.toon_n_dx = sp.normal_dx;  // (task 0164: the pixel's own, which the shared sample can't hold)
+          s.toon_n_dy = sp.normal_dy;
+        }
         if (rsm_out_) {
           /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
           const size_t k = (size_t)y * W + x;

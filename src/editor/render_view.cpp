@@ -64,7 +64,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const Outline &ol = *static_cast<const Outline *>(oc);
     const float scale = world_scale_of(it.model);
     const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
-    const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale) : 1.0f;
+    const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale, game ? 1 : 0) : 1.0f;
     DrawItem o;
     if (outline_draw_item(g, *m, it, (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0), tscale, o)) items.push_back(o);
   });
