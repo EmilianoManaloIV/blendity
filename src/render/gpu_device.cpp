@@ -479,27 +479,131 @@ class VulkanRenderer final : public Renderer {
     return (double)busy * ts_period_ns_ * 1e-6;
   }
 
+  /* The whole scene: every buffer's copy recorded from one staging arena and submitted once (task 0162; it was a
+   * submission a buffer), then the acceleration structures (the BLASes in one submission, the TLAS in one). */
   bool upload(const Scene &s, std::string *err) override {
     wait_all(nullptr);
     f_.vkDeviceWaitIdle(dev_);
     for (int i = 3; i < 16; i++) free_buffer(bufs_[i]);  // 0-2: params and pixel buffers
     free_accel();
     scene_params_ = s.params;
-    auto up = [&](int binding, const void *data, size_t bytes, VkBufferUsageFlags extra = 0) {
-      return make_device_buffer(bufs_[binding], data, bytes, extra, err);
-    };
     const VkBufferUsageFlags as_input = rt_ ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) : 0;
-    bool ok = up(3, s.nodes.data(), s.nodes.size() * sizeof(GNode)) && up(4, s.tris.data(), s.tris.size() * sizeof(GTri)) &&
-              up(5, s.instances.data(), s.instances.size() * sizeof(GInstance)) && up(6, s.verts.data(), s.verts.size() * sizeof(GVertex), as_input) &&
-              up(7, s.idx.data(), s.idx.size() * 4) && up(8, s.materials.data(), s.materials.size() * sizeof(GMaterial)) &&
-              up(9, s.lights.data(), s.lights.size() * sizeof(GLight)) && up(10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight)) &&
-              up(11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4) && up(12, s.tex8.data(), s.tex8.size() * 4) &&
-              up(13, s.texf.data(), s.texf.size() * 4) && up(14, s.textures.data(), s.textures.size() * sizeof(GTexInfo)) &&
-              up(15, s.tlas_order.data(), s.tlas_order.size() * 4);
-    if (!ok) return false;
+    Batch b;
+    const bool ok = batch_put(b, 3, s.nodes.data(), s.nodes.size() * sizeof(GNode), 0, err) && batch_put(b, 4, s.tris.data(), s.tris.size() * sizeof(GTri), 0, err) &&
+                    batch_put(b, 5, s.instances.data(), s.instances.size() * sizeof(GInstance), 0, err) &&
+                    batch_put(b, 6, s.verts.data(), s.verts.size() * sizeof(GVertex), as_input, err) && batch_put(b, 7, s.idx.data(), s.idx.size() * 4, 0, err) &&
+                    batch_put(b, 8, s.materials.data(), s.materials.size() * sizeof(GMaterial), 0, err) &&
+                    batch_put(b, 9, s.lights.data(), s.lights.size() * sizeof(GLight), 0, err) &&
+                    batch_put(b, 10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight), 0, err) &&
+                    batch_put(b, 11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4, 0, err) && batch_put(b, 12, s.tex8.data(), s.tex8.size() * 4, 0, err) &&
+                    batch_put(b, 13, s.texf.data(), s.texf.size() * 4, 0, err) && batch_put(b, 14, s.textures.data(), s.textures.size() * sizeof(GTexInfo), 0, err) &&
+                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err);
+    if (!ok || !batch_send(b, err)) return false;
     if (rt_ && !build_accel(s, err)) return false;
-    set_params(s.params);
+    if (pixels_ == 0) set_params(s.params);  // (the first scene: the pixel buffers; later reset() sends the parameters at the frame's size)
+    else update_descriptors();
     return true;
+  }
+
+  /* Task 0162: the instances alone (a moved object): their buffer, the TLAS's nodes (the software BVH's prefix of
+   * the nodes buffer) and order; on ray tracing hardware the TLAS is rebuilt over the kept BLASes. */
+  bool update_instances(const Scene &s, std::string *err) override {
+    if (!bufs_[5].buf) return upload(s, err);
+    wait_all(nullptr);
+    f_.vkDeviceWaitIdle(dev_);
+    scene_params_ = s.params;
+    Batch b;
+    const size_t tlas_nodes = (size_t)std::max(0, s.params.counts[3]) * sizeof(GNode);
+    const bool ok = batch_put(b, 5, s.instances.data(), s.instances.size() * sizeof(GInstance), 0, err) &&
+                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err) &&
+                    (tlas_nodes == 0 || batch_patch(b, 3, s.nodes.data(), tlas_nodes, err));
+    if (!ok || !batch_send(b, err)) return false;
+    if (rt_ && !build_tlas(s, err)) return false;
+    update_descriptors();  // (the new buffers; reset() sends the parameters and clears)
+    return true;
+  }
+  bool update_materials(const Scene &s, std::string *err) override {
+    if (!bufs_[8].buf) return upload(s, err);
+    wait_all(nullptr);
+    f_.vkDeviceWaitIdle(dev_);
+    scene_params_ = s.params;
+    Batch b;
+    if (!batch_put(b, 8, s.materials.data(), s.materials.size() * sizeof(GMaterial), 0, err) || !batch_send(b, err)) return false;
+    update_descriptors();
+    return true;
+  }
+  bool update_lights(const Scene &s, std::string *err) override {
+    if (!bufs_[9].buf) return upload(s, err);
+    wait_all(nullptr);
+    f_.vkDeviceWaitIdle(dev_);
+    scene_params_ = s.params;
+    Batch b;
+    const bool ok = batch_put(b, 9, s.lights.data(), s.lights.size() * sizeof(GLight), 0, err) &&
+                    batch_put(b, 10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight), 0, err) &&
+                    batch_put(b, 11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4, 0, err);
+    if (!ok || !batch_send(b, err)) return false;
+    update_descriptors();
+    return true;
+  }
+  uint64_t submits() const override { return submits_; }
+
+  /* A batch of uploads: one staging arena, every copy recorded, one submission. */
+  struct Batch {
+    std::vector<uint8_t> staging;  // the sections one after another
+    struct Copy { int binding; size_t src, bytes; };
+    std::vector<Copy> copies;
+  };
+  /* A new device buffer for the binding, its data queued in the batch (an empty section gets a 16-byte buffer, zeroed). */
+  bool batch_put(Batch &b, int binding, const void *data, size_t bytes, VkBufferUsageFlags extra, std::string *err) {
+    free_buffer(bufs_[binding]);
+    const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | extra;
+    if (!make_buffer(bufs_[binding], bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      if (err) *err = strprintf("%s: out of GPU memory (%.1f MB buffer)", info_.name.c_str(), bytes / 1048576.0);
+      return false;
+    }
+    if (!data || !bytes) {
+      b.copies.push_back({binding, SIZE_MAX, 0});  // (zeroed when sent)
+      return true;
+    }
+    return batch_patch(b, binding, data, bytes, err);
+  }
+  /* The first `bytes` of an existing buffer replaced from the batch. */
+  bool batch_patch(Batch &b, int binding, const void *data, size_t bytes, std::string *err) {
+    if (bytes > bufs_[binding].size) {
+      if (err) *err = info_.name + ": a section grew past its buffer";
+      return false;
+    }
+    const size_t at = b.staging.size();
+    b.staging.insert(b.staging.end(), (const uint8_t *)data, (const uint8_t *)data + bytes);
+    b.copies.push_back({binding, at, bytes});
+    return true;
+  }
+  bool batch_send(Batch &b, std::string *err) {
+    Buffer staging;
+    if (!b.staging.empty()) {
+      if (!make_host_buffer(staging, b.staging.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        if (err) *err = strprintf("%s: out of memory for a %.1f MB upload", info_.name.c_str(), b.staging.size() / 1048576.0);
+        return false;
+      }
+      std::memcpy(staging.mapped, b.staging.data(), b.staging.size());
+    }
+    begin();
+    for (const Batch::Copy &c : b.copies) {
+      if (c.src == SIZE_MAX) {
+        f_.vkCmdFillBuffer(cmd_, bufs_[c.binding].buf, 0, VK_WHOLE_SIZE, 0);
+        continue;
+      }
+      VkBufferCopy copy{c.src, 0, c.bytes};
+      f_.vkCmdCopyBuffer(cmd_, staging.buf, bufs_[c.binding].buf, 1, &copy);
+    }
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};  // (the copies before the shaders and the acceleration-structure builds that read them)
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | (rt_ ? VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR : 0);
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (rt_ ? VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR : 0), 0, 1, &mb, 0, nullptr, 0, nullptr);
+    const bool ok = submit_wait();
+    free_buffer(staging);
+    if (!ok && err) *err = info_.name + ": the GPU stopped responding";
+    return ok;
   }
 
   void set_params(const GParams &p) override {
@@ -569,6 +673,7 @@ class VulkanRenderer final : public Renderer {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &fl.cmd;
     f_.vkResetFences(dev_, 1, &fl.fence);
+    submits_++;
     if (f_.vkQueueSubmit(queue_, 1, &si, fl.fence) != VK_SUCCESS) {
       if (err) *err = info_.name + ": the GPU refused the samples";
       return false;
@@ -727,8 +832,11 @@ class VulkanRenderer final : public Renderer {
   OpenStats stats_;
   uint32_t scratch_align_ = 256;
   std::vector<Buffer> as_buffers_;
+  std::vector<Buffer> tlas_buffers_;            // (task 0162: the TLAS's store and instance buffer, replaced with it)
+  std::vector<VkDeviceAddress> blas_addr_;      // (the kept BLASes' addresses, for a TLAS rebuilt alone)
   std::vector<VkAccelerationStructureKHR> blas_;
   VkAccelerationStructureKHR tlas_ = VK_NULL_HANDLE;
+  std::atomic<uint64_t> submits_{0};
 
   uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
@@ -808,6 +916,7 @@ class VulkanRenderer final : public Renderer {
     f_.vkBeginCommandBuffer(cmd_, &bi);
   }
   bool submit_wait() {
+    submits_++;
     f_.vkEndCommandBuffer(cmd_);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -922,8 +1031,6 @@ class VulkanRenderer final : public Renderer {
    * own space) and a top-level one over the objects, as Cycles builds them
    * for OptiX - the driver picks the layout its RT units traverse fastest. */
   bool build_accel(const Scene &s, std::string *err) {
-    const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     /* Tight 32-bit index triplets for the builder. */
     std::vector<uint32_t> tri_idx(s.idx.size() / 4 * 3);
     for (size_t t = 0; t < s.idx.size() / 4; t++)
@@ -934,8 +1041,23 @@ class VulkanRenderer final : public Renderer {
       return false;
     as_buffers_.push_back(ib);
     std::vector<VkDeviceAddress> blas_addr;
-    for (const GBlas &gb : s.blas) {
-      VkAccelerationStructureGeometryKHR geo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    if (!build_blases(s, ib, blas_addr, err)) return false;
+    blas_addr_ = blas_addr;
+    return build_tlas(s, err);
+  }
+  /* Every BLAS built in one submission (task 0162: it was one each), their addresses out. */
+  bool build_blases(const Scene &s, const Buffer &ib, std::vector<VkDeviceAddress> &blas_addr, std::string *err) {
+    const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    std::vector<VkAccelerationStructureGeometryKHR> geos(s.blas.size());
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos(s.blas.size());
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(s.blas.size());
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR *> range_ptrs(s.blas.size());
+    std::vector<Buffer> scratches;
+    for (size_t k = 0; k < s.blas.size(); k++) {
+      const GBlas &gb = s.blas[k];
+      VkAccelerationStructureGeometryKHR &geo = geos[k];
+      geo = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
       geo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
       geo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
       auto &tr = geo.geometry.triangles;
@@ -946,36 +1068,78 @@ class VulkanRenderer final : public Renderer {
       tr.maxVertex = std::max(1u, gb.vtx_count) - 1;
       tr.indexType = VK_INDEX_TYPE_UINT32;
       tr.indexData.deviceAddress = ib.address + (VkDeviceAddress)gb.idx_off * 12;
-      VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+      VkAccelerationStructureBuildGeometryInfoKHR &bi = infos[k];
+      bi = VkAccelerationStructureBuildGeometryInfoKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
       bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
       bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
       bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
       bi.geometryCount = 1;
       bi.pGeometries = &geo;
       VkAccelerationStructureKHR as;
-      if (!build_one(bi, gb.tri_count, as_usage, scratch_usage, as, err)) return false;
+      Buffer scratch;
+      if (!prepare_one(bi, gb.tri_count, as_usage, scratch_usage, as, scratch, err)) {
+        for (Buffer &sc : scratches) free_buffer(sc);
+        return false;
+      }
+      scratches.push_back(scratch);
       blas_.push_back(as);
+      ranges[k] = {gb.tri_count, 0, 0, 0};
+      range_ptrs[k] = &ranges[k];
       VkAccelerationStructureDeviceAddressInfoKHR adi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
       adi.accelerationStructure = as;
       blas_addr.push_back(f_.vkGetAccelerationStructureDeviceAddressKHR(dev_, &adi));
     }
-    /* Instances: transform, custom index = object, culling off (double-sided). */
-    std::vector<VkAccelerationStructureInstanceKHR> inst(s.instances.size());
+    bool ok = true;
+    if (!infos.empty()) {
+      begin();
+      f_.vkCmdBuildAccelerationStructuresKHR(cmd_, (uint32_t)infos.size(), infos.data(), range_ptrs.data());
+      ok = submit_wait();
+    }
+    for (Buffer &sc : scratches) free_buffer(sc);
+    if (!ok && err) *err = info_.name + ": building the acceleration structures failed";
+    return ok;
+  }
+  /* The TLAS over the instances and the kept BLASes (its old one and instance buffer freed); one submission. */
+  bool build_tlas(const Scene &s, std::string *err) {
+    const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    if (tlas_) {
+      f_.vkDestroyAccelerationStructureKHR(dev_, tlas_, nullptr);
+      tlas_ = VK_NULL_HANDLE;
+    }
+    for (Buffer &b : tlas_buffers_) free_buffer(b);
+    tlas_buffers_.clear();
+    const std::vector<VkDeviceAddress> &blas_addr = blas_addr_;
+    if (s.object_blas.size() != s.instances.size()) {
+      if (err) *err = info_.name + ": the instances and their meshes disagree";
+      return false;
+    }
+    for (uint32_t ob : s.object_blas)
+      if (ob != UINT32_MAX && ob >= blas_addr.size()) {
+        if (err) *err = info_.name + ": an instance of a mesh the card doesn't hold";
+        return false;
+      }
+    /* Instances: transform, custom index = object, culling off (double-sided); an object without a mesh stays out. */
+    std::vector<VkAccelerationStructureInstanceKHR> inst;
+    inst.reserve(s.instances.size());
     for (size_t o = 0; o < s.instances.size(); o++) {
+      if (s.object_blas[o] == UINT32_MAX) continue;
+      VkAccelerationStructureInstanceKHR in{};
       const float *m = s.instances[o].to_world;  // column-major
       for (int r = 0; r < 3; r++)
-        for (int c = 0; c < 4; c++) inst[o].transform.matrix[r][c] = m[c * 4 + r];
-      inst[o].instanceCustomIndex = (uint32_t)o;
-      inst[o].mask = 0xFF;
-      inst[o].instanceShaderBindingTableRecordOffset = 0;
-      inst[o].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-      inst[o].accelerationStructureReference = blas_addr[s.object_blas[o]];
+        for (int c = 0; c < 4; c++) in.transform.matrix[r][c] = m[c * 4 + r];
+      in.instanceCustomIndex = (uint32_t)o;
+      in.mask = 0xFF;
+      in.instanceShaderBindingTableRecordOffset = 0;
+      in.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+      in.accelerationStructureReference = blas_addr[s.object_blas[o]];
+      inst.push_back(in);
     }
     Buffer instb;
     if (!make_device_buffer(instb, inst.data(), inst.size() * sizeof(VkAccelerationStructureInstanceKHR),
                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, err))
       return false;
-    as_buffers_.push_back(instb);
+    tlas_buffers_.push_back(instb);
     VkAccelerationStructureGeometryKHR geo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     geo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
     geo.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
@@ -986,15 +1150,35 @@ class VulkanRenderer final : public Renderer {
     bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     bi.geometryCount = 1;
     bi.pGeometries = &geo;
-    return build_one(bi, (uint32_t)inst.size(), as_usage, scratch_usage, tlas_, err);
+    Buffer scratch;
+    if (!prepare_one(bi, (uint32_t)inst.size(), as_usage, scratch_usage, tlas_, scratch, err)) return false;
+    tlas_buffers_.push_back(as_buffers_.back());  // (the TLAS's store, freed with the next TLAS)
+    as_buffers_.pop_back();
+    VkAccelerationStructureBuildRangeInfoKHR range{(uint32_t)inst.size(), 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR *pr = &range;
+    begin();
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};  // (the BLASes built before: read by this build)
+    mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    f_.vkCmdBuildAccelerationStructuresKHR(cmd_, 1, &bi, &pr);
+    const bool ok = submit_wait();
+    free_buffer(scratch);
+    if (!ok && err) *err = info_.name + ": building the top-level acceleration structure failed";
+    if (ok) update_descriptors();  // (the descriptor set names the TLAS)
+    return ok;
   }
-  bool build_one(VkAccelerationStructureBuildGeometryInfoKHR &bi, uint32_t prims, VkBufferUsageFlags as_usage, VkBufferUsageFlags scratch_usage,
-                 VkAccelerationStructureKHR &out, std::string *err) {
+  /* The structure's store and scratch made and the build info pointed at them; the build is recorded by the caller
+   * (task 0162: several in one submission). The scratch is the caller's to free after the build. */
+  bool prepare_one(VkAccelerationStructureBuildGeometryInfoKHR &bi, uint32_t prims, VkBufferUsageFlags as_usage, VkBufferUsageFlags scratch_usage,
+                   VkAccelerationStructureKHR &out, Buffer &scratch, std::string *err) {
     VkAccelerationStructureBuildSizesInfoKHR sz{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     f_.vkGetAccelerationStructureBuildSizesKHR(dev_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &prims, &sz);
-    Buffer store, scratch;
+    Buffer store;
     if (!make_buffer(store, sz.accelerationStructureSize, as_usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
         !make_buffer(scratch, sz.buildScratchSize + scratch_align_, scratch_usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      free_buffer(store);
+      free_buffer(scratch);
       if (err) *err = info_.name + ": out of GPU memory for acceleration structures";
       return false;
     }
@@ -1003,22 +1187,20 @@ class VulkanRenderer final : public Renderer {
     ci.size = sz.accelerationStructureSize;
     ci.type = bi.type;
     if (f_.vkCreateAccelerationStructureKHR(dev_, &ci, nullptr, &out) != VK_SUCCESS) {
+      free_buffer(store);
+      free_buffer(scratch);
       if (err) *err = info_.name + ": could not create an acceleration structure";
       return false;
     }
     bi.dstAccelerationStructure = out;
     bi.scratchData.deviceAddress = (scratch.address + scratch_align_ - 1) / scratch_align_ * scratch_align_;
-    VkAccelerationStructureBuildRangeInfoKHR range{prims, 0, 0, 0};
-    const VkAccelerationStructureBuildRangeInfoKHR *pr = &range;
-    begin();
-    f_.vkCmdBuildAccelerationStructuresKHR(cmd_, 1, &bi, &pr);
-    bool ok = submit_wait();
-    free_buffer(scratch);
     as_buffers_.push_back(store);
-    if (!ok && err) *err = info_.name + ": building an acceleration structure failed";
-    return ok;
+    return true;
   }
   void free_accel() {
+    for (Buffer &b : tlas_buffers_) free_buffer(b);
+    tlas_buffers_.clear();
+    blas_addr_.clear();
     for (auto as : blas_) f_.vkDestroyAccelerationStructureKHR(dev_, as, nullptr);
     blas_.clear();
     if (tlas_) f_.vkDestroyAccelerationStructureKHR(dev_, tlas_, nullptr);

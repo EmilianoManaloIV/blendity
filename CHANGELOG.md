@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 182): incremental scene uploads, one submission per upload (task 0162)
+
+**Asked:** the roadmap's "incremental scene uploads, one submission per upload" - every build re-uploaded the whole
+scene to each card buffer by buffer, a fence wait each, and a submission per acceleration structure.
+
+**Changed**
+- The scene's buffers go up in one submission: the Vulkan device copies every section from one staging arena
+  (`Batch`); every BLAS is built in one submission and the TLAS in its own, each with its input buffer sent before
+  it, and the parameters and the clear follow: the test counts 9 submissions for a first whole upload on ray
+  tracing hardware and 5 for an instance update (5 and 3 with Blendity's BVH; it was 13 for the buffers alone plus
+  one an acceleration structure); `Renderer::submits()` counts them and the stress gpu section's upload row shows
+  them.
+- Only what changed goes up: `upload_gpus` hashes the scene's sections (the geometry, the instances with the
+  software TLAS, the materials, the lights, the texture arena, the parameters) and, when every card holds the
+  geometry and the textures, sends the instances (`update_instances`: the instance buffer, the TLAS's nodes and
+  order; on ray tracing hardware the TLAS rebuilt over the kept BLASes), the materials or the lights alone; a card
+  that joins gets the whole scene. `PTStats` counts `upload_calls / instance_updates / material_updates /
+  light_updates` and times `upload_ms`. An object added that reuses a mesh is still a whole upload (the mesh
+  table changes); a partial update re-points the descriptors and leaves the pixel buffers alone (the whole
+  upload used to re-make them at one pixel and again at the frame's size).
+- Not done: the scene is still flattened whole on the CPU each build (the hashes read the bytes); a changed texture
+  arena is a whole upload.
+
+**Measured (RTX 4070 SUPER, docs/PERFORMANCE.md Pass 13)**
+- NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 11.4 ms in 1 submissions; one object moved 4.9 ms in 1; one material edited 4.7 ms in 1.
+- NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 14.0 ms in 5 submissions; one object moved 6.1 ms in 3; one material edited 4.9 ms in 1.
+- NVIDIA GeForce RTX 3060 Ti (compute, Blendity BVH): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 11.1 ms in 1 submissions; one object moved 5.2 ms in 1; one material edited 5.2 ms in 1.
+- NVIDIA GeForce RTX 3060 Ti (ray tracing hardware): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 14.5 ms in 5 submissions; one object moved 6.3 ms in 3; one material edited 4.3 ms in 1.
+- Before this round a whole upload was a submission a buffer (13) plus one an acceleration structure, and every build sent the whole scene.
+
+**Checked**
+- Moving one object: no whole upload, one instance update, a fixed-seed sample within 1e-5 of a fresh upload's; a
+  material edit one material update with the BVH under 5 ms; a light edit one light update; a new mesh a whole
+  upload (tests/test_gpu.cpp).
+- Unit checks (round 182): Windows 11,184, 0 failed (914 tests); render-cache verify mode 11,185, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 181): the path tracer off the main thread, two submissions in flight (task 0161, ADR 0052)
 
 **Asked:** "feels slower", "CPU and GPU usage look low" - task 0159 measured a card 99 % busy inside each submission

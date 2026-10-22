@@ -122,6 +122,10 @@ struct PTStats {
    * of the calls' wall time - the wait on the CPU side: submitting, the fence, the driver. busy stays -1 while no
    * device reported a time (no timestamps). */
   double gpu_busy_ms = -1, gpu_wait_ms = 0;
+  /* Task 0162: how the scene reached the cards since the last build that sent it whole - whole uploads, and the
+   * sections replaced alone (a moved object, a material edit, a light edit). */
+  int upload_calls = 0, instance_updates = 0, material_updates = 0, light_updates = 0;
+  double upload_ms = 0;  // the last upload_gpus (flattening, hashing, sending)
 };
 
 class PathTracer {
@@ -148,6 +152,11 @@ class PathTracer {
    * that touches a device or the sums; cheap when nothing runs. */
   void pause();
   bool gpu_async() const { return !gpus_.empty(); }  // (the cards work between render() calls)
+  uint64_t gpu_submits() const {  // (task 0162: the cards' queue submissions so far, summed; tests and stress)
+    uint64_t n = 0;
+    for (const auto &g : gpus_) n += g->r->submits();
+    return n;
+  }
   ~PathTracer();
   int samples() const { return samples_; }
   int width() const { return w_; }
@@ -371,6 +380,13 @@ class PathTracer {
    * back. What the last upload took and the frame size it allowed for, and the card's memory. */
   std::vector<std::unique_ptr<GpuSlot>> parked_gpus_;
   uint64_t gpu_upload_bytes_ = 0, gpu_vram_mb_ = 0;
+  /* Task 0162: the uploaded scene's sections, hashed, so the next upload sends only what changed. */
+  struct GpuSections {
+    uint64_t geometry = 0, instances = 0, materials = 0, lights = 0, textures = 0;
+    bool valid = false;
+  } gpu_sections_;
+  static GpuSections gpu_scene_sections(const gpu::Scene &s);
+  bool upload_gpus_partial(const gpu::Scene &gs, const GpuSections &now);
   int gpu_fit_w_ = -1, gpu_fit_h_ = -1;
   void sync_gpus();
   bool background_gpu_open_ = gpu::background_open_default();

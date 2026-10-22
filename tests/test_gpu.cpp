@@ -114,6 +114,7 @@ static void round59_tests() {
     set_env("BLENDITY_CACHE_DIR", dir);
     const std::string path = gpu::pipeline_cache_file(0, true);
     CHECK(!path.empty() && path.find("gpu_cache") != std::string::npos);
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));  // (a spare opening in the background would rewrite the file under the test: task 0162)
     std::remove(path.c_str());
     std::string err;
     std::unique_ptr<gpu::Renderer> a = gpu::Renderer::create(0, true, &err);
@@ -1477,6 +1478,110 @@ static void tests_round181() {
   });
 }
 
+static void tests_round182() {
+  test("incremental uploads: moving one object sends the card its instances alone (no whole upload) and a fixed-seed sample matches a whole re-upload's within 1e-5 - with ray tracing hardware and with Blendity's BVH, where the move changes the TLAS's split; a material edit sends the materials alone, a light edit the lights; a whole upload is a few submissions, an instance update fewer (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto sphere = primitives::uv_sphere(0.5f, 24, 12), cube = primitives::cube(0.8f);
+    MaterialPtr grey = make_material("Grey", Vec3(0.5f)), red = make_material("Red", Vec3(0.8f, 0.2f, 0.2f));
+    std::vector<MaterialPtr> mats = {grey}, mats2 = {red};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0.5f, 0.5f, 0.5f};
+    RenderLight sun;
+    sun.type = RenderLight::Directional;
+    sun.direction = normalize(Vec3(-0.3f, -1.0f, 0.2f));
+    sun.color = Vec3(1.0f);
+    sun.intensity = 2.0f;
+    /* Four objects: the sphere's move from x to the far side changes the top-level BVH's split (its node count with
+     * leaves of two), which the software-BVH card must take as new geometry (the BLAS nodes sit after the TLAS's). */
+    auto objects = [&](float x) {
+      return std::vector<PTObject>{{&sphere->render_mesh_tangents(), Mat4::translate({x, 0.5f, 0.0f}), &mats},
+                                   {&cube->render_mesh_tangents(), Mat4::translate({-1.0f, 0.4f, 0.5f}), &mats2},
+                                   {&cube->render_mesh_tangents(), Mat4::translate({-1.2f, 0.4f, -0.6f}), &mats},
+                                   {&sphere->render_mesh_tangents(), Mat4::translate({-0.9f, 0.9f, 0.0f}), &mats2}};
+    };
+    auto frame = [&](PathTracer &pt) {
+      pt.set_camera(Mat4::look_at({0, 2, -4}, {0, 0.4f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 50), 96, 96);
+      int done = 0;
+      while (done < 4) done = pt.render(1e9, 4);
+      pt.pause();
+      return pt.linear_rgb(false);
+    };
+    for (bool hw : {true, false}) {
+    PTSettings st;
+    st.use_cpu = false;
+    st.gpus = {0};
+    st.gpu_hardware_rt = hw;
+    st.denoise = false;
+    std::printf("    %s:\n", hw ? "ray tracing hardware" : "Blendity's BVH in compute");
+    /* The first build: a whole upload. */
+    PathTracer pt;
+    pt.set_settings(st);
+    pt.build(objects(0.0f), {sun}, env);
+    CHECK(pt.gpu_async());
+    const PTStats &s = pt.stats();
+    const int uploads0 = s.upload_calls;
+    CHECK(uploads0 == 1 && s.instance_updates == 0);
+    frame(pt);
+    /* The sphere moved to the far side: the instances alone, unless the split changed the node layout (then a whole
+     * upload, which the hash must catch: the picture below says whether it did). */
+    const uint64_t sub0 = pt.gpu_submits();
+    pt.build(objects(2.5f), {sun}, env);
+    const uint64_t inst_sub = pt.gpu_submits() - sub0;
+    std::printf("    the move: %d whole uploads, %d instance updates, %llu submissions\n", s.upload_calls, s.instance_updates, (unsigned long long)inst_sub);
+    CHECK(s.upload_calls + s.instance_updates == uploads0 + 1 && s.material_updates == 0);
+    const std::vector<float> moved = frame(pt);
+    /* The same scene built fresh (a whole upload): the same samples. */
+    PathTracer fresh;
+    fresh.set_settings(st);
+    const uint64_t fsub0 = fresh.gpu_submits();
+    fresh.build(objects(2.5f), {sun}, env);
+    const uint64_t whole_sub = fresh.gpu_submits() - fsub0;
+    std::printf("    a whole upload: %llu submissions\n", (unsigned long long)whole_sub);
+    CHECK(whole_sub >= 1 && whole_sub <= 9 && (s.instance_updates == 0 || inst_sub < whole_sub));
+    const std::vector<float> whole = frame(fresh);
+    double worst = 0.0;
+    for (size_t i = 0; i < moved.size() && i < whole.size(); i++) worst = std::max(worst, (double)std::fabs(moved[i] - whole[i]));
+    std::printf("    after the move: %d whole uploads, %d instance updates; the picture against a fresh upload's: worst channel difference %.2e\n",
+                s.upload_calls, s.instance_updates, worst);
+    CHECK(moved.size() == whole.size() && worst < 1e-5);
+    /* A material edit: the materials alone, and no BVH work. */
+    red->base_color = Vec3(0.2f, 0.2f, 0.8f);
+    red->touch();
+    const int uploads1 = s.upload_calls;
+    pt.build(objects(2.5f), {sun}, env);
+    std::printf("    a material edit: %d whole uploads, %d material updates, BVH %.2f ms, the upload %.2f ms\n", s.upload_calls, s.material_updates, s.bvh_build_ms, s.upload_ms);
+    CHECK(s.upload_calls == uploads1 && s.material_updates == 1);
+    std::printf("    the whole build after a material edit (Embree's refit, the flattening, the hashes, the send): %.2f ms (a measurement, not a check: ADR 0056)\n", s.bvh_build_ms);
+    const std::vector<float> blue = frame(pt);
+    PathTracer fresh2;
+    fresh2.set_settings(st);
+    fresh2.build(objects(2.5f), {sun}, env);
+    const std::vector<float> whole2 = frame(fresh2);
+    worst = 0.0;
+    for (size_t i = 0; i < blue.size() && i < whole2.size(); i++) worst = std::max(worst, (double)std::fabs(blue[i] - whole2[i]));
+    CHECK(worst < 1e-5);
+    /* A light edit: the lights alone. */
+    RenderLight sun2 = sun;
+    sun2.intensity = 4.0f;
+    pt.build(objects(2.5f), {sun2}, env);
+    CHECK(s.upload_calls == uploads1 && s.light_updates == 1);
+    /* A new mesh: the whole scene again, the light count untouched. */
+    auto torus = primitives::uv_sphere(0.3f, 8, 6);
+    std::vector<PTObject> more = objects(2.5f);
+    more.push_back({&torus->render_mesh_tangents(), Mat4::translate({1.5f, 0.3f, 0.0f}), &mats});
+    pt.build(more, {sun2}, env);
+    CHECK(s.upload_calls == uploads1 + 1 && s.light_updates == 1);
+    red->base_color = Vec3(0.8f, 0.2f, 0.2f);
+    red->touch();
+    }
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -1486,4 +1591,5 @@ void run_gpu_tests() {
   tests_round179();
   tests_round180();
   tests_round181();
+  tests_round182();
 }

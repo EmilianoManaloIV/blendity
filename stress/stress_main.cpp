@@ -3293,6 +3293,44 @@ static void test_gpu_devices(Report &rep, const Options &o) {
   }
   rep.note("Task 0051: a GPU submission stays near 100 ms (the first of a frame is one sample) so a slow card can't pass "
            "Windows' 2 s driver timeout; a GTX 1050 Ti traces with the compute kernel (no ray tracing hardware).");
+  /* Task 0162: what reaching the card costs - the whole scene, then one object moved (the instances alone), then
+   * one material edited (the materials alone) - time and queue submissions, per card. */
+  rep.table({"upload (task 0162)", "device", "whole build ms", "submissions", "instance update: build ms", "submissions", "material update: build ms", "submissions"});
+  for (const Run &r : runs) {
+    if (r.gpus.size() != 1 || r.cpu) continue;
+    PathTracer pt;
+    PTSettings st;
+    st.use_cpu = false;
+    st.gpus = r.gpus;
+    st.gpu_hardware_rt = r.hw;
+    st.denoise = false;
+    pt.set_settings(st);
+    pt.build(objs, {sun}, env);  // (the device opens)
+    if (!pt.gpu_async()) continue;
+    std::vector<PTObject> moved = objs;
+    auto submits = [&] { return pt.gpu_submits(); };
+    uint64_t a = 0;
+    /* A whole upload: a mesh added and taken away again changes the geometry both times. */
+    auto extra = primitives::ico_sphere(0.3f, 2);
+    std::vector<PTObject> more = objs;
+    more.push_back({&extra->render_mesh_tangents(), Mat4::translate({0, 3, 0}), &m_ball});
+    pt.build(more, {sun}, env);
+    a = submits();
+    const double whole_ms = time_ms([&] { pt.build(objs, {sun}, env); });
+    const uint64_t whole_sub = submits() - a;
+    moved[0].model = Mat4::translate({0.3f, 0.0f, 0.0f}) * moved[0].model;
+    a = submits();
+    const double inst_ms = time_ms([&] { pt.build(moved, {sun}, env); });
+    const uint64_t inst_sub = submits() - a;
+    m_ball[0]->base_color = Vec3(0.3f, 0.6f, 0.9f);
+    m_ball[0]->touch();
+    a = submits();
+    const double mat_ms = time_ms([&] { pt.build(moved, {sun}, env); });
+    const uint64_t mat_sub = submits() - a;
+    m_ball[0]->base_color = Vec3(0.8f);
+    m_ball[0]->touch();
+    rep.row({"", r.name, f1(whole_ms), std::to_string(whole_sub), f1(inst_ms), std::to_string(inst_sub), f1(mat_ms), std::to_string(mat_sub)});
+  }
   rep.note("Every device renders whole samples of the frame and the sums are averaged, so devices of any speed combine "
            "without seams (Cycles splits work across devices the same way). The unit tests check each device against the CPU.");
 }

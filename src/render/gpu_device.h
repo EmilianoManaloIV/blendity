@@ -119,6 +119,14 @@ class Renderer {
   virtual OpenStats open_stats() const { return {}; }
   virtual ~Renderer() = default;
   virtual bool upload(const Scene &scene, std::string *error) = 0;
+  /* Task 0162: one section of an uploaded scene replaced, the rest kept - the instances (with the TLAS rebuilt on
+   * a card with ray tracing hardware; the BLASes stay), the materials (the texture arena must be the same), the
+   * lights (the mesh lights and their cdf with them). The default does a whole upload. */
+  virtual bool update_instances(const Scene &scene, std::string *error) { return upload(scene, error); }
+  virtual bool update_materials(const Scene &scene, std::string *error) { return upload(scene, error); }
+  virtual bool update_lights(const Scene &scene, std::string *error) { return upload(scene, error); }
+  /* How many times the queue was submitted to (an upload is one submission, the BLAS builds one, the TLAS one). */
+  virtual uint64_t submits() const { return 0; }
   /* Camera, resolution and other per-frame parameters (clears the buffers). */
   virtual void set_params(const GParams &p) = 0;
   virtual void clear() = 0;

@@ -1844,6 +1844,7 @@ void PathTracer::sync_gpus() {
   for (int i : settings_.gpus)
     if (i >= 0 && i < (int)devs.size() && std::find(want.begin(), want.end(), i) == want.end()) want.push_back(i);
   pause();  // (task 0161: no worker touches a device while the slots change)
+  const size_t had = gpus_.size();
   /* Devices set aside because the last scene didn't fit them (task 0051) come back for this one. */
   for (auto &g : parked_gpus_) gpus_.push_back(std::move(g));
   parked_gpus_.clear();
@@ -1889,6 +1890,7 @@ void PathTracer::sync_gpus() {
       }
       else gpu_error_ += (gpu_error_.empty() ? "" : "; ") + devs[(size_t)i].name + ": " + err;
     }
+    gpu_sections_.valid = gpu_sections_.valid && had == gpus_.size() && add.empty();  // (task 0162: a new card gets the whole scene)
     return;
   }
   std::vector<std::unique_ptr<gpu::Renderer>> made(add.size());
@@ -1910,6 +1912,7 @@ void PathTracer::sync_gpus() {
     slot->r = std::move(made[k]);
     gpus_.push_back(std::move(slot));
   }
+  gpu_sections_.valid = gpu_sections_.valid && had == gpus_.size() && add.empty();  // (task 0162: a new card gets the whole scene)
 }
 
 /* The scene in the GPU kernel's layouts: Blendity's own BVH (for GPUs that
@@ -2307,6 +2310,7 @@ void PathTracer::upload_gpus() {
     Log::warn("Path tracer: %s", msg.c_str());
     for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
     gpus_.clear();
+    gpu_sections_.valid = false;
     stats_.bvh_build_ms += t.ms();
     if (w_ > 0 && h_ > 0) reset();
     return;
@@ -2315,19 +2319,82 @@ void PathTracer::upload_gpus() {
   if (skipped > 0) Log::info("Path tracer: textures sent to the GPU %d mip level(s) smaller to fit its %llu MB", skipped, (unsigned long long)vram);
   gpu_tex_skip_ = skipped;
   gpu_params_ = gs.params;
-  for (size_t k = 0; k < gpus_.size();) {
-    std::string err;
-    if (gpus_[k]->r->upload(gs, &err)) {
-      k++;
-      continue;
+  /* Task 0162: the sections hashed; when every card holds this geometry and these textures, only what changed is
+   * sent (the instances, the materials, the lights), else the whole scene in one submission. */
+  const GpuSections now = gpu_scene_sections(gs);
+  if (!upload_gpus_partial(gs, now)) {
+    for (size_t k = 0; k < gpus_.size();) {
+      std::string err;
+      if (gpus_[k]->r->upload(gs, &err)) {
+        k++;
+        continue;
+      }
+      gpu_error_ += (gpu_error_.empty() ? "" : "; ") + err;
+      Log::warn("GPU %s dropped: %s", gpus_[k]->r->info().name.c_str(), err.c_str());
+      stop_worker(*gpus_[k]);
+      gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
     }
-    gpu_error_ += (gpu_error_.empty() ? "" : "; ") + err;
-    Log::warn("GPU %s dropped: %s", gpus_[k]->r->info().name.c_str(), err.c_str());
-    stop_worker(*gpus_[k]);
-    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+    stats_.upload_calls++;
+    gpu_sections_ = now;
+    gpu_sections_.valid = !gpus_.empty();
   }
   stats_.bvh_build_ms += t.ms();
+  stats_.upload_ms = t.ms();
   if (w_ > 0 && h_ > 0) reset();  // camera and buffers for the new scene
+}
+
+/* The hashes of what the cards hold: the geometry (vertices, indices, the BLAS layout, the software BLAS nodes and
+ * triangles), the instances (with the software TLAS and its order), the materials, the lights (with the mesh lights
+ * and their cdf), the texture arena, the parameters. */
+PathTracer::GpuSections PathTracer::gpu_scene_sections(const gpu::Scene &s) {
+  GpuSections h;
+  auto bytes = [](uint64_t seed, const auto &v) { return mix_bytes(seed, v.data(), v.size() * sizeof(v[0])); };
+  const size_t tlas = (size_t)std::max(0, s.params.counts[3]);
+  uint64_t g = bytes(kFnvBasis, s.verts);
+  g = bytes(g, s.idx);
+  g = bytes(g, s.blas);
+  g = bytes(g, s.object_blas);
+  g = bytes(g, s.tris);
+  g = s.nodes.size() > tlas ? mix_bytes(g, s.nodes.data() + tlas, (s.nodes.size() - tlas) * sizeof(gpu::GNode)) : g;
+  g = hash_mix(g, (uint64_t)tlas);  // (the software TLAS's node count: the BLAS nodes sit after it, so a split that changes it moves them)
+  g = hash_mix(g, (uint64_t)s.nodes.size());
+  h.geometry = g;
+  uint64_t i = bytes(kFnvBasis, s.instances);
+  i = bytes(i, s.tlas_order);
+  i = mix_bytes(i, s.nodes.data(), std::min(tlas, s.nodes.size()) * sizeof(gpu::GNode));
+  h.instances = i;
+  h.materials = bytes(kFnvBasis, s.materials);
+  uint64_t l = bytes(kFnvBasis, s.lights);
+  l = bytes(l, s.mesh_lights);
+  h.lights = bytes(l, s.mesh_cdf);
+  uint64_t x = bytes(kFnvBasis, s.tex8);
+  x = bytes(x, s.texf);
+  h.textures = bytes(x, s.textures);
+  h.valid = true;
+  return h;
+}
+
+/* The changed sections alone, when the cards hold the rest: true when that was enough (or nothing changed). */
+bool PathTracer::upload_gpus_partial(const gpu::Scene &gs, const GpuSections &now) {
+  if (!gpu_sections_.valid || gpu_sections_.geometry != now.geometry || gpu_sections_.textures != now.textures) return false;
+  const bool inst = gpu_sections_.instances != now.instances, mats = gpu_sections_.materials != now.materials, lights = gpu_sections_.lights != now.lights;
+  for (size_t k = 0; k < gpus_.size(); k++) {
+    gpu::Renderer &r = *gpus_[k]->r;
+    std::string err;
+    bool ok = true;
+    if (inst) ok = ok && r.update_instances(gs, &err);
+    if (mats) ok = ok && r.update_materials(gs, &err);
+    if (lights) ok = ok && r.update_lights(gs, &err);
+    if (ok) continue;  // (nothing changed: reset() sends the parameters)
+    Log::warn("GPU %s: the partial update failed (%s); the scene is sent whole", r.info().name.c_str(), err.c_str());
+    gpu_sections_.valid = false;
+    return false;
+  }
+  stats_.instance_updates += inst ? 1 : 0;
+  stats_.material_updates += mats ? 1 : 0;
+  stats_.light_updates += lights ? 1 : 0;
+  gpu_sections_ = now;
+  return true;
 }
 
 bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
