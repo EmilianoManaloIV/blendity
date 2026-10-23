@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 194): the Godot and Unreal bridges, specified (task 0175)
+
+**Asked:** Godot and Unreal bridges on the same protocol, after Blender's and Unity's.
+
+**Changed**
+- `docs/tasks/0175-godot-unreal-bridges.md`: what each bridge does against `blendity-livelink/1` unchanged - Godot 4
+  as a GDScript editor plug-in (`StreamPeerTCP`, an own glTF reader into `ArrayMesh` surfaces, `StandardMaterial3D`
+  with Godot's toon diffuse and specular, the cameras and lights turned onto Godot's -Z), Unreal 5 as a C++ editor
+  module (`FSocket`, `FMeshDescription` to a static mesh and a dynamic mesh once vertices move, a master material's
+  instances, Unreal's centimetres and the basis its own glTF importer uses), each with a smoke test replaying the
+  recorded session. Each gets its own task when started; the protocol needed nothing new.
+
+**Checked**
+- Documentation only: no code changed, the check chain wasn't run again (round 192's checks hold).
+
 ## 2026-10-22 (round 193): the Unity bridge - Blendity's scene live in the Unity Editor (task 0174)
 
 **Asked:** a Unity bridge for Live Link, after Blender's.
