@@ -671,6 +671,23 @@ void Editor::run_console_command(const std::string &line) {
     gpu_list();
     return;
   }
+  if (c == "layoutguide") {  // layoutguide on|off|reset|dismiss (task 0190)
+    const std::string v = to_lower(arg(1, "reset"));
+    if (v != "reset" && v != "dismiss" && v != "on" && v != "off") {
+      Log::info("usage: layoutguide on|off|reset|dismiss");
+      return;
+    }
+    if (v == "reset") guides_seen_.clear();
+    else if (v == "dismiss") guides_seen_.insert(workspace_);
+    else guides_enabled_ = v == "on";
+    save_prefs();
+    return;
+  }
+  if (c == "inspector") {  // inspector essentials on|off (task 0190)
+    inspector_essentials_ = to_lower(arg(2, arg(1, "on"))) != "off";
+    save_prefs();
+    return;
+  }
   if (c == "palette" || c == "favorite") {  // palette <words> | palette run <words> | favorite <command name> (task 0189)
     palette_command(t, line);
     return;

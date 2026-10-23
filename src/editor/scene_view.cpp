@@ -780,6 +780,7 @@ bool Editor::gizmo_update(const Recti &view) {
   /* Start drag. */
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt()) {
     drag_ = Drag::Gizmo;
+    gizmo_typed_.clear();
     autopose_.bone = 0;  // (a drag cut short before - a modal opened - starts AutoPosing afresh, from the pose now)
     autopose_.start.clear();
     gizmo_axis_ = gizmo_hot_;
@@ -932,6 +933,7 @@ bool Editor::gizmo_update(const Recti &view) {
           gizmo_snap_point_ = p;
         }
       }
+      if (h <= H_MOVE_Z) typed_axis_move(axis[h], delta);  // (task 0190: type 2.5 while dragging: exactly 2.5 along the axis)
       gizmo_live_delta_ = delta;
       if (eo) {
         ProfileScope prof{prof_.ms_edit_apply, {}};

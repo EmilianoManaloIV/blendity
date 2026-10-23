@@ -73,6 +73,11 @@ Press Ctrl+K (or F3, Blender's key) and type what you want: "hair", "unwrap", "b
 Right-click a command in the palette, or a row in a menu, and it goes into Quick Favorites: Shift+Q opens them where the mouse is. Each layout keeps its own (modeling favorites in Modeling & Topology, lighting ones in Lighting & Rendering). Blender's Q menu works the same way.
 ? You can't find Separate Loose Parts in the Animation layout's menus. What's the quickest way? | Ctrl+K, type "separate", Enter: the palette reaches tools a layout hides.
 ! cmd:palette hair | List what the palette finds for "hair" (in the Console)
+# Essentials first
+The Inspector shows each component's first seven fields - the ones most edits need - and keeps the rest under Show more; the All Fields button beside Add Component shows everything at once, as Unity's debug Inspector does. The first time you choose a stage layout, a strip says what it is for and offers its next three steps; Got it hides it for good (Help > Reset Guides brings them back). While dragging a gizmo's arrow, type a number to move exactly that far: 2.5, or 2*1.25.
+? A Light's Inspector shows a few fields and "Show 6 more". Where are the others, and how do you see every field of every component at once? | Under Show 6 more (Show less folds them again); the All Fields button beside Add Component shows them all, everywhere.
+! cmd:inspector essentials off | Show every field (All Fields on)
+! cmd:inspector essentials on | Back to the essentials
 # Windows on other screens
 Any tab can leave the editor: drag it out past the window's edge and let go, or right-click its tab > Move to New Window (or Move to Display 2, to fill most of that screen). The new window is a dock of its own - drag more tabs in, split it - and its own size and scale on its own display; the scene, the selection and undo stay one. Right-click a tab > Move to Main Window, or close the window, to bring its tabs back; Window > Bring Back... brings them all. Blendity remembers the windows with the layout. Blender does the same with Window > New Window; Unity with floating windows.
 ? You drag the Render tab out onto your second screen and close Blendity. What happens next time? | The Render tab opens in its own window on that screen again (fitted to a display that is there).

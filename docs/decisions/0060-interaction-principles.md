@@ -36,6 +36,13 @@ consistency), Shneiderman's direct manipulation; the command palette pattern (VS
 - Task 0190 takes the next changes by the same measure (progressive disclosure in the Inspector, scaffolded first
   runs, keyboard-only Hierarchy / Inspector, undo labels...).
 
+## Amendment (task 0190, round 206): essentials and guides
+Progressive disclosure in the Inspector: a component shows its first seven fields (the reflection's order puts the
+essential ones first; task 0145's groups hold the advanced ones), the rest under Show more, with an All Fields switch
+for experts. Scaffolding: each stage layout's first use shows what it is for and its next three steps, dismissed for
+good. Action counts don't measure either (task 0189's audit): their measure is a newcomer's task load and success,
+the 2025 study's, which needs people.
+
 ## Alternatives considered
 - A searchable menu bar only (macOS Help search): rejected - the console's commands and windows' buttons aren't menus.
 - Moving Blendity toward Blender's layout: rejected by the user's framing (keep the Unity feel).

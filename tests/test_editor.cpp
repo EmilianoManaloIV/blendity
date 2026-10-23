@@ -2746,6 +2746,98 @@ static void tests_round205() {
   });
 }
 
+/* Task 0190: the Inspector's essentials, the layouts' guides, Open Recent, Redo's label, a typed gizmo move. */
+static void tests_round206() {
+  test("Inspector essentials: a Camera shows 7 fields and Show more until opened; All Fields shows everything; the guide strip shows a layout's purpose and three steps until Got it, for good; Open Recent; Redo names the action", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.set_essentials_for_test(true);
+    ed.command("create Camera");  // (a Camera: dozens of fields; a Point Light shows only a few)
+    ed.step_frame_headless();
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    bool more = false;
+    for (const auto &kv : br) more = more || kv.first.rfind("Show ", 0) == 0 && kv.first.find(" more") != std::string::npos;
+    CHECK(more);
+    ed.command("inspector essentials off");
+    ed.step_frame_headless();
+    bool still = false;
+    for (const auto &kv : ed.ui_for_test().button_rects) still = still || kv.first.find(" more") != std::string::npos;
+    CHECK(!still);
+    ed.command("inspector essentials on");
+    ed.set_guides_for_test(true);
+    ed.command("layout UV Unwrapping");
+    ed.step_frame_headless();
+    CHECK(ed.ui_for_test().button_rects.count("Smart UV Project") == 1 && ed.ui_for_test().button_rects.count("Got it") == 1);
+    const Recti got = ed.ui_for_test().button_rects.at("Got it");
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, got.x + 4, got.y + 4)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, got.x + 4, got.y + 4)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, got.x + 4, got.y + 4)});
+    ed.step_frame_headless();
+    CHECK(ed.guide_seen_for_test("UV Unwrapping") && ed.ui_for_test().button_rects.count("Got it") == 0);
+    ed.command("layout Default");  // (Default has no guide: nothing drawn)
+    ed.step_frame_headless();
+    CHECK(ed.ui_for_test().button_rects.count("Got it") == 0);
+    const std::string scene = fs::join(test_dir(), "recent.scene");
+    Scene saved;
+    build_default_scene(saved);
+    CHECK(save_scene(saved, scene));
+    CHECK(ed.open_scene_for_test(scene));
+    CHECK(!ed.recent_scenes_for_test().empty() && ed.recent_scenes_for_test()[0] == scene);
+    ed.command("create Sphere");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(!ed.redo_label_for_test().empty());  // (Edit > Redo names it: "Redo <action>")
+  });
+
+  test("a number typed while dragging a gizmo axis moves exactly that far along it; every layout's guide names commands the palette has", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    for (const char *layout : {"Reference & Planning", "Blocking Out", "Modeling & Topology", "UV Unwrapping", "Texturing & Materials", "Lighting & Rendering",
+                               "Editing", "Rigging", "Skinning & Weight Painting", "Animation"})
+      CHECK(!ed.palette_guide_steps_for_test(layout).empty() && ed.palette_guide_steps_for_test(layout).size() == 3);
+    platform::Event typing;
+    typing.type = platform::EventType::Text;
+    Vec3 delta(0.3f, 0.0f, 0.0f);
+    for (char c : std::string("2*1.25")) {
+      typing.codepoint = (uint32_t)c;
+      ed.step_frame_headless({typing});
+      CHECK(ed.typed_axis_move_for_test(Vec3(1, 0, 0), delta) || c == '*');
+    }
+    CHECK(std::fabs(delta.x - 2.5f) < 1e-5f && delta.y == 0.0f && ed.gizmo_typed_for_test() == "2*1.25");
+    // During a real arrow drag the typed keys are the number's, not shortcuts (Maya's Backspace and Delete delete)
+    ed.command("feel Maya");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.select_for_test(cube->id, false);
+    ed.step_frame_headless();
+    int px = 0, py = 0, ax = 0, ay = 0;
+    CHECK(ed.project_to_window(cube->world_position(), px, py) && ed.project_to_window(cube->world_position() + Vec3(0.3f, 0, 0), ax, ay));
+    const float len = std::max(1.0f, std::hypot((float)(ax - px), (float)(ay - py)));
+    int hx = -1, hy = -1;
+    for (int k = 8; k < 240 && hx < 0; k += 2) {
+      const int x = px + (int)((ax - px) / len * k), y = py + (int)((ay - py) / len * k);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, x, y)});
+      if (ed.gizmo_hot_for_test() == 0) hx = x, hy = y;  // (H_MOVE_X)
+    }
+    CHECK(hx >= 0);
+    const float x0 = cube->world_position().x;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, hx, hy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, hx + 6, hy)});
+    CHECK(ed.gizmo_dragging_for_test());
+    typing.codepoint = '2';
+    ed.step_frame_headless({typing, key_ev(platform::KEY_2)});
+    CHECK(ed.gizmo_typed_for_test() == "2" && std::fabs(cube->world_position().x - x0 - 2.0f) < 1e-4f);
+    ed.step_frame_headless({key_ev(platform::KEY_BACKSPACE), key_ev(platform::KEY_DELETE)});
+    CHECK(ed.gizmo_typed_for_test().empty());
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, hx + 6, hy)});
+    CHECK(ed.scene().find_by_name("Cube") != nullptr);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2773,5 +2865,6 @@ void run_editor_tests() {
   tests_round203();
   tests_round204();
   tests_round205();
+  tests_round206();
   coverage_tests();
 }

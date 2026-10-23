@@ -85,7 +85,9 @@ and Animation (chapter 9).
 **Find any command.** Ctrl+K (or F3) opens the command palette: type a few words and every action, window, layout,
 creatable object and console command that matches is listed with its shortcut; Enter runs it, even a tool the current
 layout hides. Right-click a row (or a menu row) to keep it in Quick Favorites (Shift+Q, one list per layout). The
-status bar says what the mouse and keys do where the mouse is, and offers Undo for the last action.
+status bar says what the mouse and keys do where the mouse is, and offers Undo for the last action. The Inspector shows
+each component's first seven fields (Show more for the rest, All Fields for everything); each stage layout's first use
+shows a guide strip with its next three steps. While dragging a gizmo arrow, type a number to move exactly that far.
 
 **Windows on other screens.** Drag any tab out past the editor's edge and it gets a window of its own where you let
 go; right-click a tab for Move to New Window, Move to Display N or Move to Main Window. Each window is a dock of its

@@ -2,6 +2,35 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 206): essentials first, a guide per layout, Open Recent, typed gizmo moves (task 0190, ADR 0060 amended)
+
+**Asked:** the interaction pass's second round.
+
+**Changed**
+- **The Inspector shows each component's first seven fields**, the rest under "Show N more" (Show less folds them
+  again); its All Fields switch shows everything (kept in the preferences; `inspector essentials on|off`).
+- **A first-run guide per layout:** the first time you use a stage layout, a strip above the windows says what it is
+  for and offers its next three steps (UV Unwrapping: Smart UV Project, Part Unwrap, Pack Islands); Got it hides it
+  for good; Help > Reset Guides brings them back.
+- **File > Open Recent** (the last eight scenes); **Edit > Redo** names the action as Undo does.
+- **Typing a number while dragging a gizmo's arrow** moves exactly that far along it (2*1.25 works), as Blender's
+  numeric input; Push/Pull already took typed distances.
+
+**Checked**
+- A Camera's Inspector shows Show more until opened and nothing hidden with All Fields; the UV Unwrapping guide shows
+  its steps until Got it, then never; every guide's steps are palette commands; an opened scene leads Open Recent;
+  Redo carries the action's name; "2*1.25" typed during an axis drag moves 2.5 (tests/test_editor.cpp).
+- The audit's action counts don't change for these (they reduce what is on screen and what must be remembered, not
+  path length): a study with newcomers would measure them.
+- An Opus review's findings are fixed: digits typed during a gizmo drag also ran shortcuts (Maya's Backspace deleted
+  the selection; a test now drags a real arrow and types), the Camera Filters stack was cut inside its effects, Open
+  Recent swapped the scene mid-frame, a 2-pixel band under the guide strip wasn't painted, Show less where nothing was
+  hidden, the guides switch and All Fields not saved at once. Known limit: the seven are the first seven in each
+  component's order, so an Area Light with colour temperature on hides Intensity until Show more.
+- Unit checks (round 206): Windows, in render-cache verify mode, 11,818, 0 failed (968 tests), 0 stale
+  pictures. Linux with libraries: 11,465, 0 failed. Sanitizer build: 11,341, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 205): find any command - the palette, Quick Favorites, the status bar's hints (task 0189, ADR 0060)
 
 **Asked:** an interaction pass grounded in HCI research: keep the Unity feel, cut the friction; measure first.

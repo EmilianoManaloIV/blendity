@@ -205,6 +205,7 @@ bool Editor::init(int argc, char **argv) {
 void Editor::init_headless(int width, int height) {
   common_init(this);
   headless_ = true;
+  inspector_essentials_ = false, guides_enabled_ = false;  // (the tests' Inspector shows every field; no guide strip moves the docks)
   resolve_project_paths();
   dpi_ = 1.0f;
   apply_ui_scale();
@@ -579,6 +580,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   seqr_.drawn = false;
   sync_material_asset_names();
   draw_toolbar(toolbar);
+  dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
   for (WindowKind k : tab_close_queue_) dock_remove(k);
@@ -739,6 +741,13 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("New Scene", "Ctrl+N")) new_scene();
     if (u.menu_item("Open Scene...", "Ctrl+O")) open_scene_dialog();
+    if (!recent_scenes_.empty())
+      u.submenu("Open Recent", u.px(320), [this] {
+        for (const std::string &p : std::vector<std::string>(recent_scenes_))
+          if (ui_.menu_item(fs::filename(p), nullptr, false, fs::exists(p))) defer([this, p] { open_scene(p); });  // (after the frame: windows hold pointers into this scene)
+        ui_.menu_separator();
+        if (ui_.menu_item("Clear Recent")) recent_scenes_.clear();
+      });
     u.menu_separator();
     if (u.menu_item("Save", "Ctrl+S")) save_scene_cmd(false);
     if (u.menu_item("Save As...", "Ctrl+Shift+S")) save_scene_cmd(true);
@@ -778,7 +787,7 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("Work like Unity, Unreal, Blender or Maya: their keys and their Scene view mouse navigation.");
     u.menu_separator();
     if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), "Ctrl+Z", false, !undo_.empty() || pending_change_)) undo();
-    if (u.menu_item("Redo", "Ctrl+Y", false, !redo_.empty())) redo();
+    if (u.menu_item(redo_.empty() ? std::string("Redo") : "Redo " + redo_.back().label, "Ctrl+Y", false, !redo_.empty())) redo();
     u.menu_separator();
     if (u.menu_item("Select All", "Ctrl+A")) {
       if (edit_mode_) edit_select_all(true);
@@ -1082,6 +1091,11 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
     if (u.menu_item("Open Manual")) open_manual();
+    if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty())) {
+      guides_seen_.clear();
+      save_prefs();
+    }
+    u.tooltip("Show each layout's first-run guide again (what it is for, its next three steps).");
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
     if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
@@ -1907,6 +1921,7 @@ bool Editor::open_scene(const std::string &path) {
   redo_.clear();
   clear_selection();
   scene_dirty_ = false;
+  note_recent_scene(path);
   Log::info("Opened %s (%zu objects)", fs::filename(path).c_str(), scene_->object_count());
   return true;
 }
@@ -3361,6 +3376,10 @@ void Editor::load_prefs() {
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
     else if (k == "windows") windows_pref_ = v;
+    else if (k == "recent_scenes") recent_scenes_ = split_list(v, ';');
+    else if (k == "guides_seen") for (const std::string &g : split_list(v, ';')) guides_seen_.insert(g);
+    else if (k == "inspector_essentials") inspector_essentials_ = v != "0";
+    else if (k == "guides") guides_enabled_ = v != "0";
     else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
     else if (k == "favorites") load_favorites_pref(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
@@ -3487,6 +3506,7 @@ void Editor::save_prefs() {
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   s += "windows=" + windows_layout() + "\n";  // (task 0187)
   s += favorites_prefs_text();  // (task 0189)
+  s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
 }
 

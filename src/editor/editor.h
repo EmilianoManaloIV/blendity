@@ -521,6 +521,17 @@ class Editor {
   void set_tool_for_test(Tool t) { tool_ = t; }
   void set_scene_hovered_for_test(bool on) { scene_hovered_ = on; }
   const std::vector<std::string> &add_component_recent_for_test() const { return add_component_recent_; }
+  void set_essentials_for_test(bool on) { inspector_essentials_ = on; }
+  void set_guides_for_test(bool on) { guides_enabled_ = on; }
+  const std::vector<std::string> &recent_scenes_for_test() const { return recent_scenes_; }
+  bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
+  std::string gizmo_typed_for_test() const { return gizmo_typed_; }
+  int gizmo_hot_for_test() const { return gizmo_hot_; }
+  bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
+  bool typed_axis_move_for_test(Vec3 axis, Vec3 &delta) { return typed_axis_move(axis, delta); }
+  bool open_scene_for_test(const std::string &p) { return open_scene(p); }
+  std::string redo_label_for_test() const { return redo_.empty() ? std::string() : redo_.back().label; }
+  std::vector<std::string> palette_guide_steps_for_test(const std::string &layout);
   float edit_brush_radius_for_test() const { return edit_brush_radius(); }
   void set_render_image_for_test(const Image &img) {
     render_img_ = img;
@@ -2283,6 +2294,20 @@ class Editor {
   /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
   std::vector<PaletteEntry> palette_entries_;
   std::vector<std::string> add_component_recent_;
+  /* ---- the interaction pass's second round (task 0190: interaction_extras.cpp) ---- */
+  static constexpr int kEssentialFields = 7;
+  bool inspector_essentials_ = true;      // (each component's first seven fields, the rest under Show more; headless: off)
+  std::set<std::string> inspector_more_;  // components opened past their essentials
+  std::vector<std::string> recent_scenes_;
+  std::set<std::string> guides_seen_;     // layouts whose first-run guide was dismissed
+  bool guides_enabled_ = true;            // (headless: off, as the tests' layouts expect)
+  std::string gizmo_typed_;               // a number typed while dragging a gizmo axis (Blender's numeric input)
+  int essentials_limit(const std::string &type) const;
+  void draw_show_more(ui::Layout &lay, const std::string &type, int hidden, int seen);
+  void note_recent_scene(const std::string &path);
+  Recti draw_layout_guide(const Recti &area);
+  std::string prefs_text_0190() const;
+  bool typed_axis_move(Vec3 axis, Vec3 &delta);
   std::vector<std::string> palette_recent_;
   std::map<std::string, std::vector<std::string>> favorites_;  // per layout
   std::string palette_query_, last_palette_command_;
