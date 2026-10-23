@@ -566,6 +566,8 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "file.save_as") save_scene_cmd(true);
   else if (id == "file.new") new_scene();
   else if (id == "file.open") open_scene_dialog();
+  else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
+  else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();
   else if (id == "edit.undo") undo();
   else if (id == "edit.redo") redo();
   else if (id == "edit.duplicate") {

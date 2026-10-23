@@ -10,6 +10,7 @@
 //
 // Theory: GEA Vol. I 2.3 Profiling Tools, 10.8 In-Game Profiling;
 //         FoCG 12.3 Spatial Data Structures.
+#include "../src/image/edit_doc.h"
 #include "../src/scene/curve.h"
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
@@ -3043,6 +3044,55 @@ static void test_pathtracer(Report &rep, const Options &o) {
                     : std::string("No GPU for OpenImageDenoise here (its CUDA module needs an NVIDIA card, HIP an AMD one)."));
 }
 
+/* Task 0181 (ADR 0058): the Editing window's adjustments on a 4K picture - each one alone, a typical develop stack in
+ * full, and a slider on its last step (the cached steps before it not rerun). */
+static void test_editing(Report &rep, const Options &o) {
+  rep.title("Editing: adjustments on a 4K image",
+            "Each adjustment alone on a 3840 x 2160 linear float picture, then an 11-step develop stack evaluated in full and "
+            "with a slider moved on its last step (the steps before it come from the cache). The targets (task 0181): the "
+            "full stack in at most 150 ms, a slider in at most 40 ms.");
+  const int W = o.quick ? 1920 : 3840, H = o.quick ? 1080 : 2160;
+  edit::Image img;
+  img.resize(W, H);
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      float *p = img.at(x, y);
+      p[0] = 0.8f * x / W, p[1] = 0.6f * y / H, p[2] = 0.3f + 0.2f * std::sin(x * 0.01f) * std::cos(y * 0.013f), p[3] = 1.0f;
+    }
+  rep.table({"adjustment", "ms"});
+  for (const edit::AdjustmentInfo &info : edit::adjustment_infos()) {
+    edit::Adjustment a = edit::make_adjustment(info.name);
+    for (size_t f = 0; f < a.v.size(); f++) a.v[f] = info.fields[f].def + (info.fields[f].mx - info.fields[f].def) * 0.3f;
+    if (a.type == "Tone Curve") a.curve[0] = {Vec2(0, 0), Vec2(0.5f, 0.6f), Vec2(1, 1)};
+    edit::Image out;
+    const double ms = time_ms([&] { edit::apply(a, img, out); });
+    rep.row({info.name, f1(ms)});
+  }
+  edit::Doc doc;
+  doc.open_pixels(img, "stress");
+  for (const char *t : {"Exposure", "Contrast", "Highlights", "Shadows", "Temperature / Tint", "Vibrance / Saturation", "Clarity", "Tone Curve", "HSL", "Sharpen", "Vignette"}) doc.add(t);
+  doc.set_path("Exposure", 0.3f), doc.set_path("Contrast", 15), doc.set_path("Clarity", 20), doc.set_path("HSL.Orange Saturation", 20);
+  doc.result();
+  const double full = doc.last_eval_ms();
+  doc.set_path("Vignette.Amount", -30);
+  doc.result();
+  const double slider = doc.last_eval_ms();
+  const int rerun = doc.evaluated_steps();
+  doc.set_path("Exposure", 0.5f);
+  doc.result();
+  const double first = doc.last_eval_ms();
+  rep.table({"develop stack (11 steps)", "ms", "steps rerun"});
+  rep.row({"full evaluation", f1(full), "11"});
+  rep.row({"a slider on the last step (Vignette)", f1(slider), std::to_string(rerun)});
+  rep.row({"a slider on the first step (Exposure)", f1(first), std::to_string(doc.evaluated_steps())});
+  if (o.quick) {  // (the targets are for 4K)
+    rep.note(strprintf("At %d x %d (quick): the full stack %.1f ms, a slider on the last step %.1f ms.", W, H, full, slider));
+    return;
+  }
+  rep.note(strprintf("Task 0181's targets at %d x %d: the full stack %.1f ms (at most 150: %s), a slider on the last step %.1f ms (at most 40: %s).",
+                     W, H, full, full <= 150 ? "met" : "missed", slider, slider <= 40 ? "met" : "missed"));
+}
+
 static void test_uv_unwrap(Report &rep, const Options &o) {
   rep.title("UV: LSCM unwrap and packing",
             "LSCM on an n x n grid (one island): block-Jacobi conjugate gradients on the assembled normal equations "
@@ -5590,7 +5640,7 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

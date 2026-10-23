@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 198): the Editing tab - develop a render or an image, non-destructively (task 0181, ADR 0058)
+
+**Asked:** a new Editing tab with basic Lightroom / Photoshop adjustments on renders, images and textures,
+extensible.
+
+**Changed**
+- Window > Editing (and the Editing layout): a picture with an adjustment stack beside it. Open an image (or drop one
+  on the window), or the Render window's last render - its light, shown through the render's own view transform.
+  Seventeen adjustments, applied top to bottom in linear light: Exposure, Contrast, Highlights, Shadows, Whites,
+  Blacks, Temperature / Tint, Vibrance / Saturation, Clarity, Dehaze, Tone Curve (RGB and per channel: click, drag,
+  right-click), HSL (eight hue bands), Sharpen, Noise Reduction, Vignette, Crop / Straighten, Flip / Rotate. Each step
+  turns off, moves or goes; Undo / Redo; a Before / After line dragged across the picture; presets (Neutral, Film,
+  Anime Pop, Manga Contrast, Cinematic Teal-Orange).
+- Non-destructive: the source is never written. Save keeps the stack as an `.edit` text file beside the image (a
+  render's pixels beside it as EXR, or HDR where the build writes no EXR); Export writes PNG / JPEG through the view, or EXR / HDR in linear light.
+- A slider reruns only the steps from the one changed (each step's result is cached).
+- The camera filters' Color Grading and Vignette share their formulas with the Editing tab (`image/grade.h`).
+- The console: `develop open <file>|render`, `add`, `set <Type>.<Field> <value>`, `remove`, `move`, `enable`, `curve`,
+  `preset`, `undo`, `redo`, `export`, `save`, `split`, `list` (`edit` stays Edit Mode's).
+
+**Checked**
+- Exposure +1 doubles a mid-grey pixel; Contrast 0 is the identity; Highlights -100 lowers 0.9 and leaves 0.2; a tone
+  curve through (0.5, 0.75) lifts 0.5 to 0.75; HSL red -100 greys red and leaves blue; every adjustment is the
+  identity at its defaults and survives its text form; crop, straighten, flips and quarter turns move the right
+  pixels; a slider on the last step reruns one step; undo; save and reopen reproduce the export byte for byte; every
+  preset; the window through the console, the split, export (tests/test_editor.cpp).
+- Measured (stress `editing`, 3840 x 2160): the 11-step develop stack 683.2 ms in full, a slider on its last step 30.7 ms (1 step rerun), on its first 706.8 ms; the slowest adjustment alone Noise Reduction 467.8 ms. Task 0181's targets at 3840 x 2160: the full stack 683.2 ms (at most 150: missed), a slider on the last step 30.7 ms (at most 40: met). The full stack is the Tone Curve (347 ms alone) and Noise Reduction (468 ms) at full resolution: the next round takes it up (a preview at the screen's size, as Lightroom's, and look-up tables).
+- Unit checks (round 198): Windows, in render-cache verify mode, 11,569, 0 failed (955 tests), 0 stale
+  pictures. Linux with libraries: 11,216, 0 failed. Sanitizer build: 11,092, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `filters`, `editing`: 0 problems. (the sanitizer leg's autopose timing check failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 197): the UV Editor on one material's faces (task 0186)
 
 **Asked:** the UV Editor showing one material's islands: a Material filter, the others dimmed or hidden; "Edit UVs"

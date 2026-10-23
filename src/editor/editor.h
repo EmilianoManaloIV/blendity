@@ -40,6 +40,7 @@
 #include "ui.h"
 #include "livelink.h"
 #include "../scene/partfield.h"
+#include "../image/edit_doc.h"
 
 #include <atomic>
 #include <mutex>
@@ -114,7 +115,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -502,6 +503,12 @@ class Editor {
   const Image &render_image_for_test() const { return render_img_; }
   const std::vector<float> &render_linear_for_test() const { return render_linear_; }  // (the finished render's light, 3 floats a pixel)
   bool rendering_for_test() const { return rendering_; }
+  /* Task 0181: the Editing window's document and the picture it shows (0xAARRGGBB, the result; the split's
+   * before is the source's). */
+  edit::Doc &edit_doc_for_test() { return edit_doc_; }
+  const std::vector<uint32_t> &edit_display_for_test() const { return edit_after_px_; }
+  const std::vector<uint32_t> &edit_before_for_test() const { return edit_before_px_; }
+  float edit_split_for_test() const { return edit_split_; }
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
@@ -1312,6 +1319,44 @@ class Editor {
   void draw_sequencer_window(const Recti &r);
   /* ---- Live Link (task 0172, ADR 0055: livelink.cpp, livelink_window.cpp) ---- */
   void draw_livelink_window(const Recti &r);
+  /* ---- Editing (task 0181, ADR 0058: editing_window.cpp) ---- */
+  bool edit_open_file(const std::string &path);  // an image or an .edit
+  bool edit_open_render();
+  void edit_open_dialog();
+  std::string edit_default_export_path() const;
+  bool edit_export(const std::string &path);  // "" -> Renders/<name>_edit.png
+  void edit_export_dialog();
+  bool edit_save(const std::string &path);  // "" -> beside the source
+  void edit_list();
+  void edit_command(const std::vector<std::string> &t, const std::string &line);
+  void edit_curve_command(const std::vector<std::string> &t);
+  void edit_update_display();
+  void draw_editing_window(const Recti &r);
+  void draw_editing_canvas(const Recti &r);
+  void draw_edit_panel(const Recti &r);
+  void draw_edit_step(ui::Layout &lay, int step);
+  void draw_edit_field(ui::Layout &lay, int step, const edit::FieldInfo &f, float value);
+  void draw_edit_curve(ui::Layout &lay, int step);
+  void draw_curve_box(const Recti &box, const std::vector<Vec2> &pts, int ch);
+  Vec2 curve_to_px(const Recti &box, Vec2 p) const;
+  int curve_point_near(const Recti &box, const std::vector<Vec2> &pts) const;
+  void edit_curve_input(const Recti &box, int step, int ch);
+  void edit_curve_drag_to(const Recti &box, int step, int ch);
+  bool edit_window_has_mouse();
+  std::string edit_default_save_path() const;
+  edit::Doc edit_doc_;
+  int edit_opened_ = 0;  // (counts documents opened: the display's key)
+  std::vector<uint32_t> edit_after_px_, edit_before_px_;
+  int edit_after_w_ = 0, edit_after_h_ = 0;
+  std::string edit_shown_key_, edit_before_key_;
+  float edit_zoom_ = 0;  // 0: fit
+  Vec2 edit_pan_{0, 0};
+  float edit_split_ = -1.0f;  // the before / after line across the picture (0-1), -1 off
+  bool edit_split_drag_ = false;
+  ui::Id edit_drag_id_ = 0;  // the slider being dragged (one undo step a drag)
+  int edit_curve_channel_ = 0, edit_hsl_band_ = 0, edit_panel_h_ = 0;
+  int edit_curve_drag_ = -1, edit_curve_step_ = -1, edit_curve_ch_ = 0;  // the curve point dragged, and whose
+  Recti edit_canvas_rect_{0, 0, 0, 0}, edit_window_rect_{0, 0, 0, 0};
   void uv_report_log();     // task 0179: `uv report`
   void uv_parts_command(const std::vector<std::string> &t);
   float part_tau_ = 1.25f;  // Part Unwrap's distortion bound (`uv parts <bound>`)

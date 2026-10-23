@@ -665,6 +665,10 @@ void Editor::run_console_command(const std::string &line) {
     livelink_command(t);
     return;
   }
+  if (c == "develop") {  // develop open <file>|render | add | set | remove | curve | preset | undo | export | save ... (task 0181)
+    edit_command(t, line);
+    return;
+  }
   if (c == "uv" && (arg(1, "") == "material" || arg(1, "") == "others")) {  // uv material <name>|+<name>|all, uv others dim|hide (task 0186)
     if (arg(1, "") == "others") uv_hide_others_ = to_lower(arg(2, "dim")) == "hide";
     else uv_material_command(line.size() > 12 ? line.substr(line.find("material") + 9) : std::string("all"));

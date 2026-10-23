@@ -3,6 +3,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../image/grade.h"
 #include "../image/image.h"
 #include "display.h"
 
@@ -331,12 +332,7 @@ void apply_color_grading(RenderTarget &rt, const ColorGradingParams &p) {
     const bool through_hdr = !done.empty() && done[(size_t)y * rt.width + x];
     Vec3 c{lin[(px >> 16) & 255], lin[(px >> 8) & 255], lin[px & 255]};
     c = c * wb * (through_hdr ? 1.0f : ex);
-    if (contrast != 0.0f)  // a power curve through middle grey (0.18), as ACES / Unity grade contrast
-      for (int k = 0; k < 3; k++) c[k] = c[k] > 0.0f ? 0.18f * std::pow(c[k] / 0.18f, 1.0f + contrast) : 0.0f;
-    if (sat != 1.0f) {
-      const float y = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-      c = Vec3(y) + (c - Vec3(y)) * sat;
-    }
+    c = grade::saturate_by(grade::contrast(c, contrast), sat);  // (the Editing window's Contrast and Saturation too)
     if (lgg)  // ASC CDL style: lift raises the blacks, gain scales, gamma bends the middle (no clamp above 1:
       for (int k = 0; k < 3; k++) {  // exposure's headroom survives a gain below 1)
         float v = std::max(0.0f, c[k]);
@@ -385,15 +381,10 @@ void apply_invert(RenderTarget &rt, float amount) {
 void apply_vignette(RenderTarget &rt, const VignetteParams &p) {
   const float in = saturate(fin(p.intensity, 0.0f)), sm = std::max(0.01f, saturate(fin(p.smoothness, 0.5f))), rd = saturate(fin(p.roundness, 1.0f));
   if (in <= 0.0f || rt.width <= 0 || rt.height <= 0) return;
-  const float ax = 1.0f + ((float)rt.width / rt.height - 1.0f) * rd;  // 1: follows the frame; the aspect: a circle
-  const float corner = std::sqrt(ax * ax + 1.0f);
   const int cr = clamp8f(fin(p.color.x, 0.0f) * 255.0f), cg = clamp8f(fin(p.color.y, 0.0f) * 255.0f), cb = clamp8f(fin(p.color.z, 0.0f) * 255.0f);
   const float W = (float)rt.width, H = (float)rt.height;
   each_pixel(rt, [&](int x, int y, uint32_t &px) {
-    const float dx = ((x + 0.5f) / W * 2.0f - 1.0f) * ax, dy = (y + 0.5f) / H * 2.0f - 1.0f;
-    const float r = std::sqrt(dx * dx + dy * dy) / corner;  // 0 at the centre, 1 in the corners
-    float t = saturate((r - (1.0f - sm)) / sm);
-    t = t * t * (3.0f - 2.0f * t) * in;
+    const float t = grade::vignette_weight((x + 0.5f) / W, (y + 0.5f) / H, W / H, sm, rd) * in;  // (shared with the Editing window)
     if (t <= 0.0f) return;
     const int pr = (px >> 16) & 255, pg = (px >> 8) & 255, pb = px & 255;
     px = pack(px, clamp8f(pr + (cr - pr) * t), clamp8f(pg + (cg - pg) * t), clamp8f(pb + (cb - pb) * t));

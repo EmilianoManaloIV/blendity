@@ -68,7 +68,7 @@ Unity and Blender both split one window into panels. Unity calls them windows an
 ! layout:2 by 3 | Try the "2 by 3" layout
 ! layout:Default | Back to Default
 # Layouts for each stage
-A 3D job goes through stages, and each needs only some of the tools. The Layout dropdown (top right, as in Unity; Blender's Workspaces) has a layout for each: Reference & Planning, Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Rigging, Skinning & Weight Painting and Animation. Each arranges the windows for its stage (the UV Editor beside the Scene view for UVs; the Materials and Textures windows for texturing; the Rigging window for rigs) and shows that stage's tools in the Modeling Tools window, the GameObject menu and Add Component; the others step aside. Nothing is gone: the keys and the console reach every tool, and Window > Layouts > Show All Tools shows them all. Default shows everything, as do the arrangements (2 by 3, Tall, Wide, Learning). Save Layout... keeps your own arrangement under a name.
+A 3D job goes through stages, and each needs only some of the tools. The Layout dropdown (top right, as in Unity; Blender's Workspaces) has a layout for each: Reference & Planning, Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Editing, Rigging, Skinning & Weight Painting and Animation. Each arranges the windows for its stage (the UV Editor beside the Scene view for UVs; the Materials and Textures windows for texturing; the Rigging window for rigs) and shows that stage's tools in the Modeling Tools window, the GameObject menu and Add Component; the others step aside. Nothing is gone: the keys and the console reach every tool, and Window > Layouts > Show All Tools shows them all. Default shows everything, as do the arrangements (2 by 3, Tall, Wide, Learning). Save Layout... keeps your own arrangement under a name.
 | Stage | Windows | Tools shown
 | Reference & Planning | Scene, Game, Project | create, reference images, cameras
 | Blocking Out | Scene, Modeling Tools | primitives, drawing, snapping
@@ -76,6 +76,7 @@ A 3D job goes through stages, and each needs only some of the tools. The Layout 
 | UV Unwrapping | Scene + UV Editor | Edit Mode, UV
 | Texturing & Materials | Scene, Game, Materials, Textures | materials, textures, baking
 | Lighting & Rendering | Scene, Game, Lighting, Render | lights, cameras
+| Editing | Editing, Render | developing a render or an image
 | Rigging / Skinning | Scene, Rigging | bones, skins, weights, IK
 Reference & Planning has GameObject > Reference Image...: a picture to model from, an unlit plane the picture's shape, kept out of renders (Blender: Add > Image > Reference; console `refimage <path> front|side|top`).
 ! layout:Modeling & Topology | Use the Modeling & Topology layout
@@ -919,6 +920,27 @@ Scene light is unbounded but a screen shows 0 to 1. A view transform compresses 
 ? Why render in linear light and tone map at the end? | Light adds linearly. Doing the lighting maths in sRGB values gives wrong falloff and blending; the curve is only for display.
 ! cmd:world sky; shading shaded | Use the physical sky
 ! cmd:world gradient | Back to the gradient
+)"},
+    {"Editing: Develop a Render", "Exposure, white balance, curves and crops without touching the file", R"(
+# Developing a picture
+A render rarely leaves as it came out: a little more light, a warmer white, a curve that lifts the shadows, a crop. Window > Editing (or the Editing layout) does that last pass inside Blendity. Open the Render window's last render with Render, or any image with Open... (or drop it on the window). Add Adjustment puts a step on the stack; the stack runs top to bottom, and every step can be turned off with its box, moved with ^ and v, or removed. Before / After draws a line across the picture: the source on its left, the result on its right; drag it.
+The source is never changed. Save writes the stack as an .edit file beside the image (a few lines of text), and opening that file brings back the picture with every step; Export writes the result as PNG or JPEG, or as EXR / HDR with the light kept. A render opens with its light, not its 8-bit picture, and is shown through the render's own view transform, so nothing is clipped before you grade it.
+| Lightroom / Photoshop | Blendity's Editing | Blender
+| Basic: Exposure, Contrast | Exposure, Contrast | Compositor: Exposure, Bright/Contrast
+| Highlights, Shadows, Whites, Blacks | the same | (none: RGB Curves by hand)
+| White Balance: Temp, Tint | Temperature / Tint | Color Balance (white point)
+| Presence: Clarity, Dehaze, Vibrance, Saturation | the same | (none)
+| Tone Curve, HSL / Color | Tone Curve, HSL | RGB Curves, Hue Correct
+| Detail: Sharpening, Noise Reduction | Sharpen, Noise Reduction | Filter, Denoise
+| Crop, Straighten, Rotate | Crop / Straighten, Flip / Rotate | (the render's border)
+# Why in linear light
+Every step works on light, not on 8-bit pixels: +1 of Exposure doubles the light, as opening the lens one stop does, and a white balance scales the light of each colour as a camera's does (a Bradford adaptation, the method colour scientists use). The tone controls - Highlights, Shadows, Whites, Blacks, the Tone Curve and HSL - look at the pixel on the display's scale, where "the bright half" means what you see as bright, as Lightroom's do. The same formulas run in the camera filters' Color Grading and Vignette, so a look means the same in both.
+? You raise Exposure by +1. What happens to a pixel's light? | It doubles: one stop. A mid-grey of 0.18 becomes 0.36, on the light's scale rather than the screen's.
+? You crop the picture and export it, then open the source image in another program. Is it cropped? | No. The source is never written: the crop is a step in the stack, saved in the .edit file beside the image, and the export is a new file.
+? You move the Vignette slider at the bottom of a long stack. Does Blendity redo every step? | No. Each step's result is kept, and a change reruns the stack only from the step that changed - here just the vignette.
+! cmd:window Editing; develop open render | Open the last render in the Editing tab (render with F12 first)
+! cmd:develop preset Film | Apply the Film preset
+! cmd:develop split on | Compare before and after
 )"},
     {"Baked and Realtime Lighting", "Lightmaps, light modes, probe volumes and voxel GI", R"(
 Light that bounces between surfaces is either baked ahead of time with the path tracer, or computed live by Realtime GI. Baked light costs about 1 ms a frame to show; live GI costs time whenever a view re-renders. The Lighting window (Window > Rendering > Lighting) holds both, as in Unity.

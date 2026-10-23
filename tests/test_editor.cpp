@@ -1978,6 +1978,212 @@ static void tests_round187() {
   });
 }
 
+/* Task 0181: the Editing window's adjustments, document and console. */
+static edit::Image flat_image(int w, int h, Vec3 c) {
+  edit::Image img;
+  img.resize(w, h);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      float *p = img.at(x, y);
+      p[0] = c.x, p[1] = c.y, p[2] = c.z, p[3] = 1.0f;
+    }
+  return img;
+}
+
+static Vec3 px3(const edit::Image &img, int x, int y) {
+  const float *p = img.at(x, y);
+  return Vec3(p[0], p[1], p[2]);
+}
+
+static edit::Image adjusted(const edit::Image &in, const std::string &type, std::initializer_list<std::pair<const char *, double>> fields) {
+  edit::Adjustment a = edit::make_adjustment(type);
+  for (auto &f : fields) CHECK(a.set(f.first, (float)f.second));
+  edit::Image out;
+  edit::apply(a, in, out);
+  return out;
+}
+
+static float enc_srgb(float x) { return x <= 0.0031308f ? 12.92f * x : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f; }
+
+static void tests_round198() {
+  test("editing adjustments: exposure +1 doubles light, contrast 0 is the identity, highlights -100 lowers 0.9 and leaves 0.2, a tone curve lifts 0.5 to 0.75, HSL red -100 greys red and keeps blue", [] {
+    const edit::Image grey = flat_image(8, 8, Vec3(0.18f));
+    CHECK(std::fabs(px3(adjusted(grey, "Exposure", {{"Exposure", 1}}), 3, 3).x - 0.36f) < 1e-4f);
+    const edit::Image mixed = flat_image(4, 4, Vec3(0.7f, 0.3f, 0.05f));
+    const edit::Image c0 = adjusted(mixed, "Contrast", {{"Contrast", 0}});
+    CHECK(c0.px == mixed.px);
+    const edit::Image c50 = adjusted(mixed, "Contrast", {{"Contrast", 50}});
+    CHECK(px3(c50, 0, 0).x > 0.7f && px3(c50, 0, 0).z < 0.05f);  // (apart from middle grey)
+    const Vec3 hi = px3(adjusted(flat_image(4, 4, Vec3(0.9f)), "Highlights", {{"Highlights", -100}}), 1, 1);
+    const Vec3 lo = px3(adjusted(flat_image(4, 4, Vec3(0.2f)), "Highlights", {{"Highlights", -100}}), 1, 1);
+    CHECK(hi.x < 0.9f * 0.9f && std::fabs(lo.x - 0.2f) < 0.002f);
+    const Vec3 sh = px3(adjusted(flat_image(4, 4, Vec3(0.02f)), "Shadows", {{"Shadows", 100}}), 1, 1);
+    CHECK(sh.x > 0.02f * 1.2f);
+    edit::Adjustment curve = edit::make_adjustment("tone curve");
+    curve.curve[0] = {Vec2(0, 0), Vec2(0.5f, 0.75f), Vec2(1, 1)};
+    edit::Image cv;
+    edit::apply(curve, flat_image(2, 2, Vec3(srgb_to_linear(0.5f))), cv);
+    CHECK(std::fabs(enc_srgb(px3(cv, 0, 0).x) - 0.75f) < 1e-3f);
+    CHECK(std::fabs(edit::curve_eval({Vec2(0, 0), Vec2(0.5f, 0.75f), Vec2(1, 1)}, 0.25f) - 0.45f) < 0.1f);  // (smooth, no overshoot)
+    edit::Image two;
+    two.resize(2, 1);
+    const float rb[8] = {1, 0, 0, 1, 0, 0, 1, 1};
+    std::copy(rb, rb + 8, two.px.begin());
+    const edit::Image h = adjusted(two, "HSL", {{"Red Saturation", -100}});
+    const Vec3 r = px3(h, 0, 0), b = px3(h, 1, 0);
+    CHECK(std::fabs(r.x - r.y) < 1e-4f && std::fabs(r.y - r.z) < 1e-4f);
+    CHECK(std::fabs(b.x) < 1e-5f && std::fabs(b.y) < 1e-5f && std::fabs(b.z - 1.0f) < 1e-4f);
+  });
+
+  test("editing adjustments: white balance, vibrance, clarity, dehaze, sharpen, noise reduction and vignette are the identity at their defaults; warmer is redder; crop, straighten, flip and quarter turns move the right pixels", [] {
+    edit::Image grad;
+    grad.resize(200, 120);
+    for (int y = 0; y < 120; y++)
+      for (int x = 0; x < 200; x++) {
+        float *p = grad.at(x, y);
+        p[0] = x / 200.0f, p[1] = y / 120.0f, p[2] = 0.25f, p[3] = 1.0f;
+      }
+    for (const char *t : {"Temperature / Tint", "Vibrance / Saturation", "Clarity", "Sharpen", "Noise Reduction", "Vignette", "Flip / Rotate", "Crop / Straighten"}) {
+      edit::Image out;
+      edit::apply(edit::make_adjustment(t), grad, out);
+      float worst = out.w == grad.w && out.h == grad.h ? 0.0f : 1.0f;
+      for (size_t i = 0; worst < 1.0f && i < out.px.size(); i++) worst = std::max(worst, std::fabs(out.px[i] - grad.px[i]));
+      if (worst >= 1e-4f) std::printf("    not the identity at its defaults: %s (%g)\n", t, worst);
+      CHECK(worst < 1e-4f);
+    }
+    const Vec3 warm = px3(adjusted(flat_image(2, 2, Vec3(0.5f)), "Temperature / Tint", {{"Temperature", 50}}), 0, 0);
+    CHECK(warm.x > warm.z * 1.05f);
+    const Vec3 vib = px3(adjusted(flat_image(2, 2, Vec3(0.5f, 0.4f, 0.4f)), "Vibrance / Saturation", {{"Vibrance", 100}}), 0, 0);
+    CHECK(vib.x - vib.z > 0.1f);
+    edit::Image hazy = flat_image(64, 64, Vec3(0.5f, 0.52f, 0.55f));  // (a hazy object under a bright sky: the airlight)
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 64; x++) hazy.at(x, y)[0] = hazy.at(x, y)[1] = hazy.at(x, y)[2] = 0.9f;
+    const edit::Image clear = adjusted(hazy, "Dehaze", {{"Dehaze", 80}});
+    CHECK(px3(clear, 32, 56).x < 0.4f && std::fabs(px3(clear, 32, 4).x - 0.9f) < 0.05f);
+    const edit::Image vig = adjusted(flat_image(64, 64, Vec3(0.5f)), "Vignette", {{"Amount", -100}});
+    CHECK(std::fabs(px3(vig, 32, 32).x - 0.5f) < 1e-4f && px3(vig, 0, 0).x < 0.3f);
+    const edit::Image cr = adjusted(grad, "Crop / Straighten", {{"X", 10}, {"Y", 10}, {"Width", 100}, {"Height", 50}});
+    CHECK(cr.w == 100 && cr.h == 50);
+    CHECK(cr.w == 100 && px3(cr, 0, 0).x == px3(grad, 10, 10).x && px3(cr, 99, 49).y == px3(grad, 109, 59).y);
+    const edit::Image tilt = adjusted(grad, "Crop / Straighten", {{"X", 50}, {"Y", 30}, {"Width", 100}, {"Height", 60}, {"Angle", 10}});
+    CHECK(tilt.w == 100 && std::fabs(px3(tilt, 50, 30).x - px3(grad, 100, 60).x) < 0.01f && px3(tilt, 0, 0).y != px3(grad, 50, 30).y);
+    const edit::Image turn = adjusted(grad, "Flip / Rotate", {{"Quarter Turns", 1}});
+    CHECK(turn.w == 120 && turn.h == 200 && px3(turn, 0, 0).y == px3(grad, 0, 119).y && px3(turn, 119, 0).y == px3(grad, 0, 0).y);
+    const edit::Image flip = adjusted(grad, "Flip / Rotate", {{"Flip Horizontal", 1}});
+    CHECK(px3(flip, 0, 5).x == px3(grad, 199, 5).x);
+    for (const edit::AdjustmentInfo &info : edit::adjustment_infos()) {  // every type survives its text form
+      edit::Adjustment a = edit::make_adjustment(info.name), back;
+      for (size_t f = 0; f < a.v.size(); f++) a.v[f] = info.fields[f].mn + (info.fields[f].mx - info.fields[f].mn) * 0.3f;
+      a.enabled = false;
+      CHECK(edit::from_text(edit::to_text(a), back) && back.type == a.type && back.v == a.v && !back.enabled);
+    }
+    edit::Adjustment none;
+    CHECK(!edit::from_text("Not An Adjustment | x=1", none) && !edit::make_adjustment("Exposure").set("Nope", 1));
+  });
+
+  test("editing document: a slider on the last step reruns only that step; undo removes the last adjustment; save and reopen reproduce the export byte for byte; every preset applies", [] {
+    const std::string dir = fs::join(test_dir(), "editing");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> src(64 * 40);
+    for (int y = 0; y < 40; y++)
+      for (int x = 0; x < 64; x++) src[(size_t)y * 64 + x] = 0xFF000000u | (uint32_t)(x * 4) << 16 | (uint32_t)(y * 6) << 8 | 0x40u;
+    const std::string png = fs::join(dir, "source.png");
+    CHECK(write_png(png, src.data(), 64, 40, 64));
+    edit::Doc doc;
+    std::string err;
+    CHECK(doc.open_file(png, err));
+    CHECK(doc.add("Exposure") == 0 && doc.add("Clarity") == 1 && doc.add("Vignette") == 2);
+    doc.result();
+    CHECK(doc.evaluated_steps() == 3);
+    CHECK(doc.set(2, "Amount", -40));
+    doc.result();
+    CHECK(doc.evaluated_steps() == 1);
+    CHECK(doc.set_path("Exposure", 0.5f));
+    doc.result();
+    CHECK(doc.evaluated_steps() == 3);
+    CHECK(doc.undo() && doc.stack()[0].v[0] == 0.0f);
+    CHECK(doc.undo() && doc.stack().size() == 3 && doc.stack()[2].v[0] == 0.0f);
+    CHECK(doc.undo() && doc.stack().size() == 2);
+    CHECK(doc.redo() && doc.stack().size() == 3);
+    CHECK(doc.set_path("Crop / Straighten.Width", 30) && doc.set_path("Exposure.Exposure", 1));
+    const std::string a = fs::join(dir, "a.png"), b = fs::join(dir, "b.png"), e = fs::join(dir, "look.edit");
+    CHECK(doc.export_file(a, err) && doc.save(e, err));
+    edit::Doc again;
+    CHECK(again.load(e, err) && again.stack().size() == doc.stack().size() && again.export_file(b, err));
+    std::string ba, bb;
+    CHECK(fs::read_file(a, ba) && fs::read_file(b, bb) && !ba.empty() && ba == bb);
+    Bitmap out;
+    CHECK(load_image(a, out, err) && out.width == 30 && out.height == 40);
+    for (const edit::Preset &p : edit::builtin_presets()) {
+      CHECK(doc.apply_preset(p.name));
+      const edit::Image &r = doc.result();
+      bool finite = !r.empty();
+      for (float v : r.px) finite = finite && std::isfinite(v);
+      CHECK(finite && (std::string(p.name) == "Neutral") == doc.stack().empty());
+    }
+    CHECK(!doc.apply_preset("No Such Look") && !doc.open_file(fs::join(dir, "missing.png"), err));
+    /* A source that isn't a file (a render): kept beside the .edit, reopened with its view; a picture opened after it
+     * is shown plainly again. */
+    edit::Image light = flat_image(16, 8, Vec3(0.3f, 1.7f, 0.05f));
+    light.at(3, 2)[3] = 0.25f;
+    edit::Doc render;
+    render.open_pixels(light, "Render");
+    render.set_view(ViewTransform::Filmic, 0.5f);
+    CHECK(render.add("Exposure") == 0 && render.set(0, "Exposure", -1));
+    const std::string re = fs::join(dir, "render.edit");
+    CHECK(render.save(re, err) && render.edit_path() == re && !render.source_path().empty());
+    edit::Doc back;
+    CHECK(back.load(re, err) && back.view() == ViewTransform::Filmic && back.view_exposure() == 0.5f && back.stack().size() == 1);
+    const float tol = exr_available() ? 1e-3f : 0.01f;  // (EXR keeps half floats; RGBE HDR about 8 bits of mantissa)
+    CHECK(back.source().w == 16 && std::fabs(px3(back.source(), 5, 5).y - 1.7f) < tol * 1.7f);
+    if (exr_available()) CHECK(back.source().at(3, 2)[3] == 0.25f);
+    CHECK(back.open_file(png, err) && back.view() == ViewTransform::Standard && back.view_exposure() == 0.0f && back.edit_path().empty());
+  });
+
+  test("editing window: develop open, add, set and split show the developed picture beside the source; export writes the crop; undo; a render opens with its light", [] {
+    const std::string dir = fs::join(test_dir(), "editing_window");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> src(40 * 30, 0xFF808080u);  // mid grey (sRGB 128)
+    const std::string png = fs::join(dir, "grey.png");
+    CHECK(write_png(png, src.data(), 40, 30, 40));
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("window Editing");
+    ed.command("develop open " + png);
+    ed.command("develop set Exposure.Exposure 1");
+    ed.step_frame_headless();
+    const std::vector<uint32_t> &shown = ed.edit_display_for_test();
+    const int want = display::linear_to_srgb8(2.0f * srgb_to_linear(128 / 255.0f));
+    CHECK(shown.size() == 40 * 30 && std::abs((int)((shown[0] >> 16) & 255) - want) <= 1);
+    CHECK(ed.edit_doc_for_test().stack().size() == 1);
+    ed.command("develop split on");
+    ed.step_frame_headless();
+    CHECK(ed.edit_split_for_test() == 0.5f && ed.edit_before_for_test().size() == shown.size() && ((ed.edit_before_for_test()[0] >> 16) & 255) == 128);
+    ed.command("develop add Crop / Straighten");
+    ed.command("develop set Crop / Straighten.Width 20");
+    ed.command("develop set Crop / Straighten.Height 10");
+    const std::string out = fs::join(dir, "out.png");
+    ed.command("develop export " + out);
+    Bitmap b;
+    std::string err;
+    CHECK(load_image(out, b, err) && b.width == 20 && b.height == 10);
+    ed.command("develop undo");
+    ed.command("develop undo");
+    ed.command("develop undo");
+    CHECK(ed.edit_doc_for_test().stack().size() == 1);
+    ed.command("develop set Nothing.Here 3");  // (refused: nothing added)
+    ed.command("develop add Nothing");
+    CHECK(ed.edit_doc_for_test().stack().size() == 1);
+    ed.command("develop preset Manga Contrast");
+    ed.step_frame_headless();
+    const uint32_t m = ed.edit_display_for_test()[0];
+    CHECK(((m >> 16) & 255) == ((m >> 8) & 255) && ((m >> 8) & 255) == (m & 255));  // (black and white)
+    ed.command("edit face");  // (Edit Mode's command is untouched)
+    ed.command("develop open render");  // (nothing rendered: refused, the image stays)
+    CHECK(ed.edit_doc_for_test().source().w == 40);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -1998,5 +2204,6 @@ void run_editor_tests() {
   tests_round185();
   tests_round186();
   tests_round187();
+  tests_round198();
   coverage_tests();
 }
