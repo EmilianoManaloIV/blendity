@@ -49,6 +49,12 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0194, round 213): macOS
+- Blender's library set builds the Vulkan headers and loader on every platform but no MoltenVK, and its developers
+  don't expect to ship it. ADR 0001 therefore leaves macOS on the system's present and the CPU path.
+- A native Metal backend would be its own roadmap.
+- Revisited if Blender bundles MoltenVK (task 0194 has the sources).
+
 ## Consequences
 - A faint overlay line's pixel can differ from the CPU's by 1 / 255: the card blends at the attachment's 8 bits. The
   tests compare within that, as task 0100's cage did.

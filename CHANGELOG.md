@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 213): macOS and the card, decided (task 0194)
+
+**Asked:** the native-GPU roadmap's macOS step: the card presenting windows there too, if Blender's libraries make it
+possible.
+
+**Decided**
+- **No-go:** Blender's dependency build has the Vulkan loader on every platform but no MoltenVK (Vulkan over Metal), and
+  its developers don't expect to ship it. Under ADR 0001 Blendity doesn't add it, and with no Mac here nothing could
+  be run. macOS keeps the system's present and draws on the CPU what it can't draw on the card, as before.
+- Revisited if Blender bundles MoltenVK; a Metal backend would be a roadmap of its own (docs/tasks/0194).
+
+**Checked**
+- Documentation only: no code changed, no suite run (the round before ran the whole chain).
+
 ## 2026-10-23 (round 212): the card presents the windows (task 0193, ADR 0061)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round is the
