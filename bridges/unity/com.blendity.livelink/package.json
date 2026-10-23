@@ -1,0 +1,12 @@
+{
+  "name": "com.blendity.livelink",
+  "version": "1.0.0",
+  "displayName": "Blendity Live Link",
+  "description": "Follow the scene open in Blendity live in the Unity Editor (blendity-livelink/1: objects, meshes, moving vertices, materials, lights, cameras, poses). One way: Blendity is the source.",
+  "unity": "2022.3",
+  "license": "GPL-2.0-or-later",
+  "author": {
+    "name": "Blendity"
+  },
+  "keywords": ["blendity", "live link", "gltf"]
+}

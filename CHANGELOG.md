@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 193): the Unity bridge - Blendity's scene live in the Unity Editor (task 0174)
+
+**Asked:** a Unity bridge for Live Link, after Blender's.
+
+**Changed**
+- `bridges/unity/com.blendity.livelink/`: a Unity 2022.3 package - Window > Blendity Live Link: Port, Connect.
+  GameObjects under "Blendity Live Link" with a `BlendityLink` (the id); Blendity is Unity's own left-handed Y up, so
+  mirroring glTF's X back gives Blendity's numbers exactly. Meshes with a submesh per slot and each vertex's mesh
+  vertex kept for deforms; URP Lit or Standard materials with base and normal maps; Toon fields per slot in a
+  `BlendityToon` component; lights with Blendity's intensity as Unity's; cameras (disabled, so the Game view stays
+  yours); bones as posed GameObjects. An own glTF reader (`GlbReader.cs`; glTFast drops the `_VERT` attribute).
+- `bridges/unity/ReplayCheck`: the package's framing, JSON and glTF reading on the recorded session with any C#
+  compiler.
+
+**Checked**
+- ReplayCheck, compiled with the .NET Framework's C# compiler, replays the recorded session: 32 messages, every
+  mesh's vertices within its mesh, the deform applied. Not checked: the Unity-side code (the applier, the window, the
+  EditMode test) has not been compiled or run - Unity isn't installed on this PC; the README's Test section is the
+  first run.
+- No C++ changed: the check chain wasn't run again (round 192's checks hold).
+
 ## 2026-10-22 (round 192): the Blender bridge - Blendity's scene live in Blender (task 0173)
 
 **Asked:** a Blender bridge for Live Link (one way), the first of the four.

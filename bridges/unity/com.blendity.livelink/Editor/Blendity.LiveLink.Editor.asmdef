@@ -1,0 +1,6 @@
+{
+  "name": "Blendity.LiveLink.Editor",
+  "rootNamespace": "Blendity.LiveLink",
+  "references": ["Blendity.LiveLink"],
+  "includePlatforms": ["Editor"]
+}

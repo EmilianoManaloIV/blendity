@@ -271,6 +271,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | There was no OptiX render device (only task 0097's spike). | Render Settings > GPU Backend: OptiX renders the same picture as GPU Compute (one integrator); opt-in, as it measured slower (tasks 0170-0171, ADR 0054 amended). |
 | Getting a scene into Blender or Unity meant exporting and importing again after every change. | Window > Live Link sends the scene and every change as it happens to bridges on the same computer (task 0172, ADR 0055; the bridges are tasks 0173-0175). |
 | Seeing a Blendity scene in Blender (to render it in Cycles, say) meant exporting it after every change. | The Blender add-on in bridges/blender follows the scene live: objects, meshes as their vertices move, materials (toon ones as a cel setup), lights, cameras, poses (task 0173). |
+| The same in Unity meant re-importing an export. | The Unity package in bridges/unity follows the scene live as GameObjects with the same numbers (task 0174; its Unity side not yet run). |
 
 ## Still worth doing
 
