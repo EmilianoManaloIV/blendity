@@ -93,6 +93,16 @@ quote their row before / after / Blender.
   - NVIDIA GeForce RTX 3060 Ti - OptiX: 70.1 samples a second (14.28 ms a sample), its upload 12922.0 ms, 0.20x GPU Compute's, the pictures 0.00000 apart.
 - Before the inlining and the register limit: 0.09x on both cards; the first open of a card compiles the 3.6 MB PTX in about 20 s without the driver's cache.
 
+### After task 0185, round 2 (extrude three faces)
+- The stress row "An operator: extrude three faces" with the views on the CPU: 41.5 ms a frame (40.2-42.6 over seven
+  runs), was 47.5 the same day (48.2 in the table); Blender 5.2.2's row 31.7 ms. The target was half the gap (40.0):
+  41 % closed.
+- Its parts: the operator 3.3 ms, was 7.1 (its copy 0.5, was 3.3: the caches no longer copied; Auto Fuse's check about
+  0.5, was 3); the two render-mesh builds 9.1-10.3 ms, was 11.2 (the triangles and corner table shared, smooth normals on
+  every thread); the edge table 0.4 ms, was 1.4.
+- Edit Mode entry, caches cold: 23.0-24.0 ms, was 26.3-26.9. With the views on the GPU, extrude 38.1-39.8 ms (was
+  41.1-43.1).
+
 ### After task 0185, round 1 (undo of an extrude)
 - The stress row "Undo of an extrude" with the views on the CPU: 21.2 ms a frame (21.0-21.5 over five runs), was 25.9;
   Blender 5.2.2's row 15.7 ms. The target was half the gap (20.7): 45 % closed from the table's 25.7.

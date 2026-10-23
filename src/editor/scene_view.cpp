@@ -2573,8 +2573,9 @@ void Editor::run_last_op(bool first) {
   }
   double unused = 0;
   ProfileScope prof{first ? unused : prof_.ms_edit_op, {}};  // (a first run is timed by begin_redoable_op, which includes it)
-  /* Start again from the mesh as it was before the operator: the one copy an operator makes (task 0165). */
-  mf->mesh = mesh_copy(*L.before);
+  /* Start again from the mesh as it was before the operator: the one copy an operator makes (task 0165), without
+   * its caches (task 0185: most operators change the topology, and the copied render meshes were most of the copy). */
+  mf->mesh = mesh_copy_bare(*L.before);
   Mesh &m = *mf->mesh;
   struct AutoSmooth {
     Editor &ed;
@@ -2713,6 +2714,7 @@ void Editor::run_last_op(bool first) {
     else if (op == "to_sphere") meshops::to_sphere(m, vert_sel_, L.amount);
     else meshops::randomize(m, vert_sel_, L.amount, (uint32_t)std::max(1, L.segments));
   }
+  if (ok) m.adopt_caches(*L.before);  // (an operator that only moved vertices: the render meshes follow in place)
   if (!ok) {
     /* Back to the untouched mesh, as a copy (task 0165): the very pointer would bring back an earlier render-cache key
      * whose picture was drawn with state the key doesn't hold (verify mode found it after an Esc). */

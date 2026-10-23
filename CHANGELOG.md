@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 208): an extrude without the whole-mesh work (task 0185, round 2 of 3, ADR 0053 amended)
+
+**Asked:** the performance pass against Blender's numbers, its second row: extruding three faces of a 50k-face mesh.
+
+**Changed** (results the same to the bit)
+- **An Edit Mode operator's copy of the mesh leaves its caches behind** (the render meshes, edge table and topology
+  snapshot: most of the 3.3 ms copy); an operator that only moved vertices takes them back, so it still follows in place.
+- **The flat and the smooth render meshes share their triangles and corner table**; smooth normals and the edge table
+  are worked out on every thread.
+- **Auto Fuse's check after an extrude** no longer builds a table of the whole mesh or computes every face's normal on
+  one thread.
+
+**Measured** (stress editor_render, the views on the CPU, a quiet machine)
+- Extrude three faces of the 50k-face sphere: 47.5 -> 41.5 ms (40.2-42.6 over seven runs); the operator 7.1 -> 3.3 ms,
+  the two builds 11.2 -> 9.1-10.3, the edge table 1.4 -> 0.4. Blender 5.2.2's row 31.7 ms: 41 % of the gap closed,
+  short of the half (40.0 ms) by 1.5 ms.
+- Edit Mode entry gained too: 23.0-24.0 ms, was 26.3-26.9 (its build reuses the triangles). Undo 20.5-21.2 and Select
+  More 14.3-14.4 unchanged.
+
+**Checked**
+- After an extrude both render caches match builds from nothing; Smooth Vertices still builds nothing (moves in
+  place); the edge table from the corners is edges()'s on a sphere, a cube, an extrude, n-gons, a face repeating a
+  vertex, faces of one and two corners and corners in no face; smooth normals equal each vertex's faces' sum; two
+  faces fused onto one floor face leave a whole mesh (tests/test_modeling.cpp); the threaded-vs-serial build tests pass.
+- An Opus review found an out-of-range write the new Auto Fuse loop made reachable (a second region landing on the
+  faces the first fuse added: now only the faces the pass started with are looked at), and that the shared tables
+  travelled with every copy (they now start empty in a copy, as the normals' state does, and count in the mesh's
+  memory); its other points are taken (the corner table lists face corners only, the regions through a table of the
+  selected faces, the tests above).
+- Unit checks (round 208): Windows, in render-cache verify mode, 11,837, 0 failed (973 tests), 0 stale
+  pictures. Linux with libraries: 11,484, 0 failed. Sanitizer build: 11,360, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `curved`, `editor_render`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone; curved's 8 problems and 79 overlapping results are the same as the build before this round.)
+
 ## 2026-10-22 (round 207): undo no longer redraws the shadow map (task 0185, round 1 of 3)
 
 **Asked:** the performance pass against Blender's numbers: the three rows furthest behind, half of each gap a round.

@@ -1,10 +1,10 @@
 # 0185: the Blender-benchmarked performance pass
 
-- **Status:** round 1 done (round 207); rounds 2 and 3 to come
+- **Status:** rounds 1 and 2 done (rounds 207, 208); round 3 to come
 - **Requirements:** R-05 (responsive on big meshes)
 - **Decisions:** none (no architectural change)
 - **Model:** main session
-- **PR:** #152 (round 1, stacked on #151)
+- **PR:** #152 (round 1, stacked on #151), #153 (round 2)
 
 ## Scope: the three rows furthest behind Blender
 Pass 13's table (task 0178's harness), measured again on a quiet machine before this task (Blender 5.2.2):
@@ -60,6 +60,37 @@ Material slots linked to a material asset are relinked to the shared asset on un
 shaded Scene view (about 6 ms), the Game view (4.4) and the UI (2-3). All of these draw the restored mesh, which
 Blender's headless row doesn't do.
 
+## Round 2 (208): extrude three faces
+**Measured first** (probes in the stress row, removed after), the views on the CPU, 47.5 ms:
+- the operator 7.1 ms: its one copy of the mesh 3.3 (most of it the copied render meshes, edge table and topology
+  snapshot, which an extrude throws away), `extrude_faces` 1.1, and Auto Fuse's check about 3 (a vertex -> face table
+  over the whole mesh to group three selected faces, then every face's normal, serially);
+- two full render-mesh builds 11.2 ms (the flat one the Edit Mode Scene view draws, the smooth one the Game view
+  draws): corner normals 2.5, sharing corners 2.0, numbering 2.6, triangles 2.9 - each triangulating the same faces;
+- the edge table 1.4 ms (serial); the shadow map 4.4 (the shape changed: needed); the views' drawing; the UI.
+
+**Changed** (results the same to the bit; the modeling tests compare threaded builds with the serial one):
+- An operator copies the mesh without its caches (`mesh_copy_bare`: the caches moved, unchanged, into a base of Mesh
+  whose copy leaves them behind inside a `MeshCopyBare` scope). When the operator didn't change the topology (Smooth,
+  Randomize, To Sphere ...) `Mesh::adopt_caches` takes the old mesh's caches back, so its render meshes still follow
+  in place as a plain copy's did (ADR 0034).
+- The two render caches' builds share the triangles (`Mesh::tessellation`, per version) and the corners at each vertex
+  (`corners_by_vertex`, per topology); the smooth normals are summed per vertex on every thread in the serial loop's
+  order; the edge table (`edge_cache`) is built from the corners at each vertex on every thread (`edges()` stays the
+  serial reference the test compares with).
+- Auto Fuse: the selected regions are joined through the selected faces' own vertices (not a table of the whole
+  mesh), and the faces a region could land on are found on every thread, then looked at in index order as before.
+
+**Result:** 47.5 -> 41.5 ms (40.2-42.6 over seven runs; the operator 3.1-3.5 ms, the builds 9.1-10.3, the edge table
+0.4-0.5) against Blender's 31.7. From the table's 48.2: 6.7 of the 16.5 ms gap, 41 %, short of the half (40.0) by
+1.5 ms.
+Edit Mode entry also gained (23.0-24.0 ms, was 26.3-26.9 the same day: its flat build reuses the triangles and corner
+table the Object Mode build made); undo and Select More unchanged (20.5-21.2, 14.3-14.4).
+
+**What is left in the frame:** the two builds (9.2: numbering and sharing corners per cache), the shadow map (4.1),
+the cage overlay (7.3), the shaded views and the UI (4.4). Blender's headless row draws none of it.
+
 ## Tests
 tests/test_editor.cpp: "undo of a colour change keeps the shadow map ..." (fails on the old key). The stress rows
-carry the parts.
+carry the parts. tests/test_modeling.cpp: "Edit Mode operators: the copy leaves the caches behind ...", "the edge table
+from the corners at each vertex is edges()'s ...".
