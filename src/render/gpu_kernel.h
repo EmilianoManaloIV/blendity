@@ -49,6 +49,9 @@ struct Material {
   vec4 toon0;       // toon (flags.w bit 1, ADR 0020): bands, softness, threshold, specular smoothness
   vec4 toon1;       // shadow colour, specular size
   vec4 toon2;       // rim colour x strength, rim width
+  ivec4 tex2;       // task 0148: the toon ramp, shade, shadow bias and specular maps (-1: none)
+  ivec4 tex3;       // the rim mask; bits: hair highlight (1), rim side (2-3: 0 both, 1 lit, 2 shadow), key light only (8), face forward (16-32), lines only in shadow (64); task 0149: the face map id | hatch map id << 16 (0xFFFF none); the line map id | hatch scale x 64 << 16
+  vec4 toon3;       // the specular colour, the light wrap (color2.w: the face shadow's softness)
 };
 struct Light { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; };  // a: dir/pos + type (0 sun, 1 point, 2 spot, 3 area); b: colour, intensity; c: range, spot cos outer / inner, disk; d: direction, width; e: right, height
 struct MeshLight { uint obj; uint prim; float area; float power; };
@@ -68,6 +71,8 @@ layout(std430, binding = 0) readonly buffer Params {
   vec4 background;  // a camera's Solid Color for camera rays (w: on)
   mat4 retro_vp;    // a camera filter's view-projection (task 0032)
   vec4 retro;       // affine UVs, screen door, internal width, height (0: off)
+  vec4 key_light;   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
+  vec4 misc;        // task 0149: x the toon map reads (8; a uniform so the loop isn't unrolled into eight fetches)
 } P;
 layout(std430, binding = 1) buffer Accum { vec4 accum[]; };
 layout(std430, binding = 2) buffer Aux { vec4 aux[]; };  // albedo [0, n), normal + depth [n, 2n)
@@ -123,7 +128,6 @@ void onb(vec3 n, out vec3 t, out vec3 b) {
   t = vec3(1.0 + sgn * n.x * n.x * a, sgn * bb, -sgn * n.x);
   b = vec3(bb, sgn + n.y * n.y * a, -n.y);
 }
-vec3 safe_normalize(vec3 v) { float l = length(v); return l > 0.0 ? v / l : vec3(0.0); }
 
 /* ------------------------------------------------------------- textures */
 float srgb_to_linear(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
@@ -172,6 +176,9 @@ struct SurfacePoint {
   vec3 bmin, bmax;
 };
 struct Sample { vec3 albedo; float metallic; float roughness; float specular; float alpha; vec3 emission; vec3 normal; bool unlit; };
+/* The toon maps at a point (task 0148), kept out of Sample: Sample is copied at every inlined call, and a bigger one
+ * put the kernel past SPIR-V's id limit. */
+struct ToonIn { vec3 shade; bool has_shade; float bias; float spec_mask; float rim_mask; vec3 tangent; bool has_tangent; vec3 shadow_mul; vec3 line; float face_lit; };
 
 int material_index(Instance ins, uint slot) {
   if (ins.info.y == 0u) return 0;  // the default material is uploaded first
@@ -295,6 +302,56 @@ float axis_step(float e0, float e1, float x) {
   float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
 }
+/* The toon maps at the point (task 0148), read by UV (a toon character is UV-mapped; the triplanar paths of msample,
+ * inlined four times over, pushed the kernel past SPIR-V's id limit) - once, where the camera path shades a toon
+ * surface. The CPU reads them with the material's mapping; a Box-mapped toon material differs there. */
+/* The nearest texel at a UV (one tex_fetch: tex_sample's five, inlined, pushed the kernel past SPIR-V's id bound). */
+vec4 map_fetch(int t, vec2 uv, int wrap) {
+  TexInfo ti = texinfo[t];
+  return tex_fetch(t, int(floor(uv.x * float(ti.w))), int(floor((1.0 - uv.y) * float(ti.h))), wrap);
+}
+/* The face shadow (task 0149), as shading.cpp's toon_face_lit: the key light's direction in the object's space round
+ * the face's up axis against the map (its mirror for the other side). -1: no map. Once per hit (the key light is one
+ * direction a frame), not per light: the kernel sits at SPIR-V's id bound. */
+float toon_face_lit(Material m, vec2 face, vec3 ll) {
+  if (face.x < 0.0) return -1.0;
+  int f = (m.tex3.y >> 4) & 3;
+  vec3 fwd = f == 1 ? vec3(0.0, 0.0, -1.0) : f == 2 ? vec3(1.0, 0.0, 0.0) : f == 3 ? vec3(-1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
+  vec3 rt = f == 1 ? vec3(-1.0, 0.0, 0.0) : f == 2 ? vec3(0.0, 0.0, -1.0) : f == 3 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+  vec3 l = vec3(ll.x, 0.0, ll.z);
+  float len = length(l);
+  if (!(len > 1e-6)) return 1.0;
+  l /= len;
+  float thr = acos(clamp(dot(l, fwd), -1.0, 1.0)) / PI;
+  float sdf = dot(l, rt) >= 0.0 ? face.x : face.y;
+  return axis_step(thr - m.color2.w, thr + m.color2.w, sdf);
+}
+void toon_maps(Material m, SurfacePoint sp, vec3 local_key, inout ToonIn t) {
+  t.tangent = cross(sp.normal, sp.tangent.xyz) * sp.tangent.w;  // the strands run along V: the bitangent
+  t.has_tangent = sp.has_tangent;
+  vec2 uv = vec2(sp.uv.x * m.tiling.x + m.offset.x, sp.uv.y * m.tiling.y + m.offset.y);
+  /* Task 0149 adds the face shadow map (at the UV and at its mirror), the line map and the hatching (tiled). */
+  vec2 face = vec2(-1.0);
+  int face_id = (m.tex3.z & 0xFFFF) == 0xFFFF ? -1 : (m.tex3.z & 0xFFFF), hatch_id = ((m.tex3.z >> 16) & 0xFFFF) == 0xFFFF ? -1 : ((m.tex3.z >> 16) & 0xFFFF);
+  int line_id = (m.tex3.w & 0xFFFF) == 0xFFFF ? -1 : (m.tex3.w & 0xFFFF);
+  float hatch_scale = float((m.tex3.w >> 16) & 0xFFFF) / 64.0;
+  int ids[8] = int[8](m.tex2.y, m.tex2.z, m.tex2.w, m.tex3.x, face_id, face_id, line_id, hatch_id);  // (one fetch call site, in a loop)
+  for (int k = 0; k < int(P.misc.x); k++) {
+    if (ids[k] < 0) continue;
+    vec2 q = k == 5 ? vec2(1.0 - uv.x, uv.y) : k == 7 ? uv * hatch_scale : uv;
+    vec4 c = map_fetch(ids[k], q, k == 7 ? 0 : m.flags.y);
+    if (k == 0) { t.shade = c.xyz; t.has_shade = true; }
+    else if (k == 1) t.bias = isnan(c.x) ? 0.5 : c.x;
+    else if (k == 2) t.spec_mask = c.x;
+    else if (k == 3) t.rim_mask = c.x;
+    else if (k == 4) face.x = isnan(c.x) ? 0.0 : c.x;
+    else if (k == 5) face.y = isnan(c.x) ? 0.0 : c.x;
+    else if (k == 6) { if ((m.tex3.y & 64) != 0) t.shadow_mul *= c.xyz; else t.line = c.xyz; }
+    else t.shadow_mul *= c.x;
+  }
+  t.face_lit = toon_face_lit(m, face, local_key);
+}
+
 Sample evaluate_material(Material m, SurfacePoint sp) {
   int mode = int(m.axis.w + 0.5);
   if (mode == 0) return evaluate_plain(m, sp, false);
@@ -515,20 +572,46 @@ float toon_level(Material m, float lit) {
   }
   return q / float(bands);
 }
-vec3 shade_toon(Material m, Sample s, vec3 n, vec3 V, vec3 L, float lit) {
-  float q = toon_level(m, lit);
-  vec3 c = s.albedo * mix(m.toon1.xyz, vec3(1.0), q);
-  if (m.toon1.w > 0.0 && q > 0.0) {
-    float nh = dot(n, normalize(V + L)), e = 1.0 - 0.2 * m.toon1.w, w = 0.1 * m.toon0.w;
-    c += mix(vec3(1.0), s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * s.specular);
+/* Task 0148: the wrap and the painted bias before the tones; the ramp or the bands; the shade map; the spot where its
+ * map allows, as a band across the tangent for hair - as shading.cpp's shade_toon. */
+vec3 shade_toon(Material m, Sample s, ToonIn t, vec3 n, vec3 V, vec3 L, float lit) {
+  /* The bias before the tones (the wrap went onto N.L in the loop); the ramp read at (lit, lit) with v up, its nearest
+   * texel; the shade map tinted by the shadow colour - as shading.cpp's shade_toon. */
+  lit = clamp(lit + (clamp(t.bias, 0.0, 1.0) - 0.5) * 2.0, 0.0, 1.0);
+  if (isnan(lit)) lit = 0.0;
+  float q;
+  vec3 tone;
+  if (m.tex2.x >= 0) {
+    tone = map_fetch(m.tex2.x, vec2(lit, lit), 1).xyz;
+    q = clamp(dot(tone, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+  }
+  else {
+    q = toon_level(m, lit);
+    tone = mix(m.toon1.xyz, vec3(1.0), q);
+  }
+  vec3 c = t.has_shade ? mix(t.shade * m.toon1.xyz, s.albedo, q) : s.albedo * tone;
+  c = mix(c * t.shadow_mul, c, q);  // the inner lines and the hatching in the shadow tones (task 0149)
+  if (m.toon1.w > 0.0 && q > 0.0 && t.spec_mask > 0.0) {
+    vec3 H = normalize(V + L);
+    float nh = dot(n, H);
+    if ((m.tex3.y & 1) != 0 && t.has_tangent) {
+      float th = dot(normalize(t.tangent), H);
+      nh = sqrt(max(0.0, 1.0 - th * th));
+    }
+    float e = 1.0 - 0.2 * m.toon1.w, w = 0.1 * m.toon0.w;
+    c += mix(m.toon3.xyz, s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * s.specular * clamp(t.spec_mask, 0.0, 1.0));
   }
   return c;
 }
-vec3 toon_rim(Material m, vec3 n, vec3 V) {
-  if (m.toon2.w <= 0.0) return vec3(0.0);
+vec3 toon_rim(Material m, ToonIn t, vec3 n, vec3 V, vec3 keyL) {
+  if (m.toon2.w <= 0.0 || t.rim_mask <= 0.0) return vec3(0.0);
+  float ndl = dot(n, keyL);
+  int side = (m.tex3.y >> 1) & 3;
+  if ((side == 1 && ndl <= 0.0) || (side == 2 && ndl > 0.0)) return vec3(0.0);
   float f = 1.0 - max(0.0, dot(n, V)), e = 1.0 - m.toon2.w, w = m.toon0.y + 0.02;
-  return m.toon2.xyz * axis_step(e - w, e + w, f);
+  return m.toon2.xyz * (axis_step(e - w, e + w, f) * clamp(t.rim_mask, 0.0, 1.0));
 }
+
 vec3 bsdf_any(bool toon, Sample s, vec3 n, vec3 V, vec3 L) { return toon ? s.albedo * (max(0.0, dot(n, L)) / PI) : brdf_eval(s, n, V, L); }
 
 /* PathTracer::transmittance: through cutout holes and transparent surfaces. */
@@ -575,11 +658,13 @@ int find_mesh_light(uint obj, uint prim) {
 )GLSL",
 R"GLSL(
 /* ----------------------------------------------------------- integrator */
+float g_first_pdf = 0.0;  // a bake gather's cosine pdf: its first emissive hit is weighted against the texel's emitter sampling (task 0157; a file-scope value, not a parameter: the kernel is at SPIR-V's id bound)
 vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 normal_out, out float depth_out, out float id_out, bool camera) {
   id_out = 0.0;
   vec3 L = vec3(0.0), beta = vec3(1.0);
   float clamp_ind = P.settings.x;
-  float last_pdf = 0.0;
+  float last_pdf = g_first_pdf;
+  float since_scatter = 0.0;  // the distance since that direction was chosen (see-through passes add to it)
   int see_through_hits = 0, glass_hits = 0;
   bool camera_path = camera;  // the camera ray (see-through passes keep it; glass ends it; a bake's gather isn't one)
   albedo_out = vec3(0.0);
@@ -604,6 +689,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if ((m.flags.w & 2) != 0 && !(bounce == 0 && camera_path && dot(sp.geo_normal, rd) < 0.0) && see_through_hits < 64) {
       see_through_hits++;
       ro = sp.position + rd * (1e-4 + h.t * 1e-5);
+      since_scatter += h.t;
       bounce--;
       continue;
     }
@@ -619,15 +705,15 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if (bounce == 0 && camera_path && P.retro.z > 0.0 && retro_screen(sp.position, scr)) {
       if (P.retro.x > 0.5) retro_affine_uv(h.obj, h.prim, scr, sp);
       if (P.retro.y > 0.5 && surf == 2 && see_through_hits < 64) {
-        if (((int(floor(scr.x)) + int(floor(scr.y))) & 1) != 0) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+        if (((int(floor(scr.x)) + int(floor(scr.y))) & 1) != 0) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); since_scatter += h.t; bounce--; continue; }
         door_solid = true;
       }
     }
     Sample s = evaluate_material(m, sp);
-    if (door_solid && clamp(s.alpha, 0.0, 1.0) < 0.1) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+    if (door_solid && clamp(s.alpha, 0.0, 1.0) < 0.1) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); since_scatter += h.t; bounce--; continue; }
     if ((surf == 1 || surf == 2) && see_through_hits < 64 && !door_solid) {
       bool pass = surf == 1 ? s.alpha < m.tiling.w : rnd(rng) >= s.alpha;
-      if (pass) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+      if (pass) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); since_scatter += h.t; bounce--; continue; }
     }
     vec3 n = s.normal;
     if (dot(n, V) < 0.0) n = normalize(n + sp.geo_normal * (-dot(n, V) + 0.01));
@@ -636,7 +722,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     float w_emit = 1.0;
     if (last_pdf > 0.0 && P.counts.y > 0 && luminance(s.emission) > 0.0) {
       int li = find_mesh_light(h.obj, h.prim);
-      if (li >= 0) { float pl = mesh_light_pdf(uint(li), h.t, cos_hit); w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl); }
+      if (li >= 0) { float pl = mesh_light_pdf(uint(li), since_scatter + h.t, cos_hit); w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl); }
     }
     c0 = beta * s.emission * w_emit;
     if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c0.x, max(c0.y, c0.z)); if (mx > clamp_ind) c0 *= clamp_ind / mx; }
@@ -678,8 +764,13 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     }
     vec3 origin = sp.position + sp.geo_normal * (1e-4 + h.t * 1e-5);
     bool toon_here = toon && bounce == 0 && camera_path;  // tones and rim where the eye sees it; elsewhere Lambert
+    vec3 toon_keyL = P.key_light.xyz;  // the key light (task 0148), found on the CPU
+    int toon_key = int(P.key_light.w);
+    ToonIn tin = ToonIn(vec3(0.0), false, 0.5, 1.0, 1.0, vec3(0.0), false, vec3(1.0), vec3(1.0), -1.0);
     if (toon_here) {
-      vec3 c = beta * toon_rim(m, n, V);
+      toon_maps(m, sp, (insts[h.obj].to_local * vec4(toon_keyL, 0.0)).xyz, tin);  // (task 0149: the key light in the object's space, for the face shadow map)
+      s.albedo *= tin.line;  // (the line map into the colour; only in shadow it went into shadow_mul)
+      vec3 c = beta * toon_rim(m, tin, n, V, toon_keyL);
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
     }
@@ -699,6 +790,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       Light l = lights[li];
       vec3 dir;
       float dist = 1e30, power = l.b.w * PI;
+      float centre_fall = -1.0;  // an area light's falloff at its centre: the toon bands take it (as the views do)
       if (l.a.w < 0.5) {
         vec3 cdir = -l.a.xyz, ct3, cb3;
         onb(cdir, ct3, cb3);
@@ -726,26 +818,43 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
         dist = length(dd);
         if (dist < 1e-5) continue;
         dir = dd / dist;
-        /* As light_falloff on the CPU: range, the spot cone, an area's facing. */
-        float f = saturate1(1.0 - length(l.a.xyz - sp.position) / max(1e-3, l.c.x));
-        power *= f * f;
         float c = -dot(l.d.xyz, dir);
-        if (l.a.w > 1.5 && l.a.w < 2.5) {
-          float t = l.c.z - l.c.y > 1e-6 ? saturate1((c - l.c.y) / (l.c.z - l.c.y)) : (c >= l.c.y ? 1.0 : 0.0);
-          power *= t * t * (3.0 - 2.0 * t);
+        if (l.a.w > 2.5) {
+          /* As area_light_falloff on the CPU (task 0155): an emissive plane's point - its facing, the inverse
+           * square (no nearer than 1 cm), the Range as a window. */
+          vec3 dq = sp.position - p;
+          float r2 = dot(dq, dq), rr = r2 / max(1e-6, l.c.x * l.c.x);
+          float w = saturate1(1.0 - rr * rr);
+          float area = max(1e-4, abs(l.d.w * l.e.w) * (l.c.w > 0.5 ? 0.78539816 : 1.0));  // the panel's area (an ellipse's pi / 4)
+          power *= area * max(c, 0.0) * w * w / max(r2, 1e-4);
+          vec3 dc = sp.position - l.a.xyz;
+          float r2c = dot(dc, dc), rrc = r2c / max(1e-6, l.c.x * l.c.x), wc = saturate1(1.0 - rrc * rrc);
+          centre_fall = area * max(dot(l.d.xyz, dc) / max(sqrt(r2c), 1e-6), 0.0) * wc * wc / max(r2c, 1e-4);
         }
-        else if (l.a.w > 2.5) power *= max(c, 0.0);
+        else {
+          /* As light_falloff on the CPU: range, the spot cone. */
+          float f = saturate1(1.0 - length(l.a.xyz - sp.position) / max(1e-3, l.c.x));
+          power *= f * f;
+          if (l.a.w > 1.5) {
+            float t = l.c.z - l.c.y > 1e-6 ? saturate1((c - l.c.y) / (l.c.z - l.c.y)) : (c >= l.c.y ? 1.0 : 0.0);
+            power *= t * t * (3.0 - 2.0 * t);
+          }
+        }
       }
       /* One shadow ray for both models: transmittance inlines the material evaluation, and a second call site
        * pushed the optimiser past SPIR-V's id limit. A toon surface's dark side takes the shadow colour unlit. */
       float ndl = dot(n, dir);
+      if (toon_here && m.toon3.w > 0.0) ndl = (ndl + m.toon3.w) / (1.0 + m.toon3.w);  // light wrap (task 0148): the terminator moves
+      float face = toon_here && li == toon_key ? tin.face_lit : -1.0;  // (task 0149: the face shadow map's lit term for the key light)
       bool facing = ndl > 0.0 && dot(sp.geo_normal, dir) > 0.0;
       if (power <= 0.0 || (!toon_here && !facing)) continue;
       vec3 Tr = facing ? transmittance(origin, dir, dist) : vec3(0.0);
       float vis = max(Tr.x, max(Tr.y, Tr.z));
       if (!toon_here && vis <= 0.0) continue;
-      float fall = l.b.w > 0.0 ? min(1.0, power / (l.b.w * PI)) : 0.0;  // range, spot cone, an area's facing: banded too
-      vec3 c = toon_here ? beta * shade_toon(m, s, n, V, dir, max(ndl, 0.0) * vis * fall) * l.b.xyz * l.b.w
+      float fall = l.b.w > 0.0 ? min(1.0, centre_fall >= 0.0 ? centre_fall : power / (l.b.w * PI)) : 0.0;  // range, spot cone, an area's centre: banded too
+      bool fill = toon_here && (m.tex3.y & 8) != 0 && toon_key >= 0 && li != toon_key;  // (task 0148: the other lights add smooth fill)
+      float tlit = (face >= 0.0 ? face : max(ndl, 0.0) * vis) * fall;  // (the map is the face's shadow: no shadow ray on top)
+      vec3 c = toon_here ? beta * (fill ? s.albedo * max(0.0, tlit) : shade_toon(m, s, tin, n, V, dir, tlit)) * l.b.xyz * l.b.w
                          : beta * bsdf_any(toon, s, n, V, dir) * l.b.xyz * Tr * power;
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
@@ -801,6 +910,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if (pdf < 1e-8) break;
     beta *= bsdf_any(toon, s, n, V, dir) / pdf;
     last_pdf = pdf;
+    since_scatter = 0.0;
     if (bounce >= 3) {
       float q = min(0.95, max(beta.x, max(beta.y, beta.z)));
       if (rnd(rng) > q) break;
@@ -819,60 +929,64 @@ void main() {
   int W = P.size.x, H = P.size.y;
   if (px.x >= W || px.y >= H) return;
   int count = max(PC.sample_count, 1);
-  if (P.env_i.z != 0) {
-    /* Baking (task 0018): one point per invocation, its origin in Aux [0, n) and its normal (mode 1:
-     * cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
-     * arriving there adds up in Accum; w counts the paths whose first ray hit something. */
-    int i = px.y * W + px.x;
-    if (i >= P.env_i.w) return;
-    vec3 o = aux[i].xyz, nd = aux[W * H + i].xyz;
-    vec4 sum = vec4(0.0);
-    for (int k = 0; k < count; k++) {
-      int s = PC.sample_index + k;
-      uint brng = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + uint(s) * 6271u + 7u);  // cam_pos.w: the batch's first point
-      vec3 d = nd;
-      if (P.env_i.z == 1) {
-        float r1 = rnd(brng), r2 = rnd(brng), r = sqrt(r1), phi = 6.28318530718 * r2;
-        vec3 t, b;
-        onb(nd, t, b);
-        d = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
-      }
-      vec3 balb, bnrm;
-      float bdep;
-      float bid;
-      vec3 bc = trace(o, d, brng, balb, bnrm, bdep, bid, false);
-      if (any(isnan(bc)) || any(isinf(bc))) bc = vec3(0.0);
-      sum += vec4(bc, dot(bnrm, bnrm) > 0.25 ? 1.0 : 0.0);
-    }
-    accum[i] += sum;
-    return;
-  }
+  /* The camera's samples and a bake's share one loop and one call of trace(): the optimiser inlines the integrator
+   * once, not twice (task 0157: the software-BVH variant had reached SPIR-V's id bound, 4,194,303, and a second copy
+   * no longer fit; one copy leaves room). Baking (task 0018): one point per invocation, its origin in Aux [0, n) and
+   * its normal (mode 1: cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
+   * arriving there adds up in Accum; w counts the paths whose first ray hit something. */
+  const bool bake = P.env_i.z != 0;
   int i = px.y * W + px.x;
+  if (bake && i >= P.env_i.w) return;
+  vec3 o = vec3(0.0), nd = vec3(0.0);
+  if (bake) { o = aux[i].xyz; nd = aux[W * H + i].xyz; }
+  vec4 sum = vec4(0.0);
   vec3 csum = vec3(0.0), asum = vec3(0.0);
   vec4 nsum = vec4(0.0);
   float cover = 0.0, last_dep = -1.0, last_id = 0.0;
   bool any_hit = false;
   for (int k = 0; k < count; k++) {
     int s = PC.sample_index + k;
-    uint rng = pcg_hash(uint(px.y * W + px.x) * 9781u + uint(s) * 6271u + 1u);
-    float jx = rnd(rng), jy = rnd(rng);
-    float nx = 2.0 * (float(px.x) + jx) / float(W) - 1.0, ny = 1.0 - 2.0 * (float(px.y) + jy) / float(H);
-    vec4 a = P.inv_vp * vec4(nx, ny, 0.0, 1.0), b = P.inv_vp * vec4(nx, ny, 1.0, 1.0);
-    vec3 pa = a.xyz / a.w, pb = b.xyz / b.w;
-    vec3 ro = pa, rd = normalize(pb - pa);
-    if (P.lens.x > 0.0) {
-      /* Thin lens, as PathTracer::render: start on the aperture, aim at the focus plane. */
-      float lu = rnd(rng), lv = rnd(rng);
-      vec2 l = sample_aperture(lu, lv, int(P.lens.z), P.lens.w) * P.lens.x;
-      float t = (P.lens.y - dot(pa - P.cam_pos.xyz, P.cam_fwd.xyz)) / max(1e-6, dot(rd, P.cam_fwd.xyz));
-      vec3 focus = pa + rd * t;
-      ro = pa + P.cam_right.xyz * l.x + P.cam_up.xyz * l.y;
-      rd = normalize(focus - ro);
+    uint rng;
+    vec3 ro, rd;
+    if (bake) {
+      rng = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + uint(s) * 6271u + 7u);  // cam_pos.w: the batch's first point
+      ro = o;
+      rd = nd;
+      if (P.env_i.z == 1) {
+        float r1 = rnd(rng), r2 = rnd(rng), r = sqrt(r1), phi = 6.28318530718 * r2;
+        vec3 t, b;
+        onb(nd, t, b);
+        rd = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
+      }
+      g_first_pdf = (P.env_i.z == 1 && P.misc.y > 0.5) ? max(dot(nd, rd), 0.0) / 3.14159265 : 0.0;
+    }
+    else {
+      rng = pcg_hash(uint(i) * 9781u + uint(s) * 6271u + 1u);
+      float jx = rnd(rng), jy = rnd(rng);
+      float nx = 2.0 * (float(px.x) + jx) / float(W) - 1.0, ny = 1.0 - 2.0 * (float(px.y) + jy) / float(H);
+      vec4 a = P.inv_vp * vec4(nx, ny, 0.0, 1.0), b = P.inv_vp * vec4(nx, ny, 1.0, 1.0);
+      vec3 pa = a.xyz / a.w, pb = b.xyz / b.w;
+      ro = pa;
+      rd = normalize(pb - pa);
+      if (P.lens.x > 0.0) {
+        /* Thin lens, as PathTracer::render: start on the aperture, aim at the focus plane. */
+        float lu = rnd(rng), lv = rnd(rng);
+        vec2 l = sample_aperture(lu, lv, int(P.lens.z), P.lens.w) * P.lens.x;
+        float t = (P.lens.y - dot(pa - P.cam_pos.xyz, P.cam_fwd.xyz)) / max(1e-6, dot(rd, P.cam_fwd.xyz));
+        vec3 focus = pa + rd * t;
+        ro = pa + P.cam_right.xyz * l.x + P.cam_up.xyz * l.y;
+        rd = normalize(focus - ro);
+      }
+      g_first_pdf = 0.0;
     }
     vec3 alb, nrm;
     float dep, hit_id;
-    vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, true);
+    vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, !bake);
     if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+    if (bake) {
+      sum += vec4(c, dot(nrm, nrm) > 0.25 ? 1.0 : 0.0);
+      continue;
+    }
     csum += c;
     asum += alb;
     nsum += vec4(nrm, dep);
@@ -882,6 +996,10 @@ void main() {
       last_dep = dep;
     }
     last_id = hit_id;
+  }
+  if (bake) {
+    accum[i] += sum;
+    return;
   }
   /* One read and write of each plane for the dispatch's samples. */
   vec4 acc = accum[i];

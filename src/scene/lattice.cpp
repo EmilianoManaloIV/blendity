@@ -90,16 +90,8 @@ void Lattice::resample(int nu, int nv, int nw) {
 }
 
 uint64_t Lattice::content_key() const {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const int head[4] = {points_u, points_v, points_w, interpolation};
   mix(head, sizeof(head));
   const uint64_t n = offsets.size();
@@ -129,10 +121,8 @@ uint64_t LatticeModifier::modifier_dependency_hash() const {
   const Lattice *lt = nullptr;
   const GameObject *t = lattice_target(*this, &lt);
   if (!t) return 0;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   const Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
   mix(rel.m, sizeof(rel.m));
   const uint64_t k = lt->content_key();

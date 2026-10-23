@@ -520,14 +520,19 @@ void select_linked(const Mesh &m, std::vector<uint8_t> &vert_sel) {
 }
 
 void grow_selection(const Mesh &m, std::vector<uint8_t> &vert_sel, bool grow) {
+  /* One pass over the edge table (cached per topology): an adjacency built per call was 8 ms on 50k faces (task 0166). */
   vert_sel.resize(m.vert_count(), 0);
-  const auto nb = vertex_neighbours(m);
   std::vector<uint8_t> out = vert_sel;
-  for (uint32_t v = 0; v < m.vert_count(); v++)
-    for (uint32_t w : nb[v]) {
-      if (grow && vert_sel[v]) out[w] = 1;
-      if (!grow && vert_sel[v] && !vert_sel[w]) out[v] = 0;  // on the border: let go
+  for (const auto &e : m.edge_cache()) {
+    const uint32_t a = e.first, b = e.second;
+    if (grow) {
+      if (vert_sel[a]) out[b] = 1;
+      if (vert_sel[b]) out[a] = 1;
+      continue;
     }
+    if (vert_sel[a] && !vert_sel[b]) out[a] = 0;  // on the border: let go
+    if (vert_sel[b] && !vert_sel[a]) out[b] = 0;
+  }
   vert_sel = out;
 }
 
@@ -567,8 +572,8 @@ size_t select_coplanar(const Mesh &m, std::vector<uint8_t> &face_sel, float angl
     out[3] = (int64_t)std::max(-9e15, std::min(9e15, dd));
   };
   auto key = [](const int64_t c[4]) {
-    uint64_t h = 1469598103934665603ull;
-    for (int i = 0; i < 4; i++) h = (h ^ (uint64_t)c[i]) * 1099511628211ull;
+    uint64_t h = kFnvBasis;
+    for (int i = 0; i < 4; i++) h = (h ^ (uint64_t)c[i]) * kFnvPrime;
     return h;
   };
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;

@@ -86,6 +86,10 @@ void ExportOptions::reflect(Reflector &r) {
       r.help("Texels per side of the baked images (256 to 4096).");
     }
   }
+  if (materials && f == ExportFormat::FBX && !ascii) {
+    r.field("Embed Textures", embed_textures);
+    r.help("The texture images inside the .fbx, so the file carries everything (Blender: Path Mode Copy, Embed Textures).");
+  }
   if (f == ExportFormat::STL || f == ExportFormat::PLY || f == ExportFormat::FBX) {
     r.field("ASCII", ascii);
     r.help(f == ExportFormat::FBX ? "Text FBX. Unity, Autodesk tools and Blender 5.2's new FBX importer read it; Blender's classic\n"
@@ -163,6 +167,16 @@ std::vector<Vec3> split_normals(const Mesh &m) {
       }
   };
   auto sharp = [&](uint32_t a, uint32_t b) { return m.is_sharp(a, b) || (m.seams_sharp && m.is_seam(a, b)); };
+  if (m.custom_normals_fit()) {  // custom normals (task 0149): the artist's shading normals go out as they are
+    std::vector<Vec3> cn(m.corner_count());
+    for (size_t f = 0; f < nf; f++)
+      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
+        const Vec3 n = m.custom_normals[m.corner_verts[c]];
+        const float len = length(n);
+        cn[c] = finite_bits(len) && len > 1e-12f ? n / len : fn[f];
+      }
+    return cn;
+  }
   std::vector<Vec3> out(m.corner_count());
   std::vector<uint32_t> fan;
   for (size_t f = 0; f < nf; f++)
@@ -217,9 +231,18 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     m.sharp_edges = src.sharp_edges;
     m.seams = src.seams;
     m.seams_sharp = src.seams_sharp;
+    m.custom_normals = src.custom_normals;  // (task 0149: written as they are)
     m.sync_attributes();
     if (o.triangulate) meshops::triangulate(m);
     for (Vec3 &v : m.positions) v = to_out(it.world.point(v), up) * o.scale;
+    if (m.custom_normals.size() == m.positions.size()) {  // (task 0149: turned with the positions, by the inverse transpose)
+      const Mat4 nm = it.world.inverse().transposed();
+      for (Vec3 &n : m.custom_normals) {
+        const Vec3 t = to_out(nm.dir(n), up);
+        const float len = length(t);
+        n = finite_bits(len) && len > 1e-12f ? t / len : Vec3(0.0f);
+      }
+    }
     /* Mirroring flips handedness: reverse every polygon so it still faces out. */
     const bool uv = m.has_uvs();
     for (size_t f = 0; f < m.face_count(); f++) {
@@ -276,16 +299,15 @@ struct SplitKey {
 };
 struct SplitKeyHash {
   size_t operator()(const SplitKey &k) const {
-    uint64_t h = 1469598103934665603ull;
-    const unsigned char *b = reinterpret_cast<const unsigned char *>(&k);
-    for (size_t i = 0; i < sizeof(SplitKey); i++) h = (h ^ b[i]) * 1099511628211ull;
-    return (size_t)h;
+    return (size_t)fnv1a(&k, sizeof(SplitKey));
   }
 };
 
 struct SplitVerts {
   std::vector<Vec3> pos, nrm;
   std::vector<Vec2> uv;
+  std::vector<float> vid;  // each vertex's index in the mesh, when `ids` (glTF's _VERT, task 0172)
+  bool ids = false;
   std::unordered_map<SplitKey, uint32_t, SplitKeyHash> index;
   uint32_t add(const Prepared &p, uint32_t corner, bool normals, bool uvs) {
     SplitKey k;
@@ -305,6 +327,7 @@ struct SplitVerts {
     pos.push_back(p.mesh.positions[k.v]);
     if (normals) nrm.push_back(p.normals[corner]);
     if (uvs) uv.push_back(p.mesh.uvs[corner]);
+    if (ids) vid.push_back((float)k.v);
     index.emplace(k, id);
     return id;
   }
@@ -312,7 +335,52 @@ struct SplitVerts {
 
 template<class T> void put(std::string &b, T v) { b.append(reinterpret_cast<const char *>(&v), sizeof(T)); }
 
+/* A material's glTF object: `base` / `metal_rough` / `normal` are texture indices (-1: none). Says whether it used
+ * KHR_materials_emissive_strength and BLENDITY_toon (task 0172: a Toon material's fields, every one by its name). */
+struct GltfMaterialUse {
+  bool emissive_strength = false, toon = false;
+};
+std::string material_json(const Material &m, const std::string &name, int base, int metal_rough, int normal, GltfMaterialUse &use) {
+  std::string j = "{\"name\":\"" + json_escape(name) + "\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[" + num(m.base_color.x) + "," +
+                  num(m.base_color.y) + "," + num(m.base_color.z) + "," + num(m.alpha) + "],\"metallicFactor\":" + num(m.metallic) +
+                  ",\"roughnessFactor\":" + num(m.roughness);
+  if (base >= 0) j += strprintf(",\"baseColorTexture\":{\"index\":%d}", base);
+  if (metal_rough >= 0) j += strprintf(",\"metallicRoughnessTexture\":{\"index\":%d}", metal_rough);
+  j += "}";
+  if (normal >= 0) {
+    j += strprintf(",\"normalTexture\":{\"index\":%d", normal);
+    if (std::fabs(m.normal_strength - 1.0f) > 1e-4f) j += ",\"scale\":" + num(m.normal_strength);
+    j += "}";
+  }
+  std::string ext;
+  const Vec3 e = m.emission * m.emission_strength;
+  const float emax = std::max(e.x, std::max(e.y, e.z));
+  if (emax > 0) {
+    const float k = emax > 1.0f ? 1.0f / emax : 1.0f;
+    j += ",\"emissiveFactor\":[" + num(e.x * k) + "," + num(e.y * k) + "," + num(e.z * k) + "]";
+    if (emax > 1.0f) {
+      ext += "\"KHR_materials_emissive_strength\":{\"emissiveStrength\":" + num(emax) + "}";
+      use.emissive_strength = true;
+    }
+  }
+  if (m.shading_model == 1) {
+    Material copy = m;  // (reflect takes a non-const material)
+    ext += (ext.empty() ? "" : ",") + std::string("\"BLENDITY_toon\":") + reflect_to_json([&](Reflector &r) { copy.reflect(r); });
+    use.toon = true;
+  }
+  if (!ext.empty()) j += ",\"extensions\":{" + ext + "}";
+  if (m.surface == (int)MaterialSurface::Cutout) j += ",\"alphaMode\":\"MASK\",\"alphaCutoff\":" + num(m.alpha_clip);
+  else if (m.alpha < 1.0f || m.surface == (int)MaterialSurface::Transparent) j += ",\"alphaMode\":\"BLEND\"";
+  if (m.double_sided) j += ",\"doubleSided\":true";
+  return j + "}";
+}
+
 }  // namespace
+
+std::string gltf_material_json(const Material &m) {
+  GltfMaterialUse use;
+  return material_json(m, m.name, -1, -1, -1, use);
+}
 
 /* ===================================================================== */
 /* Wavefront OBJ + MTL                                                    */
@@ -417,7 +485,7 @@ namespace {
 /* One FBX record: a name, typed properties and child records - the
  * document model both encodings share (Blender: io_scene_fbx/encode_bin.py). */
 struct FbxProp {
-  char type = 'I';  // I L D S, or arrays i d
+  char type = 'I';  // I L D S R (raw bytes), or arrays i d
   int64_t i = 0;
   double d = 0;
   std::string s;
@@ -444,6 +512,7 @@ struct FbxNode {
   FbxNode &L(int64_t v) { prop('L').i = v; return *this; }
   FbxNode &D(double v) { prop('D').d = v; return *this; }
   FbxNode &S(const std::string &v) { prop('S').s = v; return *this; }
+  FbxNode &R(const std::string &bytes) { prop('R').s = bytes; return *this; }
   FbxNode &ia(std::vector<int32_t> v) { prop('i').ia = std::move(v); return *this; }
   FbxNode &da(std::vector<double> v) { prop('d').da = std::move(v); return *this; }
   /* Properties70 entry: P: "name", "type", "label", "flags", values... */
@@ -469,6 +538,7 @@ void fbx_write_binary(std::string &out, const FbxNode &n, bool is_last) {
       case 'L': put<int64_t>(out, p.i); break;
       case 'D': put<double>(out, p.d); break;
       case 'S':
+      case 'R':
         put<uint32_t>(out, (uint32_t)p.s.size());
         out += p.s;
         break;
@@ -748,6 +818,8 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
     v.add("UseMipMap").I(0);
     v.add("Filename").S(t.abs);
     v.add("RelativeFilename").S(t.rel);
+    std::string bytes;  // (Embed Textures: the image inside the file, as Blender writes it; binary only)
+    if (o.embed_textures && !o.ascii && fs::read_file(t.abs, bytes)) v.add("Content").R(bytes);
     FbxNode &x = objs.add("Texture").L(t.tex).S(fbx_name(t.name, "Texture")).S("");
     x.add("Type").S("TextureVideoClip");
     x.add("Version").I(202);
@@ -1017,7 +1089,7 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
   /* Materials */
   std::unordered_map<const Material *, int> mat_index;
   std::unordered_map<std::string, int> image_index;
-  bool emissive_strength = false;
+  GltfMaterialUse use;
   auto texture_of = [&](const TextureRef &t) -> int {
     if (t.empty() || starts_with(t.path, "generated:")) return -1;
     const std::string path = resolve_asset_path(t.path);
@@ -1075,34 +1147,10 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     if (it != mat_index.end()) return it->second;
     const Material def;
     const Material &m = mp ? *mp : def;
-    std::string j = "{\"name\":\"" + json_escape(mp ? m.name : "Default") + "\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[" +
-                    num(m.base_color.x) + "," + num(m.base_color.y) + "," + num(m.base_color.z) + "," + num(m.alpha) +
-                    "],\"metallicFactor\":" + num(m.metallic) + ",\"roughnessFactor\":" + num(m.roughness);
     const int tex = texture_of(m.base_map);
-    if (tex >= 0) j += strprintf(",\"baseColorTexture\":{\"index\":%d}", tex);
     const int mr = metal_rough_of(m);
-    if (mr >= 0) j += strprintf(",\"metallicRoughnessTexture\":{\"index\":%d}", mr);
-    j += "}";
     const int nt = texture_of(m.normal_map);
-    if (nt >= 0) {
-      j += strprintf(",\"normalTexture\":{\"index\":%d", nt);
-      if (std::fabs(m.normal_strength - 1.0f) > 1e-4f) j += ",\"scale\":" + num(m.normal_strength);
-      j += "}";
-    }
-    const Vec3 e = m.emission * m.emission_strength;
-    const float emax = std::max(e.x, std::max(e.y, e.z));
-    if (emax > 0) {
-      const float k = emax > 1.0f ? 1.0f / emax : 1.0f;
-      j += ",\"emissiveFactor\":[" + num(e.x * k) + "," + num(e.y * k) + "," + num(e.z * k) + "]";
-      if (emax > 1.0f) {
-        j += ",\"extensions\":{\"KHR_materials_emissive_strength\":{\"emissiveStrength\":" + num(emax) + "}}";
-        emissive_strength = true;
-      }
-    }
-    if (m.surface == (int)MaterialSurface::Cutout) j += ",\"alphaMode\":\"MASK\",\"alphaCutoff\":" + num(m.alpha_clip);
-    else if (m.alpha < 1.0f || m.surface == (int)MaterialSurface::Transparent) j += ",\"alphaMode\":\"BLEND\"";
-    if (m.double_sided) j += ",\"doubleSided\":true";
-    materials.push_back(j + "}");
+    materials.push_back(material_json(m, mp ? m.name : "Default", tex, mr, nt, use));
     mat_index[mp.get()] = (int)materials.size() - 1;
     return (int)materials.size() - 1;
   };
@@ -1114,6 +1162,7 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     const int slots = std::max(1, m.material_count());
     for (int slot = 0; slot < slots; slot++) {
       SplitVerts sv;
+      sv.ids = o.vertex_ids;
       std::vector<uint32_t> idx;
       for (size_t f = 0; f < m.face_count(); f++) {
         if (m.material_of(f) != slot) continue;
@@ -1131,9 +1180,14 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC2\"}", view, t.size()));
         attrs += strprintf(",\"TEXCOORD_0\":%zu", accessors.size() - 1);
       }
+      if (o.vertex_ids) {  // (task 0172) each vertex's index in the mesh, for Live Link's deform messages
+        const int view = add_view(sv.vid.data(), sv.vid.size() * sizeof(float), 34962);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"SCALAR\"}", view, sv.vid.size()));
+        attrs += strprintf(",\"_VERT\":%zu", accessors.size() - 1);
+      }
       const int iv = add_view(idx.data(), idx.size() * 4, 34963);
       accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5125,\"count\":%zu,\"type\":\"SCALAR\"}", iv, idx.size()));
-      std::string prim = "{\"attributes\":{" + attrs + strprintf("},\"indices\":%zu,\"mode\":4", accessors.size() - 1);
+      std::string prim = "{\"attributes\":{" + attrs + strprintf("},\"indices\":%zu,\"mode\":4,\"extras\":{\"slot\":%d}", accessors.size() - 1, slot);
       const int mat = material_of(slot_material(p, slot));
       if (mat >= 0) prim += strprintf(",\"material\":%d", mat);
       prims += (prims.empty() ? "" : ",") + prim + "}";
@@ -1151,7 +1205,11 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
   std::string scene_nodes = "[";
   for (size_t i = 0; i < nodes.size(); i++) scene_nodes += (i ? "," : "") + std::to_string(i);
   std::string json = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"Blendity\"}";
-  if (emissive_strength) json += ",\"extensionsUsed\":[\"KHR_materials_emissive_strength\"]";
+  if (use.emissive_strength || use.toon) {
+    std::string used = use.emissive_strength ? "\"KHR_materials_emissive_strength\"" : "";
+    if (use.toon) used += std::string(used.empty() ? "" : ",") + "\"BLENDITY_toon\"";
+    json += ",\"extensionsUsed\":[" + used + "]";
+  }
   json += ",\"scene\":0,\"scenes\":[{\"name\":\"Scene\",\"nodes\":" + scene_nodes + "]}]";
   json += ",\"nodes\":" + list(nodes) + ",\"meshes\":" + list(meshes);
   if (!materials.empty()) json += ",\"materials\":" + list(materials);

@@ -107,7 +107,8 @@ void Editor::retarget_asset_references(const std::string &from, const std::strin
   retarget_texture_assets(from, to);
   retarget_clip_references(from, to);
   auto fix = [&](Material &m) {
-    for (TextureRef *t : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map}) {
+    for (TextureRef *t : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map, &m.toon_ramp_map, &m.shade_map, &m.toon_shadow_bias_map,
+                          &m.toon_specular_map, &m.toon_rim_map, &m.face_shadow_map, &m.line_map, &m.hatch_map}) {
       std::string p = t->path;
       std::replace(p.begin(), p.end(), '\\', '/');
       /* The file itself, a file in the folder, or a procedural texture's output ("X.ptex#albedo"). */
@@ -587,7 +588,7 @@ void Editor::draw_project(const Recti &r) {
         if (ProceduralTexturePtr t = texture_asset(make_asset_relative(full))) texture_selected_ = t;
         dock_open(WindowKind::Textures);
       }
-      else if (model_extension_supported(ext)) import_model_file(full, false);
+      else if (model_extension_supported(ext) || motion_extension_supported(ext)) import_model_file(full, false);
       else if (ext != ".mat" && ext != ".ptex") fs::open_external(full);
     }
     if (hot && in.pressed[1]) {

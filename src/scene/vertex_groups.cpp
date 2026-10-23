@@ -53,25 +53,14 @@ Vec3 closest_barycentric(Vec3 p, Vec3 a, Vec3 b, Vec3 c) {
 
 bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
 
-uint64_t mix(uint64_t h, const void *p, size_t n) {
-  const uint8_t *b = (const uint8_t *)p;
-  for (size_t i = 0; i < n; i += 8) {
-    uint64_t v = 0;
-    std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-    h = (h ^ v) * 1099511628211ull;
-    h ^= h >> 29;
-  }
-  return h;
-}
-
 }  // namespace
 
 uint64_t topology_key(const Mesh &m) {
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   const uint64_t n[3] = {m.vert_count(), m.face_offsets.size(), m.corner_verts.size()};
-  h = mix(h, n, sizeof(n));
-  if (!m.face_offsets.empty()) h = mix(h, m.face_offsets.data(), m.face_offsets.size() * sizeof(uint32_t));
-  if (!m.corner_verts.empty()) h = mix(h, m.corner_verts.data(), m.corner_verts.size() * sizeof(uint32_t));
+  h = mix_bytes(h, n, sizeof(n));
+  if (!m.face_offsets.empty()) h = mix_bytes(h, m.face_offsets.data(), m.face_offsets.size() * sizeof(uint32_t));
+  if (!m.corner_verts.empty()) h = mix_bytes(h, m.corner_verts.data(), m.corner_verts.size() * sizeof(uint32_t));
   return h;
 }
 

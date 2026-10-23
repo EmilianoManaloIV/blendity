@@ -4,6 +4,8 @@
 #include "../core/core.h"
 #include "../../extern/fast_float/fast_float.h"
 #include "../../extern/ufbx/ufbx.h"
+#include "import_anim.h"
+#include "spring_bones.h"
 
 #include <algorithm>
 #include <cstring>
@@ -14,19 +16,63 @@
 namespace bl {
 
 bool model_extension_supported(const std::string &ext) {
-  return ext == ".obj" || ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".stl" || ext == ".ply" || ext == ".usda";
+  return ext == ".obj" || ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".stl" || ext == ".ply" || ext == ".usda" ||
+         ext == ".pmx" || ext == ".pmd" || ext == ".vrm" || ext == ".bvh" || ext == ".dae";
 }
 
-bool import_model(const std::string &path, ImportResult &out) {
-  std::string ext = fs::extension(path);
+bool motion_extension_supported(const std::string &ext) { return ext == ".vmd"; }
+
+namespace {
+bool import_by_format(const std::string &path, ImportResult &out) {
+  const std::string ext = fs::extension(path);
   if (ext == ".obj") return import_obj_file(path, out);
   if (ext == ".fbx") return import_fbx_file(path, out);
-  if (ext == ".glb" || ext == ".gltf") return import_gltf_file(path, out);
+  if (ext == ".glb" || ext == ".gltf" || ext == ".vrm") return import_gltf_file(path, out);
   if (ext == ".stl") return import_stl_file(path, out);
   if (ext == ".ply") return import_ply_file(path, out);
   if (ext == ".usda" || ext == ".usd") return import_usda_file(path, out);
+  if (ext == ".pmx" || ext == ".pmd") return import_pmx_file(path, out);
+  if (ext == ".bvh") return import_bvh_file(path, out);
+  if (ext == ".dae") return import_dae_file(path, out);
   out.error = "unsupported model format " + ext;
   return false;
+}
+}  // namespace
+
+bool import_model(const std::string &path, ImportResult &out) {
+  out.source = path;
+  if (!import_by_format(path, out)) return false;
+  complete_materials(out);  // (task 0134: every mesh a material; texture sets found by name)
+  if (const size_t folded = fold_end_bones(out)) out.notes.push_back(strprintf("%zu end bone(s) folded into their parents' tails", folded));
+  return true;
+}
+
+size_t fold_end_bones(ImportResult &r) {
+  auto is_end_name = [](const std::string &n) {
+    for (const char *suffix : {"_end", ".end", " End", "_End", " end", "_END"}) {
+      const size_t l = std::strlen(suffix);
+      if (n.size() > l && n.compare(n.size() - l, l, suffix) == 0) return true;
+    }
+    return false;
+  };
+  std::vector<int> children(r.nodes.size(), 0);
+  for (const ImportedNode &n : r.nodes)
+    if (n.parent >= 0 && (size_t)n.parent < r.nodes.size()) children[(size_t)n.parent]++;
+  size_t folded = 0;
+  for (size_t i = 0; i < r.nodes.size(); i++) {
+    ImportedNode &n = r.nodes[i];
+    if (!n.is_bone || n.mesh || children[i] || n.parent < 0 || !r.nodes[(size_t)n.parent].is_bone || !is_end_name(n.name)) continue;
+    bool weighted = false;  // (a leaf some vertices follow is a bone, whatever its name)
+    for (const ImportedSkin &sk : r.skins) {
+      const Mesh *m = sk.mesh_node >= 0 && (size_t)sk.mesh_node < r.nodes.size() ? r.nodes[(size_t)sk.mesh_node].mesh.get() : nullptr;
+      const int gi = m ? m->find_group(n.name) : -1;
+      weighted = weighted || (gi >= 0 && std::any_of(m->vertex_groups[(size_t)gi].weights.begin(), m->vertex_groups[(size_t)gi].weights.end(), [](float w) { return w > 0.0f; }));
+    }
+    if (weighted) continue;
+    n.folded = true;
+    folded++;
+  }
+  return folded;
 }
 
 /* ===================================================================== */
@@ -67,11 +113,12 @@ std::string mtl_map_path(const std::string &args) {
 
 TextureRef texture_ref(const std::string &dir, const std::string &file, bool non_color, ImportResult &out) {
   if (file.empty()) return {};
-  std::string f = file;
-  for (char &c : f)
-    if (c == '\\') c = '/';
-  std::string abs = fs::exists(f) ? f : fs::join(dir, f);
-  if (!fs::exists(abs)) abs = fs::join(dir, fs::filename(f));  // common: absolute path from another machine
+  if (out.source.empty()) out.source = fs::join(dir, "model");  // (a reader called on its own)
+  /* Relative to the file that links it first (an .mtl in a subfolder), else found: the link, beside the model, its .fbm
+   * or textures folder. */
+  const std::string beside = fs::join(dir, file);
+  const bool absolute = !file.empty() && (file[0] == '/' || file[0] == '\\' || (file.size() > 1 && file[1] == ':'));
+  const std::string abs = !absolute && fs::exists(beside) ? beside : find_texture(out, file);
   out.textures.push_back(abs);
   return TextureRef{abs, non_color};
 }
@@ -291,7 +338,28 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
 
 static std::string ustr(const ufbx_string &s) { return std::string(s.data, s.length); }
 
+/* A blend-shape channel's full shape as a shape key (task 0135): offsets mirrored and through the geometry transform,
+ * like the vertices; named without Maya's "blendShape1." prefix. No name: nothing to make. */
+static ShapeKey fbx_shape_key(const ufbx_blend_deformer *bd, const ufbx_blend_channel *ch, const ufbx_matrix &g, size_t verts) {
+  const ufbx_blend_shape *sh = ch->target_shape ? ch->target_shape : ch->keyframes.count ? ch->keyframes.data[ch->keyframes.count - 1].shape : nullptr;
+  if (!sh) return {};
+  ShapeKey k;
+  k.name = ustr(ch->name).empty() ? ustr(sh->name) : ustr(ch->name);
+  const std::string prefix = ustr(bd->name) + ".";
+  if (k.name.size() > prefix.size() && k.name.compare(0, prefix.size(), prefix) == 0) k.name = k.name.substr(prefix.size());
+  k.delta.assign(verts, Vec3(0.0f));
+  for (size_t oi = 0; oi < sh->num_offsets && oi < sh->offset_vertices.count && oi < sh->position_offsets.count; oi++) {
+    const uint32_t v = sh->offset_vertices.data[oi];
+    const ufbx_vec3 d = sh->position_offsets.data[oi];
+    if (v >= k.delta.size()) continue;
+    k.delta[v] = {-(float)(g.m00 * d.x + g.m01 * d.y + g.m02 * d.z), (float)(g.m10 * d.x + g.m11 * d.y + g.m12 * d.z),
+                  (float)(g.m20 * d.x + g.m21 * d.y + g.m22 * d.z)};
+  }
+  return k;
+}
+
 bool import_fbx_file(const std::string &path, ImportResult &out) {
+  if (out.source.empty()) out.source = path;
   ufbx_load_opts opts{};
   /* ufbx brings any file to right-handed Y-up (Z-up Blender files stand up);
    * then X is mirrored here, which is exactly what Unity's importer does (and
@@ -322,6 +390,13 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
       std::string f = ustr(mp.texture->filename);
       std::string abs = ustr(mp.texture->absolute_filename);
       std::string rel = ustr(mp.texture->relative_filename);
+      /* Embedded in the file (Blender's Embed Textures, Mixamo's downloads): written out, used from there. */
+      const ufbx_blob &content = mp.texture->content;
+      const std::string inside = save_embedded(!rel.empty() ? rel : !f.empty() ? f : ustr(mp.texture->name) + ".png", content.data, content.size, out);
+      if (!inside.empty()) {
+        out.textures.push_back(inside);
+        return TextureRef{inside, non_color};
+      }
       std::string pick = !abs.empty() && fs::exists(abs) ? abs : (!rel.empty() ? fs::join(dir, rel) : f);
       return texture_ref(dir, pick, non_color, out);
     };
@@ -332,6 +407,10 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
     m->base_map = texfile(fm->pbr.base_color, false);
     if (m->base_map.empty()) m->base_map = texfile(fm->fbx.diffuse_color, false);
     m->roughness_map = texfile(fm->pbr.roughness, true);
+    if (!m->roughness_map.empty() && fm->features.roughness_as_glossiness.enabled) {  // (a gloss map: inverted into roughness)
+      const std::string inv = derive_channel(m->roughness_map.path, 0, true, "rough", out);
+      if (!inv.empty()) m->roughness_map.path = inv, out.textures.push_back(inv);
+    }
     m->metallic_map = texfile(fm->pbr.metalness, true);
     m->normal_map = texfile(fm->fbx.normal_map, true);
     m->emission_map = texfile(fm->fbx.emission_color, false);
@@ -339,6 +418,11 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
       color(fm->fbx.emission_color, m->emission);
       m->emission_strength = (float)fm->fbx.emission_factor.value_real;
     }
+    if (fm->pbr.opacity.has_value && fm->pbr.opacity.value_real < 0.999) {  // (FBX transparency, as Blender reads it)
+      m->alpha = clampf((float)fm->pbr.opacity.value_real, 0, 1);
+      m->surface = (int)MaterialSurface::Transparent;
+    }
+    if (fm->features.double_sided.enabled) m->double_sided = true;
     mats[fm] = m;
     out.materials.push_back(m);
   }
@@ -407,6 +491,15 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
         int slot = fi < fm->face_material.count ? (int)fm->face_material.data[fi] : 0;
         m->add_face(fv.data(), fv.size(), has_uv ? fuv.data() : nullptr, slot);
       }
+      /* Blend shapes (task 0135): each channel a shape key, its weight onto the renderer. */
+      for (size_t bi = 0; bi < fm->blend_deformers.count; bi++)
+        for (size_t ci = 0; ci < fm->blend_deformers.data[bi]->channels.count; ci++) {
+          const ufbx_blend_channel *ch = fm->blend_deformers.data[bi]->channels.data[ci];
+          ShapeKey k = fbx_shape_key(fm->blend_deformers.data[bi], ch, g, m->vert_count());
+          if (k.name.empty() || m->find_shape(k.name) >= 0) continue;
+          node.shape_weights.push_back({k.name, (float)ch->weight});
+          m->shape_keys.push_back(std::move(k));
+        }
       /* A skin (task 0047): a vertex group per cluster, named after its bone's node. */
       for (size_t si = 0; si < fm->skin_deformers.count; si++) {
         const ufbx_skin_deformer *sk = fm->skin_deformers.data[si];
@@ -455,6 +548,27 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
         }
         if (sk->clusters.count) skinned.push_back(n);
       }
+      /* The file's normals (task 0149): per index in FBX, one per vertex when every corner of the vertex agrees (a
+       * hard edge's corners disagree: a zero, and keep_file_normals leaves such a mesh alone), through the geometry's
+       * normal matrix and mirrored like the positions; kept when they differ from the recomputed ones. */
+      if (fm->vertex_normal.exists) {
+        const ufbx_matrix gn = ufbx_matrix_for_normals(&g);
+        std::vector<Vec3> fn(m->vert_count(), Vec3(0.0f));
+        std::vector<uint8_t> seen(m->vert_count(), 0);
+        for (size_t fi = 0; fi < fm->faces.count; fi++) {
+          const ufbx_face f = fm->faces.data[fi];
+          for (uint32_t k = 0; k < f.num_indices; k++) {
+            const uint32_t ix = f.index_begin + k, vi = fm->vertex_indices.data[ix];
+            if (vi >= fn.size()) continue;
+            const ufbx_vec3 nv3 = ufbx_get_vertex_vec3(&fm->vertex_normal, ix);
+            const Vec3 n = normalize(Vec3(-(float)(gn.m00 * nv3.x + gn.m01 * nv3.y + gn.m02 * nv3.z), (float)(gn.m10 * nv3.x + gn.m11 * nv3.y + gn.m12 * nv3.z),
+                                          (float)(gn.m20 * nv3.x + gn.m21 * nv3.y + gn.m22 * nv3.z)));
+            if (!seen[vi]) fn[vi] = n, seen[vi] = 1;
+            else if (dot(fn[vi], n) < 0.9999f) fn[vi] = Vec3(0.0f);  // a split
+          }
+        }
+        if (keep_file_normals(*m, fn)) out.notes.push_back(m->name + ": the file's own normals kept as custom normals (they differ from the recomputed ones)");
+      }
       m->smooth = true;
       m->smooth_angle = 60.0f;  // keep hard edges of imported hard-surface models
       m->sync_attributes();
@@ -496,6 +610,7 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
         skin.joints.push_back(it->second);
     out.skins.push_back(std::move(skin));
   }
+  if (!out.nodes.empty()) fbx_import_clips(scene, index, out);  // (task 0139: the stacks as clips)
   ufbx_free_scene(scene);
   if (out.nodes.empty()) {
     out.error = "FBX contains no nodes";
@@ -505,11 +620,51 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
   return true;
 }
 
-GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent) {
+/* IK, spring chains and outlines (task 0136) on the objects made for their nodes. */
+static void add_rig_parts(const ImportResult &r, const std::vector<GameObject *> &made) {
+  auto at = [&](int i) { return i >= 0 && (size_t)i < made.size() ? made[(size_t)i] : nullptr; };
+  for (const ImportedIK &k : r.iks)
+    if (GameObject *g = at(k.node); g && !g->get<IKConstraint>()) {
+      IKConstraint *c = g->add<IKConstraint>();
+      c->target = k.target, c->pole = k.pole, c->chain_length = k.chain_length, c->iterations = k.iterations;
+    }
+  for (const ImportedSpring &s : r.springs) {
+    GameObject *g = at(s.node);
+    if (!g || !g->get<Bone>()) continue;
+    /* A root that forks (a skirt's ring of strands under one bone) gets a chain per strand, with the same settings. */
+    std::vector<GameObject *> firsts = spring::chains_under(*g);
+    if (std::find(firsts.begin(), firsts.end(), g) == firsts.end() && !g->get<SpringBone>()) firsts.push_back(g);
+    for (GameObject *f : firsts) {
+      if (f->get<SpringBone>()) continue;
+      spring::add(*f, s.label);
+      SpringBone *sb = f->get<SpringBone>();
+      if (!sb) continue;
+      sb->radius = s.radius;
+      if (s.stiffness >= 0.0f) sb->stiffness = s.stiffness;
+      if (s.damping >= 0.0f) sb->damping = s.damping;
+      if (s.gravity >= 0.0f) sb->gravity = s.gravity;
+    }
+  }
+  for (const ImportedOutline &o : r.outlines)
+    if (GameObject *g = at(o.node); g && !g->get<Outline>()) {
+      Outline *ol = g->add<Outline>();
+      ol->thickness = o.thickness, ol->color = o.color, ol->world_space = true;
+    }
+}
+
+std::string import_node_path(const ImportResult &r, int node) {
+  if (r.nodes.size() == 1) return "";
+  std::string p;
+  for (int n = node; n >= 0 && (size_t)n < r.nodes.size(); n = r.nodes[(size_t)n].parent) p = p.empty() ? r.nodes[(size_t)n].name : r.nodes[(size_t)n].name + "/" + p;
+  return p;
+}
+
+GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent, std::vector<GameObject *> *made_out) {
   GameObject *root = r.nodes.size() == 1 && r.nodes[0].parent < 0 ? nullptr : scene.create(root_name, parent);
   std::vector<GameObject *> made(r.nodes.size(), nullptr);
   for (size_t i = 0; i < r.nodes.size(); i++) {
     const ImportedNode &n = r.nodes[i];
+    if (n.folded) continue;
     GameObject *g = scene.create(root ? n.name : root_name, root ? root : parent);
     Transform t;
     t.position = n.position;
@@ -521,6 +676,7 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
       g->add<MeshFilter>()->mesh = n.mesh;
       auto *mr = g->add<MeshRenderer>();
       mr->materials = n.materials;
+      mr->shape_weights = n.shape_weights;
       if (mr->materials.empty()) mr->materials.push_back(make_material(n.name, Vec3(0.8f)));
     }
     made[i] = g;
@@ -546,10 +702,20 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
     }
     return rest_world[(size_t)i];
   };
+  std::vector<Vec3> rest_local(r.nodes.size(), Vec3(0.0f));  // each bone's rest position in its parent (a folded leaf's too)
   for (size_t i = 0; i < r.nodes.size(); i++) {
-    if (!r.nodes[i].is_bone || !made[i]) continue;
-    Bone *b = made[i]->add<Bone>();
     const ImportedNode &n = r.nodes[i];
+    if (!n.is_bone || (!made[i] && !n.folded)) continue;
+    rest_local[i] = n.position;
+    if (n.has_bind) {
+      const Mat4 parent_rest = n.parent >= 0 ? at_rest(n.parent) : Mat4::identity();
+      if (std::fabs(dot(cross(parent_rest.column(0), parent_rest.column(1)), parent_rest.column(2))) > 1e-12f) {
+        const Vec3 p = (parent_rest.inverse() * n.bind_world).translation();
+        if (finite_bits(p.x) && finite_bits(p.y) && finite_bits(p.z)) rest_local[i] = p;
+      }
+    }
+    if (!made[i]) continue;
+    Bone *b = made[i]->add<Bone>();
     if (n.has_bind) {
       const Mat4 parent_rest = n.parent >= 0 ? at_rest(n.parent) : Mat4::identity();
       const float det = dot(cross(parent_rest.column(0), parent_rest.column(1)), parent_rest.column(2));
@@ -567,15 +733,31 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
     else
       b->set_rest(made[i]->local());
   }
-  /* Long enough to reach the first child joint, at rest. */
-  for (size_t i = 0; i < r.nodes.size(); i++) {
-    Bone *b = r.nodes[i].is_bone && made[i] ? made[i]->get<Bone>() : nullptr;
-    if (!b) continue;
-    float len = 0.0f;
-    for (size_t c = 0; c < r.nodes.size(); c++)
-      if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone && made[c])
-        if (const Bone *cb = made[c]->get<Bone>()) len = std::max(len, length(cb->rest_position));
-    b->length = len > 1e-4f ? len : 0.1f;
+  /* Long enough to reach the first child joint at rest (a folded end bone counts: it is the tail); a bone with no
+   * child below it gets a length in metres whatever the armature's scale - half its parent's, else 10 cm - since its
+   * `length` is in its own units (a Blender FBX armature is scaled x100: 0.1 of those would be 10 m). Parents first. */
+  std::vector<size_t> order;
+  for (size_t i = 0; i < r.nodes.size(); i++)
+    if (r.nodes[i].is_bone && made[i]) order.push_back(i);
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    int da = 0, db = 0;
+    for (int p = r.nodes[a].parent; p >= 0 && da < 100000; p = r.nodes[(size_t)p].parent) da++;
+    for (int p = r.nodes[b].parent; p >= 0 && db < 100000; p = r.nodes[(size_t)p].parent) db++;
+    return da < db;
+  });
+  for (size_t i : order) {
+    Bone *b = made[i]->get<Bone>();
+    float len = r.nodes[i].length;
+    for (size_t c = 0; c < r.nodes.size() && len <= 0.0f; c++)
+      if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone && (made[c] || r.nodes[c].folded)) len = std::max(len, length(rest_local[c]));
+    if (len > 1e-4f) {
+      b->length = len;
+      continue;
+    }
+    const int p = r.nodes[i].parent;
+    const Bone *pb = p >= 0 && made[(size_t)p] ? made[(size_t)p]->get<Bone>() : nullptr;
+    const float metres = pb ? std::max(0.01f, 0.5f * pb->length * bone_world_unit(*made[(size_t)p])) : 0.1f;
+    b->length = metres / bone_world_unit(*made[i]);
   }
   for (const ImportedSkin &sk : r.skins) {
     if (sk.mesh_node < 0 || sk.mesh_node >= (int)made.size() || !made[(size_t)sk.mesh_node] || sk.joints.empty()) continue;
@@ -613,6 +795,8 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
     GameObject *mg = made[(size_t)sk.mesh_node];
     if (!mg->get<SkinModifier>()) mg->add<SkinModifier>()->object = arm->name;
   }
+  add_rig_parts(r, made);
+  if (made_out) *made_out = made;
   return root ? root : (made.empty() ? nullptr : made[0]);
 }
 

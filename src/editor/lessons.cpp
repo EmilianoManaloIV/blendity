@@ -68,7 +68,7 @@ Unity and Blender both split one window into panels. Unity calls them windows an
 ! layout:2 by 3 | Try the "2 by 3" layout
 ! layout:Default | Back to Default
 # Layouts for each stage
-A 3D job goes through stages, and each needs only some of the tools. The Layout dropdown (top right, as in Unity; Blender's Workspaces) has a layout for each: Reference & Planning, Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Rigging, Skinning & Weight Painting and Animation. Each arranges the windows for its stage (the UV Editor beside the Scene view for UVs; the Materials and Textures windows for texturing; the Rigging window for rigs) and shows that stage's tools in the Modeling Tools window, the GameObject menu and Add Component; the others step aside. Nothing is gone: the keys and the console reach every tool, and Window > Layouts > Show All Tools shows them all. Default shows everything, as do the arrangements (2 by 3, Tall, Wide, Learning). Save Layout... keeps your own arrangement under a name.
+A 3D job goes through stages, and each needs only some of the tools. The Layout dropdown (top right, as in Unity; Blender's Workspaces) has a layout for each: Reference & Planning, Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Editing, Rigging, Skinning & Weight Painting and Animation. Each arranges the windows for its stage (the UV Editor beside the Scene view for UVs; the Materials and Textures windows for texturing; the Rigging window for rigs) and shows that stage's tools in the Modeling Tools window, the GameObject menu and Add Component; the others step aside. Nothing is gone: the keys and the console reach every tool, and Window > Layouts > Show All Tools shows them all. Default shows everything, as do the arrangements (2 by 3, Tall, Wide, Learning). Save Layout... keeps your own arrangement under a name.
 | Stage | Windows | Tools shown
 | Reference & Planning | Scene, Game, Project | create, reference images, cameras
 | Blocking Out | Scene, Modeling Tools | primitives, drawing, snapping
@@ -76,6 +76,7 @@ A 3D job goes through stages, and each needs only some of the tools. The Layout 
 | UV Unwrapping | Scene + UV Editor | Edit Mode, UV
 | Texturing & Materials | Scene, Game, Materials, Textures | materials, textures, baking
 | Lighting & Rendering | Scene, Game, Lighting, Render | lights, cameras
+| Editing | Editing, Render | developing a render or an image
 | Rigging / Skinning | Scene, Rigging | bones, skins, weights, IK
 Reference & Planning has GameObject > Reference Image...: a picture to model from, an unlit plane the picture's shape, kept out of renders (Blender: Add > Image > Reference; console `refimage <path> front|side|top`).
 ! layout:Modeling & Topology | Use the Modeling & Topology layout
@@ -337,6 +338,60 @@ AI Inbetweening (Preferences > Animation Assistants; it needs its download - ONN
 ! cmd:rig humanoid; anim new Inbetween; anim key Hips Position 1 0 0.95; anim key Hips Position 1 40 0.95; assist on ai; ai style walk; ai span 0 40 | A person with two keys 40 frames apart, AI Inbetweening asked to fill them (it says how to get its download if it isn't installed)
 ? Why does AI Inbetween leave the keys at both ends exactly as they were? | It only makes the frames strictly between them: the network is given both ends and only fills the gap, so your poses stay yours.
 ? You move the second key after generating: why does the ghost turn grey instead of updating? | Nothing changes your keys on its own: the made span belongs to the old keys, so it waits for you to press AI Inbetween again.
+# Importing models: their materials made for you
+Drop a model onto the window (or File > Import, or the console's import <file>) and Blendity does what Unity's importer does. The file goes into Assets/Meshes, its textures into Assets/Textures/<model>, and every material into Assets/Materials/<model>/<name>.mat, already on the model's meshes: edit a .mat and every copy of the model changes with it. Textures packed inside the file (FBX's Embed Textures, a .glb's images) are taken out. A link that points somewhere that no longer exists (another machine's C:\ path) is looked for beside the model, in its .fbm folder and in a textures or images folder. A material the file left bare gets a texture set found by name: Body_BaseColor, Body_Normal, Body_Roughness, T_Body_ORM and so on, matched to the material's or the mesh's name, or the folder's only set. The finder looks through the folders around the model (its own and three levels below, and the folders beside it, as Sketchfab's source/ and textures/ are laid out), reads two-word names (Base_color, Normal_OpenGL), ignores sizes (_2k, _4096), and pairs each bare material with the set its name is likeliest to own; the Console says which file went where, and a wrong guess is one slot to change in the material's Inspector. Gloss and smoothness maps are inverted into roughness, and packed maps (glTF's metallic-roughness, Unity's metallic-smoothness, Unreal's ORM) are split into the channels Blendity reads. A mesh with no material at all gets one named after it. Importing the model again keeps the .mat files you edited.
+! cmd:window Project | Open the Project window (Assets/Materials/<model> holds an imported model's materials)
+? A model's textures are in a folder called "textures" beside it, but the FBX names a path on someone else's computer. What happens? | Blendity looks for the file by its name beside the model, in its .fbm folder and in textures/images folders, and uses the one it finds.
+? You recoloured an imported model's material and import the model again. Is your colour lost? | No: the .mat file already exists, so the import uses it as it is.
+? A Sketchfab download has source/model.fbx and textures/Body_Base_color.png, and the FBX names no textures. Is Body textured? | Yes: the finder reads the folders beside the model and pairs Body with the Body_Base_color set; the Console says so, and the Inspector can change it.
+# Shape keys: faces and morphs
+A shape key (Blender's name; Unity says blend shape, glTF morph target, MMD vertex morph) is a named offset of a mesh's vertices: a smile, a blink, a puffed cheek. The mesh keeps its basis shape and each key; the MeshRenderer's BlendShape sliders say how much of each is added, from 0 to 1, before the skin bends the mesh, so an expression moves with the head. Imported FBX, glTF, MMD and VRM characters bring their keys and values. The weights are ordinary numbers to key in the Animation window (Add Property > MeshRenderer > BlendShape/...). Console: shape list, shape add <name> [amount] (a key pushing the surface out along its normals), shape set <name> <weight>, shape remove <name>.
+! cmd:create Sphere; shape add Puff 0.2; shape set Puff 0.5 | A sphere with a shape key "Puff", half applied (see MeshRenderer > BlendShape/Puff)
+? Why are shape keys added before the skin rather than after? | So the expression is bent with the bones: a smile keyed on the face turns with the head instead of staying where the face was at rest.
+? An imported face has 50 keys. Does every frame cost 50 times as much? | Only the keys with a weight above 0 are added.
+# Importing: preview the look
+A model dropped onto the window (or opened with File > Import) is shown first, in the Import Preview (task 0152): the
+model on a slow turntable (drag to turn it) lit from the preview's own camera, with the import's notes beside it - what the
+file held, which textures were found. The Shading row decides how every material comes in before anything is
+written: As Imported (what the file made: a VRM's MToon, an MMD's toon), PBR, or a toon style - Classic, Guilty
+Gear, Soft Anime, Painterly, Manga - over the file's materials (their maps stay). Outline puts a line on every mesh.
+Import writes the model, its textures and the .mat files with that shading into Assets (a model imported before gets
+its existing .mat files rewritten with the look, unless As Imported); Cancel writes nothing. Several files dropped at
+once take their turns, one preview after another.
+Preferences > Import turns the preview off (the model comes in at once, as before) and sets the shading it opens
+with. From the console, import <file> <shading> skips the dialog: import Assets/Meshes/hero.fbx guiltygear.
+? Why pick a toon style at import rather than afterwards? | The .mat files are written with it, so every copy of the model and every scene that uses them has the look from the start; the Materials window changes them later all at once.
+! cmd:window Project | Open the Project window: drop a model onto the Scene view to see the Import Preview
+# MMD models: PMX and PMD
+MikuMikuDance characters (.pmx, and the older .pmd) import like any model: drop one onto the window. MMD measures in units of 8 cm and faces its characters the other way, so the model comes in scaled to metres and turned to face +Z like every other character. Its bones point at their tails, and the standard ones get the names Blendity's rig tools read (左ひざ becomes LeftLeg, 頭 Head), so Walk Cycle, Add IK and the physics tools find the legs, spine and head. Hair, skirt and accessory bones keep their own names. The legs' IK comes with it (an IKConstraint on each knee, aimed at the foot's IK bone, with a pole in front of the knee). Bones MMD simulates (hair, skirts, ribbons) become Spring Bones chains. Faces (vertex and group morphs) become shape keys under their Japanese names. Materials are Toon-shaded with MMD's colours, textures and toon ramp, and the model's edge becomes an Outline. Bone, UV and material morphs, and bones that copy another's turn (twist and eye helpers), are listed in the Console as not carried over.
+! cmd:window Project | Open the Project window: drop a .pmx or .pmd there or onto the Scene view
+? Why does an MMD model come in 0.08 times its size in the file? | MMD's unit is about 8 cm: a model 20 units tall is a 1.6 m person in metres.
+? A PMX's hair swings in MMD. What makes it move here? | Its simulated bones become Spring Bones chains, which move in Play and can be baked into keys.
+# MMD motions: VMD dances on your character
+A .vmd file is a MikuMikuDance motion: keys for bones by their Japanese names, for the face's morphs, and switches for the legs' IK. Drop one onto the Scene view with an MMD character selected (or File > Import, or the console's import <file>) and it becomes Assets/Animations/<character>/<motion>.anim, played by the character's Animation component and open in the Animation window like any clip. MMD keys a bone as a turn in its rest frame; Blendity's bones point at their tails, so each key is converted into the bone's own rotation, and MMD's timing curves become the keys' slopes - where a curve can't follow a long turn exactly, the frames between are keyed from the true arc. Morph keys land on the BlendShape sliders of every mesh that has the morph; IK switched off in the motion keys the constraint's Weight to 0. Bones the character hasn't are listed in the Console. MMD's own camera and lights aren't imported.
+! cmd:window Project | Open the Project window: drop a .vmd onto the Scene view with its character selected
+? A motion made for one MMD model is dropped onto another. Does it fit? | Yes, as far as the bones are standard: they are matched by MMD's names (左ひざ, 頭), so any model with them plays it; extra bones are listed as not found.
+? Why does a long turn get a key on every frame between two of the motion's keys? | A clip's curves are Euler angles; a big turn interpolated in angles drifts off MMD's arc, so the frames between are keyed from the arc itself.
+# VRM characters: VRoid and UniVRM avatars
+A .vrm file is a glTF with the VRM extension: the format VRoid Studio, UniVRM and most VTuber tools write, in its 0.x or 1.0 form. Drop one onto the Scene view and it comes in as a character facing +Z: its humanoid bones named for the rig tools (leftUpperLeg becomes LeftUpLeg, head Head), so Walk Cycle, Add IK and the physics tools find them; its expressions (A, I, U, E, O, blink, joy...) as shape keys on the meshes they move, each the weighted mix of morph targets the file says; its spring bones (hair, skirts, ribbons) as Spring Bones chains with the file's stiffness, drag, gravity and radius; and its MToon materials as Toon shading with the shade colour, toony edge and an Outline of the width the file asks for. The model's title, author and license are listed in the Console: a VRM's terms (what it may be used for) belong to its author.
+! cmd:window Project | Open the Project window: drop a .vrm onto the Scene view
+? A VRM 0.x and a VRM 1.0 of the same avatar: why does Blendity turn one of them around? | A 0.x model faces -Z in the file and a 1.0 model +Z; both are turned to face +Z here, like every character.
+? Where did the expression "blink" go? | It is a shape key on each mesh the file binds it to: the MeshRenderer's BlendShape/blink slider, animatable like any key.
+# Imported animations: a model's clips
+A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
+! cmd:window Animation | Open the Animation window: an imported model's clips play on its root
+? A Mixamo FBX has one animation. Where is it after the import? | In Assets/Animations/<model>/<clip>.anim, playing on the model's root; the Animation window shows it.
+? Why is a turn keyed on every frame when the file had only two keys? | The file's turn is a quaternion arc; Blendity's curves are Euler angles, which can't follow a long arc with two keys, so each frame is keyed from the arc.
+# Motion capture: BVH
+A .bvh file is motion capture in Biovision's text format: a hierarchy of joints with their offsets and channels, then a row of values a frame. Drop one onto the window and it comes in as a skeleton (a bone per joint, at the file's offsets, in metres: a capture in centimetres is scaled) with its motion as a clip in Assets/Animations/<file>/, playing on the skeleton's root at the file's frame rate. The rotation channels are composed in the order the file lists them, as the format means, and keyed as Euler angles that never wrap. The skeleton has no mesh: skin one to it (Rigging > Bind), bake its clip onto another character's rig with the same bone names, or copy keys across in the Animation window. Retargeting onto a rig with other names isn't automatic.
+! cmd:window Animation | Open the Animation window: a capture's clip plays on its skeleton
+? A CMU capture comes in 1.7 m tall although the file's numbers are around 170. Why? | A skeleton taller than 10 units is taken to be in centimetres and scaled to metres.
+? The file lists Zrotation Xrotation Yrotation. In what order are they applied? | In that order, as the format means: each about its own axis, one after another.
+# Collada: .dae scenes
+Collada is the XML scene format Blender, Maya, SketchUp and Mixamo export: geometry with materials and textures, skins with their joints, a node hierarchy, and animations. Blendity reads it with its own XML reader: drop a .dae onto the window. The file says its up axis (Z up from Blender, Y up from most others) and its unit (centimetres from many tools), and everything is brought into Blendity's Y-up metres, so a Z-up model in centimetres stands the right way up at the right size. Materials come from their effects (the diffuse colour or texture, emission, shininess as roughness, transparency); skins bring their joints as bones with their bind matrices; the animations (matrix channels, or translate / rotate / scale channels by name) become one clip in Assets/Animations/<model>/, playing on the root.
+! cmd:window Project | Open the Project window: drop a .dae onto the Scene view
+? A SketchUp export is Y up in inches. What happens to it? | The file's unit (0.0254 m) and up axis are read from its asset block: it comes in at the right size, the right way up.
+? Blender's exporter writes a 4x4 matrix per joint per frame. How does that become a clip? | Each node's matrix at each key is turned into position, rotation and scale keys, the rotation as Euler angles nearest the key before.
 # Physics for animation: a jump from start to finish
 Blendity's physics for animation follows Cascadeur's order. Weigh the body (from its skin), mark where it touches the ground (Contacts), then let physics correct what you keyed: Flight fixes the air alone, AutoPhysics the whole clip. Secondary motion (spring bones on hair, ears, tails and cloth) and an active ragdoll (hits and falls) come on top, and AutoPosing helps make the keys in the first place. Each correction is shown as a ghost with its frames coloured - green fine, blue changed, red impossible - and nothing is written until you press Apply, as one undo step. The Try-it below makes a person jump in straight lines, the way a first blocking pass often looks: find the contacts, show the flight, and see the straight lines become a parabola.
 ! cmd:rig humanoid; anim new Jump; anim key . Position 1 0 0; anim key . Position 1 5 0; anim key . Position 1 15 1; anim key . Position 1 25 0; anim key . Position 1 40 0; window Animation; body contacts find; body flight show | A person jumping in straight lines: its contacts found and its flight corrected (the ghost; Apply writes it)
@@ -364,6 +419,28 @@ Hair, ears, tails and skirts shouldn't be keyed by hand: they follow the body wi
 ? Why is a hair root with five strands five chains, not one? | Each strand swings on its own; the root they share stays where the head's animation puts it.
 ? You set a chain to None and run Find again: why isn't it listed? | None is remembered on the chain's first bone ("Not a Spring Chain"); Show Ignored lists it, and Unignore brings it back.
 ! window:Rigging | Open the Rigging window (Spring Bones, with a character's bone selected)
+# Strands: a curl that holds, wind, the body's real width
+A chain's Bend keeps each bone's animated angle to the one before it (task 0153): a curl keeps its shape instead of straightening under its own weight, a strand bends where it was bent, whichever way the chain swings. Root To Tip fades the pull toward the animation along the chain's length, so long hair's tips swing free while the root follows the head. Add a Wind component (Add Component > Scripts) anywhere: it blows along the object's forward (or away from it, Spherical, at full strength whatever the distance) at its Strength in metres a second, with Turbulence stirring and Gusts breathing; a chain's own Wind says how much it feels it, and a bake under a wind comes out the same twice. The body's capsules are as wide as the skin each bone moves, so a skirt rests on a thigh's real width; Separate keeps a chain apart from the others by its radius - never further apart than the animation laid them - so a ponytail's strands don't pass through each other.
+? A ponytail's curl straightens when Play starts. Which field holds it? | Bend: each bone keeps its animated angle to the one before it; 0 lets the curl fall out, 1 holds the animated shape.
+# Strands with weight: Density, Air and a lag that doesn't ring
+Since task 0168 a strand is a chain of masses (Density, kg per metre: hair 0.01, a tail 0.1) held to the animated pose by springs that don't depend on the frame rate. Stiffness is how strongly it returns to the pose: hair at 0.3 sags under its own weight and follows the head with a lag; 1 is rigid. Damping takes the swing out relative to where the root is going, so the lag settles without ringing. Air holds every strand back a little even in still air, and a heavier chain feels the air less and its own weight more: a tail sags further and swings longer than a lock of hair with the same Stiffness. A Wind gives the air its motion.
+? Your hair swings back and forth several times after the head stops. What do you raise, and what does it change? | Damping: it takes out the motion relative to the root, so the lag settles in one swing instead of ringing. Air also helps a little; Stiffness changes how far the hair lags, not how long it rings.
+? A tail and a lock of hair have the same Stiffness, but the tail sags further and swings longer. Why? | Its Density is ten times hair's: the same spring holds more mass, and the air holds it back less.
+! cmd:create Empty | Make an Empty (add a rig with a tail and Spring Bones to try Density)
+! cmd:create Cube; select Cube; component Wind | Add a Wind to the Cube (its forward is the wind's direction)
+# Winds you can see
+A Wind shows an icon in the Scene view like a light (task 0158), on the icons layer, clicked to select it. Selected, it draws its arrow: along its forward, half a metre plus a quarter metre for every metre a second of Strength; with Turbulence, wavy streamlines beside it; Spherical shows three rings instead, since it blows away from its object every way. A Rotator and an Oscillator show icons too, so a Play-mode mover isn't an invisible empty.
+? The Wind's arrow points the wrong way. What do you turn? | The object: the wind blows along its forward (+Z); turn it with the rotate gizmo and the arrow follows.
+! cmd:create Empty; select Empty; component Wind; set Wind.Strength 6 | A strong wind on an Empty: a long arrow when it is selected
+# Soft tissue: breasts, thighs and bellies that move
+A breast, a thigh or a belly isn't a tail: it trails the body's acceleration, not its position (task 0153). Spring Bones' fifth label, Soft, is for a single bone: Lag says how much of the body's acceleration the tissue trails (a landing throws it down, a step up, a slow walk hardly moves it), Stiffness pulls it back and Damping settles it, Limit keeps it within a cone of degrees about where the animation points the bone, and Volume narrows the bone across as it stretches along its length, so the mass keeps its volume. Find Spring Chains labels bones named breast, bust, belly, butt, a thigh or hip with jiggle or soft, MMD's 胸 and 尻, VRM's J_Sec_L_Bust as Soft. A mesh whose rig has no such bones takes a Jiggle modifier instead: a vertex group's vertices move together on the same spring.
+? A breast bone bounces on a slow walk as much as on a run. Which Soft field is wrong? | None - check the label: a Hair or Tail label pulls by position; Soft trails the acceleration, which a slow walk hardly has.
+! cmd:create Cube; select Cube; component JiggleModifier | A Jiggle on the Cube (give it a vertex group to move part of it)
+? The bone stretches but the tissue looks thinner each bounce. Which field? | Volume: at 1 the bone narrows across exactly as much as it stretches along, so the product of its scales stays 1.
+# Rig hair from its mesh
+Hair comes as cards (loose parts) or a shell with no bones at all. Rigging > Rig Hair from Mesh (hair rig [locks] [bones] on the console) makes a chain of bones from the scalp to the tip of every card - or of every sector of a shell cut into locks - under a new hair armature, skins the mesh to them and puts Spring Bones (hair) on each, in one undo step; a mesh already skinned to a character hangs its rig under the head bone, so it follows the head.
+! cmd:create Cube; select Cube; hair rig 4 2 | The Cube cut into four locks of two bones, each a spring chain
+? Twelve hair cards give how many chains? | Twelve: every loose part is a lock with its own chain from the scalp.
 # Sequencing clips
 Moving between clips doesn't need a state machine here: Window > Sequencer is the scene's timeline, as in Premiere Pro. Press Create (the scene gets Assets/Animations/<scene> Sequence.seq), then drag clips (.anim) from the Project window onto its tracks. Each bar is two things: the clip, and the object it plays on - the selected character when you drop it, or any object dragged onto its Object field below the tracks - so one timeline moves a whole cast. Each clip is a bar: drag it to move it (onto another track too), drag its ends to trim it, and set its Speed, In and Out below the tracks. Where two bars on one track overlap and play on the same object, the clips crossfade over the overlap (Premiere's cross dissolve); a bar on a higher track wins for the numbers it animates, as video layers do. Preview and the playhead work as in the Animation window. Triggers make it interactive: in Play, pressing a trigger's key (a letter, a digit, Space or F1-F12) jumps to its clip, blending from the pose of that moment over the trigger's seconds, and the timeline plays on from there. From a script or the console: seq jump <clip>.
 ? Two clips, Walk and Run, overlap by 20 frames on one track. What happens halfway through the overlap? | Each animated number is half Walk's and half Run's: the crossfade's weights go from Walk to Run linearly across the overlap.
@@ -382,6 +459,11 @@ Animators grab controls, not bones. Add IK to Bone makes the target a box and th
 ? Why are a left leg's controls blue and the right's red? | The convention of Maya and Blender rigs: you can tell the sides apart at a glance, even from behind.
 ? What happens to the target and pole when you remove an IK? | They go with it, unless another IK uses them.
 ! cmd:create Armature; bone add Bone 1; ik add Bone.001 | Two bones with IK: a box target and a diamond pole
+# IK handles: size and turn
+A handle is drawn at its Size in metres round its position, whatever the rig's scale (task 0156): a centimetre import's handles are no longer a hundred times too big. Preferences > Rig Control Size scales every handle at once, and Rigging > Fit Control Sizes sizes them from their bones again (a fifth of the shin for a foot target). Turn a handle and the foot or hand below the chain turns with it: Rotate End on the IK (on for new IK, whose handle starts world-aligned; ik orient <bone> turns it on for an old one, keeping the bone as it is).
+? A character imported from FBX shows handles the size of the room. What fixes them? | They're drawn in metres now; if the file still holds old sizes, Rigging > Fit Control Sizes (ik fitsizes).
+? You turn a foot's handle but the foot stays flat on the floor. Why? | The IK's Rotate End is off: turn it on in the Inspector, or ik orient <shin>.
+! cmd:rig humanoid; select RightFootIK; tool rotate | A humanoid's foot handle under the rotate gizmo: turn it and the foot follows
 # Auto-rig colours and views
 The auto-rig's markers are coloured by the part of the body they are on: left blue, right red, the middle (chin, spine, hips) yellow and a tail purple; a mirrored twin is lighter, a marker not yet placed is dark, and the next one is ringed. Front, Left, Right, Back and Top under the diagram switch the orthographic view while you place them. A new marker goes to the middle of the body part the click hits; a marker you drag in a side or top view slides on the plane facing you, keeping its depth, so dragging a knee in the side view fixes how far forward it sits. Console: autorig view front|left|right|back|top.
 ? Why place some markers in the side view? | The front view says where a joint is left to right and up and down; the side view fixes its depth (a knee in front of the hip line, an elbow behind).
@@ -421,7 +503,7 @@ The Camera's Pick Focus Point button is an eyedropper. Click a surface in the Sc
 ! cmd:select Main Camera; pickfocus | Pick the Main Camera's focus point (then click a surface)
 ! cmd:select Main Camera; set Camera.PhysicalCamera 1; set Camera.DepthOfField 1; set Camera.FStop 1.4; camerapreview rendered | Make the Main Camera physical with a shallow depth of field and preview it
 # Composition guides
-Show Guides (Camera inspector, or the Game view's Guides menu) draws lines over what the camera sees, never into the render. The rule of thirds splits the frame into a three by three grid: a horizon on one of the horizontal lines and a subject where two lines cross usually reads better than one dead centre. The golden ratio does the same at 0.382 and 0.618. The golden and harmonious triangles lay a diagonal across the frame with lines from the other two corners (square to the diagonal for the golden ones, to the golden section of the far edge for the harmonious ones), for compositions built on diagonals. Title Safe and Action Safe mark the margins a television might crop (Blender's defaults: Title Safe 10 % across and 5 % down, Action Safe 3.5 % both ways, of half the frame on each side).
+Show Guides (the Camera inspector's Composition Guides drop-down, or the Game view's Guides menu) draws lines over what the camera sees, never into the render. The rule of thirds splits the frame into a three by three grid: a horizon on one of the horizontal lines and a subject where two lines cross usually reads better than one dead centre. The golden ratio does the same at 0.382 and 0.618. The golden and harmonious triangles lay a diagonal across the frame with lines from the other two corners (square to the diagonal for the golden ones, to the golden section of the far edge for the harmonious ones), for compositions built on diagonals. Title Safe and Action Safe mark the margins a television might crop (Blender's defaults: Title Safe 10 % across and 5 % down, Action Safe 3.5 % both ways, of half the frame on each side).
 ! cmd:select Main Camera; guides thirds on; window Game | Show the Main Camera's rule-of-thirds guides in the Game view
 # Depth precision
 Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits close to the near plane, so a tiny near clip value causes z-fighting in the distance. Keep Near as large as you can.
@@ -429,6 +511,22 @@ Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits
 > [GEA2] 11.2 Lights, Camera, Action!
 ? Why does setting Near to 0.0001 make distant surfaces flicker? | Depth precision is spread non-linearly between the near and far planes. A very small near value leaves almost no precision far away, so surfaces at similar depths fight (z-fighting).
 ! window:Game | Show the Game view
+)"},
+    {"Overlays: See the Mesh, Hide the Rig", "The Scene view's overlay layers", R"(
+A rigged character in the Scene view is its mesh under a thicket of bones, control shapes, icons and outlines.
+The Overlays menu in the Scene view's bar (Blender: the Overlays popover; Unity: the Gizmos menu) turns each layer
+off on its own: Bones, Rig Controls (the IK and FK handles), Light & Camera Icons, Curve & Lattice Points, Object
+Origins, Footprints & Contacts, Selection Outline, Grid, Gizmos and Statistics. Hide the bones and keep the rig
+controls, and you see the mesh while you still pose it by its handles; All Overlays shows or hides the lot. A hidden
+layer can't be clicked either: with the bones off, a click lands on the mesh behind them, and the bones' head and
+tail handles stay away too. The Hierarchy still selects anything, and the gizmo still moves it. The choice is
+remembered between sessions.
+! cmd:overlay bones off; overlay icons off | Hide the bones and the light and camera icons
+! cmd:overlay all on | Show every overlay again
+# From the console
+overlay list prints each layer's state; overlay <layer> on|off sets one and overlay all on|off the lot - the same
+names as the menu: bones, controls, icons, points, origins, footprints, outline, grid, gizmos, stats.
+? You want to see a character's skin while dragging its IK targets. Which layers do you turn off? | Bones (and perhaps Selection Outline); Rig Controls stay on, so the IK handles are still drawn and can be dragged.
 )"},
     {"How This Editor Renders", "A software rasterizer you can read", R"(
 Unity and Blender draw with the GPU: Unity's render pipelines, and Blender's EEVEE or Workbench through its draw manager (Cycles is a path tracer). Blendity has no GPU dependency, so it implements the classic pipeline on the CPU, in src/render/raster.cpp:
@@ -469,7 +567,7 @@ Blendity's MeshRenderer uses the classic shading model: Lambertian diffuse, a Bl
 | Bulb | Point (Range) | Point | Point
 | Cone | Spot (Spot Angle, Inner Spot Angle) | Spot (Size, Blend) | Spot
 | Panel | Area (Rectangle / Disc, Width, Height) | Area | Area (HDRP / baked)
-A spot light lights a cone along its forward axis and fades between the inner and outer angles. An area light lights only the side its arrow points to. In path-traced renders it is sampled across its whole surface, so its shadows are soft: the larger the panel, the softer they get. Real lights have a colour temperature. Tick Use Color Temperature and the colour is tinted like a black body at that many kelvin. The tint runs warm to cool: 1900 K is candlelight, 2700 K a bulb, 5500 K noon sun and 6500 K white, while 10000 K and above is the blue of shade.
+A spot light lights a cone along its forward axis and fades between the inner and outer angles. An area light is a glowing panel: it lights only the side its arrow points to, from every point of its surface, with the inverse square of the distance from each - the same light a quad with an emissive material of strength pi x Intensity gives, so Width and Height make it give more light, and softer shadows. Its Range is where it fades out, not how it falls. In path-traced renders it is sampled across its whole surface, so its shadows are soft: the larger the panel, the softer they get; the views, lightmaps and probes compute the same light exactly. Real lights have a colour temperature. Tick Use Color Temperature and the colour is tinted like a black body at that many kelvin. The tint runs warm to cool: 1900 K is candlelight, 2700 K a bulb, 5500 K noon sun and 6500 K white, while 10000 K and above is the blue of shade.
 @ blender/intern/cycles/kernel/light/spot.h, blender/intern/cycles/kernel/light/area.h
 @ blender/intern/cycles/kernel/svm/blackbody.h
 ! cmd:create Spot Light; set Light.UseColorTemperature 1; set Light.Temperature 2700 | Add a warm spot light above the scene
@@ -508,6 +606,20 @@ Blendity's .scene format writes each shared mesh once and has objects reference 
 The Project, Materials and Textures windows select like the Hierarchy and Unity's Project window: a click selects one, Ctrl+click adds or removes one, Shift+click selects everything from the last click to this one, and Ctrl+A (with the mouse over the list) selects everything shown; a search narrows what "everything" means. Delete (or Backspace) asks once for all of them ("Delete 7 materials?") and sends their files to the Recycle Bin / Trash, where they can be restored. Deleted from the Materials window, a material leaves its slots to the default material (one undo step brings them back); deleted as a file from the Project window, objects keep it as a scene material. Console: `matdelete Bricks, Wood Floor` (names separated by commas).
 ! cmd:newmat Practice1; newmat Practice2; newmat Practice3; window Materials | Make three materials to practise on (Ctrl+click two, then press Delete over the window)
 ? Where do deleted assets go? | To the Recycle Bin (Windows) or the Trash, so a mistake can be put back. From the Materials window the slots fall back to the default material (Undo restores them); from the Project window objects keep the material as a scene material.
+# Live Link: the scene in Blender or Unity as you work
+Window > Live Link (or the console's livelink start) opens a connection that other programs on this computer can listen to. A bridge in Blender, Unity, Godot or Unreal connects and gets the whole scene, then every change as you make it: a moved object, a posed rig, vertices dragged in Edit Mode, a material's colour, a light, Play starting. It goes one way: Blendity is the source, and what you change on the other side stays there. Meshes travel as glTF binaries, the format Blender's and Unity's importers already read; everything else is one line of JSON each (docs/LIVELINK.md has the protocol). Only programs on this computer can connect.
+| | Export | Live Link
+| When | once, to a file | every change, as it happens
+| What goes | meshes and materials | objects and their hierarchy, meshes, materials, lights, cameras, poses, Play
+| Axes | the file's (glTF: right-handed, Y up) | glTF's too, in metres
+@ blender/scripts/addons_core/io_scene_gltf2/blender/imp/blender_gltf.py
+@ blender/source/blender/python/intern/bpy_app_timers.cc
+? You drag a vertex in Edit Mode with a bridge connected. Does the whole mesh go out again every frame? | No. Only the positions go, as one deform message (12 bytes a vertex). A whole mesh goes only when its faces, UVs or materials change, and it is built on a worker thread, so the frame doesn't wait for it.
+? A bridge is slow and falls behind while you drag an object. Does it get every position in between? | No. A newer transform for the same object replaces one still waiting to be sent, so the bridge catches up with where the object is now. At most 60 comparisons a second go out.
+? You connect Blender's Blendity add-on and drag a vertex in Blendity. Why does the Blender mesh keep Blendity's own vertices rather than the glTF file's? | The glTF binary splits a vertex wherever its faces' normals or UVs differ; the deform message moves Blendity's vertices. The add-on folds the split vertices back (the _VERT attribute says where each came from), so every moved position has one vertex to land on.
+! cmd:livelink start; window Live Link | Start Live Link and open its window
+! cmd:livelink status | What has gone out so far (in the Console)
+! cmd:livelink stop | Stop it
 )"},
     {"Undo, Selection and Memory", "Snapshots and copy-on-write", R"(
 Unity records undo per object (Undo.RecordObject). Blender's global undo stores snapshots of the whole file ("memfile undo") and only writes the parts that changed. Edit Mode has its own mesh undo.
@@ -516,6 +628,9 @@ Blendity takes a snapshot of the scene graph after each completed action: a gizm
 @ blender/source/blender/blenlib/BLI_implicit_sharing.hh
 @ blender/source/blender/editors/undo
 ? Why doesn't moving an object require copying its 1-million-vertex mesh into the undo history? | The snapshot only copies the object (its transform and components). The mesh is shared by pointer and copied only if someone edits it.
+? You extrude three faces of a 50k-face mesh. How many times is the mesh copied, and where does the Profiler show what the operator itself cost? | Once: the mesh before the operator is the undo step's own pointer, which nothing writes, and the operator works on one copy of it (task 0165). The Profiler's "Edit Mode: operator / mesh writes / overlap check" row shows the operator's own time - the rest of the frame is the render meshes rebuilt and the views redrawn.
+? You extrude three faces and undo. What is selected afterwards? | The three faces you extruded: undo gives back the mesh and the Edit Mode selection it had before the operator, as Blender does; redo gives back the extruded faces' selection (task 0167).
+? Select More on a big mesh: which views draw again, and why does the shadow map stay? | Only the Scene view, whose cage shows the selection. A selection operator changes the selection and nothing else - the mesh is not copied, so the shadow map and the Game view see the same mesh and keep their pictures (task 0166). With the views on the card, the card tints the selected faces itself from a bit per triangle.
 )"},
     {"Performance and Stress Testing", "Finding limits and efficiencies", R"(
 Every engine has a profiler: Unity's Profiler window, and Blender's statistics overlay and --debug timings. Blendity has a Profiler window and a separate headless program, blendity_stress, that pushes each subsystem until it breaks a time budget. It then writes a report to stress/results/.
@@ -628,6 +743,20 @@ Turn on Stretch to colour faces by area distortion: blue means the face is too s
 ? Why can't a sphere be unwrapped without seams? | Its Gaussian curvature isn't zero, so any flat map must stretch or tear it. Seams choose where it tears.
 ! cmd:select Cylinder; texture uvgrid; window UV Editor | Show the Cylinder's UVs with a UV Grid texture
 ! cmd:select Cylinder; uv smart | Smart UV Project the Cylinder
+# Unwrap by parts
+Smart UV Project needs no seams but cuts a curved surface into many small islands; Unwrap makes few islands but only where you marked seams. Part Unwrap cuts by parts, after PartUV (2025): it groups faces into a tree of parts (by direction and place, never across a material slot), then from the whole mesh down takes the fewest charts that keep every chart's stretch under a bound - 1.25 by default: on average a face may be at most a quarter bigger or smaller in UV space than its share. Each chart is flattened by ABF++ (Blender's Angle Based method: the triangles' angles kept as close to the 3D ones as a flat layout allows) where that decides it, else by LSCM, and each part's charts are packed together. `uv report` measures any UV map the same way: charts, seam length, stretch.
+> Wang et al. (2025) PartUV: Part-Based UV Unwrapping of 3D Meshes. SIGGRAPH Asia.
+> Sheffer, Levy, Mogilnitsky & Bogomyakov (2005) ABF++: Fast and Robust Angle Based Flattening. ACM TOG.
+@ blender/source/blender/geometry/intern/uv_parametrizer.cc
+? A closed cube becomes at least two charts with Part Unwrap, never one. Why? | A chart is a set of faces with no cut inside it, and a closed surface can't lie flat without a cut: each closed piece needs two charts at least.
+? You raise the bound from 1.25 to 2. What do you trade? | Fewer charts and shorter seams for more stretch: a face may then be up to twice or half its fair share of the texture.
+? You turn on uv parts semantic. What changes, and why is it off by default? | The part tree comes from PartField's learned features (parts as a person would name them) instead of the geometry, which changes where the search splits. It is off because PartField's weights are NVIDIA's, non-commercial: you install a conversion of your own, and without one the geometric tree is used.
+! cmd:select Cylinder; uv parts; window UV Editor | Part Unwrap the Cylinder and look at its charts
+! cmd:select Cylinder; uv report | Measure its UV map (charts, seams, stretch) in the Console
+# One material at a time
+A mesh with several materials usually has a texture for each, and each texture needs its own 0-1 square. The UV Editor's Material picker (or Materials > Edit UVs, or uv material <name>) edits only that material's faces: Unwrap, Pack and the transforms leave the other materials' UVs alone, and those faces are drawn as a faint outline (uv others hide hides them). Blender gets the same by selecting one material's faces in Edit Mode before opening the UV Editor.
+? You pack the UVs with only the Trim material chosen. What happens to the Paint material's islands? | Nothing: Pack fills 0-1 with Trim's islands only, and Paint's keep their own layout in their own texture's square.
+! cmd:window UV Editor; uv material all | The UV Editor on every material again
 )"},
     {"Materials and Textures", "Principled BSDF behind a Unity Material", R"(
 A Unity Material picks a shader (Standard or URP Lit) and fills its slots: Base Map, Metallic, Smoothness, Normal Map, Emission. A Blender material is a node graph, usually one Principled BSDF node with Image Texture nodes plugged in. Blendity shows a Unity-style Material in the Inspector and evaluates Blender's Principled BSDF underneath.
@@ -656,6 +785,22 @@ Drag images onto the window: they're copied to Assets/Textures and, if an object
 A procedural texture knows its real size: Physical Size is the metres one tile covers (bricks 2 m, a wood floor 2 m). A material using it tiles by its inverse, so 2 m is Tiling 0.5: one tile every two metres whatever the object's size, as SketchUp's textures keep their size. Change Physical Size and every material in the scene using that texture follows, in one undo step. A material whose Tiling you set by hand keeps it: Blendity sees that it no longer matches the old size.
 ? A Bricks texture of Physical Size 2 m is changed to 4 m. What Tiling do the materials using it get? | 0.25: one tile every 4 metres.
 ! cmd:newtex BigBricks Bricks; create Cube; settex BigBricks PhysicalSize 4 | Make a brick texture and set its tile to 4 m (put it on the Cube from the Textures window to see it)
+# Anime backgrounds: procedural textures
+A background painter works in two or three flat tones with a line: the leaves are a lit tone, a shade tone and a dark
+rim, the wall one tone with a patch of another and a crack or two, the clouds a white top over a flat blue-grey
+underside. The Textures window's generators Leaves, Grass, Plaster, Window Grid, Roof Tiles, Sky Gradient, Clouds,
+Rocks and Water draw that way (task 0150), each with its tones as colours, and the presets Anime Leaves, Anime
+Grass, Anime Wall, Anime Windows, Anime Roof, Anime Sky, Anime Clouds, Anime Rock and Anime Water set one up with a
+sensible tile size. The cards - leaves, grass, clouds - cover only their shapes: with the texture's Alpha From Cover
+on, the albedo's alpha is that cover (stacked cards add up; Warp and Tile move it with the colour), and a Cutout
+material shows holes between the leaves (a foliage card, a bush of three crossed quads, a cloud over the sky).
+`animemat <preset>` on the console does it in one step: a new texture asset and a flat-toned Toon material (a Cutout
+for a card) in the selected objects' first material slot; undo takes the material back and leaves the texture file,
+as newtex's stays.
+! cmd:create Quad; select Quad; animemat Anime Leaves | A leaf card: a Quad with the Anime Leaves texture cut out
+! cmd:create Cube; select Cube; animemat Anime Windows | A building block with the Anime Windows texture
+! cmd:newtex Sky Anime Sky | An anime sky texture (put it on a backdrop plane from the Textures window)
+? Why do the anime generators avoid gradients? | A toon material steps the light into few tones; a texture with few tones keeps the picture flat and drawn, as the painter's would be.
 # Terrain: grass on top, dirt on the slopes, snow up high
 An axis material (Axis Mode: World) takes a Top, Side and Bottom material by how steep the surface is, projected
 without UVs, so a cliff's top is grassy and its face dirt or rock. Axis High adds a material above a height (High
@@ -668,11 +813,52 @@ Ramp (Goo Engine builds it in); Unity with a toon shader. In Blendity set a mate
 pick the Toon preset): Toon Bands sets how many lit tones, Threshold where light turns to shadow, Shadow Color the
 dark side's tint, and a rim light can outline the silhouette from inside. Add an Outline component for the lines:
 a slightly larger copy of the mesh, turned inside out, so only its rim shows round the object (the inverted
-hull). Both show in the views, F12 renders on the CPU and GPU, and exports. For the printed-page look, a camera's
-Add Filter > Looks > Manga stacks Grayscale, Halftone dots, Line Art and Paper; Anime adds Line Art, a little
-saturation and a soft Bloom. Line Art draws creases where the surface turns more than an angle, so a cube's edges
-get lines and a smooth sphere only its outline.
+hull). Both show in the views, F12 renders on the CPU and GPU, and exports. The material's Toon fields sit in a
+Toon drop-down of the Inspector (and the Axis Material ones in theirs), opened by its header. Select several
+materials in the Materials window (Ctrl-click, Shift for a range) and a change reaches every one of them that has
+the field: a Toon Threshold lands on the toon ones and leaves a PBR one alone, Shading Model converts them all; a
+dash marks a field whose values differ, and +=0.1 moves each from its own value. The same with several objects
+selected in the Scene (their materials in the same slot) or several .mat files in the Project window. Console:
+matset ToonThreshold 0.4 on the selection. For the printed-page
+look, a camera's Add Filter > Looks > Manga is one effect: greys (with flat Tones if you like), halftone dots, ink
+lines and paper; Anime is one too: ink lines, a little saturation and a soft bloom. Each has its own few fields,
+and the parts (Halftone, Line Art, Paper...) are still there as effects for stacks of your own. Line Art draws
+creases where the surface turns more than an angle, so a cube's edges get lines and a smooth sphere only its
+outline.
+# Toon styles
+Toon Style (the top of a material's Toon group) is a starting point: Classic is the two-tone with a soft rim; Guilty
+Gear is Arc System Works' look - a hard two-tone, the key light alone banding the tones, no rim, the highlight only
+where its map is painted; Soft Anime has three tones with Light Wrap (the light reaching round the form) and a rim on
+the lit side; Painterly four soft tones under the sky's gradient; Manga a hard grey two-tone. Every field stays yours
+afterwards. The painted controls come from the same studio practice: a Shadow Bias Map (white keeps a point lit,
+black in shadow, grey neutral - under the chin, inside the hair), a Toon Specular Map (where the spot may show), a
+Toon Rim Map, a Shade Map (the shadow side's own picture, as VRM's MToon paints it), and a Toon Ramp (the tones as an
+image, made by the Textures window's Toon Ramp generator; MMD's toon images land here). Toon Hair Highlight turns the
+spot into the band across the hair that anime draws. Toon Key Light Only keeps several lights from banding like a
+disco ball: the brightest sun bands, the others fill smoothly. The GPU viewport draws the plain settings; a material
+with painted maps or a hair highlight draws on the CPU.
+! cmd:select Sphere; material Toon; toonstyle Guilty Gear | Give the Sphere the Guilty Gear toon style
+! cmd:select Sphere; material Toon; toonstyle Soft Anime; matset ToonWrap 0.4 | The Soft Anime style with more light wrap
+? Several lights on a toon character band its tones into a mess. Which field fixes it? | Toon Key Light Only: the brightest sun bands the tones, the other lights add smooth fill.
 ! cmd:select Sphere; material Toon; component Outline | Make the Sphere toon-shaded with an outline
+! cmd:select Sphere; material Toon; matset ToonThreshold 0.4 | Set the toon threshold on the Sphere's materials from the console
+# The 2D look: normals, the face shadow, inner lines, hold frames
+A drawn character has no bumps: its face is one tone with a shadow that sweeps across as the light turns. Blendity gets
+there four ways (task 0149). Custom normals: a mesh can carry its own shading normals (an FBX or glTF whose normals an
+artist edited keeps them; the Smooth Normals modifier averages them over the surface so a nose stops casting its own
+shading; the Normal Transfer modifier reads them off a proxy - a sphere round the head, Blender's Data Transfer
+trick - which Rigging > Anime Face Normals adds, fitted to the Head group). The face shadow map: a Toon material's
+Face Shadow Map is read by the key light's angle round the head instead of N.L (HoYo's SDF faces); the Textures
+window's Face Shadow generator makes the plain sweep to paint over. Inner lines and hatching: a Line Map multiplies
+contour lines into the colour (or only into the shadow tones), a Hatch Map tiles strokes into the shadow. The Outline
+component's Thickness Group paints the line's width, Distance Fade thins it far away, Min and Max Pixels keep it
+constant on screen. And Hold: an Animation or Sequencer on 2s or 3s changes pose every second or third frame while the
+camera moves every frame, as hand-drawn animation is shot; renders hold the same frames.
+! cmd:select Sphere; component SmoothNormalsModifier | Smooth the Sphere's shading normals
+! cmd:select Sphere; facenormals | Add a head proxy and a Normal Transfer to the Sphere
+! cmd:select Sphere; material Toon; component Outline; set Outline.DistanceFade 0.5 | A toon outline that thins with distance
+? Why does a drawn face have one tone while a scanned one has many? | Its shading follows a smooth shape (a ball), not its bumps: smoothed or transferred normals give the model the same.
+? What does Hold 2s do to the camera? | Nothing: only the held object's clip changes pose every other frame; the camera and the rest move every frame.
 # Baking textures for other programs
 Procedural textures, axis materials and Box mapping are computed by Blendity's shaders; another program only understands images on UVs. Object > Bake Textures lays the object out on new UVs (Smart UV Project and Pack Islands, as the lightmapper does) and evaluates its materials at every texel into four images: albedo, roughness, metallic and a normal map. Blender does the same with Cycles' Bake panel, Unity users with Substance's baker. The export option Bake Textures does it on copies for OBJ, FBX and glTF, leaving the scene alone.
 ? Why can't a Mirror modifier be baked in place? | The images go on the base mesh's UVs, and the mirrored half shares them: it would repeat the base's images. Apply the modifier first, or export with Bake Textures, which bakes what it exports.
@@ -735,6 +921,32 @@ Scene light is unbounded but a screen shows 0 to 1. A view transform compresses 
 ! cmd:world sky; shading shaded | Use the physical sky
 ! cmd:world gradient | Back to the gradient
 )"},
+    {"Editing: Develop a Render", "Exposure, white balance, curves and crops without touching the file", R"(
+# Developing a picture
+A render rarely leaves as it came out: a little more light, a warmer white, a curve that lifts the shadows, a crop. Window > Editing (or the Editing layout) does that last pass inside Blendity. Open the Render window's last render with Render, or any image with Open... (or drop it on the window). Add Adjustment puts a step on the stack; the stack runs top to bottom, and every step can be turned off with its box, moved with ^ and v, or removed. Before / After draws a line across the picture: the source on its left, the result on its right; drag it.
+The source is never changed. Save writes the stack as an .edit file beside the image (a few lines of text), and opening that file brings back the picture with every step; Export writes the result as PNG or JPEG, or as EXR / HDR with the light kept. A render opens with its light, not its 8-bit picture, and is shown through the render's own view transform, so nothing is clipped before you grade it.
+| Lightroom / Photoshop | Blendity's Editing | Blender
+| Basic: Exposure, Contrast | Exposure, Contrast | Compositor: Exposure, Bright/Contrast
+| Highlights, Shadows, Whites, Blacks | the same | (none: RGB Curves by hand)
+| White Balance: Temp, Tint | Temperature / Tint | Color Balance (white point)
+| Presence: Clarity, Dehaze, Vibrance, Saturation | the same | (none)
+| Tone Curve, HSL / Color | Tone Curve, HSL | RGB Curves, Hue Correct
+| Detail: Sharpening, Noise Reduction | Sharpen, Noise Reduction | Filter, Denoise
+| Crop, Straighten, Rotate | Crop / Straighten, Flip / Rotate | (the render's border)
+# Why in linear light
+Every step works on light, not on 8-bit pixels: +1 of Exposure doubles the light, as opening the lens one stop does, and a white balance scales the light of each colour as a camera's does (a Bradford adaptation, the method colour scientists use). The tone controls - Highlights, Shadows, Whites, Blacks, the Tone Curve and HSL - look at the pixel on the display's scale, where "the bright half" means what you see as bright, as Lightroom's do. The same formulas run in the camera filters' Color Grading and Vignette, so a look means the same in both.
+? You raise Exposure by +1. What happens to a pixel's light? | It doubles: one stop. A mid-grey of 0.18 becomes 0.36, on the light's scale rather than the screen's.
+? You crop the picture and export it, then open the source image in another program. Is it cropped? | No. The source is never written: the crop is a step in the stack, saved in the .edit file beside the image, and the export is a new file.
+? You move the Vignette slider at the bottom of a long stack. Does Blendity redo every step? | No. Each step's result is kept, and a change reruns the stack only from the step that changed - here just the vignette.
+! cmd:window Editing; develop open render | Open the last render in the Editing tab (render with F12 first)
+! cmd:develop preset Film | Apply the Film preset
+! cmd:develop split on | Compare before and after
+# Masks: one part of the picture
+Under each adjustment, Add Mask limits it to part of the picture, as Lightroom's masking panel does: a Linear Gradient (full at its first point, none at its second - a sky darkened toward the top), a Radial Gradient (a face brightened, its edge feathered), a Luminance Range (only the shadows, or only the highlights), a Color Range (only the blues), or a Brush you paint with the mouse or a pen. Parts combine in order: Add takes either, Subtract takes the part away, Intersect keeps only where both are; each can be inverted. Select a part to drag its handles on the picture; Show tints where the adjustment acts in red. Blender's compositor does the same with a mask node into a Mix node's factor.
+? A radial mask covers the face, and the adjustment is Exposure +1. What happens to the sky outside the circle? | Nothing: outside the mask the weight is 0, so those pixels come out exactly as they went in.
+? You want to brighten the shadows except in the sky. Which parts? | A Luminance Range on the shadows, then a Linear Gradient over the sky set to Subtract.
+! cmd:develop mask 0 add radial 0.5 0.45 0.25 0.3 0.5; develop mask show on | Mask the first adjustment to a circle (open a picture and add one first)
+)"},
     {"Baked and Realtime Lighting", "Lightmaps, light modes, probe volumes and voxel GI", R"(
 Light that bounces between surfaces is either baked ahead of time with the path tracer, or computed live by Realtime GI. Baked light costs about 1 ms a frame to show; live GI costs time whenever a view re-renders. The Lighting window (Window > Rendering > Lighting) holds both, as in Unity.
 | Piece | Blendity | Unity | Blender
@@ -745,6 +957,10 @@ Light that bounces between surfaces is either baked ahead of time with the path 
 | Live bounce | Realtime GI (voxel based) | Realtime GI (Enlighten) | (EEVEE: screen-space GI)
 # A scene that doesn't lag
 Tick Contribute GI on everything that never moves, make the sun Mixed (or Baked) and press Generate Lighting. A Probe Volume lights moving objects from the bake. Lighting Updates: Manual (the default) keeps the lighting as it was while you move things: press Update Lighting (Ctrl+Shift+L) when you want Realtime GI to catch up, and turn on Preview Lighting for a rough bake each time you stop (like Bakery's Realtime Preview). Automatic follows every change live instead.
+# Baked emission: a small lamp without blocks
+An emissive object is a light in a bake, not just a bright surface: each texel samples the emitter's surface directly (task 0157), one point a ray, the way the path tracer samples lights, and the hemisphere rays that happen to hit it are weighted down so nothing counts twice. Before, a 10 cm lamp was found only by chance - one hemisphere ray in sixty - and the floor under it came out as a scatter of blocks. Preview Lighting bakes at half the density now, with 32 rays first; a small emitter's glow shows its shape at 80 texels per metre.
+? A tiny bright bulb lit the floor in blocks. What changed? | The texel samples the bulb's surface directly instead of waiting for a hemisphere ray to hit it; the two estimates are weighted so the light isn't counted twice.
+? The glow under a small lamp looks soft but coarse. Which setting? | Lightmap Resolution: 80 texels per metre shows a small emitter's shape; 40 is Unity's default for the room.
 # Realtime lightmaps, and why GI can look blocky
 Contribute GI objects get realtime lightmaps (Realtime Resolution, 2 texels per metre as in Unity): voxel GI lights them a slice at a time when the lighting changes, so moving the camera traces nothing and they look the same from any distance. Other objects are traced at a quarter (or half) of the screen's pixels and smoothed; zoomed out, an object is only a few of those cells tall, so they can look blocky. Contribute GI or GI Resolution = Half fixes that; a bake has no blocks at all.
 > Thiedemann, Henrich, Grosch & Müller (2011) Voxel-based Global Illumination. I3D.
@@ -866,6 +1082,13 @@ The GPU runs a compute shader that is a line-for-line copy of the CPU path trace
 # Ray tracing hardware
 Most of a path tracer's time goes into finding which triangle a ray hits first. Recent GPUs have fixed-function units for exactly this: NVIDIA's RT cores, AMD's ray accelerators and Intel's ray tracing units. Through VK_KHR_ray_query Blendity builds the GPU's own acceleration structures, one per unique mesh plus one over the objects, so moving an object only rebuilds the small one. On an RTX 4070 SUPER this is about 7x faster than walking Blendity's BVH in the shader. GPUs without the hardware still work, through the software BVH.
 > [FoCG] 12.3 Spatial Data Structures
+# The cards work between frames
+A path-traced render used to get the card only inside the editor's slice of a frame: 40 ms for F12, 12 ms for the Camera Preview, one submission at a time, each waited for. The card did nothing for the rest of the frame, and the editor froze for the slice. Since task 0161 each card has its own thread that keeps two submissions in flight from one frame to the next, and the editor only polls it for a few milliseconds a frame: the Profiler's "GPU busy over the render" row rises from a fifth to most of the render's time, and moving around the editor while F12 runs stays smooth. Cycles does the same in Blender: its render runs on its own threads and the window's draw only reads the result.
+@ blender/intern/cycles/session/session.cpp
+? Why did a card report 99 % busy inside its submissions and 21 % busy over the whole render? | Between submissions - the rest of the editor's frame - the card had nothing queued. The busy share inside a submission says nothing about the gaps.
+? Two submissions in flight: why not ten? | A third waits for the oldest, so the queue holds at most two chunks of under 50 ms each: the card never idles between them, and a stop or a change of camera waits at most for those two (about 100 ms of work) and the copy of the sums.
+? You move one object while the Camera Preview renders on the card. What goes up to the card? | Only the instances (and the top-level acceleration structure rebuilt over the meshes it already holds): the scene's sections are hashed, and a build sends the ones that changed. A new mesh or a changed texture sends the whole scene, its buffers in one submission.
+! cmd:engine path; device gpu; render; window Profiler | F12 on the card with the Profiler's GPU rows
 # Combined rendering
 With several devices ticked, they share one counter of sample numbers. Each device takes the next few samples it hasn't rendered, and fast devices take bigger batches. The CPU stops taking samples once the GPUs would finish the rest sooner, so it never holds up the end of a frame. Every 100 ms the devices' sums are added together for the display. With fast GPUs the CPU adds little, and switching it off can be quicker. It helps more alongside a GPU without ray tracing hardware.
 @ blender/intern/cycles/integrator/path_trace.cpp, blender/intern/cycles/integrator/work_balancer.cpp
@@ -887,9 +1110,20 @@ The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (P
 ? Why does an Edit Mode drag on a 50,000-face mesh only send a few bytes to the card each frame? | The drag works out normals only around the faces that moved, and only those vertices and triangles go up: the rest of the mesh on the card is already right.
 ? Why does a Sky world cost the GPU almost nothing extra? | Its picture is one texture the card keeps: the background and the reflections read it, and the diffuse light comes from nine numbers (spherical harmonics) worked out once on the CPU.
 ! cmd:set World.Source Sky; viewport device gpu | A Sky world, drawn on the GPU
+? You back the camera away from a hatched toon character and the hatching turns to moire, the band edges sparkle and the outline goes dotted. What has gone wrong, and since when is it fixed? | The maps were read at full resolution whatever the distance, the band edge fell on whichever side the pixel centre landed, and the outline shell shrank under a pixel. Since task 0164 every map reads at the pixel's level of detail, a band edge is one antialiased pixel, procedurals fade under a pixel, and a new outline keeps at least one pixel.
+? You switch Render Settings > GPU Backend to OptiX. Does the picture change, and why isn't it the default? | No: OptiX runs the same integrator as GPU Compute (its GLSL translated to CUDA), so the picture is the same. It isn't the default because it measured three to five times slower: the whole integrator round optixTrace saves what is live at every ray, where Vulkan's ray queries trace inline (task 0170).
+? Your friend's PC has an RTX card but no CUDA Toolkit. Does their Blendity have OptiX, and how do they check? | Yes: the OptiX kernel ships as committed PTX and every installer builds it in (task 0169); at run time only NVIDIA's driver is needed. The console's `gpu list` says what the card and driver offer: OptiX's devices, or "no driver" with the reason.
 ? Why does the GPU read textures from storage buffers instead of using its texture units? | The texture units filter, choose mip levels and decode sRGB in their own slightly different ways. Reading the CPU's own mip chain and filtering it with the CPU's formulas keeps the two pictures within a step of 255.
 ! cmd:viewport device gpu | Draw the views on the GPU
 ! cmd:viewport device cpu | Draw the views on the CPU again
+# The Profiler's GPU block
+The Profiler window (Window > Profiler) shows how long a frame spent in the GPU path: the time from handing the card its work to getting the picture back. That is wall time, and most of it can be waiting. The GPU block puts the card's own clock beside it: how long the shadow, g-buffer and lighting passes ran (timestamp queries on the card), how long the copies of the picture out to the CPU and the wait for them took, and "GPU busy in the frame" as a share of the whole frame. While F12 or the Camera Preview is running, two rows show the path tracer's busy and wait time inside its submissions and its busy share over the whole render (F12) or the frame (Camera Preview): the card sits idle between submissions, and that is where the time goes. A card without timestamp queries shows n/a beside the wall time. Blender reads the same GPU timestamps for its own debug timings.
+@ blender/source/blender/gpu/opengl/gl_debug.cc
+? The frame spent 8 ms in the GPU path and the block says the card was busy for 1 ms. Where did the other 7 go? | The copies of the picture out and the fence after the submission (their own row), and the rest: gathering the objects, uploads, recording. The card was idle for them; that is what tasks 0160-0163 cut.
+? Why does the block say n/a on some cards? | Their queue reports no timestamp support, so there is no clock to read. The wall time row is still there.
+? A view on the card used to wait for the GPU twice a frame. What were the two waits, and which one is gone? | One fence after the picture's passes, one after the copy of the planes to the CPU. The first is gone: the copy is recorded behind the passes in the same submission, and the one fence after the copy remains (ADR 0051).
+! cmd:viewport device gpu; window Profiler | The views on the GPU, the Profiler open
+! cmd:bench 3 | bench prints "GPU busy" for the last frame
 # Drags that stay quick
 While you drag something in the Scene view, the Game view and the Camera Preview keep the picture they had and draw once when you let go, as Blender's sculpt mode updates its other views when the stroke ends. Play always draws every frame. Preferences > Other Views Follow Drags makes them follow every frame instead. On the CPU, the Scene view also draws more cheaply while you drag or orbit: the sun's shadow map at half size with a softer filter. The frame after you stop is exact again, as Blender's viewport is after it lowers its quality while you navigate (Preferences > Simpler While Moving).
 @ blender/source/blender/editors/sculpt_paint/mesh/sculpt.cc, blender/source/blender/draw/engines/eevee/eevee_instance.cc

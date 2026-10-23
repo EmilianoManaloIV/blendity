@@ -6,6 +6,7 @@
 #include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
+#include <cstring>
 #include "../core/jobs.h"
 #include "../research/research.h"
 
@@ -393,6 +394,7 @@ struct InspectorReflector : Reflector {
   ProceduralTexture *edited_texture = nullptr;  // a texture asset being edited (the Textures window)
   std::vector<FieldEdit> edits;  // what changed this frame (for multi-object editing)
   std::string record_prefix;     // a filter effect's "E<i> ": edits carry the name other objects' reflectors see
+  const std::set<std::string> *mixed = nullptr;  // fields whose values differ across the materials edited at once (task 0147): drawn as a dash
   int label_w;
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
   ui::Id fid(const char *n) { return u.id(n); }
@@ -404,18 +406,38 @@ struct InspectorReflector : Reflector {
     edits.back().name = record_prefix + n;
     return edits.back();
   }
+  /* Unity's mixed-value look: a dash over a field whose materials disagree, until it is hovered or edited (then the
+   * active one's value shows); a value typed into it lands on all of them. */
+  void dash_if_mixed(const char *n, Recti f) {
+    if (!mixed || !mixed->count(n) || u.hovered(f) || u.is_active(fid(n)) || u.editing(fid(n))) return;
+    u.canvas.fill_rect(f.shrink(u.px(2)), u.theme.field);
+    u.label({f.x + u.px(5), f.y, f.w - u.px(8), f.h}, "-", u.theme.text_dim);
+  }
+  /* A number typed into a mixed field that the active material already holds: no change on it, but the others take
+   * it (and an expression at the clamp still reaches them), so the edit is recorded anyway. */
+  bool mixed_commit(const char *n, FieldEdit::Kind k, float v) {
+    std::string expr;
+    if (!mixed || !mixed->count(n) || !u.number_committed(fid(n), &expr)) return false;
+    FieldEdit &e = record(k, n);
+    e.f_old = e.f_new = v;
+    e.i_new = (int)std::lround(v);
+    e.expr = expr;
+    return true;
+  }
   void field(const char *n, float &v, float speed, float mn, float mx) override {
     Recti row = lay.row();
     float old = v;
     bool ch = u.drag_label(fid(n) ^ 0xAB, label_rect(row), n, v, speed);
     v = clampf(v, mn, mx);
     ch |= u.float_field(fid(n), field_rect(row), v, speed, mn, mx);
+    dash_if_mixed(n, field_rect(row));
     if (ch) {
       FieldEdit &e = record(FieldEdit::Float, n);
       e.f_old = old;
       e.f_new = v;
       u.number_committed(fid(n), &e.expr);
     }
+    else ch = mixed_commit(n, FieldEdit::Float, v);
     changed |= ch;
   }
   void field(const char *n, int &v, int mn, int mx) override {
@@ -423,13 +445,16 @@ struct InspectorReflector : Reflector {
     u.label(label_rect(row), n);
     int old = v;
     (edited_texture ? ed.texture_ui_rects_ : ed.inspector_menu_rects_)["field:" + record_prefix + n] = field_rect(row);  // tests type into it
+    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (and find it outside the Inspector: the Materials window)
     bool ch = u.int_field(fid(n), field_rect(row), v, mn, mx);
+    dash_if_mixed(n, field_rect(row));
     if (ch) {
       FieldEdit &e = record(FieldEdit::Int, n);
       e.f_old = (float)old;
       e.i_new = v;
       u.number_committed(fid(n), &e.expr);
     }
+    else ch = mixed_commit(n, FieldEdit::Int, (float)v);
     changed |= ch;
   }
   /* Sample counts: type any number, halve / double it, or pick a power of two
@@ -478,6 +503,12 @@ struct InspectorReflector : Reflector {
       record(FieldEdit::Bool, n).b_new = v;
       changed = true;
     }
+    if (mixed && mixed->count(n) && !u.hovered(field_rect(row))) {  // the box as checkbox draws it, with a dash instead of a tick
+      const int sz = std::min(row.h, u.font.line_height()) - u.px(1);
+      const Recti box{field_rect(row).x, row.y + (row.h - sz) / 2, sz, sz};
+      u.frame(box, u.theme.field, u.theme.field_border, u.px(2));
+      u.label(box, "-", u.theme.text_dim, ui::Align::Center);
+    }
   }
   void field(const char *n, Vec3 &v) override {
     Recti row = lay.row();
@@ -498,6 +529,7 @@ struct InspectorReflector : Reflector {
       record(FieldEdit::Color, n).v_new = v;
       changed = true;
     }
+    dash_if_mixed(n, field_rect(row));
   }
   void color_alpha(const char *n, Vec3 &v, const char *alpha_name, float &a) override {
     Recti row = lay.row();
@@ -514,12 +546,14 @@ struct InspectorReflector : Reflector {
       }
       changed = true;
     }
+    if (mixed && (mixed->count(n) || mixed->count(alpha_name))) dash_if_mixed(mixed->count(n) ? n : alpha_name, field_rect(row));
   }
   void enumeration(const char *n, int &v, const char *const *opts, int count) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (u.combo(fid(n), field_rect(row), v, opts, count)) {
       record(FieldEdit::Enum, n).i_new = v;
+      if (material && std::strcmp(n, "Toon Style") == 0) apply_toon_style(*material, v);  // (task 0148: the preset's fields, picked again too)
       changed = true;
     }
   }
@@ -590,6 +624,27 @@ struct InspectorReflector : Reflector {
     }
   }
   void help(const char *t) override { u.tooltip(t); }
+
+  /* A collapsible group (task 0145): a foldout row, its fields indented under it and skipped while it is closed. The
+   * state is kept by the group's name - per material for a material's groups (an axis material's Axis Material
+   * group opens by its own default, a plain one's stays closed), by name alone for a component's. */
+  std::vector<bool> groups_open;
+  std::string group_key(const char *n) const { return "grp_" + (material ? std::to_string((uintptr_t)material) : std::string()) + n; }
+  bool group(const char *n, bool open_by_default) override {
+    lay.space(u.px(2));
+    Recti row = lay.row(u.row_h() + u.px(2));
+    bool &open = ed.foldouts_.emplace(group_key(n), open_by_default).first->second;
+    u.foldout({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, n, open);
+    (edited_texture ? ed.texture_ui_rects_ : ed.inspector_menu_rects_)["group:" + std::string(n)] = row;  // tests click it
+    if (open) lay.indent += u.px(10);
+    groups_open.push_back(open);
+    return open;
+  }
+  void group_end() override {
+    if (groups_open.empty()) return;
+    if (groups_open.back()) lay.indent -= u.px(10);
+    groups_open.pop_back();
+  }
 
   /* Texture slot: thumbnail + name; click for a picker (Unity's object field /
    * Blender's image browse menu). Popup results arrive on the next frame. */
@@ -767,9 +822,12 @@ struct InspectorReflector : Reflector {
       ed.remove_material_slot(owner, remove_slot);
       return;
     }
-    /* Inline editors, one per distinct material (shared slots edit once). */
+    /* Inline editors, one per distinct material (shared slots edit once). With several objects selected, an edit
+     * reaches the others' materials in the same slot that show the field (task 0147), as component edits do. */
     std::vector<Material *> seen;
-    for (auto &m : mats) {
+    const std::vector<GameObject *> selected = ed.selected_objects(false);
+    for (size_t slot = 0; slot < mats.size(); slot++) {
+      const MaterialPtr &m = mats[slot];
       if (!m || std::find(seen.begin(), seen.end(), m.get()) != seen.end()) continue;
       seen.push_back(m.get());
       lay.space(u.px(4));
@@ -779,14 +837,29 @@ struct InspectorReflector : Reflector {
       u.foldout({h.x + u.px(4), h.y, h.w - u.px(8), h.h}, "Material  " + m->name, open, Icon::Eye);
       u.tooltip("Blender: Material Properties (Principled BSDF). Unity: the material inspector at the bottom of the Inspector.");
       if (!open) continue;
+      /* The other selected objects' materials in this slot (a material in two slots is gathered from its first). */
+      std::vector<MaterialPtr> others;
+      if (selected.size() > 1)
+        for (GameObject *o : selected)
+          if (const MeshRenderer *omr = o->get<MeshRenderer>(); omr && slot < omr->materials.size() && omr->materials[slot] &&
+              std::find(others.begin(), others.end(), omr->materials[slot]) == others.end())
+            others.push_back(omr->materials[slot]);
+      const std::set<std::string> mixed = others.size() > 1 ? ed.mixed_material_fields(m.get(), others) : std::set<std::string>();
+      if (others.size() > 1) {
+        u.label(lay.row(), strprintf("Editing %zu materials (slot %zu of the selected objects): a change reaches the ones that have the field", others.size(), slot + 1),
+                u.theme.accent);
+        u.tooltip("A dash: their values differ; what you type lands on all (+=0.1 moves each from its own value).");
+      }
       u.push_id((uint64_t)(uintptr_t)m.get());
       InspectorReflector sub(ed, u, lay);
       sub.label_w = label_w;
       sub.material = m.get();
+      if (others.size() > 1) sub.mixed = &mixed;
       m->reflect(sub);
       u.pop_id();
       if (sub.changed) {
         m->touch();
+        if (others.size() > 1) ed.apply_material_edits(sub.edits, m.get(), others);
         changed = true;
       }
     }
@@ -986,8 +1059,8 @@ struct InspectorReflector : Reflector {
       for (const std::string &look : filter_looks()) {
         if (uu.menu_item(look))
           for (uint64_t id : targets) edp->filter_stack_op(id, "look", 0, 0, look);
-        uu.tooltip(look == "Anime" ? "Line Art, a little more saturation and contrast, a soft Bloom."
-                                   : "Grayscale, Halftone dots, Line Art and Paper: a printed manga page.");
+        uu.tooltip(look == "Anime" ? "One effect: ink lines, a little more saturation and contrast, a soft bloom."
+                                   : "One effect: greys, halftone dots, ink lines and paper - a printed manga page.");
       }
     });
   }
@@ -1020,15 +1093,14 @@ void Editor::draw_inspector(const Recti &r) {
           const int off = u.begin_scroll(sid, area, content_h);
           ui::Layout ml{{r.x + u.px(6), area.y, r.w - u.px(18), area.h}, area.y + u.px(4) - off};
           ml.row_h = u.row_h();
+          /* Several .mat files selected (task 0147): the edit reaches each of them that shows the field. */
+          std::vector<MaterialPtr> others;
+          for (const std::string &p : project_multi_.items)
+            if (fs::extension(p) == ".mat")
+              if (MaterialPtr om = material_asset(make_asset_relative(p)); om && std::find(others.begin(), others.end(), om) == others.end()) others.push_back(om);
           u.push_id((uint64_t)(uintptr_t)m.get());
-          InspectorReflector mr(*this, u, ml);
-          mr.material = m.get();
-          m->reflect(mr);
+          draw_material_fields(ml, m, others.size() > 1 ? &others : nullptr);
           u.pop_id();
-          if (mr.changed) {
-            m->touch();
-            mark_changed("Edit Material " + m->name);  // saved to the .mat when the edit finishes
-          }
           content_h = ml.y + off - area.y + u.px(20);
           u.end_scroll();
           return;
@@ -1426,7 +1498,8 @@ void Editor::draw_inspector(const Recti &r) {
                                          {"Solidify", "SolidifyModifier"},     {"Subdivision Surface", "SubdivisionSurface"},
                                          {"Triangulate", "TriangulateModifier"}, {"Wireframe", "WireframeModifier"}};
         static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"}, {"Lattice", "LatticeModifier"}, {"Mesh Deform", "MeshDeformModifier"}, {"Armature (Skin)", "SkinModifier"},
-                                       {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"}};
+                                       {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"},
+                                       {"Smooth Normals", "SmoothNormalsModifier"}, {"Normal Transfer", "NormalTransferModifier"}};
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);
           for (size_t i = 0; i < n; i++) {
@@ -1742,6 +1815,46 @@ void Editor::draw_console(const Recti &r) {
 /* Profiler                                                               */
 /* ===================================================================== */
 
+/* Task 0159: what the card itself did in the frame, against the time the frame spent in the GPU path. The views'
+ * pass times come from the raster device's timestamp queries, F12's and the Camera Preview's from the path tracer's;
+ * the read-back is the CPU's timer around the copy. A card without timestamps shows "n/a" beside the wall time. */
+void Editor::draw_profiler_gpu(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat) {
+  const bool views_on_card = fp.gpu_views > 0 || scene_on_gpu_;  // (a frame whose views were all reused still shows the block)
+  if (!views_on_card && !rendering_ && !cam_preview_rendered_) return;
+  if (views_on_card) draw_profiler_gpu_views(fp, stat);
+  if (rendering_) draw_profiler_gpu_tracer("F12 render", final_pt_.stats(), render_time_ * 1000.0, "the render so far", stat);
+  if (cam_preview_rendered_) draw_profiler_gpu_tracer("Camera Preview", cam_preview_pt_.stats(), frame_ms_, "the frame", stat);
+}
+
+void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat) {
+  const double busy = fp.gpu_busy_ms(), wait = std::max(0.0, fp.ms_gpu - busy - fp.ms_gpu_readback);
+  const bool stamps = busy > 0.0 || fp.ms_gpu == 0.0;
+  stat("GPU views: the GPU path (wall)", strprintf("%.2f ms", fp.ms_gpu));
+  stat("GPU views: busy (shadow / g-buffer / lighting)", stamps ? strprintf("%.2f ms (%.2f / %.2f / %.2f)", busy, fp.ms_gpu_shadow, fp.ms_gpu_gbuffer, fp.ms_gpu_lighting) : std::string("n/a (no timestamps)"));
+  stat("GPU views: copies out + fence / wait", strprintf("%.2f ms / %.2f ms", fp.ms_gpu_readback, wait));  // (the wait: the GPU path's rest - gathering, uploads, the CPU's recording)
+  stat("GPU busy in the frame", stamps && frame_ms_ > 0.0 ? strprintf("%.0f %% of %.2f ms", 100.0 * busy / frame_ms_, frame_ms_) : std::string("n/a"));
+  for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (task 0163: why a view drew on the CPU instead; a slot's last view keeps its reason until the device is chosen again)
+    if (gpu_slot_reason_[k].empty()) continue;
+    const RenderTarget *rt = gpu_slot_rt_[k];
+    const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
+    stat(strprintf("%s on the CPU", view), gpu_slot_reason_[k]);
+  }
+}
+
+/* A path tracer's card time: busy and wait inside its submissions, and the busy share of `wall_ms` (the whole render
+ * for F12, the frame for the Camera Preview) - the card sits idle between submissions, which the submissions' own
+ * wait never shows. */
+void Editor::draw_profiler_gpu_tracer(const char *what, const PTStats &s, double wall_ms, const char *of_what, const std::function<void(const std::string &, const std::string &)> &stat) {
+  const std::string key = strprintf("%s: GPU busy / wait in its submissions", what);
+  if (s.gpu_busy_ms < 0.0) {
+    stat(key, s.render_ms > 0.0 ? "n/a (the CPU, or no timestamps)" : "-");
+    return;
+  }
+  stat(key, strprintf("%.0f ms / %.0f ms", s.gpu_busy_ms, s.gpu_wait_ms));
+  const double cards = (double)std::max<size_t>(1, s.gpu_samples.size());  // (the busy is every card's, summed: a share per card)
+  if (wall_ms > 0.0) stat(strprintf("%s: GPU busy over %s%s", what, of_what, cards > 1 ? " (a card's average)" : ""), strprintf("%.0f %% of %.0f ms", 100.0 * s.gpu_busy_ms / (wall_ms * cards), wall_ms));
+}
+
 void Editor::draw_profiler(const Recti &r) {
   auto &u = ui_;
   ui::Id sid = u.id("prof_scroll");
@@ -1799,6 +1912,7 @@ void Editor::draw_profiler(const Recti &r) {
   stat("Shadow map", fp.shadow_renders ? strprintf("%.2f ms (rendered)", fp.ms_shadow) : std::string("reused"));
   stat("UI / present", strprintf("%.2f ms / %.2f ms", fp.ms_ui, fp.ms_present));
   stat("Views rendered / reused", strprintf("%llu / %llu", (unsigned long long)fp.view_renders, (unsigned long long)fp.view_cache_hits));
+  draw_profiler_gpu(fp, stat);
   /* Task 0083: what the frames are really apart (the rate the screen sees, cap and timer included), and the parts
    * an Edit Mode drag pays for. */
   if (frame_stamps_.size() >= 2) {
@@ -1812,7 +1926,7 @@ void Editor::draw_profiler(const Recti &r) {
     stat("Between frames (last second)", strprintf("%.1f ms on average, 95%% within %.1f ms", mean, gaps[p95]));
   }
   stat("Draw items / scene hashes", strprintf("%.2f ms / %.2f ms (%llu)", fp.ms_collect, fp.ms_hash, (unsigned long long)fp.scene_hashes));
-  stat("Edit Mode: mesh writes / overlap check", strprintf("%.2f ms / %.2f ms", fp.ms_edit_apply, fp.ms_overlap));
+  stat("Edit Mode: operator / mesh writes / overlap check", strprintf("%.2f ms / %.2f ms / %.2f ms", fp.ms_edit_op, fp.ms_edit_apply, fp.ms_overlap));
   stat("Lighting key / snapping", strprintf("%.2f ms (%llu) / %.2f ms", fp.ms_lighting_key, (unsigned long long)fp.lightmap_key_hashes, fp.ms_snap_pick));
   const MeshCounts &mc = mesh_last_;
   stat("Mesh copies / render meshes built / moved in place",
@@ -1900,11 +2014,11 @@ void Editor::draw_lighting_window(const Recti &r) {
     const bool pv = scene_->lighting.preview;
     if (u.button({r2.x + bw + u.px(4), r2.y, bw, r2.h}, pv ? "Preview Lighting: On" : "Preview Lighting: Off", pv, Icon::Lightbulb))
       command(pv ? "lighting preview off" : "lighting preview on");
-    u.tooltip("A rough bake while you edit, refining 16 -> 64 -> 256 samples half a second after changes stop;\n"
+    u.tooltip("A rough bake while you edit, refining 32 -> 64 -> 256 samples half a second after changes stop;\n"
               "shown instead of the bake and never saved (like Bakery's Realtime Preview).");
     std::string mode = lighting_manual() ? "Lighting Updates: Manual (lighting stays as last computed until you update)"
                                          : "Lighting Updates: Automatic (Realtime GI follows every change)";
-    if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 16 : preview_stage_ == 1 ? 64 : 256,
+    if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 32 : preview_stage_ == 1 ? 64 : 256,
                                                   preview_baker_.progress() * 100.0)
                                      : preview_samples_ ? strprintf("  -  Preview: %d samples", preview_samples_) : std::string("  -  Preview: waiting");
     u.label(lay.row(), mode, u.theme.text_dim);
@@ -1944,6 +2058,7 @@ void Editor::draw_lighting_window(const Recti &r) {
     scene_->lighting.reflect(ir);
     u.pop_id();
     if (ir.changed) mark_changed("Lighting Settings");
+    u.label(lay.row(), "Emissive meshes: sampled at every texel, like lights (task 0157)", u.theme.text_dim);
   }
   lay.space(u.px(6));
   header("Environment");
@@ -1986,6 +2101,7 @@ void Editor::draw_render_window(const Recti &r) {
                       scene_->render.preview_percent, scene_->render.preview_samples));
   if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", false, Icon::Pause) && rendering_) {
     rendering_ = false;
+    final_pt_.pause();  // (task 0161: the cards stop too)
     resolve_final_render(true);
     render_status_ += "  (stopped)";
   }
@@ -2512,15 +2628,90 @@ bool Editor::draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t)
   return ir.changed;
 }
 
-void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m) {
+void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const std::vector<MaterialPtr> *others) {
   if (!m) return;
+  auto &u = ui_;
+  const bool many = others && others->size() > 1;
+  std::set<std::string> mixed;
+  if (many) {
+    mixed = mixed_material_fields(m.get(), *others);
+    u.label(lay.row(), strprintf("Editing %zu materials: a change reaches the ones that have the field", others->size()), u.theme.accent);
+    u.tooltip("Unity's multi-object editing for materials (task 0147): a toon field reaches the toon materials among them, an\n"
+              "axis field the axis ones, Shading Model all of them. A dash: their values differ; what you type lands on all.\n"
+              "+=0.1 or *=2 changes each from its own value. Console: matset <Field> <value>.");
+  }
   InspectorReflector ir(*this, ui_, lay);
   ir.material = m.get();
+  if (many) ir.mixed = &mixed;
   m->reflect(ir);
   if (ir.changed) {
     m->touch();
-    mark_changed("Edit Material " + m->name);  // an asset is written back when the edit finishes
+    const size_t n = many ? apply_material_edits(ir.edits, m.get(), *others) : 0;
+    mark_changed(n ? strprintf("Edit %zu Materials", n + 1) : "Edit Material " + m->name);  // an asset is written back when the edit finishes
   }
+}
+
+/* The edits made on `source`, applied to every other target that shows the field: Material::reflect's own
+ * conditions (a toon field only on a Toon material, the axis fields only with an Axis Mode) decide what applies.
+ * A typed expression is evaluated from each target's own value (index / count over the targets). */
+size_t Editor::apply_material_edits(const std::vector<FieldEdit> &edits, const Material *source, const std::vector<MaterialPtr> &targets) {
+  size_t n = 0;
+  for (size_t i = 0; i < targets.size(); i++) {
+    const MaterialPtr &t = targets[i];
+    if (!t || t.get() == source) continue;
+    bool took = false;
+    for (const FieldEdit &fe : edits) {
+      if (fe.kind == FieldEdit::Text && fe.name == "Name") continue;  // a name is the material's own (its file's): renaming all would collide
+      ApplyEditReflector a(fe, (int)i, (int)targets.size(), false);
+      t->reflect(a);
+      if (a.applied && fe.kind == FieldEdit::Enum && fe.name == "Toon Style") apply_toon_style(*t, fe.i_new);  // the preset's fields on each (task 0148)
+      took = took || a.applied;
+    }
+    if (!took) continue;
+    t->touch();
+    n++;
+  }
+  return n;
+}
+
+/* Every shown field as text, by name: the materials are compared through it. */
+namespace {
+struct ValuesReflector : Reflector {
+  std::map<std::string, std::string> values;
+  void field(const char *n, float &v, float, float, float) override { values[n] = strprintf("%g", v); }
+  void field(const char *n, int &v, int, int) override { values[n] = std::to_string(v); }
+  void field(const char *n, bool &v) override { values[n] = v ? "1" : "0"; }
+  void field(const char *n, Vec3 &v) override { values[n] = strprintf("%g %g %g", v.x, v.y, v.z); }
+  void color(const char *n, Vec3 &v) override { values[n] = strprintf("%g %g %g", v.x, v.y, v.z); }
+  void enumeration(const char *n, int &v, const char *const *, int) override { values[n] = std::to_string(v); }
+  void text(const char *n, std::string &v) override { values[n] = v; }
+  void mesh(const char *, MeshPtr &) override {}
+  void texture(const char *n, TextureRef &t) override { values[n] = t.path; }
+};
+}  // namespace
+
+std::set<std::string> Editor::mixed_material_fields(const Material *source, const std::vector<MaterialPtr> &targets) {
+  std::set<std::string> mixed;
+  if (!source) return mixed;
+  /* Once per change: the same materials at the same versions give the cached answer (a Ctrl+A over hundreds of
+   * imported materials would otherwise reflect them all every frame). */
+  uint64_t key = (uint64_t)(uintptr_t)source * 1099511628211ull + source->version;
+  for (const MaterialPtr &t : targets) key = (key ^ (uint64_t)(uintptr_t)t.get()) * 1099511628211ull + (t ? t->version : 0);
+  if (key == mixed_cache_.key && mixed_cache_.key) return mixed_cache_.fields;
+  ValuesReflector mine;
+  const_cast<Material *>(source)->reflect(mine);  // (reflect isn't const; ValuesReflector only reads)
+  for (const MaterialPtr &t : targets) {
+    if (!t || t.get() == source) continue;
+    ValuesReflector theirs;
+    t->reflect(theirs);
+    for (const auto &kv : mine.values) {
+      auto it = theirs.values.find(kv.first);
+      if (it != theirs.values.end() && it->second != kv.second) mixed.insert(kv.first);
+    }
+  }
+  mixed_cache_.key = key;
+  mixed_cache_.fields = mixed;
+  return mixed;
 }
 
 /* The editor's frame rate cap, with what it costs measured on this machine.

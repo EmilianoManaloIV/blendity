@@ -58,7 +58,7 @@ bool Editor::transform_begin(int mode) {
   else {
     for (GameObject *g : selected_objects(true))
       if (g->get<Bone>() && ik_drives(*scene_, *g)) {  // IK would turn it straight back (task 0048)
-        Log::warn("%s: '%s' is turned by IK: move its target instead", kModeNames[mode], g->name.c_str());
+        Log::warn("%s: '%s' is turned by IK: %s its target instead", kModeNames[mode], g->name.c_str(), ik_end_driven(*scene_, *g) ? "turn" : "move");
         return false;
       }
     for (GameObject *g : selected_objects(true)) {
@@ -216,7 +216,7 @@ void Editor::transform_finish(bool keep) {
     if (!keep) {
       /* Cancelled: the faces as they were before the extrude. */
       if (GameObject *g = scene_->find(last_op_.obj))
-        if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = last_op_.before;
+        if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = mesh_copy(*last_op_.before);  // (a copy: see run_last_op's failure)
       vert_sel_ = last_op_.vsel;
       face_sel_ = last_op_.fsel;
       last_op_.op.clear();

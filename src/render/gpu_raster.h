@@ -47,7 +47,7 @@ struct RasterInstance {
   enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64 };
   float model[16];
   float albedo_rough[4];  // albedo rgb, roughness
-  float metal_spec[4];    // metallic, specular (Principled's IOR Level), 0, 0
+  float metal_spec[4];    // metallic, specular (Principled's IOR Level), the cutout threshold (-1: not a cutout; task 0163), the material's alpha
   float emission[3] = {0, 0, 0};
   uint32_t flags = ReceiveShadows | CastShadows;
   uint32_t mesh = 0;
@@ -65,12 +65,21 @@ struct RasterInstance {
   bool has_uv = false, has_tangent = false;
   /* The part of the mesh drawn (a material's triangles, grouped on the card): count 0 is all of it. */
   uint32_t first_index = 0, index_count = 0;
+  /* Task 0166: Edit Mode's face highlight - 1 + the index in RasterFrame::highlight_bits of this draw's first
+   * triangle's bit (0: none); the g-buffer pass mixes the highlight colour into a set triangle's albedo. */
+  uint32_t highlight = 0;
   /* Task 0102: a toon material's settings (Material's toon_*), as shade_toon, toon_rim and light_finish read them. */
   int toon_bands = 1;
   float toon_softness = 0.02f, toon_threshold = 0.15f, toon_specular_size = 0.0f, toon_specular_smooth = 0.05f;
   float toon_shadow[3] = {0.55f, 0.5f, 0.68f}, toon_rim[3] = {1, 1, 1};
   float toon_rim_width = 0.0f, toon_rim_strength = 0.5f;
   bool toon_flat_ambient = true;
+  /* Task 0148: the spot's colour, the light wrap, the rim's side (0 both, 1 lit, 2 shadow), the key light alone banding.
+   * (A toon material with painted maps or a hair highlight draws on the CPU: the lighting pass has no UVs.) */
+  float toon_specular_color[3] = {1, 1, 1}, toon_wrap = 0.0f;
+  int toon_rim_side = 0;
+  bool toon_key_light_only = false;
+  int32_t toon_ramp = -1;  // the Toon Ramp's texture (add_texture's id; -1: the bands): read in the lighting pass by how lit
 };
 
 /* The Edit Mode cage (task 0100), drawn over the picture as the CPU draws its overlay lines and dots
@@ -94,6 +103,10 @@ struct RasterLight {
   float intensity = 1.0f;
   float range = 10.0f;
   float spot_cos_outer = 0.0f, spot_cos_inner = 0.0f;
+  /* Task 0163: an area light's panel (RenderLight's right, width, height, disk), lit on the card as on the CPU. */
+  float right[3] = {1, 0, 0};
+  float width = 1.0f, height = 1.0f;
+  bool disk = false;
 };
 
 struct RasterFrame {
@@ -108,6 +121,7 @@ struct RasterFrame {
   bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
   bool cull_backfaces = true; // (double-sided instances never are)
   std::vector<RasterLight> lights;
+  std::vector<uint32_t> highlight_bits;  // task 0166: a bit per triangle of the highlighted meshes (see RasterInstance::highlight)
   /* The world's light (Environment Gradient or Color, times its strength). */
   int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
   /* Task 0102: a Sky or HDRI world (env_mode 2): its equirectangular map (add_texture's id; -1: none yet, the
@@ -132,9 +146,10 @@ struct RasterFrame {
   float cage_bias = 0.0f, cage_point_radius = 0.0f;
 };
 
-/* GPU time of the last render() (timestamps), in ms. */
+/* GPU time of the last render() (timestamps), in ms; submit_wall is the last submission's wall time from the queue
+ * submit to the fence (task 0160: the copies out and the wait are submit_wall - total). */
 struct RasterTimes {
-  double shadow = 0, gbuffer = 0, lighting = 0, total = 0;
+  double shadow = 0, gbuffer = 0, lighting = 0, total = 0, submit_wall = 0;
 };
 
 /* A GPU picture against the CPU's, scored where it says something: covered pixels (id not 0: the background is the
@@ -169,6 +184,9 @@ class Raster {
   virtual void remove_mesh(int mesh) = 0;
   /* Whether its cage pipelines were made (task 0100: else the CPU draws the cage). */
   virtual bool can_draw_cage() const = 0;
+  /* Whether the g-buffer pass can tint Edit Mode's selected faces (task 0166: it needs gl_PrimitiveID, which Vulkan
+   * ties to the geometryShader feature); without it the edit object draws on the CPU as before. */
+  virtual bool can_highlight_faces() const { return false; }
   /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
@@ -189,6 +207,11 @@ class Raster {
   virtual RasterTimes times() const = 0;
   /* (A): a slot's last frame into CPU memory; any pointer may be null (not read back then). */
   virtual bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
+  /* Task 0160 (ADR 0051): render() and read_back() as one submission - the copies out are recorded behind the frame's
+   * passes, so the card is waited for once; what the editor's views use. */
+  virtual bool render_read(const RasterFrame &frame, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
+  /* How many times the queue was submitted to and waited for (tests: a view costs one, plus any uploads). */
+  virtual uint64_t submits() const = 0;
   /* (B): a swapchain on the window (Win32 HWND), then each present: the UI canvas's changed rows go up, slot 0's view
    * (its last render) is copied to (view_x, view_y), and the frame is shown and its copies waited for. */
   virtual bool attach_window(void *native, std::string *error) = 0;

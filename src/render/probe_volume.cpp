@@ -32,14 +32,6 @@ inline float inv_sqrt(float x) {
   return 1.0f / std::sqrt(x);
 #endif
 }
-inline uint32_t hash32(uint32_t x) {
-  x ^= x >> 16;
-  x *= 0x7feb352du;
-  x ^= x >> 15;
-  x *= 0x846ca68bu;
-  x ^= x >> 16;
-  return x ? x : 1u;
-}
 inline float rnd01(uint32_t &s) {
   s ^= s << 13;
   s ^= s >> 17;
@@ -372,7 +364,7 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
           dist = length(dv);
           if (!(dist > 1e-5f)) continue;
           Ld = dv / dist;
-          fall = l.type == RenderLight::Area ? light_range_falloff(l, p) : light_falloff(l, p, Ld);
+          fall = l.type == RenderLight::Area ? 1.0f : light_falloff(l, p, Ld);  // (an area's falloff is in its irradiance)
           if (fall <= 0.0f) continue;
           dist *= 1.0f - 1e-4f;
         }
@@ -380,7 +372,7 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
         const Vec3 col = l.color * (l.intensity * fall);
         /* An area light by its whole surface (task 0030), as the rasterizer and the lightmaps take it. */
         for (int ax = 0; ax < 6; ax++)
-          c.bounce[ax] += col * (l.type == RenderLight::Area ? area_light_cosine(l, p, kAxes[ax]) : std::max(0.0f, dot(kAxes[ax], Ld)));
+          c.bounce[ax] += col * (l.type == RenderLight::Area ? area_light_irradiance(l, p, kAxes[ax]) : std::max(0.0f, dot(kAxes[ax], Ld)));
       }
     }
   });

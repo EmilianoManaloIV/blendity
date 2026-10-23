@@ -51,6 +51,8 @@ struct GParams {
   float background[4];  // a camera's Solid Color for camera rays (w: on)
   float retro_vp[16];   // a camera filter's view-projection (task 0032)
   float retro[4];       // affine UVs, screen door, internal width, height (0: off)
+  float key_light[4];   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
+  float misc[4];        // task 0149: x the toon map reads (8); task 0157: y a bake gather weights its first emissive hit
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };
@@ -68,8 +70,15 @@ struct GMaterial {
   int32_t axis_i[4];  // its Top, Side, Bottom, High in this table (-1: its own maps; High -1: no band)
   float axis2[4];     // task 0040: noise amount, 1 / noise scale, high start, high half-width
   /* Toon (ADR 0020; flags[3] bit 1): bands, softness, threshold, specular smoothness; shadow colour, specular
-   * size; rim colour x strength, rim width. */
+   * size; rim colour x strength, rim width. Task 0148: tex2 the ramp, shade, bias and specular maps; tex3 the rim
+   * mask, hair highlight, rim side, key light only; toon3 the specular colour and the light wrap. */
   float toon0[4], toon1[4], toon2[4];
+  int32_t tex2[4], tex3[4];
+  float toon3[4];
+  /* Task 0149 packs into tex3 (the kernel's Material must not grow: every copy of it costs SPIR-V ids): tex3[1] the
+   * flag bits (hair 1, rim side 2-3, key light only 8, face forward 16-32, lines only in shadow 64), tex3[2] the face
+   * map id | the hatch map id << 16 (0xFFFF: none), tex3[3] the line map id | the hatch scale x 64 << 16; the face
+   * shadow's softness in color2[3]. */
 };
 struct GLight { float a[4], b[4], c[4], d[4], e[4]; };  // see gpu_kernel.h Light
 struct GMeshLight { uint32_t obj, prim; float area, power; };
@@ -110,11 +119,28 @@ class Renderer {
   virtual OpenStats open_stats() const { return {}; }
   virtual ~Renderer() = default;
   virtual bool upload(const Scene &scene, std::string *error) = 0;
+  /* Task 0162: one section of an uploaded scene replaced, the rest kept - the instances (with the TLAS rebuilt on
+   * a card with ray tracing hardware; the BLASes stay), the materials (the texture arena must be the same), the
+   * lights (the mesh lights and their cdf with them). The default does a whole upload. */
+  virtual bool update_instances(const Scene &scene, std::string *error) { return upload(scene, error); }
+  virtual bool update_materials(const Scene &scene, std::string *error) { return upload(scene, error); }
+  virtual bool update_lights(const Scene &scene, std::string *error) { return upload(scene, error); }
+  /* How many times the queue was submitted to (an upload is one submission, the BLAS builds one, the TLAS one). */
+  virtual uint64_t submits() const { return 0; }
   /* Camera, resolution and other per-frame parameters (clears the buffers). */
   virtual void set_params(const GParams &p) = 0;
   virtual void clear() = 0;
   /* Renders samples [first, first + count) and waits for them. */
   virtual bool render(int first_sample, int count, std::string *error) = 0;
+  /* Task 0161 (ADR 0052): the same without waiting - up to two submissions in flight (a third waits for the
+   * oldest first); wait_oldest() returns when the oldest in flight has finished (false when nothing is),
+   * wait_all() when every one has. in_flight() counts them. Only one thread may drive a device. */
+  virtual bool submit(int first_sample, int count, std::string *error) { return render(first_sample, count, error); }
+  virtual bool wait_oldest(std::string *error) { (void)error; return true; }  // (a device without flights: submit() waited already)
+  virtual bool wait_all(std::string *error) { (void)error; return true; }
+  virtual int in_flight() const { return 0; }
+  /* The card's own time of the submissions that finished since the last take (-1 without timestamps). */
+  virtual double take_busy_ms() { return -1.0; }
   /* Accumulated sums (4 floats per pixel): the colour after every render call,
    * albedo and normal + depth only when the denoiser needs them. */
   virtual void download_accum(std::vector<float> &accum) = 0;
@@ -124,6 +150,9 @@ class Renderer {
   virtual bool set_points(const float *data, size_t floats, std::string *error) = 0;
   virtual const DeviceInfo &info() const = 0;
   virtual bool using_hardware_rt() const = 0;
+  /* The GPU's own time in the last render() (timestamp queries round its dispatches, task 0159): what the card was
+   * busy, against the wall time the call took; -1 on a device without timestamps. */
+  virtual double last_gpu_ms() const { return -1.0; }
 };
 
 /* A general compute kernel on one GPU (task 0018: voxel GI's gathers): GLSL compiled once per run (and
@@ -146,6 +175,7 @@ bool renderers_opening();         // a background open is running
 /* Tests: slow every background open down, and drop the ready renderers (a cold start). */
 void set_open_delay_for_test(int ms);
 void drop_ready_renderers_for_test();
+void drop_ready_renderers();  // (task 0170: the backend changed - the spares were opened for the other one)
 /* The pipeline cache file of a device (task 0037): a Vulkan VkPipelineCache kept on disk. */
 std::string pipeline_cache_file(int index, bool hardware_rt);
 

@@ -8,13 +8,13 @@
 namespace bl {
 
 namespace {
-int label_of(const std::string &w) {  // hair ear tail cloth none -> 0..3, 4; -1 not a label
-  static const char *const names[5] = {"hair", "ear", "tail", "cloth", "none"};
-  for (int i = 0; i < 5; i++)
+int label_of(const std::string &w) {  // hair ear tail cloth soft none -> 0..4, 5; -1 not a label
+  static const char *const names[6] = {"hair", "ear", "tail", "cloth", "soft", "none"};
+  for (int i = 0; i < 6; i++)
     if (to_lower(w) == names[i]) return i;
   return -1;
 }
-const char *label_name(int l) { return l >= 0 && l < 4 ? spring::kLabels[l] : "None"; }
+const char *label_name(int l) { return l >= 0 && l < 5 ? spring::kLabels[l] : "None"; }
 
 bool in_subtree(const GameObject *root, const GameObject *g) {
   for (; g; g = g->parent)
@@ -80,13 +80,13 @@ Editor::SpringView::Row *Editor::spring_row(const GameObject &first) {
 /* A chain set to None (not a spring chain): its own SpringBone off (the chains below it keep theirs), remembered on
  * its first bone. */
 void Editor::spring_set_label(GameObject &first, int label) {
-  if (label >= 4) {
-    if (SpringBone *s = first.get<SpringBone>()) first.remove_component(s);
+  if (label >= 5) {
+    if (SpringBone *s = first.get<SpringBone>()) spring::unstretch(*s, first), first.remove_component(s);
     if (Bone *b = first.get<Bone>()) b->spring_ignored = true;
     if (SpringView::Row *r = spring_row(first)) r->ignored = true, r->added = false, r->tick = false;
     return mark_changed("Not a Spring Chain");
   }
-  if (SpringBone *s = first.get<SpringBone>()) spring::apply_defaults(*s, label);
+  if (SpringBone *s = first.get<SpringBone>()) spring::unstretch(*s, first), spring::apply_defaults(*s, label);
   if (SpringView::Row *r = spring_row(first)) r->label = label;
   mark_changed("Spring Chain Label");
 }
@@ -222,9 +222,9 @@ void Editor::draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *
     const std::string name = first->name + strprintf("  (%zu)", r.bones) + (r.added ? "  added" : r.ignored ? "  ignored" : r.named ? "" : "  unnamed");
     u.label({cb.right() + u.px(6), row.y, row.w - box - lw - act - u.px(24), row.h}, name, r.ignored ? u.theme.text_dim : u.theme.text);
     const Recti lb{row.right() - lw - act - u.px(8), row.y, lw, row.h}, ab{row.right() - act - u.px(4), row.y, act, row.h};
-    if (!r.ignored && u.button(lb, label_name(r.label))) {  // (Hair -> Ear -> Tail -> Cloth -> None)
+    if (!r.ignored && u.button(lb, label_name(r.label))) {  // (Hair -> Ear -> Tail -> Cloth -> Soft -> None)
       const int next = r.label + 1;
-      if (r.added || next >= 4) spring_set_label(*first, next >= 4 ? 4 : next);
+      if (r.added || next >= 5) spring_set_label(*first, next >= 5 ? 5 : next);
       else r.label = next;
     }
     u.tooltip("What the chain is: its settings follow. None: not a spring chain (remembered on its first bone).");
@@ -235,7 +235,7 @@ void Editor::draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *
   if (buttons({{"Apply", "Spring Bones on the ticked chains, each with its label's settings (one undo step)."}}, {ticked > 0}) == 0) spring_apply();
 }
 
-/* spring find [all] | apply | tick <bone> on|off | label <bone> hair|ear|tail|cloth|none | add <bone> [label] |
+/* spring find [all] | apply | tick <bone> on|off | label <bone> hair|ear|tail|cloth|soft|none | add <bone> [label] |
  * remove <bone> | ignore <bone> | unignore <bone> | bake | list */
 void Editor::spring_command(const std::vector<std::string> &t) {
   if (!assist_require(Assist::Physics)) return;
@@ -253,9 +253,9 @@ void Editor::spring_command(const std::vector<std::string> &t) {
   }
   if (sub == "label") {
     const int l = t.size() > 3 ? label_of(t[3]) : -1;
-    if (l < 0) return Log::warn("spring label <bone> hair|ear|tail|cloth|none");
+    if (l < 0) return Log::warn("spring label <bone> hair|ear|tail|cloth|soft|none");
     GameObject *first = spring_first_of(*b);
-    if (first->get<SpringBone>() || l == 4) return spring_set_label(*first, l);
+    if (first->get<SpringBone>() || l == 5) return spring_set_label(*first, l);
     SpringView::Row *r = spring_row(*first);
     if (!r) return Log::warn("spring label: %s has no Spring Bones and isn't in a found chain (spring find)", b->name.c_str());
     r->label = l;
@@ -263,19 +263,19 @@ void Editor::spring_command(const std::vector<std::string> &t) {
   }
   if (sub == "add") {
     const int l = t.size() > 3 ? label_of(t[3]) : -1;
-    if (t.size() > 3 && (l < 0 || l > 3)) return Log::warn("spring add <bone> [hair|ear|tail|cloth]");
+    if (t.size() > 3 && (l < 0 || l > 4)) return Log::warn("spring add <bone> [hair|ear|tail|cloth|soft]");
     return spring_add(*b, l);
   }
   if (sub == "remove") return spring_remove(*b);
   if (sub == "unignore") return spring_unignore(*spring_first_of(*b));
   if (sub == "ignore") {
     GameObject *first = spring_first_of(*b);
-    return spring_set_label(*first, 4);
+    return spring_set_label(*first, 5);
   }
   for (const auto &o : scene_->objects())
     if (const SpringBone *s = o->get<SpringBone>())
       Log::info("  %s: %s, %zu bone(s)%s", o->name.c_str(), label_name(s->label), spring::chain_bones(*o).size(), s->enabled ? "" : " (baked: live off)");
-  if (sub != "list") Log::warn("spring find [all] | apply | tick <bone> on|off | label <bone> hair|ear|tail|cloth|none | add <bone> [label] | remove <bone> | "
+  if (sub != "list") Log::warn("spring find [all] | apply | tick <bone> on|off | label <bone> hair|ear|tail|cloth|soft|none | add <bone> [label] | remove <bone> | "
                                "ignore <bone> | unignore <bone> | bake | list");
 }
 

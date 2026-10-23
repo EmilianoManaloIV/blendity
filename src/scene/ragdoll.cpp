@@ -8,6 +8,7 @@
 
 #ifdef BL_WITH_JOLT
 #  include <Jolt/Jolt.h>
+#  include "physics_jolt_layers.h"
 
 #  include <Jolt/Core/JobSystemSingleThreaded.h>
 #  include <Jolt/Core/TempAllocator.h>
@@ -52,23 +53,9 @@ bool simulate(Scene &, GameObject &, const AnimationClip &, const body::Body &, 
 namespace {
 using namespace JPH;
 
-constexpr ObjectLayer kStatic = 0, kMoving = 1;
-class BroadPhaseLayers final : public BroadPhaseLayerInterface {
- public:
-  uint GetNumBroadPhaseLayers() const override { return 2; }
-  BroadPhaseLayer GetBroadPhaseLayer(ObjectLayer layer) const override { return BroadPhaseLayer((uint8)layer); }
-#  if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
-  const char *GetBroadPhaseLayerName(BroadPhaseLayer layer) const override { return layer.GetValue() == 0 ? "static" : "moving"; }
-#  endif
-};
-class ObjectVsBroadPhase final : public ObjectVsBroadPhaseLayerFilter {
- public:
-  bool ShouldCollide(ObjectLayer layer, BroadPhaseLayer bp) const override { return layer == kMoving || bp.GetValue() == kMoving; }
-};
-class ObjectPairs final : public ObjectLayerPairFilter {
- public:
-  bool ShouldCollide(ObjectLayer a, ObjectLayer b) const override { return a == kMoving || b == kMoving; }
-};
+using namespace bl::jolt_layers;  // (the two layers and their filters: physics_jolt_layers.h)
+using Layers::kMoving;
+using Layers::kStatic;
 
 JPH::Vec3 jv(bl::Vec3 v) { return JPH::Vec3(v.x, v.y, v.z); }
 bl::Vec3 bv(JPH::Vec3 v) { return bl::Vec3(v.GetX(), v.GetY(), v.GetZ()); }

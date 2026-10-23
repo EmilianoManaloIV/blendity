@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "../core/json.h"
 #include "animation.h"
 #include "sequence.h"
 #include "curve.h"
@@ -13,9 +14,11 @@
 #include "spring_bones.h"  // (SpringBone's registration)
 #include "footsteps.h"     // (Footprint's and Footsteps')
 #include "locomotion.h"    // (Locomotion's)
+#include "../core/jobs.h"  // (NormalTransferModifier's search)
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -65,6 +68,9 @@ void register_builtin_components() {
   reg<SubdivisionSurface>("Mesh", "Non-destructive Catmull-Clark subdivision applied before rendering.",
                           "Subdivision Surface modifier");
   reg<SmoothModifier>("Mesh", "Non-destructive Laplacian smoothing applied before rendering.", "Smooth modifier");
+  reg<SmoothNormalsModifier>("Mesh", "Shading normals smoothed over the surface (the anime face: its shape stays, its bumps stop shading).", "Smooth Normals modifier");
+  reg<NormalTransferModifier>("Mesh", "Shading normals taken from a proxy object's surface (a sphere round the head: Blender's Data Transfer trick).",
+                              "Normal Transfer modifier");
   reg<MirrorModifier>("Mesh", "Mirrors the mesh across its local X / Y / Z planes.", "Mirror modifier");
   reg<ArrayModifier>("Mesh", "Repeats the mesh with an offset.", "Array modifier");
   reg<SolidifyModifier>("Mesh", "Gives surfaces thickness (a shell with rim faces).", "Solidify modifier (Simple)");
@@ -77,6 +83,9 @@ void register_builtin_components() {
   reg<DisplaceModifier>("Mesh", "Pushes vertices along their normals by a noise texture.", "Displace modifier (procedural texture)");
   reg<SimpleDeformModifier>("Mesh", "Twists, bends, tapers or stretches the mesh along an axis.", "Simple Deform modifier");
   reg<CastModifier>("Mesh", "Pulls the mesh towards a sphere, cylinder or box.", "Cast modifier");
+  reg<JiggleModifier>("Mesh", "Skin jiggle without bones: a vertex group's vertices trail the body's acceleration on a damped spring\n"
+                              "(a breast, a belly on a rig with no such bones; task 0153). Runs in Play.",
+                      "Jiggle (Wiggle Bones / jiggle physics add-ons)");
   reg<SkinModifier>("Mesh", "Moves the mesh with an armature's bones: each vertex by the bones its vertex groups are named after.",
                     "Armature modifier (Vertex Groups)");
   reg<Bone>("Rigging", "A bone of a skeleton: a skin moves the vertices of the vertex group named after it.", "Bone (in an Armature)");
@@ -130,6 +139,7 @@ void register_builtin_components() {
                "hull). Pair it with a Toon material.",
                "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
+  reg<Wind>("Scripts", "A wind along this object's forward (or away from it): spring chains - hair, cloth, tails - move in it (task 0153).", "Blender's Wind force field");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
                         "No direct equivalent (Blender removed its game engine in 2.80)");
@@ -154,6 +164,20 @@ void MeshRenderer::reflect(Reflector &r) {
   r.field("Show in Renders", show_in_renders);
   r.help("Off: the Game view and rendered images leave the object out, as Blender does for Boolean cutters\n"
          "(Object > Visibility > Renders).");
+  /* Shape keys (task 0135): files and hashes keep the weights as a list (whatever order the components come in, a
+   * key's exact name); the Inspector and clips get a slider per key of the mesh (BlendShape/<name>). */
+  if (r.serializing()) r.weight_list("Shape Weights", shape_weights);
+  const MeshFilter *mf = owner && !r.serializing() ? owner->mesh_filter() : nullptr;
+  const Mesh *mesh = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  for (size_t i = 0; mesh && i < mesh->shape_keys.size(); i++) {
+    const std::string field = "BlendShape/" + mesh->shape_keys[i].name;
+    float w = shape_weight(mesh->shape_keys[i].name);
+    const float before = w;
+    r.field(field.c_str(), w, 0.01f, 0.0f, 1.0f);
+    if (i == 0) r.help("The mesh's shape keys (blend shapes, morphs): how much of each is added to the basis, before the skin\n"
+                       "deforms it. Animatable (Add Property > MeshRenderer > BlendShape/...).");
+    if (w != before) set_shape_weight(mesh->shape_keys[i].name, w);
+  }
   r.field("Contribute GI", contribute_gi);
   r.help("Part of baked lighting (Unity: Static > Contribute Global Illumination). It bounces light onto the\n"
          "others and gets a lightmap when you press Generate Lighting (Window > Lighting). Leave it off for\n"
@@ -192,7 +216,7 @@ void LightingSettings::reflect(Reflector &r) {
   r.enumeration("Lighting Mode", lighting_mode, modes, 1);
   r.help("Baked Indirect: Mixed lights keep their realtime light and shadows; only their bounced light is baked.");
   r.field("Lightmap Resolution", texels_per_unit, 0.5f, 0.01f, 1000.0f);
-  r.help("Texels per unit (metre) of surface (Unity's default is 40).");
+  r.help("Texels per unit (metre) of surface (Unity's default is 40; 80 shows a small emissive object's glow in detail).");
   r.field("Max Lightmap Size", max_size, 16, 4096);
   r.field("Lightmap Padding", padding, 0, 32);
   r.help("Texels kept between charts so they don't bleed into each other.");
@@ -332,6 +356,11 @@ void RenderSettings::reflect(Reflector &r) {
       r.field("Hardware Ray Tracing", hardware_rt);
       r.help("Use the GPU's ray tracing hardware (NVIDIA RT cores, AMD ray accelerators, Intel RTUs) when it has it,\n"
              "instead of traversing Blendity's BVH in a compute shader (Blender: OptiX vs CUDA, HIP RT vs HIP).");
+      static const char *const kBackends[3] = {"Auto", "Vulkan", "OptiX"};
+      r.enumeration("GPU Backend", gpu_backend, kBackends, 3);
+      r.help("Which API drives an NVIDIA card (task 0170): OptiX or Vulkan (GPU Compute); Auto is GPU Compute for now. The\n"
+             "two run one integrator and render the same picture; OptiX measured about three times slower (its rays leave\n"
+             "the kernel and come back). OptiX needs Hardware Ray Tracing. Blender: Preferences > System > Cycles Render Devices.");
     }
     r.samples("Samples", samples, 1, 65536);
     r.help("Samples per pixel for the final render. Noise falls as 1/sqrt(samples): each doubling cuts it by ~30%.\nBlender: Sampling > Render > Max Samples.");
@@ -386,7 +415,8 @@ void Light::reflect(Reflector &r) {
   static const char *types[] = {"Directional", "Point", "Spot", "Area"};
   r.enumeration("Type", type, types, 4);
   r.help("Directional: the sun, parallel rays. Point: all directions from a point. Spot: a cone along the light's\n"
-         "forward (blue) axis. Area: a rectangle or disc that lights its front, with soft shadows when path traced.\n"
+         "forward (blue) axis. Area: a glowing rectangle or disc that lights its front from its whole surface, like a\n"
+         "quad with an emissive material: the inverse square from every point of it, soft shadows when path traced.\n"
          "Unity: Light Type. Blender: Sun / Point / Spot / Area.");
   if (type == 2 || all) {
     r.field("Spot Angle", spot_angle, 0.5f, 1.0f, 179.0f);
@@ -411,7 +441,12 @@ void Light::reflect(Reflector &r) {
            "5500 noon sun, 6500 overcast sky (white), 9000+ blue sky in shade.");
   }
   r.field("Intensity", intensity, 0.01f, 0.0f, 8.0f);
+  if (type == 3 || all)
+    r.help("How brightly the panel glows, per square metre: a quad with an emissive material of strength 3.14 x this\n"
+           "(pi times) gives the same light, so a bigger panel gives more light and softer shadows.");
   if (r.all_fields() || type != 0) r.field("Range", range, 0.05f, 0.01f, 1000.0f);
+  if (type == 3 || all) r.help("Where an area light's light ends: it falls as the inverse square and fades out to nothing at Range.");
+  else if (type != 0 || all) r.help("How far the light reaches (Unity's falloff: nothing beyond Range).");
   static const char *light_modes[] = {"Realtime", "Mixed", "Baked"};
   r.enumeration("Mode", mode, light_modes, 3);
   r.help("Unity's Light Mode. Realtime: lit every frame, not in baked lighting. Mixed: realtime light and shadows,\n"
@@ -547,6 +582,11 @@ void Camera::reflect(Reflector &r) {
 
 void Camera::reflect_guides(Reflector &r) {
   const bool all = r.all_fields();
+  /* One drop-down in the Inspector (task 0145), closed until wanted: the guides are a dozen rows. */
+  if (!r.group("Composition Guides", false)) {
+    r.group_end();
+    return;
+  }
   r.field("Show Guides", show_guides);
   r.help("Composition guides over what this camera sees in the Game view, the Camera Preview and while piloting\n"
          "(never in renders). Blender: Camera > Viewport Display > Composition Guides. Game view: the Guides menu.");
@@ -577,6 +617,7 @@ void Camera::reflect_guides(Reflector &r) {
     }
     r.color_alpha("Guide Color", guide_color, "Guide Opacity", guide_opacity);
   }
+  r.group_end();
 }
 
 float Camera::image_aspect(float render_aspect) const {
@@ -663,6 +704,10 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
       {LineArtEffect::kName, "Stylize", "Ink lines on silhouettes, where objects meet, and on creases sharper than an angle (a manga / anime line).",
        [] { return std::make_unique<LineArtEffect>(); }},
       {PaperEffect::kName, "Stylize", "A paper texture under the picture: blotches, fibres and grain.", [] { return std::make_unique<PaperEffect>(); }},
+      {AnimeEffect::kName, "Stylize", "The anime look in one effect: ink lines on silhouettes and creases, a little more saturation and contrast, a soft bloom.",
+       [] { return std::make_unique<AnimeEffect>(); }},
+      {MangaEffect::kName, "Stylize", "A printed manga page in one effect: greys, halftone dots, ink lines and paper.",
+       [] { return std::make_unique<MangaEffect>(); }},
       {BloomEffect::kName, "Bloom & glow", "Light brighter than a threshold spills into the pixels around it: glowing lights, emissive materials, sun glints.",
        [] { return std::make_unique<BloomEffect>(); }},
   };
@@ -688,6 +733,8 @@ struct PrefixReflector : Reflector {
   std::string prefix;
   PrefixReflector(Reflector &r, std::string p) : in(r), prefix(std::move(p)) {}
   std::string n(const char *name) const { return prefix + name; }
+  bool group(const char *name, bool open) override { return in.group(name, open); }
+  void group_end() override { in.group_end(); }
   void field(const char *name, float &v, float speed, float mn, float mx) override { in.field(n(name).c_str(), v, speed, mn, mx); }
   void field(const char *name, int &v, int mn, int mx) override { in.field(n(name).c_str(), v, mn, mx); }
   void samples(const char *name, int &v, int mn, int mx) override { in.samples(n(name).c_str(), v, mn, mx); }
@@ -1142,20 +1189,81 @@ const std::vector<std::string> &filter_looks() {
 
 bool apply_filter_look(CameraFilters &cf, const std::string &name_in) {
   const std::string name = to_lower(name_in);
-  if (name == "anime") {
-    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.2f, l->crease_angle = 50.0f;
-    if (auto *g = dynamic_cast<ColorGradingEffect *>(cf.add(ColorGradingEffect::kName))) g->saturation = 0.15f, g->contrast = 0.08f;
-    if (auto *b = dynamic_cast<BloomEffect *>(cf.add(BloomEffect::kName))) b->intensity = 0.25f, b->threshold = 1.2f;
-    return true;
-  }
-  if (name == "manga") {
-    cf.add(GrayscaleEffect::kName);
-    if (auto *h = dynamic_cast<HalftoneEffect *>(cf.add(HalftoneEffect::kName))) h->cell = 6.0f, h->contrast = 1.2f;
-    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.5f;
-    cf.add(PaperEffect::kName);
-    return true;
-  }
+  /* One effect each (task 0154); until then a look was three or four effects appended, which older scenes still hold. */
+  if (name == "anime") return cf.add(AnimeEffect::kName) != nullptr;
+  if (name == "manga") return cf.add(MangaEffect::kName) != nullptr;
   return false;
+}
+
+void AnimeEffect::reflect(Reflector &r) {
+  r.field("Lines", lines);
+  r.help("Ink lines on silhouettes, where objects meet, and on creases sharper than Crease Angle.");
+  if (r.all_fields() || lines) {
+    r.color("Line Color", line_color);
+    r.field("Line Thickness", line_thickness, 0.05f, 0.5f, 8.0f);
+    r.field("Crease Angle", crease_angle, 0.5f, 1.0f, 179.0f);
+  }
+  r.field("Saturation", saturation, 0.01f, -1.0f, 1.0f);
+  r.help("A little more colour (0: unchanged; 1: twice as vivid).");
+  r.field("Contrast", contrast, 0.01f, -1.0f, 1.0f);
+  r.field("Bloom", bloom, 0.01f, 0.0f, 100.0f);
+  r.help("The soft glow round bright things (0: none).");
+  if (r.all_fields() || bloom > 0.0f) r.field("Bloom Threshold", bloom_threshold, 0.01f, 0.0f, 1000.0f);
+}
+/* The parts' own passes, so the one effect draws exactly what the three did. */
+void AnimeEffect::contribute(FilterStack &s) const {
+  if (lines) {
+    LineArtEffect l;
+    l.color = line_color, l.thickness = line_thickness, l.crease_angle = crease_angle;
+    l.contribute(s);
+  }
+  ColorGradingEffect g;
+  g.saturation = saturation, g.contrast = contrast;
+  g.contribute(s);
+  if (bloom > 0.0f) {
+    BloomEffect b;
+    b.intensity = bloom, b.threshold = bloom_threshold;
+    b.contribute(s);
+  }
+}
+
+void MangaEffect::reflect(Reflector &r) {
+  r.field("Grayscale", grayscale);
+  r.field("Tones", tones, 0, 8);
+  r.help("0: smooth greys. 2 to 8: that many flat tones (screentone steps) before the dots.");
+  r.field("Dots", dots);
+  if (r.all_fields() || dots) {
+    r.field("Dot Cell", dot_cell, 0.1f, 2.0f, 128.0f);
+    r.help("Dot spacing in pixels at 1080p (the same look at any resolution).");
+    r.field("Dot Contrast", dot_contrast, 0.01f, 0.0f, 8.0f);
+  }
+  r.field("Lines", lines);
+  if (r.all_fields() || lines) r.field("Line Thickness", line_thickness, 0.05f, 0.5f, 8.0f);
+  r.field("Paper", paper, 0.01f, 0.0f, 1.0f);
+  r.help("How much of the paper's grain shows through (0: none).");
+}
+void MangaEffect::contribute(FilterStack &s) const {
+  if (grayscale) GrayscaleEffect().contribute(s);
+  if (tones >= 2) {
+    PosterizeEffect p;
+    p.levels = tones;
+    p.contribute(s);
+  }
+  if (dots) {
+    HalftoneEffect h;
+    h.cell = dot_cell, h.contrast = dot_contrast;
+    h.contribute(s);
+  }
+  if (lines) {
+    LineArtEffect l;
+    l.thickness = line_thickness;
+    l.contribute(s);
+  }
+  if (paper > 0.0f) {
+    PaperEffect p;
+    p.strength = paper;
+    p.contribute(s);
+  }
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }
@@ -1168,15 +1276,54 @@ void Outline::reflect(Reflector &r) {
   r.color("Color", color);
   r.help("The line's colour. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
          "it as a sheet; it suits closed meshes.)");
+  r.text("Thickness Group", thickness_group);
+  r.help("A vertex group scaling the width per vertex (task 0149; Guilty Gear paints it): 1 the full width, 0 no line\n"
+         "there (inside the mouth, where the hair meets the scalp). Empty: the full width everywhere.");
+  r.field("Distance Fade", distance_fade, 0.01f, 0.0f, 10.0f);
+  r.help("The line thinner far away: the thickness divided by 1 + this x the metres to the eye (0: the same everywhere).");
+  r.field("Min Pixels", min_pixels, 0.1f, 0.0f, 64.0f);
+  r.field("Max Pixels", max_pixels, 0.1f, 0.0f, 64.0f);
+  r.help("The line's width on screen kept between these, by the object's distance (0: no limit) - a constant line\n"
+         "whatever the zoom, in the views and raster renders.");
 }
 
-const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
+float Outline::outline_distance_scale(float distance, float px_per_m, float world_scale, int view) const {
+  if (!finite_bits(distance) || !(distance > 1e-4f) || !finite_bits(px_per_m) || !(px_per_m > 0.0f)) return 1.0f;
+  float scale = 1.0f;
+  const float fade = finite_bits(distance_fade) ? std::max(0.0f, distance_fade) : 0.0f;
+  if (fade > 0.0f) scale /= 1.0f + fade * distance;
+  /* The line's width in metres: the thickness, times the object's scale when it is in the object's units. */
+  float base = finite_bits(thickness) ? std::max(0.0f, thickness) : 0.0f;
+  if (!world_space && finite_bits(world_scale) && world_scale > 0.0f) base *= world_scale;
+  if (!(base > 0.0f)) return scale;
+  const float px = base * scale * px_per_m / distance;  // the line's width on screen, in pixels
+  const float lo = finite_bits(min_pixels) ? std::max(0.0f, min_pixels) : 0.0f, hi = finite_bits(max_pixels) ? std::max(0.0f, max_pixels) : 0.0f;
+  float want = px;
+  if (lo > 0.0f) want = std::max(want, lo);
+  if (hi > 0.0f) want = std::min(want, hi);  // (the maximum wins when the two cross)
+  if (want != px && px > 0.0f) scale *= want / px;
+  if (!finite_bits(scale) || !(scale > 0.0f)) return 1.0f;
+  /* In 2 % steps, so an orbiting camera doesn't rebuild the shell every frame (a rebuild frees the last one); with a
+   * hysteresis (task 0164): the step only changes once the scale has moved a third of a step past the last one, so a
+   * dolly that hovers on a boundary doesn't pop between two shells. */
+  const float step = std::log(1.02f), raw = std::log(scale) / step;
+  float idx = std::round(raw);
+  int &last = last_step_[view == 0 ? 0 : 1];
+  if (last != kNoStep && std::fabs(raw - (float)last) < 0.5f + 1.0f / 3.0f) idx = (float)last;
+  last = (int)idx;
+  return std::exp(idx * step);
+}
+
+const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float thickness_scale) const {
   const float s = world_space ? (finite_bits(world_scale) && world_scale > 1e-6f ? world_scale : 1.0f) : 1.0f;
-  const float offset = thickness / s;
+  const float offset = thickness / s * (finite_bits(thickness_scale) && thickness_scale > 0.0f ? thickness_scale : 1.0f);
   if (!(offset > 0.0f) || !finite_bits(offset) || src.face_count() == 0) return nullptr;
   ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
   const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
-  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset) return c.mesh.get();
+  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset && c.group == thickness_group) return c.mesh.get();
+  /* The per-vertex width (task 0149): the thickness group's weight, 1 without one (or one the mesh hasn't). */
+  const int gi = thickness_group.empty() ? -1 : src.find_group(thickness_group);
+  const std::vector<float> *gw = gi >= 0 && src.vertex_groups[(size_t)gi].weights.size() == src.positions.size() ? &src.vertex_groups[(size_t)gi].weights : nullptr;
   /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
   std::vector<Vec3> vn(src.positions.size(), Vec3(0.0f));
   for (size_t f = 0; f < src.face_count(); f++) {
@@ -1194,7 +1341,8 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
   for (size_t i = 0; i < src.positions.size(); i++) {
     const float len = length(vn[i]);
     const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
-    m->positions.push_back(src.positions[i] + d * offset);
+    const float w = gw ? clampf(finite_bits((*gw)[i]) ? (*gw)[i] : 0.0f, 0.0f, 1.0f) : 1.0f;
+    m->positions.push_back(src.positions[i] + d * (offset * w));
   }
   std::vector<uint32_t> rev;
   for (size_t f = 0; f < src.face_count(); f++) {
@@ -1207,6 +1355,7 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
   c.mesh = m;
   c.serial = serial;
   c.offset = offset;
+  c.group = thickness_group;
   return c.mesh.get();
 }
 
@@ -1279,6 +1428,164 @@ void SmoothModifier::reflect(Reflector &r) {
   reflect_group_limit(r, vertex_group, invert_group);
 }
 void SmoothModifier::modify(Mesh &m) const { meshops::smooth_laplacian(m, factor, iterations); }
+
+/* The vertex group's weight per vertex (1 everywhere without one), inverted when asked; a NaN weight counts as 0. */
+static std::vector<float> group_weights_of(const Mesh &m, const std::string &group, bool invert) {
+  std::vector<float> w(m.vert_count(), 1.0f);
+  const int gi = group.empty() ? -1 : m.find_group(group);
+  if (gi >= 0 && m.vertex_groups[(size_t)gi].weights.size() == m.vert_count())
+    for (size_t i = 0; i < w.size(); i++) {
+      const float raw = m.vertex_groups[(size_t)gi].weights[i];
+      const float g = clampf(finite_bits(raw) ? raw : 0.0f, 0.0f, 1.0f);
+      w[i] = invert ? 1.0f - g : g;
+    }
+  return w;
+}
+/* `a` turned toward `b` by t, unit length; `a` when the blend has no length (opposite normals at t = 0.5). */
+static Vec3 blend_normal(Vec3 a, Vec3 b, float t) {
+  const Vec3 n = lerp(a, b, t);
+  const float len = length(n);
+  return finite_bits(len) && len > 1e-6f ? n / len : a;
+}
+/* The closest point of the triangle ABC to p, as barycentric weights of B and C (Ericson, Real-Time Collision
+ * Detection 5.1.5): each early return is one region of the plane - a vertex, an edge or the inside. */
+static void closest_point_on_triangle(Vec3 p, Vec3 A, Vec3 Bv, Vec3 C, float &u, float &v) {
+  const Vec3 ab = Bv - A, ac = C - A, ap = p - A;
+  const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+  u = 0, v = 0;
+  if (d1 <= 0.0f && d2 <= 0.0f) return;  // A
+  const Vec3 bp = p - Bv;
+  const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+  if (d3 >= 0.0f && d4 <= d3) {  // B
+    u = 1;
+    return;
+  }
+  const float vc = d1 * d4 - d3 * d2;
+  if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {  // on AB
+    u = d1 / (d1 - d3);
+    return;
+  }
+  const Vec3 cp = p - C;
+  const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+  if (d6 >= 0.0f && d5 <= d6) {  // C
+    v = 1;
+    return;
+  }
+  const float vb = d5 * d2 - d1 * d6;
+  if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {  // on AC
+    v = d2 / (d2 - d6);
+    return;
+  }
+  const float va = d3 * d6 - d5 * d4;
+  if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {  // on BC
+    const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    u = 1 - w, v = w;
+    return;
+  }
+  const float denom = 1.0f / (va + vb + vc);  // inside
+  u = vb * denom, v = vc * denom;
+}
+
+void SmoothNormalsModifier::reflect(Reflector &r) {
+  r.field("Factor", factor, 0.01f, 0.0f, 1.0f);
+  r.help("How far each vertex's normal moves toward its neighbours' average, each iteration (1: all the way).");
+  r.field("Iterations", iterations, 0, 100);
+  reflect_group_limit(r, vertex_group, invert_group);
+}
+void SmoothNormalsModifier::modify(Mesh &m) const {
+  const size_t nv = m.vert_count();
+  if (!nv) return;
+  std::vector<Vec3> n = m.custom_normals_fit() ? m.custom_normals : meshops::vertex_normals(m);
+  const std::vector<Vec3> start = n;
+  /* The neighbours along the faces' edges. */
+  std::vector<std::vector<uint32_t>> adj(nv);
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const uint32_t k = m.face_size(f);
+    for (uint32_t c = 0; c < k; c++) {
+      const uint32_t a = v[c], b = v[(c + 1) % k];
+      if (a < nv && b < nv) adj[a].push_back(b), adj[b].push_back(a);
+    }
+  }
+  const float k = clampf(factor, 0.0f, 1.0f);
+  std::vector<Vec3> next(nv);
+  for (int it = 0; it < std::max(0, std::min(iterations, 100)); it++) {
+    for (size_t i = 0; i < nv; i++) {
+      Vec3 sum(0.0f);
+      for (uint32_t j : adj[i]) sum += n[j];
+      const float len = length(sum);
+      next[i] = adj[i].empty() || !(len > 1e-12f) ? n[i] : blend_normal(n[i], sum / len, k);
+    }
+    n.swap(next);
+  }
+  const std::vector<float> w = group_weights_of(m, vertex_group, invert_group);
+  m.custom_normals.resize(nv);
+  for (size_t i = 0; i < nv; i++) m.custom_normals[i] = blend_normal(start[i], n[i], w[i]);
+}
+
+static const GameObject *proxy_target(const Component &c, const std::string &name) {
+  if (!c.owner || !c.owner->scene || name.empty()) return nullptr;
+  const GameObject *t = c.owner->scene->find_by_name(name);
+  return t && t != c.owner && t->evaluated_mesh() ? t : nullptr;
+}
+void NormalTransferModifier::reflect(Reflector &r) {
+  r.object("Proxy", object, "MeshFilter");
+  r.help("The object whose surface gives the normals: a sphere round a head makes a face shade like a ball (anime's\n"
+         "flat face), a capsule a limb. Rigging > Anime Face Normals adds one fitted to the mesh.");
+  r.field("Blend", blend, 0.01f, 0.0f, 1.0f);
+  r.help("How far the normals go from the mesh's own to the proxy's (1: all the way).");
+  reflect_group_limit(r, vertex_group, invert_group);
+}
+void NormalTransferModifier::modify(Mesh &m) const {
+  const GameObject *t = proxy_target(*this, object);
+  if (!t || !owner) return;
+  const Mesh &pm = *t->evaluated_mesh();
+  const RenderMesh &prm = pm.render_mesh();  // (its own vertices and shading normals: the triangles index these)
+  if (prm.indices.size() < 3 || prm.normals.size() != prm.positions.size()) return;
+  /* The proxy's triangles in the owner's own space (both world matrices known), so the nearest point is found there. */
+  const Mat4 to_owner = owner->world_matrix().inverse() * t->world_matrix();
+  const Mat4 nm = to_owner.inverse().transposed();
+  std::vector<Vec3> pp(prm.positions.size()), pnn(prm.positions.size());
+  for (size_t i = 0; i < pp.size(); i++) pp[i] = to_owner.point(prm.positions[i]), pnn[i] = normalize(nm.dir(prm.normals[i]));
+  const size_t nv = m.vert_count();
+  std::vector<Vec3> own = m.custom_normals_fit() ? m.custom_normals : meshops::vertex_normals(m);
+  const std::vector<float> w = group_weights_of(m, vertex_group, invert_group);
+  const float k = clampf(blend, 0.0f, 1.0f);
+  m.custom_normals.resize(nv);
+  /* Each vertex: the nearest point on the proxy's triangles, the normal interpolated there. A brute-force search:
+   * the proxy is a few hundred triangles (Anime Face Normals makes a 16 x 12 sphere) and the modifier runs once per
+   * edit, before a skin (the skin turns the normals with the bones), so no spatial structure is worth its upkeep. */
+  JobSystem::global().parallel_for((int64_t)nv, 256, [&](int64_t a, int64_t b) {
+    for (int64_t vi = a; vi < b; vi++) {
+      const Vec3 p = m.positions[(size_t)vi];
+      float best = std::numeric_limits<float>::max();
+      Vec3 bn = own[(size_t)vi];
+      for (size_t tri = 0; tri + 2 < prm.indices.size(); tri += 3) {
+        const uint32_t i0 = prm.indices[tri], i1 = prm.indices[tri + 1], i2 = prm.indices[tri + 2];
+        if (i0 >= pp.size() || i1 >= pp.size() || i2 >= pp.size()) continue;
+        float u, v;
+        closest_point_on_triangle(p, pp[i0], pp[i1], pp[i2], u, v);
+        const Vec3 q = pp[i0] + (pp[i1] - pp[i0]) * u + (pp[i2] - pp[i0]) * v;
+        const float d = dot(q - p, q - p);
+        if (d < best) best = d, bn = pnn[i0] * (1 - u - v) + pnn[i1] * u + pnn[i2] * v;
+      }
+      const float len = length(bn);
+      m.custom_normals[(size_t)vi] = blend_normal(own[(size_t)vi], finite_bits(len) && len > 1e-12f ? bn / len : own[(size_t)vi], k * w[(size_t)vi]);
+    }
+  });
+}
+uint64_t NormalTransferModifier::modifier_dependency_hash() const {
+  const GameObject *t = proxy_target(*this, object);
+  if (!t || !owner) return 0;
+  uint64_t h = t->evaluated_mesh()->version * kFnvPrime;
+  const Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
+  for (int i = 0; i < 16; i++) {
+    uint32_t b;
+    std::memcpy(&b, &rel.m[i], 4);
+    h = (h ^ b) * kFnvPrime;
+  }
+  return h;
+}
 
 void MirrorModifier::reflect(Reflector &r) {
   r.field("Axis X", x);
@@ -1452,10 +1759,8 @@ uint64_t BooleanModifier::modifier_dependency_hash() const {
   const Mesh *tm = nullptr;
   const GameObject *t = boolean_target(*this, &tm);
   if (!t) return 0;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   /* Relative placement + the cutter's mesh: moving either object re-cuts. */
   Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
   mix(rel.m, sizeof(rel.m));
@@ -1581,12 +1886,13 @@ namespace {
 struct HashReflector : Reflector {
   bool all_fields() const override { return true; }
   bool hashing() const override { return true; }
-  uint64_t h = 1469598103934665603ull;
+  bool serializing() const override { return true; }
+  uint64_t h = kFnvBasisLegacy;
   /* A byte at a time, and it stays that way: the lights' and the world's hashes are part of
    * lightmap_scene_key, saved with every bake (a new formula would mark them all out of date). */
   void mix(const void *p, size_t n) {
     auto *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= kFnvPrime; }
   }
   void field(const char *, float &v, float, float, float) override { mix(&v, 4); }
   void field(const char *, int &v, int, int) override { mix(&v, 4); }
@@ -1611,8 +1917,39 @@ struct HashReflector : Reflector {
       if (m) mix(&m->version, 8);
     }
   }
+  void weight_list(const char *, std::vector<std::pair<std::string, float>> &list) override {
+    for (auto &[name, w] : list) {
+      mix(name.data(), name.size());
+      mix(&w, 4);
+    }
+  }
 };
 }  // namespace
+
+namespace {
+struct JsonReflector : Reflector {
+  JsonWriter w;
+  bool all_fields() const override { return true; }
+  bool serializing() const override { return true; }
+  void field(const char *n, float &v, float, float, float) override { w.key(n).num(v); }
+  void field(const char *n, int &v, int, int) override { w.key(n).integer(v); }
+  void field(const char *n, bool &v) override { w.key(n).boolean(v); }
+  void field(const char *n, Vec3 &v) override { w.key(n).nums(&v.x, 3); }
+  void color(const char *n, Vec3 &v) override { w.key(n).nums(&v.x, 3); }
+  void enumeration(const char *n, int &v, const char *const *, int) override { w.key(n).integer(v); }
+  void text(const char *n, std::string &v) override { w.key(n).str(v); }
+  void mesh(const char *, MeshPtr &) override {}
+  void texture(const char *n, TextureRef &t) override { w.key(n).str(t.path); }
+};
+}  // namespace
+
+std::string reflect_to_json(const std::function<void(Reflector &)> &fn) {
+  JsonReflector jr;
+  jr.w.obj();
+  fn(jr);
+  jr.w.end();
+  return jr.w.out;
+}
 
 uint64_t hash_component(Component &c) {
   HashReflector hr;
@@ -1740,8 +2077,8 @@ uint64_t GameObject::evaluated_key(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return 0;
-  uint64_t key = 1469598103934665603ull;
-  auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  uint64_t key = kFnvBasis;
+  auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
   mix((uint64_t)kind);
@@ -1759,13 +2096,16 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
     out[0] = out[1] = out[2] = 0;
     return;
   }
-  auto mix = [](uint64_t &key, uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  auto mix = [](uint64_t &key, uint64_t v) { key = (key ^ v) * kFnvPrime; };
   for (int kind = 0; kind < 3; kind++) {  // the same prefix as evaluated_key(kind)
-    out[kind] = 1469598103934665603ull;
+    out[kind] = kFnvBasis;
     mix(out[kind], (uint64_t)(uintptr_t)mf->mesh.get());
     mix(out[kind], mf->mesh->version);
     mix(out[kind], (uint64_t)kind);
   }
+  /* The shape keys' weights (task 0135): renders and the viewport show them, Edit Mode's cage the basis. */
+  if (const uint64_t sh = shape_key_hash(*mf->mesh, get<MeshRenderer>()))
+    for (int kind = 0; kind < 2; kind++) mix(out[kind], sh);
   for (auto &c : components) {
     if (!c->is_modifier()) continue;
     const bool on[3] = {c->enabled, c->show_in_render, c->enabled && c->show_in_editmode};
@@ -1827,11 +2167,16 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return nullptr;
-  uint64_t key = 1469598103934665603ull;
+  uint64_t key = kFnvBasis;
   bool any = false;
-  auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
+  /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
+   * Edit Mode's cage (kind 2) shows the basis it edits, as Blender does. */
+  const MeshRenderer *shaping = kind == 2 ? nullptr : get<MeshRenderer>();
+  const uint64_t shape_hash = shape_key_hash(*mf->mesh, shaping);
+  const bool shaped = shape_hash != 0;
   auto on = [kind](const Component &c) {
     return c.is_modifier() && (kind == 1 ? c.show_in_render : c.enabled && (kind == 0 || c.show_in_editmode));
   };
@@ -1851,7 +2196,12 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     mix(c.modifier_dependency_hash());
     if (i + 1 == split) head_key = key;
   }
-  if (!any) return mf->mesh.get();
+  /* The weights are part of the head when a modifier runs before the tail; otherwise the keys are added on the
+   * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
+  if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime;
+  if (shaped) mix(shape_hash);
+  if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
+  if (!any && !shaped) return mf->mesh.get();
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
@@ -1859,6 +2209,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   };
   if (!any_tail) {
     auto m = std::make_shared<Mesh>(*mf->mesh);
+    apply_shape_keys(*mf->mesh, shaping, m->positions);
+    m->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
     run(*m, 0, components.size());
     m->touch();
     eval_mesh_[kind] = m;
@@ -1871,6 +2223,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   if (any_head) {
     if (!eval_head_[kind] || eval_head_key_[kind] != head_key) {
       auto h = std::make_shared<Mesh>(*mf->mesh);
+      apply_shape_keys(*mf->mesh, shaping, h->positions);
+      h->shape_keys.clear();
       run(*h, 0, split);
       h->touch();
       eval_head_[kind] = h;
@@ -1889,6 +2243,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
     const uint64_t v = m->version;
     m->positions = head->positions;
+    m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
+    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions);  // (no head: the basis shaped here)
     m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
     run(*m, split, components.size());
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
@@ -1899,6 +2255,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   }
   else {
     m = std::make_shared<Mesh>(*head);
+    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions);
+    m->shape_keys.clear();
     run(*m, split, components.size());
     m->touch();
   }

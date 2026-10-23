@@ -173,6 +173,10 @@ void Editor::draw_materials_window(const Recti &r) {
     u.redraw = true;
   }
   u.tooltip("A new .mat in Assets/Materials (Unity: Create > Material).");
+  if (material_selected_ && bar.w > u.px(480)) {  // (task 0186: the UV Editor on this material's faces)
+    if (u.button({bar.right() - u.px(96), bar.y + u.px(3), u.px(90), bh - u.px(6)}, "Edit UVs")) uv_edit_material(material_selected_);
+    u.tooltip("The UV Editor on the selected object's faces of this material (the others dimmed).");
+  }
   const Recti sf{bar.x + u.px(162), bar.y + u.px(4), std::min(u.px(200), bar.w - u.px(170)), bh - u.px(8)};
   u.text_field(u.id("mat_search"), sf, material_search_, nullptr, "Search materials");
   if (!f.empty() && list.size() < all)  // say that the search hides some
@@ -294,7 +298,7 @@ void Editor::draw_materials_window(const Recti &r) {
   u.label(head, material_selected_->name + (material_selected_->asset_path.empty() ? "  (scene material)" : "  (" + material_selected_->asset_path + ")"),
           u.theme.text_bright);
   u.push_id((uint64_t)(uintptr_t)material_selected_.get());
-  draw_material_fields(lay, material_selected_);
+  draw_material_fields(lay, material_selected_, material_multi_.items.size() > 1 ? &material_multi_.items : nullptr);  // several selected: all of them (task 0147)
   u.pop_id();
   content_h = lay.y + eoff - ed.y + u.px(20);
   u.end_scroll();

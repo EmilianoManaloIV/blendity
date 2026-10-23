@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gpu_device.h"
+#include "optix_device.h"
 
 #include "../core/core.h"
 
@@ -54,6 +55,10 @@ std::unique_ptr<Renderer> Renderer::create(int, bool, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
   return nullptr;
 }
+std::unique_ptr<Renderer> create_renderer(int, bool, bool, std::string *error) {  // (task 0170's pool calls this form)
+  if (error) *error = "this build has no GPU rendering";
+  return nullptr;
+}
 std::unique_ptr<Compute> Compute::create(int, const std::string &, std::string *error) {
   if (error) *error = "this build has no GPU compute";
   return nullptr;
@@ -82,7 +87,8 @@ namespace {
   X(vkDestroyDescriptorSetLayout) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkCreateComputePipelines)            \
   X(vkDestroyPipeline) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkAllocateDescriptorSets)                      \
   X(vkUpdateDescriptorSets) X(vkDeviceWaitIdle) X(vkInvalidateMappedMemoryRanges) X(vkCreatePipelineCache)                \
-  X(vkDestroyPipelineCache) X(vkGetPipelineCacheData)
+  X(vkDestroyPipelineCache) X(vkGetPipelineCacheData) X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkCmdResetQueryPool)   \
+  X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults)
 #define BL_VK_DEVICE_RT(X)                                                                                                    \
   X(vkGetBufferDeviceAddressKHR) X(vkCreateAccelerationStructureKHR) X(vkDestroyAccelerationStructureKHR)                     \
   X(vkGetAccelerationStructureBuildSizesKHR) X(vkCmdBuildAccelerationStructuresKHR)                                           \
@@ -298,10 +304,8 @@ std::vector<uint32_t> compile_kernel(bool ray_query, std::string *error) {
   std::string src;
   for (const char *part : kernel_source_parts) src += part;
   /* The key covers the source, the variant and the compiler options. */
-  uint64_t key = 1469598103934665603ull;
-  auto mix = [&](const char *p, size_t n) {
-    for (size_t i = 0; i < n; i++) key = (key ^ (uint8_t)p[i]) * 1099511628211ull;
-  };
+  uint64_t key = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { key = fnv1a(p, n, key); };
   const char *opts = ray_query ? "v1 vk1.2 spv1.4 size ray_query" : "v1 vk1.2 spv1.4 size";
   mix(src.data(), src.size());
   mix(opts, std::strlen(opts));
@@ -437,30 +441,174 @@ class VulkanRenderer final : public Renderer {
     f_.vkAllocateCommandBuffers(dev_, &cai, &cmd_);
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     f_.vkCreateFence(dev_, &fci, nullptr, &fence_);
+    for (Flight &fl : flights_) {  // (task 0161: the two render submissions that may be in flight)
+      f_.vkAllocateCommandBuffers(dev_, &cai, &fl.cmd);
+      f_.vkCreateFence(dev_, &fci, nullptr, &fl.fence);
+    }
+    if (const char *e = std::getenv("BLENDITY_GPU_FAKE_SLOW")) fake_slow_ms_ = std::max(0.0, std::atof(e));
+    create_timestamps(g);
     stats_.device_ms = open_timer.ms();
     return create_pipeline(err);
   }
 
+  /* Timestamp queries round a render's dispatches (task 0159): the card's own time, which the Profiler shows
+   * against the wall time; a queue without timestamps leaves last_gpu_ms at -1. */
+  void create_timestamps(VkGlobal &g) {
+    VkPhysicalDeviceProperties props;
+    g.f.vkGetPhysicalDeviceProperties(pd_, &props);
+    ts_period_ns_ = props.limits.timestampPeriod;
+    uint32_t qn = 0;
+    g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
+    std::vector<VkQueueFamilyProperties> qs(qn);
+    g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, qs.data());
+    timestamps_ = qfam_ < qn && qs[qfam_].timestampValidBits > 0 && ts_period_ns_ > 0.0f;
+    if (!timestamps_) return;
+    ts_mask_ = qs[qfam_].timestampValidBits >= 64 ? ~0ull : (1ull << qs[qfam_].timestampValidBits) - 1;  // (a shorter counter wraps: the difference is taken in its width)
+    VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qpi.queryCount = 2 * kFlights;  // (two a submission in flight, task 0161)
+    if (f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_) != VK_SUCCESS) timestamps_ = false;
+  }
+  void stamp(VkCommandBuffer cmd, uint32_t i, VkPipelineStageFlagBits stage) {
+    if (timestamps_) f_.vkCmdWriteTimestamp(cmd, stage, queries_, i);
+  }
+  /* A finished submission's time from its two queries (-1 without timestamps). Two flights overlap on the card -
+   * the second's first stamp is written while the first still runs - so the time is taken from where the last one
+   * ended: the union, never counted twice. */
+  double gpu_time_of(uint32_t first_query) {
+    uint64_t t[2] = {0, 0};
+    if (!timestamps_ || f_.vkGetQueryPoolResults(dev_, queries_, first_query, 2, sizeof(t), t, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return -1.0;
+    const uint64_t start = ((last_end_ticks_ - t[0]) & ts_mask_) < (ts_mask_ >> 1) ? last_end_ticks_ : t[0];  // (the later of the two on a wrapping clock)
+    const uint64_t busy = ((t[1] - start) & ts_mask_) < (ts_mask_ >> 1) ? (t[1] - start) & ts_mask_ : 0;
+    last_end_ticks_ = t[1];
+    return (double)busy * ts_period_ns_ * 1e-6;
+  }
+
+  /* The whole scene: every buffer's copy recorded from one staging arena and submitted once (task 0162; it was a
+   * submission a buffer), then the acceleration structures (the BLASes in one submission, the TLAS in one). */
   bool upload(const Scene &s, std::string *err) override {
+    wait_all(nullptr);
     f_.vkDeviceWaitIdle(dev_);
     for (int i = 3; i < 16; i++) free_buffer(bufs_[i]);  // 0-2: params and pixel buffers
     free_accel();
     scene_params_ = s.params;
-    auto up = [&](int binding, const void *data, size_t bytes, VkBufferUsageFlags extra = 0) {
-      return make_device_buffer(bufs_[binding], data, bytes, extra, err);
-    };
     const VkBufferUsageFlags as_input = rt_ ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) : 0;
-    bool ok = up(3, s.nodes.data(), s.nodes.size() * sizeof(GNode)) && up(4, s.tris.data(), s.tris.size() * sizeof(GTri)) &&
-              up(5, s.instances.data(), s.instances.size() * sizeof(GInstance)) && up(6, s.verts.data(), s.verts.size() * sizeof(GVertex), as_input) &&
-              up(7, s.idx.data(), s.idx.size() * 4) && up(8, s.materials.data(), s.materials.size() * sizeof(GMaterial)) &&
-              up(9, s.lights.data(), s.lights.size() * sizeof(GLight)) && up(10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight)) &&
-              up(11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4) && up(12, s.tex8.data(), s.tex8.size() * 4) &&
-              up(13, s.texf.data(), s.texf.size() * 4) && up(14, s.textures.data(), s.textures.size() * sizeof(GTexInfo)) &&
-              up(15, s.tlas_order.data(), s.tlas_order.size() * 4);
-    if (!ok) return false;
+    Batch b;
+    const bool ok = batch_put(b, 3, s.nodes.data(), s.nodes.size() * sizeof(GNode), 0, err) && batch_put(b, 4, s.tris.data(), s.tris.size() * sizeof(GTri), 0, err) &&
+                    batch_put(b, 5, s.instances.data(), s.instances.size() * sizeof(GInstance), 0, err) &&
+                    batch_put(b, 6, s.verts.data(), s.verts.size() * sizeof(GVertex), as_input, err) && batch_put(b, 7, s.idx.data(), s.idx.size() * 4, 0, err) &&
+                    batch_put(b, 8, s.materials.data(), s.materials.size() * sizeof(GMaterial), 0, err) &&
+                    batch_put(b, 9, s.lights.data(), s.lights.size() * sizeof(GLight), 0, err) &&
+                    batch_put(b, 10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight), 0, err) &&
+                    batch_put(b, 11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4, 0, err) && batch_put(b, 12, s.tex8.data(), s.tex8.size() * 4, 0, err) &&
+                    batch_put(b, 13, s.texf.data(), s.texf.size() * 4, 0, err) && batch_put(b, 14, s.textures.data(), s.textures.size() * sizeof(GTexInfo), 0, err) &&
+                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err);
+    if (!ok || !batch_send(b, err)) return false;
     if (rt_ && !build_accel(s, err)) return false;
-    set_params(s.params);
+    if (pixels_ == 0) set_params(s.params);  // (the first scene: the pixel buffers; later reset() sends the parameters at the frame's size)
+    else update_descriptors();
     return true;
+  }
+
+  /* Task 0162: the instances alone (a moved object): their buffer, the TLAS's nodes (the software BVH's prefix of
+   * the nodes buffer) and order; on ray tracing hardware the TLAS is rebuilt over the kept BLASes. */
+  bool update_instances(const Scene &s, std::string *err) override {
+    if (!bufs_[5].buf) return upload(s, err);
+    wait_all(nullptr);
+    f_.vkDeviceWaitIdle(dev_);
+    scene_params_ = s.params;
+    Batch b;
+    const size_t tlas_nodes = (size_t)std::max(0, s.params.counts[3]) * sizeof(GNode);
+    const bool ok = batch_put(b, 5, s.instances.data(), s.instances.size() * sizeof(GInstance), 0, err) &&
+                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err) &&
+                    (tlas_nodes == 0 || batch_patch(b, 3, s.nodes.data(), tlas_nodes, err));
+    if (!ok || !batch_send(b, err)) return false;
+    if (rt_ && !build_tlas(s, err)) return false;
+    update_descriptors();  // (the new buffers; reset() sends the parameters and clears)
+    return true;
+  }
+  bool update_materials(const Scene &s, std::string *err) override {
+    if (!bufs_[8].buf) return upload(s, err);
+    wait_all(nullptr);
+    f_.vkDeviceWaitIdle(dev_);
+    scene_params_ = s.params;
+    Batch b;
+    if (!batch_put(b, 8, s.materials.data(), s.materials.size() * sizeof(GMaterial), 0, err) || !batch_send(b, err)) return false;
+    update_descriptors();
+    return true;
+  }
+  bool update_lights(const Scene &s, std::string *err) override {
+    if (!bufs_[9].buf) return upload(s, err);
+    wait_all(nullptr);
+    f_.vkDeviceWaitIdle(dev_);
+    scene_params_ = s.params;
+    Batch b;
+    const bool ok = batch_put(b, 9, s.lights.data(), s.lights.size() * sizeof(GLight), 0, err) &&
+                    batch_put(b, 10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight), 0, err) &&
+                    batch_put(b, 11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4, 0, err);
+    if (!ok || !batch_send(b, err)) return false;
+    update_descriptors();
+    return true;
+  }
+  uint64_t submits() const override { return submits_; }
+
+  /* A batch of uploads: one staging arena, every copy recorded, one submission. */
+  struct Batch {
+    std::vector<uint8_t> staging;  // the sections one after another
+    struct Copy { int binding; size_t src, bytes; };
+    std::vector<Copy> copies;
+  };
+  /* A new device buffer for the binding, its data queued in the batch (an empty section gets a 16-byte buffer, zeroed). */
+  bool batch_put(Batch &b, int binding, const void *data, size_t bytes, VkBufferUsageFlags extra, std::string *err) {
+    free_buffer(bufs_[binding]);
+    const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | extra;
+    if (!make_buffer(bufs_[binding], bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      if (err) *err = strprintf("%s: out of GPU memory (%.1f MB buffer)", info_.name.c_str(), bytes / 1048576.0);
+      return false;
+    }
+    if (!data || !bytes) {
+      b.copies.push_back({binding, SIZE_MAX, 0});  // (zeroed when sent)
+      return true;
+    }
+    return batch_patch(b, binding, data, bytes, err);
+  }
+  /* The first `bytes` of an existing buffer replaced from the batch. */
+  bool batch_patch(Batch &b, int binding, const void *data, size_t bytes, std::string *err) {
+    if (bytes > bufs_[binding].size) {
+      if (err) *err = info_.name + ": a section grew past its buffer";
+      return false;
+    }
+    const size_t at = b.staging.size();
+    b.staging.insert(b.staging.end(), (const uint8_t *)data, (const uint8_t *)data + bytes);
+    b.copies.push_back({binding, at, bytes});
+    return true;
+  }
+  bool batch_send(Batch &b, std::string *err) {
+    Buffer staging;
+    if (!b.staging.empty()) {
+      if (!make_host_buffer(staging, b.staging.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        if (err) *err = strprintf("%s: out of memory for a %.1f MB upload", info_.name.c_str(), b.staging.size() / 1048576.0);
+        return false;
+      }
+      std::memcpy(staging.mapped, b.staging.data(), b.staging.size());
+    }
+    begin();
+    for (const Batch::Copy &c : b.copies) {
+      if (c.src == SIZE_MAX) {
+        f_.vkCmdFillBuffer(cmd_, bufs_[c.binding].buf, 0, VK_WHOLE_SIZE, 0);
+        continue;
+      }
+      VkBufferCopy copy{c.src, 0, c.bytes};
+      f_.vkCmdCopyBuffer(cmd_, staging.buf, bufs_[c.binding].buf, 1, &copy);
+    }
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};  // (the copies before the shaders and the acceleration-structure builds that read them)
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | (rt_ ? VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR : 0);
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (rt_ ? VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR : 0), 0, 1, &mb, 0, nullptr, 0, nullptr);
+    const bool ok = submit_wait();
+    free_buffer(staging);
+    if (!ok && err) *err = info_.name + ": the GPU stopped responding";
+    return ok;
   }
 
   void set_params(const GParams &p) override {
@@ -493,41 +641,106 @@ class VulkanRenderer final : public Renderer {
   }
 
   void clear() override {
+    wait_all(nullptr);
     begin();
     f_.vkCmdFillBuffer(cmd_, bufs_[1].buf, 0, VK_WHOLE_SIZE, 0);
     f_.vkCmdFillBuffer(cmd_, bufs_[2].buf, 0, VK_WHOLE_SIZE, 0);
     submit_wait();
   }
 
+  /* render() is submit() then wait_all(): one submission, waited for, its card time in last_gpu_ms(). */
   bool render(int first, int count, std::string *err) override {
+    if (!submit(first, count, err) || !wait_all(err)) return false;
+    last_gpu_ms_ = take_busy_ms();
+    return true;
+  }
+
+  /* Task 0161: the samples' dispatches recorded into the next free flight and submitted without waiting; the flight
+   * used two submissions ago is waited for first when both are busy. */
+  bool submit(int first, int count, std::string *err) override {
     if (!pipeline_ || pixels_ == 0) {
       if (err) *err = "GPU not ready";
       return false;
     }
-    begin();
-    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
-    const uint32_t gx = (uint32_t)(scene_params_.size[0] + 7) / 8, gy = (uint32_t)(scene_params_.size[1] + 7) / 8;
-    /* Task 0105: up to kSamplesPerDispatch samples a dispatch, summed in registers: the accumulation and the
-     * denoiser's planes are read and written once for them, not once a sample (~200 MB a sample at 1080p). */
-    constexpr int kSamplesPerDispatch = 8;
-    for (int i = 0; i < count; i += kSamplesPerDispatch) {
-      const int pc[2] = {first + i, std::min(kSamplesPerDispatch, count - i)};
-      f_.vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, pc);
-      f_.vkCmdDispatch(cmd_, gx, gy, 1);
-      VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-      mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-      mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-      f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
-    }
-    if (!submit_wait()) {
-      if (err) *err = info_.name + ": the GPU stopped responding (device lost)";
+    if (in_flight_ >= kFlights && !wait_oldest(err)) return false;
+    Flight &fl = flights_[next_flight_];
+    const uint32_t q = 2 * (uint32_t)next_flight_;
+    f_.vkResetCommandBuffer(fl.cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    f_.vkBeginCommandBuffer(fl.cmd, &bi);
+    if (timestamps_) f_.vkCmdResetQueryPool(fl.cmd, queries_, q, 2);
+    stamp(fl.cmd, q, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+    record_samples(fl.cmd, first, count);
+    stamp(fl.cmd, q + 1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    f_.vkEndCommandBuffer(fl.cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &fl.cmd;
+    f_.vkResetFences(dev_, 1, &fl.fence);
+    submits_++;
+    if (f_.vkQueueSubmit(queue_, 1, &si, fl.fence) != VK_SUCCESS) {
+      if (err) *err = info_.name + ": the GPU refused the samples";
       return false;
     }
+    fl.query = q;
+    fl.pending = true;
+    next_flight_ = (next_flight_ + 1) % kFlights;
+    in_flight_++;
     return true;
   }
 
+  /* The oldest submission in flight: waited for, its time taken into the busy sum. */
+  bool wait_oldest(std::string *err) override {
+    if (in_flight_ == 0) return false;
+    const int oldest = (next_flight_ + kFlights - in_flight_) % kFlights;
+    Flight &fl = flights_[oldest];
+    if (fake_slow_ms_ > 0.0) std::this_thread::sleep_for(std::chrono::microseconds((long long)(fake_slow_ms_ * 1000.0)));  // (the test hook: a slow card)
+    const bool ok = f_.vkWaitForFences(dev_, 1, &fl.fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    fl.pending = false;
+    in_flight_--;
+    if (!ok) {
+      if (err) *err = info_.name + ": the GPU stopped responding (device lost)";
+      return false;
+    }
+    const double ms = gpu_time_of(fl.query);
+    if (ms >= 0.0) busy_acc_ = std::max(0.0, busy_acc_) + ms;
+    return true;
+  }
+  bool wait_all(std::string *err) override {
+    while (in_flight_ > 0)
+      if (!wait_oldest(err)) return false;
+    return true;
+  }
+  int in_flight() const override { return in_flight_; }
+  double take_busy_ms() override {
+    const double b = busy_acc_;
+    busy_acc_ = -1.0;
+    return b;
+  }
+
+  /* The samples' dispatches (task 0105: up to kSamplesPerDispatch samples a dispatch, summed in registers: the
+   * accumulation and the denoiser's planes are read and written once for them, not once a sample). */
+  void record_samples(VkCommandBuffer cmd, int first, int count) {
+    f_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+    f_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
+    const uint32_t gx = (uint32_t)(scene_params_.size[0] + 7) / 8, gy = (uint32_t)(scene_params_.size[1] + 7) / 8;
+    constexpr int kSamplesPerDispatch = 8;
+    for (int i = 0; i < count; i += kSamplesPerDispatch) {
+      const int pc[2] = {first + i, std::min(kSamplesPerDispatch, count - i)};
+      f_.vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, pc);
+      f_.vkCmdDispatch(cmd, gx, gy, 1);
+      VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+      mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+      mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+      f_.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+  }
+
+  double last_gpu_ms() const override { return last_gpu_ms_; }
+
   void download_accum(std::vector<float> &accum) override {
+    wait_all(nullptr);  // (nothing may be writing the sums)
     begin();
     VkBufferCopy c{0, 0, pixels_ * 16};
     f_.vkCmdCopyBuffer(cmd_, bufs_[1].buf, readback_.buf, 1, &c);
@@ -537,6 +750,7 @@ class VulkanRenderer final : public Renderer {
     accum.assign(p, p + pixels_ * 4);
   }
   void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth, std::vector<float> *coverage) override {
+    wait_all(nullptr);
     begin();
     VkBufferCopy c{0, pixels_ * 16, pixels_ * 48};
     f_.vkCmdCopyBuffer(cmd_, bufs_[2].buf, readback_.buf, 1, &c);
@@ -583,6 +797,24 @@ class VulkanRenderer final : public Renderer {
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
+  /* Task 0161: the render submissions in flight, each its own command buffer, fence and pair of timestamps. */
+  static constexpr int kFlights = 2;
+  struct Flight {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    uint32_t query = 0;
+    bool pending = false;
+  };
+  Flight flights_[kFlights];
+  int next_flight_ = 0, in_flight_ = 0;
+  double busy_acc_ = -1.0;
+  double fake_slow_ms_ = 0.0;
+  uint64_t last_end_ticks_ = 0;  // (the card's clock where the last finished submission ended)
+  VkQueryPool queries_ = VK_NULL_HANDLE;  // task 0159: two timestamps round a render's dispatches (two pairs since task 0161)
+  bool timestamps_ = false;
+  float ts_period_ns_ = 0.0f;
+  double last_gpu_ms_ = -1.0;
+  uint64_t ts_mask_ = ~0ull;
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout layout_ = VK_NULL_HANDLE;
   VkPipeline pipeline_ = VK_NULL_HANDLE;
@@ -605,8 +837,11 @@ class VulkanRenderer final : public Renderer {
   OpenStats stats_;
   uint32_t scratch_align_ = 256;
   std::vector<Buffer> as_buffers_;
+  std::vector<Buffer> tlas_buffers_;            // (task 0162: the TLAS's store and instance buffer, replaced with it)
+  std::vector<VkDeviceAddress> blas_addr_;      // (the kept BLASes' addresses, for a TLAS rebuilt alone)
   std::vector<VkAccelerationStructureKHR> blas_;
   VkAccelerationStructureKHR tlas_ = VK_NULL_HANDLE;
+  std::atomic<uint64_t> submits_{0};
 
   uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
@@ -686,6 +921,7 @@ class VulkanRenderer final : public Renderer {
     f_.vkBeginCommandBuffer(cmd_, &bi);
   }
   bool submit_wait() {
+    submits_++;
     f_.vkEndCommandBuffer(cmd_);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -800,8 +1036,6 @@ class VulkanRenderer final : public Renderer {
    * own space) and a top-level one over the objects, as Cycles builds them
    * for OptiX - the driver picks the layout its RT units traverse fastest. */
   bool build_accel(const Scene &s, std::string *err) {
-    const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     /* Tight 32-bit index triplets for the builder. */
     std::vector<uint32_t> tri_idx(s.idx.size() / 4 * 3);
     for (size_t t = 0; t < s.idx.size() / 4; t++)
@@ -812,8 +1046,23 @@ class VulkanRenderer final : public Renderer {
       return false;
     as_buffers_.push_back(ib);
     std::vector<VkDeviceAddress> blas_addr;
-    for (const GBlas &gb : s.blas) {
-      VkAccelerationStructureGeometryKHR geo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    if (!build_blases(s, ib, blas_addr, err)) return false;
+    blas_addr_ = blas_addr;
+    return build_tlas(s, err);
+  }
+  /* Every BLAS built in one submission (task 0162: it was one each), their addresses out. */
+  bool build_blases(const Scene &s, const Buffer &ib, std::vector<VkDeviceAddress> &blas_addr, std::string *err) {
+    const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    std::vector<VkAccelerationStructureGeometryKHR> geos(s.blas.size());
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos(s.blas.size());
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(s.blas.size());
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR *> range_ptrs(s.blas.size());
+    std::vector<Buffer> scratches;
+    for (size_t k = 0; k < s.blas.size(); k++) {
+      const GBlas &gb = s.blas[k];
+      VkAccelerationStructureGeometryKHR &geo = geos[k];
+      geo = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
       geo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
       geo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
       auto &tr = geo.geometry.triangles;
@@ -824,36 +1073,78 @@ class VulkanRenderer final : public Renderer {
       tr.maxVertex = std::max(1u, gb.vtx_count) - 1;
       tr.indexType = VK_INDEX_TYPE_UINT32;
       tr.indexData.deviceAddress = ib.address + (VkDeviceAddress)gb.idx_off * 12;
-      VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+      VkAccelerationStructureBuildGeometryInfoKHR &bi = infos[k];
+      bi = VkAccelerationStructureBuildGeometryInfoKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
       bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
       bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
       bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
       bi.geometryCount = 1;
       bi.pGeometries = &geo;
       VkAccelerationStructureKHR as;
-      if (!build_one(bi, gb.tri_count, as_usage, scratch_usage, as, err)) return false;
+      Buffer scratch;
+      if (!prepare_one(bi, gb.tri_count, as_usage, scratch_usage, as, scratch, err)) {
+        for (Buffer &sc : scratches) free_buffer(sc);
+        return false;
+      }
+      scratches.push_back(scratch);
       blas_.push_back(as);
+      ranges[k] = {gb.tri_count, 0, 0, 0};
+      range_ptrs[k] = &ranges[k];
       VkAccelerationStructureDeviceAddressInfoKHR adi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
       adi.accelerationStructure = as;
       blas_addr.push_back(f_.vkGetAccelerationStructureDeviceAddressKHR(dev_, &adi));
     }
-    /* Instances: transform, custom index = object, culling off (double-sided). */
-    std::vector<VkAccelerationStructureInstanceKHR> inst(s.instances.size());
+    bool ok = true;
+    if (!infos.empty()) {
+      begin();
+      f_.vkCmdBuildAccelerationStructuresKHR(cmd_, (uint32_t)infos.size(), infos.data(), range_ptrs.data());
+      ok = submit_wait();
+    }
+    for (Buffer &sc : scratches) free_buffer(sc);
+    if (!ok && err) *err = info_.name + ": building the acceleration structures failed";
+    return ok;
+  }
+  /* The TLAS over the instances and the kept BLASes (its old one and instance buffer freed); one submission. */
+  bool build_tlas(const Scene &s, std::string *err) {
+    const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    if (tlas_) {
+      f_.vkDestroyAccelerationStructureKHR(dev_, tlas_, nullptr);
+      tlas_ = VK_NULL_HANDLE;
+    }
+    for (Buffer &b : tlas_buffers_) free_buffer(b);
+    tlas_buffers_.clear();
+    const std::vector<VkDeviceAddress> &blas_addr = blas_addr_;
+    if (s.object_blas.size() != s.instances.size()) {
+      if (err) *err = info_.name + ": the instances and their meshes disagree";
+      return false;
+    }
+    for (uint32_t ob : s.object_blas)
+      if (ob != UINT32_MAX && ob >= blas_addr.size()) {
+        if (err) *err = info_.name + ": an instance of a mesh the card doesn't hold";
+        return false;
+      }
+    /* Instances: transform, custom index = object, culling off (double-sided); an object without a mesh stays out. */
+    std::vector<VkAccelerationStructureInstanceKHR> inst;
+    inst.reserve(s.instances.size());
     for (size_t o = 0; o < s.instances.size(); o++) {
+      if (s.object_blas[o] == UINT32_MAX) continue;
+      VkAccelerationStructureInstanceKHR in{};
       const float *m = s.instances[o].to_world;  // column-major
       for (int r = 0; r < 3; r++)
-        for (int c = 0; c < 4; c++) inst[o].transform.matrix[r][c] = m[c * 4 + r];
-      inst[o].instanceCustomIndex = (uint32_t)o;
-      inst[o].mask = 0xFF;
-      inst[o].instanceShaderBindingTableRecordOffset = 0;
-      inst[o].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-      inst[o].accelerationStructureReference = blas_addr[s.object_blas[o]];
+        for (int c = 0; c < 4; c++) in.transform.matrix[r][c] = m[c * 4 + r];
+      in.instanceCustomIndex = (uint32_t)o;
+      in.mask = 0xFF;
+      in.instanceShaderBindingTableRecordOffset = 0;
+      in.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+      in.accelerationStructureReference = blas_addr[s.object_blas[o]];
+      inst.push_back(in);
     }
     Buffer instb;
     if (!make_device_buffer(instb, inst.data(), inst.size() * sizeof(VkAccelerationStructureInstanceKHR),
                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, err))
       return false;
-    as_buffers_.push_back(instb);
+    tlas_buffers_.push_back(instb);
     VkAccelerationStructureGeometryKHR geo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     geo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
     geo.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
@@ -864,15 +1155,35 @@ class VulkanRenderer final : public Renderer {
     bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     bi.geometryCount = 1;
     bi.pGeometries = &geo;
-    return build_one(bi, (uint32_t)inst.size(), as_usage, scratch_usage, tlas_, err);
+    Buffer scratch;
+    if (!prepare_one(bi, (uint32_t)inst.size(), as_usage, scratch_usage, tlas_, scratch, err)) return false;
+    tlas_buffers_.push_back(as_buffers_.back());  // (the TLAS's store, freed with the next TLAS)
+    as_buffers_.pop_back();
+    VkAccelerationStructureBuildRangeInfoKHR range{(uint32_t)inst.size(), 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR *pr = &range;
+    begin();
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};  // (the BLASes built before: read by this build)
+    mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    f_.vkCmdBuildAccelerationStructuresKHR(cmd_, 1, &bi, &pr);
+    const bool ok = submit_wait();
+    free_buffer(scratch);
+    if (!ok && err) *err = info_.name + ": building the top-level acceleration structure failed";
+    if (ok) update_descriptors();  // (the descriptor set names the TLAS)
+    return ok;
   }
-  bool build_one(VkAccelerationStructureBuildGeometryInfoKHR &bi, uint32_t prims, VkBufferUsageFlags as_usage, VkBufferUsageFlags scratch_usage,
-                 VkAccelerationStructureKHR &out, std::string *err) {
+  /* The structure's store and scratch made and the build info pointed at them; the build is recorded by the caller
+   * (task 0162: several in one submission). The scratch is the caller's to free after the build. */
+  bool prepare_one(VkAccelerationStructureBuildGeometryInfoKHR &bi, uint32_t prims, VkBufferUsageFlags as_usage, VkBufferUsageFlags scratch_usage,
+                   VkAccelerationStructureKHR &out, Buffer &scratch, std::string *err) {
     VkAccelerationStructureBuildSizesInfoKHR sz{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     f_.vkGetAccelerationStructureBuildSizesKHR(dev_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &prims, &sz);
-    Buffer store, scratch;
+    Buffer store;
     if (!make_buffer(store, sz.accelerationStructureSize, as_usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
         !make_buffer(scratch, sz.buildScratchSize + scratch_align_, scratch_usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      free_buffer(store);
+      free_buffer(scratch);
       if (err) *err = info_.name + ": out of GPU memory for acceleration structures";
       return false;
     }
@@ -881,22 +1192,20 @@ class VulkanRenderer final : public Renderer {
     ci.size = sz.accelerationStructureSize;
     ci.type = bi.type;
     if (f_.vkCreateAccelerationStructureKHR(dev_, &ci, nullptr, &out) != VK_SUCCESS) {
+      free_buffer(store);
+      free_buffer(scratch);
       if (err) *err = info_.name + ": could not create an acceleration structure";
       return false;
     }
     bi.dstAccelerationStructure = out;
     bi.scratchData.deviceAddress = (scratch.address + scratch_align_ - 1) / scratch_align_ * scratch_align_;
-    VkAccelerationStructureBuildRangeInfoKHR range{prims, 0, 0, 0};
-    const VkAccelerationStructureBuildRangeInfoKHR *pr = &range;
-    begin();
-    f_.vkCmdBuildAccelerationStructuresKHR(cmd_, 1, &bi, &pr);
-    bool ok = submit_wait();
-    free_buffer(scratch);
     as_buffers_.push_back(store);
-    if (!ok && err) *err = info_.name + ": building an acceleration structure failed";
-    return ok;
+    return true;
   }
   void free_accel() {
+    for (Buffer &b : tlas_buffers_) free_buffer(b);
+    tlas_buffers_.clear();
+    blas_addr_.clear();
     for (auto as : blas_) f_.vkDestroyAccelerationStructureKHR(dev_, as, nullptr);
     blas_.clear();
     if (tlas_) f_.vkDestroyAccelerationStructureKHR(dev_, tlas_, nullptr);
@@ -921,11 +1230,7 @@ class VulkanRenderer final : public Renderer {
 
   /* The file is the driver's data, then its length, an FNV-1a hash and a tag: a torn or truncated file (the
    * driver must get exactly what it gave) is ignored. True with the trailer removed. */
-  static uint64_t fnv64(const char *p, size_t n) {
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)p[i]) * 1099511628211ull;
-    return h;
-  }
+  static uint64_t fnv64(const char *p, size_t n) { return fnv1a(p, n); }
   static bool strip_pipeline_trailer(std::string &blob) {
     if (blob.size() < 16) return false;
     const size_t body = blob.size() - 16;
@@ -971,6 +1276,9 @@ class VulkanRenderer final : public Renderer {
     if (set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, set_layout_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
     if (fence_) f_.vkDestroyFence(dev_, fence_, nullptr);
+    for (Flight &fl : flights_)
+      if (fl.fence) f_.vkDestroyFence(dev_, fl.fence, nullptr);
+    if (queries_) f_.vkDestroyQueryPool(dev_, queries_, nullptr);
     if (pool_) f_.vkDestroyCommandPool(dev_, pool_, nullptr);
     f_.vkDestroyDevice(dev_, nullptr);
     dev_ = VK_NULL_HANDLE;
@@ -1000,6 +1308,7 @@ std::string status() {
 void prewarm(bool open_devices, bool hardware_rt) {
   static std::atomic<bool> started{false};
   if (started.exchange(true) || !available()) return;
+  if (backend() == 2) optix_list_async();  // (task 0170: CUDA's devices listed off the UI thread)
   bool rt = false, sw = false;
   for (const DeviceInfo &d : G().infos) (d.hardware_rt ? rt : sw) = true;
   /* Detached: compile_kernel keeps its results in leaked statics, so quitting
@@ -1024,14 +1333,26 @@ std::string pipeline_cache_file(int index, bool hardware_rt) {
   return fs::join(dir, strprintf("pipeline_%04x_%04x_%s.bin", props.vendorID, props.deviceID, hardware_rt && G().infos[(size_t)index].hardware_rt ? "rt" : "bvh"));
 }
 
-std::unique_ptr<Renderer> Renderer::create(int index, bool hardware_rt, std::string *error) {
+/* Task 0170: the OptiX device when `optix` (decided once by the caller: the backend, the card), GPU Compute otherwise or
+ * when OptiX can't open - the failure remembered, so the card isn't offered OptiX again this run. */
+std::unique_ptr<Renderer> create_renderer(int index, bool hardware_rt, bool optix, std::string *error) {
   if (!available() || index < 0 || index >= (int)G().infos.size()) {
     if (error) *error = "no such GPU";
     return nullptr;
   }
+  if (optix) {
+    std::string why;
+    if (std::unique_ptr<Renderer> o = create_optix_renderer(index, &why)) return o;
+    optix_failed(index);
+    Log::warn("OptiX on %s unavailable (%s): GPU Compute instead", G().infos[(size_t)index].name.c_str(), why.c_str());
+  }
   auto r = std::make_unique<VulkanRenderer>();
   if (!r->init(index, hardware_rt, error)) return nullptr;
   return r;
+}
+
+std::unique_ptr<Renderer> Renderer::create(int index, bool hardware_rt, std::string *error) {
+  return create_renderer(index, hardware_rt, hardware_rt && use_optix(index), error);
 }
 
 /* ===================================================================== */
@@ -1044,11 +1365,10 @@ namespace {
 std::vector<uint32_t> compile_glsl(const std::string &src, shaderc_shader_kind kind, std::string *error) {
   static std::mutex &m = *new std::mutex;
   static std::map<uint64_t, std::vector<uint32_t>> &mem = *new std::map<uint64_t, std::vector<uint32_t>>;
-  uint64_t key = 1469598103934665603ull;
-  for (char c : src) key = (key ^ (uint8_t)c) * 1099511628211ull;
+  uint64_t key = fnv1a(src.data(), src.size());
   const char *opts = "compute v1 vk1.2 spv1.4 performance";
-  for (const char *p = opts; *p; p++) key = (key ^ (uint8_t)*p) * 1099511628211ull;
-  if (kind != shaderc_compute_shader) key = (key ^ (uint64_t)(kind + 1)) * 1099511628211ull;  // (the compute key as before)
+  key = fnv1a_str(opts, key);
+  if (kind != shaderc_compute_shader) key = (key ^ (uint64_t)(kind + 1)) * kFnvPrime;  // (the compute key as before)
   std::lock_guard<std::mutex> lock(m);
   std::vector<uint32_t> &out = mem[key];
   if (!out.empty()) return out;
@@ -1385,6 +1705,8 @@ std::unique_ptr<Compute> Compute::create(int index, const std::string &glsl, std
 
 #endif
 
+std::unique_ptr<Renderer> create_renderer(int index, bool hardware_rt, bool optix, std::string *error);
+
 /* ===================================================================== */
 /* Renderers opened in the background (task 0037, ADR 0021)              */
 /* ===================================================================== */
@@ -1393,7 +1715,7 @@ namespace {
 
 struct RendererPool {
   std::mutex m;
-  std::map<int, std::unique_ptr<Renderer>> ready;  // key: device index * 2 + hardware ray tracing
+  std::map<int, std::unique_ptr<Renderer>> ready;  // key: device index * 4 + hardware ray tracing + OptiX (pool_key)
   std::map<int, std::pair<std::string, double>> failed;  // an open that failed (its error and when): retried after 30 s
   std::set<int> opening;
   std::atomic<uint64_t> generation{1};
@@ -1404,12 +1726,16 @@ RendererPool &pool() {
   static RendererPool *p = new RendererPool;
   return *p;
 }
-int pool_key(int index, bool rt) { return index * 2 + (rt ? 1 : 0); }
+/* Task 0170: the backend is in the key too - a renderer opened for GPU Compute isn't handed out when OptiX is asked
+ * for (BLENDITY_GPU_BACKEND or Render Settings changed). A ready renderer is filed by what it is. */
+int pool_key_of(int index, bool rt, bool optix) { return index * 4 + (rt ? 1 : 0) + (optix ? 2 : 0); }
+int pool_key(int index, bool rt) { return pool_key_of(index, rt, rt && use_optix(index)); }
 bool device_rt(int index) { return index >= 0 && index < (int)devices().size() && devices()[(size_t)index].hardware_rt; }
 
 /* Starts opening one on a detached thread, unless one is ready or opening. The pool is locked. */
 void start_open(RendererPool &p, int index, bool rt) {
-  const int key = pool_key(index, rt);
+  const bool optix = rt && use_optix(index);  // (decided once: the open makes what its key says)
+  const int key = pool_key_of(index, rt, optix);
   if (p.ready.count(key) || p.opening.count(key)) return;
   auto f = p.failed.find(key);
   if (f != p.failed.end()) {
@@ -1418,18 +1744,18 @@ void start_open(RendererPool &p, int index, bool rt) {
   }
   p.opening.insert(key);
   const std::string name = devices()[(size_t)index].name;  // copied: nothing global is read after the open
-  std::thread([index, rt, key, name] {
+  std::thread([index, rt, optix, key, name] {
     RendererPool &p = pool();
     if (const int d = p.delay_ms.load()) std::this_thread::sleep_for(std::chrono::milliseconds(d));
     std::string err;
     ScopedTimer t;
-    std::unique_ptr<Renderer> r = Renderer::create(index, rt, &err);
+    std::unique_ptr<Renderer> r = create_renderer(index, rt, optix, &err);
     const double ms = t.ms();
     const bool ok = r != nullptr;
     {
       std::lock_guard<std::mutex> lock(p.m);
       p.opening.erase(key);
-      if (ok) p.ready[key] = std::move(r);
+      if (ok) p.ready[pool_key_of(index, rt, r->info().type == "OptiX")] = std::move(r);  // (an OptiX open that fell back is filed as GPU Compute)
       else p.failed[key] = {err.empty() ? std::string("could not open the GPU") : err, now_seconds()};
     }
     p.generation++;
@@ -1510,6 +1836,8 @@ bool renderers_opening() {
 }
 
 void set_open_delay_for_test(int ms) { pool().delay_ms = std::max(0, ms); }
+
+void drop_ready_renderers() { drop_ready_renderers_for_test(); }
 
 void drop_ready_renderers_for_test() {
   RendererPool &p = pool();

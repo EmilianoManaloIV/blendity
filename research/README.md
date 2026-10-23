@@ -27,7 +27,7 @@ src/research/      ← where paper-derived features are implemented (C++)
    - the **Research** tab (citation, description, status, and an "Apply to selection" button),
    - **Mesh → Research Features**,
    - the Inspector's MeshFilter tools.
-4. **Verify.** Unit tests go in `tests/test_main.cpp`, for example the check that Taubin keeps more volume than Laplacian smoothing. Timing goes in `stress/stress_main.cpp` if performance matters.
+4. **Verify.** Unit tests go in the `tests/test_<group>.cpp` of the subsystem, for example the check that Taubin keeps more volume than Laplacian smoothing. Timing goes in `stress/stress_main.cpp` if performance matters.
 5. **Track.** Add a row to `FEATURES.md`.
 
 Features that aren't mesh operators (a new component, renderer option or importer) follow the same idea: they get registered in the matching registry (`register_component` for components) and cited in `FEATURES.md`.

@@ -10,6 +10,7 @@
 //
 // Theory: GEA Vol. I 2.3 Profiling Tools, 10.8 In-Game Profiling;
 //         FoCG 12.3 Spatial Data Structures.
+#include "../src/image/edit_doc.h"
 #include "../src/scene/curve.h"
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
@@ -20,7 +21,7 @@
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
 #include "../src/render/gpu_raster.h"
-#include "../src/render/optix_spike.h"
+#include "../src/render/optix_device.h"
 #include "../src/render/realtime_lightmap.h"
 #include "../src/render/voxel_gi_gpu.h"
 #include "../src/core/cpu.h"
@@ -36,6 +37,9 @@
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
+#include "../src/scene/export.h"
+#include "../src/scene/autophysics.h"
+#include "../tests/fixtures/synthetic_mmd.h"
 
 #include <algorithm>
 #include <cmath>
@@ -452,6 +456,37 @@ static void test_serialization(Report &rep, const Options &o) {
     for (float v : vals) append_float(sink, v);
   });
   rep.note(strprintf("Formatting 1M floats: printf %%.9g %.1f ms vs to_chars %.1f ms (%.1fx). The writer now uses to_chars.", pf, tc, pf / tc));
+  /* Blender's benchmark row (task 0178): a GLB export of the 256-icosphere scene (bpy.ops.export_scene.gltf in
+   * tools/bench_blender.py). */
+  {
+    Scene s = make_grid_scene(256, primitives::ico_sphere(0.5f, 3), 1.3f);
+    std::vector<ExportItem> items;
+    std::vector<MaterialPtr> none;
+    s.for_each([&](GameObject &g) {
+      ExportItem it;
+      it.name = g.name;
+      it.mesh = g.get<MeshFilter>()->mesh.get();
+      it.world = g.world_matrix();
+      items.push_back(it);
+    });
+    std::error_code tmp_ec;
+    const std::filesystem::path tmp = std::filesystem::temp_directory_path(tmp_ec);
+    if (tmp_ec) {
+      rep.note("GLB export skipped: no temp folder (" + tmp_ec.message() + ")");
+      return;
+    }
+    const std::string path = (tmp / "blendity_stress_export.glb").string();
+    const ExportOptions eo = export_defaults((int)ExportFormat::GLB);
+    std::string err;
+    bool ok = export_file(path, items, eo, &err);  // (warm, as Blender's first call is outside its timer)
+    const double ms = time_ms([&] { ok = ok && export_file(path, items, eo, &err); }, 3);
+    std::error_code size_ec;
+    const uintmax_t bytes = ok ? std::filesystem::file_size(path, size_ec) : 0;
+    rep.table({"GLB export (task 0178)", "objects", "triangles", "file size", "ms"});
+    rep.row({"256 icospheres", std::to_string(items.size()), num(256.0 * (double)primitives::ico_sphere(0.5f, 3)->face_count()), format_bytes(size_ec ? 0 : (size_t)bytes), ok ? f1(ms) : "failed"});
+    if (!ok) rep.note("export error: " + err);
+    std::remove(path.c_str());
+  }
 }
 
 static void test_undo(Report &rep, const Options &o) {
@@ -1103,6 +1138,12 @@ static void test_editor_render(Report &rep, const Options &o) {
                        "%llu on the CPU instead, %.2f ms a frame in the GPU path (rendering and reading back).",
                        ed.gpu_view_status().c_str(), ed.gpu_view_open_ms(), (unsigned long long)(g1.gpu_views - g0.gpu_views),
                        (unsigned long long)(g1.gpu_fallbacks - g0.gpu_fallbacks), (g1.ms_gpu - g0.ms_gpu) / (n + 1)));
+    /* Task 0159: of that path, what the card itself worked (its timestamps) and the read-back. */
+    const double busy = (g1.gpu_busy_ms() - g0.gpu_busy_ms()) / (n + 1), path = (g1.ms_gpu - g0.ms_gpu) / (n + 1);
+    const double readback = (g1.ms_gpu_readback - g0.ms_gpu_readback) / (n + 1);
+    if (busy > 0.0) rep.note(strprintf("GPU busy (task 0159): the card worked %.2f ms of the %.2f ms GPU path a frame (%.0f %%; shadow %.2f, g-buffer %.2f, lighting %.2f), the copies out and the fence %.2f ms, the rest gathering and uploading.",
+                                       busy, path, 100.0 * busy / std::max(1e-6, path), (g1.ms_gpu_shadow - g0.ms_gpu_shadow) / (n + 1), (g1.ms_gpu_gbuffer - g0.ms_gpu_gbuffer) / (n + 1), (g1.ms_gpu_lighting - g0.ms_gpu_lighting) / (n + 1), readback));
+    else rep.note("GPU busy (task 0159): this card reports no timestamps.");
     ed.viewport_device_for_test(1);
   }
   {
@@ -1298,8 +1339,8 @@ static void test_editor_render(Report &rep, const Options &o) {
   /* Task 0107 (pass 12's baseline): the frames that aren't drags - entering Edit Mode with the mesh's caches cold, an
    * operator, an undo - each frame's parts: the overlap check, the mesh's builds, the uploads to the card. */
   auto edit_frame = [&](const char *what, int reps, const std::function<void()> &before, const std::function<void()> &act) {
-    double total = 0, overlap = 0, builds = 0, edges = 0, next = 0;
-    uint64_t checks = 0, nbuilds = 0, uploads = 0;
+    double total = 0, overlap = 0, builds = 0, edges = 0, next = 0, op = 0, copies = 0;
+    uint64_t checks = 0, nbuilds = 0, uploads = 0, ncopies = 0;
     for (int r = 0; r < reps; r++) {
       before();
       const FrameProfile p0 = ed.frame_profile_totals();
@@ -1317,11 +1358,14 @@ static void test_editor_render(Report &rep, const Options &o) {
       nbuilds += c1.full_builds;
       edges += c1.ms_edges;
       uploads += p1.gpu_mesh_uploads - p0.gpu_mesh_uploads;
+      op += p1.ms_edit_op - p0.ms_edit_op;
+      copies += c1.ms_copies;
+      ncopies += c1.copies;
     }
     const double r = reps;
-    rep.note(strprintf("%s: %.1f ms (the overlap check %.1f ms, %.1f of them; render meshes built %.1f ms, %.1f of them; edge table %.1f ms; "
+    rep.note(strprintf("%s: %.1f ms (the operator itself %.1f ms; mesh copies in the frame %.1f of %.1f ms; the overlap check %.1f ms, %.1f of them; render meshes built %.1f ms, %.1f of them; edge table %.1f ms; "
                        "meshes sent to the card whole %.1f); the frame after %.1f ms.",
-                       what, total / r, overlap / r, checks / r, builds / r, nbuilds / r, edges / r, uploads / r, next / r));
+                       what, total / r, op / r, ncopies / r, copies / r, overlap / r, checks / r, builds / r, nbuilds / r, edges / r, uploads / r, next / r));
   };
   for (int device : {1, 2}) {
     ed.viewport_device_for_test(device);
@@ -1352,7 +1396,28 @@ static void test_editor_render(Report &rep, const Options &o) {
                  ed.step_frame_headless();
                },
                [&] { ed.command("editop extrude"); });
-    edit_frame(("Undo after it" + on).c_str(), 3, [&] {}, [&] { ed.command("undo"); });
+    /* (Task 0167: each rep undoes one extrude it made itself; before, three undos in a row undid the extrude, the
+     * selection step and the Edit Mode entry - three different frames.) */
+    edit_frame(("Undo of an extrude" + on).c_str(), 3,
+               [&] {
+                 ed.command("fsel 100 101 102");
+                 ed.step_frame_headless();
+                 ed.command("editop extrude");
+                 for (int i = 0; i < 2; i++) ed.step_frame_headless();
+               },
+               [&] { ed.command("undo"); });
+    edit_frame(("Redo of it" + on).c_str(), 3,
+               [&] {
+                 ed.command("fsel 100 101 102");
+                 ed.step_frame_headless();
+                 ed.command("editop extrude");
+                 for (int i = 0; i < 2; i++) ed.step_frame_headless();
+                 ed.command("undo");
+                 for (int i = 0; i < 2; i++) ed.step_frame_headless();
+               },
+               [&] { ed.command("redo"); });
+    ed.command("undo");  // (back to the sphere as it was, for the selection row)
+    ed.step_frame_headless();
     edit_frame(("A selection operator after the undo (Select More)" + on).c_str(), 2, [&] {}, [&] { ed.command("edittool select_more"); });
   }
   ed.viewport_device_for_test(1);
@@ -1961,6 +2026,44 @@ static void test_vgi(Report &rep, const Options &o) {
 }
 
 /* Probe volumes (task 0014): placement, bake, live updates and per-pixel sampling. */
+static void probe_file_damage_row(Report &rep, const ProbeVolumeData &d) {
+/* A saved ProbeVolume.bin cut at every point of its header and corrupted 150 ways: refused, or loaded and safe to
+ * sample (task 0177: the unit test keeps every 8th cut and 30 corruptions). */
+  std::error_code tmp_ec;
+  const std::string path = (std::filesystem::temp_directory_path(tmp_ec) / "blendity_stress_probes.bin").string();
+  std::string err, good;
+  if (d.save(path, err) && fs::read_file(path, good) && good.size() > 200) {
+    ProbeVolumeData x;
+    int accepted = 0, cuts = 0, loaded = 0, refused = 0, bad_samples = 0;
+    ScopedTimer t;
+    for (size_t len = 1; len < good.size(); len += (len < 400 ? 1 : 997)) {
+      fs::write_file(path, good.substr(0, len));
+      cuts++;
+      if (x.load(path, err)) accepted++;
+    }
+    uint32_t rng = 31u;
+    auto f01 = [&] { rng = rng * 1664525u + 1013904223u; return (rng >> 8) * (1.0f / 16777216.0f); };
+    for (int i = 0; i < 150; i++) {
+      std::string bad = good;
+      for (int k = 0; k < 1 + (i % 4); k++) bad[(size_t)(f01() * (float)(bad.size() - 1))] = (char)(int)(f01() * 255.0f);
+      fs::write_file(path, bad);
+      if (!x.load(path, err)) {
+        refused++;
+        continue;
+      }
+      loaded++;
+      for (int k = 0; k < 40; k++) {
+        Vec3 o;
+        const Vec3 p(f01() * 12.0f - 6.0f, f01() * 7.0f - 3.0f, f01() * 12.0f - 6.0f);
+        if (x.sample(p, Vec3(0, 1, 0), Vec3(0.3f), k & 1, o) && !std::isfinite(o.x + o.y + o.z)) bad_samples++;
+      }
+    }
+    rep.table({"damaged ProbeVolume.bin", "truncations", "accepted", "corruptions refused", "loaded and sampled", "bad samples", "ms"});
+    rep.row({format_bytes(good.size()), std::to_string(cuts), std::to_string(accepted), std::to_string(refused), std::to_string(loaded), std::to_string(bad_samples), f1(t.ms())});
+    std::remove(path.c_str());
+  }
+}
+
 static void test_probes(Report &rep, const Options &o) {
   rep.title("Probe volumes (Adaptive Probe Volume style)",
             "Spheres and cubes on a 40 m floor under the sky with a Baked sun; probes 1 m apart near geometry, up to 27 m in open space.");
@@ -2087,9 +2190,23 @@ static void test_probes(Report &rep, const Options &o) {
     runs++;
   }
   rep.note(strprintf("Odd volumes and spacings (NaN / infinite / negative / zero / huge): %d runs, %d problems.", runs, problems));
+  probe_file_damage_row(rep, d);
 }
 
 /* Baked lighting (task 0012): what a bake costs as the scene grows, and what a lightmap costs to shade. */
+/* A BakeObject with its fields set by name (task 0178: a positional initialiser had been giving want_lightmap the 0
+ * meant for the hash since the field came, and the bake rows baked nothing). */
+static BakeObject bake_object(uint64_t id, MeshPtr mesh, const Mat4 &model, const std::vector<MaterialPtr> &materials, float scale = 1.0f, bool generate_uvs = true) {
+  BakeObject o;
+  o.id = id;
+  o.mesh = mesh;
+  o.model = model;
+  o.materials = materials;
+  o.scale = scale;
+  o.generate_uvs = generate_uvs;
+  return o;
+}
+
 static void test_bake(Report &rep, const Options &o) {
   rep.title("Baked lighting (Generate Lighting)",
             "Static spheres and cubes on a floor under the sky with a Baked sun, Lightmap Resolution 10, 64 indirect samples, "
@@ -2102,13 +2219,13 @@ static void test_bake(Report &rep, const Options &o) {
     auto floor = primitives::plane(std::max(10.0f, std::sqrt((float)n) * 3.0f));
     keep.push_back(floor);
     std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
-    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
+    objs.push_back(bake_object(1, floor, Mat4::identity(), white));
     const int side = (int)std::ceil(std::sqrt((double)n));
     auto sphere = primitives::uv_sphere(0.5f, 24, 12);
     auto cube = primitives::cube();
     for (int i = 0; i < n; i++) {
       const float x = (i % side - side * 0.5f) * 2.5f, z = (i / side - side * 0.5f) * 2.5f;
-      objs.push_back({(uint64_t)i + 2, i % 2 ? sphere : cube, Mat4::translate({x, 0.5f, z}), white, 1.0f, true, 0});
+      objs.push_back(bake_object((uint64_t)i + 2, i % 2 ? sphere : cube, Mat4::translate({x, 0.5f, z}), white));
     }
     BakeLight sun;
     sun.light.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
@@ -2137,8 +2254,8 @@ static void test_bake(Report &rep, const Options &o) {
     auto sphere = primitives::uv_sphere(0.5f, 32, 16);
     auto floor = primitives::plane(20.0f);
     std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
-    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
-    for (int i = 0; i < 64; i++) objs.push_back({(uint64_t)i + 2, sphere, Mat4::translate({(i % 8 - 4) * 1.5f, 0.5f, (i / 8 - 4) * 1.5f}), white, 1.0f, true, 0});
+    objs.push_back(bake_object(1, floor, Mat4::identity(), white));
+    for (int i = 0; i < 64; i++) objs.push_back(bake_object((uint64_t)i + 2, sphere, Mat4::translate({(i % 8 - 4) * 1.5f, 0.5f, (i / 8 - 4) * 1.5f}), white));
     Lightmapper lm;
     BakeSettings bs;
     bs.texels_per_unit = 8.0f;
@@ -2198,8 +2315,8 @@ static void test_bake(Report &rep, const Options &o) {
     bs.indirect_intensity = odd[(int)(rnd() * 6) % 6];
     if (std::isfinite(bs.texels_per_unit) && bs.texels_per_unit > 50.0f) bs.texels_per_unit = 50.0f;  // keep the run short
     std::vector<MaterialPtr> none;
-    std::vector<BakeObject> objs = {{1, cube, Mat4::identity(), none, odd[(int)(rnd() * 6) % 6], rnd() < 0.5f, 0},
-                                    {2, empty, Mat4::identity(), none, 1.0f, true, 0}};
+    std::vector<BakeObject> objs = {bake_object(1, cube, Mat4::identity(), none, odd[(int)(rnd() * 6) % 6], rnd() < 0.5f),
+                                    bake_object(2, empty, Mat4::identity(), none)};
     Lightmapper lm;
     lm.begin(objs, {}, Environment{}, bs);
     int guard = 0;
@@ -2722,7 +2839,7 @@ static void test_shading_cost(Report &rep, const Options &o) {
     rep.note(strprintf("Task 0040's target: with height and noise, every point near a border, under 2.5x a plain one per point: %s.",
                        h_ms < 2.5 * p2_ms ? "met" : "NOT MET"));
   }
-  /* Area lights (task 0030): the rasterizer integrates a light's whole surface per pixel (area_light_cosine);
+  /* Area lights (task 0030): the rasterizer integrates a light's whole surface per pixel (area_light_irradiance);
    * its cost per call for the cases a scene meets, and what that is for a 1080p view on every thread. */
   {
     rep.table({"area light per pixel (1 thread)", "ns / call", "1080p ms on all threads"});
@@ -2748,7 +2865,7 @@ static void test_shading_cost(Report &rep, const Options &o) {
       l.disk = c.disk;
       const int N = 200000;
       const double ms = time_ms([&] {
-        for (int i = 0; i < N; i++) sink += area_light_cosine(l, c.p + Vec3((i & 63) * 0.01f, 0, (i >> 6 & 63) * 0.01f), c.n);
+        for (int i = 0; i < N; i++) sink += area_light_irradiance(l, c.p + Vec3((i & 63) * 0.01f, 0, (i >> 6 & 63) * 0.01f), c.n);
       });
       const double ns = ms * 1e6 / N;
       rep.row({c.name, f1(ns), f2(ns * 1920.0 * 1080.0 / 1e6 / threads)});
@@ -2927,6 +3044,55 @@ static void test_pathtracer(Report &rep, const Options &o) {
                     : std::string("No GPU for OpenImageDenoise here (its CUDA module needs an NVIDIA card, HIP an AMD one)."));
 }
 
+/* Task 0181 (ADR 0058): the Editing window's adjustments on a 4K picture - each one alone, a typical develop stack in
+ * full, and a slider on its last step (the cached steps before it not rerun). */
+static void test_editing(Report &rep, const Options &o) {
+  rep.title("Editing: adjustments on a 4K image",
+            "Each adjustment alone on a 3840 x 2160 linear float picture, then an 11-step develop stack evaluated in full and "
+            "with a slider moved on its last step (the steps before it come from the cache). The targets (task 0181): the "
+            "full stack in at most 150 ms, a slider in at most 40 ms.");
+  const int W = o.quick ? 1920 : 3840, H = o.quick ? 1080 : 2160;
+  edit::Image img;
+  img.resize(W, H);
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      float *p = img.at(x, y);
+      p[0] = 0.8f * x / W, p[1] = 0.6f * y / H, p[2] = 0.3f + 0.2f * std::sin(x * 0.01f) * std::cos(y * 0.013f), p[3] = 1.0f;
+    }
+  rep.table({"adjustment", "ms"});
+  for (const edit::AdjustmentInfo &info : edit::adjustment_infos()) {
+    edit::Adjustment a = edit::make_adjustment(info.name);
+    for (size_t f = 0; f < a.v.size(); f++) a.v[f] = info.fields[f].def + (info.fields[f].mx - info.fields[f].def) * 0.3f;
+    if (a.type == "Tone Curve") a.curve[0] = {Vec2(0, 0), Vec2(0.5f, 0.6f), Vec2(1, 1)};
+    edit::Image out;
+    const double ms = time_ms([&] { edit::apply(a, img, out); });
+    rep.row({info.name, f1(ms)});
+  }
+  edit::Doc doc;
+  doc.open_pixels(img, "stress");
+  for (const char *t : {"Exposure", "Contrast", "Highlights", "Shadows", "Temperature / Tint", "Vibrance / Saturation", "Clarity", "Tone Curve", "HSL", "Sharpen", "Vignette"}) doc.add(t);
+  doc.set_path("Exposure", 0.3f), doc.set_path("Contrast", 15), doc.set_path("Clarity", 20), doc.set_path("HSL.Orange Saturation", 20);
+  doc.result();
+  const double full = doc.last_eval_ms();
+  doc.set_path("Vignette.Amount", -30);
+  doc.result();
+  const double slider = doc.last_eval_ms();
+  const int rerun = doc.evaluated_steps();
+  doc.set_path("Exposure", 0.5f);
+  doc.result();
+  const double first = doc.last_eval_ms();
+  rep.table({"develop stack (11 steps)", "ms", "steps rerun"});
+  rep.row({"full evaluation", f1(full), "11"});
+  rep.row({"a slider on the last step (Vignette)", f1(slider), std::to_string(rerun)});
+  rep.row({"a slider on the first step (Exposure)", f1(first), std::to_string(doc.evaluated_steps())});
+  if (o.quick) {  // (the targets are for 4K)
+    rep.note(strprintf("At %d x %d (quick): the full stack %.1f ms, a slider on the last step %.1f ms.", W, H, full, slider));
+    return;
+  }
+  rep.note(strprintf("Task 0181's targets at %d x %d: the full stack %.1f ms (at most 150: %s), a slider on the last step %.1f ms (at most 40: %s).",
+                     W, H, full, full <= 150 ? "met" : "missed", slider, slider <= 40 ? "met" : "missed"));
+}
+
 static void test_uv_unwrap(Report &rep, const Options &o) {
   rep.title("UV: LSCM unwrap and packing",
             "LSCM on an n x n grid (one island): block-Jacobi conjugate gradients on the assembled normal equations "
@@ -2955,6 +3121,51 @@ static void test_uv_unwrap(Report &rep, const Options &o) {
     int islands = 0;
     double ms = time_ms([&] { islands = uvops::smart_project(m, nullptr); });
     rep.row({strprintf("Smart UV torus (subdiv %d)", lv), num((double)m.face_count()), std::to_string(islands), f1(ms)});
+  }
+  /* Blender's benchmark rows (task 0178): Smart UV Project at Blender's 66 degrees, then Pack Islands, on the 50k-face
+   * UV sphere the editor rows use (bpy.ops.uv.smart_project and uv.pack_islands in tools/bench_blender.py). */
+  {
+    Mesh m = *primitives::uv_sphere(1.0f, 256, 196);
+    int islands = 0;
+    islands = uvops::smart_project(m, nullptr, 66.0f, 0.0f);  // (warm, as Blender's first call is outside its timer)
+    const double project_ms = time_ms([&] { islands = uvops::smart_project(m, nullptr, 66.0f, 0.0f); }, 3);
+    const double pack_ms = time_ms([&] { uvops::pack_islands(m, nullptr, 0.001f, true); }, 3);
+    rep.table({"Blender's rows (task 0178)", "faces", "islands", "Smart UV Project ms", "Pack Islands ms"});
+    rep.row({"50k-face UV sphere", num((double)m.face_count()), std::to_string(islands), f1(project_ms), f1(pack_ms)});
+  }
+  /* Task 0179 (ADR 0057): Part Unwrap against Smart UV Project, PartUV's metrics (charts, seam length, distortion: the
+   * area-weighted mean of max(s, 1/s) per chart, 1 = none) and the time. */
+  rep.table({"Part Unwrap (task 0179)", "faces", "method", "charts", "seams m", "distortion mean / worst", "ms"});
+  auto compare = [&](const char *name, const Mesh &src) {
+    Mesh a = src, b = src;
+    double ms_smart = time_ms([&] { uvops::smart_project(b, nullptr); });
+    const uvops::UVReport s = uvops::uv_report(b, nullptr);
+    uvops::PartUnwrapReport r;
+    double ms_parts = time_ms([&] { r = uvops::part_unwrap(a, nullptr); });
+    const uvops::UVReport p = uvops::uv_report(a, nullptr);
+    rep.row({name, num((double)src.face_count()), "Smart UV Project", std::to_string(s.charts), f2(s.seam_length),
+             f2(s.distortion_mean) + " / " + f2(s.distortion_max), f1(ms_smart)});
+    rep.row({name, num((double)src.face_count()), strprintf("Part Unwrap (%d parts, %d tried, %d ABF++)", r.parts, r.flattened, r.abf_charts),
+             std::to_string(p.charts), f2(p.seam_length), f2(p.distortion_mean) + " / " + f2(p.distortion_max), f1(ms_parts)});
+  };
+  {
+    auto m = std::make_shared<Mesh>(*primitives::cube(1.0f));
+    meshops::append_mesh(*m, *primitives::cylinder(0.25f, 0.6f, 24), Mat4::translate({0, 0.8f, 0}));
+    meshops::append_mesh(*m, *primitives::torus(0.5f, 0.15f, 32, 12), Mat4::translate({1.6f, 0, 0}));
+    m->sync_attributes();
+    compare("cube + boss + torus", *m);
+    compare("teapot", *primitives::teapot(1.2f, 8));
+  }
+  {
+    Mesh s = *primitives::uv_sphere(1.0f, 256, 196);
+    s.face_material.assign(s.face_count(), 0);
+    for (size_t f = 0; f < s.face_count(); f++) {
+      Vec3 c(0.0f);
+      for (uint32_t i = 0; i < s.face_size(f); i++) c += s.positions[s.face_verts(f)[i]];
+      s.face_material[f] = (int32_t)((std::atan2(c.z, c.x) + 3.14159265f) / 6.2831853f * 12.0f) % 12;
+    }
+    s.sync_attributes();
+    compare("50k-face sphere, 12 slots", s);
   }
 }
 
@@ -3044,6 +3255,40 @@ static void test_texture_bake(Report &rep, const Options &o) {
   std::printf("  -> Texture bake: %d problems\n", problems_total);
 }
 
+static void mmd_damage_row(Report &rep, const std::string &dir) {
+/* Damaged MMD models (task 0177: the unit test keeps 24 of these 240): the synthetic PMX and PMD cut anywhere or with
+ * bytes flipped, each imported or refused without harm. */
+  uint32_t rng = 156;
+  auto next = [&](uint32_t n) { rng = rng * 1664525u + 1013904223u; return (size_t)((rng >> 8) % n); };
+  int refused = 0, imported = 0, problems = 0;
+  ScopedTimer t;
+  for (const std::string &whole : {r156_pmx(R156Opts()), r156_pmd()}) {
+    const std::string ext = whole[0] == 'P' && whole[1] == 'M' && whole[2] == 'X' ? ".pmx" : ".pmd";
+    for (int k = 0; k < 120; k++) {
+      std::string d = whole;
+      if (k < 60) d.resize(next((uint32_t)d.size()));
+      else
+        for (int f = 0; f < 4; f++) d[next((uint32_t)d.size())] = (char)next(256);
+      const std::string file = fs::join(dir, "damaged" + ext);
+      fs::write_file(file, d);
+      ImportResult r;
+      if (!import_model(file, r)) {
+        refused++;
+        continue;
+      }
+      imported++;
+      Scene s;
+      instantiate_import(s, r, "Bad", nullptr);
+      s.for_each([&](GameObject &g) {
+        const Mesh *m = g.evaluated_mesh();
+        if (m && !m->positions.empty() && !std::isfinite(m->positions[0].x)) problems++;
+      });
+    }
+  }
+  rep.table({"damaged MMD files", "refused", "imported", "problems", "ms"});
+  rep.row({"240 (cut anywhere, 4 bytes flipped)", std::to_string(refused), std::to_string(imported), std::to_string(problems), f1(t.ms())});
+}
+
 static void test_codecs(Report &rep, const Options &o) {
   rep.title("Image codecs and scene compression",
             "Decoding a 3840x2160 photo-like image (gradients + noise) with Blendity's own decoders vs Blender's libjpeg-turbo "
@@ -3092,6 +3337,7 @@ static void test_codecs(Report &rep, const Options &o) {
     rep.row({strprintf("%zu objects", s.object_count()), format_bytes(text.size()), format_bytes(packed.size()),
              f1((double)text.size() / packed.size()) + "x", f1(save_ms), f1(load_ms)});
   }
+  mmd_damage_row(rep, dir);
 }
 
 static void test_gpu_devices(Report &rep, const Options &o) {
@@ -3124,7 +3370,7 @@ static void test_gpu_devices(Report &rep, const Options &o) {
   }
   if (all.size() > 1) runs.push_back({"All GPUs", false, all, true});
   runs.push_back({"CPU + all GPUs", true, all, true});
-  rep.table({"device", "samples/s", "ms / sample", "vs CPU", "samples per device", "longest submission ms"});
+  rep.table({"device", "samples/s", "ms / sample", "vs CPU", "samples per device", "longest submission ms", "GPU busy % (task 0159)"});
   double cpu_rate = 0;
   for (const Run &r : runs) {
     PathTracer pt;
@@ -3148,13 +3394,126 @@ static void test_gpu_devices(Report &rep, const Options &o) {
       share = r.cpu ? strprintf("CPU %d", pt.stats().cpu_samples) : "";
       for (size_t g = 0; g < pt.stats().gpu_samples.size(); g++) share += strprintf("%sGPU%zu %d", share.empty() ? "" : ", ", g + 1, pt.stats().gpu_samples[g]);
     }
+    const PTStats &ps = pt.stats();
+    const std::string busy = ps.gpu_busy_ms < 0.0 ? std::string("-") : f1(100.0 * ps.gpu_busy_ms / std::max(1e-6, ps.gpu_busy_ms + ps.gpu_wait_ms)) + " % (" + f1(ps.gpu_busy_ms) + " of " + f1(ps.gpu_busy_ms + ps.gpu_wait_ms) + " ms)";
     rep.row({r.name, f1(rate), f2(ms / done), f2(rate / std::max(cpu_rate, 1e-9)) + "x", share,
-             r.gpus.empty() ? std::string("-") : f1(pt.stats().max_submit_ms)});
+             r.gpus.empty() ? std::string("-") : f1(ps.max_submit_ms), busy});
   }
   rep.note("Task 0051: a GPU submission stays near 100 ms (the first of a frame is one sample) so a slow card can't pass "
            "Windows' 2 s driver timeout; a GTX 1050 Ti traces with the compute kernel (no ray tracing hardware).");
+  /* Task 0162: what reaching the card costs - the whole scene, then one object moved (the instances alone), then
+   * one material edited (the materials alone) - time and queue submissions, per card. */
+  rep.table({"upload (task 0162)", "device", "whole build ms", "submissions", "instance update: build ms", "submissions", "material update: build ms", "submissions"});
+  for (const Run &r : runs) {
+    if (r.gpus.size() != 1 || r.cpu) continue;
+    PathTracer pt;
+    PTSettings st;
+    st.use_cpu = false;
+    st.gpus = r.gpus;
+    st.gpu_hardware_rt = r.hw;
+    st.denoise = false;
+    pt.set_settings(st);
+    pt.build(objs, {sun}, env);  // (the device opens)
+    if (!pt.gpu_async()) continue;
+    std::vector<PTObject> moved = objs;
+    auto submits = [&] { return pt.gpu_submits(); };
+    uint64_t a = 0;
+    /* A whole upload: a mesh added and taken away again changes the geometry both times. */
+    auto extra = primitives::ico_sphere(0.3f, 2);
+    std::vector<PTObject> more = objs;
+    more.push_back({&extra->render_mesh_tangents(), Mat4::translate({0, 3, 0}), &m_ball});
+    pt.build(more, {sun}, env);
+    a = submits();
+    const double whole_ms = time_ms([&] { pt.build(objs, {sun}, env); });
+    const uint64_t whole_sub = submits() - a;
+    moved[0].model = Mat4::translate({0.3f, 0.0f, 0.0f}) * moved[0].model;
+    a = submits();
+    const double inst_ms = time_ms([&] { pt.build(moved, {sun}, env); });
+    const uint64_t inst_sub = submits() - a;
+    m_ball[0]->base_color = Vec3(0.3f, 0.6f, 0.9f);
+    m_ball[0]->touch();
+    a = submits();
+    const double mat_ms = time_ms([&] { pt.build(moved, {sun}, env); });
+    const uint64_t mat_sub = submits() - a;
+    m_ball[0]->base_color = Vec3(0.8f);
+    m_ball[0]->touch();
+    rep.row({"", r.name, f1(whole_ms), std::to_string(whole_sub), f1(inst_ms), std::to_string(inst_sub), f1(mat_ms), std::to_string(mat_sub)});
+  }
   rep.note("Every device renders whole samples of the frame and the sums are averaged, so devices of any speed combine "
            "without seams (Cycles splits work across devices the same way). The unit tests check each device against the CPU.");
+}
+
+static void spring_chain_row(Report &rep) {
+/* A hundred spring chains (a dense hairstyle: strands 4 cm apart with 2 cm radii, touching) of three bones, and of
+ * ten: a frame's step plain, with collision, with separation too (task 0177: the unit test prints these, this row
+ * keeps them). */
+  auto bone = [](Scene &s, const std::string &name, GameObject *parent, Vec3 pos, Quat rot, float len) {
+    GameObject *g = s.create(name, parent);
+    g->set_local_position(pos);
+    g->set_local_rotation(rot);
+    Bone *b = g->add<Bone>();
+    b->length = len;
+    b->rest_position = pos;
+    b->rest_rotation = rot;
+    return g;
+  };
+  auto frame_ms = [&](int bones, double *plain, double *with_collision) {
+    Scene s;
+    GameObject *root = s.create("Rig");
+    root->add<Armature>();
+    GameObject *hip = bone(s, "Hips", root, {0, 1, 0}, Quat(), 0.2f);
+    for (int c = 0; c < 100; c++) {
+      GameObject *g = hip;
+      for (int i = 1; i <= bones; i++)
+        g = bone(s, "Strand" + std::to_string(c) + std::to_string(i), g, i == 1 ? Vec3(0.04f * (c % 10), 0.2f, 0.04f * (c / 10)) : Vec3(0, 0.05f, 0),
+                 i == 1 ? Quat::euler({180, 0, 0}) : Quat(), 0.05f);
+      spring::add(*s.find_by_name("Strand" + std::to_string(c) + "1"), 0);
+    }
+    auto run = [&](bool separate, bool collide) {
+      for (const auto &o : s.objects())
+        if (SpringBone *sb = o->get<SpringBone>()) sb->separate = separate, sb->collide = collide;
+      for (int f = 0; f < 10; f++) spring::step(s, 1.0f / 60.0f);  // (warm)
+      ScopedTimer t;
+      for (int f = 0; f < 60; f++) {
+        hip->set_local_position({0.01f * f, 1, 0});
+        spring::step(s, 1.0f / 60.0f);
+      }
+      return t.ms() / 60.0;
+    };
+    *plain = run(false, false), *with_collision = run(false, true);
+    return run(true, true);
+  };
+  rep.table({"spring chains (100)", "plain ms / frame", "with collision", "with separation too", "target"});
+  for (int bones : {3, 10}) {
+    double p = 0, c = 0;
+    const double all = frame_ms(bones, &p, &c);
+    rep.row({std::to_string(bones) + " bones", strprintf("%.3f", p), strprintf("%.3f", c), strprintf("%.3f", all), bones == 3 ? "1.0" : "5.0"});
+  }
+}
+
+static void autophysics_row(Report &rep) {
+/* AutoPhysics' centroidal solve (task 0118): a jump and a run as an animator keys them, 100 frames at 30 fps
+ * (task 0177: the unit test checks the laws hold; the time is here). */
+  auto smooth = [](float t) { t = std::min(1.0f, std::max(0.0f, t)); return t * t * (3.0f - 2.0f * t); };
+  body::CentroidalInput jump, run;
+  for (int k = 0; k < 100; k++) {
+    float y = 1.0f, z = 0.0f;
+    if (k < 40) y = 1.0f - 0.15f * std::sin(3.14159f * smooth((k - 25) / 15.0f)), z = 0.1f * smooth((k - 30) / 10.0f);
+    else if (k < 60) y = std::max(0.95f, 0.95f + 0.35f * std::sin(3.14159f * (k - 40) / 20.0f)), z = 0.1f + 0.5f * (k - 40) / 20.0f;
+    else y = 1.0f - 0.15f * std::sin(3.14159f * smooth((k - 60) / 25.0f)), z = 0.6f + 0.1f * smooth((k - 60) / 10.0f);
+    jump.com.push_back({0.0f, y, z});
+    run.com.push_back({0.0f, 0.95f + 0.03f * std::cos(2.0f * 3.14159f * k / 12.0f), 3.0f * k / 30.0f});
+  }
+  jump.contacts = {{{-0.12f, 0, 0.1f}, 0, 39}, {{0.12f, 0, 0.1f}, 0, 39}, {{-0.12f, 0, 0.7f}, 60, 99}, {{0.12f, 0, 0.7f}, 60, 99}};
+  for (int s = 0; s * 12 < 100; s++) {
+    const int from = s * 12, to = std::min(99, s * 12 + 7);
+    run.contacts.push_back({{s % 2 ? 0.1f : -0.1f, 0.0f, 3.0f * (from + to) * 0.5f / 30.0f}, from, to});
+  }
+  rep.table({"AutoPhysics clip (100 frames)", "solved", "passes", "steps", "Newton residual (g)", "Euler residual (m g)", "ms", "target ms"});
+  for (auto [name, in] : {std::pair<const char *, body::CentroidalInput *>{"a jump", &jump}, {"a run", &run}}) {
+    const body::CentroidalResult r = body::solve_centroidal(*in);
+    rep.row({name, r.solved ? "yes" : "no", std::to_string(r.passes), std::to_string(r.iterations), strprintf("%.1e", r.linear_residual), strprintf("%.1e", r.angular_residual), f1(r.ms), "1000"});
+  }
 }
 
 static void test_physics(Report &rep, const Options &o) {
@@ -3191,6 +3550,8 @@ static void test_physics(Report &rep, const Options &o) {
     rep.row({std::to_string(n), ms[0] < 0 ? "(skipped)" : f2(ms[0]), ms[1] < 0 ? "-" : f2(ms[1]),
              ms[0] > 0 && ms[1] > 0 ? f1(ms[0] / ms[1]) + "x" : "-"});
   }
+  spring_chain_row(rep);
+  autophysics_row(rep);
 }
 
 static void test_modeling_tools(Report &rep, const Options &o) {
@@ -3214,6 +3575,23 @@ static void test_modeling_tools(Report &rep, const Options &o) {
     Mesh mi = m;
     double mr = time_ms([&] { meshops::mirror(mi, true, false, false, 0.001f); });
     rep.row({"mirror X (merge)", num((double)mi.face_count()), f1(mr)});
+  }
+  /* The overlap check (task 0132): the fast check against the O(n^2)-ish reference on a 50k-face sphere whose seam
+   * doubles its vertices (task 0177: the unit test checks they agree; the speed-up is here, about 15x on 32 threads). */
+  {
+    MeshPtr big = primitives::uv_sphere(1.0f, 256, 196);
+    double fast_ms = 0, ref_ms = 0;
+    size_t nv = 0, ne = 0;
+    for (int k = 0; k < 2; k++) {
+      ScopedTimer tf;
+      nv = meshops::overlapping_vertices(*big).size(), ne = meshops::overlapping_edges(*big).size();
+      fast_ms = tf.ms();
+      ScopedTimer tr;
+      (void)meshops::overlapping_vertices_reference(*big), (void)meshops::overlapping_edges_reference(*big);
+      ref_ms = tr.ms();
+    }
+    rep.table({"overlap check", "faces", "doubled vertices", "doubled edges", "fast ms", "reference ms", "speed-up", "target"});
+    rep.row({"50k-face UV sphere", num((double)big->face_count()), std::to_string(nv), std::to_string(ne), f1(fast_ms), f1(ref_ms), f1(ref_ms / std::max(1e-6, fast_ms)) + "x", "3x"});
   }
 }
 
@@ -3792,6 +4170,33 @@ static void test_skin_weights_stress(Report &rep, const Options &o) {
 
 /* Keyframe animation (task 0059): sampling and applying a clip of 200 tracks (rotations of 67 bones, Auto keys) once a
  * frame. Target: at most 0.2 ms. */
+static void locomotion_row(Report &rep) {
+/* Locomotion in Play (task 0127): a person walking forward for 3 s under W, the component's own step time a frame
+ * (task 0177: the unit test checks the walk; its budget of 0.2 ms is this row). */
+  const bool was_live = Locomotion::live;
+  Locomotion::live = true;
+  Scene s;
+  GameObject *rig = create_rig(s, false, Vec3(0.0f));
+  Locomotion *lc = rig->add<Locomotion>();
+  const GroundGrid ground = locomotion::ground_for(s);
+  PlayContext start;
+  s.start(start);
+  const float dt = 1.0f / 60.0f;
+  float t = 0.0f, cost = 0.0f, worst = 0.0f;
+  int frames = 0;
+  for (int i = 0; i < 180; i++) {
+    PlayContext ctx;
+    ctx.dt = dt, ctx.time = t, ctx.key_down = [](int k) { return k == platform::KEY_W; };
+    s.update(ctx);
+    locomotion::step(s, dt, ground);
+    solve_constraints(s);
+    t += dt, cost += lc->cost_ms_, worst = std::max(worst, lc->cost_ms_), frames++;
+  }
+  Locomotion::live = was_live;
+  rep.table({"Locomotion (W for 3 s)", "frames", "ms / frame", "worst frame ms", "walked (m)", "target ms"});
+  rep.row({"a humanoid rig", std::to_string(frames), strprintf("%.3f", cost / frames), strprintf("%.3f", worst), f2(rig->world_position().z), "0.2"});
+}
+
 static void test_animation_stress(Report &rep, const Options &o) {
   rep.title("Keyframe animation (task 0059)",
             "A chain of bones under a root, each turned by three Euler tracks with keys every 10 frames (Auto), applied with "
@@ -3852,6 +4257,7 @@ static void test_animation_stress(Report &rep, const Options &o) {
     std::remove(resolve_asset_path(cp).c_str());
     forget_clip_assets(cp);
   }
+  locomotion_row(rep);
 }
 
 static void test_vgroups_stress(Report &rep, const Options &o) {
@@ -4827,141 +5233,244 @@ static void test_gpu_raster(Report &rep, const Options &o) {
            "setting.");
 }
 
-/* Task 0097 (spike, ADR 0037): an OptiX path tracer against the Vulkan one (GPU Compute with ray tracing hardware), the
- * same scene and settings, samples a second at 1080p. The OptiX kernel is simpler (Lambert, flat normals), so its
- * number is an upper bound of what OptiX would gain. */
+/* Task 0170 (ADR 0054; task 0097's spike before it): the OptiX device against GPU Compute (Vulkan with ray tracing
+ * hardware) - the same scene through PathTracer on each card, each backend in turn, samples a second at 1080p, the
+ * scene's upload, and how far the two pictures differ (one integrator: they should be the same). */
+static void set_backend_env(const char *b) {
+#ifdef _WIN32
+  _putenv_s("BLENDITY_GPU_BACKEND", b);
+#else
+  setenv("BLENDITY_GPU_BACKEND", b, 1);
+#endif
+}
 static void test_gpu_optix(Report &rep, const Options &o) {
-  rep.title("OptiX spike (task 0097): an OptiX path tracer vs GPU Compute (Vulkan, ray tracing hardware)",
-            "1920x1080, 256 icospheres and a floor (Lambert-like materials: roughness 1, no specular), a sun with a shadow ray per "
-            "bounce, the gradient sky, 4 bounces. Samples a second over 64 samples, each device's best of two runs. The OptiX "
-            "kernel is deliberately simpler than GPU Compute's (Lambert with flat normals, no textures or MIS): its speed is the "
-            "most OptiX could gain.");
+  rep.title("OptiX device (task 0170): OptiX vs GPU Compute (Vulkan, ray tracing hardware)",
+            "1920x1080, 256 icospheres and a floor (principled materials), a sun, 4 bounces. Samples a second over 64 samples, each "
+            "backend's best of two runs on each card; the scene's upload (build) time; the pictures' mean difference. Both run the "
+            "same integrator (gpu_kernel.h's GLSL; OptiX's translated to CUDA).");
   const int W = 1920, H = 1080, spp = o.quick ? 16 : 64, bounces = 4;
   auto mesh = primitives::ico_sphere(0.5f, 3);
   Scene s = make_grid_scene(256, mesh, 1.3f);
   auto floor = primitives::plane(40.0f, 1);
   MaterialPtr bench = make_material("bench", {0.7f, 0.5f, 0.3f}), mfl = make_material("floor", {0.8f, 0.8f, 0.8f});
-  for (MaterialPtr &m : {std::ref(bench), std::ref(mfl)}) m->roughness = 1.0f, m->metallic = 0.0f, m->specular = 0.0f;
   std::vector<MaterialPtr> mats = {bench}, mfloor = {mfl};
   std::vector<PTObject> objs;
-  std::vector<gpu::OptixObjectIn> oobjs;
-  const Mat4 floor_model = Mat4::translate({0, -0.6f, 0});
-  objs.push_back({&floor->render_mesh_tangents(), floor_model, &mfloor});
-  gpu::OptixObjectIn fo;
-  fo.mesh = 0;
-  std::memcpy(fo.model, floor_model.m, 64);
-  fo.albedo[0] = fo.albedo[1] = fo.albedo[2] = 0.8f;
-  oobjs.push_back(fo);
-  s.for_each([&](GameObject &g) {
-    objs.push_back({&g.get<MeshFilter>()->mesh->render_mesh_tangents(), g.world_matrix(), &mats});
-    gpu::OptixObjectIn oo;
-    oo.mesh = 1;
-    std::memcpy(oo.model, g.world_matrix().m, 64);
-    oo.albedo[0] = 0.7f, oo.albedo[1] = 0.5f, oo.albedo[2] = 0.3f;
-    oobjs.push_back(oo);
-  });
+  objs.push_back({&floor->render_mesh_tangents(), Mat4::translate({0, -0.6f, 0}), &mfloor});
+  s.for_each([&](GameObject &g) { objs.push_back({&g.get<MeshFilter>()->mesh->render_mesh_tangents(), g.world_matrix(), &mats}); });
   RenderLight sun;
   sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
-  Environment env;  // (the gradient sky)
+  Environment env;
   const Vec3 eye(10.0f, 8.0f, -14.0f);
   const Mat4 v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 1000.0f);
-  rep.table({"device", "scene build ms", "samples / s", "ms per sample", "vs GPU Compute"});
+  rep.table({"device", "first open + upload ms", "samples / s", "ms per sample", "vs GPU Compute", "picture difference"});
+  const char *user_backend = std::getenv("BLENDITY_GPU_BACKEND");
+  const std::string restore = user_backend ? user_backend : "vulkan";
   if (!gpu::available()) {
     rep.note("No Vulkan GPU here: nothing to compare.");
     return;
   }
-  /* GPU Compute, each Vulkan GPU with its ray tracing hardware (merging its samples only at the end). */
-  std::map<std::string, double> vulkan_sps;
-  std::vector<float> vulkan_rgb;
+  if (!gpu::optix_compiled_in()) rep.note("This build has no OptiX (its headers weren't there): GPU Compute only.");
+  double worst = 1e30;
   for (const gpu::DeviceInfo &d : gpu::devices()) {
-    PathTracer pt;
-    PTSettings st;
-    st.use_cpu = false;
-    st.gpus = {d.index};
-    st.gpu_hardware_rt = true;
-    st.max_bounces = bounces;
-    st.denoise = false;
-    st.use_guiding = false;
-    st.merge_interval_ms = 1e9;
-    pt.set_settings(st);
-    ScopedTimer tb;
-    pt.build(objs, {sun}, env);
-    const double build_ms = tb.ms();
-    pt.set_camera(v, p, W, H);
-    pt.render(1e9, 2);  // warm-up (the kernel's pipeline)
-    double best = 1e30;
-    for (int run = 0; run < 2; run++) {
+    double sps[2] = {0, 0};
+    std::vector<float> rgb[2];
+    for (int k = 0; k < 2; k++) {
+      if (k == 1 && gpu::optix_device_of(d.index) < 0) continue;
+      set_backend_env(k ? "optix" : "vulkan");
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = false;
+      st.gpus = {d.index};
+      st.gpu_hardware_rt = true;
+      st.max_bounces = bounces;
+      st.denoise = false;
+      st.use_guiding = false;
+      st.merge_interval_ms = 1e9;
+      pt.set_settings(st);
       pt.set_camera(v, p, W, H);
-      ScopedTimer t;
-      pt.render(1e9, spp);
-      best = std::min(best, t.ms());
+      ScopedTimer tb;  // (the card opens in build(): its pipeline - for OptiX the PTX's compile, cold about 20 s - is in this time)
+      pt.build(objs, {sun}, env);
+      pt.set_camera(v, p, W, H);
+      pt.render(1e9, 1);
+      const double build_ms = tb.ms();
+      double best = 1e30;
+      for (int run = 0; run < 2; run++) {
+        pt.set_camera(v, p, W, H);
+        ScopedTimer t;
+        pt.render(1e9, spp);
+        best = std::min(best, t.ms());
+      }
+      if (!pt.gpu_error().empty()) rep.note(d.name + ": " + pt.gpu_error());
+      sps[k] = spp / (best / 1000.0);
+      rgb[k] = pt.linear_rgb(false);
+      std::string diff = "-";
+      const bool is_optix = pt.device_summary().find("(OptiX)") != std::string::npos;
+      if (k == 1 && !is_optix) {
+        rep.row({d.name + " - OptiX asked for, GPU Compute opened (" + pt.device_summary() + ")", f1(build_ms), f1(sps[k]), f2(best / spp), "-", "-"});
+        continue;
+      }
+      if (k == 1) {
+        double sum = 0;
+        for (size_t i = 0; i < rgb[0].size() && i < rgb[1].size(); i++) sum += std::fabs(rgb[0][i] - rgb[1][i]);
+        diff = strprintf("%.5f", sum / std::max<size_t>(1, rgb[0].size()));
+        worst = std::min(worst, sps[1] / std::max(1e-9, sps[0]));
+      }
+      rep.row({d.name + (k ? " - OptiX (" : " - GPU Compute (") + pt.device_summary() + ")", f1(build_ms), f1(sps[k]), f2(best / spp),
+               k ? f2(sps[1] / std::max(1e-9, sps[0])) + "x" : "1.00x", diff});
     }
-    if (!pt.gpu_error().empty()) rep.note(d.name + ": " + pt.gpu_error());
-    const double sps = spp / (best / 1000.0);
-    vulkan_sps[d.name] = sps;
-    if (vulkan_rgb.empty()) vulkan_rgb = pt.linear_rgb(false);
-    rep.row({d.name + " - GPU Compute (Vulkan, RT cores)", f1(build_ms), f1(sps), f2(best / spp), "1.00x"});
   }
-  std::string err;
-  if (!gpu::OptixTracer::compiled_in()) {
-    rep.note("This build has no OptiX (built without the CUDA Toolkit and the OptiX SDK): nothing to compare.");
+  set_backend_env(restore.c_str());
+  if (worst > 1e29) rep.note("Verdict: none - no card has OptiX here.");
+  else rep.note(strprintf("OptiX vs GPU Compute, the slowest card: %.2fx (task 0170's target: 1.4x on the 4070 SUPER, 1.8x on the 3060 Ti).", worst));
+}
+
+/* Task 0172 (ADR 0055): what Live Link costs the editor's frame - the link off, on with nobody listening, one and two
+ * clients draining as fast as they can, while 1,000 objects move every frame; a 50k-face mesh built for a client
+ * (on the worker: the frames meanwhile), its vertices moved every frame (deforms), and a client that leaves mid-send. */
+struct LinkReader {
+  net::LineClient c;
+  std::thread th;
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> messages{0}, bytes{0};
+  bool open(int port) {
+    if (!c.connect(port)) return false;
+    th = std::thread([this] {
+      std::string line, bin;
+      while (!stop)
+        if (c.read(line, bin, 50)) messages++, bytes += line.size() + 1 + bin.size();
+    });
+    return true;
+  }
+  void close() {
+    stop = true;
+    if (th.joinable()) th.join();
+    c.close();
+  }
+  ~LinkReader() { close(); }
+};
+
+static void test_livelink(Report &rep, const Options &o) {
+  rep.title("Live Link (task 0172): what the link costs the editor's frame",
+            "Headless editor at 1280x720, 1,000 cubes moved every frame (each one a transform message), 120 frames a case; the "
+            "link compares the scene at most 60 times a second; the clients are threads reading as fast as they can on 127.0.0.1.");
+  const int frames = o.quick ? 40 : 120;
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.command("stress 1000 Cube");
+  std::vector<GameObject *> movers;
+  ed.scene().for_each([&](GameObject &g) {
+    if (g.mesh_filter()) movers.push_back(&g);
+  });
+  auto run = [&](int n) {
+    double sum = 0, most = 0;
+    for (int f = 0; f < n; f++) {
+      for (size_t i = 0; i < movers.size(); i++) movers[i]->set_local_position(movers[i]->local().position + Vec3(0, 0.001f, 0));
+      ScopedTimer t;
+      ed.step_frame_headless();
+      sum += t.ms();
+      most = std::max(most, t.ms());
+    }
+    return std::make_pair(sum / n, most);
+  };
+  rep.table({"case", "frame ms (mean / most)", "comparing the scene ms (mean / most)", "messages", "MB sent", "note"});
+  auto compare_ms = [&](const livelink::Stats &before) {
+    const livelink::Stats &s = ed.livelink_for_test()->stats();
+    const uint64_t n = s.ticks - before.ticks;
+    return n ? strprintf("%.2f / %.2f", (s.tick_ms_total - before.tick_ms_total) / n, s.tick_ms_max) : std::string("-");
+  };
+  run(10);  // (warm: the views' caches)
+  auto off = run(frames);
+  rep.row({"link off", strprintf("%.2f / %.2f", off.first, off.second), "-", "-", "-", ""});
+  ed.livelink_start(0);
+  livelink::Link *link = ed.livelink_for_test();
+  if (!link || !link->running()) {
+    rep.note("The link didn't start (no sockets here): nothing to measure.");
     return;
   }
-  const std::vector<std::string> cuda = gpu::OptixTracer::devices(&err);
-  if (cuda.empty()) rep.note("OptiX: no CUDA device (" + err + ").");
-  /* The meshes as OptiX takes them. */
-  std::vector<std::vector<float>> pos(2);
-  const RenderMesh *rms[2] = {&floor->render_mesh(), &mesh->render_mesh()};
-  std::vector<gpu::OptixMeshIn> omeshes(2);
-  for (int i = 0; i < 2; i++) {
-    for (const Vec3 &q : rms[i]->positions) pos[(size_t)i].insert(pos[(size_t)i].end(), {q.x, q.y, q.z});
-    omeshes[(size_t)i] = {pos[(size_t)i].data(), rms[i]->positions.size(), rms[i]->indices.data(), rms[i]->indices.size()};
+  auto idle = run(frames);
+  rep.row({"link on, no client", strprintf("%.2f / %.2f", idle.first, idle.second), "-", "0", "0", "nothing is compared without a client"});
+  auto with_clients = [&](int count, const char *label) {
+    std::vector<std::unique_ptr<LinkReader>> rs;
+    for (int i = 0; i < count; i++) {
+      rs.push_back(std::make_unique<LinkReader>());
+      rs.back()->open(link->port());
+    }
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();  // (the syncs)
+    link->wait_meshes_for_test();
+    const livelink::Stats before = link->stats();
+    const net::Server::Stats nb = link->net_stats();
+    auto r = run(frames);
+    const net::Server::Stats na = link->net_stats();
+    rep.row({label, strprintf("%.2f / %.2f", r.first, r.second), compare_ms(before), strprintf("%llu", (unsigned long long)(na.messages - nb.messages)),
+             strprintf("%.2f", (na.bytes - nb.bytes) / 1048576.0), strprintf("%llu replaced before sending", (unsigned long long)(na.coalesced - nb.coalesced))});
+    for (auto &x : rs) x->close();
+    for (int i = 0; i < 20 && link->clients() > 0; i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return r;
+  };
+  auto one = with_clients(1, "1 client");
+  with_clients(2, "2 clients");
+  /* A 50k-face mesh: built for a new client on the worker while the frames go on. */
+  ed.command("create Sphere");
+  ed.command("subdivide 4");
+  GameObject *big = ed.active_object_for_test();
+  for (int i = 0; i < 5; i++) ed.step_frame_headless();
+  const size_t faces = big && big->evaluated_mesh(0) ? big->evaluated_mesh(0)->face_count() : 0;
+  {
+    LinkReader r;
+    r.open(link->port());
+    const double enc0 = link->stats().mesh_encode_ms;
+    const uint64_t built0 = link->stats().meshes;
+    double most = 0;
+    ScopedTimer wall;
+    for (int f = 0; f < 600 && link->stats().meshes < built0 + movers.size() + 3; f++) {
+      ScopedTimer t;
+      ed.step_frame_headless();
+      most = std::max(most, t.ms());
+    }
+    link->wait_meshes_for_test();
+    rep.row({strprintf("a client's sync with a %zu-face mesh", faces), strprintf("most %.2f", most), "-", "-", strprintf("%.2f", r.bytes / 1048576.0),
+             strprintf("the worker built %llu glTF binaries in %.0f ms; the sync took %.0f ms of frames", (unsigned long long)(link->stats().meshes - built0),
+                       link->stats().mesh_encode_ms - enc0, wall.ms())});
+    /* Its vertices moved every frame: one deform a comparison. */
+    const Mesh *em = big ? big->evaluated_mesh(0) : nullptr;
+    if (em && big->mesh_filter()) {
+      const livelink::Stats before = link->stats();
+      const net::Server::Stats nb = link->net_stats();
+      double sum = 0;
+      for (int f = 0; f < frames; f++) {
+        MeshPtr m = mesh_make_mutable(big->mesh_filter()->mesh);
+        m->positions[f % m->positions.size()].y += 0.001f;
+        m->touch();
+        ScopedTimer t;
+        ed.step_frame_headless();
+        sum += t.ms();
+      }
+      const net::Server::Stats na = link->net_stats();
+      rep.row({strprintf("a vertex of the %zu-face mesh moved every frame", faces), strprintf("%.2f", sum / frames), compare_ms(before),
+               strprintf("%llu deforms", (unsigned long long)(link->stats().deforms - before.deforms)), strprintf("%.2f", (na.bytes - nb.bytes) / 1048576.0),
+               strprintf("%zu vertices: %.2f MB a deform", em->positions.size(), em->positions.size() * 12 / 1048576.0)});
+    }
+    /* The client leaves while a big message is going out. */
+    big->mesh_filter()->mesh = std::make_shared<Mesh>(*big->mesh_filter()->mesh);
+    ed.command("subdivide 1");
+    ed.step_frame_headless();
+    r.close();
+    double after = 0;
+    for (int f = 0; f < 30; f++) {
+      ScopedTimer t;
+      ed.step_frame_headless();
+      after = std::max(after, t.ms());
+    }
+    link->wait_meshes_for_test();
+    rep.row({"a client leaves mid-send", strprintf("most %.2f over the next 30 frames", after), "-", "-", "-",
+             strprintf("%d client(s) left connected", link->clients())});
   }
-  gpu::OptixFrameIn fr;
-  fr.width = W, fr.height = H, fr.max_bounces = bounces, fr.samples = 8;
-  const Mat4 inv = (p * v).inverse();
-  std::memcpy(fr.inv_view_proj, inv.m, 64);
-  fr.sun_dir[0] = sun.direction.x, fr.sun_dir[1] = sun.direction.y, fr.sun_dir[2] = sun.direction.z;
-  double worst = 1e30;
-  for (size_t i = 0; i < cuda.size(); i++) {
-    std::unique_ptr<gpu::OptixTracer> t = gpu::OptixTracer::create((int)i, &err);
-    double build_ms = 0;
-    if (!t || !t->build(omeshes, oobjs, build_ms, &err) || !t->clear(W, H, &err) || !t->render(fr, 0, &err)) {
-      rep.row({cuda[i] + " - OptiX (" + err + ")", "-", "-", "-", "-"});
-      worst = 0;
-      continue;
-    }
-    double best = 1e30;
-    bool ok = true;
-    std::vector<float> rgb;
-    for (int run = 0; run < 2 && ok; run++) {
-      ok = t->clear(W, H, &err);
-      ScopedTimer tt;
-      for (int k = 0; k < spp && ok; k += fr.samples) ok = t->render(fr, k, &err);
-      ok = ok && t->read(rgb, &err);  // (inside the time, as GPU Compute's render merges its samples back at the end)
-      best = std::min(best, tt.ms());
-    }
-    if (!ok) {
-      rep.row({cuda[i] + " - OptiX (" + err + ")", "-", "-", "-", "-"});
-      worst = 0;
-      continue;
-    }
-    const double sps = spp / (best / 1000.0);
-    const auto vk = vulkan_sps.find(cuda[i]);
-    const double ratio = vk != vulkan_sps.end() ? sps / vk->second : 0.0;
-    worst = std::min(worst, ratio);
-    /* A sanity check that it rendered the same scene: the mean brightness against GPU Compute's picture. */
-    double a = 0, b = 0;
-    for (size_t k = 0; k < rgb.size() && k < vulkan_rgb.size(); k++) a += rgb[k], b += vulkan_rgb[k];
-    rep.row({cuda[i] + " - OptiX", f1(build_ms), f1(sps), f2(best / spp), ratio > 0 ? f2(ratio) + "x" : "-"});
-    rep.note(strprintf("%s: the OptiX picture's mean brightness is %.1f %% of GPU Compute's (a simpler shader: close, not equal).", cuda[i].c_str(),
-                       b > 0 ? 100.0 * a / b : 0.0));
-  }
-  if (worst <= 0 || worst > 1e29) rep.note("Verdict: none - not every card could be measured.");
-  else
-    rep.note(strprintf("Verdict (ADR 0037: go if OptiX gives at least 1.5x GPU Compute's samples a second on every card): the slowest card "
-                       "%.2fx, %s. The OptiX kernel does less per sample than GPU Compute's, so this is the most it could gain.",
-                       worst, worst >= 1.5 ? "go" : "no-go"));
+  rep.note(strprintf("One client cost the frame %.2f ms on average against the link off (%.2f vs %.2f ms; the views' rendering is most of a frame).",
+                     one.first - off.first, one.first, off.first));
+  ed.livelink_stop();
 }
 
 /* Task 0083: what headless runs can't see - putting a frame on a real window, and how evenly a frame-rate cap holds.
@@ -5097,6 +5606,13 @@ int main(int argc, char **argv) {
 #endif
     /* The editor sections measure the CPU's views, as every pass before (task 0096's GPU views are measured by
      * name, with Viewport Device GPU asked for). */
+    if (!std::getenv("BLENDITY_GPU_BACKEND")) {  // (task 0170: GPU Compute's numbers stay GPU Compute's; gpu_optix asks for OptiX)
+#ifdef _WIN32
+      _putenv_s("BLENDITY_GPU_BACKEND", "vulkan");
+#else
+      setenv("BLENDITY_GPU_BACKEND", "vulkan", 1);
+#endif
+    }
     if (!std::getenv("BLENDITY_VIEWPORT_DEVICE")) {
 #ifdef _WIN32
       _putenv_s("BLENDITY_VIEWPORT_DEVICE", "cpu");
@@ -5124,7 +5640,7 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

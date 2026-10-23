@@ -288,8 +288,8 @@ uint64_t Mesh::Uid::next() noexcept {
 
 /* This mesh's shape now (its id, version and deform version mixed): what both its render caches share. */
 static uint64_t shape_key(uint64_t uid, uint64_t version, uint64_t deform) {
-  uint64_t k = 1469598103934665603ull;
-  for (uint64_t v : {uid, version, deform}) k = (k ^ v) * 1099511628211ull, k ^= k >> 31;
+  uint64_t k = kFnvBasis;
+  for (uint64_t v : {uid, version, deform}) k = (k ^ v) * kFnvPrime, k ^= k >> 31;
   return k ? k : 1;
 }
 
@@ -525,6 +525,20 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
   };
   each_face([&](size_t f) { fnormal[f] = face_normal(f); });
 
+  /* Custom normals (task 0149): the vertex's own at every corner, whatever the smoothing (a zero or NaN one: the
+   * face's). */
+  if (custom_normals_fit()) {
+    cnormal.resize(corner_verts.size());
+    each_face([&](size_t f) {
+      for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) {
+        const Vec3 n = custom_normals[corner_verts[c]];
+        const float len = length(n);
+        cnormal[c] = finite_bits(len) && len > 1e-12f ? n / len : fnormal[f];
+      }
+    });
+    return;
+  }
+
   /* Per-corner normal: flat = face normal; smooth = area-weighted average of
    * the faces around the vertex, restricted to faces within smooth_angle
    * (Blender's "Smooth by Angle" / Unity's import smoothing angle). */
@@ -739,7 +753,8 @@ bool Mesh::update_in_place(int ci, bool flat) const {
    * the bit), and only their corners written. The first frame after a build or a copy works out the whole mesh. */
   NormalState &ns = nstate_[ci];
   std::vector<uint32_t> verts, changed;
-  const bool partial = corner_normals_moved(ns, flat, faces, verts);
+  /* Custom normals (task 0149) aren't summed from the faces: every corner takes its vertex's own again (cheap). */
+  const bool partial = !custom_normals_fit() && corner_normals_moved(ns, flat, faces, verts);
   if (!partial) corner_normals(flat, ns.cnormal, &ns);
   if (!(partial ? write_corners_at(ci, ns.cnormal, verts, changed) : write_corners(ci, ns.cnormal, changed))) return false;
   if (!retriangulate(rm, crv, &fmoved)) return false;
@@ -985,8 +1000,8 @@ void Mesh::render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnorm
       std::memcpy(b + 1, &k.nx, 4); std::memcpy(b + 2, &k.ny, 4); std::memcpy(b + 3, &k.nz, 4);
       std::memcpy(b + 4, &k.u, 4); std::memcpy(b + 5, &k.w, 4);
       b[0] = k.v;
-      uint64_t h = 1469598103934665603ull;
-      for (uint32_t x : b) { h ^= x; h *= 1099511628211ull; }
+      uint64_t h = kFnvBasis;
+      for (uint32_t x : b) { h ^= x; h *= kFnvPrime; }
       return (size_t)h;
     }
   };

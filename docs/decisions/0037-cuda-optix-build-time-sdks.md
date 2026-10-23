@@ -1,7 +1,9 @@
 # 0037: CUDA and OptiX through build-time SDKs that Blender's libraries don't bundle
 
 - **Status:** accepted for the spike (task 0097, approved by the user: "Denoiser first, then spike"; "Yes, I'll install
-  them"). A full OptiX render device needs the user's approval on the spike's numbers.
+  them"). A full OptiX render device needs the user's approval on the spike's numbers. **Superseded in part by ADR
+  0054** (task 0169): the PTX is committed, the host headers are fetched from NVIDIA at build, and the installers
+  carry OptiX.
 - **Date:** 2026-10-15
 - **Requirements:** R-05, Q-01
 

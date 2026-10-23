@@ -45,18 +45,21 @@ std::vector<uint32_t> mesh_slots(const RenderMesh &rm) {
 /* Why a material can't be drawn on the GPU yet, or null. Textures, procedurals and Box / Generated mapping are drawn
  * there since task 0101 (ADR 0038). */
 const char *material_unsupported(const Material &m) {
-  if (!m.opaque()) return "a see-through material";
+  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) return "a see-through material";  // (a cutout draws on the card since task 0163)
   if (m.axis_mode != 0) return "an axis material";
   const Material::Resolved &tx = m.textures();
   for (int k = 0; k < 5; k++)
     if (tx.live[k]) return "a live procedural texture";
+  /* Task 0148: the toon maps are read per pixel in the lighting pass, which has no UVs; a hair highlight needs the
+   * tangent there. Those materials draw on the CPU. */
+  if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight || tx.face_shadow || tx.line || tx.hatch))
+    return "a toon material with painted maps or a hair highlight";
   return nullptr;
 }
 
 /* Why an object can't be drawn on the GPU yet, or null. */
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
-  if (it.face_highlight) return "Edit Mode's face highlight";
   if (it.vertex_colors) return "vertex colours (Weight Paint)";
   if (it.lightmap || it.rt_bounce || (it.use_probes && env.probes)) return "lightmaps, probes or realtime GI";
   for (uint32_t slot : mesh_slots(*it.mesh))
@@ -107,6 +110,10 @@ gpu::RasterLight raster_light(const RenderLight &l) {
   g.range = l.range;
   g.spot_cos_outer = l.cos_outer;
   g.spot_cos_inner = l.cos_inner;
+  g.right[0] = l.right.x, g.right[1] = l.right.y, g.right[2] = l.right.z;  // (task 0163: an area light's panel)
+  g.width = l.width;
+  g.height = l.height;
+  g.disk = l.disk;
   return g;
 }
 
@@ -156,6 +163,10 @@ void raster_toon(gpu::RasterInstance &in, const Material &m) {
   in.toon_rim_width = m.toon_rim_width;
   in.toon_rim_strength = m.toon_rim_strength;
   in.toon_flat_ambient = m.toon_flat_ambient;
+  set3(in.toon_specular_color, m.toon_specular_color);
+  in.toon_wrap = clean(m.toon_wrap, 0.0f, 1.0f);
+  in.toon_rim_side = m.toon_rim_side;
+  in.toon_key_light_only = m.toon_key_light_only;
 }
 
 /* An object (one material's part of it) as the GPU draws it: a plain material sampled once (the same everywhere but
@@ -168,9 +179,15 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   in.albedo_rough[3] = s.roughness;
   in.metal_spec[0] = s.metallic;
   in.metal_spec[1] = s.specular;
+  in.metal_spec[2] = m.surface == (int)MaterialSurface::Cutout ? m.alpha_clip : -1.0f;  // (task 0163: the card punches the holes)
+  in.metal_spec[3] = m.alpha;
   set3(in.emission, s.emission);
   if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
-  if (m.shading_model == 1) raster_toon(in, m);
+  if (m.shading_model == 1) {
+    raster_toon(in, m);
+    const TexturePtr &ramp = m.textures().toon_ramp;
+    in.toon_ramp = ramp ? tex(ramp) : -1;  // (the ramp needs no UVs: the lighting pass reads it by how lit)
+  }
   in.flags = 0;
   if (s.unlit) in.flags |= gpu::RasterInstance::Unlit;
   if (it.receive_shadows) in.flags |= gpu::RasterInstance::ReceiveShadows;
@@ -327,11 +344,12 @@ const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingE
   if (render_clear_override_on_) return "a transparent render";
   if (rt.want_hdr) return "a picture kept in linear light";
   if (env.gi || env.probes) return "realtime GI or probes";
-  for (const RenderLight &l : env.lights)
-    if (l.type == RenderLight::Area) return "an area light";
   if (env.lights.size() > 16) return "more than 16 lights";
-  for (const DrawItem &it : items)
+  const bool highlight = gpu_view_ && gpu_view_->can_highlight_faces();
+  for (const DrawItem &it : items) {
+    if (it.face_highlight && !highlight) return "Edit Mode's face highlight (the card has no geometry shaders)";
     if (const char *why = item_unsupported(it, env)) return why;
+  }
   return nullptr;
 }
 
@@ -494,6 +512,29 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   std::string err;
   std::vector<gpu::RasterInstance> inst;
   inst.reserve(items.size());
+  std::vector<uint32_t> hl_bits;  // task 0166: Edit Mode's face highlight, a bit a triangle of the edited mesh
+  auto highlight_base = [&](const DrawItem &it, const GpuMesh &e) {
+    /* One bit per triangle in the card's order: the mesh's own with one material, grouped by slot (card_indices)
+     * with several. */
+    const RenderMesh &rm = *it.mesh;
+    const std::vector<uint8_t> &fh = *it.face_highlight;
+    const uint32_t base = (uint32_t)hl_bits.size() * 32;
+    hl_bits.resize(hl_bits.size() + (rm.tri_count() + 31) / 32, 0);
+    uint32_t pos = base;
+    auto set_bit = [&](size_t t) {
+      const uint32_t f = rm.tri_face[t];
+      if (f < fh.size() && fh[f]) hl_bits[pos / 32] |= 1u << (pos & 31);
+      pos++;
+    };
+    if (e.parts.empty() || rm.tri_material.size() != rm.tri_count()) {
+      for (size_t t = 0; t < rm.tri_count() && t < rm.tri_face.size(); t++) set_bit(t);
+      return base;
+    }
+    for (const auto &part : e.parts)
+      for (size_t t = 0; t < rm.tri_count() && t < rm.tri_face.size(); t++)
+        if (rm.tri_material[t] == part[0]) set_bit(t);
+    return base;
+  };
   bool ok = true;
   std::string tex_err;  // (a texture the card can't hold: this view on the CPU, the card kept)
   auto tex = [&](const TexturePtr &t) { return gpu_texture(t, tex_err); };
@@ -503,19 +544,23 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     ok = ok && mesh >= 0;
     if (mesh < 0) continue;
     const GpuMesh &e = gpu_meshes_[it.mesh];
+    const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
     if (e.parts.empty()) {
       inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), tex));
+      inst.back().highlight = hl;
       continue;
     }
     for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
       gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), tex);
       in.first_index = part[1];
       in.index_count = part[2];
+      in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
       inst.push_back(in);
     }
   }
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
   gpu::RasterFrame fr;
+  fr.highlight_bits = std::move(hl_bits);
   fr.slot = slot;
   fr.width = rt.width;
   fr.height = rt.height;
@@ -551,7 +596,16 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   uint32_t *color = contiguous ? rt.color : gpu_color_.data();
   const bool dof = cam && cam->dof && !cam->orthographic;
   const bool want_depth = !rt.depth.empty() && (planes_wanted_ || dof), want_ids = !rt.ids.empty() && planes_wanted_;
-  ok = ok && g->render(fr, &err) && g->read_back(slot, color, want_depth ? rt.depth.data() : nullptr, want_ids ? rt.ids.data() : nullptr, &err);
+  float *depth = want_depth ? rt.depth.data() : nullptr;
+  uint32_t *ids = want_ids ? rt.ids.data() : nullptr;
+  /* Task 0160 (ADR 0051): the frame and its copies out in one submission, one wait (the split path kept for the test
+   * that checks the picture is the same). */
+  if (ok) ok = gpu_split_readback_for_test_ ? g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err) : g->render_read(fr, color, depth, ids, &err);
+  if (ok) {
+    const gpu::RasterTimes t = g->times();  // (task 0159: the card's own time in each pass, for the Profiler)
+    prof_.ms_gpu_shadow += t.shadow, prof_.ms_gpu_gbuffer += t.gbuffer, prof_.ms_gpu_lighting += t.lighting;
+    prof_.ms_gpu_readback += std::max(0.0, t.submit_wall - t.total);  // (the submission's wall time beyond the passes: the copies out and the fence wait; without timestamps the whole submission)
+  }
   gpu_forget_meshes();
   if (!ok) {
     /* Any error: this frame on the CPU, and the GPU set aside until Viewport Device is chosen again. */
@@ -604,16 +658,8 @@ static bool changed_runs(const std::vector<T> &now, const std::vector<T> &before
 
 /* What the cage's edge colours depend on (cage_edge_color), hashed as scene_view_key hashes the selection. */
 uint64_t Editor::cage_edges_key(const Mesh &m) const {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const uint64_t head[5] = {m.uid.v, m.topology_serial(), (uint64_t)elem_, ngon_mode_ ? m.version : 0, ngon_mode_ ? m.deform_version : 0};
   mix(head, sizeof(head));
   mix(vert_sel_.data(), vert_sel_.size());

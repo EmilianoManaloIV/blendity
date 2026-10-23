@@ -46,9 +46,7 @@ void Editor::set_bone_ends(GameObject &g, Vec3 head, Vec3 tail, const Quat *base
   g.set_world_position(head);
   g.set_world_rotation(normalize(rotation_between(y, d / len) * rot));
   /* The length is in the bone's own units: a scaled armature (a 0.01 FBX import) has world lengths 100 times smaller. */
-  const Mat4 &w = g.world_matrix();
-  const float unit = length(w.point(Vec3(0, 1, 0)) - w.point(Vec3(0.0f)));
-  b->length = unit > 1e-8f ? len / unit : len;
+  b->length = len / bone_world_unit(g);
   for (const Kept &k : kids) {
     k.obj->set_world_position(k.pos);
     k.obj->set_world_rotation(k.rot);
@@ -96,7 +94,7 @@ bool Editor::bone_handles_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   if (bone_drag_.bone && bone_drag_update(view)) return true;
-  GameObject *g = bone_edit_target();
+  GameObject *g = show_bones_ ? bone_edit_target() : nullptr;
   if (!g) return false;
   const int hot = bone_handle_hot(view, *g);
   if (hot < 0 || !in.pressed[0] || in.alt() || u.any_active()) return hot >= 0;
@@ -112,7 +110,7 @@ bool Editor::bone_handles_update(const Recti &view) {
 void Editor::draw_bone_handles(const Recti &view) {
   auto &u = ui_;
   GameObject *g = bone_drag_.bone ? scene_->find(bone_drag_.bone) : bone_edit_target();
-  if (!g || !g->get<Bone>()) return;
+  if (!g || !g->get<Bone>() || !show_bones_) return;  // (the Bones overlay layer off: no handles either, task 0146)
   const int hot = bone_drag_.bone ? bone_drag_.end : bone_handle_hot(view, *g);
   const Vec3 ends[2] = {bone_head(*g), bone_tail(*g)};
   u.canvas.push_clip(view);

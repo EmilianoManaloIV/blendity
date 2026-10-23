@@ -38,6 +38,9 @@
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
 #include "ui.h"
+#include "livelink.h"
+#include "../scene/partfield.h"
+#include "../image/edit_doc.h"
 
 #include <atomic>
 #include <mutex>
@@ -112,7 +115,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -127,6 +130,9 @@ struct FrameProfile {
    * the overlapping-vertices check, the "Lighting out of date" key, snapping's searches, gathering the views'
    * draw items (render meshes built on the way included) and the scene hashes - and how often the costly ones ran. */
   double ms_edit_apply = 0, ms_overlap = 0, ms_lighting_key = 0, ms_snap_pick = 0, ms_collect = 0, ms_hash = 0;
+  /* Task 0165: an Edit Mode operator's own time - its one mesh copy, the operation, the selection flushed, Auto
+   * Smooth's check - inside the command that ran it (not a view's time). */
+  double ms_edit_op = 0;
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
@@ -137,6 +143,17 @@ struct FrameProfile {
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
   double ms_gpu = 0;
+  /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
+   * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
+  double ms_gpu_shadow = 0, ms_gpu_gbuffer = 0, ms_gpu_lighting = 0, ms_gpu_readback = 0;  // (readback since task 0160: the submission's wall time beyond the passes - the copies out and the fence wait)
+  double gpu_busy_ms() const { return ms_gpu_shadow + ms_gpu_gbuffer + ms_gpu_lighting; }
+  FrameProfile operator-(const FrameProfile &o) const {  // (task 0159: the GPU fields over a span of frames; `bench`)
+    FrameProfile d;
+    d.ms_gpu = ms_gpu - o.ms_gpu, d.ms_gpu_readback = ms_gpu_readback - o.ms_gpu_readback;
+    d.ms_gpu_shadow = ms_gpu_shadow - o.ms_gpu_shadow, d.ms_gpu_gbuffer = ms_gpu_gbuffer - o.ms_gpu_gbuffer, d.ms_gpu_lighting = ms_gpu_lighting - o.ms_gpu_lighting;
+    d.gpu_views = gpu_views - o.gpu_views;
+    return d;
+  }
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
     ms_ui += o.ms_ui, ms_present += o.ms_present;
@@ -145,6 +162,7 @@ struct FrameProfile {
     views_held += o.views_held, cheap_shadows += o.cheap_shadows;
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
+    ms_edit_op += o.ms_edit_op;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
@@ -154,6 +172,7 @@ struct FrameProfile {
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
     ms_gpu += o.ms_gpu;
+    ms_gpu_shadow += o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
   }
 };
 /* Adds the time to the end of its scope to a FrameProfile field. */
@@ -251,6 +270,14 @@ struct DeleteQuestion {
   std::function<void()> on_delete, on_close;  // on_close: answered either way, or clicked away
 };
 
+/* The import preview's shadings (task 0152): As Imported, PBR, then the toon styles (from toon_style_names, so a new
+ * style joins by itself); a console word's index (asis, pbr, a style's name in any spelling, soft, gg), -1 for none. */
+const std::vector<std::string> &import_shading_names();
+int import_shading_index(const std::string &word);
+/* What finish_import does about outlines: the file's own (none from the preview), none at all, or one of this
+ * width on every mesh. */
+enum class ImportOutline { Keep, Off, Set };
+
 /* The Animation window's state (task 0059): which clip, the playhead, Preview and Record, the selected keys. */
 struct AnimEditorState {
   uint64_t root = 0;  // the object last animated (its Animation component's clip is edited)
@@ -337,6 +364,8 @@ struct SkinWeightJob {
   ~SkinWeightJob();
 };
 
+struct FieldEdit;  // an Inspector edit (panels.cpp), applied to other objects and materials
+
 /* A multi-selection in a list of assets (task 0053): the Hierarchy's clicks (Ctrl toggles, Shift selects the range
  * from the last click in the order shown, Ctrl+Shift adds that range, a plain click selects one), Ctrl+A all shown. */
 template<class T> struct MultiSelect {
@@ -405,10 +434,20 @@ template<class T> struct MultiSelect {
   }
 };
 
+/* The selection's colours in the Scene view (Unity's orange; a child of the selection a browner one). */
+inline constexpr uint32_t kSelectOrange = Color::hex(0xF7941D), kChildOrange = Color::hex(0xC28A4A);
+
+/* Edit Mode's selection at a state (task 0167): what undo gives back with the mesh, as Blender does. */
+struct EditSelection {
+  uint64_t obj = 0;  // 0: none recorded
+  std::vector<uint8_t> verts, faces;
+  std::vector<uint64_t> edges;
+};
 struct UndoState {
   std::unique_ptr<Scene> scene;
   std::vector<uint64_t> selection;
   uint64_t active = 0;
+  EditSelection edit_sel;  // Edit Mode's selection at this state (task 0167)
   std::string label;
   std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
   std::vector<std::pair<std::string, std::string>> clips;     // animation clips' texts likewise (task 0059)
@@ -427,6 +466,15 @@ class Editor {
 
   /* Headless entry points used by tests and --screenshot. */
   void init_headless(int width, int height);
+  /* Live Link (task 0172): start on a port (0: any free one), stop; the link for tests. */
+  bool livelink_start(int port);
+  void livelink_stop();
+  livelink::Link *livelink_for_test() { return livelink_.get(); }
+  const std::vector<int> &uv_slots_for_test() const { return uv_slots_; }
+  /* How the UV Editor draws face `f` of `m`: 0 editable, 1 dimmed (another material), 2 not at all. */
+  int uv_face_style_for_test(const Mesh &m, size_t f) const { return uv_slot_active(m, f) ? 0 : uv_hide_others_ ? 2 : 1; }
+  /* Task 0180: PartField stood in for by `m` (the tests'). */
+  void set_partfield_for_test(std::unique_ptr<partfield::Model> m) { partfield_ = std::move(m); }
   void step_frame_headless(std::vector<platform::Event> events = {});
   const Image &framebuffer() const { return fb_; }
   Scene &scene() { return *scene_; }
@@ -455,12 +503,21 @@ class Editor {
   const Image &render_image_for_test() const { return render_img_; }
   const std::vector<float> &render_linear_for_test() const { return render_linear_; }  // (the finished render's light, 3 floats a pixel)
   bool rendering_for_test() const { return rendering_; }
+  /* Task 0181: the Editing window's document and the picture it shows (0xAARRGGBB, the result; the split's
+   * before is the source's). */
+  edit::Doc &edit_doc_for_test() { return edit_doc_; }
+  const std::vector<uint32_t> &edit_display_for_test() const { return edit_after_px_; }
+  const std::vector<uint32_t> &edit_before_for_test() const { return edit_before_px_; }
+  const std::vector<float> &edit_mask_weights_for_test() const { return edit_mask_weights_; }  // (task 0182: what Show drew)
+  float edit_split_for_test() const { return edit_split_; }
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
   std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
+  std::vector<uint8_t> &face_sel_for_test() { return face_sel_; }
+  EditElement elem_for_test() const { return elem_; }
   bool weight_paint_for_test() const { return weight_paint_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
@@ -528,6 +585,17 @@ class Editor {
     auto it = game_guides_rects_.find(key);
     return it == game_guides_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
+  /* Tests: the Scene view's Overlays button ("button") and its menu's rows by label (task 0146). */
+  Recti overlay_rect_for_test(const std::string &key) const {
+    auto it = overlay_rects_.find(key);
+    return it == overlay_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
+  bool overlay_shown_for_test(const std::string &key);
+  /* Tests: an Inspector foldout's state by its key ("grp_Toon" for a group, task 0145); false when never drawn. */
+  bool foldout_open_for_test(const std::string &key) const {
+    auto it = foldouts_.find(key);
+    return it != foldouts_.end() && it->second;
+  }
   Recti pilot_frame() const {
     GameObject *g = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr;
     const Camera *c = g ? g->get<Camera>() : nullptr;
@@ -574,6 +642,11 @@ class Editor {
     return o;
   }
   void select_project_file_for_test(const std::string &p) { project_selected_ = p; }
+  void select_project_files_for_test(const std::vector<std::string> &paths) {  // several, as Ctrl-clicks leave them (no object selected)
+    project_multi_.items = paths;
+    project_selected_ = paths.empty() ? std::string() : paths.back();
+    clear_selection();
+  }
   bool uv_gizmo_for_test(Vec2 &centre, float &arm) const {
     if (!uv_gizmo_valid_) return false;
     centre = uv_gizmo_centre_;
@@ -619,10 +692,19 @@ class Editor {
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
   double gpu_view_open_ms() const { return gpu_view_open_ms_; }  // opening the GPU view took (device, pipelines, shaders)
+  uint64_t gpu_submits_for_test() const { return gpu_view_ ? gpu_view_->submits() : 0; }  // task 0160: the card's submissions so far
+  void gpu_split_readback_for_test(bool split) { gpu_split_readback_for_test_ = split; }  // the old render-then-read path
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
   size_t materials_selected_for_test() const { return material_multi_.items.size(); }
+  /* The fields whose values differ between `source` and any of `targets` that shows them (task 0147: the Inspector
+   * draws those as a dash). Public for the tests. */
+  std::set<std::string> mixed_material_fields(const Material *source, const std::vector<MaterialPtr> &targets);
+  struct MixedCache {  // (the comparison reflects every target: once per change, not per frame)
+    uint64_t key = 0;
+    std::set<std::string> fields;
+  } mixed_cache_;
   bool material_is_selected_for_test(const std::string &name) const {
     for (const MaterialPtr &m : material_multi_.items)
       if (m && m->name == name) return true;
@@ -655,6 +737,19 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  /* The import preview's (task 0152). */
+  bool import_preview_open_for_test() const { return ipv_.open; }
+  bool begin_import_preview_for_test(const std::string &path) { return begin_import_preview(path, true) && ipv_.open; }
+  void import_preview_force_for_test(bool on) { ipv_force_ = on; }  // (headless runs never open the dialog unless asked)
+  bool import_preview_pref_for_test() const { return import_preview_pref_; }
+  int import_shading_pref_for_test() const { return import_shading_pref_; }
+  size_t import_preview_queue_for_test() const { return ipv_queue_.size(); }
+  void close_dialog_for_test() { dialog_ = Dialog::None; }  // (as a click outside the popup)
+  Scene *import_preview_scene_for_test() { return ipv_.scene.get(); }
+  const ImportResult &import_preview_result_for_test() const { return ipv_.result; }
+  const Image &import_preview_image_for_test() const { return ipv_img_; }
+  void import_preview_pref_for_test(bool on, int shading) { import_preview_pref_ = on, import_shading_pref_ = shading; }
+  void import_preview_outline_for_test(bool on, float width) { import_preview_outline(on, width); }
   /* The rows of a frame to present: runs of 16-row bands whose pixels differ from `bands` (the hashes of the last
    * frame presented, updated here); every row when `all` or the size changed (task 0084). */
   static std::vector<std::pair<int, int>> changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all);
@@ -786,6 +881,11 @@ class Editor {
   bool autorig_set_view(const std::string &view);
   /* Task 0067 (rig_controls.cpp): rig controls drawn and picked, IK and FK added and removed. */
   void rig_control_segments(const GameObject &g, const RigControl &rc, std::vector<std::pair<Vec3, Vec3>> &out) const;
+  /* Task 0158 (rig_controls.cpp): a Wind's arrow, streamlines or rings as segments; the Scene view draws them in the
+   * selection's orange. */
+  static void wind_gizmo_segments(const GameObject &g, const Wind &w, std::vector<std::pair<Vec3, Vec3>> &out);
+  void draw_wind_gizmo(const GameObject &g, const Wind &w);
+  static ui::Icon scene_icon_of(const GameObject &g);  // the Scene view's icon for an object (lights, cameras, effectors), None for none (task 0158)
   uint32_t rig_control_color(const GameObject &g, const RigControl &rc) const;
   void draw_rig_control(const GameObject &g, const RigControl &rc);
   const GameObject *pole_joint(const GameObject &pole) const;
@@ -795,6 +895,10 @@ class Editor {
   bool remove_ik(GameObject *bone);
   bool ik_names_object(const std::string &name) const;
   int add_fk_controls(const std::vector<GameObject *> &bones);
+  int fit_control_sizes(GameObject *root);  // every control under root sized from its bone, in metres (task 0156)
+  float fitted_control_size(const GameObject &g, const RigControl &rc) const;
+  GameObject *ik_owner_of_control(const GameObject &control, bool pole) const;
+  static Mat4 unscaled_frame(const Mat4 &m);  // the matrix's axes unit and orthogonal, its mirroring and position kept
   GameObject *fk_control_of(const GameObject &bone) const;
   int remove_fk_controls(const std::vector<GameObject *> &bones);
   void fk_controls_follow_bones(GameObject *root);  // the FK controls of bones below `root` turned to their bones
@@ -878,6 +982,10 @@ class Editor {
   void draw_learn(const Recti &r);
   void open_references();  // Learn > References (the papers behind features; the Research window is retired)
   void draw_profiler(const Recti &r);
+  void draw_profiler_gpu(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat);  // task 0159
+  void draw_profiler_gpu_views(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat);
+  void draw_profiler_gpu_tracer(const char *what, const PTStats &s, double wall_ms, const char *of_what, const std::function<void(const std::string &, const std::string &)> &stat);
+  std::string render_gpu_busy_text() const;  // task 0159
   void draw_render_window(const Recti &r);
   void draw_uv_editor(const Recti &r);
   void draw_dialogs();
@@ -890,6 +998,14 @@ class Editor {
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
+  /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
+   * per metre at one metre; off between views (exports, bakes: the plain thickness). */
+  struct OutlineView {
+    bool on = false;
+    Vec3 eye;
+    float px_per_m = 0.0f;
+    bool ortho = false;  // an orthographic view: the width on screen doesn't depend on the distance
+  } outline_view_;
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
@@ -948,6 +1064,7 @@ class Editor {
   void draw_bone(const GameObject &g, const Bone &b);  // Blender's octahedral bone (task 0047)
   /* Rigging (task 0047): bone add <parent> [length], armature reset|apply [root], skin bind [object]. */
   void rig_command(const std::vector<std::string> &t);
+  void overlay_command(const std::vector<std::string> &t);  // the Scene view's overlay layers (task 0146)
   bool armature_pose(GameObject *root, bool apply_as_rest);  // Reset Pose (false) / Apply as Rest (true)
   enum class SkinBind { Inpaint, Envelope };
   bool skin_bind(GameObject *g, SkinBind how = SkinBind::Inpaint);
@@ -1201,6 +1318,82 @@ class Editor {
   void draw_seq_details(Sequence &s, const Recti &r);
   void draw_seq_triggers(Sequence &s, const Recti &r);
   void draw_sequencer_window(const Recti &r);
+  /* ---- Live Link (task 0172, ADR 0055: livelink.cpp, livelink_window.cpp) ---- */
+  void draw_livelink_window(const Recti &r);
+  /* ---- Editing (task 0181, ADR 0058: editing_window.cpp) ---- */
+  bool edit_open_file(const std::string &path);  // an image or an .edit
+  bool edit_open_render();
+  void edit_open_dialog();
+  std::string edit_default_export_path() const;
+  bool edit_export(const std::string &path);  // "" -> Renders/<name>_edit.png
+  void edit_export_dialog();
+  bool edit_save(const std::string &path);  // "" -> beside the source
+  void edit_list();
+  void edit_command(const std::vector<std::string> &t, const std::string &line);
+  void edit_curve_command(const std::vector<std::string> &t);
+  void edit_update_display();
+  void draw_editing_window(const Recti &r);
+  void draw_editing_canvas(const Recti &r);
+  void draw_edit_panel(const Recti &r);
+  void draw_edit_step(ui::Layout &lay, int step);
+  void draw_edit_field(ui::Layout &lay, int step, const edit::FieldInfo &f, float value);
+  void draw_edit_curve(ui::Layout &lay, int step);
+  void draw_curve_box(const Recti &box, const std::vector<Vec2> &pts, int ch);
+  Vec2 curve_to_px(const Recti &box, Vec2 p) const;
+  int curve_point_near(const Recti &box, const std::vector<Vec2> &pts) const;
+  void edit_curve_input(const Recti &box, int step, int ch);
+  void edit_curve_drag_to(const Recti &box, int step, int ch);
+  bool edit_window_has_mouse();
+  void draw_edit_step_fields(ui::Layout &lay, int step);
+  /* Masks (task 0182: editing_masks.cpp) */
+  void edit_mask_command(const std::vector<std::string> &t);
+  bool edit_mask_edit_parts(const std::vector<std::string> &t, int step, std::vector<edit::MaskPart> &parts);
+  void edit_mask_select(int step, int part);
+  void edit_mask_part_removed(int step, int j);
+  void edit_mask_paint(int step, int part, float u, float v, float radius, float flow, bool erase, bool record);
+  void draw_edit_mask(ui::Layout &lay, int step);
+  void draw_edit_mask_part(ui::Layout &lay, int step, int part);
+  void draw_edit_mask_params(ui::Layout &lay, int step, int part, std::vector<edit::MaskPart> &parts);
+  void draw_edit_brush_row(ui::Layout &lay, int step, int part, std::vector<edit::MaskPart> &parts);
+  bool edit_mask_on_picture() const;
+  void draw_edit_mask_overlay(const Recti &dst, const Recti &clip);
+  void edit_mask_input(const Recti &dst, const Recti &clip);
+  std::vector<Vec2> draw_mask_handles(const Recti &dst, const edit::MaskPart &m);
+  void edit_mask_brush(const Recti &dst, Vec2 mouse, bool inside);
+  float edit_brush_pressure() const;
+  bool edit_mask_show_ = false, edit_brush_erase_ = false, edit_brush_stroke_ = false, edit_handle_moved_ = false;
+  int edit_mask_step_ = -1, edit_mask_part_ = -1, edit_handle_drag_ = -1;
+  Vec2 edit_brush_last_{0, 0};
+  float edit_brush_size_ = 0.05f, edit_brush_hardness_ = 0.5f;
+  std::string edit_mask_key_;
+  std::vector<float> edit_mask_weights_;
+  int edit_mask_w_ = 0, edit_mask_h_ = 0;
+  std::string edit_default_save_path() const;
+  edit::Doc edit_doc_;
+  int edit_opened_ = 0;  // (counts documents opened: the display's key)
+  std::vector<uint32_t> edit_after_px_, edit_before_px_;
+  int edit_after_w_ = 0, edit_after_h_ = 0;
+  std::string edit_shown_key_, edit_before_key_;
+  float edit_zoom_ = 0;  // 0: fit
+  Vec2 edit_pan_{0, 0};
+  float edit_split_ = -1.0f;  // the before / after line across the picture (0-1), -1 off
+  bool edit_split_drag_ = false;
+  ui::Id edit_drag_id_ = 0;  // the slider being dragged (one undo step a drag)
+  int edit_curve_channel_ = 0, edit_hsl_band_ = 0, edit_panel_h_ = 0;
+  int edit_curve_drag_ = -1, edit_curve_step_ = -1, edit_curve_ch_ = 0;  // the curve point dragged, and whose
+  Recti edit_canvas_rect_{0, 0, 0, 0}, edit_window_rect_{0, 0, 0, 0};
+  void uv_report_log();     // task 0179: `uv report`
+  void uv_parts_command(const std::vector<std::string> &t);
+  float part_tau_ = 1.25f;  // Part Unwrap's distortion bound (`uv parts <bound>`)
+  bool part_multi_tile_ = false;
+  /* Task 0180: PartField's learned part tree (off by default: its weights are NVIDIA's, non-commercial, and the user
+   * installs a conversion of their own), loaded when first needed. */
+  bool part_semantic_ = false;
+  std::unique_ptr<partfield::Model> partfield_;
+  bool partfield_features(const Mesh &m, std::vector<float> &features, int &dims);
+  void livelink_command(const std::vector<std::string> &t);
+  void livelink_status();
+  void livelink_tick();  // once a frame, after the scene's changes
   bool seq_drop_clip(const std::string &abs_path, int mx, int my);
   void seq_command(const std::vector<std::string> &t);
   void seq_jump_command(const std::string &name, float blend);
@@ -1325,6 +1518,8 @@ class Editor {
   /* After an edit (at the undo commit): meshes whose vertex count changed get their groups back from the snapshot
    * before the edit, by position (ADR 0024). */
   void carry_vertex_groups(const Scene &before);
+  void carry_shape_keys(MeshPtr &mesh, const Mesh *before);
+  void carry_custom_normals(MeshPtr &mesh, const Mesh *before);  // (task 0149: as shape keys, by position)
   /* Weight Paint mode (task 0046, weight_paint.cpp). */
   bool set_weight_paint(bool on);
   bool wp_update(const Recti &view);  // the brush owns the mouse
@@ -1503,6 +1698,16 @@ class Editor {
   void edges_from_verts();  // edge_sel_ = edges with both ends selected
   void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
   void edit_op(const std::string &op);
+  void gpu_list();  // `gpu list`: the cards Vulkan sees and OptiX's state (task 0169)
+  void edit_op_rest(const std::string &op, GameObject &g, MeshPtr &mp);  // the operators that aren't redoable (task 0165)
+  void select_op(const std::string &op, GameObject &g, const Mesh &m);   // the selection-only operators, on the shared mesh (task 0166)
+  void select_similar_op(const std::string &op, const Mesh &m);
+  void select_sharp_op(const Mesh &m);
+  void select_overlapping_op(GameObject &g, const Mesh &m);
+  void select_coplanar_op(const Mesh &m);
+  void select_grow_op(const std::string &op, const Mesh &m);
+  void select_loop_op(const Mesh &m);
+  bool selected_edge(const Mesh &m, uint32_t &a, uint32_t &b) const;
   void edit_tool(const std::string &op);  // edit_op, if the current selection mode offers it
   bool edit_op_available(const std::string &op) const;
   /* Nearest visible edge to the mouse (edge mode / loop select / loop cut). */
@@ -1518,7 +1723,11 @@ class Editor {
   struct LastOp {
     std::string op;  // empty = none
     uint64_t obj = 0;
+    /* The mesh as it was: shared with the undo step and never written (task 0165) - run_last_op copies it once. */
     MeshPtr before;
+    size_t shallow_before = (size_t)-1;  // Auto Smooth's shallow-edge count of `before`, (size_t)-1 when it can't apply
+    float shallow_angle = 0;              // ... and the settings it was taken under (a re-run checks them: shallow_before_of)
+    bool shallow_on = false;
     const Mesh *result = nullptr;  // the mesh it produced (panel hides once anything else edits it)
     uint64_t result_version = 0;
     std::vector<uint8_t> vsel, fsel;
@@ -1542,6 +1751,17 @@ class Editor {
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
+  /* A redoable operator's start (task 0165): the selection flushed, LastOp filled from the mesh as it is, run_last_op. */
+  void begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp);
+  /* The faces an operator reads, from the vertices or the edges in those modes; how many are selected. */
+  size_t edit_selection_faces(const Mesh &m);
+  /* Whether Auto Smooth may shade a mesh after an operator: on, and the mesh shaded flat as a whole. */
+  bool auto_smooth_applies(const Mesh &m) const;
+  /* Auto Smooth's shallow-edge count of a mesh an operator is about to change, (size_t)-1 when it can't apply. */
+  size_t shallow_before(const Mesh &m) const;
+  void fill_last_op_settings(LastOp &L, const std::string &op) const;  // the tool settings an operator starts from
+  void note_shallow_before(LastOp &L) const;        // the count of L.before with the settings it was taken under
+  size_t shallow_before_of(const LastOp &L) const;  // that count, or a fresh one when the settings changed since
   bool last_op_valid();
   void settle_meshes();
   /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
@@ -1679,6 +1899,7 @@ class Editor {
   void commit_undo();
   void undo();
   void redo();
+  void restore_state(UndoState s, std::vector<UndoState> &into, const char *verb);  // (what undo and redo share)
   void new_scene();
   bool open_scene(const std::string &path);
   void save_scene_cmd(bool save_as);
@@ -1712,7 +1933,24 @@ class Editor {
   std::string import_dir_;  // the folder the last import came from
   void draw_export_options();  // panels.cpp
   void draw_edit_tools(ui::Layout &lay);
-  void draw_material_fields(ui::Layout &lay, const MaterialPtr &m);  // panels.cpp: Edit Mode tools (Inspector and Modeling Tools)
+  /* A material's fields; with `others` (several selected, task 0147) an edit reaches every one of them that shows the
+   * field, and fields whose values differ draw a dash. */
+  void draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const std::vector<MaterialPtr> *others = nullptr);
+  size_t apply_material_edits(const std::vector<FieldEdit> &edits, const Material *source, const std::vector<MaterialPtr> &targets);
+  void matset_command(const std::vector<std::string> &t, const std::string &line);  // matset <Field> <value>: the selected materials
+  void toonstyle_command(const std::string &name);  // toonstyle <style>: the selected materials' toon preset (task 0148)
+  /* Anime face normals (task 0149): a sphere proxy fitted to the head (the Head vertex group, else the top of the
+   * mesh) and a Normal Transfer modifier reading it, so the face shades like a ball. Console: facenormals. */
+  GameObject *add_face_normals(GameObject *mesh_obj);
+  void customnormals_command(const std::string &verb);  // customnormals clear|show: the selected meshes' own normals (task 0149)
+  /* Rig Hair from Mesh (task 0153): the mesh's loose parts (hair cards) - or one shell split into `locks` sectors - each
+   * a chain of `bones` bones from the scalp to the tip under a new hair armature (under the character's head bone when
+   * the mesh is skinned to one), the mesh skinned to it, Spring Bones on every chain; one undo step. The chains made.
+   * Console: hair rig [locks] [bones]. */
+  int rig_hair_from_mesh(GameObject *mesh_obj, int locks, int bones);  // locks 0: every card its own (up to 64), a shell in eight
+  /* animemat <Anime Leaves|Grass|Wall|Windows|Roof|Sky|Clouds|Rock|Water> (task 0150): the preset's texture asset and a
+   * Toon material reading it (a Cutout for the cards) on the selected objects. */
+  MaterialPtr animemat_command(const std::string &preset);
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();
@@ -1813,6 +2051,14 @@ class Editor {
   bool origin_hover_ = false;  // the Inspector's Origin row is in use: the Scene view previews the new origin
   bool origin_target(const GameObject &g, int mode, Vec3 world_point, Vec3 &c) const;
   void draw_origins(const Recti &view);
+  /* A grid of buttons, `per` to a row, a disabled one drawn flat with its label dimmed (the Rigging and Tools windows). */
+  struct GridButton {
+    std::string label, tip;
+    bool enabled;
+    std::function<void()> fn;
+  };
+  void button_grid(ui::Layout &lay, const std::vector<GridButton> &bs, int per);
+  bool project_to_view(const Recti &view, Vec3 p, Vec2 &s);  // a world point to the view's pixels; false behind the camera
   uint64_t focus_pick_cam_ = 0;  // a Camera waiting for its focus point, or a Light for its target (eyedroppers)
   void aim_light(GameObject &g, Vec3 target);
   bool focus_pick_update(const Recti &view);
@@ -1827,6 +2073,62 @@ class Editor {
   const std::vector<std::string> &image_assets();
   std::vector<MaterialPtr> scene_materials();
   void import_model_file(const std::string &path, bool copy_into_assets);
+  /* The import preview (task 0152): the model read and instantiated into a scene of its own, shown in a dialog with
+   * its shading switchable (the file's materials, PBR, a toon style) and an outline, before anything lands under
+   * Assets; Import then finishes as a plain import does, with the chosen materials. */
+  struct ImportPreview {
+    bool open = false;
+    std::string path;
+    bool copy_into_assets = true;
+    ImportResult result;                 // its materials are the preview scene's (and the import's)
+    std::vector<std::string> originals;  // the file's materials as text, to start again from under another shading
+    std::unique_ptr<Scene> scene;
+    int shading = 0;  // 0 As Imported, 1 PBR, 2.. the toon styles (Classic, Guilty Gear, Soft Anime, Painterly, Manga)
+    bool outline = false, outline_touched = false;  // (untouched: the file's own outlines come in as they are)
+    float outline_width = 0.01f;
+    float yaw = 30.0f;  // the turntable, degrees
+    bool turning = true, dragging = false;
+    int drag_x = 0;
+    double last_time = 0.0;  // the turntable turns by the clock, not the frame rate
+    uint64_t version = 0;    // bumped by every change of the materials or the outlines
+    /* What the last picture was drawn for. */
+    struct Key {
+      int yaw_q = -1, w = 0, h = 0, shading = 0, width_q = 0;
+      uint64_t version = 0;
+      bool outline = false;
+      bool operator==(const Key &o) const { return yaw_q == o.yaw_q && w == o.w && h == o.h && shading == o.shading && width_q == o.width_q && version == o.version && outline == o.outline; }
+    } key;
+  };
+  /* The model read and shown; false when there is nothing to preview (no mesh: a motion-only file) and the caller
+   * imports at once. A failed read is said and counts as handled (true). With a preview open, the file waits its turn. */
+  bool begin_import_preview(const std::string &path, bool copy_into_assets);
+  void apply_import_shading(std::vector<MaterialPtr> &mats, const std::vector<std::string> &originals, int shading);
+  void import_preview_outline(bool on, float width);
+  void render_import_preview(int w, int h);
+  void finish_import_preview(bool do_import);  // Import, or Cancel (the preview scene goes either way; the next queued file opens)
+  void draw_import_preview_dialog(const std::function<void()> &close);
+  void draw_ipv_picture();
+  void draw_ipv_shading_row();
+  void draw_ipv_outline_row();
+  void import_with_shading(const std::string &path, bool copy_into_assets, int shading);  // the console's import <file> <shading>
+  void finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
+                     bool rewrite_materials);
+  /* The draw items a view and the import preview share (task 0152): a mesh's, and its toon outline's hull. */
+  DrawItem mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing);
+  bool outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &out);
+  size_t import_material_assets(ImportResult &r, const std::string &model, bool rewrite);  // rewrite: existing .mat files take the import's fields (task 0152)
+  bool inside_assets(const std::string &path) const;
+  void shape_command(const std::vector<std::string> &t);
+  std::string copy_model_into_assets(const std::string &path);
+  void import_motion_file(const std::string &path);
+  /* A clip imported with a model or a motion saved as Assets/Animations/<folder>/<clip>.anim (a free name), and played
+   * by `root`'s Animation component when `play`; the asset's path ("" when it couldn't be written). */
+  std::string save_imported_clip(GameObject &root, const AnimationClip &clip, const std::string &folder, bool play);  // (the folder and the clip's name made file-safe)
+  GameObject *motion_target();
+  std::string import_folder(const std::vector<std::string> &sources, const std::string &stem);
+  bool import_folder_matches(const std::string &dir, const std::vector<std::string> &sources) const;
+  bool import_folder_reused(const std::vector<std::string> &sources, const std::string &stem) const;
+  void copy_import_textures(const ImportResult &r, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map);
   void assign_texture_to_selection(const std::string &asset_path);
   void assign_material_to_faces(int slot);
   void spawn_stress_grid(int count, const std::string &kind);
@@ -1857,6 +2159,7 @@ class Editor {
   ui::Context ui_;
   float dpi_ = 1.0f;
   float ui_scale_pref_ = 0.0f;  // 0 = follow OS DPI
+  float rig_control_scale_ = 1.0f;  // Preferences > Rig Control Size: every control's wire and pick distance, times this (task 0156)
   double frame_start_ = 0;
   float frame_ms_ = 0, ui_ms_ = 0;
   std::vector<float> frame_history_, raster_history_;
@@ -1937,7 +2240,16 @@ class Editor {
 
  private:
   bool pending_change_ = false;
+  EditSelection edit_sel_before_;  // Edit Mode's selection before the pending change (task 0167: the undo step's)
+  EditSelection edit_selection() const;
+  void note_edit_selection_before();          // before an Edit Mode operator changes the mesh
+  void restore_edit_selection(const EditSelection &e);
   std::string pending_label_;
+
+  /* ---- Live Link (task 0172) ---- */
+  std::unique_ptr<livelink::Link> livelink_;
+  int livelink_port_ = livelink::kDefaultPort;
+  std::string livelink_error_;
 
   /* ---- play mode ---- */
   bool playing_ = false, paused_ = false, step_requested_ = false;
@@ -1964,6 +2276,18 @@ class Editor {
   Recti scene_rect_;
   Shading shading_ = Shading::Shaded;
   bool scene_lighting_ = true, show_grid_ = true, show_gizmos_ = true, show_stats_ = true;
+  /* The Scene view's overlay layers (task 0146): bones, rig controls, light and camera icons, curve and lattice
+   * points, origins, footprints and the selection outline, each hidden on its own (Blender's Overlays popover), so
+   * a rigged character can be seen as its mesh with the IK handles still in reach. The three above are layers too. */
+  bool show_bones_ = true, show_rig_controls_ = true, show_icons_ = true, show_points_ = true, show_origins_ = true, show_footprints_ = true,
+       show_outline_ = true;
+  struct OverlayLayer {
+    const char *key, *label, *help;
+    bool *flag;
+  };
+  std::vector<OverlayLayer> overlay_layers();  // every layer in menu order (the grid, gizmos and statistics last)
+  void draw_overlays_menu();
+  std::map<std::string, Recti> overlay_rects_;  // the Overlays button ("button") and its rows by label (tests)
   RasterOptions raster_opt_;
   RasterStats scene_stats_, game_stats_;
   enum class Drag { None, Fly, Orbit, Pan, Zoom, Gizmo, Box, ViewTool, AltClick } drag_ = Drag::None;  // AltClick: Blender's Alt+click, the view still
@@ -2334,6 +2658,14 @@ class Editor {
   double live_preview_time_ = -100;
   Image cam_preview_img_;
   RenderTarget cam_preview_rt_;
+  ImportPreview ipv_;  // (task 0152)
+  std::vector<std::pair<std::string, bool>> ipv_queue_;  // files dropped while a preview is open, each with copy_into_assets
+  bool ipv_force_ = false;
+  Image ipv_img_;
+  RenderTarget ipv_rt_;
+  Renderer3D ipv_r3d_;
+  bool import_preview_pref_ = true;  // Preferences > Import: the preview before importing; the shading it opens with
+  int import_shading_pref_ = 0;
   /* Camera filters: the internal-resolution image and target (render_camera); the Scene view
    * shows the main camera's filters when scene_filters_ is on. */
   FilterTarget scene_ft_, game_ft_, preview_ft_, render_ft_;  // one per view that can be filtered
@@ -2363,6 +2695,7 @@ class Editor {
   std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
   std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
   double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)
+  bool gpu_split_readback_for_test_ = false;  // (task 0160: render and read back as two submissions, for the test)
   ShadowMap gpu_shadow_;             // the shadow map's frame for the GPU views (no depth: they render it)
   std::vector<uint32_t> gpu_color_;  // a view's colour when its rows aren't contiguous in the canvas
   uint64_t gpu_mesh_bytes_ = 0;      // what the meshes on the card take
@@ -2452,6 +2785,7 @@ class Editor {
   uint64_t cam_preview_pt_hash_ = 0;
   bool cam_preview_done_ = false;
   double render_start_ = 0, render_time_ = 0;
+  int render_resolved_samples_ = -1;  // (task 0161: the sample count the shown F12 picture was resolved from)
   std::string render_status_;
   float render_zoom_ = 0;  // 0 = fit
   Vec2 render_pan_;
@@ -2468,6 +2802,16 @@ class Editor {
   Vec2 uv_pan_;
   int uv_bg_ = 0;  // 0 material texture, 1 UV grid, 2 color grid, 3 none
   bool uv_stretch_ = false;
+  /* Task 0186: the material slots the UV Editor edits (empty: all); the other faces dimmed or (hide) not drawn. */
+  std::vector<int> uv_slots_;
+  bool uv_hide_others_ = false;
+  bool uv_slot_active(const Mesh &m, size_t f) const {
+    return uv_slots_.empty() || std::find(uv_slots_.begin(), uv_slots_.end(), m.material_of(f)) != uv_slots_.end();
+  }
+  void uv_clip_selection(const Mesh &m);              // corners of faces out of the filter unselected
+  bool uv_material_command(const std::string &arg);   // `uv material <name>|+<name>|all`
+  void uv_edit_material(const MaterialPtr &mat);       // Materials window > Edit UVs
+  void draw_uv_material_filter(const Recti &r);
   enum class UvDrag { None, Box, Move, Rotate, Scale, Pan } uv_drag_ = UvDrag::None;
   int uv_press_x_ = 0, uv_press_y_ = 0;
   std::vector<std::pair<uint32_t, Vec2>> uv_drag_start_;
@@ -2686,7 +3030,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {

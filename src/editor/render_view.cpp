@@ -24,9 +24,12 @@ namespace bl {
 /* Scene -> render data                                                   */
 /* ===================================================================== */
 
+/* An object's scale as one number (the mean of its axes), for a thickness given in metres. */
+static float world_scale_of(const Mat4 &w) { return (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f; }
+
 static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
   for (auto &m : mats)
-    if (m && !m->normal_map.empty()) return true;
+    if (m && (!m->normal_map.empty() || (m->shading_model == 1 && m->toon_hair_highlight))) return true;  // (the hair band runs across the strands: task 0148)
   return false;
 }
 
@@ -47,45 +50,62 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
-    DrawItem it;
-    it.mesh = want_tangents && needs_tangents(mr->materials) ? &m->render_mesh_tangents(editing) : &m->render_mesh(editing);
-    it.model = g.world_matrix();
-    const Material &mat0 = *mr->material(0);
-    it.albedo = mat0.base_color;
-    it.specular = mat0.specular * 0.5f;
-    it.unlit = mat0.unlit;
-    it.double_sided = editing;
-    for (auto &mp : mr->materials)
-      if (mp && mp->double_sided) it.double_sided = true;
-    it.materials = &mr->materials;
-    it.receive_shadows = mr->receive_shadows;
-    it.id = (uint32_t)g.id;
+    DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
     if (!editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
     it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
     it.realtime_lm = !editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_);
     items.push_back(it);
-    /* Toon outlines (ADR 0020): the inverted hull as its own item, back faces always culled (not in Edit Mode). */
-    if (!editing)
-      if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
-        const Outline &ol = *static_cast<const Outline *>(oc);
-        const Mat4 &w = it.model;
-        const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
-        if (const Mesh *shell = ol.shell(*m, scale, game ? 1 : 0)) {
-          DrawItem o;
-          o.mesh = &shell->render_mesh();
-          o.model = it.model;
-          o.albedo = ol.materials()[0]->base_color;  // (NaN-free)
-          o.unlit = true;
-          o.materials = &ol.materials();
-          o.receive_shadows = false;
-          o.always_cull = true;
-          o.id = it.id;
-          items.push_back(o);
-        }
-      }
+    if (editing) return;  // (no outline over the cage)
+    /* The line's width by the object's distance from this view's eye (task 0149); a scaled shell keeps its own slot,
+     * so a path tracer holding the plain one isn't left with a freed mesh. */
+    const Component *oc = g.find_role(Component::RenderRole::Outline);
+    if (!oc || !oc->enabled) return;
+    const Outline &ol = *static_cast<const Outline *>(oc);
+    const float scale = world_scale_of(it.model);
+    const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
+    const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale, game ? 1 : 0) : 1.0f;
+    DrawItem o;
+    if (outline_draw_item(g, *m, it, (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0), tscale, o)) items.push_back(o);
   });
   return items;
+}
+
+/* A mesh's draw item as every view builds it (the import preview too, task 0152). */
+DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing) {
+  DrawItem it;
+  it.mesh = want_tangents && needs_tangents(mr.materials) ? &m.render_mesh_tangents(editing) : &m.render_mesh(editing);
+  it.model = g.world_matrix();
+  const Material &mat0 = *mr.material(0);
+  it.albedo = mat0.base_color;
+  it.specular = mat0.specular * 0.5f;
+  it.unlit = mat0.unlit;
+  it.double_sided = editing;
+  for (auto &mp : mr.materials)
+    if (mp && mp->double_sided) it.double_sided = true;
+  it.materials = &mr.materials;
+  it.receive_shadows = mr.receive_shadows;
+  it.id = (uint32_t)g.id;
+  return it;
+}
+
+/* Toon outlines (ADR 0020): the inverted hull as its own item, back faces always culled. False without a hull. */
+bool Editor::outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &o) {
+  const Component *oc = g.find_role(Component::RenderRole::Outline);
+  if (!oc || !oc->enabled) return false;
+  const Outline &ol = *static_cast<const Outline *>(oc);
+  const Mesh *shell = ol.shell(m, world_scale_of(it.model), slot, thickness_scale);
+  if (!shell) return false;
+  o = DrawItem();
+  o.mesh = &shell->render_mesh();
+  o.model = it.model;
+  o.albedo = ol.materials()[0]->base_color;  // (NaN-free)
+  o.unlit = true;
+  o.materials = &ol.materials();
+  o.receive_shadows = false;
+  o.always_cull = true;
+  o.id = it.id;
+  return true;
 }
 
 /* A Light component as the renderers see it (all four types, temperature applied). */
@@ -158,10 +178,8 @@ void Editor::update_environment() {
       if (l->enabled && l->type == 0 && g.active_in_hierarchy()) sun = -normalize(g.world_rotation().rotate({0, 0, 1}));
   });
   /* Cache key: everything the baked environment depends on. */
-  uint64_t key = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) { key ^= ((const uint8_t *)p)[i]; key *= 1099511628211ull; }
-  };
+  uint64_t key = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { key = fnv1a(p, n, key); };
   mix(&es.mode, 4);
   mix(&es.turbidity, 4);
   mix(&es.ground_albedo, 4);
@@ -197,16 +215,8 @@ void Editor::update_environment() {
  * everything that can change on its own (the evaluated-mesh keys with their modifiers, the light, the
  * probe volume) is hashed every time. `memo` false hashes everything from scratch (the tests compare). */
 uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {  // 8 bytes a step: it runs for every view, every frame
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };  // 8 bytes a step: it runs for every view, every frame
   /* One pass over the components: a virtual call each instead of a dynamic_cast per type. */
   MeshRenderer *mr = nullptr;
   Light *l = nullptr;
@@ -232,14 +242,14 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
             (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
             (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41;
     if (mr->enabled) {
-      materials_key = 1469598103934665603ull;
+      materials_key = kFnvBasis;
       for (auto &mp : mr->materials) {  // a material's version is an input of every object using it
-        materials_key = (materials_key ^ (uint64_t)(uintptr_t)mp.get()) * 1099511628211ull;
-        materials_key = (materials_key ^ (mp ? mp->version : 0)) * 1099511628211ull;
+        materials_key = (materials_key ^ (uint64_t)(uintptr_t)mp.get()) * kFnvPrime;
+        materials_key = (materials_key ^ (mp ? mp->version : 0)) * kFnvPrime;
         if (mp && mp->axis_mode != 0)  // an axis material's parts as resolved (what is rendered; ADR 0018, one level)
           for (const MaterialPtr &part : mp->textures().axis) {
-            materials_key = (materials_key ^ (uint64_t)(uintptr_t)part.get()) * 1099511628211ull;
-            materials_key = (materials_key ^ (part ? part->version : 0)) * 1099511628211ull;
+            materials_key = (materials_key ^ (uint64_t)(uintptr_t)part.get()) * kFnvPrime;
+            materials_key = (materials_key ^ (part ? part->version : 0)) * kFnvPrime;
           }
       }
     }
@@ -297,16 +307,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
 uint64_t Editor::scene_render_hash(bool memo) {
   ProfileScope prof{prof_.ms_hash, {}};
   prof_.scene_hashes++;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     const uint64_t oh = object_render_hash(g, memo);
@@ -367,19 +369,11 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   std::vector<const DrawItem *> caster_ptrs;  // copied into `casters` only when the map is rendered
   std::vector<uint64_t> caster_keys, motion_keys;
   AABB bounds;
-  auto mixer = [](uint64_t &key, const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      key = (key ^ v) * 1099511628211ull;
-      key ^= key >> 29;
-    }
-  };
+  auto mixer = [](uint64_t &key, const void *p, size_t n) { key = mix_bytes(key, p, n); };
   /* What the map depends on: each caster's triangles (the render mesh's serial: a new one whenever it is rebuilt),
    * placement and materials' surface type and Cast Shadows (see-through surfaces cast none; a colour doesn't matter),
    * the light's direction and the resolution. */
-  uint64_t key = 1469598103934665603ull;
+  uint64_t key = kFnvBasis;
   bool cacheable = true;
   for (const DrawItem &it : items) {
     bool casts = false;
@@ -391,7 +385,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     caster_ptrs.push_back(&it);
     bounds.add(it.mesh->bounds.transformed(it.model));
     if (it.mesh->serial == 0) cacheable = false;
-    uint64_t ck = 1469598103934665603ull ^ it.id;
+    uint64_t ck = kFnvBasis ^ it.id;
     mixer(ck, it.model.m, sizeof(float) * 16);
     motion_keys.push_back(ck);  // what makes it "moving": its placement
     /* Its shape (task 0088): the Scene view's flat Edit Mode cache and the Game view's smooth one share it, so the two
@@ -470,7 +464,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   std::vector<DrawItem> casters;
   if (cacheable && n_moving > 0 && n_moving < caster_ptrs.size()) {
     /* The still casters' layer (drawn again only when they or the frame change), then the moving ones over it. */
-    uint64_t skey = 1469598103934665603ull;
+    uint64_t skey = kFnvBasis;
     mixer(skey, &dir, sizeof(Vec3));
     mixer(skey, &res, sizeof(int));
     mixer(skey, &frame, sizeof(AABB));
@@ -508,7 +502,9 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
                              bool scene_lights, const Camera *cam, const FilterStack *filters) {
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
+  outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
   std::vector<DrawItem> items = collect_items(game, true);
+  outline_view_.on = false;
   /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
   const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
   const bool shadows = scene_lights && scene_->render.shadows;
@@ -632,11 +628,11 @@ static std::vector<uint32_t> over_black(const std::vector<uint32_t> &px) {
 const FilterStack &Editor::camera_filters(const GameObject *owner) {
   static const FilterStack none;
   if (!owner) return none;
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   for (const auto &c : owner->components)
     if (c->render_role() == Component::RenderRole::CameraFilter) {
       const uint64_t fh = hash_component(*c) ^ (uint64_t)c->enabled;
-      h = (h ^ fh) * 1099511628211ull;
+      h = (h ^ fh) * kFnvPrime;
     }
   FilterCacheEntry &e = filter_cache_[owner->id];  // (trimmed between frames, never here: callers hold references)
   if (!e.valid || e.hash != h) {
@@ -821,6 +817,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
     s.gpus = enabled_gpus();
     s.use_cpu = rs.gpu_with_cpu || rs.device == 2 || s.gpus.empty();  // Auto: both, by speed (task 0051)
     s.gpu_hardware_rt = rs.hardware_rt;
+    s.gpu_backend = rs.gpu_backend;
   }
   s.max_bounces = rs.max_bounces;
   s.clamp_indirect = rs.clamp_indirect;
@@ -879,10 +876,8 @@ static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p,
       for (int k = 0; k < 6; k++) outside = outside || out[k] == 8;
       if (outside) continue;
     }
-    uint64_t key = 1469598103934665603ull;
-    auto mix = [&](const void *d, size_t n) {
-      for (size_t i = 0; i < n; i++) key = (key ^ ((const uint8_t *)d)[i]) * 1099511628211ull;
-    };
+    uint64_t key = kFnvBasis;
+    auto mix = [&](const void *d, size_t n) { key = fnv1a(d, n, key); };
     const void *src = it.mesh;
     mix(&src, sizeof(src));
     mix(&it.mesh->serial, sizeof(it.mesh->serial));
@@ -1076,6 +1071,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
   render_alpha_lin_.clear();
   render_transparent_ = rs.transparent;
   render_start_ = now_seconds();
+  render_resolved_samples_ = -1;  // (task 0161: the next frame resolves whatever the tracer holds)
   render_has_result_ = true;
   if (open_window) dock_open(WindowKind::Render);
   render_filters_ = camera_filters(cam ? owner : nullptr);
@@ -1166,6 +1162,14 @@ void Editor::start_final_render(bool preview, bool open_window) {
   if (!preview) Log::info("%s", render_status_.c_str());
 }
 
+/* Task 0159: the card's busy share over the whole F12 render ("" on the CPU or without timestamps). */
+std::string Editor::render_gpu_busy_text() const {
+  const PTStats &s = final_pt_.stats();
+  if (s.gpu_busy_ms < 0.0 || render_time_ <= 0.0) return "";
+  const double cards = (double)std::max<size_t>(1, s.gpu_samples.size());  // (the busy is every card's, summed: a share per card)
+  return strprintf("; GPU busy %.0f %% of the render's wall time (%s)", 100.0 * s.gpu_busy_ms / (render_time_ * 1000.0 * cards), cards > 1 ? "a card's average" : "one card");
+}
+
 void Editor::step_final_render() {
   if (!rendering_) return;
   if (mr_job_ || mr_waiting_render_) return step_moonray_render();
@@ -1173,13 +1177,20 @@ void Editor::step_final_render() {
   int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
   if (final_pt_.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there
     render_start_ = now_seconds();
+    render_resolved_samples_ = -1;  // (task 0161: the next frame resolves whatever the tracer holds)
     render_status_ = strprintf("%s: %s", render_preview_ ? "Preview" : "Path tracing", final_pt_.device_summary().c_str());
     Log::info("%s", render_status_.c_str());
   }
-  int done = final_pt_.render(40.0, target);
+  /* The CPU's slice, or with cards at work (task 0161, ADR 0052) a short wait: they render between frames. */
+  int done = final_pt_.render(final_pt_.gpu_async() ? 4.0 : 40.0, target);
   render_time_ = now_seconds() - render_start_;
   bool finished = done >= target;
-  resolve_final_render(finished);
+  /* Task 0161: the picture can only change when the tracer merged new samples (the cards' sums arrive every merge
+   * interval); a frame that merged nothing keeps the resolved image and stays short. */
+  if (finished || final_pt_.samples() != render_resolved_samples_) {
+    resolve_final_render(finished);
+    render_resolved_samples_ = final_pt_.samples();
+  }
   /* Samples per second, and how they were shared when several devices render. */
   std::string split;
   if (!final_pt_.stats().gpu_samples.empty()) {
@@ -1192,7 +1203,7 @@ void Editor::step_final_render() {
                              finished && rs.denoise ? strprintf("  |  denoised (%s)", final_pt_.denoise_backend()).c_str() : "");
   if (finished) {
     rendering_ = false;
-    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.device_summary().c_str());
+    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)%s", done, render_time_, final_pt_.device_summary().c_str(), render_gpu_busy_text().c_str());
   }
 }
 
@@ -1404,7 +1415,7 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam, uint64
     for (float f : w.m) {
       uint32_t b;
       std::memcpy(&b, &f, 4);
-      h = (h ^ b) * 1099511628211ull;
+      h = (h ^ b) * kFnvPrime;
     }
   }
   h ^= hash_reflect([this](Reflector &r) { scene_->render.reflect_raster(r); }) * 31;  // the path tracer's settings don't redraw a view
@@ -1423,15 +1434,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
   vgi_updates_++;
   vgi_last_ = game ? 1 : 0;
   VoxelGIState &vgi = vgi_[vgi_last_];
-  auto mix = [](uint64_t &h, const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  auto mix = [](uint64_t &h, const void *p, size_t n) { h = mix_bytes(h, p, n); };
   /* Occluders: what casts a shadow (as the shadow map's casters), but not see-through surfaces. */
   std::vector<const DrawItem *> occ;
   AABB bounds;
@@ -1495,7 +1498,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
     }
   const int rsm_res = std::max(32, std::min(tier_rsm_cap_ > 0 && !final_render_ ? tier_rsm_cap_ : 2048, ls.gi_rsm_resolution));
   if (ls.gi_bounce && sun) {
-    uint64_t key = 1469598103934665603ull;
+    uint64_t key = kFnvBasis;
     for (const DrawItem *it : occ) {
       mix(key, &it->mesh->serial, 8);
       mix(key, it->model.m, sizeof(it->model.m));
@@ -1546,7 +1549,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
    * resolution changes (unwrapped UVs are kept per object); update_realtime_lightmaps() fills them. */
   const float rres = finite_bits(ls.realtime_resolution) ? std::max(0.0f, std::min(100.0f, ls.realtime_resolution)) : 2.0f;
   if (rres > 0.0f) {
-    uint64_t lkey = 1469598103934665603ull;
+    uint64_t lkey = kFnvBasis;
     mix(lkey, &rres, sizeof(float));
     mix(lkey, &scene_ident_, 8);  // another scene's objects can share ids
     for (const DrawItem &it : items) {
@@ -1596,7 +1599,7 @@ void Editor::note_render_cache_mismatch() { g_cache_mismatches++; }
 uint64_t Editor::frame_scene_hash(uint64_t *scene_hash) {
   uint64_t h = scene_render_hash();
   if (scene_hash) *scene_hash = h;
-  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
+  auto mix = [&](uint64_t v) { h = hash_mix(h, v); };
   mix(hash_reflect([this](Reflector &r) { scene_->render.reflect_raster(r); }));  // (not the path tracer's settings)
   mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
   mix(hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }));  // baked and realtime GI settings
@@ -1608,15 +1611,7 @@ uint64_t Editor::frame_scene_hash(uint64_t *scene_hash) {
 uint64_t Editor::scene_view_key(const Recti &view) {
   uint64_t scene_hash = 0;
   uint64_t h = frame_scene_hash(&scene_hash);
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const float aspect = view.w / (float)std::max(1, view.h);
   const Mat4 v = cam_.view(), p = cam_.proj(aspect);
   mix(&view, sizeof(view));
@@ -1788,7 +1783,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     if (traced_img.width != tw || traced_img.height != th) traced_img.resize(tw, th);
     const int target = std::max(1, rs.preview_samples);
     if (!cam_preview_done_) {
-      int done = cam_preview_pt_.render(12.0, target);
+      int done = cam_preview_pt_.render(cam_preview_pt_.gpu_async() ? 2.0 : 12.0, target);  // (task 0161: the cards work between frames)
       if (done >= target) {
         std::vector<float> lin = cam_preview_pt_.linear_rgb(rs.denoise);
         cam_preview_pt_.resolve_rgb(lin, traced_img.pixels.data(), tw);
@@ -1956,6 +1951,7 @@ bool Editor::start_render_sequence(const std::string &dir_in) {
 void Editor::stop_render_sequence() {
   if (seq_.active) {
     if (rendering_) rendering_ = false;
+    final_pt_.pause();  // (task 0161: the cards stop too)
     Log::info("Render Camera Sequence stopped after %zu of %zu", seq_.written.size(), seq_.cams.size());
   }
   seq_.active = false;

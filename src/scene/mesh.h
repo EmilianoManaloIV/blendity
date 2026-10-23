@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -23,6 +24,20 @@ struct VertexGroup {
   std::string name;
   std::vector<float> weights;
 };
+
+/* A shape key (Blender) / blend shape (Unity, FBX) / morph target (glTF) / vertex morph (MMD), task 0135: a named
+ * offset of every vertex from the basis; a renderer's weight adds that much of it, before any modifier (the skin
+ * included). Sparse in files, dense here. A key whose size isn't the vertex count (the mesh's topology edited since)
+ * is skipped. */
+struct ShapeKey {
+  std::string name;
+  std::vector<Vec3> delta;  // one per vertex
+};
+
+struct MeshRenderer;
+/* The renderer's shape keys on `positions` (the basis's), and a hash of the weights in use (0: none). */
+void apply_shape_keys(const struct Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions);
+uint64_t shape_key_hash(const struct Mesh &m, const MeshRenderer *mr);
 
 struct Mesh {
   std::string name = "Mesh";
@@ -59,8 +74,16 @@ struct Mesh {
    * the editor (and the modifier stack) then carry them over from the mesh before by position
    * (meshops::transfer_vertex_groups). */
   std::vector<VertexGroup> vertex_groups;
+  std::vector<ShapeKey> shape_keys;  // (task 0135)
+  /* Custom normals (task 0149): an artist's shading normals, one per vertex (empty: none) - an anime face's smoothed
+   * or proxy-transferred normals, or a file's own when they differ from the recomputed ones. They replace what
+   * corner_normals works out (smooth, flat, sharp edges); saved with the mesh, carried through edits by position
+   * like shape keys. */
+  std::vector<Vec3> custom_normals;
+  int find_shape(const std::string &name) const;
   int find_group(const std::string &group) const;
   bool groups_fit() const;               // every group has one weight per vertex
+  bool custom_normals_fit() const { return !custom_normals.empty() && custom_normals.size() == positions.size(); }
   void copy_vertex_weights(uint32_t from);  // a weight for a vertex just added as a copy of `from`
   void add_loose_edge(uint32_t a, uint32_t b);
   /* Drops loose edges that a face now uses, or whose vertices are gone. */
@@ -372,6 +395,11 @@ void apply_group_map(const GroupTransferMap &map, const Mesh &from, Mesh &to);
  * vertex where one of from's was takes its weights, any other the weights interpolated at the nearest point of from's
  * surface (a new mid-edge vertex gets the average of the edge's ends). */
 void transfer_vertex_groups(const Mesh &from, Mesh &to);
+/* Shape keys likewise (task 0135): carried across an edit that renumbered or added vertices, offsets interpolated. */
+bool shape_keys_fit(const Mesh &m);
+void transfer_shape_keys(const Mesh &from, Mesh &to);
+/* Custom normals (task 0149) from `from` onto `to`, by position on from's surface (as shape keys are). */
+void transfer_custom_normals(const Mesh &from, Mesh &to);
 /* Uniform Laplacian smoothing (blender/source/blender/modifiers/intern/MOD_smooth.cc). */
 void smooth_laplacian(Mesh &m, float factor, int iterations, const std::vector<uint8_t> *vert_mask = nullptr);
 /* Moves vertices along their normals by random amounts (for stress tests / noise). */
@@ -555,6 +583,8 @@ bool follow(Mesh &m, size_t face, std::string *error = nullptr);
 /* UModeler's Follow with picked edges: the face swept along `path` (a chain of vertices, any edges
  * of the mesh) where it is, from its end nearest the face (SketchUp's Follow Me). The path is kept. */
 bool follow_path(Mesh &m, size_t face, const std::vector<uint32_t> &path, std::string *error = nullptr);
+/* The vertices of an open chain of wire edges (each vertex's neighbours in `nb`) from `start` to its other end. */
+std::vector<uint32_t> walk_wire_path(const std::unordered_map<uint32_t, std::vector<uint32_t>> &nb, uint32_t start);
 /* Hard-surface tools (mesh_tools5.cpp). */
 size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows);  // quads cut into a grid; returns quads cut
 bool pipe(Mesh &m, const std::vector<uint32_t> &path, float radius, int sides, std::string *error = nullptr);

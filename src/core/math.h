@@ -9,6 +9,8 @@
 // Blender itself is right-handed and Z-up; the OBJ importer/exporter converts.
 #pragma once
 
+#include "hash.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -367,6 +369,21 @@ inline float ray_triangle(const Ray &r, Vec3 a, Vec3 b, Vec3 c) {
   if (v < 0.0f || u + v > 1.0f) return -1.0f;
   float t = dot(e2, q) * inv;
   return t > 0.0f ? t : -1.0f;
+}
+
+/* The point of segment ab nearest p (task 0177: one copy; the skin weights, the spring bones and the gizmos had their own). */
+inline Vec3 closest_on_segment(Vec3 p, Vec3 a, Vec3 b) {
+  const Vec3 ab = b - a;
+  const float t = clampf(dot(p - a, ab) / std::max(1e-12f, dot(ab, ab)), 0.0f, 1.0f);
+  return a + ab * t;
+}
+/* The distance from p to segment ab in 2D, and where along it (0-1) when asked. */
+inline float dist_to_segment_2d(Vec2 p, Vec2 a, Vec2 b, float *t_out = nullptr) {
+  const Vec2 ab = b - a;
+  const float l2 = dot(ab, ab);
+  const float t = l2 > 0.0f ? clampf(dot(p - a, ab) / l2, 0.0f, 1.0f) : 0.0f;
+  if (t_out) *t_out = t;
+  return length(p - (a + ab * t));
 }
 
 /* Closest-point parameters between ray and an infinite line (used by gizmos). */

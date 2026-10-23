@@ -40,6 +40,7 @@ struct BakeSettings {
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;
+  bool sample_emissive = true;    // task 0157: emissive meshes sampled at each texel (off: found by the hemisphere rays only, the old way)
   int gpu_device = -1;            // task 0018: the indirect gather on this GPU (gpu::devices() index), -1 the CPU
 };
 
@@ -158,7 +159,13 @@ class Lightmapper {
   LightingData out_;
   std::vector<std::vector<uint8_t>> covered_;  // per page: which texels a chart covers
   std::vector<std::vector<int32_t>> owner_;    // per page: the object owning a texel (-1 none)
-  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true);
+  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr);
+  Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const;  // task 0157
+  /* The texels' hemisphere-gather part alone (the direct terms - lights and emitters sampled - are noise-free and
+   * never clamped), kept beside `values_` for the firefly clamp (task 0157). */
+  std::vector<Vec3> gather_;
+  void clamp_fireflies(std::vector<Vec3> &src, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &normals, int W,
+                       int H) const;
   size_t gpu_texels_ = 0;
   std::string gpu_error_;
   void finish();

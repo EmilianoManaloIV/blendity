@@ -69,7 +69,7 @@ std::unique_ptr<Raster> Raster::create(int, std::string *error) {
 namespace {
 
 #define BL_RV_INSTANCE(X)                                                                                                   \
-  X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceQueueFamilyProperties)       \
+  X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceFeatures) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceQueueFamilyProperties)       \
   X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) X(vkDestroySurfaceKHR)                  \
   X(vkGetPhysicalDeviceSurfaceSupportKHR)                                                                                   \
   X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR)
@@ -106,7 +106,7 @@ struct Fns {
 /* Shared by every stage: the frame's constants and the instances. */
 const char *kCommon = R"(
 #version 450
-struct Light { vec4 pos_type; vec4 dir_range; vec4 color; vec4 spot; };
+struct Light { vec4 pos_type; vec4 dir_range; vec4 color; vec4 spot; vec4 right_w; vec4 up_h; };  // (spot.z: an area light's disk; right_w / up_h: its panel, task 0163)
 layout(std140, set = 0, binding = 0) uniform Frame {
   mat4 view_proj;      // with Vulkan's y flip
   mat4 inv_view_proj;
@@ -138,9 +138,12 @@ struct Inst {
   vec4 toon0;    // task 0102: bands, softness, threshold, specular smoothness
   vec4 toon1;    // shadow colour, specular size
   vec4 toon2;    // rim colour, rim width
-  vec4 toon3;    // rim strength, flat ambient
+  vec4 toon3;    // rim strength, flat ambient, light wrap, key light only (task 0148)
+  vec4 toon4;    // task 0148: specular colour, rim side
+  ivec4 toon5;   // task 0148: the Toon Ramp's texture (-1: the bands)
 };
 layout(std430, set = 0, binding = 1) readonly buffer Instances { Inst inst[]; };
+layout(std430, set = 0, binding = 16) readonly buffer Highlight { uint hl[]; };  // task 0166: Edit Mode's face highlight, a bit a triangle
 const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u, F_TOON = 64u;
 )";
 
@@ -249,13 +252,18 @@ float texture_lod(int t, vec2 ddx, vec2 ddy) {
 
 /* evaluate_surface's material, after kGlslProcedurals. */
 const char *kMaterialEval = R"(
-struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; };
+struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; float alpha; };
+/* A Box projection's lod on one face from the pixel's object-space footprint times the face's tiling (task 0164). */
+float box_lod(int t, float ta, float tb, float fp) {
+  return fp > 0.0 ? texture_lod(t, vec2(fp * abs(ta), 0.0), vec2(0.0, fp * abs(tb))) : 0.0;
+}
 /* evaluate_surface (shading.cpp) for a pixel: uv / ddx / ddy as the deferred shader's (forward differences). */
 Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor, vec4 tangent, bool has_tangent) {
   Surf s;
   s.albedo = I.albedo_rough.rgb;
   s.metallic = I.metal_spec.x;
   s.rough = I.albedo_rough.w;
+  s.alpha = I.metal_spec.w;
   s.n = n;
   vec2 uv = uv0 * I.tiling.xy + I.offset.xy;
   vec2 ddx = dux * I.tiling.xy, ddy = duy * I.tiling.xy;
@@ -275,13 +283,23 @@ Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor
     bw = an / max(an.x + an.y + an.z, 1e-6);
   }
   bool no_d = ddx.x == 0.0 && ddx.y == 0.0 && ddy.x == 0.0 && ddy.y == 0.0;
+  /* Task 0164: the pixel's footprint in object space - the larger of its two forward differences, as the CPU's deferred
+   * pass measures it - gives a Generated mapping its derivatives over the bounds and a Box projection its lod from the
+   * footprint times the tiling (both were level 0 at any distance). */
+  float fp = max(length(dFdxFine(lpos)), length(dFdyFine(lpos)));
+  vec3 ext = max(I.bmax.xyz - I.bmin.xyz, vec3(1e-6));
+  if (mapping == 2 && fp > 0.0 && I.bmin.x <= I.bmax.x) {
+    ddx = vec2(fp / ext.x * abs(I.tiling.x), 0.0);
+    ddy = vec2(0.0, fp / ext.y * abs(I.tiling.y));
+    no_d = false;
+  }
 #define SAMPLE(t, out_) { \
     if (!box) out_ = tex_sample(t, uv, no_d ? 0.0 : texture_lod(t, ddx, ddy), wrap, filt); \
     else { \
       out_ = vec4(0.0); \
-      if (bw.x > 0.001) out_ += tex_sample(t, vec2(bp.z, bp.y), 0.0, wrap, filt) * bw.x; \
-      if (bw.y > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.z), 0.0, wrap, filt) * bw.y; \
-      if (bw.z > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.y), 0.0, wrap, filt) * bw.z; \
+      if (bw.x > 0.001) out_ += tex_sample(t, vec2(bp.z, bp.y), box_lod(t, I.tiling.z, I.tiling.y, fp), wrap, filt) * bw.x; \
+      if (bw.y > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.z), box_lod(t, I.tiling.x, I.tiling.z, fp), wrap, filt) * bw.y; \
+      if (bw.z > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.y), box_lod(t, I.tiling.x, I.tiling.y, fp), wrap, filt) * bw.z; \
     } }
   int proc = I.tex1.z;
   vec4 c;
@@ -290,11 +308,21 @@ Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor
     float t;  // (a branch, not a select: the noise is forty hashes a pixel, not paid for a checker)
     if (proc == 1) t = checker(pp);
     else t = clamp(0.5 + 0.5 * fbm_noise(pp, 5, 0.5) * 1.4, 0.0, 1.0);
+    /* Task 0164: cells across one pixel - from the UV derivatives, or the footprint in the pattern's units (as the CPU);
+     * under a pixel the pattern fades to its mean. */
+    float cells = 0.0;
+    if (mapping == 0) cells = max(max(abs(ddx.x), abs(ddx.y)), max(abs(ddy.x), abs(ddy.y))) * abs(I.offset.w);
+    else if (fp > 0.0) {
+      float size = I.bmin.x <= I.bmax.x ? max(1e-6, min(ext.x, min(ext.y, ext.z))) : 1.0;
+      cells = fp / size * abs(I.offset.w);
+    }
+    if (cells > 0.5) t = mix(t, 0.5, clamp((cells - 0.5) * 2.0, 0.0, 1.0));
     s.albedo = mix(I.color2.rgb, I.albedo_rough.rgb, t);
   }
   else if (I.tex0.x >= 0) {
     SAMPLE(I.tex0.x, c);
     s.albedo *= c.rgb;
+    s.alpha *= c.a;  // (a cutout's holes come from the base map's alpha, as evaluate_surface takes it)
   }
   if (I.tex0.y >= 0) { SAMPLE(I.tex0.y, c); s.metallic *= c.x; }
   if (I.tex0.z >= 0) { SAMPLE(I.tex0.z, c); s.rough *= c.x; }
@@ -339,7 +367,7 @@ void main() {
   if (dot(g, n) < 0.0) g = -g;
   Inst I = inst[ii];
   vec3 albedo = I.albedo_rough.rgb, emission = I.emission.rgb;
-  float rough = I.albedo_rough.w, metallic = I.metal_spec.x;
+  float rough = I.albedo_rough.w, metallic = I.metal_spec.x, alpha = I.metal_spec.w;
   if (I.tex2.w != 0) {
     /* The back side's normals turned first, as the CPU turns them before evaluate_material (a normal map's result
      * depends on it); the light pass then finds them facing. */
@@ -363,7 +391,15 @@ void main() {
     metallic = s.metallic;
     rough = s.rough;
     emission = s.emission;
+    alpha = s.alpha;
   }
+  if (I.metal_spec.z >= 0.0 && alpha < I.metal_spec.z) discard;  // (task 0163: a cutout's hole - no colour, depth or id, so what is behind shows and picks)
+#ifdef BL_HIGHLIGHT
+  if (I.id.z != 0u) {  // task 0166: a selected face's tint, as the CPU raster mixes it before lighting
+    uint t = I.id.z - 1u + uint(gl_PrimitiveID);
+    if (t < uint(hl.length()) * 32u && ((hl[t >> 5u] >> (t & 31u)) & 1u) != 0u) albedo = mix(albedo, vec3(1.0, 0.55, 0.1), 0.45);
+  }
+#endif
   o_normal = vec4(n, rough);
   o_albedo = vec4(albedo, metallic);
   o_geo = vec4(g, I.metal_spec.y);
@@ -561,9 +597,242 @@ vec3 brdf_eval(vec3 albedo, float rough, float metallic, float specular, vec3 n,
   vec3 F = f0 + (vec3(1.0) - f0) * fw;
   return (albedo * ((1.0 - metallic) / PI) * (vec3(1.0) - F) + F * (D * vis)) * nl;
 }
+
+/* ---- area lights (task 0163): area_light_irradiance and area_light_specular_dir (raster.h / raster.cpp) line for line.
+ * A light's block: pos_type, dir_range, color (rgb, intensity), spot (cos outer, cos inner, disk, 0), right_w (right,
+ * width), up_h (up, height). */
+const float GX5[8] = float[8](0.0000000000, -0.2692346551, 0.2692346551, -0.4530899230, 0.4530899230, 0.0000000000, 0.0000000000, 0.0000000000);
+const float GW5[8] = float[8](0.2844444444, 0.2393143352, 0.2393143352, 0.1184634425, 0.1184634425, 0.0000000000, 0.0000000000, 0.0000000000);
+const float GX6[8] = float[8](-0.1193095930, 0.1193095930, -0.3306046932, 0.3306046932, -0.4662347571, 0.4662347571, 0.0000000000, 0.0000000000);
+const float GW6[8] = float[8](0.2339569673, 0.2339569673, 0.1803807865, 0.1803807865, 0.0856622462, 0.0856622462, 0.0000000000, 0.0000000000);
+const float GX8[8] = float[8](-0.0917173212, 0.0917173212, -0.2627662050, 0.2627662050, -0.3983332387, 0.3983332387, -0.4801449282, 0.4801449282);
+const float GW8[8] = float[8](0.1813418917, 0.1813418917, 0.1568533229, 0.1568533229, 0.1111905172, 0.1111905172, 0.0506142681, 0.0506142681);
+
+float gx(int k, int a) { return k == 8 ? GX8[a] : k == 6 ? GX6[a] : GX5[a]; }
+float gw(int k, int a) { return k == 8 ? GW8[a] : k == 6 ? GW6[a] : GW5[a]; }
+float quad_atan(float x) {
+  bool inv = abs(x) > 1.0;
+  float z = inv ? 1.0 / x : x, z2 = z * z;
+  float a = z * (0.99997726 + z2 * (-0.33262347 + z2 * (0.19354346 + z2 * (-0.11643287 + z2 * (0.05265332 + z2 * -0.01172120)))));
+  return inv ? (x > 0.0 ? 0.5 * PI : -0.5 * PI) - a : a;
+}
+void quad_tan(float t, out float tan_t, out float sec2) {
+  float t2 = t * t;
+  float s = t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0 + t2 * (-1.0 / 39916800.0))))));
+  float c = 1.0 + t2 * (-0.5 + t2 * (1.0 / 24.0 + t2 * (-1.0 / 720.0 + t2 * (1.0 / 40320.0 + t2 * (-1.0 / 3628800.0 + t2 * (1.0 / 479001600.0))))));
+  float rc = 1.0 / max(c, 1e-6);
+  tan_t = s * rc;
+  sec2 = rc * rc;
+}
+float area_area(Light l) {
+  float a = abs(l.right_w.w * l.up_h.w) * (l.spot.z > 0.5 ? 0.25 * PI : 1.0);
+  return a > 1e-4 ? a : 1e-4;
+}
+float area_falloff(Light l, vec3 q, vec3 p) {
+  vec3 d = p - q;
+  float r2 = dot(d, d);
+  float c = dot(l.dir_range.xyz, d);
+  if (!(c > 0.0)) return 0.0;
+  float r = sqrt(r2), rr = r / max(l.dir_range.w, 1e-3), rr2 = rr * rr;
+  float w = 1.0 - rr2 * rr2;
+  w = w > 0.0 ? w * w : 0.0;
+  return (c / r) * w / (r2 > 1e-4 ? r2 : 1e-4);
+}
+/* The integrand over the light's own metres U (along right) and V (along up): max(0, n.d) h w / |d|^4. */
+float area_f(float U, float V, float c0, float al, float be, float fu, float fv, float h, float h2, float inv_range2) {
+  float g = c0 + al * U + be * V;
+  if (!(g > 0.0)) return 0.0;
+  float u = U - fu, v = V - fv;
+  float r2 = h2 + u * u + v * v, rr = r2 * inv_range2;
+  float w = 1.0 - rr * rr;
+  w = w > 0.0 ? w * w : 0.0;
+  return g * h * w / (r2 * (r2 > 1e-4 ? r2 : 1e-4));
+}
+/* The integrand's fixed terms for one pixel and light: n.d = c0 + al U + be V, the foot (fu, fv), the facing distance. */
+struct AreaPt { float c0, al, be, fu, fv, h, h2, inv_range2; };
+/* A rectangle: the horizon n.d = 0 is a line across it - only the side in front is integrated, the outer axis split where
+ * that line crosses a corner, each axis through x = foot + h tan(t) (the integrand's 1 / (h^2 + x^2) flattened). */
+float area_rect(AreaPt a, float W, float H, bool near) {
+    float c0 = a.c0, al = a.al, be = a.be, fu = a.fu, fv = a.fv, h = a.h, h2 = a.h2, inv_range2 = a.inv_range2;
+    float sum = 0.0;
+    bool outer_u = abs(be) >= abs(al);
+    float Wo = outer_u ? W : H, Wi = outer_u ? H : W;
+    float ao = outer_u ? al : be, ai = outer_u ? be : al;
+    float foot_o = outer_u ? fu : fv, foot_i = outer_u ? fv : fu;
+    float ht = max(h, 1e-3 * max(W, H));
+    int k = near ? 8 : 5;
+    float rht = 1.0 / ht;
+    float in_lo = 1.0, in_hi = -1.0;
+    float in_x[8], in_w[8];
+    float cuts[4];
+    cuts[0] = -0.5 * Wo;
+    int nc = 1;
+    if (abs(ai) > 1e-12 && abs(ao) > 1e-12) {
+      for (int e = 0; e < 2; e++) {
+        float iv = e == 0 ? -0.5 * Wi : 0.5 * Wi;
+        float o = -(c0 + ai * iv) / ao;
+        if (o > -0.5 * Wo && o < 0.5 * Wo) cuts[nc++] = o;
+      }
+    }
+    cuts[nc++] = 0.5 * Wo;
+    for (int i = 1; i < nc; i++) {  // (sorted: at most four)
+      float v = cuts[i];
+      int j = i - 1;
+      while (j >= 0 && cuts[j] > v) { cuts[j + 1] = cuts[j]; j--; }
+      cuts[j + 1] = v;
+    }
+    for (int piece = 0; piece + 1 < nc; piece++) {
+      float t0 = quad_atan((cuts[piece] - foot_o) * rht), t1 = quad_atan((cuts[piece + 1] - foot_o) * rht);
+      if (!(t1 > t0)) continue;
+      for (int a = 0; a < k; a++) {
+        float tn, sec2;
+        quad_tan(0.5 * (t0 + t1) + (t1 - t0) * gx(k, a), tn, sec2);
+        float o = foot_o + ht * tn, wo = (t1 - t0) * gw(k, a) * ht * sec2;
+        float lo = -0.5 * Wi, hi = 0.5 * Wi;
+        float base = c0 + ao * o;
+        if (abs(ai) > 1e-12) {
+          float edge = -base / ai;
+          if (ai > 0.0) lo = max(lo, edge);
+          else hi = min(hi, edge);
+        }
+        else if (!(base > 0.0)) continue;
+        if (!(hi > lo)) continue;
+        if (lo != in_lo || hi != in_hi) {
+          in_lo = lo;
+          in_hi = hi;
+          float s0 = quad_atan((lo - foot_i) * rht), s1 = quad_atan((hi - foot_i) * rht);
+          for (int b = 0; b < k; b++) {
+            float tn2, sec22;
+            quad_tan(0.5 * (s0 + s1) + (s1 - s0) * gx(k, b), tn2, sec22);
+            in_x[b] = foot_i + ht * tn2;
+            in_w[b] = (s1 - s0) * gw(k, b) * ht * sec22;
+          }
+        }
+        float row = 0.0;
+        for (int b = 0; b < k; b++)
+          row += in_w[b] * (outer_u ? area_f(o, in_x[b], c0, al, be, fu, fv, h, h2, inv_range2) : area_f(in_x[b], o, c0, al, be, fu, fv, h, h2, inv_range2));
+        sum += wo * row;
+      }
+    }
+    return sum;
+}
+/* An ellipse: rays from its centre at evenly spaced angles, each ray's part in front of the horizon integrated by Gauss
+ * in the area fraction r^2; the mean times the area. */
+float area_disc(AreaPt a, float W, float H, bool near, float area) {
+  float c0 = a.c0, al = a.al, be = a.be, fu = a.fu, fv = a.fv, h = a.h, h2 = a.h2, inv_range2 = a.inv_range2;
+  float sum = 0.0;
+  int k = near ? 6 : 5, na = near ? 20 : 12;
+  for (int j = 0; j < na; j++) {
+    float th = 2.0 * PI * (float(j) + 0.5) / float(na);
+    float du = 0.5 * W * cos(th), dv = 0.5 * H * sin(th);
+    float r1 = 1.0, r0 = 0.0;
+    float slope = al * du + be * dv;
+    if (abs(slope) > 1e-12) {
+      float edge = -c0 / slope;
+      if (slope > 0.0) r0 = max(r0, edge);
+      else r1 = min(r1, edge);
+    }
+    else if (!(c0 > 0.0)) continue;
+    if (!(r1 > r0)) continue;
+    float s0 = r0 * r0, s1 = r1 * r1;
+    for (int q = 0; q < k; q++) {
+      float r = sqrt(0.5 * (s0 + s1) + (s1 - s0) * gx(k, q));
+      sum += (s1 - s0) * gw(k, q) * area_f(r * du, r * dv, c0, al, be, fu, fv, h, h2, inv_range2);
+    }
+  }
+  return sum / float(na) * area;
+}
+float area_irradiance(Light l, vec3 p, vec3 n) {
+  vec3 dir = l.dir_range.xyz, right = l.right_w.xyz, up = l.up_h.xyz;
+  float W = abs(l.right_w.w), H = abs(l.up_h.w);
+  bool disk = l.spot.z > 0.5;
+  vec3 rel = p - l.pos_type.xyz;
+  float h = dot(dir, rel);
+  if (!(h > 0.0)) return 0.0;
+  float c0 = -dot(n, rel), al = dot(n, right), be = dot(n, up);
+  if (!(W * H * (disk ? 0.25 * PI : 1.0) > 1e-4)) {
+    float dl = length(rel);
+    return dl > 1e-6 ? area_area(l) * max(0.0, c0 / dl) * area_falloff(l, l.pos_type.xyz, p) : 0.0;
+  }
+  float range = max(l.dir_range.w, 1e-3);
+  AreaPt a = AreaPt(c0, al, be, dot(right, rel), dot(up, rel), h, h * h, 1.0 / (range * range));
+  bool near = h < 0.25 * max(W, H);
+  return disk ? area_disc(a, W, H, near, area_area(l)) : area_rect(a, W, H, near);
+}
+vec3 area_specular_dir(Light l, vec3 p, vec3 R, out float facing, out vec3 point) {
+  vec3 dir = l.dir_range.xyz, right = l.right_w.xyz, up = l.up_h.xyz, pos = l.pos_type.xyz;
+  vec3 q = p - dir * dot(p - pos, dir);
+  float denom = dot(R, dir);
+  if (denom < -1e-6) {
+    float t = dot(pos - p, dir) / denom;
+    if (t > 0.0) q = p + R * t;
+  }
+  float x = dot(q - pos, right), y = dot(q - pos, up);
+  float hw = 0.5 * abs(l.right_w.w), hh = 0.5 * abs(l.up_h.w);
+  if (l.spot.z > 0.5) {
+    if (!(hw > 0.0)) x = 0.0;
+    if (!(hh > 0.0)) y = 0.0;
+    float e = (hw > 0.0 ? x * x / (hw * hw) : 0.0) + (hh > 0.0 ? y * y / (hh * hh) : 0.0);
+    if (e > 1.0) {
+      float s = 1.0 / sqrt(e);
+      x *= s;
+      y *= s;
+    }
+  }
+  else {
+    x = clamp(x, -hw, hw);
+    y = clamp(y, -hh, hh);
+  }
+  vec3 rep = pos + right * x + up * y;
+  point = rep;
+  vec3 L = rep - p;
+  float dl = length(L);
+  L = dl > 1e-6 ? L / dl : -dir;
+  facing = max(0.0, -dot(dir, L));
+  return L;
+}
+/* brdf_eval_parts (shading.cpp): the diffuse without the cosine (an irradiance brings its own), the specular with it. */
+void brdf_parts(vec3 albedo, float rough, float metallic, float specular, vec3 n, vec3 v, vec3 l, out vec3 diffuse, out vec3 spec) {
+  vec3 f0 = fresnel_f0(albedo, metallic, specular);
+  vec3 diff = albedo * ((1.0 - metallic) / PI);
+  float nl = dot(n, l);
+  if (nl <= 0.0) {
+    diffuse = diff * (vec3(1.0) - f0);
+    spec = vec3(0.0);
+    return;
+  }
+  float nv = max(dot(n, v), 1e-4);
+  vec3 h = normalize(v + l);
+  float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
+  float a = max(rough * rough, 0.002), a2 = a * a;
+  float d = nh * nh * (a2 - 1.0) + 1.0;
+  float D = a2 / (PI * d * d);
+  float vis = 0.5 / (nl * sqrt(nv * nv * (1.0 - a2) + a2) + nv * sqrt(nl * nl * (1.0 - a2) + a2));
+  float fw = (1.0 - vh) * (1.0 - vh);
+  fw = fw * fw * (1.0 - vh);
+  vec3 F = f0 + (vec3(1.0) - f0) * fw;
+  diffuse = diff * (vec3(1.0) - F);
+  spec = F * (D * vis * nl);
+}
+/* The deferred shader's area branch (Renderer3D's light loop): the diffuse from the light's whole surface, the specular
+ * from its representative point with the lobe widened by the light's size and renormalised (Karis 2013). */
+vec3 area_light_lo(Light l, vec3 P, vec3 n, vec3 V, vec3 albedo, float rough, float metallic, float specular, float atten) {
+  float dcos = area_irradiance(l, P, n);
+  float c;
+  vec3 q;
+  vec3 Lr = area_specular_dir(l, P, n * (2.0 * dot(n, V)) - V, c, q);
+  float cfall = min(2.0 * PI, area_area(l) * area_falloff(l, q, P));
+  float a = max(rough * rough, 0.002);
+  float radius = sqrt(abs(l.right_w.w * l.up_h.w) / PI);
+  float a2 = min(1.0, a + radius / (2.0 * max(1e-3, length(q - P))));
+  vec3 dpart, spart;
+  brdf_parts(albedo, rough, metallic, specular, n, V, Lr, dpart, spart);
+  return (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color.rgb * atten;
+}
 float falloff(Light l, vec3 p, vec3 L) {
   int type = int(l.pos_type.w);
   if (type == 0) return 1.0;
+  if (type == 3) return area_area(l) * area_falloff(l, l.pos_type.xyz, p);  // (light_falloff: an area light at its centre - the toon branch)
   float f = 1.0 - length(l.pos_type.xyz - p) / max(l.dir_range.w, 1e-3);
   f = f > 0.0 ? f * f : 0.0;
   if (type == 2) {
@@ -660,9 +929,20 @@ float axis_step(float e0, float e1, float x) {
   float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
 }
-float toon_level(Inst I, float lit) {
+/* The shading normal's change from px to a neighbouring pixel of the same object (zero where the neighbour is the
+ * background or another object), the neighbour turned as this pixel's normal was for a back side. */
+vec3 toon_neighbour(ivec2 q, uint my_inst, bool flipped, vec3 n) {
+  ivec2 gsz = textureSize(g_normal, 0);
+  q = min(q, gsz - 1);
+  if (texelFetch(g_inst, q, 0).r != my_inst) return vec3(0.0);
+  vec3 nb = texelFetch(g_normal, q, 0).xyz;
+  if (dot(nb, nb) < 0.5) return vec3(0.0);
+  nb = normalize(nb);
+  return (flipped ? -nb : nb) - n;
+}
+float toon_level(Inst I, float lit, float edge) {
   int bands = clamp(int(I.toon0.x), 1, 8);
-  float th = clamp(I.toon0.z, 0.0, 0.95), w = clamp(I.toon0.y, 0.0, 0.5);
+  float th = clamp(I.toon0.z, 0.0, 0.95), w = max(clamp(I.toon0.y, 0.0, 0.5), clamp(edge, 0.0, 0.5));  // (task 0164: never narrower than a pixel's span)
   if (isnan(lit) || isinf(lit)) lit = 0.0;
   float q = 0.0;
   for (int k = 0; k < bands; k++) {
@@ -671,18 +951,31 @@ float toon_level(Inst I, float lit) {
   }
   return q / float(bands);
 }
-vec3 shade_toon(Inst I, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit) {
-  float q = toon_level(I, lit);
-  vec3 c = albedo * mix(I.toon1.rgb, vec3(1.0), q);
+vec3 shade_toon(Inst I, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit, float edge) {
+  float q;
+  vec3 c;
+  if (I.toon5.x >= 0) {  // task 0148: the ramp, read at (lit, lit) with v up; at a distance over the pixel's span of lit (task 0164)
+    float lod = edge > 0.0 ? texture_lod(I.toon5.x, vec2(edge * 2.0, 0.0), vec2(0.0, edge * 2.0)) : 0.0;
+    vec3 tone = tex_sample(I.toon5.x, vec2(lit, lit), lod, 1, 2).rgb;  // (Extend, Trilinear)
+    q = clamp(dot(tone, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    c = albedo * tone;
+  }
+  else {
+    q = toon_level(I, lit, edge);
+    c = albedo * mix(I.toon1.rgb, vec3(1.0), q);
+  }
   if (I.toon1.w > 0.0 && q > 0.0) {
     float nh = dot(n, normalize(V + L)), e = 1.0 - 0.2 * clamp(I.toon1.w, 0.0, 1.0);
     float w = 0.1 * clamp(I.toon0.w, 0.0, 0.5);
-    c += mix(vec3(1.0), albedo, metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * specular);
+    c += mix(I.toon4.rgb, albedo, metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * specular);
   }
   return c;
 }
-vec3 toon_rim(Inst I, vec3 n, vec3 V) {
+vec3 toon_rim(Inst I, vec3 n, vec3 V, vec3 keyL) {
   if (!(I.toon2.w > 0.0) || !(I.toon3.x > 0.0)) return vec3(0.0);
+  float ndl = dot(n, keyL);
+  int side = int(I.toon4.w + 0.5);
+  if ((side == 1 && ndl <= 0.0) || (side == 2 && ndl > 0.0)) return vec3(0.0);
   float f = 1.0 - max(0.0, dot(n, V)), e = 1.0 - clamp(I.toon2.w, 0.0, 1.0);
   float w = clamp(I.toon0.y, 0.0, 0.5) + 0.02;
   return I.toon2.rgb * (axis_step(e - w, e + w, f) * I.toon3.x);
@@ -784,6 +1077,23 @@ void main() {
   bool receive = (flags & F_RECEIVE) != 0u;
   if ((flags & F_TOON) != 0u) {  // (Renderer3D::light_surface's toon branch, then light_finish's)
     Inst I = inst[texelFetch(g_inst, px, 0).r];
+    /* The key light (task 0148): the brightest sun; with Key Light Only, the one that bands. */
+    int key = -1;
+    float key_power = -1.0;
+    vec3 keyL = vec3(0.0, 1.0, 0.0);
+    for (int li = 0; li < count; li++) {
+      Light l = lights[li];
+      if (int(l.pos_type.w) != 0) continue;
+      float p = l.color.w * dot(l.color.rgb, vec3(0.2126, 0.7152, 0.0722));
+      if (p > key_power && p > 0.0) { key_power = p; key = li; keyL = -l.dir_range.xyz; }
+    }
+    /* Task 0164: the normal at the next pixel right and below (the G-buffer's), for one-pixel band edges - of this
+     * object only (the background's normal is zero, another object's is no continuation), turned as this pixel's
+     * was for a back side. */
+    uint my_inst = texelFetch(g_inst, px, 0).r;
+    bool flipped = dot(gs.xyz, V) < 0.0;
+    vec3 n_dx = toon_neighbour(px + ivec2(1, 0), my_inst, flipped, n);
+    vec3 n_dy = toon_neighbour(px + ivec2(0, 1), my_inst, flipped, n);
     for (int li = 0; li < count; li++) {
       Light l = lights[li];
       vec3 L;
@@ -797,17 +1107,26 @@ void main() {
       }
       if (!(fall > 0.0) || !(l.color.w > 0.0)) continue;
       float ndl = dot(n, L), vis = 1.0;
+      float wrap = clamp(I.toon3.z, 0.0, 1.0);  // task 0148: light wrap on N.L, so the terminator moves
+      if (wrap > 0.0) ndl = (ndl + wrap) / (1.0 + wrap);
       if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
-      lo += shade_toon(I, albedo, metallic, specular, n, V, L, max(ndl, 0.0) * vis * min(fall, 1.0)) * l.color.rgb * l.color.w;
+      float lit = max(ndl, 0.0) * vis * min(fall, 1.0);
+      bool fill = I.toon3.w > 0.5 && key >= 0 && li != key;
+      float edge = 0.5 * (abs(dot(n_dx, L)) + abs(dot(n_dy, L)));
+      lo += (fill ? albedo * lit : shade_toon(I, albedo, metallic, specular, n, V, L, lit, edge)) * l.color.rgb * l.color.w;
     }
     vec3 amb = I.toon3.y > 0.5 ? (irradiance(vec3(0.0, 1.0, 0.0)) + irradiance(vec3(0.0, -1.0, 0.0))) * 0.5 : irradiance(n);
-    o_color = display(lo + amb * albedo + toon_rim(I, n, V) + emission);
+    o_color = display(lo + amb * albedo + toon_rim(I, n, V, keyL) + emission);
     return;
   }
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
     vec3 L;
     float atten = l.color.w * PI;
+    if (int(l.pos_type.w) == 3) {  // (task 0163: an area light, from its whole surface)
+      if (atten > 0.0) lo += area_light_lo(l, P, n, V, albedo, rough, metallic, specular, atten);
+      continue;
+    }
     if (int(l.pos_type.w) == 0) L = -l.dir_range.xyz;
     else {
       vec3 dd = l.pos_type.xyz - P;
@@ -861,7 +1180,7 @@ struct FrameUbo {
   float view_proj[16], inv_view_proj[16], sun_vp[16];
   float eye[4], sky[4], equator[4], ground[4], view[4], shadow[4], background[4];
   float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4], env_map[4], sh[9][4], cage[4];
-  float lights[16][16];
+  float lights[16][24];
 };
 struct InstGpu {
   float model[16], albedo_rough[4], metal_spec[4], emission[4];
@@ -869,7 +1188,8 @@ struct InstGpu {
   float tiling[4], offset[4], color2[4];
   int32_t tex0[4], tex1[4], tex2[4];
   float bmin[4], bmax[4];
-  float toon0[4], toon1[4], toon2[4], toon3[4];
+  float toon0[4], toon1[4], toon2[4], toon3[4], toon4[4];
+  int32_t toon5[4];
 };
 
 /* The CPU's matrices are left-handed with y up and depth 0..1; Vulkan's clip space has y down. */
@@ -916,7 +1236,15 @@ class VulkanRaster final : public Raster {
     qci.pQueuePriorities = &prio;
     const char *swapchain_ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     swapchain_ok_ = wants_swapchain();
+    /* The g-buffer shader reads gl_PrimitiveID for Edit Mode's face highlight (task 0166), which Vulkan ties to the
+     * geometryShader feature: enabled where the card has it; elsewhere the highlight stays on the CPU. */
+    VkPhysicalDeviceFeatures have{};
+    f_.vkGetPhysicalDeviceFeatures(pd_, &have);
+    VkPhysicalDeviceFeatures want{};
+    want.geometryShader = have.geometryShader;
+    geometry_ = have.geometryShader != 0;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pEnabledFeatures = &want;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = swapchain_ok_ ? 1 : 0;
@@ -945,6 +1273,7 @@ class VulkanRaster final : public Raster {
     f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_);
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
+    if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
      * arena's, which is copied over when it grows.) */
@@ -1042,6 +1371,7 @@ class VulkanRaster final : public Raster {
   }
 
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
+  bool can_highlight_faces() const override { return geometry_; }
 
   int add_texture(const Texture &t, std::string *err) override {
     if (t.levels.empty()) {
@@ -1129,6 +1459,26 @@ class VulkanRaster final : public Raster {
   }
 
   bool render(const RasterFrame &fr, std::string *err) override {
+    if (!record_frame(fr, err) || !submit_wait(err)) return false;
+    read_times();
+    return true;
+  }
+
+  /* Task 0160: the frame's passes and the copies out in one command buffer, one wait. */
+  bool render_read(const RasterFrame &fr, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
+    const size_t px = (size_t)fr.width * fr.height;
+    if (!readback_buffer(px, err)) return false;  // (before the frame is recorded: record_frame takes the queued mesh copies)
+    if (!record_frame(fr, err)) return false;
+    const Slot &sl = slots_[fr.slot];
+    record_planes(sl, px, color != nullptr, depth != nullptr, ids != nullptr);
+    if (!submit_wait(err)) return false;
+    read_times();
+    unpack_planes(px, color, depth, ids);
+    return true;
+  }
+
+  /* The frame's three passes recorded into the command buffer (begun here), the timestamps around them; not submitted. */
+  bool record_frame(const RasterFrame &fr, std::string *err) {
     if (fr.slot < 0 || fr.slot >= kSlots) return fail(err, "no such view slot");
     for (const RasterInstance &in : instances_)
       if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
@@ -1162,35 +1512,50 @@ class VulkanRaster final : public Raster {
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
     stamp(3);
-    if (!submit_wait(err)) return false;
-    read_times();
     return true;
   }
 
   RasterTimes times() const override { return times_; }
+  uint64_t submits() const override { return submits_; }
 
   bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
     if (slot < 0 || slot >= kSlots) return fail(err, "no such view slot");
     const Slot &sl = slots_[slot];
     const size_t px = (size_t)sl.color.w * sl.color.h;
     if (!px) return fail(err, "nothing rendered yet");
-    if (!readback_.buf || readback_.size < px * 12) {
-      free_buffer(readback_);
-      if (!make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
-          !make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props()))
-        return fail(err, info_.name + ": out of memory for a read-back");
-    }
+    if (!readback_buffer(px, err)) return false;
     begin();
+    record_planes(sl, px, color != nullptr, depth != nullptr, ids != nullptr);
+    if (!submit_wait(err)) return false;
+    unpack_planes(px, color, depth, ids);
+    return true;
+  }
+
+  /* The host buffer the planes are copied into: colour, depth and ids of `px` pixels, cached memory when the card has it. */
+  bool readback_buffer(size_t px, std::string *err) {
+    if (readback_.buf && readback_.size >= px * 12) return true;
+    free_buffer(readback_);
+    if (make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+      return true;
+    if (make_buffer(readback_, px * 12, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props())) return true;
+    return fail(err, info_.name + ": out of memory for a read-back");
+  }
+  /* The copies out of a slot's planes, recorded into the open command buffer (after the frame's last barrier). */
+  void record_planes(const Slot &sl, size_t px, bool color, bool depth, bool ids) {
     if (color) copy_out(sl.color, VK_IMAGE_ASPECT_COLOR_BIT, 0);
     if (depth) copy_out(sl.depth, VK_IMAGE_ASPECT_DEPTH_BIT, px * 4);
     if (ids) copy_out(sl.ids, VK_IMAGE_ASPECT_COLOR_BIT, px * 8);
-    if (!submit_wait(err)) return false;
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};  // (the copies visible to the host before the fence)
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+  }
+  void unpack_planes(size_t px, uint32_t *color, float *depth, uint32_t *ids) {
     const uint8_t *m = (const uint8_t *)readback_.mapped;
     if (color) std::memcpy(color, m, px * 4);
     if (depth) std::memcpy(depth, m + px * 4, px * 4);
     if (ids) std::memcpy(ids, m + px * 8, px * 4);
-    return true;
   }
 
   bool attach_window(void *native, std::string *err) override {
@@ -1271,6 +1636,7 @@ class VulkanRaster final : public Raster {
    * have taken the last one yet), and waits for the copies. The present's own work (the compositor's blit) is the
    * system's, after the fence: not timed here. */
   bool submit_present(uint32_t image, std::string *err) {
+    submits_++;
     f_.vkEndCommandBuffer(cmd_);
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1305,10 +1671,13 @@ class VulkanRaster final : public Raster {
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
   VkQueryPool queries_ = VK_NULL_HANDLE;
+  uint64_t submits_ = 0;  // (task 0160: queue submissions, each waited for)
   bool timestamps_ = false;
   float ts_period_ns_ = 1.0f;
   RasterTimes times_;
   Buf ubo_, inst_buf_, staging_, readback_, ui_staging_, lut_buf_;
+  Buf hl_buf_;  // the face highlight's bits (task 0166)
+  bool geometry_ = false;  // the geometryShader feature: gl_PrimitiveID in the g-buffer pass (task 0166)
   Buf cage_v_, cage_e_;  // the Edit Mode cage (task 0100)
   /* Task 0101: the textures. Their texels in two arenas (8-bit as stored, float), each texture's levels one after
    * another; the tables of textures and levels mirrored here and sent when they change. */
@@ -1451,6 +1820,8 @@ class VulkanRaster final : public Raster {
     f_.vkBeginCommandBuffer(cmd_, &bi);
   }
   bool submit_wait(std::string *err) {
+    submits_++;
+    ScopedTimer wall;
     f_.vkEndCommandBuffer(cmd_);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -1459,6 +1830,7 @@ class VulkanRaster final : public Raster {
     if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS ||
         f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS)
       return fail(err, info_.name + ": the GPU stopped responding");
+    times_.submit_wall = wall.ms();
     return true;
   }
   bool upload(Buf &dst, const void *data, size_t bytes, std::string *err) {
@@ -1766,8 +2138,23 @@ class VulkanRaster final : public Raster {
     const float t0[4] = {(float)s.toon_bands, s.toon_softness, s.toon_threshold, s.toon_specular_smooth};
     const float t1[4] = {s.toon_shadow[0], s.toon_shadow[1], s.toon_shadow[2], s.toon_specular_size};
     const float t2[4] = {s.toon_rim[0], s.toon_rim[1], s.toon_rim[2], s.toon_rim_width};
-    const float t3[4] = {s.toon_rim_strength, s.toon_flat_ambient ? 1.0f : 0.0f, 0.0f, 0.0f};
-    std::memcpy(d.toon0, t0, 16), std::memcpy(d.toon1, t1, 16), std::memcpy(d.toon2, t2, 16), std::memcpy(d.toon3, t3, 16);
+    const float t3[4] = {s.toon_rim_strength, s.toon_flat_ambient ? 1.0f : 0.0f, s.toon_wrap, s.toon_key_light_only ? 1.0f : 0.0f};
+    const float t4[4] = {s.toon_specular_color[0], s.toon_specular_color[1], s.toon_specular_color[2], (float)s.toon_rim_side};
+    std::memcpy(d.toon0, t0, 16), std::memcpy(d.toon1, t1, 16), std::memcpy(d.toon2, t2, 16), std::memcpy(d.toon3, t3, 16), std::memcpy(d.toon4, t4, 16);
+    d.toon5[0] = s.toon_ramp, d.toon5[1] = d.toon5[2] = d.toon5[3] = 0;
+  }
+  /* The face highlight's bits into their buffer (grown when a bigger mesh is edited; one zero word when none). */
+  bool write_highlight(const RasterFrame &fr, std::string *err) {
+    const size_t bytes = std::max<size_t>(4, fr.highlight_bits.size() * 4);
+    if (bytes > hl_buf_.size) {
+      f_.vkDeviceWaitIdle(dev_);
+      free_buffer(hl_buf_);
+      if (!make_buffer(hl_buf_, bytes * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory for the face highlight");
+      for (Slot &sl : slots_) bind_buffers(sl.set);
+    }
+    if (fr.highlight_bits.empty()) std::memset(hl_buf_.mapped, 0, 4);
+    else std::memcpy(hl_buf_.mapped, fr.highlight_bits.data(), fr.highlight_bits.size() * 4);
+    return true;
   }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {
@@ -1788,8 +2175,10 @@ class VulkanRaster final : public Raster {
       dst[i].emission[3] = 0.0f;
       dst[i].id[0] = s.id;
       dst[i].id[1] = s.flags;
+      dst[i].id[2] = s.highlight;
       write_material(s, dst[i]);
     }
+    if (!write_highlight(fr, err)) return false;
     FrameUbo u{};
     const Mat4 vp = vulkan_clip(fr.view_proj), sun = vulkan_clip(fr.sun_view_proj), inv = vp.inverse();
     std::memcpy(u.view_proj, vp.m, 64);
@@ -1840,7 +2229,13 @@ class VulkanRaster final : public Raster {
       o[0] = l.position[0], o[1] = l.position[1], o[2] = l.position[2], o[3] = (float)l.type;
       o[4] = l.direction[0], o[5] = l.direction[1], o[6] = l.direction[2], o[7] = l.range;
       o[8] = l.color[0], o[9] = l.color[1], o[10] = l.color[2], o[11] = l.intensity;
-      o[12] = l.spot_cos_outer, o[13] = l.spot_cos_inner;
+      o[12] = l.spot_cos_outer, o[13] = l.spot_cos_inner, o[14] = l.disk ? 1.0f : 0.0f, o[15] = 0.0f;
+      /* Task 0163: the panel's frame - right, up (the CPU's normalize(cross(direction, right))), its size. */
+      const float ux = l.direction[1] * l.right[2] - l.direction[2] * l.right[1], uy = l.direction[2] * l.right[0] - l.direction[0] * l.right[2],
+                  uz = l.direction[0] * l.right[1] - l.direction[1] * l.right[0];
+      const float ul = std::sqrt(ux * ux + uy * uy + uz * uz), inv = ul > 1e-12f ? 1.0f / ul : 0.0f;
+      o[16] = l.right[0], o[17] = l.right[1], o[18] = l.right[2], o[19] = l.width;
+      o[20] = ux * inv, o[21] = uy * inv, o[22] = uz * inv, o[23] = l.height;
     }
     std::memcpy(ubo_.mapped, &u, sizeof(u));
     return true;
@@ -1862,6 +2257,7 @@ class VulkanRaster final : public Raster {
     for (uint32_t i = 11; i <= 14; i++)  // the textures: 8-bit texels, float texels, textures, levels (task 0101)
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // each pixel's instance (task 0102)
+    b.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // the face highlight's bits (task 0166)
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
@@ -1871,7 +2267,7 @@ class VulkanRaster final : public Raster {
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
     VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9 * kSlots},
                                   {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
@@ -1894,7 +2290,8 @@ class VulkanRaster final : public Raster {
     const VkDescriptorBufferInfo more[6] = {{cage_v_.buf, 0, VK_WHOLE_SIZE},    {cage_e_.buf, 0, VK_WHOLE_SIZE},
                                             {tex8_.buf, 0, VK_WHOLE_SIZE},      {texf_.buf, 0, VK_WHOLE_SIZE},
                                             {texinfo_buf_.buf, 0, VK_WHOLE_SIZE}, {texlevel_buf_.buf, 0, VK_WHOLE_SIZE}};
-    VkWriteDescriptorSet w[9];
+    const VkDescriptorBufferInfo hb{hl_buf_.buf, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet w[10];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
     for (int i = 3; i < 9; i++) {
@@ -1915,7 +2312,11 @@ class VulkanRaster final : public Raster {
     w[1].descriptorCount = 1;
     w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[1].pBufferInfo = &sb;
-    f_.vkUpdateDescriptorSets(dev_, 9, w, 0, nullptr);
+    w[9].dstBinding = 16;
+    w[9].descriptorCount = 1;
+    w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[9].pBufferInfo = &hb;
+    f_.vkUpdateDescriptorSets(dev_, 10, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
     const Img *im[7] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst};
@@ -2083,7 +2484,7 @@ class VulkanRaster final : public Raster {
   }
   bool make_pipelines(std::string *err) {
     VkShaderModule sv = module(kShadowVert, shaderc_vertex_shader, err), gv = module(kGbufVert, shaderc_vertex_shader, err),
-                   gf = module(std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
+                   gf = module(std::string(geometry_ ? "#define BL_HIGHLIGHT 1\n" : "") + kMaterialFrag + kGlslProcedurals + kMaterialEval + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
                    lf = module(std::string(kMaterialFrag) + kLightFrag, shaderc_fragment_shader, err);
     const std::string cc = kCageCommon;
     const std::string cv = cc + kCageVertCommon;
@@ -2220,7 +2621,7 @@ class VulkanRaster final : public Raster {
     free_image(ui_img_);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);

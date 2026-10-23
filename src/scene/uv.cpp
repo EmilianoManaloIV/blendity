@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "uv.h"
+#include "uv_internal.h"
 
 #include "../core/jobs.h"
 
@@ -98,7 +99,10 @@ void project_planar(Mesh &m, const std::vector<uint32_t> &faces, Vec3 normal) {
  * conformality energy, two pinned vertices, solved with Jacobi-preconditioned
  * conjugate gradients on the normal equations (Blender uses Eigen's sparse
  * QR / its own solver in uv_parametrizer.cc). */
-void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
+}  // namespace
+
+/* The chart's corner fans (see uv_internal.h). */
+detail::ChartTopology detail::chart_topology(const Mesh &m, const std::vector<uint32_t> &faces) {
   /* Unknowns are corner fans, not mesh vertices: corners of one vertex are
    * joined only across non-seam edges, so a seam inside the island (e.g. the
    * vertical cut of a cylinder side) splits the vertex in two (Blender's
@@ -106,7 +110,8 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
   /* Corners are addressed by "slot": their position in face order within the
    * island, so every table below is a dense array. The first version used hash
    * maps keyed by mesh corner (0.6 s of setup for a 262k-face island). */
-  std::vector<uint32_t> corners;  // slot -> mesh corner
+  ChartTopology out;
+  std::vector<uint32_t> &corners = out.corners;  // slot -> mesh corner
   for (uint32_t f : faces)
     for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) corners.push_back(c);
   const size_t ns = corners.size();
@@ -140,8 +145,9 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
       }
   }
   std::vector<int> root_local(ns, -1);
-  std::vector<int> local(ns);    // slot -> unknown
-  std::vector<uint32_t> verts;   // unknown -> mesh vertex
+  std::vector<int> &local = out.local;  // slot -> unknown
+  std::vector<uint32_t> &verts = out.verts;  // unknown -> mesh vertex
+  local.resize(ns);
   for (size_t i = 0; i < ns; i++) {
     int r = fan.find((int)i);
     if (root_local[r] < 0) {
@@ -150,6 +156,23 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
     }
     local[i] = root_local[r];
   }
+  uint32_t slot = 0;
+  for (uint32_t f : faces) {
+    const uint32_t fn = m.face_size(f);
+    for (uint32_t k = 1; k + 1 < fn; k++) out.tris.push_back({local[slot], local[slot + k], local[slot + k + 1]});
+    slot += fn;
+  }
+  return out;
+}
+
+namespace {
+
+void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel, const std::vector<float> *tri_angles = nullptr) {
+  const detail::ChartTopology chart = detail::chart_topology(m, faces);
+  const std::vector<uint32_t> &corners = chart.corners;
+  const std::vector<int> &local = chart.local;
+  const std::vector<uint32_t> &verts = chart.verts;
+  const size_t ns = corners.size();
   const int nv = (int)verts.size();
   Vec3 nsum(0.0f);
   for (uint32_t f : faces) nsum += m.face_normal(f) * face_area3d(m, f);
@@ -196,33 +219,38 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
     float wr[3], wi[3];
   };
   std::vector<Tri> tris;
-  tris.reserve(faces.size() * 2);
-  uint32_t slot = 0;
-  for (uint32_t f : faces) {
-    const uint32_t fn = m.face_size(f);
-    for (uint32_t k = 1; k + 1 < fn; k++) {
-      Tri t;
-      t.v[0] = local[slot];
-      t.v[1] = local[slot + k];
-      t.v[2] = local[slot + k + 1];
-      Vec3 p0 = m.positions[verts[t.v[0]]], p1 = m.positions[verts[t.v[1]]], p2 = m.positions[verts[t.v[2]]];
-      Vec3 e1 = p1 - p0, e2 = p2 - p0;
-      float l1 = length(e1);
-      float area2 = length(cross(e1, e2));
-      if (l1 < 1e-12f || area2 < 1e-14f) continue;
-      Vec3 xa = e1 / l1, ya = normalize(e2 - xa * dot(e2, xa));
-      Vec2 z[3] = {{0, 0}, {l1, 0}, {dot(e2, xa), dot(e2, ya)}};
-      Vec2 W[3] = {z[2] - z[1], z[0] - z[2], z[1] - z[0]};
-      float s = 1.0f / std::sqrt(area2);
-      /* Conformality residual of the triangle (complex form):
-       * real = sum(wr*u - wi*v), imag = sum(wi*u + wr*v). */
-      for (int j = 0; j < 3; j++) {
-        t.wr[j] = W[j].x * s;
-        t.wi[j] = W[j].y * s;
+  tris.reserve(chart.tris.size());
+  const bool use_angles = tri_angles && tri_angles->size() == chart.tris.size() * 3;
+  for (size_t ti = 0; ti < chart.tris.size(); ti++) {
+    Tri t;
+    for (int j = 0; j < 3; j++) t.v[j] = chart.tris[ti][j];
+    Vec3 p0 = m.positions[verts[t.v[0]]], p1 = m.positions[verts[t.v[1]]], p2 = m.positions[verts[t.v[2]]];
+    Vec3 e1 = p1 - p0, e2 = p2 - p0;
+    float l1 = length(e1);
+    float area2 = length(cross(e1, e2));
+    if (l1 < 1e-12f || area2 < 1e-14f) continue;
+    Vec3 xa = e1 / l1, ya = normalize(e2 - xa * dot(e2, xa));
+    Vec2 z[3] = {{0, 0}, {l1, 0}, {dot(e2, xa), dot(e2, ya)}};
+    if (use_angles) {
+      /* ABF++'s angles: the triangle with these angles (law of sines) on the same first side. */
+      const float a0 = (*tri_angles)[ti * 3], a1 = (*tri_angles)[ti * 3 + 1], a2 = (*tri_angles)[ti * 3 + 2];
+      const float s2 = std::sin(a2);
+      if (s2 > 1e-6f) {
+        const float side02 = l1 * std::sin(a1) / s2;
+        z[2] = Vec2(side02 * std::cos(a0), side02 * std::sin(a0));
+        area2 = l1 * z[2].y;
       }
-      tris.push_back(t);
     }
-    slot += fn;
+    if (area2 < 1e-14f) continue;
+    Vec2 W[3] = {z[2] - z[1], z[0] - z[2], z[1] - z[0]};
+    float s = 1.0f / std::sqrt(area2);
+    /* Conformality residual of the triangle (complex form):
+     * real = sum(wr*u - wi*v), imag = sum(wi*u + wr*v). */
+    for (int j = 0; j < 3; j++) {
+      t.wr[j] = W[j].x * s;
+      t.wi[j] = W[j].y * s;
+    }
+    tris.push_back(t);
   }
   /* Sparsity: neighbours of each free unknown (incl. itself), sorted, built
    * with two counting passes into one flat array (CSR) - no per-row vectors. */
@@ -421,6 +449,15 @@ void normalize_island(Mesh &m, const std::vector<uint32_t> &faces) {
   for (uint32_t f : faces)
     for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) m.uvs[c] = m.uvs[c] * k;
 }
+
+}  // namespace
+
+void detail::lscm_chart(Mesh &m, const std::vector<uint32_t> &faces, const std::vector<float> *tri_angles, bool parallel) {
+  ensure_uvs(m);
+  lscm_island(m, faces, parallel, tri_angles);
+}
+
+namespace {
 
 std::vector<Vec2> convex_hull(std::vector<Vec2> p) {
   std::sort(p.begin(), p.end(), [](Vec2 a, Vec2 b) { return a.x < b.x || (a.x == b.x && a.y < b.y); });

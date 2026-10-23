@@ -22,7 +22,42 @@ MeshPtr *Editor::uv_target(GameObject **owner) {
   return mf && mf->mesh ? &mf->mesh : nullptr;
 }
 
+/* PartField's features for every face of `m` (task 0180): the model loaded the first time; false (with the reason in
+ * the Console) when it isn't installed or fails - Part Unwrap then uses the geometric tree. */
+bool Editor::partfield_features(const Mesh &m, std::vector<float> &features, int &dims) {
+  std::string error;
+  if (!partfield_) partfield_ = partfield::load(error);
+  if (!partfield_) {
+    Log::warn("Part Unwrap: %s - the geometric part tree is used", error.c_str());
+    return false;
+  }
+  ScopedTimer t;
+  if (!partfield::face_features(*partfield_, m, dims, features, error)) {
+    Log::warn("Part Unwrap: PartField failed (%s) - the geometric part tree is used", error.c_str());
+    return false;
+  }
+  Log::info("PartField: %d features for each of %zu faces in %.0f ms", dims, m.face_count(), t.ms());
+  return true;
+}
+
+/* PartUV's measures of the UV map (task 0179): islands, cut length, distortion. Changes nothing. */
+void Editor::uv_report_log() {
+  GameObject *g = nullptr;
+  MeshPtr *mp = uv_target(&g);
+  if (!mp || !*mp) {
+    Log::warn("uv report needs an object with a MeshFilter");
+    return;
+  }
+  const uvops::UVReport r = uvops::uv_report(**mp, nullptr);
+  Log::info("UV report: %d chart(s), seams %.3f m long, distortion %.3f (mean) / %.3f (worst; 1 = none)", r.charts, r.seam_length,
+            r.distortion_mean, r.distortion_max);
+}
+
 void Editor::uv_op(const std::string &op) {
+  if (op == "report") {
+    uv_report_log();
+    return;
+  }
   GameObject *g = nullptr;
   MeshPtr *mp = uv_target(&g);
   if (!mp) {
@@ -30,7 +65,8 @@ void Editor::uv_op(const std::string &op) {
     return;
   }
   Mesh &m = *mesh_make_mutable(*mp);
-  /* Operate on the selected faces in Edit Mode (Blender behaviour), else on everything. */
+  /* Operate on the selected faces in Edit Mode (Blender behaviour), else on everything; only the UV Editor's
+   * material slots (task 0186). */
   std::vector<uint8_t> mask;
   const uvops::Mask *pm = nullptr;
   if (edit_mode_ && std::find(face_sel_.begin(), face_sel_.end(), 1) != face_sel_.end()) {
@@ -38,10 +74,27 @@ void Editor::uv_op(const std::string &op) {
     mask.resize(m.face_count(), 0);
     pm = &mask;
   }
+  if (!uv_slots_.empty()) {
+    if (!pm) mask.assign(m.face_count(), 1);
+    for (size_t f = 0; f < m.face_count(); f++) mask[f] = mask[f] && uv_slot_active(m, f);
+    pm = &mask;
+  }
   ScopedTimer t;
   int islands = -1;
   if (op == "unwrap") islands = uvops::unwrap_lscm(m, pm);
   else if (op == "smart") islands = uvops::smart_project(m, pm);
+  else if (op == "parts") {
+    uvops::PartUnwrapOptions po;
+    po.tau = part_tau_;
+    po.multi_tile = part_multi_tile_;
+    std::vector<float> features;
+    if (part_semantic_ && partfield_features(m, features, po.feature_dims)) po.face_features = &features;
+    const uvops::PartUnwrapReport r = uvops::part_unwrap(m, pm, po);
+    islands = r.charts;
+    Log::info("Part Unwrap: %d chart(s) in %d part(s), distortion %.3f (worst %.3f, bound %.2f), seams %.3f m; %d charts tried, %d by ABF++; the part tree %s",
+              r.charts, r.parts, r.distortion, r.distortion_max, po.tau, r.seam_length, r.flattened, r.abf_charts,
+              r.learned_tree ? "PartField's" : "from the geometry");
+  }
   else if (op == "cube") uvops::project_cube(m, pm, std::max(0.001f, length(m.bounds().extent()) * 2.0f / std::sqrt(3.0f)));
   else if (op == "cylinder") uvops::project_cylinder(m, pm);
   else if (op == "sphere") uvops::project_sphere(m, pm);
@@ -97,6 +150,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   const B buttons[] = {
       {"Unwrap", "unwrap", "Unwrap (U): Least Squares Conformal Maps per seam-bounded island, then pack.\nBlender: UV > Unwrap (Conformal)."},
       {"Smart UV", "smart", "Smart UV Project: group faces by normal, project and pack. No seams needed."},
+      {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (console:\nuv parts [bound] [multi]); ABF++ then LSCM; each part's charts packed together. No seams needed."},
       {"Cube", "cube", "Cube Projection: each face projected along its main axis."},
       {"Cylinder", "cylinder", "Cylinder Projection around the object's Y axis."},
       {"Sphere", "sphere", "Sphere Projection (latitude / longitude)."},
@@ -110,11 +164,12 @@ void Editor::draw_uv_editor(const Recti &r) {
        "then unwrap. Blender: Select Sharp Edges, Mark Seam, Unwrap."}};
   for (const B &b : buttons) {
     int w = u.font.text_width(b.label) + u.px(14);
-    if (x + w > bar.right() - u.px(260)) break;
+    if (x + w > bar.right() - u.px(410)) break;
     if (u.button({x, y, w, h}, b.label)) uv_op(b.op);
     u.tooltip(b.tip);
     x += w + u.px(3);
   }
+  draw_uv_material_filter({bar.right() - u.px(400), y, u.px(144), h});
   static const char *bgs[] = {"Material Texture", "UV Grid", "Color Grid", "None"};
   if (u.combo(u.id("uv_bg"), {bar.right() - u.px(250), y, u.px(150), h}, uv_bg_, bgs, 4)) {
   }
@@ -138,7 +193,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   if (uv_bg_ == 1) bg = texture_uv_grid();
   else if (uv_bg_ == 2) bg = texture_color_grid();
   else if (uv_bg_ == 0 && g)
-    if (auto *mr = g->get<MeshRenderer>()) bg = mr->material(0)->textures().base;
+    if (auto *mr = g->get<MeshRenderer>()) bg = mr->material(uv_slots_.empty() ? 0 : uv_slots_[0])->textures().base;
   Vec2 s0 = to_screen({0, 1}), s1 = to_screen({1, 0});
   Recti sq{(int)s0.x, (int)s0.y, (int)(s1.x - s0.x), (int)(s1.y - s0.y)};
   if (bg && !bg->levels.empty()) {
@@ -179,7 +234,18 @@ void Editor::draw_uv_editor(const Recti &r) {
   if (uv_sel_.size() != m.corner_count()) uv_sel_.assign(m.corner_count(), 0);
   /* Faces shown: Edit Mode selection if any (Blender), else all. */
   bool use_sel = !uv_sync_ && edit_mode_ && g && g->id == edit_obj_ && std::find(face_sel_.begin(), face_sel_.end(), 1) != face_sel_.end();  // syncing: every face shows
-  auto shown = [&](size_t f) { return !use_sel || (f < face_sel_.size() && face_sel_[f]); };
+  auto in_view = [&](size_t f) { return !use_sel || (f < face_sel_.size() && face_sel_[f]); };
+  auto shown = [&](size_t f) { return in_view(f) && uv_slot_active(m, f); };  // (editable: drawn, picked, selected)
+  uv_clip_selection(m);
+  if (!uv_hide_others_)
+    for (size_t f = 0; f < m.face_count(); f++) {  // (the other materials' faces: a ghost behind)
+      if (!in_view(f) || uv_slot_active(m, f)) continue;
+      const uint32_t b = m.face_offsets[f], n = m.face_size(f);
+      for (uint32_t i = 0; i < n; i++) {
+        const Vec2 p = to_screen(m.uvs[b + i]), q = to_screen(m.uvs[b + (i + 1) % n]);
+        u.canvas.line(p.x, p.y, q.x, q.y, Color::hex(0x808080, 60), 1.0f);
+      }
+    }
   std::vector<float> stretch;
   if (uv_stretch_) stretch = uvops::face_area_stretch(m);
   for (size_t f = 0; f < m.face_count(); f++) {
@@ -582,6 +648,51 @@ void Editor::uv_sync_to_faces(const Mesh &m) {
   sync_vert_face_selection(true);
 }
 
+/* Task 0186: nothing out of the UV Editor's material slots stays selected (so nothing there moves). */
+void Editor::uv_clip_selection(const Mesh &m) {
+  if (uv_slots_.empty() || uv_sel_.size() != m.corner_count()) return;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (uv_slot_active(m, f)) continue;
+    for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) uv_sel_[k] = 0;
+  }
+}
+
+/* `uv material <name>` edits that material's slots only, `+<name>` adds them, `all` every face. */
+bool Editor::uv_material_command(const std::string &arg) {
+  if (to_lower(arg) == "all" || arg.empty()) {
+    uv_slots_.clear();
+    Log::info("UV Editor: every material");
+    return true;
+  }
+  GameObject *g = nullptr;
+  if (!uv_target(&g) || !g || !g->mesh_renderer()) {
+    Log::warn("uv material: select an object with a mesh and materials");
+    return false;
+  }
+  const bool add = arg[0] == '+';
+  const std::string name = add ? arg.substr(1) : arg;
+  std::vector<int> slots;
+  const auto &mats = g->mesh_renderer()->materials;
+  for (size_t s = 0; s < mats.size(); s++)
+    if (mats[s] && to_lower(mats[s]->name) == to_lower(name)) slots.push_back((int)s);
+  if (slots.empty()) {
+    Log::warn("uv material: %s has no material '%s' (uv material all: every face)", g->name.c_str(), name.c_str());
+    return false;
+  }
+  if (!add) uv_slots_.clear();
+  for (int s : slots)
+    if (std::find(uv_slots_.begin(), uv_slots_.end(), s) == uv_slots_.end()) uv_slots_.push_back(s);
+  Log::info("UV Editor: %s's faces (%zu slot%s)", name.c_str(), uv_slots_.size(), uv_slots_.size() > 1 ? "s" : "");
+  return true;
+}
+
+/* Materials window > Edit UVs: the UV Editor on the active object's faces of that material. */
+void Editor::uv_edit_material(const MaterialPtr &mat) {
+  if (!mat) return;
+  dock_open(WindowKind::UVEditor);
+  uv_material_command(mat->name);
+}
+
 bool Editor::uv_select(const std::string &what, int face) {
   MeshPtr *mp = uv_target(nullptr);
   if (!mp || !*mp || !(*mp)->has_uvs()) return false;
@@ -616,6 +727,7 @@ bool Editor::uv_select(const std::string &what, int face) {
       if (want[(size_t)fi[f]]) face_corners(f, 1);
   }
   else return false;
+  uv_clip_selection(m);
   uv_sync_to_faces(m);
   return true;
 }
@@ -626,6 +738,7 @@ bool Editor::uv_transform(const std::string &op, float a, float b) {
   if (!mp || !*mp || !(*mp)->has_uvs()) return false;
   Mesh &m = *mesh_make_mutable(*mp);
   if (uv_sel_.size() != m.corner_count()) return false;
+  uv_clip_selection(m);
   Vec2 lo(1e30f, 1e30f), hi(-1e30f, -1e30f);
   size_t n = 0;
   for (size_t k = 0; k < uv_sel_.size(); k++)
@@ -673,6 +786,27 @@ bool Editor::uv_transform(const std::string &op, float a, float b) {
   m.touch();
   mark_changed("UV " + op);
   return true;
+}
+
+/* Task 0186: the Material filter - All, or one of the edited object's slots (more with `uv material +<name>`). */
+void Editor::draw_uv_material_filter(const Recti &r) {
+  auto &u = ui_;
+  GameObject *g = nullptr;
+  uv_target(&g);
+  const MeshRenderer *mr = g ? g->mesh_renderer() : nullptr;
+  std::vector<std::string> names{"All materials"};
+  if (mr)
+    for (size_t s = 0; s < mr->materials.size(); s++) names.push_back(strprintf("%zu: %s", s, mr->materials[s] ? mr->materials[s]->name.c_str() : "(none)"));
+  std::vector<const char *> opts;
+  for (const std::string &n : names) opts.push_back(n.c_str());
+  int pick = uv_slots_.empty() ? 0 : uv_slots_[0] + 1;
+  if (pick >= (int)opts.size()) pick = 0;
+  if (u.combo(u.id("uv_mat"), r, pick, opts.data(), (int)opts.size())) {
+    uv_slots_.clear();
+    if (pick > 0) uv_slots_.push_back(pick - 1);
+  }
+  u.tooltip("Edit one material's UVs: the other faces are dimmed and out of reach (unwrap, pack, select, move).\n"
+            "Console: uv material <name> | +<name> (add) | all; uv others dim | hide.");
 }
 
 /* The second toolbar row: selection mode and sync, selection, quick transforms. */

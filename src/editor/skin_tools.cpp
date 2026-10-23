@@ -40,10 +40,7 @@ Mesh weights_copy(const Mesh &m) {
 }
 
 uint64_t positions_hash(const Mesh &m) {
-  uint64_t h = 1469598103934665603ull;  // FNV-1a over the bytes
-  const auto *b = reinterpret_cast<const unsigned char *>(m.positions.data());
-  for (size_t i = 0, n = m.positions.size() * sizeof(Vec3); i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
-  return h;
+  return fnv1a(m.positions.data(), m.positions.size() * sizeof(Vec3));
 }
 
 /* The source's groups a transfer should carry: its armature's bones when it has a Skin modifier (selection groups and

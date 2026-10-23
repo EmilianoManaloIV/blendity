@@ -10,8 +10,9 @@ It also compiles in a few libraries that Blender itself bundles. They are copied
 | [fast_float](https://github.com/fastfloat/fast_float) 5.0.0 | fast, exact float parsing in the scene loader | MIT (`fast_float-MIT.txt`) | `extern/fast_float` |
 | MikkTSpace (Blender's C++ port) | tangents for normal maps | Apache-2.0 (`Apache-2.0.txt`) | `intern/mikktspace` |
 | Hosek-Wilkie sky model | physical sky | BSD-3-Clause (`BSD-3-Clause.txt`) | `intern/sky` |
-| cuew (CUDA Wrangler) | loads NVIDIA's CUDA driver at run time (only in builds made with the CUDA Toolkit and the OptiX SDK, task 0097) | Modified Apache 2.0 (`cuew-Apache-2.0.txt`) | `extern/cuew` |
-| NVIDIA OptiX's loader (`optix_stubs.h`, `optix_function_table_definition.h`) | compiled into builds made with the OptiX SDK (task 0097, ADR 0037); never in the installers | BSD-3-Clause (`OptiX-BSD-3-Clause.txt`) | (the OptiX SDK) |
+| cuew (CUDA Wrangler) | loads NVIDIA's CUDA driver at run time (builds with OptiX: the Windows and Linux installers since task 0169) | Modified Apache 2.0 (`cuew-Apache-2.0.txt`) | `extern/cuew` |
+| NVIDIA OptiX's loader (`optix_stubs.h`, `optix_function_table_definition.h`) | compiled into builds with OptiX's headers - the Windows and Linux installers since task 0169 (ADR 0054; ADR 0037 before it) | BSD-3-Clause (`OptiX-BSD-3-Clause.txt`) | (NVIDIA's `optix-dev` headers, fetched at build) |
+| The OptiX kernel's PTX (`src/render/optix/optix_kernel_ptx.h`) | Blendity's own GPL kernel compiled with NVRTC against NVIDIA's OptiX device headers (their `_optix_*` intrinsic calls), committed (task 0169, ADR 0054) | GPL-2.0-or-later (Blendity's), the device headers' calls NVIDIA's | `src/render/optix_kernel.cu` |
 
 ## Blender's prebuilt libraries (optional)
 

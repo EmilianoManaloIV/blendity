@@ -24,8 +24,6 @@ namespace bl {
 using namespace platform;
 using ui::Icon;
 
-static const uint32_t kSelectOrange = Color::hex(0xF7941D);
-static const uint32_t kChildOrange = Color::hex(0xC28A4A);
 
 /* ===================================================================== */
 /* Scene view                                                             */
@@ -139,8 +137,8 @@ void Editor::draw_scene_view(const Recti &r) {
   const bool piloting = piloted_camera() != nullptr;
   if (!piloting) {
     draw_scene_icons(view);
-    draw_origins(view);
-    draw_footprint_frames(view);
+    if (show_origins_) draw_origins(view);
+    if (show_footprints_) draw_footprint_frames(view);
     draw_guides(view);
     draw_zfight_overlay(view);
     draw_overlap_overlay(view);
@@ -191,46 +189,6 @@ void Editor::draw_scene_view(const Recti &r) {
   if (edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
   else last_op_rect_ = Recti{};
   if (playing_) u.canvas.rect_outline(view, Color::hex(0x3A79BB, 120), u.px(2));
-}
-
-void Editor::draw_scene_overlay_bar(const Recti &bar) {
-  auto &u = ui_;
-  u.canvas.fill_rect(bar, u.theme.bar);
-  u.canvas.hline(bar.x, bar.right(), bar.bottom() - 1, u.theme.border);
-  int h = bar.h - u.px(6), y = bar.y + u.px(3), x = bar.x + u.px(6);
-  static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Shaded Wireframe"};
-  int m = (int)shading_;
-  if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 4)) shading_ = (Shading)m;
-  u.tooltip("Draw mode (Blender: Z pie).\nSolid = fast vertex lighting (Workbench).\n"
-            "Shaded = materials, textures, shadows (EEVEE / Unity Shaded).\n"
-            "Path tracing: F12, the Render window, or the Camera Preview's Rendered toggle.");
-  x += u.px(176);
-  if (u.icon_button({x, y, h, h}, Icon::Lightbulb, scene_lighting_, "Scene lighting on/off.\nOff = headlight from the camera, like Blender's Studio lighting.")) scene_lighting_ = !scene_lighting_;
-  x += h + u.px(2);
-  if (u.icon_button({x, y, h, h}, Icon::Grid, show_grid_, "Toggle grid (Blender: Overlays > Floor).")) show_grid_ = !show_grid_;
-  x += h + u.px(2);
-  if (u.icon_button({x, y, h, h}, Icon::Move, show_gizmos_, "Toggle Gizmos / transform handles.")) show_gizmos_ = !show_gizmos_;
-  x += h + u.px(2);
-  if (u.icon_button({x, y, h, h}, Icon::Chart, show_stats_, "Statistics overlay (Blender: Overlays > Statistics).")) show_stats_ = !show_stats_;
-  x += h + u.px(2);
-  if (u.icon_button({x, y, h, h}, Icon::Camera, scene_filters_,
-                    "Camera filters: show the Main Camera's filters (e.g. Retro Console Filter) in the Shaded view.\n"
-                    "Console: filters on / off."))
-    scene_filters_ = !scene_filters_;
-  x += h + u.px(10);
-  /* Blender-style Edit Mode toggle - Unity has no built-in mesh editing (ProBuilder adds it). */
-  int ew = u.font.text_width("Edit Mode (Tab)") + h + u.px(12);
-  Recti er{bar.right() - ew - u.px(6), y, ew, h};
-  bool can_edit = edit_mode_ || (active_object() && active_object()->get<MeshFilter>());
-  bool hot = u.hovered(er);
-  uint32_t bg = edit_mode_ ? u.theme.accent : (hot && can_edit ? u.theme.button_hover : u.theme.button);
-  u.frame(er, bg, u.theme.border, u.px(3));
-  const uint32_t ink = !can_edit ? u.theme.text_dim : edit_mode_ ? 0xFFFFFFFF : u.theme.text_bright;  // (white on the accent only)
-  u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
-  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", ink);
-  if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
-  u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
-  (void)x;
 }
 
 /* Which navigation a press in the Scene view starts, by the editor's feel (task 0063), and the button that holds it:
@@ -472,45 +430,6 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
   });
 }
 
-void Editor::draw_grid(Renderer3D &r3d) {
-  /* Unity-like adaptive floor grid on XZ, faded with distance. */
-  Vec3 eye = cam_.position();
-  float h = std::max(std::fabs(eye.y), cam_.distance * 0.35f);
-  float lg = std::log10(std::max(h, 0.01f));
-  float level = std::floor(lg);
-  float frac = lg - level;
-  float s = std::pow(10.0f, level);  // minor spacing: 1 unit when the camera is 1-10 units up
-  int n = 60;
-  Vec3 c = cam_.ortho ? cam_.pivot : eye;
-  float cx = std::round(c.x / (s * 10)) * s * 10, cz = std::round(c.z / (s * 10)) * s * 10;
-  float extent = n * s;
-  float fade_far = s * 55.0f;
-  auto seg_line = [&](Vec3 a, Vec3 b, float alpha) {
-    const int segs = 12;
-    for (int k = 0; k < segs; k++) {
-      Vec3 p0 = lerp(a, b, k / (float)segs), p1 = lerp(a, b, (k + 1) / (float)segs);
-      Vec3 mid = (p0 + p1) * 0.5f;
-      float d = length(Vec3(mid.x - c.x, 0, mid.z - c.z));
-      float f = alpha * saturate(1.0f - d / fade_far);
-      if (f > 0.01f) r3d.line(p0, p1, Color::with_alpha(0xFFFFFFFF, f), true, 1e-5f);
-    }
-  };
-  for (int i = -n; i <= n; i++) {
-    float o = i * s;
-    bool major = (i % 10) == 0;
-    float a = major ? 0.22f : 0.13f * (1.0f - frac);
-    if (a < 0.01f) continue;
-    float x = cx + o, z = cz + o;
-    if (std::fabs(x) < s * 0.01f) seg_line({x, 0, cz - extent}, {x, 0, cz + extent}, 0.0f);
-    else seg_line({x, 0, cz - extent}, {x, 0, cz + extent}, a);
-    if (std::fabs(z) < s * 0.01f) seg_line({cx - extent, 0, z}, {cx + extent, 0, z}, 0.0f);
-    else seg_line({cx - extent, 0, z}, {cx + extent, 0, z}, a);
-  }
-  /* World axes on the floor: X red, Z blue (Blender draws X red / Y green). */
-  r3d.line({cx - extent, 0, 0}, {cx + extent, 0, 0}, Color::hex(0xDB3E1D, 150), true, 1e-5f);
-  r3d.line({0, 0, cz - extent}, {0, 0, cz + extent}, Color::hex(0x3A7AF8, 150), true, 1e-5f);
-}
-
 void Editor::render_scene_view(const Recti &view) {
   scene_rt_.attach(fb_, view);
   float aspect = view.w / (float)std::max(1, view.h);
@@ -606,183 +525,6 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
   scene_stats_ = scene_r3d_.stats();
 }
 
-void Editor::render_overlays(const Recti &) {
-  draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
-  draw_footprint_soles();  // (task 0126)
-  draw_ai_overlay();       // (task 0130)
-  /* Wireframes. */
-  bool all_wire = shading_ == Shading::Wireframe || shading_ == Shading::ShadedWireframe;
-  scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    auto *mr = g.get<MeshRenderer>();
-    if (!mr || !mr->enabled) return;
-    if (edit_mode_ && g.id == edit_obj_) return;
-    const Mesh *m = g.evaluated_mesh();
-    if (!m) return;
-    const Mat4 &w = g.world_matrix();
-    if (!m->loose_edges.empty() && !all_wire && !mr->show_wireframe && mr->display_as == 0) {
-      /* Wire edges have no faces to shade: always drawn (Blender does too). */
-      const uint32_t lc = is_selected(g.id) ? kSelectOrange : Color::hex(0x202020, 220);
-      for (uint64_t k : m->loose_edges)
-        if ((k >> 32) < m->vert_count() && (k & 0xFFFFFFFF) < m->vert_count())
-          scene_r3d_.line(w.point(m->positions[(size_t)(k >> 32)]), w.point(m->positions[(size_t)(k & 0xFFFFFFFF)]), lc, true, 2e-4f);
-    }
-    if (!all_wire && !mr->show_wireframe && mr->display_as == 0) return;
-    uint32_t col = is_selected(g.id) ? kSelectOrange : (shading_ == Shading::Wireframe ? Color::hex(0xD8D8D8, 200) : Color::hex(0x101010, 150));
-    if (mr->display_as != 0 && !is_selected(g.id)) col = Color::hex(0xC8C8C8, 220);  // Blender draws wire objects light
-    bool depth = shading_ != Shading::Wireframe;
-    if (mr->display_as == 2) {  // Bounds: the box's 12 edges
-      const AABB b = m->render_mesh().bounds;
-      Vec3 c[8];
-      for (int k = 0; k < 8; k++) c[k] = w.point({k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z});
-      static const int kE[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
-      for (auto &e : kE) scene_r3d_.line(c[e[0]], c[e[1]], col, depth, 2e-4f);
-      return;
-    }
-    const auto &edges = m->edge_cache();
-    if (edges.size() > 400000) return;  // keep the editor responsive on enormous meshes
-    for (auto &e : edges) scene_r3d_.line(w.point(m->positions[e.first]), w.point(m->positions[e.second]), col, depth, 2e-4f);
-  });
-
-  /* Probe volume (Lighting > Show Probes): each probe a dot in the light it holds (seen from above),
-   * the ones inside geometry red. */
-  if (scene_->lighting.show_probes && !probes_.empty()) {
-    const size_t n = probes_.probe_count(), step = std::max<size_t>(1, n / 50000);
-    const Vec3 up(0, 1, 0), sky = env_.irradiance(up);
-    for (size_t i = 0; i < n; i += step) {
-      const bool live = probe_frame_.use_live && probes_.live_ok[i];
-      const Vec3 c = (live ? probes_.live[i] : probes_.baked[i]).eval(up, sky);
-      const uint32_t col = probes_.valid[i] ? to_display_pixel(c, ViewTransform::Standard, 0.0f) : Color::hex(0xFF3030);
-      scene_r3d_.point(probes_.position[i], std::max(1.5f, (float)ui_.px(2.5f)), col, true);
-    }
-  }
-
-  /* Selection outline (orange, children lighter), Unity & Blender style. */
-  if (!edit_mode_ && !selection_.empty() && shading_ != Shading::Wireframe) {
-    std::vector<uint32_t> sel, kids;
-    std::function<void(GameObject *)> add_kids = [&](GameObject *g) {
-      for (GameObject *c : g->children) { kids.push_back((uint32_t)c->id); add_kids(c); }
-    };
-    for (GameObject *g : selected_objects(false)) {
-      sel.push_back((uint32_t)g->id);
-      add_kids(g);
-    }
-    std::sort(kids.begin(), kids.end());
-    std::sort(sel.begin(), sel.end());
-    if (!kids.empty()) scene_r3d_.outline_ids(kids, kChildOrange, std::max(1, ui_.px(1.5f)));
-    scene_r3d_.outline_ids(sel, kSelectOrange, std::max(1, ui_.px(2)));
-  }
-
-  /* Edit-mode overlay: edges + vertices (Blender's edit-mesh overlay). */
-  if (edit_mode_) {
-    if (GameObject *g = edit_object()) {
-      const Mesh &m = **edit_mesh_ptr();
-      const Mat4 &w = g->world_matrix();
-      vert_sel_.resize(m.vert_count(), 0);
-      face_sel_.resize(m.face_count(), 0);
-      /* N-gon mode (SketchUp): edges inside a flat region are hidden, as SketchUp hides coplanar edges. */
-      if (ngon_mode_) ngon_cache(m);
-      /* The cage, recorded in parallel (task 0089: 100,000 edges of a 50k-face mesh were half the overlay's time),
-       * from the vertices placed in the world once each rather than once per edge. */
-      std::vector<Vec3> wp(m.vert_count());
-      JobSystem::global().parallel_for((int64_t)wp.size(), 4096, [&](int64_t a, int64_t b) {
-        for (int64_t i = a; i < b; i++) wp[(size_t)i] = w.point(m.positions[(size_t)i]);
-      });
-      const auto &edges = m.edge_cache();
-      if (!cage_on_gpu_) {  // (else the card drew the edges and the vertex dots into the picture: task 0100)
-        scene_r3d_.lines(edges.size(), [&](size_t k, Vec3 &a, Vec3 &b, uint32_t &col) {
-          const auto &e = edges[k];
-          col = cage_edge_color(m, e.first, e.second);
-          a = wp[e.first], b = wp[e.second];
-          return col != 0;
-        }, true, kCageBias);
-      }
-      if (elem_ == EditElement::Vertex) {
-        if (!cage_on_gpu_)
-          scene_r3d_.points(wp.size(), cage_dot_radius(), [&](size_t i, Vec3 &p, uint32_t &col) {
-            p = wp[i];
-            col = cage_dot_color(i);
-            return true;
-          }, true);
-      }
-      else if (elem_ == EditElement::Face && ngon_mode_) {
-        /* One dot per flat region: the "face" SketchUp would show. */
-        std::vector<uint8_t> rsel(ngon_region_center_.size(), 0);
-        for (size_t f = 0; f < m.face_count() && f < ngon_region_.size(); f++)
-          if (face_sel_[f] && ngon_region_[f] >= 0) rsel[(size_t)ngon_region_[f]] = 1;
-        for (size_t r = 0; r < ngon_region_center_.size(); r++)
-          scene_r3d_.point(w.point(ngon_region_center_[r]), ui_.px(2.5f), rsel[r] ? Color::hex(0xFFA733) : Color::hex(0x202020), true);
-      }
-      else if (elem_ == EditElement::Face) {
-        for (size_t f = 0; f < m.face_count(); f++)
-          scene_r3d_.point(w.point(m.face_center(f)), ui_.px(2), face_sel_[f] ? Color::hex(0xFFA733) : Color::hex(0x202020), true);
-      }
-    }
-  }
-}
-
-void Editor::draw_curve(const GameObject &g, const Curve &cv) {
-  const bool sel = is_selected(g.id);
-  const CurvePath &path = cv.local_path();  // sampled once per change, placed here by the matrix
-  const Mat4 &w = g.world_matrix();
-  const uint32_t col = sel ? kSelectOrange : Color::hex(0x101010, 200);
-  for (size_t i = 1; i < path.pos.size(); i++) scene_r3d_.line(w.point(path.pos[i - 1]), w.point(path.pos[i]), col, false);
-  if (path.closed && path.pos.size() > 2) scene_r3d_.line(w.point(path.pos.back()), w.point(path.pos.front()), col, false);
-}
-
-/* A lattice's cage: each point joined to its next along U, V and W (task 0043). */
-void Editor::draw_lattice(const GameObject &g, const Lattice &l) {
-  const int n = l.control_point_count();
-  if (!n) return;
-  const Mat4 &w = g.world_matrix();
-  const uint32_t col = is_selected(g.id) ? kSelectOrange : Color::hex(0x101010, 200);
-  const int nu = l.points_u, nv = l.points_v;
-  for (int i = 0; i < n; i++) {
-    const int iu = i % nu, iv = (i / nu) % nv, iw = i / (nu * nv);
-    const Vec3 p = w.point(l.control_point(i));
-    if (iu + 1 < nu) scene_r3d_.line(p, w.point(l.control_point(i + 1)), col, false);
-    if (iv + 1 < nv) scene_r3d_.line(p, w.point(l.control_point(i + nu)), col, false);
-    if (iw + 1 < l.points_w) scene_r3d_.line(p, w.point(l.control_point(i + nu * nv)), col, false);
-  }
-}
-
-/* The active curve's or lattice's points: selected ones orange, the rest white; the first one larger (a curve's start). */
-void Editor::draw_control_points(const Recti &view, const GameObject &g, const Component &pc) {
-  auto &u = ui_;
-  for (int i = 0; i < pc.control_point_count(); i++) {
-    Vec2 sp;
-    float z;
-    if (!scene_r3d_.project(g.world_matrix().point(pc.control_point(i)), sp, z)) continue;
-    const bool on = pt_obj_ == g.id && std::find(pt_sel_.begin(), pt_sel_.end(), i) != pt_sel_.end();
-    const float r = (float)u.px(i == 0 && g.curve() ? 5 : 4);  // a curve's start is larger
-    u.canvas.fill_circle(view.x + sp.x, view.y + sp.y, r + 1.0f, Color::hex(0x000000, 200));
-    u.canvas.fill_circle(view.x + sp.x, view.y + sp.y, r, on ? kSelectOrange : Color::hex(0xF0F0F0));
-  }
-}
-
-bool Editor::point_pick(const Recti &view, int mx, int my, int mode) {
-  GameObject *g = active_object();
-  const Component *pc = g && is_selected(g->id) ? g->point_source() : nullptr;
-  if (!pc || edit_mode_) return false;
-  int hit = -1;
-  float best = (float)ui_.px(9);
-  for (int i = 0; i < pc->control_point_count(); i++) {
-    Vec2 sp;
-    float z;
-    if (!scene_r3d_.project(g->world_matrix().point(pc->control_point(i)), sp, z)) continue;
-    const float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
-    if (d < best) best = d, hit = (int)i;
-  }
-  if (hit < 0) return false;
-  if (pt_obj_ != g->id) pt_sel_.clear();
-  pt_obj_ = g->id;
-  auto it = std::find(pt_sel_.begin(), pt_sel_.end(), hit);
-  if (mode == SEL_REPLACE) pt_sel_ = {hit};
-  else if (it != pt_sel_.end()) pt_sel_.erase(it);
-  else pt_sel_.push_back(hit);
-  return true;
-}
-
 GameObject *Editor::point_target(std::vector<int> &points) {
   points.clear();
   if (edit_mode_ || !pt_obj_ || pt_obj_ != active_ || pt_sel_.empty()) return nullptr;
@@ -792,161 +534,6 @@ GameObject *Editor::point_target(std::vector<int> &points) {
   for (int i : pt_sel_)
     if (i >= 0 && i < pc->control_point_count()) points.push_back(i);
   return points.empty() ? nullptr : g;
-}
-
-/* Blender's octahedral bone: from the head (the object's origin) along +Y by its length, widest a tenth of the way. */
-/* The armature a bone belongs to (the nearest Armature up from it, itself included). */
-static const Armature *bone_armature(const GameObject &g) {
-  for (const GameObject *p = &g; p; p = p->parent)
-    if (const Armature *a = p->get<Armature>()) return a;
-  return nullptr;
-}
-
-void Editor::draw_bone(const GameObject &g, const Bone &b) {
-  const Armature *arm = bone_armature(g);
-  if (arm && !arm->show_bones) return;
-  const bool over = !arm || arm->in_front;  // In Front: over the meshes; off: hidden behind them
-  const Mat4 &w = g.world_matrix();
-  const float L = finite_bits(b.length) ? std::max(1e-4f, b.length) : 1.0f, r = L * 0.1f;
-  const Vec3 head = w.point(Vec3(0.0f)), tail = w.point(Vec3(0, L, 0));
-  Vec3 ring[4];
-  for (int k = 0; k < 4; k++) {
-    const float a = k * kPi * 0.5f;
-    ring[k] = w.point(Vec3(std::cos(a) * r, L * 0.1f, std::sin(a) * r));
-  }
-  /* IK's bones tinted (Blender draws them yellowish): a chain turned by its control, not posed by hand. */
-  const uint32_t col = is_selected(g.id) ? kSelectOrange : ik_bones_frame_.count(g.id) ? Color::hex(0xB8A040, 230) : Color::hex(0x202020, 220);
-  for (int k = 0; k < 4; k++) {
-    scene_r3d_.line(head, ring[k], col, !over);
-    scene_r3d_.line(ring[k], tail, col, !over);
-    scene_r3d_.line(ring[k], ring[(k + 1) % 4], col, !over);
-  }
-}
-
-void Editor::draw_scene_icons(const Recti &view) {
-  auto &u = ui_;
-  ik_bones_frame_ = ik_driven_bones();
-  scene_->for_each([&](GameObject &g) {
-    if (const Component *bc = g.find_role(Component::RenderRole::Bone); bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
-    if (RigControl::live.load(std::memory_order_relaxed) && g.active_in_hierarchy())
-      if (const RigControl *rc = g.get<RigControl>()) draw_rig_control(g, *rc);
-    if (const Component *pc = g.point_source(); pc && g.active_in_hierarchy()) {
-      if (const Curve *cv = g.curve()) draw_curve(g, *cv);
-      if (const Lattice *lt = g.lattice()) draw_lattice(g, *lt);
-      if (g.id == active_ && !edit_mode_) draw_control_points(view, g, *pc);
-    }
-    auto *l = g.light();  // (the role lookups first: every object, every frame)
-    auto *c = g.camera();
-    if ((!l && !c) || !g.active_in_hierarchy()) return;
-    Vec2 sp;
-    float z;
-    if (!scene_r3d_.project(g.world_position(), sp, z)) return;
-    float x = view.x + sp.x, y = view.y + sp.y;
-    bool sel = is_selected(g.id);
-    int s = u.px(22);
-    u.canvas.fill_circle(x, y, s * 0.62f, Color::hex(sel ? 0x6A4A1A : 0x202020, 170));
-    u.draw_icon(l ? Icon::Light : Icon::Camera, {(int)x - s / 2, (int)y - s / 2, s, s}, sel ? kSelectOrange : (l ? Color::hex(0xFFE27A) : Color::hex(0xDDDDDD)));
-    if (sel && l && l->type == 0) {
-      Vec3 p = g.world_position(), d = g.world_rotation().rotate({0, 0, 1});
-      scene_r3d_.line(p, p + d * 2.0f, Color::hex(0xFFE27A), false);
-    }
-    if (sel && l && l->type == 2) {
-      /* The spot's cone out to its range, and the inner (full brightness) cone. */
-      const RenderLight rl = to_render_light(g, *l);
-      const Vec3 p = rl.position, d = rl.direction, r = rl.right, up = cross(d, r);
-      const float len = std::min(l->range, 6.0f);
-      for (int ring = 0; ring < 2; ring++) {
-        const float c = ring ? rl.cos_inner : rl.cos_outer, s = std::sqrt(std::max(0.0f, 1.0f - c * c));
-        const float rad = len * s / std::max(1e-3f, c);
-        const uint32_t col = Color::hex(0xFFE27A, ring ? 110 : 220);
-        Vec3 prev;
-        for (int k = 0; k <= 32; k++) {
-          const float a = k / 32.0f * 2.0f * kPi;
-          const Vec3 q = p + d * len + (r * std::cos(a) + up * std::sin(a)) * rad;
-          if (k) scene_r3d_.line(prev, q, col, false);
-          if (!ring && k % 8 == 0) scene_r3d_.line(p, q, col, false);
-          prev = q;
-        }
-      }
-    }
-    if (sel && l && l->type == 3) {
-      /* The area's rectangle (or disc), and its normal: it lights the side the arrow points to. */
-      const RenderLight rl = to_render_light(g, *l);
-      const Vec3 p = rl.position, d = rl.direction, r = rl.right, up = cross(d, r);
-      const uint32_t col = Color::hex(0xFFE27A);
-      Vec3 prev;
-      const int n = rl.disk ? 32 : 4;
-      for (int k = 0; k <= n; k++) {
-        Vec3 q;
-        if (rl.disk) {
-          const float a = k / (float)n * 2.0f * kPi;
-          q = p + r * (std::cos(a) * rl.width * 0.5f) + up * (std::sin(a) * rl.height * 0.5f);
-        }
-        else {
-          const float sx = (k % 4 == 1 || k % 4 == 2) ? 0.5f : -0.5f, sy = (k % 4 >= 2) ? 0.5f : -0.5f;
-          q = p + r * (sx * rl.width) + up * (sy * rl.height);
-        }
-        if (k) scene_r3d_.line(prev, q, col, false);
-        prev = q;
-      }
-      scene_r3d_.line(p, p + d * std::max(0.5f, 0.5f * (rl.width + rl.height)), col, false);
-    }
-    if (sel && c) {
-      /* Camera frustum (FoCG ch. 8.5). */
-      Quat q = g.world_rotation();
-      Vec3 p = g.world_position();
-      float far_d = std::min(c->far_clip, 4.0f);
-      float aspect = c->image_aspect(scene_->render.width / (float)std::max(1, scene_->render.height));
-      float tan_v = c->orthographic ? 0.0f : std::tan(c->vertical_fov_deg(aspect) * 0.5f * kDeg2Rad);
-      float sx = c->physical && !c->orthographic ? c->shift_x * 2.0f : 0.0f, sy = c->physical && !c->orthographic ? c->shift_y * 2.0f : 0.0f;
-      auto rect_at = [&](float d, Vec3 *out) {  // the image rectangle at distance d (lens shift included)
-        float hh = c->orthographic ? c->ortho_size : tan_v * d, hw = hh * aspect;
-        float cx = sx * hw, cy = sy * hh;
-        out[0] = {cx - hw, cy - hh, d};
-        out[1] = {cx + hw, cy - hh, d};
-        out[2] = {cx + hw, cy + hh, d};
-        out[3] = {cx - hw, cy + hh, d};
-      };
-      Vec3 corners[4];
-      rect_at(far_d, corners);
-      for (int i = 0; i < 4; i++) {
-        Vec3 a = p + q.rotate(corners[i]), b = p + q.rotate(corners[(i + 1) % 4]);
-        Vec3 o = c->orthographic ? p + q.rotate({corners[i].x, corners[i].y, 0}) : p;
-        scene_r3d_.line(o, a, Color::hex(0xDDDDDD, 200), false);
-        scene_r3d_.line(a, b, Color::hex(0xDDDDDD, 200), false);
-      }
-      if (c->dof && !c->orthographic) {
-        /* The focus plane (Blender draws it as Limits > Focus). */
-        Vec3 fc[4];
-        rect_at(c->focus_distance, fc);
-        for (int i = 0; i < 4; i++)
-          scene_r3d_.line(p + q.rotate(fc[i]), p + q.rotate(fc[(i + 1) % 4]), Color::hex(0xF0C040, 200), false);
-      }
-    }
-  });
-}
-
-/* The nearest mesh surface along a world-space ray (what the mouse points at). */
-bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
-  float best = 1e30f;
-  scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    auto *mr = g.get<MeshRenderer>();
-    const Mesh *m = mr && mr->enabled && mr->display_as == 0 ? g.evaluated_mesh() : nullptr;
-    if (!m) return;
-    const Mat4 &w = g.world_matrix();
-    const Mat4 inv = w.inverse();
-    Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};  // unnormalised: t stays a world parameter
-    const RenderMesh &rm = m->render_mesh();
-    if (ray_aabb({lr.origin, normalize(lr.dir)}, rm.bounds) < 0) return;
-    for (size_t t = 0; t < rm.tri_count(); t++) {
-      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
-      if (d > 0 && d < best) best = d;
-    }
-  });
-  if (best >= 1e30f) return false;
-  hit = ray.origin + ray.dir * best;
-  return true;
 }
 
 /* Turns a light so its +Z (the way it shines) points at `target`, keeping its
@@ -977,449 +564,9 @@ void Editor::aim_light(GameObject &g, Vec3 target) {
   mark_changed("Aim Light");
 }
 
-/* The Camera's focus eyedropper: the next click in the Scene view sets the
- * focus distance to that point's depth in front of the camera. */
-bool Editor::focus_pick_update(const Recti &view) {
-  if (!focus_pick_cam_) return false;
-  auto &u = ui_;
-  auto &in = u.in;
-  GameObject *g = scene_->find(focus_pick_cam_);
-  Camera *cam = g ? g->get<Camera>() : nullptr;
-  Light *light = g && !cam ? g->get<Light>() : nullptr;
-  if ((!cam && !light) || in.key_pressed[platform::KEY_ESCAPE]) {
-    focus_pick_cam_ = 0;
-    return false;
-  }
-  if (light) {
-    /* A light's eyedropper: aim it at the clicked point (Blender: a Track To
-     * constraint, or Light > Point At; Unity: Transform.LookAt). */
-    if (!scene_hovered_) return false;
-    u.cursor = Cursor::Hand;
-    if (!in.pressed[0]) return true;
-    u.consume_click();
-    Vec3 p;
-    const Ray r = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
-    if (!raycast_scene({r.origin, normalize(r.dir)}, p)) {
-      Log::warn("Aim Light: click on a surface");
-      return true;
-    }
-    aim_light(*g, p);
-    focus_pick_cam_ = 0;
-    return true;
-  }
-  if (!scene_hovered_) return false;
-  u.cursor = Cursor::Hand;  // picking
-  if (!in.pressed[0]) return true;
-  u.consume_click();
-  Vec3 p;
-  const Ray r = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
-  if (!raycast_scene({r.origin, normalize(r.dir)}, p)) {
-    Log::warn("Pick Focus Point: click on a surface");
-    return true;
-  }
-  const Vec3 fwd = normalize(g->world_rotation().rotate({0, 0, 1}));
-  const float d = dot(p - g->world_position(), fwd);
-  if (d <= 0.0f) {
-    Log::warn("Pick Focus Point: that point is behind the camera");
-    return true;
-  }
-  cam->focus_distance = d;
-  cam->focus_point = p;
-  cam->focus_track = true;  // stays on that point as the camera moves
-  cam->dof = true;
-  focus_pick_cam_ = 0;
-  Log::info("Focus distance: %.3f m", d);
-  mark_changed("Pick Focus Point");
-  return true;
-}
-
-/* Object origins (Blender's origin dots): where each selected object's pivot
- * is. While the Inspector's Origin row is in use, a marker shows where Set
- * Origin would move it, before Apply. */
-void Editor::draw_origins(const Recti &view) {
-  auto &u = ui_;
-  auto to_screen = [&](Vec3 p, Vec2 &s) {
-    float z;
-    if (!scene_r3d_.project(p, s, z)) return false;
-    s.x += view.x;
-    s.y += view.y;
-    return true;
-  };
-  u.canvas.push_clip(view);
-  if (!playing_)
-    for (GameObject *g : selected_objects(false)) {
-      if (edit_mode_ && g->id != edit_obj_) continue;
-      Vec2 s;
-      if (!to_screen(g->world_position(), s)) continue;
-      const bool active = g->id == active_;
-      u.canvas.fill_circle(s.x, s.y, (float)u.px(4.5f), 0xFF000000);
-      u.canvas.fill_circle(s.x, s.y, (float)u.px(3.0f), active ? Color::hex(0xFFA733) : Color::hex(0xE07020));
-    }
-  GameObject *a = active_object();
-  Vec3 c;
-  if (origin_hover_ && a && !playing_ && origin_target(*a, origin_mode_, origin_target_, c)) {
-    const Mat4 &w = a->world_matrix();
-    const Vec3 now = a->world_position();
-    /* Geometry to Origin moves the mesh, not the pivot: its new centre lands on the origin. */
-    const Vec3 to = origin_mode_ == 8 ? now : w.point(c);
-    const Vec3 from = origin_mode_ == 8 ? w.point(c) : now;
-    Vec2 s0, s1;
-    if (to_screen(from, s0) && to_screen(to, s1)) {
-      const Vec2 d = s1 - s0;
-      const float len = length(d);
-      for (float t = 0; t < len; t += 10.0f) {
-        const Vec2 p = s0 + d * (t / std::max(1.0f, len)), q = s0 + d * (std::min(len, t + 5.0f) / std::max(1.0f, len));
-        u.canvas.line(p.x, p.y, q.x, q.y, Color::hex(0x40D0FF, 200), (float)u.px(1.0f));
-      }
-      const float r = (float)u.px(7);
-      const Vec2 dia[4] = {{s1.x, s1.y - r}, {s1.x + r, s1.y}, {s1.x, s1.y + r}, {s1.x - r, s1.y}};
-      u.canvas.fill_polygon(dia, 4, Color::hex(0x40D0FF, 220));
-      u.canvas.line(s1.x - r * 1.8f, s1.y, s1.x + r * 1.8f, s1.y, 0xFF000000, 1.0f);
-      u.canvas.line(s1.x, s1.y - r * 1.8f, s1.x, s1.y + r * 1.8f, 0xFF000000, 1.0f);
-      const std::string label = origin_mode_ == 8 ? "Geometry moves to the origin" : "New origin";
-      const int tw = u.font.text_width(label) + u.px(10);
-      Recti box{(int)s1.x + u.px(12), (int)s1.y - u.row_h() - u.px(4), tw, u.row_h()};
-      u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 220));
-      u.label(box, label, Color::hex(0x40D0FF), ui::Align::Center);
-    }
-  }
-  /* Edit Origin: what a click would snap to, and how to get out. */
-  if (origin_edit_ && !edit_mode_ && !playing_) {
-    if (selection_.empty()) origin_edit_ = false;
-    Vec3 p;
-    std::string what;
-    Vec2 s1, s0;
-    if (a && scene_hovered_ && drag_ == Drag::None && gizmo_hot_ < 0 && origin_snap_target(view, u.in.mx, u.in.my, p, what) && to_screen(p, s1)) {
-      if (to_screen(a->world_position(), s0)) u.canvas.line(s0.x, s0.y, s1.x, s1.y, Color::hex(0x40D0FF, 160), (float)u.px(1.0f));
-      const float r = (float)u.px(6);
-      const Vec2 dia[4] = {{s1.x, s1.y - r}, {s1.x + r, s1.y}, {s1.x, s1.y + r}, {s1.x - r, s1.y}};
-      u.canvas.fill_polygon(dia, 4, Color::hex(0x40D0FF, 230));
-      const std::string label = "Snap origin to " + what;
-      const int tw = u.font.text_width(label) + u.px(10);
-      Recti box{(int)s1.x + u.px(12), (int)s1.y - u.row_h() - u.px(4), tw, u.row_h()};
-      u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 220));
-      u.label(box, label, Color::hex(0x40D0FF), ui::Align::Center);
-    }
-    const std::string hint = "Editing the origin: drag the handles, or click a vertex, edge or face to snap it there.  Esc: done";
-    const int hw = u.font.text_width(hint) + u.px(16);
-    Recti hb{view.x + (view.w - hw) / 2, view.y + u.px(8), hw, u.row_h()};
-    u.canvas.fill_round_rect(hb, u.px(3), Color::hex(0x103040, 230));
-    u.label(hb, hint, Color::hex(0x9FE4FF), ui::Align::Center);
-  }
-  origin_hover_ = false;  // the Inspector sets it again while its row is in use
-  u.canvas.pop_clip();
-}
-
-/* The scene gizmo's area, label included: clicks there belong to the gizmo,
- * not to selection (they used to start a box select and never reach it). */
-Recti Editor::view_gizmo_rect(const Recti &view) const {
-  const int size = ui_.px(84);
-  const float cx = view.right() - size * 0.62f, cy = view.y + size * 0.62f;
-  return {(int)(cx - size * 0.6f), (int)(cy - size * 0.6f), (int)(size * 1.2f), (int)(size * 1.2f) + ui_.row_h() + ui_.px(4)};
-}
-
-void Editor::draw_view_gizmo(const Recti &view) {
-  auto &u = ui_;
-  int size = u.px(84);
-  float cx = view.right() - size * 0.62f, cy = view.y + size * 0.62f;
-  float rad = size * 0.36f;
-  Mat4 v = cam_.view();
-  struct Ax { Vec3 dir; uint32_t col; const char *label; float yaw, pitch; bool positive; };
-  Ax axes[6] = {{{1, 0, 0}, u.theme.axis_x, "x", -90, 0, true}, {{-1, 0, 0}, u.theme.axis_x, "", 90, 0, false},
-                {{0, 1, 0}, u.theme.axis_y, "y", 0, 90, true},  {{0, -1, 0}, u.theme.axis_y, "", 0, -90, false},
-                {{0, 0, 1}, u.theme.axis_z, "z", 180, 0, true}, {{0, 0, -1}, u.theme.axis_z, "", 0, 0, false}};
-  int order[6] = {0, 1, 2, 3, 4, 5};
-  float depth[6];
-  Vec2 pos[6];
-  for (int i = 0; i < 6; i++) {
-    Vec3 d = v.dir(axes[i].dir);
-    pos[i] = {cx + d.x * rad, cy - d.y * rad};
-    depth[i] = d.z;
-  }
-  std::sort(order, order + 6, [&](int a, int b) { return depth[a] > depth[b]; });
-  Recti area = view_gizmo_rect(view);
-  bool hover_area = u.hovered(area);
-  int hot = -1;
-  float best = (float)u.px(11);
-  for (int i = 0; i < 6; i++) {
-    float d = length(Vec2((float)u.in.mx, (float)u.in.my) - pos[i]);
-    if (hover_area && d < best) { best = d; hot = i; }
-  }
-  bool hot_center = hover_area && hot < 0 && length(Vec2((float)u.in.mx, (float)u.in.my) - Vec2(cx, cy)) < u.px(10);
-  u.canvas.fill_circle(cx, cy, rad + u.px(14), Color::hex(0x000000, hover_area ? 50 : 25));
-  for (int k = 0; k < 6; k++) {
-    int i = order[k];
-    const Ax &a = axes[i];
-    uint32_t col = hot == i ? u.theme.axis_hot : a.col;
-    if (a.positive) {
-      u.canvas.line(cx, cy, pos[i].x, pos[i].y, col, (float)u.px(2));
-      u.canvas.fill_circle(pos[i].x, pos[i].y, (float)u.px(8), col);
-      u.canvas.text(u.font, (int)pos[i].x - u.font.text_width(a.label) / 2, (int)pos[i].y - u.font.line_height() / 2 - 1, a.label, Color::hex(0x101010));
-    }
-    else {
-      u.canvas.fill_circle(pos[i].x, pos[i].y, (float)u.px(6), hot == i ? u.theme.axis_hot : Color::hex(0xB0B0B0, 200));
-    }
-  }
-  u.canvas.fill_round_rect({(int)cx - u.px(6), (int)cy - u.px(6), u.px(12), u.px(12)}, u.px(2), hot_center ? u.theme.axis_hot : Color::hex(0xCFCFCF));
-  /* Unity's label: the view's name when it looks along an axis, and the projection. */
-  const Vec3 fwd = cam_.forward();
-  const char *name = nullptr;
-  static const char *const names[6] = {"Left", "Right", "Bottom", "Top", "Back", "Front"};
-  const Vec3 dirs[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, -1}, {0, 0, 1}};
-  for (int i = 0; i < 6; i++)
-    if (dot(fwd, dirs[i]) > 0.999f) name = names[i];
-  const std::string label = strprintf("< %s%s", name ? name : "", name ? (cam_.ortho ? "" : " (Persp)") : (cam_.ortho ? "Iso" : "Persp"));
-  Recti lr{(int)(cx - size * 0.5f), (int)(cy + rad + u.px(10)), size, u.row_h()};
-  const bool hot_label = u.hovered(lr);
-  {
-    const int tw = u.font.text_width(label) + u.px(10);
-    u.canvas.fill_round_rect({lr.x + (lr.w - tw) / 2, lr.y + u.px(1), tw, lr.h - u.px(2)}, u.px(3), Color::hex(0x000000, hot_label ? 150 : 100));
-  }
-  u.label(lr, label, hot_label ? u.theme.text_bright : u.theme.text, ui::Align::Center);
-  if (hover_area && u.in.pressed[0] && drag_ == Drag::None) {
-    if (hot_label) cam_.ortho = !cam_.ortho;  // Unity: click the label to switch projection
-    else if (hot >= 0) {
-      cam_.animate_to(cam_.pivot, axes[hot].yaw, axes[hot].pitch, cam_.distance, now_seconds());
-      cam_.ortho = true;
-    }
-    else cam_.ortho = !cam_.ortho;
-    u.consume_click();
-  }
-  if (hover_area) u.tooltip("Scene Gizmo: click an axis to look along it, click the centre to toggle Perspective/Isometric.\nBlender: the navigation gizmo / numpad 1, 3, 7 and 5.");
-}
-
 /* ===================================================================== */
 /* Picking                                                                */
 /* ===================================================================== */
-
-/* Edit Origin: put the meshes and children back in the world while the gizmo
- * moves or turns their objects, so only the origins change. */
-void Editor::compensate_origin_drag() {
-  for (auto &s : gizmo_starts_) {
-    GameObject *g = scene_->find(s.id);
-    if (!g) continue;
-    const Mat4 corr = g->world_matrix().inverse() * s.world;
-    for (auto &ms : origin_mesh_starts_)
-      if (ms.first == s.id && ms.second)
-        if (auto *mf = g->get<MeshFilter>()) {
-          auto m = std::make_shared<Mesh>(*ms.second);
-          for (Vec3 &p : m->positions) p = corr.point(p);
-          m->version = ms.second->version + 1 + (++redo_serial_);
-          m->touch();
-          mf->mesh = m;
-        }
-  }
-  for (auto &c : origin_child_starts_)
-    if (GameObject *ch = scene_->find(c.first)) ch->set_world_matrix(c.second);
-}
-
-/* What a click snaps the origin to: the nearest vertex, else an edge's
- * midpoint, else the centre of the face under the mouse (the active object). */
-bool Editor::origin_snap_target(const Recti &view, int mx, int my, Vec3 &world, std::string &what) {
-  GameObject *a = active_object();
-  if (!a) return false;
-  const Mesh *m = a->evaluated_mesh();
-  if (!m || m->positions.empty() || m->vert_count() > 400000) return false;
-  const Mat4 &w = a->world_matrix();
-  const Vec2 mouse((float)(mx - view.x), (float)(my - view.y));
-  auto screen = [&](Vec3 p, Vec2 &s) {
-    float z;
-    return scene_r3d_.project(w.point(p), s, z);
-  };
-  float best = (float)ui_.px(12);
-  bool found = false;
-  for (const Vec3 &p : m->positions) {
-    Vec2 s;
-    if (screen(p, s) && length(s - mouse) < best) {
-      best = length(s - mouse);
-      world = w.point(p);
-      found = true;
-    }
-  }
-  if (found) {
-    what = "Vertex";
-    return true;
-  }
-  best = (float)ui_.px(12);
-  for (auto &e : m->edge_cache()) {
-    const Vec3 mid = (m->positions[e.first] + m->positions[e.second]) * 0.5f;
-    Vec2 s;
-    if (screen(mid, s) && length(s - mouse) < best) {
-      best = length(s - mouse);
-      world = w.point(mid);
-      found = true;
-    }
-  }
-  if (found) {
-    what = "Edge Midpoint";
-    return true;
-  }
-  const Ray ray = scene_r3d_.screen_ray(mouse.x, mouse.y);
-  const Mat4 inv = w.inverse();
-  const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
-  const RenderMesh &rm = m->render_mesh();
-  float t_best = 1e30f;
-  uint32_t face = UINT32_MAX;
-  for (size_t t = 0; t < rm.tri_count(); t++) {
-    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
-    if (d > 0 && d < t_best) {
-      t_best = d;
-      face = t < rm.tri_face.size() ? rm.tri_face[t] : UINT32_MAX;
-    }
-  }
-  if (face == UINT32_MAX || face >= m->face_count()) return false;
-  world = w.point(m->face_center(face));
-  what = "Face Center";
-  return true;
-}
-
-void Editor::pick(const Recti &view, int mx, int my, int mode) {
-  if (origin_edit_ && !edit_mode_ && mode == SEL_REPLACE) {
-    Vec3 p;
-    std::string what;
-    if (origin_snap_target(view, mx, my, p, what)) {
-      set_origin(5, p);  // Origin to Point
-      Log::info("Origin snapped to the %s", to_lower(what).c_str());
-      return;
-    }
-  }
-  /* Icon gizmos first (lights & cameras have no pixels in the id buffer). */
-  uint64_t hit = 0;
-  float best = (float)ui_.px(14);
-  scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy() || (!g.get<Light>() && !g.get<Camera>())) return;
-    Vec2 sp;
-    float z;
-    if (!scene_r3d_.project(g.world_position(), sp, z)) return;
-    float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
-    if (d < best) { best = d; hit = g.id; }
-  });
-  if (!hit) hit = pick_wire_object(view, mx, my, ui_.px(6));
-  if (!hit) {
-    uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);
-    if (id)
-      if (GameObject *g = scene_->find(id)) hit = g->id;
-  }
-  if (hit) select(hit, mode);
-  else if (mode == SEL_REPLACE) clear_selection();
-}
-
-/* Wire and Bounds objects have no pixels in the id buffer: pick them by
- * their drawn edges, like Blender selects a wire cutter by clicking a line. */
-uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius) {
-  uint64_t hit = 0;
-  float best = (float)radius;
-  scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    const Component *bc = g.find_role(Component::RenderRole::Bone);
-    if (bc && bone_armature(g) && !bone_armature(g)->show_bones) bc = nullptr;  // hidden bones aren't picked
-    if (bc) {  // a bone by its line (task 0047)
-      const Bone &bn = *static_cast<const Bone *>(bc);
-      const Mat4 &bw = g.world_matrix();
-      Vec2 sa, sb;
-      float za, zb;
-      if (scene_r3d_.project(bw.point(Vec3(0.0f)), sa, za) &&
-          scene_r3d_.project(bw.point(Vec3(0, finite_bits(bn.length) ? bn.length : 1.0f, 0)), sb, zb)) {
-        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
-        const float len2 = dot(d, d);
-        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
-        const float dist = length(p - (sa + d * t));
-        if (dist < best) best = dist, hit = g.id;
-      }
-    }
-    if (const RigControl *rc = RigControl::live.load(std::memory_order_relaxed) ? g.get<RigControl>() : nullptr) {  // a control by its wire (task 0067)
-      const float d = rig_control_distance(view, g, *rc, mx, my) * 0.5f;  // (a control near a bone wins: animators grab controls)
-      if (d < best) best = d, hit = g.id;
-    }
-    if (const Lattice *lt = g.lattice()) {  // a lattice by its cage (task 0043)
-      const Mat4 &lw = g.world_matrix();
-      const int n = lt->control_point_count(), nu = lt->points_u, nv = lt->points_v;
-      auto seg = [&](Vec3 a, Vec3 b) {
-        Vec2 sa, sb;
-        float za, zb;
-        if (!scene_r3d_.project(lw.point(a), sa, za) || !scene_r3d_.project(lw.point(b), sb, zb)) return;
-        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
-        const float len2 = dot(d, d);
-        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
-        const float dist = length(p - (sa + d * t));
-        if (dist < best) best = dist, hit = g.id;
-      };
-      /* Only the box's outer edges: the inner grid lines cross the mesh inside, which a click should select. */
-      const int nw = lt->points_w;
-      auto end = [](int i, int n) { return i == 0 || i == n - 1; };
-      for (int i = 0; i < n; i++) {
-        const int iu = i % nu, iv = (i / nu) % nv, iw = i / (nu * nv);
-        if (iu + 1 < nu && end(iv, nv) && end(iw, nw)) seg(lt->control_point(i), lt->control_point(i + 1));
-        if (iv + 1 < nv && end(iu, nu) && end(iw, nw)) seg(lt->control_point(i), lt->control_point(i + nu));
-        if (iw + 1 < nw && end(iu, nu) && end(iv, nv)) seg(lt->control_point(i), lt->control_point(i + nu * nv));
-      }
-    }
-    if (const Curve *cv = g.curve()) {  // a curve by its line (task 0042)
-      const CurvePath &path = cv->local_path();
-      const Mat4 &cw = g.world_matrix();
-      const size_t n = path.pos.size();
-      for (size_t i = 0; i + 1 < n + (path.closed ? 1 : 0); i++) {
-        Vec2 sa, sb;
-        float za, zb;
-        if (!scene_r3d_.project(cw.point(path.pos[i]), sa, za) || !scene_r3d_.project(cw.point(path.pos[(i + 1) % n]), sb, zb)) continue;
-        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
-        const float len2 = dot(d, d);
-        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
-        const float dist = length(p - (sa + d * t));
-        if (dist < best) best = dist, hit = g.id;
-      }
-    }
-    auto *mr = g.get<MeshRenderer>();
-    if (!mr || !mr->enabled || mr->display_as == 0) return;
-    const Mesh *m = g.evaluated_mesh();
-    if (!m) return;
-    const Mat4 &w = g.world_matrix();
-    auto seg = [&](Vec3 a, Vec3 b) {
-      Vec2 sa, sb;
-      float za, zb;
-      if (!scene_r3d_.project(w.point(a), sa, za) || !scene_r3d_.project(w.point(b), sb, zb)) return;
-      const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
-      const float len2 = dot(d, d);
-      const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
-      const float dist = length(p - (sa + d * t));
-      if (dist < best) {
-        best = dist;
-        hit = g.id;
-      }
-    };
-    if (mr->display_as == 2) {
-      const AABB b = m->render_mesh().bounds;
-      Vec3 c[8];
-      for (int k = 0; k < 8; k++) c[k] = {k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z};
-      static const int kE[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
-      for (auto &e : kE) seg(c[e[0]], c[e[1]]);
-    }
-    else
-      for (auto &e : m->edge_cache()) seg(m->positions[e.first], m->positions[e.second]);
-  });
-  return hit;
-}
-
-void Editor::box_select(const Recti &view, Recti box, int mode) {
-  if (mode == SEL_REPLACE) clear_selection();
-  Recti b = box.intersect(view);
-  std::vector<uint32_t> ids;
-  for (int y = b.y; y < b.bottom(); y++)
-    for (int x = b.x; x < b.right(); x++) {
-      uint32_t id = scene_rt_.id_at(x - view.x, y - view.y);
-      if (id && (ids.empty() || ids.back() != id)) ids.push_back(id);
-    }
-  std::sort(ids.begin(), ids.end());
-  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-  for (uint32_t id : ids)
-    if (GameObject *g = scene_->find(id)) select(g->id, SEL_ADD);
-  scene_->for_each([&](GameObject &g) {
-    if (!g.get<Light>() && !g.get<Camera>()) return;
-    Vec2 sp;
-    float z;
-    if (scene_r3d_.project(g.world_position(), sp, z) && box.contains((int)(view.x + sp.x), (int)(view.y + sp.y))) select(g.id, SEL_ADD);
-  });
-}
 
 void Editor::frame_selected() {
   AABB b;
@@ -1456,12 +603,6 @@ enum GizmoHandle {
   H_ROT_X = 10, H_ROT_Y, H_ROT_Z, H_ROT_VIEW,
   H_SCALE_X = 20, H_SCALE_Y, H_SCALE_Z, H_SCALE_ALL
 };
-float dist_point_segment(Vec2 p, Vec2 a, Vec2 b) {
-  Vec2 d = b - a;
-  float l2 = dot(d, d);
-  float t = l2 > 0 ? clampf(dot(p - a, d) / l2, 0, 1) : 0;
-  return length(p - (a + d * t));
-}
 bool point_in_quad(Vec2 p, const Vec2 *q) {
   bool in = false;
   for (int i = 0, j = 3; i < 4; j = i++)
@@ -1579,7 +720,7 @@ bool Editor::gizmo_update(const Recti &view) {
         Vec2 a, b;
         proj(pivot, a);
         proj(pivot + axis[k] * size, b);
-        consider(H_MOVE_X + k, dist_point_segment(m, a, b) + 0.5f);
+        consider(H_MOVE_X + k, dist_to_segment_2d(m, a, b) + 0.5f);
         /* plane handle: small square spanned by the other two axes */
         int i1 = (k + 1) % 3, i2 = (k + 2) % 3;
         Vec2 q[4];
@@ -1596,7 +737,7 @@ bool Editor::gizmo_update(const Recti &view) {
         Vec2 a, b;
         proj(pivot, a);
         proj(pivot + axis[k] * size, b);
-        consider(H_SCALE_X + k, dist_point_segment(m, a, b) + 0.5f);
+        consider(H_SCALE_X + k, dist_to_segment_2d(m, a, b) + 0.5f);
       }
     }
     if (do_rot) {
@@ -1613,7 +754,7 @@ bool Editor::gizmo_update(const Recti &view) {
           if (dot(d, to_cam) < -0.05f) { has_prev = false; continue; }
           Vec2 sp;
           proj(pivot + d * size * rscale, sp);
-          if (has_prev) consider(H_ROT_X + k, dist_point_segment(m, prev, sp));
+          if (has_prev) consider(H_ROT_X + k, dist_to_segment_2d(m, prev, sp));
           prev = sp;
           has_prev = true;
         }
@@ -1632,7 +773,7 @@ bool Editor::gizmo_update(const Recti &view) {
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt() && !eo && !co)
     for (GameObject *g : objs)
       if (g->get<Bone>() && ik_drives(*scene_, *g)) {
-        Log::warn("'%s' is turned by IK: move its target instead", g->name.c_str());
+        Log::warn("'%s' is turned by IK: %s its target instead", g->name.c_str(), ik_end_driven(*scene_, *g) ? "turn" : "move");
         gizmo_hot_ = -1;
         break;
       }
@@ -2250,140 +1391,25 @@ void Editor::edit_select_all(bool sel) {
   else edge_sel_.clear();
 }
 
-void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
-  last_op_hidden_ = true;  // selecting something else puts the last operator's panel away
-  GameObject *g = edit_object();
-  if (!g) return;
-  const Mesh &m = **edit_mesh_ptr();
-  vert_sel_.resize(m.vert_count(), 0);
-  face_sel_.resize(m.face_count(), 0);
-  const Mat4 &w = g->world_matrix();
-  /* Clicking another object works as it does outside Edit Mode (Unity): a mesh
-   * becomes the one being edited (same vertex / edge / face mode); a light or
-   * camera icon leaves Edit Mode and selects it. */
-  {
-    uint64_t other = 0;
-    float best = (float)ui_.px(14);
-    scene_->for_each([&](GameObject &o) {
-      if (!o.active_in_hierarchy() || (!o.get<Light>() && !o.get<Camera>())) return;
-      Vec2 sp;
-      float z;
-      if (!scene_r3d_.project(o.world_position(), sp, z)) return;
-      float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
-      if (d < best) { best = d; other = o.id; }
-    });
-    if (other) {
-      exit_edit_mode();
-      select(other, mode);
-      return;
-    }
-    const uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);
-    GameObject *o = id ? scene_->find(id) : nullptr;
-    if (o && o->id != edit_obj_ && o->get<MeshFilter>() && o->get<MeshFilter>()->mesh) {
-      const EditElement keep = elem_;
-      exit_edit_mode();
-      select(o->id);
-      enter_edit_mode();
-      set_edit_element(keep);
-      Log::info("Editing '%s'", o->name.c_str());
-      return;
-    }
-  }
-  if (mode == SEL_REPLACE) edit_select_all(false);
-  if (elem_ == EditElement::Vertex) {
-    int best = -1;
-    float bd = (float)ui_.px(12);
-    for (size_t i = 0; i < m.vert_count(); i++) {
-      Vec2 s;
-      float z;
-      if (!scene_r3d_.project(w.point(m.positions[i]), s, z)) continue;
-      float d = length(Vec2(view.x + s.x - mx, view.y + s.y - my));
-      if (d >= bd) continue;
-      if (z > scene_rt_.depth_at((int)s.x, (int)s.y) + 2e-3f) continue;  // hidden behind something
-      bd = d;
-      best = (int)i;
-    }
-    if (best >= 0) vert_sel_[best] = mode == SEL_TOGGLE ? !vert_sel_[best] : 1;
-    sync_vert_face_selection(false);
-  }
-  else if (elem_ == EditElement::Edge) {
-    uint32_t a, b;
-    /* The edge itself, not its two ends: two opposite sides of a quad stay two edges. */
-    if (edit_pick_edge(view, mx, my, a, b)) {
-      const uint64_t k = Mesh::edge_key(a, b);
-      if (mode == SEL_TOGGLE && edge_sel_.count(k)) edge_sel_.erase(k);
-      else edge_sel_.insert(k);
-    }
-    verts_from_edges();
-  }
-  else {
-    Ray ray = scene_r3d_.screen_ray((float)(mx - view.x), (float)(my - view.y));
-    Mat4 inv = w.inverse();
-    Ray lr{inv.point(ray.origin), normalize(inv.dir(ray.dir))};
-    const RenderMesh &rm = m.render_mesh(true);
-    float bt = 1e30f;
-    int bf = -1;
-    if (ray_aabb(lr, rm.bounds) >= 0)
-      for (size_t t = 0; t < rm.tri_count(); t++) {
-        float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
-        if (d > 0 && d < bt) { bt = d; bf = (int)rm.tri_face[t]; }
-      }
-    if (bf >= 0 && ngon_mode_) {
-      /* N-gon mode: the whole flat region is one face (SketchUp). */
-      std::vector<uint8_t> region;
-      meshops::coplanar_region(m, (size_t)bf, kNgonAngle, region);
-      const uint8_t to = mode == SEL_TOGGLE ? !face_sel_[bf] : 1;
-      for (size_t f = 0; f < region.size(); f++)
-        if (region[f]) face_sel_[f] = to;
-    }
-    else if (bf >= 0) face_sel_[bf] = mode == SEL_TOGGLE ? !face_sel_[bf] : 1;
-    sync_vert_face_selection(true);
-  }
-}
-
-void Editor::edit_box_select(const Recti &view, Recti box, int mode) {
-  last_op_hidden_ = true;
-  GameObject *g = edit_object();
-  if (!g) return;
-  const Mesh &m = **edit_mesh_ptr();
-  vert_sel_.resize(m.vert_count(), 0);
-  face_sel_.resize(m.face_count(), 0);
-  if (mode == SEL_REPLACE) edit_select_all(false);
-  const Mat4 &w = g->world_matrix();
-  auto visible_in_box = [&](Vec3 p) {
-    Vec2 s;
-    float z;
-    if (!scene_r3d_.project(w.point(p), s, z)) return false;
-    if (!box.contains((int)(view.x + s.x), (int)(view.y + s.y))) return false;
-    return z <= scene_rt_.depth_at((int)s.x, (int)s.y) + 2e-3f;
-  };
-  if (elem_ == EditElement::Edge) {
-    for (auto &e : m.edge_cache())
-      if (visible_in_box(m.positions[e.first]) && visible_in_box(m.positions[e.second])) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
-    verts_from_edges();
-  }
-  else if (elem_ != EditElement::Face) {
-    for (size_t i = 0; i < m.vert_count(); i++)
-      if (visible_in_box(m.positions[i])) vert_sel_[i] = 1;
-    sync_vert_face_selection(false);
-  }
-  else {
-    for (size_t f = 0; f < m.face_count(); f++)
-      if (visible_in_box(m.face_center(f))) face_sel_[f] = 1;
-    sync_vert_face_selection(true);
-  }
-}
-
 /* Auto Smooth: an operator that leaves more shallow-angle edges (a curved surface)
  * on a flat-shaded mesh turns on smooth shading by angle - curves look round,
  * hard edges stay hard. Meshes shaded per face are left as they are. */
 void Editor::auto_smooth_after(Mesh *m, size_t before) {
-  if (!auto_smooth_ || !m || m->smooth || !m->face_smooth.empty()) return;
+  if (!m || !auto_smooth_applies(*m)) return;
   if (meshops::shallow_edges(*m, auto_smooth_angle_) <= before) return;
   meshops::shade_auto_smooth(*m, auto_smooth_angle_);
   /* Still the last operator's result (shading is part of it): a modal Bevel / Inset carries on. */
   if (last_op_.result == m) last_op_.result_version = m->version;
   Log::info("Auto Smooth: curved surface shaded smooth (edges sharper than %.0f degrees stay hard)", auto_smooth_angle_);
+}
+
+/* The operators that change the selection and nothing else (task 0166): they read the mesh the undo step shares -
+ * no copy, so the views don't see a "new" mesh and only the Scene view's picture, whose cage shows the selection,
+ * draws again. */
+static bool selection_only_op(const std::string &op) {
+  return op == "select_similar_normal" || op == "select_similar_area" || op == "select_by_material" || op == "select_sharp" ||
+         op == "select_overlapping" || op == "select_coplanar" || op == "select_linked" || op == "select_more" || op == "select_less" ||
+         op == "select_invert" || op == "select_non_manifold" || op == "select_ring" || op == "select_loop";
 }
 
 void Editor::edit_op(const std::string &op_in) {
@@ -2400,20 +1426,20 @@ void Editor::edit_op(const std::string &op_in) {
     return;
   }
   MeshPtr &mp = *edit_mesh_ptr();
-  Mesh &m = *mesh_make_mutable(mp);
-  struct AutoSmooth {
-    Editor &ed;
-    size_t before;
-    ~AutoSmooth() {
-      if (MeshPtr *p = ed.edit_mesh_ptr())
-        if (*p) ed.auto_smooth_after(p->get(), before);
-    }
-  } auto_smooth{*this, auto_smooth_ ? meshops::shallow_edges(m, auto_smooth_angle_) : (size_t)-1};
+  if (edit_op_redoable(op)) {
+    begin_redoable_op(op, *g, mp);
+    return;
+  }
+  if (selection_only_op(op)) {
+    select_op(op, *g, *mp);
+    return;
+  }
+  edit_op_rest(op, *g, mp);
+}
+
+size_t Editor::edit_selection_faces(const Mesh &m) {
   vert_sel_.resize(m.vert_count(), 0);
   face_sel_.resize(m.face_count(), 0);
-  /* In edge mode the tools read exactly the selected edges. */
-  const std::unordered_set<uint64_t> edges = edge_sel_;
-  meshops::EdgeSelectionScope scope(elem_ == EditElement::Edge ? &edges : nullptr);
   if (elem_ == EditElement::Edge) verts_from_edges();
   else if (elem_ != EditElement::Face) {
     /* Derive faces from vertices like Blender does when switching modes. */
@@ -2423,58 +1449,297 @@ void Editor::edit_op(const std::string &op_in) {
       face_sel_[f] = all;
     }
   }
-  size_t nsel = std::count(face_sel_.begin(), face_sel_.end(), 1);
-  if (edit_op_redoable(op)) {
-    if ((op == "extrude" || op == "inset" || op == "push_through" || op == "push_pull" || op == "poke" || op == "extrude_individual" || op == "grid" ||
-         op == "array" || op == "taper" || op == "recess" || op == "shell" || op == "draft") &&
-        !nsel) {
-      /* (Merge by Distance works on everything when nothing is selected.) */
-      Log::warn("Select faces first (press 3 for face mode)");
-      return;
-    }
-    LastOp L;
-    L.op = op;
-    L.obj = g->id;
-    L.before = std::make_shared<Mesh>(m);
-    L.vsel = vert_sel_;
-    L.fsel = face_sel_;
-    L.esel = edges;
-    L.elem = elem_;
-    L.fuse = auto_fuse_;
-    if (op == "extrude") L.amount = extrude_dist_;
-    else if (op == "merge_distance") {
-      L.amount = merge_dist_;
-      L.individual = false;  // F9: Unselected
-    }
-    else if (op == "inset") {
-      L.individual = inset_individual_;
-      L.amount = inset_individual_ ? inset_amount_ : inset_thickness_;
-    }
-    else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; L.clamp = bevel_clamp_; L.profile = bevel_profile_; }
-    else if (op == "bridge") L.segments = bridge_segments_;
-    else if (op == "subdivide_edges") L.segments = subdivide_cuts_;
-    else if (op == "loopcut") { L.segments = loop_cuts_; L.amount = loop_slide_; }
-    else if (op == "smooth") L.amount = smooth_factor_;
-    else if (op == "poke") L.amount = 0.0f;
-    else if (op == "extrude_individual") L.amount = extrude_dist_;
-    else if (op == "shrink_fatten") L.amount = 0.1f;
-    else if (op == "to_sphere") L.amount = 1.0f;
-    else if (op == "randomize") { L.amount = 0.05f; L.segments = 1; }
-    else if (op == "push_pull") {
-      L.amount = pp_last_distance_ != 0 ? pp_last_distance_ : extrude_dist_;
-      L.individual = pp_individual_;
-    }
-    else if (op == "grid") { L.segments = grid_cols_; L.count = grid_rows_; }
-    else if (op == "pipe") { L.amount = pipe_radius_; L.segments = pipe_sides_; }
-    else if (op == "array") { L.count = array_count_; L.amount = array_spacing_; L.axis = array_axis_; }
-    else if (op == "taper") { L.amount = taper_distance_; L.amount2 = taper_scale_; }
-    else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
-    else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
-    else if (op == "draft") L.amount = draft_angle_;
-    last_op_ = std::move(L);
-    run_last_op(true);
+  return (size_t)std::count(face_sel_.begin(), face_sel_.end(), 1);
+}
+
+bool Editor::auto_smooth_applies(const Mesh &m) const {
+  /* Auto Smooth is for a mesh shaded flat as a whole: one already smooth, or shaded per face by the user, is left alone. */
+  return auto_smooth_ && !m.smooth && m.face_smooth.empty();
+}
+
+size_t Editor::shallow_before(const Mesh &m) const {
+  /* The count costs about 4 ms on 50k faces (23 before task 0165), so it is only taken when it can decide anything. */
+  return auto_smooth_applies(m) ? meshops::shallow_edges(m, auto_smooth_angle_) : (size_t)-1;
+}
+
+void Editor::note_shallow_before(LastOp &L) const {
+  L.shallow_before = shallow_before(*L.before);
+  L.shallow_angle = auto_smooth_angle_;
+  L.shallow_on = auto_smooth_;
+}
+
+size_t Editor::shallow_before_of(const LastOp &L) const {
+  /* The count noted when the operator ran, unless Auto Smooth's settings changed since (an F9 re-run after
+   * `autosmooth on 60`): then it is taken again, so a re-run never compares against another angle's count. */
+  const bool same = L.shallow_angle == auto_smooth_angle_ && L.shallow_on == auto_smooth_;
+  return same ? L.shallow_before : shallow_before(*L.before);
+}
+
+/* The mesh before the operator stays as it is - the pointer the undo step holds, never written (copy-on-write, ADR
+ * 0003) - and run_last_op copies it once for the result. Before task 0165 the operator copied the mesh three times
+ * (a mutable copy, the `before` copy, the copy run_last_op works on). */
+/* Whether an operator needs selected faces (Merge by Distance works on everything when nothing is selected). */
+static bool needs_selected_faces(const std::string &op) {
+  return op == "extrude" || op == "inset" || op == "push_through" || op == "push_pull" || op == "poke" || op == "extrude_individual" || op == "grid" ||
+         op == "array" || op == "taper" || op == "recess" || op == "shell" || op == "draft";
+}
+
+void Editor::begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp) {
+  ProfileScope prof{prof_.ms_edit_op, {}};  // (run_last_op's own scope counts only the re-runs)
+  note_edit_selection_before();
+  const Mesh &m = *mp;
+  /* In edge mode the tools read exactly the selected edges. */
+  const std::unordered_set<uint64_t> edges = edge_sel_;
+  const size_t nsel = edit_selection_faces(m);
+  if (needs_selected_faces(op) && !nsel) {
+    Log::warn("Select faces first (press 3 for face mode)");
     return;
   }
+  LastOp L;
+  L.op = op;
+  L.obj = g.id;
+  L.before = mp;
+  note_shallow_before(L);
+  L.vsel = vert_sel_;
+  L.fsel = face_sel_;
+  L.esel = edges;
+  L.elem = elem_;
+  L.fuse = auto_fuse_;
+  fill_last_op_settings(L, op);
+  last_op_ = std::move(L);
+  run_last_op(true);
+}
+
+/* The tool settings the operator starts from (F9 adjusts them afterwards). */
+void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
+  if (op == "extrude") L.amount = extrude_dist_;
+  else if (op == "merge_distance") {
+    L.amount = merge_dist_;
+    L.individual = false;  // F9: Unselected
+  }
+  else if (op == "inset") {
+    L.individual = inset_individual_;
+    L.amount = inset_individual_ ? inset_amount_ : inset_thickness_;
+  }
+  else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; L.clamp = bevel_clamp_; L.profile = bevel_profile_; }
+  else if (op == "bridge") L.segments = bridge_segments_;
+  else if (op == "subdivide_edges") L.segments = subdivide_cuts_;
+  else if (op == "loopcut") { L.segments = loop_cuts_; L.amount = loop_slide_; }
+  else if (op == "smooth") L.amount = smooth_factor_;
+  else if (op == "poke") L.amount = 0.0f;
+  else if (op == "extrude_individual") L.amount = extrude_dist_;
+  else if (op == "shrink_fatten") L.amount = 0.1f;
+  else if (op == "to_sphere") L.amount = 1.0f;
+  else if (op == "randomize") { L.amount = 0.05f; L.segments = 1; }
+  else if (op == "push_pull") {
+    L.amount = pp_last_distance_ != 0 ? pp_last_distance_ : extrude_dist_;
+    L.individual = pp_individual_;
+  }
+  else if (op == "grid") { L.segments = grid_cols_; L.count = grid_rows_; }
+  else if (op == "pipe") { L.amount = pipe_radius_; L.segments = pipe_sides_; }
+  else if (op == "array") { L.count = array_count_; L.amount = array_spacing_; L.axis = array_axis_; }
+  else if (op == "taper") { L.amount = taper_distance_; L.amount2 = taper_scale_; }
+  else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
+  else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
+  else if (op == "draft") L.amount = draft_angle_;
+}
+
+/* The one selected edge (exactly two adjacent selected vertices) Loop Cut and Select Loop start from; false when
+ * there is none or more than one (the caller says so). */
+bool Editor::selected_edge(const Mesh &m, uint32_t &a, uint32_t &b) const {
+  a = b = UINT32_MAX;
+  for (auto &e : m.edge_cache())
+    if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
+      if (a != UINT32_MAX) { a = UINT32_MAX; break; }
+      a = e.first;
+      b = e.second;
+    }
+  return a != UINT32_MAX;
+}
+
+/* Select Similar Normal / Area, Select By Material: the faces like the selected ones. */
+void Editor::select_similar_op(const std::string &op, const Mesh &m) {
+  std::vector<size_t> sel;
+  for (size_t f = 0; f < face_sel_.size() && f < m.face_count(); f++)
+    if (face_sel_[f]) sel.push_back(f);
+  if (sel.empty()) {
+    Log::warn("Select a face first");
+    return;
+  }
+  auto area = [&](size_t f) {  /* half the Newell vector's length */
+    Vec3 s(0.0f);
+    const uint32_t *v = m.face_verts(f);
+    for (uint32_t i = 0; i < m.face_size(f); i++) s += cross(m.positions[v[i]], m.positions[v[(i + 1) % m.face_size(f)]]);
+    return 0.5f * length(s);
+  };
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (size_t s : sel) {
+      bool same = false;
+      if (op == "select_similar_normal") same = dot(m.face_normal(f), m.face_normal(s)) > std::cos(5.0f * kDeg2Rad);
+      else if (op == "select_similar_area") {
+        const float a = area(f), b = area(s);
+        same = std::fabs(a - b) <= 0.05f * std::max(a, b) + 1e-9f;
+      }
+      else same = m.material_of(f) == m.material_of(s);
+      if (same) {
+        face_sel_[f] = 1;
+        break;
+      }
+    }
+  sync_vert_face_selection(true);
+  return;
+}
+
+/* Select Sharp Edges (Blender's): edge mode with them selected. */
+void Editor::select_sharp_op(const Mesh &m) {
+  /* Blender's Select Sharp Edges: switches to edge mode with them selected. */
+  if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
+  edge_sel_.clear();
+  for (uint64_t k : meshops::sharp_edges_by_angle(m, seam_angle_, true)) edge_sel_.insert(k);
+  verts_from_edges();
+  Log::info("Selected %zu sharp edge(s) (> %.0f deg)", edge_sel_.size(), seam_angle_);
+  return;
+}
+
+/* Select Z-Fighting: the faces the check finds on top of each other. */
+void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
+  /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
+  const size_t n = zfight_scan(false);
+  zfight_from_panel_ = false;  // outlines only while editing this mesh
+  set_edit_element(EditElement::Face);
+  face_sel_.assign(m.face_count(), 0);
+  for (const ZFightIssue &z : zfight_) {
+    if (z.obj_a == g.id && z.face_a < face_sel_.size()) face_sel_[z.face_a] = 1;
+    if (z.obj_b == g.id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
+  }
+  sync_vert_face_selection(true);
+  Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
+  return;
+}
+
+/* Select Coplanar: the flat regions around the selected faces. */
+void Editor::select_coplanar_op(const Mesh &m) {
+  /* Selection only, and it only adds. In vertex or edge mode, the faces whose corners are all selected are
+   * the start, and the faces found add their corners (and edges) to what is selected. */
+  vert_sel_.resize(m.vert_count(), 0);
+  if (elem_ != EditElement::Face) {
+    face_sel_.assign(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool all = m.face_size(f) > 0;
+      for (uint32_t k = 0; k < m.face_size(f); k++) all = all && vert_sel_[m.face_verts(f)[k]];
+      face_sel_[f] = all;
+    }
+  }
+  bool any = false;
+  for (uint8_t f : face_sel_) any = any || f;
+  if (!any) {
+    Log::warn("Select Coplanar: select a face first (or all the corners of one)");
+    return;
+  }
+  const size_t added = meshops::select_coplanar(m, face_sel_);
+  if (elem_ == EditElement::Face) sync_vert_face_selection(true);
+  else
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (!face_sel_[f]) continue;
+      const uint32_t *fv = m.face_verts(f);
+      const uint32_t ns = m.face_size(f);
+      for (uint32_t k = 0; k < ns; k++) {
+        vert_sel_[fv[k]] = 1;
+        if (elem_ == EditElement::Edge) edge_sel_.insert(Mesh::edge_key(fv[k], fv[(k + 1) % ns]));
+      }
+    }
+  Log::info("Select Coplanar: %zu face%s added", added, added == 1 ? "" : "s");
+  return;
+}
+
+/* Select Linked / More / Less / Invert / Non-Manifold / Edge Ring: through the vertices. */
+void Editor::select_grow_op(const std::string &op, const Mesh &m) {
+  /* Selection only: no undo step, nothing touched. */
+  if (op == "select_ring") {
+    std::vector<uint64_t> sel(edge_sel_.begin(), edge_sel_.end());
+    if (elem_ != EditElement::Edge || sel.empty()) {
+      Log::warn("Select Edge Ring: select an edge first (press 2 for edge mode)");
+      return;
+    }
+    for (uint64_t k : sel)
+      for (auto &e : meshops::edge_ring_edges(m, (uint32_t)(k >> 32), (uint32_t)(k & 0xFFFFFFFF))) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
+    verts_from_edges();
+    return;
+  }
+  if (elem_ == EditElement::Face && op != "select_non_manifold") {
+    /* Faces: through the vertices, then back to whole faces. */
+    sync_vert_face_selection(true);
+  }
+  if (op == "select_linked") meshops::select_linked(m, vert_sel_);
+  else if (op == "select_more") meshops::grow_selection(m, vert_sel_, true);
+  else if (op == "select_less") meshops::grow_selection(m, vert_sel_, false);
+  else if (op == "select_invert") {
+    if (elem_ == EditElement::Face) {
+      for (auto &f : face_sel_) f = !f;
+      sync_vert_face_selection(true);
+      return;
+    }
+    if (elem_ == EditElement::Edge) {
+      std::unordered_set<uint64_t> inv;
+      for (auto &e : m.edge_cache())
+        if (!edge_sel_.count(Mesh::edge_key(e.first, e.second))) inv.insert(Mesh::edge_key(e.first, e.second));
+      edge_sel_ = inv;
+      verts_from_edges();
+      return;
+    }
+    for (auto &v : vert_sel_) v = !v;
+  }
+  else meshops::select_non_manifold(m, vert_sel_);
+  sync_vert_face_selection(false);  // faces: those whose corners are all selected
+  return;
+}
+
+/* Select Edge Loop from the one selected edge. */
+void Editor::select_loop_op(const Mesh &m) {
+  uint32_t a, b;
+  if (!selected_edge(m, a, b)) {
+    Log::warn("Select exactly one edge (press 2 for edge mode)");
+    return;
+  }
+  auto loop = meshops::edge_loop(m, a, b);
+  for (uint32_t v : loop) vert_sel_[v] = 1;
+  sync_vert_face_selection(false);
+  Log::info("Edge loop: %zu vertices", loop.size());
+}
+
+/* The operators that change the selection and nothing else (selection_only_op lists them): they read the mesh the
+ * undo step shares. The F9 panel ends here as it did before task 0166 (its operator's result is no longer the
+ * latest edit), and the Profiler's operator row counts them. */
+void Editor::select_op(const std::string &op, GameObject &g, const Mesh &m) {
+  ProfileScope prof{prof_.ms_edit_op, {}};
+  edit_selection_faces(m);  // (faces from the vertices or the edges, as every operator starts)
+  last_op_.result = nullptr;
+  if (op == "select_similar_normal" || op == "select_similar_area" || op == "select_by_material") return select_similar_op(op, m);
+  if (op == "select_sharp") return select_sharp_op(m);
+  if (op == "select_overlapping") return select_overlapping_op(g, m);
+  if (op == "select_coplanar") return select_coplanar_op(m);
+  if (op == "select_loop") return select_loop_op(m);
+  select_grow_op(op, m);
+}
+
+/* The operators that aren't redoable: on a mutable copy of the mesh (shared with the undo step until now). */
+void Editor::edit_op_rest(const std::string &op, GameObject &g_ref, MeshPtr &mp) {
+  GameObject *g = &g_ref;
+  note_edit_selection_before();
+  ProfileScope prof{prof_.ms_edit_op, {}};
+  Mesh &m = *mesh_make_mutable(mp);
+  struct AutoSmooth {
+    Editor &ed;
+    size_t before;
+    ~AutoSmooth() {
+      if (MeshPtr *p = ed.edit_mesh_ptr())
+        if (*p) ed.auto_smooth_after(p->get(), before);
+    }
+  } auto_smooth{*this, shallow_before(m)};
+  /* In edge mode the tools read exactly the selected edges. */
+  const std::unordered_set<uint64_t> edges = edge_sel_;
+  meshops::EdgeSelectionScope scope(elem_ == EditElement::Edge ? &edges : nullptr);
+  const size_t nsel = edit_selection_faces(m);
   if (op == "dissolve" || op == "connect" || op == "collapse") {
     size_t n = op == "dissolve" ? meshops::dissolve_edges(m, vert_sel_)
                : op == "connect" ? meshops::connect_vertices(m, vert_sel_)
@@ -2544,16 +1809,7 @@ void Editor::edit_op(const std::string &op_in) {
                                    : "Follow: select one open chain of edges for the path");
         return;
       }
-      std::vector<uint32_t> path = {start};
-      for (uint32_t prev = UINT32_MAX, cur = start;;) {
-        uint32_t next = UINT32_MAX;
-        for (uint32_t w : nb[cur])
-          if (w != prev) next = w;
-        if (next == UINT32_MAX || std::find(path.begin(), path.end(), next) != path.end()) break;
-        path.push_back(next);
-        prev = cur;
-        cur = next;
-      }
+      const std::vector<uint32_t> path = meshops::walk_wire_path(nb, start);
       if (!meshops::follow_path(m, face, path, &err)) {
         Log::warn("Follow: %s", err.c_str());
         return;
@@ -2603,46 +1859,6 @@ void Editor::edit_op(const std::string &op_in) {
     edge_sel_.clear();
     Log::info("Slice: %zu cut(s)", n_cut);
   }
-  else if (op == "select_similar_normal" || op == "select_similar_area" || op == "select_by_material") {
-    std::vector<size_t> sel;
-    for (size_t f = 0; f < face_sel_.size() && f < m.face_count(); f++)
-      if (face_sel_[f]) sel.push_back(f);
-    if (sel.empty()) {
-      Log::warn("Select a face first");
-      return;
-    }
-    auto area = [&](size_t f) {  /* half the Newell vector's length */
-      Vec3 s(0.0f);
-      const uint32_t *v = m.face_verts(f);
-      for (uint32_t i = 0; i < m.face_size(f); i++) s += cross(m.positions[v[i]], m.positions[v[(i + 1) % m.face_size(f)]]);
-      return 0.5f * length(s);
-    };
-    for (size_t f = 0; f < m.face_count(); f++)
-      for (size_t s : sel) {
-        bool same = false;
-        if (op == "select_similar_normal") same = dot(m.face_normal(f), m.face_normal(s)) > std::cos(5.0f * kDeg2Rad);
-        else if (op == "select_similar_area") {
-          const float a = area(f), b = area(s);
-          same = std::fabs(a - b) <= 0.05f * std::max(a, b) + 1e-9f;
-        }
-        else same = m.material_of(f) == m.material_of(s);
-        if (same) {
-          face_sel_[f] = 1;
-          break;
-        }
-      }
-    sync_vert_face_selection(true);
-    return;
-  }
-  else if (op == "select_sharp") {
-    /* Blender's Select Sharp Edges: switches to edge mode with them selected. */
-    if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
-    edge_sel_.clear();
-    for (uint64_t k : meshops::sharp_edges_by_angle(m, seam_angle_, true)) edge_sel_.insert(k);
-    verts_from_edges();
-    Log::info("Selected %zu sharp edge(s) (> %.0f deg)", edge_sel_.size(), seam_angle_);
-    return;
-  }
   else if (op == "dissolve_limited") {
     /* The selected faces only (any mode: faces whose corners are all selected), else the whole mesh. */
     const bool only_sel = nsel > 0;
@@ -2687,20 +1903,6 @@ void Editor::edit_op(const std::string &op_in) {
     face_sel_.assign(m.face_count(), 0);
     if (elem_ == EditElement::Edge) edges_from_verts();
     Log::info("Extruded %zu %s", n, elem_ == EditElement::Edge ? "edge(s)" : "edge(s) / vertices");
-  }
-  else if (op == "select_overlapping") {
-    /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
-    const size_t n = zfight_scan(false);
-    zfight_from_panel_ = false;  // outlines only while editing this mesh
-    set_edit_element(EditElement::Face);
-    face_sel_.assign(m.face_count(), 0);
-    for (const ZFightIssue &z : zfight_) {
-      if (z.obj_a == g->id && z.face_a < face_sel_.size()) face_sel_[z.face_a] = 1;
-      if (z.obj_b == g->id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
-    }
-    sync_vert_face_selection(true);
-    Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
-    return;
   }
   else if (op == "delete_loose") {
     const bool any = std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end();
@@ -2834,107 +2036,6 @@ void Editor::edit_op(const std::string &op_in) {
     face_sel_.assign(m.face_count(), 0);
     sync_vert_face_selection(false);
     Log::info("Edge Split");
-  }
-  else if (op == "select_coplanar") {
-    /* Selection only, and it only adds. In vertex or edge mode, the faces whose corners are all selected are
-     * the start, and the faces found add their corners (and edges) to what is selected. */
-    vert_sel_.resize(m.vert_count(), 0);
-    if (elem_ != EditElement::Face) {
-      face_sel_.assign(m.face_count(), 0);
-      for (size_t f = 0; f < m.face_count(); f++) {
-        bool all = m.face_size(f) > 0;
-        for (uint32_t k = 0; k < m.face_size(f); k++) all = all && vert_sel_[m.face_verts(f)[k]];
-        face_sel_[f] = all;
-      }
-    }
-    bool any = false;
-    for (uint8_t f : face_sel_) any = any || f;
-    if (!any) {
-      Log::warn("Select Coplanar: select a face first (or all the corners of one)");
-      return;
-    }
-    const size_t added = meshops::select_coplanar(m, face_sel_);
-    if (elem_ == EditElement::Face) sync_vert_face_selection(true);
-    else
-      for (size_t f = 0; f < m.face_count(); f++) {
-        if (!face_sel_[f]) continue;
-        const uint32_t *fv = m.face_verts(f);
-        const uint32_t ns = m.face_size(f);
-        for (uint32_t k = 0; k < ns; k++) {
-          vert_sel_[fv[k]] = 1;
-          if (elem_ == EditElement::Edge) edge_sel_.insert(Mesh::edge_key(fv[k], fv[(k + 1) % ns]));
-        }
-      }
-    Log::info("Select Coplanar: %zu face%s added", added, added == 1 ? "" : "s");
-    return;
-  }
-  else if (op == "select_linked" || op == "select_more" || op == "select_less" || op == "select_invert" ||
-           op == "select_non_manifold" || op == "select_ring") {
-    /* Selection only: no undo step, nothing touched. */
-    if (op == "select_ring") {
-      std::vector<uint64_t> sel(edge_sel_.begin(), edge_sel_.end());
-      if (elem_ != EditElement::Edge || sel.empty()) {
-        Log::warn("Select Edge Ring: select an edge first (press 2 for edge mode)");
-        return;
-      }
-      for (uint64_t k : sel)
-        for (auto &e : meshops::edge_ring_edges(m, (uint32_t)(k >> 32), (uint32_t)(k & 0xFFFFFFFF))) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
-      verts_from_edges();
-      return;
-    }
-    if (elem_ == EditElement::Face && op != "select_non_manifold") {
-      /* Faces: through the vertices, then back to whole faces. */
-      sync_vert_face_selection(true);
-    }
-    if (op == "select_linked") meshops::select_linked(m, vert_sel_);
-    else if (op == "select_more") meshops::grow_selection(m, vert_sel_, true);
-    else if (op == "select_less") meshops::grow_selection(m, vert_sel_, false);
-    else if (op == "select_invert") {
-      if (elem_ == EditElement::Face) {
-        for (auto &f : face_sel_) f = !f;
-        sync_vert_face_selection(true);
-        return;
-      }
-      if (elem_ == EditElement::Edge) {
-        std::unordered_set<uint64_t> inv;
-        for (auto &e : m.edge_cache())
-          if (!edge_sel_.count(Mesh::edge_key(e.first, e.second))) inv.insert(Mesh::edge_key(e.first, e.second));
-        edge_sel_ = inv;
-        verts_from_edges();
-        return;
-      }
-      for (auto &v : vert_sel_) v = !v;
-    }
-    else meshops::select_non_manifold(m, vert_sel_);
-    sync_vert_face_selection(false);  // faces: those whose corners are all selected
-    return;
-  }
-  else if (op == "loopcut" || op == "select_loop") {
-    /* Uses the selected edge (exactly two adjacent selected vertices). */
-    uint32_t a = UINT32_MAX, b = UINT32_MAX;
-    for (auto &e : m.edge_cache())
-      if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
-        if (a != UINT32_MAX) { a = UINT32_MAX; break; }
-        a = e.first;
-        b = e.second;
-      }
-    if (a == UINT32_MAX) { Log::warn("Select exactly one edge (press 2 for edge mode)"); return; }
-    if (op == "loopcut") {
-      auto made = meshops::loop_cut(m, a, b, loop_cuts_, loop_slide_);
-      if (made.empty()) { Log::warn("Loop Cut needs quads around the edge"); return; }
-      vert_sel_.assign(m.vert_count(), 0);
-      for (uint32_t v : made) vert_sel_[v] = 1;
-      Log::info("Loop Cut: %zu new vertices", made.size());
-    }
-    else {
-      auto loop = meshops::edge_loop(m, a, b);
-      for (uint32_t v : loop) vert_sel_[v] = 1;
-      sync_vert_face_selection(false);
-      Log::info("Edge loop: %zu vertices", loop.size());
-      return;  // selection only
-    }
-    face_sel_.assign(m.face_count(), 0);
-    sync_vert_face_selection(false);
   }
   m.touch();
   mark_changed("Edit: " + op);
@@ -3121,34 +2222,6 @@ void Editor::set_edit_element(EditElement e) {
   if (e == EditElement::Face) sync_vert_face_selection(false);
   else if (old == EditElement::Face) sync_vert_face_selection(true);
   if (e == EditElement::Edge && old != EditElement::Edge) edges_from_verts();  // from here on edges are kept themselves
-}
-
-bool Editor::edit_pick_edge(const Recti &view, int mx, int my, uint32_t &a, uint32_t &b) {
-  GameObject *g = edit_object();
-  if (!g) return false;
-  const Mesh &m = **edit_mesh_ptr();
-  const Mat4 &w = g->world_matrix();
-  Vec2 mp((float)(mx - view.x), (float)(my - view.y));
-  float bd = (float)ui_.px(10);
-  bool found = false;
-  for (auto &e : m.edge_cache()) {
-    Vec2 s0, s1;
-    float z0, z1;
-    if (!scene_r3d_.project(w.point(m.positions[e.first]), s0, z0) || !scene_r3d_.project(w.point(m.positions[e.second]), s1, z1)) continue;
-    Vec2 d = s1 - s0;
-    float l2 = dot(d, d);
-    float t = l2 > 1e-6f ? clampf(dot(mp - s0, d) / l2, 0.0f, 1.0f) : 0.0f;
-    Vec2 c = s0 + d * t;
-    float dist = length(mp - c);
-    if (dist >= bd) continue;
-    /* NDC depth is affine in screen space, so lerping it along the edge is exact. */
-    if (z0 + (z1 - z0) * t > scene_rt_.depth_at((int)c.x, (int)c.y) + 2e-3f) continue;
-    bd = dist;
-    a = e.first;
-    b = e.second;
-    found = true;
-  }
-  return found;
 }
 
 void Editor::edit_select_loop(const Recti &view, int mx, int my, bool add) {
@@ -3496,17 +2569,20 @@ void Editor::run_last_op(bool first) {
     L.op.clear();
     return;
   }
-  /* Start again from the mesh as it was before the operator. */
-  mf->mesh = std::make_shared<Mesh>(*L.before);
+  double unused = 0;
+  ProfileScope prof{first ? unused : prof_.ms_edit_op, {}};  // (a first run is timed by begin_redoable_op, which includes it)
+  /* Start again from the mesh as it was before the operator: the one copy an operator makes (task 0165). */
+  mf->mesh = mesh_copy(*L.before);
   Mesh &m = *mf->mesh;
   struct AutoSmooth {
     Editor &ed;
     MeshFilter *mf;
+    const Mesh *shared;  // the mesh before the operator: a failed re-run puts it back, and it is never written
     size_t before;
     ~AutoSmooth() {
-      if (mf->mesh) ed.auto_smooth_after(mf->mesh.get(), before);
+      if (mf->mesh && mf->mesh.get() != shared) ed.auto_smooth_after(mf->mesh.get(), before);
     }
-  } auto_smooth{*this, mf, auto_smooth_ ? meshops::shallow_edges(*L.before, auto_smooth_angle_) : (size_t)-1};
+  } auto_smooth{*this, mf, L.before.get(), shallow_before_of(L)};
   m.version = L.before->version + 1 + (++redo_serial_);  // never reuse an old version number
   vert_sel_ = L.vsel;
   face_sel_ = L.fsel;
@@ -3549,20 +2625,12 @@ void Editor::run_last_op(bool first) {
     sync_vert_face_selection(false);
   }
   else if (op == "loopcut") {
-    uint32_t a = UINT32_MAX, b = UINT32_MAX;
-    for (auto &e : m.edge_cache())
-      if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
-        if (a != UINT32_MAX) {
-          a = UINT32_MAX;
-          break;
-        }
-        a = e.first;
-        b = e.second;
-      }
+    uint32_t a, b;
+    const bool one = selected_edge(m, a, b);
     std::vector<uint32_t> made;
-    if (a != UINT32_MAX) made = meshops::loop_cut(m, a, b, L.segments, L.amount);
+    if (one) made = meshops::loop_cut(m, a, b, L.segments, L.amount);
     ok = !made.empty();
-    if (!ok) err = a == UINT32_MAX ? "Select exactly one edge (press 2 for edge mode)" : "Loop Cut needs quads around the edge";
+    if (!ok) err = one ? "Loop Cut needs quads around the edge" : "Select exactly one edge (press 2 for edge mode)";
     vert_sel_.assign(m.vert_count(), 0);
     for (uint32_t v : made) vert_sel_[v] = 1;
     face_sel_.assign(m.face_count(), 0);
@@ -3644,7 +2712,9 @@ void Editor::run_last_op(bool first) {
     else meshops::randomize(m, vert_sel_, L.amount, (uint32_t)std::max(1, L.segments));
   }
   if (!ok) {
-    mf->mesh = L.before;  // back to the untouched mesh (copied on the next edit)
+    /* Back to the untouched mesh, as a copy (task 0165): the very pointer would bring back an earlier render-cache key
+     * whose picture was drawn with state the key doesn't hold (verify mode found it after an Esc). */
+    mf->mesh = mesh_copy(*L.before);
     vert_sel_ = L.vsel;
     face_sel_ = L.fsel;
     Log::warn("%s", err.c_str());
@@ -3972,7 +3042,7 @@ void Editor::modal_finish(bool keep) {
   /* Cancelled: the mesh as it was, and no undo step left behind. */
   LastOp &L = last_op_;
   if (GameObject *g = scene_->find(L.obj))
-    if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = L.before;
+    if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = mesh_copy(*L.before);  // (a copy: see run_last_op's failure)
   vert_sel_ = L.vsel;
   face_sel_ = L.fsel;
   edge_sel_ = L.esel;
@@ -4237,6 +3307,7 @@ void Editor::pushpull_finish() {
   L.op = "push_pull";
   L.obj = pp_.obj;
   L.before = pp_.before;
+  note_shallow_before(L);
   L.fsel = pp_.fsel;
   L.vsel.assign(pp_.before->vert_count(), 0);
   L.elem = EditElement::Face;

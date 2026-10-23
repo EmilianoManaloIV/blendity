@@ -27,17 +27,6 @@ struct MeshDeformWeights {
 
 namespace {
 
-uint64_t hash_bytes(uint64_t h, const void *p, size_t n) {
-  const uint8_t *b = (const uint8_t *)p;
-  for (size_t i = 0; i < n; i += 8) {
-    uint64_t v = 0;
-    std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-    h = (h ^ v) * 1099511628211ull;
-    h ^= h >> 29;
-  }
-  return h;
-}
-
 }  // namespace
 
 /* One point's mean value coordinates over a closed triangle mesh (positions p, triangles t), into w (size p). */
@@ -115,11 +104,11 @@ static const GameObject *cage_target(const MeshDeformModifier &m, const Mesh **m
 }
 
 uint64_t MeshDeformModifier::bind_key() const {
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   const uint64_t n[2] = {bind_verts.size(), bind_tris.size()};
-  h = hash_bytes(h, n, sizeof(n));
-  if (!bind_verts.empty()) h = hash_bytes(h, bind_verts.data(), bind_verts.size() * sizeof(Vec3));
-  if (!bind_tris.empty()) h = hash_bytes(h, bind_tris.data(), bind_tris.size() * sizeof(uint32_t));
+  h = mix_bytes(h, n, sizeof(n));
+  if (!bind_verts.empty()) h = mix_bytes(h, bind_verts.data(), bind_verts.size() * sizeof(Vec3));
+  if (!bind_tris.empty()) h = mix_bytes(h, bind_tris.data(), bind_tris.size() * sizeof(uint32_t));
   return h;
 }
 
@@ -246,9 +235,9 @@ uint64_t MeshDeformModifier::modifier_dependency_hash() const {
   const GameObject *t = cage_target(*this, &cm);
   if (!t) return 0;
   const Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
-  uint64_t h = hash_bytes(1469598103934665603ull, rel.m, sizeof(rel.m));
+  uint64_t h = mix_bytes(kFnvBasis, rel.m, sizeof(rel.m));
   const uint64_t k[3] = {(uint64_t)(uintptr_t)cm, cm->version, cm->deform_version};
-  return hash_bytes(h, k, sizeof(k));
+  return mix_bytes(h, k, sizeof(k));
 }
 
 void MeshDeformModifier::modify(Mesh &m) const {

@@ -6,6 +6,8 @@
 #include "../../extern/fast_float/fast_float.h"
 
 #include <cstdint>
+#include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -158,6 +160,113 @@ struct JsonParser {
       else p = r.ptr;
     }
     return j;
+  }
+};
+
+
+/* JSON on one line (task 0172: Live Link's messages): w.obj().key("t").str("hello").key("n").num(3).end(); w.out.
+ * Numbers that aren't finite are written as 0 (JSON has no NaN). */
+struct JsonWriter {
+  std::string out;
+  JsonWriter() { out.reserve(192); }
+  JsonWriter &obj() { return open('{'); }
+  JsonWriter &arr() { return open('['); }
+  JsonWriter &end() {
+    out += stack_.empty() ? '}' : stack_.back();
+    if (!stack_.empty()) stack_.pop_back();
+    first_ = false;
+    return *this;
+  }
+  JsonWriter &key(const char *k) {
+    sep();
+    quoted(k, std::strlen(k));
+    out += ':';
+    after_key_ = true;
+    return *this;
+  }
+  JsonWriter &str(const std::string &s) {
+    sep();
+    quoted(s.data(), s.size());
+    return *this;
+  }
+  JsonWriter &num(double v) {
+    sep();
+    char b[32];
+    std::snprintf(b, sizeof(b), "%.9g", v == v && v - v == 0 ? v : 0.0);
+    out += b;
+    return *this;
+  }
+  JsonWriter &integer(int64_t v) {
+    sep();
+    out += std::to_string(v);
+    return *this;
+  }
+  JsonWriter &boolean(bool v) {
+    sep();
+    out += v ? "true" : "false";
+    return *this;
+  }
+  JsonWriter &raw(const std::string &json) {  // an already-written value
+    sep();
+    out += json;
+    return *this;
+  }
+  JsonWriter &num(float v) {  // the shortest text that reads back as the same float
+    sep();
+    char b[32];
+    const float f = v == v && v - v == 0 ? v : 0.0f;
+#if defined(__cpp_lib_to_chars) || (defined(_MSC_VER) && _MSC_VER >= 1924)
+    const auto r = std::to_chars(b, b + sizeof(b), f);
+    out.append(b, r.ptr);
+#else
+    std::snprintf(b, sizeof(b), "%.9g", (double)f);  // (Apple's libc++ before macOS 13.3: no float to_chars)
+    out += b;
+#endif
+    return *this;
+  }
+  JsonWriter &nums(const float *v, int n) {
+    arr();
+    for (int i = 0; i < n; i++) num(v[i]);
+    return end();
+  }
+
+ private:
+  std::string stack_;  // the closing brackets owed
+  bool first_ = true, after_key_ = false;
+  JsonWriter &open(char c) {
+    sep();
+    out += c;
+    stack_ += c == '{' ? '}' : ']';
+    first_ = true;
+    return *this;
+  }
+  void sep() {
+    if (after_key_) {
+      after_key_ = false;
+      return;
+    }
+    if (!first_) out += ',';
+    first_ = false;
+  }
+  void quoted(const char *s, size_t n) {
+    out += '"';
+    size_t plain = 0;  // (most text needs no escape: appended whole)
+    while (plain < n && (unsigned char)s[plain] >= 0x20 && s[plain] != '"' && s[plain] != '\\') plain++;
+    out.append(s, plain);
+    for (size_t i = plain; i < n; i++) {
+      const unsigned char c = (unsigned char)s[i];
+      if (c == '"' || c == '\\') out += '\\', out += (char)c;
+      else if (c == '\n') out += "\\n";
+      else if (c == '\r') out += "\\r";
+      else if (c == '\t') out += "\\t";
+      else if (c < 0x20) {
+        char b[8];
+        std::snprintf(b, sizeof(b), "\\u%04x", c);
+        out += b;
+      }
+      else out += (char)c;
+    }
+    out += '"';
   }
 };
 

@@ -1,0 +1,18 @@
+schema_version = "1.0.0"
+
+id = "blendity_livelink"
+version = "1.0.0"
+name = "Blendity Live Link"
+tagline = "Follow the scene open in Blendity live"
+maintainer = "Blendity"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-2.0-or-later"]
+
+tags = ["Import-Export"]
+
+[permissions]
+network = "Connects to Blendity's Live Link on this computer (127.0.0.1)"
+files = "Loads the textures Blendity's materials name"

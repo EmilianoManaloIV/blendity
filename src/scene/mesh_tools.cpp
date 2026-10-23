@@ -39,6 +39,24 @@ bool edge_selected(uint32_t a, uint32_t b, const std::vector<uint8_t> &vert_sel)
 }
 
 namespace {
+/* The closed loops (3+ vertices) of a next-vertex map: each walked once, from its first vertex (task 0177: one walk). */
+std::vector<std::vector<uint32_t>> closed_loops(const std::unordered_map<uint32_t, uint32_t> &next) {
+  std::vector<std::vector<uint32_t>> loops;
+  std::unordered_set<uint32_t> used;
+  for (auto &[start, _] : next) {
+    if (used.count(start)) continue;
+    std::vector<uint32_t> loop;
+    uint32_t v = start;
+    for (auto it = next.find(v); !used.count(v) && it != next.end(); it = next.find(v)) {
+      used.insert(v);
+      loop.push_back(v);
+      v = it->second;
+    }
+    if (v == start && loop.size() >= 3) loops.push_back(std::move(loop));
+  }
+  return loops;
+}
+
 
 /* Unnormalised Newell normal of a vertex loop (length = 2 x area). */
 Vec3 loop_newell(const Mesh &m, const std::vector<uint32_t> &loop) {
@@ -118,18 +136,7 @@ std::vector<Region> face_regions(const Mesh &m, const std::vector<uint8_t> &fsel
     r.normal = length_sq(nsum) > 1e-20f ? normalize(nsum) : Vec3(0, 1, 0);
     r.center = asum > 0 ? csum / asum : m.face_center(r.faces[0]);
     if (!pinched) {
-      std::unordered_set<uint32_t> used;
-      for (auto &[start, _] : next) {
-        if (used.count(start)) continue;
-        std::vector<uint32_t> loop;
-        uint32_t v = start;
-        while (!used.count(v) && next.count(v)) {
-          used.insert(v);
-          loop.push_back(v);
-          v = next[v];
-        }
-        if (v == start && loop.size() >= 3) r.loops.push_back(std::move(loop));
-      }
+      for (std::vector<uint32_t> &loop : closed_loops(next)) r.loops.push_back(std::move(loop));
     }
     out.push_back(std::move(r));
   }
@@ -927,35 +934,24 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
       if (ox == origin.end() || oy == origin.end() || ox->second != oy->second) continue;
       next[y] = x;  // the patch runs opposite to the open edge
     }
-    std::unordered_set<uint32_t> used;
     std::unordered_map<uint32_t, uint32_t> weld;  // twin corner -> the one kept
     std::vector<std::vector<uint32_t>> folded;
     const float sc = mesh_scale(m);
-    for (auto &[start, _] : next) {
-      if (used.count(start)) continue;
-      std::vector<uint32_t> loop;
-      uint32_t v = start;
-      while (!used.count(v) && next.count(v)) {
-        used.insert(v);
-        loop.push_back(v);
-        v = next[v];
+    for (const std::vector<uint32_t> &loop : closed_loops(next)) {
+      /* Folded flat: the patch runs out along one arc and back along its twin (a corner
+       * where two bevels meet on a curved surface). No face; the twins become one. */
+      Vec3 nw(0.0f);
+      const Vec3 p0 = m.positions[loop[0]];
+      for (size_t k = 0; k < loop.size(); k++) nw += cross(m.positions[loop[k]] - p0, m.positions[loop[(k + 1) % loop.size()]] - p0);
+      if (0.5f * length(nw) < 1e-9f * sc * sc) {
+        for (size_t i = 0; i < loop.size(); i++)
+          for (size_t j = i + 1; j < loop.size(); j++)
+            if (loop[i] != loop[j] && !weld.count(loop[j]) && length(m.positions[loop[i]] - m.positions[loop[j]]) < 1e-6f * sc) weld[loop[j]] = loop[i];
+        folded.push_back(loop);
+        continue;
       }
-      if (v == start && loop.size() >= 3) {
-        /* Folded flat: the patch runs out along one arc and back along its twin (a corner
-         * where two bevels meet on a curved surface). No face; the twins become one. */
-        Vec3 nw(0.0f);
-        const Vec3 p0 = m.positions[loop[0]];
-        for (size_t k = 0; k < loop.size(); k++) nw += cross(m.positions[loop[k]] - p0, m.positions[loop[(k + 1) % loop.size()]] - p0);
-        if (0.5f * length(nw) < 1e-9f * sc * sc) {
-          for (size_t i = 0; i < loop.size(); i++)
-            for (size_t j = i + 1; j < loop.size(); j++)
-              if (loop[i] != loop[j] && !weld.count(loop[j]) && length(m.positions[loop[i]] - m.positions[loop[j]]) < 1e-6f * sc) weld[loop[j]] = loop[i];
-          folded.push_back(loop);
-          continue;
-        }
-        m.add_face(loop.data(), loop.size(), nullptr, 0);
-        bevel_faces.push_back((uint32_t)m.face_count() - 1);
-      }
+      m.add_face(loop.data(), loop.size(), nullptr, 0);
+      bevel_faces.push_back((uint32_t)m.face_count() - 1);
     }
     if (!weld.empty()) {
       const std::vector<uint32_t> before = m.corner_verts;
@@ -1164,18 +1160,7 @@ bool bridge(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_
         if (edge_selected(a, b, vert_sel) && ef.at(a, b).size() == 1) next[b] = a;
       }
     }
-    std::unordered_set<uint32_t> used;
-    for (auto &[start, _] : next) {
-      if (used.count(start)) continue;
-      std::vector<uint32_t> loop;
-      uint32_t v = start;
-      while (!used.count(v) && next.count(v)) {
-        used.insert(v);
-        loop.push_back(v);
-        v = next[v];
-      }
-      if (v == start && loop.size() >= 3) loops.push_back(loop);
-    }
+    loops = closed_loops(next);
     if (loops.size() != 2) {
       if (err) *err = "Bridge needs two selected faces, or two open edge loops (holes)";
       return false;

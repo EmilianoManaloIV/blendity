@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "pathtracer.h"
+#include "optix_device.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -167,14 +168,23 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
         if (mp) mp->textures();  // resolved here, not by the tracing threads (Material::textures)
       }
   lights_ = lights;
+  toon_key_ = toon_key_light(lights_, &toon_key_L_);
   env_ = env;
   normal_mats_.clear();
-  for (const PTObject &ob : objects_) normal_mats_.push_back(ob.model.inverse().transposed());
+  local_keys_.clear();
+  for (const PTObject &ob : objects_) {
+    const Mat4 inv = ob.model.inverse();
+    normal_mats_.push_back(inv.transposed());
+    const Vec3 lk = inv.dir(toon_key_L_);
+    const float len = length(lk);
+    local_keys_.push_back(finite_bits(len) && len > 1e-12f ? lk / len : Vec3(0, 1, 0));
+  }
   /* GPU devices first: one without ray tracing hardware traverses Blendity's
    * own BVH, so that is built even when the CPU uses Embree. */
   gpu_error_.clear();
   if (!settings_.gpus.empty() && gpu::available()) sync_gpus();
   else {
+    stop_all_workers();  // (task 0161: a slot's worker ends before the slot goes)
     gpus_.clear();
     parked_gpus_.clear();
     gpu_starting_ = false;  // back on the CPU: nothing to wait for
@@ -551,8 +561,16 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
 }
 
 void PathTracer::reset() {
+  pause();
+  for (auto &g : gpus_) {  // (task 0161: the host copies of the sums go with them)
+    std::lock_guard<std::mutex> lock(g->host_mutex);
+    g->host_accum.clear();
+    g->host_samples = 0;
+    g->host_fresh = false;
+  }
   samples_ = 0;
   stats_.max_submit_ms = 0;
+  stats_.gpu_busy_ms = -1, stats_.gpu_wait_ms = 0;
   size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
   accum_.assign(n, Vec3(0.0f));
   albedo_.assign(n, Vec3(0.0f));
@@ -712,11 +730,33 @@ float PathTracer::mesh_light_pdf(uint32_t li, float dist, float cos_light) const
   return cos_light > 1e-6f ? (l.power / light_power_) * dist * dist / (l.area * cos_light) : 0.0f;
 }
 
+bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u) const {
+  if (mesh_lights_.empty() || !(light_power_ > 0.0f)) return false;
+  const float r = (light_u >= 0.0f && light_u < 1.0f ? light_u : rnd(rng)) * light_power_;
+  const uint32_t li = (uint32_t)std::min<size_t>(std::upper_bound(light_cdf_.begin(), light_cdf_.end(), r) - light_cdf_.begin(), mesh_lights_.size() - 1);
+  float su = rnd(rng), sv = rnd(rng);
+  if (su + sv > 1.0f) su = 1.0f - su, sv = 1.0f - sv;
+  SurfacePoint lp;
+  const Material *lmat = surface_at(mesh_lights_[li].object, mesh_lights_[li].prim, su, sv, lp);
+  const Vec3 d = lp.position - origin;
+  dist = length(d);
+  if (!(dist > 1e-5f) || !lmat) return false;
+  dir = d / dist;
+  const float cos_l = std::fabs(dot(lp.geo_normal, dir));
+  pdf = mesh_light_pdf(li, dist, cos_l);
+  if (!(pdf > 0.0f) || dot(n, dir) <= 0.0f) return false;
+  const SurfaceSample ls = evaluate_material(*lmat, lp);
+  if (lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip) return false;  // (a hole: the gather passes through it too)
+  Le = ls.emission * (lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
+  return std::isfinite(Le.x) && std::isfinite(Le.y) && std::isfinite(Le.z);
+}
+
 Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint32_t *id_out, uint64_t &rays,
-                       PTGuidingThread *guide, bool camera) const {
+                       PTGuidingThread *guide, bool camera, float first_pdf) const {
   Vec3 L(0.0f), beta(1.0f);
   const float clamp = settings_.clamp_indirect;
-  float last_pdf = 0.0f;  // solid-angle pdf of the direction that led here (0 = camera ray)
+  float last_pdf = first_pdf;  // solid-angle pdf of the direction that led here (0 = camera ray; a bake's gather gives its cosine pdf)
+  float since_scatter = 0.0f;  // the distance travelled since that direction was chosen: see-through passes add to it (the emitter's pdf is by that distance, task 0157)
   int see_through_hits = 0, glass_hits = 0;  // these get their own budgets (Cycles: transparent / transmission bounces)
   bool camera_path = camera;  // still the camera ray (see-through passes keep it; glass and BSDF bounces end it)
 #ifdef BL_WITH_OPENPGL
@@ -769,6 +809,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (mat->outline_hull && !(bounce == 0 && camera_path && dot(sp.geo_normal, ray.dir) < 0.0f) && see_through_hits < 64) {
       see_through_hits++;
       ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      since_scatter += h.t;
       bounce--;
       continue;
     }
@@ -784,6 +825,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
           if ((((int)std::floor(scr.x) + (int)std::floor(scr.y)) & 1) != 0) {  // the checkerboard's holes
             see_through_hits++;
             ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+            since_scatter += h.t;
             bounce--;
             continue;
           }
@@ -800,6 +842,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (door_solid && saturate(s.alpha) < 0.1f) {  // the rasterizer's door: nearly clear surfaces vanish
       see_through_hits++;
       ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      since_scatter += h.t;
       bounce--;
       continue;
     }
@@ -810,6 +853,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       if (pass) {
         see_through_hits++;
         ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+        since_scatter += h.t;
         bounce--;
         continue;
       }
@@ -835,7 +879,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (last_pdf > 0.0f && !mesh_lights_.empty() && luminance(s.emission) > 0.0f) {
       auto it = light_of_.find(((uint64_t)h.object << 32) | h.tri);
       if (it != light_of_.end()) {
-        float pl = mesh_light_pdf(it->second, h.t, cos_hit);
+        float pl = mesh_light_pdf(it->second, since_scatter + h.t, cos_hit);  // (the whole way from the scatter, not the last segment)
         w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
       }
     }
@@ -904,7 +948,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
     /* Toon (ADR 0020) where the eye sees the surface: its tones and rim. Elsewhere (bounces, bakes) it is Lambert. */
     const bool toon_here = s.toon && bounce == 0 && camera_path;
-    if (toon_here) add(beta * toon_rim(*s.toon, n, V));
+    if (toon_here) add(beta * toon_rim(s, n, V, toon_key_L_));
 
     /* BSDF sampling setup (one-sample MIS between the diffuse and GGX lobes),
      * needed before direct lighting: light-sample MIS weights use the same pdf. */
@@ -991,19 +1035,26 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         dist = length(d);
         if (dist < 1e-5f) continue;
         dir = d / dist;
-        power *= light_falloff(l, sp.position, dir);  // range, spot cone, area facing
+        /* Range and the spot cone; an area light's point as an emissive plane's (task 0155): its facing, the inverse
+         * square from it, the Range window, times the panel's area (the point was drawn uniformly over it). */
+        power *= l.type == RenderLight::Area ? area_light_area(l) * area_light_falloff(l, p, sp.position) : light_falloff(l, sp.position, dir);
       }
       if (toon_here) {
         /* Toon: N.L x visibility x the falloff in tones; the dark side takes the shadow colour (no shadow ray). */
         if (power <= 0 || !(l.intensity > 0.0f)) continue;
-        const float fall = std::min(1.0f, power / (l.intensity * kPi));  // range, spot cone, an area's facing
-        const float ndl = dot(n, dir);
+        /* Range, the spot cone; an area light at its centre (as the views band it: per-sample values would blur the bands). */
+        const float fall = std::min(1.0f, l.type == RenderLight::Area ? light_falloff(l, sp.position, dir) : power / (l.intensity * kPi));
+        const float ndl = toon_wrap_ndl(*s.toon, dot(n, dir));  // (the light wrap moves the terminator)
         Vec3 Tr(0.0f);
         if (ndl > 0 && dot(sp.geo_normal, dir) > 0) {
           rays++;
           Tr = transmittance({origin, dir}, dist);
         }
-        const Vec3 Lo = shade_toon(s, n, V, dir, std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z}) * fall) * l.color * l.intensity;
+        const int li_idx = (int)(&l - &lights_[0]);
+        const float face = li_idx == toon_key_ && h.object < local_keys_.size() ? toon_face_lit(*s.toon, s, local_keys_[h.object]) : -1.0f;  // (task 0149)
+        const float lit = (face >= 0.0f ? face : std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z})) * fall;  // (the map is the face's shadow: no shadow ray on top)
+        const bool fill = s.toon->toon_key_light_only && toon_key_ >= 0 && li_idx != toon_key_;  // (task 0148: the other lights add smooth fill)
+        const Vec3 Lo = (fill ? toon_fill(s, lit) : shade_toon(s, n, V, dir, lit)) * l.color * l.intensity;
         add(beta * Lo);
         record_nee(Lo);
         continue;
@@ -1041,7 +1092,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
           rays++;
           const Vec3 Tr = transmittance({origin, dir}, dist * (1.0f - 1e-4f));
           if (std::max({Tr.x, Tr.y, Tr.z}) > 0.0f) {
-            const Vec3 Le = evaluate_material(*lmat, lp).emission * Tr;
+            const SurfaceSample ls = evaluate_material(*lmat, lp);
+            const bool hole = lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip;  // (as sample_mesh_light: a cutout's hole emits nothing)
+            const Vec3 Le = ls.emission * Tr * (hole ? 0.0f : lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
             float pb = sampling_pdf(dir);
             float w = pl * pl / (pl * pl + pb * pb);
             const Vec3 Lo = bsdf(dir) * Le * (w / pl);
@@ -1078,6 +1131,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     const Vec3 f = bsdf(dir);
     beta = beta * f / pdf;
     last_pdf = pdf;
+    since_scatter = 0.0f;
 #ifdef BL_WITH_OPENPGL
     if (record && seg) {
       openpgl::cpp::SetDirectionIn(seg, pgl_v(dir));
@@ -1787,9 +1841,12 @@ bool PathTracer::gpu_available() { return gpu::available(); }
 
 void PathTracer::sync_gpus() {
   const auto &devs = gpu::devices();
+  if (settings_.gpu_backend >= 0) gpu::set_backend(settings_.gpu_backend);  // (task 0170: before any card is kept or opened)
   std::vector<int> want;
   for (int i : settings_.gpus)
     if (i >= 0 && i < (int)devs.size() && std::find(want.begin(), want.end(), i) == want.end()) want.push_back(i);
+  pause();  // (task 0161: no worker touches a device while the slots change)
+  const size_t had = gpus_.size();
   /* Devices set aside because the last scene didn't fit them (task 0051) come back for this one. */
   for (auto &g : parked_gpus_) gpus_.push_back(std::move(g));
   parked_gpus_.clear();
@@ -1797,9 +1854,13 @@ void PathTracer::sync_gpus() {
   for (size_t k = 0; k < gpus_.size();) {
     GpuSlot &s = *gpus_[k];
     bool keep = std::find(want.begin(), want.end(), s.index) != want.end() &&
-                s.hw_rt == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt);
+                s.hw_rt == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt) &&
+                s.optix == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt && gpu::use_optix(s.index));  // (task 0170: the backend changed)
     if (keep) k++;
-    else gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+    else {
+      stop_worker(s);
+      gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+    }
   }
   /* Opened in parallel: on a cold driver cache, building each device's
    * pipeline takes seconds. */
@@ -1823,6 +1884,7 @@ void PathTracer::sync_gpus() {
         auto slot = std::make_unique<GpuSlot>();
         slot->index = i;
         slot->hw_rt = r->using_hardware_rt();
+        slot->optix = r->info().type == "OptiX";
         slot->r = std::move(r);
         gpus_.push_back(std::move(slot));
       }
@@ -1832,6 +1894,7 @@ void PathTracer::sync_gpus() {
       }
       else gpu_error_ += (gpu_error_.empty() ? "" : "; ") + devs[(size_t)i].name + ": " + err;
     }
+    gpu_sections_.valid = gpu_sections_.valid && had == gpus_.size() && add.empty();  // (task 0162: a new card gets the whole scene)
     return;
   }
   std::vector<std::unique_ptr<gpu::Renderer>> made(add.size());
@@ -1850,9 +1913,11 @@ void PathTracer::sync_gpus() {
     auto slot = std::make_unique<GpuSlot>();
     slot->index = i;
     slot->hw_rt = made[k]->using_hardware_rt();
+    slot->optix = made[k]->info().type == "OptiX";
     slot->r = std::move(made[k]);
     gpus_.push_back(std::move(slot));
   }
+  gpu_sections_.valid = gpu_sections_.valid && had == gpus_.size() && add.empty();  // (task 0162: a new card gets the whole scene)
 }
 
 /* The scene in the GPU kernel's layouts: Blendity's own BVH (for GPUs that
@@ -1978,7 +2043,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     float par[4] = {m.metallic, m.roughness, m.specular, m.ior};
     float til[4] = {m.tiling.x, m.tiling.y, m.tiling.z, m.alpha_clip};
     float off[4] = {m.offset.x, m.offset.y, m.offset.z, m.procedural_scale};
-    float c2[4] = {m.procedural_color2.x, m.procedural_color2.y, m.procedural_color2.z, 0};
+    float c2[4] = {m.procedural_color2.x, m.procedural_color2.y, m.procedural_color2.z,
+                   clampf(finite_bits(m.face_shadow_softness) ? m.face_shadow_softness : 0.0f, 0.0f, 0.5f)};  // (w: the face shadow's softness, task 0149)
     std::memcpy(g.base_color, base, 16);
     std::memcpy(g.emission, em, 16);
     std::memcpy(g.params, par, 16);
@@ -2005,6 +2071,27 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     std::memcpy(g.toon0, t0, 16);
     std::memcpy(g.toon1, t1, 16);
     std::memcpy(g.toon2, t2, 16);
+    /* Task 0148: the toon maps (a Toon material's; a PBR one's stale paths stay off the card), the spot's colour, the
+     * wrap, the hair highlight, the rim's side, the key light. */
+    const bool toon_maps = m.shading_model == 1;
+    g.tex2[0] = toon_maps ? texture(tx.toon_ramp) : -1;
+    g.tex2[1] = toon_maps ? texture(tx.shade) : -1;
+    g.tex2[2] = toon_maps ? texture(tx.toon_bias) : -1;
+    g.tex2[3] = toon_maps ? texture(tx.toon_specular) : -1;
+    g.tex3[0] = toon_maps ? texture(tx.toon_rim_mask) : -1;
+    /* The flags and the 2D look's maps packed (task 0149; see gpu_device.h). */
+    g.tex3[1] = (m.toon_hair_highlight ? 1 : 0) | ((std::max(0, std::min(2, m.toon_rim_side)) & 3) << 1) | (m.toon_key_light_only ? 8 : 0) |
+                ((std::max(0, std::min(3, m.face_forward)) & 3) << 4) | (m.line_only_shadow ? 64 : 0);
+    auto id16 = [&](const TexturePtr &t) -> uint32_t {
+      const int32_t id = toon_maps ? texture(t) : -1;
+      return id < 0 || id >= 0xFFFF ? 0xFFFFu : (uint32_t)id;
+    };
+    const float hs = finite_bits(m.hatch_scale) && m.hatch_scale > 0.0f ? m.hatch_scale : 1.0f;
+    const uint32_t packed2 = id16(tx.face_shadow) | (id16(tx.hatch) << 16), packed3 = id16(tx.line) | ((uint32_t)std::lround(clampf(hs * 64.0f, 1.0f, 65535.0f)) << 16);
+    std::memcpy(&g.tex3[2], &packed2, 4);  // (built unsigned: a shift into the sign bit)
+    std::memcpy(&g.tex3[3], &packed3, 4);
+    const float t3[4] = {m.toon_specular_color.x, m.toon_specular_color.y, m.toon_specular_color.z, clampf(m.toon_wrap, 0.0f, 1.0f)};
+    std::memcpy(g.toon3, t3, 16);
     s.materials.push_back(g);
   };
   material(*default_material(), false);  // index 0
@@ -2123,6 +2210,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   p.counts[3] = own_bvh ? (int32_t)tlas_.size() : 0;
   p.env_i[0] = (int32_t)env_.mode;
   p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
+  p.key_light[0] = toon_key_L_.x, p.key_light[1] = toon_key_L_.y, p.key_light[2] = toon_key_L_.z, p.key_light[3] = (float)toon_key_;  // (task 0148)
+  p.misc[0] = 8.0f, p.misc[1] = p.misc[2] = p.misc[3] = 0.0f;  // (task 0149: the kernel's toon map reads)
   p.env_f[0] = env_.strength;
   p.env_f[1] = env_.rotation;
   auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };
@@ -2144,9 +2233,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
 void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids) {
   const size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
   /* The key: this build, the camera and the size. */
-  uint64_t key = 1469598103934665603ull ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
-  const uint8_t *b = reinterpret_cast<const uint8_t *>(inv_vp_.m);
-  for (size_t i = 0; i < sizeof(inv_vp_.m); i++) key = (key ^ b[i]) * 1099511628211ull;
+  uint64_t key = kFnvBasis ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
+  key = fnv1a(inv_vp_.m, sizeof(inv_vp_.m), key);
   if (key != centre_key_ || centre_dist_.size() != n) {
     centre_dist_.assign(n, 1e6f);
     centre_ids_.assign(n, 0u);
@@ -2208,6 +2296,7 @@ bool PathTracer::adopt_ready_gpus() {
 
 void PathTracer::upload_gpus() {
   if (gpus_.empty()) return;
+  pause();
   ScopedTimer t;
   gpu::Scene gs;
   uint64_t vram = 0;  // the smallest card's: one scene is uploaded to every GPU (a card reporting none is skipped)
@@ -2226,6 +2315,7 @@ void PathTracer::upload_gpus() {
     Log::warn("Path tracer: %s", msg.c_str());
     for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
     gpus_.clear();
+    gpu_sections_.valid = false;
     stats_.bvh_build_ms += t.ms();
     if (w_ > 0 && h_ > 0) reset();
     return;
@@ -2234,22 +2324,86 @@ void PathTracer::upload_gpus() {
   if (skipped > 0) Log::info("Path tracer: textures sent to the GPU %d mip level(s) smaller to fit its %llu MB", skipped, (unsigned long long)vram);
   gpu_tex_skip_ = skipped;
   gpu_params_ = gs.params;
-  for (size_t k = 0; k < gpus_.size();) {
-    std::string err;
-    if (gpus_[k]->r->upload(gs, &err)) {
-      k++;
-      continue;
+  /* Task 0162: the sections hashed; when every card holds this geometry and these textures, only what changed is
+   * sent (the instances, the materials, the lights), else the whole scene in one submission. */
+  const GpuSections now = gpu_scene_sections(gs);
+  if (!upload_gpus_partial(gs, now)) {
+    for (size_t k = 0; k < gpus_.size();) {
+      std::string err;
+      if (gpus_[k]->r->upload(gs, &err)) {
+        k++;
+        continue;
+      }
+      gpu_error_ += (gpu_error_.empty() ? "" : "; ") + err;
+      Log::warn("GPU %s dropped: %s", gpus_[k]->r->info().name.c_str(), err.c_str());
+      stop_worker(*gpus_[k]);
+      gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
     }
-    gpu_error_ += (gpu_error_.empty() ? "" : "; ") + err;
-    Log::warn("GPU %s dropped: %s", gpus_[k]->r->info().name.c_str(), err.c_str());
-    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+    stats_.upload_calls++;
+    gpu_sections_ = now;
+    gpu_sections_.valid = !gpus_.empty();
   }
   stats_.bvh_build_ms += t.ms();
+  stats_.upload_ms = t.ms();
   if (w_ > 0 && h_ > 0) reset();  // camera and buffers for the new scene
 }
 
+/* The hashes of what the cards hold: the geometry (vertices, indices, the BLAS layout, the software BLAS nodes and
+ * triangles), the instances (with the software TLAS and its order), the materials, the lights (with the mesh lights
+ * and their cdf), the texture arena, the parameters. */
+PathTracer::GpuSections PathTracer::gpu_scene_sections(const gpu::Scene &s) {
+  GpuSections h;
+  auto bytes = [](uint64_t seed, const auto &v) { return mix_bytes(seed, v.data(), v.size() * sizeof(v[0])); };
+  const size_t tlas = (size_t)std::max(0, s.params.counts[3]);
+  uint64_t g = bytes(kFnvBasis, s.verts);
+  g = bytes(g, s.idx);
+  g = bytes(g, s.blas);
+  g = bytes(g, s.object_blas);
+  g = bytes(g, s.tris);
+  g = s.nodes.size() > tlas ? mix_bytes(g, s.nodes.data() + tlas, (s.nodes.size() - tlas) * sizeof(gpu::GNode)) : g;
+  g = hash_mix(g, (uint64_t)tlas);  // (the software TLAS's node count: the BLAS nodes sit after it, so a split that changes it moves them)
+  g = hash_mix(g, (uint64_t)s.nodes.size());
+  h.geometry = g;
+  uint64_t i = bytes(kFnvBasis, s.instances);
+  i = bytes(i, s.tlas_order);
+  i = mix_bytes(i, s.nodes.data(), std::min(tlas, s.nodes.size()) * sizeof(gpu::GNode));
+  h.instances = i;
+  h.materials = bytes(kFnvBasis, s.materials);
+  uint64_t l = bytes(kFnvBasis, s.lights);
+  l = bytes(l, s.mesh_lights);
+  h.lights = bytes(l, s.mesh_cdf);
+  uint64_t x = bytes(kFnvBasis, s.tex8);
+  x = bytes(x, s.texf);
+  h.textures = bytes(x, s.textures);
+  h.valid = true;
+  return h;
+}
+
+/* The changed sections alone, when the cards hold the rest: true when that was enough (or nothing changed). */
+bool PathTracer::upload_gpus_partial(const gpu::Scene &gs, const GpuSections &now) {
+  if (!gpu_sections_.valid || gpu_sections_.geometry != now.geometry || gpu_sections_.textures != now.textures) return false;
+  const bool inst = gpu_sections_.instances != now.instances, mats = gpu_sections_.materials != now.materials, lights = gpu_sections_.lights != now.lights;
+  for (size_t k = 0; k < gpus_.size(); k++) {
+    gpu::Renderer &r = *gpus_[k]->r;
+    std::string err;
+    bool ok = true;
+    if (inst) ok = ok && r.update_instances(gs, &err);
+    if (mats) ok = ok && r.update_materials(gs, &err);
+    if (lights) ok = ok && r.update_lights(gs, &err);
+    if (ok) continue;  // (nothing changed: reset() sends the parameters)
+    Log::warn("GPU %s: the partial update failed (%s); the scene is sent whole", r.info().name.c_str(), err.c_str());
+    gpu_sections_.valid = false;
+    return false;
+  }
+  stats_.instance_updates += inst ? 1 : 0;
+  stats_.material_updates += mats ? 1 : 0;
+  stats_.light_updates += lights ? 1 : 0;
+  gpu_sections_ = now;
+  return true;
+}
+
 bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
-                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error) const {
+                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, bool mis_first_hit) const {
   std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
   out.clear();
   if (hit) hit->clear();
@@ -2302,6 +2456,7 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
     p.size[1] = H;
     p.env_i[2] = mode;
     p.env_i[3] = (int32_t)n;
+    p.misc[1] = mis_first_hit ? 1.0f : 0.0f;  // (task 0157: the gather's first emissive hit weighted against the texel's own emitter sampling)
     p.cam_pos[3] = (float)first;  // each point's own random sequence, whatever the batch (exact below 2^24)
     bake_gpu_->set_params(p);
     const size_t cells = (size_t)W * H;
@@ -2341,6 +2496,8 @@ std::vector<float> PathTracer::coverage() {
 
 void PathTracer::merge_aux() {
   if (aux_merged_ || gpus_.empty()) return;
+  pause();
+  if (samples_ != done_total_) merge_gpus();  // (the colour sums and the planes at the same sample count)
   const size_t n = (size_t)w_ * h_;
   std::vector<std::vector<float>> ga(gpus_.size()), gn(gpus_.size()), gc(gpus_.size());
   for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_aux(ga[k], gn[k], &gc[k]);
@@ -2373,7 +2530,7 @@ std::string PathTracer::device_summary() const {
   if (settings_.use_cpu || gpus_.empty()) s = std::string("CPU (") + ray_backend() + ")";
   if (gpus_.empty() && gpu_starting_) s += ", GPU starting...";
   for (const auto &g : gpus_)
-    s += (s.empty() ? "" : " + ") + g->r->info().name + (g->hw_rt ? " (RT hardware)" : " (GPU compute)");
+    s += (s.empty() ? "" : " + ") + g->r->info().name + (g->optix ? " (OptiX)" : g->hw_rt ? " (RT hardware)" : " (GPU compute)");
   return s;
 }
 
@@ -2398,113 +2555,338 @@ int PathTracer::render(double budget_ms, int max_samples) {
   }
   if (w_ <= 0 || h_ <= 0) return samples_;
   if (done_total_ >= max_samples) {
+    pause();
     if (samples_ < done_total_) merge_gpus();  // finished: show everything
     return done_total_;
   }
-  /* Every device claims whole samples of the frame from one counter until the
-   * target or the time budget is reached; their sums are added afterwards
-   * (an average of independent samples, so no seams between devices). */
+  /* Every device claims whole samples of the frame from one counter until the target is reached; their sums are
+   * added afterwards (an average of independent samples, so no seams between devices). The cards' threads keep
+   * going between calls (task 0161): this call feeds the CPU's own samples, or waits a little, then merges. */
   ScopedTimer t;
-  std::atomic<int> next{done_total_};
-  std::atomic<bool> any{false};
-  std::vector<std::thread> threads;
-  std::mutex err_mutex;
-  std::vector<size_t> failed;
-  for (size_t k = 0; k < gpus_.size(); k++)
-    threads.emplace_back([&, k] {
-      GpuSlot &g = *gpus_[k];
-      for (;;) {
-        double left = budget_ms - t.ms();
-        if (left <= 0 && any.load()) break;
-        /* Guided self-scheduling: claim half of this device's fair share of
-         * what is left (by measured speed), so chunks shrink toward the end
-         * and fast and slow devices finish together. Never more than fits
-         * the time budget. */
-        int n = 1;
-        if (g.ms_per_sample > 0) {
-          double rate = 1.0 / g.ms_per_sample, total = settings_.use_cpu && cpu_ms_per_sample_ > 0 ? 1.0 / cpu_ms_per_sample_ : 0.0;
-          for (auto &o : gpus_) total += o->ms_per_sample > 0 ? 1.0 / o->ms_per_sample : rate;
-          double share = (max_samples - next.load()) * rate / std::max(total, 1e-9) * 0.5;
-          /* And no submission over 100 ms: a slow card (a GTX 1050 Ti tracing in software) given 64 samples of a big
-           * frame at once would pass Windows' 2 s driver timeout, which resets the GPU (task 0051). */
-          n = (int)std::max(1.0, std::min({64.0, share, left > 0 ? left / g.ms_per_sample : 1.0, 100.0 / g.ms_per_sample}));
-        }
-        int first = next.fetch_add(n);
-        if (first >= max_samples) break;
-        n = std::min(n, max_samples - first);
-        ScopedTimer bt;
-        std::string err;
-        if (!g.r->render(first, n, &err)) {
-          std::lock_guard<std::mutex> lock(err_mutex);
-          gpu_error_ = err;
-          failed.push_back(k);
-          break;
-        }
-        const double submit_ms = bt.ms();
-        {
-          std::lock_guard<std::mutex> lock(err_mutex);
-          stats_.max_submit_ms = std::max(stats_.max_submit_ms, submit_ms);
-        }
-        double ms = submit_ms / n;
-        g.ms_per_sample = g.ms_per_sample > 0 ? g.ms_per_sample * 0.5 + ms * 0.5 : ms;
-        g.samples += n;
-        any = true;
-      }
-    });
-  if (settings_.use_cpu) {
-    /* The CPU renders one sample per pass; it stops at the budget like the
-     * GPUs, and doesn't take a sample when the GPUs would finish everything
-     * left before it could finish that one (everyone would wait for it). */
-    for (;;) {
-      if (t.ms() >= budget_ms && any.load()) break;
-      if (cpu_ms_per_sample_ > 0) {
-        double gpu_rate = 0;  // samples per ms, all GPUs
-        for (auto &g : gpus_) gpu_rate += g->ms_per_sample > 0 ? 1.0 / g->ms_per_sample : 0.0;
-        int remaining = max_samples - next.load();
-        if (gpu_rate > 0 && remaining < cpu_ms_per_sample_ * gpu_rate) break;
-      }
-      int before = cpu_samples_;
-      ScopedTimer ct;
-      render_cpu(0.0, max_samples, &next);  // one pass (budget 0 = stop after it)
-      if (cpu_samples_ == before) break;
-      double ms = ct.ms();
-      cpu_ms_per_sample_ = cpu_ms_per_sample_ > 0 ? cpu_ms_per_sample_ * 0.5 + ms * 0.5 : ms;
-      any = true;
-    }
-  }
-  for (auto &th : threads) th.join();
-  /* A device that failed (driver reset, out of memory) leaves; the others go on.
-   * Its partial sums are dropped with it, so the average stays consistent. */
-  std::sort(failed.begin(), failed.end());
-  for (size_t k = failed.size(); k-- > 0;) {
-    Log::warn("GPU %s stopped: %s", gpus_[failed[k]]->r->info().name.c_str(), gpu_error_.c_str());
-    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)failed[k]);
-  }
-  done_total_ = cpu_samples_;
-  stats_.gpu_samples.clear();
-  for (auto &g : gpus_) {
-    done_total_ += g->samples;
-    stats_.gpu_samples.push_back(g->samples);
-  }
-  stats_.cpu_samples = cpu_samples_;
-  /* Reading the GPUs back costs time, so the picture is merged only when it
-   * is shown: at the end, at first, and every merge interval in between. */
-  if (done_total_ >= max_samples || samples_ == 0 || merge_clock_.ms() >= settings_.merge_interval_ms) merge_gpus();
+  start_workers(max_samples);
+  if (settings_.use_cpu) render_cpu_beside_gpus(budget_ms, max_samples);
+  wait_for_workers(std::max(0.0, budget_ms - t.ms()));  // (with the CPU beside: the cards' last chunks, so a long budget ends with every sample done)
+  gather_workers(max_samples);
   stats_.render_ms += t.ms();
   return done_total_;
 }
 
-/* The CPU's colour sums plus each GPU's (read back). Albedo and normals are
- * only needed by the denoiser, so they merge on demand (merge_aux). */
+/* The CPU renders one sample per pass; it stops at the budget like the GPUs, and doesn't take a sample when the
+ * GPUs would finish everything left before it could finish that one (everyone would wait for it). */
+void PathTracer::render_cpu_beside_gpus(double budget_ms, int max_samples) {
+  ScopedTimer t;
+  for (;;) {
+    if (t.ms() >= budget_ms && cpu_samples_ > 0) break;
+    if (next_sample_.load() >= max_samples) break;
+    if (cpu_ms_per_sample_ > 0) {
+      double gpu_rate = 0;  // samples per ms, all GPUs
+      {
+        std::lock_guard<std::mutex> lock(work_mutex_);
+        for (auto &g : gpus_) gpu_rate += g->ms_per_sample > 0 ? 1.0 / g->ms_per_sample : 0.0;
+      }
+      const int remaining = max_samples - next_sample_.load();
+      if (gpu_rate > 0 && remaining < cpu_ms_per_sample_ * gpu_rate) break;
+    }
+    const int before = cpu_samples_;
+    ScopedTimer ct;
+    render_cpu(0.0, max_samples, &next_sample_);  // one pass (budget 0 = stop after it)
+    if (cpu_samples_ == before) break;
+    const double ms = ct.ms();
+    std::lock_guard<std::mutex> lock(work_mutex_);  // (the workers read the rate)
+    cpu_ms_per_sample_ = cpu_ms_per_sample_ > 0 ? cpu_ms_per_sample_ * 0.5 + ms * 0.5 : ms;
+  }
+}
+
+/* At most the budget, or until every card's worker idles. A budget under 8 ms is a poll and returns at once: a
+ * condition variable's timed wait rounds a few milliseconds up to the scheduler's tick on Windows (15.6 ms), and
+ * the editor's pacer paces its frame itself. */
+void PathTracer::wait_for_workers(double budget_ms) {
+  if (budget_ms < 8.0) return;
+  std::unique_lock<std::mutex> lock(work_mutex_);
+  idle_cv_.wait_for(lock, std::chrono::microseconds((long long)(budget_ms * 1000.0)), [&] { return workers_idle_locked(); });
+}
+
+/* (Under work_mutex_.) */
+int PathTracer::finished_samples_locked() const {
+  int n = cpu_samples_;
+  for (const auto &g : gpus_) n += g->samples;
+  return n;
+}
+bool PathTracer::workers_idle_locked() const {
+  for (const auto &g : gpus_)
+    if (g->active) return false;
+  return true;
+}
+
+/* What the cards have finished: the counts and times into the stats, a device that failed set aside, a merge when
+ * due. */
+void PathTracer::gather_workers(int max_samples) {
+  std::vector<size_t> failed;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    stats_.gpu_samples.clear();
+    for (size_t k = 0; k < gpus_.size(); k++) {
+      GpuSlot &g = *gpus_[k];
+      if (g.failed) failed.push_back(k);
+      stats_.gpu_samples.push_back(g.samples);
+      stats_.max_submit_ms = std::max(stats_.max_submit_ms, g.max_submit_ms);
+      if (g.busy_ms > 0.0 || g.wait_ms > 0.0) {  // (task 0159: the cards' own time, and the rest of the wait)
+        stats_.gpu_busy_ms = std::max(0.0, stats_.gpu_busy_ms) + g.busy_ms;
+        stats_.gpu_wait_ms += g.wait_ms;
+      }
+      g.busy_ms = g.wait_ms = 0.0;
+    }
+    done_total_ = finished_samples_locked();
+    stats_.cpu_samples = cpu_samples_;
+  }
+  if (!failed.empty()) drop_failed_gpus(failed);
+  const bool finished = done_total_ >= max_samples;
+  if (finished) pause();
+  /* Reading the GPUs back costs time, so the picture is merged only when it is shown: at the end, at first, and
+   * every merge interval in between. The workers download their sums when asked; the merge takes the copies made. */
+  if (!finished && samples_ != 0 && merge_clock_.ms() < settings_.merge_interval_ms) return;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    for (auto &g : gpus_) g->merge_wanted = true;
+  }
+  merge_gpus();
+}
+
+/* A device that failed (driver reset, out of memory) leaves; the others go on. Its partial sums are dropped with
+ * it, so the average stays consistent. */
+void PathTracer::drop_failed_gpus(const std::vector<size_t> &failed) {
+  pause();
+  for (size_t k = failed.size(); k-- > 0;) {
+    GpuSlot &g = *gpus_[failed[k]];
+    gpu_error_ = g.error;
+    Log::warn("GPU %s stopped: %s", g.r->info().name.c_str(), g.error.c_str());
+    stop_worker(g);
+    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)failed[k]);
+  }
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  done_total_ = finished_samples_locked();
+}
+
+/* The cards' workers started toward `max_samples` (a worker lives as long as its slot; it idles between renders).
+ * Every able slot counts as active from here, so a poll never sees them idle before they wake. */
+void PathTracer::start_workers(int max_samples) {
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    target_samples_ = max_samples;
+    if (!workers_go_) next_sample_ = finished_samples_locked();  // (nothing in flight: the counter starts from what is done)
+    workers_go_ = true;
+    for (auto &g : gpus_) {
+      if (g->failed || next_sample_.load() >= max_samples) continue;  // (nothing left to claim: a finished card stays idle)
+      g->active = true;
+      if (!g->worker.joinable()) g->worker = std::thread([this, s = g.get()] { worker_loop(*s); });
+    }
+  }
+  work_cv_.notify_all();
+}
+
+/* Everything the cards had in flight finished and their workers idle: the device and the sums are the caller's. */
+void PathTracer::pause() {
+  std::unique_lock<std::mutex> lock(work_mutex_);
+  workers_go_ = false;
+  idle_cv_.wait(lock, [&] { return workers_idle_locked(); });
+  done_total_ = finished_samples_locked();
+  stats_.gpu_samples.clear();
+  for (auto &g : gpus_) stats_.gpu_samples.push_back(g->samples);
+}
+
+/* A slot's worker ended (its own quit flag; the others sleep on) before the slot goes. */
+void PathTracer::stop_worker(GpuSlot &g) {
+  if (!g.worker.joinable()) return;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    g.quit = true;
+  }
+  work_cv_.notify_all();
+  g.worker.join();
+}
+void PathTracer::stop_all_workers() {
+  pause();
+  for (auto &g : gpus_) stop_worker(*g);
+  for (auto &g : parked_gpus_) stop_worker(*g);
+}
+
+void PathTracer::set_settings(const PTSettings &s) {
+  pause();  // (the workers read the settings)
+  settings_ = s;
+}
+
+PathTracer::~PathTracer() { stop_all_workers(); }
+
+/* Guided self-scheduling: claim half of this device's fair share of what is left (by measured speed), so chunks
+ * shrink toward the end and fast and slow devices finish together. And no chunk over 50 ms: a slow card (a GTX
+ * 1050 Ti tracing in software) given 64 samples of a big frame at once would pass Windows' 2 s driver timeout, which
+ * resets the GPU (task 0051, a 100 ms cap), and a pause - a camera move, a stop - waits for the two chunks in flight
+ * (task 0161: halved for that). */
+int PathTracer::worker_chunk(const GpuSlot &g) {
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  if (g.ms_per_sample <= 0) return 1;
+  const double rate = 1.0 / g.ms_per_sample;
+  double total = settings_.use_cpu && cpu_ms_per_sample_ > 0 ? 1.0 / cpu_ms_per_sample_ : 0.0;
+  for (const auto &o : gpus_) total += o->ms_per_sample > 0 ? 1.0 / o->ms_per_sample : rate;
+  const double share = (target_samples_ - next_sample_.load()) * rate / std::max(total, 1e-9) * 0.5;
+  return (int)std::max(1.0, std::min({64.0, share, 50.0 / g.ms_per_sample}));
+}
+
+/* A chunk claimed and submitted (two may be in flight); false when nothing is left or the card failed. */
+bool PathTracer::worker_submit_chunk(GpuSlot &g, int &n) {
+  n = worker_chunk(g);
+  int target;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    target = target_samples_;
+  }
+  /* The claim as a compare-and-swap: the counter never passes the target (a card that finds nothing left claims
+   * nothing, and a raised target starts where the last one ended). */
+  int first = next_sample_.load();
+  for (;;) {
+    if (first >= target) return false;
+    n = std::min(n, target - first);
+    if (next_sample_.compare_exchange_weak(first, first + n)) break;
+  }
+  std::string err;
+  if (g.r->submit(first, n, &err)) return true;
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  g.error = err;
+  g.failed = true;
+  return false;
+}
+
+/* The oldest submission waited for: its samples counted, its time into the slot's sums (task 0159: the card's own
+ * time from its timestamps, the rest of the wall time as the wait). */
+void PathTracer::worker_finish_oldest(GpuSlot &g, int n) {
+  ScopedTimer wt;
+  std::string err;
+  const bool ok = g.r->wait_oldest(&err);
+  const double wall = wt.ms(), busy = g.r->take_busy_ms();
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  if (!ok) {
+    g.error = err;
+    g.failed = true;
+    return;
+  }
+  g.max_submit_ms = std::max(g.max_submit_ms, wall);
+  if (busy >= 0.0) {
+    g.busy_ms += busy;
+    g.wait_ms += std::max(0.0, wall - busy);
+  }
+  const double ms = std::max(wall, busy) / std::max(1, n);
+  g.ms_per_sample = g.ms_per_sample > 0 ? g.ms_per_sample * 0.5 + ms * 0.5 : ms;
+  g.samples += n;
+}
+
+/* Every chunk in flight finished. */
+void PathTracer::worker_drain(GpuSlot &g, std::vector<int> &flight) {
+  while (!flight.empty()) {
+    worker_finish_oldest(g, flight.front());
+    flight.erase(flight.begin());
+  }
+}
+
+/* The card's sums into the host copy the main thread merges from (its in-flight work waited for first). */
+void PathTracer::worker_download(GpuSlot &g) {
+  g.r->wait_all(nullptr);
+  std::vector<float> sums;
+  g.r->download_accum(sums);
+  int samples;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    samples = g.samples;
+    g.merge_wanted = false;
+  }
+  std::lock_guard<std::mutex> lock(g.host_mutex);
+  g.host_accum.swap(sums);
+  g.host_samples = samples;
+  g.host_fresh = true;
+}
+
+/* One render's worth on a card: chunks claimed and kept two in flight until the target, a stop or a failure; the
+ * sums downloaded when a merge is wanted and when it stops. */
+void PathTracer::worker_render(GpuSlot &g) {
+  std::vector<int> flight;  // the chunk sizes in flight, oldest first
+  for (;;) {
+    bool go, merge, failed;
+    {
+      std::lock_guard<std::mutex> lock(work_mutex_);
+      go = workers_go_ && !g.quit;
+      merge = g.merge_wanted;
+      failed = g.failed;
+    }
+    if (!go || failed) break;
+    if (merge) {  // (a merge is due: the flights drained, the sums copied out, then on)
+      worker_drain(g, flight);
+      worker_download(g);
+      continue;
+    }
+    int n = 0;
+    if (flight.size() < 2 && worker_submit_chunk(g, n)) {
+      flight.push_back(n);
+      continue;
+    }
+    if (flight.empty()) break;  // (nothing left to claim and nothing in flight: done)
+    worker_finish_oldest(g, flight.front());
+    flight.erase(flight.begin());
+  }
+  worker_drain(g, flight);
+  bool failed;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    failed = g.failed;
+  }
+  if (!failed) worker_download(g);
+}
+
+/* A card's worker: idle until asked, a render, idle again; it ends on its slot's quit. */
+void PathTracer::worker_loop(GpuSlot &g) {
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lock(work_mutex_);
+      work_cv_.wait(lock, [&] { return g.quit || g.active; });  // (active is the main thread's word; a pause between the start and this wake leaves go off, and the render loop returns at once)
+      if (g.quit) {
+        g.active = false;
+        idle_cv_.notify_all();
+        return;
+      }
+    }
+    worker_render(g);
+    {
+      std::lock_guard<std::mutex> lock(work_mutex_);
+      g.active = false;
+      if (workers_idle_locked() && next_sample_.load() >= target_samples_) workers_go_ = false;  // (done: the next render() starts anew)
+    }
+    idle_cv_.notify_all();
+  }
+}
+
+/* The CPU's colour sums plus each GPU's (the host copies its worker downloaded; an idle card's sums taken now when
+ * its copy is stale). Albedo and normals are only needed by the denoiser, so they merge on demand (merge_aux). */
 void PathTracer::merge_gpus() {
   const size_t n = (size_t)w_ * h_;
   std::vector<std::vector<float>> gsum(gpus_.size());
-  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_accum(gsum[k]);
+  int merged = cpu_samples_;
+  for (size_t k = 0; k < gpus_.size(); k++) {
+    GpuSlot &g = *gpus_[k];
+    bool take_now;
+    {
+      std::lock_guard<std::mutex> lock(work_mutex_);
+      take_now = !workers_go_ && !g.active && !g.host_fresh && !g.failed;  // (idle for good until the next start: the main thread may drive the device)
+    }
+    if (take_now) worker_download(g);
+    std::lock_guard<std::mutex> lock(g.host_mutex);
+    gsum[k] = g.host_accum;
+    merged += g.host_samples;
+    g.host_fresh = false;
+  }
   JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) {
       Vec3 c = cpu_accum_[i];
       float ld = cpu_last_dist_[i];
       for (const auto &g : gsum) {
+        if (g.size() < n * 4) continue;  // (a card that has not downloaded yet)
         c += Vec3(g[i * 4], g[i * 4 + 1], g[i * 4 + 2]);
         if (g[i * 4 + 3] > 0.0f) ld = g[i * 4 + 3];  // a GPU's last hitting sample (accum's w)
       }
@@ -2513,7 +2895,7 @@ void PathTracer::merge_gpus() {
     }
   });
   aux_merged_ = false;
-  samples_ = done_total_;
+  samples_ = merged;  // (what the picture holds: the CPU's and each card's downloaded sums)
   merge_clock_ = ScopedTimer();
 }
 

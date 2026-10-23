@@ -273,9 +273,8 @@ size_t retarget_sequence_clips(const std::string &from_in, const std::string &to
 /* FNV-1a over the path, a separator, the property and the axis (a 64-bit clash between two numbers of one character is
  * not a worry). */
 uint64_t anim_value_key(const std::string &path, const std::string &property, int axis) {
-  uint64_t h = 14695981039346656037ull;
-  auto mix = [&](unsigned char c) { h = (h ^ c) * 1099511628211ull; };
-  for (char c : path) mix((unsigned char)c);
+  uint64_t h = fnv1a(path.data(), path.size());
+  auto mix = [&](unsigned char c) { h = (h ^ c) * kFnvPrime; };
   mix(0x1f);
   for (char c : property) mix((unsigned char)c);
   mix(0x1f);
@@ -320,14 +319,6 @@ const float *AnimValues::get(const std::string &path, const std::string &propert
 float blend_anim_value(const std::string &property, float a, float b, float t) {
   if (property == "Rotation") b = a + (b - a - 360.0f * std::round((b - a) / 360.0f));  // (the shorter way round)
   return a + (b - a) * t;
-}
-
-void sample_clip_values(const AnimationClip &clip, float frame, AnimValues &out) {
-  for (const AnimTrack &t : clip.tracks) {
-    if (t.keys.empty()) continue;
-    const float v = t.sample(frame);
-    if (std::isfinite(v)) out.set(t, v);
-  }
 }
 
 namespace {
@@ -482,6 +473,12 @@ void Sequencer::reflect(Reflector &r) {
   static const char *kWrap[] = {"Loop", "Once"};
   r.enumeration("Wrap", wrap, kWrap, 2);
   r.help("At the timeline's end: start again, or hold the last frame. A trigger's key jumps to its clip either way.");
+  static const char *kHold[] = {"1s", "2s", "3s", "4s"};
+  int h = std::max(0, std::min(3, hold - 1));
+  r.enumeration("Hold", h, kHold, 4);
+  r.help("Animation on 2s or 3s (task 0149): the timeline's clips change pose every 2 or 3 frames, as hand-drawn\n"
+         "animation is shot. Renders hold the same frames.");
+  hold = h + 1;
 }
 
 void Sequencer::start(PlayContext &ctx) {
@@ -529,7 +526,7 @@ void Sequencer::update(PlayContext &ctx) {
   if (!playing) return;
   time += ctx.dt * speed;
   scratch.clear();
-  sample_sequence(*s, frame(), scratch, scene_);
+  sample_sequence(*s, hold_frame(frame(), hold), scratch, scene_);
   if (blend_left > 0.0f && blend_total > 0.0f) {
     blend_left = std::max(0.0f, blend_left - ctx.dt);
     const float t = 1.0f - blend_left / blend_total;

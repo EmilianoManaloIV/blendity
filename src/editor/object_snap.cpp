@@ -224,11 +224,11 @@ void Editor::update_pilot_camera() {
   const Quat rot = cam_.rotation();
   const float fov = clampf(cam_.fov, 1.0f, 170.0f);
   const Recti fr = pilot_frame_rect(scene_rect_, *c);
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   for (float v : {pos.x, pos.y, pos.z, rot.x, rot.y, rot.z, rot.w, fov, (float)fr.w, (float)fr.h}) {
     uint32_t b;
     std::memcpy(&b, &v, 4);
-    h = (h ^ b) * 1099511628211ull;
+    h = (h ^ b) * kFnvPrime;
   }
   if (h == pilot_last_hash_) return;
   const bool first = pilot_last_hash_ == 0;

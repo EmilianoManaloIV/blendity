@@ -8,6 +8,7 @@
 // (STL and PLY as Blender writes them, USD stages with upAxis "Z") are first
 // stood up, the inverse of Blender's forward -Z / up Y axis conversion.
 #include "import.h"
+#include "import_anim.h"
 
 #include "../core/core.h"
 #include "../core/json.h"
@@ -69,8 +70,9 @@ void set_node_trs(ImportedNode &n, Vec3 t, Quat r, Vec3 s) {
   n.scale = s;
 }
 
-/* Welds vertices at identical positions (STL and glTF store split triangles). */
-void weld_exact(Mesh &m) {
+}  // namespace
+
+void weld_exact(Mesh &m, const std::vector<Vec3> *normals) {
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
   std::vector<uint32_t> remap(m.vert_count());
   std::vector<Vec3> kept;
@@ -92,6 +94,9 @@ void weld_exact(Mesh &m) {
       bool same = true;
       for (const VertexGroup &g : m.vertex_groups)
         if (g.weights.size() == m.vert_count() && g.weights[i] != g.weights[first[k]]) same = false;
+      for (const ShapeKey &s : m.shape_keys)  // (and with the same shape keys: a mouth's corners must part)
+        if (s.delta.size() == m.vert_count() && !(s.delta[i] == s.delta[first[k]])) same = false;
+      if (normals && normals->size() == m.vert_count() && dot((*normals)[i], (*normals)[first[k]]) < 0.9999f) same = false;  // (a hard edge)
       if (same) {
         found = k;
         break;
@@ -106,7 +111,7 @@ void weld_exact(Mesh &m) {
     remap[i] = found;
   }
   /* Vertex groups (a skin's weights): a welded vertex keeps the first copy's (they were at the same place). */
-  std::vector<VertexGroup> groups = m.vertex_groups;
+  std::vector<VertexGroup> groups = std::move(m.vertex_groups);  // (moved, not copied: a character's can be large)
   for (VertexGroup &g : groups) {
     if (g.weights.size() != m.vert_count()) {
       g.weights.assign(kept.size(), 0.0f);
@@ -118,12 +123,29 @@ void weld_exact(Mesh &m) {
       if (!set[remap[i]]) w[remap[i]] = g.weights[i], set[remap[i]] = 1;
     g.weights = std::move(w);
   }
+  std::vector<ShapeKey> shapes = std::move(m.shape_keys);  // (renumbered as the vertices: a welded vertex keeps the first copy's)
+  for (ShapeKey &s : shapes) {
+    std::vector<Vec3> d(kept.size(), Vec3(0.0f));
+    for (size_t i = 0; i < remap.size() && s.delta.size() == m.vert_count(); i++)
+      if (first[remap[i]] == i) d[remap[i]] = s.delta[i];
+    s.delta = std::move(d);
+  }
+  std::vector<Vec3> cnorm;  // custom normals (task 0149): a welded vertex keeps the first copy's; copies that disagree (a hard edge) leave a zero, which keep_file_normals reads as "split"
+  if (m.custom_normals.size() == m.vert_count()) {
+    cnorm.assign(kept.size(), Vec3(0.0f));
+    for (size_t i = 0; i < remap.size(); i++) {
+      if (first[remap[i]] == i) cnorm[remap[i]] = m.custom_normals[i];
+      else if (dot(cnorm[remap[i]], m.custom_normals[i]) < 0.9999f * length(cnorm[remap[i]]) * length(m.custom_normals[i])) cnorm[remap[i]] = Vec3(0.0f);
+    }
+  }
   m.positions = kept;
   for (uint32_t &v : m.corner_verts) v = remap[v];
   /* Triangles that collapsed (degenerate in the file) would break topology tools. */
   Mesh clean;
   clean.positions = m.positions;
   clean.vertex_groups = std::move(groups);
+  clean.shape_keys = std::move(shapes);
+  clean.custom_normals = std::move(cnorm);
   clean.smooth = m.smooth;
   clean.smooth_angle = m.smooth_angle;
   clean.name = m.name;
@@ -141,6 +163,55 @@ void weld_exact(Mesh &m) {
   }
   m = std::move(clean);
 }
+
+/* Vertex normals weighted by each face's angle at the vertex (what Blender, Maya and most exporters write), beside
+ * the area-weighted ones Blendity computes: a file's normals that match either are nobody's edit. */
+static std::vector<Vec3> angle_weighted_normals(const Mesh &m) {
+  std::vector<Vec3> out(m.vert_count(), Vec3(0.0f));
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const uint32_t n = m.face_size(f);
+    if (n < 3) continue;
+    const Vec3 fn = m.face_normal(f);
+    for (uint32_t c = 0; c < n; c++) {
+      const Vec3 a = normalize(m.positions[v[(c + n - 1) % n]] - m.positions[v[c]]), b = normalize(m.positions[v[(c + 1) % n]] - m.positions[v[c]]);
+      const float ang = std::acos(clampf(dot(a, b), -1.0f, 1.0f));
+      if (finite_bits(ang)) out[v[c]] += fn * ang;
+    }
+  }
+  for (Vec3 &n : out) {
+    const float len = length(n);
+    n = finite_bits(len) && len > 1e-12f ? n / len : Vec3(0, 1, 0);
+  }
+  return out;
+}
+
+bool keep_file_normals(Mesh &m, const std::vector<Vec3> &file_normals) {
+  if (file_normals.size() != m.vert_count() || m.vert_count() == 0) return false;
+  /* A zero: a vertex whose copies disagreed in the file (a hard edge) or a primitive without normals. Such normals
+   * aren't an edited smooth field: the smooth angle and the sharp edges give a better result. */
+  for (const Vec3 &n : file_normals) {
+    const float lf = length(n);
+    if (!finite_bits(lf) || lf < 1e-6f) return false;
+  }
+  const std::vector<Vec3> area = meshops::vertex_normals(m), angle = angle_weighted_normals(m);
+  size_t differ = 0;
+  const float cos2 = std::cos(2.0f * kDeg2Rad);
+  for (size_t i = 0; i < area.size(); i++) {
+    const Vec3 n = file_normals[i] / length(file_normals[i]);
+    if (dot(n, area[i]) < cos2 && dot(n, angle[i]) < cos2) differ++;
+  }
+  if (differ * 100 < area.size()) return false;  // (under 1 % of the vertices differ: the file just stored the smooth normals)
+  m.custom_normals = file_normals;
+  for (Vec3 &n : m.custom_normals) {
+    const float l = length(n);
+    n = finite_bits(l) && l > 1e-6f ? n / l : Vec3(0.0f);
+  }
+  m.touch();
+  return true;
+}
+
+namespace {
 
 std::string base64_decode(const std::string &s) {
   static int8_t t[256];
@@ -184,6 +255,7 @@ std::string uri_decode(const std::string &s) {
 /* ===================================================================== */
 
 bool import_gltf_file(const std::string &path, ImportResult &out) {
+  if (out.source.empty()) out.source = path;
   std::string data;
   if (!fs::read_file(path, data)) {
     out.error = "cannot read " + path;
@@ -264,6 +336,7 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     return r;
   };
   /* Images: files beside the model, or embedded ones extracted to the cache. */
+  int normals_kept = 0;  // meshes whose own normals differ from the recomputed ones (task 0149)
   std::vector<std::string> image_paths;
   {
     const std::string cache = fs::join(fs::join(fs::home_dir(), ".blendity"), fs::join("cache", "gltf_images"));
@@ -316,6 +389,13 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     m->metallic = clampf((float)pbr["metallicFactor"].number(1.0), 0, 1);
     m->roughness = clampf((float)pbr["roughnessFactor"].number(1.0), 0, 1);
     m->base_map = texture(pbr["baseColorTexture"], false);
+    /* glTF packs roughness in green and metallic in blue; Blendity reads each map's red: split into two (task 0134). */
+    const TextureRef mr = texture(pbr["metallicRoughnessTexture"], true);
+    if (!mr.empty()) {
+      const std::string rough = derive_channel(mr.path, 1, false, "rough", out), metal = derive_channel(mr.path, 2, false, "metal", out);
+      if (!rough.empty()) m->roughness_map = TextureRef{rough, true}, out.textures.push_back(rough);
+      if (!metal.empty()) m->metallic_map = TextureRef{metal, true}, out.textures.push_back(metal);
+    }
     m->normal_map = texture(jm["normalTexture"], true);
     m->emission_map = texture(jm["emissiveTexture"], false);
     if (jm["emissiveFactor"].size() >= 3) {
@@ -372,6 +452,12 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
         }
       const uint32_t base = (uint32_t)m->vert_count();
       for (size_t i = 0; i < nv; i++) m->add_vert(from_y_up({pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]}));
+      /* The file's normals (task 0149), alongside the vertices (a primitive without them leaves zeros); kept as custom
+       * normals after the weld when they differ from the recomputed ones. */
+      int ncomp = 0;
+      const std::vector<float> nrm = pr["attributes"]["NORMAL"].integer() >= 0 ? read_accessor(pr["attributes"]["NORMAL"].integer(), ncomp) : std::vector<float>();
+      m->custom_normals.resize(m->vert_count(), Vec3(0.0f));
+      for (size_t i = 0; i < nv && ncomp == 3 && i * 3 + 2 < nrm.size(); i++) m->custom_normals[base + i] = from_y_up({nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]});
       /* A skin's weights (task 0047): groups "J<k>" for the skin's k-th joint, renamed after the joints' nodes below. */
       if (pr["attributes"]["JOINTS_0"].integer() >= 0 && pr["attributes"]["WEIGHTS_0"].integer() >= 0) {
         int jc = 0, wc = 0;
@@ -393,6 +479,22 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
             }
       }
       for (VertexGroup &vg : m->vertex_groups) vg.weights.resize(m->vert_count(), 0.0f);
+      /* Morph targets (task 0135): the k-th target's POSITION offsets into shape key k, named by the mesh's
+       * extras.targetNames (Blender writes them), mirrored like the vertices. */
+      const Json &targets = pr["targets"];
+      for (size_t ti = 0; ti < targets.size(); ti++) {
+        if (m->shape_keys.size() <= ti) {
+          const Json &names = jm["extras"]["targetNames"];
+          m->shape_keys.push_back({ti < names.size() && !names[ti].str.empty() ? names[ti].str : "Key " + std::to_string(ti + 1), {}});
+        }
+        ShapeKey &k = m->shape_keys[ti];
+        k.delta.resize(m->vert_count(), Vec3(0.0f));
+        int dc = 0;
+        const std::vector<float> d = read_accessor(targets[ti]["POSITION"].integer(), dc);
+        if (dc == 3 && d.size() >= nv * 3)
+          for (size_t i = 0; i < nv; i++) k.delta[base + i] = from_y_up({d[i * 3], d[i * 3 + 1], d[i * 3 + 2]});
+      }
+      for (ShapeKey &k : m->shape_keys) k.delta.resize(m->vert_count(), Vec3(0.0f));
       int slot = (int)slots.size();
       const int mi = pr["material"].integer();
       MaterialPtr mp = mi >= 0 && mi < (int)mats.size() ? mats[(size_t)mi] : nullptr;
@@ -410,7 +512,12 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
         m->add_face(fv, 3, any_uv ? fuv : nullptr, slot);
       }
     }
-    weld_exact(*m);
+    weld_exact(*m);  // (as before the file's normals came along: the smooth angle makes the hard edges; copies that disagree leave a zero)
+    {
+      std::vector<Vec3> fn = std::move(m->custom_normals);
+      m->custom_normals.clear();
+      if (keep_file_normals(*m, fn)) normals_kept++;
+    }
     m->smooth = true;
     m->smooth_angle = 60.0f;  // like the FBX importer: keep the hard edges of hard-surface models
     m->sync_attributes();
@@ -459,6 +566,9 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     if (mi >= 0 && mi < (int)meshes.size()) {
       node.mesh = meshes[(size_t)mi];
       node.materials = mesh_mats[(size_t)mi];
+      /* The morph weights: the node's, else the mesh's defaults (task 0135). */
+      const Json &w = n["weights"].size() ? n["weights"] : doc["meshes"][(size_t)mi]["weights"];
+      for (size_t k = 0; k < node.mesh->shape_keys.size() && k < w.size(); k++) node.shape_weights.push_back({node.mesh->shape_keys[k].name, (float)w[k].number()});
     }
     node_index[(size_t)ni] = (int)out.nodes.size();
     out.nodes.push_back(std::move(node));
@@ -536,8 +646,13 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     out.error = "glTF: no meshes or nodes";
     return false;
   }
+  const bool vrm = vrm_present(doc);  // (task 0138: the humanoid's names before the skins take them for the groups)
+  if (vrm) vrm_name_bones(doc, node_index, out);
   skins_and_bones();
+  if (vrm) vrm_complete(doc, node_index, meshes, mats, image_paths, out);
+  gltf_import_clips(doc, node_index, read_accessor, out);  // (task 0139)
   out.summary = strprintf("%zu node(s), %zu vertices, %zu faces, %zu material(s)", out.nodes.size(), verts, faces, out.materials.size());
+  if (normals_kept) out.notes.push_back(strprintf("%d mesh(es) keep the file's own normals as custom normals (they differ from the recomputed ones)", normals_kept));
   return true;
 }
 
