@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 199): masks for the Editing tab's adjustments (task 0182, ADR 0058 amended)
+
+**Asked:** local adjustments: each adjustment limited by a mask - a gradient, a luminance or colour range, a painted
+mask - and masks combined.
+
+**Changed**
+- Each adjustment (but Crop / Straighten and Flip / Rotate) takes a mask: Add Mask > Linear Gradient, Radial
+  Gradient, Luminance Range, Color Range or Brush. Parts combine top to bottom by Add (either), Subtract or Intersect
+  (both), each invertible; a masked adjustment blends with what came before it by the mask's weight.
+- On the picture: the selected part's handles (a radial's centre and outline, a gradient's two ends) drag; a Brush
+  part paints with the mouse or a pen (pressure lightens the stroke; Erase or Alt removes), one undo step a stroke;
+  Show tints where the adjustment acts in red.
+- Masks are fractions of the picture, saved in the `.edit` file (a brush as run-length hex at 512 pixels on its
+  longest side). Console `develop mask <step> add|subtract|intersect <kind> [numbers] | paint <u> <v> <radius> |
+  invert | remove | clear`, `develop mask show on|off`.
+
+**Checked**
+- A radial mask keeps an exposure change inside its radius (a pixel outside within 1e-4 of the source); a luminance
+  range doubles a shadow and leaves a highlight; subtract and intersect; invert; a colour range picks red and not blue
+  or grey; a brush dab and its erase; the text form of every kind; a crop ignores a mask; the console's mask commands,
+  undo, the .edit file and Show (tests/test_editor.cpp).
+- Unit checks (round 199): Windows, in render-cache verify mode, 11,603, 0 failed (957 tests), 0 stale
+  pictures. Linux with libraries: 11,250, 0 failed. Sanitizer build: 11,126, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 198): the Editing tab - develop a render or an image, non-destructively (task 0181, ADR 0058)
 
 **Asked:** a new Editing tab with basic Lightroom / Photoshop adjustments on renders, images and textures,
@@ -28,7 +53,7 @@ extensible.
   identity at its defaults and survives its text form; crop, straighten, flips and quarter turns move the right
   pixels; a slider on the last step reruns one step; undo; save and reopen reproduce the export byte for byte; every
   preset; the window through the console, the split, export (tests/test_editor.cpp).
-- Measured (stress `editing`, 3840 x 2160): the 11-step develop stack 683.2 ms in full, a slider on its last step 30.7 ms (1 step rerun), on its first 706.8 ms; the slowest adjustment alone Noise Reduction 467.8 ms. Task 0181's targets at 3840 x 2160: the full stack 683.2 ms (at most 150: missed), a slider on the last step 30.7 ms (at most 40: met). The full stack is the Tone Curve (347 ms alone) and Noise Reduction (468 ms) at full resolution: the next round takes it up (a preview at the screen's size, as Lightroom's, and look-up tables).
+- Measured (stress `editing`, 3840 x 2160): the 11-step develop stack 683.2 ms in full, a slider on its last step 30.7 ms (1 step rerun), on its first 706.8 ms; the slowest adjustment alone Noise Reduction 467.8 ms. Task 0181's targets at 3840 x 2160: the full stack 683.2 ms (at most 150: missed), a slider on the last step 30.7 ms (at most 40: met). The full stack is the Tone Curve (347 ms alone) and Noise Reduction (468 ms) at full resolution: a following round takes it up (a preview at the screen's size, as Lightroom's, and look-up tables).
 - Unit checks (round 198): Windows, in render-cache verify mode, 11,569, 0 failed (955 tests), 0 stale
   pictures. Linux with libraries: 11,216, 0 failed. Sanitizer build: 11,092, 0 failed, no reports. `editor_fuzz` in
   verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `filters`, `editing`: 0 problems. (the sanitizer leg's autopose timing check failed under the parallel load and passed run again alone.)

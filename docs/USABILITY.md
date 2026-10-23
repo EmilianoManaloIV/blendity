@@ -275,6 +275,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Unwrapping without seams meant Smart UV Project's many small islands; few islands meant marking every seam by hand. | Part Unwrap cuts by parts: the fewest charts that keep each one's stretch under a bound, following material slots (task 0179, ADR 0057). |
 | The UV Editor showed every material's islands at once, so packing or moving one material's UVs disturbed the others'. | A Material picker (and Materials > Edit UVs) edits one material's faces, the others dimmed and untouched (task 0186). |
 | A render needed another program for its last touches (exposure, white balance, a curve, a crop). | The Editing tab develops it in place, non-destructively, with Lightroom's names; Save keeps the stack beside the image (task 0181, ADR 0058). |
+| An adjustment changed the whole picture: brightening a face brightened the sky too. | Masks: a gradient, a tone or colour range, or a brush limits each adjustment, combined by add, subtract and intersect (task 0182). |
 
 ## Still worth doing
 

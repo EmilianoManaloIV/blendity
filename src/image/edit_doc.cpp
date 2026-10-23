@@ -77,6 +77,7 @@ void Doc::open_pixels(Image img, const std::string &label) {
   edit_path_.clear();
   label_ = label;
   view_ = ViewTransform::Standard, view_exposure_ = 0.0f;  // (an image is shown as it is; a render sets its own after)
+  revision_++;
   stack_.clear();
   undo_.clear();
   redo_.clear();
@@ -84,6 +85,7 @@ void Doc::open_pixels(Image img, const std::string &label) {
 }
 
 void Doc::begin_change() {
+  revision_++;
   undo_.push_back(stack_);
   if (undo_.size() > kHistory) undo_.erase(undo_.begin());
   redo_.clear();
@@ -119,6 +121,7 @@ bool Doc::set(int index, const std::string &field, float value, bool record) {
   Adjustment probe = stack_[(size_t)index];
   if (!probe.set(field, value)) return false;
   if (record) begin_change();
+  revision_++;
   stack_[(size_t)index] = probe;
   return true;
 }
@@ -136,8 +139,33 @@ bool Doc::set_curve(int index, int channel, const std::vector<Vec2> &pts, bool r
   for (Vec2 &p : sorted) p = Vec2(std::max(0.0f, std::min(1.0f, p.x)), std::max(0.0f, std::min(1.0f, p.y)));
   std::sort(sorted.begin(), sorted.end(), [](Vec2 a, Vec2 b) { return a.x < b.x; });
   if (record) begin_change();
+  revision_++;
   stack_[(size_t)index].curve[channel] = sorted;
   return true;
+}
+
+bool Doc::set_mask(int index, const std::vector<MaskPart> &mask, bool record) {
+  if (index < 0 || index >= (int)stack_.size()) return false;
+  for (const MaskPart &m : mask)
+    for (float v : m.p)
+      if (!std::isfinite(v)) return false;  // (a number that can't be saved)
+  if (record) begin_change();
+  revision_++;
+  stack_[(size_t)index].mask = mask;
+  return true;
+}
+
+void Doc::step_input_size(int step, int &w, int &h) {
+  bool moved = false;
+  for (int i = 0; i < step && i < (int)stack_.size(); i++) moved = moved || (stack_[(size_t)i].enabled && stack_[(size_t)i].info() && stack_[(size_t)i].info()->geometry);
+  const Image &in = moved ? result_upto(step) : source_;
+  w = in.w, h = in.h;
+}
+
+bool Doc::geometry_after(int step) const {
+  for (int i = step + 1; i < (int)stack_.size(); i++)
+    if (stack_[(size_t)i].enabled && stack_[(size_t)i].info() && stack_[(size_t)i].info()->geometry) return true;
+  return false;
 }
 
 int Doc::find(const std::string &type) const {
@@ -164,6 +192,7 @@ bool Doc::set_path(const std::string &path, float value) {
 
 void Doc::set_stack(const std::vector<Adjustment> &s, bool record) {
   if (record) begin_change();
+  revision_++;
   stack_ = s;
 }
 
@@ -183,6 +212,7 @@ bool Doc::apply_preset(const std::string &name) {
 bool Doc::undo() {
   if (undo_.empty()) return false;
   redo_.push_back(stack_);
+  revision_++;
   stack_ = undo_.back();
   undo_.pop_back();
   return true;
@@ -191,6 +221,7 @@ bool Doc::undo() {
 bool Doc::redo() {
   if (redo_.empty()) return false;
   undo_.push_back(stack_);
+  revision_++;
   stack_ = redo_.back();
   redo_.pop_back();
   return true;
@@ -208,7 +239,7 @@ const Image &Doc::result_upto(int steps) {
    * then back to the nearest result still kept. */
   int first = 0;
   while (first < steps && first < (int)cache_key_.size() && cache_key_[(size_t)first] == to_text(stack_[(size_t)first])) first++;
-  invalidate_from(first);
+  if (first < steps) invalidate_from(first);  // (the steps after `steps` are the next full result's to check)
   int start = first;
   while (start > 0 && cache_[(size_t)start - 1].empty()) start--;
   last_evaluated_ = steps - start;
@@ -280,6 +311,7 @@ std::string Doc::stack_text() const {
 }
 
 void Doc::stack_from_text(const std::string &text) {
+  revision_++;
   stack_.clear();
   std::istringstream in(text);
   std::string line;

@@ -7,6 +7,7 @@
 #pragma once
 
 #include "../core/math.h"
+#include "masks.h"
 
 #include <string>
 #include <vector>
@@ -48,13 +49,14 @@ struct Adjustment {
   std::vector<float> v;
   std::vector<Vec2> curve[4];
   bool enabled = true;
+  std::vector<MaskPart> mask;  // where it acts (task 0182): empty, everywhere; the geometry steps ignore it
   const AdjustmentInfo *info() const { return find_adjustment(type); }
   float get(const std::string &field) const;
   bool set(const std::string &field, float value);  // clamped to the field's range; false for an unknown field
 };
 Adjustment make_adjustment(const std::string &type);  // its defaults (type "" when unknown)
 
-/* `in` through `a` into `out` (may be another size: Crop, Rotate). Every pass runs on the job threads. */
+/* `in` through `a` into `out` (may be another size: Crop, Rotate), blended with `in` by its mask's weight. */
 void apply(const Adjustment &a, const Image &in, Image &out);
 
 /* One line of an .edit file ("Exposure: Exposure=1 | ..."), and back (false when the line isn't one). */

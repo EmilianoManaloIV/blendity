@@ -941,6 +941,11 @@ Every step works on light, not on 8-bit pixels: +1 of Exposure doubles the light
 ! cmd:window Editing; develop open render | Open the last render in the Editing tab (render with F12 first)
 ! cmd:develop preset Film | Apply the Film preset
 ! cmd:develop split on | Compare before and after
+# Masks: one part of the picture
+Under each adjustment, Add Mask limits it to part of the picture, as Lightroom's masking panel does: a Linear Gradient (full at its first point, none at its second - a sky darkened toward the top), a Radial Gradient (a face brightened, its edge feathered), a Luminance Range (only the shadows, or only the highlights), a Color Range (only the blues), or a Brush you paint with the mouse or a pen. Parts combine in order: Add takes either, Subtract takes the part away, Intersect keeps only where both are; each can be inverted. Select a part to drag its handles on the picture; Show tints where the adjustment acts in red. Blender's compositor does the same with a mask node into a Mix node's factor.
+? A radial mask covers the face, and the adjustment is Exposure +1. What happens to the sky outside the circle? | Nothing: outside the mask the weight is 0, so those pixels come out exactly as they went in.
+? You want to brighten the shadows except in the sky. Which parts? | A Luminance Range on the shadows, then a Linear Gradient over the sky set to Subtract.
+! cmd:develop mask 0 add radial 0.5 0.45 0.25 0.3 0.5; develop mask show on | Mask the first adjustment to a circle (open a picture and add one first)
 )"},
     {"Baked and Realtime Lighting", "Lightmaps, light modes, probe volumes and voxel GI", R"(
 Light that bounces between surfaces is either baked ahead of time with the path tracer, or computed live by Realtime GI. Baked light costs about 1 ms a frame to show; live GI costs time whenever a view re-renders. The Lighting window (Window > Rendering > Lighting) holds both, as in Unity.

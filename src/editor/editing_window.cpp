@@ -54,6 +54,7 @@ bool Editor::edit_open_file(const std::string &path) {
     return false;
   }
   edit_opened_++;
+  edit_mask_select(-1, -1);  // (the masks selected belonged to the last picture)
   edit_zoom_ = 0, edit_pan_ = Vec2(0, 0);
   Log::info("Editing: %s (%d x %d)%s", fs::filename(path).c_str(), edit_doc_.source().w, edit_doc_.source().h,
             is_edit ? strprintf(", %zu adjustments", edit_doc_.stack().size()).c_str() : "");
@@ -78,6 +79,7 @@ bool Editor::edit_open_render() {
   edit_doc_.open_pixels(std::move(img), "Render");
   if (linear) edit_doc_.set_view(view_transform_from_setting(scene_->render.view_transform), scene_->render.exposure);
   edit_opened_++;
+  edit_mask_select(-1, -1);  // (the masks selected belonged to the last picture)
   edit_zoom_ = 0, edit_pan_ = Vec2(0, 0);
   Log::info("Editing: the render (%d x %d, %s)", w, h, linear ? "its light, through the render's view transform" : "its 8-bit picture");
   return true;
@@ -190,6 +192,10 @@ void Editor::edit_command(const std::vector<std::string> &t, const std::string &
     edit_doc_.set_enabled(std::atoi(t[2].c_str()), to_lower(t[3]) != "off");
     return;
   }
+  if (verb == "mask") {  // (task 0182)
+    edit_mask_command(t);
+    return;
+  }
   if (verb == "curve" && t.size() > 2) {
     edit_curve_command(t);
     return;
@@ -241,10 +247,10 @@ void Editor::edit_curve_command(const std::vector<std::string> &t) {
 /* ---- the window ---- */
 
 void Editor::edit_update_display() {
-  const edit::Image &res = edit_doc_.result();
   const std::string view = strprintf("%d|%d|%g", edit_opened_, (int)edit_doc_.view(), edit_doc_.view_exposure());
-  const std::string key = view + "|" + edit_doc_.stack_text();
+  const std::string key = view + strprintf("|%llu", (unsigned long long)edit_doc_.revision());
   if (key == edit_shown_key_) return;
+  const edit::Image &res = edit_doc_.result();
   edit::to_display(res, edit_after_px_, edit_doc_.view(), edit_doc_.view_exposure());
   edit_after_w_ = res.w, edit_after_h_ = res.h;
   if (view != edit_before_key_) {  // (the source's pixels: only when another image opens or the view changes)
@@ -289,6 +295,8 @@ void Editor::draw_editing_canvas(const Recti &r) {
     if (!u.in.down[0]) edit_split_drag_ = false;
     if (edit_split_drag_) edit_split_ = clampf((u.in.mx - dst.x) / (float)dst.w, 0.0f, 1.0f), u.redraw = true;
   }
+  draw_edit_mask_overlay(dst, r);
+  edit_mask_input(dst, r);
   u.canvas.rect_outline({dst.x - 1, dst.y - 1, dst.w + 2, dst.h + 2}, Color::hex(0x101010));
   u.label({r.x + u.px(8), r.bottom() - u.row_h() - u.px(4), r.w - u.px(16), u.row_h()},
           strprintf("%s  |  %d x %d  |  %.0f%%  |  %.1f ms  |  wheel zoom, middle-drag pan, double-click fit", edit_doc_.label().c_str(), iw, ih,
@@ -432,6 +440,14 @@ void Editor::draw_edit_step(ui::Layout &lay, int step) {
     else edit_doc_.move(step, step + (up ? -1 : 1));
     return;
   }
+  draw_edit_step_fields(lay, step);
+  draw_edit_mask(lay, step);
+}
+
+void Editor::draw_edit_step_fields(ui::Layout &lay, int step) {
+  auto &u = ui_;
+  const edit::Adjustment &a = edit_doc_.stack()[(size_t)step];
+  const edit::AdjustmentInfo *info = a.info();
   if (a.type == "Tone Curve") {
     draw_edit_curve(lay, step);
     return;
@@ -505,9 +521,9 @@ void Editor::draw_editing_window(const Recti &r) {
   edit_window_rect_ = r;
   const int pw = std::min(u.px(330), r.w * 2 / 5);
   /* The panel first, so the picture drawn after it shows what the panel just changed. */
-  const std::string before = edit_doc_.stack_text();
+  const uint64_t before = edit_doc_.revision();
   draw_edit_panel({r.right() - pw, r.y, pw, r.h});
-  if (edit_doc_.stack_text() != before) u.redraw = true;
+  if (edit_doc_.revision() != before) u.redraw = true;
   draw_editing_canvas({r.x, r.y, r.w - pw, r.h});
   if (!u.any_popup_open() && edit_drag_id_ != 0 && !u.in.down[0]) edit_drag_id_ = 0;
 }

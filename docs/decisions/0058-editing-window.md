@@ -44,6 +44,16 @@ changed, a stack of adjustments is kept beside it, and every step can be turned 
   registry and the document: an adjustment gains a mask; a texture is one more source.
 - Timings (a 4K stack in full, a slider) are stress rows (`editing`), not unit checks (ADR 0056).
 
+## Amendment (task 0182, round 199): masks
+Each tonal or colour adjustment carries a mask (`src/image/masks.{h,cpp}`): parts of five kinds - a linear gradient,
+a radial gradient, a luminance range and a colour range on the display axis, and a painted coverage plane at 512
+pixels on its longest side - combined in order by add (the larger weight), subtract (w * (1 - m)) and intersect
+(w * m), each invertible; a first subtract or intersect starts from the whole picture. A masked step's result is its
+input blended toward the adjusted picture by the weight, so a weight of 0 leaves a pixel exactly as it came. Positions
+are fractions of the picture the step acts on, so a mask follows a resized source; the geometry adjustments ignore
+masks. Range masks read the step's own input (what the step sees), not the source. The painted plane saves in the
+`.edit` line as run-length hex.
+
 ## Alternatives considered
 - Grading in 8 bits after the view transform (as the camera filters do): rejected: exposure and white balance must
   act on light, and highlights clipped by the view can't be recovered.

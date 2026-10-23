@@ -43,6 +43,7 @@ class Doc {
   bool move(int from, int to);
   bool set(int index, const std::string &field, float value, bool record = true);
   bool set_enabled(int index, bool on);
+  bool set_mask(int index, const std::vector<MaskPart> &mask, bool record = true);  // (task 0182)
   bool set_curve(int index, int channel, const std::vector<Vec2> &pts, bool record = true);
   /* "Exposure.Exposure" or "Exposure" (its first field): the last step of that type, added when there is none. */
   bool set_path(const std::string &path, float value);
@@ -60,7 +61,12 @@ class Doc {
    * (the last two and the input to the step changed last: a slider moves without rerunning the steps before it), so
    * a 4K stack holds three pictures, not one a step. */
   const Image &result_upto(int steps);
-  int evaluated_steps() const { return last_evaluated_; }  // steps rerun by the last result() (for the tests)
+  int evaluated_steps() const { return last_evaluated_; }
+  /* Counts changes to the stack (and openings): a cheap key for what shows it. */
+  uint64_t revision() const { return revision_; }
+  /* The size of the picture step `step` acts on (the source's, unless a crop or turn comes before it). */
+  void step_input_size(int step, int &w, int &h);
+  bool geometry_after(int step) const;  // an enabled crop or turn after `step` (its picture isn't the one shown)  // steps rerun by the last result() (for the tests)
   double last_eval_ms() const { return last_ms_; }
 
   /* PNG / JPEG (8-bit sRGB through the view), EXR / HDR (linear float, the view's exposure applied), by extension. */
@@ -86,6 +92,7 @@ class Doc {
   ViewTransform view_ = ViewTransform::Standard;
   float view_exposure_ = 0.0f;
   int last_evaluated_ = 0;
+  uint64_t revision_ = 1;
   double last_ms_ = 0;
 };
 

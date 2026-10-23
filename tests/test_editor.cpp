@@ -2184,6 +2184,130 @@ static void tests_round198() {
   });
 }
 
+/* Task 0182: masks on the Editing window's adjustments. */
+static void tests_round199() {
+  test("editing masks: a radial mask keeps an exposure change inside its radius; a luminance range acts on the shadows only; subtract, intersect, invert and a brush; the text form round-trips", [] {
+    const edit::Image grey = flat_image(64, 64, Vec3(0.18f));
+    edit::Adjustment ex = edit::make_adjustment("Exposure");
+    ex.set("Exposure", 1);
+    edit::MaskPart radial = edit::make_mask_part(edit::MaskKind::Radial, 64, 64);
+    radial.p[0] = 0.5f, radial.p[1] = 0.5f, radial.p[2] = radial.p[3] = 0.25f, radial.p[4] = 0.2f;
+    ex.mask = {radial};
+    edit::Image out;
+    edit::apply(ex, grey, out);
+    CHECK(std::fabs(px3(out, 32, 32).x - 0.36f) < 1e-4f);   // the centre: the whole change
+    CHECK(std::fabs(px3(out, 2, 2).x - 0.18f) < 1e-4f);     // a corner, outside: untouched
+    CHECK(std::fabs(px3(out, 32, 50).x - 0.18f) < 1e-4f);   // just outside the radius (0.25 of 64 = 16 px)
+    ex.mask[0].invert = true;
+    edit::apply(ex, grey, out);
+    CHECK(std::fabs(px3(out, 32, 32).x - 0.18f) < 1e-4f && std::fabs(px3(out, 2, 2).x - 0.36f) < 1e-4f);
+    edit::Image tones = flat_image(2, 1, Vec3(0.02f));  // a shadow and a highlight
+    tones.at(1, 0)[0] = tones.at(1, 0)[1] = tones.at(1, 0)[2] = 0.8f;
+    edit::MaskPart shadows = edit::make_mask_part(edit::MaskKind::Luminance);
+    shadows.p[0] = 0.0f, shadows.p[1] = 0.3f, shadows.p[2] = 0.05f;
+    ex.mask = {shadows};
+    edit::apply(ex, tones, out);
+    CHECK(std::fabs(px3(out, 0, 0).x - 0.04f) < 1e-4f && std::fabs(px3(out, 1, 0).x - 0.8f) < 1e-4f);
+    edit::MaskPart left = edit::make_mask_part(edit::MaskKind::Linear);  // full at x 0, none at x 1
+    left.p[0] = 0.0f, left.p[1] = 0.5f, left.p[2] = 1.0f, left.p[3] = 0.5f;
+    edit::MaskPart all = left;
+    all.p[2] = 100.0f;  // (nearly flat: about 1 everywhere)
+    std::vector<float> w;
+    std::vector<edit::MaskPart> parts = {all, left};
+    parts[1].op = edit::MaskOp::Subtract;
+    edit::mask_weights(parts, grey, w);
+    CHECK(w[(size_t)32 * 64 + 1] < 0.05f && w[(size_t)32 * 64 + 62] > 0.9f);  // (everything minus the left)
+    parts[1].op = edit::MaskOp::Intersect;
+    edit::mask_weights(parts, grey, w);
+    CHECK(w[(size_t)32 * 64 + 1] > 0.9f && w[(size_t)32 * 64 + 62] < 0.05f);
+    edit::MaskPart red = edit::make_mask_part(edit::MaskKind::Color);
+    const float pure_red[3] = {1, 0, 0}, pure_blue[3] = {0, 0, 1}, grey3[3] = {0.5f, 0.5f, 0.5f};
+    CHECK(edit::mask_part_weight(red, 0.5f, 0.5f, pure_red) > 0.99f && edit::mask_part_weight(red, 0.5f, 0.5f, pure_blue) == 0.0f &&
+          edit::mask_part_weight(red, 0.5f, 0.5f, grey3) == 0.0f);
+    const float rose[3] = {1.0f, 0.0f, 0.03f};  // (hue about 349: across 0 from the red band's 0, inside it)
+    CHECK(edit::mask_part_weight(red, 0.5f, 0.5f, rose) > 0.99f);
+    edit::MaskPart soft = radial;  // (the feather: full inside 1 - feather of the radius, half way through it about half)
+    soft.p[4] = 0.5f;
+    const float mid_feather = edit::mask_part_weight(soft, 0.5f + 0.25f * 0.75f, 0.5f, grey3);
+    CHECK(edit::mask_part_weight(soft, 0.5f + 0.25f * 0.4f, 0.5f, grey3) == 1.0f && mid_feather > 0.4f && mid_feather < 0.6f);
+    edit::MaskPart light = edit::make_mask_part(edit::MaskKind::Painted, 64, 64);  // (a soft pen still paints to full)
+    for (int k = 0; k < 200; k++) edit::paint_dab(light, 0.5f, 0.5f, 0.05f, 0.05f, 0.5f, false);
+    CHECK(edit::mask_part_weight(light, 0.5f, 0.5f, grey3) == 1.0f);
+    for (int k = 0; k < 200; k++) edit::paint_dab(light, 0.5f, 0.5f, 0.05f, 0.05f, 0.5f, true);
+    CHECK(edit::mask_part_weight(light, 0.5f, 0.5f, grey3) == 0.0f);
+    edit::MaskPart brush = edit::make_mask_part(edit::MaskKind::Painted, 64, 32);
+    CHECK(brush.pw == edit::kPaintSize && brush.ph == edit::kPaintSize / 2);
+    edit::paint_dab(brush, 0.25f, 0.5f, 0.05f, 1.0f, 0.5f, false);
+    CHECK(edit::mask_part_weight(brush, 0.25f, 0.5f, grey3) > 0.99f && edit::mask_part_weight(brush, 0.75f, 0.5f, grey3) == 0.0f);
+    edit::paint_dab(brush, 0.25f, 0.5f, 0.05f, 1.0f, 0.5f, true);
+    CHECK(edit::mask_part_weight(brush, 0.25f, 0.5f, grey3) < 0.01f);
+    edit::paint_dab(brush, 0.6f, 0.3f, 0.1f, 0.5f, 0.0f, false);
+    std::vector<edit::MaskPart> all_kinds = {radial, shadows, left, red, brush}, back;
+    all_kinds[1].op = edit::MaskOp::Subtract, all_kinds[3].invert = true;
+    CHECK(edit::mask_from_text(edit::mask_to_text(all_kinds), back) && back.size() == 5);
+    CHECK(back.size() == 5 && back[1].op == edit::MaskOp::Subtract && back[3].invert && back[4].paint == brush.paint && back[0].p[2] == radial.p[2]);
+    edit::Adjustment masked = edit::make_adjustment("Clarity"), again;
+    masked.mask = all_kinds;
+    CHECK(edit::from_text(edit::to_text(masked), again) && again.mask.size() == 5);
+    CHECK(!edit::mask_from_text("cloud,add,0,1,2,3,4,5", back) && !edit::mask_from_text("paint,add,0,0,0,0,0,0,4,4,zz", back));
+    edit::Adjustment crop = edit::make_adjustment("Crop / Straighten");  // (a crop ignores a mask: it acts on the whole picture)
+    crop.set("Width", 10);
+    crop.mask = {radial};
+    edit::apply(crop, grey, out);
+    CHECK(out.w == 10);
+  });
+
+  test("editing masks in the window: develop mask adds, paints, inverts and removes parts with undo; the .edit file keeps them; Show draws the mask in red", [] {
+    const std::string dir = fs::join(test_dir(), "editing_masks");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> src(48 * 32, 0xFF808080u);
+    const std::string png = fs::join(dir, "grey.png");
+    CHECK(write_png(png, src.data(), 48, 32, 48));
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("window Editing");
+    ed.command("develop open " + png);
+    ed.command("develop add Exposure");
+    ed.command("develop set Exposure.Exposure 1");
+    ed.command("develop mask 0 add radial 0.5 0.5 0.2 0.3 0.1");
+    edit::Doc &doc = ed.edit_doc_for_test();
+    CHECK(doc.stack().size() == 1 && doc.stack()[0].mask.size() == 1 && doc.stack()[0].mask[0].p[3] == 0.3f);
+    const edit::Image &r = doc.result();
+    CHECK(px3(r, 24, 16).x > px3(r, 0, 0).x * 1.9f && std::fabs(px3(r, 0, 0).x - srgb_to_linear(128 / 255.0f)) < 1e-4f);
+    ed.command("develop mask 0 paint 0.05 0.1 0.04");
+    CHECK(doc.stack()[0].mask.size() == 2 && doc.stack()[0].mask[1].kind == edit::MaskKind::Painted);
+    CHECK(px3(doc.result(), 2, 3).x > px3(doc.result(), 47, 31).x * 1.5f);
+    ed.command("develop mask 0 invert 0 on");
+    CHECK(doc.stack()[0].mask[0].invert);
+    ed.command("develop undo");
+    CHECK(!doc.stack()[0].mask[0].invert);
+    ed.command("develop mask 0 subtract luminance 0.9 1 0.05");
+    CHECK(doc.stack()[0].mask.size() == 3 && doc.stack()[0].mask[2].op == edit::MaskOp::Subtract);
+    ed.command("develop mask 0 remove 2");
+    CHECK(doc.stack()[0].mask.size() == 2);
+    const std::string e = fs::join(dir, "masked.edit");
+    ed.command("develop save " + e);
+    edit::Doc again;
+    std::string err;
+    CHECK(again.load(e, err) && again.stack().size() == 1 && again.stack()[0].mask.size() == 2 && again.stack()[0].mask[1].paint == doc.stack()[0].mask[1].paint);
+    ed.command("develop mask show on");
+    ed.command("develop mask 0 add radial");  // (the part added is selected: Show draws the step's mask over the picture)
+    ed.step_frame_headless();
+    const std::vector<float> &shown = ed.edit_mask_weights_for_test();
+    CHECK(shown.size() == 48 * 32 && shown[(size_t)16 * 48 + 24] > 0.99f && shown[0] < 0.01f);
+    ed.command("develop mask 0 invert -1 on");  // (no such part: refused, nothing read out of range)
+    ed.command("develop mask 0 remove 99");
+    ed.command("develop mask -3 clear");
+    ed.command("develop mask 0 add radial nan 0.5");
+    CHECK(doc.stack()[0].mask.size() == 3);
+    ed.command("develop mask 0 clear");
+    CHECK(doc.stack()[0].mask.empty());
+    ed.command("develop mask 5 clear");  // (no such step: refused)
+    ed.command("develop mask 0 add cloud");
+    CHECK(doc.stack()[0].mask.empty());
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2205,5 +2329,6 @@ void run_editor_tests() {
   tests_round186();
   tests_round187();
   tests_round198();
+  tests_round199();
   coverage_tests();
 }

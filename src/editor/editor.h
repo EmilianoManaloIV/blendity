@@ -508,6 +508,7 @@ class Editor {
   edit::Doc &edit_doc_for_test() { return edit_doc_; }
   const std::vector<uint32_t> &edit_display_for_test() const { return edit_after_px_; }
   const std::vector<uint32_t> &edit_before_for_test() const { return edit_before_px_; }
+  const std::vector<float> &edit_mask_weights_for_test() const { return edit_mask_weights_; }  // (task 0182: what Show drew)
   float edit_split_for_test() const { return edit_split_; }
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
@@ -1343,6 +1344,30 @@ class Editor {
   void edit_curve_input(const Recti &box, int step, int ch);
   void edit_curve_drag_to(const Recti &box, int step, int ch);
   bool edit_window_has_mouse();
+  void draw_edit_step_fields(ui::Layout &lay, int step);
+  /* Masks (task 0182: editing_masks.cpp) */
+  void edit_mask_command(const std::vector<std::string> &t);
+  bool edit_mask_edit_parts(const std::vector<std::string> &t, int step, std::vector<edit::MaskPart> &parts);
+  void edit_mask_select(int step, int part);
+  void edit_mask_part_removed(int step, int j);
+  void edit_mask_paint(int step, int part, float u, float v, float radius, float flow, bool erase, bool record);
+  void draw_edit_mask(ui::Layout &lay, int step);
+  void draw_edit_mask_part(ui::Layout &lay, int step, int part);
+  void draw_edit_mask_params(ui::Layout &lay, int step, int part, std::vector<edit::MaskPart> &parts);
+  void draw_edit_brush_row(ui::Layout &lay, int step, int part, std::vector<edit::MaskPart> &parts);
+  bool edit_mask_on_picture() const;
+  void draw_edit_mask_overlay(const Recti &dst, const Recti &clip);
+  void edit_mask_input(const Recti &dst, const Recti &clip);
+  std::vector<Vec2> draw_mask_handles(const Recti &dst, const edit::MaskPart &m);
+  void edit_mask_brush(const Recti &dst, Vec2 mouse, bool inside);
+  float edit_brush_pressure() const;
+  bool edit_mask_show_ = false, edit_brush_erase_ = false, edit_brush_stroke_ = false, edit_handle_moved_ = false;
+  int edit_mask_step_ = -1, edit_mask_part_ = -1, edit_handle_drag_ = -1;
+  Vec2 edit_brush_last_{0, 0};
+  float edit_brush_size_ = 0.05f, edit_brush_hardness_ = 0.5f;
+  std::string edit_mask_key_;
+  std::vector<float> edit_mask_weights_;
+  int edit_mask_w_ = 0, edit_mask_h_ = 0;
   std::string edit_default_save_path() const;
   edit::Doc edit_doc_;
   int edit_opened_ = 0;  // (counts documents opened: the display's key)

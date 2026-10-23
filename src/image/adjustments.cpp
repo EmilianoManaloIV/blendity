@@ -485,12 +485,10 @@ bool Adjustment::set(const std::string &field, float value) {
   return false;
 }
 
-void apply(const Adjustment &a, const Image &in, Image &out) {
+namespace {
+
+void apply_unmasked(const Adjustment &a, const Image &in, Image &out) {
   const std::string &t = a.type;
-  if (!a.enabled || in.empty() || !a.info()) {
-    out = in;
-    return;
-  }
   if (t == "Exposure") exposure(a, in, out);
   else if (t == "Contrast") contrast(a, in, out);
   else if (t == "Highlights") tone_range(a, in, out, 0);
@@ -509,6 +507,32 @@ void apply(const Adjustment &a, const Image &in, Image &out) {
   else if (t == "Crop / Straighten") crop(a, in, out);
   else if (t == "Flip / Rotate") flip_rotate(a, in, out);
   else out = in;
+}
+
+/* out = in + (out - in) * the mask's weight, pixel by pixel (alpha kept as the adjustment left it). */
+void blend_by_mask(const std::vector<MaskPart> &mask, const Image &in, Image &out) {
+  std::vector<float> w;
+  mask_weights(mask, in, w);
+  JobSystem::global().parallel_for((int64_t)w.size(), 4096, [&](int64_t i0, int64_t i1) {
+    for (int64_t i = i0; i < i1; i++)
+      for (int k = 0; k < 3; k++) {
+        float &o = out.px[(size_t)i * 4 + k];
+        const float s = in.px[(size_t)i * 4 + k];
+        o = s + (o - s) * w[(size_t)i];
+      }
+  });
+}
+
+}  // namespace
+
+void apply(const Adjustment &a, const Image &in, Image &out) {
+  if (!a.enabled || in.empty() || !a.info()) {
+    out = in;
+    return;
+  }
+  apply_unmasked(a, in, out);
+  if (a.mask.empty() || a.info()->geometry || out.w != in.w || out.h != in.h) return;
+  blend_by_mask(a.mask, in, out);
 }
 
 float curve_eval(const std::vector<Vec2> &pts, float x) {
@@ -548,6 +572,7 @@ std::string to_text(const Adjustment &a) {
       s += strprintf(" | curve%d=", c);
       for (size_t p = 0; p < a.curve[c].size(); p++) s += strprintf("%s%.9g,%.9g", p ? " " : "", a.curve[c][p].x, a.curve[c][p].y);
     }
+  if (!a.mask.empty()) s += " | mask=" + mask_to_text(a.mask);
   return s;
 }
 
@@ -573,6 +598,10 @@ bool from_text(const std::string &line, Adjustment &a) {
     const size_t eq = parts[i].find('=');
     if (eq == std::string::npos) continue;
     const std::string key = parts[i].substr(0, eq), val = parts[i].substr(eq + 1);
+    if (key == "mask") {
+      if (!mask_from_text(val, a.mask)) a.mask.clear();  // (a broken mask: the adjustment everywhere)
+      continue;
+    }
     if (key.size() == 6 && key.compare(0, 5, "curve") == 0 && key[5] >= '0' && key[5] <= '3') {
       std::vector<Vec2> pts;
       float x, y;
