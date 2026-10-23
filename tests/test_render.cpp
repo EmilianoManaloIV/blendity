@@ -4701,6 +4701,7 @@ static void round34_tests() {
   r34_redraw_case(
       "render cache: dragging the Move gizmo arrow redraws the Scene view and the cube's shadow",
       [](Editor &ed) {
+        ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
         ed.command("select Cube");
         ed.command("camera 0 20 6 0 0.5 0");  // the X arrow points straight right on screen
         ed.command("tool move");
@@ -4734,7 +4735,9 @@ static void round34_tests() {
 
   r34_redraw_case(
       "render cache: rotating the sun redraws the Scene view and makes a new shadow map",
-      [](Editor &) {},
+      [](Editor &ed) {
+        ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
+      },
       [](Editor &ed) {
         GameObject *sun = ed.scene().find_by_name("Directional Light");
         CHECK(sun != nullptr);
@@ -4894,6 +4897,7 @@ static void round34_tests() {
   /* ---------------------------------------------------------------- 3 */
   test("render cache: orbiting the Scene view renders the shadow map at most once", [] {
     Editor ed;
+    ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
     r34_open(ed, false);
     const R34Count t0 = r34_totals(ed);
     for (int i = 0; i < 8; i++) {
@@ -5415,6 +5419,7 @@ static void round45_tests() {
   });
   test("hash memo: Statistics shows the rasterizer's binning time", [] {
     Editor ed;
+    ed.viewport_device_for_test(1);  // (the CPU rasterizer's binning is shown: whatever device the run gives the views)
     r34_open(ed);
     r34_steps(ed, 2);
     const RasterStats s = ed.scene_stats_for_test();
@@ -5494,6 +5499,7 @@ static void round46_tests() {
   });
   test("render frame: the sun's shadow map is still rendered once per change, not per frame (the casters are copied only then)", [] {
     Editor ed;
+    ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
     r34_open(ed);
     r34_steps(ed, 4);
     const R34Count t0 = r34_totals(ed);

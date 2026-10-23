@@ -4,6 +4,10 @@ so docs/PERFORMANCE.md's Pass 13 table has a "Blender 5.2" column measured on th
 
     "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" -b --python tools/bench_blender.py -- --out build/bench/blender.json [--quick] [--gpu 4070]
 
+Task 0199: Blender's own viewport, with its window (not -b), at the size Blendity's windowed check opens:
+
+    "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" --window-geometry 0 0 2560 1369 --python tools/bench_blender.py -- --viewport --out build/bench/blender_viewport.json
+
 Each row says what Blender does beside what Blendity's row does (the method per row is in docs/tasks/0178). Times
 are the mean of three runs of perf_counter around the call (Blendity's editor rows are means of three frames too);
 the Cycles rows fit a line through three sample counts so a render's fixed cost drops out. Blendity is left-handed
@@ -399,12 +403,81 @@ def bench_export():
     try: os.remove(path)
     except OSError: pass
 
-for name, fn in (("edit mode", bench_edit_mode), ("uv", bench_uv), ("export", bench_export), ("cycles", bench_cycles), ("bake", bench_bake)):
-    print("[bench_blender]", name)
+
+# ------------------------------------------------------------------ Blender's own viewport (task 0199)
+def clear_scene():
+    """The objects, meshes and materials let go - with Blender's UI up, read_factory_settings would reload the window."""
+    for ob in list(bpy.data.objects): bpy.data.objects.remove(ob, do_unlink=True)
+    for me in list(bpy.data.meshes): bpy.data.meshes.remove(me)
+    for ma in list(bpy.data.materials): bpy.data.materials.remove(ma)
+
+def view3d_shading(kind, through_camera):
+    for area in bpy.context.window_manager.windows[0].screen.areas:
+        if area.type != "VIEW_3D": continue
+        sp = area.spaces.active
+        sp.shading.type = kind
+        sp.overlay.show_overlays = True
+        if through_camera and bpy.context.scene.camera: sp.region_3d.view_perspective = "CAMERA"
+
+def redraw_ms(iterations):
+    """The whole window drawn and swapped `iterations` times (wm.redraw_timer DRAW_WIN_SWAP), a frame's mean in ms."""
+    window = bpy.context.window_manager.windows[0]
+    with bpy.context.temp_override(window=window, screen=window.screen):
+        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=10)  # (warm: shaders, batches)
+        for _ in range(600):  # (EEVEE compiles its materials in the background: until they are, it draws placeholders)
+            if not bpy.app.is_job_running("SHADER_COMPILATION"): break
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=5)
+        t0 = time.perf_counter()
+        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=iterations)
+        return (time.perf_counter() - t0) * 1000.0 / iterations
+
+def bench_viewport():
+    n = 30 if QUICK else 200
+    window = bpy.context.window_manager.windows[0]
+    size = "%dx%d" % (window.width, window.height)
+    global reset
+    reset = clear_scene  # (the scene builders start from an empty scene; the window stays)
+    clear_scene()
+    bpy.ops.mesh.primitive_cube_add()  # (the startup's cube, as Blendity's starter scene has one)
+    view3d_shading("SOLID", False)
+    row("Viewport: a whole window drawn, a cube (Solid)", redraw_ms(n), "ms",
+        "wm.redraw_timer DRAW_WIN_SWAP, %d iterations after 10 warm, the window %s; Blendity's row: Blendity --windowed-check, the canvas idle and the Scene view drawn every frame by the card (the starter scene)" % (n, size))
+    gpu_stress_scene()
+    view3d_shading("SOLID", True)
+    row("Viewport: 400 spheres through the camera (Solid)", redraw_ms(n), "ms",
+        "wm.redraw_timer DRAW_WIN_SWAP, %d iterations, the window %s, the stress gpu scene seen through its camera, Solid shading; Blendity's row: --windowed-check --command \"stress 400 Sphere\" --command \"shading solid\"" % (n, size))
+    view3d_shading("MATERIAL", True)
+    row("Viewport: 400 spheres through the camera (Material Preview)", redraw_ms(n), "ms",
+        "wm.redraw_timer DRAW_WIN_SWAP, %d iterations, the window %s, Material Preview (EEVEE); Blendity's row: the same with Shaded shading" % (n, size))
+
+def run_viewport():
+    print("[bench_blender] viewport")
     try:
-        fn()
-    except Exception as e:
-        row("%s (failed)" % name, -1, "", "failed: %s" % e)
-with open(OUT, "w", encoding="utf-8") as f:
-    json.dump({"blender": bpy.app.version_string, "quick": QUICK, "gpu": GPU, "rows": rows}, f, indent=1)
-print("[bench_blender] wrote", OUT)
+        try:
+            bench_viewport()
+        except Exception as e:
+            row("viewport (failed)", -1, "", "failed: %s" % e)
+        os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
+        with open(OUT, "w", encoding="utf-8") as f:
+            json.dump({"blender": bpy.app.version_string, "quick": QUICK, "gpu": GPU, "rows": rows}, f, indent=1)
+        print("[bench_blender] wrote", OUT)
+    finally:
+        bpy.ops.wm.quit_blender()  # (a windowed Blender left running would hold the bench)
+    return None
+
+if arg("--viewport", False) is not False:
+    bpy.app.timers.register(run_viewport, first_interval=3.0)  # (once the window is up)
+
+def run_headless():
+    for name, fn in (("edit mode", bench_edit_mode), ("uv", bench_uv), ("export", bench_export), ("cycles", bench_cycles), ("bake", bench_bake)):
+        print("[bench_blender]", name)
+        try:
+            fn()
+        except Exception as e:
+            row("%s (failed)" % name, -1, "", "failed: %s" % e)
+    with open(OUT, "w", encoding="utf-8") as f:
+        json.dump({"blender": bpy.app.version_string, "quick": QUICK, "gpu": GPU, "rows": rows}, f, indent=1)
+    print("[bench_blender] wrote", OUT)
+
+if arg("--viewport", False) is False:
+    run_headless()

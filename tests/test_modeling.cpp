@@ -3951,11 +3951,13 @@ static void round17_tests() {
     /* Clicking it again closes only the list. */
     click(r.x + r.w / 2, r.y + r.h / 2);
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
-    /* Open it and pick "Unreal", the list's second row below the field (Unity, Unreal, Blender, ...: task 0063). */
+    /* Open it and pick "Unreal", the list's second row (Unity, Unreal, Blender, ...: task 0063). The list drops below
+     * the field, or opens above it when the field is near the window's bottom (task 0199's lines moved it there). */
     click(r.x + r.w / 2, r.y + r.h / 2);
     CHECK(ed.popup_count_for_test() == 2);
+    const Recti list = ed.top_popup_rect_for_test();
     const int row = r.h + 4;
-    click(r.x + 20, r.bottom() + 4 + row + row / 2);
+    click(r.x + 20, list.y + 4 + row + row / 2);
     std::printf("    picked: preset %s, dialog %d, popups %zu\n", ed.keymap_preset_name().c_str(), (int)ed.dialog_open_for_test(),
                 ed.popup_count_for_test());
     CHECK(ed.keymap_preset_name() == "Unreal");

@@ -223,6 +223,7 @@ class Context {
   void popup(Id i, int width, std::function<void()> body);
   bool any_popup_open() const { return !popups_.empty(); }
   size_t popup_count() const { return popups_.size(); }
+  Recti top_popup_rect() const { return popups_.empty() ? Recti{} : popups_.back().rect; }  // (where the last one drew)
   Recti combo_rect(Id i) const {  // where a combo was last drawn (for tests)
     auto it = combo_rects_.find(i);
     return it == combo_rects_.end() ? Recti{0, 0, 0, 0} : it->second;

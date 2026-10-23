@@ -2,6 +2,48 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 219): the GPU as the default, said per window; Blender's viewport timed (task 0199)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback ("most computers would
+have a GPU"). This round makes the choice visible and measures Blendity's window against Blender's own viewport.
+
+**Changed**
+- Preferences > Viewport Device says, for each window, where its views draw and who shows it: "views on the GPU (the
+  card), shown by the card", or "views on the CPU, shown by the system" with the reason.
+- With no card, Auto's fall back to the CPU is said once, the first time, not every start.
+- **Fixed:** switching Viewport Device kept the views' cached pictures until something changed, so the other
+  device's picture stayed on screen. The views now draw again on a switch.
+
+**Added**
+- The local chain runs the editor, render and lighting groups a second time with the views on the card, in verify
+  mode. CI is unchanged (it has no card).
+- `tools/bench_blender.py --viewport` times Blender's viewport with its window (`wm.redraw_timer`, DRAW_WIN_SWAP);
+  `Blendity --windowed-check` takes `--command` to set up the same scene.
+
+**Measured** (a 2560 x 1369 window, RTX 4070 SUPER), a whole window drawn and shown:
+- the starter scene: Blender 3.98-4.70 ms (two runs), Blendity 5.57 ms (the system presenting: 6.81);
+- 400 spheres, Solid: Blender 4.34-4.39 ms, Blendity 7.42 ms (8.68);
+- 400 spheres, Material Preview / Shaded: Blender 4.41-5.23 ms (EEVEE reuses its last sample), Blendity 7.51 ms (8.62).
+
+Blender is 1.2-1.4x ahead on the starter scene and 1.4-1.7x on 400 spheres. Its UI is drawn on the card; Blendity's is the
+CPU's (2-2.7 ms at 4K, task 0198), and Blendity's card draws each sphere with a draw call of its own.
+
+**Checked**
+- Each window's line and the once-only notice (tests/test_gpu.cpp); the Edit Mode drag on the card compares both
+  meshes, the smooth one after the release.
+- The Preferences dropdown test (tests/test_modeling.cpp) reads where the list opened: the new window lines moved
+  the keymap field near the window's bottom, and on Linux its list opens above it.
+- An Opus review found, all fixed:
+  - the window lines saying "views on the GPU" after choosing CPU (the card stays open; it isn't drawing them);
+  - the labels swapped when Preferences is drawn in a secondary window;
+  - the drag test passing without its after-release compares;
+  - a windowed check writing the user's preferences (the notice);
+  - Blender's Material Preview row timed while EEVEE still compiled its shaders, and a failed write leaving Blender
+    running.
+- Unit checks (round 219): Windows, in render-cache verify mode, 11,946, 0 failed (991 tests), 0 stale
+  pictures. Linux with libraries: 11,504, 0 failed. Sanitizer build: 11,380, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `ui_2d`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone. The GPU leg: 7,965 checks with the views on the card, 0 failed.)
+
 ## 2026-10-23 (round 218): the UI's 2D measured - it stays the CPU's; presenting made cheaper (task 0198)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round measures

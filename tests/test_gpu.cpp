@@ -436,37 +436,42 @@ static void tests_round122_to_round125() {
     ed.viewport_device_for_test(2);
     r34_steps(ed, 2);
     const FrameProfile before = ed.frame_profile_totals();
-    /* The Move gizmo's X arrow dragged with the mouse; after each frame of it, the card's copy of what the views drew
-     * holds exactly what a whole upload would (a missed range would leave old vertices or triangles there). */
+    /* The Move gizmo's X arrow dragged with the mouse; after each frame of it, the card's copy of what the Scene view
+     * drew (Edit Mode's flat mesh) holds exactly what a whole upload would (a missed range would leave old vertices or
+     * triangles there). The other views catch up on release (Other Views Follow Drags is off): the smooth mesh they
+     * drew before the drag is compared after it. */
     int x = 0, y = 0, checked = 0, differ = 0;
+    auto compare = [&](const RenderMesh &rm) {
+      std::vector<gpu::RasterVertex> card;
+      std::vector<uint32_t> card_indices;
+      if (!ed.gpu_mesh_for_test(rm, card, card_indices)) return;
+      std::vector<gpu::RasterVertex> want(rm.positions.size());  // (as the views send it: position, normal, UV, tangent)
+      for (size_t i = 0; i < want.size(); i++) {
+        want[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+        if (i < rm.uvs.size()) want[i].uv[0] = rm.uvs[i].x, want[i].uv[1] = rm.uvs[i].y;
+        if (i < rm.tangents.size())
+          want[i].t[0] = rm.tangents[i].x, want[i].t[1] = rm.tangents[i].y, want[i].t[2] = rm.tangents[i].z, want[i].t[3] = rm.tangents[i].w;
+      }
+      checked++;
+      /* (One material: the card keeps the indices' order; several are grouped by material there, task 0101.) */
+      if (card.size() != want.size() || card_indices != rm.indices || std::memcmp(card.data(), want.data(), want.size() * sizeof(gpu::RasterVertex)))
+        differ++;
+    };
     CHECK(ed.project_to_window(wp, x, y));
     ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
     ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
     for (int k = 1; k <= 6; k++) {
       ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + k * 7, y)});
-      const Mesh &m = *big->get<MeshFilter>()->mesh;
-      for (bool flat : {false, true}) {
-        const RenderMesh &rm = m.render_mesh(flat);
-        std::vector<gpu::RasterVertex> card;
-        std::vector<uint32_t> card_indices;
-        if (!ed.gpu_mesh_for_test(rm, card, card_indices)) continue;
-        std::vector<gpu::RasterVertex> want(rm.positions.size());  // (as the views send it: position, normal, UV, tangent)
-        for (size_t i = 0; i < want.size(); i++) {
-          want[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
-          if (i < rm.uvs.size()) want[i].uv[0] = rm.uvs[i].x, want[i].uv[1] = rm.uvs[i].y;
-          if (i < rm.tangents.size())
-            want[i].t[0] = rm.tangents[i].x, want[i].t[1] = rm.tangents[i].y, want[i].t[2] = rm.tangents[i].z, want[i].t[3] = rm.tangents[i].w;
-        }
-        checked++;
-        /* (One material: the card keeps the indices' order; several are grouped by material there, task 0101.) */
-        if (card.size() != want.size() || card_indices != rm.indices || std::memcmp(card.data(), want.data(), want.size() * sizeof(gpu::RasterVertex)))
-          differ++;
-      }
+      compare(big->get<MeshFilter>()->mesh->render_mesh(true));
     }
     ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 55 + 42, y)});
     const FrameProfile after = ed.frame_profile_totals();
-    std::printf("    the card's copy read back after %d drag frames: %d differed from a whole upload\n", checked, differ);
-    CHECK(checked >= 3 && differ == 0);
+    const int during = checked;
+    r34_steps(ed, 2);  // (the other views caught up)
+    compare(big->get<MeshFilter>()->mesh->render_mesh(false));
+    compare(big->get<MeshFilter>()->mesh->render_mesh(true));
+    std::printf("    the card's copy read back %d times (6 drag frames, then both meshes after it): %d differed from a whole upload\n", checked, differ);
+    CHECK(during >= 3 && checked == during + 2 && differ == 0);
     const uint64_t views = after.gpu_views - before.gpu_views, partial = after.gpu_mesh_partial - before.gpu_mesh_partial;
     const uint64_t pbytes = after.gpu_partial_bytes - before.gpu_partial_bytes;
     std::printf("    %llu views on the GPU; %llu updates sent only what moved, %llu KB each on average (the mesh whole is %llu KB)\n",
@@ -2695,6 +2700,29 @@ static void tests_round217() {
   });
 }
 
+/* ---------------------------------------------------------------- round 219: the device, said (task 0199) */
+static void tests_round219() {
+  test("Viewport Device says each window's device - the views on the GPU or the CPU, shown by the card or the system and why - and Auto's fall back to the CPU is said once, not under CPU or GPU", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(0);
+    r34_steps(ed, 2);  // (a run that gives the views a card opens it here)
+    ed.viewport_device_for_test(1);
+    const std::string cpu = ed.window_device_status_for_test(false, -1, "");  // (the card, if open, isn't drawing them)
+    const std::string sys = ed.window_device_status_for_test(false, 0, "the window can't be presented by this card");
+    std::printf("    %s | %s\n", cpu.c_str(), sys.c_str());
+    CHECK(cpu.find("views on the CPU") == 0 && cpu.find("shown by the system") != std::string::npos);
+    CHECK(sys.find("shown by the system: the window can't be presented") != std::string::npos);
+    CHECK(!ed.notice_cpu_fallback_for_test());  // (CPU chosen: nothing to say)
+    ed.viewport_device_for_test(2);
+    CHECK(!ed.notice_cpu_fallback_for_test());  // (GPU chosen: its error is in Preferences)
+    ed.viewport_device_for_test(0);
+    const bool first = ed.notice_cpu_fallback_for_test(), again = ed.notice_cpu_fallback_for_test();
+    std::printf("    Auto: said %s, then %s\n", first ? "yes" : "no", again ? "yes" : "no");
+    CHECK(first && !again);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2714,4 +2742,5 @@ void run_gpu_tests() {
   tests_round214();
   tests_round216();
   tests_round217();
+  tests_round219();
 }

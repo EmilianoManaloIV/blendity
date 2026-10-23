@@ -1144,6 +1144,9 @@ The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (P
 # Drawing on the graphics card
 With Viewport Device on Auto, the views draw on your graphics card, as Blender's viewport does: the shaded picture, the grid, the wireframes, the selection outline and Edit Mode's cage and dots, all in one go - and on Windows and Linux the card also shows the window, the views' pictures never leaving it. If there is no card, or it fails, the same window draws on the processor instead - the same picture, a little slower - and the Profiler says why. The processor's picture is the reference: every picture the card draws is checked against it.
 ? Your laptop's graphics driver crashed while you were modelling. What happens to the Scene view? | It draws on the processor from the next frame, the same picture, and the Profiler and Preferences say why; choosing Viewport Device again tries the card again.
+? Where do you see which windows the card draws and shows? | Preferences > Viewport Device: a line for each window - "views on the GPU, shown by the card", or "views on the CPU, shown by the system" with the reason (task 0199).
+? A friend's PC has no graphics card. Does Blendity warn them every time it starts? | No: Auto says once, the first time, that the views draw on the processor. After that the processor is simply how that machine draws, and Preferences keeps the reason.
+? Blender draws a 2560 x 1369 window of 400 spheres in about 4.4 ms; Blendity's card in about 7.4. Where does the difference go? | Mostly the UI: Blender draws its UI on the card, Blendity's processor draws its UI (about 2 ms). And Blendity's card draws each sphere with a draw call of its own (task 0199).
 ! cmd:viewport device gpu | Draw the views on the graphics card
 ! cmd:viewport device cpu | Draw them on the processor
 # The Profiler's GPU block

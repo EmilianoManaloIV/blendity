@@ -534,7 +534,9 @@ uint64_t gpu_mesh_budget(const gpu::DeviceInfo &d) { return std::min<uint64_t>(1
 }  // namespace
 
 void Editor::set_viewport_device(int d) {
-  viewport_device_ = std::max(0, std::min(2, d));
+  d = std::max(0, std::min(2, d));
+  if (d != viewport_device_) scene_cache_.key = game_cache_.key = 0;  // (task 0199: pictures drawn by the other device drawn again)
+  viewport_device_ = d;
   card_retry();  // (task 0193)
   gpu_view_tried_ = false;  // (choosing again tries the GPU again after an error)
   gpu_view_error_.clear();
@@ -558,12 +560,14 @@ gpu::Raster *Editor::gpu_view() {
     if (gpu_view_opening_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return nullptr;
     gpu_view_ = gpu_view_opening_.get();
     if (!gpu_view_) Log::warn("The views can't draw on the GPU (%s): drawing on the CPU", gpu_view_error_.c_str());
+    if (!gpu_view_) notice_cpu_fallback();
     return gpu_view_.get();
   }
   if (gpu_view_tried_) return nullptr;
   gpu_view_tried_ = true;
   if (!gpu::available() || gpu::devices().empty()) {
     gpu_view_error_ = "no Vulkan GPU";
+    notice_cpu_fallback();
     return nullptr;
   }
   const int index = gpu::devices()[0].index;
@@ -582,6 +586,25 @@ gpu::Raster *Editor::gpu_view() {
   }
   gpu_view_opening_ = std::async(std::launch::async, open);
   return nullptr;
+}
+
+/* Task 0199: the first time Auto finds no card for the views (none, or it couldn't open), said once - every later
+ * start keeps quiet, as the CPU is then simply how this machine draws (Preferences says why). */
+bool Editor::notice_cpu_fallback() {
+  if (viewport_device_ != 0 || cpu_fallback_noticed_ || (headless_ && !notice_in_tests_) || windowed_check_) return false;
+  Log::warn("The views draw on the CPU: %s. That works everywhere, more slowly; Preferences > Viewport Device says why.", gpu_view_error_.c_str());
+  cpu_fallback_noticed_ = true;
+  save_prefs();
+  return true;
+}
+
+/* Task 0199: a window's drawing and showing, for Preferences: its views on the card or the CPU, and whether the card
+ * or the system shows the window (with why, when the card can't). */
+std::string Editor::window_device_status(bool card_present, int card_win, const std::string &card_reason) const {
+  const bool on_gpu = gpu_view_wanted() && gpu_view_;  // (the card stays open after choosing CPU: it isn't drawing them)
+  std::string s = on_gpu ? "views on the GPU (" + gpu_view_->info().name + ")" : "views on the CPU";
+  if (card_win >= 0 && (card_present || card_reason.empty())) return s + ", shown by the card";
+  return s + ", shown by the system" + (card_reason.empty() ? std::string() : ": " + card_reason);
 }
 
 std::string Editor::gpu_view_status() const {

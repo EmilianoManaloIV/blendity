@@ -49,6 +49,13 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0199, round 219): the default said, and checked on the card
+- Preferences says each window's decision; Auto's fall back to the CPU is said once (a machine without a card is not an
+  error).
+- A device switch drops the views' cached pictures: a picture is the device's that drew it.
+- The suite stays on the CPU (CI has no card). The local chain runs the editor, render and lighting groups again on
+  the card in verify mode. Tests that count the CPU's own work pin the CPU.
+
 ## Amendment (task 0198, round 218): the UI's 2D stays the CPU's
 - Measured, the UI-heavy frames at 4K are under the 4 ms line once presenting is fixed: presents one frame behind,
   only the changed columns taken up. Scrolling is 3.41 ms.

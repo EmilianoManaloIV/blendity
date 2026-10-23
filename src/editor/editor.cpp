@@ -2525,7 +2525,9 @@ void Editor::screenshot(const std::string &path_in) {
 /* Task 0193: the editor in its real window - frames until the GPU is open (at most `frames`), then `frames` frames with
 the views drawn again each one (as an orbit does), presented by the card, and as many presented by the system; each
 part's mean frame time printed, the window as the card showed it saved to `out`. */
-int Editor::windowed_check(int frames, const std::string &out) {
+int Editor::windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands) {
+  windowed_check_ = true;
+  for (const std::string &c : commands) command(c);  // (task 0199: the scene to measure)
   std::vector<Event> events;
   auto step = [&](bool redraw_views, bool every_row = false) {
     events.clear();
@@ -3529,6 +3531,7 @@ void Editor::load_prefs() {
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str()))), had_fps = true;
     else if (k == "viewport_device") set_viewport_device(std::atoi(v.c_str()));
     else if (k == "other_views_follow") other_views_follow_ = v == "1";
+    else if (k == "cpu_fallback_noticed") cpu_fallback_noticed_ = v == "1";
     else if (k == "simpler_while_moving") simpler_while_moving_ = v == "1";
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
@@ -3615,8 +3618,8 @@ void Editor::save_prefs() {
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();
-  s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\n", viewport_device_, other_views_follow_ ? 1 : 0,
-                 simpler_while_moving_ ? 1 : 0);
+  s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
+                 other_views_follow_ ? 1 : 0, simpler_while_moving_ ? 1 : 0, cpu_fallback_noticed_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
   s += strprintf("import_preview=%d\nimport_shading=%d\n", import_preview_pref_ ? 1 : 0, import_shading_pref_);  // (task 0152)

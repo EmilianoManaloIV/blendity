@@ -2881,9 +2881,17 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     set_viewport_device(di);
     save_prefs();
   }
-  u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster; anything it doesn't draw\n"
-            "yet (GI and probes, axis or see-through materials, camera filters...) draws on the CPU, as before. F12 renders stay on the CPU.");
+  u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster, and on Windows and Linux\n"
+            "it shows the window too; the little it doesn't draw yet (realtime GI's per-pixel light, a retro filter's snapped vertices,\n"
+            "a live procedural seen very close) draws on the CPU, as before. With no GPU everything draws on the CPU. F12 renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
+  /* Task 0199: each window - its views' device and who shows it. */
+  /* (While a secondary window draws, its state is the members' and its entry holds the main window's, swapped.) */
+  auto label = [&](int id) { return id == 0 ? std::string("Main window: ") : strprintf("Window %d: ", id); };
+  text(label(active_window_) + window_device_status(card_present_ || card_views_shown_.size() > 0, card_win_, card_reason_), u.theme.text_dim);
+  for (const auto &w : windows_)
+    if (w && w->os)
+      text(label(w->id == active_window_ ? 0 : w->id) + window_device_status(w->card_present, w->card_win, w->card_reason), u.theme.text_dim);
   /* Task 0103: the other views during a drag. */
   if (u.toggle_row(row(u.row_h()), "Other Views Follow Drags", other_views_follow_)) save_prefs();
   u.tooltip("Off (the default): while you drag in the Scene view, the Game view and the Camera Preview keep their last picture and\n"
@@ -2915,7 +2923,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
          u.theme.text_dim);
   const uint32_t dim = u.theme.text_dim;
   text("What it costs:", u.theme.text);
-  text(gpu_view_ ? "- The views' 3D is drawn on the GPU; the UI, overlays and picking on the CPU."
+  text(gpu_view_wanted() && gpu_view_ ? "- The views' 3D and overlays are drawn on the GPU, which shows the window; the UI and picking on the CPU."
                  : "- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.",
        dim);
   if (max_fps_ == 0)

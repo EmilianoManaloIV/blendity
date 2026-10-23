@@ -288,6 +288,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A scene with baked lighting - lightmaps, light probes, realtime lightmaps - had its views drawn by the processor. | The card draws them; realtime GI's per-pixel light alone stays the processor's (task 0197). |
 | A camera with any filter - a colour grade, a bloom, an outline - had its views drawn by the processor. | The card draws the 3D and the filters run over its picture; a retro filter's rasterizer stage alone stays the processor's (task 0197). |
 | With the card presenting, a resize or a long scroll took the window twice as long to show as the system did. | Presents don't wait for the card and only the changed columns go up: a whole window as fast as the system's, a 4K scroll 3.4 ms (task 0198). |
+| Preferences didn't say which windows the card showed, and switching Viewport Device left the other device's picture on screen until something changed. | Each window's line says where its views draw and who shows it; a switch draws the views again; with no card, the fall back to the CPU is said once (task 0199). |
 
 ## Still worth doing
 

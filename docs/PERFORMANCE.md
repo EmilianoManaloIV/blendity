@@ -3,6 +3,20 @@
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
+### After task 0199 (Blender's own viewport against Blendity's window)
+- A whole window drawn and shown, a frame: Blender 5.2.2 `tools/bench_blender.py --viewport` (`wm.redraw_timer`
+  DRAW_WIN_SWAP, 200 after 10 warm, its window 2560 x 1361) against `Blendity --windowed-check` (400 frames, the
+  Scene view drawn each, 2560 x 1369):
+
+  | Scene | Blender 5.2.2 | Blendity, the card | Blendity, the system presenting |
+  |---|---|---|---|
+  | The starter scene (a cube; Blender's Solid) | 3.98-4.70 ms | 5.57 ms | 6.81 ms |
+  | 400 spheres through the camera, Solid | 4.34-4.39 ms | 7.42 ms | 8.68 ms |
+  | 400 spheres, Material Preview / Shaded | 4.41-5.23 ms | 7.51 ms | 8.62 ms |
+
+- Blender's Material Preview reuses EEVEE's last sample when nothing moved, which `redraw_timer` doesn't change.
+- Blendity's canvas alone, idle: 1.69-1.98 ms by the card.
+
 ### After task 0198 (the UI's 2D measured; presenting made cheaper)
 - `Blendity --windowed-check` (a real 2560 x 1369 window, RTX 4070 SUPER), the views unchanged:
 

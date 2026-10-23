@@ -538,7 +538,7 @@ class Editor {
   int gizmo_hot_for_test() const { return gizmo_hot_; }
   void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
   void clear_selection_for_test() { clear_selection(); }
-  int windowed_check(int frames, const std::string &out);  // (task 0193: Blendity --windowed-check)
+  int windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands = {});  // (task 0193: Blendity --windowed-check)
   void card_present_for_test(bool on) { card_present_for_test_ = on; }  // (task 0193: headless frames as if the card presented them)
   bool card_frame_for_test(std::vector<uint32_t> &out);                // the frame the card would show (compose_read)
   size_t card_views_for_test() const { return card_views_.size(); }
@@ -753,6 +753,7 @@ class Editor {
   }
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
+  Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
   bool transform_active_for_test() const { return xf_.active; }  // a G / R / S is running
   size_t overlap_vert_pairs_for_test() { overlap_refresh(); return overlap_.verts.size(); }
@@ -789,6 +790,19 @@ class Editor {
   int viewport_device() const { return viewport_device_; }
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
+  std::string window_device_status(bool card_present, int card_win, const std::string &card_reason) const;  // (task 0199)
+  bool notice_cpu_fallback();  // (true: said now)
+  bool notice_in_tests_ = false;
+  bool windowed_check_ = false;  // (a measuring run: it leaves the preferences as they were)
+  bool notice_cpu_fallback_for_test() {  // (headless runs say it too while testing it)
+    notice_in_tests_ = true;
+    const bool said = notice_cpu_fallback();
+    notice_in_tests_ = false;
+    return said;
+  }
+  std::string window_device_status_for_test(bool card_present, int card_win, const std::string &reason) const {
+    return window_device_status(card_present, card_win, reason);
+  }
   double gpu_view_open_ms() const { return gpu_view_open_ms_; }  // opening the GPU view took (device, pipelines, shaders)
   uint64_t gpu_submits_for_test() const { return gpu_view_ ? gpu_view_->submits() : 0; }  // task 0160: the card's submissions so far
   void gpu_split_readback_for_test(bool split) { gpu_split_readback_for_test_ = split; }  // the old render-then-read path
@@ -1915,6 +1929,7 @@ class Editor {
   }
   bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
   bool other_views_follow_ = false;
+  bool cpu_fallback_noticed_ = false;  // task 0199: Auto's fall back to the CPU said once (kept in the preferences)
   void views_command(const std::string &what, const std::string &value);
   bool hold_other_views() const { return !other_views_follow_ && scene_moving() && !(playing_ && !paused_); }
   /* Task 0104 (ADR 0039; Blender's is_navigating / is_transforming): while you interact, the CPU views' shadow map is
