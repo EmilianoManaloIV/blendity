@@ -10,6 +10,8 @@
 
 #include "../core/jobs.h"
 #include "../render/colormanagement.h"
+#include "../render/probe_volume.h"
+#include "../render/voxel_gi.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -63,7 +65,6 @@ const char *material_unsupported(const Material &m) {
 /* Why an object can't be drawn on the GPU yet, or null. */
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
-  if (it.lightmap || it.rt_bounce || (it.use_probes && env.probes)) return "lightmaps, probes or realtime GI";
   for (uint32_t slot : mesh_slots(*it.mesh))
     if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
   return nullptr;
@@ -116,7 +117,50 @@ gpu::RasterLight raster_light(const RenderLight &l) {
   g.width = l.width;
   g.height = l.height;
   g.disk = l.disk;
+  g.bake_mode = l.bake_mode;  // (task 0197)
   return g;
+}
+
+/* Task 0197: the probe volume packed for the card (gpu::Raster::set_probe_volume, read by kProbeFns): a header of
+ * three vec4, then the octree's nodes (two each), the bricks (two each), the probes (thirteen each: position and
+ * flags, the baked cube's six axes, the live one's), the roots four to a vec4. */
+std::vector<float> probe_pack(const ProbeVolumeData &d) {
+  const size_t nn = d.nodes.size(), nb = d.bricks.size(), np = d.position.size(), nr = d.roots.size();
+  const size_t node_at = 3, brick_at = node_at + nn * 2, probe_at = brick_at + nb * 2, root_at = probe_at + np * 13;
+  std::vector<float> o((root_at + (nr + 3) / 4) * 4, 0.0f);
+  auto put = [&](size_t v, float a, float b, float c, float e) { o[v * 4] = a, o[v * 4 + 1] = b, o[v * 4 + 2] = c, o[v * 4 + 3] = e; };
+  auto bits = [](int64_t i) {  // (an index as its int32's bits: exact past 2^24, read with floatBitsToInt)
+    const int32_t v = (int32_t)i;
+    float f;
+    std::memcpy(&f, &v, 4);
+    return f;
+  };
+  put(0, d.origin.x, d.origin.y, d.origin.z, d.top);
+  put(1, bits(d.tn[0]), bits(d.tn[1]), bits(d.tn[2]), bits((int64_t)node_at));
+  put(2, bits((int64_t)brick_at), bits((int64_t)probe_at), bits((int64_t)root_at), 0.0f);
+  for (size_t i = 0; i < nn; i++) {
+    const ProbeVolumeData::Node &n = d.nodes[i];
+    put(node_at + i * 2, n.b.min.x, n.b.min.y, n.b.min.z, bits(n.child));
+    put(node_at + i * 2 + 1, n.b.max.x, n.b.max.y, n.b.max.z, bits(n.brick));
+  }
+  for (size_t i = 0; i < nb; i++) {
+    const ProbeBrick &b = d.bricks[i];
+    put(brick_at + i * 2, b.min.x, b.min.y, b.min.z, b.spacing);
+    put(brick_at + i * 2 + 1, bits(b.first), 0.0f, 0.0f, 0.0f);
+  }
+  for (size_t i = 0; i < np; i++) {
+    const size_t v = probe_at + i * 13;
+    const bool valid = i < d.valid.size() && d.valid[i], live_ok = i < d.live_ok.size() && d.live_ok[i];
+    put(v, d.position[i].x, d.position[i].y, d.position[i].z, bits((valid ? 1 : 0) + (live_ok ? 2 : 0)));
+    const ProbeCube &baked = i < d.baked.size() ? d.baked[i] : ProbeCube{};
+    const ProbeCube &live = live_ok && i < d.live.size() ? d.live[i] : baked;
+    for (int ax = 0; ax < 6; ax++) {
+      put(v + 1 + ax, baked.bounce[(size_t)ax].x, baked.bounce[(size_t)ax].y, baked.bounce[(size_t)ax].z, baked.sky[(size_t)ax]);
+      put(v + 7 + ax, live.bounce[(size_t)ax].x, live.bounce[(size_t)ax].y, live.bounce[(size_t)ax].z, live.sky[(size_t)ax]);
+    }
+  }
+  for (size_t i = 0; i < nr; i++) o[root_at * 4 + i] = bits(d.roots[i]);
+  return o;
 }
 
 void set3(float *d, Vec3 v) { d[0] = v.x, d[1] = v.y, d[2] = v.z; }
@@ -554,7 +598,11 @@ const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingE
                                          const FilterStack *filters) const {
   if (filters && !filters->empty()) return "a camera filter";
   if (rt.want_hdr) return "a picture kept in linear light";
-  if (env.gi || env.probes) return "realtime GI or probes";
+  /* (Lightmaps, realtime lightmaps and probes draw on the card since task 0197; realtime GI's per-pixel gather - the
+   * receivers the CPU traces from its own picture - for objects without realtime lightmaps doesn't.) */
+  if (env.gi)
+    for (const DrawItem &it : items)
+      if (it.mesh && !(it.rt_bounce && it.rt_sky && it.rt_uv)) return "realtime GI's per-pixel light (Receive GI: Lightmaps draws on the card)";
   const bool highlight = gpu_view_ && gpu_view_->can_highlight_faces();
   for (const DrawItem &it : items) {
     if (it.face_highlight && !highlight) return "Edit Mode's face highlight (the card has no geometry shaders)";
@@ -707,6 +755,53 @@ int Editor::gpu_slot(const RenderTarget &rt) {
   return best;
 }
 
+/* Task 0197: a lightmap page on the card - a float texture kept by the page's serial (a page is published whole: a
+ * new serial when it changes); a page let go is dropped with the textures nothing uses. -1: refused (why in `err`). */
+int Editor::gpu_lightmap(const Lightmap &lm, std::string &err) {
+  auto found = gpu_lightmaps_.find(&lm);
+  if (found != gpu_lightmaps_.end() && found->second.first != lm.serial) {  // (replaced: the old copy let go)
+    gpu_forget_texture(found->second.second.get());
+    gpu_lightmaps_.erase(found);
+    found = gpu_lightmaps_.end();
+  }
+  if (gpu_lightmaps_.size() > 256) prune_gpu_lightmaps();
+  if (found == gpu_lightmaps_.end()) {
+    auto t = std::make_shared<Texture>();
+    t->srgb = false, t->is_float = true, t->width = lm.width, t->height = lm.height;
+    Texture::Level l;
+    l.w = lm.width, l.h = lm.height;
+    l.pxf.resize(lm.texels.size());
+    for (size_t i = 0; i < lm.texels.size(); i++) l.pxf[i] = Vec4(lm.texels[i], 1.0f);
+    t->levels.push_back(std::move(l));
+    gpu_lightmaps_[&lm] = {lm.serial, t};
+    found = gpu_lightmaps_.find(&lm);
+  }
+  return gpu_texture(found->second.second, err);
+}
+
+/* Task 0197: a texture's copy on the card let go now (a lightmap page replaced). */
+void Editor::gpu_forget_texture(const Texture *t) {
+  auto e = gpu_textures_.find(t);
+  if (e == gpu_textures_.end()) return;
+  if (e->second.id >= 0 && gpu_view_) gpu_view_->remove_texture(e->second.id);
+  gpu_textures_.erase(e);
+}
+
+/* Task 0197: the pages whose card copy was already let go (not drawn for a while: gpu_forget_meshes) forgotten here too. */
+void Editor::prune_gpu_lightmaps() {
+  for (auto it = gpu_lightmaps_.begin(); it != gpu_lightmaps_.end();)
+    it = gpu_textures_.count(it->second.second.get()) ? std::next(it) : gpu_lightmaps_.erase(it);
+}
+
+/* Task 0197: the probe volume to the card when it changed (another bake, more probes, a live update). */
+void Editor::gpu_probe_volume(const ProbeVolumeData &d) {
+  const uint64_t key = ((((uint64_t)(uintptr_t)&d * 31 ^ d.scene_key) * 1099511628211ull ^ d.probe_count()) * 1099511628211ull ^ probe_live_gen_) *
+                           1099511628211ull ^ lighting_gen_;
+  if (key == gpu_probe_key_) return;
+  gpu_probe_key_ = key;
+  gpu_view_->set_probe_volume(probe_pack(d));
+}
+
 /* Task 0196: why an item's live procedural textures need the CPU in this view (seen close up), or null. */
 const char *Editor::live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 &vp, const Mat4 &p, Vec3 eye, int height) {
   if (!it.materials) return nullptr;
@@ -817,6 +912,40 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     raster_axis(inst[i], m, *it.mesh, tex, axis_parts);
     axis_owner.resize(axis_parts.size(), i);
   };
+  std::vector<float> corners;  // task 0197: the baked-lit triangles' corners
+  const VoxelGIFrame *gi = env.gi && env.gi->grid && env.gi->grid->valid() ? env.gi : nullptr;  // (as Renderer3D::flush takes it)
+  const bool bounce_onto_lm = gi ? gi->bounce_not_baked : env.rt_bounce_not_baked;
+  auto baked_of = [&](const DrawItem &it, const GpuMesh &e, size_t first_inst) {
+    const RenderMesh &rm = *it.mesh;
+    const bool lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= rm.tri_count() * 3;
+    const bool rt = it.rt_bounce && it.rt_sky && it.rt_uv && it.rt_uv->size() >= rm.tri_count() * 3;
+    const bool probes = !lm && !rt && it.use_probes && env.probes && env.probes->data && !env.probes->data->empty();
+    if (!lm && !rt && !probes) return;
+    const int32_t lm_tex = lm ? gpu_lightmap(*it.lightmap, tex_err) : -1;
+    const int32_t rb = rt ? gpu_lightmap(*it.rt_bounce, tex_err) : -1, rs = rt ? gpu_lightmap(*it.rt_sky, tex_err) : -1;
+    const int32_t base = lm || rt ? (int32_t)(corners.size() / 24) : -1;
+    if (lm || rt) {  // (the card's order: the mesh's, or grouped by material slot as card_indices groups them)
+      auto put = [&](size_t t) {
+        for (int k = 0; k < 3; k++) {
+          const Vec3 p = rm.positions[rm.indices[t * 3 + (size_t)k]];
+          const Vec2 a = lm ? (*it.lightmap_uv)[t * 3 + (size_t)k] : Vec2(0.0f, 0.0f), b = rt ? (*it.rt_uv)[t * 3 + (size_t)k] : Vec2(0.0f, 0.0f);
+          corners.insert(corners.end(), {p.x, p.y, p.z, a.x, a.y, b.x, b.y, 0.0f});
+        }
+      };
+      const bool grouped = !e.parts.empty() && rm.tri_material.size() == rm.tri_count();
+      for (size_t t = 0; !grouped && t < rm.tri_count(); t++) put(t);
+      for (size_t p = 0; grouped && p < e.parts.size(); p++)
+        for (size_t t = 0; t < rm.tri_count(); t++)
+          if (rm.tri_material[t] == e.parts[p][0]) put(t);
+    }
+    for (size_t k = first_inst; k < inst.size(); k++) {
+      gpu::RasterInstance &in = inst[k];
+      in.baked = true;
+      in.lightmap = lm_tex, in.rt_bounce = rb, in.rt_sky = rs;
+      in.corner_base = base < 0 ? -1 : base + (int32_t)(in.first_index / 3);
+      in.baked_flags = (probes ? 1u : 0u) | (lm && rt && bounce_onto_lm ? 2u : 0u);
+    }
+  };
   for (const DrawItem &it : items) {
     if (!it.mesh || it.mesh->indices.empty()) continue;
     const int mesh = gpu_mesh(*it.mesh, err);
@@ -833,6 +962,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       inst.back().vertex_colors = vc;
       if (gouraud) solid_instance(inst.back(), it);
       axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
+      if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
       if (inst.back().surface) gather_see_through(it, first_inst, e);
       continue;
     }
@@ -851,6 +981,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
         gather_see_through(it, first_inst, e);
         break;
       }
+    if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
   }
   for (size_t k = 0; k < axis_parts.size(); k++) {  // (the parts after every drawn instance: no index moves)
     inst[axis_owner[k]].axis_parts[axis_parts[k].second] = (float)inst.size();
@@ -860,9 +991,20 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (!see.empty() && !g->can_draw_see_through()) return gpu_view_refuse(slot, "see-through surfaces (the card has no dual-source blending)");
   if (!see.empty() && opt.screen_door) return gpu_view_refuse(slot, "see-through surfaces drawn as a screen door");
   const bool toon_maps = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return (in.flags & gpu::RasterInstance::ToonMaps) != 0; });
+  const bool baked = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return in.baked; });
+  if (baked && env.probes && env.probes->data && env.probes->data->probe_count() > kCardMaxProbes)
+    return gpu_view_refuse(slot, "a probe volume of more than 262,144 probes");
+  if (baked && !g->can_draw_baked()) return gpu_view_refuse(slot, "lightmaps or probes (the card has no geometry shaders)");
   if (toon_maps && !g->can_draw_toon_maps()) return gpu_view_refuse(slot, "toon maps (the card's toon pass couldn't be made)");
   gpu::RasterFrame fr;
   see_through_to_frame(see, fr.see_through);
+  fr.corners = std::move(corners);  // (task 0197: the baked light's settings)
+  if (env.probes) {
+    fr.probe_normal_bias = env.probes->normal_bias, fr.probe_view_bias = env.probes->view_bias;
+    fr.probe_leak = env.probes->leak_reduction, fr.probe_live = env.probes->use_live;
+    if (env.probes->data) gpu_probe_volume(*env.probes->data);
+  }
+  fr.gi_specular_occlusion = env.gi ? env.gi->params.specular_occlusion : env.rt_specular_occlusion;
   fr.highlight_bits = std::move(hl_bits);
   fr.slot = slot;
   fr.width = rt.width;
@@ -1058,6 +1200,8 @@ void Editor::gpu_view_drop() {
   gpu_cage_e_.clear();
   gpu_cage_owner_ = nullptr;
   gpu_cage_edges_key_ = 0;
+  gpu_lightmaps_.clear();  // (task 0197: a card opened again gets the pages and the probe volume again)
+  gpu_probe_key_ = 0;
   scene_on_gpu_ = false;
   gpu_view_.reset();
 }

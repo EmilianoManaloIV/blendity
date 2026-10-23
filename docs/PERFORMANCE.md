@@ -3,6 +3,19 @@
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
+### After task 0197, part 1 (lightmaps and probes on the card)
+- tests/test_gpu.cpp round 216, the Scene view's own time a frame, warm (RTX 4070 SUPER, a test run, not a quiet
+  machine):
+
+  | Scene | CPU | Card |
+  |---|---|---|
+  | Baked floor, wall and box with a probe-lit ball | 1.49 ms | 0.69 ms |
+  | Realtime lightmaps | 4.16 ms | 1.80 ms |
+
+- Cold, the card's first frames cost 21-26 ms each: the lightmap pages go up, and the plane and probe volume are made.
+- A probe volume is re-sent whole on every live update. For the volumes the card takes (up to 262,144 probes, 54 MB)
+  that is a copy of up to that much a frame while live probes catch up.
+
 ### After task 0196 (toon maps and live procedurals on the card)
 - stress editor_render, this round's scene: toon materials with a shade map, inner lines, a specular mask and the hair
   highlight on the icospheres, one moved each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):

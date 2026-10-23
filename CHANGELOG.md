@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 216): baked light on the card - lightmaps and probes (task 0197, part 1)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the
+baked lighting's reasons to fall back, which kept most views of a baked scene - the user's project's - on the CPU.
+
+**Changed**
+- **Baked lightmaps, realtime lightmaps (Receive GI: Lightmaps) and the probe volume draw on the card.** A baked pass
+  reads each visible pixel's ambient light the way the CPU does: the lightmap at the pixel's lightmap UVs, the
+  realtime maps' bounce and sky share, or the probes around the point. The lighting then ranks them as the CPU does,
+  and skips the lights in Baked mode where a lightmap or baked probes already hold them.
+- Lightmap pages go up to the card once, and again only when a bake or a realtime pass publishes new ones.
+- Still on the CPU, saying why: realtime GI's per-pixel light for objects without realtime lightmaps. The CPU gathers
+  it from its own picture of the frame. Camera filters and the picture kept in linear light are the next round's.
+
+**Measured**
+- tests/test_gpu.cpp round 216, the Scene view's own time a frame, warm (RTX 4070 SUPER, a test run, not a quiet
+  machine):
+
+  | Scene | CPU | Card |
+  |---|---|---|
+  | Baked floor, wall and box with a probe-lit ball | 1.49 ms | 0.69 ms |
+  | Realtime lightmaps | 4.16 ms | 1.80 ms |
+
+- Cold, the card's first frames cost 21-26 ms each: the lightmap pages go up, and the plane and probe volume are made.
+- A probe volume is re-sent whole on every live update. For the volumes the card takes (up to 262,144 probes, 54 MB)
+  that is a copy of up to that much a frame while live probes catch up.
+
+**Checked**
+- Card against CPU (RTX 4070 SUPER):
+  - a baked floor, wall and box with a probe-lit ball: mean 0.060 / 255, 99.99 % within 3;
+  - realtime lightmaps: 0.051, 100 %.
+- Clearing the bake changes 166,098 of the card's pixels: the card isn't blind to it.
+- With an object that takes the per-pixel light, the view goes to the CPU with its reason.
+- An Opus review found:
+  - a card opened again (after a GPU error) never getting the probe volume back;
+  - replaced lightmap pages kept on the card and in memory;
+  - the probe volume's indices as floats past 2^24, and no cap on its size;
+  - a rebake with the same key unnoticed;
+  - the baked pass's cutout test without the world footprint;
+  - the bounce-onto-lightmap flag without the CPU's grid check.
+
+  All are fixed.
+- Unit checks (round 216): Windows, in render-cache verify mode, 11,920, 0 failed (988 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test, and on Linux the global sequencer's Play test, failed under the parallel load and passed alone.)
+
 ## 2026-10-23 (round 215): toon maps and live procedurals on the card (task 0196)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the

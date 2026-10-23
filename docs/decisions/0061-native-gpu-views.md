@@ -49,6 +49,13 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0197, round 216): baked light
+- A baked pass (depth EQUAL) reads lightmaps, realtime lightmaps and probes per visible pixel; the lighting ranks them
+  as the CPU does.
+- Lightmap UVs come per triangle corner, found by `gl_PrimitiveID`, so a card without geometry shaders keeps those
+  views on the CPU.
+- Realtime GI's per-pixel gather stays the CPU's: it reads the CPU's own picture of the frame.
+
 ## Amendment (task 0196, round 215): toon maps and live procedurals
 - A toon pass (the toon objects again, depth EQUAL against the g-buffer's) reads the painted maps into three planes
   for the toon lighting. They are made per view only when needed.

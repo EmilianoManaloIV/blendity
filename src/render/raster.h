@@ -20,6 +20,7 @@
 #include "canvas.h"
 #include "shading.h"
 
+#include <atomic>
 #include <functional>
 #include <vector>
 
@@ -58,6 +59,24 @@ struct RenderMesh {
 struct Lightmap {
   int width = 0, height = 0;
   std::vector<Vec3> texels;
+  /* Task 0197: which page this is - a new number for every page made, copied or moved into (the GPU views keep their
+   * copy by it: pages are published whole, never written after they are shown). */
+  uint64_t serial = next_serial();
+  Lightmap() = default;
+  Lightmap(const Lightmap &o) : width(o.width), height(o.height), texels(o.texels) {}
+  Lightmap(Lightmap &&o) noexcept : width(o.width), height(o.height), texels(std::move(o.texels)) {}
+  Lightmap &operator=(const Lightmap &o) {
+    width = o.width, height = o.height, texels = o.texels, serial = next_serial();
+    return *this;
+  }
+  Lightmap &operator=(Lightmap &&o) noexcept {
+    width = o.width, height = o.height, texels = std::move(o.texels), serial = next_serial();
+    return *this;
+  }
+  static uint64_t next_serial() {
+    static std::atomic<uint64_t> n{1};
+    return n++;
+  }
   /* Bilinear, clamped at the edges; texel centres at ((i + 0.5) / width, (j + 0.5) / height). */
   Vec3 sample(Vec2 uv) const;
 };

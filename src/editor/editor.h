@@ -2936,6 +2936,14 @@ class Editor {
     uint64_t stretch_serial = 0;  // the mesh it was measured on
   };
   const char *live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 &vp, const Mat4 &p, Vec3 eye, int height);
+  /* Task 0197: lightmap pages and the probe volume on the card. */
+  int gpu_lightmap(const Lightmap &lm, std::string &err);
+  void gpu_forget_texture(const Texture *t);
+  void prune_gpu_lightmaps();
+  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
+  void gpu_probe_volume(const ProbeVolumeData &d);
+  std::unordered_map<const Lightmap *, std::pair<uint64_t, std::shared_ptr<Texture>>> gpu_lightmaps_;
+  uint64_t gpu_probe_key_ = 0;
   int viewport_device_ = 0;          // Preferences > Viewport Device: 0 Auto, 1 CPU, 2 GPU
   std::unique_ptr<gpu::Raster> gpu_view_;
   bool gpu_view_tried_ = false;      // opening it was tried (not again until the setting changes)

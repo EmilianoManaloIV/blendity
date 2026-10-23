@@ -91,6 +91,12 @@ struct RasterInstance {
   int32_t face_forward = 0;
   float hatch_scale = 8.0f, face_softness = 0.02f;
   bool line_only_shadow = false, hair = false;
+  /* Task 0197: baked light - its lightmap, realtime bounce and sky (add_texture's ids, -1 none), its first triangle's
+   * corners in RasterFrame::corners (-1 none; gl_PrimitiveID counts on from it), flags (1 probe-lit, 2 the realtime
+   * bounce onto the lightmap); `baked`: the baked pass draws it. */
+  int32_t lightmap = -1, rt_bounce = -1, rt_sky = -1, corner_base = -1;
+  uint32_t baked_flags = 0;
+  bool baked = false;
   /* Task 0102: a toon material's settings (Material's toon_*), as shade_toon, toon_rim and light_finish read them. */
   int toon_bands = 1;
   float toon_softness = 0.02f, toon_threshold = 0.15f, toon_specular_size = 0.0f, toon_specular_smooth = 0.05f;
@@ -153,6 +159,7 @@ struct RasterLight {
   float right[3] = {1, 0, 0};
   float width = 1.0f, height = 1.0f;
   bool disk = false;
+  int bake_mode = 0;  // task 0197: RenderLight's (2 Baked: in the lightmaps and baked probes, skipped where they light)
 };
 
 /* Task 0195: a see-through triangle's corner: the mesh's vertex (local), its instance, whether its face is highlighted. */
@@ -186,6 +193,13 @@ struct RasterFrame {
   /* Task 0195: the see-through surfaces' triangles back to front, three corners each (Renderer3D::draw_see_through's
    * order), drawn after the lighting. */
   std::vector<SeeCorner> see_through;
+  /* Task 0197: the baked-lit triangles' corners, two vec4 each - (local position, lightmap u), (lightmap v, realtime
+   * u, v, 0) - three a triangle, in the card's triangle order; the probe volume's settings; realtime GI's specular
+   * occlusion. */
+  std::vector<float> corners;
+  float probe_normal_bias = 0.25f, probe_view_bias = 0.1f;
+  bool probe_leak = true, probe_live = false;
+  float gi_specular_occlusion = 1.0f;
   /* The world's light (Environment Gradient or Color, times its strength). */
   int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
   /* Task 0102: a Sky or HDRI world (env_mode 2): its equirectangular map (add_texture's id; -1: none yet, the
@@ -267,6 +281,9 @@ class Raster {
   virtual bool can_draw_overlays() const { return false; }
   virtual bool can_draw_see_through() const { return false; }  // task 0195: Transparent and Glass (dual-source blending)
   virtual bool can_draw_toon_maps() const { return false; }     // task 0196: toon materials' painted maps (the toon pass)
+  virtual bool can_draw_baked() const { return false; }         // task 0197: lightmaps and probes (the baked pass)
+  /* Task 0197: the probe volume, packed (the editor's probe_pack), kept until replaced. */
+  virtual void set_probe_volume(std::vector<float> packed) { (void)packed; }
   /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;

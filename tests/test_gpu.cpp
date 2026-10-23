@@ -2525,6 +2525,94 @@ static void tests_round214() {
   });
 }
 
+/* ---------------------------------------------------------------- round 216: baked light on the card (task 0197) */
+static void tests_round216() {
+  /* The Scene view drawn again on `device` (the ball nudged and back); its pixels. */
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();  // (a top-level object: its local position)
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  auto compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+    size_t n = 0, ok = 0;
+    double sum = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      n++, sum += w, ok += w <= 3;
+    }
+    mean = n ? sum / (double)n : 0, within3 = n ? (double)ok / (double)n : 0;
+  };
+  auto check = [&](Editor &ed, GameObject *g, const char *what) {
+    view(ed, g, 2);  // (the first frames on the card upload the pages and make the planes: warm both first)
+    view(ed, g, 1);
+    const FrameProfile c0 = ed.frame_profile_totals();
+    const std::vector<uint32_t> cpu = view(ed, g, 1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = view(ed, g, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    /* (The Scene view's time over the four frames each, the views' whole: a test run's, not a quiet machine's.) */
+    std::printf("    %s: the Scene view %.2f ms a frame on the CPU, %.2f on the card\n", what, (before.ms_scene3d - c0.ms_scene3d) / 4.0,
+                (after.ms_scene3d - before.ms_scene3d) / 4.0);
+    double mean = 0, within3 = 0;
+    compare(cpu, gpu, mean, within3);
+    std::printf("    %s: the Scene view on the card %s, %llu views on the CPU instead (%s); mean %.3f / 255, %.2f %% within 3\n", what,
+                ed.scene_on_gpu_for_test() ? "yes" : "no", (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks), ed.gpu_view_status().c_str(),
+                mean, within3 * 100);
+    CHECK(ed.scene_on_gpu_for_test());
+    CHECK(mean < 1.0 && within3 >= 0.99);
+    ed.viewport_device_for_test(1);
+  };
+  test("gpu views: baked lightmaps and baked probes on the card as on the CPU - the floor, wall and box from their lightmaps (the Baked sun in them, not lit again), the ball from the probes (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, true, 2, 1.0f, true);
+    ed.command("overlay grid off");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().empty() && !ed.probes_for_test().empty());
+    check(ed, w.ball, "baked");
+    /* (Not both blind to it: without the bake the card's picture changes.) */
+    const std::vector<uint32_t> with_bake = view(ed, w.ball, 2);
+    ed.command("bake clear");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> without = view(ed, w.ball, 2);
+    size_t changed = 0;
+    for (size_t i = 0; i < with_bake.size() && i < without.size(); i++) changed += (with_bake[i] & 0xFFFFFF) != (without[i] & 0xFFFFFF);
+    std::printf("    the bake cleared: %zu pixels of the card's picture change\n", changed);
+    CHECK(changed > 2000);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views: realtime lightmaps (Receive GI: Lightmaps) on the card as on the CPU; realtime GI's per-pixel light for an object without them stays the CPU's, saying why (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 0, 1.0f, true);
+    ed.command("overlay grid off");
+    w.ball->active = false;  // (the ball contributes no GI: it would take the per-pixel light)
+    ed.mark_changed_for_test("no ball");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    for (int i = 0; i < 120 && ed.realtime_lightmaps_for_test(false).shown.empty(); i++) ed.step_frame_headless();
+    r34_steps(ed, 6);
+    CHECK(!ed.realtime_lightmaps_for_test(false).shown.empty());
+    check(ed, w.box, "realtime lightmaps");
+    w.ball->active = true;
+    ed.mark_changed_for_test("the ball back");
+    view(ed, w.box, 2);
+    std::printf("    with the ball: the Scene view on the card %s (%s)\n", ed.scene_on_gpu_for_test() ? "yes" : "no", ed.gpu_view_status().c_str());
+    CHECK(!ed.scene_on_gpu_for_test() && ed.gpu_view_status().find("per-pixel") != std::string::npos);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2542,4 +2630,5 @@ void run_gpu_tests() {
   tests_round211();
   tests_round212();
   tests_round214();
+  tests_round216();
 }
