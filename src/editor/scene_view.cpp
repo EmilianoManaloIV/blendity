@@ -477,12 +477,15 @@ void Editor::render_scene_view(const Recti &view) {
     return;
   }
   cage_on_gpu_ = false;
-  if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
-    GameObject *fowner = nullptr;
-    if (scene_filters_) main_camera(*scene_, &fowner);
-    const bool filtered = fowner && !camera_filters(fowner).empty();
-    /* On the card the Scene view draws at full size (task 0100): when its last frame drew there, this one will too. */
-    const bool full = !filtered && scene_full_size();
+  overlays_on_gpu_ = false;
+  const bool shaded = shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe;
+  GameObject *fowner = nullptr;
+  if (shaded && scene_filters_) main_camera(*scene_, &fowner);
+  const bool filtered = fowner && !camera_filters(fowner).empty();
+  /* On the card the Scene view draws at full size (task 0100): when its last frame drew there, this one will too. */
+  const bool full = shaded && !filtered && scene_full_size();
+  record_scene_overlays(view, full && overlays_card_expected());  // (task 0192: for the card to draw with the picture)
+  if (shaded) {
     scene_on_gpu_ = false;
     render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) {
       if (filtered)  // the main camera's filters on the editor's view
@@ -499,8 +502,8 @@ void Editor::render_scene_view(const Recti &view) {
   else render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) { render_solid(t, v, p); });
   ScopedTimer ot;
   scene_r3d_.begin_overlay_batch();  // the grid and the wireframes are thousands of lines: drawn in parallel bands
-  if (show_grid_) draw_grid(scene_r3d_);
-  render_overlays(view);
+  draw_scene_overlays(view);  // (here unless the card drew them: task 0192)
+  render_edit_cage();
   scene_r3d_.end_overlay_batch();
   prof_.ms_overlays += ot.ms();
 }

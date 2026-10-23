@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 211): the 3D overlays on the card (task 0192, ADR 0061)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback when there's no GPU.
+This round is the first step: the overlays.
+
+**Changed**
+- **With the views on the GPU, the card now draws the Scene view's overlays** in the same submission as the picture:
+  the grid and its axes, wireframes, dots, the selection outline, and Face mode's dot on every face. The CPU used to
+  draw them over the read-back picture every frame. Bone, curve and lattice wires, icons and gizmos are still the
+  CPU's (task 0193 takes them on).
+- The CPU path is unchanged. When the card can't take them (an error, a scaled frame), the overlays recorded for it
+  are drawn by the CPU, exactly as before.
+
+**Measured** (stress editor_render, the views on the GPU, RTX 4070 SUPER)
+- The overlays' CPU time in Edit Mode's Face mode: 3.2-3.6 -> 0.2 ms a frame.
+- Edit Mode with GPU views: entering 18.6-21.5 -> 16.2-18.6 ms, Select More 8.6-11.0 -> 8.3-8.6, extrude
+  38.1-41.6 -> 37.5-38.8, undo 13.0-14.5 -> 11.6-14.8.
+- The card's overlays against the CPU's: the outline identical. The grid and wireframes are mostly within 1 / 255 (the
+  card blends at 8 bits, as task 0100's cage): mean 0.79 / 255, 99.09 % within 3.
+
+**Checked**
+- Recording the overlays and replaying them draws exactly what drawing them does; the card draws the grid, a
+  wireframe and the outline as the CPU does; refused, they're replayed here; the cage test gains Face and N-gon Face
+  modes (tests/test_render.cpp, tests/test_gpu.cpp).
+- Every kind of overlay interleaved - dots of several sizes over and under lines, translucent, without the depth test,
+  an outline between them - drawn by the card: mean 0.82 / 255, 99.83 % within 3; the card drew Face mode's dots.
+- An Opus review found an over-read of the outline table when there's none, and recording on frames the card would
+  refuse (which would also have drawn the probes' dots from the previous frame). Both are fixed, along with its other
+  points: the CPU's interleaved order, fewer copies, the tests above. The CPU path records nothing.
+- Unit checks (round 211): Windows, in render-cache verify mode, 11,861, 0 failed (978 tests), 0 stale
+  pictures. Linux with libraries: 11,491, 0 failed. Sanitizer build: 11,367, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-23 (round 210): the roadmap of tasks 0156-0191 written up (task 0176)
 
 **Asked:** the roadmap's last task: every task with its round, PR and numbers against the Blender column.

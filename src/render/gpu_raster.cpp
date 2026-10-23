@@ -427,6 +427,10 @@ layout(set = 0, binding = 4) uniform sampler2D g_depth;
  * the source itself. The source's part comes premultiplied, less half a step, so the attachment's rounding cuts much
  * as the CPU's shift does; alpha (a + 1) / 256 leaves dst's (255 - a) / 256. Within 1 / 255 of the CPU: where src * a
  * is under 128 the half step can't be taken off (it rounds), and exact ties go the card's way. */
+struct OvLine { vec3 a; uint color; vec3 b; float bias; };  // task 0192: an overlay line (bias < 0: no depth test)
+layout(std430, set = 0, binding = 17) readonly buffer OvLines { OvLine ol[]; };
+struct OvPoint { vec3 p; uint color; float radius; uint depth_test; uint pad0; uint pad1; };
+layout(std430, set = 0, binding = 18) readonly buffer OvPoints { OvPoint op[]; };
 vec4 cage_color(uint col, float a8) {
   vec3 s = vec3(float((col >> 16) & 255u), float((col >> 8) & 255u), float(col & 255u));
   if (a8 >= 255.0) return vec4(s / 255.0, 1.0);
@@ -446,6 +450,7 @@ const char *kCageLineVert = R"(
 layout(location = 0) flat out vec4 seg;   // nx0, ny0, nx1, ny1: in the major axis
 layout(location = 1) flat out vec4 segz;  // nz0, nz1, steep
 layout(location = 2) flat out uint col;
+layout(location = 3) flat out float lbias;  // the depth test's bias (negative: none)
 bool clipt(float p, float q, inout float t0, inout float t1) {
   if (p == 0.0) return q >= 0.0;
   float r = q / p;
@@ -460,10 +465,19 @@ bool clipt(float p, float q, inout float t0, inout float t1) {
   return true;
 }
 void main() {
+#ifdef BL_OVERLAY
+  OvLine L = ol[gl_InstanceIndex];
+  col = L.color;
+  lbias = L.bias;
+  if ((col >> 24) == 0u) { left_out(); return; }
+  vec4 ca = view_proj * vec4(L.a, 1.0), cb = view_proj * vec4(L.b, 1.0);
+#else
   uvec4 e = ce[gl_InstanceIndex];
   col = e.z;
+  lbias = cage.x;
   if ((e.z >> 24) == 0u) { left_out(); return; }
   vec4 ca = view_proj * vec4(cv[e.x].p, 1.0), cb = view_proj * vec4(cv[e.y].p, 1.0);
+#endif
   if (ca.z < 0.0 && cb.z < 0.0) { left_out(); return; }
   if (ca.z < 0.0) ca = mix(ca, cb, ca.z / (ca.z - cb.z));
   else if (cb.z < 0.0) cb = mix(cb, ca, cb.z / (cb.z - ca.z));
@@ -506,6 +520,7 @@ const char *kCageLineFrag = R"(
 layout(location = 0) flat in vec4 seg;
 layout(location = 1) flat in vec4 segz;
 layout(location = 2) flat in uint col;
+layout(location = 3) flat in float lbias;
 layout(location = 0) out vec4 o_color;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
@@ -520,7 +535,7 @@ void main() {
   float a = m == yi ? 1.0 - f : (m == yi + 1.0 ? f : 0.0);
   if (a <= 0.0) discard;
   float z = segz.x + (segz.y - segz.x) * t;
-  if (z - cage.x > texelFetch(g_depth, p, 0).r) discard;
+  if (lbias >= 0.0 && z - lbias > texelFetch(g_depth, p, 0).r) discard;
   float a8 = floor(float(col >> 24) * clamp(a, 0.0, 1.0));
   if (a8 <= 0.0) discard;
   o_color = cage_color(col, a8);
@@ -533,10 +548,21 @@ const char *kCagePointVert = R"(
 layout(location = 0) flat out vec3 ctr;  // the centre on screen, the radius
 layout(location = 1) flat out uint col;
 void main() {
+#ifdef BL_OVERLAY
+  OvPoint P = op[gl_InstanceIndex];
+  vec3 pos = P.p;
+  col = P.color;
+  float r = P.radius;
+  bool depth_test = P.depth_test != 0u;
+#else
   CageV v = cv[gl_InstanceIndex];
+  vec3 pos = v.p;
   col = v.color;
+  float r = cage.y;
+  bool depth_test = true;
+#endif
   if ((col >> 24) == 0u) { left_out(); return; }
-  vec4 c = view_proj * vec4(v.p, 1.0);
+  vec4 c = view_proj * vec4(pos, 1.0);
   if (c.w <= 1e-6) { left_out(); return; }
   float iw = 1.0 / c.w;
   vec2 s = vec2((c.x * iw * 0.5 + 0.5) * view.x, (c.y * iw * 0.5 + 0.5) * view.y);
@@ -544,8 +570,7 @@ void main() {
   if (z < 0.0) { left_out(); return; }
   int cx = int(s.x), cy = int(s.y);
   bool inside = cx >= 0 && cy >= 0 && cx < int(view.x) && cy < int(view.y);
-  if (z - 1e-4 > (inside ? texelFetch(g_depth, ivec2(cx, cy), 0).r : 1.0)) { left_out(); return; }
-  float r = cage.y;
+  if (depth_test && z - 1e-4 > (inside ? texelFetch(g_depth, ivec2(cx, cy), 0).r : 1.0)) { left_out(); return; }
   int ir = int(ceil(r));
   ctr = vec3(s, r);
   gl_Position = at_pixels(vec2(cx - ir, cy - ir) + kCorner[gl_VertexIndex] * float(2 * ir + 1));
@@ -563,6 +588,53 @@ void main() {
   float a8 = floor(clamp(a * (float(col >> 24) / 255.0), 0.0, 1.0) * 255.0);
   if (a8 <= 0.0) discard;
   o_color = cage_color(col, a8);
+}
+)";
+
+/* Task 0192: Renderer3D::outline_ids on the card - a pixel not showing one of an outline's objects, with one within
+ * `width` pixels left, right, above or below, takes its colour (the later outline's, as the CPU writes them in order).
+ * A pixel's object is its instance's id where something was drawn (the depth below 1), as the ids plane holds it. */
+const char *kOutlineFrag = R"(
+layout(set = 0, binding = 4) uniform sampler2D g_depth;
+layout(set = 0, binding = 15) uniform usampler2D g_inst;
+layout(std430, set = 0, binding = 19) readonly buffer Outlines { uint ot[]; };  // count; per outline first, n, colour, width; the ids
+layout(location = 0) out vec4 o_color;
+uint id_at(ivec2 q) {
+  if (q.x < 0 || q.y < 0 || q.x >= int(view.x) || q.y >= int(view.y)) return 0u;
+  if (texelFetch(g_depth, q, 0).r >= 1.0) return 0u;
+  return inst[texelFetch(g_inst, q, 0).r].id.x;
+}
+bool in_set(uint id, uint first, uint n) {
+  if (id == 0u) return false;
+  uint lo = first, hi = first + n;
+  while (lo < hi) {
+    uint mid = (lo + hi) >> 1u;
+    uint v = ot[mid];
+    if (v == id) return true;
+    if (v < id) lo = mid + 1u;
+    else hi = mid;
+  }
+  return false;
+}
+bool near_one(ivec2 p, uint first, uint n, int w) {
+  for (int d = 1; d <= w; d++)
+    if (in_set(id_at(p + ivec2(-d, 0)), first, n) || in_set(id_at(p + ivec2(d, 0)), first, n) || in_set(id_at(p + ivec2(0, -d)), first, n) ||
+        in_set(id_at(p + ivec2(0, d)), first, n))
+      return true;
+  return false;
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  uint here = id_at(p), count = ot[0], colour = 0u;
+  bool hit = false;
+  for (uint k = 0u; k < count; k++) {
+    uint first = ot[1u + k * 4u], n = ot[2u + k * 4u];
+    if (in_set(here, first, n) || !near_one(p, first, n, int(ot[4u + k * 4u]))) continue;
+    hit = true;
+    colour = ot[3u + k * 4u];
+  }
+  if (!hit) discard;
+  o_color = vec4(float((colour >> 16) & 255u), float((colour >> 8) & 255u), float(colour & 255u), 255.0) / 255.0;
 }
 )";
 
@@ -1274,6 +1346,8 @@ class VulkanRaster final : public Raster {
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
+    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_})  // (task 0192)
+      if (!make_buffer(*b, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
      * arena's, which is copied over when it grows.) */
@@ -1371,6 +1445,7 @@ class VulkanRaster final : public Raster {
   }
 
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
+  bool can_draw_overlays() const override { return pl_ov_line_ && pl_ov_point_ && pl_outline_; }
   bool can_highlight_faces() const override { return geometry_; }
 
   int add_texture(const Texture &t, std::string *err) override {
@@ -1508,6 +1583,7 @@ class VulkanRaster final : public Raster {
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_light_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+    if (can_draw_overlays()) draw_overlays(fr);
     if (fr.cage && can_draw_cage()) draw_cage(fr);
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
@@ -1679,6 +1755,7 @@ class VulkanRaster final : public Raster {
   Buf hl_buf_;  // the face highlight's bits (task 0166)
   bool geometry_ = false;  // the geometryShader feature: gl_PrimitiveID in the g-buffer pass (task 0166)
   Buf cage_v_, cage_e_;  // the Edit Mode cage (task 0100)
+  Buf ov_lines_, ov_points_, ov_outlines_;  // task 0192: the frame's overlays (host-visible, written each frame)
   /* Task 0101: the textures. Their texels in two arenas (8-bit as stored, float), each texture's levels one after
    * another; the tables of textures and levels mirrored here and sent when they change. */
   struct TexSlot {
@@ -1708,7 +1785,8 @@ class VulkanRaster final : public Raster {
   VkRenderPass rp_shadow_ = VK_NULL_HANDLE, rp_gbuf_ = VK_NULL_HANDLE, rp_light_ = VK_NULL_HANDLE;
   /* The G-buffer twice: back faces culled (the view's option) and not (double-sided objects, or culling off). */
   VkPipeline pl_shadow_ = VK_NULL_HANDLE, pl_gbuf_ = VK_NULL_HANDLE, pl_gbuf_cull_ = VK_NULL_HANDLE, pl_gbuf_cull_front_ = VK_NULL_HANDLE,
-             pl_light_ = VK_NULL_HANDLE, pl_cage_line_ = VK_NULL_HANDLE, pl_cage_point_ = VK_NULL_HANDLE;
+             pl_light_ = VK_NULL_HANDLE, pl_cage_line_ = VK_NULL_HANDLE, pl_cage_point_ = VK_NULL_HANDLE,
+             pl_ov_line_ = VK_NULL_HANDLE, pl_ov_point_ = VK_NULL_HANDLE, pl_outline_ = VK_NULL_HANDLE;  // (task 0192)
   enum DrawWhat { DrawNothing, DrawShadow, DrawGbuffer };
   VkSurfaceKHR surface_ = VK_NULL_HANDLE;
   VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
@@ -1969,11 +2047,34 @@ class VulkanRaster final : public Raster {
     tex_tables_dirty_ = false;
     return true;
   }
+  /* Task 0192: the frame's overlays over the picture, run by run in the order they were recorded (the CPU's: lines and
+   * dots interleaved, each outline over what came before). The outline pass reads every outline, so it is drawn once. */
+  void draw_overlays(const RasterFrame &fr) {
+    const uint32_t nl = (uint32_t)fr.overlay_lines.size(), np = (uint32_t)fr.overlay_points.size();
+    bool outlined = false;
+    for (const RasterFrame::OverlayRun &r : fr.overlay_runs) {
+      const uint32_t n = r.kind == 0 ? nl : r.kind == 1 ? np : 0;
+      if (r.kind == 2) {
+        if (outlined || fr.outlines.empty()) continue;
+        outlined = true;
+        f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_outline_);
+        f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+        continue;
+      }
+      if (r.first >= n || !r.count) continue;
+      f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, r.kind == 0 ? pl_ov_line_ : pl_ov_point_);
+      f_.vkCmdDraw(cmd_, 6, std::min(r.count, n - r.first), 0, r.first);
+    }
+  }
   /* The cage over the picture (task 0100): its lines, then its dots, as the CPU records them. */
   void draw_cage(const RasterFrame &fr) {
     if (cage_ne_) {
       f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_cage_line_);
       f_.vkCmdDraw(cmd_, 6, cage_ne_, 0, 0);
+    }
+    if (!fr.cage_dots.empty() && can_draw_overlays()) {  // (task 0192: after the overlays' own dots in their buffer)
+      f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_ov_point_);
+      f_.vkCmdDraw(cmd_, 6, (uint32_t)fr.cage_dots.size(), 0, (uint32_t)fr.overlay_points.size());
     }
     if (cage_nv_ && fr.cage_point_radius > 0.0f) {
       f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_cage_point_);
@@ -2156,6 +2257,44 @@ class VulkanRaster final : public Raster {
     else std::memcpy(hl_buf_.mapped, fr.highlight_bits.data(), fr.highlight_bits.size() * 4);
     return true;
   }
+  /* Task 0192: the frame's overlays into their host-visible buffers (grown as needed; a zero word when none). */
+  /* A host-visible buffer at least `bytes` (16 at least: a zero word when empty), grown when needed. */
+  bool fit_array(Buf &b, size_t bytes, std::string *err) {
+    const size_t need = std::max<size_t>(bytes, 16);
+    if (need > b.size) {
+      f_.vkDeviceWaitIdle(dev_);
+      free_buffer(b);
+      if (!make_buffer(b, need * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory for the overlays");
+      for (Slot &sl : slots_) bind_buffers(sl.set);
+    }
+    std::memset(b.mapped, 0, 16);
+    return true;
+  }
+  bool write_array(Buf &b, const void *data, size_t bytes, std::string *err) {
+    if (!fit_array(b, bytes, err)) return false;
+    if (data && bytes) std::memcpy(b.mapped, data, bytes);
+    return true;
+  }
+  bool write_points(const RasterFrame &fr, std::string *err) {  // the overlays' dots, then the cage's (task 0192)
+    const size_t a = fr.overlay_points.size() * sizeof(OverlayPoint), b = fr.cage_dots.size() * sizeof(OverlayPoint);
+    if (!fit_array(ov_points_, a + b, err)) return false;
+    if (a) std::memcpy(ov_points_.mapped, fr.overlay_points.data(), a);
+    if (b) std::memcpy((uint8_t *)ov_points_.mapped + a, fr.cage_dots.data(), b);
+    return true;
+  }
+  bool write_overlays(const RasterFrame &fr, std::string *err) {
+    if (!can_draw_overlays()) return true;
+    std::vector<uint32_t> ot(1 + fr.outlines.size() * 4, 0);
+    ot[0] = (uint32_t)fr.outlines.size();
+    for (size_t k = 0; k < fr.outlines.size(); k++) {
+      const OverlayOutline &o = fr.outlines[k];
+      ot[1 + k * 4] = (uint32_t)ot.size(), ot[2 + k * 4] = (uint32_t)o.ids.size(), ot[3 + k * 4] = o.color, ot[4 + k * 4] = (uint32_t)std::max(0, o.width);
+      ot.insert(ot.end(), o.ids.begin(), o.ids.end());
+    }
+    return write_array(ov_lines_, fr.overlay_lines.empty() ? nullptr : fr.overlay_lines.data(), fr.overlay_lines.size() * sizeof(OverlayLine), err) &&
+           write_points(fr, err) &&
+           write_array(ov_outlines_, ot.data(), ot.size() * 4, err);
+  }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {
     if (instances_.size() * sizeof(InstGpu) > inst_buf_.size) {
@@ -2178,7 +2317,7 @@ class VulkanRaster final : public Raster {
       dst[i].id[2] = s.highlight;
       write_material(s, dst[i]);
     }
-    if (!write_highlight(fr, err)) return false;
+    if (!write_highlight(fr, err) || !write_overlays(fr, err)) return false;
     FrameUbo u{};
     const Mat4 vp = vulkan_clip(fr.view_proj), sun = vulkan_clip(fr.sun_view_proj), inv = vp.inverse();
     std::memcpy(u.view_proj, vp.m, 64);
@@ -2258,6 +2397,8 @@ class VulkanRaster final : public Raster {
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // each pixel's instance (task 0102)
     b.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // the face highlight's bits (task 0166)
+    for (uint32_t i = 17; i <= 19; i++)  // task 0192: the overlays' lines, dots and outlines
+      b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
@@ -2267,7 +2408,7 @@ class VulkanRaster final : public Raster {
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
     VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12 * kSlots},
                                   {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
@@ -2291,7 +2432,8 @@ class VulkanRaster final : public Raster {
                                             {tex8_.buf, 0, VK_WHOLE_SIZE},      {texf_.buf, 0, VK_WHOLE_SIZE},
                                             {texinfo_buf_.buf, 0, VK_WHOLE_SIZE}, {texlevel_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo hb{hl_buf_.buf, 0, VK_WHOLE_SIZE};
-    VkWriteDescriptorSet w[10];
+    const VkDescriptorBufferInfo ov[3] = {{ov_lines_.buf, 0, VK_WHOLE_SIZE}, {ov_points_.buf, 0, VK_WHOLE_SIZE}, {ov_outlines_.buf, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[13];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
     for (int i = 3; i < 9; i++) {
@@ -2316,7 +2458,13 @@ class VulkanRaster final : public Raster {
     w[9].descriptorCount = 1;
     w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[9].pBufferInfo = &hb;
-    f_.vkUpdateDescriptorSets(dev_, 10, w, 0, nullptr);
+    for (int i = 10; i < 13; i++) {  // (task 0192: bindings 17 to 19)
+      w[i].dstBinding = (uint32_t)(7 + i);
+      w[i].descriptorCount = 1;
+      w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      w[i].pBufferInfo = &ov[i - 10];
+    }
+    f_.vkUpdateDescriptorSets(dev_, 13, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
     const Img *im[7] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst};
@@ -2498,6 +2646,20 @@ class VulkanRaster final : public Raster {
     if (!can_draw_cage()) Log::warn("The GPU view can't draw the Edit Mode cage (%s): the CPU draws it", cerr.empty() ? "?" : cerr.c_str());
     for (VkShaderModule m : {clv, clf, cpv, cpf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
+    /* Task 0192: the overlays - the cage's shaders over the frame's own lines and dots - and the outline pass. */
+    std::string oerr;
+    const std::string ov = "#define BL_OVERLAY 1\n" + cv;
+    VkShaderModule olv = module(ov + kCageLineVert, shaderc_vertex_shader, &oerr), opv = module(ov + kCagePointVert, shaderc_vertex_shader, &oerr),
+                   ofv = module(kFullVert, shaderc_vertex_shader, &oerr), off = module(kOutlineFrag, shaderc_fragment_shader, &oerr);
+    VkShaderModule olf = module(cc + kCageLineFrag, shaderc_fragment_shader, &oerr), opf = module(cc + kCagePointFrag, shaderc_fragment_shader, &oerr);
+    if (olv && opv && ofv && off && olf && opf) {
+      pl_ov_line_ = make_pipeline(rp_light_, olv, olf, 1, false, VK_CULL_MODE_NONE, true);
+      pl_ov_point_ = make_pipeline(rp_light_, opv, opf, 1, false, VK_CULL_MODE_NONE, true);
+      pl_outline_ = make_pipeline(rp_light_, ofv, off, 1, false, VK_CULL_MODE_NONE, true);
+    }
+    if (!can_draw_overlays()) Log::warn("The GPU view can't draw the overlays (%s): the CPU draws them", oerr.empty() ? "?" : oerr.c_str());
+    for (VkShaderModule m : {olv, opv, ofv, off, olf, opf})
+      if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
     if (sv && gv && gf && fv && lf) {
       pl_shadow_ = make_pipeline(rp_shadow_, sv, VK_NULL_HANDLE, 0, true, VK_CULL_MODE_NONE);
       pl_gbuf_ = make_pipeline(rp_gbuf_, gv, gf, 6, true, VK_CULL_MODE_NONE);
@@ -2614,14 +2776,14 @@ class VulkanRaster final : public Raster {
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
       for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color}) free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     free_image(ui_img_);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_, &hl_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);

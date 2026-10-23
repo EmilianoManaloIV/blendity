@@ -10323,6 +10323,52 @@ static void tests_round184() {
   });
 }
 
+/* ---------------------------------------------------------------- round 211: overlays recorded (task 0192) */
+static void tests_round211() {
+  test("overlays recorded in the world and replayed draw exactly what drawing them does - lines, dots, lines without the depth test, an outline between them", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    std::vector<uint32_t> sel;
+    for (uint32_t id : rt.ids)
+      if (id) sel.push_back(id);
+    std::sort(sel.begin(), sel.end());
+    sel.erase(std::unique(sel.begin(), sel.end()), sel.end());
+    if (sel.size() > 1) sel.resize(1);
+    R34Rng rng{77u};
+    auto draw = [&] {
+      r.begin_overlay_batch();
+      for (int i = 0; i < 300; i++) {
+        const Vec3 a(rng.range(-4.0f, 4.0f), rng.range(-2.0f, 2.0f), rng.range(-3.0f, 4.0f)), b(rng.range(-4.0f, 4.0f), rng.range(-2.0f, 2.0f), rng.range(-3.0f, 4.0f));
+        const uint32_t c = 0xC0000000u | (uint32_t)(i * 2654435761u & 0xFFFFFF);
+        if (i % 4 == 3) r.point(a, rng.range(1.0f, 5.0f), c, i % 2 == 0);
+        else r.line(a, b, c, i % 3 != 0, i % 5 == 0 ? 0.01f : 0.0f);
+        if (i == 150 && !sel.empty()) r.outline_ids(sel, 0xFFFF8800u, 2);
+      }
+      r.end_overlay_batch();
+    };
+    rng = R34Rng{77u};
+    draw();
+    const std::vector<uint32_t> direct = img.pixels;
+    img.pixels = base;
+    Renderer3D::OverlayRecord rec;
+    r.record_overlays(&rec);
+    rng = R34Rng{77u};
+    draw();
+    r.record_overlays(nullptr);
+    CHECK(img.pixels == base);  // (recording draws nothing)
+    std::printf("    %zu recorded, %zu ids\n", rec.ops.size(), rec.ids.size());
+    CHECK(rec.ops.size() == 300 + (sel.empty() ? 0 : 1));
+    r.begin_overlay_batch();
+    r.replay(rec);
+    r.end_overlay_batch();
+    CHECK(img.pixels == direct);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10360,4 +10406,5 @@ void run_render_tests() {
   tests_round167();
   tests_round168();
   tests_round184();
+  tests_round211();
 }

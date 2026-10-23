@@ -1,5 +1,21 @@
 # Performance, limits and efficiencies
 
+## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
+The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
+
+### After task 0192 (the overlays on the card)
+- With GPU views (stress editor_render, the RTX 4070 SUPER), the overlays' CPU time:
+  - Edit Mode's Face mode: 3.2-3.6 -> 0.2 ms a frame (the card draws the grid, the wires, the outline and the face
+    dots with the picture);
+  - entering Edit Mode: 0.2 ms.
+- The Edit Mode rows with GPU views:
+  - entering: 16.2-18.6 ms (was 18.6-21.5);
+  - extrude: 37.5-38.8 (38.1-41.6);
+  - undo: 11.6-14.8 (13.0-14.5);
+  - Select More: 8.3-8.6 (8.6-11.0);
+  - a Move gizmo drag's GPU path: 1.44 ms a frame.
+
+
 All numbers come from `blendity_stress` (full run, about 130 s with Blender's libraries, which add the library-vs-fallback comparisons) on the development machine: **AMD Ryzen 9 5900XT (16 cores / 32 threads), Windows 11, MSVC 14.51 `/O2`**. Re-run it on your own machine:
 
 ```

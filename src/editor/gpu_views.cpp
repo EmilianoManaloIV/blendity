@@ -587,6 +587,9 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     Log::warn("The GPU view can't take the Edit Mode cage (%s): the CPU draws it", cage_err.c_str());
     cage_err_logged_ = true;
   }
+  /* Task 0192: the Scene view's overlays with its picture, when the card draws at the view's full size. */
+  const bool overlays = scene_full_call_ && scene_overlays_recorded_ && g->can_draw_overlays() && !overlays_off_gpu_for_test_;
+  if (overlays) overlays_to_frame(fr);
   g->set_instances(inst);
   /* The picture, and the planes later work reads: depth for picking and overlays, and for a camera's depth of field
    * when it has one; ids for picking (not in a view nobody picks in: task 0092). The colour comes straight into the
@@ -624,6 +627,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (scene_gpu_call_) scene_on_gpu_ = true;
   cage_on_gpu_ = cage_on_gpu_ || cage;
   prof_.gpu_cage_frames += cage ? 1 : 0;
+  overlays_on_gpu_ = overlays_on_gpu_ || overlays;
+  prof_.gpu_overlay_frames += overlays ? 1 : 0;
   return true;
 }
 
@@ -674,6 +679,7 @@ uint64_t Editor::cage_edges_key(const Mesh &m) const {
 bool Editor::gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err) {
   GameObject *obj = edit_object();
   if (!obj || !edit_mesh_ptr() || !*edit_mesh_ptr() || !g.can_draw_cage()) return false;
+  if (elem_ == EditElement::Face && !g.can_draw_overlays()) return false;  // (Face mode's dots go with the overlays: task 0192)
   const Mesh &m = **edit_mesh_ptr();
   const Mat4 &w = obj->world_matrix();
   vert_sel_.resize(m.vert_count(), 0);
@@ -722,6 +728,14 @@ bool Editor::gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err) {
   gpu_cage_v_ = std::move(v);
   if (!edges_same) gpu_cage_e_ = std::move(e);
   gpu_cage_edges_key_ = key;
+  if (elem_ == EditElement::Face) {  // task 0192: Face mode's dots over the cage
+    std::vector<Vec3> pos;
+    std::vector<uint32_t> col;
+    const float r = edit_face_dots(m, w, pos, col);
+    fr.cage_dots.resize(pos.size());
+    for (size_t i = 0; i < pos.size(); i++) fr.cage_dots[i] = {{pos[i].x, pos[i].y, pos[i].z}, col[i], r, 1u};
+    prof_.gpu_face_dot_frames++;
+  }
   fr.cage = true;
   fr.cage_bias = kCageBias;
   fr.cage_point_radius = dots ? cage_dot_radius() : 0.0f;

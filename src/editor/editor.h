@@ -148,6 +148,8 @@ struct FrameProfile {
   uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
+  uint64_t gpu_overlay_frames = 0;                        // task 0192: Scene view frames whose overlays the card drew
+  uint64_t gpu_face_dot_frames = 0;                       // task 0192: Edit Mode frames whose Face mode dots the card drew
   double ms_gpu = 0;
   /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
    * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
@@ -177,6 +179,7 @@ struct FrameProfile {
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
+    gpu_overlay_frames += o.gpu_overlay_frames, gpu_face_dot_frames += o.gpu_face_dot_frames;
     ms_gpu += o.ms_gpu;
     ms_gpu_shadow += o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
   }
@@ -528,6 +531,9 @@ class Editor {
   bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
   std::string gizmo_typed_for_test() const { return gizmo_typed_; }
   int gizmo_hot_for_test() const { return gizmo_hot_; }
+  void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
+  void clear_selection_for_test() { clear_selection(); }
+  void overlays_extra_for_test(std::function<void(Renderer3D &)> fn) { overlays_extra_for_test_ = std::move(fn); }
   uint64_t scene_render_hash_for_test() { return scene_render_hash(); }
   bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
   bool typed_axis_move_for_test(Vec3 axis, Vec3 &delta) { return typed_axis_move(axis, delta); }
@@ -1074,6 +1080,17 @@ class Editor {
   void render_scene_view(const Recti &r);
   void render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p);
   void render_overlays(const Recti &r);
+  /* Task 0192 (ADR 0061): the Scene view's overlays recorded before its picture, for the card to draw with it. */
+  void record_scene_overlays(const Recti &view, bool on);
+  void draw_scene_overlays(const Recti &view);
+  void overlays_to_frame(gpu::RasterFrame &fr) const;
+  void render_edit_cage();
+  bool overlays_card_expected() const;
+  std::function<void(Renderer3D &)> overlays_extra_for_test_;  // (a test's own overlays, drawn first)
+  float edit_face_dots(const Mesh &m, const Mat4 &w, std::vector<Vec3> &pos, std::vector<uint32_t> &col);
+  Renderer3D::OverlayRecord scene_overlays_;
+  bool scene_overlays_recorded_ = false, overlays_on_gpu_ = false;
+  bool overlays_off_gpu_for_test_ = false;  // (a test: the card can't take them, so they're replayed here)
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);

@@ -94,6 +94,29 @@ struct CageEdge {
   uint32_t pad = 0;
 };
 
+/* Task 0192 (ADR 0061): the overlays the CPU draws over a view - Renderer3D's lines, dots and selection outlines -
+ * drawn over the picture on the card instead, as the cage is (the same per-pixel rules: draw_overlay, prepare_point,
+ * outline_ids). Colours 0xAARRGGBB. */
+struct OverlayLine {
+  float a[3];
+  uint32_t color;
+  float b[3];
+  float bias;  // the depth test's bias; negative: no depth test
+};
+struct OverlayPoint {
+  float p[3];
+  uint32_t color;
+  float radius;         // in pixels
+  uint32_t depth_test;  // 0 / 1
+  uint32_t pad[2] = {0, 0};
+};
+/* Pixels next to (within `width` of) a pixel showing one of `ids` (sorted), not themselves one, set to `color`. */
+struct OverlayOutline {
+  std::vector<uint32_t> ids;
+  uint32_t color = 0;
+  int width = 1;
+};
+
 /* A light: type 0 sun, 1 point, 2 spot (as RenderLight; a sun's direction points where its light goes). */
 struct RasterLight {
   int type = 0;
@@ -144,6 +167,18 @@ struct RasterFrame {
    * its vertices as dots of this radius in pixels (0: no dots). */
   bool cage = false;
   float cage_bias = 0.0f, cage_point_radius = 0.0f;
+  /* Task 0192: the overlays over the picture, before the cage, in the CPU's order: runs of lines, dots or outlines as
+   * they were recorded (an outline run's outlines are drawn in one pass, which reads them all). */
+  std::vector<OverlayLine> overlay_lines;
+  std::vector<OverlayPoint> overlay_points;
+  std::vector<OverlayOutline> outlines;
+  struct OverlayRun {
+    uint32_t kind = 0;  // 0 lines, 1 dots, 2 the outlines
+    uint32_t first = 0, count = 0;
+  };
+  std::vector<OverlayRun> overlay_runs;
+  /* Dots drawn over the cage, after its edges (Face mode's: a dot a face; drawn only with the cage and the overlays). */
+  std::vector<OverlayPoint> cage_dots;
 };
 
 /* GPU time of the last render() (timestamps), in ms; submit_wall is the last submission's wall time from the queue
@@ -187,6 +222,8 @@ class Raster {
   /* Whether the g-buffer pass can tint Edit Mode's selected faces (task 0166: it needs gl_PrimitiveID, which Vulkan
    * ties to the geometryShader feature); without it the edit object draws on the CPU as before. */
   virtual bool can_highlight_faces() const { return false; }
+  /* Task 0192: whether RasterFrame's overlays are drawn (else the caller draws them itself). */
+  virtual bool can_draw_overlays() const { return false; }
   /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;

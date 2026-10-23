@@ -1141,6 +1141,11 @@ The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (P
 ? Why does the GPU read textures from storage buffers instead of using its texture units? | The texture units filter, choose mip levels and decode sRGB in their own slightly different ways. Reading the CPU's own mip chain and filtering it with the CPU's formulas keeps the two pictures within a step of 255.
 ! cmd:viewport device gpu | Draw the views on the GPU
 ! cmd:viewport device cpu | Draw the views on the CPU again
+# Drawing on the graphics card
+With Viewport Device on Auto, the views draw on your graphics card, as Blender's viewport does: the shaded picture, and since this round the grid, the wireframes, the selection outline and Edit Mode's cage and dots, all in one go. If there is no card, or it fails, the same window draws on the processor instead - the same picture, a little slower - and the Profiler says why. The processor's picture is the reference: every picture the card draws is checked against it.
+? Your laptop's graphics driver crashed while you were modelling. What happens to the Scene view? | It draws on the processor from the next frame, the same picture, and the Profiler and Preferences say why; choosing Viewport Device again tries the card again.
+! cmd:viewport device gpu | Draw the views on the graphics card
+! cmd:viewport device cpu | Draw them on the processor
 # The Profiler's GPU block
 The Profiler window (Window > Profiler) shows how long a frame spent in the GPU path: the time from handing the card its work to getting the picture back. That is wall time, and most of it can be waiting. The GPU block puts the card's own clock beside it: how long the shadow, g-buffer and lighting passes ran (timestamp queries on the card), how long the copies of the picture out to the CPU and the wait for them took, and "GPU busy in the frame" as a share of the whole frame. While F12 or the Camera Preview is running, two rows show the path tracer's busy and wait time inside its submissions and its busy share over the whole render (F12) or the frame (Camera Preview): the card sits idle between submissions, and that is where the time goes. A card without timestamp queries shows n/a beside the wall time. Blender reads the same GPU timestamps for its own debug timings.
 @ blender/source/blender/gpu/opengl/gl_debug.cc

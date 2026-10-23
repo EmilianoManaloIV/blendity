@@ -426,6 +426,7 @@ static void tests_round122_to_round125() {
     ed.command("vsel 4000");
     ed.command("camera 0 15 5 0 1 0");
     ed.command("tool move");
+    ed.command("overlay grid off");  // (the grid on the card is task 0192's test: this one compares the range uploads)
     r34_steps(ed, 3);
     const Mesh &m0 = *big->get<MeshFilter>()->mesh;
     const Vec3 wp = big->world_matrix().point(m0.positions[4000]);
@@ -485,7 +486,8 @@ static void tests_round122_to_round125() {
     r122_compare(r34_crop(ed, ed.scene_view_rect()), gpu, mean, within3);
     std::printf("    after the drag: mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, within3 * 100);
     /* (The same difference with whole uploads instead of ranges, 0.899 / 255 either way: what's left is the GPU's
-     * picture against the CPU's on this scene, not what was sent.) */
+     * picture against the CPU's on this scene, not what was sent. The grid is off: since task 0192 the card draws it,
+     * within 1 / 255 of the CPU's, which this test isn't about.) */
     CHECK(mean < 1.0 && within3 >= 0.99);
   });
   /* ---------------------------------------------------------------- round 125: the Edit Mode cage on the GPU (task 0100) */
@@ -541,11 +543,13 @@ static void tests_round122_to_round125() {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
     }
-    for (const char *mode : {"vertex", "edge", "N-gon"}) {
+    for (const char *mode : {"vertex", "edge", "N-gon", "face", "N-gon face"}) {  // (the face modes' dots: task 0192)
       Editor ed;
       GameObject *big = r125_open(ed);
-      if (std::string(mode) == "edge") ed.command("edit edge");
-      if (std::string(mode) == "N-gon") ed.command("ngon on");
+      const std::string md = mode;
+      if (md == "edge") ed.command("edit edge");
+      if (md == "face" || md == "N-gon face") ed.command("edit face");
+      if (md.rfind("N-gon", 0) == 0) ed.command("ngon on");
       const std::vector<uint32_t> cpu = r125_scene(ed, big, 1);
       const FrameProfile before = ed.frame_profile_totals();
       const std::vector<uint32_t> gpu = r125_scene(ed, big, 2);
@@ -561,6 +565,7 @@ static void tests_round122_to_round125() {
                   "pixels: %.3f, %.2f %%\n",
                   mode, (unsigned long long)(after.gpu_cage_frames - before.gpu_cage_frames), mean, within3 * 100, n, cmean, cwithin3 * 100);
       CHECK(after.gpu_cage_frames > before.gpu_cage_frames);
+      if (md == "face" || md == "N-gon face") CHECK(after.gpu_face_dot_frames > before.gpu_face_dot_frames);  // (the card drew the face dots: task 0192)
       CHECK(n > 2000);
       CHECK(mean < 1.0 && within3 >= 0.99);
       CHECK(cmean < 1.0 && cwithin3 >= 0.99);
@@ -2009,6 +2014,153 @@ static void tests_round190() {
   });
 }
 
+/* ---------------------------------------------------------------- round 211: the overlays on the card (task 0192) */
+static void tests_round211() {
+  /* The Scene view, drawn again on `device` (a change and back: the card draws at full size from its second frame). */
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position({2.0f, k ? 1.0f : 1.0001f, 0.0f});
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  /* Over the pixels where `with` differs from `without` (the overlays' own): how many, the mean of the worst channel's
+   * difference between `with` and `gpu`, and the share within 3 / 255. */
+  auto compare = [](const std::vector<uint32_t> &with, const std::vector<uint32_t> &without, const std::vector<uint32_t> &gpu, size_t &n, double &mean,
+                    double &within3) {
+    auto worst = [](uint32_t a, uint32_t b) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)));
+      return w;
+    };
+    double sum = 0;
+    size_t within = 0;
+    n = 0;
+    for (size_t i = 0; i < with.size() && i < without.size() && i < gpu.size(); i++) {
+      if (worst(with[i], without[i]) <= 8) continue;
+      const int w = worst(with[i], gpu[i]);
+      n++, sum += w, within += w <= 3;
+    }
+    mean = n ? sum / (double)n : 0;
+    within3 = n ? (double)within / (double)n : 0;
+  };
+  auto open = [](Editor &ed) {
+    r34_open(ed);
+    GameObject *wire = ed.scene().create("Wired");
+    wire->add<MeshFilter>()->mesh = primitives::uv_sphere(0.8f, 24, 16);
+    wire->add<MeshRenderer>()->show_wireframe = true;
+    wire->set_local_position({2.0f, 1.0f, 0.0f});
+    ed.mark_changed_for_test("Wired");
+    ed.command("select Cube");
+    ed.command("camera 0 4 6 0 1 0");
+    r34_steps(ed, 3);
+    return wire;
+  };
+  test("gpu views: the Scene view's overlays - the grid and its axes, a wireframe, the selection outline - drawn by the card as the CPU draws them (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *wire = open(ed);
+    const std::vector<uint32_t> cpu = view(ed, wire, 1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = view(ed, wire, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    ed.viewport_device_for_test(1);
+    ed.command("overlay grid off");
+    ed.clear_selection_for_test();
+    wire->get<MeshRenderer>()->show_wireframe = false;
+    const std::vector<uint32_t> plain = view(ed, wire, 1);
+    const std::vector<uint32_t> gpu_plain = view(ed, wire, 2);
+    size_t n = 0;
+    double mean = 0, within3 = 0;
+    compare(cpu, plain, gpu, n, mean, within3);
+    /* The lines alone: their pixels where the two pictures under them agree (so the 3D's own small differences, which
+     * show through faint lines, don't count). */
+    std::vector<uint32_t> cpu_same, plain_same, gpu_same;
+    for (size_t i = 0; i < cpu.size() && i < plain.size() && i < gpu.size() && i < gpu_plain.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((plain[i] >> k) & 255) - (int)((gpu_plain[i] >> k) & 255)));
+      if (d > 0) continue;
+      cpu_same.push_back(cpu[i]), plain_same.push_back(plain[i]), gpu_same.push_back(gpu[i]);
+    }
+    size_t ln = 0;
+    double lmean = 0, lwithin3 = 0;
+    compare(cpu_same, plain_same, gpu_same, ln, lmean, lwithin3);
+    std::printf("    the card drew the overlays in %llu frames; their %zu pixels: mean difference %.3f / 255, %.2f %% within 3; the %zu where the "
+                "pictures under them agree: %.3f, %.2f %%\n",
+                (unsigned long long)(after.gpu_overlay_frames - before.gpu_overlay_frames), n, mean, within3 * 100, ln, lmean, lwithin3 * 100);
+    CHECK(after.gpu_overlay_frames > before.gpu_overlay_frames);
+    CHECK(n > 2000);
+    CHECK(mean < 1.0 && within3 >= 0.99);
+  });
+  test("gpu views: every kind of overlay on the card as on the CPU - dots of several sizes over and under lines, translucent, without the depth test, lines without it, an outline between them (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *wire = open(ed);
+    wire->get<MeshRenderer>()->show_wireframe = false;
+    ed.command("overlay grid off");
+    ed.clear_selection_for_test();
+    const uint32_t cube = (uint32_t)ed.scene().find_by_name("Cube")->id;
+    ed.overlays_extra_for_test([cube](Renderer3D &r) {
+      for (int i = 0; i < 40; i++) {
+        const float t = i / 40.0f;
+        const Vec3 a(-2.5f + 5.0f * t, 0.2f + 1.6f * t, -0.5f), b(2.5f - 5.0f * t, 2.0f - 1.4f * t, 0.8f);
+        if (i % 3 == 0) r.point(a, 2.0f + (i % 5), 0x8C30C0F0u, i % 2 == 0);  // (translucent, some through everything)
+        r.line(a, b, i % 4 == 0 ? 0xFFE04020u : 0xA0FFFFFFu, i % 4 != 0, 2e-4f);
+        if (i == 20) r.outline_ids({cube}, 0xFFFF8800u, 2);
+        if (i % 3 == 1) r.point(b, 3.0f, 0xFF20E060u, true);
+      }
+    });
+    const std::vector<uint32_t> cpu = view(ed, wire, 1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = view(ed, wire, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    ed.overlays_extra_for_test(nullptr);
+    ed.viewport_device_for_test(1);
+    const std::vector<uint32_t> plain = view(ed, wire, 1);
+    size_t n = 0;
+    double mean = 0, within3 = 0;
+    compare(cpu, plain, gpu, n, mean, within3);
+    std::printf("    the card drew them in %llu frames; their %zu pixels: mean difference %.3f / 255, %.2f %% within 3\n",
+                (unsigned long long)(after.gpu_overlay_frames - before.gpu_overlay_frames), n, mean, within3 * 100);
+    CHECK(after.gpu_overlay_frames > before.gpu_overlay_frames);
+    CHECK(n > 1000 && mean < 1.0 && within3 >= 0.99);
+  });
+  test("gpu views: when the card can't take the overlays they're drawn here over its picture, the same as the CPU's (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *wire = open(ed);
+    const std::vector<uint32_t> cpu = view(ed, wire, 1);
+    ed.overlays_off_gpu_for_test(true);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = view(ed, wire, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    ed.overlays_off_gpu_for_test(false);
+    ed.viewport_device_for_test(1);
+    ed.command("overlay grid off");
+    ed.clear_selection_for_test();
+    wire->get<MeshRenderer>()->show_wireframe = false;
+    const std::vector<uint32_t> plain = view(ed, wire, 1);
+    size_t n = 0;
+    double mean = 0, within3 = 0;
+    compare(cpu, plain, gpu, n, mean, within3);
+    std::printf("    replayed here: %llu card frames with overlays, %llu views on the card; their %zu pixels: mean %.3f, %.2f %% within 3\n",
+                (unsigned long long)(after.gpu_overlay_frames - before.gpu_overlay_frames), (unsigned long long)(after.gpu_views - before.gpu_views), n,
+                mean, within3 * 100);
+    CHECK(after.gpu_overlay_frames == before.gpu_overlay_frames && after.gpu_views > before.gpu_views);
+    CHECK(n > 2000 && mean < 1.0 && within3 >= 0.99);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2023,4 +2175,5 @@ void run_gpu_tests() {
   tests_round186();
   tests_round189();
   tests_round190();
+  tests_round211();
 }

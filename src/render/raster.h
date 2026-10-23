@@ -314,6 +314,23 @@ class Renderer3D {
   }
   /* Orange outline around pixels whose id is in `selected`, Unity/Blender style. */
   void outline_ids(const std::vector<uint32_t> &selected_sorted, uint32_t color, int width = 2);
+  /* Task 0192 (ADR 0061): while a record is set, line(), point(), lines(), points() and outline_ids() are kept in it,
+   * in the world and in order, instead of drawn - for the card to draw, or replay() to draw here as they would have. */
+  struct OverlayRecord {
+    struct Op {
+      enum Kind : uint8_t { Line, Point, Outline } kind = Line;
+      Vec3 a, b;
+      uint32_t color = 0;
+      float value = 0.0f;  // a line's bias, a dot's radius
+      bool depth_test = true;
+      uint32_t first = 0, count = 0;  // an outline's ids in `ids`; its width in `value`
+    };
+    std::vector<Op> ops;
+    std::vector<uint32_t> ids;
+    void clear() { ops.clear(), ids.clear(); }
+  };
+  void record_overlays(OverlayRecord *r) { record_ = r; }
+  void replay(const OverlayRecord &r);
 
   bool project(Vec3 world, Vec2 &screen, float &depth) const;
   Ray screen_ray(float x, float y) const;
@@ -386,6 +403,7 @@ class Renderer3D {
   };
   bool batching_ = false;
   std::vector<OverlayCmd> overlay_cmds_;
+  OverlayRecord *record_ = nullptr;  // (task 0192)
   /* flush() scratch, kept between flushes (cleared, not freed): per item, is it visible, is it big enough
    * for the separate vertex stage, does it have see-through materials; the vertex-stage jobs. */
   std::vector<uint8_t> visible_, big_, see_through_;
