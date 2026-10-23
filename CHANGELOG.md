@@ -2,6 +2,23 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 220): the views native on the GPU, written up (task 0200)
+
+**Asked:** "Why is it that the view still runs on the CPU? Shouldn't it run on the GPU natively like Blender?", with
+the CPU as the fallback. This round writes up the roadmap that answered it (tasks 0192-0199, rounds 211-219, PRs
+#156-#164).
+
+**Added:** docs/tasks/0200-native-gpu-views-write-up.md:
+- every task with its round, PR and numbers;
+- the CPU fallbacks before and after: of the eleven features that sent a whole view to the CPU, only realtime GI's
+  per-pixel gather still does, with a few narrow cases (a retro filter's rasterizer stage, a live procedural seen very
+  close, see-through toon materials, bloom over see-through surfaces, probe volumes over 262,144 probes);
+- Blender's viewport against Blendity's window: Blender 3.98-5.23 ms, Blendity 5.57-7.51 ms (the card presenting);
+- what stays on the CPU and why, and the follow-ups (the card's 33-second first open after a shader change; one draw
+  call for many copies of a mesh; the UI on the card).
+
+**Checked:** documentation only; no code changed.
+
 ## 2026-10-23 (round 219): the GPU as the default, said per window; Blender's viewport timed (task 0199)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback ("most computers would
