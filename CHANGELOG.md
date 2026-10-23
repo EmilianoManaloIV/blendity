@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 196): PartField's part tree for Part Unwrap, opt-in (task 0180, ADR 0057 amended)
+
+**Asked:** an opt-in "semantic parts" switch: PartField's learned per-face features (NVIDIA; non-commercial weights,
+never downloaded by Blendity) in place of the geometric part tree, as PartUV uses them.
+
+**Changed**
+- `uv parts semantic on|off` (off by default): Part Unwrap's part tree from PartField's features when the user has
+  installed a conversion of the model (`~/.blendity/ai/partfield/partfield.onnx`, through the ONNX Runtime of the AI
+  install); the geometric tree otherwise, the Console saying which and why. `src/scene/partfield.*`: the model's
+  contract (face centroids and normals in -> a feature per face out), rows scaled to unit length; the part tree takes
+  features of any width (wider than 32 through a fixed random projection).
+- `tools/partfield/`: the conversion script the user runs with PartField's code and their weights, and its README.
+
+**Not done:** the roadmap's spike - does PartField export to ONNX? - needs PartField's code and weights, which are
+NVIDIA's under a non-commercial licence; downloading them is the user's decision, so it wasn't run. The export script
+is written against the contract with placeholder names for PartField's encoder and feature query (its README says so,
+and names the fallback: features written by PartField in Python, read the same way).
+
+**Checked**
+- With a stand-in model, the features reach the part tree: the teapot's charts come out otherwise (10 against the
+  geometric tree's 11), every chart under the bound, also with features 448 wide; the switch is off by default, the
+  geometric tree is used exactly when nothing is installed, the editor's result is the stand-in's exactly
+  (tests/test_modeling.cpp).
+- Unit checks (round 196): Windows, in render-cache verify mode, 11,450, 0 failed (949 tests), 0 stale
+  pictures. Linux with libraries: 11,097, 0 failed. Sanitizer build: 10,974, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `uv`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test (a GPU opening in the background, timed) failed under the parallel load, then in two of three runs alone (one while another build loaded the machine, one on a quiet machine) and passed in the third: a flaky timing test, not changed by this round; the sanitizer leg's autopose timing likewise failed under load and passed alone.)
+
 ## 2026-10-22 (round 195): unwrap by parts - PartUV's search on a geometric part tree, ABF++ beside LSCM (task 0179, ADR 0057)
 
 **Asked:** a part-based unwrapper after PartUV (SIGGRAPH Asia 2025): its geometric core (the PartField model is task

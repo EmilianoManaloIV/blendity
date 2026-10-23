@@ -825,7 +825,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
-    Log::info("  uv parts [bound] [multi|single] (unwrap by parts, PartUV), uv report (charts, seam length, distortion)");
+    Log::info("  uv parts [bound] [multi|single] (unwrap by parts, PartUV), uv parts semantic on|off (PartField's tree), uv report");
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
@@ -1676,6 +1676,13 @@ void Editor::run_console_command(const std::string &line) {
 
 /* `gpu list` (task 0169): every card Vulkan sees, then OptiX's state - in the build, turned off, its driver, its cards. */
 void Editor::uv_parts_command(const std::vector<std::string> &t) {
+  if (t.size() > 2 && to_lower(t[2]) == "semantic") {  // uv parts semantic on|off (task 0180)
+    part_semantic_ = to_lower(t.size() > 3 ? t[3] : "on") != "off";
+    const std::string why = partfield::install_problem();
+    Log::info("Part Unwrap's part tree: %s%s", part_semantic_ ? "PartField's (non-commercial weights, your own conversion)" : "from the geometry",
+              part_semantic_ && !why.empty() && !partfield_ ? (" - but " + why + ": the geometric tree is used").c_str() : "");
+    return;
+  }
   for (size_t i = 2; i < t.size(); i++) {
     const std::string w = to_lower(t[i]);
     if (w == "multi" || w == "single") {

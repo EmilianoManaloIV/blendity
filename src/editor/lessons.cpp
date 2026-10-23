@@ -749,6 +749,7 @@ Smart UV Project needs no seams but cuts a curved surface into many small island
 @ blender/source/blender/geometry/intern/uv_parametrizer.cc
 ? A closed cube becomes at least two charts with Part Unwrap, never one. Why? | A chart is a set of faces with no cut inside it, and a closed surface can't lie flat without a cut: each closed piece needs two charts at least.
 ? You raise the bound from 1.25 to 2. What do you trade? | Fewer charts and shorter seams for more stretch: a face may then be up to twice or half its fair share of the texture.
+? You turn on uv parts semantic. What changes, and why is it off by default? | The part tree comes from PartField's learned features (parts as a person would name them) instead of the geometry, which changes where the search splits. It is off because PartField's weights are NVIDIA's, non-commercial: you install a conversion of your own, and without one the geometric tree is used.
 ! cmd:select Cylinder; uv parts; window UV Editor | Part Unwrap the Cylinder and look at its charts
 ! cmd:select Cylinder; uv report | Measure its UV map (charts, seams, stretch) in the Console
 )"},

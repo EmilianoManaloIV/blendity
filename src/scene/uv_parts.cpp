@@ -159,12 +159,16 @@ struct Dendrogram {
   }
 };
 
-constexpr int kFeat = 6;
-using Feature = std::array<float, kFeat>;
+/* The faces' features, row by row (`dims` a row): the geometric ones (normal, position) or a model's (task 0180). */
+struct Features {
+  std::vector<float> v;
+  int dims = 0;
+  const float *row(size_t i) const { return v.data() + i * (size_t)dims; }
+};
 
 struct Cluster {
   double weight = 0;
-  Feature sum{};
+  std::vector<double> sum;  // area-weighted feature sum
   int node = 0, group = 0, version = 0;
   bool alive = true;
   std::unordered_set<int> nbr;
@@ -178,7 +182,7 @@ struct Pair {
 
 double ward(const Cluster &a, const Cluster &b) {
   double d2 = 0;
-  for (int k = 0; k < kFeat; k++) {
+  for (size_t k = 0; k < a.sum.size(); k++) {
     const double x = a.sum[k] / a.weight - b.sum[k] / b.weight;
     d2 += x * x;
   }
@@ -187,7 +191,7 @@ double ward(const Cluster &a, const Cluster &b) {
 
 /* `items` (local faces of the part) with their features; `group` keeps material slots apart until nothing else is
  * left to merge. Merges whatever stays apart (the components) at the end, largest last. */
-Dendrogram cluster(const FaceData &d, const std::vector<int> &items, const std::vector<Feature> &feat, const std::vector<int> &group) {
+Dendrogram cluster(const FaceData &d, const std::vector<int> &items, const Features &feat, const std::vector<int> &group) {
   Dendrogram tree;
   const int n = (int)items.size();
   tree.leaves = n;
@@ -197,7 +201,8 @@ Dendrogram cluster(const FaceData &d, const std::vector<int> &items, const std::
   for (int i = 0; i < n; i++) {
     const double w = std::max(1e-12f, d.area[items[i]]);
     c[i].weight = w;
-    for (int k = 0; k < kFeat; k++) c[i].sum[k] = (float)(feat[i][k] * w);
+    c[i].sum.resize((size_t)feat.dims);
+    for (int k = 0; k < feat.dims; k++) c[i].sum[k] = feat.row(i)[k] * w;
     c[i].node = i;
     c[i].group = group[i];
     for (int f : d.nbr[items[i]]) {
@@ -225,7 +230,8 @@ Dendrogram cluster(const FaceData &d, const std::vector<int> &items, const std::
     c[b].nbr.clear();
     c[b].alive = false;
     c[a].weight += c[b].weight;
-    for (int k = 0; k < kFeat; k++) c[a].sum[k] += c[b].sum[k];
+    for (size_t k = 0; k < c[a].sum.size(); k++) c[a].sum[k] += c[b].sum[k];
+    c[b].sum.clear();
     if (c[a].group != c[b].group) c[a].group = std::min(c[a].group, c[b].group);
     tree.merge.push_back({c[a].node, c[b].node});
     c[a].node = n + (int)tree.merge.size() - 1;
@@ -450,11 +456,9 @@ bool Solver::all_pass(std::vector<std::vector<int>> &sets, std::vector<Chart> &o
 /* PartUV's Normal heuristic: the part's faces clustered by their normals (connected clusters), the fewest of 2..10
  * that all pass. */
 bool Solver::try_normal(const std::vector<int> &items, std::vector<Chart> &out) {
-  std::vector<Feature> feat(items.size());
-  for (size_t i = 0; i < items.size(); i++) {
-    const Vec3 n = d.normal[items[i]];
-    feat[i] = {n.x, n.y, n.z, 0, 0, 0};
-  }
+  Features feat;
+  feat.dims = 3;
+  for (int i : items) feat.v.insert(feat.v.end(), {d.normal[i].x, d.normal[i].y, d.normal[i].z});
   const Dendrogram tree = cluster(d, items, feat, std::vector<int>(items.size(), 0));
   const int n = (int)items.size();
   for (int k = 2; k <= std::min(o.max_normal_charts, n); k++) {
@@ -714,6 +718,56 @@ void solve_parts(Solver &s, const Dendrogram &tree) {
   }
 }
 
+/* A model's features for the faces `faces`, at most 32 numbers a face: wider ones (PartField's, hundreds wide) through a fixed
+ * random Gaussian projection, which keeps their distances to within a few percent (Johnson-Lindenstrauss) and the
+ * clustering's memory at a few bytes a face. */
+Features project(const std::vector<float> &all, int dims, const std::vector<uint32_t> &faces) {
+  constexpr int kOut = 32;
+  Features f;
+  f.dims = std::min(dims, kOut);
+  std::vector<float> R;
+  if (dims > kOut) {
+    R.resize((size_t)dims * kOut);
+    uint64_t s = 0x9E3779B97F4A7C15ull;
+    for (float &r : R) {  // (Box-Muller from a fixed sequence: the same projection every run)
+      s = s * 6364136223846793005ull + 1442695040888963407ull;
+      const double u1 = ((s >> 11) + 1.0) / 9007199254740993.0;
+      s = s * 6364136223846793005ull + 1442695040888963407ull;
+      const double u2 = (s >> 11) / 9007199254740992.0;
+      r = (float)(std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2) / std::sqrt((double)kOut));
+    }
+  }
+  f.v.reserve(faces.size() * (size_t)f.dims);
+  for (uint32_t face : faces) {
+    const float *x = all.data() + face * (size_t)dims;
+    if (R.empty()) {
+      f.v.insert(f.v.end(), x, x + dims);
+      continue;
+    }
+    for (int k = 0; k < kOut; k++) {
+      double acc = 0;
+      for (int j = 0; j < dims; j++) acc += (double)x[j] * R[(size_t)j * kOut + k];
+      f.v.push_back((float)acc);
+    }
+  }
+  return f;
+}
+
+/* The part tree's features: a model's (PartField's, task 0180) when given for every face, else the geometry's - the
+ * normal and the position over the mesh's size. */
+Features tree_features(const Mesh &m, const FaceData &d, const PartUnwrapOptions &o, PartUnwrapReport &report) {
+  Features f;
+  const bool learned = o.face_features && o.feature_dims > 0 && o.face_features->size() == m.face_count() * (size_t)o.feature_dims;
+  report.learned_tree = learned;
+  if (learned) return project(*o.face_features, o.feature_dims, d.face);
+  f.dims = 6;
+  for (size_t i = 0; i < d.face.size(); i++) {
+    const Vec3 n = d.normal[i], c = d.centroid[i] * (2.0f / d.diag);
+    f.v.insert(f.v.end(), {n.x, n.y, n.z, c.x, c.y, c.z});
+  }
+  return f;
+}
+
 }  // namespace
 
 PartUnwrapReport part_unwrap(Mesh &m, const Mask *mask, const PartUnwrapOptions &o) {
@@ -725,13 +779,9 @@ PartUnwrapReport part_unwrap(Mesh &m, const Mask *mask, const PartUnwrapOptions 
   /* The part tree: normal and position (over the size of the mesh), material slots last. */
   std::vector<int> items(d.face.size());
   std::iota(items.begin(), items.end(), 0);
-  std::vector<Feature> feat(items.size());
   std::vector<int> group(items.size());
-  for (size_t i = 0; i < items.size(); i++) {
-    const Vec3 n = d.normal[i], c = d.centroid[i] * (2.0f / d.diag);
-    feat[i] = {n.x, n.y, n.z, c.x, c.y, c.z};
-    group[i] = d.material[i];
-  }
+  for (size_t i = 0; i < items.size(); i++) group[i] = d.material[i];
+  const Features feat = tree_features(m, d, o, report);
   const Dendrogram tree = cluster(d, items, feat, group);
   Solver s{m, d, o, report, {}};
   solve_parts(s, tree);

@@ -22,6 +22,24 @@ MeshPtr *Editor::uv_target(GameObject **owner) {
   return mf && mf->mesh ? &mf->mesh : nullptr;
 }
 
+/* PartField's features for every face of `m` (task 0180): the model loaded the first time; false (with the reason in
+ * the Console) when it isn't installed or fails - Part Unwrap then uses the geometric tree. */
+bool Editor::partfield_features(const Mesh &m, std::vector<float> &features, int &dims) {
+  std::string error;
+  if (!partfield_) partfield_ = partfield::load(error);
+  if (!partfield_) {
+    Log::warn("Part Unwrap: %s - the geometric part tree is used", error.c_str());
+    return false;
+  }
+  ScopedTimer t;
+  if (!partfield::face_features(*partfield_, m, dims, features, error)) {
+    Log::warn("Part Unwrap: PartField failed (%s) - the geometric part tree is used", error.c_str());
+    return false;
+  }
+  Log::info("PartField: %d features for each of %zu faces in %.0f ms", dims, m.face_count(), t.ms());
+  return true;
+}
+
 /* PartUV's measures of the UV map (task 0179): islands, cut length, distortion. Changes nothing. */
 void Editor::uv_report_log() {
   GameObject *g = nullptr;
@@ -63,10 +81,13 @@ void Editor::uv_op(const std::string &op) {
     uvops::PartUnwrapOptions po;
     po.tau = part_tau_;
     po.multi_tile = part_multi_tile_;
+    std::vector<float> features;
+    if (part_semantic_ && partfield_features(m, features, po.feature_dims)) po.face_features = &features;
     const uvops::PartUnwrapReport r = uvops::part_unwrap(m, pm, po);
     islands = r.charts;
-    Log::info("Part Unwrap: %d chart(s) in %d part(s), distortion %.3f (worst %.3f, bound %.2f), seams %.3f m; %d charts tried, %d by ABF++",
-              r.charts, r.parts, r.distortion, r.distortion_max, po.tau, r.seam_length, r.flattened, r.abf_charts);
+    Log::info("Part Unwrap: %d chart(s) in %d part(s), distortion %.3f (worst %.3f, bound %.2f), seams %.3f m; %d charts tried, %d by ABF++; the part tree %s",
+              r.charts, r.parts, r.distortion, r.distortion_max, po.tau, r.seam_length, r.flattened, r.abf_charts,
+              r.learned_tree ? "PartField's" : "from the geometry");
   }
   else if (op == "cube") uvops::project_cube(m, pm, std::max(0.001f, length(m.bounds().extent()) * 2.0f / std::sqrt(3.0f)));
   else if (op == "cylinder") uvops::project_cylinder(m, pm);

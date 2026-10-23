@@ -2,6 +2,7 @@
 // blendity_tests: the modeling tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/scene/uv_internal.h"
+#include "../src/scene/partfield.h"
 
 static void first_tests() {
   test("math: matrix inverse", [] {
@@ -7752,6 +7753,118 @@ static void tests_round195() {
   });
 }
 
+/* Task 0180: PartField stood in for - each point's feature says which side of the mesh (x) it is on, `dims` wide
+ * (one-hot in the first two numbers, the rest zero), as the real model's 448 numbers would group a part. */
+struct SideModel : partfield::Model {
+  int width = 2, calls = 0;
+  bool run(const std::vector<float> &points, size_t n, int &dims, std::vector<float> &out, std::string &error) override {
+    (void)error;
+    calls++;
+    dims = width;
+    out.assign(n * (size_t)width, 0.0f);
+    for (size_t i = 0; i < n; i++) out[i * width + (points[i * 6] < 0 ? 0 : 1)] = 1.0f;
+    return true;
+  }
+};
+
+/* Does every UV island hold faces of one side (x of its centroid) only? */
+static bool charts_one_side(const Mesh &m) {
+  std::vector<int> island, side;
+  const int n = uvops::compute_islands(m, nullptr, false, island);
+  side.assign((size_t)n, -1);
+  const std::vector<float> pts = partfield::face_points(m);
+  for (size_t f = 0; f < island.size(); f++) {
+    const int s = pts[f * 6] < 0 ? 0 : 1;
+    int &have = side[(size_t)island[f]];
+    if (have >= 0 && have != s) return false;
+    have = s;
+  }
+  return true;
+}
+
+/* The faces' chart partition (the islands as sets of faces, in a canonical order). */
+static std::vector<std::vector<uint32_t>> partition(const Mesh &m) {
+  std::vector<int> island;
+  const int n = uvops::compute_islands(m, nullptr, false, island);
+  std::vector<std::vector<uint32_t>> sets((size_t)n);
+  for (size_t f = 0; f < island.size(); f++) sets[(size_t)island[f]].push_back((uint32_t)f);
+  std::sort(sets.begin(), sets.end());
+  return sets;
+}
+
+static void tests_round196() {
+  test("uv parts: a learned part tree (PartField's features, here a stand-in) reaches the search: the teapot's charts come out otherwise, each under the bound", [] {
+    /* The teapot: no candidate passes for the whole mesh, so the part tree decides (a sphere is solved at its root by
+     * the Normal heuristic, the tree never asked). */
+    MeshPtr g = mesh_copy(*primitives::teapot(1.2f, 8)), l = mesh_copy(*g), w = mesh_copy(*g);
+    const std::vector<float> pts = partfield::face_points(*g);
+    bool unit = pts.size() == g->face_count() * 6;
+    for (size_t i = 0; unit && i < g->face_count(); i++)
+      unit = std::fabs(pts[i * 6]) <= 0.5001f && std::fabs(pts[i * 6 + 1]) <= 0.5001f &&
+             std::fabs(std::sqrt(pts[i * 6 + 3] * pts[i * 6 + 3] + pts[i * 6 + 4] * pts[i * 6 + 4] + pts[i * 6 + 5] * pts[i * 6 + 5]) - 1.0f) < 1e-4f;
+    CHECK(unit);
+    const uvops::PartUnwrapReport rg = uvops::part_unwrap(*g, nullptr);
+    SideModel model;
+    std::vector<float> feat;
+    int dims = 0;
+    std::string err;
+    CHECK(partfield::face_features(model, *l, dims, feat, err) && dims == 2);
+    uvops::PartUnwrapOptions o;
+    o.face_features = &feat;
+    o.feature_dims = dims;
+    const uvops::PartUnwrapReport rl = uvops::part_unwrap(*l, nullptr, o);
+    std::printf("    geometric tree: %d charts, one side each: %s; learned: %d charts, one side each: %s\n", rg.charts, charts_one_side(*g) ? "yes" : "no",
+                rl.charts, charts_one_side(*l) ? "yes" : "no");
+    /* The features reach the tree: the search recurses along the model's parts, so the charts come out otherwise (the
+     * heuristics at a part may still cut across the model's parts, as PartUV's do). */
+    CHECK(!rg.learned_tree && rl.learned_tree);
+    CHECK(partition(*l) != partition(*g));
+    CHECK(rl.distortion_max <= 1.25f + 1e-4f && flipped_faces(*l) == 0);
+    /* PartField's 448 numbers a face go through the projection to 32: the same grouping. */
+    SideModel wide;
+    wide.width = 448;
+    CHECK(partfield::face_features(wide, *w, dims, feat, err) && dims == 448);
+    o.feature_dims = dims;
+    const uvops::PartUnwrapReport rw = uvops::part_unwrap(*w, nullptr, o);
+    CHECK(rw.learned_tree && rw.distortion_max <= 1.25f + 1e-4f && partition(*w) != partition(*g));
+  });
+  test("uv parts: semantic parts are off by default; on without PartField installed the geometric tree is used (and says why); with it, its tree", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    set_env("BLENDITY_PARTFIELD_DIR", fs::join(test_dir(), "no_partfield"));
+    ed.command("create Teapot");
+    GameObject *s = ed.active_object_for_test();
+    CHECK(s && s->mesh_filter());
+    if (!s) return;
+    CHECK(!partfield::install_problem().empty());
+    const MeshPtr original = mesh_copy(*s->mesh_filter()->mesh);
+    ed.command("uv parts semantic on");
+    ed.command("uv parts");
+    MeshPtr geometric = mesh_copy(*original);
+    uvops::part_unwrap(*geometric, nullptr);
+    CHECK(same_uvs(s->mesh_filter()->mesh->uvs, geometric->uvs));  // (not installed: the geometric tree)
+    auto model = std::make_unique<SideModel>();
+    SideModel *seen = model.get();
+    ed.set_partfield_for_test(std::move(model));
+    ed.command("uv parts");
+    /* What the editor made is what the stand-in's features make directly. */
+    MeshPtr learned = mesh_copy(*original);
+    SideModel direct;
+    std::vector<float> feat;
+    int dims = 0;
+    std::string err;
+    partfield::face_features(direct, *learned, dims, feat, err);
+    uvops::PartUnwrapOptions o;
+    o.face_features = &feat;
+    o.feature_dims = dims;
+    uvops::part_unwrap(*learned, nullptr, o);
+    CHECK(seen->calls == 1 && same_uvs(s->mesh_filter()->mesh->uvs, learned->uvs) && !same_uvs(learned->uvs, geometric->uvs));
+    ed.command("uv parts semantic off");
+    ed.command("uv parts");
+    CHECK(seen->calls == 1);  // (off: the model isn't asked)
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -7783,4 +7896,5 @@ void run_modeling_tests() {
   tests_round185();
   tests_round186();
   tests_round195();
+  tests_round196();
 }

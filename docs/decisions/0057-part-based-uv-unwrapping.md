@@ -44,3 +44,14 @@ twenty-eighth of Blender's chart count at comparable distortion. PartField's wei
   barely stretch) at many more charts and longer seams.
 - The search is the cost: tens to a hundred flattenings a mesh (the report counts them).
 - `uv report` measures any UV map PartUV's way (charts, seam length, distortion), for comparing methods.
+
+## Amendment (task 0180): PartField's tree, behind the licence boundary
+- PartField's weights are NVIDIA's under a non-commercial licence. Blendity ships nothing of it and downloads nothing
+  of it: the user obtains the model and converts it (`tools/partfield/export_onnx.py`) into
+  `~/.blendity/ai/partfield/partfield.onnx`; Blendity runs it through the ONNX Runtime of the AI install (ADR 0046)
+  when `uv parts semantic on` asks for it, off by default, and says which tree it used.
+- The contract is Blendity's own (face centroids and normals in, a feature per face out), so a later or different
+  learned model can stand in without code changes. Features wider than 32 numbers go through a fixed random Gaussian
+  projection (distances kept within a few percent, Johnson-Lindenstrauss), so the clustering's memory stays small.
+- The export itself is unverified (no PartField checkout or weights were used): the spike is open, with a fallback
+  (features computed in Python, read the same way).

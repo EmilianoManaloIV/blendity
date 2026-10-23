@@ -56,6 +56,10 @@ struct PartUnwrapOptions {
   bool multi_tile = false;      // each separate piece on its own UDIM tile (U 0-1, 1-2, ...)
   bool abf = true;              // ABF++ before LSCM (Blender's Angle Based); LSCM alone when false
   float margin = 0.02f;
+  /* Task 0180: a learned part tree - `feature_dims` numbers for every face of the mesh (PartField's, unit rows) in
+   * place of the geometric features. Ignored unless there is a row for every face. */
+  const std::vector<float> *face_features = nullptr;
+  int feature_dims = 0;
 };
 struct PartUnwrapReport {
   int charts = 0, parts = 0;     // charts made; parts (blocks) they were packed in
@@ -64,6 +68,7 @@ struct PartUnwrapReport {
   float distortion = 0, distortion_max = 0;  // the charts' distortion: area-weighted mean, worst
   double seam_length = 0;        // the cut edges' total length
   double ms = 0;
+  bool learned_tree = false;     // the part tree came from the given features (task 0180), not the geometry
 };
 PartUnwrapReport part_unwrap(Mesh &m, const Mask *mask, const PartUnwrapOptions &o = PartUnwrapOptions());
 

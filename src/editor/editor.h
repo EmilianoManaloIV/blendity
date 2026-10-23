@@ -39,6 +39,7 @@
 #include "../scene/skin_weights.h"
 #include "ui.h"
 #include "livelink.h"
+#include "../scene/partfield.h"
 
 #include <atomic>
 #include <mutex>
@@ -468,6 +469,8 @@ class Editor {
   bool livelink_start(int port);
   void livelink_stop();
   livelink::Link *livelink_for_test() { return livelink_.get(); }
+  /* Task 0180: PartField stood in for by `m` (the tests'). */
+  void set_partfield_for_test(std::unique_ptr<partfield::Model> m) { partfield_ = std::move(m); }
   void step_frame_headless(std::vector<platform::Event> events = {});
   const Image &framebuffer() const { return fb_; }
   Scene &scene() { return *scene_; }
@@ -1310,6 +1313,11 @@ class Editor {
   void uv_parts_command(const std::vector<std::string> &t);
   float part_tau_ = 1.25f;  // Part Unwrap's distortion bound (`uv parts <bound>`)
   bool part_multi_tile_ = false;
+  /* Task 0180: PartField's learned part tree (off by default: its weights are NVIDIA's, non-commercial, and the user
+   * installs a conversion of their own), loaded when first needed. */
+  bool part_semantic_ = false;
+  std::unique_ptr<partfield::Model> partfield_;
+  bool partfield_features(const Mesh &m, std::vector<float> &features, int &dims);
   void livelink_command(const std::vector<std::string> &t);
   void livelink_status();
   void livelink_tick();  // once a frame, after the scene's changes
