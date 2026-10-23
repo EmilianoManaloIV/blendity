@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 217): camera filters over the card's picture (task 0197, part 2)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round lets
+filtered cameras' views draw their 3D on the card.
+
+**Changed**
+- **A camera filter no longer sends its view to the CPU:** the card draws the 3D, and the filter's passes run over
+  its picture. Colour grading, vignette, grain, pixelate, edge outline, CRT, sharpen, halftone, hatching, line art,
+  paper, colour ramp and bloom give the same picture as before.
+- **Bloom's linear-light picture comes from the card**, from an HDR variant of its lighting pass.
+- Still on the CPU, saying why:
+  - a filter's rasterizer stage (Retro Console's snapped vertices, affine UVs, texture rules, screen door);
+  - bloom over see-through surfaces;
+  - realtime GI's per-pixel light.
+
+**Measured**
+- stress editor_render, this round's scene: colour grading, bloom and edge outline on the Main Camera, an icosphere moved
+  each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 44.53 ms a frame;
+  - views on the card: 42.09 ms, 33 views on the card and none on the CPU.
+- The filters' own passes, which stay the CPU's, are most of the Game view's time: 24.49 ms against 25.41.
+- The Scene view's 3D: 9.72 ms against 5.50.
+
+**Checked**
+- Card against CPU, the Game view through the Main Camera's filters (RTX 4070 SUPER):
+  - colour grading, vignette and bloom: mean 0.053 / 255, 100 % within 3;
+  - edge outline and sharpen: 0.093;
+  - halftone: 0.037;
+  - line art: 0.094.
+- Each stack changes the plain picture: the filters ran.
+- Retro Console's view goes to the CPU with its reason.
+- An Opus review found:
+  - a transparent render's bloom seeing "no light" where the CPU sees 0;
+  - the card's colour one step off the CPU's own encoding of its linear light (colour grading's exposure and bloom
+    treated those pixels as touched);
+  - a test that couldn't show bloom read the card's linear light;
+  - the read-back's failure path;
+  - an extra full-size buffer each frame;
+  - unchecked framebuffers.
+
+  All are fixed. The colour is now encoded from the linear light as the CPU does, and an emissive cube's bloom
+  matches (mean 0.051 / 255).
+- Unit checks (round 217): Windows, in render-cache verify mode, 11,935, 0 failed (989 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-23 (round 216): baked light on the card - lightmaps and probes (task 0197, part 1)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the

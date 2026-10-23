@@ -286,6 +286,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A glass window, a transparent veil, an axis-material ground, Weight Paint, Solid shading or a scene with many lights sent the whole view back to the processor. | The card draws them as the processor does (task 0195). |
 | An anime character's painted toon maps, face shadow and hair highlight, or any live procedural texture, sent the view back to the processor. | The card draws them; a live procedural only close up goes back, where the processor evaluates it point by point (task 0196). |
 | A scene with baked lighting - lightmaps, light probes, realtime lightmaps - had its views drawn by the processor. | The card draws them; realtime GI's per-pixel light alone stays the processor's (task 0197). |
+| A camera with any filter - a colour grade, a bloom, an outline - had its views drawn by the processor. | The card draws the 3D and the filters run over its picture; a retro filter's rasterizer stage alone stays the processor's (task 0197). |
 
 ## Still worth doing
 

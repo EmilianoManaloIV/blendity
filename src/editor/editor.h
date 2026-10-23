@@ -2939,6 +2939,8 @@ class Editor {
   /* Task 0197: lightmap pages and the probe volume on the card. */
   int gpu_lightmap(const Lightmap &lm, std::string &err);
   void gpu_forget_texture(const Texture *t);
+  bool read_linear_light(RenderTarget &rt, int slot, bool want, const LightingEnv &env);
+  std::vector<float> gpu_hdr_scratch_;  // (task 0197: the card's linear light, read back, kept between frames)
   void prune_gpu_lightmaps();
   static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
   void gpu_probe_volume(const ProbeVolumeData &d);

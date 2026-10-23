@@ -1883,7 +1883,7 @@ static void tests_round183() {
     bool named = any_named();
     CHECK(!named);  // (every view on the card: no such row)
     ed.command("select Main Camera");
-    ed.command("filter add Vignette");  // (a camera filter: the Game view falls back)
+    ed.command("filter add Retro Console");  // (a camera filter's rasterizer stage: the Game view falls back; since task 0197 a filter's passes don't)
     for (int i = 0; i < 3; i++) {
       cube->set_local_position({0.1f * (float)i, 0.5f, 0.0f});
       ed.step_frame_headless();
@@ -2613,6 +2613,88 @@ static void tests_round216() {
   });
 }
 
+/* ---------------------------------------------------------------- round 217: camera filters on the card (task 0197) */
+static void tests_round217() {
+  test("gpu views: camera filters run over the card's picture - colour grading, a vignette, bloom (from the card's linear light), edge outline, sharpen, halftone, line art - and the Game view matches the CPU's; a rasterizer stage (Retro Console) still sends it to the CPU (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    ed.command("select Main Camera");
+    auto game = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    };
+    auto compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+      size_t n = 0, ok = 0;
+      double sum = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+        int w = 0;
+        for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+        n++, sum += w, ok += w <= 3;
+      }
+      mean = n ? sum / (double)n : 0, within3 = n ? (double)ok / (double)n : 0;
+    };
+    const std::vector<uint32_t> plain = game(1);
+    const char *stacks[][4] = {{"Color Grading", "Vignette", "Bloom", nullptr}, {"Edge Outline", "Sharpen", nullptr, nullptr},
+                               {"Halftone", nullptr, nullptr, nullptr}, {"Line Art", nullptr, nullptr, nullptr}};
+    for (const auto &st : stacks) {
+      for (int k = 0; k < 4 && st[k]; k++) ed.command(std::string("filter add ") + st[k]);
+      ed.mark_changed_for_test("filters");
+      const std::vector<uint32_t> cpu = game(1);
+      const FrameProfile before = ed.frame_profile_totals();
+      const std::vector<uint32_t> gpu = game(2);
+      const FrameProfile after = ed.frame_profile_totals();
+      double mean = 0, within3 = 0, fmean = 0, fw = 0;
+      compare(cpu, gpu, mean, within3);
+      compare(cpu, plain, fmean, fw);
+      std::printf("    %s%s%s: %llu views on the card, %llu on the CPU (%s); against the CPU mean %.3f / 255, %.2f %% within 3 (the filters change it by %.1f)\n", st[0],
+                  st[1] ? " + " : "", st[1] ? st[1] : "", (unsigned long long)(after.gpu_views - before.gpu_views),
+                  (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks), ed.gpu_view_status().c_str(), mean, within3 * 100, fmean);
+      CHECK(after.gpu_views > before.gpu_views && after.gpu_fallbacks == before.gpu_fallbacks);
+      CHECK(mean < 1.5 && within3 >= 0.98);
+      CHECK(fmean > 1.0);  // (the filters did something)
+      for (int k = 0; k < 4 && st[k]; k++) ed.command("filter remove 0");
+      ed.mark_changed_for_test("filters off");
+    }
+    /* Bloom alone on an emissive cube, its light well past 1: the glow comes from the linear light (the 8-bit picture
+     * clips at 1), so the card's must be there and agree. */
+    MaterialPtr hot = make_material("hot", {0.2f, 0.2f, 0.2f});
+    hot->emission = Vec3(6.0f, 4.0f, 2.0f);
+    hot->emission_strength = 1.0f;
+    hot->touch();
+    cube->get<MeshRenderer>()->materials = {hot};
+    ed.mark_changed_for_test("hot");
+    const std::vector<uint32_t> no_bloom = game(1);
+    ed.command("filter add Bloom");
+    ed.mark_changed_for_test("bloom");
+    {
+      const std::vector<uint32_t> cpu = game(1), gpu = game(2);
+      double mean = 0, within3 = 0, glow = 0, gw = 0;
+      compare(cpu, gpu, mean, within3);
+      compare(cpu, no_bloom, glow, gw);
+      std::printf("    Bloom over an emissive cube: against the CPU mean %.3f / 255, %.2f %% within 3 (the glow changes it by %.2f)\n", mean, within3 * 100, glow);
+      CHECK(glow > 0.5);
+      CHECK(mean < 1.0 && within3 >= 0.99);
+    }
+    ed.command("filter remove 0");
+    ed.command("filter add Retro Console");
+    ed.mark_changed_for_test("retro");
+    game(2);
+    std::printf("    Retro Console: %s\n", ed.gpu_view_status().c_str());
+    CHECK(ed.gpu_view_status().find("rasterizer stage") != std::string::npos);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2631,4 +2713,5 @@ void run_gpu_tests() {
   tests_round212();
   tests_round214();
   tests_round216();
+  tests_round217();
 }

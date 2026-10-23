@@ -49,6 +49,11 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0197, round 217): camera filters
+- A filtered view's 3D draws on the card and comes back for the filter's passes, as depth of field's does. Only a
+  filter's rasterizer stage keeps the view on the CPU.
+- The picture in linear light comes from an HDR variant of the lighting pass, read back for bloom.
+
 ## Amendment (task 0197, round 216): baked light
 - A baked pass (depth EQUAL) reads lightmaps, realtime lightmaps and probes per visible pixel; the lighting ranks them
   as the CPU does.

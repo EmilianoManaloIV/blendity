@@ -1550,6 +1550,28 @@ static void test_editor_render(Report &rep, const Options &o) {
     }
     ed.viewport_device_for_test(1);
   }
+  {
+    /* Task 0197: camera filters (colour grading, bloom, edge outline) on the Main Camera: its views' 3D on the card,
+     * the passes over its picture, against all on the CPU. */
+    ed.command("select Main Camera");
+    for (const char *f : {"Color Grading", "Bloom", "Edge Outline"}) ed.command(std::string("filter add ") + f);
+    GameObject *moved = ed.scene().find_by_name("Icosphere");
+    for (int device : {2, 1}) {
+      ed.viewport_device_for_test(device);
+      const FrameProfile f0 = ed.frame_profile_totals();
+      const std::string name = strprintf("moving an object, camera filters on the Main Camera, the views on the %s (task 0197)", device == 2 ? "GPU" : "CPU");
+      row(name.c_str(), [&](int i) {
+        if (moved) moved->set_local_position({0.1f * i + 0.06f, 1.0f, 0.0f});
+        ed.step_frame_headless();
+      });
+      const FrameProfile f1 = ed.frame_profile_totals();
+      if (device == 2)
+        rep.note(strprintf("Task 0197's filtered scene: %llu views on the GPU, %llu on the CPU instead (%s).", (unsigned long long)(f1.gpu_views - f0.gpu_views),
+                           (unsigned long long)(f1.gpu_fallbacks - f0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+    }
+    for (int k = 0; k < 3; k++) ed.command("filter remove 0");
+    ed.viewport_device_for_test(1);
+  }
   Log::echo_stdout = true;
   rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
            "casters or the light change (task 0011).");

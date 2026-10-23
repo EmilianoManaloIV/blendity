@@ -10,6 +10,7 @@
 
 #include "../core/jobs.h"
 #include "../render/colormanagement.h"
+#include "../render/display.h"
 #include "../render/probe_volume.h"
 #include "../render/voxel_gi.h"
 
@@ -596,8 +597,11 @@ std::string Editor::gpu_view_status() const {
 
 const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingEnv &env, const std::vector<DrawItem> &items,
                                          const FilterStack *filters) const {
-  if (filters && !filters->empty()) return "a camera filter";
-  if (rt.want_hdr) return "a picture kept in linear light";
+  /* (Since task 0197 a camera filter's passes run over the card's picture, read back; its rasterizer stage - snapped
+   * vertices, affine UVs, texture rules, a screen door - changes how the triangles are drawn, which the card doesn't.) */
+  if (filters && (filters->vertex_snap > 0.0f || filters->affine_uv || filters->tex.active() || filters->screen_door))
+    return "a camera filter's rasterizer stage (snapped vertices, affine UVs, texture rules or a screen door)";
+  if (rt.want_hdr && !(gpu_view_ && gpu_view_->can_draw_hdr())) return "a picture kept in linear light";
   /* (Lightmaps, realtime lightmaps and probes draw on the card since task 0197; realtime GI's per-pixel gather - the
    * receivers the CPU traces from its own picture - for objects without realtime lightmaps doesn't.) */
   if (env.gi)
@@ -990,6 +994,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
   if (!see.empty() && !g->can_draw_see_through()) return gpu_view_refuse(slot, "see-through surfaces (the card has no dual-source blending)");
   if (!see.empty() && opt.screen_door) return gpu_view_refuse(slot, "see-through surfaces drawn as a screen door");
+  const bool want_hdr = rt.want_hdr && opt.shade == ShadeMode::Deferred;  // (task 0197: a camera's bloom reads it)
+  if (want_hdr && !see.empty()) return gpu_view_refuse(slot, "a picture kept in linear light with see-through surfaces");
   const bool toon_maps = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return (in.flags & gpu::RasterInstance::ToonMaps) != 0; });
   const bool baked = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return in.baked; });
   if (baked && env.probes && env.probes->data && env.probes->data->probe_count() > kCardMaxProbes)
@@ -1005,6 +1011,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     if (env.probes->data) gpu_probe_volume(*env.probes->data);
   }
   fr.gi_specular_occlusion = env.gi ? env.gi->params.specular_occlusion : env.rt_specular_occlusion;
+  fr.want_hdr = want_hdr;
   fr.highlight_bits = std::move(hl_bits);
   fr.slot = slot;
   fr.width = rt.width;
@@ -1051,9 +1058,10 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const bool dof = cam && cam->dof && !cam->orthographic;
   int card_x = 0, card_y = 0;
   /* (Task 0193: the picture stays on the card - unless the CPU works on it afterwards: a camera's depth of field.) */
-  const bool to_card = card_present_ && !dof && card_view_at(rt, card_x, card_y);
+  const bool filtered = filters && !filters->passes.empty();  // (task 0197: the CPU's passes work on the picture afterwards)
+  const bool to_card = card_present_ && !dof && !filtered && card_view_at(rt, card_x, card_y);
   uint32_t *color = to_card ? nullptr : contiguous ? rt.color : gpu_color_.data();
-  const bool want_depth = !rt.depth.empty() && (planes_wanted_ || dof), want_ids = !rt.ids.empty() && planes_wanted_;
+  const bool want_depth = !rt.depth.empty() && (planes_wanted_ || dof || filtered), want_ids = !rt.ids.empty() && (planes_wanted_ || filtered);
   float *depth = want_depth ? rt.depth.data() : nullptr;
   uint32_t *ids = want_ids ? rt.ids.data() : nullptr;
   /* Task 0160 (ADR 0051): the frame and its copies out in one submission, one wait (the split path kept for the test
@@ -1081,6 +1089,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   }
   for (int y = 0; !to_card && !contiguous && y < rt.height; y++)
     std::memcpy(rt.color + (size_t)y * rt.stride, &gpu_color_[(size_t)y * rt.width], (size_t)rt.width * 4);
+  if (!read_linear_light(rt, slot, want_hdr, env)) return false;  // (task 0197: after the colour - it encodes it again)
   gpu_slot_reason_[slot].clear();
   gpu_view_reason_.clear();
   prof_.gpu_views++;
@@ -1089,6 +1098,52 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   prof_.gpu_cage_frames += cage ? 1 : 0;
   overlays_on_gpu_ = overlays_on_gpu_ || overlays;
   prof_.gpu_overlay_frames += overlays ? 1 : 0;
+  return true;
+}
+
+/* Task 0197: the picture in linear light into the target, as Renderer3D's begin() and deferred pass fill it ("none",
+ * x -1, where the card's pass kept none), or the target's let go when not wanted (as Renderer3D clears it). */
+bool Editor::read_linear_light(RenderTarget &rt, int slot, bool want, const LightingEnv &env) {
+  if (!want) {
+    rt.hdr.clear();
+    return true;
+  }
+  const size_t px = (size_t)rt.width * rt.height;
+  gpu_hdr_scratch_.resize(px * 4);
+  std::string err;
+  if (!gpu_view_->read_hdr(slot, gpu_hdr_scratch_.data(), &err)) {  // (any error: as gpu_view_draw's own - the card set aside)
+    Log::warn("The GPU view couldn't read its linear light back (%s): drawing on the CPU", err.c_str());
+    gpu_view_error_ = err;
+    gpu_slot_reason_[slot] = gpu_view_reason_ = "a GPU error";
+    gpu_view_drop();
+    prof_.gpu_fallbacks++;
+    return false;
+  }
+  rt.hdr.resize(px);
+  rt.hdr_view_transform = env.view_transform;
+  rt.hdr_exposure = env.exposure;
+  /* Where nothing was lit: "none", or 0 in a transparent render's black and white passes (render_view fills 0 there:
+   * no light for bloom in either). Where lit: the colour as the CPU encodes its own linear light, bit for bit, so the
+   * passes that check a pixel still holds its linear light (colour grading's exposure, bloom) find it does. */
+  const Vec3 none = render_clear_override_on_ ? Vec3(0.0f) : Vec3(-1.0f, 0.0f, 0.0f);
+  const float *f = gpu_hdr_scratch_.data();
+  JobSystem::global().parallel_for(rt.height, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) {
+      Vec3 *h = rt.hdr.data() + (size_t)y * rt.width;
+      uint32_t *c = rt.color + (size_t)y * rt.stride;
+      const float *row = f + (size_t)y * rt.width * 4;
+      int run = -1;  // (the first of the current run of lit pixels)
+      for (int x = 0; x <= rt.width; x++) {
+        const bool lit = x < rt.width && row[x * 4] >= 0.0f;
+        if (lit) h[x] = Vec3(row[x * 4], row[x * 4 + 1], row[x * 4 + 2]);
+        else if (x < rt.width) h[x] = none;
+        if (lit && run < 0) run = x;
+        if (lit || run < 0) continue;
+        display::encode_span(&h[run].x, c + run, (size_t)(x - run), env.view_transform, env.exposure);
+        run = -1;
+      }
+    }
+  });
   return true;
 }
 

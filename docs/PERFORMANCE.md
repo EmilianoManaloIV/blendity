@@ -3,6 +3,14 @@
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
+### After task 0197, part 2 (camera filters over the card's picture)
+- stress editor_render, this round's scene: colour grading, bloom and edge outline on the Main Camera, an icosphere moved
+  each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 44.53 ms a frame;
+  - views on the card: 42.09 ms, 33 views on the card and none on the CPU.
+- The filters' own passes, which stay the CPU's, are most of the Game view's time: 24.49 ms against 25.41.
+- The Scene view's 3D: 9.72 ms against 5.50.
+
 ### After task 0197, part 1 (lightmaps and probes on the card)
 - tests/test_gpu.cpp round 216, the Scene view's own time a frame, warm (RTX 4070 SUPER, a test run, not a quiet
   machine):

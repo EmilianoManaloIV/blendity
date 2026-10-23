@@ -1342,6 +1342,9 @@ vec3 ocio(vec3 c) {
   return c000 + (lut_at(i, 1, 1, 0) - lut_at(i, 0, 1, 0)) * fr + (lut_at(i, 0, 1, 0) - c000) * fg + (c111 - lut_at(i, 1, 1, 0)) * fb;
 }
 vec4 display(vec3 hdr) {
+#ifdef BL_HDR
+  return vec4(hdr, 1.0);  // (task 0197: the picture in linear light, before the view transform)
+#endif
   if (int(env.z) == 3) return vec4(clamp(ocio(hdr * exp2(env.w)), 0.0, 1.0), 1.0);
   vec3 t = tonemap(hdr);
   return vec4(srgb(t.r), srgb(t.g), srgb(t.b), 1.0);
@@ -1353,6 +1356,9 @@ vec3 view_dir(vec2 ndc) {
 /* What shows where nothing was drawn: one colour, the editor's sky (clear_sky: not tone mapped) or the world. */
 vec4 background_at(vec2 ndc) {
   int mode = int(bg.x);
+#ifdef BL_HDR
+  if (mode != 2) return vec4(-1.0, 0.0, 0.0, 0.0);  // (the CPU keeps linear light behind only for the world)
+#endif
   if (mode == 0) return background;
   vec3 d = view_dir(ndc);
   if (mode == 2) return display(radiance(d));
@@ -1900,6 +1906,8 @@ struct Slot {
   VkFramebuffer fb_toon = VK_NULL_HANDLE;
   Img amb;                                // task 0197: the baked pass's plane (made when first needed)
   VkFramebuffer fb_baked = VK_NULL_HANDLE;
+  Img hdr;                                // task 0197: the picture in linear light (made when first needed)
+  VkFramebuffer fb_hdr = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
 };
 
@@ -2109,6 +2117,23 @@ class VulkanRaster final : public Raster {
   bool can_draw_see_through() const override { return pl_see_ && pl_see_ids_; }
   bool can_draw_toon_maps() const override { return pl_toon_[0] && pl_toon_[1] && pl_toon_[2]; }
   bool can_draw_baked() const override { return pl_baked_[0] && pl_baked_[1] && pl_baked_[2]; }
+  bool can_draw_hdr() const override { return pl_hdr_ != VK_NULL_HANDLE; }
+  /* Task 0197: the slot's last picture in linear light, rgba per pixel (x -1: none there), read back on its own. */
+  bool read_hdr(int slot, float *rgba, std::string *err) override {
+    if (slot < 0 || slot >= kSlots || !slots_[slot].fb_hdr) return fail(err, "no picture kept in linear light");
+    const Slot &sl = slots_[slot];
+    const size_t px = (size_t)sl.hdr.w * sl.hdr.h;
+    if (!readback_buffer(px * 2, err)) return false;  // (12 bytes a pixel each: room for the 16 this takes)
+    begin();
+    copy_out(sl.hdr, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    if (!submit_wait(err)) return false;
+    std::memcpy(rgba, readback_.mapped, px * 16);
+    return true;
+  }
   void set_probe_volume(std::vector<float> packed) override {
     probe_volume_ = std::move(packed);
     probe_dirty_ = true;
@@ -2231,6 +2256,7 @@ class VulkanRaster final : public Raster {
     if (toon && !toon_targets(sl, err)) return false;
     const bool baked = can_draw_baked() && std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return in.baked; });
     if (baked && !baked_targets(sl, err)) return false;
+    if (fr.want_hdr && (!can_draw_hdr() || !hdr_targets(sl, err))) return fail(err, err && !err->empty() ? *err : "no linear-light pass");
     for (const RasterInstance &in : instances_)
       if ((uint64_t)in.first_index + in.index_count > meshes_[in.mesh].indices) return fail(err, "an instance's part past its mesh");
     for (const RasterInstance &in : instances_)
@@ -2268,6 +2294,19 @@ class VulkanRaster final : public Raster {
     if (fr.cage && can_draw_cage()) draw_cage(fr);
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
+    if (fr.want_hdr) {  // (task 0197: the lighting again in linear light, for a camera's bloom)
+      VkRenderPassBeginInfo hb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+      hb.renderPass = rp_hdr_;
+      hb.framebuffer = sl.fb_hdr;
+      hb.renderArea = {{0, 0}, {(uint32_t)fr.width, (uint32_t)fr.height}};
+      f_.vkCmdBeginRenderPass(cmd_, &hb, VK_SUBPASS_CONTENTS_INLINE);
+      viewport(fr.width, fr.height);
+      f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_hdr_);
+      f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
+      f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+      f_.vkCmdEndRenderPass(cmd_);
+      barrier();
+    }
     stamp(3);
     return true;
   }
@@ -2807,6 +2846,8 @@ class VulkanRaster final : public Raster {
              pl_see_ = VK_NULL_HANDLE, pl_see_ids_ = VK_NULL_HANDLE;  // (task 0195)
   VkPipeline pl_toon_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0196: the toon pass - not culled, back, front
   VkPipeline pl_baked_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0197: the baked pass
+  VkPipeline pl_hdr_ = VK_NULL_HANDLE;    // task 0197: the lighting in linear light
+  VkRenderPass rp_hdr_ = VK_NULL_HANDLE;
   VkRenderPass rp_baked_ = VK_NULL_HANDLE;
   Buf baked_buf_, corner_buf_, probe_buf_;  // task 0197: the instances' baked light, the triangles' corners, the probe volume
   std::vector<float> probe_volume_;          // (set_probe_volume's, written once)
@@ -3653,8 +3694,9 @@ class VulkanRaster final : public Raster {
     rp_ids_ = make_pass({VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT}, false, false, true);  // (task 0195)
     rp_toon_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}, true, false, false, true);  // (task 0196)
     rp_baked_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, true, false, false, true);  // (task 0197)
+    rp_hdr_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, false, true);
     rp_light_load_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, false, true);
-    return rp_shadow_ && rp_gbuf_ && rp_light_ && rp_ids_ && rp_light_load_ && rp_toon_ && rp_baked_ ? true : fail(err, "could not make the render passes");
+    return rp_shadow_ && rp_gbuf_ && rp_light_ && rp_ids_ && rp_light_load_ && rp_toon_ && rp_baked_ && rp_hdr_ ? true : fail(err, "could not make the render passes");
   }
 
   VkShaderModule module(const std::string &body, shaderc_shader_kind kind, std::string *err) {
@@ -3793,6 +3835,17 @@ class VulkanRaster final : public Raster {
     }
     if (!can_draw_baked()) Log::warn("The GPU view can't draw lightmaps or probes (%s): the CPU draws those views", berr.empty() ? "?" : berr.c_str());
   }
+  /* Task 0197: the lighting pass again into linear light (the picture a camera's bloom reads). */
+  void make_hdr_pipeline(VkShaderModule fv) {
+    std::string herr;
+    VkShaderModule hf = module(std::string("#define BL_HDR 1\n") + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain,
+                               shaderc_fragment_shader, &herr);
+    if (hf) {
+      pl_hdr_ = make_pipeline(rp_hdr_, fv, hf, 1, false, VK_CULL_MODE_NONE);
+      f_.vkDestroyShaderModule(dev_, hf, nullptr);
+    }
+    if (!can_draw_hdr()) Log::warn("The GPU view can't keep the picture in linear light (%s): the CPU draws those views", herr.empty() ? "?" : herr.c_str());
+  }
   bool make_pipelines(std::string *err) {
     VkShaderModule sv = module(kShadowVert, shaderc_vertex_shader, err), gv = module(std::string(kLightFns) + kGbufVert, shaderc_vertex_shader, err),
                    gf = module(std::string(geometry_ ? "#define BL_HIGHLIGHT 1\n" : "") + kMaterialFrag + kGlslProcedurals + kMaterialEval + kLightFns + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
@@ -3832,6 +3885,7 @@ class VulkanRaster final : public Raster {
       pl_light_ = make_pipeline(rp_light_, fv, lf, 1, false, VK_CULL_MODE_NONE);
       make_toon_pipelines(gv);
       make_baked_pipelines(gv);
+      make_hdr_pipeline(fv);
     }
     for (VkShaderModule m : {sv, gv, gf, fv, lf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
@@ -3846,8 +3900,17 @@ class VulkanRaster final : public Raster {
     for (Img &im : sl.toon)
       if (!make_image(im, sl.color.w, sl.color.h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the toon maps");
     sl.fb_toon = framebuffer(rp_toon_, {sl.toon[0].view, sl.toon[1].view, sl.toon[2].view, sl.depth.view}, sl.color.w, sl.color.h);
+    if (!sl.fb_toon) return fail(err, "could not make the toon maps' framebuffer");
     bind_images(sl);
     return true;
+  }
+  /* Task 0197: the slot's linear-light plane and its framebuffer, made the first time a frame wants them. */
+  bool hdr_targets(Slot &sl, std::string *err) {
+    if (sl.fb_hdr) return true;
+    const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!make_image(sl.hdr, sl.color.w, sl.color.h, VK_FORMAT_R32G32B32A32_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the linear picture");
+    sl.fb_hdr = framebuffer(rp_hdr_, {sl.hdr.view}, sl.color.w, sl.color.h);
+    return sl.fb_hdr ? true : fail(err, "could not make the linear picture's framebuffer");
   }
   /* Task 0197: the slot's baked plane and its framebuffer, at the slot's size, made the first time a frame needs them. */
   bool baked_targets(Slot &sl, std::string *err) {
@@ -3855,6 +3918,7 @@ class VulkanRaster final : public Raster {
     const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     if (!make_image(sl.amb, sl.color.w, sl.color.h, VK_FORMAT_R32G32B32A32_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the baked light");
     sl.fb_baked = framebuffer(rp_baked_, {sl.amb.view, sl.depth.view}, sl.color.w, sl.color.h);
+    if (!sl.fb_baked) return fail(err, "could not make the baked light's framebuffer");
     bind_images(sl);
     return true;
   }
@@ -3874,10 +3938,11 @@ class VulkanRaster final : public Raster {
       sl.fb_shadow = framebuffer(rp_shadow_, {sl.shadow.view}, s, s);
     }
     if (!view_ok) {
-      for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked})
+      for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      sl.fb_toon = sl.fb_baked = VK_NULL_HANDLE;
-      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb}) free_image(*im);
+      sl.fb_toon = sl.fb_baked = sl.fb_hdr = VK_NULL_HANDLE;
+      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb, &sl.hdr})
+        free_image(*im);
       const bool ok = make_image(sl.normal, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.geo, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
@@ -3920,13 +3985,14 @@ class VulkanRaster final : public Raster {
     if (compose_layout_) f_.vkDestroyPipelineLayout(dev_, compose_layout_, nullptr);
     if (compose_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, compose_set_layout_, nullptr);
     for (Slot &sl : slots_) {
-      for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked})
+      for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb}) free_image(*im);
+      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb, &sl.hdr})
+        free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2]})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
-    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_})
+    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,

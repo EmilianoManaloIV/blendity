@@ -200,6 +200,7 @@ struct RasterFrame {
   float probe_normal_bias = 0.25f, probe_view_bias = 0.1f;
   bool probe_leak = true, probe_live = false;
   float gi_specular_occlusion = 1.0f;
+  bool want_hdr = false;  // task 0197: also the picture in linear light (read_hdr), for a camera's bloom
   /* The world's light (Environment Gradient or Color, times its strength). */
   int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
   /* Task 0102: a Sky or HDRI world (env_mode 2): its equirectangular map (add_texture's id; -1: none yet, the
@@ -282,6 +283,9 @@ class Raster {
   virtual bool can_draw_see_through() const { return false; }  // task 0195: Transparent and Glass (dual-source blending)
   virtual bool can_draw_toon_maps() const { return false; }     // task 0196: toon materials' painted maps (the toon pass)
   virtual bool can_draw_baked() const { return false; }         // task 0197: lightmaps and probes (the baked pass)
+  virtual bool can_draw_hdr() const { return false; }           // task 0197: the picture in linear light
+  /* Task 0197: the slot's last picture in linear light (a frame with want_hdr), rgba a pixel, x -1 where none. */
+  virtual bool read_hdr(int slot, float *rgba, std::string *err) { (void)slot, (void)rgba; if (err) *err = "no linear light"; return false; }
   /* Task 0197: the probe volume, packed (the editor's probe_pack), kept until replaced. */
   virtual void set_probe_volume(std::vector<float> packed) { (void)packed; }
   /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
