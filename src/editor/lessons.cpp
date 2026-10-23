@@ -615,6 +615,7 @@ Window > Live Link (or the console's livelink start) opens a connection that oth
 @ blender/source/blender/python/intern/bpy_app_timers.cc
 ? You drag a vertex in Edit Mode with a bridge connected. Does the whole mesh go out again every frame? | No. Only the positions go, as one deform message (12 bytes a vertex). A whole mesh goes only when its faces, UVs or materials change, and it is built on a worker thread, so the frame doesn't wait for it.
 ? A bridge is slow and falls behind while you drag an object. Does it get every position in between? | No. A newer transform for the same object replaces one still waiting to be sent, so the bridge catches up with where the object is now. At most 60 comparisons a second go out.
+? You connect Blender's Blendity add-on and drag a vertex in Blendity. Why does the Blender mesh keep Blendity's own vertices rather than the glTF file's? | The glTF binary splits a vertex wherever its faces' normals or UVs differ; the deform message moves Blendity's vertices. The add-on folds the split vertices back (the _VERT attribute says where each came from), so every moved position has one vertex to land on.
 ! cmd:livelink start; window Live Link | Start Live Link and open its window
 ! cmd:livelink status | What has gone out so far (in the Console)
 ! cmd:livelink stop | Stop it

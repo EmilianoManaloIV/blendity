@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 192): the Blender bridge - Blendity's scene live in Blender (task 0173)
+
+**Asked:** a Blender bridge for Live Link (one way), the first of the four.
+
+**Changed**
+- `bridges/blender/blendity_livelink/`: an add-on (and a Blender 4.2+ extension) - View3D > Sidebar > Blendity: Port,
+  Connect. The objects live in a collection "Blendity Live Link" (custom property `blendity_id`); hierarchy,
+  transforms (glTF's Y up to Blender's Z up as Blender's glTF importer converts), meshes with Blendity's own vertices
+  (the binary's split vertices folded back by `_VERT`, so moving vertices land in place), UVs, Blendity's hard edges as sharp edges (so the
+  normals follow moving vertices), a material per slot; Principled materials with their image textures (tint, alpha
+  and cutouts included); Toon materials as an EEVEE cel setup (Shader to
+  RGB, a constant ramp of Toon Bands) with every field kept as `blendity_toon`; suns, points, spots and area lights in
+  Cycles' units matched to Blendity's path tracer (as the MoonRay export matches them); cameras; bones as posed
+  empties. A timer reads the socket with a 20 ms budget a tick and leaves the rest in it, so Blendity's queue keeps
+  replacing stale updates.
+- Meshes are read by the add-on (numpy), not through `bpy.ops.import_scene.gltf` as the roadmap planned: the importer
+  splits vertices by normal and UV (a deform would have nothing to land on) and needs a window context a timer lacks.
+
+**Checked**
+- `bridges/blender/smoke_test.py` in Blender 5.2.2 headless replays the recorded session: every object, the Sphere
+  deleted, the Box at Blender (-1, -3, 2), its Cel material recoloured with its cel setup, the moved vertex, the
+  cube's 12 hard edges sharp, the camera's 60 degrees and direction, the sun at pi W/m2, the bone hierarchy and its
+  30 degree pose, an object deleted in Blender made again by its next message. An Opus review's findings (camera and
+  light scale, stale references, tint and cutouts, normals after deforms, inactive parents) are fixed. Live: the add-on
+  connected to a running Blendity and received the sync with every mesh. Blender's extension validator accepts the
+  manifest.
+- Unit checks (round 192): Windows, in render-cache verify mode, 11,417, 0 failed (943 tests), 0 stale
+  pictures. Linux with libraries: 11,064, 0 failed. Sanitizer build: 10,944, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (in the parallel runs, the gpu group's slow-open test, a Linux texture-deletion test and a sanitizer export read-back failed under load and passed run again alone.)
+
 ## 2026-10-22 (round 191): Live Link - the scene sent live to Blender, Unity, Godot or Unreal (task 0172, ADR 0055)
 
 **Asked:** "bridges" in Blender, Unity, Godot and Unreal applying Blendity's changes in real time, Blender and Unity
