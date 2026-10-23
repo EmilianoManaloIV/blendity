@@ -2308,6 +2308,116 @@ static void tests_round199() {
   });
 }
 
+/* Task 0183: textures through the Editing tab, and the stack as a camera look. */
+static void tests_round200() {
+  test("editing a texture: Apply puts the edit on top of the texture's stack as an albedo Image layer matching the export within 1/255; editing again goes on from the same adjustments, not on top", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ProceduralTexturePtr pt = ed.new_texture_asset_for_test("Bricks");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    pt->width = pt->height = 128;
+    pt->touch();
+    const size_t layers = pt->layers.size();
+    const Bitmap before = pt->output(0);
+    ed.command("develop open texture " + pt->asset_path);
+    edit::Doc &doc = ed.edit_doc_for_test();
+    CHECK(doc.is_open() && doc.source().w == 128);
+    ed.command("develop set Exposure.Exposure 0.5");
+    ed.command("develop set HSL.Red Hue 30");
+    ed.command("develop apply");
+    CHECK(pt->layers.size() == layers + 1 && pt->layers.back()->targets == TargetAlbedo);
+    std::string err;
+    Bitmap exported, after = pt->output(0);
+    const std::string png = resolve_asset_path(pt->asset_path.substr(0, pt->asset_path.size() - 5) + " edit.png");
+    CHECK(load_image(png, exported, err) && exported.width == 128 && after.width == 128);
+    int worst = 0;
+    for (size_t i = 0; i < after.rgba8.size() && i < exported.rgba8.size(); i++)
+      if (i % 4 != 3) worst = std::max(worst, std::abs((int)after.rgba8[i] - (int)exported.rgba8[i]));
+    std::printf("    the texture's albedo after Apply vs the export: worst %d / 255\n", worst);
+    CHECK(worst <= 1);
+    CHECK(after.rgba8 != before.rgba8);
+    {  // (an Image layer reads its file the right way up: the file's top row is the albedo's top row)
+      std::vector<uint32_t> half(64 * 64, 0xFF000000u);
+      for (size_t i = 0; i < 64 * 32; i++) half[i] = 0xFFFFFFFFu;  // (white on top)
+      const std::string top = fs::join(test_dir(), "top_white.png");
+      CHECK(write_png(top, half.data(), 64, 64, 64));
+      ProceduralTexture plain;
+      plain.width = plain.height = 64;
+      TextureLayer *l = plain.add("Image");
+      CHECK(l && ed.set_layer_field_for_test(*l, "Image", top));
+      const Bitmap o = plain.output(0);
+      CHECK(o.width == 64 && o.rgba8[(size_t)(2 * 64 + 2) * 4] > 200 && o.rgba8[(size_t)(60 * 64 + 2) * 4] < 50);
+    }
+    ed.command("develop open texture " + pt->asset_path);  // (again: the albedo under the edit, the same adjustments)
+    CHECK(doc.stack().size() == 2 && doc.source().px.size() == (size_t)128 * 128 * 4);
+    ed.command("develop set Exposure.Exposure 0.25");
+    ed.command("develop apply");
+    CHECK(pt->layers.size() == layers + 1);  // (the same layer, its image rewritten)
+    CHECK(!ed.edit_doc_for_test().stack().empty());
+    ed.command("develop open texture Nothing At All");  // (refused)
+  });
+
+  test("editing as a camera look: an exposure +1 stack gives the Main Camera a Color Grading with exposure 1 that doubles mid-grey; contrast, saturation, a curve, a vignette and sharpening carry over, masked and other steps are left out", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    edit::Doc &doc = ed.edit_doc_for_test();
+    doc.open_pixels(flat_image(8, 8, Vec3(0.18f)), "grey");
+    ed.command("develop set Exposure.Exposure 1");
+    ed.command("develop look");
+    GameObject *cam = ed.main_camera_owner_for_test();
+    CHECK(cam && cam->get<CameraFilters>());
+    if (!cam || !cam->get<CameraFilters>()) return;
+    CameraFilters *cf = cam->get<CameraFilters>();
+    auto first = [&](const char *type) -> FilterEffect * {  // (the camera may have had filters of its own)
+      for (auto &e : cf->effects)
+        if (std::string(e->type_name()) == type) return e.get();
+      return nullptr;
+    };
+    const auto *cg = dynamic_cast<const ColorGradingEffect *>(first("Color Grading"));
+    CHECK(cg && cg->exposure == 1.0f);
+    std::vector<uint32_t> px(4, 0xFF000000u | 0x76u << 16 | 0x76u << 8 | 0x76u);  // (sRGB 118: linear 0.18)
+    RenderTarget rt;
+    rt.color = px.data(), rt.stride = 2, rt.width = 2, rt.height = 2;
+    ColorGradingParams p;
+    p.exposure = cg ? cg->exposure : 0.0f;
+    apply_color_grading(rt, p);
+    const int want = display::linear_to_srgb8(2.0f * srgb_to_linear(118 / 255.0f));
+    CHECK(std::abs((int)((px[0] >> 16) & 255) - want) <= 1);
+    const size_t n = cf->effects.size();
+    const bool had_vignette = first("Vignette"), had_sharpen = first("Sharpen");
+    ed.command("develop set Contrast.Contrast 20");
+    ed.command("develop set Vibrance / Saturation.Saturation -30");
+    ed.command("develop curve rgb 0,0.05 0.5,0.55 1,0.95");
+    ed.command("develop set Vignette.Amount -40");
+    ed.command("develop set Sharpen.Amount 75");
+    ed.command("develop set Clarity.Clarity 30");
+    ed.command("develop add Shadows");
+    ed.command("develop set Shadows.Shadows 40");
+    ed.command("develop mask 7 add radial");
+    ed.command("develop look");
+    const size_t added = (had_vignette ? 0 : 1) + (had_sharpen ? 0 : 1);  // (the Color Grading reused; Clarity and the masked Shadows left out)
+    CHECK(cf->effects.size() == n + added);
+    ed.command("develop look");
+    CHECK(cf->effects.size() == n + added);  // (again: the same effects, replaced)
+    const auto *g2 = dynamic_cast<const ColorGradingEffect *>(first("Color Grading"));
+    CHECK(g2 && g2->exposure == 1.0f && std::fabs(g2->contrast - 0.2f) < 1e-6f && std::fabs(g2->saturation + 0.3f) < 1e-6f);
+    CHECK(g2 && g2->lift.x > 0.0f && g2->gain.x < 1.0f && g2->gamma.x > 0.05f);
+    if (g2) {  // (the curve's black, grey and white through the camera's lift / gamma / gain)
+      auto lgg = [&](float v) { return std::pow(g2->gain.x * (v + g2->lift.x * (1.0f - v)), 1.0f / g2->gamma.x); };
+      auto dec = [](float e) { return e <= 0.04045f ? e / 12.92f : std::pow((e + 0.055f) / 1.055f, 2.4f); };
+      CHECK(std::fabs(lgg(0.0f) - dec(0.05f)) < 1e-3f && std::fabs(lgg(1.0f) - dec(0.95f)) < 1e-3f);
+    }
+    const auto *vg = dynamic_cast<const VignetteEffect *>(first("Vignette"));
+    CHECK(vg && std::fabs(vg->intensity - (1.0f - std::pow(0.6f, 1.0f / 2.4f))) < 1e-5f && first("Sharpen"));
+    edit::Doc &d2 = ed.edit_doc_for_test();
+    d2.open_pixels(flat_image(4, 4, Vec3(0.5f)), "only clarity");
+    ed.command("develop set Clarity.Clarity 40");
+    ed.command("develop look");  // (nothing a camera does: refused, nothing added)
+    CHECK(cf->effects.size() == n + added);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2330,5 +2440,6 @@ void run_editor_tests() {
   tests_round187();
   tests_round198();
   tests_round199();
+  tests_round200();
   coverage_tests();
 }

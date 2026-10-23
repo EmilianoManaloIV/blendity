@@ -946,6 +946,12 @@ Under each adjustment, Add Mask limits it to part of the picture, as Lightroom's
 ? A radial mask covers the face, and the adjustment is Exposure +1. What happens to the sky outside the circle? | Nothing: outside the mask the weight is 0, so those pixels come out exactly as they went in.
 ? You want to brighten the shadows except in the sky. Which parts? | A Luminance Range on the shadows, then a Linear Gradient over the sky set to Subtract.
 ! cmd:develop mask 0 add radial 0.5 0.45 0.25 0.3 0.5; develop mask show on | Mask the first adjustment to a circle (open a picture and add one first)
+# Textures and the camera
+Textures window > Edit opens a texture's colour in the Editing tab. Apply to Texture puts the result back as an Image layer on top of the texture's stack, writing only the colour: the bricks or the noise underneath stay procedural, and turning the layer off shows the texture without the edit. Opening it again starts from the colour under the layer, with the same adjustments, so you keep refining one edit instead of stacking edits.
+Use as Camera Look gives the Main Camera the stack's look as camera filters, so the Game view and every F12 render carry it while the scene moves: Exposure, Contrast and Saturation exactly, white balance and the Tone Curve closely, Vignette and Sharpen as their own filters. What a camera filter can't do (Highlights, Clarity, HSL, masked steps) is named in the Console and left out. Unity calls this a post-processing volume; Blender, the compositor.
+? You apply an edit to a brick texture, then change the bricks' rows. Does the edit stay? | The edit's layer stays on top, but it holds the picture made from the old bricks. Edit the texture again (it opens the new bricks' colour with your adjustments) and Apply.
+? Your stack has Exposure, Clarity and a masked Shadows. What does Use as Camera Look give the camera? | A Color Grading with the exposure. Clarity and the masked Shadows are left out and named in the Console.
+! cmd:develop look | Give the Main Camera this stack's look
 )"},
     {"Baked and Realtime Lighting", "Lightmaps, light modes, probe volumes and voxel GI", R"(
 Light that bounces between surfaces is either baked ahead of time with the path tracer, or computed live by Realtime GI. Baked light costs about 1 ms a frame to show; live GI costs time whenever a view re-renders. The Lighting window (Window > Rendering > Lighting) holds both, as in Unity.

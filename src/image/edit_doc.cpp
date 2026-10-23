@@ -18,7 +18,9 @@ namespace {
 
 const size_t kHistory = 200;
 
-Image from_bitmap(const Bitmap &b) {
+}  // namespace
+
+Image image_from_bitmap(const Bitmap &b) {
   Image img;
   img.resize(b.width, b.height);
   const size_t n = (size_t)b.width * b.height;
@@ -31,6 +33,8 @@ Image from_bitmap(const Bitmap &b) {
   for (size_t i = 0; i < n * 4 && i < b.rgba8.size(); i++) img.px[i] = (i % 4 == 3) ? b.rgba8[i] / 255.0f : lut[b.rgba8[i]];
   return img;
 }
+
+namespace {
 
 std::vector<float> rgb_of(const Image &img) {
   std::vector<float> rgb((size_t)img.w * img.h * 3);
@@ -66,7 +70,7 @@ bool Doc::open_file(const std::string &path, std::string &error) {
     error = "empty image";
     return false;
   }
-  open_pixels(from_bitmap(b), path);
+  open_pixels(image_from_bitmap(b), path);
   source_path_ = path;
   return true;
 }
@@ -347,6 +351,25 @@ bool Doc::save_source(const std::string &path, std::string &error) {
     return false;
   }
   source_path_ = src;
+  return true;
+}
+
+/* The stack alone, as an .edit file without a source (an applied texture edit's adjustments). */
+bool Doc::save_stack(const std::string &path, std::string &error) {
+  if (fs::write_file(path, "blendity-edit 1\n" + stack_text())) return true;
+  error = "could not write " + path;
+  return false;
+}
+
+/* An .edit file's adjustments onto the picture open now (its source and view left alone). */
+bool Doc::load_stack(const std::string &path, std::string &error) {
+  std::string text;
+  if (!fs::read_file(path, text) || text.compare(0, 14, "blendity-edit ") != 0) {
+    error = "no stack in " + path;
+    return false;
+  }
+  stack_from_text(text.substr(text.find('\n') + 1));
+  undo_.clear(), redo_.clear();
   return true;
 }
 

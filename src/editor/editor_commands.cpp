@@ -117,6 +117,16 @@ void Editor::views_command(const std::string &what, const std::string &value) {
 }
 
 /* Finds the field (its key exactly, else the first whose key starts with it) and sets it. */
+static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflector &)> &reflect);
+
+/* A texture layer's field by name (task 0183: an Image layer's image). */
+bool Editor::set_layer_field(TextureLayer &layer, const std::string &field, const std::string &value) {
+  SetFieldReflector sr;
+  sr.key = field_key(field);
+  sr.value = value;
+  return set_field_on(sr, [&](Reflector &r) { layer.reflect(r); });
+}
+
 static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflector &)> &reflect) {
   sr.target.clear();
   sr.names.clear();

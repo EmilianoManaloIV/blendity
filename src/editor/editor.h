@@ -506,6 +506,7 @@ class Editor {
   /* Task 0181: the Editing window's document and the picture it shows (0xAARRGGBB, the result; the split's
    * before is the source's). */
   edit::Doc &edit_doc_for_test() { return edit_doc_; }
+  bool set_layer_field_for_test(TextureLayer &l, const std::string &f, const std::string &v) { return set_layer_field(l, f, v); }
   const std::vector<uint32_t> &edit_display_for_test() const { return edit_after_px_; }
   const std::vector<uint32_t> &edit_before_for_test() const { return edit_before_px_; }
   const std::vector<float> &edit_mask_weights_for_test() const { return edit_mask_weights_; }  // (task 0182: what Show drew)
@@ -1335,6 +1336,7 @@ class Editor {
   void draw_editing_window(const Recti &r);
   void draw_editing_canvas(const Recti &r);
   void draw_edit_panel(const Recti &r);
+  void draw_edit_targets(ui::Layout &lay);
   void draw_edit_step(ui::Layout &lay, int step);
   void draw_edit_field(ui::Layout &lay, int step, const edit::FieldInfo &f, float value);
   void draw_edit_curve(ui::Layout &lay, int step);
@@ -1345,6 +1347,23 @@ class Editor {
   void edit_curve_drag_to(const Recti &box, int step, int ch);
   bool edit_window_has_mouse();
   void draw_edit_step_fields(ui::Layout &lay, int step);
+  /* Textures and the camera look (task 0183: editing_textures.cpp) */
+  bool edit_open_texture(const std::string &name);
+  bool edit_apply_to_texture();
+  TextureLayer *add_edit_layer(ProceduralTexture &pt, const std::string &image);
+  bool set_layer_field(TextureLayer &layer, const std::string &field, const std::string &value);
+  bool edit_use_as_camera_look();
+  struct CameraLook {
+    ColorGradingEffect cg;
+    VignetteEffect vg;
+    SharpenEffect sh;
+    bool graded = false, vignette = false, sharpen = false;
+    std::string skipped;
+  };
+  bool camera_look_step(const edit::Adjustment &a, CameraLook &look);
+  bool camera_look_effect(const edit::Adjustment &a, CameraLook &look);
+  template<class T> T *camera_effect(CameraFilters &cf);
+  std::string edit_texture_asset_;  // the texture asset the Editing tab has open ("" for an image or a render)
   /* Masks (task 0182: editing_masks.cpp) */
   void edit_mask_command(const std::vector<std::string> &t);
   bool edit_mask_edit_parts(const std::vector<std::string> &t, int step, std::vector<edit::MaskPart> &parts);

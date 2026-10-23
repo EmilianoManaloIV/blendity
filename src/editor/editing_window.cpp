@@ -55,6 +55,7 @@ bool Editor::edit_open_file(const std::string &path) {
   }
   edit_opened_++;
   edit_mask_select(-1, -1);  // (the masks selected belonged to the last picture)
+  edit_texture_asset_.clear();
   edit_zoom_ = 0, edit_pan_ = Vec2(0, 0);
   Log::info("Editing: %s (%d x %d)%s", fs::filename(path).c_str(), edit_doc_.source().w, edit_doc_.source().h,
             is_edit ? strprintf(", %zu adjustments", edit_doc_.stack().size()).c_str() : "");
@@ -80,6 +81,7 @@ bool Editor::edit_open_render() {
   if (linear) edit_doc_.set_view(view_transform_from_setting(scene_->render.view_transform), scene_->render.exposure);
   edit_opened_++;
   edit_mask_select(-1, -1);  // (the masks selected belonged to the last picture)
+  edit_texture_asset_.clear();
   edit_zoom_ = 0, edit_pan_ = Vec2(0, 0);
   Log::info("Editing: the render (%d x %d, %s)", w, h, linear ? "its light, through the render's view transform" : "its 8-bit picture");
   return true;
@@ -158,12 +160,19 @@ void Editor::edit_command(const std::vector<std::string> &t, const std::string &
   while (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
   if (verb == "open") {
     if (to_lower(rest) == "render") edit_open_render();
+    else if (to_lower(rest).compare(0, 8, "texture ") == 0) edit_open_texture(rest.substr(8));
     else if (!rest.empty()) edit_open_file(rest);
-    else Log::warn("develop open <file> | develop open render");
+    else Log::warn("develop open <file> | develop open render | develop open texture <name>");
     return;
   }
   if (verb == "list") {
     edit_list();
+    return;
+  }
+  if (verb == "look" || verb == "apply") {  // (task 0183)
+    if (!edit_doc_.is_open()) Log::warn("Editing: nothing open");
+    else if (verb == "look") edit_use_as_camera_look();
+    else edit_apply_to_texture();
     return;
   }
   if (!edit_doc_.is_open()) {
@@ -496,6 +505,7 @@ void Editor::draw_edit_panel(const Recti &left) {
     const bool can_undo = edit_doc_.can_undo();
     if (u.button({row.x + 2 * (hw + u.px(4)), row.y, hw / 2 - u.px(2), row.h}, "Undo") && can_undo) edit_doc_.undo();
     if (u.button({row.x + 2 * (hw + u.px(4)) + hw / 2, row.y, hw / 2, row.h}, "Redo")) edit_doc_.redo();
+    draw_edit_targets(lay);
     static std::vector<const char *> add_names;
     if (add_names.empty()) {
       add_names.push_back("Add Adjustment...");
@@ -514,6 +524,18 @@ void Editor::draw_edit_panel(const Recti &left) {
   }
   edit_panel_h_ = lay.y - top + u.px(16);
   u.end_scroll();
+}
+
+/* Where the result goes besides a file: the texture it came from, the camera. */
+void Editor::draw_edit_targets(ui::Layout &lay) {
+  auto &u = ui_;
+  Recti row = lay.row();
+  const bool texture = !edit_texture_asset_.empty();
+  const int bw = texture ? (row.w - u.px(4)) / 2 : row.w;
+  if (texture && u.button({row.x, row.y, bw, row.h}, "Apply to Texture")) edit_apply_to_texture();
+  if (texture) u.tooltip("Put the result on the texture as an Image layer on top (its procedural layers stay underneath).");
+  if (u.button({row.right() - bw, row.y, bw, row.h}, "Use as Camera Look")) edit_use_as_camera_look();
+  u.tooltip("Give the Main Camera these adjustments as camera filters, so the Game view and F12 carry the look.");
 }
 
 void Editor::draw_editing_window(const Recti &r) {

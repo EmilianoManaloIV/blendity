@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 200): textures through the Editing tab, and the stack as a camera look (task 0183, ADR 0058 amended)
+
+**Asked:** the Editing tab for textures (results kept as texture assets), and a look made there carried live by the
+camera.
+
+**Changed**
+- Textures window > Edit (or `develop open texture <name>`): the texture's albedo in the Editing tab. Apply to Texture
+  (`develop apply`) writes the result beside the asset as `<texture> edit.png` and puts an Image layer on top of the
+  texture's stack that writes the albedo only - the procedural layers stay underneath, the layer can be turned off,
+  and the asset is saved as any edit of it is. Editing the texture again starts from the albedo under that layer with
+  the same adjustments (kept beside the image as `.edit`), so edits go on rather than pile up.
+- Use as Camera Look (`develop look`): the stack's global adjustments become the Main Camera's filters, so the Game
+  view and F12 carry the look live: Exposure, Contrast, Saturation, Temperature / Tint and the Tone Curve (as lift,
+  gamma and gain through black, middle grey and white) into one Color Grading; a darkening Vignette and Sharpen as
+  their own. Masked steps and the ones no camera filter does (Highlights, Clarity, HSL...) are left out and named.
+  Using it again replaces the look it gave before (the camera's first Color Grading, Vignette and Sharpen are reused).
+- Fixed: a texture's Image layer read its file upside down (the layer's rows from the top, the image's from the
+  bottom). Image layers now show their file the way up it is; a texture made with one before shows it flipped back.
+
+**Checked**
+- An Image layer's top row is its file's top row. A Bricks texture edited and applied: its albedo matches the
+  Editing export exactly (0 / 255 apart); editing again reopens the
+  same adjustments and Apply reuses the layer; an exposure +1 stack gives the camera a Color Grading with exposure 1
+  that doubles a mid-grey pixel; contrast, saturation, a curve (through its black, grey and white), a vignette and
+  sharpening carry over, a masked step and Clarity are left out, a second look replaces the first, a stack with
+  nothing a camera does is refused (tests/test_editor.cpp). An Opus review's findings are fixed (the flipped Image
+  layer, a second Apply not reaching materials, looks piling up, the curve's ends, the vignette's strength).
+- Unit checks (round 200): Windows, in render-cache verify mode, 11,625, 0 failed (959 tests), 0 stale
+  pictures. Linux with libraries: 11,272, 0 failed. Sanitizer build: 11,148, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `textures`, `filters`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 199): masks for the Editing tab's adjustments (task 0182, ADR 0058 amended)
 
 **Asked:** local adjustments: each adjustment limited by a mask - a gradient, a luminance or colour range, a painted

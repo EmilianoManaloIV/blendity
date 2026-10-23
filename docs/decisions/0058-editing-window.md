@@ -54,6 +54,16 @@ are fractions of the picture the step acts on, so a mask follows a resized sourc
 masks. Range masks read the step's own input (what the step sees), not the source. The painted plane saves in the
 `.edit` line as run-length hex.
 
+## Amendment (task 0183, round 200): textures and the camera look
+A texture asset is one more source: its albedo output, evaluated without the layer an earlier Apply added, opens in
+the Editing tab. Apply writes the export beside the asset (`<texture> edit.png`, the stack beside it as `.edit`) and
+adds - or reuses - an Image layer on top that writes the albedo only, so the asset stays procedural underneath and the
+edit is one layer to turn off. "Use as Camera Look" maps the unmasked steps a camera filter can do onto the Main
+Camera's filter stack: Exposure, Contrast and Saturation exactly (the same formulas, `grade.h`), Temperature / Tint
+and the Tone Curve approximately (the camera's white balance is channel gains; a curve becomes lift, gamma and gain
+through black, middle grey and white), a darkening Vignette and Sharpen as their own effects; the rest is named and
+left out rather than faked.
+
 ## Alternatives considered
 - Grading in 8 bits after the view transform (as the camera filters do): rejected: exposure and white balance must
   act on light, and highlights clipped by the view can't be recovered.

@@ -212,6 +212,8 @@ void procedural_texture_set_preview(const std::string &asset_path, bool on);
 void procedural_texture_clear_previews();
 bool procedural_texture_preview();  // any texture in preview
 void procedural_texture_cache_clear();
+/* One asset's cached outputs dropped (task 0183: an Image layer's file rewritten under the same path). */
+void procedural_texture_cache_forget(const std::string &asset_path);
 
 /* Presets the Textures window and `newtex` start from: "Bricks", "Wood Floor", "Tatami", "Tiles", "Noise". */
 const std::vector<std::string> &texture_preset_names();

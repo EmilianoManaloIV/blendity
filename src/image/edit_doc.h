@@ -75,6 +75,8 @@ class Doc {
    * A source that isn't a file (a render) is written beside it first: <path>.source.exr (half floats, with alpha) when
    * the build writes EXR, else <path>.source.hdr (RGBE: about 8 bits of mantissa, no alpha). */
   bool save(const std::string &path, std::string &error);
+  bool save_stack(const std::string &path, std::string &error);  // (task 0183: the stack alone)
+  bool load_stack(const std::string &path, std::string &error);
   bool load(const std::string &path, std::string &error);
   std::string stack_text() const;
   void stack_from_text(const std::string &text);
@@ -95,6 +97,9 @@ class Doc {
   uint64_t revision_ = 1;
   double last_ms_ = 0;
 };
+
+/* A decoded image in linear float (an 8-bit one from sRGB; alpha as it is). */
+Image image_from_bitmap(const Bitmap &b);
 
 /* 8-bit sRGB pixels (0xAARRGGBB, the image's alpha) of a linear image through a view transform. */
 void to_display(const Image &img, std::vector<uint32_t> &out, ViewTransform vt = ViewTransform::Standard, float exposure = 0.0f);
