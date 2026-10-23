@@ -78,6 +78,11 @@ struct KeyChord {
   int mods = 0;
   bool operator==(const KeyChord &o) const { return key == o.key && mods == o.mods; }
 };
+/* One command the palette finds (task 0189): a keymap action (`action`) or a console line (`command`). */
+struct PaletteEntry {
+  std::string name, category, help, command, action;
+};
+
 struct ShortcutAction {
   const char *id;
   const char *label;
@@ -505,6 +510,17 @@ class Editor {
   std::string windows_layout_for_test() { return windows_layout(); }
   void restore_windows_for_test(const std::string &s) { restore_windows(s); }
   Recti render_picture_rect_for_test() const { return render_picture_rect_; }
+  std::string statusbar_text_for_test() const;
+  const std::string &last_palette_command_for_test() const { return last_palette_command_; }
+  std::vector<std::string> palette_names_for_test(const std::string &q) {
+    std::vector<std::string> out;
+    for (const PaletteEntry *e : palette_matches(q)) out.push_back(e->name);
+    return out;
+  }
+  std::vector<std::string> favorites_for_test() { return favorites(); }
+  void set_tool_for_test(Tool t) { tool_ = t; }
+  void set_scene_hovered_for_test(bool on) { scene_hovered_ = on; }
+  const std::vector<std::string> &add_component_recent_for_test() const { return add_component_recent_; }
   float edit_brush_radius_for_test() const { return edit_brush_radius(); }
   void set_render_image_for_test(const Image &img) {
     render_img_ = img;
@@ -2264,6 +2280,31 @@ class Editor {
   int pointer_window_ = 0;    // the window the last press was in (its drags: assets, the Hierarchy's)
   bool in_frame_ = false, save_prefs_pending_ = false;
   bool tablet_ = false;  // (the drawing window's Tablet mode: its UI 1.5 times as big, task 0188)
+  /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
+  std::vector<PaletteEntry> palette_entries_;
+  std::vector<std::string> add_component_recent_;
+  std::vector<std::string> palette_recent_;
+  std::map<std::string, std::vector<std::string>> favorites_;  // per layout
+  std::string palette_query_, last_palette_command_;
+  int palette_sel_ = 0;
+  const std::vector<PaletteEntry> &palette_entries();
+  const PaletteEntry *palette_find(const std::string &name);
+  const PaletteEntry *palette_find_built(const std::string &name) const;
+  std::vector<const PaletteEntry *> palette_matches(const std::string &query);
+  void palette_run(const PaletteEntry &e);
+  std::vector<std::string> &favorites();
+  bool toggle_favorite(const std::string &name);
+  void take_favorite_request();
+  void open_palette();
+  void open_favorites();
+  void draw_command_palette();
+  void draw_palette_body();
+  void palette_command(const std::vector<std::string> &t, const std::string &line);
+  std::string statusbar_hint() const;
+  void draw_statusbar_hint(const Recti &r);
+  void draw_statusbar_log(const Recti &r);
+  std::string favorites_prefs_text() const;
+  void load_favorites_pref(const std::string &v);
   struct WindowMode {
     enum What { RenderOnly, FullScreen, Tablet };
     int id;  // (0: the main window)

@@ -111,6 +111,8 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"file.new", "New Scene", "File", CTX_GLOBAL},
       {"file.open", "Open Scene", "File", CTX_GLOBAL},
       {"edit.undo", "Undo", "Edit", CTX_GLOBAL},
+      {"edit.palette", "Command Palette", "Edit", CTX_GLOBAL},
+      {"edit.favorites", "Quick Favorites", "Edit", CTX_GLOBAL},
       {"edit.redo", "Redo", "Edit", CTX_GLOBAL},
       {"edit.duplicate", "Duplicate", "Edit", CTX_GLOBAL},
       {"edit.select_all", "Select All", "Edit", CTX_GLOBAL},
@@ -221,6 +223,8 @@ static void common_bindings(Keymap &k) {
   b("file.open", {"Ctrl+O"});
   b("edit.undo", {"Ctrl+Z"});
   b("edit.redo", {"Ctrl+Y", "Ctrl+Shift+Z"});
+  b("edit.palette", {"Ctrl+K", "F3"});  // (VS Code's palette key; Blender's F3 search)
+  b("edit.favorites", {"Shift+Q"});     // (Blender's Q menu; Q is a tool key in these presets)
   b("render.image", {"F12"});
   b("render.screenshot", {"Shift+F12"});
   b("render.animation", {"Ctrl+F12"});
@@ -566,6 +570,10 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "file.save_as") save_scene_cmd(true);
   else if (id == "file.new") new_scene();
   else if (id == "file.open") open_scene_dialog();
+  else if ((id == "edit.palette" || id == "edit.favorites") && (drag_ == Drag::Fly || ui_.in.down[1]))
+    return false;  // (flying: Shift+Q is "down, fast", not a menu)
+  else if (id == "edit.palette") open_palette();
+  else if (id == "edit.favorites") open_favorites();
   else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
   else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();
   else if (id == "edit.undo") undo();

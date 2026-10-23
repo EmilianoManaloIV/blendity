@@ -585,6 +585,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   tab_close_queue_.clear();
   draw_statusbar(status);
   draw_menubar(menubar);  // last so its popups are declared after windows (they draw on top anyway)
+  draw_command_palette();  // (task 0189: Ctrl+K, Shift+Q)
   draw_dialogs();
   if (pointer_window_ == active_window_) update_asset_drag();  // (a drag belongs to the window it started in: task 0187)
   handle_drop();
@@ -593,6 +594,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   update_tab_drag();
 
   if (pointer_window_ == active_window_) finish_hierarchy_drag();
+  take_favorite_request();
   poll_skin_job();
   anim_tick();
   seq_tick();
@@ -1198,21 +1200,12 @@ void Editor::draw_toolbar(const Recti &r) {
   draw_layout_dialogs();  // Save / Delete Layout (task 0055)
 }
 
+/* The status bar: the last message (left), what the mouse does and the last action's Undo (middle), the frame's numbers
+ * (right). The right part is measured first; the hint gets what is left between and is cut with an ellipsis. */
 void Editor::draw_statusbar(const Recti &r) {
   auto &u = ui_;
   u.canvas.fill_rect(r, u.theme.tabbar);
   u.canvas.hline(r.x, r.right(), r.y, u.theme.border);
-  int x = r.x + u.px(8);
-  if (!log_.empty()) {
-    const LogEntry &e = log_.back();
-    Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
-    uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
-    int a = u.font.line_height() - u.px(4);
-    u.draw_icon(ic, {x, r.y + (r.h - a) / 2, a, a}, col);
-    Recti tr{x + a + u.px(6), r.y, r.w / 2, r.h};
-    u.label(tr, e.text, u.theme.text);
-    if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
-  }
   std::string lighting = baking_                 ? bake_status_ + "  |  "
                          : lighting_out_of_date()  ? std::string("Lighting out of date  |  ")
                          : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: Ctrl+Shift+L)  |  ")
@@ -1220,7 +1213,26 @@ void Editor::draw_statusbar(const Recti &r) {
   std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
                                 playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
                                 scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
+  const int right_w = u.font.text_width(right) + u.px(20);
   u.label({r.x, r.y, r.w - u.px(10), r.h}, right, u.theme.text_dim, ui::Align::Right);
+  const int x = r.x + u.px(8), log_w = r.w * 7 / 20;
+  draw_statusbar_log({x, r.y, log_w, r.h});
+  const int mid_x = x + log_w + u.px(12);
+  draw_statusbar_hint({mid_x, r.y, std::max(0, r.right() - right_w - mid_x), r.h});
+}
+
+/* The last message: its icon and text; a click opens the Console. */
+void Editor::draw_statusbar_log(const Recti &r) {
+  auto &u = ui_;
+  if (log_.empty()) return;
+  const LogEntry &e = log_.back();
+  Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
+  uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
+  int a = u.font.line_height() - u.px(4);
+  u.draw_icon(ic, {r.x, r.y + (r.h - a) / 2, a, a}, col);
+  Recti tr{r.x + a + u.px(6), r.y, std::max(0, r.w - a - u.px(6)), r.h};
+  u.canvas.text_ellipsis(u.font, tr.x, tr.y + (tr.h - u.font.line_height()) / 2, tr.w, e.text, u.theme.text);
+  if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
 }
 
 /* ===================================================================== */
@@ -1387,18 +1399,19 @@ void Editor::dock_layout(DockNode *n, const Recti &r) {
 void Editor::dock_draw(DockNode *n) {
   auto &u = ui_;
   if (n->split) {
-    dock_draw(n->a.get());
-    dock_draw(n->b.get());
     Recti sr = n->vertical ? Recti{n->rect.x, n->a->rect.bottom(), n->rect.w, n->b->rect.y - n->a->rect.bottom()}
                            : Recti{n->a->rect.right(), n->rect.y, n->b->rect.x - n->a->rect.right(), n->rect.h};
-    u.canvas.fill_rect(sr, u.theme.border);  // (the frame no longer clears the whole framebuffer)
-    Recti hit = n->vertical ? Recti{sr.x, sr.y - u.px(2), sr.w, sr.h + u.px(4)} : Recti{sr.x - u.px(2), sr.y, sr.w + u.px(4), sr.h};
-    bool hot = u.hovered(hit) && !u.any_active();
-    if (hot || split_drag_ == n) u.cursor = n->vertical ? Cursor::ResizeV : Cursor::ResizeH;
-    if (hot && u.in.pressed[0]) {
+    const int grab = std::max(u.px(4), 4);  // (task 0189: an 8-pixel-wide target at any scale, Fitts)
+    Recti hit = n->vertical ? Recti{sr.x, sr.y - grab, sr.w, sr.h + 2 * grab} : Recti{sr.x - grab, sr.y, sr.w + 2 * grab, sr.h};
+    const bool hot = u.hovered(hit) && !u.any_active() && !u.any_popup_open();
+    if (hot && u.in.pressed[0]) {  // (taken before the areas beside it draw: they'd act on the same press)
       split_drag_ = n;
       u.consume_click();
     }
+    dock_draw(n->a.get());
+    dock_draw(n->b.get());
+    u.canvas.fill_rect(sr, u.theme.border);  // (the frame no longer clears the whole framebuffer)
+    if ((hot && !u.any_active()) || split_drag_ == n) u.cursor = n->vertical ? Cursor::ResizeV : Cursor::ResizeH;
     if (split_drag_ == n) {
       float t = n->vertical ? (u.in.my - n->rect.y) / (float)n->rect.h : (u.in.mx - n->rect.x) / (float)n->rect.w;
       n->ratio = clampf(t, 0.06f, 0.94f);
@@ -2761,6 +2774,12 @@ void Editor::delete_selected() {
 }
 
 void Editor::add_component_to_selection(const std::string &name) {
+  if (!selected_objects(false).empty() && (name == "Retro Console Filter" || find_component_info(name))) {  // (Add Component's Recent: what was added, task 0189)
+    auto &recent = add_component_recent_;
+    recent.erase(std::remove(recent.begin(), recent.end(), name), recent.end());
+    recent.insert(recent.begin(), name);
+    if (recent.size() > 5) recent.resize(5);
+  }
   if (name == "Retro Console Filter") {  // task 0004's component: now an effect in the filter stack
     for (GameObject *g : selected_objects(false)) filter_stack_op(g->id, "add", 0, 0, RetroConsoleFilter::kName);
     return;
@@ -3342,6 +3361,8 @@ void Editor::load_prefs() {
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
     else if (k == "windows") windows_pref_ = v;
+    else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
+    else if (k == "favorites") load_favorites_pref(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
@@ -3465,6 +3486,7 @@ void Editor::save_prefs() {
                  mr_folder_.c_str(), mr_installed_ ? 1 : 0);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   s += "windows=" + windows_layout() + "\n";  // (task 0187)
+  s += favorites_prefs_text();  // (task 0189)
   fs::write_file(prefs_path_, s);
 }
 

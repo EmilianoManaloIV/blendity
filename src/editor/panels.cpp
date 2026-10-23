@@ -1711,6 +1711,11 @@ void Editor::draw_inspector(const Recti &r) {
     if (!u.editing(fid) && add_component_search_.empty()) u.begin_edit(fid, "", false);
     u.text_field(fid, sr.shrink(u.px(3)), add_component_search_, nullptr, "Search");
     std::string f = to_lower(add_component_search_);
+    if (f.empty() && !add_component_recent_.empty()) {  // (task 0189: the last ones added first, as Unity's search shows)
+      u.menu_label("Recent");
+      for (const std::string &name : std::vector<std::string>(add_component_recent_))
+        if (u.menu_item(name)) add_component_to_selection(name);
+    }
     std::string last_cat;
     for (auto &ci : component_registry()) {
       if (!f.empty() && to_lower(ci.name).find(f) == std::string::npos) continue;

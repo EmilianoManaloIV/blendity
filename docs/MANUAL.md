@@ -82,6 +82,11 @@ and Animation (chapter 9).
 
 **Undo** (Ctrl+Z / Ctrl+Y) covers the scene, materials, textures and animation clips.
 
+**Find any command.** Ctrl+K (or F3) opens the command palette: type a few words and every action, window, layout,
+creatable object and console command that matches is listed with its shortcut; Enter runs it, even a tool the current
+layout hides. Right-click a row (or a menu row) to keep it in Quick Favorites (Shift+Q, one list per layout). The
+status bar says what the mouse and keys do where the mouse is, and offers Undo for the last action.
+
 **Windows on other screens.** Drag any tab out past the editor's edge and it gets a window of its own where you let
 go; right-click a tab for Move to New Window, Move to Display N or Move to Main Window. Each window is a dock of its
 own, at its own display's scale; the scene, selection and undo stay one, and the windows come back with the layout.

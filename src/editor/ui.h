@@ -142,6 +142,8 @@ class Context {
   bool redraw = false;
   /* Tests: each button's rectangle by its label, as last drawn (filled only while record_buttons is set). */
   bool record_buttons = false;
+  /* A menu row right-clicked this frame (task 0189: Quick Favorites takes its command by the row's text). */
+  std::string favorite_request;
   std::unordered_map<std::string, Recti> button_rects;
   /* Absolute time at which the UI wants to be woken (tooltips, caret blink); 0 = never. */
   double next_wakeup = 0;

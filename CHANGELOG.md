@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 205): find any command - the palette, Quick Favorites, the status bar's hints (task 0189, ADR 0060)
+
+**Asked:** an interaction pass grounded in HCI research: keep the Unity feel, cut the friction; measure first.
+
+**Changed**
+- **Command palette** (Ctrl+K, or F3 as in Blender): type a few words and every keymap action, window, layout,
+  creatable object and console-backed command that matches is listed with its shortcut, the recent ones first; Enter
+  runs it. It reaches tools the current layout hides. Console `palette <words>` lists, `palette run <words>` runs.
+- **Quick Favorites** (Shift+Q): right-click a palette row or a menu row to keep its command there; each layout has
+  its own list; `favorite <name>` from the console. The preferences keep them and the palette's recent list.
+- **The status bar** says what the mouse and keys do where the mouse is (the Scene view's tool or Edit Mode, the
+  feel's navigation) and offers Undo for the last action by name.
+- **Add Component** lists the last five added above the categories; **splitters** take a grab 4 pixels either side.
+
+**Checked**
+- "hair" puts Rig Hair from Mesh first and Enter runs it; every keymap action is in the palette; `palette run create
+  cube` makes a cube; a favorite shows under Shift+Q and only in its layout; the status bar's text follows the tool;
+  Add Component's Recent; the splitter grabbed 3 pixels inside the area beside it; Esc closes the palette; every
+  palette name is unique; `palette run bring windows back` closes a secondary window (tests/test_editor.cpp).
+- The audit (docs/tasks/0189-interaction-pass-1.md): 12 common tasks walked through before and after - 28 actions to
+  27 (4 %), far from the roadmap's 30 %: the paths were already two or three actions, like Unity's and Blender's. The
+  first count (33 -> 28 with dead ends removed) was wrong, an Opus review found; the corrected one is published. What
+  the palette changes is recall - knowing where a command lives - which needs people to measure.
+- An Opus review's findings are fixed: Esc didn't close the palette, a favorite couldn't be removed from Shift+Q,
+  Shift+Q opened while flying (Unity's "down, fast"), palette names repeated (each is unique now), a menu row mapped to
+  the wrong command (layouts before windows; combo options never), the status bar's hint cut and the message squeezed
+  (measured now, cut with an ellipsis), a splitter press also reaching the area beside it, a layout chosen from a
+  secondary window changing state without its dock, Tab moving the keyboard behind the palette, and hints that said
+  "add" where a click toggles.
+- Unit checks (round 205): Windows, in render-cache verify mode, 11,785, 0 failed (966 tests), 0 stale
+  pictures. Linux with libraries: 11,432, 0 failed. Sanitizer build: 11,308, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 204): a render-only window and a pen tablet (task 0188, ADR 0059 amended)
 
 **Asked:** a second screen showing the render large; a pen display for the Editing tab.

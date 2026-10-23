@@ -2660,6 +2660,92 @@ static void tests_round204() {
   });
 }
 
+/* Task 0189: the command palette, Quick Favorites, the status bar's hints, Add Component's recent, the splitter. */
+static platform::Event key_ev(int key, int mods = 0) {
+  platform::Event e;
+  e.type = platform::EventType::KeyDown, e.key = key, e.mods = mods;
+  return e;
+}
+
+static std::vector<platform::Event> typed(const std::string &s) {
+  std::vector<platform::Event> out;
+  for (char c : s) {
+    platform::Event e;
+    e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+    out.push_back(e);
+  }
+  return out;
+}
+
+static void tests_round205() {
+  test("command palette: Ctrl+K, typing \"hair\" puts Rig Hair from Mesh first and Enter runs it; every keymap action, window and layout is in it; the console's palette lists and runs", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    const std::vector<std::string> hair = ed.palette_names_for_test("hair");
+    CHECK(!hair.empty() && hair[0] == "Rig Hair from Mesh");
+    CHECK(!ed.palette_names_for_test("unwrap").empty() && ed.palette_names_for_test("unwrap")[0] == "Unwrap (LSCM)");
+    CHECK(!ed.palette_names_for_test("editing window").empty() && ed.palette_names_for_test("editing window")[0] == "Editing Window");
+    std::vector<std::string> all = ed.palette_names_for_test("");
+    std::sort(all.begin(), all.end());
+    CHECK(std::adjacent_find(all.begin(), all.end()) == all.end());  // (every name once: favorites key on them)
+    for (const ShortcutAction &a : shortcut_actions()) CHECK(!ed.palette_names_for_test(a.label).empty());
+    CHECK(ed.palette_names_for_test("zzqq nothing").empty());
+    ed.step_frame_headless({key_ev(platform::KEY_K, platform::MOD_CTRL)});
+    CHECK(ed.ui_for_test().any_popup_open());
+    ed.step_frame_headless(typed("hair"));
+    ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+    ed.step_frame_headless();
+    CHECK(ed.last_palette_command_for_test() == "hair rig" && !ed.ui_for_test().any_popup_open());
+    CHECK(ed.palette_names_for_test("")[0] == "Rig Hair from Mesh");  // (used lately: first with no query)
+    ed.command("palette run create cube");
+    CHECK(ed.last_palette_command_for_test() == "create Cube" && ed.active_object_for_test() && ed.active_object_for_test()->name.find("Cube") == 0);
+    ed.step_frame_headless({key_ev(platform::KEY_F3)});  // (Blender's search key opens it too)
+    CHECK(ed.ui_for_test().any_popup_open());
+    ed.step_frame_headless(typed("unw"));
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(!ed.ui_for_test().any_popup_open());  // (Esc closes it, typing or not)
+    ed.command("dock move Console newwindow");
+    CHECK(ed.window_count_for_test() == 2);
+    ed.command("palette run bring windows back");
+    CHECK(ed.window_count_for_test() == 1);
+  });
+
+  test("Quick Favorites: favorite adds a command for this layout, Shift+Q lists it, it runs from there, and the preferences keep it; the status bar says what the mouse does and offers Undo; Add Component lists what was added last; the splitter's grab zone is 8 pixels", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("favorite smart uv project");  // (any case)
+    ed.command("favorite No Such Command");  // (refused)
+    CHECK(ed.favorites_for_test() == std::vector<std::string>{"Smart UV Project"});
+    ed.step_frame_headless({key_ev(platform::KEY_Q, platform::MOD_SHIFT)});
+    CHECK(ed.ui_for_test().any_popup_open());
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    CHECK(!ed.ui_for_test().any_popup_open());
+    ed.command("layout Animation");
+    CHECK(ed.favorites_for_test().empty());  // (each layout its own)
+    ed.command("layout Default");
+    CHECK(ed.favorites_for_test().size() == 1);
+    ed.set_scene_hovered_for_test(true);
+    ed.set_tool_for_test(Tool::Move);
+    const std::string move = ed.statusbar_text_for_test();
+    ed.set_tool_for_test(Tool::Rotate);
+    const std::string rotate = ed.statusbar_text_for_test();
+    CHECK(move != rotate && move.find("Move") != std::string::npos && rotate.find("ring") != std::string::npos);
+    ed.set_scene_hovered_for_test(false);
+    CHECK(ed.statusbar_text_for_test().find("Ctrl+K") != std::string::npos);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    CHECK(ed.statusbar_text_for_test().find("Last: ") != std::string::npos);
+    ed.command("component Rigidbody");
+    ed.command("component MirrorModifier");
+    CHECK(ed.add_component_recent_for_test().size() == 2 && ed.add_component_recent_for_test()[0] == "MirrorModifier");
+    ed.step_frame_headless();
+    const Recti ins = ed.dock_leaf_rect_for_test(WindowKind::Inspector);  // (its left edge is a splitter in the Default layout)
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, ins.x + 3, ins.y + ins.h / 2)});  // (3 pixels inside: the old 2-pixel zone missed it)
+    CHECK(ed.ui_for_test().cursor == platform::Cursor::ResizeH);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2686,5 +2772,6 @@ void run_editor_tests() {
   tests_round201();
   tests_round203();
   tests_round204();
+  tests_round205();
   coverage_tests();
 }

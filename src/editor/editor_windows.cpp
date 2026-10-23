@@ -299,6 +299,8 @@ void Editor::draw_secondary_window(EditorWindow &w, double now) {
   handle_shortcuts();
   update_tab_drag();
   if (pointer_window_ == active_window_) finish_hierarchy_drag();
+  draw_command_palette();
+  take_favorite_request();
   ui_.end_frame();
   w.changed = had_events;
   if (!dock_->split && dock_->tabs.empty()) w.close = true;
@@ -479,6 +481,11 @@ bool Editor::place_on_display(int &x, int &y, int &w, int &h) {
 
 void Editor::dock_command(const std::vector<std::string> &t, const std::string &line) {
   const std::string verb = t.size() > 1 ? to_lower(t[1]) : "windows";
+  if (verb == "bringback") {  // (Window > Bring Back N Windows)
+    for (auto &w : windows_) w->close = true;
+    if (active_window_ == 0) close_finished_windows();
+    return;
+  }
   if (verb == "windows") {
     Log::info("Windows: the main one%s", windows_.empty() ? " only" : "");
     for (auto &w : windows_) {

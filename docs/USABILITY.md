@@ -279,6 +279,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A look found in the Editing tab stayed on one image; fixing a texture's colours meant another program. | Use as Camera Look carries it to the camera live; Apply to Texture puts an edit on a texture as a layer (task 0183). |
 | Every window lived inside the one editor window: a second screen couldn't hold the render or the Editing tab. | A tab dragged out of the editor gets a window of its own, on any display, remembered with the layout (task 0187, ADR 0059). |
 | A second screen showed the render inside the Render window's controls; a pen was only a mouse with pressure. | Render Only and Full Screen show the picture alone on its display; a pen's tilt and eraser reach the brush, palms are ignored, Tablet Mode enlarges a window's targets (task 0188). |
+| A command lived in a menu, a window's button or the console, and a layout could hide it: you had to remember where. | The command palette (Ctrl+K) finds any command by name with its shortcut; Quick Favorites (Shift+Q) keeps your own; the status bar says what the mouse does (task 0189, ADR 0060). |
 
 ## Still worth doing
 
