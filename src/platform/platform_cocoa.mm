@@ -292,6 +292,7 @@ Window *create_secondary_window(const char *title, int x, int y, int width, int 
     [w->window setTitle:[NSString stringWithUTF8String:title]];
     [w->window setAcceptsMouseMovedEvents:YES];
     [w->window setMinSize:NSMakeSize(240, 160)];
+    [w->window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];  // (its own full screen: task 0188)
     set_window_rect(w, x, y, std::max(240, width), std::max(160, height));
     [w->window makeKeyAndOrderFront:nil];
     [w->window makeFirstResponder:w->view];
@@ -327,6 +328,11 @@ void get_window_rect(Window *w, int &x, int &y, int &width, int &height) {
   const NSRect c = [w->window contentRectForFrameRect:[w->window frame]];
   x = (int)c.origin.x, y = (int)(primary_height() - c.origin.y - c.size.height);
   width = (int)c.size.width, height = (int)c.size.height;
+}
+
+void set_fullscreen(Window *w, bool on) {
+  const bool now = ([w->window styleMask] & NSWindowStyleMaskFullScreen) != 0;
+  if (now != on) [w->window toggleFullScreen:nil];
 }
 
 void set_window_rect(Window *w, int x, int y, int width, int height) {

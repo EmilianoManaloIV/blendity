@@ -25,6 +25,7 @@ void Editor::swap_window_state(EditorWindow &w) {
   std::swap(present_h_, w.present_h);
   std::swap(present_all_, w.present_all);
   std::swap(dpi_, w.dpi);
+  std::swap(tablet_, w.tablet);
   active_window_ = active_window_ == 0 ? w.id : 0;
 }
 
@@ -232,6 +233,10 @@ void Editor::draw_tab_menu_windows(WindowKind k) {
                              (int)(std::max(r.h, 320) * u), 0});
   ui_.tooltip("Its own window, to put on another display (or drag the tab out of the editor).");
   if (active_window_ != 0 && ui_.menu_item("Move to Main Window")) window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
+  EditorWindow *here = editor_window(active_window_);
+  if (here && (k == WindowKind::Render || k == WindowKind::Game) && ui_.menu_item("Render Only (the picture alone)"))
+    window_modes_.push_back({here->id, WindowMode::RenderOnly, true});
+  if (ui_.menu_item("Tablet Mode (bigger targets)", nullptr, tablet_)) window_modes_.push_back({active_window_, WindowMode::Tablet, !tablet_});
   const std::vector<Monitor> ms = headless_ ? test_monitors_ : monitors();
   for (size_t i = 0; ms.size() > 1 && i < ms.size(); i++)
     if (ui_.menu_item(strprintf("Move to Display %zu (%s)", i + 1, ms[i].name.c_str())))
@@ -251,6 +256,7 @@ void Editor::draw_secondary_windows(double now) {
   }
   close_finished_windows();
   apply_window_moves();
+  apply_window_modes();
 }
 
 void Editor::draw_secondary_window(EditorWindow &w, double now) {
@@ -278,8 +284,14 @@ void Editor::draw_secondary_window(EditorWindow &w, double now) {
   ui_.begin_frame(&fb_, now);
   const Recti area{0, 0, fb_.width, fb_.height};
   ui_.canvas.fill_rect(area, ui_.theme.border);
-  dock_layout(dock_.get(), area);
-  dock_draw(dock_.get());
+  if (w.fullscreen && ui_.in.key_pressed[KEY_ESCAPE]) {
+    window_modes_.push_back({w.id, WindowMode::FullScreen, false});
+    ui_.in.key_pressed[KEY_ESCAPE] = false;  // (taken: nothing else answers it)
+  }
+  if (!draw_render_only(w, area)) {
+    dock_layout(dock_.get(), area);
+    dock_draw(dock_.get());
+  }
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
   if (pointer_window_ == active_window_) update_asset_drag();
@@ -296,6 +308,115 @@ void Editor::draw_secondary_window(EditorWindow &w, double now) {
   collect_tabs(dock_.get(), tabs);
   if (!tabs.empty()) set_title(window_, std::string(window_title(tabs[0])) + " - Blendity");
   present_changed();
+}
+
+/* ---- render-only, fullscreen, tablet (task 0188) ---- */
+
+/* The window's one view - the Render tab's picture or the Game view - over all of it, its controls in a strip that
+ * shows while the mouse is at the top (false: not render-only, or it holds another kind of tab). The strip's clicks
+ * are taken before the view draws, so the Game view's own bar under it doesn't get them. */
+bool Editor::draw_render_only(EditorWindow &w, const Recti &area) {
+  const WindowKind k = render_only_kind(w);
+  if (k == WindowKind::Count) return false;
+  const Recti strip{area.x, area.y, area.w, ui_.row_h() + ui_.px(8)};
+  const bool show_strip = ui_.hovered(strip);
+  if (show_strip) draw_render_only_strip(w, strip);  // (its clicks first, consumed)
+  if (ui_.hovered(area) && (ui_.in.pressed[0] || ui_.in.pressed[1] || ui_.in.pressed[2])) focused_ = k;
+  ui_.push_id((uint64_t)k * 0x100000001B3ull + 7);
+  if (k == WindowKind::Game || !render_has_result_) draw_game_view(area);  // (no render yet: the camera's live view, its bar kept)
+  else draw_render_image(area, 0);  // (the picture fitted to the whole window)
+  ui_.pop_id();
+  window_rects_[k] = area;
+  if (show_strip) draw_render_only_strip(w, strip);  // (drawn again over the view; its click was taken above)
+  return true;
+}
+
+/* The tab render-only shows, or Count (not render-only, or the window holds another kind: it leaves the mode). */
+WindowKind Editor::render_only_kind(EditorWindow &w) {
+  if (!w.render_only) return WindowKind::Count;
+  if (!dock_->split && !dock_->tabs.empty()) {
+    const WindowKind k = dock_->tabs[(size_t)std::max(0, std::min(dock_->active, (int)dock_->tabs.size() - 1))];
+    if (k == WindowKind::Render || k == WindowKind::Game) return k;
+  }
+  w.render_only = false;
+  return WindowKind::Count;
+}
+
+void Editor::draw_render_only_strip(EditorWindow &w, const Recti &strip) {
+  auto &u = ui_;
+  u.canvas.fill_rect(strip, Color::hex(0x202020, 220));
+  const int bw = u.px(130);
+  if (u.button({strip.x + u.px(6), strip.y + u.px(4), bw, strip.h - u.px(8)}, "Show Tabs")) {
+    window_modes_.push_back({w.id, WindowMode::RenderOnly, false});
+    if (w.fullscreen) window_modes_.push_back({w.id, WindowMode::FullScreen, false});  // (tabs in a frame again)
+    u.consume_click();
+  }
+  u.tooltip("Back to the window's tabs and their controls (and out of full screen).");
+  if (u.button({strip.x + bw + u.px(12), strip.y + u.px(4), bw, strip.h - u.px(8)}, w.fullscreen ? "Exit Full Screen" : "Full Screen")) {
+    window_modes_.push_back({w.id, WindowMode::FullScreen, !w.fullscreen});
+    u.consume_click();
+  }
+  u.tooltip("Fill the display it is on (Esc leaves).");
+}
+
+/* Window modes asked for while a window drew (its state was swapped in): done after it, on the right window. */
+void Editor::apply_window_modes() {
+  std::vector<WindowMode> modes;
+  modes.swap(window_modes_);
+  for (const WindowMode &m : modes) {
+    EditorWindow *w = m.id ? editor_window(m.id) : nullptr;
+    if (m.what == WindowMode::Tablet) set_window_tablet(w, m.on);
+    else if (w && m.what == WindowMode::RenderOnly) w->render_only = m.on;
+    else if (w) set_window_fullscreen(*w, m.on);
+  }
+}
+
+/* Full screen on the window's display: the OS window borderless over it (headless: the size it would have). Call
+ * with the window's own state in place (between frames). */
+void Editor::set_window_fullscreen(EditorWindow &w, bool on) {
+  if (w.fullscreen == on) return;
+  w.fullscreen = on;
+  if (w.os) {
+    set_fullscreen(w.os, on);
+    return;
+  }
+  const std::vector<Monitor> ms = headless_ ? test_monitors_ : monitors();
+  if (ms.empty()) return;
+  const Monitor &m = ms[(size_t)std::max(0, std::min((int)ms.size() - 1, w.monitor))];
+  if (on) w.saved_rect = {w.x, w.y, w.fb.width, w.fb.height}, w.x = m.x, w.y = m.y, w.fb.resize(m.width, m.height);
+  else w.x = w.saved_rect.x, w.y = w.saved_rect.y, w.fb.resize(w.saved_rect.w, w.saved_rect.h);
+}
+
+/* Tablet: a window's UI half as big again (bigger targets for a pen or a finger); null: the main window. Call
+ * between frames (the main window's state in place). */
+void Editor::set_window_tablet(EditorWindow *w, bool on) {
+  if (!w) {
+    tablet_ = on;
+    apply_ui_scale();
+    return;
+  }
+  w->tablet = on;
+  swap_window_state(*w);
+  apply_ui_scale();
+  swap_window_state(*w);
+}
+
+/* window renderonly|fullscreen|tablet on|off [id]: renderonly and fullscreen without an id the newest window; tablet
+ * without one the main window. Queued: done between frames, whichever window's console typed it. */
+bool Editor::window_mode_command(const std::vector<std::string> &t) {
+  const std::string what = t.size() > 1 ? to_lower(t[1]) : "";
+  const int kind = what == "renderonly" ? WindowMode::RenderOnly : what == "fullscreen" ? WindowMode::FullScreen : what == "tablet" ? WindowMode::Tablet : -1;
+  if (kind < 0) return false;
+  const bool on = t.size() < 3 || to_lower(t[2]) != "off";
+  int id = t.size() > 3 ? std::atoi(t[3].c_str()) : 0;
+  if (t.size() <= 3 && kind != WindowMode::Tablet) id = windows_.empty() ? -1 : windows_.back()->id;
+  if (id != 0 && !editor_window(id)) {
+    Log::warn("window %s: no window %s (dock windows lists them; dock move Render newwindow makes one)", what.c_str(), t.size() > 3 ? t[3].c_str() : "of its own");
+    return true;
+  }
+  window_modes_.push_back({id, (WindowMode::What)kind, on});
+  if (active_window_ == 0) apply_window_modes();
+  return true;
 }
 
 /* ---- the layout: W(x,y,w,h,monitor,<dock>) for each window, after the main dock ---- */

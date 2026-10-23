@@ -40,6 +40,13 @@ Blender's Window > New Window), and the user's second screen and pen display wan
 - Workspaces (layouts) still describe the main window only.
 - Headless tests drive secondary windows without OS windows (`open_window_for_test`, `step_window_headless`).
 
+## Amendment (task 0188, round 204): render-only, full screen, a pen
+A secondary window holding a Render or Game tab can show the picture alone (`EditorWindow::render_only`: the dock not
+drawn, the Render window's picture via `draw_render_image` with no margin, controls in a strip shown on hover) and go
+full screen on its display (`platform::set_fullscreen`). Events carry a pen's tilt and eraser end beside its pressure;
+Win32 drops touch-made mouse events and gestures while a pen is in range (palm rejection). Tablet mode is per window
+(`tablet_`, swapped with the window's state): the UI scale times 1.5.
+
 ## Alternatives considered
 - A second `Editor`: rejected - two scenes or a shared one with two undo stacks and two simulations.
 - Drawing every window in one pass with a window index on each widget: rejected - every `draw_*` would change.

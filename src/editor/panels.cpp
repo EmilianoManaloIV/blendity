@@ -2248,7 +2248,14 @@ void Editor::draw_render_window(const Recti &r) {
   content_h = lay.y + off - left.y;
   u.end_scroll();
 
-  /* ---- image view ---- */
+  draw_render_image(right);
+}
+
+/* The Render window's picture (task 0188: also alone, in a render-only window): a checker behind, wheel zoom,
+ * middle-drag pan, double-click fit. */
+void Editor::draw_render_image(const Recti &right, int margin) {
+  auto &u = ui_;
+  if (margin < 0) margin = u.px(20);
   u.canvas.push_clip(right);
   /* Transparency-style checker behind the image. */
   for (int y = right.y; y < right.bottom(); y += u.px(16))
@@ -2260,17 +2267,18 @@ void Editor::draw_render_window(const Recti &r) {
     return;
   }
   const int iw = render_img_.width, ih = render_img_.height;
-  float fit = std::min((right.w - u.px(20)) / (float)iw, (right.h - u.px(20)) / (float)ih);
+  float fit = std::min((right.w - margin) / (float)iw, (right.h - margin) / (float)ih);
   if (u.hovered(right) && u.in.wheel_y != 0) {
     if (render_zoom_ <= 0) render_zoom_ = fit;
     render_zoom_ = clampf(render_zoom_ * std::pow(1.2f, u.in.wheel_y), 0.05f, 16.0f);
   }
   if (u.hovered(right) && u.in.down[2]) render_pan_ += Vec2((float)u.in.dx(), (float)u.in.dy());
   if (u.hovered(right) && u.in.double_clicked[0]) { render_zoom_ = 0; render_pan_ = Vec2(0, 0); }
-  float sc = render_zoom_ > 0 ? render_zoom_ : fit;
+  float sc = render_zoom_ > 0 && margin > 0 ? render_zoom_ : fit;  // (render-only, no margin: always fitted)
   int dw = (int)(iw * sc), dh = (int)(ih * sc);
   int ox = right.x + (right.w - dw) / 2 + (int)render_pan_.x, oy = right.y + (right.h - dh) / 2 + (int)render_pan_.y;
   Recti dst = Recti{ox, oy, dw, dh}.intersect(right);
+  render_picture_rect_ = {ox, oy, dw, dh};
   Image *fb = u.canvas.target();
   for (int y = dst.y; y < dst.bottom(); y++) {
     int sy = std::min(ih - 1, (int)((y - oy) / sc));

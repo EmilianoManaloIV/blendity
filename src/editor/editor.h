@@ -272,6 +272,8 @@ struct EditorWindow {
   int x = 0, y = 0, monitor = 0;
   bool close = false;
   bool changed = false;  // (it had events this frame: the main window redraws after it)
+  bool render_only = false, fullscreen = false, tablet = false;  // (task 0188)
+  Recti saved_rect{0, 0, 0, 0};  // (headless full screen's way back)
 };
 void collect_dock_tabs(const DockNode *n, std::vector<WindowKind> &out);
 
@@ -502,6 +504,12 @@ class Editor {
   void set_monitors_for_test(const std::vector<platform::Monitor> &m) { test_monitors_ = m; }
   std::string windows_layout_for_test() { return windows_layout(); }
   void restore_windows_for_test(const std::string &s) { restore_windows(s); }
+  Recti render_picture_rect_for_test() const { return render_picture_rect_; }
+  float edit_brush_radius_for_test() const { return edit_brush_radius(); }
+  void set_render_image_for_test(const Image &img) {
+    render_img_ = img;
+    render_has_result_ = true;
+  }
   bool in_main_dock_for_test(WindowKind k) { return dock_find(k) != nullptr; }
   Recti dock_leaf_rect_for_test(WindowKind k) {
     DockNode *n = dock_find(k);
@@ -1425,6 +1433,7 @@ class Editor {
   std::vector<Vec2> draw_mask_handles(const Recti &dst, const edit::MaskPart &m);
   void edit_mask_brush(const Recti &dst, Vec2 mouse, bool inside);
   float edit_brush_pressure() const;
+  float edit_brush_radius() const;
   bool edit_mask_show_ = false, edit_brush_erase_ = false, edit_brush_stroke_ = false, edit_handle_moved_ = false;
   int edit_mask_step_ = -1, edit_mask_part_ = -1, edit_handle_drag_ = -1;
   Vec2 edit_brush_last_{0, 0};
@@ -2254,6 +2263,23 @@ class Editor {
   int tab_drag_window_ = 0;   // the window a tab drag started in
   int pointer_window_ = 0;    // the window the last press was in (its drags: assets, the Hierarchy's)
   bool in_frame_ = false, save_prefs_pending_ = false;
+  bool tablet_ = false;  // (the drawing window's Tablet mode: its UI 1.5 times as big, task 0188)
+  struct WindowMode {
+    enum What { RenderOnly, FullScreen, Tablet };
+    int id;  // (0: the main window)
+    What what;
+    bool on;
+  };
+  std::vector<WindowMode> window_modes_;
+  void apply_window_modes();
+  WindowKind render_only_kind(EditorWindow &w);
+  Recti render_picture_rect_{0, 0, 0, 0};  // (where the Render window's picture was last drawn)
+  void draw_render_image(const Recti &r, int margin = -1);  // (margin: around the fitted picture; -1 the window's 20 px)
+  bool draw_render_only(EditorWindow &w, const Recti &area);
+  void draw_render_only_strip(EditorWindow &w, const Recti &strip);
+  void set_window_fullscreen(EditorWindow &w, bool on);
+  void set_window_tablet(EditorWindow *w, bool on);
+  bool window_mode_command(const std::vector<std::string> &t);
   void frame_body(std::vector<platform::Event> &events);
   bool any_button_down() const;
   bool key_down_any(int k) const;

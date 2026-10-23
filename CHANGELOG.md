@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 204): a render-only window and a pen tablet (task 0188, ADR 0059 amended)
+
+**Asked:** a second screen showing the render large; a pen display for the Editing tab.
+
+**Changed**
+- A Render or Game tab in a window of its own: right-click its tab > Render Only shows the picture alone, fitted to
+  the window (the Game view live until a render exists); its controls (Show Tabs, Full Screen) appear in a strip when
+  the mouse is at the top. Full Screen fills the window's display without a frame (Esc leaves): Win32 borderless,
+  X11's _NET_WM_STATE_FULLSCREEN, macOS full screen.
+- Pens: the tilt and the eraser end come with the pressure (Windows' pointer messages); the Editing tab's brush gets
+  thinner with lighter pressure and wider when the pen is tilted, as a pencil; the eraser end erases. A palm on the
+  screen while the pen is in range is ignored (no stray clicks or pinch-zooms).
+- Tablet Mode (a tab's right-click menu, or `window tablet on [id]`): that window's UI half as big again - bigger
+  targets for a pen or a finger.
+- Console `window renderonly|fullscreen|tablet on|off [id]`.
+
+**Checked**
+- Render-only draws no controls until the mouse reaches the top, the picture fills the window's width or height within
+  2 pixels, Show Tabs and Full Screen appear at the top; full screen takes the display's rectangle and gives the old
+  one back; Tablet scales one window's UI by 1.5 and not the main one's; a pen at half pressure and 30 degrees of tilt
+  makes a 0.875-times-wide dab, a mouse the size set, the eraser end reaches the brush; the strip's Full Screen acts
+  on its own window (not the main one), Esc and Show Tabs leave full screen, an unknown window id is refused
+  (tests/test_editor.cpp).
+- An Opus review's findings are fixed: the strip's buttons and the console's window modes acted on the main window
+  (a window's state is swapped in while it draws: the modes now wait for the frame's end, as tab moves do); a window
+  could stay full screen with no way out; a finger's button-up could be dropped while a pen came near; any pointer
+  leaving cleared the pen's nearness; full screen restored a maximised window's rectangle wrongly.
+- Unit checks (round 204): Windows, in render-cache verify mode, 11,675, 0 failed (964 tests), 0 stale
+  pictures. Linux with libraries: 11,322, 0 failed. Sanitizer build: 11,198, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 203): windows beside the main one, on any display (task 0187, ADR 0059)
 
 **Asked:** windows outside the main editor - the Render tab on a second screen, the Editing tab on a pen display.

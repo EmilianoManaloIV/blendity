@@ -361,6 +361,7 @@ void Editor::process_events(std::vector<Event> &events) {
       case EventType::MouseMove:
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
+        in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
         break;
       case EventType::Gesture:  // (task 0075: two fingers; the Scene view navigates with them)
         if (!in.down[0] && !in.down[1] && !in.down[2]) in.mx = e.x, in.my = e.y;  // (a held button's drag keeps its own point)
@@ -375,6 +376,7 @@ void Editor::process_events(std::vector<Event> &events) {
         int b = e.button;
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
+        in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
         in.down[b] = true;
         in.pressed[b] = true;
         double t = now_seconds();
@@ -437,7 +439,7 @@ void Editor::process_events(std::vector<Event> &events) {
 }
 
 void Editor::apply_ui_scale() {
-  float s = ui_scale_pref_ > 0 ? ui_scale_pref_ : std::max(1.0f, dpi_);
+  float s = (ui_scale_pref_ > 0 ? ui_scale_pref_ : std::max(1.0f, dpi_)) * (tablet_ ? 1.5f : 1.0f);  // (Tablet: bigger targets, task 0188)
   ui_.scale = s;
   if (ui_.font.source().empty()) ui_.font.load_system_ui_font(13.0f * s);
   else ui_.font.set_pixel_height(13.0f * s);

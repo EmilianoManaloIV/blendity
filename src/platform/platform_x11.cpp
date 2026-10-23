@@ -223,6 +223,20 @@ void get_window_rect(Window *w, int &x, int &y, int &width, int &height) {
   width = w->width, height = w->height;
 }
 
+/* The window manager's fullscreen state (EWMH _NET_WM_STATE_FULLSCREEN), asked for with a client message. */
+void set_fullscreen(Window *w, bool on) {
+  XEvent e{};
+  e.xclient.type = ClientMessage;
+  e.xclient.window = w->win;
+  e.xclient.message_type = XInternAtom(w->dpy, "_NET_WM_STATE", False);
+  e.xclient.format = 32;
+  e.xclient.data.l[0] = on ? 1 : 0;  // (_NET_WM_STATE_ADD / _REMOVE)
+  e.xclient.data.l[1] = (long)XInternAtom(w->dpy, "_NET_WM_STATE_FULLSCREEN", False);
+  e.xclient.data.l[3] = 1;
+  XSendEvent(w->dpy, DefaultRootWindow(w->dpy), False, SubstructureRedirectMask | SubstructureNotifyMask, &e);
+  XFlush(w->dpy);
+}
+
 void set_window_rect(Window *w, int x, int y, int width, int height) {
   XMoveResizeWindow(w->dpy, w->win, x, y, (unsigned)std::max(1, width), (unsigned)std::max(1, height));
   XFlush(w->dpy);

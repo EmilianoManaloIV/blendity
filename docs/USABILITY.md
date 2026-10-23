@@ -278,6 +278,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | An adjustment changed the whole picture: brightening a face brightened the sky too. | Masks: a gradient, a tone or colour range, or a brush limits each adjustment, combined by add, subtract and intersect (task 0182). |
 | A look found in the Editing tab stayed on one image; fixing a texture's colours meant another program. | Use as Camera Look carries it to the camera live; Apply to Texture puts an edit on a texture as a layer (task 0183). |
 | Every window lived inside the one editor window: a second screen couldn't hold the render or the Editing tab. | A tab dragged out of the editor gets a window of its own, on any display, remembered with the layout (task 0187, ADR 0059). |
+| A second screen showed the render inside the Render window's controls; a pen was only a mouse with pressure. | Render Only and Full Screen show the picture alone on its display; a pen's tilt and eraser reach the brush, palms are ignored, Tablet Mode enlarges a window's targets (task 0188). |
 
 ## Still worth doing
 

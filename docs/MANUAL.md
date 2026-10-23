@@ -82,6 +82,18 @@ and Animation (chapter 9).
 
 **Undo** (Ctrl+Z / Ctrl+Y) covers the scene, materials, textures and animation clips.
 
+**Windows on other screens.** Drag any tab out past the editor's edge and it gets a window of its own where you let
+go; right-click a tab for Move to New Window, Move to Display N or Move to Main Window. Each window is a dock of its
+own, at its own display's scale; the scene, selection and undo stay one, and the windows come back with the layout.
+A Render or Game tab in its own window can be Render Only (the picture alone, fitted, its controls at the top) and Full
+Screen on that display - a second monitor showing the render large. **Tablet Mode** (the tab menu) makes a window's
+UI half as big again for a pen or a finger; a pen's pressure and tilt shape the Editing tab's brush, its eraser end
+erases, and a palm resting on the screen is ignored.
+
+**Example: the render on a second screen**
+1. Drag the Render tab out of the editor onto your second display (or right-click it > Move to Display 2).
+2. Right-click its tab > Render Only, then at the top of the window, Full Screen. F12 renders into it.
+
 > Learn: *Welcome to Blendity*, *The Editor Layout*, *Navigating the Scene View*, *GameObjects, Components and Objects*,
 > *Hierarchy, Parenting and the Scene Graph*, *Move, Rotate, Scale*.
 
@@ -328,10 +340,20 @@ Generate Lighting bakes on the GPU too.
 1. Select the camera, Add Component > Camera Filters, Add Filter > Retro Console, Console: PlayStation (PS1).
 2. F12: the wobbling vertices, affine textures and dithered colour show in the path-traced render too.
 
+**Developing a render.** Window > Editing (or the Editing layout) develops a render or an image the way Lightroom does:
+a stack of adjustments - Exposure, Contrast, Highlights / Shadows, white balance, a Tone Curve, HSL, Clarity, Dehaze,
+Sharpen, Noise Reduction, Vignette, Crop - each limited by a mask if you like (a gradient, a tone or colour range, a
+brush), applied in linear light and never written into the source: Save keeps the stack beside the image, Export writes
+the result. Use as Camera Look gives the camera the same look live; Apply to Texture puts an edit on a texture.
+
+**Example: develop the last render**
+1. F12, then in the Editing tab press Render; Preset > Film.
+2. Add Adjustment > Exposure, Add Mask > Radial Gradient over the subject, raise Exposure; Export....
+
 **Use cases:** product shots and turntables (path traced); game levels with baked light; stylised and retro looks.
 
 > Learn: *How This Editor Renders*, *Lights and Materials*, *Render Engines*, *Light, Sky and Tone Mapping*,
-> *Baked and Realtime Lighting*, *Rendering on the GPU*.
+> *Baked and Realtime Lighting*, *Rendering on the GPU*, *Editing: Develop a Render*.
 
 ---
 

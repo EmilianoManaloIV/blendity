@@ -50,6 +50,10 @@ struct Event {
    * pixels, their turn in degrees (counter-clockwise). */
   float zoom = 1.0f, pan_x = 0.0f, pan_y = 0.0f, rotate = 0.0f;
   float pressure = 1.0f;  // MouseMove / MouseDown from a pen: how hard it presses (0..1); 1 for a mouse or a finger
+  /* From a pen (task 0188): its tilt from upright in degrees (x toward the right, y toward the user), and whether it
+   * is the eraser end. */
+  bool pen = false, eraser = false;
+  float tilt_x = 0.0f, tilt_y = 0.0f;
 };
 
 enum class Cursor { Arrow, IBeam, ResizeH, ResizeV, Move, Hand };
@@ -75,6 +79,8 @@ std::vector<Monitor> monitors();
 /* The window's client area on the desktop, and moving / resizing it there. */
 void get_window_rect(Window *w, int &x, int &y, int &width, int &height);
 void set_window_rect(Window *w, int x, int y, int width, int height);
+/* Borderless over its whole display (task 0188: a render shown on a second screen), and back. */
+void set_fullscreen(Window *w, bool on);
 
 /* Collects pending events. If none are queued it blocks for up to timeout_ms
  * (0 = never block). This is how the idle editor uses ~0% CPU. */

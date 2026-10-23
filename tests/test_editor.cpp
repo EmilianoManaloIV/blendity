@@ -2578,6 +2578,88 @@ static void tests_round203() {
   });
 }
 
+/* Task 0188: a render-only window, full screen, a pen on the Editing brush, Tablet mode. */
+static void tests_round204() {
+  test("windows: render-only shows the render alone, fitted to the window, its controls only at the top; full screen takes the display; Tablet makes a window's UI 1.5 times as big", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    Image pic;
+    pic.resize(800, 450);
+    for (size_t i = 0; i < pic.pixels.size(); i++) pic.pixels[i] = 0xFF000000u | (uint32_t)(i % 800 * 255 / 800) << 16;
+    ed.set_render_image_for_test(pic);
+    ed.command("dock move Render newwindow");
+    ed.step_frame_headless();
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    ed.command("window renderonly on");
+    w->ui.record_buttons = true;
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, w->fb.width / 2, w->fb.height / 2)});
+    CHECK(w->render_only && w->ui.button_rects.empty());  // (no chrome while the mouse is away from the top)
+    const Recti pr = ed.render_picture_rect_for_test();
+    CHECK(std::abs(pr.w - w->fb.width) <= 2 || std::abs(pr.h - w->fb.height) <= 2);
+    std::printf("    the picture %d x %d in a %d x %d window\n", pr.w, pr.h, w->fb.width, w->fb.height);
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, 40, 6)});
+    CHECK(w->ui.button_rects.count("Show Tabs") == 1 && w->ui.button_rects.count("Full Screen") == 1);
+    ed.set_monitors_for_test({platform::Monitor{0, 0, 1920, 1080, 1.0f, "One", true}, platform::Monitor{1920, 0, 2560, 1440, 1.0f, "Two", false}});
+    w->monitor = 1;
+    const int before_w = w->fb.width;
+    ed.command("window fullscreen on");
+    CHECK(w->fullscreen && w->fb.width == 2560 && w->fb.height == 1440 && w->x == 1920 && w->y == 0);
+    ed.command("window fullscreen off");
+    CHECK(!w->fullscreen && w->fb.width == before_w);
+    const Recti fsb = w->ui.button_rects.count("Full Screen") ? w->ui.button_rects["Full Screen"] : Recti{0, 0, 0, 0};
+    const int main_w = ed.main_fb_for_test().width;
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, fsb.x + 5, fsb.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseDown, fsb.x + 5, fsb.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseUp, fsb.x + 5, fsb.y + 5)});
+    CHECK(w->fullscreen && w->fb.width == 2560 && ed.main_fb_for_test().width == main_w);  // (the strip's window, not the main one)
+    platform::Event esc;
+    esc.type = platform::EventType::KeyDown, esc.key = platform::KEY_ESCAPE;
+    ed.step_window_headless(1, {esc});
+    CHECK(!w->fullscreen && w->fb.width == before_w);  // (Esc leaves)
+    ed.command("window fullscreen on");
+    const Recti tabs_button = w->ui.button_rects.count("Show Tabs") ? w->ui.button_rects["Show Tabs"] : Recti{0, 0, 0, 0};
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, tabs_button.x + 5, tabs_button.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseDown, tabs_button.x + 5, tabs_button.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseUp, tabs_button.x + 5, tabs_button.y + 5)});
+    CHECK(!w->render_only && !w->fullscreen);  // (Show Tabs leaves full screen too: no frameless window left without its strip)
+    ed.command("window renderonly off");
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, w->fb.width / 2, w->fb.height / 2)});
+    CHECK(!w->render_only && !w->ui.button_rects.empty());  // (the Render window's own controls again)
+    const float main_scale = ed.ui_for_test().scale;
+    ed.command("window tablet on 7");  // (no such window: refused, the main window untouched)
+    CHECK(ed.ui_for_test().scale == main_scale);
+    ed.command("window tablet on 1");
+    ed.step_frame_headless();
+    CHECK(std::fabs(w->ui.scale - 1.5f * main_scale) < 1e-4f && ed.ui_for_test().scale == main_scale);
+    CHECK(w->ui.row_h() >= ed.ui_for_test().row_h() * 1.4f);
+    ed.command("window tablet off 1");
+    CHECK(std::fabs(w->ui.scale - main_scale) < 1e-4f);
+    ed.command("dock move Render main");
+    ed.command("window renderonly on");  // (no window of its own left: refused)
+  });
+
+  test("windows: a pen's pressure, tilt and eraser reach the Editing tab's brush: half pressure and 30 degrees of tilt make a 0.875 times wide dab, the eraser end erases", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    const float size = ed.edit_brush_radius_for_test();
+    platform::Event pen = mouse_ev(platform::EventType::MouseMove, 300, 300);
+    pen.pen = true, pen.pressure = 0.5f, pen.tilt_x = 30.0f, pen.tilt_y = 0.0f;
+    ed.step_frame_headless({pen});
+    CHECK(std::fabs(ed.edit_brush_radius_for_test() - size * 0.7f * 1.25f) < 1e-5f);
+    pen.pressure = 1.0f, pen.tilt_x = 0.0f;
+    ed.step_frame_headless({pen});
+    CHECK(std::fabs(ed.edit_brush_radius_for_test() - size) < 1e-5f);
+    platform::Event mouse = mouse_ev(platform::EventType::MouseMove, 310, 300);
+    ed.step_frame_headless({mouse});
+    CHECK(ed.edit_brush_radius_for_test() == size && !ed.ui_for_test().in.pen);
+    pen.eraser = true;
+    ed.step_frame_headless({pen});
+    CHECK(ed.ui_for_test().in.eraser && ed.ui_for_test().in.pen);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2603,5 +2685,6 @@ void run_editor_tests() {
   tests_round200();
   tests_round201();
   tests_round203();
+  tests_round204();
   coverage_tests();
 }

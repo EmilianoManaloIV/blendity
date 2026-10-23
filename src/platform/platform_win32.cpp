@@ -43,6 +43,12 @@ struct Window {
   double gesture_dist = 0.0, gesture_angle = 0.0;
   POINT gesture_at{};
   float pen_pressure = 1.0f;
+  float pen_tilt_x = 0.0f, pen_tilt_y = 0.0f;
+  bool pen_eraser = false, pen_near = false;  // (near: a pen in range - a touch then is a palm, not a finger: task 0188)
+  UINT32 pen_id = 0;  // (the pen's pointer: only its leaving clears pen_near)
+  bool fullscreen = false;
+  LONG_PTR saved_style = 0;
+  WINDOWPLACEMENT saved_place{sizeof(WINDOWPLACEMENT)};
   int min_w = 640, min_h = 400;  // (a secondary window may be smaller: task 0187)
   bool placing = false;  // (moved by the program: a display's DPI change keeps the size asked for)
 };
@@ -131,8 +137,14 @@ static float window_dpi(HWND hwnd) {
 /* Is the mouse message being handled one Windows made from a pen? (Touch and pens mark theirs: MI_WP_SIGNATURE, with
  * 0x80 set for touch.) A mouse's or a finger's moves press at 1, whatever a pen did before. */
 static bool message_from_pen() { return (GetMessageExtraInfo() & 0xFFFFFF80) == 0xFF515700; }
+/* A mouse message Windows made from a touch (its signature with the touch bit). */
+static bool message_from_touch() { return (GetMessageExtraInfo() & 0xFFFFFF80) == 0xFF515780; }
 
 static void push(Window *w, Event e) {
+  const bool pointer = e.type == EventType::MouseMove || e.type == EventType::MouseDown || e.type == EventType::MouseUp;
+  if ((e.type == EventType::MouseMove || e.type == EventType::MouseDown) && w->pen_near && message_from_touch()) return;  // (a palm while the pen is near; a button-up always passes)
+  if (e.type == EventType::Gesture && w->pen_near) return;
+  if (pointer && message_from_pen()) e.pen = true, e.eraser = w->pen_eraser, e.tilt_x = w->pen_tilt_x, e.tilt_y = w->pen_tilt_y;
   if (e.type == EventType::MouseMove || e.type == EventType::MouseDown) e.pressure = message_from_pen() ? w->pen_pressure : 1.0f;
   w->queue.push_back(std::move(e));
 }
@@ -190,6 +202,11 @@ static void note_pointer(Window *w, WPARAM wp) {
   POINTER_PEN_INFO pen{};
   if (!get_type || !get_pen || !get_type(id, &type) || type != PT_PEN || !get_pen(id, &pen)) return;
   w->pen_pressure = (pen.penMask & PEN_MASK_PRESSURE) ? std::max(0.0f, std::min(pen.pressure / 1024.0f, 1.0f)) : 1.0f;
+  w->pen_tilt_x = (pen.penMask & PEN_MASK_TILT_X) ? (float)pen.tiltX : 0.0f;
+  w->pen_tilt_y = (pen.penMask & PEN_MASK_TILT_Y) ? (float)pen.tiltY : 0.0f;
+  w->pen_eraser = (pen.penFlags & (PEN_FLAG_ERASER | PEN_FLAG_INVERTED)) != 0;
+  w->pen_near = true;
+  w->pen_id = id;
 }
 
 static void mouse_button(Window *w, int button, bool down, LPARAM lp) {
@@ -327,6 +344,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_POINTERUP:
     case WM_POINTERLEAVE:
     case WM_POINTERCAPTURECHANGED:
+      if (msg == WM_POINTERLEAVE && GET_POINTERID_WPARAM(wp) == w->pen_id) w->pen_near = false;  // (the pen out of range: touches are fingers again)
       w->pen_pressure = 1.0f;  // (lifted or gone: nothing presses)
       break;
     case WM_DROPFILES: {
@@ -538,6 +556,28 @@ static UINT dpi_at(int x, int y) {
   UINT dx = 96, dy = 96;
   if (fn) fn(MonitorFromPoint(POINT{x, y}, MONITOR_DEFAULTTONEAREST), 0, &dx, &dy);
   return dx;
+}
+
+void set_fullscreen(Window *w, bool on) {
+  if (w->fullscreen == on) return;
+  w->fullscreen = on;
+  w->placing = true;  // (the size asked for, whatever the display's DPI)
+  if (on) {
+    w->saved_style = GetWindowLongPtrW(w->hwnd, GWL_STYLE);
+    GetWindowPlacement(w->hwnd, &w->saved_place);  // (its normal rectangle even when maximised)
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromWindow(w->hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+    SetWindowLongPtrW(w->hwnd, GWL_STYLE, w->saved_style & ~WS_OVERLAPPEDWINDOW);
+    const RECT &m = mi.rcMonitor;
+    SetWindowPos(w->hwnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    w->placing = false;
+    return;
+  }
+  SetWindowLongPtrW(w->hwnd, GWL_STYLE, w->saved_style);
+  SetWindowPlacement(w->hwnd, &w->saved_place);
+  SetWindowPos(w->hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+  w->placing = false;
 }
 
 void set_window_rect(Window *w, int x, int y, int width, int height) {
