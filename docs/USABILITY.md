@@ -273,6 +273,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Seeing a Blendity scene in Blender (to render it in Cycles, say) meant exporting it after every change. | The Blender add-on in bridges/blender follows the scene live: objects, meshes as their vertices move, materials (toon ones as a cel setup), lights, cameras, poses (task 0173). |
 | The same in Unity meant re-importing an export. | The Unity package in bridges/unity follows the scene live as GameObjects with the same numbers (task 0174; its Unity side not yet run). |
 | Unwrapping without seams meant Smart UV Project's many small islands; few islands meant marking every seam by hand. | Part Unwrap cuts by parts: the fewest charts that keep each one's stretch under a bound, following material slots (task 0179, ADR 0057). |
+| The UV Editor showed every material's islands at once, so packing or moving one material's UVs disturbed the others'. | A Material picker (and Materials > Edit UVs) edits one material's faces, the others dimmed and untouched (task 0186). |
 
 ## Still worth doing
 

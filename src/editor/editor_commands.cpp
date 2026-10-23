@@ -665,6 +665,11 @@ void Editor::run_console_command(const std::string &line) {
     livelink_command(t);
     return;
   }
+  if (c == "uv" && (arg(1, "") == "material" || arg(1, "") == "others")) {  // uv material <name>|+<name>|all, uv others dim|hide (task 0186)
+    if (arg(1, "") == "others") uv_hide_others_ = to_lower(arg(2, "dim")) == "hide";
+    else uv_material_command(line.size() > 12 ? line.substr(line.find("material") + 9) : std::string("all"));
+    return;
+  }
   if (c == "uv" && arg(1, "") == "parts") {  // uv parts [bound] [multi|single] (task 0179)
     uv_parts_command(t);
     return;
@@ -826,6 +831,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
     Log::info("  uv parts [bound] [multi|single] (unwrap by parts, PartUV), uv parts semantic on|off (PartField's tree), uv report");
+    Log::info("  uv material <name>|+<name>|all (the UV Editor on one material's faces), uv others dim|hide");
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");

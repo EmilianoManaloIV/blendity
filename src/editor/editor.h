@@ -469,6 +469,9 @@ class Editor {
   bool livelink_start(int port);
   void livelink_stop();
   livelink::Link *livelink_for_test() { return livelink_.get(); }
+  const std::vector<int> &uv_slots_for_test() const { return uv_slots_; }
+  /* How the UV Editor draws face `f` of `m`: 0 editable, 1 dimmed (another material), 2 not at all. */
+  int uv_face_style_for_test(const Mesh &m, size_t f) const { return uv_slot_active(m, f) ? 0 : uv_hide_others_ ? 2 : 1; }
   /* Task 0180: PartField stood in for by `m` (the tests'). */
   void set_partfield_for_test(std::unique_ptr<partfield::Model> m) { partfield_ = std::move(m); }
   void step_frame_headless(std::vector<platform::Event> events = {});
@@ -2729,6 +2732,16 @@ class Editor {
   Vec2 uv_pan_;
   int uv_bg_ = 0;  // 0 material texture, 1 UV grid, 2 color grid, 3 none
   bool uv_stretch_ = false;
+  /* Task 0186: the material slots the UV Editor edits (empty: all); the other faces dimmed or (hide) not drawn. */
+  std::vector<int> uv_slots_;
+  bool uv_hide_others_ = false;
+  bool uv_slot_active(const Mesh &m, size_t f) const {
+    return uv_slots_.empty() || std::find(uv_slots_.begin(), uv_slots_.end(), m.material_of(f)) != uv_slots_.end();
+  }
+  void uv_clip_selection(const Mesh &m);              // corners of faces out of the filter unselected
+  bool uv_material_command(const std::string &arg);   // `uv material <name>|+<name>|all`
+  void uv_edit_material(const MaterialPtr &mat);       // Materials window > Edit UVs
+  void draw_uv_material_filter(const Recti &r);
   enum class UvDrag { None, Box, Move, Rotate, Scale, Pan } uv_drag_ = UvDrag::None;
   int uv_press_x_ = 0, uv_press_y_ = 0;
   std::vector<std::pair<uint32_t, Vec2>> uv_drag_start_;

@@ -752,6 +752,10 @@ Smart UV Project needs no seams but cuts a curved surface into many small island
 ? You turn on uv parts semantic. What changes, and why is it off by default? | The part tree comes from PartField's learned features (parts as a person would name them) instead of the geometry, which changes where the search splits. It is off because PartField's weights are NVIDIA's, non-commercial: you install a conversion of your own, and without one the geometric tree is used.
 ! cmd:select Cylinder; uv parts; window UV Editor | Part Unwrap the Cylinder and look at its charts
 ! cmd:select Cylinder; uv report | Measure its UV map (charts, seams, stretch) in the Console
+# One material at a time
+A mesh with several materials usually has a texture for each, and each texture needs its own 0-1 square. The UV Editor's Material picker (or Materials > Edit UVs, or uv material <name>) edits only that material's faces: Unwrap, Pack and the transforms leave the other materials' UVs alone, and those faces are drawn as a faint outline (uv others hide hides them). Blender gets the same by selecting one material's faces in Edit Mode before opening the UV Editor.
+? You pack the UVs with only the Trim material chosen. What happens to the Paint material's islands? | Nothing: Pack fills 0-1 with Trim's islands only, and Paint's keep their own layout in their own texture's square.
+! cmd:window UV Editor; uv material all | The UV Editor on every material again
 )"},
     {"Materials and Textures", "Principled BSDF behind a Unity Material", R"(
 A Unity Material picks a shader (Standard or URP Lit) and fills its slots: Base Map, Metallic, Smoothness, Normal Map, Emission. A Blender material is a node graph, usually one Principled BSDF node with Image Texture nodes plugged in. Blendity shows a Unity-style Material in the Inspector and evaluates Blender's Principled BSDF underneath.

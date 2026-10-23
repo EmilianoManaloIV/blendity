@@ -2,6 +2,25 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 197): the UV Editor on one material's faces (task 0186)
+
+**Asked:** the UV Editor showing one material's islands: a Material filter, the others dimmed or hidden; "Edit UVs"
+from the Materials window; the background following the chosen material.
+
+**Changed**
+- UV Editor > the Material picker (All materials, then each slot): only that material's faces are drawn as editable,
+  picked, selected, moved, unwrapped (Unwrap, Smart UV, Part Unwrap, projections) and packed; the others are a faint
+  outline behind, or hidden (`uv others hide`), and keep their UVs. The Material Texture background is the chosen
+  slot's. Console `uv material <name>` / `+<name>` (adds a material) / `all`; Materials window > Edit UVs.
+
+**Checked**
+- On a cube with two materials, the second chosen: Unwrap changes only its faces, Select All selects only its corners,
+  Pack puts them in 0-1 and leaves the first material's UVs exactly; dimmed, hidden, adding a material, All, an unknown
+  name refused (tests/test_modeling.cpp).
+- Unit checks (round 197): Windows, in render-cache verify mode, 11,460, 0 failed (951 tests), 0 stale
+  pictures. Linux with libraries: 11,107, 0 failed. Sanitizer build: 10,984, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `uv`: 0 problems.
+
 ## 2026-10-22 (round 196): PartField's part tree for Part Unwrap, opt-in (task 0180, ADR 0057 amended)
 
 **Asked:** an opt-in "semantic parts" switch: PartField's learned per-face features (NVIDIA; non-commercial weights,

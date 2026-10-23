@@ -7865,6 +7865,64 @@ static void tests_round196() {
   });
 }
 
+static void tests_round197() {
+  test("uv material: with the second of a cube's two materials chosen, unwrap, select all and pack touch only its faces; the others dim, or hide", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->mesh_filter() && g->mesh_renderer());
+    if (!g) return;
+    MeshPtr &mp = g->mesh_filter()->mesh;
+    mesh_make_mutable(mp);
+    mp->face_material.assign(mp->face_count(), 0);
+    for (size_t f = 3; f < mp->face_count(); f++) mp->face_material[f] = 1;
+    mp->sync_attributes();
+    mp->touch();
+    g->mesh_renderer()->materials = {make_material("Paint", {0.8f, 0.2f, 0.2f}), make_material("Trim", {0.2f, 0.2f, 0.8f})};
+    ed.command("uv smart");
+    ed.step_frame_headless();
+    const std::vector<Vec2> before = g->mesh_filter()->mesh->uvs;
+    ed.command("uv material Trim");
+    CHECK(ed.uv_slots_for_test() == std::vector<int>{1});
+    ed.command("uv unwrap");
+    const Mesh &m = *g->mesh_filter()->mesh;
+    bool a_kept = true, b_moved = false;
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) {
+        const bool same = m.uvs[k].x == before[k].x && m.uvs[k].y == before[k].y;
+        if (f < 3) a_kept = a_kept && same;
+        else b_moved = b_moved || !same;
+      }
+    CHECK(a_kept && b_moved);
+    ed.command("uvsel all");
+    size_t b_corners = 0;
+    for (size_t f = 3; f < m.face_count(); f++) b_corners += m.face_size(f);
+    CHECK(ed.uv_selected_corners() == b_corners);
+    const std::vector<Vec2> unwrapped = g->mesh_filter()->mesh->uvs;
+    ed.command("uv pack");
+    const Mesh &p = *g->mesh_filter()->mesh;
+    bool inside = true, a_same = true;
+    for (size_t f = 0; f < p.face_count(); f++)
+      for (uint32_t k = p.face_offsets[f]; k < p.face_offsets[f + 1]; k++) {
+        if (f >= 3) inside = inside && p.uvs[k].x >= -1e-4f && p.uvs[k].x <= 1.0001f && p.uvs[k].y >= -1e-4f && p.uvs[k].y <= 1.0001f;
+        else a_same = a_same && p.uvs[k].x == unwrapped[k].x && p.uvs[k].y == unwrapped[k].y;
+      }
+    CHECK(inside && a_same);
+    CHECK(ed.uv_face_style_for_test(p, 0) == 1 && ed.uv_face_style_for_test(p, 4) == 0);
+    ed.command("uv others hide");
+    CHECK(ed.uv_face_style_for_test(p, 0) == 2);
+    ed.command("uv material +Paint");
+    CHECK(ed.uv_slots_for_test() == (std::vector<int>{1, 0}) && ed.uv_face_style_for_test(p, 0) == 0);
+    ed.command("uv material all");
+    CHECK(ed.uv_slots_for_test().empty());
+    ed.command("uv material Nothing");  // (an unknown name changes nothing)
+    CHECK(ed.uv_slots_for_test().empty());
+    ed.command("window UV Editor");
+    ed.step_frame_headless();  // (the editor draws with the filter's picker in its toolbar)
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -7897,4 +7955,5 @@ void run_modeling_tests() {
   tests_round186();
   tests_round195();
   tests_round196();
+  tests_round197();
 }
