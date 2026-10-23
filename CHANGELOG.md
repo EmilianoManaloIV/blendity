@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 218): the UI's 2D measured - it stays the CPU's; presenting made cheaper (task 0198)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round measures
+whether the UI itself should be drawn by the card (go only if the frames that change much of it cost over 4 ms at
+4K).
+
+**Decided:** no. The UI stays drawn by the CPU and taken up to the card where it changed. The measuring found the
+card's presenting slower than it should be, so that was fixed instead (docs/tasks/0198):
+- **Presents no longer wait for the card:** they run one frame behind. In a real 2560 x 1369 window, presenting the
+  whole canvas (a resize) went from 6.0 to 3.0 ms a frame; an idle frame from 2.1 to 1.7 ms.
+- **Only the changed columns go up, not whole rows:** scrolling a long Hierarchy at 4K costs the UI 3.41 ms a frame
+  in all, down from 6.38.
+- The card's first open after its shaders change compiles them in parallel: 35.3 -> 32.8 s on this machine. The views
+  draw on the CPU meanwhile; a warm open takes about 130 ms. Compiling them when Blendity is built would end the wait:
+  a follow-up.
+
+**Measured**
+- Real window (2560 x 1369, `Blendity --windowed-check`):
+  - the canvas idle, by the card 1.69 ms (the system 1.58);
+  - the canvas presented whole, 3.03 ms (2.61);
+  - the Scene view drawn every frame, 5.54 ms (6.84).
+- Headless 4K (stress `ui_2d`):
+  - the canvas's drawing 2.0-2.7 ms;
+  - scrolling 3.41 ms in all;
+  - resizing 5.92 ms - over the line, but a resize repaints everything whoever draws the UI.
+
+**Checked**
+- `changed_rects` takes up only the changed tiles' columns (tests/test_editor.cpp).
+- The views and their presenting checks pass (the gpu group).
+- An Opus review found no synchronisation fault in the presents run one frame behind. It did find:
+  - the stress window section taking nothing up (its row pair read as an empty rect);
+  - a second staging buffer the offscreen compose never used;
+  - the shader cache written in place (now written beside it and renamed);
+  - shaders compiled for passes a card can't make;
+  - the card's UI image missing changes the system presented meanwhile.
+
+  All are fixed.
+- Unit checks (round 218): Windows, in render-cache verify mode, 11,941, 0 failed (990 tests), 0 stale
+  pictures. Linux with libraries: 11,499, 0 failed. Sanitizer build: 11,375, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `ui_2d`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-23 (round 217): camera filters over the card's picture (task 0197, part 2)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round lets

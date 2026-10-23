@@ -49,6 +49,12 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0198, round 218): the UI's 2D stays the CPU's
+- Measured, the UI-heavy frames at 4K are under the 4 ms line once presenting is fixed: presents one frame behind,
+  only the changed columns taken up. Scrolling is 3.41 ms.
+- A resize (5.92 ms) repaints everything whoever draws the UI.
+- No batch renderer for the canvas. Revisit if the canvas's drawing passes 4 ms at 4K (UI scale 2 at 4K, for one).
+
 ## Amendment (task 0197, round 217): camera filters
 - A filtered view's 3D draws on the card and comes back for the filter's passes, as depth of field's does. Only a
   filter's rasterizer stage keeps the view on the CPU.

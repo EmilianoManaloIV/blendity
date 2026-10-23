@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "../core/jobs.h"
 #include "gpu_raster.h"
 
 #include "../core/core.h"
@@ -2007,6 +2008,9 @@ class VulkanRaster final : public Raster {
     f_.vkAllocateCommandBuffers(dev_, &cai, &cmd_);
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     f_.vkCreateFence(dev_, &fci, nullptr, &fence_);
+    cai.commandBufferCount = 2;  // (task 0198: the presents', two in flight)
+    f_.vkAllocateCommandBuffers(dev_, &cai, pcmd_);
+    for (VkFence &pf : pfence_) f_.vkCreateFence(dev_, &fci, nullptr, &pf);
     VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
     qpi.queryCount = 4;
@@ -2372,7 +2376,7 @@ class VulkanRaster final : public Raster {
     w.live = true;
     w.surface = surface;
     VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    f_.vkCreateSemaphore(dev_, &si, nullptr, &w.acquired);
+    for (VkSemaphore &a : w.acquired) f_.vkCreateSemaphore(dev_, &si, nullptr, &a);
     if (make_swapchain(w, 0, 0, err) < 0) {  // (no size yet - minimised - is fine: made at the first present)
       detach_window((int)id);
       return -1;
@@ -2386,12 +2390,13 @@ class VulkanRaster final : public Raster {
     Win &w = wins_[(size_t)id];
     free_swapchain(w);
     free_ui(w);
-    if (w.acquired) f_.vkDestroySemaphore(dev_, w.acquired, nullptr);
+    for (VkSemaphore a : w.acquired)
+      if (a) f_.vkDestroySemaphore(dev_, a, nullptr);
     if (w.surface) f_.vkDestroySurfaceKHR(vk::instance(), w.surface, nullptr);
     w = Win{};
   }
 
-  PresentResult present_window(int id, const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows, bool all,
+  PresentResult present_window(int id, const uint32_t *ui, int width, int height, const std::vector<PresentRect> &rects, bool all,
                                const std::vector<PresentView> &views, std::string *err) override {
     if (id < 0 || (size_t)id >= wins_.size() || !wins_[(size_t)id].live) return fail(err, "no such window"), Failed;
     Win &w = wins_[(size_t)id];
@@ -2403,21 +2408,35 @@ class VulkanRaster final : public Raster {
     }
     bool fresh = false;
     if (!fit_ui(w, width, height, fresh, err)) return Failed;
+    const int k = pring_;  // (task 0198: this present's slot; its last use done before its buffers are touched)
+    if (!present_slot_free(k, err)) return Failed;
     uint32_t image = 0;
-    VkResult ar = f_.vkAcquireNextImageKHR(dev_, w.swapchain, 1000000000ull, w.acquired, VK_NULL_HANDLE, &image);
+    VkResult ar = f_.vkAcquireNextImageKHR(dev_, w.swapchain, 1000000000ull, w.acquired[k], VK_NULL_HANDLE, &image);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR) {  // (the window changed under it: made again once)
       const PresentResult r = fit_swapchain(w, width, height, err);
       if (r != Shown) return r;
-      ar = f_.vkAcquireNextImageKHR(dev_, w.swapchain, 1000000000ull, w.acquired, VK_NULL_HANDLE, &image);
+      ar = f_.vkAcquireNextImageKHR(dev_, w.swapchain, 1000000000ull, w.acquired[k], VK_NULL_HANDLE, &image);
     }
     if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_TIMEOUT || ar == VK_NOT_READY) return Skipped;
     if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return fail(err, "could not get the window's next image"), Failed;
+    VkCommandBuffer frame_cmd = cmd_;
+    cmd_ = pcmd_[k];  // (the recording helpers write cmd_: the present's own buffer while it records)
     begin();
-    upload_ui(w, ui, width, height, all || fresh || resized ? std::vector<std::pair<int, int>>{{0, height}} : rows);
+    upload_ui(w, ui, width, height, all || fresh || resized ? std::vector<PresentRect>{{0, 0, width, height}} : rects, k);
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     compose(w, w.images[image], layout, w.fbs[image], width, height, views);
     to_layout(w.images[image], layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    return submit_present(w, image, err) ? Shown : Failed;
+    const bool shown = submit_present(w, image, k, err);
+    cmd_ = frame_cmd;
+    pring_ ^= 1;
+    return shown ? Shown : Failed;
+  }
+  /* Task 0198: a present slot whose last submission is done (waited for here, a frame later than it was sent). */
+  bool present_slot_free(int k, std::string *err) {
+    if (!pbusy_[k]) return true;
+    if (f_.vkWaitForFences(dev_, 1, &pfence_[k], VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS) return fail(err, "the GPU stopped responding");
+    pbusy_[k] = false;
+    return true;
   }
 
   bool compose_read(const uint32_t *ui, int width, int height, const std::vector<PresentView> &views, uint32_t *out, std::string *err) override {
@@ -2440,7 +2459,7 @@ class VulkanRaster final : public Raster {
       if (!make_buffer(off_readback_, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props())) return fail(err, "out of memory for the window's picture");
     }
     begin();
-    upload_ui(w, ui, width, height, {{0, height}});
+    upload_ui(w, ui, width, height, {{0, 0, width, height}});
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     compose(w, off_img_.img, layout, w.fbs[0], width, height, views);
     to_layout(off_img_.img, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -2467,11 +2486,11 @@ class VulkanRaster final : public Raster {
     std::vector<VkImage> images;
     std::vector<VkImageView> views;
     std::vector<VkFramebuffer> fbs;
-    VkSemaphore acquired = VK_NULL_HANDLE;
+    VkSemaphore acquired[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0198: one per present in flight
     std::vector<VkSemaphore> rendered;  // one per swapchain image
     Img ui;
     VkImageLayout ui_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    Buf ui_staging;
+    Buf ui_staging[2];                  // task 0198: one per present in flight (the host writes one while the card reads the other)
     VkDescriptorSet set = VK_NULL_HANDLE;
   };
   std::vector<Win> wins_;
@@ -2629,7 +2648,8 @@ class VulkanRaster final : public Raster {
     free_ui(w);
     fresh = true;
     if (!make_image(w.ui, width, height, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT) ||
-        !make_buffer(w.ui_staging, (size_t)width * height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props()))
+        !make_buffer(w.ui_staging[0], (size_t)width * height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props()) ||
+        (&w != &off_ && !make_buffer(w.ui_staging[1], (size_t)width * height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props())))  // (compose_read: one, it waits)
       return fail(err, "out of memory for the window's UI image");
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = compose_pool_;
@@ -2654,26 +2674,35 @@ class VulkanRaster final : public Raster {
     if (w.set) f_.vkFreeDescriptorSets(dev_, compose_pool_, 1, &w.set);
     w.set = VK_NULL_HANDLE;
     free_image(w.ui);
-    free_buffer(w.ui_staging);
+    free_buffer(w.ui_staging[0]);
+    free_buffer(w.ui_staging[1]);
     w.ui_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   }
   /* The UI's changed rows go up into its image (kept on the GPU between frames). */
-  void upload_ui(Win &w, const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows) {
+  void upload_ui(Win &w, const uint32_t *ui, int width, int height, const std::vector<PresentRect> &rects, int k = 0) {
+    Buf &staging = w.ui_staging[k];
     std::vector<VkBufferImageCopy> regions;
-    for (const auto &r : rows) {
-      const int y0 = std::max(0, r.first), y1 = std::min(height, r.second);
-      if (y1 <= y0) continue;
-      std::memcpy((uint8_t *)w.ui_staging.mapped + (size_t)y0 * width * 4, ui + (size_t)y0 * width, (size_t)(y1 - y0) * width * 4);
+    for (const PresentRect &r : rects) {
+      const int y0 = std::max(0, r.y0), y1 = std::min(height, r.y1), x0 = std::max(0, r.x0), x1 = std::min(width, r.x1);
+      if (y1 <= y0 || x1 <= x0) continue;
+      /* Task 0198: the rect's rows copied by every thread, 16 at a time, at their places in the staging buffer (laid out
+       * as the canvas: one row is the canvas's width). */
+      uint8_t *dst = (uint8_t *)staging.mapped;
+      JobSystem::global().parallel_for(y1 - y0, 16, [&](int64_t a0, int64_t a1) {
+        for (int64_t y = y0 + a0; y < y0 + a1; y++)
+          std::memcpy(dst + ((size_t)y * width + x0) * 4, ui + (size_t)y * width + x0, (size_t)(x1 - x0) * 4);
+      });
       VkBufferImageCopy c{};
-      c.bufferOffset = (VkDeviceSize)y0 * width * 4;
+      c.bufferOffset = ((VkDeviceSize)y0 * width + x0) * 4;
+      c.bufferRowLength = (uint32_t)width;
       c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-      c.imageOffset = {0, y0, 0};
-      c.imageExtent = {(uint32_t)width, (uint32_t)(y1 - y0), 1};
+      c.imageOffset = {x0, y0, 0};
+      c.imageExtent = {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0), 1};
       regions.push_back(c);
     }
     to_layout(w.ui.img, w.ui_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     if (!regions.empty())
-      f_.vkCmdCopyBufferToImage(cmd_, w.ui_staging.buf, w.ui.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regions.size(), regions.data());
+      f_.vkCmdCopyBufferToImage(cmd_, staging.buf, w.ui.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regions.size(), regions.data());
     to_layout(w.ui.img, w.ui_layout, VK_IMAGE_LAYOUT_GENERAL);
   }
   /* A window's frame: black, each view's last picture copied to its place (clipped to the window), then the UI blended
@@ -2709,20 +2738,21 @@ class VulkanRaster final : public Raster {
   }
   /* Submits after the acquire, presents after the frame (each image signals its own semaphore: a present may not have
    * taken the last one yet), and waits for the frame. */
-  bool submit_present(Win &w, uint32_t image, std::string *err) {
+  bool submit_present(Win &w, uint32_t image, int k, std::string *err) {
     submits_++;
     f_.vkEndCommandBuffer(cmd_);
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.waitSemaphoreCount = 1;
-    si.pWaitSemaphores = &w.acquired;
+    si.pWaitSemaphores = &w.acquired[k];
     si.pWaitDstStageMask = &wait_stage;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd_;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &w.rendered[image];
-    f_.vkResetFences(dev_, 1, &fence_);
-    if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS) return fail(err, "the GPU refused the frame");
+    f_.vkResetFences(dev_, 1, &pfence_[k]);
+    if (f_.vkQueueSubmit(queue_, 1, &si, pfence_[k]) != VK_SUCCESS) return fail(err, "the GPU refused the frame");
+    pbusy_[k] = true;  // (not waited for now: the next present in this slot does)
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
     pi.pWaitSemaphores = &w.rendered[image];
@@ -2730,7 +2760,6 @@ class VulkanRaster final : public Raster {
     pi.pSwapchains = &w.swapchain;
     pi.pImageIndices = &image;
     const VkResult pr = f_.vkQueuePresentKHR(queue_, &pi);
-    if (f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS) return fail(err, "the GPU stopped responding");
     if (pr == VK_ERROR_OUT_OF_DATE_KHR) {  // (shown or not, the next frame makes the swapchain again)
       w.extent = {0, 0};
       return true;
@@ -2801,6 +2830,12 @@ class VulkanRaster final : public Raster {
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
+  /* Task 0198: the presents' own command buffers and fences, two in flight (a present isn't waited for until its
+   * slot comes round again). */
+  VkCommandBuffer pcmd_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkFence pfence_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  bool pbusy_[2] = {false, false};
+  int pring_ = 0;
   VkQueryPool queries_ = VK_NULL_HANDLE;
   uint64_t submits_ = 0;  // (task 0160: queue submissions, each waited for)
   bool timestamps_ = false;
@@ -3846,7 +3881,30 @@ class VulkanRaster final : public Raster {
     }
     if (!can_draw_hdr()) Log::warn("The GPU view can't keep the picture in linear light (%s): the CPU draws those views", herr.empty() ? "?" : herr.c_str());
   }
+  /* Task 0198: the heavy shaders compiled at once, on every thread, before the pipelines ask for them one by one (they
+   * then come from the compile's memory cache). The same sources as below: one that drifts only costs its own compile. */
+  void compile_ahead() {
+    const std::string mat = std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval;
+    const std::string light = std::string(kLightFrag) + kLightFns + kLightFrag2;
+    const std::string see = mat + light + kSeeCommon;
+    std::vector<std::pair<std::string, shaderc_shader_kind>> srcs = {
+        {std::string(geometry_ ? "#define BL_HIGHLIGHT 1\n" : "") + mat + kLightFns + kGbufFrag, shaderc_fragment_shader},
+        {std::string(kMaterialFrag) + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain, shaderc_fragment_shader},
+        {std::string("#define BL_HDR 1\n") + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain, shaderc_fragment_shader},
+        {mat + kToonFrag, shaderc_fragment_shader},
+        {std::string(kLightFns) + kGbufVert, shaderc_vertex_shader},
+    };
+    if (dual_src_) srcs.push_back({see + kSeeFrag, shaderc_fragment_shader}), srcs.push_back({"#define BL_SEE_IDS 1\n" + see + kSeeFrag, shaderc_fragment_shader});
+    if (geometry_) srcs.push_back({mat + light + kProbeFns + kBakedFrag, shaderc_fragment_shader});  // (as their pipelines are made: only on such cards)
+    JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) {
+        std::string e;
+        vk::compile(std::string(kCommon) + srcs[(size_t)i].first, srcs[(size_t)i].second, &e);
+      }
+    });
+  }
   bool make_pipelines(std::string *err) {
+    compile_ahead();
     VkShaderModule sv = module(kShadowVert, shaderc_vertex_shader, err), gv = module(std::string(kLightFns) + kGbufVert, shaderc_vertex_shader, err),
                    gf = module(std::string(geometry_ ? "#define BL_HIGHLIGHT 1\n" : "") + kMaterialFrag + kGlslProcedurals + kMaterialEval + kLightFns + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
                    lf = module(std::string(kMaterialFrag) + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain, shaderc_fragment_shader, err);
@@ -4004,6 +4062,8 @@ class VulkanRaster final : public Raster {
     if (set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, set_layout_, nullptr);
     if (queries_) f_.vkDestroyQueryPool(dev_, queries_, nullptr);
     if (fence_) f_.vkDestroyFence(dev_, fence_, nullptr);
+    for (VkFence pf : pfence_)
+      if (pf) f_.vkDestroyFence(dev_, pf, nullptr);
     if (pool_) f_.vkDestroyCommandPool(dev_, pool_, nullptr);
     f_.vkDestroyDevice(dev_, nullptr);
     dev_ = VK_NULL_HANDLE;

@@ -287,6 +287,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | An anime character's painted toon maps, face shadow and hair highlight, or any live procedural texture, sent the view back to the processor. | The card draws them; a live procedural only close up goes back, where the processor evaluates it point by point (task 0196). |
 | A scene with baked lighting - lightmaps, light probes, realtime lightmaps - had its views drawn by the processor. | The card draws them; realtime GI's per-pixel light alone stays the processor's (task 0197). |
 | A camera with any filter - a colour grade, a bloom, an outline - had its views drawn by the processor. | The card draws the 3D and the filters run over its picture; a retro filter's rasterizer stage alone stays the processor's (task 0197). |
+| With the card presenting, a resize or a long scroll took the window twice as long to show as the system did. | Presents don't wait for the card and only the changed columns go up: a whole window as fast as the system's, a 4K scroll 3.4 ms (task 0198). |
 
 ## Still worth doing
 

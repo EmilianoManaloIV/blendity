@@ -27,6 +27,7 @@ void Editor::swap_window_state(EditorWindow &w) {
   std::swap(dpi_, w.dpi);
   std::swap(tablet_, w.tablet);
   std::swap(card_present_, w.card_present), std::swap(card_off_, w.card_off), std::swap(card_win_, w.card_win);  // (task 0193)
+  std::swap(card_ui_stale_, w.card_ui_stale);  // (task 0198)
   std::swap(card_reason_, w.card_reason), std::swap(card_views_, w.card_views), std::swap(card_views_shown_, w.card_views_shown);
   active_window_ = active_window_ == 0 ? w.id : 0;
 }

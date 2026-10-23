@@ -280,17 +280,58 @@ std::vector<std::pair<int, int>> Editor::changed_rows(const uint32_t *px, int wi
   return runs;
 }
 
+/* Task 0198: the changed parts of a frame as rects - 16-row bands, each with the columns its changed 256-pixel tiles
+ * span (a scrolled panel changes its own columns, not the window's) - against `tiles` (the hashes of the last frame
+ * presented, updated here); the whole frame when `all` or the size changed. Bands next to each other spanning the same
+ * columns are one rect. */
+std::vector<gpu::Raster::PresentRect> Editor::changed_rects(const uint32_t *px, int width, int height, std::vector<uint64_t> &tiles, bool all) {
+  constexpr int kBand = 16, kTile = 256;
+  const int nb = (height + kBand - 1) / kBand, nt = (width + kTile - 1) / kTile;
+  std::vector<uint64_t> fresh((size_t)nb * nt);
+  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+    for (int b = (int)b0; b < (int)b1; b++)
+      for (int t = 0; t < nt; t++) {
+        const int x0 = t * kTile, w = std::min(kTile, width - x0);
+        uint64_t h = 0;
+        for (int y = b * kBand; y < std::min(height, (b + 1) * kBand); y++)
+          h = (h ^ band_hash((const uint8_t *)(px + (size_t)y * width + x0), (size_t)w * 4)) * 0x100000001B3ull;
+        fresh[(size_t)b * nt + t] = h;
+      }
+  });
+  all = all || tiles.size() != fresh.size();
+  std::vector<gpu::Raster::PresentRect> rects;
+  for (int b = 0; b < nb; b++) {
+    int lo = nt, hi = -1;
+    for (int t = 0; t < nt; t++)
+      if (all || tiles[(size_t)b * nt + t] != fresh[(size_t)b * nt + t]) lo = std::min(lo, t), hi = t;
+    if (hi < 0) continue;
+    const int y0 = b * kBand, y1 = std::min(height, y0 + kBand), x0 = lo * kTile, x1 = std::min(width, (hi + 1) * kTile);
+    if (!rects.empty() && rects.back().y1 == y0 && rects.back().x0 == x0 && rects.back().x1 == x1) rects.back().y1 = y1;
+    else rects.push_back({x0, y0, x1, y1});
+  }
+  tiles.swap(fresh);
+  return rects;
+}
+
 void Editor::present_changed() {
   const bool all = present_all_ || fb_.width != present_w_ || fb_.height != present_h_;
   present_w_ = fb_.width, present_h_ = fb_.height;
-  const std::vector<std::pair<int, int>> runs = changed_rows(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  /* (Task 0198: changed rects for the card; the system shows whole rows, the rects' bands.) */
+  const std::vector<gpu::Raster::PresentRect> rects = changed_rects(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  std::vector<std::pair<int, int>> runs;
+  for (const gpu::Raster::PresentRect &r : rects) {
+    if (!runs.empty() && runs.back().second == r.y0) runs.back().second = r.y1;
+    else runs.emplace_back(r.y0, r.y1);
+  }
   present_all_ = false;
   /* Task 0193: the card shows the window - the views it holds, the canvas over them - when it presents this one. */
   if (card_present_ && card_win_ >= 0 && gpu_view_) {
     card_present_ = false;  // (until the next frame decides again: nothing drawn between frames keeps a view there)
     std::string err;
-    const gpu::Raster::PresentResult r = gpu_view_->present_window(card_win_, fb_.pixels.data(), fb_.width, fb_.height, runs, all, card_views_, &err);
+    const gpu::Raster::PresentResult r =
+        gpu_view_->present_window(card_win_, fb_.pixels.data(), fb_.width, fb_.height, rects, all || card_ui_stale_, card_views_, &err);
     if (r == gpu::Raster::Shown) {
+      card_ui_stale_ = false;
       card_views_shown_ = card_views_;
       card_frames_++;
       return;
@@ -301,6 +342,7 @@ void Editor::present_changed() {
     if (!card_views_.empty()) return;  // (the canvas has holes where the card's pictures were: the next frame draws them here)
   }
   card_views_shown_.clear();
+  if (card_win_ >= 0) card_ui_stale_ = true;  // (task 0198: the card's UI image doesn't have this frame's changes)
   if (all) return present(window_, fb_.pixels.data(), fb_.width, fb_.height);
   present_rows(window_, fb_.pixels.data(), fb_.width, fb_.height, runs);
 }
@@ -2485,11 +2527,12 @@ the views drawn again each one (as an orbit does), presented by the card, and as
 part's mean frame time printed, the window as the card showed it saved to `out`. */
 int Editor::windowed_check(int frames, const std::string &out) {
   std::vector<Event> events;
-  auto step = [&](bool redraw_views) {
+  auto step = [&](bool redraw_views, bool every_row = false) {
     events.clear();
     if (window_) poll_events(window_, events, 0);
     ui_.redraw = true;
     if (redraw_views) scene_cache_.key = game_cache_.key = 0;
+    if (every_row) present_all_ = true;  // (task 0198: the whole canvas presented, as after a resize)
     ScopedTimer t;
     frame(events);
     return t.ms();
@@ -2517,6 +2560,18 @@ int Editor::windowed_check(int frames, const std::string &out) {
   std::vector<uint32_t> pixels;
   part(true, &pixels);
   part(false, nullptr);
+  /* Task 0198: the canvas alone - idle frames, then frames presenting every row - the views unchanged. */
+  auto canvas = [&](bool card, bool every_row) {
+    card_present_pref_ = card;
+    for (int i = 0; i < 10; i++) step(false, every_row);
+    double sum = 0;
+    for (int i = 0; i < frames && running_; i++) sum += step(false, every_row);
+    std::printf("  the canvas %s, presented by the %s: %.2f ms a frame (the views unchanged)\n", every_row ? "presented whole" : "idle",
+                card ? "card" : "system", sum / std::max(1, frames));
+  };
+  for (bool every_row : {false, true})
+    for (bool card : {true, false}) canvas(card, every_row);
+  card_present_pref_ = true;
   const bool wrote = !pixels.empty() && write_png(out, pixels.data(), fb_.width, fb_.height, fb_.width);
   std::printf("  %s %s\n", wrote ? "wrote" : "could not write", out.c_str());
   return wrote ? 0 : 1;

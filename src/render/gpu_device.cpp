@@ -1369,9 +1369,16 @@ std::vector<uint32_t> compile_glsl(const std::string &src, shaderc_shader_kind k
   const char *opts = "compute v1 vk1.2 spv1.4 performance";
   key = fnv1a_str(opts, key);
   if (kind != shaderc_compute_shader) key = (key ^ (uint64_t)(kind + 1)) * kFnvPrime;  // (the compute key as before)
-  std::lock_guard<std::mutex> lock(m);
-  std::vector<uint32_t> &out = mem[key];
-  if (!out.empty()) return out;
+  {  // (task 0198: the lock for the memory cache only - shaders compile in parallel)
+    std::lock_guard<std::mutex> lock(m);
+    auto hit = mem.find(key);
+    if (hit != mem.end() && !hit->second.empty()) return hit->second;
+  }
+  std::vector<uint32_t> out;
+  auto keep = [&] {
+    std::lock_guard<std::mutex> lock(m);
+    mem[key] = out;
+  };
   const std::string path = kernel_cache_path(key);
   std::string bytes;
   if (fs::read_file(path, bytes) && bytes.size() >= 8 && bytes.size() % 4 == 0) {
@@ -1381,6 +1388,7 @@ std::vector<uint32_t> compile_glsl(const std::string &src, shaderc_shader_kind k
     if (magic == 0x07230203u && trailer == (uint32_t)key) {
       out.resize(bytes.size() / 4 - 1);
       std::memcpy(out.data(), bytes.data(), out.size() * 4);
+      keep();
       return out;
     }
   }
@@ -1400,14 +1408,18 @@ std::vector<uint32_t> compile_glsl(const std::string &src, shaderc_shader_kind k
     std::string file(reinterpret_cast<const char *>(out.data()), n * 4);
     const uint32_t trailer = (uint32_t)key;
     file.append(reinterpret_cast<const char *>(&trailer), 4);
-    fs::write_file(path, file);
+    /* (Task 0198: written beside it and renamed into place - two threads may compile one source at once, and a reader
+     * never sees half a file.) */
+    const std::string tmp = path + strprintf(".%zx.tmp", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    std::error_code ec;
+    if (fs::write_file(tmp, file)) std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);
+    if (ec) std::filesystem::remove(std::filesystem::u8path(tmp), ec);
   }
   shaderc_result_release(r);
   shaderc_compile_options_release(o);
   shaderc_compiler_release(c);
-  std::vector<uint32_t> copy = out;
-  if (out.empty()) mem.erase(key);
-  return copy;
+  if (!out.empty()) keep();
+  return out;
 }
 
 std::vector<uint32_t> compile_compute(const std::string &src, std::string *error) { return compile_glsl(src, shaderc_compute_shader, error); }

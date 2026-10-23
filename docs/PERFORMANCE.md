@@ -3,6 +3,21 @@
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
+### After task 0198 (the UI's 2D measured; presenting made cheaper)
+- `Blendity --windowed-check` (a real 2560 x 1369 window, RTX 4070 SUPER), the views unchanged:
+
+  | A frame | The card | The system |
+  |---|---|---|
+  | The canvas idle | 1.69 ms (2.04-2.11 before) | 1.55-1.60 ms |
+  | The canvas presented whole | 3.03 ms (6.02-6.42 before) | 2.61-2.98 ms |
+  | The Scene view drawn every frame | 5.54 ms (6.32 before) | 6.84 ms |
+
+- stress `ui_2d` at 4K (2,000 objects in the Hierarchy): the canvas 2.0-2.7 ms.
+  - Scrolling: 63 % of rows changed, but 5 % of the pixels by tiles; 6.38 -> 3.41 ms in all.
+  - Resizing: 5.92 ms.
+- The card's first open after a shader change: 35.3 -> 32.8 s (in parallel; spirv-opt on four large fragment
+  shaders). Warm: 120-133 ms.
+
 ### After task 0197, part 2 (camera filters over the card's picture)
 - stress editor_render, this round's scene: colour grading, bloom and edge outline on the Main Camera, an icosphere moved
   each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):

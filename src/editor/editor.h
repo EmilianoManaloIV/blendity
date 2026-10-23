@@ -284,7 +284,7 @@ struct EditorWindow {
   bool render_only = false, fullscreen = false, tablet = false;  // (task 0188)
   Recti saved_rect{0, 0, 0, 0};  // (headless full screen's way back)
   /* Task 0193: presented by the card (Editor::card_*). */
-  bool card_present = false, card_off = false;
+  bool card_present = false, card_off = false, card_ui_stale = false;
   int card_win = -1;
   std::string card_reason;
   std::vector<gpu::Raster::PresentView> card_views, card_views_shown;
@@ -851,6 +851,8 @@ class Editor {
   /* The rows of a frame to present: runs of 16-row bands whose pixels differ from `bands` (the hashes of the last
    * frame presented, updated here); every row when `all` or the size changed (task 0084). */
   static std::vector<std::pair<int, int>> changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all);
+  /* Task 0198: the changed parts as rects (16-row bands, the columns of their changed 256-pixel tiles), against `tiles`. */
+  static std::vector<gpu::Raster::PresentRect> changed_rects(const uint32_t *px, int width, int height, std::vector<uint64_t> &tiles, bool all);
   void show_update_for_test(const std::string &json, const std::string &tag) {
     upd_.list = releases::parse(json);
     upd_.selected = tag;
@@ -2861,6 +2863,7 @@ class Editor {
    * views' pictures, the canvas over them. card_off_: its present failed, the system presents it from now on. Per
    * window (swapped with the window's state). */
   bool card_present_ = false, card_off_ = false, card_present_pref_ = true, card_present_for_test_ = false;
+  bool card_ui_stale_ = false;  // task 0198: the system presented while the card kept its UI image: all of it next time
   int card_win_ = -1;
   std::string card_reason_;
   std::vector<gpu::Raster::PresentView> card_views_, card_views_shown_;

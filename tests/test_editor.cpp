@@ -1317,6 +1317,22 @@ static void tests_round110() {
     px[5] ^= 0x80000000u;
     CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
   });
+  test("present (task 0198): the card takes up only the changed tiles' columns of each band - a narrow panel's change is a narrow rect, neighbouring bands with the same columns one rect", [] {
+    const int w = 1000, h = 100;  // (tiles 256 wide: 0-255, 256-511, 512-767, 768-999)
+    std::vector<uint32_t> px((size_t)w * h, 0xFF202020u);
+    std::vector<uint64_t> tiles;
+    auto rects = Editor::changed_rects(px.data(), w, h, tiles, false);
+    CHECK(rects.size() == 1 && rects[0].x0 == 0 && rects[0].x1 == w && rects[0].y0 == 0 && rects[0].y1 == h);  // (nothing presented yet: all)
+    CHECK(Editor::changed_rects(px.data(), w, h, tiles, false).empty());
+    for (int y = 16; y < 48; y++) px[(size_t)y * w + 300] = 0xFFFFFFFFu;  // a column in tile 1, bands 1 and 2
+    px[(size_t)99 * w + 999] = 0xFF00FF00u;                              // the last tile of the short last band
+    rects = Editor::changed_rects(px.data(), w, h, tiles, false);
+    for (const auto &r : rects) std::printf("    [%d, %d) x [%d, %d)\n", r.x0, r.x1, r.y0, r.y1);
+    CHECK(rects.size() == 2);
+    CHECK(rects.size() == 2 && rects[0].x0 == 256 && rects[0].x1 == 512 && rects[0].y0 == 16 && rects[0].y1 == 48);
+    CHECK(rects.size() == 2 && rects[1].x0 == 768 && rects[1].x1 == 1000 && rects[1].y0 == 96 && rects[1].y1 == 100);
+    CHECK(Editor::changed_rects(px.data(), w, h, tiles, true).size() == 1);  // (asked for all)
+  });
 }
 
 static void tests_round115() {

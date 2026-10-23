@@ -1577,6 +1577,128 @@ static void test_editor_render(Report &rep, const Options &o) {
            "casters or the light change (task 0011).");
 }
 
+/* Task 0198's measurement (ADR 0061: the UI's 2D on the card only if it pays): the frames that change the UI most,
+ * at 1080p and 4K - the canvas drawn on the CPU (the Profiler's UI time), the rows that then differ (Editor's own
+ * changed_rows, as presenting finds them) and what taking those rows up to the card costs at its measured upload
+ * rate. Go only if scrolling or resizing at 4K costs over 4 ms a frame. */
+static void test_ui_2d(Report &rep, const Options &o) {
+  rep.title("The UI's 2D (task 0198): what the canvas costs a frame, and what the card would take up",
+            "Headless editor frames with 2,000 objects in the Hierarchy, at 1920 x 1080 and 3840 x 2160 (UI scale 1). The canvas time is "
+            "the Profiler's UI part; changed rows are the canvas rows that differ from the frame before (16-row bands, as presenting "
+            "finds them); their upload is priced at the card's upload rate, measured below.");
+  /* The card's upload rate: a 4K RGBA8 image taken up whole (the staging copy, the transfer, the wait). */
+  double mb_per_ms = 0.0;
+  {
+    std::string err;
+    const std::vector<gpu::DeviceInfo> devs = gpu::devices();
+    std::unique_ptr<gpu::Raster> r = devs.empty() ? nullptr : gpu::Raster::create(devs[0].index, &err);
+    if (r) {
+      Texture t;
+      t.srgb = false, t.width = 3840, t.height = 2160;
+      Texture::Level l;
+      l.w = 3840, l.h = 2160;
+      l.px8.assign((size_t)l.w * l.h, 0xFF808080u);
+      t.levels.push_back(std::move(l));
+      int id = r->add_texture(t, &err);
+      if (id >= 0) r->remove_texture(id);
+      const double ms = time_ms([&] {
+        const int k = r->add_texture(t, &err);
+        if (k >= 0) r->remove_texture(k);
+      }, o.quick ? 3 : 8);
+      mb_per_ms = 3840.0 * 2160.0 * 4.0 / 1e6 / std::max(ms, 1e-6);
+      rep.note(strprintf("The card's upload rate (%s): a 4K RGBA8 image (33.2 MB) in %.2f ms, %.1f MB a millisecond.", devs[0].name.c_str(), ms, mb_per_ms));
+      /* The presenting path itself (task 0193's upload_ui and compose): a whole canvas taken up, composed and read back -
+       * an upper bound on presenting it (no read-back there). */
+      for (const auto &sz : {std::pair<int, int>{1920, 1080}, {3840, 2160}}) {
+        std::vector<uint32_t> ui((size_t)sz.first * sz.second, 0xFF404040u), out(ui.size());
+        r->compose_read(ui.data(), sz.first, sz.second, {}, out.data(), &err);
+        const double cms = time_ms([&] { r->compose_read(ui.data(), sz.first, sz.second, {}, out.data(), &err); }, o.quick ? 3 : 8);
+        rep.note(strprintf("A whole %dx%d canvas through the presenting path (taken up, composed, read back): %.2f ms.", sz.first, sz.second, cms));
+      }
+    }
+    else rep.note("No card: the upload column is left out.");
+  }
+  /* The presenting path's own rate (task 0198's pipelined presents), from the windowed check on this machine: a whole
+   * 2560 x 1369 canvas presented took 2.91 ms a frame against 1.66 idle - 14.0 MB in 1.25 ms. */
+  const double present_mb_per_ms = 14.0 / 1.25;
+  rep.note(strprintf("The presenting path's rate (Blendity --windowed-check, a whole 2560 x 1369 canvas against an idle one): %.1f MB a millisecond.", present_mb_per_ms));
+  rep.table({"size", "frame", "canvas ms", "rows changed", "finding them ms", "upload ms (priced)", "UI total ms (rows)", "tiles changed",
+             "finding them ms", "UI total ms (rects, the card)"});
+  for (const auto &sz : {std::pair<int, int>{1920, 1080}, {3840, 2160}}) {
+    Editor ed;
+    Log::echo_stdout = false;
+    ed.init_headless(sz.first, sz.second);
+    for (int i = 0; i < 2000; i++) ed.scene().create(strprintf("Item %04d", i));  // (top level: a list 2,000 rows long)
+    ed.mark_changed_for_test("items");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::vector<uint64_t> bands;
+    const Image &fb0 = ed.main_fb_for_test();
+    Editor::changed_rows(fb0.pixels.data(), fb0.width, fb0.height, bands, true);
+    using ET = platform::EventType;
+    const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+    auto row = [&](const char *name, const std::function<void(int)> &step, bool everything = false) {
+      step(0);
+      const Image &f = ed.main_fb_for_test();
+      Editor::changed_rows(f.pixels.data(), f.width, f.height, bands, true);
+      const int n = o.quick ? 8 : 24;
+      std::vector<uint64_t> tiles;
+      Editor::changed_rects(f.pixels.data(), f.width, f.height, tiles, true);
+      double canvas = 0, find = 0, rows = 0, total_rows = 0, rect_px = 0, find_rects = 0;
+      for (int k = 1; k <= n; k++) {
+        const FrameProfile a = ed.frame_profile_totals();
+        step(k);
+        const FrameProfile b = ed.frame_profile_totals();
+        canvas += b.ms_ui - a.ms_ui;
+        const Image &fb = ed.main_fb_for_test();
+        std::vector<std::pair<int, int>> runs;
+        find += time_ms([&] { runs = Editor::changed_rows(fb.pixels.data(), fb.width, fb.height, bands, everything); }, 1);
+        for (const auto &r : runs) rows += r.second - r.first;
+        total_rows += fb.height;
+        std::vector<gpu::Raster::PresentRect> rects;
+        find_rects += time_ms([&] { rects = Editor::changed_rects(fb.pixels.data(), fb.width, fb.height, tiles, everything); }, 1);
+        for (const auto &r : rects) rect_px += (double)(r.x1 - r.x0) * (r.y1 - r.y0);
+      }
+      const double share = total_rows > 0 ? rows / total_rows : 0.0;
+      const double bytes_mb = rows / n * sz.first * 4.0 / 1e6;
+      const double upload = mb_per_ms > 0 ? bytes_mb / mb_per_ms : 0.0;
+      const double rect_mb = rect_px / n * 4.0 / 1e6, rect_upload = present_mb_per_ms > 0 ? rect_mb / present_mb_per_ms : 0.0;
+      rep.row({strprintf("%dx%d", sz.first, sz.second), name, f2(canvas / n), strprintf("%.0f %%", share * 100.0), f2(find / n),
+               mb_per_ms > 0 ? f2(upload) : "-", f2(canvas / n + find / n + upload),
+               strprintf("%.0f %%", rect_px / n / ((double)sz.first * sz.second) * 100.0), f2(find_rects / n),
+               present_mb_per_ms > 0 ? f2(canvas / n + find_rects / n + rect_upload) : "-"});
+    };
+    row("idle", [&](int) { ed.step_frame_headless(); });
+    row("the mouse over the Hierarchy", [&](int k) {
+      platform::Event e;
+      e.type = ET::MouseMove;
+      e.x = hier.x + 20 + (k % 7) * 9;
+      e.y = hier.y + 40 + (k % 13) * 18;
+      ed.step_frame_headless({e});
+    });
+    row("scrolling the Hierarchy", [&](int k) {
+      platform::Event m;
+      m.type = ET::MouseMove;
+      m.x = hier.x + 40, m.y = hier.y + hier.h / 2;
+      platform::Event w = m;
+      w.type = ET::Wheel;
+      w.wheel_y = -2.0f;  // (down, the whole way: 2,000 rows)
+      ed.step_frame_headless({m, w});
+    });
+    /* A resize: the window presents everything again (Editor's present_all_ on Resize), the canvas drawn whole - as
+     * headless frames can't change size, priced as a hover frame's canvas with every row taken up. */
+    row("resizing the window (every row again)", [&](int k) {
+      platform::Event e;
+      e.type = ET::MouseMove;
+      e.x = hier.x + 20 + (k % 7) * 9;
+      e.y = hier.y + 40 + (k % 13) * 18;
+      ed.step_frame_headless({e});
+    }, true);
+    Log::echo_stdout = true;
+  }
+  rep.note("Go (the UI drawn on the card) only if scrolling or resizing at 4K costs over 4 ms a frame; otherwise the canvas stays "
+           "the CPU's, its changed rows uploaded (task 0193).");
+}
+
 /* Draw items with their meshes and materials kept alive (as the unit tests' scenes). */
 struct CfScene {
   std::vector<MeshPtr> meshes;
@@ -5301,7 +5423,7 @@ static bool gpu_raster_window(Report &rep, GpuRasterScene &sc, const gpu::Device
     ScopedTimer t;
     ok = r->render(sc.gpu_frame(k), &err);
     for (int y = fh - 24; y < fh; y++) canvas[(size_t)y * fw + (k * 13) % fw] = 0xFF000000u | (uint32_t)(k * 977 + y);
-    ok = ok && r->present_window(win, canvas.data(), fw, fh, {{fh - 24, fh}}, false, shown, &err) != gpu::Raster::Failed;
+    ok = ok && r->present_window(win, canvas.data(), fw, fh, {{0, fh - 24, fw, fh}}, false, shown, &err) != gpu::Raster::Failed;  // (the bottom strip: x0, y0, x1, y1)
     ms.push_back(t.ms());
   }
   if (w) platform::destroy_window(w);
@@ -5797,7 +5919,7 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"procedural_textures", test_textures}, {"vgi", test_vgi}, {"probes", test_probes},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"ui_2d", test_ui_2d}, {"bake", test_bake}, {"procedural_textures", test_textures}, {"vgi", test_vgi}, {"probes", test_probes},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},

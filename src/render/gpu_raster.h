@@ -318,6 +318,10 @@ class Raster {
    * present_window shows a frame: the UI canvas's changed rows (all of them when `all`) go up into the window's image of
    * it, each view's last picture (its slot's) is copied to its place, and the UI is blended over them - a view shows
    * where the canvas is transparent. compose_read makes the same frame in memory instead (tests). */
+  /* Task 0198: a changed part of the canvas to take up: columns x0..x1, rows y0..y1 (ends excluded). */
+  struct PresentRect {
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  };
   struct PresentView {
     int slot = 0;
     int x = 0, y = 0;  // where its picture goes in the window
@@ -327,7 +331,7 @@ class Raster {
   /* Skipped: nothing shown this time, nothing wrong (the window minimised, being resized, its image not ready) - the
    * caller shows everything next time. Failed: the card can't present this window (*error says why). */
   enum PresentResult { Shown, Skipped, Failed };
-  virtual PresentResult present_window(int id, const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows,
+  virtual PresentResult present_window(int id, const uint32_t *ui, int width, int height, const std::vector<PresentRect> &rects,
                                        bool all, const std::vector<PresentView> &views, std::string *error) = 0;
   virtual bool compose_read(const uint32_t *ui, int width, int height, const std::vector<PresentView> &views, uint32_t *out,
                             std::string *error) = 0;
