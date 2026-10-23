@@ -1,6 +1,6 @@
 # 0159: GPU time in the Profiler
 
-- **Status:** in progress (round 179)
+- **Status:** done (round 179)
 - **Requirements:** R-07 (performance), R-09 (the Profiler says where the time goes)
 - **Decisions:** none (a measurement; the async pipeline that follows is ADR 0051 / 0052)
 - **Model:** main session

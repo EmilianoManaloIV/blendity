@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 210): the roadmap of tasks 0156-0191 written up (task 0176)
+
+**Asked:** the roadmap's last task: every task with its round, PR and numbers against the Blender column.
+
+**Added**
+- docs/tasks/0176-roadmap-write-up.md: the 36 tasks of rounds 174-209 (PRs #119-#154) stack by stack - what changed
+  and what was measured, the targets missed marked as missed (OptiX 0.32x / 0.20x GPU Compute against 1.4x / 1.8x; the
+  first Editing stack's 683 ms at 4K before task 0191; the interaction audit's 4 % against 30 %; two of the three
+  performance rows short of half their gap), and what stayed open.
+- Tasks 0159, 0160 and 0178 were still marked "in progress" though their rounds landed: marked done.
+
+**Checked**
+- Documentation only: no code changed, no suite run (the round before ran the whole chain: 11,841 checks on Windows,
+  11,488 on Linux, 11,364 with sanitizers, all passing).
+
 ## 2026-10-23 (round 209): entering Edit Mode redraws only the Scene view (task 0185, round 3 of 3)
 
 **Asked:** the performance pass against Blender's numbers, its third row: entering Edit Mode on a 50k-face mesh.

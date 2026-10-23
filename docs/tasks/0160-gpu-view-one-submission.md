@@ -1,6 +1,6 @@
 # 0160: the views' render and read-back in one submission
 
-- **Status:** in progress (round 180)
+- **Status:** done (round 180)
 - **Requirements:** R-05 (the views on the GPU), Q-01 (responsiveness)
 - **Decisions:** ADR 0051
 - **Model:** main session
