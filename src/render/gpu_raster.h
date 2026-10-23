@@ -46,8 +46,10 @@ struct RasterInstance {
    * settings below shade it (task 0102, ADR 0020). */
   enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64 };
   float model[16];
-  float albedo_rough[4];  // albedo rgb, roughness
-  float metal_spec[4];    // metallic, specular (Principled's IOR Level), the cutout threshold (-1: not a cutout; task 0163), the material's alpha
+  float albedo_rough[4] = {0.8f, 0.8f, 0.8f, 0.5f};  // albedo rgb, roughness
+  /* metallic, specular (Principled's IOR Level), the cutout threshold (-1: not a cutout; task 0163), the material's
+   * alpha. (Given defaults: an instance that left them unset was a cutout by chance - task 0193 found a test doing it.) */
+  float metal_spec[4] = {0.0f, 0.5f, -1.0f, 1.0f};
   float emission[3] = {0, 0, 0};
   uint32_t flags = ReceiveShadows | CastShadows;
   uint32_t mesh = 0;
@@ -249,11 +251,24 @@ class Raster {
   virtual bool render_read(const RasterFrame &frame, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
   /* How many times the queue was submitted to and waited for (tests: a view costs one, plus any uploads). */
   virtual uint64_t submits() const = 0;
-  /* (B): a swapchain on the window (Win32 HWND), then each present: the UI canvas's changed rows go up, slot 0's view
-   * (its last render) is copied to (view_x, view_y), and the frame is shown and its copies waited for. */
-  virtual bool attach_window(void *native, std::string *error) = 0;
-  virtual bool present(const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows, int view_x, int view_y,
-                       std::string *error) = 0;
+  /* Task 0193 (ADR 0061): presenting windows. attach_window makes a swapchain on an OS window (Win32: `window` is the
+   * HWND, `display` unused; X11: the Display* and the Window id) and returns its id (-1: refused, *error says why).
+   * present_window shows a frame: the UI canvas's changed rows (all of them when `all`) go up into the window's image of
+   * it, each view's last picture (its slot's) is copied to its place, and the UI is blended over them - a view shows
+   * where the canvas is transparent. compose_read makes the same frame in memory instead (tests). */
+  struct PresentView {
+    int slot = 0;
+    int x = 0, y = 0;  // where its picture goes in the window
+  };
+  virtual int attach_window(void *display, void *window, std::string *error) = 0;
+  virtual void detach_window(int id) = 0;
+  /* Skipped: nothing shown this time, nothing wrong (the window minimised, being resized, its image not ready) - the
+   * caller shows everything next time. Failed: the card can't present this window (*error says why). */
+  enum PresentResult { Shown, Skipped, Failed };
+  virtual PresentResult present_window(int id, const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows,
+                                       bool all, const std::vector<PresentView> &views, std::string *error) = 0;
+  virtual bool compose_read(const uint32_t *ui, int width, int height, const std::vector<PresentView> &views, uint32_t *out,
+                            std::string *error) = 0;
   virtual const DeviceInfo &info() const = 0;
 };
 

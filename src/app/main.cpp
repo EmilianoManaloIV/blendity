@@ -92,6 +92,17 @@ int main(int argc, char **argv) {
   if (const int code = launch::hand_over(argc, argv); code >= 0) return code;
   for (int i = 1; i < argc; i++)
     if (std::strcmp(argv[i], "--headless-screenshot") == 0) return headless(argc, argv);
+  /* Task 0193: --windowed-check out.png [--frames N] - a real window's frames, the window as shown saved. */
+  for (int i = 1; i + 1 < argc; i++) {
+    if (std::strcmp(argv[i], "--windowed-check") != 0) continue;
+    int frames = 120;
+    for (int k = 1; k + 1 < argc; k++)
+      if (std::strcmp(argv[k], "--frames") == 0) frames = std::atoi(argv[k + 1]);
+    Editor *editor = new Editor;  // (never destroyed: a check leaves the preferences and the project as they were)
+    const int result = editor->init(argc, argv) ? editor->windowed_check(frames, argv[i + 1]) : 1;
+    std::fflush(nullptr);
+    std::_Exit(result);  // (a GPU may still be opening: as below)
+  }
   int code = 0;
   {
     Editor editor;

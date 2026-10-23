@@ -671,6 +671,12 @@ void Editor::run_console_command(const std::string &line) {
     gpu_list();
     return;
   }
+  if (c == "viewport" && arg(1, "") == "present") {  // viewport present card|system (task 0193)
+    card_present_pref_ = to_lower(arg(2, "card")) != "system";
+    if (card_present_pref_) card_retry();
+    Log::info("Windows are presented by the %s", card_present_pref_ ? "card when there is one" : "system");
+    return;
+  }
   if (c == "layoutguide") {  // layoutguide on|off|reset|dismiss (task 0190)
     const std::string v = to_lower(arg(1, "reset"));
     if (v != "reset" && v != "dismiss" && v != "on" && v != "off") {

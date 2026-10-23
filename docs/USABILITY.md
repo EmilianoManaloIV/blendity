@@ -282,6 +282,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A command lived in a menu, a window's button or the console, and a layout could hide it: you had to remember where. | The command palette (Ctrl+K) finds any command by name with its shortcut; Quick Favorites (Shift+Q) keeps your own; the status bar says what the mouse does (task 0189, ADR 0060). |
 | A component showed every field at once, and a new layout gave no hint what to do next. | Seven essential fields first, the rest under Show more; each stage layout's first use says what it is for and offers three next steps (task 0190). |
 | With the views on the GPU, the processor still drew the grid, wireframes, outline and Edit Mode's face dots over the picture every frame. | The card draws them with the picture; the processor only when there's no card (task 0192, ADR 0061). |
+| With the views on the GPU, every frame's picture came back to the processor and was shown through the system. | The card shows the window itself, the views' pictures never leaving it; the system only when the card can't (task 0193). |
 
 ## Still worth doing
 

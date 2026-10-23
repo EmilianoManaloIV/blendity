@@ -1650,10 +1650,17 @@ uint64_t Editor::scene_view_key(const Recti &view) {
 }
 
 /* Puts a cached picture back into the framebuffer (the frame cleared it), if it is the one for `key`. */
+/* Task 0193: a cached picture the card holds can be shown only while it presents this window and the slot still has it;
+ * shown, it goes in this frame's views. */
+bool Editor::card_picture_kept(const ViewCache &c) const {
+  return c.card_slot < 0 || (card_present_ && gpu_slot_gen_[c.card_slot] == c.card_gen);
+}
+
 bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
   if (key == 0 || c.key != key || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width ||
-      r.bottom() > fb_.height)
+      r.bottom() > fb_.height || !card_picture_kept(c))
     return false;
+  if (c.card_slot >= 0 && !cache_verify_) card_views_.push_back({c.card_slot, r.x, r.y});
   JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
   });
@@ -1661,8 +1668,10 @@ bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
 }
 
 bool Editor::view_cache_show(ViewCache &c, const Recti &r) {
-  if (c.key == 0 || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height)
+  if (c.key == 0 || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height ||
+      !card_picture_kept(c))
     return false;
+  if (c.card_slot >= 0) card_views_.push_back({c.card_slot, r.x, r.y});
   JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
   });
@@ -1671,6 +1680,9 @@ bool Editor::view_cache_show(ViewCache &c, const Recti &r) {
 
 void Editor::view_cache_store(ViewCache &c, uint64_t key, const Recti &r) {
   c.key = 0;
+  c.card_slot = -1;
+  for (const gpu::Raster::PresentView &v : card_views_)  // (task 0193: its picture is the card's)
+    if (v.x == r.x && v.y == r.y) c.card_slot = v.slot, c.card_gen = gpu_slot_gen_[v.slot];
   if (key == 0 || r.w <= 0 || r.h <= 0 || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height) return;
   if (c.img.width != r.w || c.img.height != r.h) c.img.resize(r.w, r.h);
   JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {

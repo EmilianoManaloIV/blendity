@@ -572,7 +572,7 @@ void Canvas::fill_rect(const Recti &r_, uint32_t color) {
     uint32_t *row = img_->row(y) + r.x;
     if (opaque) std::fill(row, row + r.w, color);
     else
-      for (int x = 0; x < r.w; x++) row[x] = Color::blend(row[x], color);
+      for (int x = 0; x < r.w; x++) row[x] = Color::over(row[x], color);
   }
 }
 
@@ -769,7 +769,7 @@ int Canvas::text(Font &f, int x, int y, const char *s, size_t len, uint32_t colo
         uint8_t a = ar[xx];
         if (!a || px < clip_.x || px >= clip_.right()) continue;
         uint32_t aa = (a * ca) / 255;
-        row[px] = Color::blend(row[px], (color & 0xFFFFFF) | (aa << 24));
+        row[px] = Color::over(row[px], (color & 0xFFFFFF) | (aa << 24));
       }
     }
     pen += g.advance;

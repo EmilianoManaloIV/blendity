@@ -2161,6 +2161,93 @@ static void tests_round211() {
   });
 }
 
+/* ---------------------------------------------------------------- round 212: presenting from the card (task 0193) */
+static void tests_round212() {
+  auto diff = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within2) {
+    size_t n = 0, ok = 0;
+    double sum = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      n++, sum += w, ok += w <= 2;
+    }
+    mean = n ? sum / (double)n : 0, within2 = n ? (double)ok / (double)n : 0;
+  };
+  test("gpu views: a frame the card presents - the views' pictures kept on the card, the window's canvas over them - is the frame the system presents, drawn fresh, from the cache, and back on the system (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);  // (2 by 3: the Scene view and the Game view)
+    ed.viewport_device_for_test(2);
+    ed.command("select Cube");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    auto redraw = [&] {
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+    };
+    redraw();
+    const std::vector<uint32_t> system = ed.framebuffer().pixels;
+    ed.card_present_for_test(true);
+    redraw();
+    size_t holes = 0;
+    for (uint32_t p : ed.framebuffer().pixels) holes += (p >> 24) == 0;
+    std::vector<uint32_t> card;
+    const size_t views = ed.card_views_for_test();
+    CHECK(ed.card_frame_for_test(card));
+    double mean = 0, within2 = 0;
+    diff(system, card, mean, within2);
+    std::printf("    drawn fresh: %zu views on the card, %zu canvas pixels left for them; the card's frame against the system's: mean %.3f / 255, %.2f %% within 2\n",
+                views, holes, mean, within2 * 100);
+    CHECK(views >= 2 && holes > 10000);
+    CHECK(mean < 0.5 && within2 >= 0.995);
+    r34_steps(ed, 2);  // (nothing changed: the views come from their caches, their pictures still the card's)
+    const FrameProfile before = ed.frame_profile_totals();
+    r34_steps(ed, 1);
+    const uint64_t renders = ed.frame_profile_totals().view_renders - before.view_renders;
+    CHECK(ed.card_frame_for_test(card));
+    diff(system, card, mean, within2);
+    std::printf("    from the cache: %llu views drawn, %zu on the card; mean %.3f, %.2f %% within 2\n", (unsigned long long)renders,
+                ed.card_views_for_test(), mean, within2 * 100);
+    CHECK(renders == 0 && ed.card_views_for_test() >= 2);
+    CHECK(mean < 0.5 && within2 >= 0.995);
+    /* The slots drawn by something else since: a cached picture the card no longer holds draws again. */
+    ed.card_slots_redrawn_for_test();
+    const FrameProfile b2 = ed.frame_profile_totals();
+    r34_steps(ed, 1);
+    const uint64_t again = ed.frame_profile_totals().view_renders - b2.view_renders;
+    CHECK(ed.card_frame_for_test(card));
+    diff(system, card, mean, within2);
+    std::printf("    its slots drawn over: %llu views drawn again; mean %.3f\n", (unsigned long long)again, mean);
+    CHECK(again >= 2 && mean < 0.5);
+    /* A camera with depth of field: the CPU blurs its picture after the card draws it, so the Game view comes back to
+     * the canvas (one view on the card, the Scene view's) and still matches the system's frame with the blur. */
+    Camera *main = ed.scene().find_by_name("Main Camera")->get<Camera>();
+    main->dof = true;
+    main->focus_distance = 2.0f;
+    main->f_stop = 1.0f;
+    ed.card_present_for_test(false);
+    redraw();
+    const std::vector<uint32_t> blurred = ed.framebuffer().pixels;
+    ed.card_present_for_test(true);
+    redraw();
+    CHECK(ed.card_frame_for_test(card));
+    diff(blurred, card, mean, within2);
+    std::printf("    depth of field on: %zu views on the card; mean %.3f\n", ed.card_views_for_test(), mean);
+    CHECK(ed.card_views_for_test() == 1 && mean < 0.5);
+    ed.card_present_for_test(false);  // (the system presents again: the cached holes are no use, the views draw again)
+    r34_steps(ed, 2);
+    holes = 0;
+    for (uint32_t p : ed.framebuffer().pixels) holes += (p >> 24) == 0;
+    diff(system, ed.framebuffer().pixels, mean, within2);
+    std::printf("    back on the system: %zu transparent pixels; against the first frame: mean %.3f\n", holes, mean);
+    CHECK(holes == 0 && mean < 0.05);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2176,4 +2263,5 @@ void run_gpu_tests() {
   tests_round189();
   tests_round190();
   tests_round211();
+  tests_round212();
 }

@@ -3,6 +3,13 @@
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
+### After task 0193 (the card presents the windows)
+- `Blendity --windowed-check` (a real 2560 x 1369 window, the starter scene, the Scene view drawn every frame, RTX 4070
+  SUPER): 3.27 ms a frame presented by the card, 3.69 ms presented by the system.
+- stress gpu_raster (a 1080p window, the editor_render scene, drawn and presented each frame): RTX 4070 SUPER 0.65 ms,
+  RTX 3060 Ti 2.23 ms; the CPU's view drawn and its rows presented through GDI 16.75 ms.
+- The first open of the card in a fresh profile: 5.7 s (shaders compiled cold); the views draw on the CPU until then.
+
 ### After task 0192 (the overlays on the card)
 - With GPU views (stress editor_render, the RTX 4070 SUPER), the overlays' CPU time:
   - Edit Mode's Face mode: 3.2-3.6 -> 0.2 ms a frame (the card draws the grid, the wires, the outline and the face

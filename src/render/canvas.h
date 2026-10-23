@@ -133,7 +133,7 @@ class Canvas {
     if (a <= 0.0f || !clip_.contains(x, y)) return;
     uint32_t ca = (uint32_t)((color >> 24) * saturate(a));
     uint32_t &d = img_->pixels[(size_t)y * img_->width + x];
-    d = Color::blend(d, (color & 0xFFFFFF) | (ca << 24));
+    d = Color::over(d, (color & 0xFFFFFF) | (ca << 24));
   }
 
  private:

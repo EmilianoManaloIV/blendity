@@ -386,7 +386,8 @@ void present_rows(Window *w, const uint32_t *pixels, int width, int height, cons
   if (!rows.empty()) present(w, pixels, width, height);
 }
 
-void *native_handle(Window *) { return nullptr; }  // (task 0095's swapchain spike is Windows only)
+void *native_handle(Window *) { return nullptr; }  // (the card presents on Win32 and X11: task 0193; macOS: task 0194)
+void *native_display(Window *) { return nullptr; }
 
 void get_framebuffer_size(Window *w, int &width, int &height) {
   NSRect b = [w->view bounds];

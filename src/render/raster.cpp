@@ -1111,7 +1111,7 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
         float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
         if (a <= 0) continue;
         uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
-        d = Color::blend(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));
+        d = Color::over(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));  // (over: task 0193)
       }
     return;
   }
@@ -1122,7 +1122,7 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
     if (c.depth_test && z - c.bias > rt_->depth[(size_t)y * Wi + x]) return;
     uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
     uint32_t ca8 = (uint32_t)((color >> 24) * saturate(a));
-    d = Color::blend(d, (color & 0xFFFFFF) | (ca8 << 24));
+    d = Color::over(d, (color & 0xFFFFFF) | (ca8 << 24));
   };
   float nx0 = c.x0, ny0 = c.y0, nz0 = c.z0, nx1 = c.x1, ny1 = c.y1, nz1 = c.z1;
   float ldx = nx1 - nx0, ldy = ny1 - ny0;

@@ -424,6 +424,19 @@ struct Color {
     uint32_t g = (((src & 0x00FF00) * a + (dst & 0x00FF00) * ia) >> 8) & 0x00FF00;
     return 0xFF000000 | rb | g;
   }
+  /* src over dst keeping dst's coverage (task 0193): over an opaque dst exactly blend(); over a transparent or partly
+   * covered one - a hole where the card's picture of a view shows through the window's UI - Porter-Duff "over" in
+   * straight alpha, so the card can put the result over its picture and get what blend() would have made over it. */
+  static uint32_t over(uint32_t dst, uint32_t src) {
+    const uint32_t da = dst >> 24, a = src >> 24;
+    if (da == 255 || a == 255 || a == 0) return da == 255 ? blend(dst, src) : a == 0 ? dst : src;
+    const float sa = a / 255.0f, db = da / 255.0f * (1.0f - sa), oa = sa + db;
+    auto ch = [&](int k) {
+      const float v = (((src >> k) & 255) * sa + ((dst >> k) & 255) * db) / oa;
+      return (uint32_t)std::min(255.0f, v + 0.5f) << k;
+    };
+    return (uint32_t)std::min(255.0f, oa * 255.0f + 0.5f) << 24 | ch(16) | ch(8) | ch(0);
+  }
   static uint32_t with_alpha(uint32_t c, float a) { return (c & 0xFFFFFF) | ((uint32_t)(saturate(a) * 255.0f) << 24); }
   static uint32_t mix(uint32_t a, uint32_t b, float t) {
     return from(lerp(to_vec(a), to_vec(b), t));

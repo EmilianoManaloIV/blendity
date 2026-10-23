@@ -10369,6 +10369,32 @@ static void tests_round211() {
   });
 }
 
+/* ---------------------------------------------------------------- round 212: Color::over (task 0193) */
+static void tests_round212() {
+  test("Color::over is blend() over an opaque pixel, and drawing over a transparent hole then putting that over a picture gives what drawing over the picture gives (within 2 / 255 a layer)", [] {
+    R34Rng rng{212u};
+    int worst = 0;
+    bool same = true;
+    for (int i = 0; i < 20000; i++) {
+      const uint32_t base = 0xFF000000u | ((uint32_t)rng.range(0.0f, 16777215.0f) & 0xFFFFFF);
+      auto alpha = [&] { return std::min(255u, (uint32_t)rng.range(0.0f, 300.0f)); };  // (255, opaque, a sixth of the time)
+      const uint32_t s1 = alpha() << 24 | ((uint32_t)rng.range(0.0f, 16777215.0f) & 0xFFFFFF);
+      const uint32_t s2 = alpha() << 24 | ((uint32_t)rng.range(0.0f, 16777215.0f) & 0xFFFFFF);
+      same = same && Color::over(base, s1) == Color::blend(base, s1);
+      /* The UI's layer: two things drawn over a hole; the card then puts it over the picture (straight alpha). */
+      const uint32_t layer = Color::over(Color::over(0u, s1), s2), direct = Color::blend(Color::blend(base, s1), s2);
+      const float a = (layer >> 24) / 255.0f;
+      for (int k = 0; k < 24; k += 8) {
+        const float c = ((layer >> k) & 255) * a + ((base >> k) & 255) * (1.0f - a);
+        worst = std::max(worst, std::abs((int)std::lround(c) - (int)((direct >> k) & 255)));
+      }
+    }
+    std::printf("    composited against drawn directly: at most %d / 255 apart\n", worst);
+    CHECK(same);
+    CHECK(worst <= 4);  // (blend() truncates at each layer and the composite rounds once: up to 2 / 255 a layer, two layers here)
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10407,4 +10433,5 @@ void run_render_tests() {
   tests_round168();
   tests_round184();
   tests_round211();
+  tests_round212();
 }

@@ -95,8 +95,10 @@ void present(Window *w, const uint32_t *pixels, int width, int height);
 void present_rows(Window *w, const uint32_t *pixels, int width, int height, const std::vector<std::pair<int, int>> &rows);
 
 void get_framebuffer_size(Window *w, int &width, int &height);
-/* The system's own handle (Win32: the HWND), for a GPU swapchain (task 0095's spike); null where there is none yet. */
+/* The system's own handles for a GPU swapchain (task 0193): the window (Win32: the HWND; X11: the Window id) and its
+ * display (X11: the Display*; null elsewhere). Null where the card can't present yet (macOS: task 0194). */
 void *native_handle(Window *w);
+void *native_display(Window *w);
 float dpi_scale(Window *w);
 void set_title(Window *w, const std::string &title);
 void set_cursor(Window *w, Cursor c);

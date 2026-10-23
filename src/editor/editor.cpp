@@ -86,8 +86,11 @@ Editor::~Editor() {
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
   procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
-  for (auto &w : windows_)
+  for (auto &w : windows_) {
+    if (gpu_view_ && w->card_win >= 0) gpu_view_->detach_window(w->card_win);  // (a swapchain before its window: task 0193)
     if (w->os) destroy_window(w->os);
+  }
+  if (gpu_view_ && card_win_ >= 0) gpu_view_->detach_window(card_win_);
   if (window_) destroy_window(window_);
 }
 
@@ -132,6 +135,7 @@ void Editor::resolve_project_paths(const std::string &near) {
   screenshots_dir_ = fs::join(project_root_, "Screenshots");
   fs::make_dirs(fs::join(assets_dir_, "Scenes"));
   std::string prefs_dir = fs::join(fs::home_dir(), ".blendity");
+  if (const char *env = std::getenv("BLENDITY_PREFS_DIR")) prefs_dir = env;  // (a check or a test: scratch preferences, task 0193)
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
@@ -281,6 +285,22 @@ void Editor::present_changed() {
   present_w_ = fb_.width, present_h_ = fb_.height;
   const std::vector<std::pair<int, int>> runs = changed_rows(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
   present_all_ = false;
+  /* Task 0193: the card shows the window - the views it holds, the canvas over them - when it presents this one. */
+  if (card_present_ && card_win_ >= 0 && gpu_view_) {
+    card_present_ = false;  // (until the next frame decides again: nothing drawn between frames keeps a view there)
+    std::string err;
+    const gpu::Raster::PresentResult r = gpu_view_->present_window(card_win_, fb_.pixels.data(), fb_.width, fb_.height, runs, all, card_views_, &err);
+    if (r == gpu::Raster::Shown) {
+      card_views_shown_ = card_views_;
+      card_frames_++;
+      return;
+    }
+    present_all_ = true;  // (skipped or failed: all of it next time)
+    if (r == gpu::Raster::Skipped) return;  // (minimised, mid-resize: nothing wrong, nothing to show now)
+    card_present_failed(err);
+    if (!card_views_.empty()) return;  // (the canvas has holes where the card's pictures were: the next frame draws them here)
+  }
+  card_views_shown_.clear();
   if (all) return present(window_, fb_.pixels.data(), fb_.width, fb_.height);
   present_rows(window_, fb_.pixels.data(), fb_.width, fb_.height, runs);
 }
@@ -544,6 +564,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   Log::fetch(log_.size(), log_);
 
   ui_.begin_frame(&fb_, now);
+  begin_card_frame();  // (task 0193: whether the card presents this window this frame)
   auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
   /* While a GPU opens in the background, wake a few times a second so a waiting view takes it (task 0037; after
    * begin_frame, which clears the wake-up). */
@@ -2454,8 +2475,51 @@ void Editor::screenshot(const std::string &path_in) {
     std::strftime(buf, sizeof(buf), "blendity_%Y%m%d_%H%M%S.png", std::localtime(&t));
     path = fs::join(screenshots_dir_, buf);
   }
-  if (write_png(path, fb_.pixels.data(), fb_.width, fb_.height, fb_.width)) Log::info("Screenshot saved: %s", path.c_str());
+  const std::vector<uint32_t> pixels = window_pixels();  // (the card's frame when it shows the views: task 0193)
+  if (write_png(path, pixels.data(), fb_.width, fb_.height, fb_.width)) Log::info("Screenshot saved: %s", path.c_str());
   else Log::error("Could not save screenshot to %s", path.c_str());
+}
+
+/* Task 0193: the editor in its real window - frames until the GPU is open (at most `frames`), then `frames` frames with
+the views drawn again each one (as an orbit does), presented by the card, and as many presented by the system; each
+part's mean frame time printed, the window as the card showed it saved to `out`. */
+int Editor::windowed_check(int frames, const std::string &out) {
+  std::vector<Event> events;
+  auto step = [&](bool redraw_views) {
+    events.clear();
+    if (window_) poll_events(window_, events, 0);
+    ui_.redraw = true;
+    if (redraw_views) scene_cache_.key = game_cache_.key = 0;
+    ScopedTimer t;
+    frame(events);
+    return t.ms();
+  };
+  for (int i = 0; i < frames && running_ && !card_present_; i++) {
+    step(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  auto part = [&](bool card, std::vector<uint32_t> *pixels) {
+    card_present_pref_ = card;
+    double sum = 0;
+    size_t views = 0;
+    for (int i = 0; i < 10; i++) step(true);  // (settled first)
+    for (int i = 0; i < frames && running_; i++) {
+      sum += step(true);
+      views += card_views_shown_.size();
+    }
+    if (pixels) *pixels = window_pixels();
+    std::printf("  presented by the %s: %.2f ms a frame over %d frames, %.1f views a frame on the card%s%s\n", card ? "card" : "system",
+                sum / std::max(1, frames), frames, (double)views / std::max(1, frames), gpu_view_reason_.empty() ? "" : "; on the CPU: ",
+                gpu_view_reason_.c_str());
+  };
+  std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),
+              card_present_ ? "presents the window" : "doesn't present it", card_reason_.empty() ? "" : ": ", card_reason_.c_str());
+  std::vector<uint32_t> pixels;
+  part(true, &pixels);
+  part(false, nullptr);
+  const bool wrote = !pixels.empty() && write_png(out, pixels.data(), fb_.width, fb_.height, fb_.width);
+  std::printf("  %s %s\n", wrote ? "wrote" : "could not write", out.c_str());
+  return wrote ? 0 : 1;
 }
 
 void Editor::screenshot_dialog() {
@@ -2463,7 +2527,7 @@ void Editor::screenshot_dialog() {
    * before the dialog opens over the window. */
   defer(
       [this] {
-        const std::vector<uint32_t> pixels = fb_.pixels;
+        const std::vector<uint32_t> pixels = window_pixels();
         const int w = fb_.width, h = fb_.height;
         fs::make_dirs(screenshots_dir_);
         std::time_t t = std::time(nullptr);

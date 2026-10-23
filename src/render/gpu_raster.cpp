@@ -17,6 +17,12 @@
 #    endif
 #    include <windows.h>
 #    include <vulkan/vulkan_win32.h>
+#  elif defined(__linux__)
+/* Task 0193: an X11 window's surface - the Xlib types vulkan_xlib.h names, without Xlib's macros (None, Bool...). */
+typedef struct _XDisplay Display;
+typedef unsigned long Window;
+typedef unsigned long VisualID;
+#    include <vulkan/vulkan_xlib.h>
 #  endif
 #endif
 
@@ -81,7 +87,7 @@ namespace {
   X(vkDestroyFramebuffer) X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreateDescriptorSetLayout)                    \
   X(vkDestroyDescriptorSetLayout) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkCreateGraphicsPipelines)          \
   X(vkDestroyPipeline) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkAllocateDescriptorSets)                      \
-  X(vkUpdateDescriptorSets) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers)                       \
+  X(vkUpdateDescriptorSets) X(vkFreeDescriptorSets) X(vkCmdClearColorImage) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers)                       \
   X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkResetCommandBuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass)        \
   X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed)      \
   X(vkCmdDraw) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdCopyBuffer) X(vkCmdCopyImageToBuffer)                           \
@@ -98,6 +104,8 @@ struct Fns {
   BL_RV_SWAPCHAIN(BL_RV_DECLARE)
 #ifdef _WIN32
   PFN_vkCreateWin32SurfaceKHR vkCreateWin32SurfaceKHR = nullptr;
+#elif defined(__linux__)
+  PFN_vkCreateXlibSurfaceKHR vkCreateXlibSurfaceKHR = nullptr;  // (task 0193)
 #endif
 };
 
@@ -413,6 +421,17 @@ const char *kFullVert = R"(
 void main() {
   vec2 uv = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
   gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+/* Task 0193: a window's UI image over the views' pictures already in its frame - straight alpha (Color::over's), sent
+ * premultiplied to the blender (ONE, ONE_MINUS_SRC_ALPHA). */
+const char *kComposeFrag = R"(
+layout(set = 0, binding = 20) uniform sampler2D ui_img;
+layout(location = 0) out vec4 o_color;
+void main() {
+  vec4 u = texelFetch(ui_img, ivec2(gl_FragCoord.xy), 0);
+  o_color = vec4(u.rgb * u.a, u.a);
 }
 )";
 
@@ -1286,6 +1305,8 @@ class VulkanRaster final : public Raster {
     BL_RV_INSTANCE(BL_RV_LOAD_I)
 #ifdef _WIN32
     f_.vkCreateWin32SurfaceKHR = (PFN_vkCreateWin32SurfaceKHR)gipa(inst, "vkCreateWin32SurfaceKHR");
+#elif defined(__linux__)
+    f_.vkCreateXlibSurfaceKHR = (PFN_vkCreateXlibSurfaceKHR)gipa(inst, "vkCreateXlibSurfaceKHR");
 #endif
     VkPhysicalDeviceProperties props;
     f_.vkGetPhysicalDeviceProperties(pd_, &props);
@@ -1355,7 +1376,7 @@ class VulkanRaster final : public Raster {
       if (!make_buffer(*b, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
         return fail(err, "out of memory");
-    return make_layout(err) && make_render_passes(err) && make_pipelines(err);
+    return make_layout(err) && make_render_passes(err) && make_pipelines(err) && make_compose(err);
   }
 
   int add_mesh(const std::vector<RasterVertex> &v, const std::vector<uint32_t> &idx, std::string *err) override {
@@ -1634,106 +1655,441 @@ class VulkanRaster final : public Raster {
     if (ids) std::memcpy(ids, m + px * 8, px * 4);
   }
 
-  bool attach_window(void *native, std::string *err) override {
-#ifdef _WIN32
-    if (!vk::surfaces() || !f_.vkCreateWin32SurfaceKHR || !native) return fail(err, "no window surfaces on this system");
-    VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
-    si.hinstance = GetModuleHandleA(nullptr);
-    si.hwnd = (HWND)native;
-    if (f_.vkCreateWin32SurfaceKHR(vk::instance(), &si, nullptr, &surface_) != VK_SUCCESS) return fail(err, "could not make a window surface");
+  int attach_window(void *display, void *window, std::string *err) override {
+    if (!swapchain_ok_ || !pl_compose_) return fail(err, info_.name + " has no swapchains"), -1;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    if (!make_surface(display, window, surface, err)) return -1;
     VkBool32 ok = VK_FALSE;
-    f_.vkGetPhysicalDeviceSurfaceSupportKHR(pd_, qfam_, surface_, &ok);
-    if (!ok) return fail(err, info_.name + " can't present to this window");
-    return make_swapchain(err);
-#else
-    (void)native;
-    return fail(err, "the swapchain spike is Windows only");
-#endif
+    f_.vkGetPhysicalDeviceSurfaceSupportKHR(pd_, qfam_, surface, &ok);
+    if (!ok) {
+      f_.vkDestroySurfaceKHR(vk::instance(), surface, nullptr);
+      return fail(err, info_.name + " can't present to this window"), -1;
+    }
+    size_t id = 0;
+    while (id < wins_.size() && wins_[id].live) id++;
+    if (id == wins_.size()) wins_.emplace_back();
+    Win &w = wins_[id];
+    w = Win{};
+    w.live = true;
+    w.surface = surface;
+    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    f_.vkCreateSemaphore(dev_, &si, nullptr, &w.acquired);
+    if (make_swapchain(w, 0, 0, err) < 0) {  // (no size yet - minimised - is fine: made at the first present)
+      detach_window((int)id);
+      return -1;
+    }
+    return (int)id;
   }
 
-  bool present(const uint32_t *ui, int w, int h, const std::vector<std::pair<int, int>> &rows, int vx, int vy, std::string *err) override {
-    if (!swapchain_) return fail(err, "no window attached");
-    if (w != (int)sc_extent_.width || h != (int)sc_extent_.height || vx < 0 || vy < 0 || vx >= w || vy >= h)
-      return fail(err, "the window changed size, or the view lies outside it");
-    if (!ui_img_.img && !make_image(ui_img_, w, h, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                                    VK_IMAGE_ASPECT_COLOR_BIT))
-      return fail(err, "out of memory for the UI image");
-    if (!ui_staging_.buf && !make_buffer(ui_staging_, (size_t)w * h * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props())) return fail(err, "out of memory");
+  void detach_window(int id) override {
+    if (id < 0 || (size_t)id >= wins_.size() || !wins_[(size_t)id].live) return;
+    f_.vkDeviceWaitIdle(dev_);
+    Win &w = wins_[(size_t)id];
+    free_swapchain(w);
+    free_ui(w);
+    if (w.acquired) f_.vkDestroySemaphore(dev_, w.acquired, nullptr);
+    if (w.surface) f_.vkDestroySurfaceKHR(vk::instance(), w.surface, nullptr);
+    w = Win{};
+  }
+
+  PresentResult present_window(int id, const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows, bool all,
+                               const std::vector<PresentView> &views, std::string *err) override {
+    if (id < 0 || (size_t)id >= wins_.size() || !wins_[(size_t)id].live) return fail(err, "no such window"), Failed;
+    Win &w = wins_[(size_t)id];
+    if (width <= 0 || height <= 0) return Skipped;
+    const bool resized = (int)w.extent.width != width || (int)w.extent.height != height;
+    if (resized) {
+      const PresentResult r = fit_swapchain(w, width, height, err);
+      if (r != Shown) return r;
+    }
+    bool fresh = false;
+    if (!fit_ui(w, width, height, fresh, err)) return Failed;
     uint32_t image = 0;
-    const VkResult ar = f_.vkAcquireNextImageKHR(dev_, swapchain_, 1000000000ull, acquired_, VK_NULL_HANDLE, &image);
-    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return fail(err, "could not get a swapchain image");
+    VkResult ar = f_.vkAcquireNextImageKHR(dev_, w.swapchain, 1000000000ull, w.acquired, VK_NULL_HANDLE, &image);
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR) {  // (the window changed under it: made again once)
+      const PresentResult r = fit_swapchain(w, width, height, err);
+      if (r != Shown) return r;
+      ar = f_.vkAcquireNextImageKHR(dev_, w.swapchain, 1000000000ull, w.acquired, VK_NULL_HANDLE, &image);
+    }
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_TIMEOUT || ar == VK_NOT_READY) return Skipped;
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return fail(err, "could not get the window's next image"), Failed;
     begin();
-    upload_ui(ui, w, h, rows);
-    compose(image, w, h, vx, vy);
-    return submit_present(image, err);
+    upload_ui(w, ui, width, height, all || fresh || resized ? std::vector<std::pair<int, int>>{{0, height}} : rows);
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    compose(w, w.images[image], layout, w.fbs[image], width, height, views);
+    to_layout(w.images[image], layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    return submit_present(w, image, err) ? Shown : Failed;
+  }
+
+  bool compose_read(const uint32_t *ui, int width, int height, const std::vector<PresentView> &views, uint32_t *out, std::string *err) override {
+    if (!pl_compose_) return fail(err, info_.name + " can't compose windows");
+    Win &w = off_;
+    if (w.extent.width != (uint32_t)width || w.extent.height != (uint32_t)height) {
+      f_.vkDeviceWaitIdle(dev_);
+      free_offscreen();
+      if (!make_image(off_img_, width, height, VK_FORMAT_B8G8R8A8_UNORM,
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT))
+        return fail(err, "out of memory for the window's image");
+      w.fbs.assign(1, make_framebuffer(off_img_.view, width, height));
+      w.extent = {(uint32_t)width, (uint32_t)height};
+    }
+    bool fresh = false;
+    if (!fit_ui(w, width, height, fresh, err)) return false;
+    const size_t bytes = (size_t)width * height * 4;
+    if (off_readback_.size < bytes) {
+      free_buffer(off_readback_);
+      if (!make_buffer(off_readback_, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props())) return fail(err, "out of memory for the window's picture");
+    }
+    begin();
+    upload_ui(w, ui, width, height, {{0, height}});
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    compose(w, off_img_.img, layout, w.fbs[0], width, height, views);
+    to_layout(off_img_.img, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy c{};
+    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.imageExtent = {(uint32_t)width, (uint32_t)height, 1};
+    f_.vkCmdCopyImageToBuffer(cmd_, off_img_.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, off_readback_.buf, 1, &c);
+    if (!submit_wait(err)) return false;
+    std::memcpy(out, off_readback_.mapped, bytes);
+    return true;
   }
 
   const DeviceInfo &info() const override { return info_; }
 
  private:
+  /* Task 0193: a presented window - its surface and swapchain (an image view and a framebuffer for each image, a
+   * semaphore for each present), its UI canvas's image (kept between frames: only changed rows go up) and the
+   * descriptor set the composition reads it through. off_ is compose_read's (no swapchain). */
+  struct Win {
+    bool live = false;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    VkExtent2D extent{0, 0};
+    std::vector<VkImage> images;
+    std::vector<VkImageView> views;
+    std::vector<VkFramebuffer> fbs;
+    VkSemaphore acquired = VK_NULL_HANDLE;
+    std::vector<VkSemaphore> rendered;  // one per swapchain image
+    Img ui;
+    VkImageLayout ui_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Buf ui_staging;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+  };
+  std::vector<Win> wins_;
+  Win off_;
+  Img off_img_;
+  Buf off_readback_;  // compose_read's picture (task 0193)
+  VkRenderPass rp_compose_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout compose_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout compose_layout_ = VK_NULL_HANDLE;
+  VkDescriptorPool compose_pool_ = VK_NULL_HANDLE;
+  VkPipeline pl_compose_ = VK_NULL_HANDLE;
+
+  bool make_surface(void *display, void *window, VkSurfaceKHR &surface, std::string *err) {
+#ifdef _WIN32
+    (void)display;
+    if (!vk::surfaces() || !f_.vkCreateWin32SurfaceKHR || !window) return fail(err, "no window surfaces on this system");
+    VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    si.hinstance = GetModuleHandleA(nullptr);
+    si.hwnd = (HWND)window;
+    if (f_.vkCreateWin32SurfaceKHR(vk::instance(), &si, nullptr, &surface) != VK_SUCCESS) return fail(err, "could not make a window surface");
+    return true;
+#elif defined(__linux__)
+    if (!vk::surfaces() || !f_.vkCreateXlibSurfaceKHR || !display || !window) return fail(err, "no window surfaces on this system");
+    VkXlibSurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR};
+    si.dpy = (Display *)display;
+    si.window = (Window)(uintptr_t)window;
+    if (f_.vkCreateXlibSurfaceKHR(vk::instance(), &si, nullptr, &surface) != VK_SUCCESS) return fail(err, "could not make a window surface");
+    return true;
+#else
+    (void)display, (void)window, (void)surface;
+    return fail(err, "windows aren't presented by the card on this system");
+#endif
+  }
+
+  /* The swapchain at the window's size: Shown when it is that size now, Skipped when the system has it at another size
+   * (minimised, mid-resize: the next present tries again), Failed when it can't be made. */
+  PresentResult fit_swapchain(Win &w, int width, int height, std::string *err) {
+    const int r = make_swapchain(w, width, height, err);
+    if (r < 0) return Failed;
+    if (r == 0 || (int)w.extent.width != width || (int)w.extent.height != height) return Skipped;
+    return Shown;
+  }
+  /* The window's swapchain at its size (width / height when the system leaves the size to us), made again in place:
+   * 1 made, 0 the window has no size (minimised), -1 failed. */
+  int make_swapchain(Win &w, int width, int height, std::string *err) {
+    VkSurfaceCapabilitiesKHR caps;
+    if (f_.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd_, w.surface, &caps) != VK_SUCCESS) return fail(err, "the window's surface is gone"), -1;
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if ((caps.supportedUsageFlags & usage) != usage) return fail(err, "the window's images can't be drawn into"), -1;
+    uint32_t n = 0;
+    f_.vkGetPhysicalDeviceSurfaceFormatsKHR(pd_, w.surface, &n, nullptr);
+    std::vector<VkSurfaceFormatKHR> formats(n);
+    f_.vkGetPhysicalDeviceSurfaceFormatsKHR(pd_, w.surface, &n, formats.data());
+    bool bgra = false;
+    for (const VkSurfaceFormatKHR &f : formats) bgra = bgra || f.format == VK_FORMAT_B8G8R8A8_UNORM;
+    if (!bgra) return fail(err, "the window takes no B8G8R8A8 images (the UI canvas's layout)"), -1;
+    n = 0;
+    f_.vkGetPhysicalDeviceSurfacePresentModesKHR(pd_, w.surface, &n, nullptr);
+    std::vector<VkPresentModeKHR> modes(n);
+    f_.vkGetPhysicalDeviceSurfacePresentModesKHR(pd_, w.surface, &n, modes.data());
+    /* Never waiting for the display on the main thread (as the system's present doesn't): mailbox where offered (the
+     * newest frame at the next refresh, three images so an acquire never waits), else immediate, else FIFO. */
+    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
+    for (VkPresentModeKHR m : modes)
+      if (m == VK_PRESENT_MODE_MAILBOX_KHR || (m == VK_PRESENT_MODE_IMMEDIATE_KHR && mode == VK_PRESENT_MODE_FIFO_KHR)) mode = m;
+    VkExtent2D extent = caps.currentExtent;
+    if (extent.width == 0xFFFFFFFFu)
+      extent = {std::min(caps.maxImageExtent.width, std::max(caps.minImageExtent.width, (uint32_t)std::max(1, width))),
+                std::min(caps.maxImageExtent.height, std::max(caps.minImageExtent.height, (uint32_t)std::max(1, height)))};
+    if (extent.width == 0 || extent.height == 0) return 0;
+    VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    for (VkCompositeAlphaFlagBitsKHR a : {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR})
+      if (caps.supportedCompositeAlpha & a) {
+        alpha = a;
+        break;
+      }
+    VkSwapchainKHR old = w.swapchain;
+    if (old) f_.vkDeviceWaitIdle(dev_);
+    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    ci.surface = w.surface;
+    ci.minImageCount = std::max(mode == VK_PRESENT_MODE_MAILBOX_KHR ? 3u : 2u, caps.minImageCount);
+    if (caps.maxImageCount) ci.minImageCount = std::min(ci.minImageCount, caps.maxImageCount);
+    ci.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
+    ci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    ci.imageExtent = extent;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage = usage;
+    ci.preTransform = caps.currentTransform;
+    ci.compositeAlpha = alpha;
+    ci.presentMode = mode;
+    ci.clipped = VK_TRUE;
+    ci.oldSwapchain = old;
+    VkSwapchainKHR sc = VK_NULL_HANDLE;
+    const VkResult r = f_.vkCreateSwapchainKHR(dev_, &ci, nullptr, &sc);
+    free_swapchain(w);
+    if (r != VK_SUCCESS) return fail(err, "could not make a swapchain"), -1;
+    w.swapchain = sc;
+    w.extent = extent;
+    f_.vkGetSwapchainImagesKHR(dev_, sc, &n, nullptr);
+    w.images.resize(n);
+    f_.vkGetSwapchainImagesKHR(dev_, sc, &n, w.images.data());
+    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    for (VkImage im : w.images) {
+      VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+      vi.image = im;
+      vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      vi.format = VK_FORMAT_B8G8R8A8_UNORM;
+      vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      VkImageView v = VK_NULL_HANDLE;
+      f_.vkCreateImageView(dev_, &vi, nullptr, &v);
+      w.views.push_back(v);
+      w.fbs.push_back(make_framebuffer(v, (int)extent.width, (int)extent.height));
+      VkSemaphore s = VK_NULL_HANDLE;
+      f_.vkCreateSemaphore(dev_, &si, nullptr, &s);
+      w.rendered.push_back(s);
+    }
+    return 1;
+  }
+  void free_swapchain(Win &w) {
+    if (w.swapchain) f_.vkDeviceWaitIdle(dev_);  // (its last present's semaphore before it goes)
+    for (VkFramebuffer fb : w.fbs)
+      if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
+    for (VkImageView v : w.views)
+      if (v) f_.vkDestroyImageView(dev_, v, nullptr);
+    for (VkSemaphore s : w.rendered)
+      if (s) f_.vkDestroySemaphore(dev_, s, nullptr);
+    if (w.swapchain) f_.vkDestroySwapchainKHR(dev_, w.swapchain, nullptr);
+    w.fbs.clear(), w.views.clear(), w.rendered.clear(), w.images.clear();
+    w.swapchain = VK_NULL_HANDLE;
+    w.extent = {0, 0};
+  }
+  VkFramebuffer make_framebuffer(VkImageView v, int width, int height) {
+    VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fi.renderPass = rp_compose_;
+    fi.attachmentCount = 1;
+    fi.pAttachments = &v;
+    fi.width = (uint32_t)width;
+    fi.height = (uint32_t)height;
+    fi.layers = 1;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    f_.vkCreateFramebuffer(dev_, &fi, nullptr, &fb);
+    return fb;
+  }
+  void free_offscreen() {
+    for (VkFramebuffer fb : off_.fbs)
+      if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
+    off_.fbs.clear();
+    off_.extent = {0, 0};
+    free_image(off_img_);
+  }
+  /* The window's UI image and its staging buffer at the window's size (`fresh`: made now, so every row goes up). */
+  bool fit_ui(Win &w, int width, int height, bool &fresh, std::string *err) {
+    if (w.ui.img && w.set && w.ui.w == width && w.ui.h == height) return true;
+    f_.vkDeviceWaitIdle(dev_);
+    free_ui(w);
+    fresh = true;
+    if (!make_image(w.ui, width, height, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT) ||
+        !make_buffer(w.ui_staging, (size_t)width * height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props()))
+      return fail(err, "out of memory for the window's UI image");
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = compose_pool_;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &compose_set_layout_;
+    if (f_.vkAllocateDescriptorSets(dev_, &dai, &w.set) != VK_SUCCESS) {
+      w.set = VK_NULL_HANDLE;
+      free_ui(w);
+      return fail(err, "too many windows");
+    }
+    VkDescriptorImageInfo ii{sampler_, w.ui.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr.dstSet = w.set;
+    wr.dstBinding = 20;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &ii;
+    f_.vkUpdateDescriptorSets(dev_, 1, &wr, 0, nullptr);
+    return true;
+  }
+  void free_ui(Win &w) {
+    if (w.set) f_.vkFreeDescriptorSets(dev_, compose_pool_, 1, &w.set);
+    w.set = VK_NULL_HANDLE;
+    free_image(w.ui);
+    free_buffer(w.ui_staging);
+    w.ui_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  }
   /* The UI's changed rows go up into its image (kept on the GPU between frames). */
-  void upload_ui(const uint32_t *ui, int w, int h, const std::vector<std::pair<int, int>> &rows) {
+  void upload_ui(Win &w, const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows) {
     std::vector<VkBufferImageCopy> regions;
     for (const auto &r : rows) {
-      const int y0 = std::max(0, r.first), y1 = std::min(h, r.second);
+      const int y0 = std::max(0, r.first), y1 = std::min(height, r.second);
       if (y1 <= y0) continue;
-      std::memcpy((uint8_t *)ui_staging_.mapped + (size_t)y0 * w * 4, ui + (size_t)y0 * w, (size_t)(y1 - y0) * w * 4);
+      std::memcpy((uint8_t *)w.ui_staging.mapped + (size_t)y0 * width * 4, ui + (size_t)y0 * width, (size_t)(y1 - y0) * width * 4);
       VkBufferImageCopy c{};
-      c.bufferOffset = (VkDeviceSize)y0 * w * 4;
+      c.bufferOffset = (VkDeviceSize)y0 * width * 4;
       c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
       c.imageOffset = {0, y0, 0};
-      c.imageExtent = {(uint32_t)w, (uint32_t)(y1 - y0), 1};
+      c.imageExtent = {(uint32_t)width, (uint32_t)(y1 - y0), 1};
       regions.push_back(c);
     }
-    to_layout(ui_img_.img, ui_layout_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    to_layout(w.ui.img, w.ui_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     if (!regions.empty())
-      f_.vkCmdCopyBufferToImage(cmd_, ui_staging_.buf, ui_img_.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regions.size(), regions.data());
-    to_layout(ui_img_.img, ui_layout_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+      f_.vkCmdCopyBufferToImage(cmd_, w.ui_staging.buf, w.ui.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regions.size(), regions.data());
+    to_layout(w.ui.img, w.ui_layout, VK_IMAGE_LAYOUT_GENERAL);
   }
-  /* The swapchain image: the whole UI, then the view over its rectangle. */
-  void compose(uint32_t image, int w, int h, int vx, int vy) {
-    VkImageLayout sc_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    to_layout(sc_images_[image], sc_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkImageCopy whole{};
-    whole.srcSubresource = whole.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    whole.extent = {(uint32_t)w, (uint32_t)h, 1};
-    f_.vkCmdCopyImage(cmd_, ui_img_.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc_images_[image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &whole);
-    const Img &color = slots_[0].color;
-    if (color.img) {
-      VkImageCopy v{};
-      v.srcSubresource = v.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-      v.dstOffset = {vx, vy, 0};
-      v.extent = {(uint32_t)std::min(color.w, w - vx), (uint32_t)std::min(color.h, h - vy), 1};
-      f_.vkCmdCopyImage(cmd_, color.img, VK_IMAGE_LAYOUT_GENERAL, sc_images_[image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &v);
+  /* A window's frame: black, each view's last picture copied to its place (clipped to the window), then the UI blended
+   * over all of it. `layout` follows the target; it ends GENERAL. */
+  void compose(Win &w, VkImage target, VkImageLayout &layout, VkFramebuffer fb, int width, int height, const std::vector<PresentView> &views) {
+    to_layout(target, layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+    const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    f_.vkCmdClearColorImage(cmd_, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
+    for (const PresentView &v : views) {
+      if (v.slot < 0 || v.slot >= kSlots) continue;
+      const Img &color = slots_[v.slot].color;
+      const int x0 = std::max(0, v.x), y0 = std::max(0, v.y), x1 = std::min(width, v.x + color.w), y1 = std::min(height, v.y + color.h);
+      if (!color.img || x1 <= x0 || y1 <= y0) continue;
+      VkImageCopy c{};
+      c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+      c.srcOffset = {x0 - v.x, y0 - v.y, 0};
+      c.dstOffset = {x0, y0, 0};
+      c.extent = {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0), 1};
+      f_.vkCmdCopyImage(cmd_, color.img, VK_IMAGE_LAYOUT_GENERAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     }
-    to_layout(sc_images_[image], sc_layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rb.renderPass = rp_compose_;
+    rb.framebuffer = fb;
+    rb.renderArea = {{0, 0}, {(uint32_t)width, (uint32_t)height}};
+    f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
+    viewport(width, height);
+    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_compose_);
+    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_layout_, 0, 1, &w.set, 0, nullptr);
+    f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+    f_.vkCmdEndRenderPass(cmd_);
+    layout = VK_IMAGE_LAYOUT_GENERAL;
   }
-  /* Submits after the acquire, presents after the copies (each image signals its own semaphore: a present may not
-   * have taken the last one yet), and waits for the copies. The present's own work (the compositor's blit) is the
-   * system's, after the fence: not timed here. */
-  bool submit_present(uint32_t image, std::string *err) {
+  /* Submits after the acquire, presents after the frame (each image signals its own semaphore: a present may not have
+   * taken the last one yet), and waits for the frame. */
+  bool submit_present(Win &w, uint32_t image, std::string *err) {
     submits_++;
     f_.vkEndCommandBuffer(cmd_);
-    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.waitSemaphoreCount = 1;
-    si.pWaitSemaphores = &acquired_;
+    si.pWaitSemaphores = &w.acquired;
     si.pWaitDstStageMask = &wait_stage;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd_;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &rendered_[image];
+    si.pSignalSemaphores = &w.rendered[image];
     f_.vkResetFences(dev_, 1, &fence_);
     if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS) return fail(err, "the GPU refused the frame");
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &rendered_[image];
+    pi.pWaitSemaphores = &w.rendered[image];
     pi.swapchainCount = 1;
-    pi.pSwapchains = &swapchain_;
+    pi.pSwapchains = &w.swapchain;
     pi.pImageIndices = &image;
     const VkResult pr = f_.vkQueuePresentKHR(queue_, &pi);
     if (f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS) return fail(err, "the GPU stopped responding");
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR) {  // (shown or not, the next frame makes the swapchain again)
+      w.extent = {0, 0};
+      return true;
+    }
     return pr == VK_SUCCESS || pr == VK_SUBOPTIMAL_KHR ? true : fail(err, "the frame wasn't shown");
+  }
+  /* The composition's pass (the frame's copies kept: LOAD), its descriptor set's layout, pool and pipeline. */
+  bool make_compose(std::string *err) {
+    VkAttachmentDescription d{};
+    d.format = VK_FORMAT_B8G8R8A8_UNORM;
+    d.samples = VK_SAMPLE_COUNT_1_BIT;
+    d.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    d.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    d.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sp{};
+    sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sp.colorAttachmentCount = 1;
+    sp.pColorAttachments = &ref;
+    const VkAccessFlags all = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    VkSubpassDependency dep[2] = {{VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, all, all, 0},
+                                  {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, all, all, 0}};
+    VkRenderPassCreateInfo ri{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    ri.attachmentCount = 1;
+    ri.pAttachments = &d;
+    ri.subpassCount = 1;
+    ri.pSubpasses = &sp;
+    ri.dependencyCount = 2;
+    ri.pDependencies = dep;
+    f_.vkCreateRenderPass(dev_, &ri, nullptr, &rp_compose_);
+    VkDescriptorSetLayoutBinding b{20, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dli.bindingCount = 1;
+    dli.pBindings = &b;
+    f_.vkCreateDescriptorSetLayout(dev_, &dli, nullptr, &compose_set_layout_);
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &compose_set_layout_;
+    f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &compose_layout_);
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32};
+    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = 32;
+    dpi.poolSizeCount = 1;
+    dpi.pPoolSizes = &ps;
+    f_.vkCreateDescriptorPool(dev_, &dpi, nullptr, &compose_pool_);
+    std::string cerr;
+    VkShaderModule v = module(kFullVert, shaderc_vertex_shader, &cerr), f = module(kComposeFrag, shaderc_fragment_shader, &cerr);
+    if (rp_compose_ && compose_layout_ && compose_pool_ && v && f)
+      pl_compose_ = make_pipeline(rp_compose_, v, f, 1, false, VK_CULL_MODE_NONE, true, compose_layout_);
+    for (VkShaderModule m : {v, f})
+      if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
+    if (!pl_compose_) Log::warn("The GPU can't compose windows (%s): they're shown as before", cerr.empty() ? "?" : cerr.c_str());
+    (void)err;
+    return true;  // (optional: without it windows are presented by the system, as before)
   }
 
   DeviceInfo info_;
@@ -1751,7 +2107,7 @@ class VulkanRaster final : public Raster {
   bool timestamps_ = false;
   float ts_period_ns_ = 1.0f;
   RasterTimes times_;
-  Buf ubo_, inst_buf_, staging_, readback_, ui_staging_, lut_buf_;
+  Buf ubo_, inst_buf_, staging_, readback_, lut_buf_;
   Buf hl_buf_;  // the face highlight's bits (task 0166)
   bool geometry_ = false;  // the geometryShader feature: gl_PrimitiveID in the g-buffer pass (task 0166)
   Buf cage_v_, cage_e_;  // the Edit Mode cage (task 0100)
@@ -1776,8 +2132,6 @@ class VulkanRaster final : public Raster {
   std::vector<Mesh> meshes_;
   std::vector<RasterInstance> instances_;
   Slot slots_[kSlots];
-  Img ui_img_;
-  VkImageLayout ui_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
   VkSampler sampler_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout layout_ = VK_NULL_HANDLE;
@@ -1788,17 +2142,11 @@ class VulkanRaster final : public Raster {
              pl_light_ = VK_NULL_HANDLE, pl_cage_line_ = VK_NULL_HANDLE, pl_cage_point_ = VK_NULL_HANDLE,
              pl_ov_line_ = VK_NULL_HANDLE, pl_ov_point_ = VK_NULL_HANDLE, pl_outline_ = VK_NULL_HANDLE;  // (task 0192)
   enum DrawWhat { DrawNothing, DrawShadow, DrawGbuffer };
-  VkSurfaceKHR surface_ = VK_NULL_HANDLE;
-  VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
-  VkExtent2D sc_extent_{0, 0};
-  std::vector<VkImage> sc_images_;
-  VkSemaphore acquired_ = VK_NULL_HANDLE;
-  std::vector<VkSemaphore> rendered_;  // one per swapchain image
   bool swapchain_ok_ = false;          // the device was made with VK_KHR_swapchain
 
-  /* Windows only (where (B) is measured), and only when the device lists the extension. */
+  /* Win32 and X11 (task 0193), when the system has surfaces and the device lists the extension. */
   bool wants_swapchain() {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
     if (!vk::surfaces()) return false;
     uint32_t n = 0;
     f_.vkEnumerateDeviceExtensionProperties(pd_, nullptr, &n, nullptr);
@@ -2559,7 +2907,7 @@ class VulkanRaster final : public Raster {
    * when asked. Front faces are the CPU's: clockwise on screen (Unity's convention), and the y flip keeps the screen's
    * orientation, so clockwise in Vulkan's framebuffer too. */
   VkPipeline make_pipeline(VkRenderPass rp, VkShaderModule vs, VkShaderModule fs, int colors, bool geometry, VkCullModeFlags cull,
-                           bool blend = false) {
+                           bool blend = false, VkPipelineLayout layout = VK_NULL_HANDLE) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     st[0].module = vs;
@@ -2624,7 +2972,7 @@ class VulkanRaster final : public Raster {
     pi.pDepthStencilState = &ds;
     pi.pColorBlendState = &cbs;
     pi.pDynamicState = &dy;
-    pi.layout = layout_;
+    pi.layout = layout ? layout : layout_;
     pi.renderPass = rp;
     VkPipeline p = VK_NULL_HANDLE;
     f_.vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &pi, nullptr, &p);
@@ -2720,57 +3068,18 @@ class VulkanRaster final : public Raster {
     return fb;
   }
 
-  bool make_swapchain(std::string *err) {
-    if (!swapchain_ok_) return fail(err, info_.name + " has no swapchains");
-    VkSurfaceCapabilitiesKHR caps;
-    f_.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd_, surface_, &caps);
-    if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return fail(err, "the window's images can't be copied into");
-    uint32_t n = 0;
-    f_.vkGetPhysicalDeviceSurfaceFormatsKHR(pd_, surface_, &n, nullptr);
-    std::vector<VkSurfaceFormatKHR> formats(n);
-    f_.vkGetPhysicalDeviceSurfaceFormatsKHR(pd_, surface_, &n, formats.data());
-    bool bgra = false;
-    for (const VkSurfaceFormatKHR &f : formats) bgra = bgra || f.format == VK_FORMAT_B8G8R8A8_UNORM;
-    if (!bgra) return fail(err, "the window takes no B8G8R8A8 images (the UI canvas's layout)");
-    n = 0;
-    f_.vkGetPhysicalDeviceSurfacePresentModesKHR(pd_, surface_, &n, nullptr);
-    std::vector<VkPresentModeKHR> modes(n);
-    f_.vkGetPhysicalDeviceSurfacePresentModesKHR(pd_, surface_, &n, modes.data());
-    /* Not tied to the display's refresh: the spike times the work, not the vsync wait (as the CPU path's present). */
-    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
-    for (VkPresentModeKHR m : modes)
-      if (m == VK_PRESENT_MODE_IMMEDIATE_KHR || (m == VK_PRESENT_MODE_MAILBOX_KHR && mode == VK_PRESENT_MODE_FIFO_KHR)) mode = m;
-    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
-    ci.surface = surface_;
-    ci.minImageCount = std::max(2u, caps.minImageCount);
-    ci.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
-    ci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-    ci.imageExtent = caps.currentExtent;
-    ci.imageArrayLayers = 1;
-    ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    ci.preTransform = caps.currentTransform;
-    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    ci.presentMode = mode;
-    ci.clipped = VK_TRUE;
-    if (f_.vkCreateSwapchainKHR(dev_, &ci, nullptr, &swapchain_) != VK_SUCCESS) return fail(err, "could not make a swapchain");
-    sc_extent_ = caps.currentExtent;
-    f_.vkGetSwapchainImagesKHR(dev_, swapchain_, &n, nullptr);
-    sc_images_.resize(n);
-    f_.vkGetSwapchainImagesKHR(dev_, swapchain_, &n, sc_images_.data());
-    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    f_.vkCreateSemaphore(dev_, &si, nullptr, &acquired_);
-    rendered_.assign(sc_images_.size(), VK_NULL_HANDLE);
-    for (VkSemaphore &s : rendered_) f_.vkCreateSemaphore(dev_, &si, nullptr, &s);
-    return true;
-  }
-
   void destroy() {
     if (!dev_) return;
     f_.vkDeviceWaitIdle(dev_);
-    if (swapchain_) f_.vkDestroySwapchainKHR(dev_, swapchain_, nullptr);
-    if (acquired_) f_.vkDestroySemaphore(dev_, acquired_, nullptr);
-    for (VkSemaphore s : rendered_)
-      if (s) f_.vkDestroySemaphore(dev_, s, nullptr);
+    for (size_t i = 0; i < wins_.size(); i++) detach_window((int)i);
+    free_offscreen();
+    free_ui(off_);
+    free_buffer(off_readback_);
+    if (pl_compose_) f_.vkDestroyPipeline(dev_, pl_compose_, nullptr);
+    if (rp_compose_) f_.vkDestroyRenderPass(dev_, rp_compose_, nullptr);
+    if (compose_pool_) f_.vkDestroyDescriptorPool(dev_, compose_pool_, nullptr);
+    if (compose_layout_) f_.vkDestroyPipelineLayout(dev_, compose_layout_, nullptr);
+    if (compose_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, compose_set_layout_, nullptr);
     for (Slot &sl : slots_) {
       for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
@@ -2780,9 +3089,8 @@ class VulkanRaster final : public Raster {
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
-    free_image(ui_img_);
     for (Mesh &m : meshes_) free_mesh(m);
-    for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
+    for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
                    &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
@@ -2793,7 +3101,6 @@ class VulkanRaster final : public Raster {
     if (fence_) f_.vkDestroyFence(dev_, fence_, nullptr);
     if (pool_) f_.vkDestroyCommandPool(dev_, pool_, nullptr);
     f_.vkDestroyDevice(dev_, nullptr);
-    if (surface_ && f_.vkDestroySurfaceKHR) f_.vkDestroySurfaceKHR(vk::instance(), surface_, nullptr);
     dev_ = VK_NULL_HANDLE;
   }
 };

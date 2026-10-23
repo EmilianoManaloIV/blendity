@@ -283,6 +283,11 @@ struct EditorWindow {
   bool changed = false;  // (it had events this frame: the main window redraws after it)
   bool render_only = false, fullscreen = false, tablet = false;  // (task 0188)
   Recti saved_rect{0, 0, 0, 0};  // (headless full screen's way back)
+  /* Task 0193: presented by the card (Editor::card_*). */
+  bool card_present = false, card_off = false;
+  int card_win = -1;
+  std::string card_reason;
+  std::vector<gpu::Raster::PresentView> card_views, card_views_shown;
 };
 void collect_dock_tabs(const DockNode *n, std::vector<WindowKind> &out);
 
@@ -533,6 +538,14 @@ class Editor {
   int gizmo_hot_for_test() const { return gizmo_hot_; }
   void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
   void clear_selection_for_test() { clear_selection(); }
+  int windowed_check(int frames, const std::string &out);  // (task 0193: Blendity --windowed-check)
+  void card_present_for_test(bool on) { card_present_for_test_ = on; }  // (task 0193: headless frames as if the card presented them)
+  bool card_frame_for_test(std::vector<uint32_t> &out);                // the frame the card would show (compose_read)
+  size_t card_views_for_test() const { return card_views_.size(); }
+  void card_slots_redrawn_for_test() {  // (every slot drawn by something else since: a cached card picture is gone)
+    for (uint64_t &g : gpu_slot_gen_) g++;
+  }
+  const std::string &card_reason_for_test() const { return card_reason_; }
   void overlays_extra_for_test(std::function<void(Renderer3D &)> fn) { overlays_extra_for_test_ = std::move(fn); }
   uint64_t scene_render_hash_for_test() { return scene_render_hash(); }
   bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
@@ -2837,8 +2850,29 @@ class Editor {
   struct ViewCache {
     uint64_t key = 0;
     Image img;
+    int card_slot = -1;      // task 0193: the card holds the picture (img is the transparent hole over it): which slot,
+    uint64_t card_gen = 0;   // and its drawing then
   };
   ViewCache scene_cache_, game_cache_;
+  /* Task 0193 (ADR 0061): the window drawing now is presented by the card. Its views drawn there stay there: the
+   * canvas is left transparent over them (card_views_ says where each goes) and present_window shows the frame - the
+   * views' pictures, the canvas over them. card_off_: its present failed, the system presents it from now on. Per
+   * window (swapped with the window's state). */
+  bool card_present_ = false, card_off_ = false, card_present_pref_ = true, card_present_for_test_ = false;
+  int card_win_ = -1;
+  std::string card_reason_;
+  std::vector<gpu::Raster::PresentView> card_views_, card_views_shown_;
+  uint64_t gpu_slot_gen_[gpu::Raster::kSlots] = {};  // each slot's pictures drawn (a cached view knows it's still there)
+  uint64_t card_frames_ = 0;
+  void begin_card_frame();
+  bool card_view_at(const RenderTarget &rt, int &x, int &y) const;
+  void card_present_failed(const std::string &why);
+  void card_forget_windows();
+  bool card_attach(gpu::Raster &g);
+  void card_detach();
+  void card_retry();
+  bool card_picture_kept(const ViewCache &c) const;
+  std::vector<uint32_t> window_pixels();
   bool view_cache_show(ViewCache &c, const Recti &r);  // its last picture whatever the key (a held view, task 0103)
   uint64_t cam_preview_key_ = 0;
   uint64_t cam_preview_of_ = 0;  // the camera its picture is of (a held one must be the same camera's: task 0103)

@@ -1142,7 +1142,7 @@ The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (P
 ! cmd:viewport device gpu | Draw the views on the GPU
 ! cmd:viewport device cpu | Draw the views on the CPU again
 # Drawing on the graphics card
-With Viewport Device on Auto, the views draw on your graphics card, as Blender's viewport does: the shaded picture, and since this round the grid, the wireframes, the selection outline and Edit Mode's cage and dots, all in one go. If there is no card, or it fails, the same window draws on the processor instead - the same picture, a little slower - and the Profiler says why. The processor's picture is the reference: every picture the card draws is checked against it.
+With Viewport Device on Auto, the views draw on your graphics card, as Blender's viewport does: the shaded picture, the grid, the wireframes, the selection outline and Edit Mode's cage and dots, all in one go - and on Windows and Linux the card also shows the window, the views' pictures never leaving it. If there is no card, or it fails, the same window draws on the processor instead - the same picture, a little slower - and the Profiler says why. The processor's picture is the reference: every picture the card draws is checked against it.
 ? Your laptop's graphics driver crashed while you were modelling. What happens to the Scene view? | It draws on the processor from the next frame, the same picture, and the Profiler and Preferences say why; choosing Viewport Device again tries the card again.
 ! cmd:viewport device gpu | Draw the views on the graphics card
 ! cmd:viewport device cpu | Draw them on the processor

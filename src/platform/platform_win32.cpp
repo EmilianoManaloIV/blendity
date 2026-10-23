@@ -672,6 +672,7 @@ void present_rows(Window *w, const uint32_t *pixels, int width, int height, cons
 }
 
 void *native_handle(Window *w) { return w ? (void *)w->hwnd : nullptr; }
+void *native_display(Window *) { return nullptr; }
 
 void get_framebuffer_size(Window *w, int &width, int &height) {
   RECT r;

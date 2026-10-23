@@ -40,6 +40,15 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   that view only, with its reason shown, as now.
 - **macOS** follows only if Blender's libraries bundle MoltenVK (task 0194, ADR 0001); otherwise it keeps the CPU path.
 
+## Amendment (task 0193, round 212): presenting
+- The card presents a window only when it can, decided per window per frame.
+- A present the system can't take now (minimised, mid-resize, no image ready) is skipped, not failed.
+- A failed one hands that window to the system for good, until the setting or the device is chosen again.
+- Presents never wait for the display: MAILBOX with three images, else IMMEDIATE, else FIFO.
+- What the CPU draws over a view keeps its coverage through `Color::over`, which equals `blend()` over opaque pixels,
+  so nothing changes for the CPU path.
+- Views whose pictures the CPU still works on (depth of field) stay read back.
+
 ## Consequences
 - A faint overlay line's pixel can differ from the CPU's by 1 / 255: the card blends at the attachment's 8 bits. The
   tests compare within that, as task 0100's cage did.

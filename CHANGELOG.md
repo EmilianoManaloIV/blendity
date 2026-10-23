@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 212): the card presents the windows (task 0193, ADR 0061)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round is the
+second step: the window shown by the card.
+
+**Changed**
+- **The card shows the window** (Windows and Linux): a swapchain on each OS window. A view drawn on the card stays
+  there: its picture isn't copied back, the window's canvas is left transparent over it, and the card puts the canvas
+  over the views' pictures and shows the frame. Only the canvas rows that changed go up each frame.
+- What the processor draws over a view - icons, gizmo handles, wires, panels, text - keeps its coverage
+  (`Color::over`, the same as before over anything opaque).
+- When the card can't present a window, or a present fails, the system shows it as before, every view drawn again.
+  `viewport present card|system` chooses.
+- Screenshots take the frame the card showed.
+- `Blendity --windowed-check out.png [--frames N]` runs the editor in a real window and measures card against system;
+  `BLENDITY_PREFS_DIR` gives such a run its own preferences.
+- `RasterInstance` has default material values: the card's texture-store test left them unset and was flaky.
+
+**Measured**
+- A real 2560 x 1369 window with the Scene view drawn every frame (RTX 4070 SUPER): 3.27 ms a frame presented by the
+  card, 3.69 ms by the system.
+- A 1080p window drawn and presented each frame (stress gpu_raster): 0.65 ms on the RTX 4070 SUPER, 2.23 ms on the
+  3060 Ti; the CPU's view and GDI present 16.75 ms.
+- The card's frame against the system's: mean 0.007 / 255.
+
+**Checked**
+- Color::over equals blend() over opaque pixels; layers drawn over a hole and composited match drawing directly within
+  2 / 255 a layer (tests/test_render.cpp).
+- A frame the card presents equals the system's, drawn fresh and from the caches; back on the system no transparent
+  pixel is left (tests/test_gpu.cpp).
+- A cached picture whose slot was drawn over draws again; a camera's depth of field keeps its view off the card and the
+  frame still matches; a real window through `--windowed-check`; the card's texture-store test 10 of 10 runs.
+- An Opus review found that minimising a window turned the card off for good, a mid-resize swapchain drawn at the old
+  size, the swapchain left on a window the system then presented, depth of field lost on card views, closed windows'
+  swapchains not let go, a failed present showing the views black and presents waiting for the display. All are fixed.
+- Unit checks (round 212): Windows, in render-cache verify mode, 11,874, 0 failed (980 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-23 (round 211): the 3D overlays on the card (task 0192, ADR 0061)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback when there's no GPU.

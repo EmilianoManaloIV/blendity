@@ -5194,11 +5194,16 @@ static bool gpu_raster_window(Report &rep, GpuRasterScene &sc, const gpu::Device
   platform::Window *w = r ? platform::create_window("Blendity stress: GPU view (swapchain)", 2400, 1300) : nullptr;
   std::vector<gpu::RasterInstance> inst;
   int m_big = -1;
-  bool ok = r && w && r->attach_window(platform::native_handle(w), &err) && sc.upload(*r, inst, m_big, err);
+  const int win = r && w ? r->attach_window(nullptr, platform::native_handle(w), &err) : -1;
+  bool ok = win >= 0 && sc.upload(*r, inst, m_big, err);
   int fw = 0, fh = 0;
   if (w) platform::get_framebuffer_size(w, fw, fh);
   std::vector<uint32_t> canvas((size_t)std::max(fw, 1) * std::max(fh, 1), 0xFF2B2B2Bu);
-  ok = ok && r->render(sc.gpu_frame(0), &err) && r->present(canvas.data(), fw, fh, {{0, fh}}, vx, vy, &err);
+  const gpu::RasterFrame first = sc.gpu_frame(0);
+  for (int y = std::max(0, vy); y < std::min(fh, vy + first.height); y++)  // (transparent where the view shows: task 0193)
+    for (int x = std::max(0, vx); x < std::min(fw, vx + first.width); x++) canvas[(size_t)y * fw + x] = 0;
+  const std::vector<gpu::Raster::PresentView> shown = {{first.slot, vx, vy}};
+  ok = ok && r->render(first, &err) && r->present_window(win, canvas.data(), fw, fh, {}, true, shown, &err) == gpu::Raster::Shown;
   std::vector<double> ms;
   std::vector<platform::Event> ev;
   for (int k = 0; k < frames && ok; k++) {
@@ -5207,7 +5212,7 @@ static bool gpu_raster_window(Report &rep, GpuRasterScene &sc, const gpu::Device
     ScopedTimer t;
     ok = r->render(sc.gpu_frame(k), &err);
     for (int y = fh - 24; y < fh; y++) canvas[(size_t)y * fw + (k * 13) % fw] = 0xFF000000u | (uint32_t)(k * 977 + y);
-    ok = ok && r->present(canvas.data(), fw, fh, {{fh - 24, fh}}, vx, vy, &err);
+    ok = ok && r->present_window(win, canvas.data(), fw, fh, {{fh - 24, fh}}, false, shown, &err) != gpu::Raster::Failed;
     ms.push_back(t.ms());
   }
   if (w) platform::destroy_window(w);

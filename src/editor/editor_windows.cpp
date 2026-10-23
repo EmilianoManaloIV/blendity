@@ -26,6 +26,8 @@ void Editor::swap_window_state(EditorWindow &w) {
   std::swap(present_all_, w.present_all);
   std::swap(dpi_, w.dpi);
   std::swap(tablet_, w.tablet);
+  std::swap(card_present_, w.card_present), std::swap(card_off_, w.card_off), std::swap(card_win_, w.card_win);  // (task 0193)
+  std::swap(card_reason_, w.card_reason), std::swap(card_views_, w.card_views), std::swap(card_views_shown_, w.card_views_shown);
   active_window_ = active_window_ == 0 ? w.id : 0;
 }
 
@@ -150,6 +152,8 @@ void Editor::move_to_main(WindowKind k) {
 void Editor::close_window(EditorWindow &w) {
   std::vector<WindowKind> tabs;
   collect_tabs(w.dock.get(), tabs);
+  if (gpu_view_ && w.card_win >= 0) gpu_view_->detach_window(w.card_win);  // (its swapchain before its window: task 0193)
+  w.card_win = -1;
   if (w.os) destroy_window(w.os);
   w.os = nullptr;
   w.dock.reset();
@@ -282,6 +286,7 @@ void Editor::draw_secondary_window(EditorWindow &w, double now) {
     if (fw > 0 && fh > 0 && (fw != fb_.width || fh != fb_.height)) fb_.resize(fw, fh);
   }
   ui_.begin_frame(&fb_, now);
+  begin_card_frame();  // (task 0193)
   const Recti area{0, 0, fb_.width, fb_.height};
   ui_.canvas.fill_rect(area, ui_.theme.border);
   if (w.fullscreen && ui_.in.key_pressed[KEY_ESCAPE]) {

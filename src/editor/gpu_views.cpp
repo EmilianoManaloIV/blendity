@@ -278,6 +278,7 @@ uint64_t gpu_mesh_budget(const gpu::DeviceInfo &d) { return std::min<uint64_t>(1
 
 void Editor::set_viewport_device(int d) {
   viewport_device_ = std::max(0, std::min(2, d));
+  card_retry();  // (task 0193)
   gpu_view_tried_ = false;  // (choosing again tries the GPU again after an error)
   gpu_view_error_.clear();
   gpu_view_reason_.clear();
@@ -596,8 +597,11 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
    * canvas when its rows are contiguous there, else through a buffer of the view's own size. */
   const bool contiguous = rt.stride == rt.width;
   if (!contiguous) gpu_color_.resize((size_t)rt.width * rt.height);
-  uint32_t *color = contiguous ? rt.color : gpu_color_.data();
   const bool dof = cam && cam->dof && !cam->orthographic;
+  int card_x = 0, card_y = 0;
+  /* (Task 0193: the picture stays on the card - unless the CPU works on it afterwards: a camera's depth of field.) */
+  const bool to_card = card_present_ && !dof && card_view_at(rt, card_x, card_y);
+  uint32_t *color = to_card ? nullptr : contiguous ? rt.color : gpu_color_.data();
   const bool want_depth = !rt.depth.empty() && (planes_wanted_ || dof), want_ids = !rt.ids.empty() && planes_wanted_;
   float *depth = want_depth ? rt.depth.data() : nullptr;
   uint32_t *ids = want_ids ? rt.ids.data() : nullptr;
@@ -619,7 +623,12 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     prof_.gpu_fallbacks++;
     return false;
   }
-  for (int y = 0; !contiguous && y < rt.height; y++)
+  gpu_slot_gen_[slot]++;
+  if (to_card) {  // (transparent where its picture shows: what is drawn over it here keeps its coverage, Color::over)
+    for (int y = 0; y < rt.height; y++) std::fill(rt.color + (size_t)y * rt.stride, rt.color + (size_t)y * rt.stride + rt.width, 0u);
+    card_views_.push_back({slot, card_x, card_y});
+  }
+  for (int y = 0; !to_card && !contiguous && y < rt.height; y++)
     std::memcpy(rt.color + (size_t)y * rt.stride, &gpu_color_[(size_t)y * rt.width], (size_t)rt.width * 4);
   gpu_slot_reason_[slot].clear();
   gpu_view_reason_.clear();
@@ -632,9 +641,106 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   return true;
 }
 
+/* Task 0193: whether the card presents the window drawing now (it is open, wanted, and its swapchain attached - made
+ * here the first time), and its views for this frame forgotten. */
+void Editor::begin_card_frame() {
+  card_views_.clear();
+  card_present_ = false;
+  if (card_present_for_test_) {
+    card_present_ = gpu_view_wanted() && card_present_pref_ && gpu_view() != nullptr;
+    return;
+  }
+  /* (Verify mode compares each cached picture with a fresh one: a hole the card fills would always compare equal.) */
+  const bool want = gpu_view_wanted() && card_present_pref_ && !headless_ && window_ && !card_off_ && !cache_verify_;
+  if (!want) return card_detach();
+  gpu::Raster *g = gpu_view();
+  if (g && (card_win_ >= 0 || card_attach(*g))) card_present_ = true;
+}
+
+/* The card's swapchain on this window (false, and the system shows it from now on, when the card can't). */
+bool Editor::card_attach(gpu::Raster &g) {
+  std::string err;
+  card_win_ = g.attach_window(platform::native_display(window_), platform::native_handle(window_), &err);
+  present_all_ = true;
+  if (card_win_ >= 0) {
+    Log::info("The card presents this window (%s)", g.info().name.c_str());
+    return true;
+  }
+  card_off_ = true;
+  card_reason_ = err.empty() ? "the card can't present this window" : err;
+  Log::info("This window is shown by the system: %s", card_reason_.c_str());
+  return false;
+}
+
+/* This window no longer presented by the card (the setting, the device): its swapchain let go, so the system's present
+ * reaches the window, all of it the next time. */
+void Editor::card_detach() {
+  if (card_win_ < 0) return;
+  if (gpu_view_) gpu_view_->detach_window(card_win_);
+  card_win_ = -1;
+  present_all_ = true;
+  scene_cache_.key = game_cache_.key = 0;  // (pictures that were the card's)
+}
+
+/* The card may present the windows again (Viewport Device or `viewport present card` chosen again). */
+void Editor::card_retry() {
+  card_off_ = false, card_reason_.clear();
+  for (auto &w : windows_) w->card_off = false, w->card_reason.clear();
+}
+
+/* Where a view drawing into `rt` sits in the window, when rt is a full-size part of the window's canvas (a scaled or
+ * separate target is read back as before). */
+bool Editor::card_view_at(const RenderTarget &rt, int &x, int &y) const {
+  if (!rt.color || fb_.pixels.empty() || rt.stride != fb_.width) return false;
+  const uint32_t *base = fb_.pixels.data();
+  if (rt.color < base || rt.color >= base + fb_.pixels.size()) return false;
+  const size_t off = (size_t)(rt.color - base);
+  x = (int)(off % (size_t)fb_.width), y = (int)(off / (size_t)fb_.width);
+  return x + rt.width <= fb_.width && y + rt.height <= fb_.height;
+}
+
+/* Presenting through the card failed: the system shows this window from now on, every view drawn again for it. */
+void Editor::card_present_failed(const std::string &why) {
+  Log::warn("The card can't present this window (%s): the system shows it", why.c_str());
+  card_off_ = true;
+  card_reason_ = why;
+  if (gpu_view_ && card_win_ >= 0) gpu_view_->detach_window(card_win_);
+  card_win_ = -1;
+  scene_cache_.key = game_cache_.key = 0;  // (their pictures were the card's)
+  present_all_ = true;
+  ui_.redraw = true;
+}
+
+/* The card set aside or made again: no window is attached to it any more (each attaches again when it draws). */
+void Editor::card_forget_windows() {
+  card_win_ = -1, card_present_ = false;
+  card_views_.clear(), card_views_shown_.clear();
+  for (auto &w : windows_) w->card_win = -1, w->card_present = false, w->card_views.clear(), w->card_views_shown.clear();
+  scene_cache_.key = game_cache_.key = 0;
+  present_all_ = true;
+}
+
+/* The window as shown: the card's frame when it shows views, else the canvas (screenshots). */
+std::vector<uint32_t> Editor::window_pixels() {
+  if (card_views_shown_.empty() || !gpu_view_) return fb_.pixels;
+  std::vector<uint32_t> out(fb_.pixels.size());
+  std::string err;
+  if (gpu_view_->compose_read(fb_.pixels.data(), fb_.width, fb_.height, card_views_shown_, out.data(), &err)) return out;
+  Log::warn("The window's picture couldn't be read from the card (%s)", err.c_str());
+  return fb_.pixels;
+}
+
+bool Editor::card_frame_for_test(std::vector<uint32_t> &out) {
+  if (!gpu_view_) return false;
+  out.resize(fb_.pixels.size());
+  std::string err;
+  return gpu_view_->compose_read(fb_.pixels.data(), fb_.width, fb_.height, card_views_, out.data(), &err);
+}
+
 /* The card set aside (an error): what was kept there is forgotten with it, so a card opened again - perhaps at the
  * same address - gets everything again. */
 void Editor::gpu_view_drop() {
+  card_forget_windows();  // (task 0193)
   gpu_meshes_.clear();
   gpu_textures_.clear();
   gpu_world_tex_ = nullptr;
