@@ -1,10 +1,10 @@
 # 0185: the Blender-benchmarked performance pass
 
-- **Status:** rounds 1 and 2 done (rounds 207, 208); round 3 to come
+- **Status:** done (rounds 207-209)
 - **Requirements:** R-05 (responsive on big meshes)
 - **Decisions:** none (no architectural change)
 - **Model:** main session
-- **PR:** #152 (round 1, stacked on #151), #153 (round 2)
+- **PR:** #152 (round 1, stacked on #151), #153 (round 2), #154 (round 3)
 
 ## Scope: the three rows furthest behind Blender
 Pass 13's table (task 0178's harness), measured again on a quiet machine before this task (Blender 5.2.2):
@@ -90,7 +90,40 @@ table the Object Mode build made); undo and Select More unchanged (20.5-21.2, 14
 **What is left in the frame:** the two builds (9.2: numbering and sharing corners per cache), the shadow map (4.1),
 the cage overlay (7.3), the shaded views and the UI (4.4). Blender's headless row draws none of it.
 
+## Round 3 (209): entering Edit Mode
+**Measured first** (the stress row's parts), the views on the CPU, 23.0-24.1 ms after round 2 (24.5 in the table,
+26.3-26.9 before round 2): the Scene view 15.2 (the cage overlay 6.2, the flat render mesh 2.7), **the Game view 5.3**,
+the UI 3.1. The Game view drew again although nothing in it changes: the scene's render hash, which its key (and the
+Camera Preview's, and the lighting keys) is made from, mixed in `edit_mode_` and the edited object. Only the Scene view
+draws the cage (`collect_items` and `submit_scene` choose the edit mesh for it alone, `!game`), and its own key already
+holds the edit state.
+
+**Changed:** the scene's render hash leaves the edit state out.
+
+An Opus review checked every user of the hash (the Game view, the Camera Preview locked or not, the final render and
+its preview, MoonRay, the GPU views, the lighting keys, voxel GI, Live Link): none draws differently in Edit Mode. It
+noted one case left: with Realtime GI on and the edited object contributing GI, the Scene view's realtime lightmap drops
+the cage and its generation (mixed into the scene's hash for both views) still redraws the Game view on entry. Keying
+each view on its own lightmap's generation would fix it; not done here.
+
+**Result:** 18.0-18.4 ms over three runs against Blender's 18.1: from the table's 24.5, the whole gap closed (the
+target was half, 21.3). "Entering Edit Mode again, nothing changed" 14.1-14.3 ms. Extrude, undo and Select More
+unchanged (40.1-40.4, 20.7-21.3, 14.6-15.5).
+
+## The pass, all three rows
+| row | before (table) | after | Blender 5.2.2 | gap closed | target (half) |
+|---|---|---|---|---|---|
+| Undo of the extrude | 25.7 ms | about 21.0 | 15.7 | 45-50 % | missed by about 0.4 ms |
+| Extrude three faces | 48.2 ms | 40.1-41.5 | 31.7 | 41-49 % | missed by up to 1.5 ms |
+| Entering Edit Mode | 24.5 ms | 18.0-18.4 | 18.1 | all of it | met |
+
+No other row of Pass 13's table regressed: the rounds changed only Edit Mode's frames and the mesh caches (the other
+rows - path tracing, UV, bake, export - don't run that code). The remaining frame time in every row is drawing on the
+CPU (the cage overlay, the shaded views), which headless Blender doesn't do; with the views on the GPU every row is
+level with Blender or ahead.
+
 ## Tests
 tests/test_editor.cpp: "undo of a colour change keeps the shadow map ..." (fails on the old key). The stress rows
 carry the parts. tests/test_modeling.cpp: "Edit Mode operators: the copy leaves the caches behind ...", "the edge table
-from the corners at each vertex is edges()'s ...".
+from the corners at each vertex is edges()'s ...". tests/test_editor.cpp: "entering and leaving Edit Mode redraws the
+Scene view only ...".

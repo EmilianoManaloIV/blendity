@@ -322,8 +322,9 @@ uint64_t Editor::scene_render_hash(bool memo) {
   mix(&es.color, sizeof(Vec3));
   mix(&es.sky, sizeof(Vec3) * 3);
   mix(es.hdri.path.data(), es.hdri.path.size());
-  mix(&edit_mode_, 1);
-  mix(&edit_obj_, 8);
+  /* (Not Edit Mode: only the Scene view draws the cage - collect_items and submit_scene edit only for it - and its own
+   * key, scene_view_key, holds the edit state. Here it redrew the Game view and staled the lighting keys on every
+   * entry: task 0185.) */
   mix(&scene_lighting_, 1);
   mix(&scene_->serial, 8);
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded

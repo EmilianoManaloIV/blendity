@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 209): entering Edit Mode redraws only the Scene view (task 0185, round 3 of 3)
+
+**Asked:** the performance pass against Blender's numbers, its third row: entering Edit Mode on a 50k-face mesh.
+
+**Fixed**
+- **Entering or leaving Edit Mode redrew the Game view** (and changed the Camera Preview's and the lighting's keys)
+  though nothing in them changes: the scene's render hash held the edit state, which only the Scene view draws and
+  its own key already holds.
+
+**Measured** (stress editor_render, the views on the CPU, a quiet machine)
+- Entering Edit Mode, caches cold: 23.0-24.1 -> 18.0-18.4 ms (24.5 in the table before the pass); Blender 5.2.2's row
+  18.1 ms: level with it, the target of half the gap met.
+- The pass, three rounds: undo 25.7 -> about 21.0 ms (Blender 15.7), extrude 48.2 -> 40.1-41.5 (31.7), Edit Mode entry
+  24.5 -> 18.0-18.4 (18.1); the first two short of half their gap, the third closed. What is left is drawing on the CPU.
+
+**Checked**
+- Entering and leaving Edit Mode renders the Scene view only and leaves the scene's render hash as it was
+  (tests/test_editor.cpp); render-cache verify mode (every cached picture drawn again and compared) found no stale
+  picture.
+- Unit checks (round 209): Windows, in render-cache verify mode, 11,841, 0 failed (974 tests), 0 stale
+  pictures. Linux with libraries: 11,488, 0 failed. Sanitizer build: 11,364, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone; Edit Mode entry 17.9 ms in the chain's stress run.)
+
 ## 2026-10-23 (round 208): an extrude without the whole-mesh work (task 0185, round 2 of 3, ADR 0053 amended)
 
 **Asked:** the performance pass against Blender's numbers, its second row: extruding three faces of a 50k-face mesh.

@@ -93,6 +93,13 @@ quote their row before / after / Blender.
   - NVIDIA GeForce RTX 3060 Ti - OptiX: 70.1 samples a second (14.28 ms a sample), its upload 12922.0 ms, 0.20x GPU Compute's, the pictures 0.00000 apart.
 - Before the inlining and the register limit: 0.09x on both cards; the first open of a card compiles the 3.6 MB PTX in about 20 s without the driver's cache.
 
+### After task 0185, round 3 (entering Edit Mode)
+- The stress row "Entering Edit Mode on the 50k-face mesh, its caches cold" with the views on the CPU: 18.0-18.4 ms a
+  frame, was 23.0-24.1 after round 2 (24.5 in the table); Blender 5.2.2's row 18.1 ms. The Game view no longer draws
+  again (0.2 ms, was 5.3): the scene's render hash leaves Edit Mode to the Scene view's key.
+- The pass's three rows after it: undo of the extrude about 21.0 ms (15.7 Blender), extrude 40.1-41.5 (31.7), Edit
+  Mode entry 18.0-18.4 (18.1).
+
 ### After task 0185, round 2 (extrude three faces)
 - The stress row "An operator: extrude three faces" with the views on the CPU: 41.5 ms a frame (40.2-42.6 over seven
   runs), was 47.5 the same day (48.2 in the table); Blender 5.2.2's row 31.7 ms. The target was half the gap (40.0):

@@ -2871,6 +2871,37 @@ static void tests_round207() {
   });
 }
 
+/* ---------------------------------------------------------------- round 209: entering Edit Mode draws what shows it (task 0185) */
+static void tests_round209() {
+  test("entering and leaving Edit Mode redraws the Scene view only: the Game view's picture and the scene's render hash don't change", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.set_render_cache_verify(false);  // (it counts renders: verify mode would re-render every hit)
+    ed.viewport_device_for_test(1);
+    ed.command("layout 2 by 3");
+    ed.command("select Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const uint64_t h0 = ed.scene_render_hash_for_test();
+    const FrameProfile p0 = ed.frame_profile_totals();
+    ed.command("edit vertex");
+    ed.step_frame_headless();
+    const FrameProfile p1 = ed.frame_profile_totals();
+    CHECK(ed.scene_render_hash_for_test() == h0);
+    CHECK(p1.view_renders - p0.view_renders == 1);  // (the Scene view, with its cage)
+    ed.command("edit off");
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_totals().view_renders - p1.view_renders == 1);
+    /* And no picture kept is wrong: verify mode draws every cached picture again and compares. */
+    ed.set_render_cache_verify(true);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    for (const char *c : {"edit vertex", "edit off", "edit face", "edit off"}) {
+      ed.command(c);
+      ed.step_frame_headless();
+    }
+    CHECK(Editor::render_cache_mismatches_all() == m0);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2900,5 +2931,6 @@ void run_editor_tests() {
   tests_round205();
   tests_round206();
   tests_round207();
+  tests_round209();
   coverage_tests();
 }

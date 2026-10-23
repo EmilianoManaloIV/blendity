@@ -528,6 +528,7 @@ class Editor {
   bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
   std::string gizmo_typed_for_test() const { return gizmo_typed_; }
   int gizmo_hot_for_test() const { return gizmo_hot_; }
+  uint64_t scene_render_hash_for_test() { return scene_render_hash(); }
   bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
   bool typed_axis_move_for_test(Vec3 axis, Vec3 &delta) { return typed_axis_move(axis, delta); }
   bool open_scene_for_test(const std::string &p) { return open_scene(p); }
