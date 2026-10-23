@@ -1333,6 +1333,10 @@ class Editor {
   void edit_command(const std::vector<std::string> &t, const std::string &line);
   void edit_curve_command(const std::vector<std::string> &t);
   void edit_update_display();
+  int edit_preview_side() const;
+  int edit_shown_side_ = 0, edit_before_w_ = 0, edit_before_h_ = 0;
+  float edit_shown_scale_ = 1.0f;  // (the shown picture's size over the full result's: a preview's)
+  double edit_shown_ms_ = 0;
   void draw_editing_window(const Recti &r);
   void draw_editing_canvas(const Recti &r);
   void draw_edit_panel(const Recti &r);

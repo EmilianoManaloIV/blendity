@@ -938,6 +938,7 @@ Every step works on light, not on 8-bit pixels: +1 of Exposure doubles the light
 ? You raise Exposure by +1. What happens to a pixel's light? | It doubles: one stop. A mid-grey of 0.18 becomes 0.36, on the light's scale rather than the screen's.
 ? You crop the picture and export it, then open the source image in another program. Is it cropped? | No. The source is never written: the crop is a step in the stack, saved in the .edit file beside the image, and the export is a new file.
 ? You move the Vignette slider at the bottom of a long stack. Does Blendity redo every step? | No. Each step's result is kept, and a change reruns the stack only from the step that changed - here just the vignette.
+? You develop a 4K render in a window 1500 pixels wide. How many pixels does a slider work on? | The window's preview, about 1500 pixels across, as Lightroom's previews: the full 4K picture is worked out when you export, apply it to a texture, or zoom in past the preview.
 ! cmd:window Editing; develop open render | Open the last render in the Editing tab (render with F12 first)
 ! cmd:develop preset Film | Apply the Film preset
 ! cmd:develop split on | Compare before and after

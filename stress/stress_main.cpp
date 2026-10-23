@@ -3081,16 +3081,28 @@ static void test_editing(Report &rep, const Options &o) {
   doc.set_path("Exposure", 0.5f);
   doc.result();
   const double first = doc.last_eval_ms();
+  /* The window's preview (task 0191): the same stack on the picture made 1600 pixels across, as a canvas shows it. */
+  doc.preview(1600);
+  doc.set_path("Exposure", 0.6f);
+  doc.preview(1600);
+  const double pv_full = doc.last_preview_ms();
+  const int pv_full_steps = doc.preview_evaluated_steps();
+  doc.set_path("Vignette.Amount", -35);
+  doc.preview(1600);
+  const double pv_slider = doc.last_preview_ms();
   rep.table({"develop stack (11 steps)", "ms", "steps rerun"});
   rep.row({"full evaluation", f1(full), "11"});
   rep.row({"a slider on the last step (Vignette)", f1(slider), std::to_string(rerun)});
   rep.row({"a slider on the first step (Exposure)", f1(first), std::to_string(doc.evaluated_steps())});
+  rep.row({"the window's preview (1600 px): the whole stack", f1(pv_full), std::to_string(pv_full_steps)});
+  rep.row({"the window's preview: a slider on the last step", f1(pv_slider), std::to_string(doc.preview_evaluated_steps())});
   if (o.quick) {  // (the targets are for 4K)
     rep.note(strprintf("At %d x %d (quick): the full stack %.1f ms, a slider on the last step %.1f ms.", W, H, full, slider));
     return;
   }
-  rep.note(strprintf("Task 0181's targets at %d x %d: the full stack %.1f ms (at most 150: %s), a slider on the last step %.1f ms (at most 40: %s).",
-                     W, H, full, full <= 150 ? "met" : "missed", slider, slider <= 40 ? "met" : "missed"));
+  rep.note(strprintf("Task 0181's targets at %d x %d: the full stack %.1f ms (at most 150: %s), a slider on the last step %.1f ms (at most 40: %s). "
+                     "What the window evaluates while you work (task 0191, its 1600-pixel preview): the whole stack %.1f ms, a slider %.1f ms.",
+                     W, H, full, full <= 150 ? "met" : "missed", slider, slider <= 40 ? "met" : "missed", pv_full, pv_slider));
 }
 
 static void test_uv_unwrap(Report &rep, const Options &o) {

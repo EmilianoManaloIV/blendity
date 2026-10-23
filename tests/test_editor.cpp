@@ -2418,6 +2418,78 @@ static void tests_round200() {
   });
 }
 
+/* Task 0191: the Editing tab at 4K - a preview the window's size, tables for the display axis. */
+static void tests_round201() {
+  test("editing preview: the window's preview is the source made no larger than asked, the stack on it matches the full result made small, a crop on it is the crop at its scale; noise reduction still smooths", [] {
+    edit::Image src;
+    src.resize(400, 300);
+    for (int y = 0; y < 300; y++)
+      for (int x = 0; x < 400; x++) {
+        float *p = src.at(x, y);
+        p[0] = 0.9f * x / 400, p[1] = 0.7f * y / 300, p[2] = 0.2f + 0.1f * ((x / 25 + y / 25) % 2), p[3] = 1.0f;
+      }
+    edit::Doc doc;
+    doc.open_pixels(src, "gradient");
+    doc.add("Exposure"), doc.add("Contrast"), doc.add("Tone Curve"), doc.add("HSL");
+    doc.set_path("Exposure", 0.4f), doc.set_path("Contrast", 20), doc.set_path("HSL.Orange Saturation", 30);
+    doc.set_curve(2, 0, {Vec2(0, 0.03f), Vec2(0.5f, 0.6f), Vec2(1, 1)});
+    const edit::Image &pv = doc.preview(200);
+    CHECK(pv.w == 200 && pv.h == 150 && std::fabs(doc.preview_scale() - 0.5f) < 1e-6f);
+    const edit::Image pv_copy = pv;
+    const edit::Image &full = doc.result();
+    double diff = 0;
+    for (int y = 0; y < 150; y++)
+      for (int x = 0; x < 200; x++)
+        for (int k = 0; k < 3; k++) {
+          float avg = 0;  // (the full result's 2 x 2 block)
+          for (int j = 0; j < 4; j++) avg += full.at(2 * x + j % 2, 2 * y + j / 2)[k] * 0.25f;
+          diff += std::fabs(avg - pv_copy.at(x, y)[k]);
+        }
+    diff /= 200.0 * 150 * 3;
+    std::printf("    the preview vs the full result made small: mean difference %.5f\n", diff);
+    CHECK(diff < 0.01);
+    CHECK(&doc.preview(1000) == &doc.result());  // (a picture smaller than the preview: the full result itself)
+    CHECK(doc.set_path("Crop / Straighten.Width", 100) && doc.set_path("Crop / Straighten.Height", 50) && doc.set_path("Crop / Straighten.X", 40));
+    const edit::Image &cropped = doc.preview(200);
+    CHECK(cropped.w == 50 && cropped.h == 25 && doc.result().w == 100 && doc.result().h == 50);
+    {  // (the crop's content: the preview's corner is the full crop's corner made small)
+      const float full_corner = doc.result().at(1, 1)[0];
+      CHECK(std::fabs(doc.preview(200).at(0, 0)[0] - full_corner) < 0.02f);
+    }
+    /* Buffers reused: a middle step changed, then a masked and a spatial step, against a document made fresh. */
+    doc.set_path("Contrast", 35);
+    doc.add("Clarity"), doc.set_path("Clarity", 30);
+    doc.add("Vignette"), doc.set_path("Vignette.Amount", -40);
+    edit::MaskPart circle = edit::make_mask_part(edit::MaskKind::Radial, 400, 300);
+    doc.set_mask((int)doc.stack().size() - 1, {circle});
+    const edit::Image again = doc.result();
+    edit::Doc fresh;
+    fresh.open_pixels(src, "gradient");
+    fresh.set_stack(doc.stack());
+    CHECK(again.px == fresh.result().px);
+    int sw = 0, sh = 0;
+    doc.step_input_size((int)doc.stack().size(), sw, sh);
+    CHECK(sw == 100 && sh == 50);
+    edit::Image noisy = flat_image(64, 64, Vec3(0.3f));
+    uint32_t seed = 7;
+    for (float &v : noisy.px) {
+      seed = seed * 1664525u + 1013904223u;
+      v = (&v - noisy.px.data()) % 4 == 3 ? 1.0f : std::max(0.0f, v + ((seed >> 8) / 16777216.0f - 0.5f) * 0.1f);
+    }
+    edit::Image smooth;
+    edit::Adjustment nr = edit::make_adjustment("Noise Reduction");
+    nr.set("Luminance", 100), nr.set("Color", 100);
+    edit::apply(nr, noisy, smooth);
+    auto variance = [](const edit::Image &img) {
+      double m = 0, m2 = 0;
+      for (int i = 0; i < img.w * img.h; i++) m += img.px[(size_t)i * 4 + 1], m2 += img.px[(size_t)i * 4 + 1] * img.px[(size_t)i * 4 + 1];
+      m /= img.w * img.h;
+      return m2 / (img.w * img.h) - m * m;
+    };
+    CHECK(variance(smooth) < variance(noisy) * 0.5);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2441,5 +2513,6 @@ void run_editor_tests() {
   tests_round198();
   tests_round199();
   tests_round200();
+  tests_round201();
   coverage_tests();
 }

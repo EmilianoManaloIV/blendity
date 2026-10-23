@@ -19,6 +19,22 @@ struct Preset {
 };
 const std::vector<Preset> &builtin_presets();
 
+/* A stack's results on one picture (the source, or its preview), keyed by each step's text and the scale: a few kept,
+ * the buffers of the dropped ones reused (a 4K picture is 133 MB: allocating and clearing one costs as much as a
+ * step). */
+struct Pipeline {
+  std::vector<Image> cache;       // cache[i]: through steps 0..i (empty when dropped; its key kept)
+  std::vector<std::string> keys;  // to_text of step i when cached
+  std::vector<Image> spare;       // buffers to write the next results into
+  float scale = 1.0f;             // the picture's size over the source's (pixel-sized fields follow it)
+  size_t max_spare = 2;
+  int evaluated = 0;
+  double ms = 0;
+  void clear();
+  void recycle(Image &img);
+  Image take(int w, int h);
+};
+
 class Doc {
  public:
   /* A file (PNG, JPEG, TGA, BMP, HDR, EXR; 8-bit files decoded from sRGB to linear) or pixels handed over. */
@@ -61,13 +77,21 @@ class Doc {
    * (the last two and the input to the step changed last: a slider moves without rerunning the steps before it), so
    * a 4K stack holds three pictures, not one a step. */
   const Image &result_upto(int steps);
-  int evaluated_steps() const { return last_evaluated_; }
+  /* The same on a preview of the source no larger than `max_side` on its longest side (the source itself when it
+   * is smaller): what the window shows, as Lightroom's previews (task 0191). */
+  const Image &preview(int max_side) { return preview_upto((int)stack_.size(), max_side); }
+  const Image &preview_upto(int steps, int max_side);
+  const Image &preview_source(int max_side);
+  float preview_scale() const { return preview_.scale; }
+  double last_preview_ms() const { return preview_.ms; }
+  int preview_evaluated_steps() const { return preview_.evaluated; }
+  int evaluated_steps() const { return full_.evaluated; }
   /* Counts changes to the stack (and openings): a cheap key for what shows it. */
   uint64_t revision() const { return revision_; }
   /* The size of the picture step `step` acts on (the source's, unless a crop or turn comes before it). */
   void step_input_size(int step, int &w, int &h);
   bool geometry_after(int step) const;  // an enabled crop or turn after `step` (its picture isn't the one shown)  // steps rerun by the last result() (for the tests)
-  double last_eval_ms() const { return last_ms_; }
+  double last_eval_ms() const { return full_.ms; }
 
   /* PNG / JPEG (8-bit sRGB through the view), EXR / HDR (linear float, the view's exposure applied), by extension. */
   bool export_file(const std::string &path, std::string &error);
@@ -82,20 +106,18 @@ class Doc {
   void stack_from_text(const std::string &text);
 
  private:
-  void invalidate_from(int step);
-  void drop_cache(int steps, int changed);
+  const Image &run(Pipeline &p, const Image &src, int steps);
   bool save_source(const std::string &path, std::string &error);
   Image source_;
   std::string source_path_, label_, edit_path_;
   std::vector<Adjustment> stack_;
   std::vector<std::vector<Adjustment>> undo_, redo_;
-  std::vector<Image> cache_;           // cache_[i]: through steps 0..i (empty when dropped; its key kept)
-  std::vector<std::string> cache_key_;  // to_text of step i when cached
+  Pipeline full_, preview_;
+  Image preview_src_;
+  int preview_side_ = 0;
   ViewTransform view_ = ViewTransform::Standard;
   float view_exposure_ = 0.0f;
-  int last_evaluated_ = 0;
   uint64_t revision_ = 1;
-  double last_ms_ = 0;
 };
 
 /* A decoded image in linear float (an 8-bit one from sRGB; alpha as it is). */

@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 201): the Editing tab at 4K - a preview the window's size, tables for the display axis (task 0191, ADR 0058 amended)
+
+**Asked:** (round 198's measured miss) an 11-step stack on a 4K render took 683 ms, and a slider near the top of the
+stack stalled the editor as long.
+
+**Changed**
+- The Editing window works on a preview the canvas's size (its longest side in steps of 512 pixels), as Lightroom's
+  Develop module does; zoomed in past it, the window shows the full picture. Export, Apply to Texture and the camera
+  look use the full picture. The status line says when a preview is shown.
+- The display axis through tables (no `pow` per pixel in Highlights / Shadows / Whites / Blacks, Clarity, HSL, Noise
+  Reduction); the Tone Curve as one table per channel; Noise Reduction's tones once a pixel and its weights from
+  tables; result buffers reused instead of allocated and cleared for each step.
+- A step's input size is worked out from the crops and turns before it, not by running them (adding a mask after a
+  crop no longer evaluates the stack at full size).
+
+**Checked**
+- The preview matches the full result made small for pointwise steps (mean difference 0.00014); a crop on it is the
+  crop at its scale; results written into reused buffers equal a fresh document's; Noise Reduction still smooths
+  (tests/test_editor.cpp). An Opus review's findings are fixed (spare buffers of an old size kept, a resize remaking
+  the preview each frame, an infinite pixel in Noise Reduction, a tiny crop becoming the whole picture).
+- Measured (stress `editing`, 3840 x 2160): what the window evaluates while you work, its 1600-pixel preview - the 11-step stack 65.4 ms, a slider on its last step 2.4 ms (task 0181's targets: 150 and 40). At full size, for export: the stack 412.0 ms (683 before), a slider on its first step 392.0 ms (707), on its last 14.0 ms (31); the Tone Curve alone 29.8 ms (347), Noise Reduction 252.1 ms (468).
+- Unit checks (round 201): Windows, in render-cache verify mode, 11,634, 0 failed (960 tests), 0 stale
+  pictures. Linux with libraries: 11,281, 0 failed. Sanitizer build: 11,157, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 200): textures through the Editing tab, and the stack as a camera look (task 0183, ADR 0058 amended)
 
 **Asked:** the Editing tab for textures (results kept as texture assets), and a look made there carried live by the

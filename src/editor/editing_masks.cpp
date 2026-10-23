@@ -242,9 +242,9 @@ bool Editor::edit_mask_on_picture() const {
 /* The selected step's mask over the picture, red by its weight; recomputed only when the document changed. */
 void Editor::draw_edit_mask_overlay(const Recti &dst, const Recti &clip) {
   if (!edit_mask_show_ || !edit_mask_on_picture()) return;
-  const std::string key = strprintf("%d|%d|%llu", edit_opened_, edit_mask_step_, (unsigned long long)edit_doc_.revision());
+  const std::string key = strprintf("%d|%d|%llu|%d", edit_opened_, edit_mask_step_, (unsigned long long)edit_doc_.revision(), edit_shown_side_);
   if (key != edit_mask_key_) {
-    const edit::Image &in = edit_doc_.result_upto(edit_mask_step_);
+    const edit::Image &in = edit_shown_side_ > 0 ? edit_doc_.preview_upto(edit_mask_step_, edit_shown_side_) : edit_doc_.result_upto(edit_mask_step_);
     edit::mask_weights(edit_doc_.stack()[(size_t)edit_mask_step_].mask, in, edit_mask_weights_);
     edit_mask_w_ = in.w, edit_mask_h_ = in.h, edit_mask_key_ = key;
   }

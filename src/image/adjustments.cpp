@@ -47,14 +47,44 @@ std::string squash(const std::string &s) {  // lower case without spaces, "/" or
 }
 
 /* ---- the display axis ---- */
-float enc(float x) {
+float enc_exact(float x) {
   if (!(x > 0.0f)) return 0.0f;
   return x <= 0.0031308f ? 12.92f * x : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
 }
-float dec(float e) {
+float dec_exact(float e) {
   if (!(e > 0.0f)) return 0.0f;
   return e <= 0.04045f ? e / 12.92f : std::pow((e + 0.055f) / 1.055f, 2.4f);
 }
+/* The display axis through tables (4097 entries; enc indexed by sqrt(x), dense near black where it is steep),
+ * within 1e-5 of the exact curves - the hot passes' pow() calls cost more than everything else they do. */
+struct SrgbTables {
+  float enc[4097], dec[4097];
+  SrgbTables() {
+    for (int i = 0; i <= 4096; i++) {
+      const float t = i / 4096.0f;
+      enc[i] = enc_exact(t * t);
+      dec[i] = dec_exact(t);
+    }
+  }
+};
+const SrgbTables &srgb_tables() {
+  static const SrgbTables t;
+  return t;
+}
+float table(const float *v, float t) {
+  const float f = t * 4096.0f;
+  const int i = std::min(4095, (int)f);
+  return v[i] + (v[i + 1] - v[i]) * (f - i);
+}
+float enc(float x) {
+  if (!(x > 0.0f)) return 0.0f;
+  return x < 1.0f ? table(srgb_tables().enc, std::sqrt(x)) : enc_exact(x);
+}
+float dec(float e) {
+  if (!(e > 0.0f)) return 0.0f;
+  return e < 1.0f ? table(srgb_tables().dec, e) : dec_exact(e);
+}
+
 float smooth(float a, float b, float x) {
   const float t = std::max(0.0f, std::min(1.0f, (x - a) / (b - a)));
   return t * t * (3.0f - 2.0f * t);
@@ -252,17 +282,26 @@ void dehaze(const Adjustment &a, const Image &in, Image &out) {
   });
 }
 
+float curve_through(const std::vector<Vec2> &pts, float e) {
+  if (pts.size() < 2) return e;
+  if (e <= 1.0f) return curve_eval(pts, e);
+  return e + curve_eval(pts, 1.0f) - 1.0f;  // (above white: carried by the curve's end)
+}
+
+/* Each channel's whole path - linear, encoded, the RGB curve, its own curve, linear again - as a table over
+ * sqrt(x) in 0-1 (4097 entries), the exact path above white. */
 void tone_curve(const Adjustment &a, const Image &in, Image &out) {
-  auto through = [](const std::vector<Vec2> &pts, float e) {
-    if (pts.size() < 2) return e;
-    if (e <= 1.0f) return curve_eval(pts, e);
-    return e + curve_eval(pts, 1.0f) - 1.0f;  // (above white: carried by the curve's end)
-  };
+  auto path = [&](int k, float x) { return dec_exact(curve_through(a.curve[1 + k], curve_through(a.curve[0], enc_exact(x)))); };
+  std::vector<float> lut[3];
+  for (int k = 0; k < 3; k++) {
+    lut[k].resize(4097);
+    for (int i = 0; i <= 4096; i++) lut[k][(size_t)i] = path(k, (i / 4096.0f) * (i / 4096.0f));
+  }
   per_pixel(in, out, [&](Vec3 &c, int, int) {
     for (int k = 0; k < 3; k++) {
-      float e = through(a.curve[0], enc(c[k]));
-      e = through(a.curve[1 + k], e);
-      c[k] = dec(e);
+      if (!(c[k] > 0.0f)) c[k] = lut[k][0];
+      else if (c[k] < 1.0f) c[k] = table(lut[k].data(), std::sqrt(c[k]));
+      else c[k] = path(k, c[k]);  // (above white: the exact path)
     }
   });
 }
@@ -323,34 +362,64 @@ void sharpen(const Adjustment &a, const Image &in, Image &out) {
 }
 
 /* Noise Reduction: a bilateral filter on the luminance (edges kept), a blur of the colour's difference from it. */
+/* The bilateral filter's weights: 5 x 5 spatial ones, the range one from a table over the tone difference. */
+struct NoiseKernel {
+  float space[25];
+  float range[1025];
+  float range_max;
+  explicit NoiseKernel(float sr) {
+    for (int dy = -2; dy <= 2; dy++)
+      for (int dx = -2; dx <= 2; dx++) space[(dy + 2) * 5 + dx + 2] = std::exp(-(dx * dx + dy * dy) / 4.5f);
+    range_max = 4.0f * sr;  // (beyond four sigmas: no weight)
+    for (int i = 0; i <= 1024; i++) {
+      const float d = range_max * i / 1024.0f;
+      range[i] = std::exp(-d * d / (2.0f * sr * sr));
+    }
+  }
+  float range_weight(float d) const {
+    d = std::fabs(d);
+    return d < range_max ? range[(int)(d / range_max * 1024.0f)] : 0.0f;  // (NaN, an infinite pixel's: no weight)
+  }
+};
+
+/* One row of the luminance smoothed: each pixel by its 5 x 5 neighbours of a similar tone. */
+void bilateral_row(const std::vector<float> &y, const std::vector<float> &pe, std::vector<float> &ys, int w, int h, int r, const NoiseKernel &k) {
+  for (int x = 0; x < w; x++) {
+    const float p0 = pe[(size_t)r * w + x];
+    float sum = 0, wsum = 0;
+    for (int dy = -2; dy <= 2; dy++) {
+      const size_t row = (size_t)std::max(0, std::min(h - 1, r + dy)) * w;
+      for (int dx = -2; dx <= 2; dx++) {
+        const size_t i = row + std::max(0, std::min(w - 1, x + dx));
+        const float wt = dx == 0 && dy == 0 ? 1.0f : k.space[(dy + 2) * 5 + dx + 2] * k.range_weight(pe[i] - p0);  // (the centre: always 1)
+        sum += wt * y[i], wsum += wt;
+      }
+    }
+    ys[(size_t)r * w + x] = sum / wsum;  // (the centre's own weight is never 0)
+  }
+}
+
 void noise_reduction(const Adjustment &a, const Image &in, Image &out) {
   const float lum = a.v[0] / 100.0f, col = a.v[1] / 100.0f;
   if (lum == 0.0f && col == 0.0f) {
     out = in;
     return;
   }
-  std::vector<float> y = luminance_plane(in), ys((size_t)in.w * in.h);
+  std::vector<float> y = luminance_plane(in), ys((size_t)in.w * in.h), pe(y.size());
   const float sr = 0.02f + 0.2f * lum;
+  JobSystem::global().parallel_for((int64_t)y.size(), 4096, [&](int64_t i0, int64_t i1) {
+    for (int64_t i = i0; i < i1; i++) pe[(size_t)i] = enc(y[(size_t)i]);  // (the display axis once, not 25 times a pixel)
+  });
+  NoiseKernel kernel(sr);
   JobSystem::global().parallel_for(in.h, 8, [&](int64_t y0, int64_t y1) {
-    for (int64_t r = y0; r < y1; r++)
-      for (int x = 0; x < in.w; x++) {
-        const float p0 = enc(y[(size_t)r * in.w + x]);
-        double sum = 0, wsum = 0;
-        for (int dy = -2; dy <= 2; dy++)
-          for (int dx = -2; dx <= 2; dx++) {
-            const int xx = std::max(0, std::min(in.w - 1, x + dx)), yy = std::max(0, std::min(in.h - 1, (int)r + dy));
-            const float v = y[(size_t)yy * in.w + xx], dp = enc(v) - p0;
-            const double w = std::exp(-(dx * dx + dy * dy) / 4.5 - dp * dp / (2.0 * sr * sr));
-            sum += w * v, wsum += w;
-          }
-        ys[(size_t)r * in.w + x] = (float)(sum / wsum);
-      }
+    for (int64_t r = y0; r < y1; r++) bilateral_row(y, pe, ys, in.w, in.h, (int)r, kernel);
   });
   std::vector<float> ch[3];
   for (int k = 0; k < 3; k++) {
     ch[k].resize(y.size());
     for (size_t i = 0; i < y.size(); i++) ch[k][i] = in.px[i * 4 + k] - y[i];
-    if (col > 0.0f) blur_plane(ch[k], in.w, in.h, std::max(1, (int)std::lround(1 + 3 * col)));
+    const float s = a.v.size() > 2 ? a.v[2] : 1.0f;  // (a preview's scale, set by apply)
+    if (col > 0.0f) blur_plane(ch[k], in.w, in.h, std::max(1, (int)std::lround((1 + 3 * col) * s)));
   }
   per_pixel(in, out, [&](Vec3 &c, int x, int yy) {
     const size_t i = (size_t)yy * in.w + x;
@@ -487,6 +556,16 @@ bool Adjustment::set(const std::string &field, float value) {
 
 namespace {
 
+/* The adjustment with its pixel-sized fields at a preview's scale. */
+Adjustment scaled(const Adjustment &a, float s) {
+  Adjustment b = a;
+  if (a.type == "Crop / Straighten")  // (a size of 1 or more stays at least 1: under 1 means "to the edge")
+    for (int k = 0; k < 4; k++) b.v[(size_t)k] = k >= 2 && a.v[(size_t)k] >= 1 ? std::max(1.0f, a.v[(size_t)k] * s) : a.v[(size_t)k] * s;
+  if (a.type == "Noise Reduction") b.v.push_back(s);  // (its colour blur's radius in pixels follows the scale)
+  if (a.type == "Sharpen") b.v[1] = std::max(0.25f, a.v[1] * s);
+  return b;
+}
+
 void apply_unmasked(const Adjustment &a, const Image &in, Image &out) {
   const std::string &t = a.type;
   if (t == "Exposure") exposure(a, in, out);
@@ -525,14 +604,28 @@ void blend_by_mask(const std::vector<MaskPart> &mask, const Image &in, Image &ou
 
 }  // namespace
 
-void apply(const Adjustment &a, const Image &in, Image &out) {
+void apply(const Adjustment &a, const Image &in, Image &out, float scale) {
   if (!a.enabled || in.empty() || !a.info()) {
     out = in;
     return;
   }
-  apply_unmasked(a, in, out);
+  Adjustment at_scale;
+  const Adjustment &use = scale == 1.0f ? a : (at_scale = scaled(a, scale));  // (a preview: the pixel-sized fields at its scale)
+  apply_unmasked(use, in, out);
   if (a.mask.empty() || a.info()->geometry || out.w != in.w || out.h != in.h) return;
   blend_by_mask(a.mask, in, out);
+}
+
+void output_size(const Adjustment &a, int w, int h, int &ow, int &oh) {
+  ow = w, oh = h;
+  if (!a.enabled || w <= 0 || h <= 0) return;
+  if (a.type == "Crop / Straighten") {
+    const int x0 = std::max(0, std::min(w - 1, (int)a.v[0])), y0 = std::max(0, std::min(h - 1, (int)a.v[1]));
+    ow = std::max(1, a.v[2] >= 1 ? std::min(w - x0, (int)a.v[2]) : w - x0);
+    oh = std::max(1, a.v[3] >= 1 ? std::min(h - y0, (int)a.v[3]) : h - y0);
+    return;
+  }
+  if (a.type == "Flip / Rotate" && ((int)std::lround(a.v[2]) % 2 + 2) % 2 == 1) ow = h, oh = w;
 }
 
 float curve_eval(const std::vector<Vec2> &pts, float x) {

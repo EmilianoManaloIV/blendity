@@ -64,6 +64,15 @@ and the Tone Curve approximately (the camera's white balance is channel gains; a
 through black, middle grey and white), a darkening Vignette and Sharpen as their own effects; the rest is named and
 left out rather than faked.
 
+## Amendment (task 0191, round 201): the window's preview
+The window evaluates the stack on a preview of the source no larger than its canvas (an area average, the side in
+steps of 512 pixels so a resize doesn't remake it every frame), through a second pipeline with its own cache; the
+fields in pixels (Crop's rectangle, Sharpen's radius, Noise Reduction's colour blur) follow its scale; the full
+picture is evaluated for export, Apply to Texture, the camera look and a zoom past the preview's resolution. Pointwise
+steps match the full result made small; neighbourhood steps are close (Lightroom's previews have the same property).
+Results are written into reused buffers (a 4K picture is 133 MB); the full-size pipeline keeps one spare and none
+after an export. The display axis's encode and decode go through 4097-entry tables (within 1e-5 of the curves).
+
 ## Alternatives considered
 - Grading in 8 bits after the view transform (as the camera filters do): rejected: exposure and white balance must
   act on light, and highlights clipped by the view can't be recovered.

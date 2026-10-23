@@ -255,15 +255,32 @@ void Editor::edit_curve_command(const std::vector<std::string> &t) {
 
 /* ---- the window ---- */
 
+/* The size of preview the window shows (task 0191): the canvas's longest side, or none (0: the full picture) when the
+ * zoom shows more pixels than that. */
+int Editor::edit_preview_side() const {
+  /* In steps of 512 (rounded up): resizing the window doesn't make a new preview every frame. */
+  const int canvas = std::max(edit_canvas_rect_.w, edit_canvas_rect_.h);
+  const int side = std::max(512, std::min(4096, (canvas + 511) / 512 * 512));
+  const int longest = std::max(edit_doc_.source().w, edit_doc_.source().h);
+  if (edit_zoom_ > 0.0f && edit_zoom_ * longest > side) return 0;
+  return side;
+}
+
 void Editor::edit_update_display() {
-  const std::string view = strprintf("%d|%d|%g", edit_opened_, (int)edit_doc_.view(), edit_doc_.view_exposure());
+  const int side = edit_preview_side();
+  const std::string view = strprintf("%d|%d|%g|%d", edit_opened_, (int)edit_doc_.view(), edit_doc_.view_exposure(), side);
   const std::string key = view + strprintf("|%llu", (unsigned long long)edit_doc_.revision());
   if (key == edit_shown_key_) return;
-  const edit::Image &res = edit_doc_.result();
+  const edit::Image &res = side > 0 ? edit_doc_.preview(side) : edit_doc_.result();
+  edit_shown_side_ = side;
+  edit_shown_scale_ = side > 0 && &edit_doc_.preview_source(side) != &edit_doc_.source() ? edit_doc_.preview_scale() : 1.0f;
+  edit_shown_ms_ = edit_shown_scale_ < 1.0f ? edit_doc_.last_preview_ms() : edit_doc_.last_eval_ms();
   edit::to_display(res, edit_after_px_, edit_doc_.view(), edit_doc_.view_exposure());
   edit_after_w_ = res.w, edit_after_h_ = res.h;
-  if (view != edit_before_key_) {  // (the source's pixels: only when another image opens or the view changes)
-    edit::to_display(edit_doc_.source(), edit_before_px_, edit_doc_.view(), edit_doc_.view_exposure());
+  if (view != edit_before_key_) {  // (the source's pixels: only when another image opens, the view or the preview's size changes)
+    const edit::Image &src = side > 0 ? edit_doc_.preview_source(side) : edit_doc_.source();
+    edit::to_display(src, edit_before_px_, edit_doc_.view(), edit_doc_.view_exposure());
+    edit_before_w_ = src.w, edit_before_h_ = src.h;
     edit_before_key_ = view;
   }
   edit_shown_key_ = key;
@@ -278,7 +295,9 @@ void Editor::draw_editing_canvas(const Recti &r) {
     return;
   }
   edit_update_display();
-  const int iw = edit_after_w_, ih = edit_after_h_;
+  /* The picture's full size (a preview is shown scaled up to it), from the stack's fields. */
+  int iw = 0, ih = 0;
+  edit_doc_.step_input_size((int)edit_doc_.stack().size(), iw, ih);
   if (iw <= 0 || ih <= 0) return;
   const float fit = std::min((r.w - u.px(20)) / (float)iw, (r.h - u.px(20)) / (float)ih);
   if (u.hovered(r) && u.in.wheel_y != 0) {
@@ -292,10 +311,10 @@ void Editor::draw_editing_canvas(const Recti &r) {
   const Recti dst{r.x + (r.w - dw) / 2 + (int)edit_pan_.x, r.y + (r.h - dh) / 2 + (int)edit_pan_.y, dw, dh};
   u.canvas.push_clip(r);
   Image *fb = u.canvas.target();
-  draw_scaled(fb, edit_after_px_, iw, ih, dst, r, r.x);
+  draw_scaled(fb, edit_after_px_, edit_after_w_, edit_after_h_, dst, r, r.x);
   if (edit_split_ >= 0.0f) {  // before | after: the source left of the line (scaled into the same frame)
     const int sx = dst.x + (int)(dst.w * edit_split_);
-    draw_scaled(fb, edit_before_px_, edit_doc_.source().w, edit_doc_.source().h, dst, Recti{r.x, r.y, std::max(0, sx - r.x), r.h}, r.x);
+    draw_scaled(fb, edit_before_px_, edit_before_w_, edit_before_h_, dst, Recti{r.x, r.y, std::max(0, sx - r.x), r.h}, r.x);
     u.canvas.vline(sx, dst.y, dst.bottom(), u.theme.accent);
     u.label({sx - u.px(64), dst.y + u.px(4), u.px(60), u.row_h()}, "Before", u.theme.text_bright, ui::Align::Right);
     u.label({sx + u.px(4), dst.y + u.px(4), u.px(60), u.row_h()}, "After", u.theme.text_bright);
@@ -308,8 +327,8 @@ void Editor::draw_editing_canvas(const Recti &r) {
   edit_mask_input(dst, r);
   u.canvas.rect_outline({dst.x - 1, dst.y - 1, dst.w + 2, dst.h + 2}, Color::hex(0x101010));
   u.label({r.x + u.px(8), r.bottom() - u.row_h() - u.px(4), r.w - u.px(16), u.row_h()},
-          strprintf("%s  |  %d x %d  |  %.0f%%  |  %.1f ms  |  wheel zoom, middle-drag pan, double-click fit", edit_doc_.label().c_str(), iw, ih,
-                    sc * 100.0f, edit_doc_.last_eval_ms()),
+          strprintf("%s  |  %d x %d%s  |  %.0f%%  |  %.1f ms  |  wheel zoom, middle-drag pan, double-click fit", edit_doc_.label().c_str(), iw, ih,
+                    edit_shown_scale_ < 1.0f ? strprintf(" (a %d x %d preview)", edit_after_w_, edit_after_h_).c_str() : "", sc * 100.0f, edit_shown_ms_),
           u.theme.text_dim);
   u.canvas.pop_clip();
 }
