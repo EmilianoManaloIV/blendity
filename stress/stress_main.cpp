@@ -1483,6 +1483,41 @@ static void test_editor_render(Report &rep, const Options &o) {
     }
     ed.viewport_device_for_test(1);
   }
+  {
+    /* Task 0195: the fallbacks it removed - glass, transparent and axis materials on the icospheres, in Shaded and in
+     * Solid shading - with the views on the GPU (none on the CPU now) and on the CPU. */
+    MaterialPtr glass = make_material("Glass", {0.8f, 0.9f, 0.95f}), veil = make_material("Veil", {0.9f, 0.4f, 0.3f}), axis = make_material("Axis", {0.6f, 0.6f, 0.6f});
+    glass->surface = (int)MaterialSurface::Glass;
+    veil->surface = (int)MaterialSurface::Transparent;
+    veil->alpha = 0.5f;
+    axis->axis_mode = 1;
+    axis->axis_noise = 0.5f;
+    int k = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Icosphere", 0) != 0) return;
+      if (MeshRenderer *mr = g.get<MeshRenderer>()) mr->materials = {k % 3 == 0 ? glass : k % 3 == 1 ? veil : axis};
+      k++;
+    });
+    GameObject *moved = ed.scene().find_by_name("Icosphere");
+    for (const char *mode : {"shaded", "solid"}) {
+      ed.command(std::string("shading ") + mode);
+      for (int device : {2, 1}) {
+        ed.viewport_device_for_test(device);
+        const FrameProfile f0 = ed.frame_profile_totals();
+        const std::string name = strprintf("moving an object, glass, transparent and axis materials, %s shading, the views on the %s (task 0195)", mode, device == 2 ? "GPU" : "CPU");
+        row(name.c_str(), [&](int i) {
+          if (moved) moved->set_local_position({0.1f * i + 0.03f, 1.0f, 0.0f});
+          ed.step_frame_headless();
+        });
+        const FrameProfile f1 = ed.frame_profile_totals();
+        if (device == 2)
+          rep.note(strprintf("Task 0195's scene, %s shading: %llu views on the GPU, %llu on the CPU instead (%s).", mode, (unsigned long long)(f1.gpu_views - f0.gpu_views),
+                             (unsigned long long)(f1.gpu_fallbacks - f0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+      }
+    }
+    ed.command("shading shaded");
+    ed.viewport_device_for_test(1);
+  }
   Log::echo_stdout = true;
   rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
            "casters or the light change (task 0011).");

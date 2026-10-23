@@ -397,6 +397,13 @@ static LightingEnv build_env(const Scene &s) {
 }
 
 void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEnv &, Vec3) {
+  for (const DrawItem &it : solid_items(s, game)) r3d.add(it);
+}
+
+/* What Solid shading draws (submit_scene's items): each shown mesh with its materials, Edit Mode's cage mesh with its face
+ * highlight, Weight Paint's mesh in its weight colours. */
+std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
+  std::vector<DrawItem> items;
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -426,8 +433,9 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
       it.unlit = false;
       it.materials = nullptr;  // (with materials, Solid shades per pixel from them: the weight colours are the point here)
     }
-    r3d.add(it);
+    items.push_back(it);
   });
+  return items;
 }
 
 void Editor::render_scene_view(const Recti &view) {
@@ -483,7 +491,7 @@ void Editor::render_scene_view(const Recti &view) {
   if (shaded && scene_filters_) main_camera(*scene_, &fowner);
   const bool filtered = fowner && !camera_filters(fowner).empty();
   /* On the card the Scene view draws at full size (task 0100): when its last frame drew there, this one will too. */
-  const bool full = shaded && !filtered && scene_full_size();
+  const bool full = !filtered && scene_full_size();  // (Solid and Wireframe too since task 0195)
   record_scene_overlays(view, full && overlays_card_expected());  // (task 0192: for the card to draw with the picture)
   if (shaded) {
     scene_on_gpu_ = false;
@@ -499,7 +507,15 @@ void Editor::render_scene_view(const Recti &view) {
     }, fowner, true, true, full);
     scene_stats_ = scene_r3d_.stats();
   }
-  else render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) { render_solid(t, v, p); });
+  else {  // (Solid and Wireframe: on the card too, task 0195)
+    scene_on_gpu_ = false;
+    render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) {
+      scene_gpu_call_ = true;
+      scene_full_call_ = full;
+      render_solid(t, v, p);
+      scene_gpu_call_ = scene_full_call_ = false;
+    }, nullptr, false, true, full);
+  }
   ScopedTimer ot;
   scene_r3d_.begin_overlay_batch();  // the grid and the wireframes are thousands of lines: drawn in parallel bands
   draw_scene_overlays(view);  // (here unless the card drew them: task 0192)
@@ -520,11 +536,21 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
     env.sky = env.equator = env.ground = Vec3(0.35f);
   }
   scene_r3d_.begin(&rt, v, p, env, raster_opt_);
-  scene_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
-  if (shading_ != Shading::Wireframe) {
-    submit_scene(scene_r3d_, *scene_, false, env, env.camera_pos);
-    scene_r3d_.flush();
+  /* Task 0195: on the card when it can - the same items, the headlight, the editor's sky (scene_lights false: the
+   * editor's background), no shadow map, as here; Gouraud (the default) lit per vertex by shade()'s formulas. */
+  std::vector<DrawItem> items;
+  if (shading_ != Shading::Wireframe) items = solid_items(*scene_, false);
+  if (raster_opt_.shade != ShadeMode::DepthOnly && gpu_view_may_draw(rt, env, items, nullptr) &&
+      gpu_view_draw(rt, v, p, env.camera_pos, env, items, nullptr, false, nullptr, raster_opt_)) {
+    size_t tris = 0;
+    for (const DrawItem &it : items) tris += it.mesh ? it.mesh->tri_count() : 0;
+    scene_r3d_.note_submitted((int)items.size(), tris);
+    scene_stats_ = scene_r3d_.stats();
+    return;
   }
+  scene_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
+  for (const DrawItem &it : items) scene_r3d_.add(it);
+  if (!items.empty()) scene_r3d_.flush();
   scene_stats_ = scene_r3d_.stats();
 }
 

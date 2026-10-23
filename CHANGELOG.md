@@ -2,6 +2,59 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 214): fewer views on the CPU - many lights, Solid, see-through and axis materials (task 0195)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the
+first set of reasons a view still went back to the CPU.
+
+**Changed**
+- **More than 16 lights** draw on the card: the lights are a buffer of their own, any number of them.
+- **Solid and Wireframe shading** in the Scene view draw on the card. Solid lights each vertex with the CPU's own
+  formula and blends the colours across the face, as the CPU does, without the view transform.
+- **Weight Paint's colours** draw on the card too.
+- **Transparent and Glass materials** draw on the card: sorted back to front as the CPU sorts them, blended over the
+  lit picture the CPU's way (a Transparent surface by its alpha; Glass tinting what is behind and adding its
+  reflection). A click picks them as on the CPU, the selection outline goes round them, and they cast no shadow.
+- **Axis materials** draw on the card: their Top, Side, Bottom and High parts blended by slope and height, with the
+  noisy border, each projected triplanar.
+- What still draws on the CPU, saying why: see-through toon materials, toon maps and the hair highlight, live
+  procedural textures (next round), lightmaps, probes, realtime GI and camera filters (the round after), and cards
+  without dual-source blending.
+
+**Measured**
+- stress editor_render, this round's scene: glass, transparent and axis-material icospheres, one moved each frame, with
+  the 50k-face sphere (RTX 4070 SUPER, headless, so every picture is read back):
+
+  | Shading | Views on the CPU (all of them, before this round) | Views on the card | Views on the card / on the CPU |
+  |---|---|---|---|
+  | Shaded | 33.27 ms a frame | 27.07 ms | 33 / 0 |
+  | Solid | 28.81 ms | 25.07 ms | 33 / 0 |
+
+- The Scene view's own share:
+  - Shaded: 14.14 ms on the CPU against 9.68 on the card.
+  - Solid: 8.34 against 8.85. The CPU's Gouraud Solid is cheap, and headless the card's picture is copied back, which
+    the presented window of task 0193 doesn't do.
+
+**Checked**
+- Card against CPU (RTX 4070 SUPER):
+  - 24 lights in Shaded, Solid and Wireframe: mean 0.19-0.22 / 255;
+  - Weight Paint: mean 0.36 / 255;
+  - Transparent, Glass and a textured Transparent sphere: 99.9 % of pixels within 3 / 255;
+  - glass and faint panes in Shaded and Solid, and the glass pane selected: 100 %;
+  - axis materials in World mode (with the band and noise) and Local mode: 99.96 % and 99.69 %.
+- A click on the glass pane picks it, and through the faint pane the cube behind, on both devices.
+- An Opus review found:
+  - the outline missing round see-through objects over the sky;
+  - derivatives taken after a discard;
+  - an unknown surface value drawn opaque (the CPU draws it as Glass);
+  - Solid building axis parts it doesn't use.
+
+  All are fixed. Two small orderings differ from the CPU and are written up in docs/tasks/0195: a cutout drawn in the
+  CPU's see-through sort, and a triangle cut by the near plane sorted as one.
+- Unit checks (round 214): Windows, in render-cache verify mode, 11,904, 0 failed (985 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-23 (round 213): macOS and the card, decided (task 0194)
 
 **Asked:** the native-GPU roadmap's macOS step: the card presenting windows there too, if Blender's libraries make it

@@ -3,6 +3,20 @@
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
+### After task 0195 (fewer views on the CPU)
+- stress editor_render, this round's scene: glass, transparent and axis-material icospheres, one moved each frame, with
+  the 50k-face sphere (RTX 4070 SUPER, headless, so every picture is read back):
+
+  | Shading | Views on the CPU (all of them, before this round) | Views on the card | Views on the card / on the CPU |
+  |---|---|---|---|
+  | Shaded | 33.27 ms a frame | 27.07 ms | 33 / 0 |
+  | Solid | 28.81 ms | 25.07 ms | 33 / 0 |
+
+- The Scene view's own share:
+  - Shaded: 14.14 ms on the CPU against 9.68 on the card.
+  - Solid: 8.34 against 8.85. The CPU's Gouraud Solid is cheap, and headless the card's picture is copied back, which
+    the presented window of task 0193 doesn't do.
+
 ### After task 0193 (the card presents the windows)
 - `Blendity --windowed-check` (a real 2560 x 1369 window, the starter scene, the Scene view drawn every frame, RTX 4070
   SUPER): 3.27 ms a frame presented by the card, 3.69 ms presented by the system.

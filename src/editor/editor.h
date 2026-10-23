@@ -879,6 +879,7 @@ class Editor {
     return out;
   }
   bool weight_paint_active_for_test() const { return weight_paint_; }
+  bool scene_on_gpu_for_test() const { return scene_on_gpu_; }  // (task 0195: the Scene view's last frame drew on the card)
   void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
@@ -1105,6 +1106,7 @@ class Editor {
   bool scene_overlays_recorded_ = false, overlays_on_gpu_ = false;
   bool overlays_off_gpu_for_test_ = false;  // (a test: the card can't take them, so they're replayed here)
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
+  std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
   /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels

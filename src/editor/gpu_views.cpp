@@ -45,11 +45,18 @@ std::vector<uint32_t> mesh_slots(const RenderMesh &rm) {
 /* Why a material can't be drawn on the GPU yet, or null. Textures, procedurals and Box / Generated mapping are drawn
  * there since task 0101 (ADR 0038). */
 const char *material_unsupported(const Material &m) {
-  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) return "a see-through material";  // (a cutout draws on the card since task 0163)
-  if (m.axis_mode != 0) return "an axis material";
+  /* (A cutout draws on the card since task 0163, Transparent and Glass since task 0195 - but not toon ones, whose
+   * lighting reads the neighbouring pixels' normals in the g-buffer.) */
+  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout && m.shading_model == 1) return "a see-through toon material";
   const Material::Resolved &tx = m.textures();
   for (int k = 0; k < 5; k++)
     if (tx.live[k]) return "a live procedural texture";
+  /* Axis materials draw on the card since task 0195 - not toon ones (the toon maps aren't read through the parts), nor
+   * parts with live procedurals. */
+  if (m.axis_mode != 0 && m.shading_model == 1) return "a toon axis material";
+  for (int k = 0; m.axis_mode != 0 && k < 4; k++)
+    for (int j = 0; tx.axis[k] && j < 5; j++)
+      if ((tx.axis_tx[k] ? *tx.axis_tx[k] : tx.axis[k]->textures()).live[j]) return "a live procedural texture";
   /* Task 0148: the toon maps are read per pixel in the lighting pass, which has no UVs; a hair highlight needs the
    * tangent there. Those materials draw on the CPU. */
   if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight || tx.face_shadow || tx.line || tx.hatch))
@@ -60,7 +67,6 @@ const char *material_unsupported(const Material &m) {
 /* Why an object can't be drawn on the GPU yet, or null. */
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
-  if (it.vertex_colors) return "vertex colours (Weight Paint)";
   if (it.lightmap || it.rt_bounce || (it.use_probes && env.probes)) return "lightmaps, probes or realtime GI";
   for (uint32_t slot : mesh_slots(*it.mesh))
     if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
@@ -121,8 +127,9 @@ void set3(float *d, Vec3 v) { d[0] = v.x, d[1] = v.y, d[2] = v.z; }
 
 /* A material that varies over the surface (task 0101, ADR 0038): its own values and its maps, which the card
  * evaluates per pixel as evaluate_surface does. `tex` gives a texture's id on the card. */
-void raster_textured(gpu::RasterInstance &in, const Material &m, const RenderMesh &rm, const std::function<int(const TexturePtr &)> &tex) {
-  const Material::Resolved &tx = m.textures();
+void raster_textured(gpu::RasterInstance &in, const Material &m, const RenderMesh &rm, const std::function<int(const TexturePtr &)> &tex,
+                     const Material::Resolved *resolved = nullptr) {
+  const Material::Resolved &tx = resolved ? *resolved : m.textures();
   in.textured = true;
   set3(in.albedo_rough, m.base_color);
   in.albedo_rough[3] = m.roughness;
@@ -149,6 +156,32 @@ void raster_textured(gpu::RasterInstance &in, const Material &m, const RenderMes
   in.has_tangent = !rm.tangents.empty();
 }
 
+/* Task 0195: an axis material (ADR 0018) for the card - its settings as the path tracer's GMaterial takes them, and its
+ * parts as instances of their own (`parts`, each with the slot it fills; a part that is itself an axis material is used
+ * plainly, as on the CPU). The caller places the parts and fills in their indices. */
+void raster_axis(gpu::RasterInstance &in, const Material &m, const RenderMesh &rm, const std::function<int(const TexturePtr &)> &tex,
+                 std::vector<std::pair<gpu::RasterInstance, int>> &parts) {
+  in.flags |= gpu::RasterInstance::Axis;
+  in.axis[0] = std::cos(clampf(m.axis_angle, 0.0f, 90.0f) * kDeg2Rad);
+  in.axis[1] = clampf(m.axis_blend, 0.0f, 1.0f) * 0.5f;
+  in.axis[2] = 1.0f / std::max(0.01f, m.axis_scale);
+  in.axis[3] = (float)m.axis_mode;
+  in.axis2[0] = finite_bits(m.axis_noise) ? clampf(m.axis_noise, 0.0f, 1.0f) : 0.0f;
+  in.axis2[1] = 1.0f / (finite_bits(m.axis_noise_scale) ? std::max(0.01f, m.axis_noise_scale) : 4.0f);
+  in.axis2[2] = finite_bits(m.axis_high_start) ? m.axis_high_start : 0.0f;
+  in.axis2[3] = finite_bits(m.axis_high_blend) ? std::max(0.0f, m.axis_high_blend) : 1.0f;
+  const Material::Resolved &tx = m.textures();
+  for (int k = 0; k < 4; k++) {
+    in.axis_parts[k] = -1.0f;
+    if (!tx.axis[k]) continue;
+    gpu::RasterInstance part = in;
+    part.flags = gpu::RasterInstance::AxisPart;
+    raster_textured(part, *tx.axis[k], rm, tex, tx.axis_tx[k]);
+    part.metal_spec[3] = tx.axis[k]->alpha;
+    parts.push_back({part, k});
+  }
+}
+
 /* A toon material's settings (ADR 0020), as the lighting pass's shade_toon / toon_rim read them (task 0102). */
 void raster_toon(gpu::RasterInstance &in, const Material &m) {
   /* (A NaN setting: clampf's result on the CPU, where GLSL's clamp of a NaN is undefined.) */
@@ -169,6 +202,56 @@ void raster_toon(gpu::RasterInstance &in, const Material &m) {
   in.toon_key_light_only = m.toon_key_light_only;
 }
 
+/* Task 0195: an instance as Solid shading draws it (the CPU raster's Gouraud mode): the object's one colour and
+ * highlight strength, unlit or not, lit per vertex; a cutout keeps its material, shaded per pixel as the see-through
+ * pass does. */
+void solid_instance(gpu::RasterInstance &in, const DrawItem &it) {
+  in.metal_spec[1] = it.specular;
+  in.flags &= ~(uint32_t)gpu::RasterInstance::Toon;
+  if (in.metal_spec[2] >= 0.0f || in.surface) return;
+  set3(in.albedo_rough, it.albedo);
+  in.textured = false;
+  in.flags &= ~(uint32_t)gpu::RasterInstance::Unlit;
+  if (it.unlit) in.flags |= gpu::RasterInstance::Unlit;
+}
+
+/* Weight Paint's colours for the card: one a vertex, the object's colour past the end (as shade_vertex reads them). */
+uint32_t solid_vertex_colors(const DrawItem &it, std::vector<float> &out) {
+  const uint32_t first = (uint32_t)(out.size() / 4) + 1;
+  const std::vector<Vec3> &c = *it.vertex_colors;
+  for (size_t v = 0; v < it.mesh->positions.size(); v++) {
+    const Vec3 x = v < c.size() ? c[v] : it.albedo;
+    out.insert(out.end(), {x.x, x.y, x.z, 1.0f});
+  }
+  return first;
+}
+
+/* Task 0195: one see-through triangle as Renderer3D::draw_see_through keeps it - clipped against the near plane, its
+ * pieces culled by their winding on screen unless two-sided - with the first kept piece's mean depth, its sort key.
+ * False: none kept. (The card draws the whole triangle: its own clipper cuts it the same.) */
+bool see_through_key(const Vec4 (&v)[3], bool cull, float facing, float &key) {
+  Vec4 pv[4];
+  int np = 0;
+  for (int k = 0; k < 3; k++) {
+    const int k2 = (k + 1) % 3;
+    const bool in0 = v[k].z >= 0, in1 = v[k2].z >= 0;
+    if (in0) pv[np++] = v[k];
+    if (in0 != in1) pv[np++] = lerp(v[k], v[k2], v[k].z / (v[k].z - v[k2].z));
+  }
+  float sx[4], sy[4], sz[4];
+  for (int k = 0; k < np; k++) {
+    const float iw = 1.0f / pv[k].w;
+    sx[k] = pv[k].x * iw, sy[k] = -pv[k].y * iw, sz[k] = pv[k].z * iw;  // (y down, as the CPU's screen; the scale cancels in the sign)
+  }
+  for (int k = 1; k + 1 < np; k++) {
+    const float area = (sx[k] - sx[0]) * (sy[k + 1] - sy[0]) - (sx[k + 1] - sx[0]) * (sy[k] - sy[0]);
+    if (area == 0.0f || (area * facing < 0.0f && cull)) continue;
+    key = (sz[0] + sz[k] + sz[k + 1]) / 3.0f;
+    return true;
+  }
+  return false;
+}
+
 /* An object (one material's part of it) as the GPU draws it: a plain material sampled once (the same everywhere but
  * for the normal), else evaluated per pixel; the flags as the CPU decides them. */
 gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material &m, const std::function<int(const TexturePtr &)> &tex) {
@@ -181,6 +264,8 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   in.metal_spec[1] = s.specular;
   in.metal_spec[2] = m.surface == (int)MaterialSurface::Cutout ? m.alpha_clip : -1.0f;  // (task 0163: the card punches the holes)
   in.metal_spec[3] = m.alpha;
+  /* (Task 0195: see-through - Transparent, else Glass, as draw_see_through takes any other value.) */
+  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) in.surface = m.surface == (int)MaterialSurface::Transparent ? 2 : 3, in.ior = m.ior;
   set3(in.emission, s.emission);
   if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
   if (m.shading_model == 1) {
@@ -213,6 +298,31 @@ std::vector<gpu::RasterVertex> raster_vertices(const RenderMesh &rm) {
   std::vector<gpu::RasterVertex> v(rm.positions.size());
   for (size_t i = 0; i < v.size(); i++) v[i] = raster_vertex(rm, i);
   return v;
+}
+
+/* Task 0195: the see-through triangles back to front (a stable sort: ties keep the items' and triangles' order, as
+ * the CPU's), three corners each - the mesh's vertices, the instance, the face highlight. */
+template <class SeeTri>
+void see_through_to_frame(std::vector<SeeTri> &see, std::vector<gpu::SeeCorner> &out) {
+  std::stable_sort(see.begin(), see.end(), [](const SeeTri &a, const SeeTri &b) { return a.key > b.key; });
+  out.resize(see.size() * 3);
+  for (size_t i = 0; i < see.size(); i++) {
+    const DrawItem &it = *see[i].it;
+    const RenderMesh &rm = *it.mesh;
+    const uint32_t prim = see[i].prim;
+    const bool hl = it.face_highlight && prim < rm.tri_face.size() && rm.tri_face[prim] < it.face_highlight->size() && (*it.face_highlight)[rm.tri_face[prim]];
+    for (int q = 0; q < 3; q++) {
+      const gpu::RasterVertex rv = raster_vertex(rm, rm.indices[(size_t)prim * 3 + q]);
+      gpu::SeeCorner &c = out[i * 3 + q];
+      std::memcpy(c.p, rv.p, 12);
+      std::memcpy(c.n, rv.n, 12);
+      std::memcpy(c.uv, rv.uv, 8);
+      std::memcpy(c.t, rv.t, 16);
+      c.inst = see[i].inst;
+      c.highlight = hl ? 1.0f : 0.0f;
+      c.pad[0] = c.pad[1] = 0.0f;
+    }
+  }
 }
 
 /* The frame's world, background and view transform, as render_deferred and light_finish take them. Without a world
@@ -335,17 +445,14 @@ std::string Editor::gpu_view_status() const {
   for (const std::string &r : gpu_slot_reason_)
     if (!r.empty() && why.find(r) == std::string::npos) why += (why.empty() ? "" : "; ") + r;
   if (!why.empty()) s += " (a view on the CPU: " + why + ")";
-  if (shading_ == Shading::Solid || shading_ == Shading::Wireframe) s += " (the Scene view's Solid / Wireframe shading draws on the CPU)";
   return s;
 }
 
 const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingEnv &env, const std::vector<DrawItem> &items,
                                          const FilterStack *filters) const {
   if (filters && !filters->empty()) return "a camera filter";
-  if (render_clear_override_on_) return "a transparent render";
   if (rt.want_hdr) return "a picture kept in linear light";
   if (env.gi || env.probes) return "realtime GI or probes";
-  if (env.lights.size() > 16) return "more than 16 lights";
   const bool highlight = gpu_view_ && gpu_view_->can_highlight_faces();
   for (const DrawItem &it : items) {
     if (it.face_highlight && !highlight) return "Edit Mode's face highlight (the card has no geometry shaders)";
@@ -514,6 +621,36 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   std::vector<gpu::RasterInstance> inst;
   inst.reserve(items.size());
   std::vector<uint32_t> hl_bits;  // task 0166: Edit Mode's face highlight, a bit a triangle of the edited mesh
+  const bool gouraud = opt.shade == ShadeMode::Gouraud;  // task 0195: Solid shading
+  std::vector<float> vcols;
+  struct SeeTri {  // task 0195: a see-through triangle, its sort key, its instance
+    float key;
+    uint32_t inst, prim;
+    const DrawItem *it;
+  };
+  std::vector<SeeTri> see;
+  std::vector<std::pair<gpu::RasterInstance, int>> axis_parts;  // task 0195: axis materials' parts, and their owners
+  std::vector<size_t> axis_owner;
+  const Mat4 vp = p * v;
+  auto gather_see_through = [&](const DrawItem &it, uint32_t first_inst, const GpuMesh &e) {
+    const RenderMesh &rm = *it.mesh;
+    const Mat4 mvp = vp * it.model;
+    const bool cull = !((it.double_sided || !opt.backface_culling) && !it.always_cull);
+    const float facing = mirrored(it.model) ? -1.0f : 1.0f;
+    for (uint32_t prim = 0; prim < (uint32_t)rm.tri_count(); prim++) {
+      const uint32_t slot = rm.tri_material.size() == rm.tri_count() ? rm.tri_material[prim] : 0;
+      const Material &m = *slot_material(it, slot);
+      if (m.opaque() || m.surface == (int)MaterialSurface::Cutout) continue;
+      const uint32_t *tri = &rm.indices[(size_t)prim * 3];
+      const Vec4 c[3] = {mvp * Vec4(rm.positions[tri[0]], 1.0f), mvp * Vec4(rm.positions[tri[1]], 1.0f), mvp * Vec4(rm.positions[tri[2]], 1.0f)};
+      float key;
+      if (!see_through_key(c, cull, facing, key)) continue;
+      uint32_t inst_at = first_inst;
+      for (size_t k = 0; k < e.parts.size(); k++)
+        if (e.parts[k][0] == slot) inst_at = first_inst + (uint32_t)k;
+      see.push_back({key, inst_at, prim, &it});
+    }
+  };
   auto highlight_base = [&](const DrawItem &it, const GpuMesh &e) {
     /* One bit per triangle in the card's order: the mesh's own with one material, grouped by slot (card_indices)
      * with several. */
@@ -539,6 +676,11 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   bool ok = true;
   std::string tex_err;  // (a texture the card can't hold: this view on the CPU, the card kept)
   auto tex = [&](const TexturePtr &t) { return gpu_texture(t, tex_err); };
+  auto axis_of = [&](size_t i, const DrawItem &it, const Material &m) {
+    if (m.axis_mode == 0 || !inst[i].textured) return;
+    raster_axis(inst[i], m, *it.mesh, tex, axis_parts);
+    axis_owner.resize(axis_parts.size(), i);
+  };
   for (const DrawItem &it : items) {
     if (!it.mesh || it.mesh->indices.empty()) continue;
     const int mesh = gpu_mesh(*it.mesh, err);
@@ -546,9 +688,15 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     if (mesh < 0) continue;
     const GpuMesh &e = gpu_meshes_[it.mesh];
     const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
+    const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
+    const uint32_t first_inst = (uint32_t)inst.size();
     if (e.parts.empty()) {
       inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), tex));
       inst.back().highlight = hl;
+      inst.back().vertex_colors = vc;
+      if (gouraud) solid_instance(inst.back(), it);
+      axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
+      if (inst.back().surface) gather_see_through(it, first_inst, e);
       continue;
     }
     for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
@@ -556,16 +704,30 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       in.first_index = part[1];
       in.index_count = part[2];
       in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
+      in.vertex_colors = vc;
+      if (gouraud) solid_instance(in, it);
       inst.push_back(in);
+      axis_of(inst.size() - 1, it, *slot_material(it, part[0]));
     }
+    for (size_t k = first_inst; k < inst.size(); k++)
+      if (inst[k].surface) {
+        gather_see_through(it, first_inst, e);
+        break;
+      }
+  }
+  for (size_t k = 0; k < axis_parts.size(); k++) {  // (the parts after every drawn instance: no index moves)
+    inst[axis_owner[k]].axis_parts[axis_parts[k].second] = (float)inst.size();
+    inst.push_back(axis_parts[k].first);
   }
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
+  if (!see.empty() && !g->can_draw_see_through()) return gpu_view_refuse(slot, "see-through surfaces (the card has no dual-source blending)");
+  if (!see.empty() && opt.screen_door) return gpu_view_refuse(slot, "see-through surfaces drawn as a screen door");
   gpu::RasterFrame fr;
+  see_through_to_frame(see, fr.see_through);
   fr.highlight_bits = std::move(hl_bits);
   fr.slot = slot;
   fr.width = rt.width;
   fr.height = rt.height;
-  const Mat4 vp = p * v;
   std::memcpy(fr.view_proj, vp.m, 64);
   set3(fr.eye, eye);
   fr.shadow_size = env.shadow && env.shadow_light >= 0 ? env.shadow->size : 0;
@@ -578,6 +740,14 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   fr.cull_backfaces = opt.backface_culling;
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
   raster_world(fr, env, cam, scene_lights);
+  if (render_clear_override_on_) fr.background = 0, fr.clear = render_clear_override_;  // (a transparent render's black / white pass: task 0195)
+  if (gouraud) {  // (shade()'s ambient: the LightingEnv's own colours, whatever the world)
+    fr.gouraud = true;
+    fr.vertex_colors = std::move(vcols);
+    set3(fr.sky, env.sky);
+    set3(fr.equator, env.equator);
+    set3(fr.ground, env.ground);
+  }
   raster_world_map(fr, env, tex);
   gpu_forget_old_world(env);
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);  // (the world's map too large for the card)

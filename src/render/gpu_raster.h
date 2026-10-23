@@ -44,7 +44,9 @@ struct RasterInstance {
   /* Mirrored: a placement that turns the faces inside out (negative determinant); culling keeps the other side. */
   /* AlwaysCull: back faces culled whatever the view's setting (a toon outline's inverted hull). Toon: the toon
    * settings below shade it (task 0102, ADR 0020). */
-  enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64 };
+  /* Axis: an axis material (task 0195) - its settings below, its parts instances of their own flagged AxisPart (read
+   * by it, never drawn). (128 is the g-buffer's own flag.) */
+  enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64, Axis = 256, AxisPart = 512 };
   float model[16];
   float albedo_rough[4] = {0.8f, 0.8f, 0.8f, 0.5f};  // albedo rgb, roughness
   /* metallic, specular (Principled's IOR Level), the cutout threshold (-1: not a cutout; task 0163), the material's
@@ -70,6 +72,17 @@ struct RasterInstance {
   /* Task 0166: Edit Mode's face highlight - 1 + the index in RasterFrame::highlight_bits of this draw's first
    * triangle's bit (0: none); the g-buffer pass mixes the highlight colour into a set triangle's albedo. */
   uint32_t highlight = 0;
+  /* Task 0195: Weight Paint's colours - 1 + this mesh's first vertex's in RasterFrame::vertex_colors (0: none), lit per
+   * vertex in place of the albedo with RasterFrame::gouraud. */
+  uint32_t vertex_colors = 0;
+  /* Task 0195: a see-through surface (MaterialSurface: 2 Transparent, 3 Glass; else 0), drawn by the see-through pass
+   * from RasterFrame::see_through rather than the g-buffer's; Glass's index of refraction. */
+  int32_t surface = 0;
+  float ior = 1.45f;
+  /* Task 0195: an axis material's (ADR 0018) cos(angle), half blend, 1 / scale, mode; noise amount, 1 / noise scale,
+   * high start, high half-width; its Top, Side, Bottom, High as instance indices (-1: its own maps; High -1: no band). */
+  float axis[4] = {0, 0, 1, 0}, axis2[4] = {0, 0.25f, 0, 1};
+  float axis_parts[4] = {-1, -1, -1, -1};
   /* Task 0102: a toon material's settings (Material's toon_*), as shade_toon, toon_rim and light_finish read them. */
   int toon_bands = 1;
   float toon_softness = 0.02f, toon_threshold = 0.15f, toon_specular_size = 0.0f, toon_specular_smooth = 0.05f;
@@ -134,6 +147,17 @@ struct RasterLight {
   bool disk = false;
 };
 
+/* Task 0195: a see-through triangle's corner: the mesh's vertex (local), its instance, whether its face is highlighted. */
+struct SeeCorner {
+  float p[3];
+  uint32_t inst;
+  float n[3];
+  float highlight;
+  float uv[2], pad[2];
+  float t[4];
+};
+static_assert(sizeof(SeeCorner) == 64, "SeeCorner: the shaders' layout");
+
 struct RasterFrame {
   int slot = 0;               // which view (0-3): its own targets
   int width = 0, height = 0;
@@ -147,6 +171,13 @@ struct RasterFrame {
   bool cull_backfaces = true; // (double-sided instances never are)
   std::vector<RasterLight> lights;
   std::vector<uint32_t> highlight_bits;  // task 0166: a bit per triangle of the highlighted meshes (see RasterInstance::highlight)
+  /* Task 0195: Solid shading (the CPU raster's Gouraud): each vertex lit by shade()'s formulas - the ambient from
+   * sky / equator / ground, Lambert and a ^32 highlight per light - and written as it is; a cutout per pixel. */
+  bool gouraud = false;
+  std::vector<float> vertex_colors;  // rgba per vertex (RasterInstance::vertex_colors)
+  /* Task 0195: the see-through surfaces' triangles back to front, three corners each (Renderer3D::draw_see_through's
+   * order), drawn after the lighting. */
+  std::vector<SeeCorner> see_through;
   /* The world's light (Environment Gradient or Color, times its strength). */
   int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
   /* Task 0102: a Sky or HDRI world (env_mode 2): its equirectangular map (add_texture's id; -1: none yet, the
@@ -226,6 +257,7 @@ class Raster {
   virtual bool can_highlight_faces() const { return false; }
   /* Task 0192: whether RasterFrame's overlays are drawn (else the caller draws them itself). */
   virtual bool can_draw_overlays() const { return false; }
+  virtual bool can_draw_see_through() const { return false; }  // task 0195: Transparent and Glass (dual-source blending)
   /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;

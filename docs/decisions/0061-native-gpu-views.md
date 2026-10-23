@@ -49,6 +49,14 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0195, round 214): the first fallbacks removed
+- On the card now: any number of lights, Solid and Wireframe shading, Weight Paint, Transparent and Glass, axis
+  materials.
+- See-through surfaces follow the CPU's sort and blend: the CPU sorts the triangles, and the card blends them with
+  dual-source blending. A card without that feature keeps those views on the CPU.
+- Two orderings differ slightly, both written up in task 0195: cutouts, which the CPU sorts among the see-through
+  triangles, and triangles cut by the near plane.
+
 ## Amendment (task 0194, round 213): macOS
 - Blender's library set builds the Vulkan headers and loader on every platform but no MoltenVK, and its developers
   don't expect to ship it. ADR 0001 therefore leaves macOS on the system's present and the CPU path.
