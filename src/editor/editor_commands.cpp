@@ -671,6 +671,10 @@ void Editor::run_console_command(const std::string &line) {
     gpu_list();
     return;
   }
+  if (c == "dock") {  // dock move <Window> newwindow | main | monitor <n>; dock windows (task 0187)
+    dock_command(t, line);
+    return;
+  }
   if (c == "livelink") {  // livelink start [port] | stop | status (task 0172)
     livelink_command(t);
     return;

@@ -3105,6 +3105,52 @@ static void test_editing(Report &rep, const Options &o) {
                      W, H, full, full <= 150 ? "met" : "missed", slider, slider <= 40 ? "met" : "missed", pv_full, pv_slider));
 }
 
+/* Task 0187 (ADR 0059): a real secondary OS window - made at a place, shown, moved, moved to another display when
+ * there is one - checked against what the platform reports. It opens a window on the screen: only when asked. */
+static void test_windows(Report &rep, const Options &) {
+  rep.title("Windows: a secondary OS window",
+            "A window made with create_secondary_window at a place on the primary display, a picture presented in it, then "
+            "moved and resized with set_window_rect, and moved to the middle of the second display when there is one; "
+            "get_window_rect's answers against what was asked (the client area, in desktop pixels).");
+  const std::vector<platform::Monitor> ms = platform::monitors();
+  rep.table({"display", "rectangle", "scale", "primary"});
+  for (size_t i = 0; i < ms.size(); i++)
+    rep.row({std::to_string(i + 1) + " " + ms[i].name, strprintf("%d, %d, %d x %d", ms[i].x, ms[i].y, ms[i].width, ms[i].height), strprintf("%.2f", ms[i].dpi),
+             ms[i].primary ? "yes" : ""});
+  platform::Window *w = platform::create_secondary_window("Blendity window test", ms[0].x + 120, ms[0].y + 120, 640, 400);
+  if (!w) {
+    rep.note("No window could be made here (no display): nothing measured.");
+    return;
+  }
+  auto settle = [&](int ms_wait) {
+    std::vector<platform::Event> ev;
+    for (int i = 0; i < ms_wait / 10; i++) platform::poll_events(w, ev, 10);
+  };
+  auto check = [&](const char *what, int x, int y, int cw, int ch) {
+    settle(300);
+    int gx = 0, gy = 0, gw = 0, gh = 0;
+    platform::get_window_rect(w, gx, gy, gw, gh);
+    std::vector<uint32_t> px((size_t)std::max(1, gw) * std::max(1, gh));
+    for (int yy = 0; yy < gh; yy++)
+      for (int xx = 0; xx < gw; xx++) px[(size_t)yy * gw + xx] = 0xFF000000u | (uint32_t)(xx * 255 / std::max(1, gw)) << 16 | (uint32_t)(yy * 255 / std::max(1, gh)) << 8 | 0x60u;
+    if (gw > 0 && gh > 0) platform::present(w, px.data(), gw, gh);
+    const bool ok = std::abs(gx - x) <= 2 && std::abs(gy - y) <= 2 && std::abs(gw - cw) <= 2 && std::abs(gh - ch) <= 2;
+    rep.row({what, strprintf("%d, %d, %d x %d", x, y, cw, ch), strprintf("%d, %d, %d x %d", gx, gy, gw, gh), ok ? "yes" : "no"});
+  };
+  rep.table({"step", "asked", "reported", "within 2 px"});
+  check("made", ms[0].x + 120, ms[0].y + 120, 640, 400);
+  platform::set_window_rect(w, ms[0].x + 200, ms[0].y + 160, 800, 500);
+  check("moved and resized", ms[0].x + 200, ms[0].y + 160, 800, 500);
+  if (ms.size() > 1) {
+    const platform::Monitor &m = ms[1];
+    const int cw = m.width * 3 / 4, ch = m.height * 3 / 4;
+    platform::set_window_rect(w, m.x + (m.width - cw) / 2, m.y + (m.height - ch) / 2, cw, ch);
+    check("on display 2", m.x + (m.width - cw) / 2, m.y + (m.height - ch) / 2, cw, ch);
+  }
+  settle(200);
+  platform::destroy_window(w);
+}
+
 static void test_uv_unwrap(Report &rep, const Options &o) {
   rep.title("UV: LSCM unwrap and packing",
             "LSCM on an n x n grid (one island): block-Jacobi conjugate gradients on the assembled normal equations "
@@ -5652,13 +5698,14 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
     if (std::string(t.name) == "present" && o.only != "present") continue;  // (it opens a window: only when asked for)
     if (std::string(t.name) == "gpu_raster" && o.only != "gpu_raster") continue;  // (a spike with windows: only when asked for)
     if (std::string(t.name) == "gpu_optix" && o.only != "gpu_optix") continue;  // (a spike: only when asked for)
+    if (std::string(t.name) == "windows" && o.only != "windows") continue;  // (it opens a window: only when asked for)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);

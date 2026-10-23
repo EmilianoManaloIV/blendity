@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 203): windows beside the main one, on any display (task 0187, ADR 0059)
+
+**Asked:** windows outside the main editor - the Render tab on a second screen, the Editing tab on a pen display.
+
+**Changed**
+- Drag a tab out of the editor and it gets a window of its own where you let go; its tab menu has Move to New Window,
+  Move to Main Window and Move to Display N; Window > Bring Back N Windows; closing such a window gives its tabs back.
+  A window holds a dock like the main one (split it, add tabs); each window type is still in one place at a time.
+- One scene and one simulation: a window draws with its own input, popups, keyboard focus and DPI (a display at 150%
+  scales its window only), and a drag (an asset, a Hierarchy row) belongs to the window it started in.
+- The windows are remembered with the layout and open again where they were (fitted to a display that is there).
+- Console `dock move <Window> newwindow | main | monitor <n>`, `dock windows`.
+
+**Checked**
+- `dock move Render newwindow`: a second window holds the Render tab and both draw; its tab's right-click menu opens
+  in it, not in the main window; a UI scale on it alone; closing it gives the tab back; the layout string brings it
+  back; a layout for the main window leaves it there; a broken or oversized saved window is refused or fitted; a tab
+  moved to display 2's middle and back; a tab dragged out of the editor gets a window (tests/test_editor.cpp).
+- A real window on this PC's three displays (stress `windows`, run by hand: it opens a window): made at (120, 120)
+  640 x 400, moved to (200, 160) 800 x 500 and onto display 2, each reported back exactly where asked.
+- An Opus review's findings are fixed (the UI context's font wasn't movable; a poll inside a frame could paint the main
+  window into a secondary one; drags and undo read the main window's mouse; prefs and layouts saved or applied from a
+  secondary window; Win32 DPI and Cocoa's points in placement; X11 copy and paste between windows).
+- Unit checks (round 203): Windows, in render-cache verify mode, 11,657, 0 failed (962 tests), 0 stale
+  pictures. Linux with libraries: 11,304, 0 failed. Sanitizer build: 11,180, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone; macOS compiles the Cocoa calls in CI only.)
+
 ## 2026-10-22 (round 202): the Editing tab's room to grow, specified (task 0184)
 
 **Asked:** the roadmap's last Editing task: layers with blend modes, text, healing and clone, content-aware fill -

@@ -255,6 +255,33 @@ struct DockNode {
   DockNode *parent = nullptr;
 };
 
+/* A window beside the main one (task 0187, ADR 0059): its OS window, framebuffer, UI context and dock root, swapped
+ * into the editor's while it draws (editor_windows.cpp). */
+struct EditorWindow {
+  int id = 0;
+  platform::Window *os = nullptr;  // (null headless)
+  Image fb;
+  ui::Context ui;
+  std::unique_ptr<DockNode> dock;
+  std::vector<platform::Event> pending;  // its events, gathered by the run loop or a test
+  std::vector<uint64_t> present_bands;
+  int present_w = 0, present_h = 0;
+  bool present_all = true;
+  float dpi = 1.0f;
+  float scale_for_test = 0.0f;  // (tests: a UI scale of its own, as a display at another DPI gives)
+  int x = 0, y = 0, monitor = 0;
+  bool close = false;
+  bool changed = false;  // (it had events this frame: the main window redraws after it)
+};
+void collect_dock_tabs(const DockNode *n, std::vector<WindowKind> &out);
+
+/* A tab moved between windows, asked for while drawing and done between frames. */
+struct WindowMove {
+  enum Kind { NewWindow, Main, Monitor } kind = NewWindow;
+  WindowKind tab = WindowKind::Count;
+  int x = 0, y = 0, w = 0, h = 0, monitor = 0;
+};
+
 const char *trash_name();  // "Recycle Bin" on Windows, else "Trash" (project_window.cpp)
 
 /* A "Delete ...?" question (the Materials, Textures and Project windows; Editor::ask_delete): a title, the names
@@ -466,6 +493,20 @@ class Editor {
 
   /* Headless entry points used by tests and --screenshot. */
   void init_headless(int width, int height);
+  /* Task 0187: windows beside the main one (headless: framebuffers without OS windows). */
+  int open_window_for_test(WindowKind k, int w, int h);
+  void step_window_headless(int id, std::vector<platform::Event> events);
+  size_t window_count_for_test() const { return windows_.size() + 1; }
+  EditorWindow *window_for_test(int id) { return editor_window(id); }
+  const Image &main_fb_for_test() const { return fb_; }
+  void set_monitors_for_test(const std::vector<platform::Monitor> &m) { test_monitors_ = m; }
+  std::string windows_layout_for_test() { return windows_layout(); }
+  void restore_windows_for_test(const std::string &s) { restore_windows(s); }
+  bool in_main_dock_for_test(WindowKind k) { return dock_find(k) != nullptr; }
+  Recti dock_leaf_rect_for_test(WindowKind k) {
+    DockNode *n = dock_find(k);
+    return n ? n->rect : Recti{0, 0, 0, 0};
+  }
   /* Live Link (task 0172): start on a port (0: any free one), stop; the link for tests. */
   bool livelink_start(int port);
   void livelink_stop();
@@ -2204,6 +2245,42 @@ class Editor {
   std::vector<uint64_t> present_bands_;
   bool present_all_ = true;
   int present_w_ = 0, present_h_ = 0;
+  /* ---- windows beside the main one (task 0187, ADR 0059: editor_windows.cpp) ---- */
+  std::vector<std::unique_ptr<EditorWindow>> windows_;
+  int next_window_id_ = 1, active_window_ = 0;  // (0: the main window is drawing or nothing is)
+  std::vector<WindowMove> window_moves_;
+  std::vector<platform::Monitor> test_monitors_{platform::Monitor{0, 0, 1920, 1080, 1.0f, "Test display", true}};
+  std::string windows_pref_;  // the windows of the last session, opened once the main window is
+  int tab_drag_window_ = 0;   // the window a tab drag started in
+  int pointer_window_ = 0;    // the window the last press was in (its drags: assets, the Hierarchy's)
+  bool in_frame_ = false, save_prefs_pending_ = false;
+  void frame_body(std::vector<platform::Event> &events);
+  bool any_button_down() const;
+  bool key_down_any(int k) const;
+  float os_units() const;
+  bool place_on_display(int &x, int &y, int &w, int &h);
+  void swap_window_state(EditorWindow &w);
+  EditorWindow *editor_window(int id);
+  DockNode *dock_find_elsewhere(WindowKind k, EditorWindow **owner);
+  DockNode *dock_find_anywhere(WindowKind k);
+  EditorWindow *open_window(WindowKind k, int x, int y, int w, int h);
+  void init_window_ui(EditorWindow &w);
+  void take_tab(WindowKind k);
+  void move_to_main(WindowKind k);
+  void close_window(EditorWindow &w);
+  void close_finished_windows();
+  int monitor_at(int x, int y);
+  void move_to_monitor(WindowKind k, int index);
+  void apply_window_moves();
+  void queue_new_window_at_mouse(WindowKind k);
+  void draw_secondary_windows(double now);
+  void draw_secondary_window(EditorWindow &w, double now);
+  void update_tab_drag();
+  void draw_tab_menu_windows(WindowKind k);
+  std::string windows_layout();
+  void restore_windows(const std::string &s);
+  void dock_command(const std::vector<std::string> &t, const std::string &line);
+  void gather_window_events();
   void present_changed();
   /* The mesh caches' tallies at the last frame's end, and that frame's share (task 0083). Process-wide: work on other
    * threads (a skin bind) lands in the frame it finished in. */

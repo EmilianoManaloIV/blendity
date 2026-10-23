@@ -131,7 +131,15 @@ static std::string percent_decode(const std::string &s) {
   return out;
 }
 
-Window *create_window(const char *title, int width, int height) {
+/* Blendity's own windows (each on its own display connection): a copy in one is pasted in another from here, as
+ * the owning connection isn't polled while another window asks it (task 0187). */
+static std::vector<Window *> &our_windows() {
+  static std::vector<Window *> w;
+  return w;
+}
+
+/* A window on its own display connection (each window polls its own), at (x, y) with a minimum size. */
+static Window *make_window(const char *title, int x, int y, int width, int height, bool scale, int min_w, int min_h) {
   XInitThreads();
   Display *dpy = XOpenDisplay(nullptr);
   if (!dpy) return nullptr;
@@ -139,9 +147,9 @@ Window *create_window(const char *title, int width, int height) {
   w->dpy = dpy;
   w->dpi = query_dpi(dpy);
   int screen = DefaultScreen(dpy);
-  w->width = (int)(width * w->dpi);
-  w->height = (int)(height * w->dpi);
-  w->win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0, w->width, w->height, 0, BlackPixel(dpy, screen),
+  w->width = scale ? (int)(width * w->dpi) : width;
+  w->height = scale ? (int)(height * w->dpi) : height;
+  w->win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), x, y, w->width, w->height, 0, BlackPixel(dpy, screen),
                                BlackPixel(dpy, screen));
   XSelectInput(dpy, w->win,
                ExposureMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
@@ -168,9 +176,11 @@ Window *create_window(const char *title, int width, int height) {
   XChangeProperty(dpy, w->win, w->xdnd_aware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&version, 1);
 
   XSizeHints hints{};
-  hints.flags = PMinSize;
-  hints.min_width = 640;
-  hints.min_height = 400;
+  hints.flags = PMinSize | PWinGravity | (x || y ? PPosition | USPosition : 0);
+  hints.win_gravity = StaticGravity;  // (the client area where asked: the window manager's frame around it, no creep)
+  hints.min_width = min_w;
+  hints.min_height = min_h;
+  hints.x = x, hints.y = y;
   XSetWMNormalHints(dpy, w->win, &hints);
 
   w->gc = XCreateGC(dpy, w->win, 0, nullptr);
@@ -180,12 +190,48 @@ Window *create_window(const char *title, int width, int height) {
     w->ic = XCreateIC(w->im, XNInputStyle, XIMPreeditNothing | XIMStatusNothing, XNClientWindow, w->win,
                       XNFocusWindow, w->win, nullptr);
   XMapWindow(dpy, w->win);
+  if (x || y) XMoveWindow(dpy, w->win, x, y);
   XFlush(dpy);
+  our_windows().push_back(w);
   return w;
+}
+
+Window *create_window(const char *title, int width, int height) { return make_window(title, 0, 0, width, height, true, 640, 400); }
+
+Window *create_secondary_window(const char *title, int x, int y, int width, int height) {
+  return make_window(title, x, y, std::max(240, width), std::max(160, height), false, 240, 160);
+}
+
+std::vector<Monitor> monitors() {
+  std::vector<Monitor> out;
+  Display *dpy = XOpenDisplay(nullptr);
+  Monitor m;
+  m.primary = true, m.name = "Screen";
+  m.width = 1920, m.height = 1080;  // (no display to ask: a common one)
+  if (dpy) {
+    const int s = DefaultScreen(dpy);
+    m.width = DisplayWidth(dpy, s), m.height = DisplayHeight(dpy, s), m.dpi = query_dpi(dpy);
+    XCloseDisplay(dpy);
+  }
+  out.push_back(m);
+  return out;
+}
+
+void get_window_rect(Window *w, int &x, int &y, int &width, int &height) {
+  ::Window child;
+  XTranslateCoordinates(w->dpy, w->win, DefaultRootWindow(w->dpy), 0, 0, &x, &y, &child);
+  width = w->width, height = w->height;
+}
+
+void set_window_rect(Window *w, int x, int y, int width, int height) {
+  XMoveResizeWindow(w->dpy, w->win, x, y, (unsigned)std::max(1, width), (unsigned)std::max(1, height));
+  XFlush(w->dpy);
 }
 
 void destroy_window(Window *w) {
   if (!w) return;
+  auto &ours = our_windows();
+  ours.erase(std::remove(ours.begin(), ours.end(), w), ours.end());
   if (w->image) {
     w->image->data = nullptr;  // we own the pixels
     XDestroyImage(w->image);
@@ -467,8 +513,9 @@ void set_cursor(Window *w, Cursor c) {
 
 std::string get_clipboard(Window *w) {
   ::Window owner = XGetSelectionOwner(w->dpy, w->clipboard);
-  if (owner == w->win) return w->clipboard_text;
   if (owner == None) return {};
+  for (Window *o : our_windows())
+    if (o->win == owner) return o->clipboard_text;  // (this window's or another of ours)
   XConvertSelection(w->dpy, w->clipboard, w->utf8, w->prop, w->win, CurrentTime);
   /* Wait briefly for the owner to answer. */
   for (int i = 0; i < 100; i++) {

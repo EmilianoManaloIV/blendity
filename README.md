@@ -175,7 +175,8 @@ everything):
 Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2; **Live Link** sends the
 scene as you change it to Blender, Unity, Godot or Unreal on the same computer (`docs/LIVELINK.md`). The keymap starts
 from Unity, Unreal, Blender, Maya, 3ds Max or SketchUp, and **Edit > Editor Feel** switches the keys and the Scene view's
-mouse navigation together to Unity's, Unreal's, Blender's or Maya's.
+mouse navigation together to Unity's, Unreal's, Blender's or Maya's. Any tab can have a window of its own, on any
+display (drag it out of the editor).
 
 ## Machines
 
@@ -216,7 +217,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (11634 unit checks in 960 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (11657 unit checks in 962 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

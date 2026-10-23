@@ -59,6 +59,8 @@ class Font {
  public:
   Font();
   ~Font();
+  Font(Font &&) noexcept;  // (movable: a window's UI context is swapped in while it draws, task 0187)
+  Font &operator=(Font &&) noexcept;
   /* Loads a .ttf/.ttc and sets the pixel size. Returns false on failure. */
   bool load_file(const std::string &path, float pixel_height);
   /* Searches the usual OS font folders. Falls back to the built-in 8x8 font. */

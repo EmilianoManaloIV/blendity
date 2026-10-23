@@ -67,6 +67,11 @@ Unity and Blender both split one window into panels. Unity calls them windows an
 ? Which Blender editor plays the role of Unity's Inspector? | The Properties editor (space_buttons in the source). It also shows modifiers, materials and physics as tabs.
 ! layout:2 by 3 | Try the "2 by 3" layout
 ! layout:Default | Back to Default
+# Windows on other screens
+Any tab can leave the editor: drag it out past the window's edge and let go, or right-click its tab > Move to New Window (or Move to Display 2, to fill most of that screen). The new window is a dock of its own - drag more tabs in, split it - and its own size and scale on its own display; the scene, the selection and undo stay one. Right-click a tab > Move to Main Window, or close the window, to bring its tabs back; Window > Bring Back... brings them all. Blendity remembers the windows with the layout. Blender does the same with Window > New Window; Unity with floating windows.
+? You drag the Render tab out onto your second screen and close Blendity. What happens next time? | The Render tab opens in its own window on that screen again (fitted to a display that is there).
+! cmd:dock move Render newwindow | Put the Render tab in a window of its own
+! cmd:dock move Render main | Bring it back
 # Layouts for each stage
 A 3D job goes through stages, and each needs only some of the tools. The Layout dropdown (top right, as in Unity; Blender's Workspaces) has a layout for each: Reference & Planning, Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Editing, Rigging, Skinning & Weight Painting and Animation. Each arranges the windows for its stage (the UV Editor beside the Scene view for UVs; the Materials and Textures windows for texturing; the Rigging window for rigs) and shows that stage's tools in the Modeling Tools window, the GameObject menu and Add Component; the others step aside. Nothing is gone: the keys and the console reach every tool, and Window > Layouts > Show All Tools shows them all. Default shows everything, as do the arrangements (2 by 3, Tall, Wide, Learning). Save Layout... keeps your own arrangement under a name.
 | Stage | Windows | Tools shown

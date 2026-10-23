@@ -268,6 +268,72 @@ Window *create_window(const char *title, int width, int height) {
   }
 }
 
+Window *create_secondary_window(const char *title, int x, int y, int width, int height) {
+  @autoreleasepool {
+    auto *w = new Window();
+    NSRect frame = NSMakeRect(0, 0, std::max(240, width), std::max(160, height));
+    w->window = [[NSWindow alloc]
+        initWithContentRect:frame
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable |
+                            NSWindowStyleMaskResizable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    w->view = [[BLView alloc] initWithFrame:frame];
+    w->view.owner = w;
+    [w->view setWantsLayer:YES];
+    w->view.layer.contentsGravity = kCAGravityResize;
+    w->view.layer.magnificationFilter = kCAFilterNearest;
+    [w->view registerForDraggedTypes:@[ NSPasteboardTypeFileURL ]];
+    w->delegate = [[BLWindowDelegate alloc] init];
+    w->delegate.owner = w;
+    [w->window setReleasedWhenClosed:NO];
+    [w->window setDelegate:w->delegate];
+    [w->window setContentView:w->view];
+    [w->window setTitle:[NSString stringWithUTF8String:title]];
+    [w->window setAcceptsMouseMovedEvents:YES];
+    [w->window setMinSize:NSMakeSize(240, 160)];
+    set_window_rect(w, x, y, std::max(240, width), std::max(160, height));
+    [w->window makeKeyAndOrderFront:nil];
+    [w->window makeFirstResponder:w->view];
+    return w;
+  }
+}
+
+/* Cocoa's screen coordinates start at the bottom left of the primary display: flipped to top-left here. */
+static CGFloat primary_height() { return [[NSScreen screens] count] ? [[[NSScreen screens] objectAtIndex:0] frame].size.height : 0; }
+
+std::vector<Monitor> monitors() {
+  std::vector<Monitor> out;
+  @autoreleasepool {
+    const CGFloat top = primary_height();
+    NSArray<NSScreen *> *screens = [NSScreen screens];
+    for (NSUInteger i = 0; i < [screens count]; i++) {
+      NSScreen *s = [screens objectAtIndex:i];
+      const NSRect f = [s frame];
+      Monitor m;
+      m.x = (int)f.origin.x, m.y = (int)(top - f.origin.y - f.size.height);
+      m.width = (int)f.size.width, m.height = (int)f.size.height;
+      m.dpi = (float)[s backingScaleFactor];
+      m.name = [[s localizedName] UTF8String] ? [[s localizedName] UTF8String] : "Display";
+      m.primary = i == 0;
+      out.push_back(m);
+    }
+  }
+  if (out.empty()) out.push_back(Monitor{0, 0, 1440, 900, 1.0f, "Display", true});
+  return out;
+}
+
+void get_window_rect(Window *w, int &x, int &y, int &width, int &height) {
+  const NSRect c = [w->window contentRectForFrameRect:[w->window frame]];
+  x = (int)c.origin.x, y = (int)(primary_height() - c.origin.y - c.size.height);
+  width = (int)c.size.width, height = (int)c.size.height;
+}
+
+void set_window_rect(Window *w, int x, int y, int width, int height) {
+  const NSRect c = NSMakeRect(x, primary_height() - y - height, width, height);
+  [w->window setFrame:[w->window frameRectForContentRect:c] display:YES];
+}
+
 void destroy_window(Window *w) {
   if (!w) return;
   [w->window setDelegate:nil];

@@ -43,6 +43,8 @@ struct Window {
   double gesture_dist = 0.0, gesture_angle = 0.0;
   POINT gesture_at{};
   float pen_pressure = 1.0f;
+  int min_w = 640, min_h = 400;  // (a secondary window may be smaller: task 0187)
+  bool placing = false;  // (moved by the program: a display's DPI change keeps the size asked for)
 };
 
 static std::string narrow(const wchar_t *w, int len = -1) {
@@ -239,14 +241,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_GETMINMAXINFO: {
       auto *mmi = (MINMAXINFO *)lp;
-      mmi->ptMinTrackSize.x = 640;
-      mmi->ptMinTrackSize.y = 400;
+      mmi->ptMinTrackSize.x = w->min_w;
+      mmi->ptMinTrackSize.y = w->min_h;
       return 0;
     }
     case WM_DPICHANGED: {
       w->dpi = HIWORD(wp) / 96.0f;
       RECT *r = (RECT *)lp;
-      SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+      if (!w->placing) SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
       push(w, {EventType::DpiChanged});
       return 0;
     }
@@ -414,34 +416,36 @@ static HICON make_icon(int size) {
   return icon;
 }
 
-Window *create_window(const char *title, int width, int height) {
+/* The window class, once (the first window registers it; later ones reuse it). */
+static const wchar_t *window_class() {
+  static bool registered = false;
+  if (registered) return L"BlendityWindow";
   /* Per-monitor DPI awareness so text stays crisp (loaded dynamically for Win7+). */
   using SetDpiCtxFn = BOOL(WINAPI *)(HANDLE);
   if (auto fn = (SetDpiCtxFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"))
     fn((HANDLE)-4 /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */);
   else
     SetProcessDPIAware();
-
-  HINSTANCE inst = GetModuleHandleW(nullptr);
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
   wc.style = CS_OWNDC;
   wc.lpfnWndProc = wnd_proc;
-  wc.hInstance = inst;
+  wc.hInstance = GetModuleHandleW(nullptr);
   wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
   wc.lpszClassName = L"BlendityWindow";
   wc.hIcon = make_icon(64);
   wc.hIconSm = make_icon(32);
   RegisterClassExW(&wc);
+  registered = true;
+  return L"BlendityWindow";
+}
 
+/* A window with its outer rectangle (x, y, w, h; CW_USEDEFAULT for the system's place). */
+static Window *make_window(const char *title, int x, int y, int ow, int oh) {
   auto *w = new Window();
-  float scale = window_dpi(nullptr);
-  RECT r{0, 0, (LONG)(width * scale), (LONG)(height * scale)};
-  AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
   std::wstring wt = widen(title);
-  w->hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, wt.c_str(), WS_OVERLAPPEDWINDOW,
-                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr,
-                            inst, nullptr);
+  w->hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, window_class(), wt.c_str(), WS_OVERLAPPEDWINDOW, x, y, ow, oh, nullptr, nullptr,
+                            GetModuleHandleW(nullptr), nullptr);
   if (!w->hwnd) {
     delete w;
     return nullptr;
@@ -454,9 +458,95 @@ Window *create_window(const char *title, int width, int height) {
                         {GID_ROTATE, GC_ROTATE, 0},
                         {GID_PAN, GC_PAN, GC_PAN_WITH_SINGLE_FINGER_VERTICALLY | GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY | GC_PAN_WITH_INERTIA}};
   SetGestureConfig(w->hwnd, 0, 3, gc, sizeof(GESTURECONFIG));
+  return w;
+}
+
+static void frame_for_client(RECT &r, UINT dpi);
+static UINT dpi_at(int x, int y);
+
+Window *create_window(const char *title, int width, int height) {
+  window_class();  // (the DPI awareness first: the scale below reads it)
+  float scale = window_dpi(nullptr);
+  RECT r{0, 0, (LONG)(width * scale), (LONG)(height * scale)};
+  AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+  Window *w = make_window(title, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top);
+  if (!w) return nullptr;
   ShowWindow(w->hwnd, SW_SHOWMAXIMIZED);
   UpdateWindow(w->hwnd);
   return w;
+}
+
+Window *create_secondary_window(const char *title, int x, int y, int width, int height) {
+  window_class();
+  RECT r{x, y, x + std::max(240, width), y + std::max(160, height)};
+  frame_for_client(r, dpi_at(x + width / 2, y + height / 2));
+  Window *w = make_window(title, r.left, r.top, r.right - r.left, r.bottom - r.top);
+  if (!w) return nullptr;
+  w->min_w = 240, w->min_h = 160;
+  w->placing = true;  // (shown on its display at the size asked for)
+  ShowWindow(w->hwnd, SW_SHOWNORMAL);
+  UpdateWindow(w->hwnd);
+  w->placing = false;
+  return w;
+}
+
+static BOOL CALLBACK add_monitor(HMONITOR m, HDC, LPRECT, LPARAM data) {
+  auto *out = (std::vector<Monitor> *)data;
+  MONITORINFOEXW mi{};
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(m, &mi)) return TRUE;
+  Monitor mon;
+  mon.x = mi.rcMonitor.left, mon.y = mi.rcMonitor.top;
+  mon.width = mi.rcMonitor.right - mi.rcMonitor.left, mon.height = mi.rcMonitor.bottom - mi.rcMonitor.top;
+  mon.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+  mon.name = narrow(mi.szDevice);
+  using GetDpiForMonitorFn = HRESULT(WINAPI *)(HMONITOR, int, UINT *, UINT *);
+  static auto dpi_fn = (GetDpiForMonitorFn)GetProcAddress(LoadLibraryW(L"shcore.dll"), "GetDpiForMonitor");
+  UINT dx = 96, dy = 96;
+  if (dpi_fn && dpi_fn(m, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy) == S_OK) mon.dpi = dx / 96.0f;
+  out->push_back(mon);
+  return TRUE;
+}
+
+std::vector<Monitor> monitors() {
+  std::vector<Monitor> out;
+  EnumDisplayMonitors(nullptr, nullptr, add_monitor, (LPARAM)&out);
+  std::stable_sort(out.begin(), out.end(), [](const Monitor &a, const Monitor &b) { return a.primary && !b.primary; });
+  if (out.empty()) out.push_back({0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), 1.0f, "Display", true});
+  return out;
+}
+
+void get_window_rect(Window *w, int &x, int &y, int &width, int &height) {
+  RECT r;
+  GetClientRect(w->hwnd, &r);
+  POINT p{0, 0};
+  ClientToScreen(w->hwnd, &p);
+  x = p.x, y = p.y, width = r.right - r.left, height = r.bottom - r.top;
+}
+
+/* The frame around a client rectangle at a display's DPI (the system's DPI where Windows has no per-DPI call). */
+static void frame_for_client(RECT &r, UINT dpi) {
+  using AdjustForDpiFn = BOOL(WINAPI *)(LPRECT, DWORD, BOOL, DWORD, UINT);
+  static auto fn = (AdjustForDpiFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi");
+  if (fn) fn(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+  else AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+}
+
+static UINT dpi_at(int x, int y) {
+  using GetDpiForMonitorFn = HRESULT(WINAPI *)(HMONITOR, int, UINT *, UINT *);
+  static auto fn = (GetDpiForMonitorFn)GetProcAddress(LoadLibraryW(L"shcore.dll"), "GetDpiForMonitor");
+  UINT dx = 96, dy = 96;
+  if (fn) fn(MonitorFromPoint(POINT{x, y}, MONITOR_DEFAULTTONEAREST), 0, &dx, &dy);
+  return dx;
+}
+
+void set_window_rect(Window *w, int x, int y, int width, int height) {
+  RECT r{x, y, x + width, y + height};
+  frame_for_client(r, dpi_at(x + width / 2, y + height / 2));
+  w->placing = true;
+  ShowWindow(w->hwnd, SW_SHOWNORMAL);
+  SetWindowPos(w->hwnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+  w->placing = false;
 }
 
 void destroy_window(Window *w) {

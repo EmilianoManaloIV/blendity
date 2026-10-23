@@ -57,7 +57,24 @@ enum class Cursor { Arrow, IBeam, ResizeH, ResizeV, Move, Hand };
 struct Window;
 
 Window *create_window(const char *title, int width, int height);
+/* Another window beside the first (task 0187): its client area at (x, y) on the screen, width x height pixels, not
+ * maximised, as small as 240 x 160. Events for it are gathered by polling the first window and collected by polling
+ * this one (with no wait). */
+Window *create_secondary_window(const char *title, int x, int y, int width, int height);
 void destroy_window(Window *w);
+
+/* A display: its desktop rectangle in pixels, its scale (1 = 96 dpi) and name; the primary one first. */
+struct Monitor {
+  int x = 0, y = 0, width = 0, height = 0;
+  float dpi = 1.0f;
+  std::string name;
+  bool primary = false;
+};
+/* Every display, at least one (X11 without RandR: the screen as one display). */
+std::vector<Monitor> monitors();
+/* The window's client area on the desktop, and moving / resizing it there. */
+void get_window_rect(Window *w, int &x, int &y, int &width, int &height);
+void set_window_rect(Window *w, int x, int y, int width, int height);
 
 /* Collects pending events. If none are queued it blocks for up to timeout_ms
  * (0 = never block). This is how the idle editor uses ~0% CPU. */

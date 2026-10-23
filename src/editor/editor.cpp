@@ -86,6 +86,8 @@ Editor::~Editor() {
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
   procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
+  for (auto &w : windows_)
+    if (w->os) destroy_window(w->os);
   if (window_) destroy_window(window_);
 }
 
@@ -172,12 +174,14 @@ bool Editor::init(int argc, char **argv) {
   ui_.clipboard_get = [this] { return get_clipboard(window_); };
   ui_.clipboard_set = [this](const std::string &s) { set_clipboard(window_, s); };
   set_refresh_callback(window_, [this] {
-    std::vector<Event> none;
     present_all_ = true;  // (the system asked for the window to be painted: all of it)
+    if (in_frame_) return;  // (asked from inside a frame - a window's move or a secondary window's poll: the next frame paints)
+    std::vector<Event> none;
     frame(none);
   });
   if (!layout_arg.empty()) dock_reset(layout_arg);
   if (!dock_) dock_reset("Default");
+  if (layout_arg.empty()) restore_windows(windows_pref_);  // (the windows of the last session, task 0187)
   scene_ = std::make_unique<Scene>();
   std::string sample = fs::join(assets_dir_, "Scenes/SampleScene.scene");
   if (!scene_arg.empty()) open_scene(scene_arg);
@@ -292,9 +296,12 @@ int Editor::run() {
     if (continuous) timeout = 0;  // (the pacer below waits for the frame's turn, precisely)
     else if (ui_.next_wakeup > 0) timeout = std::max(1, (int)((ui_.next_wakeup - now) * 1000.0) + 1);
     if (ui_.redraw || first) timeout = 0;
+    if (!windows_.empty()) timeout = std::min(timeout, 50);  // (X11 and Cocoa wake for the main window's events only)
     poll_events(window_, events, timeout);
+    gather_window_events();
     now = now_seconds();
     bool need = first || !events.empty() || ui_.redraw || continuous || (ui_.next_wakeup > 0 && now >= ui_.next_wakeup);
+    for (auto &w : windows_) need = need || !w->pending.empty() || w->ui.redraw || (w->ui.next_wakeup > 0 && now >= w->ui.next_wakeup);
     /* Pick up log lines written from other threads/systems. */
     std::vector<LogEntry> tmp;
     if (Log::fetch(log_seen_ + log_.size(), tmp) > log_seen_ + log_.size()) need = true;
@@ -337,8 +344,8 @@ void Editor::request_close() {
 
 void Editor::process_events(std::vector<Event> &events) {
   auto &in = ui_.in;
-  static double last_click[3] = {-1, -1, -1};
-  static int last_click_x[3], last_click_y[3];
+  double *last_click = in.last_click;  // (each window's own: task 0187)
+  int *last_click_x = in.last_click_x, *last_click_y = in.last_click_y;
   in.pmx = in.mx;
   in.pmy = in.my;
   for (int b = 0; b < 3; b++) in.pressed[b] = in.released[b] = in.double_clicked[b] = false;
@@ -364,6 +371,7 @@ void Editor::process_events(std::vector<Event> &events) {
         in.touch_rotate += e.rotate;
         break;
       case EventType::MouseDown: {
+        pointer_window_ = active_window_;  // (the window the press is in owns its drags)
         int b = e.button;
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
@@ -440,6 +448,13 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
+  in_frame_ = true;
+  frame_body(events);
+  in_frame_ = false;
+  if (save_prefs_pending_) save_prefs();  // (asked for while another window drew: its state was in place then)
+}
+
+void Editor::frame_body(std::vector<Event> &events) {
   /* The system asked for the window to be painted, or it changed: present all of it (what it showed may be gone). */
   for (const Event &e : events)
     if (e.type == EventType::Repaint || e.type == EventType::Resize || e.type == EventType::DpiChanged) present_all_ = true;
@@ -452,7 +467,7 @@ void Editor::frame(std::vector<Event> &events) {
   process_events(events);
   update_procedural_shapes();
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
-  if (texture_touch_pending_ && !ui_.in.down[0]) {
+  if (texture_touch_pending_ && !any_button_down()) {
     procedural_texture_clear_previews();
     invalidate_material_textures();
     texture_touch_pending_ = false;
@@ -489,7 +504,7 @@ void Editor::frame(std::vector<Event> &events) {
       play_time_ += dt;
       ctx.time = play_time_;
       ctx.dt = dt;
-      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && ui_.in.key_down[k]; };
+      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && key_down_any(k); };
       scene_->update(ctx);
       play_dt = dt;
       step_requested_ = false;
@@ -569,58 +584,13 @@ void Editor::frame(std::vector<Event> &events) {
   draw_statusbar(status);
   draw_menubar(menubar);  // last so its popups are declared after windows (they draw on top anyway)
   draw_dialogs();
-  update_asset_drag();
+  if (pointer_window_ == active_window_) update_asset_drag();  // (a drag belongs to the window it started in: task 0187)
   handle_drop();
   handle_shortcuts();
 
-  /* Tab drag & drop between dock areas. */
-  if (tab_drag_ != WindowKind::Count) {
-    auto &in = ui_.in;
-    if (!tab_dragging_ && (std::abs(in.mx - tab_press_x_) > ui_.px(8) || std::abs(in.my - tab_press_y_) > ui_.px(8)))
-      tab_dragging_ = true;
-    if (tab_dragging_) {
-      DockNode *leaf = dock_leaf_at(in.mx, in.my);
-      int zone = 0;
-      Recti pr;
-      if (leaf) {
-        Recti r = leaf->rect;
-        int tbh = ui_.row_h() + ui_.px(4);
-        float fx = (in.mx - r.x) / (float)r.w, fy = (in.my - r.y - tbh) / (float)std::max(1, r.h - tbh);
-        if (in.my < r.y + tbh) zone = 0;
-        else if (fx < 0.25f) zone = 1;
-        else if (fx > 0.75f) zone = 2;
-        else if (fy < 0.25f) zone = 3;
-        else if (fy > 0.75f) zone = 4;
-        pr = r;
-        if (zone == 1) pr.w /= 2;
-        if (zone == 2) { pr.x += pr.w / 2; pr.w /= 2; }
-        if (zone == 3) pr.h /= 2;
-        if (zone == 4) { pr.y += pr.h / 2; pr.h /= 2; }
-      }
-      WindowKind k = tab_drag_;
-      ui_.overlay([this, pr, leaf, k] {
-        auto &cv = ui_.canvas;
-        if (leaf) {
-          cv.fill_rect(pr, Color::hex(0x3A79BB, 70));
-          cv.rect_outline(pr, Color::hex(0x3A79BB), ui_.px(2));
-        }
-        std::string t = window_title(k);
-        Recti tr{ui_.in.mx + ui_.px(10), ui_.in.my + ui_.px(6), ui_.font.text_width(t) + ui_.px(16), ui_.row_h()};
-        ui_.frame(tr, ui_.theme.tab_active, ui_.theme.focus, ui_.px(3));
-        cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
-      });
-      if (in.released[0]) {
-        if (leaf) dock_move(k, leaf, zone);
-        tab_dragging_ = false;
-        tab_drag_ = WindowKind::Count;
-      }
-    }
-    else if (!in.down[0]) {
-      tab_drag_ = WindowKind::Count;
-    }
-  }
+  update_tab_drag();
 
-  finish_hierarchy_drag();
+  if (pointer_window_ == active_window_) finish_hierarchy_drag();
   poll_skin_job();
   anim_tick();
   seq_tick();
@@ -632,7 +602,7 @@ void Editor::frame(std::vector<Event> &events) {
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
-  if (pending_change_ && !ui_.in.down[0] && !ui_.in.down[1] && !ui_.in.down[2] && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
+  if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
 
   std::string title = scene_display_name() + (scene_dirty_ ? "*" : "") + " - Blendity" + (playing_ ? " [Playing]" : "");
   if (title != last_title_ && window_) {
@@ -641,6 +611,7 @@ void Editor::frame(std::vector<Event> &events) {
   }
   ui_ms_ = (float)frame_timer.ms();
   if (window_) present_changed();
+  draw_secondary_windows(now);  // (task 0187: after the main window, with its own input each)
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
   /* A move just ended (task 0103 / 0104): one more frame, whatever ends it, so no held or cheap picture stays up. */
@@ -670,6 +641,59 @@ void Editor::frame(std::vector<Event> &events) {
       else i++;
     for (Deferred &d : due) d.fn();
     ui_.redraw = true;
+  }
+}
+
+/* Tab drag & drop between dock areas; a tab dropped outside its window gets a window of its own (from a secondary
+ * window: back into the main one). */
+void Editor::update_tab_drag() {
+  if (tab_drag_ == WindowKind::Count || tab_drag_window_ != active_window_) return;
+  auto &in = ui_.in;
+  if (!tab_dragging_ && (std::abs(in.mx - tab_press_x_) > ui_.px(8) || std::abs(in.my - tab_press_y_) > ui_.px(8)))
+    tab_dragging_ = true;
+  if (!tab_dragging_) {
+    if (!in.down[0]) tab_drag_ = WindowKind::Count;
+    return;
+  }
+  {
+    DockNode *leaf = dock_leaf_at(in.mx, in.my);
+    int zone = 0;
+    Recti pr;
+    if (leaf) {
+      Recti r = leaf->rect;
+      int tbh = ui_.row_h() + ui_.px(4);
+      float fx = (in.mx - r.x) / (float)r.w, fy = (in.my - r.y - tbh) / (float)std::max(1, r.h - tbh);
+      if (in.my < r.y + tbh) zone = 0;
+      else if (fx < 0.25f) zone = 1;
+      else if (fx > 0.75f) zone = 2;
+      else if (fy < 0.25f) zone = 3;
+      else if (fy > 0.75f) zone = 4;
+      pr = r;
+      if (zone == 1) pr.w /= 2;
+      if (zone == 2) { pr.x += pr.w / 2; pr.w /= 2; }
+      if (zone == 3) pr.h /= 2;
+      if (zone == 4) { pr.y += pr.h / 2; pr.h /= 2; }
+    }
+    WindowKind k = tab_drag_;
+    ui_.overlay([this, pr, leaf, k] {
+      auto &cv = ui_.canvas;
+      if (leaf) {
+        cv.fill_rect(pr, Color::hex(0x3A79BB, 70));
+        cv.rect_outline(pr, Color::hex(0x3A79BB), ui_.px(2));
+      }
+      std::string t = window_title(k);
+      Recti tr{ui_.in.mx + ui_.px(10), ui_.in.my + ui_.px(6), ui_.font.text_width(t) + ui_.px(16), ui_.row_h()};
+      ui_.frame(tr, ui_.theme.tab_active, ui_.theme.focus, ui_.px(3));
+      cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
+    });
+    if (in.released[0]) {
+      const bool outside = in.mx < 0 || in.my < 0 || in.mx >= fb_.width || in.my >= fb_.height;
+      if (leaf) dock_move(k, leaf, zone);
+      else if (outside && active_window_ != 0) window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
+      else if (outside) queue_new_window_at_mouse(k);
+      tab_dragging_ = false;
+      tab_drag_ = WindowKind::Count;
+    }
   }
 }
 
@@ -1016,8 +1040,10 @@ void Editor::draw_menubar(const Recti &r) {
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
-          u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
+          u.menu_item(window_title((WindowKind)k), keys[k], dock_find_anywhere((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
+    if (!windows_.empty() && u.menu_item(strprintf("Bring Back %zu Window%s", windows_.size(), windows_.size() == 1 ? "" : "s")))
+      for (auto &w : windows_) w->close = true;  // (their tabs return to this window: task 0187)
     u.menu_separator();
     u.submenu("Layouts", u.px(230), [this] {
       /* The stages of the work first, then the arrangements and the user's own (task 0055). */
@@ -1306,6 +1332,10 @@ void Editor::dock_fix_parents(DockNode *n, DockNode *parent) {
 }
 
 void Editor::dock_reset(const std::string &preset) {
+  if (active_window_ != 0) {  // (a layout is the main window's: task 0187)
+    Log::warn("Layouts arrange the main window: choose one there");
+    return;
+  }
   /* Window ids: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 7 Research 8 Profiler */
   /* A layout by name (the table in workspaces.cpp: its windows and its focus, task 0055), a raw dock string, or
    * Default. */
@@ -1319,6 +1349,12 @@ void Editor::dock_reset(const std::string &preset) {
   size_t pos = 0;
   dock_ = dock_parse(s, pos);
   dock_fix_parents(dock_.get(), nullptr);
+  for (auto &w : windows_) {  // (a tab another window holds stays there, not twice)
+    std::vector<WindowKind> held;
+    collect_dock_tabs(w->dock.get(), held);
+    for (WindowKind k : held)
+      if (dock_find(k) && (dock_->split || dock_->tabs.size() > 1)) dock_remove(k);
+  }
   /* A layout saved before the Research window was retired (task 0034): its tab goes, and an area that held only it
    * closes. */
   while (DockNode *leaf = dock_find(WindowKind::Research)) {
@@ -1396,6 +1432,7 @@ void Editor::dock_draw(DockNode *n) {
       tab_press_x_ = u.in.mx;
       tab_press_y_ = u.in.my;
       tab_dragging_ = false;
+      tab_drag_window_ = active_window_;
     }
     if (hot && u.in.pressed[2]) {
       tab_close_queue_.push_back(k);  // closed after dock_draw: removing now would free nodes still on the stack
@@ -1405,10 +1442,11 @@ void Editor::dock_draw(DockNode *n) {
     if (hot && u.in.pressed[1]) u.open_popup(u.id("tabmenu") ^ (uint64_t)k, {u.in.mx, u.in.my, 0, 0});
     u.popup(u.id("tabmenu") ^ (uint64_t)k, u.px(200), [this, k] {
       if (ui_.menu_item("Close Tab")) tab_close_queue_.push_back(k);
+      draw_tab_menu_windows(k);
       ui_.menu_separator();
       ui_.menu_label("Add Tab");
       for (int w = 0; w < (int)WindowKind::Count; w++)
-        if ((WindowKind)w != WindowKind::Research && !dock_find((WindowKind)w) &&  // (retired, task 0034)
+        if ((WindowKind)w != WindowKind::Research && !dock_find_anywhere((WindowKind)w) &&  // (retired, task 0034)
             ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
           DockNode *leaf = dock_find(k);
           if (leaf) {
@@ -1521,6 +1559,12 @@ void Editor::dock_open(WindowKind k, bool focus) {
     return;
   }
   DockNode *leaf = dock_find(k);
+  EditorWindow *owner = nullptr;
+  if (!leaf && (leaf = dock_find_elsewhere(k, &owner)) != nullptr) {  // (in another window, task 0187: shown there)
+    leaf->active = (int)(std::find(leaf->tabs.begin(), leaf->tabs.end(), k) - leaf->tabs.begin());
+    if (focus) focused_ = k;
+    return;
+  }
   if (!leaf) {
     /* The Textures window goes beside the Materials window when it is docked (not over the Scene view, which a
      * thumbnail is dragged onto); everything else into the largest area. */
@@ -3295,6 +3339,7 @@ void Editor::load_prefs() {
     else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
+    else if (k == "windows") windows_pref_ = v;
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
@@ -3384,6 +3429,8 @@ void Editor::load_prefs() {
 
 void Editor::save_prefs() {
   if (headless_ && !prefs_for_test_) return;
+  save_prefs_pending_ = active_window_ != 0;  // (another window is drawing: its dock is in the main one's place)
+  if (save_prefs_pending_) return;
   std::string done;
   for (int l : lessons_done_) done += std::to_string(l) + " ";
   std::string off;
@@ -3415,6 +3462,7 @@ void Editor::save_prefs() {
   s += strprintf("moonray_never_ask=%d\nmoonray_last=%.0f\nmoonray_folder=%s\nmoonray_installed=%d\n", mr_never_ask_ ? 1 : 0, mr_last_ask_,
                  mr_folder_.c_str(), mr_installed_ ? 1 : 0);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
+  s += "windows=" + windows_layout() + "\n";  // (task 0187)
   fs::write_file(prefs_path_, s);
 }
 

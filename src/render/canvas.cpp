@@ -368,6 +368,8 @@ static const uint8_t kFont8x8[95][8] = {
 
 Font::Font() { set_pixel_height(13); }
 Font::~Font() = default;
+Font::Font(Font &&) noexcept = default;
+Font &Font::operator=(Font &&) noexcept = default;
 
 bool Font::load_file(const std::string &path, float pixel_height) {
   std::string bytes;

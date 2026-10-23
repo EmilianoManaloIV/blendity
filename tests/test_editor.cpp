@@ -2490,6 +2490,94 @@ static void tests_round201() {
   });
 }
 
+/* Task 0187: windows beside the main one. */
+static platform::Event mouse_ev(platform::EventType t, int x, int y, int button = 0) {
+  platform::Event e;
+  e.type = t, e.x = x, e.y = y, e.button = button;
+  return e;
+}
+
+static bool has_content(const Image &fb) {  // (more than one colour)
+  for (uint32_t p : fb.pixels)
+    if (p != fb.pixels[0]) return true;
+  return false;
+}
+
+static void tests_round203() {
+  test("windows: dock move Render newwindow gives it a window of its own that draws, takes its own clicks and popups, scales on its own, and gives the tab back when closed", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("window Render");
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Render));
+    ed.command("dock move Render newwindow");
+    CHECK(ed.window_count_for_test() == 2 && !ed.in_main_dock_for_test(WindowKind::Render));
+    ed.step_frame_headless();
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    CHECK(has_content(w->fb) && has_content(ed.main_fb_for_test()));
+    ed.command("window Render");  // (it is in the other window: shown there, not docked twice)
+    CHECK(!ed.in_main_dock_for_test(WindowKind::Render) && ed.window_count_for_test() == 2);
+    // (the window's one tab is at its top left)
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, 30, 10)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseDown, 30, 10, 1), mouse_ev(platform::EventType::MouseUp, 30, 10, 1)});
+    ed.step_frame_headless();
+    CHECK(w->ui.any_popup_open());  // (its tab menu, in its own window)
+    CHECK(!ed.ui_for_test().any_popup_open());
+    w->ui.close_popups();
+    w->scale_for_test = 1.5f;
+    ed.step_frame_headless();
+    CHECK(w->ui.scale == 1.5f && ed.ui_for_test().scale == 1.0f);
+    const std::string layout = ed.windows_layout_for_test();
+    CHECK(layout.rfind("W(", 0) == 0 && layout.find("L(9:0)") != std::string::npos);
+    ed.step_window_headless(1, {platform::Event{platform::EventType::Quit}});
+    CHECK(ed.window_count_for_test() == 1 && ed.in_main_dock_for_test(WindowKind::Render));
+    ed.restore_windows_for_test(layout);  // (the layout string brings the window back)
+    CHECK(ed.window_count_for_test() == 2 && !ed.in_main_dock_for_test(WindowKind::Render));
+    ed.dock_reset_for_test("Default");  // (a layout for the main window: Render stays in its own window, not in both)
+    CHECK(!ed.in_main_dock_for_test(WindowKind::Render) && ed.window_count_for_test() == 2);
+    ed.command("dock move Render main");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 1 && ed.in_main_dock_for_test(WindowKind::Render));
+    ed.command("dock move Nothing newwindow");  // (refused)
+    CHECK(ed.window_count_for_test() == 1);
+    ed.restore_windows_for_test("W(1,2,3,4,0,H");  // (a preferences line cut short: nothing, no crash)
+    ed.restore_windows_for_test("W(5000,5000,90000,90000,3,L(8:0))");  // (a display gone, a size too big: on the primary, fitted)
+    CHECK(ed.window_count_for_test() == 2);
+    EditorWindow *fitted = ed.window_for_test(3);
+    CHECK(fitted && fitted->fb.width <= 1920 && fitted->fb.height <= 1080 && fitted->x >= 0 && fitted->x < 1920);
+  });
+
+  test("windows: displays are listed; a tab moves to the second display's middle; a tab dragged out of the editor gets a window at the mouse", [] {
+    const std::vector<platform::Monitor> real = platform::monitors();
+    CHECK(!real.empty() && real[0].width > 0 && real[0].height > 0);
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.set_monitors_for_test({platform::Monitor{0, 0, 1920, 1080, 1.0f, "One", true}, platform::Monitor{1920, 0, 2560, 1440, 1.5f, "Two", false}});
+    ed.command("dock move Console monitor 2");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2);
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w && w->monitor == 1 && w->x >= 1920 && w->fb.width == 2560 * 3 / 4);
+    ed.command("dock move Console monitor 1");  // (the same window, moved)
+    CHECK(ed.window_count_for_test() == 2 && w && w->monitor == 0 && w->x < 1920);
+    ed.command("dock move Console main");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 1);
+    const Recti leaf = ed.dock_leaf_rect_for_test(WindowKind::Inspector);  // (Inspector: the first tab of its area)
+    CHECK(leaf.w > 0);
+    const int tx = leaf.x + 12, ty = leaf.y + 6;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, tx, ty)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, tx, ty)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, tx + 300, ty + 40)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, 1300, ty + 40)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, 1300, ty + 40)});
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2 && !ed.in_main_dock_for_test(WindowKind::Inspector));
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2514,5 +2602,6 @@ void run_editor_tests() {
   tests_round199();
   tests_round200();
   tests_round201();
+  tests_round203();
   coverage_tests();
 }
