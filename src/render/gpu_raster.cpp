@@ -156,6 +156,24 @@ layout(std430, set = 0, binding = 16) readonly buffer Highlight { uint hl[]; }; 
 const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u, F_TOON = 64u;
 const uint F_RAW = 128u;  // task 0195: a colour the lighting pass writes as it is (Solid shading's)
 const uint F_AXIS = 256u;  // task 0195: an axis material (toon0-2: its settings and parts)
+const uint F_TOONMAP = 1024u;  // task 0196: a toon object with painted maps (the toon pass's planes hold them)
+/* (The flags travel in the emission plane's alpha, a 16-bit float: exact up to 2048, so no flag may be 2048 or more.) */
+/* Task 0196: an instance's toon maps - shade, bias, specular, rim; face shadow, lines, hatching (texture ids, -1 none),
+ * the face's forward axis; the hatching's scale, lines in the shadow only, the face shadow's softness, the hair. */
+struct ToonMaps { ivec4 a; ivec4 b; vec4 c; };
+layout(std430, set = 0, binding = 24) readonly buffer ToonTable { ToonMaps tmap[]; };
+/* A unit vector in two numbers (octahedral; the toon pass's hair strands). */
+vec2 oct_encode(vec3 v) {
+  v /= abs(v.x) + abs(v.y) + abs(v.z);
+  vec2 e = v.xy;
+  if (v.z < 0.0) e = (1.0 - abs(v.yx)) * vec2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
+  return e;
+}
+vec3 oct_decode(vec2 e) {
+  vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+  if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+  return normalize(v);
+}
 )";
 
 /* Objects that cast no shadow are sent outside the map's clip volume (clipped away). */
@@ -181,6 +199,7 @@ layout(location = 5) noperspective out vec3 uvw; // UV / w, 1 / w: linear on scr
 layout(location = 6) out vec3 wt;                // the tangent in the world; its sign the triangle's first vertex's
 layout(location = 7) flat out float tw;
 layout(location = 8) out vec3 gc;                // task 0195: Solid shading's colour, lit here (Gouraud)
+invariant gl_Position;  // (task 0196: the toon pass draws the same triangles with a depth test of EQUAL)
 void main() {
   mat4 m = inst[gl_InstanceIndex].model;
   vec4 w = m * vec4(p, 1.0);
@@ -275,6 +294,54 @@ struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; f
 float box_lod(int t, float ta, float tb, float fp) {
   return fp > 0.0 ? texture_lod(t, vec2(fp * abs(ta), 0.0), vec2(0.0, fp * abs(tb))) : 0.0;
 }
+/* Where a material's maps are read at a pixel (task 0196: evaluate_surface's coordinates, shared by evaluate_part and the
+ * toon pass): the UV with its derivatives, Generated mapping over the bounds, Box's triplanar weights; `fp` the pixel's
+ * object-space footprint. */
+struct MapAt { vec2 uv, ddx, ddy; vec3 gen, ext, bw, bp; bool box, no_d; float fp; int wrap, filt; };
+MapAt map_at(Inst I, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor, float fp, bool force_box) {
+  MapAt m;
+  m.uv = uv0 * I.tiling.xy + I.offset.xy;
+  m.ddx = dux * I.tiling.xy;
+  m.ddy = duy * I.tiling.xy;
+  m.gen = lpos;
+  if (I.bmin.x <= I.bmax.x) m.gen = (lpos - I.bmin.xyz) / max(I.bmax.xyz - I.bmin.xyz, vec3(1e-6));
+  int mapping = I.tex1.y;
+  m.wrap = I.tex1.w;
+  m.filt = I.tex2.x;
+  if (mapping == 2 && !force_box) {
+    m.uv = m.gen.xy * I.tiling.xy + I.offset.xy;
+    m.ddx = m.ddy = vec2(0.0);
+  }
+  m.box = force_box || mapping == 1;
+  m.bw = vec3(0.0);
+  m.bp = lpos * I.tiling.xyz + I.offset.xyz;
+  if (m.box) {
+    vec3 an = abs(lnor);
+    an = an * an;
+    an = an * an;
+    m.bw = an / max(an.x + an.y + an.z, 1e-6);
+  }
+  m.no_d = m.ddx.x == 0.0 && m.ddx.y == 0.0 && m.ddy.x == 0.0 && m.ddy.y == 0.0;
+  /* Task 0164: the pixel's footprint gives a Generated mapping its derivatives over the bounds and a Box projection its
+   * lod from the footprint times the tiling (both were level 0 at any distance). */
+  m.fp = fp;
+  m.ext = max(I.bmax.xyz - I.bmin.xyz, vec3(1e-6));
+  if (mapping == 2 && !force_box && fp > 0.0 && I.bmin.x <= I.bmax.x) {
+    m.ddx = vec2(fp / m.ext.x * abs(I.tiling.x), 0.0);
+    m.ddy = vec2(0.0, fp / m.ext.y * abs(I.tiling.y));
+    m.no_d = false;
+  }
+  return m;
+}
+/* A map at that point (evaluate_surface's sample_image): at its lod, or Box's three projections blended. */
+vec4 sample_at(Inst I, MapAt m, int t) {
+  if (!m.box) return tex_sample(t, m.uv, m.no_d ? 0.0 : texture_lod(t, m.ddx, m.ddy), m.wrap, m.filt);
+  vec4 o = vec4(0.0);
+  if (m.bw.x > 0.001) o += tex_sample(t, vec2(m.bp.z, m.bp.y), box_lod(t, I.tiling.z, I.tiling.y, m.fp), m.wrap, m.filt) * m.bw.x;
+  if (m.bw.y > 0.001) o += tex_sample(t, vec2(m.bp.x, m.bp.z), box_lod(t, I.tiling.x, I.tiling.z, m.fp), m.wrap, m.filt) * m.bw.y;
+  if (m.bw.z > 0.001) o += tex_sample(t, vec2(m.bp.x, m.bp.y), box_lod(t, I.tiling.x, I.tiling.y, m.fp), m.wrap, m.filt) * m.bw.z;
+  return o;
+}
 /* evaluate_surface (shading.cpp) for a pixel: uv / ddx / ddy as the deferred shader's (forward differences), `fp` the
  * pixel's object-space footprint. force_box: an axis material's part (task 0195) - projected triplanar at lpos by
  * lnor, its procedural at lpos, its footprint in the projection's units. */
@@ -286,41 +353,11 @@ Surf evaluate_part(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3
   s.alpha = I.metal_spec.w;
   s.spec = I.metal_spec.y;
   s.n = n;
-  vec2 uv = uv0 * I.tiling.xy + I.offset.xy;
-  vec2 ddx = dux * I.tiling.xy, ddy = duy * I.tiling.xy;
-  vec3 gen = lpos;
-  if (I.bmin.x <= I.bmax.x) gen = (lpos - I.bmin.xyz) / max(I.bmax.xyz - I.bmin.xyz, vec3(1e-6));
-  int mapping = I.tex1.y, wrap = I.tex1.w, filt = I.tex2.x;
-  if (mapping == 2 && !force_box) {
-    uv = gen.xy * I.tiling.xy + I.offset.xy;
-    ddx = ddy = vec2(0.0);
-  }
-  bool box = force_box || mapping == 1;
-  vec3 bw = vec3(0.0), bp = lpos * I.tiling.xyz + I.offset.xyz;
-  if (box) {
-    vec3 an = abs(lnor);
-    an = an * an;
-    an = an * an;
-    bw = an / max(an.x + an.y + an.z, 1e-6);
-  }
-  bool no_d = ddx.x == 0.0 && ddx.y == 0.0 && ddy.x == 0.0 && ddy.y == 0.0;
-  /* Task 0164: the pixel's footprint in object space - the larger of its two forward differences, as the CPU's deferred
-   * pass measures it - gives a Generated mapping its derivatives over the bounds and a Box projection its lod from the
-   * footprint times the tiling (both were level 0 at any distance). (Measured by the caller since task 0195.) */
-  vec3 ext = max(I.bmax.xyz - I.bmin.xyz, vec3(1e-6));
-  if (mapping == 2 && !force_box && fp > 0.0 && I.bmin.x <= I.bmax.x) {
-    ddx = vec2(fp / ext.x * abs(I.tiling.x), 0.0);
-    ddy = vec2(0.0, fp / ext.y * abs(I.tiling.y));
-    no_d = false;
-  }
-#define SAMPLE(t, out_) { \
-    if (!box) out_ = tex_sample(t, uv, no_d ? 0.0 : texture_lod(t, ddx, ddy), wrap, filt); \
-    else { \
-      out_ = vec4(0.0); \
-      if (bw.x > 0.001) out_ += tex_sample(t, vec2(bp.z, bp.y), box_lod(t, I.tiling.z, I.tiling.y, fp), wrap, filt) * bw.x; \
-      if (bw.y > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.z), box_lod(t, I.tiling.x, I.tiling.z, fp), wrap, filt) * bw.y; \
-      if (bw.z > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.y), box_lod(t, I.tiling.x, I.tiling.y, fp), wrap, filt) * bw.z; \
-    } }
+  MapAt M = map_at(I, uv0, dux, duy, lpos, lnor, fp, force_box);
+  vec2 uv = M.uv, ddx = M.ddx, ddy = M.ddy;
+  vec3 gen = M.gen, ext = M.ext;
+  int mapping = I.tex1.y;
+#define SAMPLE(t, out_) out_ = sample_at(I, M, t);
   int proc = I.tex1.z;
   vec4 c;
   if (proc == 1 || proc == 2) {
@@ -482,6 +519,8 @@ void main() {
     emission = s.emission;
     alpha = s.alpha;
     specular = s.spec;
+    if (tmap[ii].b.y >= 0 && tmap[ii].c.y < 0.5)  // task 0196: the inner lines into the colour (as evaluate_surface: Solid's cutouts too)
+      albedo *= sample_at(I, map_at(I, uv, dux, duy, lp, normalize(ln), fp, false), tmap[ii].b.y).rgb;
   }
   if (I.metal_spec.z >= 0.0 && alpha < I.metal_spec.z) discard;  // (task 0163: a cutout's hole - no colour, depth or id, so what is behind shows and picks)
   vec3 solid = gc;
@@ -761,6 +800,9 @@ layout(set = 0, binding = 6) uniform sampler2D g_geo;
 layout(set = 0, binding = 7) uniform sampler2D g_emit;
 layout(std430, set = 0, binding = 8) readonly buffer Lut { vec4 lut_data[]; };
 layout(set = 0, binding = 15) uniform usampler2D g_inst;
+layout(set = 0, binding = 25) uniform sampler2D g_toon0;  // task 0196: the toon pass's planes
+layout(set = 0, binding = 26) uniform sampler2D g_toon1;
+layout(set = 0, binding = 27) uniform sampler2D g_toon2;
 )";
 
 /* The lights' formulas (the BRDF, area lights, falloff): the lighting pass's, and Solid shading's in the g-buffer pass
@@ -1183,23 +1225,47 @@ float toon_level(Inst I, float lit, float edge) {
   }
   return q / float(bands);
 }
-vec3 shade_toon(Inst I, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit, float edge) {
+/* Task 0196: a pixel's painted toon maps (the toon pass's planes), or what no maps mean. */
+struct ToonPx { vec4 t0, t1, t2; };
+ToonPx toon_px(ivec2 px, uint flags) {
+  ToonPx T;
+  T.t0 = vec4(-1.0, -1.0, -1.0, 0.5);
+  T.t1 = vec4(1.0);
+  T.t2 = vec4(1.0, -1.0, 4.0, 0.0);
+  if ((flags & F_TOONMAP) == 0u) return T;
+  T.t0 = texelFetch(g_toon0, px, 0);
+  T.t1 = texelFetch(g_toon1, px, 0);
+  T.t2 = texelFetch(g_toon2, px, 0);
+  return T;
+}
+/* shade_toon (shading.cpp): the painted bias moves lit; the tones (the ramp or the bands) take the shade map's colour
+ * where there is one; the inner lines and hatching darken the shadow tones; the hard spot, masked, across the hair's
+ * strands for hair. */
+vec3 shade_toon(Inst I, ToonPx T, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit, float edge) {
+  lit = clamp(lit + (clamp(T.t0.w, 0.0, 1.0) - 0.5) * 2.0, 0.0, 1.0);
+  if (isnan(lit) || isinf(lit)) lit = 0.0;
   float q;
-  vec3 c;
+  vec3 tone;
   if (I.toon5.x >= 0) {  // task 0148: the ramp, read at (lit, lit) with v up; at a distance over the pixel's span of lit (task 0164)
     float lod = edge > 0.0 ? texture_lod(I.toon5.x, vec2(edge * 2.0, 0.0), vec2(0.0, edge * 2.0)) : 0.0;
-    vec3 tone = tex_sample(I.toon5.x, vec2(lit, lit), lod, 1, 2).rgb;  // (Extend, Trilinear)
+    tone = tex_sample(I.toon5.x, vec2(lit, lit), lod, 1, 2).rgb;  // (Extend, Trilinear)
     q = clamp(dot(tone, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
-    c = albedo * tone;
   }
   else {
     q = toon_level(I, lit, edge);
-    c = albedo * mix(I.toon1.rgb, vec3(1.0), q);
+    tone = mix(I.toon1.rgb, vec3(1.0), q);
   }
-  if (I.toon1.w > 0.0 && q > 0.0) {
-    float nh = dot(n, normalize(V + L)), e = 1.0 - 0.2 * clamp(I.toon1.w, 0.0, 1.0);
-    float w = 0.1 * clamp(I.toon0.w, 0.0, 0.5);
-    c += mix(I.toon4.rgb, albedo, metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * specular);
+  vec3 c = T.t0.x >= 0.0 ? mix(T.t0.rgb * I.toon1.rgb, albedo, q) : albedo * tone;
+  c = mix(c * T.t1.rgb, c, q);
+  if (I.toon1.w > 0.0 && q > 0.0 && T.t1.w > 0.0) {
+    vec3 H = normalize(V + L);
+    float nh = dot(n, H);
+    if (T.t2.z < 2.0) {  // (the hair: a band where the half vector is square to the strands)
+      float th = dot(oct_decode(T.t2.zw), H);
+      nh = sqrt(max(0.0, 1.0 - th * th));
+    }
+    float e = 1.0 - 0.2 * clamp(I.toon1.w, 0.0, 1.0), w = 0.1 * clamp(I.toon0.w, 0.0, 0.5);
+    c += mix(I.toon4.rgb, albedo, metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * specular * clamp(T.t1.w, 0.0, 1.0));
   }
   return c;
 }
@@ -1312,6 +1378,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     uint my_inst = self;
     vec3 n_dx = toon_neighbour(px + ivec2(1, 0), my_inst, flipped, n);
     vec3 n_dy = toon_neighbour(px + ivec2(0, 1), my_inst, flipped, n);
+    ToonPx T = toon_px(px, flags);
     for (int li = 0; li < count; li++) {
       Light l = lights[li];
       vec3 L;
@@ -1328,13 +1395,14 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
       float wrap = clamp(I.toon3.z, 0.0, 1.0);  // task 0148: light wrap on N.L, so the terminator moves
       if (wrap > 0.0) ndl = (ndl + wrap) / (1.0 + wrap);
       if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
-      float lit = max(ndl, 0.0) * vis * min(fall, 1.0);
+      float face = li == key ? T.t2.y : -1.0;  // (task 0196: the face shadow map's lit term for the key light - no cast shadow on it)
+      float lit = (face >= 0.0 ? face : max(ndl, 0.0) * vis) * min(fall, 1.0);
       bool fill = I.toon3.w > 0.5 && key >= 0 && li != key;
       float edge = 0.5 * (abs(dot(n_dx, L)) + abs(dot(n_dy, L)));
-      lo += (fill ? albedo * lit : shade_toon(I, albedo, metallic, specular, n, V, L, lit, edge)) * l.color.rgb * l.color.w;
+      lo += (fill ? albedo * lit : shade_toon(I, T, albedo, metallic, specular, n, V, L, lit, edge)) * l.color.rgb * l.color.w;
     }
     vec3 amb = I.toon3.y > 0.5 ? (irradiance(vec3(0.0, 1.0, 0.0)) + irradiance(vec3(0.0, -1.0, 0.0))) * 0.5 : irradiance(n);
-    return display(lo + amb * albedo + toon_rim(I, n, V, keyL) + emission);
+    return display(lo + amb * albedo + toon_rim(I, n, V, keyL) * clamp(T.t2.x, 0.0, 1.0) + emission);
   }
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
@@ -1384,6 +1452,106 @@ void main() {
     return;
   }
   o_color = light_pixel(px, texelFetch(g_inst, px, 0).r, wp.xyz / wp.w, normalize(nr.xyz), normalize(gs.xyz), am.rgb, nr.w, am.a, gs.w, em.rgb, flags);
+}
+)";
+
+
+/* Task 0196: the toon pass - a toon object's painted maps at its visible pixels (depth EQUAL against the g-buffer's), as
+ * evaluate_surface reads them, into three planes: the shade map's colour (r < 0: none) and the bias; the shadow tones'
+ * multiplier (the inner lines in the shadow only, the hatching) and the specular mask; the rim mask, the face shadow
+ * map's lit term for the key light (-1: none) and the hair's strand (octahedral; x 4: none). */
+const char *kToonFrag = R"(
+layout(location = 0) in vec3 wn;
+layout(location = 1) flat in uint ii;
+layout(location = 2) in vec3 wpos;
+layout(location = 3) in vec3 lp;
+layout(location = 4) in vec3 ln;
+layout(location = 5) noperspective in vec3 uvw;
+layout(location = 6) in vec3 wt;
+layout(location = 7) flat in float tw;
+layout(location = 8) in vec3 gc;
+layout(location = 0) out vec4 o_t0;
+layout(location = 1) out vec4 o_t1;
+layout(location = 2) out vec4 o_t2;
+/* toon_face_lit (shading.cpp): the face map's threshold against the key light's angle round the face's up axis. */
+float face_lit(ToonMaps T, float sdf, float mirror, vec3 lk) {
+  vec3 fwd = vec3(0.0, 0.0, 1.0), right = vec3(1.0, 0.0, 0.0);
+  if (T.b.w == 1) { fwd = vec3(0.0, 0.0, -1.0); right = vec3(-1.0, 0.0, 0.0); }
+  else if (T.b.w == 2) { fwd = vec3(1.0, 0.0, 0.0); right = vec3(0.0, 0.0, -1.0); }
+  else if (T.b.w == 3) { fwd = vec3(-1.0, 0.0, 0.0); right = vec3(0.0, 0.0, 1.0); }
+  vec3 l = vec3(lk.x, 0.0, lk.z);
+  float len = length(l);
+  if (isnan(len) || isinf(len) || !(len > 1e-6)) return 1.0;
+  float thr = acos(clamp(dot(l / len, fwd), -1.0, 1.0)) / 3.14159265358979;
+  float s = dot(l, right) >= 0.0 ? sdf : mirror;
+  return axis_weight(thr - T.c.z, thr + T.c.z, s);
+}
+/* The key light (toon_key_light): the brightest sun with any light; -1 none. */
+int key_light(out vec3 L) {
+  int best = -1;
+  float power = 0.0;
+  L = vec3(0.0, 1.0, 0.0);
+  for (int li = 0; li < int(view.z); li++) {
+    Light l = lights[li];
+    if (int(l.pos_type.w) != 0) continue;
+    float p = l.color.w * dot(l.color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    if (p > power) { power = p; best = li; L = normalize(-l.dir_range.xyz); }
+  }
+  return best;
+}
+void main() {
+  vec3 n = normalize(wn);
+  vec3 g = cross(dFdx(wpos), dFdy(wpos));
+  g = dot(g, g) > 0.0 ? normalize(g) : n;
+  if (dot(g, n) < 0.0) g = -g;
+  if (dot(g, eye.xyz - wpos) < 0.0) n = -n;  // (turned to the eye first, as the g-buffer pass and the CPU turn it)
+  Inst I = inst[ii];
+  ToonMaps T = tmap[ii];
+  vec2 uv = vec2(0.0), dux = vec2(0.0), duy = vec2(0.0);
+  if (I.tex2.y != 0) {
+    vec3 ex = dFdxFine(uvw), ey = dFdyFine(uvw);
+    uv = uvw.xy / uvw.z;
+    dux = (uvw.xy + ex.xy) / (uvw.z + ex.z) - uv;
+    duy = (uvw.xy + ey.xy) / (uvw.z + ey.z) - uv;
+  }
+  float fp = max(length(dFdxFine(lp)), length(dFdyFine(lp)));
+  MapAt M = map_at(I, uv, dux, duy, lp, normalize(ln), fp, false);
+  if (I.metal_spec.z >= 0.0) {  // (a cutout's hole: as the g-buffer pass punched it)
+    Surf s = evaluate(I, n, uv, dux, duy, lp, normalize(ln), vec4(normalize(wt), tw), I.tex2.z != 0, fp, wpos, 0.0);
+    if (s.alpha < I.metal_spec.z) discard;
+  }
+  vec4 t0 = vec4(-1.0, -1.0, -1.0, 0.5), t1 = vec4(1.0), t2 = vec4(1.0, -1.0, 4.0, 0.0);
+  if (T.a.x >= 0) t0.rgb = sample_at(I, M, T.a.x).rgb;
+  if (T.a.y >= 0) t0.w = sample_at(I, M, T.a.y).x;
+  if (isnan(t0.w) || isinf(t0.w)) t0.w = 0.5;  // (a float map's NaN: neutral)
+  if (T.a.z >= 0) t1.w = sample_at(I, M, T.a.z).x;
+  if (T.a.w >= 0) t2.x = sample_at(I, M, T.a.w).x;
+  if (!(t2.x > 0.0)) t2.x = 0.0;  // (a NaN mask: none, as the CPU's !(mask > 0))
+  if (T.b.y >= 0 && T.c.y > 0.5) t1.rgb *= sample_at(I, M, T.b.y).rgb;  // (the lines in the shadow tones only)
+  if (T.b.z >= 0) {  // the hatching, tiled over the UVs, at its lod from the scaled derivatives
+    float sc = T.c.x;
+    float hlod = M.no_d ? 0.0 : texture_lod(T.b.z, M.ddx * sc, M.ddy * sc);
+    t1.rgb *= tex_sample(T.b.z, M.uv * sc, hlod, 0, 2).x;  // (Repeat, Trilinear)
+  }
+  vec3 keyL;
+  if (T.b.x >= 0 && key_light(keyL) >= 0) {  // the face shadow map at the UV and its mirror, for the key light in the object's space
+    float flod = M.no_d ? 0.0 : texture_lod(T.b.x, M.ddx, M.ddy);
+    float sdf = tex_sample(T.b.x, M.uv, flod, M.wrap, M.filt).x, mir = tex_sample(T.b.x, vec2(1.0 - M.uv.x, M.uv.y), flod, M.wrap, M.filt).x;
+    if (isnan(sdf) || isinf(sdf)) sdf = 0.0;
+    if (isnan(mir) || isinf(mir)) mir = 0.0;
+    vec3 lk = inverse(mat3(I.model)) * keyL;
+    float len = length(lk);
+    lk = !isnan(len) && !isinf(len) && len > 1e-12 ? lk / len : vec3(0.0, 1.0, 0.0);
+    t2.y = sdf < 0.0 ? -1.0 : face_lit(T, sdf, mir, lk);  // (a negative map value: N.L, as toon_face_lit)
+  }
+  if (T.c.w > 0.5 && I.tex2.z != 0) {  // the hair's strands: the bitangent (cross(normal, tangent) x its sign)
+    vec3 s = cross(n, normalize(wt)) * tw;
+    float len = length(s);
+    if (len > 1e-6) t2.zw = oct_encode(s / len);
+  }
+  o_t0 = t0;
+  o_t1 = t1;
+  o_t2 = t2;
 }
 )";
 
@@ -1524,6 +1692,8 @@ struct Slot {
   Img shadow, normal, albedo, geo, emit, ids, inst, depth, color;
   VkFramebuffer fb_shadow = VK_NULL_HANDLE, fb_gbuf = VK_NULL_HANDLE, fb_light = VK_NULL_HANDLE;
   VkFramebuffer fb_ids = VK_NULL_HANDLE;  // task 0195: the see-through pass's ids and instances
+  Img toon[3];                            // task 0196: the toon pass's planes (made when first needed: most views have no toon maps)
+  VkFramebuffer fb_toon = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
 };
 
@@ -1629,7 +1799,7 @@ class VulkanRaster final : public Raster {
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
-    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_})  // (tasks 0192, 0195)
+    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_})  // (tasks 0192, 0195, 0196)
       if (!make_buffer(*b, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
@@ -1730,6 +1900,7 @@ class VulkanRaster final : public Raster {
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
   bool can_draw_overlays() const override { return pl_ov_line_ && pl_ov_point_ && pl_outline_; }
   bool can_draw_see_through() const override { return pl_see_ && pl_see_ids_; }
+  bool can_draw_toon_maps() const override { return pl_toon_[0] && pl_toon_[1] && pl_toon_[2]; }
   bool can_highlight_faces() const override { return geometry_; }
 
   int add_texture(const Texture &t, std::string *err) override {
@@ -1843,6 +2014,9 @@ class VulkanRaster final : public Raster {
       if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
     Slot &sl = slots_[fr.slot];
     if (!targets(sl, fr.width, fr.height, fr.shadow_size, err) || !write_frame(fr, err) || !send_tex_tables(err) || !stage_pending(err)) return false;
+    const bool toon = can_draw_toon_maps() &&
+                      std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return (in.flags & RasterInstance::ToonMaps) != 0; });
+    if (toon && !toon_targets(sl, err)) return false;
     for (const RasterInstance &in : instances_)
       if ((uint64_t)in.first_index + in.index_count > meshes_[in.mesh].indices) return fail(err, "an instance's part past its mesh");
     for (const RasterInstance &in : instances_)
@@ -1857,6 +2031,10 @@ class VulkanRaster final : public Raster {
     stamp(1);
     draw_pass(rp_gbuf_, sl.fb_gbuf, fr.width, fr.height, sl.set, 7, DrawGbuffer, fr.cull_backfaces);
     barrier();
+    if (toon) {  // (task 0196: the toon objects' painted maps, at the pixels they won)
+      draw_pass(rp_toon_, sl.fb_toon, fr.width, fr.height, sl.set, 4, DrawToon, fr.cull_backfaces);
+      barrier();
+    }
     stamp(2);
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rb.renderPass = rp_light_;
@@ -2409,9 +2587,12 @@ class VulkanRaster final : public Raster {
              pl_light_ = VK_NULL_HANDLE, pl_cage_line_ = VK_NULL_HANDLE, pl_cage_point_ = VK_NULL_HANDLE,
              pl_ov_line_ = VK_NULL_HANDLE, pl_ov_point_ = VK_NULL_HANDLE, pl_outline_ = VK_NULL_HANDLE,  // (task 0192)
              pl_see_ = VK_NULL_HANDLE, pl_see_ids_ = VK_NULL_HANDLE;  // (task 0195)
+  VkPipeline pl_toon_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0196: the toon pass - not culled, back, front
+  VkRenderPass rp_toon_ = VK_NULL_HANDLE;
+  Buf toon_buf_;  // task 0196: the instances' toon maps (ToonMaps, binding 24)
   VkRenderPass rp_ids_ = VK_NULL_HANDLE, rp_light_load_ = VK_NULL_HANDLE;  // task 0195: the see-through ids; the overlays after them
   bool dual_src_ = false;                                                // the dualSrcBlend feature (the see-through pass)
-  enum DrawWhat { DrawNothing, DrawShadow, DrawGbuffer };
+  enum DrawWhat { DrawNothing, DrawShadow, DrawGbuffer, DrawToon };
   bool swapchain_ok_ = false;          // the device was made with VK_KHR_swapchain
 
   /* Win32 and X11 (task 0193), when the system has surfaces and the device lists the extension. */
@@ -2850,9 +3031,12 @@ class VulkanRaster final : public Raster {
       const uint32_t fl = instances_[i].flags;
       if (instances_[i].surface >= 2) continue;  // (task 0195: the see-through pass draws it; it casts no shadow, as on the CPU)
       if (instances_[i].flags & RasterInstance::AxisPart) continue;  // (task 0195: an axis material's part: read, not drawn)
+      if (what == DrawToon && !(instances_[i].flags & RasterInstance::ToonMaps)) continue;  // (task 0196: the toon pass's own)
       /* (A toon outline's hull is culled whatever the view's setting, as the CPU's always_cull.) */
-      const bool culled = what == DrawGbuffer && ((cull && !(fl & RasterInstance::DoubleSided)) || (fl & RasterInstance::AlwaysCull));
-      const VkPipeline pl = what == DrawShadow ? pl_shadow_ : !culled ? pl_gbuf_ : (fl & RasterInstance::Mirrored) ? pl_gbuf_cull_front_ : pl_gbuf_cull_;
+      const bool culled = what != DrawShadow && ((cull && !(fl & RasterInstance::DoubleSided)) || (fl & RasterInstance::AlwaysCull));
+      const int cv_k = !culled ? 0 : (fl & RasterInstance::Mirrored) ? 2 : 1;  // (not culled, back, front)
+      const VkPipeline gb[3] = {pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_};
+      const VkPipeline pl = what == DrawShadow ? pl_shadow_ : what == DrawToon ? pl_toon_[cv_k] : gb[cv_k];
       if (pl != bound) f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = pl);
       const Mesh &m = meshes_[instances_[i].mesh];
       VkDeviceSize off = 0;
@@ -2902,6 +3086,19 @@ class VulkanRaster final : public Raster {
     if (fr.highlight_bits.empty()) std::memset(hl_buf_.mapped, 0, 4);
     else std::memcpy(hl_buf_.mapped, fr.highlight_bits.data(), fr.highlight_bits.size() * 4);
     return true;
+  }
+  /* Task 0196: each instance's toon maps (ToonMaps), in the instances' order. */
+  bool write_toon_table(std::string *err) {
+    std::vector<int32_t> t(instances_.size() * 12, 0);
+    for (size_t i = 0; i < instances_.size(); i++) {
+      const RasterInstance &s = instances_[i];
+      int32_t *d = &t[i * 12];
+      for (int k = 0; k < 7; k++) d[k] = s.toon_maps[k];
+      d[7] = s.face_forward;
+      const float c[4] = {s.hatch_scale, s.line_only_shadow ? 1.0f : 0.0f, s.face_softness, s.hair ? 1.0f : 0.0f};
+      std::memcpy(d + 8, c, 16);
+    }
+    return write_array(toon_buf_, t.data(), t.size() * 4, err);
   }
   /* Task 0192: the frame's overlays into their host-visible buffers (grown as needed; a zero word when none). */
   /* A host-visible buffer at least `bytes` (16 at least: a zero word when empty), grown when needed. */
@@ -2979,6 +3176,7 @@ class VulkanRaster final : public Raster {
     if (!fit_array(light_buf_, (size_t)nl * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
+    if (!write_toon_table(err)) return false;
     u.view[0] = (float)fr.width;
     u.view[1] = (float)fr.height;
     u.view[2] = (float)nl;
@@ -3046,10 +3244,12 @@ class VulkanRaster final : public Raster {
     for (uint32_t i = 11; i <= 14; i++)  // the textures: 8-bit texels, float texels, textures, levels (task 0101)
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // each pixel's instance (task 0102)
+    for (uint32_t i = 25; i <= 27; i++)  // task 0196: the toon pass's planes
+      b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // the face highlight's bits (task 0166)
     for (uint32_t i = 17; i <= 19; i++)  // task 0192: the overlays' lines, dots and outlines
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
-    for (uint32_t i = 21; i <= 23; i++)  // the lights, the vertex colours, the see-through corners (task 0195)
+    for (uint32_t i = 21; i <= 24; i++)  // the lights, the vertex colours, the see-through corners (task 0195), the toon maps (task 0196)
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
@@ -3060,8 +3260,8 @@ class VulkanRaster final : public Raster {
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
     VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 15 * kSlots},
-                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * kSlots}};
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10 * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
     dpi.poolSizeCount = 3;
@@ -3085,8 +3285,9 @@ class VulkanRaster final : public Raster {
                                             {texinfo_buf_.buf, 0, VK_WHOLE_SIZE}, {texlevel_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo hb{hl_buf_.buf, 0, VK_WHOLE_SIZE};
     const VkDescriptorBufferInfo ov[3] = {{ov_lines_.buf, 0, VK_WHOLE_SIZE}, {ov_points_.buf, 0, VK_WHOLE_SIZE}, {ov_outlines_.buf, 0, VK_WHOLE_SIZE}};
-    const VkDescriptorBufferInfo lb2[3] = {{light_buf_.buf, 0, VK_WHOLE_SIZE}, {vcol_buf_.buf, 0, VK_WHOLE_SIZE}, {see_buf_.buf, 0, VK_WHOLE_SIZE}};
-    VkWriteDescriptorSet w[16];
+    const VkDescriptorBufferInfo lb2[4] = {{light_buf_.buf, 0, VK_WHOLE_SIZE}, {vcol_buf_.buf, 0, VK_WHOLE_SIZE}, {see_buf_.buf, 0, VK_WHOLE_SIZE},
+                                           {toon_buf_.buf, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[17];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
     for (int i = 3; i < 9; i++) {
@@ -3117,32 +3318,34 @@ class VulkanRaster final : public Raster {
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       w[i].pBufferInfo = &ov[i - 10];
     }
-    for (int i = 13; i < 16; i++) {  // (task 0195)
+    for (int i = 13; i < 17; i++) {  // (tasks 0195, 0196)
       w[i].dstBinding = (uint32_t)(21 + i - 13);
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       w[i].pBufferInfo = &lb2[i - 13];
     }
-    f_.vkUpdateDescriptorSets(dev_, 16, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 17, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
-    const Img *im[7] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst};
-    VkDescriptorImageInfo ii[7];
-    VkWriteDescriptorSet w[7];
-    for (int i = 0; i < 7; i++) {
+    const bool toon = sl.fb_toon != VK_NULL_HANDLE;
+    const Img *im[10] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst,
+                         toon ? &sl.toon[0] : &sl.normal, toon ? &sl.toon[1] : &sl.normal, toon ? &sl.toon[2] : &sl.normal};
+    VkDescriptorImageInfo ii[10];
+    VkWriteDescriptorSet w[10];
+    for (int i = 0; i < 10; i++) {
       ii[i] = {sampler_, im[i]->view, VK_IMAGE_LAYOUT_GENERAL};
       w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       w[i].dstSet = sl.set;
-      w[i].dstBinding = (uint32_t)(i < 6 ? 2 + i : 15);  // (the instances' plane: binding 15, task 0102)
+      w[i].dstBinding = (uint32_t)(i < 6 ? 2 + i : i == 6 ? 15 : 25 + (i - 7));  // (the instances' plane: binding 15, task 0102; the toon planes 25-27, task 0196)
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       w[i].pImageInfo = &ii[i];
     }
-    f_.vkUpdateDescriptorSets(dev_, 7, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 10, w, 0, nullptr);
   }
 
   /* Render passes whose attachments end in GENERAL: read by the next pass and copied out without other moves. */
-  VkRenderPass make_pass(const std::vector<VkFormat> &colors, bool depth, bool load_dont_care, bool load = false) {
+  VkRenderPass make_pass(const std::vector<VkFormat> &colors, bool depth, bool load_dont_care, bool load = false, bool load_depth = false) {
     std::vector<VkAttachmentDescription> a;
     std::vector<VkAttachmentReference> refs;
     for (VkFormat f : colors) {
@@ -3163,11 +3366,11 @@ class VulkanRaster final : public Raster {
       VkAttachmentDescription d{};
       d.format = VK_FORMAT_D32_SFLOAT;
       d.samples = VK_SAMPLE_COUNT_1_BIT;
-      d.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      d.loadOp = load_depth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;  // (task 0196: the toon pass tests the g-buffer's)
       d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
       d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
       d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-      d.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      d.initialLayout = load_depth ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;  // (loaded: kept as the g-buffer pass left it)
       d.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
       a.push_back(d);
     }
@@ -3202,8 +3405,9 @@ class VulkanRaster final : public Raster {
                          true, false);
     rp_light_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, true);
     rp_ids_ = make_pass({VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT}, false, false, true);  // (task 0195)
+    rp_toon_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}, true, false, false, true);  // (task 0196)
     rp_light_load_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, false, true);
-    return rp_shadow_ && rp_gbuf_ && rp_light_ && rp_ids_ && rp_light_load_ ? true : fail(err, "could not make the render passes");
+    return rp_shadow_ && rp_gbuf_ && rp_light_ && rp_ids_ && rp_light_load_ && rp_toon_ ? true : fail(err, "could not make the render passes");
   }
 
   VkShaderModule module(const std::string &body, shaderc_shader_kind kind, std::string *err) {
@@ -3220,7 +3424,7 @@ class VulkanRaster final : public Raster {
    * when asked. Front faces are the CPU's: clockwise on screen (Unity's convention), and the y flip keeps the screen's
    * orientation, so clockwise in Vulkan's framebuffer too. */
   VkPipeline make_pipeline(VkRenderPass rp, VkShaderModule vs, VkShaderModule fs, int colors, bool geometry, VkCullModeFlags cull,
-                           bool blend = false, VkPipelineLayout layout = VK_NULL_HANDLE, bool dual = false) {
+                           bool blend = false, VkPipelineLayout layout = VK_NULL_HANDLE, bool dual = false, bool depth_equal = false) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     st[0].module = vs;
@@ -3254,6 +3458,7 @@ class VulkanRaster final : public Raster {
     VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     ds.depthTestEnable = ds.depthWriteEnable = geometry ? VK_TRUE : VK_FALSE;
     ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    if (depth_equal) ds.depthWriteEnable = VK_FALSE, ds.depthCompareOp = VK_COMPARE_OP_EQUAL;  // (task 0196: the toon pass)
     std::vector<VkPipelineColorBlendAttachmentState> cb((size_t)colors);
     for (auto &c : cb) {
       c.colorWriteMask = 0xF;
@@ -3317,6 +3522,17 @@ class VulkanRaster final : public Raster {
     for (VkShaderModule m : {vs, cf, idf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
   }
+  /* Task 0196: the toon pass's pipelines, culled as the g-buffer's (the same vertex shader: the same depth). */
+  void make_toon_pipelines(VkShaderModule gv) {
+    std::string terr;
+    VkShaderModule tf = module(std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kToonFrag, shaderc_fragment_shader, &terr);
+    if (tf) {
+      const VkCullModeFlags cull[3] = {VK_CULL_MODE_NONE, VK_CULL_MODE_BACK_BIT, VK_CULL_MODE_FRONT_BIT};
+      for (int k = 0; k < 3; k++) pl_toon_[k] = make_pipeline(rp_toon_, gv, tf, 3, true, cull[k], false, VK_NULL_HANDLE, false, true);
+      f_.vkDestroyShaderModule(dev_, tf, nullptr);
+    }
+    if (!can_draw_toon_maps()) Log::warn("The GPU view can't draw toon maps (%s): the CPU draws those views", terr.empty() ? "?" : terr.c_str());
+  }
   bool make_pipelines(std::string *err) {
     VkShaderModule sv = module(kShadowVert, shaderc_vertex_shader, err), gv = module(std::string(kLightFns) + kGbufVert, shaderc_vertex_shader, err),
                    gf = module(std::string(geometry_ ? "#define BL_HIGHLIGHT 1\n" : "") + kMaterialFrag + kGlslProcedurals + kMaterialEval + kLightFns + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
@@ -3354,6 +3570,7 @@ class VulkanRaster final : public Raster {
       pl_gbuf_cull_ = make_pipeline(rp_gbuf_, gv, gf, 6, true, VK_CULL_MODE_BACK_BIT);
       pl_gbuf_cull_front_ = make_pipeline(rp_gbuf_, gv, gf, 6, true, VK_CULL_MODE_FRONT_BIT);
       pl_light_ = make_pipeline(rp_light_, fv, lf, 1, false, VK_CULL_MODE_NONE);
+      make_toon_pipelines(gv);
     }
     for (VkShaderModule m : {sv, gv, gf, fv, lf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
@@ -3361,6 +3578,16 @@ class VulkanRaster final : public Raster {
     return fail(err, err && !err->empty() ? *err : "could not make the pipelines");
   }
 
+  /* Task 0196: the slot's toon planes and their framebuffer, at the slot's size, made the first time a frame needs them. */
+  bool toon_targets(Slot &sl, std::string *err) {
+    if (sl.fb_toon) return true;
+    const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    for (Img &im : sl.toon)
+      if (!make_image(im, sl.color.w, sl.color.h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the toon maps");
+    sl.fb_toon = framebuffer(rp_toon_, {sl.toon[0].view, sl.toon[1].view, sl.toon[2].view, sl.depth.view}, sl.color.w, sl.color.h);
+    bind_images(sl);
+    return true;
+  }
   /* A slot's images and framebuffers for this size (made again only when it changes). */
   bool targets(Slot &sl, int w, int h, int shadow, std::string *err) {
     if (w <= 0 || h <= 0) return fail(err, "an empty frame");
@@ -3377,9 +3604,10 @@ class VulkanRaster final : public Raster {
       sl.fb_shadow = framebuffer(rp_shadow_, {sl.shadow.view}, s, s);
     }
     if (!view_ok) {
-      for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light, sl.fb_ids})
+      for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color}) free_image(*im);
+      sl.fb_toon = VK_NULL_HANDLE;
+      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2]}) free_image(*im);
       const bool ok = make_image(sl.normal, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.geo, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
@@ -3422,17 +3650,17 @@ class VulkanRaster final : public Raster {
     if (compose_layout_) f_.vkDestroyPipelineLayout(dev_, compose_layout_, nullptr);
     if (compose_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, compose_set_layout_, nullptr);
     for (Slot &sl : slots_) {
-      for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids})
+      for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color}) free_image(*im);
+      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2]}) free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2]})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
-    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_})
+    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);

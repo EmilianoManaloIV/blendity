@@ -2932,7 +2932,10 @@ class Editor {
     uint32_t vertices = 0, indices = 0;
     uint64_t used = 0;  // the gpu_calls_ count it was last drawn at
     uint64_t bytes = 0;
+    float uv_stretch = -1.0f;     // task 0196: its UVs' most stretch (live_close_up_of), -1 not measured
+    uint64_t stretch_serial = 0;  // the mesh it was measured on
   };
+  const char *live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 &vp, const Mat4 &p, Vec3 eye, int height);
   int viewport_device_ = 0;          // Preferences > Viewport Device: 0 Auto, 1 CPU, 2 GPU
   std::unique_ptr<gpu::Raster> gpu_view_;
   bool gpu_view_tried_ = false;      // opening it was tried (not again until the setting changes)

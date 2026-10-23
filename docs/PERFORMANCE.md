@@ -3,6 +3,13 @@
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
+### After task 0196 (toon maps and live procedurals on the card)
+- stress editor_render, this round's scene: toon materials with a shade map, inner lines, a specular mask and the hair
+  highlight on the icospheres, one moved each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 24.10 ms a frame;
+  - views on the card: 11.19 ms, 33 views on the card and none on the CPU;
+  - the Scene view's own share: 9.31 ms against 4.43.
+
 ### After task 0195 (fewer views on the CPU)
 - stress editor_render, this round's scene: glass, transparent and axis-material icospheres, one moved each frame, with
   the 50k-face sphere (RTX 4070 SUPER, headless, so every picture is read back):

@@ -1518,6 +1518,38 @@ static void test_editor_render(Report &rep, const Options &o) {
     ed.command("shading shaded");
     ed.viewport_device_for_test(1);
   }
+  {
+    /* Task 0196: toon materials with painted maps (a shade map, inner lines, a specular mask, the hair's highlight) on
+     * the icospheres, the views on the GPU (none on the CPU now) and on the CPU. */
+    MaterialPtr toon = make_material("Painted Toon", {0.9f, 0.7f, 0.6f});
+    toon->shading_model = 1;
+    toon->toon_bands = 2;
+    toon->shade_map.path = "generated:UV Grid";
+    toon->line_map.path = "generated:UV Grid";
+    toon->line_only_shadow = true;
+    toon->toon_specular_size = 0.5f;
+    toon->toon_specular_map.path = "generated:UV Grid";
+    toon->toon_hair_highlight = true;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Icosphere", 0) != 0) return;
+      if (MeshRenderer *mr = g.get<MeshRenderer>()) mr->materials = {toon};
+    });
+    GameObject *moved = ed.scene().find_by_name("Icosphere");
+    for (int device : {2, 1}) {
+      ed.viewport_device_for_test(device);
+      const FrameProfile f0 = ed.frame_profile_totals();
+      const std::string name = strprintf("moving an object, toon materials with painted maps, the views on the %s (task 0196)", device == 2 ? "GPU" : "CPU");
+      row(name.c_str(), [&](int i) {
+        if (moved) moved->set_local_position({0.1f * i + 0.04f, 1.0f, 0.0f});
+        ed.step_frame_headless();
+      });
+      const FrameProfile f1 = ed.frame_profile_totals();
+      if (device == 2)
+        rep.note(strprintf("Task 0196's scene: %llu views on the GPU, %llu on the CPU instead (%s).", (unsigned long long)(f1.gpu_views - f0.gpu_views),
+                           (unsigned long long)(f1.gpu_fallbacks - f0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+    }
+    ed.viewport_device_for_test(1);
+  }
   Log::echo_stdout = true;
   rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
            "casters or the light change (task 0011).");

@@ -46,7 +46,8 @@ struct RasterInstance {
    * settings below shade it (task 0102, ADR 0020). */
   /* Axis: an axis material (task 0195) - its settings below, its parts instances of their own flagged AxisPart (read
    * by it, never drawn). (128 is the g-buffer's own flag.) */
-  enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64, Axis = 256, AxisPart = 512 };
+  enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64, Axis = 256, AxisPart = 512,
+                          ToonMaps = 1024 };  // (task 0196: a toon material with painted maps or a hair highlight)
   float model[16];
   float albedo_rough[4] = {0.8f, 0.8f, 0.8f, 0.5f};  // albedo rgb, roughness
   /* metallic, specular (Principled's IOR Level), the cutout threshold (-1: not a cutout; task 0163), the material's
@@ -83,6 +84,13 @@ struct RasterInstance {
    * high start, high half-width; its Top, Side, Bottom, High as instance indices (-1: its own maps; High -1: no band). */
   float axis[4] = {0, 0, 1, 0}, axis2[4] = {0, 0.25f, 0, 1};
   float axis_parts[4] = {-1, -1, -1, -1};
+  /* Task 0196: a toon material's painted maps (add_texture's ids, -1 none): shade, bias, specular mask, rim mask, face
+   * shadow, inner lines, hatching; the face's forward axis (Material::face_forward), the hatching's scale, the lines in
+   * the shadow only, the face shadow's softness, the hair's highlight across the strands. */
+  int32_t toon_maps[7] = {-1, -1, -1, -1, -1, -1, -1};
+  int32_t face_forward = 0;
+  float hatch_scale = 8.0f, face_softness = 0.02f;
+  bool line_only_shadow = false, hair = false;
   /* Task 0102: a toon material's settings (Material's toon_*), as shade_toon, toon_rim and light_finish read them. */
   int toon_bands = 1;
   float toon_softness = 0.02f, toon_threshold = 0.15f, toon_specular_size = 0.0f, toon_specular_smooth = 0.05f;
@@ -258,6 +266,7 @@ class Raster {
   /* Task 0192: whether RasterFrame's overlays are drawn (else the caller draws them itself). */
   virtual bool can_draw_overlays() const { return false; }
   virtual bool can_draw_see_through() const { return false; }  // task 0195: Transparent and Glass (dual-source blending)
+  virtual bool can_draw_toon_maps() const { return false; }     // task 0196: toon materials' painted maps (the toon pass)
   /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;

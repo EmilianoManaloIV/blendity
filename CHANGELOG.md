@@ -2,6 +2,46 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-23 (round 215): toon maps and live procedurals on the card (task 0196)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the
+toon materials' and live procedural textures' reasons to fall back.
+
+**Changed**
+- **Toon materials' painted maps draw on the card:** the shade map, the shadow bias, the specular and rim masks, the
+  face shadow map, the inner lines and the hatching, and the hair's highlight across the strands. A toon pass reads
+  them at each visible pixel, and the toon lighting uses them as the CPU does.
+- **Live procedural textures draw on the card** wherever the CPU reads their image too. Only close up, where one of
+  the texture's texels covers more than a pixel and the CPU evaluates the procedural point by point, does the view
+  draw on the CPU, saying "a live procedural texture seen close up".
+- Still on the CPU: see-through toon materials, toon axis materials, lightmaps, probes, realtime GI and camera filters
+  (the next round).
+
+**Measured**
+- stress editor_render, this round's scene: toon materials with a shade map, inner lines, a specular mask and the hair
+  highlight on the icospheres, one moved each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 24.10 ms a frame;
+  - views on the card: 11.19 ms, 33 views on the card and none on the CPU;
+  - the Scene view's own share: 9.31 ms against 4.43.
+
+**Checked**
+- Card against CPU (RTX 4070 SUPER):
+  - a toon sphere with every painted map: mean 0.34 / 255, 99.96 % of pixels within 3;
+  - one with the face shadow map, the hair highlight and lines in the shadow only: 0.47, 99.95 %;
+  - a live Bricks texture from 6 m: 0.33, 99.99 %.
+- The same texture close up sends the Scene view to the CPU with its reason.
+- An Opus review found:
+  - a failed toon-shader compile drawing the normals as maps instead of falling back;
+  - the toon pass's depth loaded from an undefined layout;
+  - the close-up estimate too generous off the frame's centre and under shear, and wrong on UVs in a line;
+  - toon cutouts losing their inner lines in Solid;
+  - a NaN rim mask, and a negative face map value.
+
+  All are fixed.
+- Unit checks (round 215): Windows, in render-cache verify mode, 11,910, 0 failed (986 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-23 (round 214): fewer views on the CPU - many lights, Solid, see-through and axis materials (task 0195)
 
 **Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the

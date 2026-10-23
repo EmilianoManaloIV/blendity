@@ -49,18 +49,14 @@ const char *material_unsupported(const Material &m) {
    * lighting reads the neighbouring pixels' normals in the g-buffer.) */
   if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout && m.shading_model == 1) return "a see-through toon material";
   const Material::Resolved &tx = m.textures();
-  for (int k = 0; k < 5; k++)
-    if (tx.live[k]) return "a live procedural texture";
-  /* Axis materials draw on the card since task 0195 - not toon ones (the toon maps aren't read through the parts), nor
+  /* (A live procedural texture draws on the card since task 0196, except seen close up: gpu_view_draw's live_close_up.)
+   * Axis materials draw on the card since task 0195 - not toon ones (the toon maps aren't read through the parts), nor
    * parts with live procedurals. */
   if (m.axis_mode != 0 && m.shading_model == 1) return "a toon axis material";
   for (int k = 0; m.axis_mode != 0 && k < 4; k++)
     for (int j = 0; tx.axis[k] && j < 5; j++)
       if ((tx.axis_tx[k] ? *tx.axis_tx[k] : tx.axis[k]->textures()).live[j]) return "a live procedural texture";
-  /* Task 0148: the toon maps are read per pixel in the lighting pass, which has no UVs; a hair highlight needs the
-   * tangent there. Those materials draw on the CPU. */
-  if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight || tx.face_shadow || tx.line || tx.hatch))
-    return "a toon material with painted maps or a hair highlight";
+  /* (Toon materials' painted maps and the hair highlight draw on the card since task 0196: its toon pass.) */
   return nullptr;
 }
 
@@ -182,6 +178,109 @@ void raster_axis(gpu::RasterInstance &in, const Material &m, const RenderMesh &r
   }
 }
 
+/* Task 0196: a toon material's painted maps and its hair highlight, for the card's toon pass (evaluate_surface's toon
+ * maps; the settings as it cleans them). True: it has some (the instance's ToonMaps flag). */
+bool raster_toon_maps(gpu::RasterInstance &in, const Material &m, const std::function<int(const TexturePtr &)> &tex) {
+  const Material::Resolved &tx = m.textures();
+  const TexturePtr *maps[7] = {&tx.shade, &tx.toon_bias, &tx.toon_specular, &tx.toon_rim_mask, &tx.face_shadow, &tx.line, &tx.hatch};
+  bool any = m.toon_hair_highlight;
+  for (int k = 0; k < 7; k++) {
+    in.toon_maps[k] = *maps[k] ? tex(*maps[k]) : -1;
+    any = any || *maps[k];
+  }
+  if (!any) return false;
+  in.face_forward = m.face_forward;
+  in.hatch_scale = finite_bits(m.hatch_scale) && m.hatch_scale > 0.0f ? m.hatch_scale : 1.0f;
+  in.face_softness = clampf(finite_bits(m.face_shadow_softness) ? m.face_shadow_softness : 0.0f, 0.0f, 0.5f);
+  in.line_only_shadow = m.line_only_shadow;
+  in.hair = m.toon_hair_highlight;
+  return true;
+}
+
+/* Task 0196: the most a mesh's UVs are stretched - the largest world length one UV unit spans along any direction, over
+ * its triangles (the largest singular value of each triangle's position-from-UV map), in its own space. Triangles with
+ * no UV area are left out: the CPU sees no UV change across them, and reads the image there. */
+float uv_stretch(const RenderMesh &rm) {
+  if (rm.uvs.size() < rm.positions.size()) return 0.0f;
+  float most = 0.0f;
+  for (size_t t = 0; t + 2 < rm.indices.size(); t += 3) {
+    const uint32_t a = rm.indices[t], b = rm.indices[t + 1], c = rm.indices[t + 2];
+    const Vec3 e1 = rm.positions[b] - rm.positions[a], e2 = rm.positions[c] - rm.positions[a];
+    const Vec2 d1 = rm.uvs[b] - rm.uvs[a], d2 = rm.uvs[c] - rm.uvs[a];
+    const float det = d1.x * d2.y - d2.x * d1.y;
+    if (d1.x == 0.0f && d1.y == 0.0f && d2.x == 0.0f && d2.y == 0.0f) continue;  // (one UV for the triangle: no change, the image)
+    if (!(std::fabs(det) > 1e-12f)) {  // (UVs on a line: the largest world length an edge's UV length spans)
+      const Vec3 e3 = rm.positions[c] - rm.positions[b];
+      const Vec2 d3 = rm.uvs[c] - rm.uvs[b];
+      for (const auto &[e, d] : {std::pair<Vec3, Vec2>{e1, d1}, {e2, d2}, {e3, d3}}) {
+        const float dl = std::sqrt(d.x * d.x + d.y * d.y);
+        if (dl > 0.0f) most = std::max(most, length(e) / dl);
+      }
+      continue;
+    }
+    /* J = [e1 e2] [d1 d2]^-1: its columns dP/du and dP/dv; the largest singular value from J^T J. */
+    const Vec3 ju = (e1 * d2.y - e2 * d1.y) / det, jv = (e2 * d1.x - e1 * d2.x) / det;
+    const float p = dot(ju, ju), q = dot(ju, jv), r = dot(jv, jv);
+    const float s = 0.5f * (p + r) + std::sqrt(std::max(0.0f, 0.25f * (p - r) * (p - r) + q * q));
+    if (finite_bits(s)) most = std::max(most, std::sqrt(s));
+  }
+  return most;
+}
+
+/* Task 0196: the largest stretch of the linear map with columns a, b, c (its largest singular value), by power
+ * iteration on M^T M, rounded up a little: an upper bound in practice. */
+float largest_stretch(Vec3 a, Vec3 b, Vec3 c) {
+  Vec3 x(1.0f, 0.7f, 0.4f);
+  float s = 0.0f;
+  for (int i = 0; i < 24; i++) {
+    const Vec3 mx = a * x.x + b * x.y + c * x.z;  // M x
+    const Vec3 y(dot(a, mx), dot(b, mx), dot(c, mx));  // M^T M x
+    const float len = length(y);
+    if (!(len > 1e-20f) || !finite_bits(len)) break;
+    s = len / std::max(length(x), 1e-20f);
+    x = y / len;
+  }
+  return std::sqrt(std::max(s, 0.0f)) * 1.01f;
+}
+
+/* Task 0196: whether the CPU would evaluate one of this material's live procedural textures point by point anywhere
+ * on the item (evaluate_surface's live_weight above 0: one of its texels larger than a pixel), judged at the item's
+ * nearest point to the eye and, for UVs, their most stretched triangle; then the view draws on the CPU. `px1`: a
+ * pixel's world size one metre away (or everywhere, orthographic: `ortho`). Conservative: where it says no, the CPU
+ * reads the same image the card does. */
+bool live_close_up(const DrawItem &it, const Material &m, float stretch, float near_d, float px1, bool ortho) {
+  const Material::Resolved &tx = m.textures();
+  if (m.wrap != (int)TexWrap::Repeat || m.filter == (int)TexFilter::Closest) return false;  // (the CPU's live_ok: the image always)
+  const TexturePtr *images[5] = {&tx.base, &tx.metallic, &tx.roughness, &tx.normal, &tx.emission};
+  const Vec3 sx = it.model.dir(Vec3(1, 0, 0)), sy = it.model.dir(Vec3(0, 1, 0)), sz = it.model.dir(Vec3(0, 0, 1));
+  const float scale = std::max(largest_stretch(sx, sy, sz), 1e-6f);  // (sheared too)
+  const float f = (ortho ? 1.0f : near_d) * px1;  // the smallest world footprint of a pixel on it
+  const bool box = m.mapping == (int)MaterialMapping::Box, uv = m.mapping == (int)MaterialMapping::UV;
+  for (int k = 0; k < 5; k++) {
+    if (!tx.live[k]) continue;
+    const TexturePtr &t = *images[k];
+    if (!t) return true;  // (no image: always evaluated)
+    const float texels = (float)std::max(t->width, t->height);
+    float per_px;
+    if (uv) {
+      if (!(stretch > 0.0f)) continue;  // (no UV changes: the image)
+      const float tile = std::min(std::fabs(m.tiling.x), std::fabs(m.tiling.y));
+      per_px = f / (stretch * scale) * tile * texels / std::sqrt(2.0f);  // (the largest derivative component is at least this)
+    }
+    else {
+      float size = 1.0f;
+      if (!box && it.mesh->bounds.valid()) {
+        const Vec3 ext = it.mesh->bounds.max - it.mesh->bounds.min;
+        size = std::max(1e-6f, std::min({std::max(ext.x, 1e-6f), std::max(ext.y, 1e-6f), std::max(ext.z, 1e-6f)}));
+      }
+      const float tile = std::max({std::fabs(m.tiling.x), std::fabs(m.tiling.y), std::fabs(m.tiling.z)});
+      per_px = f / scale * tile * texels / size;
+    }
+    if (!(per_px >= 1.0f)) return true;
+  }
+  return false;
+}
+
 /* A toon material's settings (ADR 0020), as the lighting pass's shade_toon / toon_rim read them (task 0102). */
 void raster_toon(gpu::RasterInstance &in, const Material &m) {
   /* (A NaN setting: clampf's result on the CPU, where GLSL's clamp of a NaN is undefined.) */
@@ -207,7 +306,7 @@ void raster_toon(gpu::RasterInstance &in, const Material &m) {
  * pass does. */
 void solid_instance(gpu::RasterInstance &in, const DrawItem &it) {
   in.metal_spec[1] = it.specular;
-  in.flags &= ~(uint32_t)gpu::RasterInstance::Toon;
+  in.flags &= ~(uint32_t)(gpu::RasterInstance::Toon | gpu::RasterInstance::ToonMaps);
   if (in.metal_spec[2] >= 0.0f || in.surface) return;
   set3(in.albedo_rough, it.albedo);
   in.textured = false;
@@ -268,8 +367,10 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) in.surface = m.surface == (int)MaterialSurface::Transparent ? 2 : 3, in.ior = m.ior;
   set3(in.emission, s.emission);
   if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
+  bool toon_maps = false;
   if (m.shading_model == 1) {
     raster_toon(in, m);
+    toon_maps = raster_toon_maps(in, m, tex);
     const TexturePtr &ramp = m.textures().toon_ramp;
     in.toon_ramp = ramp ? tex(ramp) : -1;  // (the ramp needs no UVs: the lighting pass reads it by how lit)
   }
@@ -281,6 +382,7 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   if (mirrored(it.model)) in.flags |= gpu::RasterInstance::Mirrored;
   if (it.always_cull) in.flags |= gpu::RasterInstance::AlwaysCull;
   if (m.shading_model == 1) in.flags |= gpu::RasterInstance::Toon;
+  if (toon_maps) in.flags |= gpu::RasterInstance::ToonMaps;  // (task 0196)
   in.mesh = (uint32_t)mesh;
   in.id = it.id;
   return in;
@@ -605,6 +707,40 @@ int Editor::gpu_slot(const RenderTarget &rt) {
   return best;
 }
 
+/* Task 0196: why an item's live procedural textures need the CPU in this view (seen close up), or null. */
+const char *Editor::live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 &vp, const Mat4 &p, Vec3 eye, int height) {
+  if (!it.materials) return nullptr;
+  bool live = false;
+  for (const MaterialPtr &m : *it.materials)
+    for (int k = 0; m && k < 5; k++) live = live || m->textures().live[k];
+  if (!live) return nullptr;
+  if (e.stretch_serial != it.mesh->serial || e.uv_stretch < 0.0f) {
+    e.uv_stretch = uv_stretch(*it.mesh);
+    e.stretch_serial = it.mesh->serial;
+  }
+  const AABB box = it.mesh->bounds.transformed(it.model);
+  const Vec3 c(clampf(eye.x, box.min.x, box.max.x), clampf(eye.y, box.min.y, box.max.y), clampf(eye.z, box.min.z, box.max.z));
+  const bool ortho = std::fabs(p.at(3, 3) - 1.0f) < 1e-6f;
+  /* A pixel's world size one metre away at the frame's centre, shrunk to the object's farthest place from it on screen
+   * (by 1 + tan^2 x + tan^2 y there: off the axis a pixel covers less; its box's corners, within the frame). */
+  const float tx = 1.0f / std::fabs(p.at(0, 0)), ty = 1.0f / std::fabs(p.at(1, 1));
+  float ox = 0.0f, oy = 0.0f;
+  for (int k = 0; k < 8 && !ortho; k++) {
+    const Vec3 q((k & 1) ? box.max.x : box.min.x, (k & 2) ? box.max.y : box.min.y, (k & 4) ? box.max.z : box.min.z);
+    const Vec4 cl = vp * Vec4(q, 1.0f);
+    if (!(cl.w > 1e-6f)) {  // (behind the eye: anywhere in the frame)
+      ox = tx, oy = ty;
+      break;
+    }
+    ox = std::max(ox, std::min(tx, std::fabs(cl.x / cl.w) * tx));
+    oy = std::max(oy, std::min(ty, std::fabs(cl.y / cl.w) * ty));
+  }
+  const float px1 = 2.0f / (std::fabs(p.at(1, 1)) * (float)std::max(height, 1)) / (1.0f + ox * ox + oy * oy);
+  for (const MaterialPtr &m : *it.materials)
+    if (m && live_close_up(it, *m, e.uv_stretch, length(c - eye), px1, ortho)) return "a live procedural texture seen close up";
+  return nullptr;
+}
+
 bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, const LightingEnv &env, const std::vector<DrawItem> &items,
                            const Camera *cam, bool scene_lights, const FilterStack *filters, const RasterOptions &opt) {
   gpu::Raster *g = gpu_view_.get();
@@ -686,7 +822,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     const int mesh = gpu_mesh(*it.mesh, err);
     ok = ok && mesh >= 0;
     if (mesh < 0) continue;
-    const GpuMesh &e = gpu_meshes_[it.mesh];
+    GpuMesh &e = gpu_meshes_[it.mesh];
+    if (const char *why = live_close_up_of(it, e, vp, p, eye, rt.height)) return gpu_view_refuse(slot, why);
     const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
     const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
     const uint32_t first_inst = (uint32_t)inst.size();
@@ -722,6 +859,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
   if (!see.empty() && !g->can_draw_see_through()) return gpu_view_refuse(slot, "see-through surfaces (the card has no dual-source blending)");
   if (!see.empty() && opt.screen_door) return gpu_view_refuse(slot, "see-through surfaces drawn as a screen door");
+  const bool toon_maps = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return (in.flags & gpu::RasterInstance::ToonMaps) != 0; });
+  if (toon_maps && !g->can_draw_toon_maps()) return gpu_view_refuse(slot, "toon maps (the card's toon pass couldn't be made)");
   gpu::RasterFrame fr;
   see_through_to_frame(see, fr.see_through);
   fr.highlight_bits = std::move(hl_bits);

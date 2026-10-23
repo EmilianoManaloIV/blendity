@@ -745,6 +745,8 @@ static void tests_round126_to_round127() {
     uint64_t gpu_views = 0, fallbacks = 0;
     std::string reason;
     std::vector<uint32_t> cpu;
+    bool scene_card = false;  // (task 0196: the Scene view itself drew on the card)
+    std::string status;       // every view's device and reason
   };
   bool r126_grid = true;  // (off: the grid's far lines at the horizon, task 0192's to compare, left out)
   auto r126_case = [&](MeshPtr mesh, const std::vector<MaterialPtr> &mats, Vec3 eye, Vec3 at, Quat rot) {
@@ -775,6 +777,8 @@ static void tests_round126_to_round127() {
     r.gpu_views = after.gpu_views - before.gpu_views;
     r.fallbacks = after.gpu_fallbacks - before.gpu_fallbacks;
     r.reason = ed.gpu_view_reason();
+    r.scene_card = ed.scene_on_gpu_for_test();
+    r.status = ed.gpu_view_status();
     obj->active = false;
     const std::vector<uint32_t> empty = draw(1);
     auto worst = [](uint32_t a, uint32_t b) {
@@ -883,7 +887,7 @@ static void tests_round126_to_round127() {
     std::printf("    the normal map changes %zu pixels of the plain sphere\n", bumped);
     CHECK(bumped > 10000);
   });
-  test("gpu views: a live procedural texture still sends the view to the CPU, saying why (a cutout draws on the card since task 0163; Transparent, Glass and axis materials since task 0195)", [&] {
+  test("gpu views: a live procedural texture draws on the card from afar as on the CPU, and close up (a texel larger than a pixel, where the CPU evaluates it per point) sends the view to the CPU, saying why (task 0196)", [&] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
@@ -899,10 +903,59 @@ static void tests_round126_to_round127() {
     MaterialPtr live = make_material("live", {1, 1, 1});
     live->base_map.path = bricks->asset_path + "#albedo";
     live->touch();
-    for (const MaterialPtr &m : {live}) {
-      const R126Result r = r126_case(primitives::cube(1.0f), {m}, {0.0f, 2.2f, 2.4f}, {0.0f, 1.0f, 0.0f}, Quat());
-      std::printf("    %s: %llu views on the CPU instead: %s\n", m->name.c_str(), (unsigned long long)r.fallbacks, r.reason.c_str());
-      CHECK(r.fallbacks > 0 && !r.reason.empty());
+    const R126Result far = r126_case(primitives::cube(1.2f), {live}, {0.0f, 3.5f, 6.5f}, {0.0f, 1.0f, 0.0f}, Quat());  // (6 m: under a texel a pixel, the CPU reads the image; 1.2 m, so no face meets the scene's cube's)
+    /* (The Scene view's own device: the Game view and Camera Preview see the cube from the camera, which may be close.) */
+    std::printf("    from afar: the Scene view on the card %s (%s); its %zu pixels: mean %.3f / 255, %.2f %% within 3\n", far.scene_card ? "yes" : "no",
+                far.status.c_str(), far.pixels, far.mean, far.within3 * 100);
+    CHECK(far.scene_card && far.pixels > 1000);
+    CHECK(far.mean < 1.0 && far.within3 >= 0.99);
+    const R126Result near = r126_case(primitives::cube(1.2f), {live}, {0.0f, 1.0f, 0.75f}, {0.0f, 1.0f, 0.0f}, Quat());
+    std::printf("    close up: the Scene view on the card %s (%s)\n", near.scene_card ? "yes" : "no", near.status.c_str());
+    CHECK(!near.scene_card && near.status.find("close up") != std::string::npos);
+  });
+  test("gpu views: toon materials' painted maps draw on the card as on the CPU - shade, bias, specular and rim masks, inner lines and hatching, the face shadow map, the hair's highlight (task 0196; skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    auto grey = [](int v) { return 0xFF000000u | (uint32_t)v << 16 | (uint32_t)v << 8 | (uint32_t)v; };
+    const std::string shade = r126_png("r215_shade.png", 64, 64, [](int x, int y) { return 0xFF000000u | (uint32_t)(70 + x * 2) << 16 | (uint32_t)(50 + y) << 8 | 190u; });
+    const std::string bias = r126_png("r215_bias.png", 64, 64, [&](int x, int) { return grey((x / 8) % 2 ? 220 : 40); });
+    const std::string spec = r126_png("r215_spec.png", 64, 64, [&](int x, int y) { return grey(((x / 16) + (y / 16)) % 2 ? 255 : 0); });
+    const std::string rim = r126_png("r215_rim.png", 64, 64, [&](int x, int) { return grey(x < 32 ? 255 : 60); });
+    const std::string lines = r126_png("r215_lines.png", 64, 64, [&](int x, int y) { return grey(x % 16 < 2 || y % 16 < 2 ? 30 : 255); });
+    const std::string hatch = r126_png("r215_hatch.png", 32, 32, [&](int x, int y) { return grey((x + y) % 8 < 3 ? 70 : 255); });
+    const std::string face = r126_png("r215_face.png", 64, 64, [&](int x, int y) { return grey(std::min(255, x * 4 + y)); });
+    MaterialPtr painted = make_material("painted", {0.9f, 0.7f, 0.6f});
+    painted->shading_model = 1;
+    painted->toon_bands = 2;
+    painted->toon_softness = 0.05f;
+    painted->shade_map.path = shade;
+    painted->toon_shadow_bias_map.path = bias;
+    painted->toon_specular_size = 0.6f;
+    painted->toon_specular_map.path = spec;
+    painted->toon_rim_width = 0.4f;
+    painted->toon_rim_strength = 0.8f;
+    painted->toon_rim_map.path = rim;
+    painted->line_map.path = lines;
+    painted->hatch_map.path = hatch;
+    painted->hatch_scale = 2.0f;
+    painted->touch();
+    MaterialPtr face_hair = make_material("face and hair", {0.95f, 0.8f, 0.7f});
+    face_hair->shading_model = 1;
+    face_hair->face_shadow_map.path = face;
+    face_hair->face_shadow_softness = 0.05f;
+    face_hair->toon_hair_highlight = true;
+    face_hair->toon_specular_size = 0.5f;
+    face_hair->line_map.path = lines;
+    face_hair->line_only_shadow = true;
+    face_hair->touch();
+    for (const MaterialPtr &m : {painted, face_hair}) {
+      const R126Result r = r126_case(primitives::uv_sphere(0.8f, 48, 24), {m}, {0.0f, 2.2f, 2.6f}, {0.0f, 1.0f, 0.0f}, Quat());
+      std::printf("    %s: %llu views on the card, %llu on the CPU%s%s; its %zu pixels: mean %.3f / 255, %.2f %% within 3\n", m->name.c_str(),
+                  (unsigned long long)r.gpu_views, (unsigned long long)r.fallbacks, r.reason.empty() ? "" : ": ", r.reason.c_str(), r.pixels, r.mean, r.within3 * 100);
+      CHECK(r.gpu_views > 0 && r.fallbacks == 0 && r.pixels > 1000);
+      CHECK(r.mean < 1.0 && r.within3 >= 0.99);
     }
   });
   test("gpu views: Transparent and Glass materials draw on the card as the CPU draws them - sorted back to front, over the lit picture (task 0195; skipped without a GPU)", [&] {

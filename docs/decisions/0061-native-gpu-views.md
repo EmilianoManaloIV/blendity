@@ -49,6 +49,13 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0196, round 215): toon maps and live procedurals
+- A toon pass (the toon objects again, depth EQUAL against the g-buffer's) reads the painted maps into three planes
+  for the toon lighting. They are made per view only when needed.
+- Live procedural textures draw on the card wherever the CPU reads their image. A conservative estimate (nearest
+  distance, the UVs' largest stretch) sends a view to the CPU when a texel could cover more than a pixel.
+- Porting the procedural node stack to GLSL stays not done (ADR 0048).
+
 ## Amendment (task 0195, round 214): the first fallbacks removed
 - On the card now: any number of lights, Solid and Wireframe shading, Weight Paint, Transparent and Glass, axis
   materials.
