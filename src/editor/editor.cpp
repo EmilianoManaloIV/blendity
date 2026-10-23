@@ -983,6 +983,7 @@ void Editor::draw_menubar(const Recti &r) {
       auto &u = ui_;
       if (u.menu_item("Unwrap", "U")) uv_op("unwrap");
       if (u.menu_item("Smart UV Project")) uv_op("smart");
+      if (u.menu_item("Part Unwrap")) uv_op("parts");
       if (u.menu_item("Cube Projection")) uv_op("cube");
       if (u.menu_item("Cylinder Projection")) uv_op("cylinder");
       if (u.menu_item("Sphere Projection")) uv_op("sphere");

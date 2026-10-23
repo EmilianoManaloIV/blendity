@@ -3083,6 +3083,40 @@ static void test_uv_unwrap(Report &rep, const Options &o) {
     rep.table({"Blender's rows (task 0178)", "faces", "islands", "Smart UV Project ms", "Pack Islands ms"});
     rep.row({"50k-face UV sphere", num((double)m.face_count()), std::to_string(islands), f1(project_ms), f1(pack_ms)});
   }
+  /* Task 0179 (ADR 0057): Part Unwrap against Smart UV Project, PartUV's metrics (charts, seam length, distortion: the
+   * area-weighted mean of max(s, 1/s) per chart, 1 = none) and the time. */
+  rep.table({"Part Unwrap (task 0179)", "faces", "method", "charts", "seams m", "distortion mean / worst", "ms"});
+  auto compare = [&](const char *name, const Mesh &src) {
+    Mesh a = src, b = src;
+    double ms_smart = time_ms([&] { uvops::smart_project(b, nullptr); });
+    const uvops::UVReport s = uvops::uv_report(b, nullptr);
+    uvops::PartUnwrapReport r;
+    double ms_parts = time_ms([&] { r = uvops::part_unwrap(a, nullptr); });
+    const uvops::UVReport p = uvops::uv_report(a, nullptr);
+    rep.row({name, num((double)src.face_count()), "Smart UV Project", std::to_string(s.charts), f2(s.seam_length),
+             f2(s.distortion_mean) + " / " + f2(s.distortion_max), f1(ms_smart)});
+    rep.row({name, num((double)src.face_count()), strprintf("Part Unwrap (%d parts, %d tried, %d ABF++)", r.parts, r.flattened, r.abf_charts),
+             std::to_string(p.charts), f2(p.seam_length), f2(p.distortion_mean) + " / " + f2(p.distortion_max), f1(ms_parts)});
+  };
+  {
+    auto m = std::make_shared<Mesh>(*primitives::cube(1.0f));
+    meshops::append_mesh(*m, *primitives::cylinder(0.25f, 0.6f, 24), Mat4::translate({0, 0.8f, 0}));
+    meshops::append_mesh(*m, *primitives::torus(0.5f, 0.15f, 32, 12), Mat4::translate({1.6f, 0, 0}));
+    m->sync_attributes();
+    compare("cube + boss + torus", *m);
+    compare("teapot", *primitives::teapot(1.2f, 8));
+  }
+  {
+    Mesh s = *primitives::uv_sphere(1.0f, 256, 196);
+    s.face_material.assign(s.face_count(), 0);
+    for (size_t f = 0; f < s.face_count(); f++) {
+      Vec3 c(0.0f);
+      for (uint32_t i = 0; i < s.face_size(f); i++) c += s.positions[s.face_verts(f)[i]];
+      s.face_material[f] = (int32_t)((std::atan2(c.z, c.x) + 3.14159265f) / 6.2831853f * 12.0f) % 12;
+    }
+    s.sync_attributes();
+    compare("50k-face sphere, 12 slots", s);
+  }
 }
 
 static void test_texture_sampling(Report &rep, const Options &o) {

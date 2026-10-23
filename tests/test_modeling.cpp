@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the modeling tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/scene/uv_internal.h"
 
 static void first_tests() {
   test("math: matrix inverse", [] {
@@ -7500,6 +7501,257 @@ static void tests_round186() {
   });
 }
 
+/* Task 0179: PartUV's "Common Shapes" idea from Blendity's primitives - a cube with a cylinder boss on it, a torus
+ * beside it. */
+static MeshPtr common_shape() {
+  auto m = std::make_shared<Mesh>(*primitives::cube(1.0f));
+  meshops::append_mesh(*m, *primitives::cylinder(0.25f, 0.6f, 24), Mat4::translate({0, 0.8f, 0}));
+  meshops::append_mesh(*m, *primitives::torus(0.5f, 0.15f, 32, 12), Mat4::translate({1.6f, 0, 0}));
+  m->sync_attributes();
+  return m;
+}
+
+/* Faces whose UV triangle runs the wrong way (folded), and the share of a 512^2 raster covered twice (overlap). */
+static int flipped_faces(const Mesh &m) {
+  int n = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t b = m.face_offsets[f], k = m.face_size(f);
+    double a = 0;
+    for (uint32_t i = 0; i < k; i++) {
+      const Vec2 p = m.uvs[b + i], q = m.uvs[b + (i + 1) % k];
+      a += (double)p.x * q.y - (double)q.x * p.y;
+    }
+    if (a <= 0) n++;
+  }
+  return n;
+}
+
+static bool same_uvs(const std::vector<Vec2> &a, const std::vector<Vec2> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (a[i].x != b[i].x || a[i].y != b[i].y) return false;
+  return true;
+}
+
+static double overlap_share(const Mesh &m) {
+  const int N = 512;
+  std::vector<uint8_t> hits((size_t)N * N, 0);
+  size_t covered = 0, twice = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t b = m.face_offsets[f], k = m.face_size(f);
+    for (uint32_t j = 1; j + 1 < k; j++) {
+      const Vec2 a = m.uvs[b] * (float)N, c1 = m.uvs[b + j] * (float)N, c2 = m.uvs[b + j + 1] * (float)N;
+      const float area = (c1.x - a.x) * (c2.y - a.y) - (c2.x - a.x) * (c1.y - a.y);
+      if (std::fabs(area) < 1e-12f) continue;
+      const int x0 = std::max(0, (int)std::floor(std::min({a.x, c1.x, c2.x}))), x1 = std::min(N - 1, (int)std::ceil(std::max({a.x, c1.x, c2.x})));
+      const int y0 = std::max(0, (int)std::floor(std::min({a.y, c1.y, c2.y}))), y1 = std::min(N - 1, (int)std::ceil(std::max({a.y, c1.y, c2.y})));
+      for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+          const float px = x + 0.5f, py = y + 0.5f;
+          const float w0 = ((c1.x - px) * (c2.y - py) - (c2.x - px) * (c1.y - py)) / area;
+          const float w1 = ((c2.x - px) * (a.y - py) - (a.x - px) * (c2.y - py)) / area;
+          if (w0 < 0 || w1 < 0 || w0 + w1 > 1) continue;
+          uint8_t &h = hits[(size_t)y * N + x];
+          if (h == 1) twice++;
+          if (h == 0) covered++;
+          h = (uint8_t)std::min(2, h + 1);
+        }
+    }
+  }
+  return covered ? (double)twice / covered : 0.0;
+}
+
+static void tests_round195() {
+  test("uv parts: a cube with a cylinder boss and a torus - the fewest charts face sets allow (a third of Smart UV Project's), shorter seams, each chart under the bound, no folds, no overlaps", [] {
+    MeshPtr a = common_shape(), b = mesh_copy(*a);
+    uvops::smart_project(*b, nullptr);
+    const uvops::UVReport smart = uvops::uv_report(*b, nullptr);
+    const uvops::PartUnwrapReport r = uvops::part_unwrap(*a, nullptr);
+    const uvops::UVReport parts = uvops::uv_report(*a, nullptr);
+    std::printf("    Smart UV Project: %d charts, seams %.2f m, distortion %.3f / %.3f; Part Unwrap: %d charts in %d parts, seams %.2f m, distortion %.3f / %.3f (%d flattened, %d by ABF++, %.0f ms)\n",
+                smart.charts, smart.seam_length, smart.distortion_mean, smart.distortion_max, parts.charts, r.parts, parts.seam_length,
+                parts.distortion_mean, parts.distortion_max, r.flattened, r.abf_charts, r.ms);
+    CHECK(parts.charts == r.charts && r.charts >= 3);
+    CHECK(r.distortion_max <= 1.25f + 1e-4f && parts.distortion_max <= 1.25f + 1e-3f);
+    /* Charts are sets of faces (no cuts inside one), so a closed piece takes two at least: six for these three is the
+     * fewest there can be (the roadmap's 1/5 of Smart UV Project's would be 4.4). */
+    CHECK(parts.charts == 6 && parts.charts * 3 <= smart.charts);
+    CHECK(parts.seam_length <= 0.6 * smart.seam_length);
+    CHECK(flipped_faces(*a) == 0);
+#ifdef BL_WITH_EIGEN
+    CHECK(r.abf_charts > 0);  // (ABF++ decided some near miss)
+#endif
+    double lo = 1e9, hi = -1e9;
+    for (Vec2 uv : a->uvs) lo = std::min(lo, (double)std::min(uv.x, uv.y)), hi = std::max(hi, (double)std::max(uv.x, uv.y));
+    CHECK(lo >= -1e-4 && hi <= 1.0 + 1e-4);
+    const double ov = overlap_share(*a);
+    std::printf("    overlap: %.4f %% of the covered texels\n", ov * 100.0);
+    CHECK(ov < 0.002);
+  });
+  test("uv parts: the charts follow material slots (12 on a sphere), a non-manifold edge is a cut, tau bounds every chart", [] {
+    MeshPtr s = mesh_copy(*primitives::uv_sphere(0.5f, 48, 24));
+    s->face_material.assign(s->face_count(), 0);
+    for (size_t f = 0; f < s->face_count(); f++) {
+      Vec3 c(0.0f);
+      for (uint32_t i = 0; i < s->face_size(f); i++) c += s->positions[s->face_verts(f)[i]];
+      s->face_material[f] = (int32_t)((std::atan2(c.z, c.x) + 3.14159265f) / 6.2831853f * 12.0f) % 12;
+    }
+    s->sync_attributes();
+    const uvops::PartUnwrapReport r = uvops::part_unwrap(*s, nullptr);
+    std::vector<int> island;
+    const int n = uvops::compute_islands(*s, nullptr, false, island);
+    std::vector<int> slot_of(n, -1);
+    bool single = n == r.charts;
+    for (size_t f = 0; f < island.size(); f++) {
+      int &sl = slot_of[island[f]];
+      if (sl < 0) sl = s->face_material[f];
+      single = single && sl == s->face_material[f];
+    }
+    std::printf("    12-slot sphere: %d charts, worst distortion %.3f\n", r.charts, r.distortion_max);
+    CHECK(single && r.charts >= 12 && r.distortion_max <= 1.25f + 1e-4f && flipped_faces(*s) == 0);
+    /* Three quads on one edge (a book of pages): the edge can't be flattened shared, each page its own chart. */
+    Mesh book;
+    book.positions = {{0, 0, 0}, {0, 1, 0}, {1, 0, 0}, {1, 1, 0}, {-1, 0, 0}, {-1, 1, 0}, {0, 0, 1}, {0, 1, 1}};
+    book.face_offsets = {0, 4, 8, 12};
+    book.corner_verts = {0, 2, 3, 1, 0, 1, 5, 4, 0, 6, 7, 1};
+    book.sync_attributes();
+    const uvops::PartUnwrapReport rb = uvops::part_unwrap(book, nullptr);
+    bool finite = true;
+    for (Vec2 uv : book.uvs) finite = finite && std::isfinite(uv.x) && std::isfinite(uv.y);
+    CHECK(rb.charts == 3 && finite);
+    /* A connected 2 x 2 sheet with a fin on its middle edge: the fin's edge is non-manifold, the sheet stays one piece
+     * around it - two charts. */
+    Mesh fin;
+    fin.positions = {{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {0, 0, 1}, {1, 0, 1}, {2, 0, 1}, {0, 0, 2}, {1, 0, 2}, {2, 0, 2}, {1, 1, 0.5f}, {1, 1, 1.5f}};
+    fin.face_offsets = {0, 4, 8, 12, 16, 20};
+    fin.corner_verts = {0, 3, 4, 1, 1, 4, 5, 2, 3, 6, 7, 4, 4, 7, 8, 5, 4, 10, 9, 1};
+    fin.sync_attributes();
+    const uvops::PartUnwrapReport rf = uvops::part_unwrap(fin, nullptr);
+    CHECK(rf.charts == 2 && flipped_faces(fin) == 0);
+    /* A looser bound: every chart under it (the search is greedy: fewer charts is likely, not promised). */
+    MeshPtr t1 = mesh_copy(*primitives::torus(0.5f, 0.2f, 32, 16)), t2 = mesh_copy(*t1);
+    uvops::PartUnwrapOptions tight, loose;
+    loose.tau = 2.0f;
+    const auto rt = uvops::part_unwrap(*t1, nullptr, tight), rl = uvops::part_unwrap(*t2, nullptr, loose);
+    std::printf("    torus: %d charts at bound 1.25, %d at 2.0\n", rt.charts, rl.charts);
+    CHECK(rl.charts <= rt.charts && rt.distortion_max <= 1.25f + 1e-4f && rl.distortion_max <= 2.0f + 1e-4f);
+  });
+  test("uv abf: ABF++ closes every triangle at pi and every interior vertex at 2 pi, and keeps a dome's angles better than LSCM alone", [] {
+    MeshPtr s = mesh_copy(*primitives::uv_sphere(0.5f, 32, 16));
+    std::vector<uint32_t> dome;
+    for (size_t f = 0; f < s->face_count(); f++) {
+      bool top = true;
+      for (uint32_t i = 0; i < s->face_size(f); i++) top = top && s->positions[s->face_verts(f)[i]].y > 0.05f;
+      if (top) dome.push_back((uint32_t)f);
+    }
+    const uvops::detail::ChartTopology chart = uvops::detail::chart_topology(*s, dome);
+    std::vector<float> ang;
+    const bool ok = uvops::detail::abf_angles(*s, chart, ang);
+#ifdef BL_WITH_EIGEN
+    CHECK(ok && ang.size() == chart.tris.size() * 3);
+#else
+    CHECK(!ok);  // (the dependency-free build: LSCM's own angles)
+    return;
+#endif
+    double worst_tri = 0;
+    for (size_t t = 0; t < chart.tris.size(); t++) worst_tri = std::max(worst_tri, std::fabs((double)ang[t * 3] + ang[t * 3 + 1] + ang[t * 3 + 2] - 3.14159265358979));
+    std::vector<double> around(chart.verts.size(), 0.0);
+    std::vector<int> uses(chart.verts.size(), 0);
+    for (size_t t = 0; t < chart.tris.size(); t++)
+      for (int c = 0; c < 3; c++) around[chart.tris[t][c]] += ang[t * 3 + c], uses[chart.tris[t][c]]++;
+    /* The pole and the rings above the lowest are interior: their angles meet at 2 pi. */
+    double worst_vertex = 0;
+    for (size_t v = 0; v < around.size(); v++)
+      if (s->positions[chart.verts[v]].y > 0.2f) worst_vertex = std::max(worst_vertex, std::fabs(around[v] - 6.28318530717959));
+    CHECK(worst_tri < 1e-3 && worst_vertex < 1e-3);
+    /* Angle distortion of the layouts: mean |UV angle - 3D angle| / 3D angle. */
+    auto angle_error = [&](const Mesh &m) {
+      double sum = 0;
+      int n = 0;
+      for (uint32_t f : dome) {
+        const uint32_t b = m.face_offsets[f], k = m.face_size(f);
+        for (uint32_t i = 0; i < k; i++) {
+          const Vec3 p = m.positions[m.corner_verts[b + i]], p1 = m.positions[m.corner_verts[b + (i + 1) % k]], p2 = m.positions[m.corner_verts[b + (i + k - 1) % k]];
+          const Vec2 q = m.uvs[b + i], q1 = m.uvs[b + (i + 1) % k], q2 = m.uvs[b + (i + k - 1) % k];
+          const double a3 = std::acos(std::clamp((double)dot(normalize(p1 - p), normalize(p2 - p)), -1.0, 1.0));
+          const Vec2 u = q1 - q, w = q2 - q;
+          const double lu = std::sqrt((double)u.x * u.x + (double)u.y * u.y), lw = std::sqrt((double)w.x * w.x + (double)w.y * w.y);
+          if (lu < 1e-12 || lw < 1e-12 || a3 < 1e-6) continue;
+          const double a2 = std::acos(std::clamp(((double)u.x * w.x + (double)u.y * w.y) / (lu * lw), -1.0, 1.0));
+          sum += std::fabs(a2 - a3) / a3;
+          n++;
+        }
+      }
+      return n ? sum / n : 1e9;
+    };
+    MeshPtr l = mesh_copy(*s), a = mesh_copy(*s);
+    uvops::detail::lscm_chart(*l, dome, nullptr);
+    uvops::detail::lscm_chart(*a, dome, &ang);
+    const double el = angle_error(*l), ea = angle_error(*a);
+    std::printf("    dome of %zu faces: angle error LSCM %.4f, ABF++ then LSCM %.4f\n", dome.size(), el, ea);
+    CHECK(ea < el);
+  });
+  test("uv parts: twelve separate pieces on UDIM tiles (u 0-9, then a row up), the Edit Mode mask leaves other faces' UVs", [] {
+    Mesh m;
+    for (int i = 0; i < 12; i++) meshops::append_mesh(m, *primitives::cube(1.0f), Mat4::translate({2.0f * i, 0, 0}));
+    m.sync_attributes();
+    uvops::PartUnwrapOptions o;
+    o.multi_tile = true;
+    uvops::part_unwrap(m, nullptr, o);
+    std::vector<int> tile_of(12, -1);
+    bool one_tile_each = true;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const int piece = (int)(f / 6);
+      for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) {
+        const Vec2 uv = m.uvs[k];
+        const int tile = (int)std::floor(uv.x) + 10 * (int)std::floor(uv.y);
+        const bool inside = uv.x - std::floor(uv.x) > 1e-5f && uv.y - std::floor(uv.y) > 1e-5f;
+        if (tile_of[piece] < 0) tile_of[piece] = tile;
+        one_tile_each = one_tile_each && tile == tile_of[piece] && inside && uv.x < 10.0f;
+      }
+    }
+    std::vector<int> sorted = tile_of;
+    std::sort(sorted.begin(), sorted.end());
+    CHECK(one_tile_each && std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end() && sorted.back() == 11);
+    /* Only the masked faces change. */
+    MeshPtr t = mesh_copy(*primitives::torus(0.5f, 0.2f, 24, 12));
+    uvops::smart_project(*t, nullptr);
+    const std::vector<Vec2> before = t->uvs;
+    uvops::Mask mask(t->face_count(), 0);
+    for (size_t f = 0; f < mask.size() / 2; f++) mask[f] = 1;
+    uvops::part_unwrap(*t, &mask);
+    bool kept = true, moved = false;
+    for (size_t f = 0; f < t->face_count(); f++)
+      for (uint32_t k = t->face_offsets[f]; k < t->face_offsets[f + 1]; k++) {
+        const bool same = t->uvs[k].x == before[k].x && t->uvs[k].y == before[k].y;
+        if (mask[f]) moved = moved || !same;
+        else kept = kept && same;
+      }
+    CHECK(kept && moved);
+  });
+  test("uv parts: the console's uv parts unwraps the selected mesh (a bound that isn't a number is refused), uv report runs, undo brings the old UVs back", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("create Torus");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->mesh_filter());
+    if (!g) return;
+    ed.step_frame_headless();
+    const std::vector<Vec2> before = g->mesh_filter()->mesh->uvs;
+    ed.command("uv parts x");
+    CHECK(same_uvs(g->mesh_filter()->mesh->uvs, before));
+    ed.command("uv parts 1.3");
+    ed.step_frame_headless();
+    const Mesh &m = *g->mesh_filter()->mesh;
+    const uvops::UVReport r = uvops::uv_report(m, nullptr);
+    CHECK(!same_uvs(m.uvs, before) && r.charts >= 2 && r.distortion_max <= 1.3f + 1e-3f);
+    ed.command("uv report");
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.active_object_for_test() && same_uvs(ed.active_object_for_test()->mesh_filter()->mesh->uvs, before));
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -7530,4 +7782,5 @@ void run_modeling_tests() {
   tests_round132();
   tests_round185();
   tests_round186();
+  tests_round195();
 }

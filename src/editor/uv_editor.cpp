@@ -22,7 +22,24 @@ MeshPtr *Editor::uv_target(GameObject **owner) {
   return mf && mf->mesh ? &mf->mesh : nullptr;
 }
 
+/* PartUV's measures of the UV map (task 0179): islands, cut length, distortion. Changes nothing. */
+void Editor::uv_report_log() {
+  GameObject *g = nullptr;
+  MeshPtr *mp = uv_target(&g);
+  if (!mp || !*mp) {
+    Log::warn("uv report needs an object with a MeshFilter");
+    return;
+  }
+  const uvops::UVReport r = uvops::uv_report(**mp, nullptr);
+  Log::info("UV report: %d chart(s), seams %.3f m long, distortion %.3f (mean) / %.3f (worst; 1 = none)", r.charts, r.seam_length,
+            r.distortion_mean, r.distortion_max);
+}
+
 void Editor::uv_op(const std::string &op) {
+  if (op == "report") {
+    uv_report_log();
+    return;
+  }
   GameObject *g = nullptr;
   MeshPtr *mp = uv_target(&g);
   if (!mp) {
@@ -42,6 +59,15 @@ void Editor::uv_op(const std::string &op) {
   int islands = -1;
   if (op == "unwrap") islands = uvops::unwrap_lscm(m, pm);
   else if (op == "smart") islands = uvops::smart_project(m, pm);
+  else if (op == "parts") {
+    uvops::PartUnwrapOptions po;
+    po.tau = part_tau_;
+    po.multi_tile = part_multi_tile_;
+    const uvops::PartUnwrapReport r = uvops::part_unwrap(m, pm, po);
+    islands = r.charts;
+    Log::info("Part Unwrap: %d chart(s) in %d part(s), distortion %.3f (worst %.3f, bound %.2f), seams %.3f m; %d charts tried, %d by ABF++",
+              r.charts, r.parts, r.distortion, r.distortion_max, po.tau, r.seam_length, r.flattened, r.abf_charts);
+  }
   else if (op == "cube") uvops::project_cube(m, pm, std::max(0.001f, length(m.bounds().extent()) * 2.0f / std::sqrt(3.0f)));
   else if (op == "cylinder") uvops::project_cylinder(m, pm);
   else if (op == "sphere") uvops::project_sphere(m, pm);
@@ -97,6 +123,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   const B buttons[] = {
       {"Unwrap", "unwrap", "Unwrap (U): Least Squares Conformal Maps per seam-bounded island, then pack.\nBlender: UV > Unwrap (Conformal)."},
       {"Smart UV", "smart", "Smart UV Project: group faces by normal, project and pack. No seams needed."},
+      {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (console:\nuv parts [bound] [multi]); ABF++ then LSCM; each part's charts packed together. No seams needed."},
       {"Cube", "cube", "Cube Projection: each face projected along its main axis."},
       {"Cylinder", "cylinder", "Cylinder Projection around the object's Y axis."},
       {"Sphere", "sphere", "Sphere Projection (latitude / longitude)."},

@@ -742,6 +742,15 @@ Turn on Stretch to colour faces by area distortion: blue means the face is too s
 ? Why can't a sphere be unwrapped without seams? | Its Gaussian curvature isn't zero, so any flat map must stretch or tear it. Seams choose where it tears.
 ! cmd:select Cylinder; texture uvgrid; window UV Editor | Show the Cylinder's UVs with a UV Grid texture
 ! cmd:select Cylinder; uv smart | Smart UV Project the Cylinder
+# Unwrap by parts
+Smart UV Project needs no seams but cuts a curved surface into many small islands; Unwrap makes few islands but only where you marked seams. Part Unwrap cuts by parts, after PartUV (2025): it groups faces into a tree of parts (by direction and place, never across a material slot), then from the whole mesh down takes the fewest charts that keep every chart's stretch under a bound - 1.25 by default: on average a face may be at most a quarter bigger or smaller in UV space than its share. Each chart is flattened by ABF++ (Blender's Angle Based method: the triangles' angles kept as close to the 3D ones as a flat layout allows) where that decides it, else by LSCM, and each part's charts are packed together. `uv report` measures any UV map the same way: charts, seam length, stretch.
+> Wang et al. (2025) PartUV: Part-Based UV Unwrapping of 3D Meshes. SIGGRAPH Asia.
+> Sheffer, Levy, Mogilnitsky & Bogomyakov (2005) ABF++: Fast and Robust Angle Based Flattening. ACM TOG.
+@ blender/source/blender/geometry/intern/uv_parametrizer.cc
+? A closed cube becomes at least two charts with Part Unwrap, never one. Why? | A chart is a set of faces with no cut inside it, and a closed surface can't lie flat without a cut: each closed piece needs two charts at least.
+? You raise the bound from 1.25 to 2. What do you trade? | Fewer charts and shorter seams for more stretch: a face may then be up to twice or half its fair share of the texture.
+! cmd:select Cylinder; uv parts; window UV Editor | Part Unwrap the Cylinder and look at its charts
+! cmd:select Cylinder; uv report | Measure its UV map (charts, seams, stretch) in the Console
 )"},
     {"Materials and Textures", "Principled BSDF behind a Unity Material", R"(
 A Unity Material picks a shader (Standard or URP Lit) and fills its slots: Base Map, Metallic, Smoothness, Normal Map, Emission. A Blender material is a node graph, usually one Principled BSDF node with Image Texture nodes plugged in. Blendity shows a Unity-style Material in the Inspector and evaluates Blender's Principled BSDF underneath.

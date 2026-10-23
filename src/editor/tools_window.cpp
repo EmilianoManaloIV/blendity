@@ -213,6 +213,7 @@ void Editor::draw_tools_window(const Recti &r) {
     std::vector<GridButton> bs = {
         {"Unwrap", "Unwrap along the seams (U).", mesh, [this] { uv_op("unwrap"); }},
         {"Smart UV", "Smart UV Project: no seams needed.", mesh, [this] { uv_op("smart"); }},
+        {"Part Unwrap", "Unwrap by parts: few charts, each under the stretch bound.", mesh, [this] { uv_op("parts"); }},
         {"Cube Project", "Each face projected along its main axis.", mesh, [this] { uv_op("cube"); }},
         {"Seams from Sharp", "A seam on every sharp edge (and marked sharp edges).", mesh, [this] { uv_op("seams_from_sharp"); }},
         {"Sharp + Unwrap", "Seams from sharp edges, then unwrap.", mesh, [this] { uv_op("seams_from_sharp_unwrap"); }},

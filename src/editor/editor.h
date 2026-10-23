@@ -1306,6 +1306,10 @@ class Editor {
   void draw_sequencer_window(const Recti &r);
   /* ---- Live Link (task 0172, ADR 0055: livelink.cpp, livelink_window.cpp) ---- */
   void draw_livelink_window(const Recti &r);
+  void uv_report_log();     // task 0179: `uv report`
+  void uv_parts_command(const std::vector<std::string> &t);
+  float part_tau_ = 1.25f;  // Part Unwrap's distortion bound (`uv parts <bound>`)
+  bool part_multi_tile_ = false;
   void livelink_command(const std::vector<std::string> &t);
   void livelink_status();
   void livelink_tick();  // once a frame, after the scene's changes

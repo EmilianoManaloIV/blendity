@@ -665,6 +665,10 @@ void Editor::run_console_command(const std::string &line) {
     livelink_command(t);
     return;
   }
+  if (c == "uv" && arg(1, "") == "parts") {  // uv parts [bound] [multi|single] (task 0179)
+    uv_parts_command(t);
+    return;
+  }
   if (c == "layout") {
     /* layout <name> | layout save <name> | layout delete <name> (task 0055); a raw dock string still works */
     const std::string rest = line.substr(line.find(' ') + 1);
@@ -821,6 +825,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
+    Log::info("  uv parts [bound] [multi|single] (unwrap by parts, PartUV), uv report (charts, seam length, distortion)");
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
@@ -1670,6 +1675,24 @@ void Editor::run_console_command(const std::string &line) {
 }
 
 /* `gpu list` (task 0169): every card Vulkan sees, then OptiX's state - in the build, turned off, its driver, its cards. */
+void Editor::uv_parts_command(const std::vector<std::string> &t) {
+  for (size_t i = 2; i < t.size(); i++) {
+    const std::string w = to_lower(t[i]);
+    if (w == "multi" || w == "single") {
+      part_multi_tile_ = w == "multi";
+      continue;
+    }
+    char *end = nullptr;
+    const float v = std::strtof(t[i].c_str(), &end);
+    if (end == t[i].c_str() || *end || !(v > 0)) {
+      Log::warn("uv parts [bound] [multi|single]: '%s' isn't a bound (a number from 1.05 up; PartUV's is 1.25)", t[i].c_str());
+      return;
+    }
+    part_tau_ = std::max(1.05f, v);  // (1.0 would allow no stretch at all: one chart a face)
+  }
+  uv_op("parts");
+}
+
 void Editor::gpu_list() {
   const std::vector<gpu::DeviceInfo> &devs = gpu::devices();
   if (devs.empty()) Log::info("Vulkan: %s", gpu::status().c_str());

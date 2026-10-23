@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 195): unwrap by parts - PartUV's search on a geometric part tree, ABF++ beside LSCM (task 0179, ADR 0057)
+
+**Asked:** a part-based unwrapper after PartUV (SIGGRAPH Asia 2025): its geometric core (the PartField model is task
+0180, opt-in).
+
+**Changed**
+- UV Editor > Part Unwrap (also the UV menu, Modeling Tools, console `uv parts [bound] [multi|single]`): as few charts
+  as keep every chart's distortion - the area-weighted mean of max(s, 1/s) over its faces, s a face's share of the UV
+  area over its share of the 3D area - under the bound (PartUV's 1.25). A part tree clustered from the geometry
+  (normal and position, across manifold edges only; material slots joined last) is searched top down: a part becomes
+  one chart if it passes, else the fewest charts of PartUV's Normal heuristic (clustered by normal, 2..10) or Merge
+  heuristic (the part's oriented-box labels, merged greedily) that all pass, else its two children. A chart never spans
+  two material slots; a chart whose outline crosses itself or whose triangle flips fails; a non-manifold edge is a cut.
+- ABF++ (`src/scene/uv_abf.cpp`, ported from Blender's Angle Based unwrap: angles moved least so a flat layout exists)
+  then LSCM on a chart that LSCM alone nearly passes (within 1.5 x the bound), kept when better; LSCM screens every
+  candidate (one solve). LSCM takes per-triangle angles (`uv_internal.h`).
+- Each part's charts packed together as one block, the blocks at one texel density with a gap between them; or each
+  separate piece on its own UDIM tile (u 0-9, then a row up). The top-level parts are solved on threads.
+- `uv report`: any UV map measured PartUV's way - charts, seam length, distortion.
+- The tests' scratch folder comes from `BLENDITY_TEST_DIR` when set: the check chain runs the test groups as parallel
+  processes, and a shared temporary folder had let one group's files become another's (a texture deletion and an
+  export read-back failed under load in round 192's chain, then passed run alone).
+
+**Measured** (stress `uv`, "Part Unwrap (task 0179)")
+- cube + boss + torus (416 faces): Smart UV Project 22 charts, seams 32.56 m, distortion 1.05 / 1.17, 0.4 ms; Part Unwrap 6 charts, seams 16.90 m, distortion 1.13 / 1.22, 35.9 ms (3 parts, 42 tried, 1 ABF++).
+- teapot (2.0k faces): Smart UV Project 58 charts, seams 42.94 m, distortion 1.08 / 1.20, 1.5 ms; Part Unwrap 11 charts, seams 15.74 m, distortion 1.13 / 1.18, 108.0 ms (4 parts, 101 tried, 2 ABF++).
+- 50k-face sphere, 12 slots (50.2k faces): Smart UV Project 8 charts, seams 22.90 m, distortion 1.09 / 1.10, 40.5 ms; Part Unwrap 12 charts, seams 37.70 m, distortion 1.03 / 1.03, 265.9 ms (12 parts, 12 tried, 0 ABF++).
+
+**Checked**
+- A cube with a cylinder boss and a torus: six charts, the fewest face sets allow (each closed piece needs two), a
+  third of Smart UV Project's 22, half its seam length, every chart under the bound, no folds or overlaps, ABF++ used;
+  a 12-slot sphere's charts each one slot; a non-manifold fin a cut; twelve pieces on twelve UDIM tiles; the Edit Mode
+  mask; ABF++ closing every triangle at pi and every interior vertex at 2 pi with less angle error than LSCM alone; the
+  console's `uv parts` (a non-number refused), `uv report` and undo (tests/test_modeling.cpp). An Opus review's
+  findings (neighbours lost in the clustering, a wasted Merge pass, UDIM numbering, blocks touching, self-overlap,
+  the bound's parsing, threads and packing costs) are fixed.
+- Unit checks (round 195): Windows, in render-cache verify mode, 11,438, 0 failed (948 tests), 0 stale
+  pictures. Linux with libraries: 11,085, 0 failed. Sanitizer build: 10,962, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `uv`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
 ## 2026-10-22 (round 194): the Godot and Unreal bridges, specified (task 0175)
 
 **Asked:** Godot and Unreal bridges on the same protocol, after Blender's and Unity's.
