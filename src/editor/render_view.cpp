@@ -392,9 +392,11 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
      * views share one map instead of each rendering its own every frame of a drag. */
     const uint64_t shape = it.mesh->shape ? it.mesh->shape : it.mesh->serial;
     mixer(ck, &shape, 8);
+    /* Only what the depth pass reads (its surface type, Cast Shadows), not the material's address: an undo restores
+     * the scene's snapshot, whose materials are copies at other addresses, and the map would be drawn again (task 0185). */
     if (it.materials)
       for (const MaterialPtr &m : *it.materials) {
-        const uint64_t mv[3] = {(uint64_t)(uintptr_t)m.get(), m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
+        const uint64_t mv[2] = {m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
         mixer(ck, mv, sizeof(mv));
       }
     caster_keys.push_back(ck);

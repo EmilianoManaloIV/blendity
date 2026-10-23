@@ -1340,6 +1340,7 @@ static void test_editor_render(Report &rep, const Options &o) {
    * operator, an undo - each frame's parts: the overlap check, the mesh's builds, the uploads to the card. */
   auto edit_frame = [&](const char *what, int reps, const std::function<void()> &before, const std::function<void()> &act) {
     double total = 0, overlap = 0, builds = 0, edges = 0, next = 0, op = 0, copies = 0;
+    FrameProfile parts;  // (task 0185: where the frame went - the restore, each view, the UI)
     uint64_t checks = 0, nbuilds = 0, uploads = 0, ncopies = 0;
     for (int r = 0; r < reps; r++) {
       before();
@@ -1361,11 +1362,21 @@ static void test_editor_render(Report &rep, const Options &o) {
       op += p1.ms_edit_op - p0.ms_edit_op;
       copies += c1.ms_copies;
       ncopies += c1.copies;
+      parts.ms_undo += p1.ms_undo - p0.ms_undo, parts.ms_scene3d += p1.ms_scene3d - p0.ms_scene3d;
+      parts.ms_overlays += p1.ms_overlays - p0.ms_overlays, parts.ms_game += p1.ms_game - p0.ms_game;
+      parts.ms_shadow += p1.ms_shadow - p0.ms_shadow, parts.ms_collect += p1.ms_collect - p0.ms_collect;
+      parts.ms_hash += p1.ms_hash - p0.ms_hash, parts.ms_ui += p1.ms_ui - p0.ms_ui, parts.ms_present += p1.ms_present - p0.ms_present;
+      parts.ms_lighting_key += p1.ms_lighting_key - p0.ms_lighting_key, parts.ms_gpu += p1.ms_gpu - p0.ms_gpu;
+      parts.view_renders += p1.view_renders - p0.view_renders;
     }
     const double r = reps;
     rep.note(strprintf("%s: %.1f ms (the operator itself %.1f ms; mesh copies in the frame %.1f of %.1f ms; the overlap check %.1f ms, %.1f of them; render meshes built %.1f ms, %.1f of them; edge table %.1f ms; "
                        "meshes sent to the card whole %.1f); the frame after %.1f ms.",
                        what, total / r, op / r, ncopies / r, copies / r, overlap / r, checks / r, builds / r, nbuilds / r, edges / r, uploads / r, next / r));
+    rep.note(strprintf("  its parts: the undo's restore %.1f ms; the Scene view %.1f (inside it: its overlays %.1f), the Game view %.1f; inside the views: shadows %.1f, "
+                       "gathering the draw items %.1f, scene hashes %.1f, the lighting key %.1f, the GPU path %.1f; the UI %.1f, presenting %.1f; %.1f views rendered.",
+                       parts.ms_undo / r, parts.ms_scene3d / r, parts.ms_overlays / r, parts.ms_game / r, parts.ms_shadow / r, parts.ms_collect / r,
+                       parts.ms_hash / r, parts.ms_lighting_key / r, parts.ms_gpu / r, parts.ms_ui / r, parts.ms_present / r, parts.view_renders / r));
   };
   for (int device : {1, 2}) {
     ed.viewport_device_for_test(device);

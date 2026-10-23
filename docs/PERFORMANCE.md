@@ -93,6 +93,14 @@ quote their row before / after / Blender.
   - NVIDIA GeForce RTX 3060 Ti - OptiX: 70.1 samples a second (14.28 ms a sample), its upload 12922.0 ms, 0.20x GPU Compute's, the pictures 0.00000 apart.
 - Before the inlining and the register limit: 0.09x on both cards; the first open of a card compiles the 3.6 MB PTX in about 20 s without the driver's cache.
 
+### After task 0185, round 1 (undo of an extrude)
+- The stress row "Undo of an extrude" with the views on the CPU: 21.2 ms a frame (21.0-21.5 over five runs), was 25.9;
+  Blender 5.2.2's row 15.7 ms. The target was half the gap (20.7): 45 % closed from the table's 25.7.
+- Its parts before: the restore 0.3 ms, the Scene view 17.6 (the cage overlay 7.2, the shadow map 4.0 inside it), the
+  Game view 4.6, the UI 2.6. After: the shadow map isn't drawn (its key no longer holds material addresses, which an
+  undo's restored copies changed), the Scene view 12.9-13.8.
+- With the views on the GPU: 13.1-14.2 ms, unchanged. Edit Mode entry, extrude and Select More unchanged within noise.
+
 ## Pass 12: Edit Mode's frames that aren't drags, compared with Blender (tasks 0107-0110)
 
 The user asked to "look for performance gains in edit mode; compare to how blender implements their edit mode", and

@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 207): undo no longer redraws the shadow map (task 0185, round 1 of 3)
+
+**Asked:** the performance pass against Blender's numbers: the three rows furthest behind, half of each gap a round.
+
+**Fixed**
+- **Undo drew the shadow map again every time.** The map's cache key mixed in each material's address; undo restores
+  the scene's snapshot, whose materials are copies, so it always missed (redo restores the live objects and hit). The
+  key now holds only what the depth pass reads: each material's surface type and Cast Shadows.
+
+**Measured** (stress editor_render, the views on the CPU, a quiet machine)
+- Undo of an extrude on the 50k-face sphere: 25.9 -> 21.2 ms (21.0-21.5 over five runs, 21.9 in the chain's stress run; the table had 25.7); Blender 5.2.2's row 15.7 ms.
+  45 % of the gap closed, short of the half (20.7 ms). With the views on the GPU it was, and stays, about 13.6 ms.
+- The stress rows now print each Edit Mode frame's parts (the restore, each view, the overlays, shadows, the UI): the
+  undo frame's restore is 0.3 ms; the rest is drawing the restored mesh, which headless Blender doesn't do.
+- Tried and reverted: the overlay batch's sort and copy in parallel (no measurable change).
+- The other rows within noise of the same day's run before the fix: Edit Mode entry 25.5-26.8 ms (was 26.3-26.9), extrude 46.7-49.0 (48.4), Select More 14.3-14.7 (14.7).
+
+**Checked**
+- An undo of a colour change keeps the shadow map while the views draw it (fails on the old key; tests/test_editor.cpp).
+- An Opus review found no bug; its points are taken: the test pinned to the CPU views and checking they redrew, the
+  stress parts labelled as nested, the baseline drift stated; two other caches keyed by material addresses are noted
+  in the task doc.
+- Unit checks (round 207): Windows, in render-cache verify mode, 11,824, 0 failed (969 tests), 0 stale
+  pictures. Linux with libraries: 11,471, 0 failed. Sanitizer build: 11,347, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load (and once alone while another build ran) and passed run alone on a quiet machine.)
+
 ## 2026-10-22 (round 206): essentials first, a guide per layout, Open Recent, typed gizmo moves (task 0190, ADR 0060 amended)
 
 **Asked:** the interaction pass's second round.

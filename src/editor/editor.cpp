@@ -1828,6 +1828,7 @@ void Editor::undo() {
 
 /* The scene and selection of `s` become the editor's; what they replace goes onto `into` (undo's redo, redo's undo). */
 void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char *verb) {
+  ProfileScope prof{prof_.ms_undo, {}};
   UndoState cur;
   cur.scene = std::move(scene_);
   detach_material_assets(*cur.scene);  // (its .mat slots: its own values, whatever the restored state writes)

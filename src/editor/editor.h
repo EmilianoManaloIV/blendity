@@ -138,6 +138,7 @@ struct FrameProfile {
   /* Task 0165: an Edit Mode operator's own time - its one mesh copy, the operation, the selection flushed, Auto
    * Smooth's check - inside the command that ran it (not a view's time). */
   double ms_edit_op = 0;
+  double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
@@ -167,7 +168,7 @@ struct FrameProfile {
     views_held += o.views_held, cheap_shadows += o.cheap_shadows;
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
-    ms_edit_op += o.ms_edit_op;
+    ms_edit_op += o.ms_edit_op, ms_undo += o.ms_undo;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;

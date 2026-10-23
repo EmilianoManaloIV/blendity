@@ -2838,6 +2838,39 @@ static void tests_round206() {
   });
 }
 
+/* ---------------------------------------------------------------- round 207: undo without redrawing what didn't change (task 0185) */
+static void tests_round207() {
+  test("undo of a colour change keeps the shadow map: the restored scene's materials are copies, and a colour doesn't cast", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.set_render_cache_verify(false);  // (it counts renders: verify mode would re-render every hit)
+    ed.viewport_device_for_test(1);      // (the CPU views keep the map this counts; the GPU's draws its own)
+    ed.command("layout 2 by 3");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr mat = std::make_shared<Material>();  // (the scene's own material: a snapshot copies it)
+    cube->get<MeshRenderer>()->materials = {mat};
+    ed.mark_changed_for_test("Material");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    mat->base_color = Vec3(0.9f, 0.1f, 0.1f);
+    ed.mark_changed_for_test("Colour");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const FrameProfile p0 = ed.frame_profile_totals();
+    CHECK(p0.shadow_renders >= 1);  // (the sun has a map to keep)
+    ed.command("undo");
+    ed.step_frame_headless();
+    const FrameProfile &p1 = ed.frame_profile_totals();
+    const GameObject *restored = ed.scene().find_by_name("Cube");
+    const MeshRenderer *mr = restored ? restored->get<MeshRenderer>() : nullptr;
+    const bool copied = mr && !mr->materials.empty() && mr->materials[0];
+    CHECK(copied && mr->materials[0].get() != mat.get());  // (a copy: what the key used to miss on)
+    CHECK(copied && length(mr->materials[0]->base_color - Material().base_color) < 1e-6f);  // (the colour went back)
+    CHECK(p1.view_renders > p0.view_renders);  // (the views did draw the undo: the map was there to reuse)
+    CHECK(p1.shadow_renders == p0.shadow_renders);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2866,5 +2899,6 @@ void run_editor_tests() {
   tests_round204();
   tests_round205();
   tests_round206();
+  tests_round207();
   coverage_tests();
 }
