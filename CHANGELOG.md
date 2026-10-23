@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 202): the Editing tab's room to grow, specified (task 0184)
+
+**Asked:** the roadmap's last Editing task: layers with blend modes, text, healing and clone, content-aware fill -
+specified now, built when asked.
+
+**Changed**
+- docs/tasks/0184-editing-room-to-grow.md: where each attaches (the adjustment registry, masks, the document's cache
+  keyed by text, so a step holding pixels needs a revision in its text) and the research each would follow - the
+  W3C / Photoshop blend modes Blender's Mix node shares, Poisson image editing (Pérez et al. 2003) for healing,
+  PatchMatch (Barnes et al. 2009) with Wexler et al.'s voting for content-aware fill, Criminisi et al.'s exemplar
+  inpainting as the simpler first step - an order, and what isn't planned (generative fill: a model and licence
+  question to ask first).
+
+**Checked**
+- Documentation only: no code changed, the check chain wasn't run again (round 201's checks hold).
+
 ## 2026-10-22 (round 201): the Editing tab at 4K - a preview the window's size, tables for the display axis (task 0191, ADR 0058 amended)
 
 **Asked:** (round 198's measured miss) an 11-step stack on a 4K render took 683 ms, and a slider near the top of the
