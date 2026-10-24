@@ -754,6 +754,7 @@ class Editor {
   }
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
+  bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
   Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
   bool transform_active_for_test() const { return xf_.active; }  // a G / R / S is running

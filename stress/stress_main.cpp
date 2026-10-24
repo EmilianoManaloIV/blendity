@@ -6078,8 +6078,8 @@ void parity_edit_mode(ParityRows &out, const Options &o, bool big) {
     in_edit("vertex");
     ed.command("vsel 0");
     settle();
-  }, [&] { ed.command("editop select_invert"); ed.command("editop select_more"); }, nothing);
-  out.row("Select all" + on, all.total, "ms", all.alone, "editop select_invert from one vertex, then select_more (Blendity has no Select All operator of its own: the two together select every vertex)");
+  }, [&] { ed.run_action_for_test("edit.select_all"); }, nothing);
+  out.row("Select all" + on, all.total, "ms", all.alone, "Edit Mode's Select All (its shortcut's action, Ctrl+A / A)");
   const Timed linked = parity_mean(ed, reps, faces("100"), [&] { ed.command("editop select_linked"); }, nothing);
   out.row("Select linked from one face" + on, linked.total, "ms", linked.alone, "editop select_linked from face 100 (the whole sphere)");
   const Timed ext = parity_mean(ed, reps, faces("100 101 102"), [&] { ed.command("editop extrude"); }, undo);
@@ -6108,9 +6108,7 @@ void parity_edit_mode(ParityRows &out, const Options &o, bool big) {
   auto every = [&](const char *elem) {
     return [&, elem] {
       in_edit(elem);
-      ed.command("vsel 0");
-      ed.command("editop select_invert");
-      ed.command("editop select_more");
+      ed.run_action_for_test("edit.select_all");
       settle();
     };
   };

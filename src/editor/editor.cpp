@@ -2548,14 +2548,26 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     double sum = 0;
     size_t views = 0;
     for (int i = 0; i < 10; i++) step(true);  // (settled first)
+    const FrameProfile p0 = frame_profile_totals();
     for (int i = 0; i < frames && running_; i++) {
       sum += step(true);
       views += card_views_shown_.size();
     }
     if (pixels) *pixels = window_pixels();
-    std::printf("  presented by the %s: %.2f ms a frame over %d frames, %.1f views a frame on the card%s%s\n", card ? "card" : "system",
-                sum / std::max(1, frames), frames, (double)views / std::max(1, frames), gpu_view_reason_.empty() ? "" : "; on the CPU: ",
-                gpu_view_reason_.c_str());
+    const double n = std::max(1, frames);
+    std::printf("  presented by the %s: %.2f ms a frame over %d frames, %.1f views a frame on the card%s%s\n", card ? "card" : "system", sum / n, frames,
+                (double)views / n, gpu_view_reason_.empty() ? "" : "; on the CPU: ", gpu_view_reason_.c_str());
+    /* Task 0203: where the frame went (the Profiler's parts, a frame's mean): what makes a row slow. The parts nest: the
+     * overlays, gathering, hashing and the Scene view's own GPU path are inside the Scene view; the GPU path counts every
+     * view's; the UI is the rest of the panels. */
+    const FrameProfile p1 = frame_profile_totals();
+    std::printf("    of it (nested, not to add up): the Scene view %.2f (its overlays %.2f), the views' GPU path %.2f (the card's passes %.2f; "
+                "uploads, copies back and the wait %.2f), gathering %.2f, hashing %.2f; the UI %.2f, presenting %.2f ms; %.1f meshes sent a frame\n",
+                (p1.ms_scene3d - p0.ms_scene3d) / n, (p1.ms_overlays - p0.ms_overlays) / n, (p1.ms_gpu - p0.ms_gpu) / n,
+                (p1.ms_gpu_shadow - p0.ms_gpu_shadow + p1.ms_gpu_gbuffer - p0.ms_gpu_gbuffer + p1.ms_gpu_lighting - p0.ms_gpu_lighting) / n,
+                (p1.ms_gpu_readback - p0.ms_gpu_readback) / n,
+                (p1.ms_collect - p0.ms_collect) / n, (p1.ms_hash - p0.ms_hash) / n, (p1.ms_ui - p0.ms_ui) / n, (p1.ms_present - p0.ms_present) / n,
+                (double)(p1.gpu_mesh_uploads - p0.gpu_mesh_uploads + p1.gpu_mesh_updates - p0.gpu_mesh_updates) / n);
   };
   std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),
               card_present_ ? "presents the window" : "doesn't present it", card_reason_.empty() ? "" : ": ", card_reason_.c_str());

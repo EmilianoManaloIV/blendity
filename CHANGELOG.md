@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 223): why Blendity trails Blender where it does (task 0203)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round finds the causes. docs/tasks/0203-parity-causes.md ranks every gap of 1.25x or more by what
+the user feels, with its cause and its fix task:
+1. **The views wait for the card every frame (0204).** The Scene view copies its ids and depth back for picking only
+   a click needs.
+2. **Edit Mode's cage on big meshes (0205):** the edge shader's antialiasing strip, and the cage rebuilt on the CPU
+   each frame.
+3. **Playback (0206):** the clip applied and the scene's matrices and hash worked out again each frame.
+4. **Duplicating many objects (0207):** names tried against every sibling, n³ in all.
+5. **Select All, Inset and Bevel (0208):** the edge selection as a hash set of every edge; whole-mesh copies and
+   rebuilds to change three faces.
+6. **Files (0209):** the exporter's per-corner normal flood (271 ms at the sphere's poles); the importers' per-value
+   type checks.
+7. **Big scenes saved and opened (0210):** a text format.
+8. **Boolean and Array (0211):** map-based conversions; vertices and faces added one at a time.
+
+**Changed**
+- `--windowed-check` prints where each frame goes: the Scene view, the views' GPU path (the card's passes; uploads,
+  copies back and the wait), the UI and presenting.
+- Pass 15's Select All row runs Edit Mode's own Select All. It had timed two operators standing in for it, and the
+  real one is slower: 14.9 ms against Blender's 2.6 on 50k faces, 249 against 23 on 500k.
+
+**Checked**
+- An Opus review checked each cause against the code it names and corrected the document:
+  - Blender too draws edit-mesh edges as screen-space quads (rank 2 now names the edge shader's strip and the cage's
+    per-frame rebuild);
+  - `Mesh::corner_normals` is not the exporter's normals under 180 degrees (rank 6);
+  - dropping the copies back would leave the fence wait (rank 1);
+  - Select All's edge set is walked every frame after it (rank 5);
+  - the breakdown's parts nest, and its "copies back" includes the uploads (both now labelled).
+- Unit checks (round 223): Windows, in render-cache verify mode, 11,957, 0 failed (993 tests), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 222): Blender's viewport, playback and start-up against Blendity's window (task 0202)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
