@@ -63,6 +63,8 @@ void Editor::draw_scene_view(const Recti &r) {
   if (draw_update(view)) gizmo_busy = true;
 
   auto &in = u.in;
+  /* Task 0214: in Tablet Mode a finger the gizmo and the tools didn't take orbits (a tap still selects). */
+  if (finger_navigates() && drag_ == Drag::None && scene_hovered_ && in.pressed[0] && !gizmo_busy && !u.any_active()) finger_orbit_start();
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
   if (drag_ == Drag::None && scene_hovered_ && in.pressed[0] && !in.alt() && !gizmo_busy && tool_ != Tool::View &&
       !u.any_active()) {
@@ -88,13 +90,7 @@ void Editor::draw_scene_view(const Recti &r) {
         if (edit_mode_) edit_box_select(view, box, mode == SEL_TOGGLE ? SEL_ADD : SEL_REPLACE);
         else box_select(view, box, mode == SEL_TOGGLE ? SEL_ADD : SEL_REPLACE);
       }
-      else {
-        if (edit_mode_) edit_pick(view, in.mx, in.my, mode);
-        else if (!point_pick(view, in.mx, in.my, mode)) {
-          pt_sel_.clear();
-          pick(view, in.mx, in.my, mode);
-        }
-      }
+      else click_select(view, in.mx, in.my, mode);
       if (moved && !edit_mode_) pt_sel_.clear();
       drag_ = Drag::None;
       box_visible = false;
@@ -103,8 +99,9 @@ void Editor::draw_scene_view(const Recti &r) {
   /* Esc drops a curve's point selection (the object stays selected). */
   if (!pt_sel_.empty() && scene_hovered_ && drag_ == Drag::None && in.key_pressed[platform::KEY_ESCAPE] && !u.wants_keyboard())
     pt_sel_.clear();
-  /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). */
-  if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_) frame_selected();
+  /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). A finger's double tap
+   * in Tablet Mode does it as it lifts (task 0214). */
+  if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_ && !finger_orbit_) frame_selected();
 
   {
     /* The 3D layer is reused while nothing it shows has changed (an idle frame, the mouse over a panel,
@@ -224,8 +221,9 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
 void Editor::scene_navigation(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
-  double now = now_seconds();
+  double now = clock_now();
   float k_pan = (2.0f * cam_.distance * std::tan(cam_.fov * 0.5f * kDeg2Rad)) / std::max(1, view.h);
+  finger_glide(now);
 
   if (nav_style_ == NavStyle::Unreal && drag_ == Drag::Box && in.pressed[1]) {  // Unreal: LMB then RMB held pans too
     drag_ = Drag::Pan;
@@ -280,11 +278,13 @@ void Editor::scene_navigation(const Recti &view) {
     }
     case Drag::Orbit:
       if (!in.down[drag_button_]) {
-        if (drag_button_ == 0) alt_click_release(view);
+        if (finger_orbit_) finger_orbit_end(view, now);
+        else if (drag_button_ == 0) alt_click_release(view);
         drag_ = Drag::None;
         break;
       }
       u.cursor = Cursor::Move;
+      if (finger_orbit_ && !finger_orbit_move(dx, dy, now)) break;  // (a tap's jitter doesn't turn the view)
       cam_.yaw += dx * 0.3f;
       cam_.pitch = clampf(cam_.pitch + dy * 0.3f, -89.9f, 89.9f);
       break;
@@ -348,6 +348,86 @@ void Editor::touch_navigate(float k_pan) {
     cam_.pivot += cam_.up() * (in.touch_pan_y * k_pan);
   }
   if (std::isfinite(in.touch_rotate)) cam_.yaw -= in.touch_rotate;
+  ui_.redraw = true;
+}
+
+/* A click's selection at (x, y): Edit Mode's elements, else a point of a curve, else an object. */
+void Editor::click_select(const Recti &view, int x, int y, int mode) {
+  if (edit_mode_) {
+    edit_pick(view, x, y, mode);
+    return;
+  }
+  if (point_pick(view, x, y, mode)) return;
+  pt_sel_.clear();
+  pick(view, x, y, mode);
+}
+
+/* ---- a finger in Tablet Mode (task 0214) ---- */
+
+void Editor::finger_orbit_start() {
+  const auto &in = ui_.in;
+  drag_ = Drag::Orbit;
+  drag_button_ = 0;
+  finger_orbit_ = true;
+  finger_double_ = in.double_clicked[0];
+  finger_press_x_ = in.mx, finger_press_y_ = in.my;
+  finger_travel_ = finger_vel_yaw_ = finger_vel_pitch_ = 0.0f;
+  finger_last_ = clock_now();
+  glide_yaw_ = glide_pitch_ = 0.0f;
+  cam_.animating = false;
+}
+
+/* The finger's speed, smoothed over the last few moves (the glide starts from it). False while it is still within a
+ * tap's reach (8 px): the view doesn't turn for a tap's jitter. */
+bool Editor::finger_orbit_move(int dx, int dy, double now) {
+  const bool orbiting = finger_travel_ >= ui_.px(8);
+  finger_travel_ += std::abs((float)dx) + std::abs((float)dy);
+  const float dt = (float)std::max(now - finger_last_, 1.0 / 240.0);
+  finger_last_ = now;
+  finger_vel_yaw_ = finger_vel_yaw_ * 0.5f + dx * 0.3f / dt * 0.5f;
+  finger_vel_pitch_ = finger_vel_pitch_ * 0.5f + dy * 0.3f / dt * 0.5f;
+  return orbiting;
+}
+
+/* Let go: a tap selects where it touched (a double tap frames the selection); a flick still moving glides on. A
+ * press taken back (a second finger) does neither. */
+void Editor::finger_orbit_end(const Recti &view, double now) {
+  finger_orbit_ = false;
+  const auto &in = ui_.in;
+  if (in.cancelled) return;
+  if (finger_travel_ < ui_.px(8)) {
+    /* A double tap: Edit Mode's edge loop, as a double-click selects it, else the selection framed. */
+    if (finger_double_ && edit_mode_ && elem_ != EditElement::Face) edit_select_loop(view, finger_press_x_, finger_press_y_, in.shift());
+    else if (finger_double_) frame_selected();
+    else click_select(view, finger_press_x_, finger_press_y_, (in.shift() || in.ctrl()) ? SEL_TOGGLE : SEL_REPLACE);
+    return;
+  }
+  const bool still_moving = now - finger_last_ < 0.06;  // (a finger that stopped before lifting doesn't glide)
+  const float speed = std::hypot(finger_vel_yaw_, finger_vel_pitch_);
+  if (!still_moving || speed < 60.0f) return;
+  const float cap = std::min(1.0f, 720.0f / speed);  // (at most two turns a second)
+  glide_yaw_ = finger_vel_yaw_ * cap, glide_pitch_ = finger_vel_pitch_ * cap;
+  glide_last_ = now;
+}
+
+/* The glide: it slows by about 4x every half second and stops at the next touch, press, wheel or gesture. */
+void Editor::finger_glide(double now) {
+  if (glide_yaw_ == 0.0f && glide_pitch_ == 0.0f) return;
+  const auto &in = ui_.in;
+  const bool touched = in.pressed[0] || in.pressed[1] || in.pressed[2] || in.wheel_y != 0.0f || in.touch_zoom != 1.0f ||
+                       in.touch_pan_x != 0.0f || in.touch_pan_y != 0.0f || in.touch_rotate != 0.0f;
+  /* (A glide whose view wasn't drawn for a while - another tab over it - ends rather than jumping on.) */
+  if (touched || drag_ != Drag::None || now - glide_last_ > 0.2) {
+    glide_yaw_ = glide_pitch_ = 0.0f;
+    return;
+  }
+  const float dt = (float)std::min(now - glide_last_, 0.1);
+  glide_last_ = now;
+  cam_.yaw += glide_yaw_ * dt;
+  cam_.pitch = clampf(cam_.pitch + glide_pitch_ * dt, -89.9f, 89.9f);
+  const float decay = std::exp(-2.8f * dt);
+  glide_yaw_ *= decay, glide_pitch_ *= decay;
+  if (std::hypot(glide_yaw_, glide_pitch_) < 4.0f) glide_yaw_ = glide_pitch_ = 0.0f;
   ui_.redraw = true;
 }
 
@@ -625,7 +705,7 @@ void Editor::frame_selected() {
   }
   float radius = std::max(0.25f, length(b.extent()));
   float dist = radius / std::sin(cam_.fov * 0.5f * kDeg2Rad) * 1.1f;
-  cam_.animate_to(b.center(), cam_.yaw, cam_.pitch, dist, now_seconds());
+  cam_.animate_to(b.center(), cam_.yaw, cam_.pitch, dist, clock_now());
 }
 
 /* ===================================================================== */

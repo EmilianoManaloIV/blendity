@@ -4,6 +4,9 @@
 
 #include "../src/core/touch_gestures.h"
 
+#include <chrono>
+#include <thread>
+
 using namespace bl;
 
 namespace {
@@ -182,4 +185,165 @@ static void tests_round233() {
   });
 }
 
-void run_input_tests() { tests_round233(); }
+/* ---------------------------------------------------------------- round 234: fingers navigate the Scene view (task 0214) */
+static void tests_round234() {
+  using platform::EventType;
+  const platform::Pointer finger = platform::Pointer::Touch;
+  /* A finger's drag in the Scene view, from its middle, `steps` moves of (sx, sy) pixels a frame. */
+  /* Time on the editor's clock (task 0214): frames 8 ms apart however fast the build runs. */
+  auto later = [&](Editor &ed, double seconds) { ed.set_clock_for_test(ed.clock_for_test() + seconds); };
+  auto finger_drag = [&](Editor &ed, int sx, int sy, int steps, bool pause) {
+    const Recti r = ed.scene_rect_for_test();
+    int x = r.x + r.w / 2, y = r.y + r.h / 2;
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, x, y, finger)});
+    for (int i = 0; i < steps; i++) {
+      x += sx, y += sy;
+      if (pause) later(ed, 0.008);
+      ed.step_frame_headless({pointer_ev(EventType::MouseMove, x, y, finger)});
+    }
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, x, y, finger)});
+  };
+
+  test("tablet: one finger dragging in the Scene view orbits round the pivot and selects nothing; outside Tablet Mode the same drag box-selects and the view stays", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    ed.clear_selection_for_test();
+    const SceneCamera a = ed.scene_camera_for_test();
+    finger_drag(ed, 20, 6, 10, false);
+    ed.step_frame_headless();
+    const SceneCamera b = ed.scene_camera_for_test();
+    const size_t boxed = ed.selected_objects_for_test().size();
+    std::printf("    outside Tablet Mode: yaw %.1f -> %.1f, %zu selected\n", a.yaw, b.yaw, boxed);
+    CHECK(b.yaw == a.yaw && b.pitch == a.pitch && boxed > 0);
+    ed.command("window tablet on");
+    ed.step_frame_headless();
+    ed.clear_selection_for_test();
+    finger_drag(ed, 20, 6, 10, false);
+    const SceneCamera c = ed.scene_camera_for_test();  // (as the finger lifts: the scripted drag is quick, so it glides on after)
+    std::printf("    in Tablet Mode: yaw %.1f -> %.1f, pitch %.1f -> %.1f, %zu selected\n", b.yaw, c.yaw, b.pitch, c.pitch, ed.selected_objects_for_test().size());
+    /* (The first move only takes the finger past a tap's 8 px: the other nine turn the view, 0.3 degrees a pixel.) */
+    CHECK(std::fabs(c.yaw - (b.yaw + 180 * 0.3f)) < 0.01f && std::fabs(c.pitch - (b.pitch + 54 * 0.3f)) < 0.01f);
+    CHECK(ed.selected_objects_for_test().empty() && length(c.pivot - b.pivot) < 1e-6f);
+    /* The mouse in Tablet Mode is still the mouse: its press stops the glide, and its drag box-selects. */
+    const Recti r = ed.scene_rect_for_test();
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, r.x + r.w / 8, r.y + r.h / 8)});
+    const float pressed_yaw = ed.scene_camera_for_test().yaw;
+    ed.step_frame_headless({pointer_ev(EventType::MouseMove, r.right() - r.w / 8, r.bottom() - r.h / 8)});
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, r.right() - r.w / 8, r.bottom() - r.h / 8)});
+    ed.step_frame_headless();
+    std::printf("    the mouse's box in Tablet Mode: %zu selected\n", ed.selected_objects_for_test().size());
+    CHECK(!ed.selected_objects_for_test().empty() && ed.scene_camera_for_test().yaw == pressed_yaw && ed.glide_yaw_for_test() == 0.0f);
+  });
+
+  test("tablet: a finger's tap selects what a click selects; a double tap frames the selection; a press taken back by a second finger does neither", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("window tablet on");
+    ed.step_frame_headless();
+    ed.clear_selection_for_test();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, cx, cy, finger)});
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, cx, cy, finger)});
+    ed.step_frame_headless();
+    const size_t tapped = ed.selected_objects_for_test().size();
+    CHECK(tapped > 0 && !ed.scene_camera_for_test().animating);
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, cx, cy, finger)});
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, cx, cy, finger)});
+    std::printf("    a tap selected %zu; the second tap framed it: %s\n", tapped, ed.scene_camera_for_test().animating ? "yes" : "no");
+    CHECK(ed.scene_camera_for_test().animating);
+    later(ed, 0.4);  // (the double tap's window gone)
+    ed.step_frame_headless();
+    ed.clear_selection_for_test();
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, cx, cy, finger)});
+    platform::Event back = pointer_ev(EventType::MouseUp, cx, cy, finger);
+    back.cancel = true;
+    ed.step_frame_headless({back});
+    ed.step_frame_headless();
+    CHECK(ed.selected_objects_for_test().empty());
+  });
+
+  test("tablet: a flick glides on and slows to a stop; a finger's next touch stops it at once; a drag that stopped before lifting doesn't glide", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("window tablet on");
+    ed.step_frame_headless();
+    const float yaw0 = ed.scene_camera_for_test().yaw;
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, 500, 400, finger), pointer_ev(EventType::MouseMove, 503, 401, finger)});
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, 503, 401, finger)});
+    std::printf("    a tap with 4 px of jitter turned the view %.2f degrees\n", ed.scene_camera_for_test().yaw - yaw0);
+    CHECK(ed.scene_camera_for_test().yaw == yaw0);
+    ed.clear_selection_for_test();  // (the tap selected something: a flick on its gizmo would move it, not the view)
+    finger_drag(ed, 30, 0, 6, true);
+    const float speed = ed.glide_yaw_for_test();
+    const float at_release = ed.scene_camera_for_test().yaw;
+    later(ed, 0.05);
+    ed.step_frame_headless();
+    const float on = ed.scene_camera_for_test().yaw;
+    std::printf("    a flick: gliding at %.0f degrees a second, %.2f degrees on 50 ms later\n", speed, on - at_release);
+    CHECK(speed > 60.0f && on > at_release && ed.wants_continuous_redraw_for_test());
+    const Recti r = ed.scene_rect_for_test();
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, r.x + r.w / 2, r.y + r.h / 2, finger)});
+    CHECK(ed.glide_yaw_for_test() == 0.0f);
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, r.x + r.w / 2, r.y + r.h / 2, finger)});
+    /* Moved, then held still 150 ms, then lifted: no glide. */
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, r.x + 100, r.y + 100, finger)});
+    for (int i = 1; i <= 5; i++) ed.step_frame_headless({pointer_ev(EventType::MouseMove, r.x + 100 + 30 * i, r.y + 100, finger)});
+    later(ed, 0.15);
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, r.x + 250, r.y + 100, finger)});
+    CHECK(ed.glide_yaw_for_test() == 0.0f);
+    /* A glide whose view goes undrawn for a while (another tab over it) ends rather than jumping on when it's back. */
+    finger_drag(ed, 30, 0, 6, true);
+    CHECK(ed.glide_yaw_for_test() != 0.0f);
+    const float left_at = ed.scene_camera_for_test().yaw;
+    later(ed, 0.3);
+    ed.step_frame_headless();
+    CHECK(ed.glide_yaw_for_test() == 0.0f && ed.scene_camera_for_test().yaw == left_at);
+  });
+
+  test("tablet: a finger on the move gizmo's handle drags it, not the view", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("window tablet on");
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, cx, cy, finger)});
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, cx, cy, finger)});
+    ed.step_frame_headless();
+    std::vector<GameObject *> sel = ed.selected_objects_for_test();
+    CHECK(sel.size() == 1);
+    if (sel.size() != 1) return;
+    /* A pixel on a handle, found with the mouse's hover. */
+    int hx = -1, hy = cy;
+    for (int dx = 0; dx < r.w / 2 && hx < 0; dx += 3) {
+      ed.step_frame_headless({pointer_ev(EventType::MouseMove, cx + dx, cy)});
+      if (ed.gizmo_hot_for_test() >= 0) hx = cx + dx;
+    }
+    for (int dy = 0; dy < r.h / 2 && hx < 0; dy += 3) {
+      ed.step_frame_headless({pointer_ev(EventType::MouseMove, cx, cy - dy)});
+      if (ed.gizmo_hot_for_test() >= 0) hx = cx, hy = cy - dy;
+    }
+    CHECK(hx >= 0);
+    if (hx < 0) return;
+    const Vec3 before = sel[0]->world_position();
+    const float yaw = ed.scene_camera_for_test().yaw;
+    ed.step_frame_headless({pointer_ev(EventType::MouseMove, r.x + 5, r.y + 40)});  // (the mouse away: the finger lands cold)
+    ed.step_frame_headless({pointer_ev(EventType::MouseDown, hx, hy, finger)});
+    for (int i = 1; i <= 6; i++) ed.step_frame_headless({pointer_ev(EventType::MouseMove, hx + 8 * i, hy - 8 * i, finger)});
+    ed.step_frame_headless({pointer_ev(EventType::MouseUp, hx + 48, hy - 48, finger)});
+    ed.step_frame_headless();
+    const Vec3 after = sel[0]->world_position();
+    std::printf("    handle %d at (%d, %d): moved %.3f, the view turned %.2f degrees\n", ed.gizmo_hot_for_test(), hx, hy, length(after - before), ed.scene_camera_for_test().yaw - yaw);
+    CHECK(length(after - before) > 1e-3f && ed.scene_camera_for_test().yaw == yaw);
+  });
+}
+
+void run_input_tests() {
+  tests_round233();
+  tests_round234();
+}

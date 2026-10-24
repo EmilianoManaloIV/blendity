@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 234): fingers navigate the Scene view (task 0214)
+
+**Asked:** the plan for a 2-in-1 - in Tablet Mode one finger orbits, two pinch / pan / twist, the pen manipulates.
+
+**Changed** (Tablet Mode, the Scene view, a finger the gizmo and tools didn't take):
+- one finger drags to orbit round the pivot, in every feel;
+- a tap selects, and a double tap frames the selection (in Edit Mode on vertices or edges, it selects the edge loop);
+- a flick glides on and slows to a stop; the next touch stops it.
+
+A finger on a gizmo handle still drags it. The mouse and the pen are unchanged.
+
+**Checked**
+- Scripted finger drags, taps, double taps and flicks in Tablet Mode and out of it, and a finger on the gizmo's
+  handle (tests/test_input.cpp).
+- An Opus review found four things, all fixed:
+  - a glide kept the editor redrawing while another tab covered the Scene view; it ends now, and doesn't jump on later;
+  - a double tap framed the selection twice, and its second press couldn't orbit;
+  - in Edit Mode a double tap framed instead of selecting an edge loop as a double-click does;
+  - a tap's jitter turned the view a little before selecting; the view now waits until the finger has gone past a
+    tap's 8 px.
+- The editor has a clock a test can fix (`clock_now`): a double click's window, a finger's speed and its glide
+  are measured on it, so the sanitizer build's slower frames don't change what the tests see (its first run failed the
+  double tap and the flick on time alone).
+- Unit checks (round 234): Windows, in render-cache verify mode, 12,066, 0 failed (1013 tests), 0 stale
+  pictures. Linux with libraries: 11,608, 0 failed. Sanitizer build: 11,478, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems.
+
 ## 2026-10-24 (round 233): which pointer is which, and fingers read directly (task 0213)
 
 **Asked:** "Integrate better support for pen mode. So that if I'm in a 2 in 1 laptop I can navigate more fluidly and

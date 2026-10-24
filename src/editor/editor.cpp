@@ -224,7 +224,7 @@ void Editor::init_headless(int width, int height) {
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
-  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
+  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || (scene_drawn_ && (glide_yaw_ != 0.0f || glide_pitch_ != 0.0f)) || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
          lighting_update_requested_ || preview_running_ ||
          seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
          body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
@@ -445,7 +445,7 @@ void Editor::process_events(std::vector<Event> &events) {
         in.touch = e.pointer == Pointer::Touch, in.barrel = e.barrel;
         in.down[b] = true;
         in.pressed[b] = true;
-        double t = now_seconds();
+        double t = clock_now();
         if (t - last_click[b] < 0.35 && std::abs(e.x - last_click_x[b]) < 5 && std::abs(e.y - last_click_y[b]) < 5) {
           in.double_clicked[b] = true;
           last_click[b] = -1;
@@ -529,7 +529,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   /* The system asked for the window to be painted, or it changed: present all of it (what it showed may be gone). */
   for (const Event &e : events)
     if (e.type == EventType::Repaint || e.type == EventType::Resize || e.type == EventType::DpiChanged) present_all_ = true;
-  double now = now_seconds();
+  double now = clock_now();
   ScopedTimer frame_timer;
   /* Frames in the last second: the measured rate (Preferences > Performance). */
   frame_stamps_.push_back(now);
@@ -3285,7 +3285,7 @@ bool Editor::bench_scene(const std::string &name) {
   selection_ = made;
   active_ = made.back();
   frame_selected();
-  cam_.update(now_seconds() + 10.0);  // (the framing's animation finished now)
+  cam_.update(clock_now() + 10.0);  // (the framing's animation finished now)
   if (name == "keyed1k") selection_ = {made[0]}, active_ = made[0];  // (one box: the Animation window plays its parent's clip)
   else if (name != "sphere50k" && name != "sphere500k") clear_selection();
   mark_changed("Bench Scene");

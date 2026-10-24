@@ -709,7 +709,7 @@ void Editor::draw_view_gizmo(const Recti &view) {
   if (hover_area && u.in.pressed[0] && drag_ == Drag::None) {
     if (hot_label) cam_.ortho = !cam_.ortho;  // Unity: click the label to switch projection
     else if (hot >= 0) {
-      cam_.animate_to(cam_.pivot, axes[hot].yaw, axes[hot].pitch, cam_.distance, now_seconds());
+      cam_.animate_to(cam_.pivot, axes[hot].yaw, axes[hot].pitch, cam_.distance, clock_now());
       cam_.ortho = true;
     }
     else cam_.ortho = !cam_.ortho;

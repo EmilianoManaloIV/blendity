@@ -239,7 +239,7 @@ bool Editor::autorig_set_view(const std::string &view_in) {
   const float side = (v == "left" || v == "right") ? b.max.z - b.min.z : b.max.x - b.min.x;
   const float half = 0.55f * std::max(v == "top" ? b.max.z - b.min.z : b.max.y - b.min.y, side);
   cam_.ortho = true;
-  cam_.animate_to(b.center(), yaw, pitch, std::max(0.1f, half) / std::tan(cam_.fov * 0.5f * kDeg2Rad), now_seconds());
+  cam_.animate_to(b.center(), yaw, pitch, std::max(0.1f, half) / std::tan(cam_.fov * 0.5f * kDeg2Rad), clock_now());
   v[0] = (char)std::toupper((unsigned char)v[0]);
   autorig_.view = v;
   return true;

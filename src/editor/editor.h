@@ -992,7 +992,10 @@ class Editor {
   GameObject *rig_root_of(GameObject *g) const;
   std::string theme_name_ = "Dark";
   void set_theme(const std::string &name, bool save = true);
-  void touch_navigate(float k_pan);  // task 0075
+  void touch_navigate(float k_pan);
+  float glide_yaw_for_test() const { return glide_yaw_; }  // task 0075
+  void set_clock_for_test(double t) { test_clock_ = t; }
+  double clock_for_test() const { return clock_now(); }
   const std::string &theme_name_for_test() const { return theme_name_; }
   int retile_texture_users(const std::string &asset_path, float from, float to);  // task 0072
   std::vector<std::pair<MaterialPtr, bool>> texture_followers(const std::string &asset_path, float from);
@@ -2349,6 +2352,25 @@ class Editor {
   int pointer_window_ = 0;    // the window the last press was in (its drags: assets, the Hierarchy's)
   bool in_frame_ = false, save_prefs_pending_ = false;
   bool tablet_ = false;  // (the drawing window's Tablet mode: its UI 1.5 times as big, task 0188)
+  /* Task 0214: in Tablet Mode a finger navigates the Scene view - one finger orbits (a tap selects, a double tap
+   * frames the selection), and a flick glides on. The finger's press, how far it has gone, its speed (degrees a
+   * second of yaw and pitch), and the glide after it. */
+  bool finger_navigates() const { return tablet_ && ui_.in.touch; }
+  /* The frame's clock (task 0214): the system's, or a test's fixed time - a double click's window, a finger's speed and
+   * its glide are measured on it, so tests don't depend on how fast a build runs. */
+  double test_clock_ = -1.0;
+  double clock_now() const { return test_clock_ >= 0.0 ? test_clock_ : now_seconds(); }
+  bool finger_orbit_ = false, finger_double_ = false;
+  int finger_press_x_ = 0, finger_press_y_ = 0;
+  float finger_travel_ = 0.0f, finger_vel_yaw_ = 0.0f, finger_vel_pitch_ = 0.0f;
+  double finger_last_ = 0.0;
+  float glide_yaw_ = 0.0f, glide_pitch_ = 0.0f;
+  double glide_last_ = 0.0;
+  void finger_orbit_start();
+  bool finger_orbit_move(int dx, int dy, double now);
+  void finger_orbit_end(const Recti &view, double now);
+  void finger_glide(double now);
+  void click_select(const Recti &view, int x, int y, int mode);
   /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
   std::vector<PaletteEntry> palette_entries_;
   std::vector<std::string> add_component_recent_;

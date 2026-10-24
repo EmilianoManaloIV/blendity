@@ -785,7 +785,7 @@ void Editor::set_editor_feel(const std::string &name_in) {
 }
 
 void Editor::view_along(float yaw, float pitch, bool ortho) {
-  cam_.animate_to(cam_.pivot, yaw, pitch, cam_.distance, now_seconds());
+  cam_.animate_to(cam_.pivot, yaw, pitch, cam_.distance, clock_now());
   cam_.ortho = ortho;
 }
 
