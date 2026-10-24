@@ -43,7 +43,8 @@ void Editor::draw_scene_view(const Recti &r) {
   }
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
-  scene_navigation(view);
+  const bool quick_menu_took = quick_menu_update();  // (task 0217: before anything else takes the press)
+  if (!quick_menu_took) scene_navigation(view);
   view_gizmo_drag(view);  // (a drag begun on the Scene Gizmo or its hand / magnifier: task 0216)
   update_pilot_camera();  // flying a camera: it follows the view
 
@@ -51,7 +52,7 @@ void Editor::draw_scene_view(const Recti &r) {
    * render, so transforms applied by a drag show up in the same frame. */
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
-  bool gizmo_busy = bone_handles_update(view);  // (before the gizmo: a pressed handle is the bone's, task 0066)
+  bool gizmo_busy = quick_menu_took || bone_handles_update(view);  // (before the gizmo: a pressed handle is the bone's, task 0066)
   if (gizmo_update(view)) gizmo_busy = true;
   if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
   /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
@@ -64,6 +65,13 @@ void Editor::draw_scene_view(const Recti &r) {
   if (draw_update(view)) gizmo_busy = true;
 
   auto &in = u.in;
+  /* Task 0217: a pen held still half a second where a press would box-select opens the quick menu there. */
+  if (drag_ == Drag::None && scene_hovered_ && in.pressed[0] && in.pen) pen_press_at_ = clock_now();
+  pen_holding_ = drag_ == Drag::Box && in.pen && in.down[0];
+  if (pen_holding_ && std::max(std::abs(in.mx - drag_x_), std::abs(in.my - drag_y_)) <= u.px(4) && clock_now() - pen_press_at_ >= 0.5) {
+    drag_ = Drag::None;
+    quick_menu_open(drag_x_, drag_y_, true);
+  }
   /* Task 0214: in Tablet Mode a finger the gizmo and the tools didn't take orbits (a tap still selects). */
   if (finger_navigates() && drag_ == Drag::None && scene_hovered_ && in.pressed[0] && !gizmo_busy && !u.any_active()) finger_orbit_start();
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
@@ -156,6 +164,7 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_modal(view);
   draw_transform(view);
   if (!piloting) draw_view_gizmo(view);
+  quick_menu_draw();
 
   /* Statistics overlay (Blender: Viewport Overlays > Statistics). */
   if (show_stats_ && !piloting) {
@@ -235,8 +244,13 @@ void Editor::scene_navigation(const Recti &view) {
     drag_ = Drag::Pan;
     drag_button_ = 1;
   }
+  if (barrel_nav_ && drag_ != Drag::None && !in.down[drag_button_]) {  // (task 0217)
+    barrel_nav_ = false;
+    if (std::max(std::abs(in.mx - drag_x_), std::abs(in.my - drag_y_)) <= u.px(4) && !in.cancelled) quick_menu_open(in.mx, in.my, false);
+  }
   if (drag_ == Drag::None && scene_hovered_ && !u.any_active()) {
     std::tie(drag_, drag_button_) = nav_drag_for_press();
+    barrel_nav_ = drag_ != Drag::None && in.pen && in.barrel;
     if (drag_ == Drag::Fly) {
       fly_last_ = now;
       fly_accel_ = 1.0f;

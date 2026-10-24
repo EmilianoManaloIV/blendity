@@ -540,9 +540,141 @@ static void tests_round236() {
   });
 }
 
+/* ---------------------------------------------------------------- round 237: the pen quick menu (task 0217) */
+static void tests_round237() {
+  using platform::EventType;
+  const platform::Pointer pen = platform::Pointer::Pen;
+  /* A frame 20 ms after the last on the editor's clock. */
+  auto step = [&](Editor &ed, std::vector<platform::Event> events) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  auto pen_ev = [&](EventType t, int x, int y, int button = 0, bool barrel = false) {
+    platform::Event e = pointer_ev(t, x, y, pen);
+    e.button = button, e.barrel = barrel;
+    return e;
+  };
+  auto setup = [&](Editor &ed) {
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed, {});
+  };
+  /* A point in the Scene view over nothing (its top-left area, below the overlay bar). */
+  auto empty_spot = [&](Editor &ed) {
+    const Recti r = ed.scene_rect_for_test();
+    return std::make_pair(r.x + r.w / 5, r.y + r.h / 5);
+  };
+
+  test("pen: held still half a second in the Scene view, it opens the quick menu (no box select); flicking through Undo and lifting undoes", [&] {
+    Editor ed;
+    setup(ed);
+    ed.command("create Cube");
+    const size_t made = ed.scene().object_count();
+    ed.clear_selection_for_test();
+    auto [x, y] = empty_spot(ed);
+    step(ed, {pen_ev(EventType::MouseMove, x, y)});
+    step(ed, {pen_ev(EventType::MouseDown, x, y)});
+    for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) step(ed, {});  // (0.5 s at 20 ms a frame: 25)
+    CHECK(ed.quick_menu_open_for_test());
+    /* Undo is the seventh of the ten slices, 216 degrees clockwise from straight up. */
+    const float a = 216.0f * 3.14159265f / 180.0f;
+    const int ux = x + (int)(std::sin(a) * 90.0f), uy = y - (int)(std::cos(a) * 90.0f);
+    step(ed, {pen_ev(EventType::MouseMove, ux, uy)});
+    std::printf("    the menu opened; the slice under the pen: %d (Undo is 6)\n", ed.quick_menu_hot_for_test());
+    CHECK(ed.quick_menu_hot_for_test() == 6);
+    step(ed, {pen_ev(EventType::MouseUp, ux, uy)});
+    step(ed, {});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == made - 1 && ed.selected_objects_for_test().empty());
+  });
+
+  test("pen: the quick menu opened at the Scene view's edge is kept inside it, and a held pen lifted where it opened picks nothing", [&] {
+    Editor ed;
+    setup(ed);
+    const Recti r = ed.scene_rect_for_test();
+    const int x = r.x + 6, y = r.y + r.h / 2;
+    step(ed, {pen_ev(EventType::MouseMove, x, y)});
+    step(ed, {pen_ev(EventType::MouseDown, x, y)});
+    for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) step(ed, {});
+    CHECK(ed.quick_menu_open_for_test() && ed.quick_menu_hot_for_test() == -1);
+    const size_t objects = ed.scene().object_count();
+    step(ed, {pen_ev(EventType::MouseUp, x, y)});
+    CHECK(ed.quick_menu_open_for_test() && ed.scene().object_count() == objects);  // (waits for a tap)
+    step(ed, {pen_ev(EventType::MouseDown, x, y)});
+    step(ed, {pen_ev(EventType::MouseUp, x, y)});
+  });
+
+  test("pen: a pen that moves box-selects as before (no menu); the mouse held still opens nothing", [&] {
+    Editor ed;
+    setup(ed);
+    ed.clear_selection_for_test();
+    const Recti r = ed.scene_rect_for_test();
+    step(ed, {pen_ev(EventType::MouseDown, r.x + 8, r.y + 40)});
+    step(ed, {pen_ev(EventType::MouseMove, r.right() - 8, r.bottom() - 8)});
+    for (int i = 0; i < 40; i++) step(ed, {});
+    step(ed, {pen_ev(EventType::MouseUp, r.right() - 8, r.bottom() - 8)});
+    CHECK(!ed.quick_menu_open_for_test() && !ed.selected_objects_for_test().empty());
+    auto [x, y] = empty_spot(ed);
+    step(ed, {pointer_ev(EventType::MouseDown, x, y)});
+    for (int i = 0; i < 40; i++) step(ed, {});
+    CHECK(!ed.quick_menu_open_for_test());
+    step(ed, {pointer_ev(EventType::MouseUp, x, y)});
+  });
+
+  test("pen: its side button clicked opens the quick menu; a tap outside closes it; a tap on Delete deletes the selection; `quickmenu pick` does the same", [&] {
+    Editor ed;
+    setup(ed);
+    auto [x, y] = empty_spot(ed);
+    step(ed, {pen_ev(EventType::MouseMove, x, y, 1, true)});
+    step(ed, {pen_ev(EventType::MouseDown, x, y, 1, true)});
+    step(ed, {pen_ev(EventType::MouseUp, x, y, 1, true)});
+    CHECK(ed.quick_menu_open_for_test());
+    const Recti r = ed.scene_rect_for_test();
+    step(ed, {pen_ev(EventType::MouseDown, r.right() - 20, r.bottom() - 20)});
+    step(ed, {pen_ev(EventType::MouseUp, r.right() - 20, r.bottom() - 20)});
+    CHECK(!ed.quick_menu_open_for_test());
+    ed.command("create Cube");
+    const size_t before = ed.scene().object_count();
+    CHECK(ed.selected_objects_for_test().size() == 1);
+    step(ed, {pen_ev(EventType::MouseDown, x, y, 1, true)});
+    step(ed, {pen_ev(EventType::MouseUp, x, y, 1, true)});
+    /* Delete is the fifth slice, 144 degrees clockwise from up. */
+    const float a = 144.0f * 3.14159265f / 180.0f;
+    const int dx = x + (int)(std::sin(a) * 90.0f), dy = y - (int)(std::cos(a) * 90.0f);
+    step(ed, {pen_ev(EventType::MouseMove, dx, dy)});
+    step(ed, {pen_ev(EventType::MouseDown, dx, dy)});
+    step(ed, {pen_ev(EventType::MouseUp, dx, dy)});
+    step(ed, {});
+    std::printf("    %zu objects, %zu after the quick menu's Delete\n", before, ed.scene().object_count());
+    CHECK(ed.scene().object_count() == before - 1 && !ed.quick_menu_open_for_test());
+    ed.command("create Cube");
+    ed.command("quickmenu pick Delete");
+    CHECK(ed.scene().object_count() == before - 1);
+  });
+
+  test("pen: the quick menu's Add to Selection makes the next press add (Shift held for it), then presses replace again", [&] {
+    Editor ed;
+    setup(ed);
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    ed.command("quickmenu pick Add to Selection");
+    step(ed, {pen_ev(EventType::MouseMove, cx, cy)});
+    CHECK(!ed.ui_for_test().in.shift());  // (armed: no press yet)
+    step(ed, {pen_ev(EventType::MouseDown, cx, cy)});
+    const bool on_press = ed.ui_for_test().in.shift();
+    step(ed, {pen_ev(EventType::MouseUp, cx, cy)});
+    const bool on_release = ed.ui_for_test().in.shift();
+    step(ed, {pen_ev(EventType::MouseDown, cx, cy)});  // (straight after: no frame between, as a finger's next tap)
+    const bool next = ed.ui_for_test().in.shift();
+    step(ed, {pen_ev(EventType::MouseUp, cx, cy)});
+    std::printf("    Shift on the press %d, on its release %d, on the next press %d\n", on_press, on_release, next);
+    CHECK(on_press && on_release && !next);
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
   tests_round235();
   tests_round236();
+  tests_round237();
 }

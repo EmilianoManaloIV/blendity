@@ -2,6 +2,30 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 237): the pen quick menu (task 0217)
+
+**Asked:** the plan for a 2-in-1 - a pen quick menu (side button or long press) for tools without a keyboard.
+
+**Added**
+- **A ring of commands at the pen** in the Scene view, opened by the pen's side button clicked or by holding it still
+  half a second. Flick through a slice and lift, or tap one; a tap elsewhere closes it.
+- **Slices:** Move / Rotate / Scale, Duplicate, Delete, Frame, Undo / Redo and Edit Mode in Object mode; Extrude,
+  Vertex / Edge / Face, Select All and Object Mode in Edit Mode. Add to Selection makes the next press add.
+- `quickmenu open|close|pick <slice>|list`.
+- Windows' own press-and-hold right click is off in the editor's windows: holding the pen is the editor's now.
+
+**Checked**
+- Scripted holds, flicks, side-button clicks and taps (tests/test_input.cpp).
+- An Opus review found these, all fixed:
+  - Add to Selection failed whenever a second window was open (another window's input cleared it);
+  - Shift lingered into the frame after the release, so a key or the next tap could read it;
+  - the menu opened near the Scene view's edge was cut off, and a hidden slice could be picked by a flick;
+  - with the Scene view in a second window, the held pen's half second wasn't noticed until the pen moved;
+  - Esc that closed the menu also cleared a curve's points, and a middle-button press left the menu open.
+- Unit checks (round 237): Windows, in render-cache verify mode, 12,101 (1022 tests; the gpu group's below), 0 stale
+  pictures. Linux with libraries: 11,643, 0 failed. Sanitizer build: 11,513, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group failed under the parallel load: its slow-open test, and its click-after-a-switch-to-the-CPU test even run alone while the Linux legs still loaded the machine. On a quiet machine the group passed, 380 checks, 0 failed.)
+
 ## 2026-10-24 (round 236): navigating with the pen alone (task 0216)
 
 **Asked:** the plan for a 2-in-1 - with no keyboard or middle button, the pen still orbits, pans and zooms.

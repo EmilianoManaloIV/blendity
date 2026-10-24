@@ -481,6 +481,8 @@ static Window *make_window(const char *title, int x, int y, int ow, int oh) {
   SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
   w->dpi = window_dpi(w->hwnd);
   DragAcceptFiles(w->hwnd, TRUE);
+  /* Task 0217: a pen held still is the editor's (its quick menu), not Windows' press-and-hold right click. */
+  SetPropW(w->hwnd, L"MicrosoftTabletPenServiceProperty", (HANDLE)(UINT_PTR)0x00000001);  // (TABLET_DISABLE_PRESSANDHOLD)
   return w;
 }
 

@@ -538,6 +538,8 @@ class Editor {
   bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
   std::string gizmo_typed_for_test() const { return gizmo_typed_; }
   int gizmo_hot_for_test() const { return gizmo_hot_; }
+  bool quick_menu_open_for_test() const { return qm_.open; }
+  int quick_menu_hot_for_test() const { return qm_.hot; }
   Recti nav_button_rect_for_test(int which) const { return nav_buttons_shown() ? nav_button_rect(scene_rect_, which) : Recti{}; }
   Recti view_gizmo_rect_for_test() const { return view_gizmo_rect(scene_rect_); }
   void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
@@ -2386,6 +2388,23 @@ class Editor {
   Recti nav_button_rect(const Recti &view, int which) const;  // 0 the hand, 1 the magnifier
   void view_gizmo_drag(const Recti &view);
   void view_gizmo_click(int axis);
+  /* Task 0217 (quick_menu.cpp): the pen quick menu - opened by the pen's side button clicked or the pen held still
+   * 0.5 s in the Scene view. `sticky_add_`: 1 armed by its Add to Selection, 2 while the next press adds. */
+  struct QuickMenu {
+    bool open = false, held = false;
+    int x = 0, y = 0, hot = -1;
+    int px = 0, py = 0;  // (where the pen opened it: moved inside the view, the ring's middle may not be under it)
+  } qm_;
+  int sticky_add_ = 0;
+  double pen_press_at_ = 0.0;
+  bool pen_holding_ = false;  // (a pen held still in the Scene view, whichever window draws it: frames keep coming for the 0.5 s)
+  bool barrel_nav_ = false;  // (the navigation drag began with the pen's side button: a click without moving opens the menu)
+  std::vector<std::pair<std::string, std::string>> quick_menu_slices() const;
+  void quick_menu_open(int x, int y, bool held);
+  int quick_menu_hot(int mx, int my) const;
+  bool quick_menu_pick(const std::string &name);
+  bool quick_menu_update();
+  void quick_menu_draw();
   /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
   std::vector<PaletteEntry> palette_entries_;
   std::vector<std::string> add_component_recent_;

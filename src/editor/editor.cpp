@@ -224,7 +224,8 @@ void Editor::init_headless(int width, int height) {
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
-  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || (scene_drawn_ && (glide_yaw_ != 0.0f || glide_pitch_ != 0.0f)) || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
+  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || pen_holding_ || (scene_drawn_ && (glide_yaw_ != 0.0f || glide_pitch_ != 0.0f)) ||
+         tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
          lighting_update_requested_ || preview_running_ ||
          seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
          body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
@@ -443,6 +444,7 @@ void Editor::process_events(std::vector<Event> &events) {
         in.pressure = e.pressure;
         in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
         in.touch = e.pointer == Pointer::Touch, in.barrel = e.barrel;
+        if (sticky_add_ == 1) sticky_add_ = 2;  // (the quick menu's Add to Selection: this press adds, task 0217)
         in.down[b] = true;
         in.pressed[b] = true;
         double t = clock_now();
@@ -459,6 +461,7 @@ void Editor::process_events(std::vector<Event> &events) {
       }
       case EventType::MouseUp:
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
+        if (sticky_add_ == 2 && e.button == 0) sticky_add_ = 3;  // (its release: Shift for this frame's click, then off)
         in.touch = e.pointer == Pointer::Touch, in.barrel = e.barrel;
         in.down[e.button] = false;
         in.released[e.button] = true;
@@ -503,6 +506,8 @@ void Editor::process_events(std::vector<Event> &events) {
   }
   if (!in.down[0] && !in.released[0]) gizmo_nav_ = GizmoNav::None;  // (task 0216)
   /* Keep modifiers consistent with key state (some platforms omit them on key events). */
+  if (sticky_add_ >= 2 && pointer_window_ == active_window_) in.mods |= MOD_SHIFT;  // (task 0217)
+  if (sticky_add_ == 3 && pointer_window_ == active_window_) sticky_add_ = 0;
   if (in.key_down[KEY_SHIFT]) in.mods |= MOD_SHIFT;
   if (in.key_down[KEY_CTRL]) in.mods |= MOD_CTRL;
   if (in.key_down[KEY_ALT]) in.mods |= MOD_ALT;

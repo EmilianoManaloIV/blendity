@@ -689,6 +689,16 @@ void Editor::run_console_command(const std::string &line) {
     save_prefs();
     return;
   }
+  if (c == "quickmenu") {  // quickmenu open [x y]|close|pick <slice>|list (task 0217)
+    const std::string v = to_lower(arg(1, "list"));
+    if (v == "open") quick_menu_open(std::atoi(arg(2, std::to_string(scene_rect_.x + scene_rect_.w / 2)).c_str()),
+                                     std::atoi(arg(3, std::to_string(scene_rect_.y + scene_rect_.h / 2)).c_str()), false);
+    else if (v == "close") qm_.open = false;
+    else if (v == "pick" && !quick_menu_pick(line.substr(line.find("pick") + 5))) Log::warn("quickmenu: no slice named that");
+    else if (v == "list")
+      for (const auto &s : quick_menu_slices()) Log::info("%s", s.first.c_str());
+    return;
+  }
   if (c == "navbuttons") {  // navbuttons tablet|always: when the Scene Gizmo's hand and magnifier show (task 0216)
     const std::string v = to_lower(arg(1, ""));
     if (v != "tablet" && v != "always") {
