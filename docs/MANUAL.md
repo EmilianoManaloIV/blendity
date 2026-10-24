@@ -56,6 +56,28 @@ Tools** shows everything. **Save Layout...** keeps your own arrangement.
 W A S D (Q / E down / up, Shift faster) to fly, F frames the selection. Click the cones of the gizmo in the corner for
 front / top / side views, its centre for perspective / orthographic.
 
+**Fingers and a pen on a 2-in-1.** Tablet Mode (the tab menu, or Preferences > Pen and touch > Tablet Mode: Auto turns
+it on when the keyboard folds away) makes the targets half as big again, and then fingers navigate while the pen
+works:
+
+| Action | In Tablet Mode | Otherwise |
+|---|---|---|
+| One finger drags in the Scene view | orbits round the pivot; a flick glides on | box-selects, as the mouse |
+| One finger taps / double taps | selects / frames the selection (Edit Mode on vertices or edges: the edge loop) | clicks / double-clicks |
+| Two fingers | pinch zooms, drag pans, twist turns | the same |
+| One finger drags a list or panel | scrolls it (sideways still moves sliders and numbers) | as the mouse |
+| The pen | selects, moves, draws, paints, as the mouse | the same |
+| The pen's side button held while dragging | orbits; Shift pans, Ctrl zooms | the same |
+| The pen's side button clicked, or the pen held still half a second where a press would select | the quick menu: flick or tap Undo, Delete, Extrude, Face... | the same |
+| Drag the Scene Gizmo / its hand / its magnifier | orbits / pans / zooms | the gizmo orbits (the hand and magnifier show with Preferences > Pen and touch > Navigation buttons: Always) |
+
+A finger's press waits a moment before it counts, so a pinch never starts a box select. On Windows a palm resting on
+the screen while the pen is near is ignored. On Linux, fingers and pens come through XInput 2 where the system has it,
+and touches are ignored while the pen is moving; on a Mac, the trackpad's pinch and twist navigate and a tablet's pen
+has its pressure and tilt.
+
+> Learn: *The Editor Layout > Fingers and a pen on a 2-in-1*.
+
 **Selecting and moving.** Click to select, Ctrl+click to add, drag a box. Q W E R Y pick the View, Move, Rotate,
 Scale and Transform tools; Blender's G / R / S also work, with X / Y / Z to lock an axis and a typed number. Hold Ctrl
 to snap. Ctrl+Shift while moving drops the object onto the surface under the mouse; V snaps a vertex onto another.
@@ -536,8 +558,8 @@ class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 
 says so on the first run, with High one click away. There, editing frames run at about 35-40 fps and orbiting at 60.
 The GPU is for path tracing, baking and realtime GI; an integrated one gets a quarter of the RAM for it.
 
-**Touch and pen (Windows):** two fingers over the Scene view pinch to zoom, drag to pan and twist to turn round the
-pivot, in every editor feel; one finger is the mouse. A pen's pressure scales the weight-paint brush.
+**Touch and pen:** on a 2-in-1, see *Fingers and a pen on a 2-in-1* in chapter 1: Tablet Mode follows the fold, fingers
+navigate and the pen works. A pen's pressure scales the weight-paint brush.
 
 **Quality tiers** (Edit > Preferences..., Quality):
 

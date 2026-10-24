@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 241): the manual, the Learn lesson, the hints for fingers and the pen (task 0221)
+
+**Asked:** the plan for a 2-in-1 - document it where users look.
+
+**Added**
+- The manual's "Fingers and a pen on a 2-in-1" (chapter 1): every finger and pen action, in Tablet Mode and out.
+- The Learn tab's section of the same name, with questions and Try-it buttons.
+- The status bar's hints in Tablet Mode: the fingers' and the pen's.
+
+**Checked**
+- The hints in Tablet Mode and out (tests/test_input.cpp); the manual's Learn links (tests/test_editor.cpp).
+- An Opus review checked every claim against the code and found five to correct, all fixed:
+  - a double tap selects an edge loop only on vertices or edges;
+  - the try-it buttons switch the main window's Tablet Mode;
+  - palm rejection is Windows' (on Linux, touches are ignored while the pen moves);
+  - the navigation buttons' preference is under Pen and touch;
+  - the quick menu opens in the Scene view, which must be showing.
+
+  The lesson also gained a button to put the navigation buttons back.
+- Unit checks (round 241): Windows, in render-cache verify mode, 12,125, 0 failed (1031 tests), 0 stale
+  pictures. Linux with libraries: 11,667, 0 failed. Sanitizer build: 11,537, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 240): macOS - the trackpad and pen tablets (task 0220)
 
 **Asked:** the plan for a 2-in-1 - the same model on macOS.

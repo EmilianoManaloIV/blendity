@@ -781,6 +781,26 @@ static void tests_round240() {
   });
 }
 
+/* ---------------------------------------------------------------- round 241: the manual, the lesson, the hints (task 0221) */
+static void tests_round241() {
+  test("tablet: the status bar gives the fingers' and the pen's hints in Tablet Mode, the mouse's otherwise", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    ed.step_frame_headless({pointer_ev(platform::EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+    const std::string mouse = ed.statusbar_hint_for_test();
+    ed.command("window tablet on");
+    ed.step_frame_headless();
+    const Recti t = ed.scene_rect_for_test();
+    ed.step_frame_headless({pointer_ev(platform::EventType::MouseMove, t.x + t.w / 2, t.y + t.h / 2)});
+    const std::string tablet = ed.statusbar_hint_for_test();
+    std::printf("    mouse: %s\n    tablet: %s\n", mouse.c_str(), tablet.c_str());
+    CHECK(mouse.find("orbit") != std::string::npos && mouse.find("finger") == std::string::npos);
+    CHECK(tablet.find("One finger: orbit") != std::string::npos && tablet.find("quick menu") != std::string::npos);
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
@@ -790,4 +810,5 @@ void run_input_tests() {
   tests_round238();
   tests_round239();
   tests_round240();
+  tests_round241();
 }

@@ -263,6 +263,10 @@ void Editor::palette_command(const std::vector<std::string> &t, const std::strin
 
 /* What the mouse and the keys do where the mouse is (the Scene view's tool and mode, the feel's navigation). */
 std::string Editor::statusbar_hint() const {
+  /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */
+  if (tablet_ && scene_hovered_)
+    return "One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button or hold: quick menu";
+  if (tablet_) return "Tablet Mode: a finger scrolls lists  |  Pen side button or hold in the Scene view: quick menu";
   if (!scene_hovered_) return "Ctrl+K: find any command  |  Shift+Q: Quick Favorites";
   std::string nav;
   switch (nav_style_) {

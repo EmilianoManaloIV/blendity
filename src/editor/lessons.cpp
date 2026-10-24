@@ -91,6 +91,25 @@ For a second screen that shows the render large: in the Render tab's own window,
 ? In Tablet Mode, what does one finger do in the Scene view, and what does the pen do? | One finger orbits (a tap selects, a double tap frames, a flick glides on); two pinch, pan and twist. The pen selects and moves things, as the mouse does. A finger on a gizmo handle still drags the handle (task 0214).
 ? You put one finger on the Scene view, then a second to pinch. Why doesn't the first finger start a box select? | A finger's press waits up to 0.12 s (or 10 px, or its lift), and a pinch's second finger usually lands in that time, so the first never pressed. A second finger after that takes the press back: nothing is selected, dropped or docked (task 0213).
 ? A pen is pressed lightly and tilted on the Editing tab's mask brush. What happens to the stroke? | It is thinner where the pressure is light and wider where the pen leans, as with a pencil; turning the pen over erases.
+# Fingers and a pen on a 2-in-1
+With the keyboard folded away, Tablet Mode splits the work: fingers move the view, the pen does the work. Tablet Mode turns on by itself when the laptop folds (Preferences > Pen and touch > Tablet Mode: Auto), or from any tab's menu. Its targets are half as big again.
+| Touch | In Tablet Mode
+| One finger in the Scene view | Orbits; a tap selects, a double tap frames, a flick glides on
+| Two fingers | Pinch zooms, drag pans, twist turns
+| One finger on a list | Scrolls it; sideways it still moves sliders
+| The pen | Selects, moves, draws, as the mouse does
+| The pen's side button held | Orbits; Shift pans, Ctrl zooms
+| Side button clicked, or the pen held still where a press would select | The quick menu: flick or tap a command
+| The Scene Gizmo, its hand, its magnifier | Drag to orbit, pan, zoom
+? With the keyboard folded away, how do you delete the selection? | Open the quick menu - click the pen's side button, or hold the pen still half a second - and tap Delete (or flick through it and lift).
+? Two fingers touch the Scene view a moment apart. Does the first one start a box select? | No: a finger's press waits a moment, and a second finger in that time makes it a pinch; a later second finger takes the press back.
+! cmd:window tablet on | Tablet Mode on (the main window)
+! cmd:window tablet off | Tablet Mode off (the main window)
+! cmd:navbuttons always | Show the hand and the magnifier always
+! cmd:navbuttons tablet | Show them only in Tablet Mode again
+! cmd:quickmenu open | Open the quick menu in the Scene view (with the Scene view showing)
+@ blender/source/blender/editors/space_view3d/view3d_navigate.cc  (the navigation gizmo's orbit, pan and zoom)
+@ blender/intern/ghost/intern/GHOST_SystemWin32.cc  (pointer and pen input)
 # Layouts for each stage
 A 3D job goes through stages, and each needs only some of the tools. The Layout dropdown (top right, as in Unity; Blender's Workspaces) has a layout for each: Reference & Planning, Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Editing, Rigging, Skinning & Weight Painting and Animation. Each arranges the windows for its stage (the UV Editor beside the Scene view for UVs; the Materials and Textures windows for texturing; the Rigging window for rigs) and shows that stage's tools in the Modeling Tools window, the GameObject menu and Add Component; the others step aside. Nothing is gone: the keys and the console reach every tool, and Window > Layouts > Show All Tools shows them all. Default shows everything, as do the arrangements (2 by 3, Tall, Wide, Learning). Save Layout... keeps your own arrangement under a name.
 | Stage | Windows | Tools shown

@@ -540,6 +540,7 @@ class Editor {
   int gizmo_hot_for_test() const { return gizmo_hot_; }
   void set_tablet_posture_for_test(int folded) { test_posture_ = folded; }  // (1 folded, 0 open, -1 the system's)
   bool tablet_for_test() const { return tablet_; }
+  std::string statusbar_hint_for_test() const { return statusbar_hint(); }
   std::string prefs_text_for_test() const { return prefs_text_0190(); }
   bool quick_menu_open_for_test() const { return qm_.open; }
   int quick_menu_hot_for_test() const { return qm_.hot; }
