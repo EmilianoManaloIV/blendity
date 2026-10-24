@@ -2,6 +2,25 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 240): macOS - the trackpad and pen tablets (task 0220)
+
+**Asked:** the plan for a 2-in-1 - the same model on macOS.
+
+**Added**
+- The trackpad's pinch zooms and its twist turns the Scene view; two-finger scrolling stays scrolling.
+- A tablet's pen (Wacom, Sidecar's Apple Pencil): pressure, tilt, eraser, and its side buttons as the barrel.
+
+**Checked**
+- The conversions and the Scene view's response to a pinch and a twist (tests/test_input.cpp). No Mac here: CI
+  compiles it.
+- An Opus review found the eraser unreliable, fixed: it was kept per window, and missed a proximity that came inside
+  a mouse event, or while another app was in front. One flag for the program is read from every event before a
+  window gets it. It also noted that a Mac's tilt reads a little high near the ends (the system scales it by the
+  tablet's own most, about 60 degrees on a Wacom), now written down where it is converted.
+- Unit checks (round 240): Windows, in render-cache verify mode, 12,123, 0 failed (1029 tests), 0 stale
+  pictures. Linux with libraries: 11,665, 0 failed. Sanitizer build: 11,535, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone. The Windows run failed this round's own pinch test, which compared floats exactly where the optimised build rounds 1 + 0.1 differently; with a tolerance the input group passes, 100 checks, 0 failed.)
+
 ## 2026-10-24 (round 239): Linux - fingers and the pen through XInput 2 (task 0219)
 
 **Asked:** the plan for a 2-in-1 - the same fingers and pen on Linux.

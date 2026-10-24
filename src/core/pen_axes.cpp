@@ -44,4 +44,8 @@ bool valuator(const unsigned char *mask, int mask_len, const double *values, int
   return true;
 }
 
+float tilt_from_unit(double t) { return (float)std::max(-1.0, std::min(1.0, t)) * 90.0f; }
+
+float pinch_zoom(double magnification) { return (float)std::max(0.01, 1.0 + magnification); }
+
 }  // namespace bl::pen

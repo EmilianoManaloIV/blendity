@@ -754,6 +754,33 @@ static void tests_round239() {
   });
 }
 
+/* ---------------------------------------------------------------- round 240: macOS - the trackpad and pen tablets (task 0220) */
+static void tests_round240() {
+  test("mac: a trackpad pinch's magnification is the gesture's spread factor (never zero or less); a tablet's tilt is degrees from upright", [] {
+    /* (Near, not equal: an optimised build may round 1 + 0.1 to another float.) */
+    auto near = [](float x, float y) { return std::fabs(x - y) < 1e-5f; };
+    CHECK(near(pen::pinch_zoom(0.1), 1.1f) && near(pen::pinch_zoom(0.0), 1.0f) && near(pen::pinch_zoom(-0.5), 0.5f) && pen::pinch_zoom(-3.0) > 0.0f);
+    CHECK(near(pen::tilt_from_unit(0.0), 0.0f) && near(pen::tilt_from_unit(1.0), 90.0f) && near(pen::tilt_from_unit(-0.5), -45.0f) && near(pen::tilt_from_unit(4.0), 90.0f));
+  });
+
+  test("mac: a pinch's and a twist's gestures navigate the Scene view as two fingers do: in closer, turned round the pivot", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const SceneCamera a = ed.scene_camera_for_test();
+    platform::Event pinch;
+    pinch.type = platform::EventType::Gesture, pinch.x = r.x + r.w / 2, pinch.y = r.y + r.h / 2, pinch.zoom = pen::pinch_zoom(0.25);
+    ed.step_frame_headless({pinch});
+    platform::Event twist = pinch;
+    twist.zoom = 1.0f, twist.rotate = 10.0f;
+    ed.step_frame_headless({twist});
+    const SceneCamera b = ed.scene_camera_for_test();
+    std::printf("    distance %.2f -> %.2f, yaw %.1f -> %.1f\n", a.distance, b.distance, a.yaw, b.yaw);
+    CHECK(std::fabs(b.distance - a.distance / 1.25f) < 1e-3f && std::fabs(b.yaw - (a.yaw - 10.0f)) < 1e-3f);
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
@@ -762,4 +789,5 @@ void run_input_tests() {
   tests_round237();
   tests_round238();
   tests_round239();
+  tests_round240();
 }

@@ -24,4 +24,10 @@ float tilt_degrees(double v, double mn, double mx);
  * event didn't carry it. */
 bool valuator(const unsigned char *mask, int mask_len, const double *values, int index, double &out);
 
+/* Task 0220 (macOS): a tablet's tilt as the system gives it (-1..1 each way, of the tablet's own most - about 60
+ * degrees on a Wacom - so this reads a little high near the ends) in degrees from upright; a trackpad pinch's
+ * magnification (0.1: 10 % wider) as the spread factor the two-finger gesture uses. */
+float tilt_from_unit(double t);
+float pinch_zoom(double magnification);
+
 }  // namespace bl::pen

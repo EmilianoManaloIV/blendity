@@ -4,6 +4,7 @@
 #ifdef __APPLE__
 
 #include "platform.h"
+#include "../core/pen_axes.h"
 
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
@@ -97,6 +98,22 @@ static int map_keycode(unsigned short kc) {
 
 static void push(Window *w, Event e) { w->queue.push_back(std::move(e)); }
 
+/* Task 0220: the tablet's end in proximity is its eraser - one for the program (the pen comes near over any window, or
+ * while another app is in front), read from every event before a window gets it: a proximity event of its own, or a
+ * mouse event carrying it (Wacom's driver often sends it so). */
+static bool g_pen_eraser = false;
+
+static void note_proximity(NSEvent *e) {
+  const NSEventType t = [e type];
+  const bool own = t == NSEventTypeTabletProximity;
+  const bool mouse = t == NSEventTypeLeftMouseDown || t == NSEventTypeLeftMouseUp || t == NSEventTypeRightMouseDown ||
+                     t == NSEventTypeRightMouseUp || t == NSEventTypeOtherMouseDown || t == NSEventTypeOtherMouseUp ||
+                     t == NSEventTypeMouseMoved || t == NSEventTypeLeftMouseDragged || t == NSEventTypeRightMouseDragged ||
+                     t == NSEventTypeOtherMouseDragged;
+  if (!own && !(mouse && [e subtype] == NSEventSubtypeTabletProximity)) return;
+  if ([e isEnteringProximity]) g_pen_eraser = [e pointingDeviceType] == NSPointingDeviceTypeEraser;
+}
+
 }  // namespace bl::platform
 
 using namespace bl::platform;
@@ -116,6 +133,38 @@ using namespace bl::platform;
   ev.button = b;
   ev.x = (int)(p.x * s);
   ev.y = (int)(p.y * s);
+  ev.mods = mods_from_flags([e modifierFlags]);
+  /* Task 0220: a tablet's point (Wacom, Sidecar's Apple Pencil): the pen, its pressure, tilt and eraser; its side
+   * buttons (the right and other buttons) as the right button with the barrel held, as Windows sends them. */
+  if ([e subtype] == NSEventSubtypeTabletPoint) {
+    ev.pointer = Pointer::Pen, ev.pen = true;
+    ev.pressure = t == EventType::MouseUp ? 1.0f : (float)[e pressure];
+    const NSPoint tilt = [e tilt];
+    ev.tilt_x = bl::pen::tilt_from_unit(tilt.x), ev.tilt_y = bl::pen::tilt_from_unit(tilt.y);
+    ev.eraser = g_pen_eraser;
+    if (b != 0) ev.button = 1, ev.barrel = true;
+  }
+  push(self.owner, ev);
+}
+/* Task 0220: the trackpad's pinch and twist as the Scene view's two-finger gesture (two-finger scrolling stays the
+ * wheel: lists and panels scroll with it). */
+- (void)magnifyWithEvent:(NSEvent *)e {
+  NSPoint p = [self convertPoint:[e locationInWindow] fromView:nil];
+  CGFloat s = [[self window] backingScaleFactor];
+  Event ev;
+  ev.type = EventType::Gesture;
+  ev.x = (int)(p.x * s), ev.y = (int)(p.y * s);
+  ev.zoom = bl::pen::pinch_zoom([e magnification]);
+  ev.mods = mods_from_flags([e modifierFlags]);
+  push(self.owner, ev);
+}
+- (void)rotateWithEvent:(NSEvent *)e {
+  NSPoint p = [self convertPoint:[e locationInWindow] fromView:nil];
+  CGFloat s = [[self window] backingScaleFactor];
+  Event ev;
+  ev.type = EventType::Gesture;
+  ev.x = (int)(p.x * s), ev.y = (int)(p.y * s);
+  ev.rotate = (float)[e rotation];  // (degrees, counter-clockwise)
   ev.mods = mods_from_flags([e modifierFlags]);
   push(self.owner, ev);
 }
@@ -355,6 +404,7 @@ void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
     for (;;) {
       NSEvent *e = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:until inMode:NSDefaultRunLoopMode dequeue:YES];
       if (!e) break;
+      note_proximity(e);  // (task 0220: before any window has it)
       [NSApp sendEvent:e];
       until = [NSDate distantPast];
     }
