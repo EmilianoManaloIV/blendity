@@ -288,6 +288,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A scene with baked lighting - lightmaps, light probes, realtime lightmaps - had its views drawn by the processor. | The card draws them; realtime GI's per-pixel light alone stays the processor's (task 0197). |
 | A camera with any filter - a colour grade, a bloom, an outline - had its views drawn by the processor. | The card draws the 3D and the filters run over its picture; a retro filter's rasterizer stage alone stays the processor's (task 0197). |
 | With the card presenting, a resize or a long scroll took the window twice as long to show as the system did. | Presents don't wait for the card and only the changed columns go up: a whole window as fast as the system's, a 4K scroll 3.4 ms (task 0198). |
+| Opening a scene with a 500k-face mesh took half a second, 18 times Blender's. | The file is read at once and its big blocks parsed on every core: 135 ms; saving 140 ms (task 0210). |
 | Exporting a 50k-face sphere took a third of a second to most formats, four times Blender's. | Normals are worked out once per fan of faces at a vertex: OBJ 108 ms, FBX 24, glTF 32, USD 112 (task 0209). |
 | On a 50k-face mesh, Inset and Bevel took three times Blender's, and Select All six times. | Only what they change is rebuilt, and Select All keeps no edge set outside Edge mode: Inset 26 ms, Bevel 30, Select All 4 (task 0208). |
 | Duplicate on 10,000 selected objects took eleven minutes. | One go for the whole selection: 70 ms, Blender 1.5 s (task 0207). |
