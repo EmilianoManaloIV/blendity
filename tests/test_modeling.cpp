@@ -8038,6 +8038,31 @@ static void tests_round208() {
   });
 }
 
+/* ---------------------------------------------------------------- round 221: redo's numbers kept (task 0201) */
+static void tests_round221() {
+  test("redo from the console keeps an operator's numbers for its next use, as its F9 panel does (a bevel's width and segments)", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 32, 24);
+    big->add<MeshRenderer>();
+    ed.commit_change("add Big");
+    ed.command("select Big");
+    ed.command("edit face");
+    ed.command("fsel 100 101 102");
+    ed.command("editop bevel");
+    ed.command("redo amount 0.005");
+    ed.command("redo segments 3");
+    ed.command("undo");
+    r34_steps(ed, 2);
+    ed.command("fsel 100 101 102");
+    ed.command("editop bevel");
+    std::printf("    the next bevel: width %.3f, %d segments\n", ed.last_op_amount_for_test(), ed.last_op_segments_for_test());
+    CHECK(ed.last_op_name_for_test() == "bevel");
+    CHECK(std::fabs(ed.last_op_amount_for_test() - 0.005f) < 1e-6f && ed.last_op_segments_for_test() == 3);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8072,4 +8097,5 @@ void run_modeling_tests() {
   tests_round196();
   tests_round197();
   tests_round208();
+  tests_round221();
 }

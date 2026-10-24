@@ -75,9 +75,9 @@ def cell_text(value, unit):
     if value is None: return "-"
     return ("%.3f" % value if value < 1 else "%.1f" % value) + " " + unit
 
-def write_between_markers(path, table):
+def write_between_markers(path, table, marker="pass13-table"):
     with open(path, encoding="utf-8") as f: doc = f.read()
-    start, end = "<!-- pass13-table -->", "<!-- /pass13-table -->"
+    start, end = "<!-- %s -->" % marker, "<!-- /%s -->" % marker
     if start not in doc or end not in doc:
         print("markers not found in", path, file=sys.stderr)
         sys.exit(1)
@@ -85,13 +85,74 @@ def write_between_markers(path, table):
     with open(path, "w", encoding="utf-8", newline="\n") as f: f.write(doc[:i] + "\n" + table + "\n" + doc[j:])
     print("written into", path)
 
+# Pass 15 (task 0201): the stress `blender_parity` table and tools/bench_blender.py --parity joined by row name, in areas.
+AREAS = [
+    ("Files", lambda n: n.startswith(("Save a scene", "Open it", "Export ", "Import "))),
+    ("Objects", lambda n: n.endswith("objects") and "keyframed" not in n),
+    ("Edit Mode, 50k faces", lambda n: n.endswith("(50k faces)")),
+    ("Edit Mode, 500k faces", lambda n: n.endswith("(500k faces)")),
+    ("Modifiers", lambda n: n.startswith("Modifier")),
+    ("UV, animation, physics", lambda n: n.startswith(("Unwrap", "A frame of", "Ten shape keys")) or "rigid boxes" in n),
+    ("Rendering and memory", lambda n: n.startswith(("F12", "Memory"))),
+]
+
+def parity_rows(folder):
+    """The `blender_parity` table's rows: name -> (Blendity, unit, operator alone, method)."""
+    rows = {}
+    path = os.path.join(folder, "latest.md")
+    if not os.path.exists(path): return rows
+    with open(path, encoding="utf-8", errors="replace") as f:
+        inside = False
+        for line in f:
+            line = line.strip()
+            if line.startswith("## "): inside = line.startswith("## Blender parity")
+            if not inside or not line.startswith("|") or line.startswith("|---"): continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 5 and cells[0] != "row": rows[cells[0]] = (number(cells[1]) if cells[1] != "failed" else None, cells[2], number(cells[3]), cells[4])
+    return rows
+
+def parity_table(stress_folder, blender_json):
+    with open(blender_json, encoding="utf-8") as f: data = json.load(f)
+    blender = {r["row"]: r for r in data["rows"]}
+    mine = parity_rows(stress_folder)
+    out = []
+    behind = 0
+    for area, member in AREAS:
+        names = [n for n in mine if member(n)]
+        if not names: continue
+        out += ["", "**%s**" % area, "", "| row | Blendity | of it the operator alone | Blender %s | ratio | Blendity's method | Blender's method |" % data.get("blender", "5.2"), "|---|---|---|---|---|---|---|"]
+        for n in names:
+            value, unit, alone, method = mine[n]
+            b = blender.get(n)
+            theirs = b["blender"] if b and b["blender"] is not None and b["blender"] >= 0 else None
+            r = ratio_text(value, theirs, "lower")
+            if r.endswith("behind"): behind += 1
+            out.append("| %s | %s | %s | %s | %s | %s | %s |" % (n, cell_text(value, unit), cell_text(alone, unit) if alone is not None else "-", cell_text(theirs, unit), r,
+                                                         method.replace("|", "/"), (b["method"] if b else "no Blender row").replace("|", "/")))
+    missing = [r for r in data["rows"] if r["row"] not in mine]
+    if missing:
+        out += ["", "Blender rows without a Blendity twin: " + "; ".join(r["row"] for r in missing) + "."]
+    out.insert(0, "%d rows; Blendity behind on %d." % (sum(1 for n in mine if any(m(n) for _, m in AREAS)), behind))
+    return "\n".join(out), data.get("quick")
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stress", required=True)
-    ap.add_argument("--blender", required=True)
+    ap.add_argument("--stress")
+    ap.add_argument("--blender")
+    ap.add_argument("--parity", help="Pass 15: the folder holding the stress blender_parity report")
+    ap.add_argument("--blender-parity", help="Pass 15: tools/bench_blender.py --parity's JSON")
     ap.add_argument("--gpu", default="4070")
     ap.add_argument("--write")
     a = ap.parse_args()
+    if a.parity:
+        table, quick = parity_table(a.parity, a.blender_parity)
+        print(table)
+        if not a.write: return
+        if quick:
+            print("a --quick run is not written into the doc", file=sys.stderr)
+            sys.exit(1)
+        write_between_markers(a.write, table, "pass15-table")
+        return
     with open(a.blender, encoding="utf-8") as f: data = json.load(f)
     blender = {r["row"]: r for r in data["rows"]}
     reports = {}

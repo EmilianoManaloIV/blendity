@@ -8,6 +8,10 @@ Task 0199: Blender's own viewport, with its window (not -b), at the size Blendit
 
     "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" --window-geometry 0 0 2560 1369 --python tools/bench_blender.py -- --viewport --out build/bench/blender_viewport.json
 
+Task 0201: every editor feature's twin of Blendity's stress `blender_parity` rows (PERFORMANCE.md's Pass 15), headless:
+
+    "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" -b --python tools/bench_blender.py -- --parity --out build/bench/blender_parity.json
+
 Each row says what Blender does beside what Blendity's row does (the method per row is in docs/tasks/0178). Times
 are the mean of three runs of perf_counter around the call (Blendity's editor rows are means of three frames too);
 the Cycles rows fit a line through three sample counts so a render's fixed cost drops out. Blendity is left-handed
@@ -468,6 +472,458 @@ def run_viewport():
 if arg("--viewport", False) is not False:
     bpy.app.timers.register(run_viewport, first_interval=3.0)  # (once the window is up)
 
+# ------------------------------------------------------------------ Blender parity (task 0201)
+# The twins of Blendity's stress `blender_parity` rows, under the same names (tools/bench_table.py joins them). Headless
+# Blender draws nothing: an editor row is the operator, its undo step where Blender's editor pushes one, and the
+# depsgraph update. Means of three after a warm call unless a row says otherwise.
+
+def resident_mb():
+    """This process's resident memory (Windows: the working set; elsewhere /proc), in MB; -1 when unknown."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        class PMC(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD), ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t), ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+        pmc = PMC()
+        pmc.cb = ctypes.sizeof(PMC)
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        if k32.K32GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb): return pmc.WorkingSetSize / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/statm") as f: return int(f.read().split()[1]) * 4096 / (1024.0 * 1024.0)
+    except Exception:
+        return -1.0
+
+def parity_sphere(big):
+    """Blendity's parity spheres: 256 x 196 segments (50,176 faces) and 1024 x 490 (501,760)."""
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=1024 if big else 256, ring_count=490 if big else 196, radius=1.0)
+    return bpy.context.active_object
+
+def cube_grid(n):
+    """n objects sharing one 1 m cube (Blendity's make_grid_scene: 1.6 m apart in a square)."""
+    reset()
+    bpy.ops.mesh.primitive_cube_add(size=1.0)
+    proto = bpy.context.active_object
+    side = math.ceil(math.sqrt(n))
+    coll = bpy.context.collection
+    for i in range(n):
+        ob = proto if i == 0 else bpy.data.objects.new("obj", proto.data)
+        if i: coll.objects.link(ob)
+        ob.location = at((i % side - side * 0.5) * 1.6, 0.0, (i // side - side * 0.5) * 1.6)
+    bpy.context.view_layer.update()
+    return proto
+
+def timed_update(fn):
+    t0 = time.perf_counter()
+    fn()
+    bpy.context.view_layer.update()
+    return (time.perf_counter() - t0) * 1000.0
+
+def parity_files():
+    import shutil
+    bpy.context.preferences.filepaths.save_version = 0  # (no .blend1 backup renamed inside the timer)
+    tmp = tempfile.mkdtemp(prefix="blender_parity_")
+    def save_open(what, build, name):
+        build()
+        path = os.path.join(tmp, name)
+        bpy.ops.wm.save_as_mainfile(filepath=path, compress=False, copy=True)  # (warm)
+        save = mean_ms(lambda: bpy.ops.wm.save_as_mainfile(filepath=path, compress=False, copy=True))
+        size = os.path.getsize(path)
+        row("Save a scene: " + what, save, "ms", "wm.save_as_mainfile, uncompressed (%.1f MB written); Blendity's row: its .scene text written" % (size / 1e6))
+        opened = mean_ms(lambda: bpy.ops.wm.open_mainfile(filepath=path, load_ui=False))
+        row("Open it: " + what, opened, "ms", "wm.open_mainfile without its UI; Blendity's row: the file read and parsed into a scene, not swapped into an editor")
+        os.remove(path)
+    save_open("10,000 cubes", lambda: cube_grid(10000), "parity_cubes.blend")
+    def big():
+        reset()
+        parity_sphere(True)
+        bpy.context.view_layer.update()
+    save_open("a 500k-face mesh", big, "parity_big.blend")
+    formats = [
+        ("OBJ", ".obj", lambda p: bpy.ops.wm.obj_export(filepath=p), lambda p: bpy.ops.wm.obj_import(filepath=p)),
+        ("FBX", ".fbx", lambda p: bpy.ops.export_scene.fbx(filepath=p), lambda p: bpy.ops.import_scene.fbx(filepath=p)),
+        ("glTF (GLB)", ".glb", lambda p: bpy.ops.export_scene.gltf(filepath=p, export_format="GLB"), lambda p: bpy.ops.import_scene.gltf(filepath=p)),
+        ("STL", ".stl", lambda p: bpy.ops.wm.stl_export(filepath=p), lambda p: bpy.ops.wm.stl_import(filepath=p)),
+        ("PLY", ".ply", lambda p: bpy.ops.wm.ply_export(filepath=p), lambda p: bpy.ops.wm.ply_import(filepath=p)),
+        ("USD (USDA)", ".usda", lambda p: bpy.ops.wm.usd_export(filepath=p), lambda p: bpy.ops.wm.usd_import(filepath=p)),
+    ]
+    for label, ext, export, imp in formats:
+        path = os.path.join(tmp, "parity_sphere" + ext)
+        try:
+            reset()
+            parity_sphere(False)
+            export(path)  # (warm)
+            ms = mean_ms(lambda: export(path))
+            row("Export the 50k sphere as " + label, ms, "ms", "the exporter's operator at its defaults (%.1f MB written)" % (os.path.getsize(path) / 1e6))
+        except Exception as e:
+            row("Export the 50k sphere as " + label, -1, "ms", "failed: %s" % e)
+            continue
+        try:
+            total = 0.0
+            for _ in range(3):
+                reset()
+                total += timed_update(lambda: imp(path))
+            faces = sum(len(o.data.polygons) for o in bpy.data.objects if o.type == "MESH")
+            row("Import the 50k sphere from " + label, total / 3, "ms", "the importer's operator at its defaults + the depsgraph update (%d faces read)" % faces)
+        except Exception as e:
+            row("Import the 50k sphere from " + label, -1, "ms", "failed: %s" % e)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+def parity_objects():
+    cube_grid(10000)
+    what = "10,000 objects"
+    def deselect(): bpy.ops.object.select_all(action="DESELECT")
+    total = 0.0
+    for _ in range(3):
+        deselect()
+        total += timed_update(lambda: bpy.ops.object.select_all(action="SELECT"))
+    row("Select all, " + what, total / 3, "ms", "object.select_all + the depsgraph update; Blendity's row: selectall and the frame that shows it")
+    total = 0.0
+    for _ in range(3):
+        bpy.ops.object.select_all(action="SELECT")
+        bpy.ops.ed.undo_push(message="before")
+        def dup():
+            in_view3d(bpy.ops.object.duplicate, linked=True)
+            bpy.ops.ed.undo_push(message="duplicate")
+        total += timed_update(dup)
+        bpy.ops.ed.undo()
+    row("Duplicate " + what, total / 3, "ms", "object.duplicate linked (Alt+D: the copies share the mesh, as Blendity's copy-on-write copies do; Shift+D would copy 10,000 meshes) + its undo step + the depsgraph update; undone outside the timer")
+    total = 0.0
+    for _ in range(3):
+        bpy.ops.object.select_all(action="SELECT")
+        bpy.ops.ed.undo_push(message="before")
+        def delete():
+            in_view3d(bpy.ops.object.delete)
+            bpy.ops.ed.undo_push(message="delete")
+        total += timed_update(delete)
+        bpy.ops.ed.undo()
+    row("Delete " + what, total / 3, "ms", "object.delete + its undo step + the depsgraph update; undone outside the timer")
+    total = 0.0
+    for _ in range(3):
+        bpy.ops.object.select_all(action="SELECT")
+        bpy.ops.ed.undo_push(message="before")
+        in_view3d(bpy.ops.object.delete)
+        bpy.ops.ed.undo_push(message="delete")
+        total += timed_update(bpy.ops.ed.undo)
+        if len(bpy.data.objects) < 10000: raise RuntimeError("the undo did not bring the objects back")
+    row("Undo of the delete, " + what, total / 3, "ms", "ed.undo of the delete (the memfile step read back) + the depsgraph update")
+
+def select_all_mesh(ob, select=True):
+    bm = bmesh.from_edit_mesh(ob.data)
+    for v in bm.verts: v.select = select
+    for e in bm.edges: e.select = select
+    for f in bm.faces: f.select = select
+    bmesh.update_edit_mesh(ob.data)
+
+def meridian_edge(ob):
+    """The edge at the equator, angle 0, going down: a loop cut through it is a ring (Blendity's parity_meridian_edge)."""
+    bm = bmesh.from_edit_mesh(ob.data)
+    bm.verts.ensure_lookup_table()
+    v0 = min(bm.verts, key=lambda v: (v.co - Vector((1.0, 0.0, 0.0))).length)
+    e = min((e for e in v0.link_edges), key=lambda e: e.other_vert(v0).co.z if abs(e.other_vert(v0).co.y) < 1e-4 else 9.0)
+    return e.index
+
+def parity_edit_mode(big):
+    reset()
+    ob = parity_sphere(big)
+    on = " (500k faces)" if big else " (50k faces)"
+    bpy.context.view_layer.objects.active = ob
+    bpy.ops.object.mode_set(mode="OBJECT")
+    total = 0.0
+    for _ in range(3):
+        total += timed_update(lambda: bpy.ops.object.mode_set(mode="EDIT"))
+        bpy.ops.object.mode_set(mode="OBJECT")
+    row("Enter Edit Mode" + on, total / 3, "ms", "mode_set(EDIT) + the depsgraph update (the Mesh made a BMesh); headless Blender builds no draw cache")
+    bpy.ops.object.mode_set(mode="EDIT")
+    def op_row(name, select, op, method, undone=True):
+        total = 0.0
+        for _ in range(3):
+            select()
+            bpy.ops.ed.undo_push(message="before")
+            n0 = face_count(ob)
+            def run():
+                op()
+                bpy.ops.ed.undo_push(message=name)
+            total += timed_update(run)
+            if undone:
+                bpy.ops.ed.undo()
+                if face_count(ob) != n0: raise RuntimeError("undo did not restore the mesh")
+        row(name + on, total / 3, "ms", method + " + its undo step + the depsgraph update; undone outside the timer")
+    def sel_none(): select_all_mesh(ob, False)
+    total = 0.0
+    for _ in range(3):
+        sel_none()
+        total += timed_update(lambda: in_view3d(bpy.ops.mesh.select_all, action="SELECT"))
+    row("Select all" + on, total / 3, "ms", "mesh.select_all + the depsgraph update (no undo step timed: Blendity's selection pushes none)")
+    total = 0.0
+    for _ in range(3):
+        select_faces(ob, (100,))
+        total += timed_update(lambda: in_view3d(bpy.ops.mesh.select_linked))
+    row("Select linked from one face" + on, total / 3, "ms", "mesh.select_linked from face 100 + the depsgraph update")
+    three = lambda: select_faces(ob, (100, 101, 102))
+    everything = lambda: select_all_mesh(ob, True)
+    op_row("Extrude three faces", three, lambda: in_view3d(bpy.ops.mesh.extrude_region_shrink_fatten, TRANSFORM_OT_shrink_fatten={"value": 0.5}),
+           "mesh.extrude_region_shrink_fatten on faces 100-102, 0.5 along their normals")
+    op_row("Inset three faces", three, lambda: in_view3d(bpy.ops.mesh.inset, thickness=0.01, use_individual=False), "mesh.inset, region, thickness 0.01")
+    if not big:
+        op_row("Bevel three faces' edges", three, lambda: in_view3d(bpy.ops.mesh.bevel, offset=0.005, segments=3, affect="EDGES"),
+               "mesh.bevel on faces 100-102's edges, offset 0.005, 3 segments")
+        def cut():
+            idx = meridian_edge(ob)
+            in_view3d(bpy.ops.mesh.loopcut_slide, MESH_OT_loopcut={"number_cuts": 1, "edge_index": idx, "object_index": 0},
+                      TRANSFORM_OT_edge_slide={"value": 0.0})
+        try:
+            op_row("Loop cut", sel_none, cut, "mesh.loopcut_slide, 1 cut, through the meridian edge at the equator (a ring of 256 faces)")
+        except Exception as e:
+            row("Loop cut" + on, -1, "ms", "failed: %s" % e)
+        op_row("Subdivide every edge", everything, lambda: in_view3d(bpy.ops.mesh.subdivide, number_cuts=1), "mesh.subdivide, 1 cut, everything selected")
+        total = 0.0
+        for _ in range(3):
+            everything()
+            bpy.ops.ed.undo_push(message="before")
+            in_view3d(bpy.ops.mesh.subdivide, number_cuts=1)
+            bpy.ops.ed.undo_push(message="subdivide")
+            total += timed_update(bpy.ops.ed.undo)
+        row("Undo of the subdivide" + on, total / 3, "ms", "ed.undo of mesh.subdivide + the depsgraph update")
+    op_row("Merge by distance, everything", everything, lambda: in_view3d(bpy.ops.mesh.remove_doubles, threshold=0.001),
+           "mesh.remove_doubles, 0.001, everything selected (the rings beside the poles merge)")
+    op_row("Triangulate every face", everything, lambda: in_view3d(bpy.ops.mesh.quads_convert_to_tris), "mesh.quads_convert_to_tris, everything selected")
+    total = 0.0
+    for _ in range(3):
+        everything()
+        bpy.ops.ed.undo_push(message="before")
+        in_view3d(bpy.ops.mesh.quads_convert_to_tris)
+        bpy.ops.ed.undo_push(message="triangulate")
+        total += timed_update(bpy.ops.ed.undo)
+    row("Undo of the triangulate" + on, total / 3, "ms", "ed.undo of mesh.quads_convert_to_tris + the depsgraph update")
+    total = 0.0
+    for _ in range(3):
+        bpy.ops.object.mode_set(mode="EDIT")
+        total += timed_update(lambda: bpy.ops.object.mode_set(mode="OBJECT"))
+    row("Exit Edit Mode" + on, total / 3, "ms", "mode_set(OBJECT) + the depsgraph update (the BMesh written back to the Mesh)")
+
+def parity_modifiers():
+    def evaluate(name, add, method):
+        total, faces = 0.0, 0
+        for _ in range(3):
+            reset()
+            ob = parity_sphere(False)
+            bpy.context.view_layer.update()
+            add(ob)
+            def read():
+                nonlocal faces
+                faces = len(ob.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.polygons)
+            total += timed_update(lambda: None) + mean_ms(read, 1)
+        row("Modifier: %s on the 50k sphere" % name, total / 3, "ms",
+            "%s, the depsgraph update and the evaluated mesh read (a subdivision is built when read); %d faces out" % (method, faces))
+    def subsurf(level):
+        def add(ob):
+            m = ob.modifiers.new("Subdivision", "SUBSURF")
+            m.levels = level
+            m.use_limit_surface = False  # (Blendity subdivides a step at a time, as Blender's without the limit surface)
+        return add
+    evaluate("Subdivision level 1", subsurf(1), "Subdivision Surface, viewport level 1, the limit surface off (OpenSubdiv on the CPU; the sphere's poles have 256 edges)")
+    evaluate("Subdivision level 2", subsurf(2), "Subdivision Surface, viewport level 2, the limit surface off")
+    total, faces = 0.0, 0
+    for _ in range(3):
+        reset()
+        bpy.ops.mesh.primitive_cube_add(size=1.0)
+        ob = bpy.context.active_object
+        bpy.ops.object.mode_set(mode="EDIT")
+        in_view3d(bpy.ops.mesh.subdivide, number_cuts=63)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.context.view_layer.update()
+        subsurf(1)(ob)
+        def read():
+            nonlocal faces
+            faces = len(ob.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.polygons)
+        total += timed_update(lambda: None) + mean_ms(read, 1)
+    row("Modifier: Subdivision level 1 on a 24,576-quad cube", total / 3, "ms",
+        "Subdivision Surface level 1, the limit surface off, on a cube cut 64 x 64 a side; %d faces out" % faces)
+    def mirror(ob):
+        m = ob.modifiers.new("Mirror", "MIRROR")
+        m.use_mirror_merge, m.merge_threshold = True, 0.001
+    evaluate("Mirror", mirror, "Mirror on X, merging at 0.001")
+    def array(ob):
+        ob.modifiers.new("Array", "ARRAY").count = 10
+    evaluate("Array x10", array, "Array, 10 copies a mesh-size apart")
+    def solidify(ob):
+        m = ob.modifiers.new("Solidify", "SOLIDIFY")
+        m.thickness, m.use_rim = 0.01, True
+    evaluate("Solidify", solidify, "Solidify, 0.01 thick, rim filled")
+    def bevel(ob):
+        m = ob.modifiers.new("Bevel", "BEVEL")
+        m.width, m.segments, m.limit_method = 0.001, 1, "NONE"
+    evaluate("Bevel", bevel, "Bevel, width 0.001, 1 segment, every edge (no limit)")
+    def decimate(ob):
+        m = ob.modifiers.new("Decimate", "DECIMATE")
+        m.ratio = 0.5
+    evaluate("Decimate 0.5", decimate, "Decimate collapse, ratio 0.5")
+    def boolean(ob):
+        bpy.ops.mesh.primitive_uv_sphere_add(segments=256, ring_count=196, radius=1.0, location=at(0.5, 0.0, 0.0))
+        cutter = bpy.context.active_object
+        cutter.hide_set(True)
+        m = ob.modifiers.new("Boolean", "BOOLEAN")
+        m.operation, m.object = "UNION", cutter
+        try: m.solver = "MANIFOLD"
+        except TypeError: m.solver = "EXACT"
+        bpy.context.view_layer.objects.active = ob
+    evaluate("Boolean union with a second 50k sphere", boolean, "Boolean union, the Manifold solver (Blendity's too)")
+    reset()
+    ob = parity_sphere(False)
+    ob.modifiers.new("Subdivision", "SUBSURF").levels = 1
+    ob.modifiers.new("Mirror", "MIRROR")
+    bpy.context.view_layer.update()
+    total = 0.0
+    for k in range(3):
+        ob.data.vertices[1000].co.z += 0.001
+        ob.data.update()
+        total += timed_update(lambda: None) + mean_ms(lambda: len(ob.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.polygons), 1)
+    row("Modifier stack again after a vertex moved (Subdivision 1 + Mirror)", total / 3, "ms", "one vertex moved, mesh.update, the depsgraph update and the evaluated mesh read")
+
+def parity_uv_anim_physics():
+    reset()
+    ob = parity_sphere(False)
+    for e in ob.data.edges:  # (a seam down the meridian at angle 0, pole to pole: a closed sphere has no disk to unwrap to)
+        a, b = (ob.data.vertices[i].co for i in e.vertices)
+        e.use_seam = all(abs(p.y) < 1e-4 and p.x >= -1e-4 for p in (a, b))
+    bpy.ops.object.mode_set(mode="EDIT")
+    select_all_mesh(ob, True)
+    in_view3d(bpy.ops.uv.unwrap, method="CONFORMAL", margin=0.02)  # (warm)
+    ms = mean_ms(lambda: in_view3d(bpy.ops.uv.unwrap, method="CONFORMAL", margin=0.02))
+    bpy.ops.object.mode_set(mode="OBJECT")
+    row("Unwrap the 50k sphere", ms, "ms", "uv.unwrap, Conformal (LSCM, Blendity's), a seam down one meridian, margin 0.02")
+    # 1,000 objects keyed on frames 1, 30 and 60.
+    proto = cube_grid(1000)
+    for i, o in enumerate(bpy.data.objects):
+        base = o.location.copy()
+        for f, dy in ((1, 0.0), (30, float(i % 7)), (60, 0.0)):
+            o.location = base + Vector((0.0, 0.0, dy))
+            o.keyframe_insert("location", frame=f)
+    scene = bpy.context.scene
+    frames = [2 + (k % 58) for k in range(30)]
+    t0 = time.perf_counter()
+    for f in frames: scene.frame_set(f)
+    row("A frame of 1,000 keyframed objects", (time.perf_counter() - t0) * 1000.0 / len(frames), "ms",
+        "scene.frame_set at a new frame each time (location keys on frames 1, 30, 60), the depsgraph update included")
+    # Ten shape keys on the 50k sphere at half weight, one key's value changed and the mesh evaluated again.
+    reset()
+    ob = parity_sphere(False)
+    ob.shape_key_add(name="Basis")
+    for k in range(10):
+        key = ob.shape_key_add(name="Key %d" % k)
+        for i, v in enumerate(ob.data.vertices): key.data[i].co = v.co * (1.0 + 0.01 * (k + 1))
+        key.value = 0.5
+    bpy.context.view_layer.update()
+    keys = ob.data.shape_keys.key_blocks
+    total = 0.0
+    for k in range(20):
+        keys[1].value = 0.5 + 0.001 * (k % 2)
+        total += timed_update(lambda: None)
+    row("Ten shape keys on the 50k sphere, evaluated", total / 20, "ms", "one key's value changed, the depsgraph update that mixes all ten")
+    # 1,000 rigid boxes falling onto a plane.
+    reset()
+    bpy.ops.mesh.primitive_plane_add(size=200.0)
+    ground = bpy.context.active_object
+    bpy.ops.rigidbody.world_add()
+    scene = bpy.context.scene
+    scene.render.fps = 60
+    scene.rigidbody_world.substeps_per_frame = 1  # (Jolt steps once a 60 Hz frame)
+    scene.rigidbody_world.point_cache.frame_end = 250
+    bpy.context.view_layer.objects.active = ground
+    bpy.ops.rigidbody.object_add(type="PASSIVE")
+    side = math.ceil(1000 ** (1.0 / 3.0))
+    bpy.ops.mesh.primitive_cube_add(size=1.0)
+    proto = bpy.context.active_object
+    boxes = [proto]
+    for i in range(1, 1000):
+        o = bpy.data.objects.new("Box", proto.data)
+        bpy.context.collection.objects.link(o)
+        boxes.append(o)
+    for i, o in enumerate(boxes):
+        o.location = at((i % side) * 1.1 - side * 0.55, 1.0 + (i // (side * side)) * 1.1, ((i // side) % side) * 1.1 - side * 0.55)
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in boxes: o.select_set(True)
+    bpy.context.view_layer.objects.active = proto
+    bpy.ops.rigidbody.objects_add(type="ACTIVE")
+    scene.frame_set(1)
+    t0 = time.perf_counter()
+    for f in range(2, 32): scene.frame_set(f)
+    row("1,000 rigid boxes falling: a frame", (time.perf_counter() - t0) * 1000.0 / 30, "ms",
+        "scene.frame_set through the first 30 frames at 60 fps (Bullet, %d substep a frame, %d solver iterations), mean" %
+        (scene.rigidbody_world.substeps_per_frame, scene.rigidbody_world.solver_iterations))
+
+def stress_spheres(count):
+    """Blendity's `stress 400 Sphere`: 24 x 16 spheres of radius 0.5 in a cube-root grid 1.5 m apart, 8 colours, the
+    camera 20 m back and 6 m up looking down 3 degrees with a 60 degree vertical field of view, a sun."""
+    reset()
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=16, radius=0.5)
+    proto = bpy.context.active_object
+    mats = []
+    for i in range(8):
+        m = bpy.data.materials.new("Stress %d" % i)
+        m.diffuse_color = (0.35 + 0.08 * i, 0.45 + 0.05 * ((i * 3) % 8), 0.9 - 0.07 * i, 1.0)
+        if m.node_tree: m.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = m.diffuse_color
+        mats.append(m)
+    side = math.ceil(count ** (1.0 / 3.0))
+    seed = 1234
+    for i in range(count):
+        ob = proto if i == 0 else bpy.data.objects.new("Sphere", proto.data)
+        if i: bpy.context.collection.objects.link(ob)
+        x, y, z = i % side, (i // side) % side, i // (side * side)
+        ob.location = at((x - side * 0.5) * 1.5, y * 1.5 + 0.5, (z - side * 0.5) * 1.5)
+        seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF
+        if not ob.material_slots: ob.data.materials.append(None)
+        ob.material_slots[0].link = "OBJECT"
+        ob.material_slots[0].material = mats[(seed >> 24) % 8]
+    sun_along((-0.4, -1.0, 0.3))
+    camera_at((0, 6, -20), (0, 5, -1), 60.0)
+
+def parity_render():
+    stress_spheres(400)
+    scene = bpy.context.scene
+    scene.render.engine = "BLENDER_EEVEE"
+    scene.render.resolution_x, scene.render.resolution_y, scene.render.resolution_percentage = 1920, 1080, 100
+    scene.render.filepath = os.path.join(tempfile.gettempdir(), "bench_blender_f12.png")
+    bpy.ops.render.render()  # (warm: shaders compiled)
+    ms = mean_ms(lambda: bpy.ops.render.render())
+    row("F12 at 1920x1080, 400 spheres (raster)", ms, "ms", "render.render with EEVEE at its default %d samples, Blendity's stress 400 Sphere built alike (a sun for its starter light)" % scene.eevee.taa_render_samples)
+
+def parity_memory():
+    """Run first, as Blendity's: the resident set grows only when the heap does."""
+    reset()
+    before = resident_mb()
+    cube_grid(10000)
+    after = resident_mb()
+    row("Memory: 10,000 cubes", after - before if before >= 0 else -1, "MB", "the resident set's growth when the scene is made (one shared cube mesh) and evaluated")
+    reset()
+    before = resident_mb()
+    parity_sphere(True)
+    bpy.context.view_layer.update()
+    after = resident_mb()
+    row("Memory: a 500k-face mesh", after - before if before >= 0 else -1, "MB", "the resident set's growth for the mesh and its evaluated copy (headless: no draw cache)")
+
+def run_parity():
+    for name, fn in (("memory", parity_memory), ("files", parity_files), ("objects", parity_objects), ("edit mode 50k", lambda: parity_edit_mode(False)),
+                     ("edit mode 500k", lambda: parity_edit_mode(True)), ("modifiers", parity_modifiers), ("uv, animation, physics", parity_uv_anim_physics),
+                     ("render", parity_render)):
+        print("[bench_blender] parity:", name)
+        try:
+            fn()
+        except Exception as e:
+            row("parity %s (failed)" % name, -1, "", "failed: %s" % e)
+    os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
+    with open(OUT, "w", encoding="utf-8") as f:
+        json.dump({"blender": bpy.app.version_string, "quick": QUICK, "gpu": GPU, "rows": rows}, f, indent=1)
+    print("[bench_blender] wrote", OUT)
+
+
 def run_headless():
     for name, fn in (("edit mode", bench_edit_mode), ("uv", bench_uv), ("export", bench_export), ("cycles", bench_cycles), ("bake", bench_bake)):
         print("[bench_blender]", name)
@@ -479,5 +935,7 @@ def run_headless():
         json.dump({"blender": bpy.app.version_string, "quick": QUICK, "gpu": GPU, "rows": rows}, f, indent=1)
     print("[bench_blender] wrote", OUT)
 
-if arg("--viewport", False) is False:
+if arg("--parity", False) is not False:
+    run_parity()
+elif arg("--viewport", False) is False:
     run_headless()

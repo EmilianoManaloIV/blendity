@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 221): every editor feature measured against Blender 5.2 (task 0201)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round measures. The causes and the fixes follow in tasks 0203-0211.
+
+**Added**
+- The stress section `blender_parity` and `tools/bench_blender.py --parity`: 59 rows timed in both programs on the
+  same scenes, under the same names, joined by `tools/bench_table.py` into PERFORMANCE.md's Pass 15.
+  - Files: save and open, and six formats' export and import.
+  - Objects: 10,000 of them.
+  - Edit Mode: 13 operators on a 50k-face mesh, 9 on a 500k one.
+  - Modifiers, UV, animation, physics, F12 and memory.
+- `tools/bench.bat` runs both sides.
+
+**Fixed:** `redo <field> <value>` from the console keeps the numbers for the tool's next use, as the F9 panel does.
+
+**Measured:** Blendity is behind on 23 rows of 59.
+- Duplicating 10,000 objects takes 648 s against Blender's 1.5 s. Each copy's name is found by trying "Cube (1)",
+  "Cube (2)" ... against every sibling.
+- Exporting the 50k sphere is 3-47x slower in every format.
+- Saving and opening a 500k-face mesh's scene is 12-18x slower.
+- Bevel, Inset, Boolean, Array, Select All and Merge by Distance are 1.2-3.7x slower.
+
+Blendity is ahead on delete (316x), opening many objects, three importers, Edit Mode's entry and most of its
+operators, Subdivision, UV unwrap, animation, physics, memory and F12.
+
+**Checked**
+- An Opus review found, all fixed:
+  - the bevel row running the old width: the console's `redo` didn't keep its numbers (fixed in the editor, with a
+    test);
+  - Blender's subdivision evaluating its limit surface (17 s on the sphere's 256-edge poles), where Blendity
+    subdivides a step;
+  - the Bevel modifier rows bevelling nothing (every edge under the angle limit);
+  - a Boolean that fails timed as a success;
+  - physics simulating different time (Blender at 24 fps with 10 substeps);
+  - "less the frame after" hiding work left for that frame;
+  - a failed import overwriting its export's row, `.blend1` backups saved inside the timer, temp folders left;
+  - a duplicate of linked meshes against shared ones;
+  - quick runs too heavy for CI.
+- Unit checks (round 221): Windows, in render-cache verify mode, 11,948, 0 failed (992 tests), 0 stale
+  pictures. Linux with libraries: 11,506, 0 failed. Sanitizer build: 11,382, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `blender_parity`: 0 problems. (The gpu group's slow-open test failed under the parallel load and the sanitizer build's autopose timing check under its load; each passed alone.)
+
 ## 2026-10-23 (round 220): the views native on the GPU, written up (task 0200)
 
 **Asked:** "Why is it that the view still runs on the CPU? Shouldn't it run on the GPU natively like Blender?", with

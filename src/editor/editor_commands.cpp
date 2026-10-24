@@ -1404,6 +1404,7 @@ void Editor::run_console_command(const std::string &line) {
     else if (k == "move") last_op_.move = Vec3(v, (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str()));
     else { Log::warn("redo: unknown parameter '%s'", k.c_str()); return; }
     run_last_op(false);
+    remember_last_op_settings();  // (task 0201: as the F9 panel does - the tool's next use starts from these)
   }
   else if (c == "loopcuts") {
     loop_cuts_ = std::max(1, std::atoi(arg(1, "1").c_str()));

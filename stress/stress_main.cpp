@@ -38,6 +38,7 @@
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
 #include "../src/scene/export.h"
+#include "../src/scene/import.h"
 #include "../src/scene/autophysics.h"
 #include "../tests/fixtures/synthetic_mmd.h"
 
@@ -5849,6 +5850,533 @@ static void test_present(Report &rep, const Options &o) {
            "(No input arrives here; in the editor, input wakes the wait early.)");
 }
 
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Blender parity (task 0201): the editor's features on the scenes tools/bench_blender.py builds in Blender 5.2, row by
+ * row under the same names, so tools/bench_table.py can put them side by side (PERFORMANCE.md's Pass 15). Each row's
+ * "Blendity" is what the user waits for: an editor operator with the frame that shows it (less the frame after, so
+ * the frame's fixed cost drops out), with the views on the GPU when there is one; "operator alone" is the command
+ * without its frame. Headless Blender draws nothing, so its rows are the operator and the depsgraph update. */
+
+namespace {
+
+struct ParityRows {
+  Report &rep;
+  void row(const std::string &name, double value, const char *unit, double alone, const std::string &method) {
+    rep.row({name, value < 0 ? "failed" : f2(value), unit, alone < 0 ? "-" : f2(alone), method});
+  }
+};
+
+/* The 50k-face benchmark sphere (Pass 13's) and the 500k one: UV spheres of 256 x 196 and 1024 x 490 segments. */
+MeshPtr parity_sphere(bool big) { return primitives::uv_sphere(1.0f, big ? 1024 : 256, big ? 490 : 196); }
+
+/* An editor on a scene of its own, the views on the card when there is one. */
+void parity_editor(Editor &ed) {
+  Log::echo_stdout = false;
+  ed.init_headless(1600, 1000);
+  ed.viewport_device_for_test(gpu::available() ? 2 : 1);
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+}
+
+/* An editor command timed as the user waits for it: the command and the frame that shows it, less an idle frame
+ * measured just before (the frame's fixed cost), and whatever the frame after costs beyond an idle one (work left
+ * for it: a rebuild, a present one frame behind). */
+struct Timed {
+  double total = 0, alone = 0;
+};
+Timed parity_timed(Editor &ed, const std::function<void()> &act) {
+  Timed t;
+  const double idle = time_ms([&] { ed.step_frame_headless(); });
+  t.alone = time_ms(act);
+  const double frame = time_ms([&] { ed.step_frame_headless(); });
+  const double next = time_ms([&] { ed.step_frame_headless(); });
+  t.total = t.alone + std::max(0.0, frame - idle) + std::max(0.0, next - idle);
+  return t;
+}
+
+/* The mean of `reps` timed runs, each set up by `before` (outside the timer) and put back by `after`. */
+Timed parity_mean(Editor &ed, int reps, const std::function<void()> &before, const std::function<void()> &act, const std::function<void()> &after) {
+  Timed sum;
+  for (int r = 0; r < reps; r++) {
+    before();
+    const Timed t = parity_timed(ed, act);
+    sum.total += t.total / reps;
+    sum.alone += t.alone / reps;
+    after();
+  }
+  return sum;
+}
+
+/* A vertical (meridian) edge of the UV sphere at the equator, at angle 0: a loop cut through it is the ring below. */
+std::string parity_meridian_edge(int segments, int rings) {
+  const int i = rings / 2;
+  const uint32_t a = (uint32_t)(1 + (i - 1) * segments), b = (uint32_t)(1 + i * segments);
+  return strprintf("%u %u", a, b);
+}
+
+void parity_files(ParityRows &out, const Options &o) {
+  std::error_code ec;
+  const std::filesystem::path tmp = std::filesystem::temp_directory_path(ec) / "blendity_parity";
+  std::filesystem::create_directories(tmp, ec);
+  if (ec) {
+    out.rep.note("Files skipped: no temp folder (" + ec.message() + ")");
+    return;
+  }
+  /* A scene saved and opened: 10,000 cubes sharing one mesh (Blender: linked duplicates), and one 500k-face mesh. */
+  auto save_open = [&](const std::string &what, Scene &s, const std::string &file) {
+    const std::string path = (tmp / file).string();
+    std::string text;
+    const double save = time_ms([&] {
+      text = save_scene_text(s);
+      fs::write_file(path, text);
+    }, o.quick ? 1 : 3);
+    std::string err;
+    size_t objects = 0;
+    const double open = time_ms([&] {
+      Scene loaded;
+      std::string read;
+      fs::read_file(path, read);
+      load_scene_text(read, loaded, err);
+      objects = loaded.object_count();
+    }, o.quick ? 1 : 3);
+    const std::string note = strprintf("the scene's text written to a file (%s); Blendity's .scene", format_bytes(text.size()).c_str());
+    out.row("Save a scene: " + what, save, "ms", -1, note);
+    out.row("Open it: " + what, objects == s.object_count() ? open : -1, "ms", -1, "the file read and parsed into a scene (not swapped into an editor)");
+    std::filesystem::remove(path, ec);
+  };
+  {
+    Scene s = make_grid_scene(o.quick ? 1000 : 10000, primitives::cube());
+    save_open(o.quick ? "1,000 cubes" : "10,000 cubes", s, "parity_cubes.scene");
+  }
+  {
+    Scene s;
+    GameObject *g = s.create("Sphere");
+    g->add<MeshFilter>()->mesh = parity_sphere(!o.quick);
+    g->add<MeshRenderer>();
+    save_open(o.quick ? "a 50k-face mesh" : "a 500k-face mesh", s, "parity_big.scene");
+  }
+  /* The 50k sphere written and read in each format: export_file as File > Export does; import_model as the importer
+   * reads it, objects made for its meshes (not copied into a project: Blender's importer copies nothing either). */
+  MeshPtr sphere = parity_sphere(false);
+  ExportItem item;
+  item.name = "Sphere";
+  item.mesh = sphere.get();
+  item.world = Mat4::identity();
+  const std::pair<const char *, ExportFormat> formats[] = {{"OBJ", ExportFormat::OBJ}, {"FBX", ExportFormat::FBX}, {"glTF (GLB)", ExportFormat::GLB},
+                                                           {"STL", ExportFormat::STL}, {"PLY", ExportFormat::PLY}, {"USD (USDA)", ExportFormat::USD}};
+  for (const auto &[label, fmt] : formats) {
+    if (o.quick && fmt != ExportFormat::OBJ && fmt != ExportFormat::GLB) continue;  // (CI: two formats)
+    const std::string path = (tmp / (std::string("parity_sphere") + export_format_extension((int)fmt))).string();
+    const ExportOptions eo = export_defaults((int)fmt);
+    std::string err;
+    bool ok = export_file(path, {item}, eo, &err);  // (warm)
+    const double ex = time_ms([&] { ok = ok && export_file(path, {item}, eo, &err); }, o.quick ? 1 : 3);
+    std::error_code sec;
+    const uintmax_t bytes = ok ? std::filesystem::file_size(path, sec) : 0;
+    out.row(std::string("Export the 50k sphere as ") + label, ok ? ex : -1, "ms", -1, strprintf("export_file, %s written", format_bytes((size_t)bytes).c_str()));
+    size_t faces = 0;
+    const double im = time_ms([&] {
+      ImportResult r;
+      ok = ok && import_model(path, r);
+      Scene s;
+      faces = 0;
+      for (const ImportedNode &node : r.nodes) {
+        GameObject *g = s.create(node.name);
+        g->set_local_position(node.position);
+        if (!node.mesh) continue;
+        g->add<MeshFilter>()->mesh = node.mesh;
+        g->add<MeshRenderer>();
+        faces += node.mesh->face_count();
+      }
+    }, o.quick ? 1 : 3);
+    out.row(std::string("Import the 50k sphere from ") + label, ok && faces > 0 ? im : -1, "ms", -1,
+            strprintf("import_model, an object made for each mesh (%s faces read)", num((double)faces).c_str()));
+    std::filesystem::remove(path, ec);
+  }
+  std::filesystem::remove_all(tmp, ec);
+}
+
+void parity_objects(ParityRows &out, const Options &o) {
+  Editor ed;
+  parity_editor(ed);
+  const int n = o.quick ? 1000 : 10000;
+  ed.command(strprintf("stress %d Cube", n));
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  const std::string what = o.quick ? "1,000 objects" : "10,000 objects";
+  const int reps = o.quick ? 1 : 3;
+  auto nothing = [] {};
+  const Timed sel = parity_mean(ed, reps, [&] { ed.command("select Main Camera"); }, [&] { ed.command("selectall"); }, nothing);
+  out.row("Select all, " + what, sel.total, "ms", sel.alone, "selectall (every object with a mesh)");
+  const Timed dup = parity_mean(ed, 1, [&] { ed.command("selectall"); }, [&] { ed.command("duplicate"); }, [&] {
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  });
+  out.row("Duplicate " + what, dup.total, "ms", dup.alone,
+          "duplicate on every object selected (Blendity's copies share their meshes, copy on write), one run; undone outside the timer");
+  const Timed del = parity_mean(ed, reps, [&] { ed.command("selectall"); }, [&] { ed.command("delete"); }, [&] {
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  });
+  out.row("Delete " + what, del.total, "ms", del.alone, "delete on every object selected; undone outside the timer");
+  const Timed und = parity_mean(ed, reps, [&] {
+    ed.command("selectall");
+    ed.command("delete");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  }, [&] { ed.command("undo"); }, nothing);
+  out.row("Undo of the delete, " + what, und.total, "ms", und.alone, "undo of the delete (the scene's snapshot restored)");
+  if (ed.scene().object_count() < (size_t)n) out.rep.note("ERROR: the undo did not bring the objects back");
+}
+
+/* Edit Mode on one sphere: the operators the user runs most, each undone outside its timer. */
+void parity_edit_mode(ParityRows &out, const Options &o, bool big) {
+  Editor ed;
+  parity_editor(ed);
+  const int segments = big ? 1024 : 256, rings = big ? 490 : 196;
+  GameObject *g = ed.scene().create("Parity Sphere");  // (a name of its own: the starter scene may have a Sphere)
+  g->add<MeshFilter>()->mesh = parity_sphere(big);
+  g->add<MeshRenderer>();
+  g->set_local_position({0, 0, -6});
+  ed.mark_changed_for_test("Add Parity Sphere");  // (an undo step: an undo later must not take the sphere away)
+  ed.command("select Parity Sphere");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  const std::string on = big ? " (500k faces)" : " (50k faces)";
+  const int reps = o.quick ? 1 : 3;
+  auto settle = [&] {
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  };
+  auto undo = [&] {
+    ed.command("undo");
+    settle();
+  };
+  auto nothing = [] {};
+  const Timed enter = parity_mean(ed, reps, [&] {
+    ed.command("edit off");
+    if (auto *mf = g->get<MeshFilter>()) {  // (a mesh never edited: its caches cold, as Blender builds its BMesh anew)
+      MeshPtr fresh = std::make_shared<Mesh>(*mf->mesh);
+      fresh->forget_caches();
+      ed.overlap_forget_for_test();
+      mf->mesh = fresh;
+    }
+    settle();
+  }, [&] { ed.command("edit vertex"); }, nothing);
+  out.row("Enter Edit Mode" + on, enter.total, "ms", enter.alone, "edit vertex, its caches cold (a fresh copy of the mesh)");
+  /* (An undo can leave the sphere unselected: each setup selects it and enters Edit Mode again.) */
+  auto in_edit = [&](const char *elem) {
+    if (!ed.selected_object() || ed.selected_object()->name != "Parity Sphere") {
+      ed.command("select Parity Sphere");
+      settle();
+    }
+    ed.command(std::string("edit ") + elem);
+  };
+  auto faces = [&](const char *list) {
+    return [&, list] {
+      in_edit("face");
+      ed.command(std::string("fsel ") + list);
+      settle();
+    };
+  };
+  const Timed all = parity_mean(ed, reps, [&] {
+    in_edit("vertex");
+    ed.command("vsel 0");
+    settle();
+  }, [&] { ed.command("editop select_invert"); ed.command("editop select_more"); }, nothing);
+  out.row("Select all" + on, all.total, "ms", all.alone, "editop select_invert from one vertex, then select_more (Blendity has no Select All operator of its own: the two together select every vertex)");
+  const Timed linked = parity_mean(ed, reps, faces("100"), [&] { ed.command("editop select_linked"); }, nothing);
+  out.row("Select linked from one face" + on, linked.total, "ms", linked.alone, "editop select_linked from face 100 (the whole sphere)");
+  const Timed ext = parity_mean(ed, reps, faces("100 101 102"), [&] { ed.command("editop extrude"); }, undo);
+  out.row("Extrude three faces" + on, ext.total, "ms", ext.alone, "editop extrude on faces 100-102 (0.5 along their normal)");
+  ed.command("insetmode region 0.01");
+  const Timed ins = parity_mean(ed, reps, faces("100 101 102"), [&] { ed.command("editop inset"); }, undo);
+  out.row("Inset three faces" + on, ins.total, "ms", ins.alone, "editop inset, region, thickness 0.01");
+  if (!big) {
+    /* Bevel's width and segments set once outside the timers, as its F9 panel would (redo keeps them for the next use). */
+    faces("100 101 102")();
+    ed.command("editop bevel");
+    ed.command("redo amount 0.005");
+    ed.command("redo segments 3");
+    undo();
+    const Timed bev = parity_mean(ed, reps, faces("100 101 102"), [&] { ed.command("editop bevel"); }, undo);
+    out.row("Bevel three faces' edges" + on, bev.total, "ms", bev.alone, "editop bevel on faces 100-102's edges, width 0.005, 3 segments");
+    const std::string edge = parity_meridian_edge(segments, rings);
+    ed.command("loopcuts 1 0.5");
+    const Timed cut = parity_mean(ed, reps, [&] {
+      in_edit("edge");
+      ed.command("esel " + edge);
+      settle();
+    }, [&] { ed.command("editop loopcut"); }, undo);
+    out.row("Loop cut" + on, cut.total, "ms", cut.alone, "editop loopcut, 1 cut, through a meridian edge at the equator (a ring of 256 faces cut)");
+  }
+  auto every = [&](const char *elem) {
+    return [&, elem] {
+      in_edit(elem);
+      ed.command("vsel 0");
+      ed.command("editop select_invert");
+      ed.command("editop select_more");
+      settle();
+    };
+  };
+  if (!big) {
+    const Timed sub = parity_mean(ed, reps, every("edge"), [&] { ed.command("editop subdivide_edges"); }, undo);
+    out.row("Subdivide every edge" + on, sub.total, "ms", sub.alone, "editop subdivide_edges, 1 cut, everything selected");
+    const Timed undo_sub = parity_mean(ed, reps, [&] {
+      every("edge")();
+      ed.command("editop subdivide_edges");
+      settle();
+    }, [&] { ed.command("undo"); }, settle);
+    out.row("Undo of the subdivide" + on, undo_sub.total, "ms", undo_sub.alone, "undo of subdivide_edges (the mesh before it restored)");
+  }
+  const Timed merge = parity_mean(ed, reps, every("vertex"), [&] { ed.command("editop merge_distance"); }, undo);
+  out.row("Merge by distance, everything" + on, merge.total, "ms", merge.alone,
+          "editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001)");
+  const Timed tri = parity_mean(ed, reps, every("face"), [&] { ed.command("editop triangulate_faces"); }, undo);
+  out.row("Triangulate every face" + on, tri.total, "ms", tri.alone, "editop triangulate_faces, everything selected");
+  const Timed undo_tri = parity_mean(ed, reps, [&] {
+    every("face")();
+    ed.command("editop triangulate_faces");
+    settle();
+  }, [&] { ed.command("undo"); }, settle);
+  out.row("Undo of the triangulate" + on, undo_tri.total, "ms", undo_tri.alone, "undo of triangulate_faces");
+  const Timed exit = parity_mean(ed, reps, [&] {
+    in_edit("vertex");
+    settle();
+  }, [&] { ed.command("edit off"); }, settle);
+  out.row("Exit Edit Mode" + on, exit.total, "ms", exit.alone, "edit off");
+}
+
+/* The modifier stack evaluated on the 50k sphere: a fresh object each time, so nothing is cached. */
+void parity_modifiers(ParityRows &out, const Options &o) {
+  const int reps = o.quick ? 1 : 3;
+  MeshPtr sphere = parity_sphere(false);
+  auto eval = [&](const std::string &name, const std::function<void(Scene &, GameObject &)> &add, const std::string &method) {
+    double total = 0;
+    size_t faces = 0;
+    for (int r = 0; r < reps; r++) {
+      Scene s;
+      GameObject *g = s.create("Sphere");
+      g->add<MeshFilter>()->mesh = sphere;
+      g->add<MeshRenderer>();
+      add(s, *g);
+      total += time_ms([&] { faces = g->evaluated_mesh() ? g->evaluated_mesh()->face_count() : 0; });
+    }
+    const bool changed = faces != sphere->face_count() || name == "Decimate 0.5" || name == "Bevel";  // (a Boolean that failed gives its input back)
+    out.row("Modifier: " + name + " on the 50k sphere", faces && changed ? total / reps : -1, "ms", -1, strprintf("%s; %s faces out", method.c_str(), num((double)faces).c_str()));
+  };
+  eval("Subdivision level 1", [](Scene &, GameObject &g) { g.add<SubdivisionSurface>()->levels = 1; }, "SubdivisionSurface levels 1 (Blendity's own Catmull-Clark)");
+  if (!o.quick) eval("Subdivision level 2", [](Scene &, GameObject &g) { g.add<SubdivisionSurface>()->levels = 2; }, "SubdivisionSurface levels 2");
+  eval("Mirror", [](Scene &, GameObject &g) { g.add<MirrorModifier>(); }, "MirrorModifier on X, merging at 0.001");
+  eval("Array x10", [](Scene &, GameObject &g) { g.add<ArrayModifier>()->count = 10; }, "ArrayModifier, 10 copies a mesh-size apart");
+  eval("Solidify", [](Scene &, GameObject &g) { g.add<SolidifyModifier>()->thickness = 0.01f; }, "SolidifyModifier, 0.01 thick, rim filled");
+  eval("Bevel", [](Scene &, GameObject &g) {
+    auto *b = g.add<BevelModifier>();
+    b->width = 0.001f;
+    b->limit_method = 0;  // (every edge: the sphere's are all under the 30 degree limit)
+  }, "BevelModifier, width 0.001, 1 segment, every edge (no angle limit)");
+  eval("Decimate 0.5", [](Scene &, GameObject &g) { g.add<DecimateModifier>()->ratio = 0.5f; }, "DecimateModifier collapse, ratio 0.5 (meshoptimizer)");
+  eval("Boolean union with a second 50k sphere", [&](Scene &s, GameObject &g) {
+    GameObject *c = s.create("Cutter");
+    c->add<MeshFilter>()->mesh = sphere;
+    c->set_local_position({0.5f, 0.0f, 0.0f});
+    auto *b = g.add<BooleanModifier>();
+    b->object = "Cutter";
+    b->operation = 1;
+  }, "BooleanModifier union (Manifold, with Blender's libraries)");
+  {
+    /* Subdivision on a mesh of quads only (a cube cut into 24,576 faces): no poles of high valence. */
+    Mesh quads = *primitives::cube();
+    for (int i = 0; i < 6; i++) quads = meshops::subdivide_simple(quads);
+    MeshPtr qp = std::make_shared<Mesh>(quads);
+    double total = 0;
+    size_t faces = 0;
+    for (int r = 0; r < reps; r++) {
+      Scene s;
+      GameObject *g = s.create("Cube");
+      g->add<MeshFilter>()->mesh = qp;
+      g->add<MeshRenderer>();
+      g->add<SubdivisionSurface>()->levels = 1;
+      total += time_ms([&] { faces = g->evaluated_mesh() ? g->evaluated_mesh()->face_count() : 0; });
+    }
+    out.row("Modifier: Subdivision level 1 on a 24,576-quad cube", total / reps, "ms", -1,
+            strprintf("SubdivisionSurface levels 1 on a cube cut 64 x 64 a side; %s faces out", num((double)faces).c_str()));
+  }
+  /* The stack again after one vertex moved (the user dragging in Edit Mode with the modifiers live). */
+  {
+    Scene s;
+    GameObject *g = s.create("Sphere");
+    g->add<MeshFilter>()->mesh = std::make_shared<Mesh>(*sphere);
+    g->add<MeshRenderer>();
+    g->add<SubdivisionSurface>()->levels = 1;
+    g->add<MirrorModifier>();
+    g->evaluated_mesh();
+    double total = 0;
+    for (int r = 0; r < reps; r++) {
+      MeshPtr &mp = g->get<MeshFilter>()->mesh;
+      mp = std::make_shared<Mesh>(*mp);
+      mp->positions[1000].y += 0.001f;
+      mp->forget_caches();
+      mp->touch();
+      total += time_ms([&] { g->evaluated_mesh(); });
+    }
+    out.row("Modifier stack again after a vertex moved (Subdivision 1 + Mirror)", total / reps, "ms", -1, "one vertex moved, the stack evaluated again");
+  }
+}
+
+void parity_uv_anim_physics(ParityRows &out, const Options &o) {
+  const int reps = o.quick ? 1 : 3;
+  {
+    double total = 0;
+    int charts = 0;
+    for (int r = 0; r < reps; r++) {
+      Mesh m = *parity_sphere(false);
+      /* A seam down the meridian at angle 0, pole to pole (a closed sphere has no disk to unwrap to): the top, each
+       * ring's first vertex, the bottom. */
+      const uint32_t top = 0, bottom = (uint32_t)m.vert_count() - 1;
+      uint32_t prev = top;
+      for (int i = 1; i <= 196; i++) {
+        const uint32_t v = i < 196 ? (uint32_t)(1 + (i - 1) * 256) : bottom;
+        m.seams.push_back(((uint64_t)std::min(prev, v) << 32) | std::max(prev, v));
+        prev = v;
+      }
+      std::sort(m.seams.begin(), m.seams.end());
+      total += time_ms([&] { charts = uvops::unwrap_lscm(m, nullptr, 0.02f); });
+    }
+    out.row("Unwrap the 50k sphere", total / reps, "ms", -1,
+            strprintf("unwrap_lscm (Blender's Conformal), a seam down one meridian, margin 0.02 (%s; %d charts)", uvops::lscm_solver_name(), charts));
+  }
+  {
+    /* 1,000 objects, each with Position keys on frames 1, 30 and 60: a frame of the clip applied. */
+    Scene s;
+    GameObject *root = s.create("Root");
+    AnimationClip clip;
+    const int n = o.quick ? 100 : 1000;
+    for (int i = 0; i < n; i++) {
+      GameObject *c = s.create(strprintf("Box %d", i));
+      s.set_parent(c, root);
+      c->add<MeshFilter>()->mesh = primitives::cube();
+      c->add<MeshRenderer>();
+      for (int axis = 0; axis < 3; axis++) {
+        AnimTrack &t = clip.track(anim_path(*root, *c), "Position", axis);
+        t.set_key(1.0f, 0.0f);
+        t.set_key(30.0f, (float)(i % 7));
+        t.set_key(60.0f, 0.0f);
+      }
+    }
+    int f = 2;
+    const double ms = time_ms([&] { apply_clip(clip, *root, (float)(f++ % 59 + 1)); }, o.quick ? 5 : 30);
+    out.row(strprintf("A frame of %s keyframed objects", n == 1000 ? "1,000" : std::to_string(n).c_str()), ms, "ms", -1, "apply_clip at a new frame each time (3 Position tracks of 3 keys per object)");
+  }
+  {
+    /* Ten shape keys on the 50k sphere, all at half weight: the positions they give. */
+    Mesh m = *parity_sphere(false);
+    MeshRenderer mr;
+    for (int k = 0; k < 10; k++) {
+      ShapeKey key;
+      key.name = strprintf("Key %d", k);
+      key.delta.resize(m.vert_count());
+      for (size_t v = 0; v < key.delta.size(); v++) key.delta[v] = m.positions[v] * (0.01f * (float)(k + 1));
+      m.shape_keys.push_back(std::move(key));
+      mr.shape_weights.push_back({strprintf("Key %d", k), 0.5f});
+    }
+    std::vector<Vec3> p;
+    const double ms = time_ms([&] {
+      p = m.positions;  // (the basis the keys add to)
+      apply_shape_keys(m, &mr, p);
+    }, o.quick ? 3 : 20);
+    out.row("Ten shape keys on the 50k sphere, evaluated", ms, "ms", -1, "the basis copied and apply_shape_keys, every key at 0.5");
+  }
+  {
+    /* 1,000 rigid boxes falling onto a plane (Jolt; Blender: Bullet), a 60 Hz step's mean over 2 seconds. */
+    const int n = o.quick ? 100 : 1000;
+    Scene s;
+    GameObject *ground = s.create("Ground");
+    ground->add<MeshFilter>()->mesh = primitives::plane(200.0f, 1);
+    ground->add<MeshRenderer>();
+    auto cube = primitives::cube();
+    const int side = (int)std::ceil(std::cbrt((double)n));
+    for (int i = 0; i < n; i++) {
+      GameObject *b = s.create("Box");
+      b->add<MeshFilter>()->mesh = cube;
+      b->add<MeshRenderer>();
+      b->add<Rigidbody>();
+      b->set_local_position({(i % side) * 1.1f - side * 0.55f, 1.0f + (i / (side * side)) * 1.1f, ((i / side) % side) * 1.1f - side * 0.55f});
+    }
+    PlayContext ctx;
+    ctx.dt = 1.0f / 60.0f;
+    s.start(ctx);
+    const double ms = time_ms([&] { s.update(ctx); }, 30);  // (the first half second: falling and landing, before they sleep)
+    out.row(strprintf("%s rigid boxes falling: a frame", n == 1000 ? "1,000" : std::to_string(n).c_str()), ms, "ms", -1,
+            strprintf("Scene::update at 60 Hz, one step a frame, mean of the first 30 frames (%s)", physics_jolt_available() ? "Jolt" : "Blendity's own solver"));
+  }
+}
+
+void parity_render(ParityRows &out, const Options &o) {
+  if (o.quick) return;  // (two CPU renders at 1080p: not for CI)
+  {
+    /* F12 at 1920 x 1080 with the raster engine (Blender: EEVEE, one sample), the stress gpu scene's layout. */
+    Editor ed;
+    parity_editor(ed);
+    ed.command("engine raster");
+    ed.scene().render.width = 1920;
+    ed.scene().render.height = 1080;
+    ed.command("stress 400 Sphere");
+    /* The Main Camera 20 m back and 6 m up, looking down 3 degrees at the grid (Blender's row places its camera there). */
+    if (GameObject *cam = ed.scene().find_by_name("Main Camera")) {
+      cam->set_local_position({0, 6, -20});
+      cam->set_local_rotation(Quat::euler({3, 0, 0}));
+      if (auto *c = cam->get<Camera>()) c->fov = 60.0f;
+    }
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("render");  // (warm)
+    const double ms = time_ms([&] { ed.command("render"); }, o.quick ? 1 : 3);
+    out.row("F12 at 1920x1080, 400 spheres (raster)", ms, "ms", -1,
+            "render, engine raster (the CPU's reference raster, supersampled), stress 400 Sphere (an 8 x 8 x 7 grid of 24 x 16 spheres, 8 materials) under the starter scene's light");
+  }
+}
+
+/* Run first: the resident set grows only when the heap does, and the other rows grow it and free it again. */
+void parity_memory(ParityRows &out, const Options &o) {
+  {
+    /* What a scene costs in memory: the resident set before and after building it. */
+    const uint64_t before = sys::working_set_bytes();
+    if (before == 0) return;
+    {
+      Scene s = make_grid_scene(o.quick ? 1000 : 10000, primitives::cube());
+      const uint64_t after = sys::working_set_bytes();
+      out.row(o.quick ? "Memory: 1,000 cubes" : "Memory: 10,000 cubes", (double)(after - std::min(after, before)) / (1024.0 * 1024.0), "MB", -1,
+              "the resident set's growth when the scene is made (one shared cube mesh; objects with transforms, no editor state; "
+              "run first in the section, but after any section before it)");
+    }
+    const uint64_t b2 = sys::working_set_bytes();
+    {
+      Scene s;
+      GameObject *g = s.create("Sphere");
+      g->add<MeshFilter>()->mesh = parity_sphere(!o.quick);
+      g->add<MeshRenderer>();
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      m.render_mesh();  // (what drawing it keeps: its triangles and normals)
+      const uint64_t after = sys::working_set_bytes();
+      out.row(o.quick ? "Memory: a 50k-face mesh" : "Memory: a 500k-face mesh", (double)(after - std::min(after, b2)) / (1024.0 * 1024.0), "MB", -1, "the resident set's growth for the mesh and its render mesh");
+    }
+  }
+}
+
+}  // namespace
+
+static void test_blender_parity(Report &rep, const Options &o) {
+  rep.title("Blender parity (task 0201)",
+            "Every row has a twin in tools/bench_blender.py, under the same name; tools/bench_table.py puts the two side by side "
+            "(PERFORMANCE.md's Pass 15). Editor rows: the command and the frame that shows it and the frame after, each less an "
+            "idle frame (the views on the GPU when there is one); \"operator alone\" is the command without its frames.");
+  rep.table({"row", "Blendity", "unit", "operator alone", "method"});
+  ParityRows out{rep};
+  parity_memory(out, o);
+  parity_files(out, o);
+  parity_objects(out, o);
+  parity_edit_mode(out, o, false);
+  if (!o.quick) parity_edit_mode(out, o, true);
+  parity_modifiers(out, o);
+  parity_uv_anim_physics(out, o);
+  parity_render(out, o);
+}
+
 int main(int argc, char **argv) {
   install_crash_handler();
   Options o;
@@ -5925,7 +6453,7 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
