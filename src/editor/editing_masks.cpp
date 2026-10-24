@@ -242,9 +242,9 @@ bool Editor::edit_mask_on_picture() const {
 /* The selected step's mask over the picture, red by its weight; recomputed only when the document changed. */
 void Editor::draw_edit_mask_overlay(const Recti &dst, const Recti &clip) {
   if (!edit_mask_show_ || !edit_mask_on_picture()) return;
-  const std::string key = strprintf("%d|%d|%llu", edit_opened_, edit_mask_step_, (unsigned long long)edit_doc_.revision());
+  const std::string key = strprintf("%d|%d|%llu|%d", edit_opened_, edit_mask_step_, (unsigned long long)edit_doc_.revision(), edit_shown_side_);
   if (key != edit_mask_key_) {
-    const edit::Image &in = edit_doc_.result_upto(edit_mask_step_);
+    const edit::Image &in = edit_shown_side_ > 0 ? edit_doc_.preview_upto(edit_mask_step_, edit_shown_side_) : edit_doc_.result_upto(edit_mask_step_);
     edit::mask_weights(edit_doc_.stack()[(size_t)edit_mask_step_].mask, in, edit_mask_weights_);
     edit_mask_w_ = in.w, edit_mask_h_ = in.h, edit_mask_key_ = key;
   }
@@ -321,7 +321,7 @@ std::vector<Vec2> Editor::draw_mask_handles(const Recti &dst, const edit::MaskPa
  * mouse's path until the button comes up. */
 void Editor::edit_mask_brush(const Recti &dst, Vec2 mouse, bool inside) {
   auto &u = ui_;
-  const float rpx = edit_brush_size_ * std::max(dst.w, dst.h);
+  const float rpx = edit_brush_radius() * std::max(dst.w, dst.h);  // (the dab's size: a pen's pressure and tilt shape it)
   if (inside) u.canvas.circle((float)u.in.mx, (float)u.in.my, rpx, u.theme.text_bright, 1.0f);
   if (!u.in.down[0]) {
     edit_brush_stroke_ = false;
@@ -330,10 +330,11 @@ void Editor::edit_mask_brush(const Recti &dst, Vec2 mouse, bool inside) {
   const bool start = !edit_brush_stroke_ && inside && u.in.pressed[0] && !u.in.double_clicked[0] && dst.contains(u.in.mx, u.in.my);
   if (!start && !edit_brush_stroke_) return;
   if (start) u.consume_click();
-  const bool erase = edit_brush_erase_ || u.in.alt();
+  const bool erase = edit_brush_erase_ || u.in.alt() || u.in.eraser;
   const float flow = 0.35f * edit_brush_pressure();
+  const float radius = edit_brush_radius();
   if (start) {
-    edit_mask_paint(edit_mask_step_, edit_mask_part_, mouse.x, mouse.y, edit_brush_size_, flow, erase, true);
+    edit_mask_paint(edit_mask_step_, edit_mask_part_, mouse.x, mouse.y, radius, flow, erase, true);
     edit_brush_last_ = mouse, edit_brush_stroke_ = true, u.redraw = true;
     return;
   }
@@ -345,10 +346,18 @@ void Editor::edit_mask_brush(const Recti &dst, Vec2 mouse, bool inside) {
   for (int i = 1; i <= dabs; i++) {
     const float f = i / (float)dabs;
     edit_mask_paint(edit_mask_step_, edit_mask_part_, edit_brush_last_.x + (mouse.x - edit_brush_last_.x) * f,
-                    edit_brush_last_.y + (mouse.y - edit_brush_last_.y) * f, edit_brush_size_, flow, erase, false);
+                    edit_brush_last_.y + (mouse.y - edit_brush_last_.y) * f, radius, flow, erase, false);
   }
   edit_brush_last_ = mouse;
   u.redraw = true;
+}
+
+/* The brush's radius under a pen: lighter pressure a thinner line (40 % at none), a tilted pen a wider one, as a
+ * pencil laid on its side (up to 1.5 times at 60 degrees). A mouse: the size set. */
+float Editor::edit_brush_radius() const {
+  if (!ui_.in.pen) return edit_brush_size_;
+  const float tilt = std::min(60.0f, std::hypot(ui_.in.tilt_x, ui_.in.tilt_y));
+  return edit_brush_size_ * (0.4f + 0.6f * std::max(0.0f, std::min(1.0f, ui_.in.pressure))) * (1.0f + 0.5f * tilt / 60.0f);
 }
 
 float Editor::edit_brush_pressure() const { return ui_.in.pressure > 0.0f ? ui_.in.pressure : 1.0f; }  // (a pen presses lighter strokes)

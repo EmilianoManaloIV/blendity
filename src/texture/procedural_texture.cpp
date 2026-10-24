@@ -567,6 +567,12 @@ void procedural_texture_set_preview(const std::string &asset_path, bool on) {
   if (on) g_previews.insert(asset_path);
   else g_previews.erase(asset_path);
 }
+void procedural_texture_cache_forget(const std::string &asset_path) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  g_cache.erase(asset_path);
+  g_cache.erase(asset_path + "#preview");
+}
+
 void procedural_texture_clear_previews() {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_previews.clear();

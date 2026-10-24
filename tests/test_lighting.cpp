@@ -3482,6 +3482,7 @@ static void round39_tests() {
 
   test("baked no live cost: probe samples shared by 2 x 2 pixels match sampling every pixel to within a level or two", [] {
     Editor ed;
+    ed.viewport_device_for_test(1);  // (the CPU's quads are what's compared - the card samples every pixel: whatever device the run gives the views)
     p37_world(ed, true, 1, 1.0f, true);  // a probe volume; the ball is lit by probes
     r35_bake(ed);
     const std::vector<uint32_t> shared = r35_game(ed);

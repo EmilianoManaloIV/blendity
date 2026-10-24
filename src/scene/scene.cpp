@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <unordered_set>
 
 namespace bl {
 
@@ -2393,36 +2394,82 @@ void Scene::set_parent(GameObject *child, GameObject *new_parent, int index, boo
   if (keep_world) child->set_world_matrix(world);
 }
 
-static std::string unique_sibling_name(const std::vector<GameObject *> &siblings, const std::string &name) {
-  std::string base = name;
-  size_t p = base.rfind(" (");
-  if (p != std::string::npos && base.back() == ')') base = base.substr(0, p);
-  for (int n = 1;; n++) {
-    std::string cand = base + " (" + std::to_string(n) + ")";
-    bool used = false;
-    for (auto *s : siblings)
-      if (s->name == cand) { used = true; break; }
-    if (!used) return cand;
-  }
-}
+GameObject *Scene::duplicate(GameObject *go) { return duplicate_many({go}).front(); }
 
-GameObject *Scene::duplicate(GameObject *go) {
+/* A copy's name is "Name (n)" with the smallest n no sibling has (Unity's rule); its place is right after the original.
+ * Task 0207: the siblings' names gathered once per parent, each base keeping where its count got to, and each list
+ * rebuilt once - one copy at a time tried every n against every sibling and moved the list each time: 10,000 copies
+ * under one parent took eleven minutes. */
+std::vector<GameObject *> Scene::duplicate_many(const std::vector<GameObject *> &gos) {
+  struct Names {
+    std::unordered_set<std::string> used;
+    std::unordered_map<std::string, int> next;  // the first n not yet tried, per base
+  };
+  std::unordered_map<GameObject *, Names> names;  // per parent (nullptr: the roots)
+  std::unordered_map<GameObject *, std::vector<GameObject *>> after;  // each original's copies, as they will follow it
+  std::unordered_set<GameObject *> copies;
+  /* A copy of a subtree in which an earlier copy already sits after its original (one at a time, it would be there). */
   std::function<GameObject *(GameObject *, GameObject *)> copy = [&](GameObject *src, GameObject *parent) {
     GameObject *dst = create(src->name, parent);
     dst->active = src->active;
     dst->set_local(src->local());
     for (auto &c : src->components) dst->add_component(c->clone());
-    for (GameObject *ch : src->children) copy(ch, dst);
+    for (GameObject *ch : src->children) {
+      if (copies.count(ch)) continue;
+      copy(ch, dst);
+      auto a = after.find(ch);
+      if (a != after.end())
+        for (GameObject *later : a->second) copy(later, dst);
+    }
     return dst;
   };
-  GameObject *d = copy(go, go->parent);
-  auto &list = go->parent ? go->parent->children : roots;
-  d->name = unique_sibling_name(list, go->name);
-  /* Place right after the original, like Unity. */
-  list.erase(std::remove(list.begin(), list.end(), d), list.end());
-  auto it = std::find(list.begin(), list.end(), go);
-  list.insert(it == list.end() ? list.end() : it + 1, d);
-  return d;
+  std::vector<GameObject *> out;
+  out.reserve(gos.size());
+  for (GameObject *go : gos) {
+    auto &list = go->parent ? go->parent->children : roots;
+    auto found = names.find(go->parent);
+    if (found == names.end()) {  // (before any copy joins the list)
+      found = names.emplace(go->parent, Names{}).first;
+      for (GameObject *s : list) found->second.used.insert(s->name);
+    }
+    Names &nm = found->second;
+    GameObject *d = copy(go, go->parent);
+    std::string base = go->name;
+    const size_t p = base.rfind(" (");
+    if (p != std::string::npos && base.back() == ')') base = base.substr(0, p);
+    int &n = nm.next.emplace(base, 1).first->second;
+    std::string cand = base + " (" + std::to_string(n) + ")";
+    while (nm.used.count(cand)) cand = base + " (" + std::to_string(++n) + ")";
+    n++;
+    nm.used.insert(cand);
+    d->name = cand;
+    auto &follow = after[go];
+    follow.insert(follow.begin(), d);  // (the latest copy of an object goes right after it, ahead of earlier ones)
+    copies.insert(d);
+    out.push_back(d);
+  }
+  /* Each list once: the copies out of the end, each set right after its original (like Unity). */
+  for (auto &kv : names) {
+    auto &list = kv.first ? kv.first->children : roots;
+    std::vector<GameObject *> rebuilt, stray;
+    rebuilt.reserve(list.size());
+    std::unordered_set<GameObject *> placed;
+    for (GameObject *c : list) {
+      if (copies.count(c)) {
+        stray.push_back(c);
+        continue;
+      }
+      rebuilt.push_back(c);
+      auto a = after.find(c);
+      if (a == after.end()) continue;
+      rebuilt.insert(rebuilt.end(), a->second.begin(), a->second.end());
+      placed.insert(a->second.begin(), a->second.end());
+    }
+    for (GameObject *c : stray)  // (an original no longer in its parent's list: its copy stays at the end, as before)
+      if (!placed.count(c)) rebuilt.push_back(c);
+    list = std::move(rebuilt);
+  }
+  return out;
 }
 
 std::unique_ptr<Scene> Scene::clone() const {

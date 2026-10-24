@@ -5230,6 +5230,70 @@ static void tests_round174() {
 
 }
 
+/* ---------------------------------------------------------------- round 226: playback without the bookkeeping (task 0206) */
+static void tests_round226() {
+  test("animation: a clip of many tracks poses the objects it names - the first child of a name, as one track at a time found them - and Record turned on after playing still keys a move", [] {
+    /* A root with 100 children, two of them named alike: the clip (300 tracks) moves the first of the name. */
+    Scene s;
+    GameObject *root = s.create("Root");
+    std::vector<GameObject *> kids;
+    for (int i = 0; i < 100; i++) {
+      GameObject *c = s.create(i == 50 ? "Box 7" : strprintf("Box %d", i), root);
+      kids.push_back(c);
+    }
+    AnimationClip clip;
+    for (int i = 0; i < 100; i++)
+      for (int axis = 0; axis < 3; axis++) {
+        AnimTrack &t = clip.track(strprintf("Box %d", i), "Position", axis);
+        t.set_key(1.0f, (float)i);
+        t.set_key(10.0f, (float)i + 1.0f);
+      }
+    apply_clip(clip, *root, 10.0f);
+    std::printf("    Box 7 (the first): x %.1f; the second of the name: x %.1f; Box 99: x %.1f\n", kids[7]->local().position.x,
+                kids[50]->local().position.x, kids[99]->local().position.x);
+    CHECK(kids[7]->local().position.x == 8.0f && kids[99]->local().position.x == 100.0f);
+    CHECK(kids[50]->local().position.x == 0.0f);  // (the clip's "Box 7" is the first child of that name)
+    CHECK(anim_target(*root, "Box 7") == kids[7]);
+    /* Below the top level too, and the names a path can't spell: the same objects anim_target finds (or none). */
+    GameObject *arm1 = s.create("Arm", root), *arm2 = s.create("Arm", root), *hand = s.create("Hand", arm2);
+    GameObject *blank = s.create("", root), *under_blank = s.create("Box 1", blank);
+    (void)arm1, (void)under_blank;
+    AnimationClip deep = clip;
+    deep.track("Arm/Hand", "Position", 0).set_key(1.0f, 5.0f);  // (the first Arm has no Hand: anim_target finds none)
+    deep.track("", "Position", 0).set_key(1.0f, 9.0f);           // (the root itself)
+    const float root_x = root->local().position.x;
+    apply_clip(deep, *root, 1.0f);
+    std::printf("    Arm/Hand x %.1f (the second Arm's Hand: not the track's); the root x %.1f; Box 1 x %.1f\n", hand->local().position.x,
+                root->local().position.x, kids[1]->local().position.x);
+    CHECK(anim_target(*root, "Arm/Hand") == nullptr && hand->local().position.x == 0.0f);
+    CHECK(root->local().position.x == 9.0f && root_x != 9.0f);
+    CHECK(kids[1]->local().position.x == 1.0f && under_blank->local().position.x == 0.0f);
+    /* Played with Record off, stopped, Record on: a move still becomes a key. */
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("benchscene keyed1k");
+    ed.command("anim play");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.command("anim stop");
+    ed.command("anim frame 20");
+    ed.command("anim record on");
+    ed.step_frame_headless();
+    GameObject *box = ed.scene().find_by_name("Box 3");
+    CHECK(box != nullptr);
+    if (!box) return;
+    Transform t = box->local();
+    t.position.z += 2.0f;
+    box->set_local(t);
+    ed.mark_changed_for_test("Move Box 3");
+    ed.step_frame_headless();
+    AnimationClipPtr c = ed.anim_clip_for_test();
+    const AnimTrack *z = c ? c->find("Box 3", "Position", 2) : nullptr;
+    std::printf("    recorded after playing: %s\n", z && z->key_at(20.0f) >= 0 ? strprintf("Box 3 z key at 20 = %g", z->keys[(size_t)z->key_at(20.0f)].value).c_str() : "nothing");
+    CHECK(z && z->key_at(20.0f) >= 0 && std::fabs(z->keys[(size_t)z->key_at(20.0f)].value - t.position.z) < 1e-4f);
+    ed.command("anim record off");
+  });
+}
+
 void run_animation_tests() {
   round64_tests();
   round69_tests();
@@ -5245,4 +5309,5 @@ void run_animation_tests() {
   tests_round141();
   tests_round149_to_round151();
   tests_round174();
+  tests_round226();
 }

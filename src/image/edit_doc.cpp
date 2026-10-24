@@ -3,6 +3,7 @@
 #include "edit_doc.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 #include "../render/canvas.h"
 #include "../render/display.h"
 #include "image.h"
@@ -18,7 +19,9 @@ namespace {
 
 const size_t kHistory = 200;
 
-Image from_bitmap(const Bitmap &b) {
+}  // namespace
+
+Image image_from_bitmap(const Bitmap &b) {
   Image img;
   img.resize(b.width, b.height);
   const size_t n = (size_t)b.width * b.height;
@@ -31,6 +34,8 @@ Image from_bitmap(const Bitmap &b) {
   for (size_t i = 0; i < n * 4 && i < b.rgba8.size(); i++) img.px[i] = (i % 4 == 3) ? b.rgba8[i] / 255.0f : lut[b.rgba8[i]];
   return img;
 }
+
+namespace {
 
 std::vector<float> rgb_of(const Image &img) {
   std::vector<float> rgb((size_t)img.w * img.h * 3);
@@ -66,9 +71,24 @@ bool Doc::open_file(const std::string &path, std::string &error) {
     error = "empty image";
     return false;
   }
-  open_pixels(from_bitmap(b), path);
+  open_pixels(image_from_bitmap(b), path);
   source_path_ = path;
   return true;
+}
+
+/* One row of `out` as the average of the source pixels it covers (an area filter: no aliasing when shrinking). */
+void downsample_row(const Image &in, Image &out, int y) {
+  const float sx = (float)in.w / out.w, sy = (float)in.h / out.h;
+  const int r0 = (int)(y * sy), r1 = std::max(r0 + 1, std::min(in.h, (int)((y + 1) * sy)));
+  for (int x = 0; x < out.w; x++) {
+    const int c0 = (int)(x * sx), c1 = std::max(c0 + 1, std::min(in.w, (int)((x + 1) * sx)));
+    float acc[4] = {0, 0, 0, 0};
+    for (int r = r0; r < r1; r++)
+      for (int c = c0; c < c1; c++)
+        for (int k = 0; k < 4; k++) acc[k] += in.at(c, r)[k];
+    const float n = 1.0f / ((r1 - r0) * (c1 - c0));
+    for (int k = 0; k < 4; k++) out.at(x, y)[k] = acc[k] * n;
+  }
 }
 
 void Doc::open_pixels(Image img, const std::string &label) {
@@ -81,7 +101,10 @@ void Doc::open_pixels(Image img, const std::string &label) {
   stack_.clear();
   undo_.clear();
   redo_.clear();
-  invalidate_from(0);
+  full_.clear(), preview_.clear();
+  full_.spare.clear(), preview_.spare.clear();  // (another picture's sizes)
+  full_.max_spare = 1;  // (full-size buffers are the big ones: one spare, and none after an export)
+  preview_src_ = Image(), preview_side_ = 0;
 }
 
 void Doc::begin_change() {
@@ -156,10 +179,8 @@ bool Doc::set_mask(int index, const std::vector<MaskPart> &mask, bool record) {
 }
 
 void Doc::step_input_size(int step, int &w, int &h) {
-  bool moved = false;
-  for (int i = 0; i < step && i < (int)stack_.size(); i++) moved = moved || (stack_[(size_t)i].enabled && stack_[(size_t)i].info() && stack_[(size_t)i].info()->geometry);
-  const Image &in = moved ? result_upto(step) : source_;
-  w = in.w, h = in.h;
+  w = source_.w, h = source_.h;
+  for (int i = 0; i < step && i < (int)stack_.size(); i++) output_size(stack_[(size_t)i], w, h, w, h);  // (from the fields: no pixels)
 }
 
 bool Doc::geometry_after(int step) const {
@@ -227,41 +248,86 @@ bool Doc::redo() {
   return true;
 }
 
-void Doc::invalidate_from(int step) {
-  if (step < (int)cache_.size()) cache_.resize((size_t)std::max(0, step));
-  if (step < (int)cache_key_.size()) cache_key_.resize((size_t)std::max(0, step));
+void Pipeline::clear() {
+  for (Image &img : cache) recycle(img);
+  cache.clear(), keys.clear();
 }
 
-const Image &Doc::result_upto(int steps) {
+void Pipeline::recycle(Image &img) {
+  if (img.px.empty()) return;
+  if (spare.size() >= max_spare) spare.erase(spare.begin());  // (the oldest goes: sizes change with crops and previews)
+  spare.push_back(std::move(img));
+  img = Image();
+}
+
+/* A buffer for a w x h result: a spare one (its old pixels overwritten by the step), else a new one. */
+Image Pipeline::take(int w, int h) {
+  for (size_t i = 0; i < spare.size(); i++) {
+    if (spare[i].px.size() != (size_t)w * h * 4) continue;
+    Image img = std::move(spare[i]);
+    spare.erase(spare.begin() + (long)i);
+    img.w = w, img.h = h;
+    return img;
+  }
+  spare.clear();  // (a size none of them has: they were another size's, so no use keeping them)
+  return Image();
+}
+
+/* `steps` adjustments on `src` through pipeline `p`: from the first step whose settings differ from its cache's, back
+ * to the nearest result still kept; then only the last two results and the input to the changed step are kept. */
+const Image &Doc::run(Pipeline &p, const Image &src, int steps) {
   const ScopedTimer t;
   steps = std::max(0, std::min((int)stack_.size(), steps));
-  /* The first step whose settings differ from what its cache was made with (a change there reruns it and after),
-   * then back to the nearest result still kept. */
   int first = 0;
-  while (first < steps && first < (int)cache_key_.size() && cache_key_[(size_t)first] == to_text(stack_[(size_t)first])) first++;
-  if (first < steps) invalidate_from(first);  // (the steps after `steps` are the next full result's to check)
+  while (first < steps && first < (int)p.keys.size() && p.keys[(size_t)first] == to_text(stack_[(size_t)first])) first++;
+  if (first < steps) {  // (the steps after `steps` are the next full run's to check)
+    for (size_t i = (size_t)first; i < p.cache.size(); i++) p.recycle(p.cache[i]);
+    p.cache.resize((size_t)first), p.keys.resize((size_t)first);
+  }
   int start = first;
-  while (start > 0 && cache_[(size_t)start - 1].empty()) start--;
-  last_evaluated_ = steps - start;
+  while (start > 0 && p.cache[(size_t)start - 1].empty()) start--;
+  p.evaluated = steps - start;
   for (int i = start; i < steps; i++) {
-    Image out;
-    apply(stack_[(size_t)i], i == 0 ? source_ : cache_[(size_t)i - 1], out);
+    const Image &in = i == 0 ? src : p.cache[(size_t)i - 1];
+    Image out = p.take(in.w, in.h);
+    apply(stack_[(size_t)i], in, out, p.scale);
     if (i < first) {
-      cache_[(size_t)i] = std::move(out);
+      p.cache[(size_t)i] = std::move(out);
       continue;
     }
-    cache_.push_back(std::move(out));
-    cache_key_.push_back(to_text(stack_[(size_t)i]));
+    p.cache.push_back(std::move(out));
+    p.keys.push_back(to_text(stack_[(size_t)i]));
   }
-  drop_cache(steps, first);
-  last_ms_ = t.ms();
-  return steps == 0 ? source_ : cache_[(size_t)steps - 1];
+  for (int i = 0; i < steps && i < (int)p.cache.size(); i++)
+    if (i != steps - 1 && i != steps - 2 && i != first - 1) p.recycle(p.cache[(size_t)i]);
+  p.ms = t.ms();
+  return steps == 0 ? src : p.cache[(size_t)steps - 1];
 }
 
-/* Keeps the result of the last step, the one before it and the input to the step changed last; frees the rest. */
-void Doc::drop_cache(int steps, int changed) {
-  for (int i = 0; i < steps && i < (int)cache_.size(); i++)
-    if (i != steps - 1 && i != steps - 2 && i != changed - 1) cache_[(size_t)i] = Image();
+const Image &Doc::result_upto(int steps) { return run(full_, source_, steps); }
+
+/* The source made no larger than `max_side` (an area average), made again when the size asked for changes. */
+const Image &Doc::preview_source(int max_side) {
+  const int longest = std::max(source_.w, source_.h);
+  if (max_side <= 0 || longest <= max_side) return source_;
+  if (preview_side_ == max_side && !preview_src_.empty()) return preview_src_;
+  const float s = (float)max_side / longest;
+  const int w = std::max(1, (int)std::lround(source_.w * s)), h = std::max(1, (int)std::lround(source_.h * s));
+  preview_src_.resize(w, h);
+  JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) downsample_row(source_, preview_src_, (int)y);
+  });
+  preview_side_ = max_side;
+  preview_.clear();
+  preview_.spare.clear();  // (the old size's)
+  preview_.scale = (float)w / source_.w;
+  return preview_src_;
+}
+
+const Image &Doc::preview_upto(int steps, int max_side) {
+  const Image &src = preview_source(max_side);
+  if (&src == &source_) return result_upto(steps);
+  return run(preview_, src, steps);
 }
 
 const Image &Doc::result() { return result_upto((int)stack_.size()); }
@@ -301,6 +367,7 @@ bool Doc::export_file(const std::string &path, std::string &error) {
     return false;
   }
   if (!ok && error.empty()) error = "could not write " + path;
+  full_.spare.clear();  // (the full size's spare buffers: an export is done, the window works on its preview)
   return ok;
 }
 
@@ -347,6 +414,25 @@ bool Doc::save_source(const std::string &path, std::string &error) {
     return false;
   }
   source_path_ = src;
+  return true;
+}
+
+/* The stack alone, as an .edit file without a source (an applied texture edit's adjustments). */
+bool Doc::save_stack(const std::string &path, std::string &error) {
+  if (fs::write_file(path, "blendity-edit 1\n" + stack_text())) return true;
+  error = "could not write " + path;
+  return false;
+}
+
+/* An .edit file's adjustments onto the picture open now (its source and view left alone). */
+bool Doc::load_stack(const std::string &path, std::string &error) {
+  std::string text;
+  if (!fs::read_file(path, text) || text.compare(0, 14, "blendity-edit ") != 0) {
+    error = "no stack in " + path;
+    return false;
+  }
+  stack_from_text(text.substr(text.find('\n') + 1));
+  undo_.clear(), redo_.clear();
   return true;
 }
 

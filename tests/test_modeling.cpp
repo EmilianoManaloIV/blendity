@@ -3951,11 +3951,13 @@ static void round17_tests() {
     /* Clicking it again closes only the list. */
     click(r.x + r.w / 2, r.y + r.h / 2);
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
-    /* Open it and pick "Unreal", the list's second row below the field (Unity, Unreal, Blender, ...: task 0063). */
+    /* Open it and pick "Unreal", the list's second row (Unity, Unreal, Blender, ...: task 0063). The list drops below
+     * the field, or opens above it when the field is near the window's bottom (task 0199's lines moved it there). */
     click(r.x + r.w / 2, r.y + r.h / 2);
     CHECK(ed.popup_count_for_test() == 2);
+    const Recti list = ed.top_popup_rect_for_test();
     const int row = r.h + 4;
-    click(r.x + 20, r.bottom() + 4 + row + row / 2);
+    click(r.x + 20, list.y + 4 + row + row / 2);
     std::printf("    picked: preset %s, dialog %d, popups %zu\n", ed.keymap_preset_name().c_str(), (int)ed.dialog_open_for_test(),
                 ed.popup_count_for_test());
     CHECK(ed.keymap_preset_name() == "Unreal");
@@ -7923,6 +7925,197 @@ static void tests_round197() {
   });
 }
 
+/* ---------------------------------------------------------------- round 208: an extrude without the whole-mesh work (task 0185) */
+static bool r208_same_render(const RenderMesh &a, const RenderMesh &b) {
+  auto same = [](const auto &x, const auto &y) { return x.size() == y.size() && (x.empty() || std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0); };
+  return same(a.positions, b.positions) && same(a.normals, b.normals) && same(a.uvs, b.uvs) && same(a.indices, b.indices) &&
+         same(a.tri_corner, b.tri_corner) && same(a.tri_face, b.tri_face) && same(a.tri_material, b.tri_material);
+}
+
+static void tests_round208() {
+  test("Edit Mode operators: the copy leaves the caches behind; after an extrude both render caches match builds from nothing; a vertices-only operator still follows in place", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 64, 48);
+    big->add<MeshRenderer>();
+    ed.commit_change("add Big");
+    ed.command("select Big");
+    ed.command("edit face");
+    ed.command("fsel 100 101 102");
+    r34_steps(ed, 2);
+    const MeshCounts c0 = mesh_counts();
+    const MeshPtr before = big->get<MeshFilter>()->mesh;
+    ed.command("editop extrude");
+    const MeshCounts c1 = mesh_counts() - c0;
+    CHECK(c1.copies == 1);
+    /* The copy came without the render meshes and tables (a plain copy of the drawn mesh carried them all). */
+    const size_t made = big->get<MeshFilter>()->mesh->memory_bytes(), was = before->memory_bytes();
+    std::printf("    the operator's mesh before it is drawn: %zu KB, the mesh it copied: %zu KB\n", made / 1024, was / 1024);
+    CHECK(made * 2 < was);
+    r34_steps(ed, 2);
+    const Mesh &m = *big->get<MeshFilter>()->mesh;
+    Mesh ref = m;
+    ref.forget_caches();
+    for (bool flat : {true, false}) CHECK(r208_same_render(m.render_mesh(flat), ref.render_mesh(flat)));
+    /* A vertices-only operator: the topology held, so the copy took the caches back and the views follow in place. */
+    ed.command("edit vertex");
+    ed.command("vsel 10 11 12 13");
+    r34_steps(ed, 2);
+    const MeshCounts s0 = mesh_counts();
+    ed.command("editop smooth");
+    r34_steps(ed, 2);
+    const MeshCounts s1 = mesh_counts() - s0;
+    std::printf("    Smooth Vertices: %llu render meshes built, %llu moved in place\n", (unsigned long long)s1.full_builds, (unsigned long long)s1.in_place);
+    CHECK(ed.last_op_name_for_test() == "smooth");
+    CHECK(s1.full_builds == 0 && s1.in_place >= 1);
+  });
+
+  test("the edge table from the corners at each vertex is edges()'s: a sphere, a cube, an extrude, n-gons, a face repeating a vertex, loose edges", [] {
+    std::vector<MeshPtr> meshes = {primitives::uv_sphere(1.0f, 24, 16), primitives::cube(1.0f)};
+    MeshPtr ext = primitives::uv_sphere(1.0f, 24, 16);
+    std::vector<uint8_t> sel(ext->face_count(), 0);
+    sel[5] = sel[6] = sel[30] = 1;
+    meshops::extrude_faces(*ext, sel, 0.3f);
+    meshes.push_back(ext);
+    MeshPtr odd = std::make_shared<Mesh>();
+    odd->positions = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {2, 0, 0}, {3, 3, 3}};
+    odd->face_offsets = {0, 5, 8, 9, 11};
+    odd->corner_verts = {0, 1, 4, 2, 3, 2, 2, 4, 3, 0, 5, 1, 2};  // (an n-gon, a face repeating vertex 2, faces of one and
+                                                                  // two corners, then two corners in no face)
+    odd->loose_edges = {((uint64_t)0 << 32) | 5, ((uint64_t)0 << 32) | 1};  // (one new, one already a face's)
+    meshes.push_back(odd);
+    for (const MeshPtr &mp : meshes) {
+      std::vector<std::pair<uint32_t, uint32_t>> want;
+      mp->edges(want);
+      CHECK(mp->edge_cache() == want);
+    }
+  });
+
+  test("smooth normals summed per vertex on every thread are each vertex's faces' area-weighted normals, a face repeating a vertex included", [] {
+    MeshPtr m = primitives::uv_sphere(1.0f, 32, 24);
+    m->smooth = true;
+    m->smooth_angle = 180.0f;
+    m->face_smooth.clear();
+    /* A face using vertex 5 twice (5, 6, 5, 7 is degenerate; 5, 6, 40, 5, 41 has it twice, apart). */
+    const uint32_t extra[] = {5, 6, 40, 5, 41};
+    m->corner_verts.insert(m->corner_verts.end(), std::begin(extra), std::end(extra));
+    m->face_offsets.push_back((uint32_t)m->corner_verts.size());
+    m->touch();
+    std::vector<Vec3> want(m->vert_count(), Vec3(0.0f));
+    for (size_t f = 0; f < m->face_count(); f++) {
+      const uint32_t *v = m->face_verts(f), n = m->face_size(f);
+      Vec3 nw(0.0f);  // (Newell: twice the area along the normal)
+      for (uint32_t i = 0; i < n; i++) {
+        const Vec3 &a = m->positions[v[i]], &b = m->positions[v[(i + 1) % n]];
+        nw += Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+      }
+      for (uint32_t i = 0; i < n; i++) want[v[i]] += nw;
+    }
+    const RenderMesh &rm = m->render_mesh();
+    float worst = 0.0f;
+    for (size_t k = 0; k < rm.indices.size(); k++) {
+      const Vec3 w = normalize(want[m->corner_verts[rm.tri_corner[k]]]);
+      worst = std::max(worst, length(rm.normals[rm.indices[k]] - w));
+    }
+    std::printf("    the largest difference from the faces' sum: %g\n", worst);
+    CHECK(worst < 1e-4f);
+  });
+
+  test("Auto Fuse: two faces landing on one floor face - the first fuses, the second can't land on the hole the first made, and the mesh stays whole", [] {
+    MeshPtr m = std::make_shared<Mesh>();
+    m->positions = {{-2, 0, -2}, {-2, 0, 2}, {2, 0, 2}, {2, 0, -2},                     // the floor (facing up)
+                    {-0.6f, 0, -0.2f}, {-0.2f, 0, -0.2f}, {-0.2f, 0, 0.2f}, {-0.6f, 0, 0.2f},  // two faces on it, facing down
+                    {0.2f, 0, -0.2f}, {0.6f, 0, -0.2f}, {0.6f, 0, 0.2f}, {0.2f, 0, 0.2f}};
+    m->face_offsets = {0, 4, 8, 12};
+    m->corner_verts = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    std::vector<uint8_t> sel = {0, 1, 1};
+    CHECK(meshops::fuse_contacts(*m, sel));
+    bool whole = m->face_offsets.back() == m->corner_verts.size();
+    for (uint32_t v : m->corner_verts) whole = whole && v < m->vert_count();
+    std::printf("    after fusing: %zu faces, %zu vertices\n", m->face_count(), m->vert_count());
+    CHECK(whole);
+  });
+}
+
+/* ---------------------------------------------------------------- round 221: redo's numbers kept (task 0201) */
+static void tests_round221() {
+  test("redo from the console keeps an operator's numbers for its next use, as its F9 panel does (a bevel's width and segments)", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 32, 24);
+    big->add<MeshRenderer>();
+    ed.commit_change("add Big");
+    ed.command("select Big");
+    ed.command("edit face");
+    ed.command("fsel 100 101 102");
+    ed.command("editop bevel");
+    ed.command("redo amount 0.005");
+    ed.command("redo segments 3");
+    ed.command("undo");
+    r34_steps(ed, 2);
+    ed.command("fsel 100 101 102");
+    ed.command("editop bevel");
+    std::printf("    the next bevel: width %.3f, %d segments\n", ed.last_op_amount_for_test(), ed.last_op_segments_for_test());
+    CHECK(ed.last_op_name_for_test() == "bevel");
+    CHECK(std::fabs(ed.last_op_amount_for_test() - 0.005f) < 1e-6f && ed.last_op_segments_for_test() == 3);
+  });
+}
+
+/* ---------------------------------------------------------------- round 228: Edit Mode operators on big meshes (task 0208) */
+static void tests_round228() {
+  test("Select All keeps no edge set outside Edge mode, and Edge mode - by the console's edit edge too - still has every edge; Inset on faces too small for its thickness stops short of folding; Bevel twice gives the same mesh, its corner patches in the same order", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 64, 48);
+    big->add<MeshRenderer>();
+    ed.commit_change("add Big");
+    ed.command("select Big");
+    ed.command("edit vertex");
+    ed.run_action_for_test("edit.select_all");
+    const size_t edges = big->get<MeshFilter>()->mesh->edge_cache().size();
+    std::printf("    Vertex mode, all selected: %zu edges kept; the mesh has %zu\n", ed.edge_sel_count_for_test(), edges);
+    CHECK(ed.edge_sel_count_for_test() == 0);
+    ed.command("edit edge");
+    std::printf("    then the console's edit edge: %zu edges selected\n", ed.edge_sel_count_for_test());
+    CHECK(ed.edge_sel_count_for_test() == edges);
+    /* Inset 0.05 on the top cap's tiny triangles folds: it stops at the furthest thickness that doesn't. */
+    ed.command("edit face");
+    ed.command("fsel 10 11 12");
+    ed.command("insetmode region 0.05");
+    const Mesh before = *big->get<MeshFilter>()->mesh;
+    ed.command("editop inset");
+    const Mesh &after = *big->get<MeshFilter>()->mesh;
+    CHECK(after.face_count() > before.face_count());
+    bool turned = false;  // (every face of the top cap - all its corners high up - faces up: none folded over)
+    for (size_t f = 0; f < after.face_count(); f++) {
+      bool cap = true;
+      for (uint32_t k = 0; k < after.face_size(f); k++) cap = cap && after.positions[after.face_verts(f)[k]].y > 0.95f;
+      if (cap) turned = turned || dot(after.face_normal(f), Vec3(0, 1, 0)) <= 0.0f;
+    }
+    CHECK(!turned);
+    ed.command("undo");
+    /* Bevel twice from the same mesh: the same result, patch for patch. */
+    auto bevel_once = [&](Mesh &out) {
+      Mesh m = *primitives::uv_sphere(1.0f, 32, 24);
+      std::vector<uint8_t> vs(m.vert_count(), 0), fs(m.face_count(), 0);
+      for (uint32_t f : {100u, 101u, 102u, 140u}) {
+        fs[f] = 1;
+        for (uint32_t k = 0; k < m.face_size(f); k++) vs[m.face_verts(f)[k]] = 1;
+      }
+      std::string err;
+      const bool ok = meshops::bevel_edges(m, vs, fs, 0.01f, 3, &err, true, 0.5f);
+      out = std::move(m);
+      return ok;
+    };
+    Mesh a, b;
+    CHECK(bevel_once(a) && bevel_once(b));
+    CHECK(a.face_count() == b.face_count() && a.corner_verts == b.corner_verts && a.positions.size() == b.positions.size());
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -7956,4 +8149,7 @@ void run_modeling_tests() {
   tests_round195();
   tests_round196();
   tests_round197();
+  tests_round208();
+  tests_round221();
+  tests_round228();
 }

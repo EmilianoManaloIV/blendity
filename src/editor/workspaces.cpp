@@ -74,6 +74,10 @@ std::vector<std::string> Editor::workspace_names() const {
 bool Editor::apply_workspace(const std::string &name) {
   const Workspace *w = find_workspace(name);
   if (!w) return false;
+  if (active_window_ != 0) {  // (another window is drawing: a layout arranges the main window, task 0187)
+    Log::warn("Layouts arrange the main window: choose one there");
+    return false;
+  }
   dock_reset(w->dock);
   focus_ = w->focus;
   workspace_ = w->name;

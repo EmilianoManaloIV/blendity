@@ -86,6 +86,11 @@ Editor::~Editor() {
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
   procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
+  for (auto &w : windows_) {
+    if (gpu_view_ && w->card_win >= 0) gpu_view_->detach_window(w->card_win);  // (a swapchain before its window: task 0193)
+    if (w->os) destroy_window(w->os);
+  }
+  if (gpu_view_ && card_win_ >= 0) gpu_view_->detach_window(card_win_);
   if (window_) destroy_window(window_);
 }
 
@@ -130,6 +135,7 @@ void Editor::resolve_project_paths(const std::string &near) {
   screenshots_dir_ = fs::join(project_root_, "Screenshots");
   fs::make_dirs(fs::join(assets_dir_, "Scenes"));
   std::string prefs_dir = fs::join(fs::home_dir(), ".blendity");
+  if (const char *env = std::getenv("BLENDITY_PREFS_DIR")) prefs_dir = env;  // (a check or a test: scratch preferences, task 0193)
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
@@ -172,12 +178,14 @@ bool Editor::init(int argc, char **argv) {
   ui_.clipboard_get = [this] { return get_clipboard(window_); };
   ui_.clipboard_set = [this](const std::string &s) { set_clipboard(window_, s); };
   set_refresh_callback(window_, [this] {
-    std::vector<Event> none;
     present_all_ = true;  // (the system asked for the window to be painted: all of it)
+    if (in_frame_) return;  // (asked from inside a frame - a window's move or a secondary window's poll: the next frame paints)
+    std::vector<Event> none;
     frame(none);
   });
   if (!layout_arg.empty()) dock_reset(layout_arg);
   if (!dock_) dock_reset("Default");
+  if (layout_arg.empty()) restore_windows(windows_pref_);  // (the windows of the last session, task 0187)
   scene_ = std::make_unique<Scene>();
   std::string sample = fs::join(assets_dir_, "Scenes/SampleScene.scene");
   if (!scene_arg.empty()) open_scene(scene_arg);
@@ -201,6 +209,7 @@ bool Editor::init(int argc, char **argv) {
 void Editor::init_headless(int width, int height) {
   common_init(this);
   headless_ = true;
+  inspector_essentials_ = false, guides_enabled_ = false;  // (the tests' Inspector shows every field; no guide strip moves the docks)
   resolve_project_paths();
   dpi_ = 1.0f;
   apply_ui_scale();
@@ -271,11 +280,69 @@ std::vector<std::pair<int, int>> Editor::changed_rows(const uint32_t *px, int wi
   return runs;
 }
 
+/* Task 0198: the changed parts of a frame as rects - 16-row bands, each with the columns its changed 256-pixel tiles
+ * span (a scrolled panel changes its own columns, not the window's) - against `tiles` (the hashes of the last frame
+ * presented, updated here); the whole frame when `all` or the size changed. Bands next to each other spanning the same
+ * columns are one rect. */
+std::vector<gpu::Raster::PresentRect> Editor::changed_rects(const uint32_t *px, int width, int height, std::vector<uint64_t> &tiles, bool all) {
+  constexpr int kBand = 16, kTile = 256;
+  const int nb = (height + kBand - 1) / kBand, nt = (width + kTile - 1) / kTile;
+  std::vector<uint64_t> fresh((size_t)nb * nt);
+  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+    for (int b = (int)b0; b < (int)b1; b++)
+      for (int t = 0; t < nt; t++) {
+        const int x0 = t * kTile, w = std::min(kTile, width - x0);
+        uint64_t h = 0;
+        for (int y = b * kBand; y < std::min(height, (b + 1) * kBand); y++)
+          h = (h ^ band_hash((const uint8_t *)(px + (size_t)y * width + x0), (size_t)w * 4)) * 0x100000001B3ull;
+        fresh[(size_t)b * nt + t] = h;
+      }
+  });
+  all = all || tiles.size() != fresh.size();
+  std::vector<gpu::Raster::PresentRect> rects;
+  for (int b = 0; b < nb; b++) {
+    int lo = nt, hi = -1;
+    for (int t = 0; t < nt; t++)
+      if (all || tiles[(size_t)b * nt + t] != fresh[(size_t)b * nt + t]) lo = std::min(lo, t), hi = t;
+    if (hi < 0) continue;
+    const int y0 = b * kBand, y1 = std::min(height, y0 + kBand), x0 = lo * kTile, x1 = std::min(width, (hi + 1) * kTile);
+    if (!rects.empty() && rects.back().y1 == y0 && rects.back().x0 == x0 && rects.back().x1 == x1) rects.back().y1 = y1;
+    else rects.push_back({x0, y0, x1, y1});
+  }
+  tiles.swap(fresh);
+  return rects;
+}
+
 void Editor::present_changed() {
   const bool all = present_all_ || fb_.width != present_w_ || fb_.height != present_h_;
   present_w_ = fb_.width, present_h_ = fb_.height;
-  const std::vector<std::pair<int, int>> runs = changed_rows(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  /* (Task 0198: changed rects for the card; the system shows whole rows, the rects' bands.) */
+  const std::vector<gpu::Raster::PresentRect> rects = changed_rects(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  std::vector<std::pair<int, int>> runs;
+  for (const gpu::Raster::PresentRect &r : rects) {
+    if (!runs.empty() && runs.back().second == r.y0) runs.back().second = r.y1;
+    else runs.emplace_back(r.y0, r.y1);
+  }
   present_all_ = false;
+  /* Task 0193: the card shows the window - the views it holds, the canvas over them - when it presents this one. */
+  if (card_present_ && card_win_ >= 0 && gpu_view_) {
+    card_present_ = false;  // (until the next frame decides again: nothing drawn between frames keeps a view there)
+    std::string err;
+    const gpu::Raster::PresentResult r =
+        gpu_view_->present_window(card_win_, fb_.pixels.data(), fb_.width, fb_.height, rects, all || card_ui_stale_, card_views_, &err);
+    if (r == gpu::Raster::Shown) {
+      card_ui_stale_ = false;
+      card_views_shown_ = card_views_;
+      card_frames_++;
+      return;
+    }
+    present_all_ = true;  // (skipped or failed: all of it next time)
+    if (r == gpu::Raster::Skipped) return;  // (minimised, mid-resize: nothing wrong, nothing to show now)
+    card_present_failed(err);
+    if (!card_views_.empty()) return;  // (the canvas has holes where the card's pictures were: the next frame draws them here)
+  }
+  card_views_shown_.clear();
+  if (card_win_ >= 0) card_ui_stale_ = true;  // (task 0198: the card's UI image doesn't have this frame's changes)
   if (all) return present(window_, fb_.pixels.data(), fb_.width, fb_.height);
   present_rows(window_, fb_.pixels.data(), fb_.width, fb_.height, runs);
 }
@@ -292,9 +359,12 @@ int Editor::run() {
     if (continuous) timeout = 0;  // (the pacer below waits for the frame's turn, precisely)
     else if (ui_.next_wakeup > 0) timeout = std::max(1, (int)((ui_.next_wakeup - now) * 1000.0) + 1);
     if (ui_.redraw || first) timeout = 0;
+    if (!windows_.empty()) timeout = std::min(timeout, 50);  // (X11 and Cocoa wake for the main window's events only)
     poll_events(window_, events, timeout);
+    gather_window_events();
     now = now_seconds();
     bool need = first || !events.empty() || ui_.redraw || continuous || (ui_.next_wakeup > 0 && now >= ui_.next_wakeup);
+    for (auto &w : windows_) need = need || !w->pending.empty() || w->ui.redraw || (w->ui.next_wakeup > 0 && now >= w->ui.next_wakeup);
     /* Pick up log lines written from other threads/systems. */
     std::vector<LogEntry> tmp;
     if (Log::fetch(log_seen_ + log_.size(), tmp) > log_seen_ + log_.size()) need = true;
@@ -337,8 +407,8 @@ void Editor::request_close() {
 
 void Editor::process_events(std::vector<Event> &events) {
   auto &in = ui_.in;
-  static double last_click[3] = {-1, -1, -1};
-  static int last_click_x[3], last_click_y[3];
+  double *last_click = in.last_click;  // (each window's own: task 0187)
+  int *last_click_x = in.last_click_x, *last_click_y = in.last_click_y;
   in.pmx = in.mx;
   in.pmy = in.my;
   for (int b = 0; b < 3; b++) in.pressed[b] = in.released[b] = in.double_clicked[b] = false;
@@ -354,6 +424,7 @@ void Editor::process_events(std::vector<Event> &events) {
       case EventType::MouseMove:
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
+        in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
         break;
       case EventType::Gesture:  // (task 0075: two fingers; the Scene view navigates with them)
         if (!in.down[0] && !in.down[1] && !in.down[2]) in.mx = e.x, in.my = e.y;  // (a held button's drag keeps its own point)
@@ -364,9 +435,11 @@ void Editor::process_events(std::vector<Event> &events) {
         in.touch_rotate += e.rotate;
         break;
       case EventType::MouseDown: {
+        pointer_window_ = active_window_;  // (the window the press is in owns its drags)
         int b = e.button;
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
+        in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
         in.down[b] = true;
         in.pressed[b] = true;
         double t = now_seconds();
@@ -429,7 +502,7 @@ void Editor::process_events(std::vector<Event> &events) {
 }
 
 void Editor::apply_ui_scale() {
-  float s = ui_scale_pref_ > 0 ? ui_scale_pref_ : std::max(1.0f, dpi_);
+  float s = (ui_scale_pref_ > 0 ? ui_scale_pref_ : std::max(1.0f, dpi_)) * (tablet_ ? 1.5f : 1.0f);  // (Tablet: bigger targets, task 0188)
   ui_.scale = s;
   if (ui_.font.source().empty()) ui_.font.load_system_ui_font(13.0f * s);
   else ui_.font.set_pixel_height(13.0f * s);
@@ -440,6 +513,13 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
+  in_frame_ = true;
+  frame_body(events);
+  in_frame_ = false;
+  if (save_prefs_pending_) save_prefs();  // (asked for while another window drew: its state was in place then)
+}
+
+void Editor::frame_body(std::vector<Event> &events) {
   /* The system asked for the window to be painted, or it changed: present all of it (what it showed may be gone). */
   for (const Event &e : events)
     if (e.type == EventType::Repaint || e.type == EventType::Resize || e.type == EventType::DpiChanged) present_all_ = true;
@@ -452,7 +532,7 @@ void Editor::frame(std::vector<Event> &events) {
   process_events(events);
   update_procedural_shapes();
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
-  if (texture_touch_pending_ && !ui_.in.down[0]) {
+  if (texture_touch_pending_ && !any_button_down()) {
     procedural_texture_clear_previews();
     invalidate_material_textures();
     texture_touch_pending_ = false;
@@ -489,7 +569,7 @@ void Editor::frame(std::vector<Event> &events) {
       play_time_ += dt;
       ctx.time = play_time_;
       ctx.dt = dt;
-      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && ui_.in.key_down[k]; };
+      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && key_down_any(k); };
       scene_->update(ctx);
       play_dt = dt;
       step_requested_ = false;
@@ -526,6 +606,7 @@ void Editor::frame(std::vector<Event> &events) {
   Log::fetch(log_.size(), log_);
 
   ui_.begin_frame(&fb_, now);
+  begin_card_frame();  // (task 0193: whether the card presents this window this frame)
   auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
   /* While a GPU opens in the background, wake a few times a second so a waiting view takes it (task 0037; after
    * begin_frame, which clears the wake-up). */
@@ -562,65 +643,23 @@ void Editor::frame(std::vector<Event> &events) {
   seqr_.drawn = false;
   sync_material_asset_names();
   draw_toolbar(toolbar);
+  dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
   draw_statusbar(status);
   draw_menubar(menubar);  // last so its popups are declared after windows (they draw on top anyway)
+  draw_command_palette();  // (task 0189: Ctrl+K, Shift+Q)
   draw_dialogs();
-  update_asset_drag();
+  if (pointer_window_ == active_window_) update_asset_drag();  // (a drag belongs to the window it started in: task 0187)
   handle_drop();
   handle_shortcuts();
 
-  /* Tab drag & drop between dock areas. */
-  if (tab_drag_ != WindowKind::Count) {
-    auto &in = ui_.in;
-    if (!tab_dragging_ && (std::abs(in.mx - tab_press_x_) > ui_.px(8) || std::abs(in.my - tab_press_y_) > ui_.px(8)))
-      tab_dragging_ = true;
-    if (tab_dragging_) {
-      DockNode *leaf = dock_leaf_at(in.mx, in.my);
-      int zone = 0;
-      Recti pr;
-      if (leaf) {
-        Recti r = leaf->rect;
-        int tbh = ui_.row_h() + ui_.px(4);
-        float fx = (in.mx - r.x) / (float)r.w, fy = (in.my - r.y - tbh) / (float)std::max(1, r.h - tbh);
-        if (in.my < r.y + tbh) zone = 0;
-        else if (fx < 0.25f) zone = 1;
-        else if (fx > 0.75f) zone = 2;
-        else if (fy < 0.25f) zone = 3;
-        else if (fy > 0.75f) zone = 4;
-        pr = r;
-        if (zone == 1) pr.w /= 2;
-        if (zone == 2) { pr.x += pr.w / 2; pr.w /= 2; }
-        if (zone == 3) pr.h /= 2;
-        if (zone == 4) { pr.y += pr.h / 2; pr.h /= 2; }
-      }
-      WindowKind k = tab_drag_;
-      ui_.overlay([this, pr, leaf, k] {
-        auto &cv = ui_.canvas;
-        if (leaf) {
-          cv.fill_rect(pr, Color::hex(0x3A79BB, 70));
-          cv.rect_outline(pr, Color::hex(0x3A79BB), ui_.px(2));
-        }
-        std::string t = window_title(k);
-        Recti tr{ui_.in.mx + ui_.px(10), ui_.in.my + ui_.px(6), ui_.font.text_width(t) + ui_.px(16), ui_.row_h()};
-        ui_.frame(tr, ui_.theme.tab_active, ui_.theme.focus, ui_.px(3));
-        cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
-      });
-      if (in.released[0]) {
-        if (leaf) dock_move(k, leaf, zone);
-        tab_dragging_ = false;
-        tab_drag_ = WindowKind::Count;
-      }
-    }
-    else if (!in.down[0]) {
-      tab_drag_ = WindowKind::Count;
-    }
-  }
+  update_tab_drag();
 
-  finish_hierarchy_drag();
+  if (pointer_window_ == active_window_) finish_hierarchy_drag();
+  take_favorite_request();
   poll_skin_job();
   anim_tick();
   seq_tick();
@@ -632,7 +671,7 @@ void Editor::frame(std::vector<Event> &events) {
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
-  if (pending_change_ && !ui_.in.down[0] && !ui_.in.down[1] && !ui_.in.down[2] && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
+  if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
 
   std::string title = scene_display_name() + (scene_dirty_ ? "*" : "") + " - Blendity" + (playing_ ? " [Playing]" : "");
   if (title != last_title_ && window_) {
@@ -641,6 +680,7 @@ void Editor::frame(std::vector<Event> &events) {
   }
   ui_ms_ = (float)frame_timer.ms();
   if (window_) present_changed();
+  draw_secondary_windows(now);  // (task 0187: after the main window, with its own input each)
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
   /* A move just ended (task 0103 / 0104): one more frame, whatever ends it, so no held or cheap picture stays up. */
@@ -670,6 +710,59 @@ void Editor::frame(std::vector<Event> &events) {
       else i++;
     for (Deferred &d : due) d.fn();
     ui_.redraw = true;
+  }
+}
+
+/* Tab drag & drop between dock areas; a tab dropped outside its window gets a window of its own (from a secondary
+ * window: back into the main one). */
+void Editor::update_tab_drag() {
+  if (tab_drag_ == WindowKind::Count || tab_drag_window_ != active_window_) return;
+  auto &in = ui_.in;
+  if (!tab_dragging_ && (std::abs(in.mx - tab_press_x_) > ui_.px(8) || std::abs(in.my - tab_press_y_) > ui_.px(8)))
+    tab_dragging_ = true;
+  if (!tab_dragging_) {
+    if (!in.down[0]) tab_drag_ = WindowKind::Count;
+    return;
+  }
+  {
+    DockNode *leaf = dock_leaf_at(in.mx, in.my);
+    int zone = 0;
+    Recti pr;
+    if (leaf) {
+      Recti r = leaf->rect;
+      int tbh = ui_.row_h() + ui_.px(4);
+      float fx = (in.mx - r.x) / (float)r.w, fy = (in.my - r.y - tbh) / (float)std::max(1, r.h - tbh);
+      if (in.my < r.y + tbh) zone = 0;
+      else if (fx < 0.25f) zone = 1;
+      else if (fx > 0.75f) zone = 2;
+      else if (fy < 0.25f) zone = 3;
+      else if (fy > 0.75f) zone = 4;
+      pr = r;
+      if (zone == 1) pr.w /= 2;
+      if (zone == 2) { pr.x += pr.w / 2; pr.w /= 2; }
+      if (zone == 3) pr.h /= 2;
+      if (zone == 4) { pr.y += pr.h / 2; pr.h /= 2; }
+    }
+    WindowKind k = tab_drag_;
+    ui_.overlay([this, pr, leaf, k] {
+      auto &cv = ui_.canvas;
+      if (leaf) {
+        cv.fill_rect(pr, Color::hex(0x3A79BB, 70));
+        cv.rect_outline(pr, Color::hex(0x3A79BB), ui_.px(2));
+      }
+      std::string t = window_title(k);
+      Recti tr{ui_.in.mx + ui_.px(10), ui_.in.my + ui_.px(6), ui_.font.text_width(t) + ui_.px(16), ui_.row_h()};
+      ui_.frame(tr, ui_.theme.tab_active, ui_.theme.focus, ui_.px(3));
+      cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
+    });
+    if (in.released[0]) {
+      const bool outside = in.mx < 0 || in.my < 0 || in.mx >= fb_.width || in.my >= fb_.height;
+      if (leaf) dock_move(k, leaf, zone);
+      else if (outside && active_window_ != 0) window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
+      else if (outside) queue_new_window_at_mouse(k);
+      tab_dragging_ = false;
+      tab_drag_ = WindowKind::Count;
+    }
   }
 }
 
@@ -711,6 +804,13 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("New Scene", "Ctrl+N")) new_scene();
     if (u.menu_item("Open Scene...", "Ctrl+O")) open_scene_dialog();
+    if (!recent_scenes_.empty())
+      u.submenu("Open Recent", u.px(320), [this] {
+        for (const std::string &p : std::vector<std::string>(recent_scenes_))
+          if (ui_.menu_item(fs::filename(p), nullptr, false, fs::exists(p))) defer([this, p] { open_scene(p); });  // (after the frame: windows hold pointers into this scene)
+        ui_.menu_separator();
+        if (ui_.menu_item("Clear Recent")) recent_scenes_.clear();
+      });
     u.menu_separator();
     if (u.menu_item("Save", "Ctrl+S")) save_scene_cmd(false);
     if (u.menu_item("Save As...", "Ctrl+Shift+S")) save_scene_cmd(true);
@@ -750,7 +850,7 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("Work like Unity, Unreal, Blender or Maya: their keys and their Scene view mouse navigation.");
     u.menu_separator();
     if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), "Ctrl+Z", false, !undo_.empty() || pending_change_)) undo();
-    if (u.menu_item("Redo", "Ctrl+Y", false, !redo_.empty())) redo();
+    if (u.menu_item(redo_.empty() ? std::string("Redo") : "Redo " + redo_.back().label, "Ctrl+Y", false, !redo_.empty())) redo();
     u.menu_separator();
     if (u.menu_item("Select All", "Ctrl+A")) {
       if (edit_mode_) edit_select_all(true);
@@ -1016,8 +1116,10 @@ void Editor::draw_menubar(const Recti &r) {
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
-          u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
+          u.menu_item(window_title((WindowKind)k), keys[k], dock_find_anywhere((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
+    if (!windows_.empty() && u.menu_item(strprintf("Bring Back %zu Window%s", windows_.size(), windows_.size() == 1 ? "" : "s")))
+      for (auto &w : windows_) w->close = true;  // (their tabs return to this window: task 0187)
     u.menu_separator();
     u.submenu("Layouts", u.px(230), [this] {
       /* The stages of the work first, then the arrangements and the user's own (task 0055). */
@@ -1052,6 +1154,11 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
     if (u.menu_item("Open Manual")) open_manual();
+    if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty())) {
+      guides_seen_.clear();
+      save_prefs();
+    }
+    u.tooltip("Show each layout's first-run guide again (what it is for, its next three steps).");
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
     if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
@@ -1170,21 +1277,12 @@ void Editor::draw_toolbar(const Recti &r) {
   draw_layout_dialogs();  // Save / Delete Layout (task 0055)
 }
 
+/* The status bar: the last message (left), what the mouse does and the last action's Undo (middle), the frame's numbers
+ * (right). The right part is measured first; the hint gets what is left between and is cut with an ellipsis. */
 void Editor::draw_statusbar(const Recti &r) {
   auto &u = ui_;
   u.canvas.fill_rect(r, u.theme.tabbar);
   u.canvas.hline(r.x, r.right(), r.y, u.theme.border);
-  int x = r.x + u.px(8);
-  if (!log_.empty()) {
-    const LogEntry &e = log_.back();
-    Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
-    uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
-    int a = u.font.line_height() - u.px(4);
-    u.draw_icon(ic, {x, r.y + (r.h - a) / 2, a, a}, col);
-    Recti tr{x + a + u.px(6), r.y, r.w / 2, r.h};
-    u.label(tr, e.text, u.theme.text);
-    if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
-  }
   std::string lighting = baking_                 ? bake_status_ + "  |  "
                          : lighting_out_of_date()  ? std::string("Lighting out of date  |  ")
                          : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: Ctrl+Shift+L)  |  ")
@@ -1192,7 +1290,26 @@ void Editor::draw_statusbar(const Recti &r) {
   std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
                                 playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
                                 scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
+  const int right_w = u.font.text_width(right) + u.px(20);
   u.label({r.x, r.y, r.w - u.px(10), r.h}, right, u.theme.text_dim, ui::Align::Right);
+  const int x = r.x + u.px(8), log_w = r.w * 7 / 20;
+  draw_statusbar_log({x, r.y, log_w, r.h});
+  const int mid_x = x + log_w + u.px(12);
+  draw_statusbar_hint({mid_x, r.y, std::max(0, r.right() - right_w - mid_x), r.h});
+}
+
+/* The last message: its icon and text; a click opens the Console. */
+void Editor::draw_statusbar_log(const Recti &r) {
+  auto &u = ui_;
+  if (log_.empty()) return;
+  const LogEntry &e = log_.back();
+  Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
+  uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
+  int a = u.font.line_height() - u.px(4);
+  u.draw_icon(ic, {r.x, r.y + (r.h - a) / 2, a, a}, col);
+  Recti tr{r.x + a + u.px(6), r.y, std::max(0, r.w - a - u.px(6)), r.h};
+  u.canvas.text_ellipsis(u.font, tr.x, tr.y + (tr.h - u.font.line_height()) / 2, tr.w, e.text, u.theme.text);
+  if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
 }
 
 /* ===================================================================== */
@@ -1306,6 +1423,10 @@ void Editor::dock_fix_parents(DockNode *n, DockNode *parent) {
 }
 
 void Editor::dock_reset(const std::string &preset) {
+  if (active_window_ != 0) {  // (a layout is the main window's: task 0187)
+    Log::warn("Layouts arrange the main window: choose one there");
+    return;
+  }
   /* Window ids: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 7 Research 8 Profiler */
   /* A layout by name (the table in workspaces.cpp: its windows and its focus, task 0055), a raw dock string, or
    * Default. */
@@ -1319,6 +1440,12 @@ void Editor::dock_reset(const std::string &preset) {
   size_t pos = 0;
   dock_ = dock_parse(s, pos);
   dock_fix_parents(dock_.get(), nullptr);
+  for (auto &w : windows_) {  // (a tab another window holds stays there, not twice)
+    std::vector<WindowKind> held;
+    collect_dock_tabs(w->dock.get(), held);
+    for (WindowKind k : held)
+      if (dock_find(k) && (dock_->split || dock_->tabs.size() > 1)) dock_remove(k);
+  }
   /* A layout saved before the Research window was retired (task 0034): its tab goes, and an area that held only it
    * closes. */
   while (DockNode *leaf = dock_find(WindowKind::Research)) {
@@ -1349,18 +1476,19 @@ void Editor::dock_layout(DockNode *n, const Recti &r) {
 void Editor::dock_draw(DockNode *n) {
   auto &u = ui_;
   if (n->split) {
-    dock_draw(n->a.get());
-    dock_draw(n->b.get());
     Recti sr = n->vertical ? Recti{n->rect.x, n->a->rect.bottom(), n->rect.w, n->b->rect.y - n->a->rect.bottom()}
                            : Recti{n->a->rect.right(), n->rect.y, n->b->rect.x - n->a->rect.right(), n->rect.h};
-    u.canvas.fill_rect(sr, u.theme.border);  // (the frame no longer clears the whole framebuffer)
-    Recti hit = n->vertical ? Recti{sr.x, sr.y - u.px(2), sr.w, sr.h + u.px(4)} : Recti{sr.x - u.px(2), sr.y, sr.w + u.px(4), sr.h};
-    bool hot = u.hovered(hit) && !u.any_active();
-    if (hot || split_drag_ == n) u.cursor = n->vertical ? Cursor::ResizeV : Cursor::ResizeH;
-    if (hot && u.in.pressed[0]) {
+    const int grab = std::max(u.px(4), 4);  // (task 0189: an 8-pixel-wide target at any scale, Fitts)
+    Recti hit = n->vertical ? Recti{sr.x, sr.y - grab, sr.w, sr.h + 2 * grab} : Recti{sr.x - grab, sr.y, sr.w + 2 * grab, sr.h};
+    const bool hot = u.hovered(hit) && !u.any_active() && !u.any_popup_open();
+    if (hot && u.in.pressed[0]) {  // (taken before the areas beside it draw: they'd act on the same press)
       split_drag_ = n;
       u.consume_click();
     }
+    dock_draw(n->a.get());
+    dock_draw(n->b.get());
+    u.canvas.fill_rect(sr, u.theme.border);  // (the frame no longer clears the whole framebuffer)
+    if ((hot && !u.any_active()) || split_drag_ == n) u.cursor = n->vertical ? Cursor::ResizeV : Cursor::ResizeH;
     if (split_drag_ == n) {
       float t = n->vertical ? (u.in.my - n->rect.y) / (float)n->rect.h : (u.in.mx - n->rect.x) / (float)n->rect.w;
       n->ratio = clampf(t, 0.06f, 0.94f);
@@ -1396,6 +1524,7 @@ void Editor::dock_draw(DockNode *n) {
       tab_press_x_ = u.in.mx;
       tab_press_y_ = u.in.my;
       tab_dragging_ = false;
+      tab_drag_window_ = active_window_;
     }
     if (hot && u.in.pressed[2]) {
       tab_close_queue_.push_back(k);  // closed after dock_draw: removing now would free nodes still on the stack
@@ -1405,10 +1534,11 @@ void Editor::dock_draw(DockNode *n) {
     if (hot && u.in.pressed[1]) u.open_popup(u.id("tabmenu") ^ (uint64_t)k, {u.in.mx, u.in.my, 0, 0});
     u.popup(u.id("tabmenu") ^ (uint64_t)k, u.px(200), [this, k] {
       if (ui_.menu_item("Close Tab")) tab_close_queue_.push_back(k);
+      draw_tab_menu_windows(k);
       ui_.menu_separator();
       ui_.menu_label("Add Tab");
       for (int w = 0; w < (int)WindowKind::Count; w++)
-        if ((WindowKind)w != WindowKind::Research && !dock_find((WindowKind)w) &&  // (retired, task 0034)
+        if ((WindowKind)w != WindowKind::Research && !dock_find_anywhere((WindowKind)w) &&  // (retired, task 0034)
             ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
           DockNode *leaf = dock_find(k);
           if (leaf) {
@@ -1521,6 +1651,12 @@ void Editor::dock_open(WindowKind k, bool focus) {
     return;
   }
   DockNode *leaf = dock_find(k);
+  EditorWindow *owner = nullptr;
+  if (!leaf && (leaf = dock_find_elsewhere(k, &owner)) != nullptr) {  // (in another window, task 0187: shown there)
+    leaf->active = (int)(std::find(leaf->tabs.begin(), leaf->tabs.end(), k) - leaf->tabs.begin());
+    if (focus) focused_ = k;
+    return;
+  }
   if (!leaf) {
     /* The Textures window goes beside the Materials window when it is docked (not over the Scene view, which a
      * thumbnail is dragged onto); everything else into the largest area. */
@@ -1612,12 +1748,14 @@ GameObject *Editor::active_object() const { return active_ ? scene_->find(active
 
 std::vector<GameObject *> Editor::selected_objects(bool top_level_only) const {
   std::vector<GameObject *> out;
+  std::unordered_set<uint64_t> chosen;  // (task 0207: each ancestor looked up, not searched for, in a selection of thousands)
+  if (top_level_only) chosen.insert(selection_.begin(), selection_.end());
   for (uint64_t id : selection_) {
     GameObject *g = scene_->find(id);
     if (!g) continue;
     if (top_level_only) {
       bool covered = false;
-      for (GameObject *p = g->parent; p && !covered; p = p->parent) covered = is_selected(p->id);
+      for (GameObject *p = g->parent; p && !covered; p = p->parent) covered = chosen.count(p->id) > 0;
       if (covered) continue;
     }
     out.push_back(g);
@@ -1680,6 +1818,8 @@ void Editor::restore_edit_selection(const EditSelection &e) {
   if (!mp || !*mp || e.verts.size() != (*mp)->vert_count() || e.faces.size() != (*mp)->face_count()) return;
   vert_sel_ = e.verts, face_sel_ = e.faces;
   edge_sel_ = std::unordered_set<uint64_t>(e.edges.begin(), e.edges.end());
+  /* (Task 0208: a selection made outside Edge mode keeps no edges of its own; Edge mode works them out, as switching does.) */
+  if (elem_ == EditElement::Edge && edge_sel_.empty() && std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end()) edges_from_verts();
 }
 
 void Editor::commit_undo() {
@@ -1755,6 +1895,7 @@ void Editor::undo() {
 
 /* The scene and selection of `s` become the editor's; what they replace goes onto `into` (undo's redo, redo's undo). */
 void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char *verb) {
+  ProfileScope prof{prof_.ms_undo, {}};
   UndoState cur;
   cur.scene = std::move(scene_);
   detach_material_assets(*cur.scene);  // (its .mat slots: its own values, whatever the restored state writes)
@@ -1848,6 +1989,7 @@ bool Editor::open_scene(const std::string &path) {
   redo_.clear();
   clear_selection();
   scene_dirty_ = false;
+  note_recent_scene(path);
   Log::info("Opened %s (%zu objects)", fs::filename(path).c_str(), scene_->object_count());
   return true;
 }
@@ -2379,8 +2521,78 @@ void Editor::screenshot(const std::string &path_in) {
     std::strftime(buf, sizeof(buf), "blendity_%Y%m%d_%H%M%S.png", std::localtime(&t));
     path = fs::join(screenshots_dir_, buf);
   }
-  if (write_png(path, fb_.pixels.data(), fb_.width, fb_.height, fb_.width)) Log::info("Screenshot saved: %s", path.c_str());
+  const std::vector<uint32_t> pixels = window_pixels();  // (the card's frame when it shows the views: task 0193)
+  if (write_png(path, pixels.data(), fb_.width, fb_.height, fb_.width)) Log::info("Screenshot saved: %s", path.c_str());
   else Log::error("Could not save screenshot to %s", path.c_str());
+}
+
+/* Task 0193: the editor in its real window - frames until the GPU is open (at most `frames`), then `frames` frames with
+the views drawn again each one (as an orbit does), presented by the card, and as many presented by the system; each
+part's mean frame time printed, the window as the card showed it saved to `out`. */
+int Editor::windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands) {
+  windowed_check_ = true;
+  for (const std::string &c : commands) command(c);  // (task 0199: the scene to measure)
+  std::vector<Event> events;
+  auto step = [&](bool redraw_views, bool every_row = false) {
+    events.clear();
+    if (window_) poll_events(window_, events, 0);
+    ui_.redraw = true;
+    if (redraw_views) scene_cache_.key = game_cache_.key = 0;
+    if (every_row) present_all_ = true;  // (task 0198: the whole canvas presented, as after a resize)
+    ScopedTimer t;
+    frame(events);
+    return t.ms();
+  };
+  for (int i = 0; i < frames && running_ && !card_present_; i++) {
+    step(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  auto part = [&](bool card, std::vector<uint32_t> *pixels) {
+    card_present_pref_ = card;
+    double sum = 0;
+    size_t views = 0;
+    for (int i = 0; i < 10; i++) step(true);  // (settled first)
+    const FrameProfile p0 = frame_profile_totals();
+    for (int i = 0; i < frames && running_; i++) {
+      sum += step(true);
+      views += card_views_shown_.size();
+    }
+    if (pixels) *pixels = window_pixels();
+    const double n = std::max(1, frames);
+    std::printf("  presented by the %s: %.2f ms a frame over %d frames, %.1f views a frame on the card%s%s\n", card ? "card" : "system", sum / n, frames,
+                (double)views / n, gpu_view_reason_.empty() ? "" : "; on the CPU: ", gpu_view_reason_.c_str());
+    /* Task 0203: where the frame went (the Profiler's parts, a frame's mean): what makes a row slow. The parts nest: the
+     * overlays, gathering, hashing and the Scene view's own GPU path are inside the Scene view; the GPU path counts every
+     * view's; the UI is the rest of the panels. */
+    const FrameProfile p1 = frame_profile_totals();
+    std::printf("    of it (nested, not to add up): the Scene view %.2f (its overlays %.2f), the views' GPU path %.2f (the card's passes %.2f; "
+                "uploads, copies back and the wait %.2f), gathering %.2f, hashing %.2f; the UI %.2f, presenting %.2f ms; %.1f meshes sent a frame\n",
+                (p1.ms_scene3d - p0.ms_scene3d) / n, (p1.ms_overlays - p0.ms_overlays) / n, (p1.ms_gpu - p0.ms_gpu) / n,
+                (p1.ms_gpu_shadow - p0.ms_gpu_shadow + p1.ms_gpu_gbuffer - p0.ms_gpu_gbuffer + p1.ms_gpu_lighting - p0.ms_gpu_lighting) / n,
+                (p1.ms_gpu_readback - p0.ms_gpu_readback) / n,
+                (p1.ms_collect - p0.ms_collect) / n, (p1.ms_hash - p0.ms_hash) / n, (p1.ms_ui - p0.ms_ui) / n, (p1.ms_present - p0.ms_present) / n,
+                (double)(p1.gpu_mesh_uploads - p0.gpu_mesh_uploads + p1.gpu_mesh_updates - p0.gpu_mesh_updates) / n);
+  };
+  std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),
+              card_present_ ? "presents the window" : "doesn't present it", card_reason_.empty() ? "" : ": ", card_reason_.c_str());
+  std::vector<uint32_t> pixels;
+  part(true, &pixels);
+  part(false, nullptr);
+  /* Task 0198: the canvas alone - idle frames, then frames presenting every row - the views unchanged. */
+  auto canvas = [&](bool card, bool every_row) {
+    card_present_pref_ = card;
+    for (int i = 0; i < 10; i++) step(false, every_row);
+    double sum = 0;
+    for (int i = 0; i < frames && running_; i++) sum += step(false, every_row);
+    std::printf("  the canvas %s, presented by the %s: %.2f ms a frame (the views unchanged)\n", every_row ? "presented whole" : "idle",
+                card ? "card" : "system", sum / std::max(1, frames));
+  };
+  for (bool every_row : {false, true})
+    for (bool card : {true, false}) canvas(card, every_row);
+  card_present_pref_ = true;
+  const bool wrote = !pixels.empty() && write_png(out, pixels.data(), fb_.width, fb_.height, fb_.width);
+  std::printf("  %s %s\n", wrote ? "wrote" : "could not write", out.c_str());
+  return wrote ? 0 : 1;
 }
 
 void Editor::screenshot_dialog() {
@@ -2388,7 +2600,7 @@ void Editor::screenshot_dialog() {
    * before the dialog opens over the window. */
   defer(
       [this] {
-        const std::vector<uint32_t> pixels = fb_.pixels;
+        const std::vector<uint32_t> pixels = window_pixels();
         const int w = fb_.width, h = fb_.height;
         fs::make_dirs(screenshots_dir_);
         std::time_t t = std::time(nullptr);
@@ -2682,7 +2894,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
 void Editor::duplicate_selected() {
   if (edit_mode_) return;
   std::vector<uint64_t> fresh;
-  for (GameObject *g : selected_objects(true)) fresh.push_back(scene_->duplicate(g)->id);
+  for (GameObject *g : scene_->duplicate_many(selected_objects(true))) fresh.push_back(g->id);
   if (fresh.empty()) return;
   selection_ = fresh;
   active_ = fresh.back();
@@ -2715,6 +2927,12 @@ void Editor::delete_selected() {
 }
 
 void Editor::add_component_to_selection(const std::string &name) {
+  if (!selected_objects(false).empty() && (name == "Retro Console Filter" || find_component_info(name))) {  // (Add Component's Recent: what was added, task 0189)
+    auto &recent = add_component_recent_;
+    recent.erase(std::remove(recent.begin(), recent.end(), name), recent.end());
+    recent.insert(recent.begin(), name);
+    if (recent.size() > 5) recent.resize(5);
+  }
   if (name == "Retro Console Filter") {  // task 0004's component: now an effect in the filter stack
     for (GameObject *g : selected_objects(false)) filter_stack_op(g->id, "add", 0, 0, RetroConsoleFilter::kName);
     return;
@@ -2997,6 +3215,87 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
   select(root->id);
   mark_changed("Stress grid");
   Log::info("Spawned %d %s objects in %.1f ms (%zu tris each)", count, kind.c_str(), t.ms(), shared ? shared->render_mesh().tri_count() : (size_t)0);
+}
+
+/* Task 0202: the scenes Blender's viewport is timed on (tools/bench_blender.py --parity-ui builds the same), each in a
+ * new scene emptied but for its light (Blender's is emptied likewise), the Scene view framing it at once (no camera
+ * animation under the timings), nothing selected but the sphere (or, for keyed1k, one box, whose parent's clip plays):
+ * - sphere50k / sphere500k: one UV sphere of 256 x 196 / 1024 x 490 segments, "Parity Sphere", selected;
+ * - million: ten of the 50k spheres (one shared mesh) in a row 2.5 m apart, about a million triangles;
+ * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square;
+ * - keyed1k: 1,000 cubes under "Keyed", each keyed on frames 1, 30 and 60 (Position), the clip at frame 1. */
+bool Editor::bench_scene(const std::string &name) {
+  const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "keyed1k";
+  if (!known) return false;
+  new_scene();
+  for (const char *starter : {"Utah Teapot", "Plane", "Main Camera"})
+    if (GameObject *g = scene_->find_by_name(starter)) scene_->destroy(g);
+  std::vector<uint64_t> made;
+  auto object = [&](const std::string &n, MeshPtr mesh, Vec3 at, GameObject *parent = nullptr) {
+    GameObject *g = scene_->create(n, parent);
+    g->set_local_position(at);
+    g->add<MeshFilter>()->mesh = std::move(mesh);
+    g->add<MeshRenderer>();
+    made.push_back(g->id);
+    return g;
+  };
+  if (name == "sphere50k" || name == "sphere500k") {
+    const bool big = name == "sphere500k";
+    object("Parity Sphere", primitives::uv_sphere(1.0f, big ? 1024 : 256, big ? 490 : 196), {0, 0, 0});
+  }
+  else if (name == "million") {
+    MeshPtr sphere = primitives::uv_sphere(1.0f, 256, 196);
+    for (int i = 0; i < 10; i++) object(strprintf("Sphere %d", i), sphere, {(i - 4.5f) * 2.5f, 1.0f, 0.0f});
+  }
+  else if (name == "cubes10k") {
+    MeshPtr cube = primitives::cube();
+    for (int i = 0; i < 10000; i++) object(strprintf("Cube %d", i), cube, {(i % 100 - 50) * 1.6f, 0.0f, (i / 100 - 50) * 1.6f});
+  }
+  else {
+    GameObject *root = scene_->create("Keyed");
+    MeshPtr cube = primitives::cube();
+    for (int i = 0; i < 1000; i++) object(strprintf("Box %d", i), cube, {(i % 32 - 16) * 1.6f, 0.0f, (i / 32 - 16) * 1.6f}, root);
+    selection_ = {root->id};
+    active_ = root->id;
+    if (anim_new_clip(root, "Keyed")) {
+      anim_edit_keys("Keys", [&](AnimationClip &clip) {
+        for (size_t k = 0; k < made.size(); k++) {
+          GameObject *g = scene_->find(made[k]);
+          const Vec3 p = g->local().position;
+          const std::string path = anim_path(*root, *g);
+          for (int axis = 0; axis < 3; axis++) {
+            AnimTrack &t = clip.track(path, "Position", axis);
+            t.set_key(1.0f, p[axis]);
+            t.set_key(30.0f, p[axis] + (axis == 1 ? (float)(k % 7) : 0.0f));
+            t.set_key(60.0f, p[axis]);
+          }
+        }
+      });
+      anim_set_frame(1.0f);
+    }
+  }
+  selection_ = made;
+  active_ = made.back();
+  frame_selected();
+  cam_.update(now_seconds() + 10.0);  // (the framing's animation finished now)
+  if (name == "keyed1k") selection_ = {made[0]}, active_ = made[0];  // (one box: the Animation window plays its parent's clip)
+  else if (name != "sphere50k" && name != "sphere500k") clear_selection();
+  mark_changed("Bench Scene");
+  Log::info("Bench scene %s: %zu objects", name.c_str(), made.size());
+  return true;
+}
+
+/* Task 0202: Blendity --startup-check - init, the first frames until one is on the screen (the card presents one frame
+ * behind: three frames), quit; tools/bench_ui.py times the process. */
+int Editor::startup_check() {
+  std::vector<Event> events;
+  for (int i = 0; i < 3; i++) {
+    events.clear();
+    if (window_) poll_events(window_, events, 0);
+    ui_.redraw = true;
+    frame(events);
+  }
+  return 0;
 }
 
 void Editor::enter_play() {
@@ -3295,6 +3594,13 @@ void Editor::load_prefs() {
     else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
+    else if (k == "windows") windows_pref_ = v;
+    else if (k == "recent_scenes") recent_scenes_ = split_list(v, ';');
+    else if (k == "guides_seen") for (const std::string &g : split_list(v, ';')) guides_seen_.insert(g);
+    else if (k == "inspector_essentials") inspector_essentials_ = v != "0";
+    else if (k == "guides") guides_enabled_ = v != "0";
+    else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
+    else if (k == "favorites") load_favorites_pref(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
@@ -3322,6 +3628,7 @@ void Editor::load_prefs() {
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str()))), had_fps = true;
     else if (k == "viewport_device") set_viewport_device(std::atoi(v.c_str()));
     else if (k == "other_views_follow") other_views_follow_ = v == "1";
+    else if (k == "cpu_fallback_noticed") cpu_fallback_noticed_ = v == "1";
     else if (k == "simpler_while_moving") simpler_while_moving_ = v == "1";
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
@@ -3384,6 +3691,8 @@ void Editor::load_prefs() {
 
 void Editor::save_prefs() {
   if (headless_ && !prefs_for_test_) return;
+  save_prefs_pending_ = active_window_ != 0;  // (another window is drawing: its dock is in the main one's place)
+  if (save_prefs_pending_) return;
   std::string done;
   for (int l : lessons_done_) done += std::to_string(l) + " ";
   std::string off;
@@ -3406,8 +3715,8 @@ void Editor::save_prefs() {
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();
-  s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\n", viewport_device_, other_views_follow_ ? 1 : 0,
-                 simpler_while_moving_ ? 1 : 0);
+  s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
+                 other_views_follow_ ? 1 : 0, simpler_while_moving_ ? 1 : 0, cpu_fallback_noticed_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
   s += strprintf("import_preview=%d\nimport_shading=%d\n", import_preview_pref_ ? 1 : 0, import_shading_pref_);  // (task 0152)
@@ -3415,6 +3724,9 @@ void Editor::save_prefs() {
   s += strprintf("moonray_never_ask=%d\nmoonray_last=%.0f\nmoonray_folder=%s\nmoonray_installed=%d\n", mr_never_ask_ ? 1 : 0, mr_last_ask_,
                  mr_folder_.c_str(), mr_installed_ ? 1 : 0);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
+  s += "windows=" + windows_layout() + "\n";  // (task 0187)
+  s += favorites_prefs_text();  // (task 0189)
+  s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
 }
 

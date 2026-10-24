@@ -117,6 +117,16 @@ void Editor::views_command(const std::string &what, const std::string &value) {
 }
 
 /* Finds the field (its key exactly, else the first whose key starts with it) and sets it. */
+static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflector &)> &reflect);
+
+/* A texture layer's field by name (task 0183: an Image layer's image). */
+bool Editor::set_layer_field(TextureLayer &layer, const std::string &field, const std::string &value) {
+  SetFieldReflector sr;
+  sr.key = field_key(field);
+  sr.value = value;
+  return set_field_on(sr, [&](Reflector &r) { layer.reflect(r); });
+}
+
 static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflector &)> &reflect) {
   sr.target.clear();
   sr.names.clear();
@@ -661,6 +671,38 @@ void Editor::run_console_command(const std::string &line) {
     gpu_list();
     return;
   }
+  if (c == "viewport" && arg(1, "") == "present") {  // viewport present card|system (task 0193)
+    card_present_pref_ = to_lower(arg(2, "card")) != "system";
+    if (card_present_pref_) card_retry();
+    Log::info("Windows are presented by the %s", card_present_pref_ ? "card when there is one" : "system");
+    return;
+  }
+  if (c == "layoutguide") {  // layoutguide on|off|reset|dismiss (task 0190)
+    const std::string v = to_lower(arg(1, "reset"));
+    if (v != "reset" && v != "dismiss" && v != "on" && v != "off") {
+      Log::info("usage: layoutguide on|off|reset|dismiss");
+      return;
+    }
+    if (v == "reset") guides_seen_.clear();
+    else if (v == "dismiss") guides_seen_.insert(workspace_);
+    else guides_enabled_ = v == "on";
+    save_prefs();
+    return;
+  }
+  if (c == "inspector") {  // inspector essentials on|off (task 0190)
+    inspector_essentials_ = to_lower(arg(2, arg(1, "on"))) != "off";
+    save_prefs();
+    return;
+  }
+  if (c == "palette" || c == "favorite") {  // palette <words> | palette run <words> | favorite <command name> (task 0189)
+    palette_command(t, line);
+    return;
+  }
+  if (c == "window" && window_mode_command(t)) return;  // window renderonly|fullscreen|tablet on|off [id] (task 0188)
+  if (c == "dock") {  // dock move <Window> newwindow | main | monitor <n>; dock windows (task 0187)
+    dock_command(t, line);
+    return;
+  }
   if (c == "livelink") {  // livelink start [port] | stop | status (task 0172)
     livelink_command(t);
     return;
@@ -751,6 +793,11 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "anim") {
     anim_command(t);
+    return;
+  }
+  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|keyed1k (task 0202)
+    if (!bench_scene(to_lower(arg(1, ""))))
+      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|keyed1k: the scenes tools/bench_blender.py --parity-ui builds");
     return;
   }
   if (c == "manual") {
@@ -902,9 +949,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "edit") {
     if (!edit_mode_) enter_edit_mode();
-    if (arg(1, "") == "face") elem_ = EditElement::Face;
-    if (arg(1, "") == "edge") elem_ = EditElement::Edge;
-    if (arg(1, "") == "vertex") elem_ = EditElement::Vertex;
+    /* (Task 0208: as the mode buttons switch, so a selection follows - Edge mode works its edges out from the vertices.) */
+    if (arg(1, "") == "face") set_edit_element(EditElement::Face);
+    if (arg(1, "") == "edge") set_edit_element(EditElement::Edge);
+    if (arg(1, "") == "vertex") set_edit_element(EditElement::Vertex);
     if (arg(1, "") == "all" || arg(2, "") == "all") edit_select_all(true);
   }
   else if (c == "pickfocus") {
@@ -1362,6 +1410,7 @@ void Editor::run_console_command(const std::string &line) {
     else if (k == "move") last_op_.move = Vec3(v, (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str()));
     else { Log::warn("redo: unknown parameter '%s'", k.c_str()); return; }
     run_last_op(false);
+    remember_last_op_settings();  // (task 0201: as the F9 panel does - the tool's next use starts from these)
   }
   else if (c == "loopcuts") {
     loop_cuts_ = std::max(1, std::atoi(arg(1, "1").c_str()));

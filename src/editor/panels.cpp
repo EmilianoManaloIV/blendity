@@ -396,6 +396,15 @@ struct InspectorReflector : Reflector {
   std::string record_prefix;     // a filter effect's "E<i> ": edits carry the name other objects' reflectors see
   const std::set<std::string> *mixed = nullptr;  // fields whose values differ across the materials edited at once (task 0147): drawn as a dash
   int label_w;
+  /* Progressive disclosure (task 0190): past `limit` fields (-1: none) the rest aren't drawn, only counted. */
+  int limit = -1, seen = 0, hidden = 0;
+  bool last_skipped = false;
+  bool skip() {
+    last_skipped = limit >= 0 && ++seen > limit;
+    seen += limit < 0;  // (counted either way: Show less needs to know there were more than seven)
+    hidden += last_skipped;
+    return last_skipped;
+  }
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
   ui::Id fid(const char *n) { return u.id(n); }
   Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
@@ -425,6 +434,7 @@ struct InspectorReflector : Reflector {
     return true;
   }
   void field(const char *n, float &v, float speed, float mn, float mx) override {
+    if (skip()) return;
     Recti row = lay.row();
     float old = v;
     bool ch = u.drag_label(fid(n) ^ 0xAB, label_rect(row), n, v, speed);
@@ -441,6 +451,7 @@ struct InspectorReflector : Reflector {
     changed |= ch;
   }
   void field(const char *n, int &v, int mn, int mx) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     int old = v;
@@ -460,6 +471,7 @@ struct InspectorReflector : Reflector {
   /* Sample counts: type any number, halve / double it, or pick a power of two
    * (16, 32, 64 ... like Cycles' presets). Noise falls as 1/sqrt(samples). */
   void samples(const char *n, int &v, int mn, int mx) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     Recti f = field_rect(row);
@@ -497,6 +509,7 @@ struct InspectorReflector : Reflector {
     }
   }
   void field(const char *n, bool &v) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (u.checkbox(field_rect(row), v)) {
@@ -511,6 +524,7 @@ struct InspectorReflector : Reflector {
     }
   }
   void field(const char *n, Vec3 &v) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     Vec3 old = v;
@@ -523,6 +537,7 @@ struct InspectorReflector : Reflector {
     }
   }
   void color(const char *n, Vec3 &v) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (u.color_field(fid(n), field_rect(row), v)) {
@@ -532,6 +547,7 @@ struct InspectorReflector : Reflector {
     dash_if_mixed(n, field_rect(row));
   }
   void color_alpha(const char *n, Vec3 &v, const char *alpha_name, float &a) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     const Vec3 old_rgb = v;
@@ -549,6 +565,7 @@ struct InspectorReflector : Reflector {
     if (mixed && (mixed->count(n) || mixed->count(alpha_name))) dash_if_mixed(mixed->count(n) ? n : alpha_name, field_rect(row));
   }
   void enumeration(const char *n, int &v, const char *const *opts, int count) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (u.combo(fid(n), field_rect(row), v, opts, count)) {
@@ -560,6 +577,7 @@ struct InspectorReflector : Reflector {
   /* An axis material's part: a button with the material's name that opens the material picker, and a clear button.
    * The pick lands at the end of the frame (the popup), through Editor::set_material_ref. */
   void material_ref(const char *n, std::string &v) override {
+    if (skip()) return;
     if (!material) {
       text(n, v);
       return;
@@ -586,6 +604,7 @@ struct InspectorReflector : Reflector {
     }
   }
   void text(const char *n, std::string &v) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (u.text_field(fid(n), field_rect(row), v)) {
@@ -595,6 +614,7 @@ struct InspectorReflector : Reflector {
   }
   /* Unity's object field: type the name, or drag the object here from the Hierarchy (of the field's type). */
   void object(const char *n, std::string &v, const char *type) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (!ed.object_field(n, field_rect(row), v, type)) return;
@@ -603,6 +623,7 @@ struct InspectorReflector : Reflector {
   }
   /* An asset field: the file dragged here from the Project window, or picked. */
   void asset(const char *n, std::string &p, const char *ext, const char *kind) override {
+    if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (!ed.asset_field(n, field_rect(row), p, ext, kind)) return;
@@ -610,6 +631,7 @@ struct InspectorReflector : Reflector {
     changed = true;
   }
   void mesh(const char *n, MeshPtr &m) override {
+    last_skipped = false;
     Recti row = lay.row();
     u.label(label_rect(row), n);
     Recti f = field_rect(row);
@@ -623,7 +645,9 @@ struct InspectorReflector : Reflector {
               strprintf("%zu verts, %zu faces, %zu tris", m->vert_count(), m->face_count(), m->render_mesh().tri_count()), u.theme.text_dim);
     }
   }
-  void help(const char *t) override { u.tooltip(t); }
+  void help(const char *t) override {
+    if (!last_skipped) u.tooltip(t);
+  }
 
   /* A collapsible group (task 0145): a foldout row, its fields indented under it and skipped while it is closed. The
    * state is kept by the group's name - per material for a material's groups (an axis material's Axis Material
@@ -631,6 +655,10 @@ struct InspectorReflector : Reflector {
   std::vector<bool> groups_open;
   std::string group_key(const char *n) const { return "grp_" + (material ? std::to_string((uintptr_t)material) : std::string()) + n; }
   bool group(const char *n, bool open_by_default) override {
+    if (skip()) {  // (a group past the essentials: closed, its fields counted as hidden)
+      groups_open.push_back(false);
+      return false;
+    }
     lay.space(u.px(2));
     Recti row = lay.row(u.row_h() + u.px(2));
     bool &open = ed.foldouts_.emplace(group_key(n), open_by_default).first->second;
@@ -649,6 +677,7 @@ struct InspectorReflector : Reflector {
   /* Texture slot: thumbnail + name; click for a picker (Unity's object field /
    * Blender's image browse menu). Popup results arrive on the next frame. */
   void texture(const char *n, TextureRef &t) override {
+    if (skip()) return;
     static std::unordered_map<ui::Id, TextureRef> results;
     ui::Id pid = u.id(n) ^ 0x7E7E7ull;
     auto res = results.find(pid);
@@ -714,6 +743,7 @@ struct InspectorReflector : Reflector {
 
   /* Unity's MeshRenderer > Materials array + inline material inspectors. */
   void material_list(const char *n, std::vector<MaterialPtr> &mats) override {
+    last_skipped = false;
     struct Pick {
       MaterialPtr m;
       bool none = false;
@@ -977,6 +1007,13 @@ struct InspectorReflector : Reflector {
   void filter_effects(const char *, FilterEffectList &effects) override {
     GameObject *g = ed.active_object();
     if (!g) return;
+    last_skipped = false;
+    const int keep_limit = limit;  // (the filter stack is one field: its effects' own fields are never cut)
+    limit = -1;
+    filter_effects_rows(g, effects);
+    limit = keep_limit;
+  }
+  void filter_effects_rows(GameObject *g, FilterEffectList &effects) {
     const uint64_t gid = g->id;
     const int n = (int)effects.size();
     if (effects.empty()) {
@@ -1331,7 +1368,9 @@ void Editor::draw_inspector(const Recti &r) {
     if (en != c->enabled) c->enabled = en;
     if (open) {
       InspectorReflector ir(*this, u, lay);
+      ir.limit = essentials_limit(c->type_name());
       c->reflect(ir);
+      draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
       if (ir.changed) mark_changed(std::string("Edit ") + c->type_name());
       /* Multi-object editing: the same field of the same component (the nth
        * of its type) on every other selected object. */
@@ -1593,7 +1632,9 @@ void Editor::draw_inspector(const Recti &r) {
         if (c->ui_expanded) {
           lay.indent += u.px(10);
           InspectorReflector ir(*this, u, lay);
+          ir.limit = essentials_limit(c->type_name());
           c->reflect(ir);
+          draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
           if (ir.changed) mark_changed(std::string("Edit ") + c->type_name());
           lay.indent -= u.px(10);
           if (auto *bm = dynamic_cast<BooleanModifier *>(c); bm && !bm->last_error.empty()) {
@@ -1704,6 +1745,14 @@ void Editor::draw_inspector(const Recti &r) {
     u.open_popup(add_id, ab);
   }
   u.tooltip("Blender equivalent: Add Modifier / Add Constraint / Physics tab.");
+  Recti er{ab.right() + u.px(8), ab.y, std::min(u.px(120), ar.right() - ab.right() - u.px(8)), ab.h};
+  if (er.w > u.px(60)) {
+    if (u.button(er, "All Fields", !inspector_essentials_)) {
+      inspector_essentials_ = !inspector_essentials_;
+      save_prefs();
+    }
+    u.tooltip("Every field of every component (off: each shows its first seven, the rest under Show more).");
+  }
   u.popup(add_id, u.px(220), [this, add_id] {
     auto &u = ui_;
     Recti sr = u.popup_row(u.row_h() + u.px(6));
@@ -1711,6 +1760,11 @@ void Editor::draw_inspector(const Recti &r) {
     if (!u.editing(fid) && add_component_search_.empty()) u.begin_edit(fid, "", false);
     u.text_field(fid, sr.shrink(u.px(3)), add_component_search_, nullptr, "Search");
     std::string f = to_lower(add_component_search_);
+    if (f.empty() && !add_component_recent_.empty()) {  // (task 0189: the last ones added first, as Unity's search shows)
+      u.menu_label("Recent");
+      for (const std::string &name : std::vector<std::string>(add_component_recent_))
+        if (u.menu_item(name)) add_component_to_selection(name);
+    }
     std::string last_cat;
     for (auto &ci : component_registry()) {
       if (!f.empty() && to_lower(ci.name).find(f) == std::string::npos) continue;
@@ -2248,7 +2302,14 @@ void Editor::draw_render_window(const Recti &r) {
   content_h = lay.y + off - left.y;
   u.end_scroll();
 
-  /* ---- image view ---- */
+  draw_render_image(right);
+}
+
+/* The Render window's picture (task 0188: also alone, in a render-only window): a checker behind, wheel zoom,
+ * middle-drag pan, double-click fit. */
+void Editor::draw_render_image(const Recti &right, int margin) {
+  auto &u = ui_;
+  if (margin < 0) margin = u.px(20);
   u.canvas.push_clip(right);
   /* Transparency-style checker behind the image. */
   for (int y = right.y; y < right.bottom(); y += u.px(16))
@@ -2260,17 +2321,18 @@ void Editor::draw_render_window(const Recti &r) {
     return;
   }
   const int iw = render_img_.width, ih = render_img_.height;
-  float fit = std::min((right.w - u.px(20)) / (float)iw, (right.h - u.px(20)) / (float)ih);
+  float fit = std::min((right.w - margin) / (float)iw, (right.h - margin) / (float)ih);
   if (u.hovered(right) && u.in.wheel_y != 0) {
     if (render_zoom_ <= 0) render_zoom_ = fit;
     render_zoom_ = clampf(render_zoom_ * std::pow(1.2f, u.in.wheel_y), 0.05f, 16.0f);
   }
   if (u.hovered(right) && u.in.down[2]) render_pan_ += Vec2((float)u.in.dx(), (float)u.in.dy());
   if (u.hovered(right) && u.in.double_clicked[0]) { render_zoom_ = 0; render_pan_ = Vec2(0, 0); }
-  float sc = render_zoom_ > 0 ? render_zoom_ : fit;
+  float sc = render_zoom_ > 0 && margin > 0 ? render_zoom_ : fit;  // (render-only, no margin: always fitted)
   int dw = (int)(iw * sc), dh = (int)(ih * sc);
   int ox = right.x + (right.w - dw) / 2 + (int)render_pan_.x, oy = right.y + (right.h - dh) / 2 + (int)render_pan_.y;
   Recti dst = Recti{ox, oy, dw, dh}.intersect(right);
+  render_picture_rect_ = {ox, oy, dw, dh};
   Image *fb = u.canvas.target();
   for (int y = dst.y; y < dst.bottom(); y++) {
     int sy = std::min(ih - 1, (int)((y - oy) / sc));
@@ -2819,9 +2881,17 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     set_viewport_device(di);
     save_prefs();
   }
-  u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster; anything it doesn't draw\n"
-            "yet (GI and probes, axis or see-through materials, camera filters...) draws on the CPU, as before. F12 renders stay on the CPU.");
+  u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster, and on Windows and Linux\n"
+            "it shows the window too; the little it doesn't draw yet (realtime GI's per-pixel light, a retro filter's snapped vertices,\n"
+            "a live procedural seen very close) draws on the CPU, as before. With no GPU everything draws on the CPU. F12 renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
+  /* Task 0199: each window - its views' device and who shows it. */
+  /* (While a secondary window draws, its state is the members' and its entry holds the main window's, swapped.) */
+  auto label = [&](int id) { return id == 0 ? std::string("Main window: ") : strprintf("Window %d: ", id); };
+  text(label(active_window_) + window_device_status(card_present_ || card_views_shown_.size() > 0, card_win_, card_reason_), u.theme.text_dim);
+  for (const auto &w : windows_)
+    if (w && w->os)
+      text(label(w->id == active_window_ ? 0 : w->id) + window_device_status(w->card_present, w->card_win, w->card_reason), u.theme.text_dim);
   /* Task 0103: the other views during a drag. */
   if (u.toggle_row(row(u.row_h()), "Other Views Follow Drags", other_views_follow_)) save_prefs();
   u.tooltip("Off (the default): while you drag in the Scene view, the Game view and the Camera Preview keep their last picture and\n"
@@ -2853,7 +2923,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
          u.theme.text_dim);
   const uint32_t dim = u.theme.text_dim;
   text("What it costs:", u.theme.text);
-  text(gpu_view_ ? "- The views' 3D is drawn on the GPU; the UI, overlays and picking on the CPU."
+  text(gpu_view_wanted() && gpu_view_ ? "- The views' 3D and overlays are drawn on the GPU, which shows the window; the UI and picking on the CPU."
                  : "- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.",
        dim);
   if (max_fps_ == 0)
@@ -3088,6 +3158,30 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   u.tooltip("Each vertex's weights over all groups add up to 1 (Blender: Normalize All).");
   if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "Clean")) command("wpclean 0.01");
   u.tooltip("Weights under 0.01 become 0 (Blender: Clean).");
+}
+
+}  // namespace bl
+
+namespace bl {
+
+/* ---- the Inspector's essentials (task 0190, ADR 0060 amended: progressive disclosure) ---- */
+
+/* How many fields a component shows before Show more (-1: all of them - the preference off, or opened). */
+int Editor::essentials_limit(const std::string &type) const {
+  if (type == CameraFilters::kName) return -1;  // (one stack: its effects keep all their fields)
+  return inspector_essentials_ && !inspector_more_.count(type) ? kEssentialFields : -1;
+}
+
+void Editor::draw_show_more(ui::Layout &lay, const std::string &type, int hidden, int seen) {
+  auto &u = ui_;
+  if (!inspector_essentials_) return;
+  const bool opened = inspector_more_.count(type) > 0 && seen > kEssentialFields;
+  if (hidden <= 0 && !opened) return;
+  Recti row = lay.row();
+  const std::string label = opened ? "Show less" : strprintf("Show %d more", hidden);
+  if (!u.button({row.x + u.px(4), row.y, std::min(row.w - u.px(8), u.px(140)), row.h}, label)) return;
+  if (opened) inspector_more_.erase(type);
+  else inspector_more_.insert(type);
 }
 
 }  // namespace bl

@@ -322,8 +322,9 @@ uint64_t Editor::scene_render_hash(bool memo) {
   mix(&es.color, sizeof(Vec3));
   mix(&es.sky, sizeof(Vec3) * 3);
   mix(es.hdri.path.data(), es.hdri.path.size());
-  mix(&edit_mode_, 1);
-  mix(&edit_obj_, 8);
+  /* (Not Edit Mode: only the Scene view draws the cage - collect_items and submit_scene edit only for it - and its own
+   * key, scene_view_key, holds the edit state. Here it redrew the Game view and staled the lighting keys on every
+   * entry: task 0185.) */
   mix(&scene_lighting_, 1);
   mix(&scene_->serial, 8);
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
@@ -392,9 +393,11 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
      * views share one map instead of each rendering its own every frame of a drag. */
     const uint64_t shape = it.mesh->shape ? it.mesh->shape : it.mesh->serial;
     mixer(ck, &shape, 8);
+    /* Only what the depth pass reads (its surface type, Cast Shadows), not the material's address: an undo restores
+     * the scene's snapshot, whose materials are copies at other addresses, and the map would be drawn again (task 0185). */
     if (it.materials)
       for (const MaterialPtr &m : *it.materials) {
-        const uint64_t mv[3] = {(uint64_t)(uintptr_t)m.get(), m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
+        const uint64_t mv[2] = {m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
         mixer(ck, mv, sizeof(mv));
       }
     caster_keys.push_back(ck);
@@ -1647,10 +1650,17 @@ uint64_t Editor::scene_view_key(const Recti &view) {
 }
 
 /* Puts a cached picture back into the framebuffer (the frame cleared it), if it is the one for `key`. */
+/* Task 0193: a cached picture the card holds can be shown only while it presents this window and the slot still has it;
+ * shown, it goes in this frame's views. */
+bool Editor::card_picture_kept(const ViewCache &c) const {
+  return c.card_slot < 0 || (card_present_ && gpu_slot_gen_[c.card_slot] == c.card_gen);
+}
+
 bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
   if (key == 0 || c.key != key || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width ||
-      r.bottom() > fb_.height)
+      r.bottom() > fb_.height || !card_picture_kept(c))
     return false;
+  if (c.card_slot >= 0 && !cache_verify_) card_views_.push_back({c.card_slot, r.x, r.y});
   JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
   });
@@ -1658,8 +1668,10 @@ bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
 }
 
 bool Editor::view_cache_show(ViewCache &c, const Recti &r) {
-  if (c.key == 0 || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height)
+  if (c.key == 0 || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height ||
+      !card_picture_kept(c))
     return false;
+  if (c.card_slot >= 0) card_views_.push_back({c.card_slot, r.x, r.y});
   JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
   });
@@ -1668,6 +1680,9 @@ bool Editor::view_cache_show(ViewCache &c, const Recti &r) {
 
 void Editor::view_cache_store(ViewCache &c, uint64_t key, const Recti &r) {
   c.key = 0;
+  c.card_slot = -1;
+  for (const gpu::Raster::PresentView &v : card_views_)  // (task 0193: its picture is the card's)
+    if (v.x == r.x && v.y == r.y) c.card_slot = v.slot, c.card_gen = gpu_slot_gen_[v.slot];
   if (key == 0 || r.w <= 0 || r.h <= 0 || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height) return;
   if (c.img.width != r.w || c.img.height != r.h) c.img.resize(r.w, r.h);
   JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {

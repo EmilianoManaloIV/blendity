@@ -39,7 +39,133 @@ struct MeshRenderer;
 void apply_shape_keys(const struct Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions);
 uint64_t shape_key_hash(const struct Mesh &m, const MeshRenderer *mr);
 
-struct Mesh {
+/* What a Mesh works out about itself and keeps (task 0185 moved them here, unchanged, from Mesh's private part): the
+ * render meshes, the edge table, the topology snapshot and the tables built per topology. A plain copy carries them
+ * (a mesh copied for a drag keeps following in place, ADR 0034); a copy made inside a MeshCopyBare scope leaves them
+ * behind - an operator's copy whose topology changes would only throw them away (a 50k-face mesh's were most of its
+ * copy). */
+struct MeshCacheFields {
+  struct VertexFaces {
+    std::vector<uint32_t> offsets, faces;
+  };
+
+ protected:
+  /* Task 0099: what corner_normals last worked out for a render cache (from the positions that cache drew), so an
+   * in-place update works out again only what a drag moved. */
+  struct NormalState {
+    uint64_t topo = 0;
+    bool flat = false, valid = false;
+    std::vector<Vec3> fnormal, fweighted, cnormal;  // per face; per face (smooth only); per corner
+    std::vector<uint32_t> vfirst;                   // per vertex: the render vertex of its first corner
+    /* A copy starts empty (a mesh copied for an edit doesn't carry it, nor pay for it): its first in-place frame
+     * works the whole mesh out again and keeps it from there. */
+    NormalState() = default;
+    NormalState(const NormalState &) {}
+    NormalState &operator=(const NormalState &) {
+      reset();
+      return *this;
+    }
+    void reset() {
+      topo = 0;
+      flat = valid = false;
+      std::vector<Vec3>().swap(fnormal), std::vector<Vec3>().swap(fweighted), std::vector<Vec3>().swap(cnormal);
+      std::vector<uint32_t>().swap(vfirst);
+    }
+    bool fits(uint64_t topology, bool is_flat, size_t faces, size_t corners) const {
+      return valid && topo == topology && flat == is_flat && fnormal.size() == faces && cnormal.size() == corners &&
+             (is_flat || fweighted.size() == faces);
+    }
+    size_t bytes() const {
+      return (fnormal.capacity() + fweighted.capacity() + cnormal.capacity()) * sizeof(Vec3) + vfirst.capacity() * 4;
+    }
+  };
+  /* What the render and edge caches were built from besides positions (ADR 0034): when a new `version` has the
+   * same, they can follow in place. `topology_serial()` changes whenever this does. */
+  struct Topology {
+    size_t verts = 0;
+    std::vector<uint32_t> face_offsets, corner_verts;
+    std::vector<Vec2> uvs;
+    std::vector<int32_t> face_material;
+    std::vector<uint8_t> face_smooth;
+    std::vector<uint64_t> seams, sharp_edges, loose_edges;
+    bool smooth = false, seams_sharp = false;
+    float smooth_angle = 180.0f;
+  };
+  mutable Topology topo_;
+  mutable uint64_t topo_version_ = 0, topo_serial_ = 0;
+  /* The manifold edges' two sides, for smooth fans (corner_normals): built once per topology, not every call. */
+  struct EdgeSides {
+    uint32_t sf, sca, scb, tf, tca, tcb;
+    bool hard;  // marked sharp, or a seam when seams are sharp, or a face beside it shaded flat
+  };
+  mutable std::vector<EdgeSides> sides_;
+  mutable uint64_t sides_topo_ = 0;
+  mutable std::vector<uint32_t> vside_off_, vside_;  // sides_ at each vertex (CSR), per topology (task 0099)
+  mutable uint64_t vside_topo_ = 0;
+  mutable NormalState nstate_[2];
+  /* Where each face's triangles start in a build (n - 2 per face, in face order), and whether any face has more than
+   * three corners: per topology, for retriangulate(). */
+  mutable VertexFaces vf_;
+  mutable uint64_t vf_topo_ = 0;
+  mutable std::vector<uint32_t> tri_start_;
+  mutable bool tri_big_ = false;
+  mutable uint64_t tri_topo_ = 0;
+  mutable uint64_t edges_topo_ = 0;
+  mutable std::vector<std::pair<uint32_t, uint32_t>> edges_;
+  mutable uint64_t edges_version_ = 0;
+  /* One cache per variant (0 = as shaded, 1 = forced flat for Edit Mode) so a
+   * renderer holding pointers to one never sees it rebuilt as the other. */
+  mutable RenderMesh cache_[2];
+  mutable uint64_t cache_version_[2] = {0, 0};
+  mutable bool cache_tangents_[2] = {false, false};
+  mutable uint64_t cache_deform_[2] = {0, 0};
+  mutable uint64_t cache_topo_[2] = {0, 0};
+  mutable bool cache_flat_[2] = {false, false};
+  mutable bool cache_approx_[2] = {false, false};  // tangents made the quick way while following a drag
+  mutable std::vector<uint32_t> corner_rv_[2];  // each corner's render vertex in cache_[i]
+  /* What both caches' full builds share (task 0185: an Edit Mode operator rebuilt the flat one and the shaded one in
+   * the same frame, each from scratch): the triangles (three corners and the face each, in face order) per version,
+   * and the corners at each vertex (CSR, in corner order) per topology. */
+  struct BuildShare {
+    std::vector<uint32_t> tess;
+    uint64_t tess_version = 0, tess_deform = 0;
+    std::vector<uint32_t> cv_off, cv_by, cv_face;  // (cv_face: each listed corner's face)
+    uint64_t cv_topo = 0;
+    /* A copy starts empty, as NormalState does: made again from the data in a fraction of a build, not worth copying
+     * with every mesh (a drag's copy, an undo snapshot). */
+    BuildShare() = default;
+    BuildShare(const BuildShare &) {}
+    BuildShare &operator=(const BuildShare &) {
+      std::vector<uint32_t>().swap(tess), std::vector<uint32_t>().swap(cv_off), std::vector<uint32_t>().swap(cv_by);
+      std::vector<uint32_t>().swap(cv_face);
+      tess_version = tess_deform = cv_topo = 0;
+      return *this;
+    }
+    size_t bytes() const { return (tess.capacity() + cv_off.capacity() + cv_by.capacity() + cv_face.capacity()) * 4; }
+  };
+  mutable BuildShare share_;
+};
+
+/* While one is open on this thread, a copied Mesh starts with empty caches (see MeshCacheFields). */
+inline thread_local bool g_mesh_copy_bare = false;
+struct MeshCopyBare {
+  bool was = g_mesh_copy_bare;
+  MeshCopyBare() { g_mesh_copy_bare = true; }
+  ~MeshCopyBare() { g_mesh_copy_bare = was; }
+};
+
+struct MeshCaches : MeshCacheFields {
+  MeshCaches() = default;
+  MeshCaches(const MeshCaches &o) : MeshCacheFields(g_mesh_copy_bare ? MeshCacheFields() : static_cast<const MeshCacheFields &>(o)) {}
+  MeshCaches(MeshCaches &&) = default;
+  MeshCaches &operator=(const MeshCaches &o) {
+    MeshCacheFields::operator=(g_mesh_copy_bare ? MeshCacheFields() : static_cast<const MeshCacheFields &>(o));
+    return *this;
+  }
+  MeshCaches &operator=(MeshCaches &&) = default;
+};
+
+struct Mesh : MeshCaches {
   std::string name = "Mesh";
   std::vector<Vec3> positions;
   std::vector<uint32_t> face_offsets{0};  // size faces + 1
@@ -134,9 +260,6 @@ struct Mesh {
   /* The faces at each vertex, in face order (faces[offsets[v]] to faces[offsets[v + 1]], a face listed once per
    * corner on the vertex), kept per topology: what a drag looks edges up in every frame (task 0087). Like the other
    * caches, for the main thread: not safe to call from jobs while the mesh changes. */
-  struct VertexFaces {
-    std::vector<uint32_t> offsets, faces;
-  };
   const VertexFaces &vertex_faces() const;
   void touch() { version++; }
   /* After a drag (ADR 0034): tangents that followed it the quick way (Lengyel's, while the render mesh moved in
@@ -148,6 +271,10 @@ struct Mesh {
   bool tangents_approximate() const { return cache_approx_[0] || cache_approx_[1]; }
   /* Drops the render and edge caches: the next render_mesh() builds from scratch (tests compare the two). */
   void forget_caches() const;
+  /* The caches of `before`, when this mesh (an operator's bare copy of it, MeshCopyBare) still has its topology:
+   * what a plain copy would have carried, so the render meshes follow the moved positions in place. False (nothing
+   * taken) when the topology differs. */
+  bool adopt_caches(const Mesh &before);
   uint64_t version = 1;
   /* An id of its own: a copy gets a new one (task 0088: a render cache's `shape` is this mesh at this version). */
   struct Uid {
@@ -172,35 +299,6 @@ struct Mesh {
   uint64_t topology_serial() const;
 
  private:
-  /* Task 0099: what corner_normals last worked out for a render cache (from the positions that cache drew), so an
-   * in-place update works out again only what a drag moved. */
-  struct NormalState {
-    uint64_t topo = 0;
-    bool flat = false, valid = false;
-    std::vector<Vec3> fnormal, fweighted, cnormal;  // per face; per face (smooth only); per corner
-    std::vector<uint32_t> vfirst;                   // per vertex: the render vertex of its first corner
-    /* A copy starts empty (a mesh copied for an edit doesn't carry it, nor pay for it): its first in-place frame
-     * works the whole mesh out again and keeps it from there. */
-    NormalState() = default;
-    NormalState(const NormalState &) {}
-    NormalState &operator=(const NormalState &) {
-      reset();
-      return *this;
-    }
-    void reset() {
-      topo = 0;
-      flat = valid = false;
-      std::vector<Vec3>().swap(fnormal), std::vector<Vec3>().swap(fweighted), std::vector<Vec3>().swap(cnormal);
-      std::vector<uint32_t>().swap(vfirst);
-    }
-    bool fits(uint64_t topology, bool is_flat, size_t faces, size_t corners) const {
-      return valid && topo == topology && flat == is_flat && fnormal.size() == faces && cnormal.size() == corners &&
-             (is_flat || fweighted.size() == faces);
-    }
-    size_t bytes() const {
-      return (fnormal.capacity() + fweighted.capacity() + cnormal.capacity()) * sizeof(Vec3) + vfirst.capacity() * 4;
-    }
-  };
   /* Per-corner shading normals (flat, smooth, smooth by angle, sharp edges): what render_mesh splits by. `keep`
    * receives the faces' normals and the result, for corner_normals_moved. */
   void corner_normals(bool flat, std::vector<Vec3> &out, NormalState *keep = nullptr) const;
@@ -220,6 +318,9 @@ struct Mesh {
   /* A full build's render vertices and triangles (corner_rv: each corner's render vertex): on every thread (task 0109),
    * or the serial build before it (the tests compare). */
   void build_render_vertices(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;
+  const std::vector<uint32_t> &tessellation() const;  // share_.tess, made when this version hasn't one
+  void corners_by_vertex() const;                     // share_'s corner table, made when this topology hasn't it
+  void edges_by_corners(std::vector<std::pair<uint32_t, uint32_t>> &out) const;  // edges()'s table, from them
   void render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;
   /* corner_normals' three smooth modes for the corners `at` one vertex (corner, face), into st.cnormal. */
   using CornerFaces = std::vector<std::pair<uint32_t, uint32_t>>;
@@ -231,53 +332,9 @@ struct Mesh {
    * the triangulation of quads and n-gons rewritten in place. False when the split pattern no longer holds (a full
    * build then). */
   bool update_in_place(int ci, bool flat) const;
-  /* What the render and edge caches were built from besides positions (ADR 0034): when a new `version` has the
-   * same, they can follow in place. `topology_serial()` changes whenever this does. */
-  struct Topology {
-    size_t verts = 0;
-    std::vector<uint32_t> face_offsets, corner_verts;
-    std::vector<Vec2> uvs;
-    std::vector<int32_t> face_material;
-    std::vector<uint8_t> face_smooth;
-    std::vector<uint64_t> seams, sharp_edges, loose_edges;
-    bool smooth = false, seams_sharp = false;
-    float smooth_angle = 180.0f;
-  };
   void build_edge_sides() const;
   /* `moved`: per face, whether any of its vertices moved (null: all of them); the others keep their triangles. */
   bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint8_t> *moved) const;
-  mutable Topology topo_;
-  mutable uint64_t topo_version_ = 0, topo_serial_ = 0;
-  /* The manifold edges' two sides, for smooth fans (corner_normals): built once per topology, not every call. */
-  struct EdgeSides {
-    uint32_t sf, sca, scb, tf, tca, tcb;
-    bool hard;  // marked sharp, or a seam when seams are sharp, or a face beside it shaded flat
-  };
-  mutable std::vector<EdgeSides> sides_;
-  mutable uint64_t sides_topo_ = 0;
-  mutable std::vector<uint32_t> vside_off_, vside_;  // sides_ at each vertex (CSR), per topology (task 0099)
-  mutable uint64_t vside_topo_ = 0;
-  mutable NormalState nstate_[2];
-  /* Where each face's triangles start in a build (n - 2 per face, in face order), and whether any face has more than
-   * three corners: per topology, for retriangulate(). */
-  mutable VertexFaces vf_;
-  mutable uint64_t vf_topo_ = 0;
-  mutable std::vector<uint32_t> tri_start_;
-  mutable bool tri_big_ = false;
-  mutable uint64_t tri_topo_ = 0;
-  mutable uint64_t edges_topo_ = 0;
-  mutable std::vector<std::pair<uint32_t, uint32_t>> edges_;
-  mutable uint64_t edges_version_ = 0;
-  /* One cache per variant (0 = as shaded, 1 = forced flat for Edit Mode) so a
-   * renderer holding pointers to one never sees it rebuilt as the other. */
-  mutable RenderMesh cache_[2];
-  mutable uint64_t cache_version_[2] = {0, 0};
-  mutable bool cache_tangents_[2] = {false, false};
-  mutable uint64_t cache_deform_[2] = {0, 0};
-  mutable uint64_t cache_topo_[2] = {0, 0};
-  mutable bool cache_flat_[2] = {false, false};
-  mutable bool cache_approx_[2] = {false, false};  // tangents made the quick way while following a drag
-  mutable std::vector<uint32_t> corner_rv_[2];  // each corner's render vertex in cache_[i]
 };
 
 using MeshPtr = std::shared_ptr<Mesh>;
@@ -300,6 +357,8 @@ MeshCounts mesh_counts();
 MeshPtr &mesh_make_mutable(MeshPtr &m);
 /* A new copy of `m` (counted in MeshCounts::copies, as mesh_make_mutable's are). */
 MeshPtr mesh_copy(const Mesh &m);
+/* The same without the caches (MeshCopyBare): for an edit about to change the topology. */
+MeshPtr mesh_copy_bare(const Mesh &m);
 
 /* ------------------------------------------------------------- Primitives */
 /* Tests: render meshes built the way before task 0109 (one thread), to compare the threaded build with. */

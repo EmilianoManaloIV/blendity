@@ -1,6 +1,6 @@
 # 0178: Blender as the benchmark - a headless harness and Pass 13's reference column
 
-- **Status:** in progress (round 178)
+- **Status:** done (round 178)
 - **Requirements:** R-07 (performance), C-05 (honest comparison)
 - **Decisions:** none (a measuring tool; PERFORMANCE.md Pass 13 holds the numbers)
 - **Model:** main session

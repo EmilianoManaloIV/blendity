@@ -78,6 +78,11 @@ struct KeyChord {
   int mods = 0;
   bool operator==(const KeyChord &o) const { return key == o.key && mods == o.mods; }
 };
+/* One command the palette finds (task 0189): a keymap action (`action`) or a console line (`command`). */
+struct PaletteEntry {
+  std::string name, category, help, command, action;
+};
+
 struct ShortcutAction {
   const char *id;
   const char *label;
@@ -133,6 +138,7 @@ struct FrameProfile {
   /* Task 0165: an Edit Mode operator's own time - its one mesh copy, the operation, the selection flushed, Auto
    * Smooth's check - inside the command that ran it (not a view's time). */
   double ms_edit_op = 0;
+  double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
@@ -142,6 +148,9 @@ struct FrameProfile {
   uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
+  uint64_t gpu_overlay_frames = 0;                        // task 0192: Scene view frames whose overlays the card drew
+  uint64_t gpu_face_dot_frames = 0;                       // task 0192: Edit Mode frames whose Face mode dots the card drew
+  uint64_t gpu_cage_vert_builds = 0;                      // task 0205: frames whose cage vertices (and Face mode's dots) were worked out again
   double ms_gpu = 0;
   /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
    * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
@@ -162,7 +171,7 @@ struct FrameProfile {
     views_held += o.views_held, cheap_shadows += o.cheap_shadows;
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
-    ms_edit_op += o.ms_edit_op;
+    ms_edit_op += o.ms_edit_op, ms_undo += o.ms_undo;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
@@ -171,6 +180,8 @@ struct FrameProfile {
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
+    gpu_overlay_frames += o.gpu_overlay_frames, gpu_face_dot_frames += o.gpu_face_dot_frames;
+    gpu_cage_vert_builds += o.gpu_cage_vert_builds;
     ms_gpu += o.ms_gpu;
     ms_gpu_shadow += o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
   }
@@ -253,6 +264,40 @@ struct DockNode {
   int active = 0;
   Recti rect;
   DockNode *parent = nullptr;
+};
+
+/* A window beside the main one (task 0187, ADR 0059): its OS window, framebuffer, UI context and dock root, swapped
+ * into the editor's while it draws (editor_windows.cpp). */
+struct EditorWindow {
+  int id = 0;
+  platform::Window *os = nullptr;  // (null headless)
+  Image fb;
+  ui::Context ui;
+  std::unique_ptr<DockNode> dock;
+  std::vector<platform::Event> pending;  // its events, gathered by the run loop or a test
+  std::vector<uint64_t> present_bands;
+  int present_w = 0, present_h = 0;
+  bool present_all = true;
+  float dpi = 1.0f;
+  float scale_for_test = 0.0f;  // (tests: a UI scale of its own, as a display at another DPI gives)
+  int x = 0, y = 0, monitor = 0;
+  bool close = false;
+  bool changed = false;  // (it had events this frame: the main window redraws after it)
+  bool render_only = false, fullscreen = false, tablet = false;  // (task 0188)
+  Recti saved_rect{0, 0, 0, 0};  // (headless full screen's way back)
+  /* Task 0193: presented by the card (Editor::card_*). */
+  bool card_present = false, card_off = false, card_ui_stale = false;
+  int card_win = -1;
+  std::string card_reason;
+  std::vector<gpu::Raster::PresentView> card_views, card_views_shown;
+};
+void collect_dock_tabs(const DockNode *n, std::vector<WindowKind> &out);
+
+/* A tab moved between windows, asked for while drawing and done between frames. */
+struct WindowMove {
+  enum Kind { NewWindow, Main, Monitor } kind = NewWindow;
+  WindowKind tab = WindowKind::Count;
+  int x = 0, y = 0, w = 0, h = 0, monitor = 0;
 };
 
 const char *trash_name();  // "Recycle Bin" on Windows, else "Trash" (project_window.cpp)
@@ -466,6 +511,61 @@ class Editor {
 
   /* Headless entry points used by tests and --screenshot. */
   void init_headless(int width, int height);
+  /* Task 0187: windows beside the main one (headless: framebuffers without OS windows). */
+  int open_window_for_test(WindowKind k, int w, int h);
+  void step_window_headless(int id, std::vector<platform::Event> events);
+  size_t window_count_for_test() const { return windows_.size() + 1; }
+  EditorWindow *window_for_test(int id) { return editor_window(id); }
+  const Image &main_fb_for_test() const { return fb_; }
+  void set_monitors_for_test(const std::vector<platform::Monitor> &m) { test_monitors_ = m; }
+  std::string windows_layout_for_test() { return windows_layout(); }
+  void restore_windows_for_test(const std::string &s) { restore_windows(s); }
+  Recti render_picture_rect_for_test() const { return render_picture_rect_; }
+  std::string statusbar_text_for_test() const;
+  const std::string &last_palette_command_for_test() const { return last_palette_command_; }
+  std::vector<std::string> palette_names_for_test(const std::string &q) {
+    std::vector<std::string> out;
+    for (const PaletteEntry *e : palette_matches(q)) out.push_back(e->name);
+    return out;
+  }
+  std::vector<std::string> favorites_for_test() { return favorites(); }
+  void set_tool_for_test(Tool t) { tool_ = t; }
+  void set_scene_hovered_for_test(bool on) { scene_hovered_ = on; }
+  const std::vector<std::string> &add_component_recent_for_test() const { return add_component_recent_; }
+  void set_essentials_for_test(bool on) { inspector_essentials_ = on; }
+  void set_guides_for_test(bool on) { guides_enabled_ = on; }
+  const std::vector<std::string> &recent_scenes_for_test() const { return recent_scenes_; }
+  bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
+  std::string gizmo_typed_for_test() const { return gizmo_typed_; }
+  int gizmo_hot_for_test() const { return gizmo_hot_; }
+  void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
+  void clear_selection_for_test() { clear_selection(); }
+  int windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands = {});  // (task 0193: Blendity --windowed-check)
+  int startup_check();  // (task 0202: Blendity --startup-check - the first frame drawn, then quit)
+  void card_present_for_test(bool on) { card_present_for_test_ = on; }  // (task 0193: headless frames as if the card presented them)
+  bool card_frame_for_test(std::vector<uint32_t> &out);                // the frame the card would show (compose_read)
+  size_t card_views_for_test() const { return card_views_.size(); }
+  void card_slots_redrawn_for_test() {  // (every slot drawn by something else since: a cached card picture is gone)
+    for (uint64_t &g : gpu_slot_gen_) g++;
+  }
+  const std::string &card_reason_for_test() const { return card_reason_; }
+  void overlays_extra_for_test(std::function<void(Renderer3D &)> fn) { overlays_extra_for_test_ = std::move(fn); }
+  uint64_t scene_render_hash_for_test() { return scene_render_hash(); }
+  bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
+  bool typed_axis_move_for_test(Vec3 axis, Vec3 &delta) { return typed_axis_move(axis, delta); }
+  bool open_scene_for_test(const std::string &p) { return open_scene(p); }
+  std::string redo_label_for_test() const { return redo_.empty() ? std::string() : redo_.back().label; }
+  std::vector<std::string> palette_guide_steps_for_test(const std::string &layout);
+  float edit_brush_radius_for_test() const { return edit_brush_radius(); }
+  void set_render_image_for_test(const Image &img) {
+    render_img_ = img;
+    render_has_result_ = true;
+  }
+  bool in_main_dock_for_test(WindowKind k) { return dock_find(k) != nullptr; }
+  Recti dock_leaf_rect_for_test(WindowKind k) {
+    DockNode *n = dock_find(k);
+    return n ? n->rect : Recti{0, 0, 0, 0};
+  }
   /* Live Link (task 0172): start on a port (0: any free one), stop; the link for tests. */
   bool livelink_start(int port);
   void livelink_stop();
@@ -506,6 +606,7 @@ class Editor {
   /* Task 0181: the Editing window's document and the picture it shows (0xAARRGGBB, the result; the split's
    * before is the source's). */
   edit::Doc &edit_doc_for_test() { return edit_doc_; }
+  bool set_layer_field_for_test(TextureLayer &l, const std::string &f, const std::string &v) { return set_layer_field(l, f, v); }
   const std::vector<uint32_t> &edit_display_for_test() const { return edit_after_px_; }
   const std::vector<uint32_t> &edit_before_for_test() const { return edit_before_px_; }
   const std::vector<float> &edit_mask_weights_for_test() const { return edit_mask_weights_; }  // (task 0182: what Show drew)
@@ -655,6 +756,10 @@ class Editor {
   }
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
+  bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
+  std::vector<GameObject *> selected_objects_for_test() const { return selected_objects(false); }
+  bool scene_planes_deferred_for_test() const { return scene_planes_slot_ >= 0; }
+  Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
   bool transform_active_for_test() const { return xf_.active; }  // a G / R / S is running
   size_t overlap_vert_pairs_for_test() { overlap_refresh(); return overlap_.verts.size(); }
@@ -691,6 +796,19 @@ class Editor {
   int viewport_device() const { return viewport_device_; }
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
+  std::string window_device_status(bool card_present, int card_win, const std::string &card_reason) const;  // (task 0199)
+  bool notice_cpu_fallback();  // (true: said now)
+  bool notice_in_tests_ = false;
+  bool windowed_check_ = false;  // (a measuring run: it leaves the preferences as they were)
+  bool notice_cpu_fallback_for_test() {  // (headless runs say it too while testing it)
+    notice_in_tests_ = true;
+    const bool said = notice_cpu_fallback();
+    notice_in_tests_ = false;
+    return said;
+  }
+  std::string window_device_status_for_test(bool card_present, int card_win, const std::string &reason) const {
+    return window_device_status(card_present, card_win, reason);
+  }
   double gpu_view_open_ms() const { return gpu_view_open_ms_; }  // opening the GPU view took (device, pipelines, shaders)
   uint64_t gpu_submits_for_test() const { return gpu_view_ ? gpu_view_->submits() : 0; }  // task 0160: the card's submissions so far
   void gpu_split_readback_for_test(bool split) { gpu_split_readback_for_test_ = split; }  // the old render-then-read path
@@ -753,6 +871,8 @@ class Editor {
   /* The rows of a frame to present: runs of 16-row bands whose pixels differ from `bands` (the hashes of the last
    * frame presented, updated here); every row when `all` or the size changed (task 0084). */
   static std::vector<std::pair<int, int>> changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all);
+  /* Task 0198: the changed parts as rects (16-row bands, the columns of their changed 256-pixel tiles), against `tiles`. */
+  static std::vector<gpu::Raster::PresentRect> changed_rects(const uint32_t *px, int width, int height, std::vector<uint64_t> &tiles, bool all);
   void show_update_for_test(const std::string &json, const std::string &tag) {
     upd_.list = releases::parse(json);
     upd_.selected = tag;
@@ -781,6 +901,7 @@ class Editor {
     return out;
   }
   bool weight_paint_active_for_test() const { return weight_paint_; }
+  bool scene_on_gpu_for_test() const { return scene_on_gpu_; }  // (task 0195: the Scene view's last frame drew on the card)
   void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
@@ -995,7 +1116,19 @@ class Editor {
   void render_scene_view(const Recti &r);
   void render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p);
   void render_overlays(const Recti &r);
+  /* Task 0192 (ADR 0061): the Scene view's overlays recorded before its picture, for the card to draw with it. */
+  void record_scene_overlays(const Recti &view, bool on);
+  void draw_scene_overlays(const Recti &view);
+  void overlays_to_frame(gpu::RasterFrame &fr) const;
+  void render_edit_cage();
+  bool overlays_card_expected() const;
+  std::function<void(Renderer3D &)> overlays_extra_for_test_;  // (a test's own overlays, drawn first)
+  float edit_face_dots(const Mesh &m, const Mat4 &w, std::vector<Vec3> &pos, std::vector<uint32_t> &col);
+  Renderer3D::OverlayRecord scene_overlays_;
+  bool scene_overlays_recorded_ = false, overlays_on_gpu_ = false;
+  bool overlays_off_gpu_for_test_ = false;  // (a test: the card can't take them, so they're replayed here)
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
+  std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
   /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
@@ -1332,9 +1465,14 @@ class Editor {
   void edit_command(const std::vector<std::string> &t, const std::string &line);
   void edit_curve_command(const std::vector<std::string> &t);
   void edit_update_display();
+  int edit_preview_side() const;
+  int edit_shown_side_ = 0, edit_before_w_ = 0, edit_before_h_ = 0;
+  float edit_shown_scale_ = 1.0f;  // (the shown picture's size over the full result's: a preview's)
+  double edit_shown_ms_ = 0;
   void draw_editing_window(const Recti &r);
   void draw_editing_canvas(const Recti &r);
   void draw_edit_panel(const Recti &r);
+  void draw_edit_targets(ui::Layout &lay);
   void draw_edit_step(ui::Layout &lay, int step);
   void draw_edit_field(ui::Layout &lay, int step, const edit::FieldInfo &f, float value);
   void draw_edit_curve(ui::Layout &lay, int step);
@@ -1345,6 +1483,23 @@ class Editor {
   void edit_curve_drag_to(const Recti &box, int step, int ch);
   bool edit_window_has_mouse();
   void draw_edit_step_fields(ui::Layout &lay, int step);
+  /* Textures and the camera look (task 0183: editing_textures.cpp) */
+  bool edit_open_texture(const std::string &name);
+  bool edit_apply_to_texture();
+  TextureLayer *add_edit_layer(ProceduralTexture &pt, const std::string &image);
+  bool set_layer_field(TextureLayer &layer, const std::string &field, const std::string &value);
+  bool edit_use_as_camera_look();
+  struct CameraLook {
+    ColorGradingEffect cg;
+    VignetteEffect vg;
+    SharpenEffect sh;
+    bool graded = false, vignette = false, sharpen = false;
+    std::string skipped;
+  };
+  bool camera_look_step(const edit::Adjustment &a, CameraLook &look);
+  bool camera_look_effect(const edit::Adjustment &a, CameraLook &look);
+  template<class T> T *camera_effect(CameraFilters &cf);
+  std::string edit_texture_asset_;  // the texture asset the Editing tab has open ("" for an image or a render)
   /* Masks (task 0182: editing_masks.cpp) */
   void edit_mask_command(const std::vector<std::string> &t);
   bool edit_mask_edit_parts(const std::vector<std::string> &t, int step, std::vector<edit::MaskPart> &parts);
@@ -1361,6 +1516,7 @@ class Editor {
   std::vector<Vec2> draw_mask_handles(const Recti &dst, const edit::MaskPart &m);
   void edit_mask_brush(const Recti &dst, Vec2 mouse, bool inside);
   float edit_brush_pressure() const;
+  float edit_brush_radius() const;
   bool edit_mask_show_ = false, edit_brush_erase_ = false, edit_brush_stroke_ = false, edit_handle_moved_ = false;
   int edit_mask_step_ = -1, edit_mask_part_ = -1, edit_handle_drag_ = -1;
   Vec2 edit_brush_last_{0, 0};
@@ -1779,6 +1935,7 @@ class Editor {
   }
   bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
   bool other_views_follow_ = false;
+  bool cpu_fallback_noticed_ = false;  // task 0199: Auto's fall back to the CPU said once (kept in the preferences)
   void views_command(const std::string &what, const std::string &value);
   bool hold_other_views() const { return !other_views_follow_ && scene_moving() && !(playing_ && !paused_); }
   /* Task 0104 (ADR 0039; Blender's is_navigating / is_transforming): while you interact, the CPU views' shadow map is
@@ -2132,6 +2289,7 @@ class Editor {
   void assign_texture_to_selection(const std::string &asset_path);
   void assign_material_to_faces(int slot);
   void spawn_stress_grid(int count, const std::string &kind);
+  bool bench_scene(const std::string &name);  // (task 0202: the Blender parity scenes, built as tools/bench_blender.py builds them)
   void run_console_command(const std::string &cmd);
   bool set_field_command(const std::string &path, const std::string &value);  // console: set Camera.FStop 1.4
   void enter_play();
@@ -2181,6 +2339,98 @@ class Editor {
   std::vector<uint64_t> present_bands_;
   bool present_all_ = true;
   int present_w_ = 0, present_h_ = 0;
+  /* ---- windows beside the main one (task 0187, ADR 0059: editor_windows.cpp) ---- */
+  std::vector<std::unique_ptr<EditorWindow>> windows_;
+  int next_window_id_ = 1, active_window_ = 0;  // (0: the main window is drawing or nothing is)
+  std::vector<WindowMove> window_moves_;
+  std::vector<platform::Monitor> test_monitors_{platform::Monitor{0, 0, 1920, 1080, 1.0f, "Test display", true}};
+  std::string windows_pref_;  // the windows of the last session, opened once the main window is
+  int tab_drag_window_ = 0;   // the window a tab drag started in
+  int pointer_window_ = 0;    // the window the last press was in (its drags: assets, the Hierarchy's)
+  bool in_frame_ = false, save_prefs_pending_ = false;
+  bool tablet_ = false;  // (the drawing window's Tablet mode: its UI 1.5 times as big, task 0188)
+  /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
+  std::vector<PaletteEntry> palette_entries_;
+  std::vector<std::string> add_component_recent_;
+  /* ---- the interaction pass's second round (task 0190: interaction_extras.cpp) ---- */
+  static constexpr int kEssentialFields = 7;
+  bool inspector_essentials_ = true;      // (each component's first seven fields, the rest under Show more; headless: off)
+  std::set<std::string> inspector_more_;  // components opened past their essentials
+  std::vector<std::string> recent_scenes_;
+  std::set<std::string> guides_seen_;     // layouts whose first-run guide was dismissed
+  bool guides_enabled_ = true;            // (headless: off, as the tests' layouts expect)
+  std::string gizmo_typed_;               // a number typed while dragging a gizmo axis (Blender's numeric input)
+  int essentials_limit(const std::string &type) const;
+  void draw_show_more(ui::Layout &lay, const std::string &type, int hidden, int seen);
+  void note_recent_scene(const std::string &path);
+  Recti draw_layout_guide(const Recti &area);
+  std::string prefs_text_0190() const;
+  bool typed_axis_move(Vec3 axis, Vec3 &delta);
+  std::vector<std::string> palette_recent_;
+  std::map<std::string, std::vector<std::string>> favorites_;  // per layout
+  std::string palette_query_, last_palette_command_;
+  int palette_sel_ = 0;
+  const std::vector<PaletteEntry> &palette_entries();
+  const PaletteEntry *palette_find(const std::string &name);
+  const PaletteEntry *palette_find_built(const std::string &name) const;
+  std::vector<const PaletteEntry *> palette_matches(const std::string &query);
+  void palette_run(const PaletteEntry &e);
+  std::vector<std::string> &favorites();
+  bool toggle_favorite(const std::string &name);
+  void take_favorite_request();
+  void open_palette();
+  void open_favorites();
+  void draw_command_palette();
+  void draw_palette_body();
+  void palette_command(const std::vector<std::string> &t, const std::string &line);
+  std::string statusbar_hint() const;
+  void draw_statusbar_hint(const Recti &r);
+  void draw_statusbar_log(const Recti &r);
+  std::string favorites_prefs_text() const;
+  void load_favorites_pref(const std::string &v);
+  struct WindowMode {
+    enum What { RenderOnly, FullScreen, Tablet };
+    int id;  // (0: the main window)
+    What what;
+    bool on;
+  };
+  std::vector<WindowMode> window_modes_;
+  void apply_window_modes();
+  WindowKind render_only_kind(EditorWindow &w);
+  Recti render_picture_rect_{0, 0, 0, 0};  // (where the Render window's picture was last drawn)
+  void draw_render_image(const Recti &r, int margin = -1);  // (margin: around the fitted picture; -1 the window's 20 px)
+  bool draw_render_only(EditorWindow &w, const Recti &area);
+  void draw_render_only_strip(EditorWindow &w, const Recti &strip);
+  void set_window_fullscreen(EditorWindow &w, bool on);
+  void set_window_tablet(EditorWindow *w, bool on);
+  bool window_mode_command(const std::vector<std::string> &t);
+  void frame_body(std::vector<platform::Event> &events);
+  bool any_button_down() const;
+  bool key_down_any(int k) const;
+  float os_units() const;
+  bool place_on_display(int &x, int &y, int &w, int &h);
+  void swap_window_state(EditorWindow &w);
+  EditorWindow *editor_window(int id);
+  DockNode *dock_find_elsewhere(WindowKind k, EditorWindow **owner);
+  DockNode *dock_find_anywhere(WindowKind k);
+  EditorWindow *open_window(WindowKind k, int x, int y, int w, int h);
+  void init_window_ui(EditorWindow &w);
+  void take_tab(WindowKind k);
+  void move_to_main(WindowKind k);
+  void close_window(EditorWindow &w);
+  void close_finished_windows();
+  int monitor_at(int x, int y);
+  void move_to_monitor(WindowKind k, int index);
+  void apply_window_moves();
+  void queue_new_window_at_mouse(WindowKind k);
+  void draw_secondary_windows(double now);
+  void draw_secondary_window(EditorWindow &w, double now);
+  void update_tab_drag();
+  void draw_tab_menu_windows(WindowKind k);
+  std::string windows_layout();
+  void restore_windows(const std::string &s);
+  void dock_command(const std::vector<std::string> &t, const std::string &line);
+  void gather_window_events();
   void present_changed();
   /* The mesh caches' tallies at the last frame's end, and that frame's share (task 0083). Process-wide: work on other
    * threads (a skin bind) lands in the frame it finished in. */
@@ -2626,8 +2876,30 @@ class Editor {
   struct ViewCache {
     uint64_t key = 0;
     Image img;
+    int card_slot = -1;      // task 0193: the card holds the picture (img is the transparent hole over it): which slot,
+    uint64_t card_gen = 0;   // and its drawing then
   };
   ViewCache scene_cache_, game_cache_;
+  /* Task 0193 (ADR 0061): the window drawing now is presented by the card. Its views drawn there stay there: the
+   * canvas is left transparent over them (card_views_ says where each goes) and present_window shows the frame - the
+   * views' pictures, the canvas over them. card_off_: its present failed, the system presents it from now on. Per
+   * window (swapped with the window's state). */
+  bool card_present_ = false, card_off_ = false, card_present_pref_ = true, card_present_for_test_ = false;
+  bool card_ui_stale_ = false;  // task 0198: the system presented while the card kept its UI image: all of it next time
+  int card_win_ = -1;
+  std::string card_reason_;
+  std::vector<gpu::Raster::PresentView> card_views_, card_views_shown_;
+  uint64_t gpu_slot_gen_[gpu::Raster::kSlots] = {};  // each slot's pictures drawn (a cached view knows it's still there)
+  uint64_t card_frames_ = 0;
+  void begin_card_frame();
+  bool card_view_at(const RenderTarget &rt, int &x, int &y) const;
+  void card_present_failed(const std::string &why);
+  void card_forget_windows();
+  bool card_attach(gpu::Raster &g);
+  void card_detach();
+  void card_retry();
+  bool card_picture_kept(const ViewCache &c) const;
+  std::vector<uint32_t> window_pixels();
   bool view_cache_show(ViewCache &c, const Recti &r);  // its last picture whatever the key (a held view, task 0103)
   uint64_t cam_preview_key_ = 0;
   uint64_t cam_preview_of_ = 0;  // the camera its picture is of (a held one must be the same camera's: task 0103)
@@ -2674,6 +2946,9 @@ class Editor {
   void render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
                      const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false,
                      bool planes = true, bool full_size = false);  // planes: depth and ids at full size too (for picking)
+  int scene_planes_slot_ = -1;  // (task 0204: the card's slot holding the Scene view's depth and ids not yet copied back)
+  int scene_planes_w_ = 0, scene_planes_h_ = 0;  // (the size they were drawn at)
+  void ensure_scene_planes();   // (task 0204: those planes into scene_rt_ before the CPU reads them)
   bool planes_wanted_ = true;  // (render_scaled's `planes` while it draws: a filter stack's upscale follows it too)
   bool planes_always_ = false;  // tests: every view copies its planes, as before task 0092
   /* Task 0096 (ADR 0036): the views' deferred 3D on the GPU (gpu_views.cpp). One device for every view, each view its
@@ -2685,7 +2960,20 @@ class Editor {
     uint32_t vertices = 0, indices = 0;
     uint64_t used = 0;  // the gpu_calls_ count it was last drawn at
     uint64_t bytes = 0;
+    float uv_stretch = -1.0f;     // task 0196: its UVs' most stretch (live_close_up_of), -1 not measured
+    uint64_t stretch_serial = 0;  // the mesh it was measured on
   };
+  const char *live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 &vp, const Mat4 &p, Vec3 eye, int height);
+  /* Task 0197: lightmap pages and the probe volume on the card. */
+  int gpu_lightmap(const Lightmap &lm, std::string &err);
+  void gpu_forget_texture(const Texture *t);
+  bool read_linear_light(RenderTarget &rt, int slot, bool want, const LightingEnv &env);
+  std::vector<float> gpu_hdr_scratch_;  // (task 0197: the card's linear light, read back, kept between frames)
+  void prune_gpu_lightmaps();
+  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
+  void gpu_probe_volume(const ProbeVolumeData &d);
+  std::unordered_map<const Lightmap *, std::pair<uint64_t, std::shared_ptr<Texture>>> gpu_lightmaps_;
+  uint64_t gpu_probe_key_ = 0;
   int viewport_device_ = 0;          // Preferences > Viewport Device: 0 Auto, 1 CPU, 2 GPU
   std::unique_ptr<gpu::Raster> gpu_view_;
   bool gpu_view_tried_ = false;      // opening it was tried (not again until the setting changes)
@@ -2737,6 +3025,7 @@ class Editor {
   std::vector<gpu::CageEdge> gpu_cage_e_;
   const gpu::Raster *gpu_cage_owner_ = nullptr;
   uint64_t gpu_cage_edges_key_ = 0;  // what the edges' colours were worked out from
+  uint64_t gpu_cage_verts_key_ = 0;  // (task 0205) what the vertices were worked out from: the mesh's version, the object's matrix, the dots' colours
   bool gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err);
   uint32_t cage_edge_color(const Mesh &m, uint32_t a, uint32_t b) const;  // 0: not drawn
   uint32_t cage_dot_color(size_t v) const;

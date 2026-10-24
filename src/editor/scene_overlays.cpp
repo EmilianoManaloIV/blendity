@@ -180,6 +180,7 @@ void Editor::draw_grid(Renderer3D &r3d) {
 }
 
 void Editor::render_overlays(const Recti &) {
+  if (overlays_extra_for_test_) overlays_extra_for_test_(scene_r3d_);  // (a test's own lines, dots and outlines first)
   draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
   if (show_footprints_) draw_footprint_soles();  // (task 0126)
   draw_ai_overlay();       // (task 0130)
@@ -245,53 +246,132 @@ void Editor::render_overlays(const Recti &) {
     if (!kids.empty()) scene_r3d_.outline_ids(kids, kChildOrange, std::max(1, ui_.px(1.5f)));
     scene_r3d_.outline_ids(sel, kSelectOrange, std::max(1, ui_.px(2)));
   }
+}
 
-  /* Edit-mode overlay: edges + vertices (Blender's edit-mesh overlay). */
-  if (edit_mode_) {
-    if (GameObject *g = edit_object()) {
-      const Mesh &m = **edit_mesh_ptr();
-      const Mat4 &w = g->world_matrix();
-      vert_sel_.resize(m.vert_count(), 0);
-      face_sel_.resize(m.face_count(), 0);
-      /* N-gon mode (SketchUp): edges inside a flat region are hidden, as SketchUp hides coplanar edges. */
-      if (ngon_mode_) ngon_cache(m);
-      /* The cage, recorded in parallel (task 0089: 100,000 edges of a 50k-face mesh were half the overlay's time),
-       * from the vertices placed in the world once each rather than once per edge. */
-      std::vector<Vec3> wp(m.vert_count());
-      JobSystem::global().parallel_for((int64_t)wp.size(), 4096, [&](int64_t a, int64_t b) {
-        for (int64_t i = a; i < b; i++) wp[(size_t)i] = w.point(m.positions[(size_t)i]);
-      });
-      const auto &edges = m.edge_cache();
-      if (!cage_on_gpu_) {  // (else the card drew the edges and the vertex dots into the picture: task 0100)
-        scene_r3d_.lines(edges.size(), [&](size_t k, Vec3 &a, Vec3 &b, uint32_t &col) {
-          const auto &e = edges[k];
-          col = cage_edge_color(m, e.first, e.second);
-          a = wp[e.first], b = wp[e.second];
-          return col != 0;
-        }, true, kCageBias);
-      }
-      if (elem_ == EditElement::Vertex) {
-        if (!cage_on_gpu_)
-          scene_r3d_.points(wp.size(), cage_dot_radius(), [&](size_t i, Vec3 &p, uint32_t &col) {
-            p = wp[i];
-            col = cage_dot_color(i);
-            return true;
-          }, true);
-      }
-      else if (elem_ == EditElement::Face && ngon_mode_) {
-        /* One dot per flat region: the "face" SketchUp would show. */
-        std::vector<uint8_t> rsel(ngon_region_center_.size(), 0);
-        for (size_t f = 0; f < m.face_count() && f < ngon_region_.size(); f++)
-          if (face_sel_[f] && ngon_region_[f] >= 0) rsel[(size_t)ngon_region_[f]] = 1;
-        for (size_t r = 0; r < ngon_region_center_.size(); r++)
-          scene_r3d_.point(w.point(ngon_region_center_[r]), ui_.px(2.5f), rsel[r] ? Color::hex(0xFFA733) : Color::hex(0x202020), true);
-      }
-      else if (elem_ == EditElement::Face) {
-        for (size_t f = 0; f < m.face_count(); f++)
-          scene_r3d_.point(w.point(m.face_center(f)), ui_.px(2), face_sel_[f] ? Color::hex(0xFFA733) : Color::hex(0x202020), true);
-      }
-    }
+/* Whether the card will take this frame's overlays (task 0192): it is open with their pipelines, and nothing shown
+ * sends the view to the CPU anyway (the probes' dots: their colours come from the frame's render, after this). */
+bool Editor::overlays_card_expected() const {
+  if (!gpu_view_wanted() || !gpu_view_ || !gpu_view_->can_draw_overlays() || overlays_off_gpu_for_test_) return false;
+  return !(scene_->lighting.show_probes && !probes_.empty());
+}
+
+/* Task 0192: the Scene view's overlays recorded before its picture (the grid and render_overlays: all in the world),
+ * so the card can draw them with it; drawn here instead when it doesn't (draw_scene_overlays). */
+void Editor::record_scene_overlays(const Recti &view, bool on) {
+  scene_overlays_.clear();
+  scene_overlays_recorded_ = on;
+  if (!on) return;
+  ScopedTimer t;
+  scene_r3d_.record_overlays(&scene_overlays_);
+  if (show_grid_) draw_grid(scene_r3d_);
+  render_overlays(view);
+  scene_r3d_.record_overlays(nullptr);
+  prof_.ms_overlays += t.ms();
+}
+
+void Editor::draw_scene_overlays(const Recti &view) {
+  if (!scene_overlays_recorded_) {
+    if (show_grid_) draw_grid(scene_r3d_);
+    render_overlays(view);
+    return;
   }
+  if (!overlays_on_gpu_) scene_r3d_.replay(scene_overlays_);
+}
+
+/* The overlays as the card takes them (task 0192): lines, dots and outlines, and the runs of each in record order. */
+void Editor::overlays_to_frame(gpu::RasterFrame &fr) const {
+  using Op = Renderer3D::OverlayRecord::Op;
+  fr.overlay_lines.reserve(scene_overlays_.ops.size());
+  fr.overlay_points.reserve(scene_overlays_.ops.size() / 8);
+  auto run = [&](uint32_t kind, size_t at) {
+    if (fr.overlay_runs.empty() || fr.overlay_runs.back().kind != kind) fr.overlay_runs.push_back({kind, (uint32_t)at, 0});
+    fr.overlay_runs.back().count++;
+  };
+  for (const Op &op : scene_overlays_.ops) {
+    if (op.kind == Op::Outline) {
+      run(2, fr.outlines.size());
+      gpu::OverlayOutline o;
+      o.ids.assign(scene_overlays_.ids.begin() + op.first, scene_overlays_.ids.begin() + op.first + op.count);
+      o.color = op.color, o.width = (int)op.value;
+      fr.outlines.push_back(std::move(o));
+      continue;
+    }
+    if (op.kind == Op::Point) {
+      run(1, fr.overlay_points.size());
+      gpu::OverlayPoint p;
+      p.p[0] = op.a.x, p.p[1] = op.a.y, p.p[2] = op.a.z, p.color = op.color, p.radius = op.value, p.depth_test = op.depth_test ? 1u : 0u;
+      fr.overlay_points.push_back(p);
+      continue;
+    }
+    run(0, fr.overlay_lines.size());
+    gpu::OverlayLine l;
+    l.a[0] = op.a.x, l.a[1] = op.a.y, l.a[2] = op.a.z, l.b[0] = op.b.x, l.b[1] = op.b.y, l.b[2] = op.b.z;
+    /* (A negative bias means "no depth test" on the card: a depth-tested line's bias is never below 0 here.) */
+    l.color = op.color, l.bias = op.depth_test ? std::max(0.0f, op.value) : -1.0f;
+    fr.overlay_lines.push_back(l);
+  }
+}
+
+/* Edit-mode overlay: edges + vertices (Blender's edit-mesh overlay). */
+void Editor::render_edit_cage() {
+  GameObject *g = edit_mode_ ? edit_object() : nullptr;
+  if (!g) return;
+  const Mesh &m = **edit_mesh_ptr();
+  const Mat4 &w = g->world_matrix();
+  vert_sel_.resize(m.vert_count(), 0);
+  face_sel_.resize(m.face_count(), 0);
+  /* N-gon mode (SketchUp): edges inside a flat region are hidden, as SketchUp hides coplanar edges. */
+  if (ngon_mode_) ngon_cache(m);
+  if (cage_on_gpu_) return;  // (the card drew the edges and the dots into the picture: tasks 0100, 0192)
+  /* The cage, recorded in parallel (task 0089: 100,000 edges of a 50k-face mesh were half the overlay's time), from the
+   * vertices placed in the world once each rather than once per edge. */
+  std::vector<Vec3> wp(m.vert_count());
+  JobSystem::global().parallel_for((int64_t)wp.size(), 4096, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) wp[(size_t)i] = w.point(m.positions[(size_t)i]);
+  });
+  const auto &edges = m.edge_cache();
+  scene_r3d_.lines(edges.size(), [&](size_t k, Vec3 &a, Vec3 &b, uint32_t &col) {
+    const auto &e = edges[k];
+    col = cage_edge_color(m, e.first, e.second);
+    a = wp[e.first], b = wp[e.second];
+    return col != 0;
+  }, true, kCageBias);
+  if (elem_ == EditElement::Vertex) {
+    scene_r3d_.points(wp.size(), cage_dot_radius(), [&](size_t i, Vec3 &p, uint32_t &col) {
+      p = wp[i];
+      col = cage_dot_color(i);
+      return true;
+    }, true);
+    return;
+  }
+  if (elem_ != EditElement::Face) return;
+  std::vector<Vec3> pos;
+  std::vector<uint32_t> col;
+  const float r = edit_face_dots(m, w, pos, col);
+  scene_r3d_.points(pos.size(), r, [&](size_t i, Vec3 &p, uint32_t &c) {
+    p = pos[i], c = col[i];
+    return true;
+  }, true);
+}
+
+/* Face mode's dots, their radius returned (task 0192: the CPU's overlay and the card's cage both draw them): one at each
+ * face's centre, or one per flat region in N-gon mode (the "face" SketchUp would show), orange when selected. */
+float Editor::edit_face_dots(const Mesh &m, const Mat4 &w, std::vector<Vec3> &pos, std::vector<uint32_t> &col) {
+  const uint32_t on = Color::hex(0xFFA733), off = Color::hex(0x202020);
+  face_sel_.resize(m.face_count(), 0);
+  if (ngon_mode_) {
+    std::vector<uint8_t> rsel(ngon_region_center_.size(), 0);
+    for (size_t f = 0; f < m.face_count() && f < ngon_region_.size(); f++)
+      if (face_sel_[f] && ngon_region_[f] >= 0) rsel[(size_t)ngon_region_[f]] = 1;
+    pos.resize(ngon_region_center_.size()), col.resize(ngon_region_center_.size());
+    for (size_t r = 0; r < ngon_region_center_.size(); r++) pos[r] = w.point(ngon_region_center_[r]), col[r] = rsel[r] ? on : off;
+    return ui_.px(2.5f);
+  }
+  pos.resize(m.face_count()), col.resize(m.face_count());
+  JobSystem::global().parallel_for((int64_t)m.face_count(), 4096, [&](int64_t a, int64_t b) {
+    for (int64_t f = a; f < b; f++) pos[(size_t)f] = w.point(m.face_center((size_t)f)), col[(size_t)f] = face_sel_[(size_t)f] ? on : off;
+  });
+  return ui_.px(2);
 }
 
 void Editor::draw_curve(const GameObject &g, const Curve &cv) {

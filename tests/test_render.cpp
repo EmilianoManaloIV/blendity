@@ -4701,6 +4701,7 @@ static void round34_tests() {
   r34_redraw_case(
       "render cache: dragging the Move gizmo arrow redraws the Scene view and the cube's shadow",
       [](Editor &ed) {
+        ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
         ed.command("select Cube");
         ed.command("camera 0 20 6 0 0.5 0");  // the X arrow points straight right on screen
         ed.command("tool move");
@@ -4734,7 +4735,9 @@ static void round34_tests() {
 
   r34_redraw_case(
       "render cache: rotating the sun redraws the Scene view and makes a new shadow map",
-      [](Editor &) {},
+      [](Editor &ed) {
+        ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
+      },
       [](Editor &ed) {
         GameObject *sun = ed.scene().find_by_name("Directional Light");
         CHECK(sun != nullptr);
@@ -4894,6 +4897,7 @@ static void round34_tests() {
   /* ---------------------------------------------------------------- 3 */
   test("render cache: orbiting the Scene view renders the shadow map at most once", [] {
     Editor ed;
+    ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
     r34_open(ed, false);
     const R34Count t0 = r34_totals(ed);
     for (int i = 0; i < 8; i++) {
@@ -5415,6 +5419,7 @@ static void round45_tests() {
   });
   test("hash memo: Statistics shows the rasterizer's binning time", [] {
     Editor ed;
+    ed.viewport_device_for_test(1);  // (the CPU rasterizer's binning is shown: whatever device the run gives the views)
     r34_open(ed);
     r34_steps(ed, 2);
     const RasterStats s = ed.scene_stats_for_test();
@@ -5494,6 +5499,7 @@ static void round46_tests() {
   });
   test("render frame: the sun's shadow map is still rendered once per change, not per frame (the casters are copied only then)", [] {
     Editor ed;
+    ed.viewport_device_for_test(1);  // (the CPU's own shadow maps are counted: whatever device the run gives the views)
     r34_open(ed);
     r34_steps(ed, 4);
     const R34Count t0 = r34_totals(ed);
@@ -10323,6 +10329,78 @@ static void tests_round184() {
   });
 }
 
+/* ---------------------------------------------------------------- round 211: overlays recorded (task 0192) */
+static void tests_round211() {
+  test("overlays recorded in the world and replayed draw exactly what drawing them does - lines, dots, lines without the depth test, an outline between them", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    std::vector<uint32_t> sel;
+    for (uint32_t id : rt.ids)
+      if (id) sel.push_back(id);
+    std::sort(sel.begin(), sel.end());
+    sel.erase(std::unique(sel.begin(), sel.end()), sel.end());
+    if (sel.size() > 1) sel.resize(1);
+    R34Rng rng{77u};
+    auto draw = [&] {
+      r.begin_overlay_batch();
+      for (int i = 0; i < 300; i++) {
+        const Vec3 a(rng.range(-4.0f, 4.0f), rng.range(-2.0f, 2.0f), rng.range(-3.0f, 4.0f)), b(rng.range(-4.0f, 4.0f), rng.range(-2.0f, 2.0f), rng.range(-3.0f, 4.0f));
+        const uint32_t c = 0xC0000000u | (uint32_t)(i * 2654435761u & 0xFFFFFF);
+        if (i % 4 == 3) r.point(a, rng.range(1.0f, 5.0f), c, i % 2 == 0);
+        else r.line(a, b, c, i % 3 != 0, i % 5 == 0 ? 0.01f : 0.0f);
+        if (i == 150 && !sel.empty()) r.outline_ids(sel, 0xFFFF8800u, 2);
+      }
+      r.end_overlay_batch();
+    };
+    rng = R34Rng{77u};
+    draw();
+    const std::vector<uint32_t> direct = img.pixels;
+    img.pixels = base;
+    Renderer3D::OverlayRecord rec;
+    r.record_overlays(&rec);
+    rng = R34Rng{77u};
+    draw();
+    r.record_overlays(nullptr);
+    CHECK(img.pixels == base);  // (recording draws nothing)
+    std::printf("    %zu recorded, %zu ids\n", rec.ops.size(), rec.ids.size());
+    CHECK(rec.ops.size() == 300 + (sel.empty() ? 0 : 1));
+    r.begin_overlay_batch();
+    r.replay(rec);
+    r.end_overlay_batch();
+    CHECK(img.pixels == direct);
+  });
+}
+
+/* ---------------------------------------------------------------- round 212: Color::over (task 0193) */
+static void tests_round212() {
+  test("Color::over is blend() over an opaque pixel, and drawing over a transparent hole then putting that over a picture gives what drawing over the picture gives (within 2 / 255 a layer)", [] {
+    R34Rng rng{212u};
+    int worst = 0;
+    bool same = true;
+    for (int i = 0; i < 20000; i++) {
+      const uint32_t base = 0xFF000000u | ((uint32_t)rng.range(0.0f, 16777215.0f) & 0xFFFFFF);
+      auto alpha = [&] { return std::min(255u, (uint32_t)rng.range(0.0f, 300.0f)); };  // (255, opaque, a sixth of the time)
+      const uint32_t s1 = alpha() << 24 | ((uint32_t)rng.range(0.0f, 16777215.0f) & 0xFFFFFF);
+      const uint32_t s2 = alpha() << 24 | ((uint32_t)rng.range(0.0f, 16777215.0f) & 0xFFFFFF);
+      same = same && Color::over(base, s1) == Color::blend(base, s1);
+      /* The UI's layer: two things drawn over a hole; the card then puts it over the picture (straight alpha). */
+      const uint32_t layer = Color::over(Color::over(0u, s1), s2), direct = Color::blend(Color::blend(base, s1), s2);
+      const float a = (layer >> 24) / 255.0f;
+      for (int k = 0; k < 24; k += 8) {
+        const float c = ((layer >> k) & 255) * a + ((base >> k) & 255) * (1.0f - a);
+        worst = std::max(worst, std::abs((int)std::lround(c) - (int)((direct >> k) & 255)));
+      }
+    }
+    std::printf("    composited against drawn directly: at most %d / 255 apart\n", worst);
+    CHECK(same);
+    CHECK(worst <= 4);  // (blend() truncates at each layer and the composite rounds once: up to 2 / 255 a layer, two layers here)
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10360,4 +10438,6 @@ void run_render_tests() {
   tests_round167();
   tests_round168();
   tests_round184();
+  tests_round211();
+  tests_round212();
 }

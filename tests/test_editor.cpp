@@ -1317,6 +1317,22 @@ static void tests_round110() {
     px[5] ^= 0x80000000u;
     CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
   });
+  test("present (task 0198): the card takes up only the changed tiles' columns of each band - a narrow panel's change is a narrow rect, neighbouring bands with the same columns one rect", [] {
+    const int w = 1000, h = 100;  // (tiles 256 wide: 0-255, 256-511, 512-767, 768-999)
+    std::vector<uint32_t> px((size_t)w * h, 0xFF202020u);
+    std::vector<uint64_t> tiles;
+    auto rects = Editor::changed_rects(px.data(), w, h, tiles, false);
+    CHECK(rects.size() == 1 && rects[0].x0 == 0 && rects[0].x1 == w && rects[0].y0 == 0 && rects[0].y1 == h);  // (nothing presented yet: all)
+    CHECK(Editor::changed_rects(px.data(), w, h, tiles, false).empty());
+    for (int y = 16; y < 48; y++) px[(size_t)y * w + 300] = 0xFFFFFFFFu;  // a column in tile 1, bands 1 and 2
+    px[(size_t)99 * w + 999] = 0xFF00FF00u;                              // the last tile of the short last band
+    rects = Editor::changed_rects(px.data(), w, h, tiles, false);
+    for (const auto &r : rects) std::printf("    [%d, %d) x [%d, %d)\n", r.x0, r.x1, r.y0, r.y1);
+    CHECK(rects.size() == 2);
+    CHECK(rects.size() == 2 && rects[0].x0 == 256 && rects[0].x1 == 512 && rects[0].y0 == 16 && rects[0].y1 == 48);
+    CHECK(rects.size() == 2 && rects[1].x0 == 768 && rects[1].x1 == 1000 && rects[1].y0 == 96 && rects[1].y1 == 100);
+    CHECK(Editor::changed_rects(px.data(), w, h, tiles, true).size() == 1);  // (asked for all)
+  });
 }
 
 static void tests_round115() {
@@ -2308,6 +2324,697 @@ static void tests_round199() {
   });
 }
 
+/* Task 0183: textures through the Editing tab, and the stack as a camera look. */
+static void tests_round200() {
+  test("editing a texture: Apply puts the edit on top of the texture's stack as an albedo Image layer matching the export within 1/255; editing again goes on from the same adjustments, not on top", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ProceduralTexturePtr pt = ed.new_texture_asset_for_test("Bricks");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    pt->width = pt->height = 128;
+    pt->touch();
+    const size_t layers = pt->layers.size();
+    const Bitmap before = pt->output(0);
+    ed.command("develop open texture " + pt->asset_path);
+    edit::Doc &doc = ed.edit_doc_for_test();
+    CHECK(doc.is_open() && doc.source().w == 128);
+    ed.command("develop set Exposure.Exposure 0.5");
+    ed.command("develop set HSL.Red Hue 30");
+    ed.command("develop apply");
+    CHECK(pt->layers.size() == layers + 1 && pt->layers.back()->targets == TargetAlbedo);
+    std::string err;
+    Bitmap exported, after = pt->output(0);
+    const std::string png = resolve_asset_path(pt->asset_path.substr(0, pt->asset_path.size() - 5) + " edit.png");
+    CHECK(load_image(png, exported, err) && exported.width == 128 && after.width == 128);
+    int worst = 0;
+    for (size_t i = 0; i < after.rgba8.size() && i < exported.rgba8.size(); i++)
+      if (i % 4 != 3) worst = std::max(worst, std::abs((int)after.rgba8[i] - (int)exported.rgba8[i]));
+    std::printf("    the texture's albedo after Apply vs the export: worst %d / 255\n", worst);
+    CHECK(worst <= 1);
+    CHECK(after.rgba8 != before.rgba8);
+    {  // (an Image layer reads its file the right way up: the file's top row is the albedo's top row)
+      std::vector<uint32_t> half(64 * 64, 0xFF000000u);
+      for (size_t i = 0; i < 64 * 32; i++) half[i] = 0xFFFFFFFFu;  // (white on top)
+      const std::string top = fs::join(test_dir(), "top_white.png");
+      CHECK(write_png(top, half.data(), 64, 64, 64));
+      ProceduralTexture plain;
+      plain.width = plain.height = 64;
+      TextureLayer *l = plain.add("Image");
+      CHECK(l && ed.set_layer_field_for_test(*l, "Image", top));
+      const Bitmap o = plain.output(0);
+      CHECK(o.width == 64 && o.rgba8[(size_t)(2 * 64 + 2) * 4] > 200 && o.rgba8[(size_t)(60 * 64 + 2) * 4] < 50);
+    }
+    ed.command("develop open texture " + pt->asset_path);  // (again: the albedo under the edit, the same adjustments)
+    CHECK(doc.stack().size() == 2 && doc.source().px.size() == (size_t)128 * 128 * 4);
+    ed.command("develop set Exposure.Exposure 0.25");
+    ed.command("develop apply");
+    CHECK(pt->layers.size() == layers + 1);  // (the same layer, its image rewritten)
+    CHECK(!ed.edit_doc_for_test().stack().empty());
+    ed.command("develop open texture Nothing At All");  // (refused)
+  });
+
+  test("editing as a camera look: an exposure +1 stack gives the Main Camera a Color Grading with exposure 1 that doubles mid-grey; contrast, saturation, a curve, a vignette and sharpening carry over, masked and other steps are left out", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    edit::Doc &doc = ed.edit_doc_for_test();
+    doc.open_pixels(flat_image(8, 8, Vec3(0.18f)), "grey");
+    ed.command("develop set Exposure.Exposure 1");
+    ed.command("develop look");
+    GameObject *cam = ed.main_camera_owner_for_test();
+    CHECK(cam && cam->get<CameraFilters>());
+    if (!cam || !cam->get<CameraFilters>()) return;
+    CameraFilters *cf = cam->get<CameraFilters>();
+    auto first = [&](const char *type) -> FilterEffect * {  // (the camera may have had filters of its own)
+      for (auto &e : cf->effects)
+        if (std::string(e->type_name()) == type) return e.get();
+      return nullptr;
+    };
+    const auto *cg = dynamic_cast<const ColorGradingEffect *>(first("Color Grading"));
+    CHECK(cg && cg->exposure == 1.0f);
+    std::vector<uint32_t> px(4, 0xFF000000u | 0x76u << 16 | 0x76u << 8 | 0x76u);  // (sRGB 118: linear 0.18)
+    RenderTarget rt;
+    rt.color = px.data(), rt.stride = 2, rt.width = 2, rt.height = 2;
+    ColorGradingParams p;
+    p.exposure = cg ? cg->exposure : 0.0f;
+    apply_color_grading(rt, p);
+    const int want = display::linear_to_srgb8(2.0f * srgb_to_linear(118 / 255.0f));
+    CHECK(std::abs((int)((px[0] >> 16) & 255) - want) <= 1);
+    const size_t n = cf->effects.size();
+    const bool had_vignette = first("Vignette"), had_sharpen = first("Sharpen");
+    ed.command("develop set Contrast.Contrast 20");
+    ed.command("develop set Vibrance / Saturation.Saturation -30");
+    ed.command("develop curve rgb 0,0.05 0.5,0.55 1,0.95");
+    ed.command("develop set Vignette.Amount -40");
+    ed.command("develop set Sharpen.Amount 75");
+    ed.command("develop set Clarity.Clarity 30");
+    ed.command("develop add Shadows");
+    ed.command("develop set Shadows.Shadows 40");
+    ed.command("develop mask 7 add radial");
+    ed.command("develop look");
+    const size_t added = (had_vignette ? 0 : 1) + (had_sharpen ? 0 : 1);  // (the Color Grading reused; Clarity and the masked Shadows left out)
+    CHECK(cf->effects.size() == n + added);
+    ed.command("develop look");
+    CHECK(cf->effects.size() == n + added);  // (again: the same effects, replaced)
+    const auto *g2 = dynamic_cast<const ColorGradingEffect *>(first("Color Grading"));
+    CHECK(g2 && g2->exposure == 1.0f && std::fabs(g2->contrast - 0.2f) < 1e-6f && std::fabs(g2->saturation + 0.3f) < 1e-6f);
+    CHECK(g2 && g2->lift.x > 0.0f && g2->gain.x < 1.0f && g2->gamma.x > 0.05f);
+    if (g2) {  // (the curve's black, grey and white through the camera's lift / gamma / gain)
+      auto lgg = [&](float v) { return std::pow(g2->gain.x * (v + g2->lift.x * (1.0f - v)), 1.0f / g2->gamma.x); };
+      auto dec = [](float e) { return e <= 0.04045f ? e / 12.92f : std::pow((e + 0.055f) / 1.055f, 2.4f); };
+      CHECK(std::fabs(lgg(0.0f) - dec(0.05f)) < 1e-3f && std::fabs(lgg(1.0f) - dec(0.95f)) < 1e-3f);
+    }
+    const auto *vg = dynamic_cast<const VignetteEffect *>(first("Vignette"));
+    CHECK(vg && std::fabs(vg->intensity - (1.0f - std::pow(0.6f, 1.0f / 2.4f))) < 1e-5f && first("Sharpen"));
+    edit::Doc &d2 = ed.edit_doc_for_test();
+    d2.open_pixels(flat_image(4, 4, Vec3(0.5f)), "only clarity");
+    ed.command("develop set Clarity.Clarity 40");
+    ed.command("develop look");  // (nothing a camera does: refused, nothing added)
+    CHECK(cf->effects.size() == n + added);
+  });
+}
+
+/* Task 0191: the Editing tab at 4K - a preview the window's size, tables for the display axis. */
+static void tests_round201() {
+  test("editing preview: the window's preview is the source made no larger than asked, the stack on it matches the full result made small, a crop on it is the crop at its scale; noise reduction still smooths", [] {
+    edit::Image src;
+    src.resize(400, 300);
+    for (int y = 0; y < 300; y++)
+      for (int x = 0; x < 400; x++) {
+        float *p = src.at(x, y);
+        p[0] = 0.9f * x / 400, p[1] = 0.7f * y / 300, p[2] = 0.2f + 0.1f * ((x / 25 + y / 25) % 2), p[3] = 1.0f;
+      }
+    edit::Doc doc;
+    doc.open_pixels(src, "gradient");
+    doc.add("Exposure"), doc.add("Contrast"), doc.add("Tone Curve"), doc.add("HSL");
+    doc.set_path("Exposure", 0.4f), doc.set_path("Contrast", 20), doc.set_path("HSL.Orange Saturation", 30);
+    doc.set_curve(2, 0, {Vec2(0, 0.03f), Vec2(0.5f, 0.6f), Vec2(1, 1)});
+    const edit::Image &pv = doc.preview(200);
+    CHECK(pv.w == 200 && pv.h == 150 && std::fabs(doc.preview_scale() - 0.5f) < 1e-6f);
+    const edit::Image pv_copy = pv;
+    const edit::Image &full = doc.result();
+    double diff = 0;
+    for (int y = 0; y < 150; y++)
+      for (int x = 0; x < 200; x++)
+        for (int k = 0; k < 3; k++) {
+          float avg = 0;  // (the full result's 2 x 2 block)
+          for (int j = 0; j < 4; j++) avg += full.at(2 * x + j % 2, 2 * y + j / 2)[k] * 0.25f;
+          diff += std::fabs(avg - pv_copy.at(x, y)[k]);
+        }
+    diff /= 200.0 * 150 * 3;
+    std::printf("    the preview vs the full result made small: mean difference %.5f\n", diff);
+    CHECK(diff < 0.01);
+    CHECK(&doc.preview(1000) == &doc.result());  // (a picture smaller than the preview: the full result itself)
+    CHECK(doc.set_path("Crop / Straighten.Width", 100) && doc.set_path("Crop / Straighten.Height", 50) && doc.set_path("Crop / Straighten.X", 40));
+    const edit::Image &cropped = doc.preview(200);
+    CHECK(cropped.w == 50 && cropped.h == 25 && doc.result().w == 100 && doc.result().h == 50);
+    {  // (the crop's content: the preview's corner is the full crop's corner made small)
+      const float full_corner = doc.result().at(1, 1)[0];
+      CHECK(std::fabs(doc.preview(200).at(0, 0)[0] - full_corner) < 0.02f);
+    }
+    /* Buffers reused: a middle step changed, then a masked and a spatial step, against a document made fresh. */
+    doc.set_path("Contrast", 35);
+    doc.add("Clarity"), doc.set_path("Clarity", 30);
+    doc.add("Vignette"), doc.set_path("Vignette.Amount", -40);
+    edit::MaskPart circle = edit::make_mask_part(edit::MaskKind::Radial, 400, 300);
+    doc.set_mask((int)doc.stack().size() - 1, {circle});
+    const edit::Image again = doc.result();
+    edit::Doc fresh;
+    fresh.open_pixels(src, "gradient");
+    fresh.set_stack(doc.stack());
+    CHECK(again.px == fresh.result().px);
+    int sw = 0, sh = 0;
+    doc.step_input_size((int)doc.stack().size(), sw, sh);
+    CHECK(sw == 100 && sh == 50);
+    edit::Image noisy = flat_image(64, 64, Vec3(0.3f));
+    uint32_t seed = 7;
+    for (float &v : noisy.px) {
+      seed = seed * 1664525u + 1013904223u;
+      v = (&v - noisy.px.data()) % 4 == 3 ? 1.0f : std::max(0.0f, v + ((seed >> 8) / 16777216.0f - 0.5f) * 0.1f);
+    }
+    edit::Image smooth;
+    edit::Adjustment nr = edit::make_adjustment("Noise Reduction");
+    nr.set("Luminance", 100), nr.set("Color", 100);
+    edit::apply(nr, noisy, smooth);
+    auto variance = [](const edit::Image &img) {
+      double m = 0, m2 = 0;
+      for (int i = 0; i < img.w * img.h; i++) m += img.px[(size_t)i * 4 + 1], m2 += img.px[(size_t)i * 4 + 1] * img.px[(size_t)i * 4 + 1];
+      m /= img.w * img.h;
+      return m2 / (img.w * img.h) - m * m;
+    };
+    CHECK(variance(smooth) < variance(noisy) * 0.5);
+  });
+}
+
+/* Task 0187: windows beside the main one. */
+static platform::Event mouse_ev(platform::EventType t, int x, int y, int button = 0) {
+  platform::Event e;
+  e.type = t, e.x = x, e.y = y, e.button = button;
+  return e;
+}
+
+static bool has_content(const Image &fb) {  // (more than one colour)
+  for (uint32_t p : fb.pixels)
+    if (p != fb.pixels[0]) return true;
+  return false;
+}
+
+static void tests_round203() {
+  test("windows: dock move Render newwindow gives it a window of its own that draws, takes its own clicks and popups, scales on its own, and gives the tab back when closed", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("window Render");
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Render));
+    ed.command("dock move Render newwindow");
+    CHECK(ed.window_count_for_test() == 2 && !ed.in_main_dock_for_test(WindowKind::Render));
+    ed.step_frame_headless();
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    CHECK(has_content(w->fb) && has_content(ed.main_fb_for_test()));
+    ed.command("window Render");  // (it is in the other window: shown there, not docked twice)
+    CHECK(!ed.in_main_dock_for_test(WindowKind::Render) && ed.window_count_for_test() == 2);
+    // (the window's one tab is at its top left)
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, 30, 10)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseDown, 30, 10, 1), mouse_ev(platform::EventType::MouseUp, 30, 10, 1)});
+    ed.step_frame_headless();
+    CHECK(w->ui.any_popup_open());  // (its tab menu, in its own window)
+    CHECK(!ed.ui_for_test().any_popup_open());
+    w->ui.close_popups();
+    w->scale_for_test = 1.5f;
+    ed.step_frame_headless();
+    CHECK(w->ui.scale == 1.5f && ed.ui_for_test().scale == 1.0f);
+    const std::string layout = ed.windows_layout_for_test();
+    CHECK(layout.rfind("W(", 0) == 0 && layout.find("L(9:0)") != std::string::npos);
+    ed.step_window_headless(1, {platform::Event{platform::EventType::Quit}});
+    CHECK(ed.window_count_for_test() == 1 && ed.in_main_dock_for_test(WindowKind::Render));
+    ed.restore_windows_for_test(layout);  // (the layout string brings the window back)
+    CHECK(ed.window_count_for_test() == 2 && !ed.in_main_dock_for_test(WindowKind::Render));
+    ed.dock_reset_for_test("Default");  // (a layout for the main window: Render stays in its own window, not in both)
+    CHECK(!ed.in_main_dock_for_test(WindowKind::Render) && ed.window_count_for_test() == 2);
+    ed.command("dock move Render main");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 1 && ed.in_main_dock_for_test(WindowKind::Render));
+    ed.command("dock move Nothing newwindow");  // (refused)
+    CHECK(ed.window_count_for_test() == 1);
+    ed.restore_windows_for_test("W(1,2,3,4,0,H");  // (a preferences line cut short: nothing, no crash)
+    ed.restore_windows_for_test("W(5000,5000,90000,90000,3,L(8:0))");  // (a display gone, a size too big: on the primary, fitted)
+    CHECK(ed.window_count_for_test() == 2);
+    EditorWindow *fitted = ed.window_for_test(3);
+    CHECK(fitted && fitted->fb.width <= 1920 && fitted->fb.height <= 1080 && fitted->x >= 0 && fitted->x < 1920);
+  });
+
+  test("windows: displays are listed; a tab moves to the second display's middle; a tab dragged out of the editor gets a window at the mouse", [] {
+    const std::vector<platform::Monitor> real = platform::monitors();
+    CHECK(!real.empty() && real[0].width > 0 && real[0].height > 0);
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.set_monitors_for_test({platform::Monitor{0, 0, 1920, 1080, 1.0f, "One", true}, platform::Monitor{1920, 0, 2560, 1440, 1.5f, "Two", false}});
+    ed.command("dock move Console monitor 2");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2);
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w && w->monitor == 1 && w->x >= 1920 && w->fb.width == 2560 * 3 / 4);
+    ed.command("dock move Console monitor 1");  // (the same window, moved)
+    CHECK(ed.window_count_for_test() == 2 && w && w->monitor == 0 && w->x < 1920);
+    ed.command("dock move Console main");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 1);
+    const Recti leaf = ed.dock_leaf_rect_for_test(WindowKind::Inspector);  // (Inspector: the first tab of its area)
+    CHECK(leaf.w > 0);
+    const int tx = leaf.x + 12, ty = leaf.y + 6;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, tx, ty)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, tx, ty)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, tx + 300, ty + 40)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, 1300, ty + 40)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, 1300, ty + 40)});
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2 && !ed.in_main_dock_for_test(WindowKind::Inspector));
+  });
+}
+
+/* Task 0188: a render-only window, full screen, a pen on the Editing brush, Tablet mode. */
+static void tests_round204() {
+  test("windows: render-only shows the render alone, fitted to the window, its controls only at the top; full screen takes the display; Tablet makes a window's UI 1.5 times as big", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    Image pic;
+    pic.resize(800, 450);
+    for (size_t i = 0; i < pic.pixels.size(); i++) pic.pixels[i] = 0xFF000000u | (uint32_t)(i % 800 * 255 / 800) << 16;
+    ed.set_render_image_for_test(pic);
+    ed.command("dock move Render newwindow");
+    ed.step_frame_headless();
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    ed.command("window renderonly on");
+    w->ui.record_buttons = true;
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, w->fb.width / 2, w->fb.height / 2)});
+    CHECK(w->render_only && w->ui.button_rects.empty());  // (no chrome while the mouse is away from the top)
+    const Recti pr = ed.render_picture_rect_for_test();
+    CHECK(std::abs(pr.w - w->fb.width) <= 2 || std::abs(pr.h - w->fb.height) <= 2);
+    std::printf("    the picture %d x %d in a %d x %d window\n", pr.w, pr.h, w->fb.width, w->fb.height);
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, 40, 6)});
+    CHECK(w->ui.button_rects.count("Show Tabs") == 1 && w->ui.button_rects.count("Full Screen") == 1);
+    ed.set_monitors_for_test({platform::Monitor{0, 0, 1920, 1080, 1.0f, "One", true}, platform::Monitor{1920, 0, 2560, 1440, 1.0f, "Two", false}});
+    w->monitor = 1;
+    const int before_w = w->fb.width;
+    ed.command("window fullscreen on");
+    CHECK(w->fullscreen && w->fb.width == 2560 && w->fb.height == 1440 && w->x == 1920 && w->y == 0);
+    ed.command("window fullscreen off");
+    CHECK(!w->fullscreen && w->fb.width == before_w);
+    const Recti fsb = w->ui.button_rects.count("Full Screen") ? w->ui.button_rects["Full Screen"] : Recti{0, 0, 0, 0};
+    const int main_w = ed.main_fb_for_test().width;
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, fsb.x + 5, fsb.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseDown, fsb.x + 5, fsb.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseUp, fsb.x + 5, fsb.y + 5)});
+    CHECK(w->fullscreen && w->fb.width == 2560 && ed.main_fb_for_test().width == main_w);  // (the strip's window, not the main one)
+    platform::Event esc;
+    esc.type = platform::EventType::KeyDown, esc.key = platform::KEY_ESCAPE;
+    ed.step_window_headless(1, {esc});
+    CHECK(!w->fullscreen && w->fb.width == before_w);  // (Esc leaves)
+    ed.command("window fullscreen on");
+    const Recti tabs_button = w->ui.button_rects.count("Show Tabs") ? w->ui.button_rects["Show Tabs"] : Recti{0, 0, 0, 0};
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, tabs_button.x + 5, tabs_button.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseDown, tabs_button.x + 5, tabs_button.y + 5)});
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseUp, tabs_button.x + 5, tabs_button.y + 5)});
+    CHECK(!w->render_only && !w->fullscreen);  // (Show Tabs leaves full screen too: no frameless window left without its strip)
+    ed.command("window renderonly off");
+    ed.step_window_headless(1, {mouse_ev(platform::EventType::MouseMove, w->fb.width / 2, w->fb.height / 2)});
+    CHECK(!w->render_only && !w->ui.button_rects.empty());  // (the Render window's own controls again)
+    const float main_scale = ed.ui_for_test().scale;
+    ed.command("window tablet on 7");  // (no such window: refused, the main window untouched)
+    CHECK(ed.ui_for_test().scale == main_scale);
+    ed.command("window tablet on 1");
+    ed.step_frame_headless();
+    CHECK(std::fabs(w->ui.scale - 1.5f * main_scale) < 1e-4f && ed.ui_for_test().scale == main_scale);
+    CHECK(w->ui.row_h() >= ed.ui_for_test().row_h() * 1.4f);
+    ed.command("window tablet off 1");
+    CHECK(std::fabs(w->ui.scale - main_scale) < 1e-4f);
+    ed.command("dock move Render main");
+    ed.command("window renderonly on");  // (no window of its own left: refused)
+  });
+
+  test("windows: a pen's pressure, tilt and eraser reach the Editing tab's brush: half pressure and 30 degrees of tilt make a 0.875 times wide dab, the eraser end erases", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    const float size = ed.edit_brush_radius_for_test();
+    platform::Event pen = mouse_ev(platform::EventType::MouseMove, 300, 300);
+    pen.pen = true, pen.pressure = 0.5f, pen.tilt_x = 30.0f, pen.tilt_y = 0.0f;
+    ed.step_frame_headless({pen});
+    CHECK(std::fabs(ed.edit_brush_radius_for_test() - size * 0.7f * 1.25f) < 1e-5f);
+    pen.pressure = 1.0f, pen.tilt_x = 0.0f;
+    ed.step_frame_headless({pen});
+    CHECK(std::fabs(ed.edit_brush_radius_for_test() - size) < 1e-5f);
+    platform::Event mouse = mouse_ev(platform::EventType::MouseMove, 310, 300);
+    ed.step_frame_headless({mouse});
+    CHECK(ed.edit_brush_radius_for_test() == size && !ed.ui_for_test().in.pen);
+    pen.eraser = true;
+    ed.step_frame_headless({pen});
+    CHECK(ed.ui_for_test().in.eraser && ed.ui_for_test().in.pen);
+  });
+}
+
+/* Task 0189: the command palette, Quick Favorites, the status bar's hints, Add Component's recent, the splitter. */
+static platform::Event key_ev(int key, int mods = 0) {
+  platform::Event e;
+  e.type = platform::EventType::KeyDown, e.key = key, e.mods = mods;
+  return e;
+}
+
+static std::vector<platform::Event> typed(const std::string &s) {
+  std::vector<platform::Event> out;
+  for (char c : s) {
+    platform::Event e;
+    e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+    out.push_back(e);
+  }
+  return out;
+}
+
+static void tests_round205() {
+  test("command palette: Ctrl+K, typing \"hair\" puts Rig Hair from Mesh first and Enter runs it; every keymap action, window and layout is in it; the console's palette lists and runs", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    const std::vector<std::string> hair = ed.palette_names_for_test("hair");
+    CHECK(!hair.empty() && hair[0] == "Rig Hair from Mesh");
+    CHECK(!ed.palette_names_for_test("unwrap").empty() && ed.palette_names_for_test("unwrap")[0] == "Unwrap (LSCM)");
+    CHECK(!ed.palette_names_for_test("editing window").empty() && ed.palette_names_for_test("editing window")[0] == "Editing Window");
+    std::vector<std::string> all = ed.palette_names_for_test("");
+    std::sort(all.begin(), all.end());
+    CHECK(std::adjacent_find(all.begin(), all.end()) == all.end());  // (every name once: favorites key on them)
+    for (const ShortcutAction &a : shortcut_actions()) CHECK(!ed.palette_names_for_test(a.label).empty());
+    CHECK(ed.palette_names_for_test("zzqq nothing").empty());
+    ed.step_frame_headless({key_ev(platform::KEY_K, platform::MOD_CTRL)});
+    CHECK(ed.ui_for_test().any_popup_open());
+    ed.step_frame_headless(typed("hair"));
+    ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+    ed.step_frame_headless();
+    CHECK(ed.last_palette_command_for_test() == "hair rig" && !ed.ui_for_test().any_popup_open());
+    CHECK(ed.palette_names_for_test("")[0] == "Rig Hair from Mesh");  // (used lately: first with no query)
+    ed.command("palette run create cube");
+    CHECK(ed.last_palette_command_for_test() == "create Cube" && ed.active_object_for_test() && ed.active_object_for_test()->name.find("Cube") == 0);
+    ed.step_frame_headless({key_ev(platform::KEY_F3)});  // (Blender's search key opens it too)
+    CHECK(ed.ui_for_test().any_popup_open());
+    ed.step_frame_headless(typed("unw"));
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(!ed.ui_for_test().any_popup_open());  // (Esc closes it, typing or not)
+    ed.command("dock move Console newwindow");
+    CHECK(ed.window_count_for_test() == 2);
+    ed.command("palette run bring windows back");
+    CHECK(ed.window_count_for_test() == 1);
+  });
+
+  test("Quick Favorites: favorite adds a command for this layout, Shift+Q lists it, it runs from there, and the preferences keep it; the status bar says what the mouse does and offers Undo; Add Component lists what was added last; the splitter's grab zone is 8 pixels", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("favorite smart uv project");  // (any case)
+    ed.command("favorite No Such Command");  // (refused)
+    CHECK(ed.favorites_for_test() == std::vector<std::string>{"Smart UV Project"});
+    ed.step_frame_headless({key_ev(platform::KEY_Q, platform::MOD_SHIFT)});
+    CHECK(ed.ui_for_test().any_popup_open());
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    CHECK(!ed.ui_for_test().any_popup_open());
+    ed.command("layout Animation");
+    CHECK(ed.favorites_for_test().empty());  // (each layout its own)
+    ed.command("layout Default");
+    CHECK(ed.favorites_for_test().size() == 1);
+    ed.set_scene_hovered_for_test(true);
+    ed.set_tool_for_test(Tool::Move);
+    const std::string move = ed.statusbar_text_for_test();
+    ed.set_tool_for_test(Tool::Rotate);
+    const std::string rotate = ed.statusbar_text_for_test();
+    CHECK(move != rotate && move.find("Move") != std::string::npos && rotate.find("ring") != std::string::npos);
+    ed.set_scene_hovered_for_test(false);
+    CHECK(ed.statusbar_text_for_test().find("Ctrl+K") != std::string::npos);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    CHECK(ed.statusbar_text_for_test().find("Last: ") != std::string::npos);
+    ed.command("component Rigidbody");
+    ed.command("component MirrorModifier");
+    CHECK(ed.add_component_recent_for_test().size() == 2 && ed.add_component_recent_for_test()[0] == "MirrorModifier");
+    ed.step_frame_headless();
+    const Recti ins = ed.dock_leaf_rect_for_test(WindowKind::Inspector);  // (its left edge is a splitter in the Default layout)
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, ins.x + 3, ins.y + ins.h / 2)});  // (3 pixels inside: the old 2-pixel zone missed it)
+    CHECK(ed.ui_for_test().cursor == platform::Cursor::ResizeH);
+  });
+}
+
+/* Task 0190: the Inspector's essentials, the layouts' guides, Open Recent, Redo's label, a typed gizmo move. */
+static void tests_round206() {
+  test("Inspector essentials: a Camera shows 7 fields and Show more until opened; All Fields shows everything; the guide strip shows a layout's purpose and three steps until Got it, for good; Open Recent; Redo names the action", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.set_essentials_for_test(true);
+    ed.command("create Camera");  // (a Camera: dozens of fields; a Point Light shows only a few)
+    ed.step_frame_headless();
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    bool more = false;
+    for (const auto &kv : br) more = more || kv.first.rfind("Show ", 0) == 0 && kv.first.find(" more") != std::string::npos;
+    CHECK(more);
+    ed.command("inspector essentials off");
+    ed.step_frame_headless();
+    bool still = false;
+    for (const auto &kv : ed.ui_for_test().button_rects) still = still || kv.first.find(" more") != std::string::npos;
+    CHECK(!still);
+    ed.command("inspector essentials on");
+    ed.set_guides_for_test(true);
+    ed.command("layout UV Unwrapping");
+    ed.step_frame_headless();
+    CHECK(ed.ui_for_test().button_rects.count("Smart UV Project") == 1 && ed.ui_for_test().button_rects.count("Got it") == 1);
+    const Recti got = ed.ui_for_test().button_rects.at("Got it");
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, got.x + 4, got.y + 4)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, got.x + 4, got.y + 4)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, got.x + 4, got.y + 4)});
+    ed.step_frame_headless();
+    CHECK(ed.guide_seen_for_test("UV Unwrapping") && ed.ui_for_test().button_rects.count("Got it") == 0);
+    ed.command("layout Default");  // (Default has no guide: nothing drawn)
+    ed.step_frame_headless();
+    CHECK(ed.ui_for_test().button_rects.count("Got it") == 0);
+    const std::string scene = fs::join(test_dir(), "recent.scene");
+    Scene saved;
+    build_default_scene(saved);
+    CHECK(save_scene(saved, scene));
+    CHECK(ed.open_scene_for_test(scene));
+    CHECK(!ed.recent_scenes_for_test().empty() && ed.recent_scenes_for_test()[0] == scene);
+    ed.command("create Sphere");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(!ed.redo_label_for_test().empty());  // (Edit > Redo names it: "Redo <action>")
+  });
+
+  test("a number typed while dragging a gizmo axis moves exactly that far along it; every layout's guide names commands the palette has", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    for (const char *layout : {"Reference & Planning", "Blocking Out", "Modeling & Topology", "UV Unwrapping", "Texturing & Materials", "Lighting & Rendering",
+                               "Editing", "Rigging", "Skinning & Weight Painting", "Animation"})
+      CHECK(!ed.palette_guide_steps_for_test(layout).empty() && ed.palette_guide_steps_for_test(layout).size() == 3);
+    platform::Event typing;
+    typing.type = platform::EventType::Text;
+    Vec3 delta(0.3f, 0.0f, 0.0f);
+    for (char c : std::string("2*1.25")) {
+      typing.codepoint = (uint32_t)c;
+      ed.step_frame_headless({typing});
+      CHECK(ed.typed_axis_move_for_test(Vec3(1, 0, 0), delta) || c == '*');
+    }
+    CHECK(std::fabs(delta.x - 2.5f) < 1e-5f && delta.y == 0.0f && ed.gizmo_typed_for_test() == "2*1.25");
+    // During a real arrow drag the typed keys are the number's, not shortcuts (Maya's Backspace and Delete delete)
+    ed.command("feel Maya");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.select_for_test(cube->id, false);
+    ed.step_frame_headless();
+    int px = 0, py = 0, ax = 0, ay = 0;
+    CHECK(ed.project_to_window(cube->world_position(), px, py) && ed.project_to_window(cube->world_position() + Vec3(0.3f, 0, 0), ax, ay));
+    const float len = std::max(1.0f, std::hypot((float)(ax - px), (float)(ay - py)));
+    int hx = -1, hy = -1;
+    for (int k = 8; k < 240 && hx < 0; k += 2) {
+      const int x = px + (int)((ax - px) / len * k), y = py + (int)((ay - py) / len * k);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, x, y)});
+      if (ed.gizmo_hot_for_test() == 0) hx = x, hy = y;  // (H_MOVE_X)
+    }
+    CHECK(hx >= 0);
+    const float x0 = cube->world_position().x;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, hx, hy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, hx + 6, hy)});
+    CHECK(ed.gizmo_dragging_for_test());
+    typing.codepoint = '2';
+    ed.step_frame_headless({typing, key_ev(platform::KEY_2)});
+    CHECK(ed.gizmo_typed_for_test() == "2" && std::fabs(cube->world_position().x - x0 - 2.0f) < 1e-4f);
+    ed.step_frame_headless({key_ev(platform::KEY_BACKSPACE), key_ev(platform::KEY_DELETE)});
+    CHECK(ed.gizmo_typed_for_test().empty());
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, hx + 6, hy)});
+    CHECK(ed.scene().find_by_name("Cube") != nullptr);
+  });
+}
+
+/* ---------------------------------------------------------------- round 207: undo without redrawing what didn't change (task 0185) */
+static void tests_round207() {
+  test("undo of a colour change keeps the shadow map: the restored scene's materials are copies, and a colour doesn't cast", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.set_render_cache_verify(false);  // (it counts renders: verify mode would re-render every hit)
+    ed.viewport_device_for_test(1);      // (the CPU views keep the map this counts; the GPU's draws its own)
+    ed.command("layout 2 by 3");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr mat = std::make_shared<Material>();  // (the scene's own material: a snapshot copies it)
+    cube->get<MeshRenderer>()->materials = {mat};
+    ed.mark_changed_for_test("Material");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    mat->base_color = Vec3(0.9f, 0.1f, 0.1f);
+    ed.mark_changed_for_test("Colour");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const FrameProfile p0 = ed.frame_profile_totals();
+    CHECK(p0.shadow_renders >= 1);  // (the sun has a map to keep)
+    ed.command("undo");
+    ed.step_frame_headless();
+    const FrameProfile &p1 = ed.frame_profile_totals();
+    const GameObject *restored = ed.scene().find_by_name("Cube");
+    const MeshRenderer *mr = restored ? restored->get<MeshRenderer>() : nullptr;
+    const bool copied = mr && !mr->materials.empty() && mr->materials[0];
+    CHECK(copied && mr->materials[0].get() != mat.get());  // (a copy: what the key used to miss on)
+    CHECK(copied && length(mr->materials[0]->base_color - Material().base_color) < 1e-6f);  // (the colour went back)
+    CHECK(p1.view_renders > p0.view_renders);  // (the views did draw the undo: the map was there to reuse)
+    CHECK(p1.shadow_renders == p0.shadow_renders);
+  });
+}
+
+/* ---------------------------------------------------------------- round 209: entering Edit Mode draws what shows it (task 0185) */
+static void tests_round209() {
+  test("entering and leaving Edit Mode redraws the Scene view only: the Game view's picture and the scene's render hash don't change", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.set_render_cache_verify(false);  // (it counts renders: verify mode would re-render every hit)
+    ed.viewport_device_for_test(1);
+    ed.command("layout 2 by 3");
+    ed.command("select Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const uint64_t h0 = ed.scene_render_hash_for_test();
+    const FrameProfile p0 = ed.frame_profile_totals();
+    ed.command("edit vertex");
+    ed.step_frame_headless();
+    const FrameProfile p1 = ed.frame_profile_totals();
+    CHECK(ed.scene_render_hash_for_test() == h0);
+    CHECK(p1.view_renders - p0.view_renders == 1);  // (the Scene view, with its cage)
+    ed.command("edit off");
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_totals().view_renders - p1.view_renders == 1);
+    /* And no picture kept is wrong: verify mode draws every cached picture again and compares. */
+    ed.set_render_cache_verify(true);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    for (const char *c : {"edit vertex", "edit off", "edit face", "edit off"}) {
+      ed.command(c);
+      ed.step_frame_headless();
+    }
+    CHECK(Editor::render_cache_mismatches_all() == m0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 222: the parity scenes (task 0202) */
+static void tests_round222() {
+  test("benchscene builds the scenes Blender's viewport is timed on: the 50k sphere selected, ten spheres sharing one mesh, 10,000 cubes, 1,000 keyed boxes that move; an unknown name builds nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("benchscene sphere50k");
+    GameObject *s = ed.scene().find_by_name("Parity Sphere");
+    CHECK(s && s->get<MeshFilter>() && s->get<MeshFilter>()->mesh->face_count() == 256u * 196u);
+    CHECK(ed.selected_object() == s);
+    CHECK(!ed.scene().find_by_name("Utah Teapot") && !ed.scene().find_by_name("Main Camera"));  // (the starter scene emptied but for its light)
+    ed.command("benchscene million");
+    size_t spheres = 0;
+    const Mesh *shared = nullptr;
+    bool one_mesh = true;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Sphere ", 0) != 0 || !g.get<MeshFilter>()) return;
+      spheres++;
+      if (shared && shared != g.get<MeshFilter>()->mesh.get()) one_mesh = false;
+      shared = g.get<MeshFilter>()->mesh.get();
+    });
+    CHECK(spheres == 10 && one_mesh);
+    CHECK(!ed.scene().find_by_name("Parity Sphere"));  // (a new scene each time)
+    ed.command("benchscene cubes10k");
+    size_t cubes = 0;
+    ed.scene().for_each([&](GameObject &g) { cubes += g.name.rfind("Cube ", 0) == 0; });
+    CHECK(cubes == 10000);
+    ed.command("benchscene keyed1k");
+    GameObject *box = ed.scene().find_by_name("Box 3");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(box && clip && clip->tracks.size() == 3000);
+    if (!box || !clip) return;
+    const float y1 = box->local().position.y;
+    GameObject *root = ed.scene().find_by_name("Keyed");
+    apply_clip(*clip, *root, 30.0f);
+    std::printf("    Box 3 at frame 1: y %.2f, at frame 30: y %.2f\n", y1, box->local().position.y);
+    CHECK(std::fabs(box->local().position.y - (y1 + 3.0f)) < 1e-4f);  // (box k rises k % 7 by frame 30)
+    const size_t objects = ed.scene().object_count();
+    ed.command("benchscene nothing");
+    CHECK(ed.scene().object_count() == objects);
+  });
+}
+
+/* ---------------------------------------------------------------- round 227: duplicating many objects (task 0207) */
+static void tests_round227() {
+  test("Duplicate on many objects names each copy as one at a time did - the smallest free number, a name already taken skipped - and puts it right after its original; 2,000 under one parent come out with 2,000 new names", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("newscene");
+    Scene &s = ed.scene();
+    GameObject *parent = s.create("Group");
+    GameObject *a = s.create("Cube", parent), *b = s.create("Cube (2)", parent), *c = s.create("Cube", parent);
+    ed.mark_changed_for_test("Cubes");
+    ed.step_frame_headless();
+    const std::vector<GameObject *> made = s.duplicate_many({a, b, c});
+    std::string order;
+    for (GameObject *g : parent->children) order += (order.empty() ? "" : ", ") + g->name;
+    std::printf("    %s\n", order.c_str());
+    CHECK(made.size() == 3 && made[0]->name == "Cube (1)" && made[1]->name == "Cube (3)" && made[2]->name == "Cube (4)");
+    CHECK(parent->children.size() == 6 && parent->children[1] == made[0] && parent->children[3] == made[1] && parent->children[5] == made[2]);
+    /* Through the editor: 2,000 selected, duplicated in one go. */
+    ed.command("newscene");
+    ed.command("stress 2000 Cube");
+    ed.command("selectall");
+    ScopedTimer t;
+    ed.command("duplicate");
+    const double ms = t.ms();
+    GameObject *root = nullptr;
+    ed.scene().for_each([&](GameObject &g) { if (!root && g.children.size() > 100) root = &g; });
+    std::set<std::string> seen;
+    size_t copies = 0;
+    if (root)
+      for (GameObject *g : root->children) {
+        seen.insert(g->name);
+        copies += g->name.find(" (") != std::string::npos;
+      }
+    std::printf("    2,000 duplicated in %.1f ms: %zu children, %zu names, %zu copies named \"Cube (n)\"\n", ms, root ? root->children.size() : 0,
+                seen.size(), copies);
+    CHECK(root && root->children.size() == 4000 && copies == 2000 && seen.size() == 2001);  // ("Cube" and 2,000 numbered)
+    const std::vector<GameObject *> sel = ed.selected_objects_for_test();  // (the copies: the 2,000 cubes and the starter scene's two)
+    CHECK(sel.size() >= 2000 && std::all_of(sel.begin(), sel.end(), [](GameObject *g) { return g->name.find(" (") != std::string::npos; }));
+    bool paired = root != nullptr;  // (each copy right after its original: originals at even places)
+    for (size_t i = 0; root && i + 1 < root->children.size(); i += 2)
+      paired = paired && root->children[i]->name == "Cube" && root->children[i + 1]->name.find("Cube (") == 0;
+    CHECK(paired);
+    /* The same object twice: the later copy goes right after it, as one at a time put it. */
+    ed.command("newscene");
+    GameObject *one = ed.scene().create("Lamp");
+    const std::vector<GameObject *> twice = ed.scene().duplicate_many({one, one});
+    order.clear();
+    for (GameObject *g : ed.scene().roots) order += (order.empty() ? "" : ", ") + g->name;
+    std::printf("    the same object twice: %s\n", order.c_str());
+    CHECK(twice.size() == 2 && twice[0]->name == "Lamp (1)" && twice[1]->name == "Lamp (2)");
+    auto at = std::find(ed.scene().roots.begin(), ed.scene().roots.end(), one);
+    CHECK(at + 2 < ed.scene().roots.end() && *(at + 1) == twice[1] && *(at + 2) == twice[0]);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2330,5 +3037,15 @@ void run_editor_tests() {
   tests_round187();
   tests_round198();
   tests_round199();
+  tests_round200();
+  tests_round201();
+  tests_round203();
+  tests_round204();
+  tests_round205();
+  tests_round206();
+  tests_round207();
+  tests_round209();
+  tests_round222();
+  tests_round227();
   coverage_tests();
 }

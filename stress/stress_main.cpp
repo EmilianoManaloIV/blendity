@@ -38,6 +38,7 @@
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
 #include "../src/scene/export.h"
+#include "../src/scene/import.h"
 #include "../src/scene/autophysics.h"
 #include "../tests/fixtures/synthetic_mmd.h"
 
@@ -1340,6 +1341,7 @@ static void test_editor_render(Report &rep, const Options &o) {
    * operator, an undo - each frame's parts: the overlap check, the mesh's builds, the uploads to the card. */
   auto edit_frame = [&](const char *what, int reps, const std::function<void()> &before, const std::function<void()> &act) {
     double total = 0, overlap = 0, builds = 0, edges = 0, next = 0, op = 0, copies = 0;
+    FrameProfile parts;  // (task 0185: where the frame went - the restore, each view, the UI)
     uint64_t checks = 0, nbuilds = 0, uploads = 0, ncopies = 0;
     for (int r = 0; r < reps; r++) {
       before();
@@ -1361,11 +1363,21 @@ static void test_editor_render(Report &rep, const Options &o) {
       op += p1.ms_edit_op - p0.ms_edit_op;
       copies += c1.ms_copies;
       ncopies += c1.copies;
+      parts.ms_undo += p1.ms_undo - p0.ms_undo, parts.ms_scene3d += p1.ms_scene3d - p0.ms_scene3d;
+      parts.ms_overlays += p1.ms_overlays - p0.ms_overlays, parts.ms_game += p1.ms_game - p0.ms_game;
+      parts.ms_shadow += p1.ms_shadow - p0.ms_shadow, parts.ms_collect += p1.ms_collect - p0.ms_collect;
+      parts.ms_hash += p1.ms_hash - p0.ms_hash, parts.ms_ui += p1.ms_ui - p0.ms_ui, parts.ms_present += p1.ms_present - p0.ms_present;
+      parts.ms_lighting_key += p1.ms_lighting_key - p0.ms_lighting_key, parts.ms_gpu += p1.ms_gpu - p0.ms_gpu;
+      parts.view_renders += p1.view_renders - p0.view_renders;
     }
     const double r = reps;
     rep.note(strprintf("%s: %.1f ms (the operator itself %.1f ms; mesh copies in the frame %.1f of %.1f ms; the overlap check %.1f ms, %.1f of them; render meshes built %.1f ms, %.1f of them; edge table %.1f ms; "
                        "meshes sent to the card whole %.1f); the frame after %.1f ms.",
                        what, total / r, op / r, ncopies / r, copies / r, overlap / r, checks / r, builds / r, nbuilds / r, edges / r, uploads / r, next / r));
+    rep.note(strprintf("  its parts: the undo's restore %.1f ms; the Scene view %.1f (inside it: its overlays %.1f), the Game view %.1f; inside the views: shadows %.1f, "
+                       "gathering the draw items %.1f, scene hashes %.1f, the lighting key %.1f, the GPU path %.1f; the UI %.1f, presenting %.1f; %.1f views rendered.",
+                       parts.ms_undo / r, parts.ms_scene3d / r, parts.ms_overlays / r, parts.ms_game / r, parts.ms_shadow / r, parts.ms_collect / r,
+                       parts.ms_hash / r, parts.ms_lighting_key / r, parts.ms_gpu / r, parts.ms_ui / r, parts.ms_present / r, parts.view_renders / r));
   };
   for (int device : {1, 2}) {
     ed.viewport_device_for_test(device);
@@ -1472,9 +1484,220 @@ static void test_editor_render(Report &rep, const Options &o) {
     }
     ed.viewport_device_for_test(1);
   }
+  {
+    /* Task 0195: the fallbacks it removed - glass, transparent and axis materials on the icospheres, in Shaded and in
+     * Solid shading - with the views on the GPU (none on the CPU now) and on the CPU. */
+    MaterialPtr glass = make_material("Glass", {0.8f, 0.9f, 0.95f}), veil = make_material("Veil", {0.9f, 0.4f, 0.3f}), axis = make_material("Axis", {0.6f, 0.6f, 0.6f});
+    glass->surface = (int)MaterialSurface::Glass;
+    veil->surface = (int)MaterialSurface::Transparent;
+    veil->alpha = 0.5f;
+    axis->axis_mode = 1;
+    axis->axis_noise = 0.5f;
+    int k = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Icosphere", 0) != 0) return;
+      if (MeshRenderer *mr = g.get<MeshRenderer>()) mr->materials = {k % 3 == 0 ? glass : k % 3 == 1 ? veil : axis};
+      k++;
+    });
+    GameObject *moved = ed.scene().find_by_name("Icosphere");
+    for (const char *mode : {"shaded", "solid"}) {
+      ed.command(std::string("shading ") + mode);
+      for (int device : {2, 1}) {
+        ed.viewport_device_for_test(device);
+        const FrameProfile f0 = ed.frame_profile_totals();
+        const std::string name = strprintf("moving an object, glass, transparent and axis materials, %s shading, the views on the %s (task 0195)", mode, device == 2 ? "GPU" : "CPU");
+        row(name.c_str(), [&](int i) {
+          if (moved) moved->set_local_position({0.1f * i + 0.03f, 1.0f, 0.0f});
+          ed.step_frame_headless();
+        });
+        const FrameProfile f1 = ed.frame_profile_totals();
+        if (device == 2)
+          rep.note(strprintf("Task 0195's scene, %s shading: %llu views on the GPU, %llu on the CPU instead (%s).", mode, (unsigned long long)(f1.gpu_views - f0.gpu_views),
+                             (unsigned long long)(f1.gpu_fallbacks - f0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+      }
+    }
+    ed.command("shading shaded");
+    ed.viewport_device_for_test(1);
+  }
+  {
+    /* Task 0196: toon materials with painted maps (a shade map, inner lines, a specular mask, the hair's highlight) on
+     * the icospheres, the views on the GPU (none on the CPU now) and on the CPU. */
+    MaterialPtr toon = make_material("Painted Toon", {0.9f, 0.7f, 0.6f});
+    toon->shading_model = 1;
+    toon->toon_bands = 2;
+    toon->shade_map.path = "generated:UV Grid";
+    toon->line_map.path = "generated:UV Grid";
+    toon->line_only_shadow = true;
+    toon->toon_specular_size = 0.5f;
+    toon->toon_specular_map.path = "generated:UV Grid";
+    toon->toon_hair_highlight = true;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Icosphere", 0) != 0) return;
+      if (MeshRenderer *mr = g.get<MeshRenderer>()) mr->materials = {toon};
+    });
+    GameObject *moved = ed.scene().find_by_name("Icosphere");
+    for (int device : {2, 1}) {
+      ed.viewport_device_for_test(device);
+      const FrameProfile f0 = ed.frame_profile_totals();
+      const std::string name = strprintf("moving an object, toon materials with painted maps, the views on the %s (task 0196)", device == 2 ? "GPU" : "CPU");
+      row(name.c_str(), [&](int i) {
+        if (moved) moved->set_local_position({0.1f * i + 0.04f, 1.0f, 0.0f});
+        ed.step_frame_headless();
+      });
+      const FrameProfile f1 = ed.frame_profile_totals();
+      if (device == 2)
+        rep.note(strprintf("Task 0196's scene: %llu views on the GPU, %llu on the CPU instead (%s).", (unsigned long long)(f1.gpu_views - f0.gpu_views),
+                           (unsigned long long)(f1.gpu_fallbacks - f0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+    }
+    ed.viewport_device_for_test(1);
+  }
+  {
+    /* Task 0197: camera filters (colour grading, bloom, edge outline) on the Main Camera: its views' 3D on the card,
+     * the passes over its picture, against all on the CPU. */
+    ed.command("select Main Camera");
+    for (const char *f : {"Color Grading", "Bloom", "Edge Outline"}) ed.command(std::string("filter add ") + f);
+    GameObject *moved = ed.scene().find_by_name("Icosphere");
+    for (int device : {2, 1}) {
+      ed.viewport_device_for_test(device);
+      const FrameProfile f0 = ed.frame_profile_totals();
+      const std::string name = strprintf("moving an object, camera filters on the Main Camera, the views on the %s (task 0197)", device == 2 ? "GPU" : "CPU");
+      row(name.c_str(), [&](int i) {
+        if (moved) moved->set_local_position({0.1f * i + 0.06f, 1.0f, 0.0f});
+        ed.step_frame_headless();
+      });
+      const FrameProfile f1 = ed.frame_profile_totals();
+      if (device == 2)
+        rep.note(strprintf("Task 0197's filtered scene: %llu views on the GPU, %llu on the CPU instead (%s).", (unsigned long long)(f1.gpu_views - f0.gpu_views),
+                           (unsigned long long)(f1.gpu_fallbacks - f0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+    }
+    for (int k = 0; k < 3; k++) ed.command("filter remove 0");
+    ed.viewport_device_for_test(1);
+  }
   Log::echo_stdout = true;
   rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
            "casters or the light change (task 0011).");
+}
+
+/* Task 0198's measurement (ADR 0061: the UI's 2D on the card only if it pays): the frames that change the UI most,
+ * at 1080p and 4K - the canvas drawn on the CPU (the Profiler's UI time), the rows that then differ (Editor's own
+ * changed_rows, as presenting finds them) and what taking those rows up to the card costs at its measured upload
+ * rate. Go only if scrolling or resizing at 4K costs over 4 ms a frame. */
+static void test_ui_2d(Report &rep, const Options &o) {
+  rep.title("The UI's 2D (task 0198): what the canvas costs a frame, and what the card would take up",
+            "Headless editor frames with 2,000 objects in the Hierarchy, at 1920 x 1080 and 3840 x 2160 (UI scale 1). The canvas time is "
+            "the Profiler's UI part; changed rows are the canvas rows that differ from the frame before (16-row bands, as presenting "
+            "finds them); their upload is priced at the card's upload rate, measured below.");
+  /* The card's upload rate: a 4K RGBA8 image taken up whole (the staging copy, the transfer, the wait). */
+  double mb_per_ms = 0.0;
+  {
+    std::string err;
+    const std::vector<gpu::DeviceInfo> devs = gpu::devices();
+    std::unique_ptr<gpu::Raster> r = devs.empty() ? nullptr : gpu::Raster::create(devs[0].index, &err);
+    if (r) {
+      Texture t;
+      t.srgb = false, t.width = 3840, t.height = 2160;
+      Texture::Level l;
+      l.w = 3840, l.h = 2160;
+      l.px8.assign((size_t)l.w * l.h, 0xFF808080u);
+      t.levels.push_back(std::move(l));
+      int id = r->add_texture(t, &err);
+      if (id >= 0) r->remove_texture(id);
+      const double ms = time_ms([&] {
+        const int k = r->add_texture(t, &err);
+        if (k >= 0) r->remove_texture(k);
+      }, o.quick ? 3 : 8);
+      mb_per_ms = 3840.0 * 2160.0 * 4.0 / 1e6 / std::max(ms, 1e-6);
+      rep.note(strprintf("The card's upload rate (%s): a 4K RGBA8 image (33.2 MB) in %.2f ms, %.1f MB a millisecond.", devs[0].name.c_str(), ms, mb_per_ms));
+      /* The presenting path itself (task 0193's upload_ui and compose): a whole canvas taken up, composed and read back -
+       * an upper bound on presenting it (no read-back there). */
+      for (const auto &sz : {std::pair<int, int>{1920, 1080}, {3840, 2160}}) {
+        std::vector<uint32_t> ui((size_t)sz.first * sz.second, 0xFF404040u), out(ui.size());
+        r->compose_read(ui.data(), sz.first, sz.second, {}, out.data(), &err);
+        const double cms = time_ms([&] { r->compose_read(ui.data(), sz.first, sz.second, {}, out.data(), &err); }, o.quick ? 3 : 8);
+        rep.note(strprintf("A whole %dx%d canvas through the presenting path (taken up, composed, read back): %.2f ms.", sz.first, sz.second, cms));
+      }
+    }
+    else rep.note("No card: the upload column is left out.");
+  }
+  /* The presenting path's own rate (task 0198's pipelined presents), from the windowed check on this machine: a whole
+   * 2560 x 1369 canvas presented took 2.91 ms a frame against 1.66 idle - 14.0 MB in 1.25 ms. */
+  const double present_mb_per_ms = 14.0 / 1.25;
+  rep.note(strprintf("The presenting path's rate (Blendity --windowed-check, a whole 2560 x 1369 canvas against an idle one): %.1f MB a millisecond.", present_mb_per_ms));
+  rep.table({"size", "frame", "canvas ms", "rows changed", "finding them ms", "upload ms (priced)", "UI total ms (rows)", "tiles changed",
+             "finding them ms", "UI total ms (rects, the card)"});
+  for (const auto &sz : {std::pair<int, int>{1920, 1080}, {3840, 2160}}) {
+    Editor ed;
+    Log::echo_stdout = false;
+    ed.init_headless(sz.first, sz.second);
+    for (int i = 0; i < 2000; i++) ed.scene().create(strprintf("Item %04d", i));  // (top level: a list 2,000 rows long)
+    ed.mark_changed_for_test("items");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::vector<uint64_t> bands;
+    const Image &fb0 = ed.main_fb_for_test();
+    Editor::changed_rows(fb0.pixels.data(), fb0.width, fb0.height, bands, true);
+    using ET = platform::EventType;
+    const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+    auto row = [&](const char *name, const std::function<void(int)> &step, bool everything = false) {
+      step(0);
+      const Image &f = ed.main_fb_for_test();
+      Editor::changed_rows(f.pixels.data(), f.width, f.height, bands, true);
+      const int n = o.quick ? 8 : 24;
+      std::vector<uint64_t> tiles;
+      Editor::changed_rects(f.pixels.data(), f.width, f.height, tiles, true);
+      double canvas = 0, find = 0, rows = 0, total_rows = 0, rect_px = 0, find_rects = 0;
+      for (int k = 1; k <= n; k++) {
+        const FrameProfile a = ed.frame_profile_totals();
+        step(k);
+        const FrameProfile b = ed.frame_profile_totals();
+        canvas += b.ms_ui - a.ms_ui;
+        const Image &fb = ed.main_fb_for_test();
+        std::vector<std::pair<int, int>> runs;
+        find += time_ms([&] { runs = Editor::changed_rows(fb.pixels.data(), fb.width, fb.height, bands, everything); }, 1);
+        for (const auto &r : runs) rows += r.second - r.first;
+        total_rows += fb.height;
+        std::vector<gpu::Raster::PresentRect> rects;
+        find_rects += time_ms([&] { rects = Editor::changed_rects(fb.pixels.data(), fb.width, fb.height, tiles, everything); }, 1);
+        for (const auto &r : rects) rect_px += (double)(r.x1 - r.x0) * (r.y1 - r.y0);
+      }
+      const double share = total_rows > 0 ? rows / total_rows : 0.0;
+      const double bytes_mb = rows / n * sz.first * 4.0 / 1e6;
+      const double upload = mb_per_ms > 0 ? bytes_mb / mb_per_ms : 0.0;
+      const double rect_mb = rect_px / n * 4.0 / 1e6, rect_upload = present_mb_per_ms > 0 ? rect_mb / present_mb_per_ms : 0.0;
+      rep.row({strprintf("%dx%d", sz.first, sz.second), name, f2(canvas / n), strprintf("%.0f %%", share * 100.0), f2(find / n),
+               mb_per_ms > 0 ? f2(upload) : "-", f2(canvas / n + find / n + upload),
+               strprintf("%.0f %%", rect_px / n / ((double)sz.first * sz.second) * 100.0), f2(find_rects / n),
+               present_mb_per_ms > 0 ? f2(canvas / n + find_rects / n + rect_upload) : "-"});
+    };
+    row("idle", [&](int) { ed.step_frame_headless(); });
+    row("the mouse over the Hierarchy", [&](int k) {
+      platform::Event e;
+      e.type = ET::MouseMove;
+      e.x = hier.x + 20 + (k % 7) * 9;
+      e.y = hier.y + 40 + (k % 13) * 18;
+      ed.step_frame_headless({e});
+    });
+    row("scrolling the Hierarchy", [&](int k) {
+      platform::Event m;
+      m.type = ET::MouseMove;
+      m.x = hier.x + 40, m.y = hier.y + hier.h / 2;
+      platform::Event w = m;
+      w.type = ET::Wheel;
+      w.wheel_y = -2.0f;  // (down, the whole way: 2,000 rows)
+      ed.step_frame_headless({m, w});
+    });
+    /* A resize: the window presents everything again (Editor's present_all_ on Resize), the canvas drawn whole - as
+     * headless frames can't change size, priced as a hover frame's canvas with every row taken up. */
+    row("resizing the window (every row again)", [&](int k) {
+      platform::Event e;
+      e.type = ET::MouseMove;
+      e.x = hier.x + 20 + (k % 7) * 9;
+      e.y = hier.y + 40 + (k % 13) * 18;
+      ed.step_frame_headless({e});
+    }, true);
+    Log::echo_stdout = true;
+  }
+  rep.note("Go (the UI drawn on the card) only if scrolling or resizing at 4K costs over 4 ms a frame; otherwise the canvas stays "
+           "the CPU's, its changed rows uploaded (task 0193).");
 }
 
 /* Draw items with their meshes and materials kept alive (as the unit tests' scenes). */
@@ -3081,16 +3304,74 @@ static void test_editing(Report &rep, const Options &o) {
   doc.set_path("Exposure", 0.5f);
   doc.result();
   const double first = doc.last_eval_ms();
+  /* The window's preview (task 0191): the same stack on the picture made 1600 pixels across, as a canvas shows it. */
+  doc.preview(1600);
+  doc.set_path("Exposure", 0.6f);
+  doc.preview(1600);
+  const double pv_full = doc.last_preview_ms();
+  const int pv_full_steps = doc.preview_evaluated_steps();
+  doc.set_path("Vignette.Amount", -35);
+  doc.preview(1600);
+  const double pv_slider = doc.last_preview_ms();
   rep.table({"develop stack (11 steps)", "ms", "steps rerun"});
   rep.row({"full evaluation", f1(full), "11"});
   rep.row({"a slider on the last step (Vignette)", f1(slider), std::to_string(rerun)});
   rep.row({"a slider on the first step (Exposure)", f1(first), std::to_string(doc.evaluated_steps())});
+  rep.row({"the window's preview (1600 px): the whole stack", f1(pv_full), std::to_string(pv_full_steps)});
+  rep.row({"the window's preview: a slider on the last step", f1(pv_slider), std::to_string(doc.preview_evaluated_steps())});
   if (o.quick) {  // (the targets are for 4K)
     rep.note(strprintf("At %d x %d (quick): the full stack %.1f ms, a slider on the last step %.1f ms.", W, H, full, slider));
     return;
   }
-  rep.note(strprintf("Task 0181's targets at %d x %d: the full stack %.1f ms (at most 150: %s), a slider on the last step %.1f ms (at most 40: %s).",
-                     W, H, full, full <= 150 ? "met" : "missed", slider, slider <= 40 ? "met" : "missed"));
+  rep.note(strprintf("Task 0181's targets at %d x %d: the full stack %.1f ms (at most 150: %s), a slider on the last step %.1f ms (at most 40: %s). "
+                     "What the window evaluates while you work (task 0191, its 1600-pixel preview): the whole stack %.1f ms, a slider %.1f ms.",
+                     W, H, full, full <= 150 ? "met" : "missed", slider, slider <= 40 ? "met" : "missed", pv_full, pv_slider));
+}
+
+/* Task 0187 (ADR 0059): a real secondary OS window - made at a place, shown, moved, moved to another display when
+ * there is one - checked against what the platform reports. It opens a window on the screen: only when asked. */
+static void test_windows(Report &rep, const Options &) {
+  rep.title("Windows: a secondary OS window",
+            "A window made with create_secondary_window at a place on the primary display, a picture presented in it, then "
+            "moved and resized with set_window_rect, and moved to the middle of the second display when there is one; "
+            "get_window_rect's answers against what was asked (the client area, in desktop pixels).");
+  const std::vector<platform::Monitor> ms = platform::monitors();
+  rep.table({"display", "rectangle", "scale", "primary"});
+  for (size_t i = 0; i < ms.size(); i++)
+    rep.row({std::to_string(i + 1) + " " + ms[i].name, strprintf("%d, %d, %d x %d", ms[i].x, ms[i].y, ms[i].width, ms[i].height), strprintf("%.2f", ms[i].dpi),
+             ms[i].primary ? "yes" : ""});
+  platform::Window *w = platform::create_secondary_window("Blendity window test", ms[0].x + 120, ms[0].y + 120, 640, 400);
+  if (!w) {
+    rep.note("No window could be made here (no display): nothing measured.");
+    return;
+  }
+  auto settle = [&](int ms_wait) {
+    std::vector<platform::Event> ev;
+    for (int i = 0; i < ms_wait / 10; i++) platform::poll_events(w, ev, 10);
+  };
+  auto check = [&](const char *what, int x, int y, int cw, int ch) {
+    settle(300);
+    int gx = 0, gy = 0, gw = 0, gh = 0;
+    platform::get_window_rect(w, gx, gy, gw, gh);
+    std::vector<uint32_t> px((size_t)std::max(1, gw) * std::max(1, gh));
+    for (int yy = 0; yy < gh; yy++)
+      for (int xx = 0; xx < gw; xx++) px[(size_t)yy * gw + xx] = 0xFF000000u | (uint32_t)(xx * 255 / std::max(1, gw)) << 16 | (uint32_t)(yy * 255 / std::max(1, gh)) << 8 | 0x60u;
+    if (gw > 0 && gh > 0) platform::present(w, px.data(), gw, gh);
+    const bool ok = std::abs(gx - x) <= 2 && std::abs(gy - y) <= 2 && std::abs(gw - cw) <= 2 && std::abs(gh - ch) <= 2;
+    rep.row({what, strprintf("%d, %d, %d x %d", x, y, cw, ch), strprintf("%d, %d, %d x %d", gx, gy, gw, gh), ok ? "yes" : "no"});
+  };
+  rep.table({"step", "asked", "reported", "within 2 px"});
+  check("made", ms[0].x + 120, ms[0].y + 120, 640, 400);
+  platform::set_window_rect(w, ms[0].x + 200, ms[0].y + 160, 800, 500);
+  check("moved and resized", ms[0].x + 200, ms[0].y + 160, 800, 500);
+  if (ms.size() > 1) {
+    const platform::Monitor &m = ms[1];
+    const int cw = m.width * 3 / 4, ch = m.height * 3 / 4;
+    platform::set_window_rect(w, m.x + (m.width - cw) / 2, m.y + (m.height - ch) / 2, cw, ch);
+    check("on display 2", m.x + (m.width - cw) / 2, m.y + (m.height - ch) / 2, cw, ch);
+  }
+  settle(200);
+  platform::destroy_window(w);
 }
 
 static void test_uv_unwrap(Report &rep, const Options &o) {
@@ -5125,11 +5406,16 @@ static bool gpu_raster_window(Report &rep, GpuRasterScene &sc, const gpu::Device
   platform::Window *w = r ? platform::create_window("Blendity stress: GPU view (swapchain)", 2400, 1300) : nullptr;
   std::vector<gpu::RasterInstance> inst;
   int m_big = -1;
-  bool ok = r && w && r->attach_window(platform::native_handle(w), &err) && sc.upload(*r, inst, m_big, err);
+  const int win = r && w ? r->attach_window(nullptr, platform::native_handle(w), &err) : -1;
+  bool ok = win >= 0 && sc.upload(*r, inst, m_big, err);
   int fw = 0, fh = 0;
   if (w) platform::get_framebuffer_size(w, fw, fh);
   std::vector<uint32_t> canvas((size_t)std::max(fw, 1) * std::max(fh, 1), 0xFF2B2B2Bu);
-  ok = ok && r->render(sc.gpu_frame(0), &err) && r->present(canvas.data(), fw, fh, {{0, fh}}, vx, vy, &err);
+  const gpu::RasterFrame first = sc.gpu_frame(0);
+  for (int y = std::max(0, vy); y < std::min(fh, vy + first.height); y++)  // (transparent where the view shows: task 0193)
+    for (int x = std::max(0, vx); x < std::min(fw, vx + first.width); x++) canvas[(size_t)y * fw + x] = 0;
+  const std::vector<gpu::Raster::PresentView> shown = {{first.slot, vx, vy}};
+  ok = ok && r->render(first, &err) && r->present_window(win, canvas.data(), fw, fh, {}, true, shown, &err) == gpu::Raster::Shown;
   std::vector<double> ms;
   std::vector<platform::Event> ev;
   for (int k = 0; k < frames && ok; k++) {
@@ -5138,7 +5424,7 @@ static bool gpu_raster_window(Report &rep, GpuRasterScene &sc, const gpu::Device
     ScopedTimer t;
     ok = r->render(sc.gpu_frame(k), &err);
     for (int y = fh - 24; y < fh; y++) canvas[(size_t)y * fw + (k * 13) % fw] = 0xFF000000u | (uint32_t)(k * 977 + y);
-    ok = ok && r->present(canvas.data(), fw, fh, {{fh - 24, fh}}, vx, vy, &err);
+    ok = ok && r->present_window(win, canvas.data(), fw, fh, {{0, fh - 24, fw, fh}}, false, shown, &err) != gpu::Raster::Failed;  // (the bottom strip: x0, y0, x1, y1)
     ms.push_back(t.ms());
   }
   if (w) platform::destroy_window(w);
@@ -5564,6 +5850,531 @@ static void test_present(Report &rep, const Options &o) {
            "(No input arrives here; in the editor, input wakes the wait early.)");
 }
 
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Blender parity (task 0201): the editor's features on the scenes tools/bench_blender.py builds in Blender 5.2, row by
+ * row under the same names, so tools/bench_table.py can put them side by side (PERFORMANCE.md's Pass 15). Each row's
+ * "Blendity" is what the user waits for: an editor operator with the frame that shows it (less the frame after, so
+ * the frame's fixed cost drops out), with the views on the GPU when there is one; "operator alone" is the command
+ * without its frame. Headless Blender draws nothing, so its rows are the operator and the depsgraph update. */
+
+namespace {
+
+struct ParityRows {
+  Report &rep;
+  void row(const std::string &name, double value, const char *unit, double alone, const std::string &method) {
+    rep.row({name, value < 0 ? "failed" : f2(value), unit, alone < 0 ? "-" : f2(alone), method});
+  }
+};
+
+/* The 50k-face benchmark sphere (Pass 13's) and the 500k one: UV spheres of 256 x 196 and 1024 x 490 segments. */
+MeshPtr parity_sphere(bool big) { return primitives::uv_sphere(1.0f, big ? 1024 : 256, big ? 490 : 196); }
+
+/* An editor on a scene of its own, the views on the card when there is one. */
+void parity_editor(Editor &ed) {
+  Log::echo_stdout = false;
+  ed.init_headless(1600, 1000);
+  ed.viewport_device_for_test(gpu::available() ? 2 : 1);
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+}
+
+/* An editor command timed as the user waits for it: the command and the frame that shows it, less an idle frame
+ * measured just before (the frame's fixed cost), and whatever the frame after costs beyond an idle one (work left
+ * for it: a rebuild, a present one frame behind). */
+struct Timed {
+  double total = 0, alone = 0;
+};
+Timed parity_timed(Editor &ed, const std::function<void()> &act) {
+  Timed t;
+  const double idle = time_ms([&] { ed.step_frame_headless(); });
+  t.alone = time_ms(act);
+  const double frame = time_ms([&] { ed.step_frame_headless(); });
+  const double next = time_ms([&] { ed.step_frame_headless(); });
+  t.total = t.alone + std::max(0.0, frame - idle) + std::max(0.0, next - idle);
+  return t;
+}
+
+/* The mean of `reps` timed runs, each set up by `before` (outside the timer) and put back by `after`. */
+Timed parity_mean(Editor &ed, int reps, const std::function<void()> &before, const std::function<void()> &act, const std::function<void()> &after) {
+  Timed sum;
+  for (int r = 0; r < reps; r++) {
+    before();
+    const Timed t = parity_timed(ed, act);
+    sum.total += t.total / reps;
+    sum.alone += t.alone / reps;
+    after();
+  }
+  return sum;
+}
+
+/* A vertical (meridian) edge of the UV sphere at the equator, at angle 0: a loop cut through it is the ring below. */
+std::string parity_meridian_edge(int segments, int rings) {
+  const int i = rings / 2;
+  const uint32_t a = (uint32_t)(1 + (i - 1) * segments), b = (uint32_t)(1 + i * segments);
+  return strprintf("%u %u", a, b);
+}
+
+void parity_files(ParityRows &out, const Options &o) {
+  std::error_code ec;
+  const std::filesystem::path tmp = std::filesystem::temp_directory_path(ec) / "blendity_parity";
+  std::filesystem::create_directories(tmp, ec);
+  if (ec) {
+    out.rep.note("Files skipped: no temp folder (" + ec.message() + ")");
+    return;
+  }
+  /* A scene saved and opened: 10,000 cubes sharing one mesh (Blender: linked duplicates), and one 500k-face mesh. */
+  auto save_open = [&](const std::string &what, Scene &s, const std::string &file) {
+    const std::string path = (tmp / file).string();
+    std::string text;
+    const double save = time_ms([&] {
+      text = save_scene_text(s);
+      fs::write_file(path, text);
+    }, o.quick ? 1 : 3);
+    std::string err;
+    size_t objects = 0;
+    const double open = time_ms([&] {
+      Scene loaded;
+      std::string read;
+      fs::read_file(path, read);
+      load_scene_text(read, loaded, err);
+      objects = loaded.object_count();
+    }, o.quick ? 1 : 3);
+    const std::string note = strprintf("the scene's text written to a file (%s); Blendity's .scene", format_bytes(text.size()).c_str());
+    out.row("Save a scene: " + what, save, "ms", -1, note);
+    out.row("Open it: " + what, objects == s.object_count() ? open : -1, "ms", -1, "the file read and parsed into a scene (not swapped into an editor)");
+    std::filesystem::remove(path, ec);
+  };
+  {
+    Scene s = make_grid_scene(o.quick ? 1000 : 10000, primitives::cube());
+    save_open(o.quick ? "1,000 cubes" : "10,000 cubes", s, "parity_cubes.scene");
+  }
+  {
+    Scene s;
+    GameObject *g = s.create("Sphere");
+    g->add<MeshFilter>()->mesh = parity_sphere(!o.quick);
+    g->add<MeshRenderer>();
+    save_open(o.quick ? "a 50k-face mesh" : "a 500k-face mesh", s, "parity_big.scene");
+  }
+  /* The 50k sphere written and read in each format: export_file as File > Export does; import_model as the importer
+   * reads it, objects made for its meshes (not copied into a project: Blender's importer copies nothing either). */
+  MeshPtr sphere = parity_sphere(false);
+  ExportItem item;
+  item.name = "Sphere";
+  item.mesh = sphere.get();
+  item.world = Mat4::identity();
+  const std::pair<const char *, ExportFormat> formats[] = {{"OBJ", ExportFormat::OBJ}, {"FBX", ExportFormat::FBX}, {"glTF (GLB)", ExportFormat::GLB},
+                                                           {"STL", ExportFormat::STL}, {"PLY", ExportFormat::PLY}, {"USD (USDA)", ExportFormat::USD}};
+  for (const auto &[label, fmt] : formats) {
+    if (o.quick && fmt != ExportFormat::OBJ && fmt != ExportFormat::GLB) continue;  // (CI: two formats)
+    const std::string path = (tmp / (std::string("parity_sphere") + export_format_extension((int)fmt))).string();
+    const ExportOptions eo = export_defaults((int)fmt);
+    std::string err;
+    bool ok = export_file(path, {item}, eo, &err);  // (warm)
+    const double ex = time_ms([&] { ok = ok && export_file(path, {item}, eo, &err); }, o.quick ? 1 : 3);
+    std::error_code sec;
+    const uintmax_t bytes = ok ? std::filesystem::file_size(path, sec) : 0;
+    out.row(std::string("Export the 50k sphere as ") + label, ok ? ex : -1, "ms", -1, strprintf("export_file, %s written", format_bytes((size_t)bytes).c_str()));
+    size_t faces = 0;
+    const double im = time_ms([&] {
+      ImportResult r;
+      ok = ok && import_model(path, r);
+      Scene s;
+      faces = 0;
+      for (const ImportedNode &node : r.nodes) {
+        GameObject *g = s.create(node.name);
+        g->set_local_position(node.position);
+        if (!node.mesh) continue;
+        g->add<MeshFilter>()->mesh = node.mesh;
+        g->add<MeshRenderer>();
+        faces += node.mesh->face_count();
+      }
+    }, o.quick ? 1 : 3);
+    out.row(std::string("Import the 50k sphere from ") + label, ok && faces > 0 ? im : -1, "ms", -1,
+            strprintf("import_model, an object made for each mesh (%s faces read)", num((double)faces).c_str()));
+    std::filesystem::remove(path, ec);
+  }
+  std::filesystem::remove_all(tmp, ec);
+}
+
+void parity_objects(ParityRows &out, const Options &o) {
+  Editor ed;
+  parity_editor(ed);
+  const int n = o.quick ? 1000 : 10000;
+  ed.command(strprintf("stress %d Cube", n));
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  const std::string what = o.quick ? "1,000 objects" : "10,000 objects";
+  const int reps = o.quick ? 1 : 3;
+  auto nothing = [] {};
+  const Timed sel = parity_mean(ed, reps, [&] { ed.command("select Main Camera"); }, [&] { ed.command("selectall"); }, nothing);
+  out.row("Select all, " + what, sel.total, "ms", sel.alone, "selectall (every object with a mesh)");
+  const Timed dup = parity_mean(ed, 1, [&] { ed.command("selectall"); }, [&] { ed.command("duplicate"); }, [&] {
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  });
+  out.row("Duplicate " + what, dup.total, "ms", dup.alone,
+          "duplicate on every object selected (Blendity's copies share their meshes, copy on write), one run; undone outside the timer");
+  const Timed del = parity_mean(ed, reps, [&] { ed.command("selectall"); }, [&] { ed.command("delete"); }, [&] {
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  });
+  out.row("Delete " + what, del.total, "ms", del.alone, "delete on every object selected; undone outside the timer");
+  const Timed und = parity_mean(ed, reps, [&] {
+    ed.command("selectall");
+    ed.command("delete");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  }, [&] { ed.command("undo"); }, nothing);
+  out.row("Undo of the delete, " + what, und.total, "ms", und.alone, "undo of the delete (the scene's snapshot restored)");
+  if (ed.scene().object_count() < (size_t)n) out.rep.note("ERROR: the undo did not bring the objects back");
+}
+
+/* Edit Mode on one sphere: the operators the user runs most, each undone outside its timer. */
+void parity_edit_mode(ParityRows &out, const Options &o, bool big) {
+  Editor ed;
+  parity_editor(ed);
+  const int segments = big ? 1024 : 256, rings = big ? 490 : 196;
+  GameObject *g = ed.scene().create("Parity Sphere");  // (a name of its own: the starter scene may have a Sphere)
+  g->add<MeshFilter>()->mesh = parity_sphere(big);
+  g->add<MeshRenderer>();
+  g->set_local_position({0, 0, -6});
+  ed.mark_changed_for_test("Add Parity Sphere");  // (an undo step: an undo later must not take the sphere away)
+  ed.command("select Parity Sphere");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  const std::string on = big ? " (500k faces)" : " (50k faces)";
+  const int reps = o.quick ? 1 : 3;
+  auto settle = [&] {
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  };
+  auto undo = [&] {
+    ed.command("undo");
+    settle();
+  };
+  auto nothing = [] {};
+  const Timed enter = parity_mean(ed, reps, [&] {
+    ed.command("edit off");
+    if (auto *mf = g->get<MeshFilter>()) {  // (a mesh never edited: its caches cold, as Blender builds its BMesh anew)
+      MeshPtr fresh = std::make_shared<Mesh>(*mf->mesh);
+      fresh->forget_caches();
+      ed.overlap_forget_for_test();
+      mf->mesh = fresh;
+    }
+    settle();
+  }, [&] { ed.command("edit vertex"); }, nothing);
+  out.row("Enter Edit Mode" + on, enter.total, "ms", enter.alone, "edit vertex, its caches cold (a fresh copy of the mesh)");
+  /* (An undo can leave the sphere unselected: each setup selects it and enters Edit Mode again.) */
+  auto in_edit = [&](const char *elem) {
+    if (!ed.selected_object() || ed.selected_object()->name != "Parity Sphere") {
+      ed.command("select Parity Sphere");
+      settle();
+    }
+    ed.command(std::string("edit ") + elem);
+  };
+  auto faces = [&](const char *list) {
+    return [&, list] {
+      in_edit("face");
+      ed.command(std::string("fsel ") + list);
+      settle();
+    };
+  };
+  const Timed all = parity_mean(ed, reps, [&] {
+    in_edit("vertex");
+    ed.command("vsel 0");
+    settle();
+  }, [&] { ed.run_action_for_test("edit.select_all"); }, nothing);
+  out.row("Select all" + on, all.total, "ms", all.alone, "Edit Mode's Select All (its shortcut's action, Ctrl+A / A)");
+  const Timed linked = parity_mean(ed, reps, faces("100"), [&] { ed.command("editop select_linked"); }, nothing);
+  out.row("Select linked from one face" + on, linked.total, "ms", linked.alone, "editop select_linked from face 100 (the whole sphere)");
+  const Timed ext = parity_mean(ed, reps, faces("100 101 102"), [&] { ed.command("editop extrude"); }, undo);
+  out.row("Extrude three faces" + on, ext.total, "ms", ext.alone, "editop extrude on faces 100-102 (0.5 along their normal)");
+  ed.command("insetmode region 0.01");
+  const Timed ins = parity_mean(ed, reps, faces("100 101 102"), [&] { ed.command("editop inset"); }, undo);
+  out.row("Inset three faces" + on, ins.total, "ms", ins.alone, "editop inset, region, thickness 0.01");
+  if (!big) {
+    /* Bevel's width and segments set once outside the timers, as its F9 panel would (redo keeps them for the next use). */
+    faces("100 101 102")();
+    ed.command("editop bevel");
+    ed.command("redo amount 0.005");
+    ed.command("redo segments 3");
+    undo();
+    const Timed bev = parity_mean(ed, reps, faces("100 101 102"), [&] { ed.command("editop bevel"); }, undo);
+    out.row("Bevel three faces' edges" + on, bev.total, "ms", bev.alone, "editop bevel on faces 100-102's edges, width 0.005, 3 segments");
+    const std::string edge = parity_meridian_edge(segments, rings);
+    ed.command("loopcuts 1 0.5");
+    const Timed cut = parity_mean(ed, reps, [&] {
+      in_edit("edge");
+      ed.command("esel " + edge);
+      settle();
+    }, [&] { ed.command("editop loopcut"); }, undo);
+    out.row("Loop cut" + on, cut.total, "ms", cut.alone, "editop loopcut, 1 cut, through a meridian edge at the equator (a ring of 256 faces cut)");
+  }
+  auto every = [&](const char *elem) {
+    return [&, elem] {
+      in_edit(elem);
+      ed.run_action_for_test("edit.select_all");
+      settle();
+    };
+  };
+  if (!big) {
+    const Timed sub = parity_mean(ed, reps, every("edge"), [&] { ed.command("editop subdivide_edges"); }, undo);
+    out.row("Subdivide every edge" + on, sub.total, "ms", sub.alone, "editop subdivide_edges, 1 cut, everything selected");
+    const Timed undo_sub = parity_mean(ed, reps, [&] {
+      every("edge")();
+      ed.command("editop subdivide_edges");
+      settle();
+    }, [&] { ed.command("undo"); }, settle);
+    out.row("Undo of the subdivide" + on, undo_sub.total, "ms", undo_sub.alone, "undo of subdivide_edges (the mesh before it restored)");
+  }
+  const Timed merge = parity_mean(ed, reps, every("vertex"), [&] { ed.command("editop merge_distance"); }, undo);
+  out.row("Merge by distance, everything" + on, merge.total, "ms", merge.alone,
+          "editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001)");
+  const Timed tri = parity_mean(ed, reps, every("face"), [&] { ed.command("editop triangulate_faces"); }, undo);
+  out.row("Triangulate every face" + on, tri.total, "ms", tri.alone, "editop triangulate_faces, everything selected");
+  const Timed undo_tri = parity_mean(ed, reps, [&] {
+    every("face")();
+    ed.command("editop triangulate_faces");
+    settle();
+  }, [&] { ed.command("undo"); }, settle);
+  out.row("Undo of the triangulate" + on, undo_tri.total, "ms", undo_tri.alone, "undo of triangulate_faces");
+  const Timed exit = parity_mean(ed, reps, [&] {
+    in_edit("vertex");
+    settle();
+  }, [&] { ed.command("edit off"); }, settle);
+  out.row("Exit Edit Mode" + on, exit.total, "ms", exit.alone, "edit off");
+}
+
+/* The modifier stack evaluated on the 50k sphere: a fresh object each time, so nothing is cached. */
+void parity_modifiers(ParityRows &out, const Options &o) {
+  const int reps = o.quick ? 1 : 3;
+  MeshPtr sphere = parity_sphere(false);
+  auto eval = [&](const std::string &name, const std::function<void(Scene &, GameObject &)> &add, const std::string &method) {
+    double total = 0;
+    size_t faces = 0;
+    for (int r = 0; r < reps; r++) {
+      Scene s;
+      GameObject *g = s.create("Sphere");
+      g->add<MeshFilter>()->mesh = sphere;
+      g->add<MeshRenderer>();
+      add(s, *g);
+      total += time_ms([&] { faces = g->evaluated_mesh() ? g->evaluated_mesh()->face_count() : 0; });
+    }
+    const bool changed = faces != sphere->face_count() || name == "Decimate 0.5" || name == "Bevel";  // (a Boolean that failed gives its input back)
+    out.row("Modifier: " + name + " on the 50k sphere", faces && changed ? total / reps : -1, "ms", -1, strprintf("%s; %s faces out", method.c_str(), num((double)faces).c_str()));
+  };
+  eval("Subdivision level 1", [](Scene &, GameObject &g) { g.add<SubdivisionSurface>()->levels = 1; }, "SubdivisionSurface levels 1 (Blendity's own Catmull-Clark)");
+  if (!o.quick) eval("Subdivision level 2", [](Scene &, GameObject &g) { g.add<SubdivisionSurface>()->levels = 2; }, "SubdivisionSurface levels 2");
+  eval("Mirror", [](Scene &, GameObject &g) { g.add<MirrorModifier>(); }, "MirrorModifier on X, merging at 0.001");
+  eval("Array x10", [](Scene &, GameObject &g) { g.add<ArrayModifier>()->count = 10; }, "ArrayModifier, 10 copies a mesh-size apart");
+  eval("Solidify", [](Scene &, GameObject &g) { g.add<SolidifyModifier>()->thickness = 0.01f; }, "SolidifyModifier, 0.01 thick, rim filled");
+  eval("Bevel", [](Scene &, GameObject &g) {
+    auto *b = g.add<BevelModifier>();
+    b->width = 0.001f;
+    b->limit_method = 0;  // (every edge: the sphere's are all under the 30 degree limit)
+  }, "BevelModifier, width 0.001, 1 segment, every edge (no angle limit)");
+  eval("Decimate 0.5", [](Scene &, GameObject &g) { g.add<DecimateModifier>()->ratio = 0.5f; }, "DecimateModifier collapse, ratio 0.5 (meshoptimizer)");
+  eval("Boolean union with a second 50k sphere", [&](Scene &s, GameObject &g) {
+    GameObject *c = s.create("Cutter");
+    c->add<MeshFilter>()->mesh = sphere;
+    c->set_local_position({0.5f, 0.0f, 0.0f});
+    auto *b = g.add<BooleanModifier>();
+    b->object = "Cutter";
+    b->operation = 1;
+  }, "BooleanModifier union (Manifold, with Blender's libraries)");
+  {
+    /* Subdivision on a mesh of quads only (a cube cut into 24,576 faces): no poles of high valence. */
+    Mesh quads = *primitives::cube();
+    for (int i = 0; i < 6; i++) quads = meshops::subdivide_simple(quads);
+    MeshPtr qp = std::make_shared<Mesh>(quads);
+    double total = 0;
+    size_t faces = 0;
+    for (int r = 0; r < reps; r++) {
+      Scene s;
+      GameObject *g = s.create("Cube");
+      g->add<MeshFilter>()->mesh = qp;
+      g->add<MeshRenderer>();
+      g->add<SubdivisionSurface>()->levels = 1;
+      total += time_ms([&] { faces = g->evaluated_mesh() ? g->evaluated_mesh()->face_count() : 0; });
+    }
+    out.row("Modifier: Subdivision level 1 on a 24,576-quad cube", total / reps, "ms", -1,
+            strprintf("SubdivisionSurface levels 1 on a cube cut 64 x 64 a side; %s faces out", num((double)faces).c_str()));
+  }
+  /* The stack again after one vertex moved (the user dragging in Edit Mode with the modifiers live). */
+  {
+    Scene s;
+    GameObject *g = s.create("Sphere");
+    g->add<MeshFilter>()->mesh = std::make_shared<Mesh>(*sphere);
+    g->add<MeshRenderer>();
+    g->add<SubdivisionSurface>()->levels = 1;
+    g->add<MirrorModifier>();
+    g->evaluated_mesh();
+    double total = 0;
+    for (int r = 0; r < reps; r++) {
+      MeshPtr &mp = g->get<MeshFilter>()->mesh;
+      mp = std::make_shared<Mesh>(*mp);
+      mp->positions[1000].y += 0.001f;
+      mp->forget_caches();
+      mp->touch();
+      total += time_ms([&] { g->evaluated_mesh(); });
+    }
+    out.row("Modifier stack again after a vertex moved (Subdivision 1 + Mirror)", total / reps, "ms", -1, "one vertex moved, the stack evaluated again");
+  }
+}
+
+void parity_uv_anim_physics(ParityRows &out, const Options &o) {
+  const int reps = o.quick ? 1 : 3;
+  {
+    double total = 0;
+    int charts = 0;
+    for (int r = 0; r < reps; r++) {
+      Mesh m = *parity_sphere(false);
+      /* A seam down the meridian at angle 0, pole to pole (a closed sphere has no disk to unwrap to): the top, each
+       * ring's first vertex, the bottom. */
+      const uint32_t top = 0, bottom = (uint32_t)m.vert_count() - 1;
+      uint32_t prev = top;
+      for (int i = 1; i <= 196; i++) {
+        const uint32_t v = i < 196 ? (uint32_t)(1 + (i - 1) * 256) : bottom;
+        m.seams.push_back(((uint64_t)std::min(prev, v) << 32) | std::max(prev, v));
+        prev = v;
+      }
+      std::sort(m.seams.begin(), m.seams.end());
+      total += time_ms([&] { charts = uvops::unwrap_lscm(m, nullptr, 0.02f); });
+    }
+    out.row("Unwrap the 50k sphere", total / reps, "ms", -1,
+            strprintf("unwrap_lscm (Blender's Conformal), a seam down one meridian, margin 0.02 (%s; %d charts)", uvops::lscm_solver_name(), charts));
+  }
+  {
+    /* 1,000 objects, each with Position keys on frames 1, 30 and 60: a frame of the clip applied. */
+    Scene s;
+    GameObject *root = s.create("Root");
+    AnimationClip clip;
+    const int n = o.quick ? 100 : 1000;
+    for (int i = 0; i < n; i++) {
+      GameObject *c = s.create(strprintf("Box %d", i));
+      s.set_parent(c, root);
+      c->add<MeshFilter>()->mesh = primitives::cube();
+      c->add<MeshRenderer>();
+      for (int axis = 0; axis < 3; axis++) {
+        AnimTrack &t = clip.track(anim_path(*root, *c), "Position", axis);
+        t.set_key(1.0f, 0.0f);
+        t.set_key(30.0f, (float)(i % 7));
+        t.set_key(60.0f, 0.0f);
+      }
+    }
+    int f = 2;
+    const double ms = time_ms([&] { apply_clip(clip, *root, (float)(f++ % 59 + 1)); }, o.quick ? 5 : 30);
+    out.row(strprintf("A frame of %s keyframed objects", n == 1000 ? "1,000" : std::to_string(n).c_str()), ms, "ms", -1, "apply_clip at a new frame each time (3 Position tracks of 3 keys per object)");
+  }
+  {
+    /* Ten shape keys on the 50k sphere, all at half weight: the positions they give. */
+    Mesh m = *parity_sphere(false);
+    MeshRenderer mr;
+    for (int k = 0; k < 10; k++) {
+      ShapeKey key;
+      key.name = strprintf("Key %d", k);
+      key.delta.resize(m.vert_count());
+      for (size_t v = 0; v < key.delta.size(); v++) key.delta[v] = m.positions[v] * (0.01f * (float)(k + 1));
+      m.shape_keys.push_back(std::move(key));
+      mr.shape_weights.push_back({strprintf("Key %d", k), 0.5f});
+    }
+    std::vector<Vec3> p;
+    const double ms = time_ms([&] {
+      p = m.positions;  // (the basis the keys add to)
+      apply_shape_keys(m, &mr, p);
+    }, o.quick ? 3 : 20);
+    out.row("Ten shape keys on the 50k sphere, evaluated", ms, "ms", -1, "the basis copied and apply_shape_keys, every key at 0.5");
+  }
+  {
+    /* 1,000 rigid boxes falling onto a plane (Jolt; Blender: Bullet), a 60 Hz step's mean over 2 seconds. */
+    const int n = o.quick ? 100 : 1000;
+    Scene s;
+    GameObject *ground = s.create("Ground");
+    ground->add<MeshFilter>()->mesh = primitives::plane(200.0f, 1);
+    ground->add<MeshRenderer>();
+    auto cube = primitives::cube();
+    const int side = (int)std::ceil(std::cbrt((double)n));
+    for (int i = 0; i < n; i++) {
+      GameObject *b = s.create("Box");
+      b->add<MeshFilter>()->mesh = cube;
+      b->add<MeshRenderer>();
+      b->add<Rigidbody>();
+      b->set_local_position({(i % side) * 1.1f - side * 0.55f, 1.0f + (i / (side * side)) * 1.1f, ((i / side) % side) * 1.1f - side * 0.55f});
+    }
+    PlayContext ctx;
+    ctx.dt = 1.0f / 60.0f;
+    s.start(ctx);
+    const double ms = time_ms([&] { s.update(ctx); }, 30);  // (the first half second: falling and landing, before they sleep)
+    out.row(strprintf("%s rigid boxes falling: a frame", n == 1000 ? "1,000" : std::to_string(n).c_str()), ms, "ms", -1,
+            strprintf("Scene::update at 60 Hz, one step a frame, mean of the first 30 frames (%s)", physics_jolt_available() ? "Jolt" : "Blendity's own solver"));
+  }
+}
+
+void parity_render(ParityRows &out, const Options &o) {
+  if (o.quick) return;  // (two CPU renders at 1080p: not for CI)
+  {
+    /* F12 at 1920 x 1080 with the raster engine (Blender: EEVEE, one sample), the stress gpu scene's layout. */
+    Editor ed;
+    parity_editor(ed);
+    ed.command("engine raster");
+    ed.scene().render.width = 1920;
+    ed.scene().render.height = 1080;
+    ed.command("stress 400 Sphere");
+    /* The Main Camera 20 m back and 6 m up, looking down 3 degrees at the grid (Blender's row places its camera there). */
+    if (GameObject *cam = ed.scene().find_by_name("Main Camera")) {
+      cam->set_local_position({0, 6, -20});
+      cam->set_local_rotation(Quat::euler({3, 0, 0}));
+      if (auto *c = cam->get<Camera>()) c->fov = 60.0f;
+    }
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("render");  // (warm)
+    const double ms = time_ms([&] { ed.command("render"); }, o.quick ? 1 : 3);
+    out.row("F12 at 1920x1080, 400 spheres (raster)", ms, "ms", -1,
+            "render, engine raster (the CPU's reference raster, supersampled), stress 400 Sphere (an 8 x 8 x 7 grid of 24 x 16 spheres, 8 materials) under the starter scene's light");
+  }
+}
+
+/* Run first: the resident set grows only when the heap does, and the other rows grow it and free it again. */
+void parity_memory(ParityRows &out, const Options &o) {
+  {
+    /* What a scene costs in memory: the resident set before and after building it. */
+    const uint64_t before = sys::working_set_bytes();
+    if (before == 0) return;
+    {
+      Scene s = make_grid_scene(o.quick ? 1000 : 10000, primitives::cube());
+      const uint64_t after = sys::working_set_bytes();
+      out.row(o.quick ? "Memory: 1,000 cubes" : "Memory: 10,000 cubes", (double)(after - std::min(after, before)) / (1024.0 * 1024.0), "MB", -1,
+              "the resident set's growth when the scene is made (one shared cube mesh; objects with transforms, no editor state; "
+              "run first in the section, but after any section before it)");
+    }
+    const uint64_t b2 = sys::working_set_bytes();
+    {
+      Scene s;
+      GameObject *g = s.create("Sphere");
+      g->add<MeshFilter>()->mesh = parity_sphere(!o.quick);
+      g->add<MeshRenderer>();
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      m.render_mesh();  // (what drawing it keeps: its triangles and normals)
+      const uint64_t after = sys::working_set_bytes();
+      out.row(o.quick ? "Memory: a 50k-face mesh" : "Memory: a 500k-face mesh", (double)(after - std::min(after, b2)) / (1024.0 * 1024.0), "MB", -1, "the resident set's growth for the mesh and its render mesh");
+    }
+  }
+}
+
+}  // namespace
+
+static void test_blender_parity(Report &rep, const Options &o) {
+  rep.title("Blender parity (task 0201)",
+            "Every row has a twin in tools/bench_blender.py, under the same name; tools/bench_table.py puts the two side by side "
+            "(PERFORMANCE.md's Pass 15). Editor rows: the command and the frame that shows it and the frame after, each less an "
+            "idle frame (the views on the GPU when there is one); \"operator alone\" is the command without its frames.");
+  rep.table({"row", "Blendity", "unit", "operator alone", "method"});
+  ParityRows out{rep};
+  parity_memory(out, o);
+  parity_files(out, o);
+  parity_objects(out, o);
+  parity_edit_mode(out, o, false);
+  if (!o.quick) parity_edit_mode(out, o, true);
+  parity_modifiers(out, o);
+  parity_uv_anim_physics(out, o);
+  parity_render(out, o);
+}
+
 int main(int argc, char **argv) {
   install_crash_handler();
   Options o;
@@ -5634,19 +6445,20 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"procedural_textures", test_textures}, {"vgi", test_vgi}, {"probes", test_probes},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"ui_2d", test_ui_2d}, {"bake", test_bake}, {"procedural_textures", test_textures}, {"vgi", test_vgi}, {"probes", test_probes},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
     if (std::string(t.name) == "present" && o.only != "present") continue;  // (it opens a window: only when asked for)
     if (std::string(t.name) == "gpu_raster" && o.only != "gpu_raster") continue;  // (a spike with windows: only when asked for)
     if (std::string(t.name) == "gpu_optix" && o.only != "gpu_optix") continue;  // (a spike: only when asked for)
+    if (std::string(t.name) == "windows" && o.only != "windows") continue;  // (it opens a window: only when asked for)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);

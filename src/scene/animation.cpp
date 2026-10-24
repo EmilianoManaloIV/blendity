@@ -14,6 +14,7 @@
 #include <cstring>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace bl {
 
@@ -482,8 +483,33 @@ bool write_anim_value(GameObject &g, const std::string &property, int axis, floa
 }
 
 void apply_clip(const AnimationClip &clip, GameObject &root, float frame) {
-  /* Each object found once and its transform set once, however many of its numbers are animated. */
+  /* Each object found once and its transform set once, however many of its numbers are animated. Task 0206: with many
+   * tracks, the objects found in one walk of the branches the tracks name (searching a parent's children by name for
+   * each track was half a million name compares a frame under a thousand children). It follows what anim_target
+   * follows - the first child of a name - and leaves to it the paths a walk can't spell (a name empty or with a '/'). */
   std::unordered_map<std::string, GameObject *> found;
+  if (clip.tracks.size() > 64) {
+    std::unordered_set<std::string> named;  // every track's path and the paths above it
+    for (const AnimTrack &t : clip.tracks)
+      for (size_t e = t.path.find('/');; e = t.path.find('/', e + 1)) {
+        named.insert(t.path.substr(0, e));
+        if (e == std::string::npos) break;
+      }
+    std::vector<std::pair<GameObject *, std::string>> stack{{&root, std::string()}};
+    std::unordered_set<std::string> seen;
+    while (!stack.empty()) {
+      auto [g, path] = std::move(stack.back());
+      stack.pop_back();
+      seen.clear();
+      for (GameObject *c : g->children) {
+        if (!seen.insert(c->name).second || c->name.empty() || c->name.find('/') != std::string::npos) continue;  // (child_named finds only the first)
+        std::string p = g == &root ? c->name : path + "/" + c->name;
+        if (!named.count(p)) continue;
+        found.emplace(p, c);
+        stack.push_back({c, std::move(p)});
+      }
+    }
+  }
   std::unordered_map<GameObject *, Transform> poses;
   for (const AnimTrack &t : clip.tracks) {
     if (t.keys.empty()) continue;

@@ -616,7 +616,7 @@ struct ImageLayer : TextureLayerBase<ImageLayer> {
       for (int64_t y = y0; y < y1; y++)
         for (int x = 0; x < p.w; x++) {
           const size_t i = (size_t)y * p.w + x;
-          const Vec2 uv{(x + 0.5f) / p.w * k, (y + 0.5f) / p.h * k};
+          const Vec2 uv{(x + 0.5f) / p.w * k, 1.0f - (y + 0.5f) / p.h * k};  // (the planes' rows from the top; a texture's v from its bottom row)
           const Vec4 s = t->sample(uv, 0.0f, TexWrap::Repeat, TexFilter::Linear);
           const Vec3 a = vmax(Vec3(0.0f), vmin(Vec3(1.0f), fin3(Vec3(s.x, s.y, s.z), Vec3(0.5f))));
           const float lum = 0.2126f * a.x + 0.7152f * a.y + 0.0722f * a.z;
@@ -643,7 +643,7 @@ struct ImageLayer : TextureLayerBase<ImageLayer> {
     const float op = clampf(fin(opacity, 1.0f), 0.0f, 1.0f);
     const float kk = op * (use_mask ? p.mask : 1.0f);
     if (kk <= 0.0f) return;
-    const Vec4 s = aux->image->sample({u * aux->image_tiling, v * aux->image_tiling}, 0.0f, TexWrap::Repeat, TexFilter::Linear);
+    const Vec4 s = aux->image->sample({u * aux->image_tiling, 1.0f - v * aux->image_tiling}, 0.0f, TexWrap::Repeat, TexFilter::Linear);
     const Vec3 a = vmax(Vec3(0.0f), vmin(Vec3(1.0f), fin3(Vec3(s.x, s.y, s.z), Vec3(0.5f))));
     const float lum = 0.2126f * a.x + 0.7152f * a.y + 0.0722f * a.z;
     if (targets & TargetAlbedo)

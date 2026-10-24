@@ -132,7 +132,11 @@ void Editor::anim_apply() {
     solve_constraints(*scene_);
     scene_dirty_ = true;
   }
-  anim_snapshot_shown();
+  /* What's shown, remembered for Record to tell an edit from the clip. Task 0206: only while Record is on - looking up
+   * every animated number of a thousand objects each frame of playback cost more than playing them; Record turned on
+   * remembers them then, and anything else looks again before it records. */
+  if (anim_.record) anim_snapshot_shown();
+  else anim_.shown_root = 0;
 }
 
 void Editor::anim_set_frame(float f) {
@@ -459,7 +463,7 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   const Recti rec{x, y, u.px(28), bh};
   if (button(u.px(28), "", anim_.record, "Record (Unity's red button): changes to the animated objects become keys at the playhead.")) {
     anim_.record = !anim_.record;
-    if (anim_.record) anim_set_preview(true);
+    if (anim_.record) anim_set_preview(true), anim_snapshot_shown();
   }
   u.canvas.fill_circle((float)(rec.x + rec.w / 2), (float)(rec.y + rec.h / 2), (float)u.px(5), anim_.record ? Color::hex(0xFF3B3B) : Color::hex(0x884444));
   if (button(u.px(26), "|<", false, "First frame")) anim_set_frame(0.0f);
@@ -923,7 +927,7 @@ void Editor::anim_command(const std::vector<std::string> &t) {
   if (verb == "preview") return anim_set_preview(on(2));
   if (verb == "record") {
     anim_.record = on(2);
-    if (anim_.record) anim_set_preview(true);
+    if (anim_.record) anim_set_preview(true), anim_snapshot_shown();
     return;
   }
   if (verb == "play") {

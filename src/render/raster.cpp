@@ -1111,7 +1111,7 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
         float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
         if (a <= 0) continue;
         uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
-        d = Color::blend(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));
+        d = Color::over(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));  // (over: task 0193)
       }
     return;
   }
@@ -1122,7 +1122,7 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
     if (c.depth_test && z - c.bias > rt_->depth[(size_t)y * Wi + x]) return;
     uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
     uint32_t ca8 = (uint32_t)((color >> 24) * saturate(a));
-    d = Color::blend(d, (color & 0xFFFFFF) | (ca8 << 24));
+    d = Color::over(d, (color & 0xFFFFFF) | (ca8 << 24));
   };
   float nx0 = c.x0, ny0 = c.y0, nz0 = c.z0, nx1 = c.x1, ny1 = c.y1, nz1 = c.z1;
   float ldx = nx1 - nx0, ldy = ny1 - ny0;
@@ -1144,6 +1144,12 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
 }
 
 void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias) {
+  if (record_) {
+    OverlayRecord::Op op;
+    op.kind = OverlayRecord::Op::Line, op.a = a, op.b = b, op.color = color, op.value = bias, op.depth_test = depth_test;
+    record_->ops.push_back(op);
+    return;
+  }
   OverlayCmd c;
   if (!prepare_line(a, b, color, depth_test, bias, c)) return;
   if (batching_) overlay_cmds_.push_back(c);
@@ -1151,6 +1157,12 @@ void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bia
 }
 
 void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
+  if (record_) {
+    OverlayRecord::Op op;
+    op.kind = OverlayRecord::Op::Point, op.a = p, op.color = color, op.value = r, op.depth_test = depth_test;
+    record_->ops.push_back(op);
+    return;
+  }
   OverlayCmd c;
   if (!prepare_point(p, r, color, depth_test, c)) return;
   if (batching_) overlay_cmds_.push_back(c);
@@ -1183,6 +1195,14 @@ void Renderer3D::record_many(size_t n, const Prepare &prepare) {
 }
 
 void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias) {
+  if (record_) {
+    for (size_t i = 0; i < n; i++) {
+      Vec3 a, b;
+      uint32_t color = 0;
+      if (get(i, a, b, color)) line(a, b, color, depth_test, bias);
+    }
+    return;
+  }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
     Vec3 a, b;
     uint32_t color = 0;
@@ -1191,11 +1211,30 @@ void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &
 }
 
 void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test) {
+  if (record_) {
+    for (size_t i = 0; i < n; i++) {
+      Vec3 p;
+      uint32_t color = 0;
+      if (get(i, p, color)) point(p, r, color, depth_test);
+    }
+    return;
+  }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
     Vec3 p;
     uint32_t color = 0;
     return get(i, p, color) && prepare_point(p, r, color, depth_test, cmd);
   });
+}
+
+/* What was recorded, drawn here as it would have been (task 0192: the card couldn't take it). */
+void Renderer3D::replay(const OverlayRecord &r) {
+  for (const OverlayRecord::Op &op : r.ops) switch (op.kind) {
+      case OverlayRecord::Op::Line: line(op.a, op.b, op.color, op.depth_test, op.value); break;
+      case OverlayRecord::Op::Point: point(op.a, op.value, op.color, op.depth_test); break;
+      case OverlayRecord::Op::Outline:
+        outline_ids(std::vector<uint32_t>(r.ids.begin() + op.first, r.ids.begin() + op.first + op.count), op.color, (int)op.value);
+        break;
+    }
 }
 
 void Renderer3D::begin_overlay_batch() {
@@ -1231,6 +1270,14 @@ void Renderer3D::end_overlay_batch() {
 }
 
 void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, int width) {
+  if (record_ && !sel.empty()) {
+    OverlayRecord::Op op;
+    op.kind = OverlayRecord::Op::Outline, op.color = color, op.value = (float)width;
+    op.first = (uint32_t)record_->ids.size(), op.count = (uint32_t)sel.size();
+    record_->ids.insert(record_->ids.end(), sel.begin(), sel.end());
+    record_->ops.push_back(op);
+    return;
+  }
   if (sel.empty() || rt_->ids.empty()) return;  // (a view's target: a shadow map has no ids)
   if (batching_) {  // overlays recorded so far go under the outline
     end_overlay_batch();

@@ -21,9 +21,10 @@ struct Image {
   float *at(int x, int y) { return px.data() + ((size_t)y * w + x) * 4; }
   const float *at(int x, int y) const { return px.data() + ((size_t)y * w + x) * 4; }
   bool empty() const { return w <= 0 || h <= 0; }
+  /* To W x H; a buffer already that size keeps its pixels (every step writes all of them: no clearing). */
   void resize(int W, int H) {
     w = W, h = H;
-    px.assign((size_t)W * H * 4, 0.0f);
+    if (px.size() != (size_t)W * H * 4) px.assign((size_t)W * H * 4, 0.0f);
   }
 };
 
@@ -57,11 +58,16 @@ struct Adjustment {
 Adjustment make_adjustment(const std::string &type);  // its defaults (type "" when unknown)
 
 /* `in` through `a` into `out` (may be another size: Crop, Rotate), blended with `in` by its mask's weight. */
-void apply(const Adjustment &a, const Image &in, Image &out);
+/* `scale`: the picture's size over the source's (a preview): the fields in pixels (Crop's rectangle, Sharpen's
+ * radius) follow it. */
+void apply(const Adjustment &a, const Image &in, Image &out, float scale = 1.0f);
 
 /* One line of an .edit file ("Exposure: Exposure=1 | ..."), and back (false when the line isn't one). */
 std::string to_text(const Adjustment &a);
 bool from_text(const std::string &line, Adjustment &a);
+
+/* The size `a` turns a w x h picture into (a crop's, a quarter turn's), without its pixels. */
+void output_size(const Adjustment &a, int w, int h, int &ow, int &oh);
 
 /* HSL's eight hue bands (Lightroom's), in its fields' order. */
 const char *const *hsl_band_names();

@@ -1504,6 +1504,8 @@ class Scene {
   void set_parent(GameObject *child, GameObject *new_parent, int index = -1, bool keep_world = true);
   bool is_ancestor(const GameObject *ancestor, const GameObject *node) const;
   GameObject *duplicate(GameObject *go);
+  /* Task 0207: several duplicated at once (Duplicate on a selection) - each named and placed as duplicate() does it. */
+  std::vector<GameObject *> duplicate_many(const std::vector<GameObject *> &gos);
   std::unique_ptr<Scene> clone() const;
   void clear();
 

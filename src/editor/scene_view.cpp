@@ -116,7 +116,10 @@ void Editor::draw_scene_view(const Recti &r) {
     else {
       std::vector<float> depth0;
       std::vector<uint32_t> ids0;
-      if (hit) depth0 = scene_rt_.depth, ids0 = scene_rt_.ids;  // what picking would have read
+      if (hit) {  // (verify mode: what picking would have read - task 0204: from the card, if it still has them)
+        ensure_scene_planes();
+        depth0 = scene_rt_.depth, ids0 = scene_rt_.ids;
+      }
       render_scene_view(view);
       prof_.view_renders++;
       if (hit && view_cache_verify(scene_cache_, view, "Scene view") && (depth0 != scene_rt_.depth || ids0 != scene_rt_.ids)) {
@@ -397,6 +400,13 @@ static LightingEnv build_env(const Scene &s) {
 }
 
 void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEnv &, Vec3) {
+  for (const DrawItem &it : solid_items(s, game)) r3d.add(it);
+}
+
+/* What Solid shading draws (submit_scene's items): each shown mesh with its materials, Edit Mode's cage mesh with its face
+ * highlight, Weight Paint's mesh in its weight colours. */
+std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
+  std::vector<DrawItem> items;
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -426,11 +436,13 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
       it.unlit = false;
       it.materials = nullptr;  // (with materials, Solid shades per pixel from them: the weight colours are the point here)
     }
-    r3d.add(it);
+    items.push_back(it);
   });
+  return items;
 }
 
 void Editor::render_scene_view(const Recti &view) {
+  scene_planes_slot_ = -1;  // (task 0204: whoever draws this frame writes its planes; the card says so again if it keeps them)
   scene_rt_.attach(fb_, view);
   float aspect = view.w / (float)std::max(1, view.h);
   Mat4 v = cam_.view(), p = cam_.proj(aspect);
@@ -477,12 +489,15 @@ void Editor::render_scene_view(const Recti &view) {
     return;
   }
   cage_on_gpu_ = false;
-  if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
-    GameObject *fowner = nullptr;
-    if (scene_filters_) main_camera(*scene_, &fowner);
-    const bool filtered = fowner && !camera_filters(fowner).empty();
-    /* On the card the Scene view draws at full size (task 0100): when its last frame drew there, this one will too. */
-    const bool full = !filtered && scene_full_size();
+  overlays_on_gpu_ = false;
+  const bool shaded = shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe;
+  GameObject *fowner = nullptr;
+  if (shaded && scene_filters_) main_camera(*scene_, &fowner);
+  const bool filtered = fowner && !camera_filters(fowner).empty();
+  /* On the card the Scene view draws at full size (task 0100): when its last frame drew there, this one will too. */
+  const bool full = !filtered && scene_full_size();  // (Solid and Wireframe too since task 0195)
+  record_scene_overlays(view, full && overlays_card_expected());  // (task 0192: for the card to draw with the picture)
+  if (shaded) {
     scene_on_gpu_ = false;
     render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) {
       if (filtered)  // the main camera's filters on the editor's view
@@ -496,11 +511,19 @@ void Editor::render_scene_view(const Recti &view) {
     }, fowner, true, true, full);
     scene_stats_ = scene_r3d_.stats();
   }
-  else render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) { render_solid(t, v, p); });
+  else {  // (Solid and Wireframe: on the card too, task 0195)
+    scene_on_gpu_ = false;
+    render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) {
+      scene_gpu_call_ = true;
+      scene_full_call_ = full;
+      render_solid(t, v, p);
+      scene_gpu_call_ = scene_full_call_ = false;
+    }, nullptr, false, true, full);
+  }
   ScopedTimer ot;
   scene_r3d_.begin_overlay_batch();  // the grid and the wireframes are thousands of lines: drawn in parallel bands
-  if (show_grid_) draw_grid(scene_r3d_);
-  render_overlays(view);
+  draw_scene_overlays(view);  // (here unless the card drew them: task 0192)
+  render_edit_cage();
   scene_r3d_.end_overlay_batch();
   prof_.ms_overlays += ot.ms();
 }
@@ -517,11 +540,21 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
     env.sky = env.equator = env.ground = Vec3(0.35f);
   }
   scene_r3d_.begin(&rt, v, p, env, raster_opt_);
-  scene_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
-  if (shading_ != Shading::Wireframe) {
-    submit_scene(scene_r3d_, *scene_, false, env, env.camera_pos);
-    scene_r3d_.flush();
+  /* Task 0195: on the card when it can - the same items, the headlight, the editor's sky (scene_lights false: the
+   * editor's background), no shadow map, as here; Gouraud (the default) lit per vertex by shade()'s formulas. */
+  std::vector<DrawItem> items;
+  if (shading_ != Shading::Wireframe) items = solid_items(*scene_, false);
+  if (raster_opt_.shade != ShadeMode::DepthOnly && gpu_view_may_draw(rt, env, items, nullptr) &&
+      gpu_view_draw(rt, v, p, env.camera_pos, env, items, nullptr, false, nullptr, raster_opt_)) {
+    size_t tris = 0;
+    for (const DrawItem &it : items) tris += it.mesh ? it.mesh->tri_count() : 0;
+    scene_r3d_.note_submitted((int)items.size(), tris);
+    scene_stats_ = scene_r3d_.stats();
+    return;
   }
+  scene_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
+  for (const DrawItem &it : items) scene_r3d_.add(it);
+  if (!items.empty()) scene_r3d_.flush();
   scene_stats_ = scene_r3d_.stats();
 }
 
@@ -780,6 +813,7 @@ bool Editor::gizmo_update(const Recti &view) {
   /* Start drag. */
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt()) {
     drag_ = Drag::Gizmo;
+    gizmo_typed_.clear();
     autopose_.bone = 0;  // (a drag cut short before - a modal opened - starts AutoPosing afresh, from the pose now)
     autopose_.start.clear();
     gizmo_axis_ = gizmo_hot_;
@@ -932,6 +966,7 @@ bool Editor::gizmo_update(const Recti &view) {
           gizmo_snap_point_ = p;
         }
       }
+      if (h <= H_MOVE_Z) typed_axis_move(axis[h], delta);  // (task 0190: type 2.5 while dragging: exactly 2.5 along the axis)
       gizmo_live_delta_ = delta;
       if (eo) {
         ProfileScope prof{prof_.ms_edit_apply, {}};
@@ -1362,6 +1397,7 @@ void Editor::edges_from_verts() {
   edge_sel_.clear();
   if (!edit_object()) return;
   const Mesh &m = **edit_mesh_ptr();
+  edge_sel_.reserve(m.edge_cache().size());  // (task 0208: no rehashing as it fills)
   for (auto &e : m.edge_cache())
     if (e.first < vert_sel_.size() && e.second < vert_sel_.size() && vert_sel_[e.first] && vert_sel_[e.second])
       edge_sel_.insert(Mesh::edge_key(e.first, e.second));
@@ -1387,7 +1423,9 @@ void Editor::edit_select_all(bool sel) {
   if (!edit_object()) return;
   std::fill(vert_sel_.begin(), vert_sel_.end(), sel ? 1 : 0);
   std::fill(face_sel_.begin(), face_sel_.end(), sel ? 1 : 0);
-  if (sel) edges_from_verts();
+  /* Task 0208: the edges' own selection only in Edge mode, the one that reads it (switching to it works it out from the
+   * vertices): every edge of a 500k-face mesh into a set took 168 ms, and the Scene view's key walked it every frame. */
+  if (sel && elem_ == EditElement::Edge) edges_from_verts();
   else edge_sel_.clear();
 }
 
@@ -2571,8 +2609,9 @@ void Editor::run_last_op(bool first) {
   }
   double unused = 0;
   ProfileScope prof{first ? unused : prof_.ms_edit_op, {}};  // (a first run is timed by begin_redoable_op, which includes it)
-  /* Start again from the mesh as it was before the operator: the one copy an operator makes (task 0165). */
-  mf->mesh = mesh_copy(*L.before);
+  /* Start again from the mesh as it was before the operator: the one copy an operator makes (task 0165), without
+   * its caches (task 0185: most operators change the topology, and the copied render meshes were most of the copy). */
+  mf->mesh = mesh_copy_bare(*L.before);
   Mesh &m = *mf->mesh;
   struct AutoSmooth {
     Editor &ed;
@@ -2711,6 +2750,7 @@ void Editor::run_last_op(bool first) {
     else if (op == "to_sphere") meshops::to_sphere(m, vert_sel_, L.amount);
     else meshops::randomize(m, vert_sel_, L.amount, (uint32_t)std::max(1, L.segments));
   }
+  if (ok) m.adopt_caches(*L.before);  // (an operator that only moved vertices: the render meshes follow in place)
   if (!ok) {
     /* Back to the untouched mesh, as a copy (task 0165): the very pointer would bring back an earlier render-cache key
      * whose picture was drawn with state the key doesn't hold (verify mode found it after an Esc). */

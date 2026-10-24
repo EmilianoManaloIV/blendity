@@ -827,11 +827,13 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   if (popup_open(i)) {
     std::vector<std::string> opts(options, options + std::max(0, count));
     popup(i, std::max(r.w, px(120)), [this, i, v, opts = std::move(opts)] {
-      for (int k = 0; k < (int)opts.size(); k++)
+      for (int k = 0; k < (int)opts.size(); k++) {
         if (menu_item(opts[(size_t)k].c_str(), nullptr, k == v)) {
           int_results_[i] = k;
           redraw = true;
         }
+        if (favorite_request == opts[(size_t)k]) favorite_request.clear();  // (an option, not a command: no favorite)
+      }
     });
   }
   last_widget_ = r;
@@ -1251,6 +1253,7 @@ bool Context::menu_item(const std::string &text, const char *shortcut, bool chec
   }
   last_widget_ = r;
   last_hovered_ = hot;
+  if (hot && enabled && in.pressed[1]) favorite_request = text;  // (right-click: "add to Quick Favorites", task 0189)
   if (hot && enabled && in.released[0]) {
     /* A dropdown inside a dialog closes alone; anything else closes every popup. */
     if (current_layer_ > 0 && current_layer_ - 1 < (int)popups_.size() && popups_[current_layer_ - 1].dropdown) {

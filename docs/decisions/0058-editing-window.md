@@ -54,6 +54,25 @@ are fractions of the picture the step acts on, so a mask follows a resized sourc
 masks. Range masks read the step's own input (what the step sees), not the source. The painted plane saves in the
 `.edit` line as run-length hex.
 
+## Amendment (task 0183, round 200): textures and the camera look
+A texture asset is one more source: its albedo output, evaluated without the layer an earlier Apply added, opens in
+the Editing tab. Apply writes the export beside the asset (`<texture> edit.png`, the stack beside it as `.edit`) and
+adds - or reuses - an Image layer on top that writes the albedo only, so the asset stays procedural underneath and the
+edit is one layer to turn off. "Use as Camera Look" maps the unmasked steps a camera filter can do onto the Main
+Camera's filter stack: Exposure, Contrast and Saturation exactly (the same formulas, `grade.h`), Temperature / Tint
+and the Tone Curve approximately (the camera's white balance is channel gains; a curve becomes lift, gamma and gain
+through black, middle grey and white), a darkening Vignette and Sharpen as their own effects; the rest is named and
+left out rather than faked.
+
+## Amendment (task 0191, round 201): the window's preview
+The window evaluates the stack on a preview of the source no larger than its canvas (an area average, the side in
+steps of 512 pixels so a resize doesn't remake it every frame), through a second pipeline with its own cache; the
+fields in pixels (Crop's rectangle, Sharpen's radius, Noise Reduction's colour blur) follow its scale; the full
+picture is evaluated for export, Apply to Texture, the camera look and a zoom past the preview's resolution. Pointwise
+steps match the full result made small; neighbourhood steps are close (Lightroom's previews have the same property).
+Results are written into reused buffers (a 4K picture is 133 MB); the full-size pipeline keeps one spare and none
+after an export. The display axis's encode and decode go through 4097-entry tables (within 1e-5 of the curves).
+
 ## Alternatives considered
 - Grading in 8 bits after the view transform (as the camera filters do): rejected: exposure and white balance must
   act on light, and highlights clipped by the view can't be recovered.

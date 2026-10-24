@@ -211,6 +211,14 @@ void Editor::draw_textures_window(const Recti &r) {
     if (u.button(ab, "Assign to Selection", false)) assign_texture_asset_to_selection(texture_selected_->asset_path);
     u.tooltip("The selected objects' first material gets this texture's albedo, normal and roughness, tiled by its physical size.");
     x = ab.right() + u.px(6);
+    const Recti eb{x, bar.y + u.px(3), u.px(60), bh - u.px(6)};
+    texture_ui_rects_["edit"] = eb;
+    if (u.button(eb, "Edit", false)) {
+      dock_open(WindowKind::Editing);
+      edit_open_texture(texture_selected_->asset_path);
+    }
+    u.tooltip("Open this texture's colour in the Editing tab; Apply to Texture puts the result back as a layer on top.");
+    x = eb.right() + u.px(6);
     const Recti db{x, bar.y + u.px(3), u.px(80), bh - u.px(6)};
     texture_ui_rects_["delete"] = db;
     if (u.button(db, "Delete", false) && !asking) request_texture_delete();

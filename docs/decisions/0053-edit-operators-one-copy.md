@@ -40,6 +40,14 @@ frame first (its task doc has the probe's lines):
 - **What the Profiler shows:** `FrameProfile::ms_edit_op`, the operator's own time inside the command that ran it,
   in the "Edit Mode: operator / mesh writes / overlap check" row and in the stress edit_frame notes.
 
+## Amendment (task 0185, round 208): the one copy without the caches
+The copy measured as 3.5 ms was mostly what Mesh keeps about itself: its two render meshes, the edge table and the
+topology snapshot, copied and then thrown away when the operator changes the topology. The caches now sit in a base of
+Mesh whose copy leaves them behind inside a `MeshCopyBare` scope (`mesh_copy_bare`, what run_last_op uses): 0.5 ms.
+An operator that only moved vertices takes the old mesh's caches back (`Mesh::adopt_caches`, when the topology data is
+byte-identical), so its render meshes follow in place as before. Per-array copy-on-write stays declined: the data the
+operator writes is still copied, once.
+
 ## Consequences
 - The operator itself drops from 60 ms to under 10 ms on 50k faces (the task doc's measured line); the frame
   after it - two render meshes rebuilt, the shadow map and the views redrawn - is now most of the row and is
