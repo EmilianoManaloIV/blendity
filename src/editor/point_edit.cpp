@@ -36,14 +36,6 @@ std::vector<size_t> point_samples(const Curve &c, const CurvePath &path) {
   return at;
 }
 
-float dist_to_segment_2d(Vec2 p, Vec2 a, Vec2 b, float *t_out = nullptr) {
-  const Vec2 ab = b - a;
-  const float l2 = dot(ab, ab);
-  const float t = l2 > 0.0f ? std::max(0.0f, std::min(1.0f, dot(p - a, ab) / l2)) : 0.0f;
-  if (t_out) *t_out = t;
-  return length(p - (a + ab * t));
-}
-
 }  // namespace
 
 bool Editor::curve_extrude(GameObject *g, const std::vector<int> &pts) {

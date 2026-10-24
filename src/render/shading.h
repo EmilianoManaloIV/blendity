@@ -49,6 +49,9 @@ struct SurfacePoint {
    * always live). */
   bool live_textures = false;
   float footprint = 0.0f, world_footprint = 0.0f;  // the same in world metres (an axis material's World mode)
+  /* Task 0164: how the shading normal changes to the next pixel right and below (the deferred pass's forward
+   * differences; zero where unknown), so a toon band's edge can be one pixel wide wherever it falls. */
+  Vec3 normal_dx, normal_dy;
   /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
   bool has_lightmap = false;
   Vec3 lightmap;
@@ -71,6 +74,19 @@ struct SurfaceSample {
   Vec3 normal;  // after normal mapping
   bool unlit = false;
   const Material *toon = nullptr;  // a Toon material (ADR 0020): lights shade it through shade_toon
+  /* The toon maps at this point (task 0148): the shadow side's own albedo, the painted shadow bias (0.5 neutral), the
+   * highlight's and the rim's masks, the ramp (sampled per light by how lit), and the tangent for a hair highlight. */
+  Vec3 toon_shade;
+  bool has_shade = false;
+  float toon_bias = 0.5f, toon_spec_mask = 1.0f, toon_rim_mask = 1.0f;
+  const Texture *toon_ramp = nullptr;
+  Vec3 toon_strand;  // the hair's direction (V of the UVs: the bitangent), for the hair highlight
+  bool toon_has_tangent = false;
+  /* The 2D look (task 0149): what multiplies the shadow tones (the inner lines when only in shadow, the hatching), and
+   * the face shadow map at the point and at its mirror (-1: no map). */
+  Vec3 toon_shadow_mul{1.0f, 1.0f, 1.0f};
+  Vec3 toon_n_dx, toon_n_dy;  // task 0164: the normal's change across the pixel (sp.normal_dx / dy), for the band edges
+  float face_sdf = -1.0f, face_sdf_mirror = -1.0f;
 };
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
@@ -85,20 +101,39 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
 
 /* --- Toon (ADR 0020) --- */
 /* How lit a toon surface is, 0 (the shadow tone) to 1, in `toon_bands` steps: lit = N.L x visibility. */
-float toon_level(const Material &m, float lit);
+float toon_level(const Material &m, float lit, float edge = 0.0f);  // edge: a screen-space half-width added to the softness (task 0164)
 /* A toon surface's light toward the eye from one light, per unit of the light's colour x intensity (Unity's
- * convention: intensity 1 lights a white surface white): the albedo from the shadow colour to full by the tone,
- * plus the highlight spot. s.toon must be set. */
+ * convention: intensity 1 lights a white surface white): the albedo from the shadow colour (or the shade map) to
+ * full by the tone - the bands, or the ramp - after the light wrap and the painted bias, plus the highlight spot
+ * where its map allows (a band across the tangent for hair). s.toon must be set. */
 Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit);
-/* The rim light at the silhouette (added once, not per light). */
-Vec3 toon_rim(const Material &m, Vec3 n, Vec3 V);
+/* The rim light at the silhouette (added once, not per light), on the side the material asks for relative to the
+ * key light's direction `key_L` (toward the light), where its mask allows. */
+Vec3 toon_rim(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 key_L);
+/* The key light (task 0148): the brightest directional light's index, -1 without one; `L` the direction toward it
+ * (up when there is none). With Toon Key Light Only, only it bands the tones. */
+struct RenderLight;  // raster.h
+int toon_key_light(const std::vector<RenderLight> &lights, Vec3 *L = nullptr);
+/* The face shadow (task 0149): the key light's direction in the object's space `local_L`, projected round the face's
+ * up axis, gives an angle (0 from the front, 1 from behind); the map's value at the point (its mirror when the light
+ * is on the face's other side) above it means lit. The lit term in place of N.L, or -1 when the sample has no map. */
+float toon_face_lit(const Material &m, const SurfaceSample &s, Vec3 local_L);
+/* A fill light's share on a toon surface (Key Light Only): smooth Lambert in the toon's units. */
+inline Vec3 toon_fill(const SurfaceSample &s, float lit) { return s.albedo * std::max(0.0f, lit); }
+/* Light wrap (task 0148): the signed N.L remapped so the light reaches round the form - before the clamp, the shadow
+ * lookup and the falloff, so the terminator moves and a cast shadow stays dark. Every renderer's light loop takes
+ * N.L through this for a toon surface. */
+inline float toon_wrap_ndl(const Material &m, float ndl) {
+  const float w = finite_bits(m.toon_wrap) ? std::max(0.0f, std::min(1.0f, m.toon_wrap)) : 0.0f;
+  return w > 0.0f ? (ndl + w) / (1.0f + w) : ndl;
+}
 
 /* --- BRDF --- */
 Vec3 fresnel_f0(const SurfaceSample &s);
 /* Cook-Torrance GGX + Lambert, times N.L. n, v, l normalized; v, l point away from the surface. */
 Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l);
 /* brdf_eval's two terms apart: the diffuse per unit N.L (albedo, Fresnel-weighted) and the specular times
- * N.L (an area light shades its diffuse from area_light_cosine and its specular from one direction). */
+ * N.L (an area light shades its diffuse from area_light_irradiance and its specular from one direction). */
 void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffuse, Vec3 &specular);
 /* Karis' analytic approximation of the split-sum environment BRDF. */
 Vec3 env_brdf_approx(Vec3 f0, float roughness, float nv);

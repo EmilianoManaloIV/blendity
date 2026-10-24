@@ -4,6 +4,7 @@
 #include "learn.h"
 #include "../texture/procedural_texture.h"
 #include "../render/texture_bake.h"
+#include "../render/optix_device.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -30,13 +31,13 @@ using ui::Icon;
 static const char *kVersion = releases::version();  // (VERSION, through the build scripts)
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer", "Live Link", "Editing"};
   static_assert(sizeof(names) / sizeof(names[0]) == (size_t)WindowKind::Count, "a title per window");
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step, Icon::Play};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step, Icon::Play, Icon::Globe, Icon::Eye};
   static_assert(sizeof(icons) / sizeof(icons[0]) == (size_t)WindowKind::Count, "an icon per window");
   return icons[(int)k];
 }
@@ -85,6 +86,11 @@ Editor::~Editor() {
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
   procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
+  for (auto &w : windows_) {
+    if (gpu_view_ && w->card_win >= 0) gpu_view_->detach_window(w->card_win);  // (a swapchain before its window: task 0193)
+    if (w->os) destroy_window(w->os);
+  }
+  if (gpu_view_ && card_win_ >= 0) gpu_view_->detach_window(card_win_);
   if (window_) destroy_window(window_);
 }
 
@@ -129,6 +135,7 @@ void Editor::resolve_project_paths(const std::string &near) {
   screenshots_dir_ = fs::join(project_root_, "Screenshots");
   fs::make_dirs(fs::join(assets_dir_, "Scenes"));
   std::string prefs_dir = fs::join(fs::home_dir(), ".blendity");
+  if (const char *env = std::getenv("BLENDITY_PREFS_DIR")) prefs_dir = env;  // (a check or a test: scratch preferences, task 0193)
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
@@ -171,12 +178,14 @@ bool Editor::init(int argc, char **argv) {
   ui_.clipboard_get = [this] { return get_clipboard(window_); };
   ui_.clipboard_set = [this](const std::string &s) { set_clipboard(window_, s); };
   set_refresh_callback(window_, [this] {
-    std::vector<Event> none;
     present_all_ = true;  // (the system asked for the window to be painted: all of it)
+    if (in_frame_) return;  // (asked from inside a frame - a window's move or a secondary window's poll: the next frame paints)
+    std::vector<Event> none;
     frame(none);
   });
   if (!layout_arg.empty()) dock_reset(layout_arg);
   if (!dock_) dock_reset("Default");
+  if (layout_arg.empty()) restore_windows(windows_pref_);  // (the windows of the last session, task 0187)
   scene_ = std::make_unique<Scene>();
   std::string sample = fs::join(assets_dir_, "Scenes/SampleScene.scene");
   if (!scene_arg.empty()) open_scene(scene_arg);
@@ -200,6 +209,7 @@ bool Editor::init(int argc, char **argv) {
 void Editor::init_headless(int width, int height) {
   common_init(this);
   headless_ = true;
+  inspector_essentials_ = false, guides_enabled_ = false;  // (the tests' Inspector shows every field; no guide strip moves the docks)
   resolve_project_paths();
   dpi_ = 1.0f;
   apply_ui_scale();
@@ -270,11 +280,69 @@ std::vector<std::pair<int, int>> Editor::changed_rows(const uint32_t *px, int wi
   return runs;
 }
 
+/* Task 0198: the changed parts of a frame as rects - 16-row bands, each with the columns its changed 256-pixel tiles
+ * span (a scrolled panel changes its own columns, not the window's) - against `tiles` (the hashes of the last frame
+ * presented, updated here); the whole frame when `all` or the size changed. Bands next to each other spanning the same
+ * columns are one rect. */
+std::vector<gpu::Raster::PresentRect> Editor::changed_rects(const uint32_t *px, int width, int height, std::vector<uint64_t> &tiles, bool all) {
+  constexpr int kBand = 16, kTile = 256;
+  const int nb = (height + kBand - 1) / kBand, nt = (width + kTile - 1) / kTile;
+  std::vector<uint64_t> fresh((size_t)nb * nt);
+  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+    for (int b = (int)b0; b < (int)b1; b++)
+      for (int t = 0; t < nt; t++) {
+        const int x0 = t * kTile, w = std::min(kTile, width - x0);
+        uint64_t h = 0;
+        for (int y = b * kBand; y < std::min(height, (b + 1) * kBand); y++)
+          h = (h ^ band_hash((const uint8_t *)(px + (size_t)y * width + x0), (size_t)w * 4)) * 0x100000001B3ull;
+        fresh[(size_t)b * nt + t] = h;
+      }
+  });
+  all = all || tiles.size() != fresh.size();
+  std::vector<gpu::Raster::PresentRect> rects;
+  for (int b = 0; b < nb; b++) {
+    int lo = nt, hi = -1;
+    for (int t = 0; t < nt; t++)
+      if (all || tiles[(size_t)b * nt + t] != fresh[(size_t)b * nt + t]) lo = std::min(lo, t), hi = t;
+    if (hi < 0) continue;
+    const int y0 = b * kBand, y1 = std::min(height, y0 + kBand), x0 = lo * kTile, x1 = std::min(width, (hi + 1) * kTile);
+    if (!rects.empty() && rects.back().y1 == y0 && rects.back().x0 == x0 && rects.back().x1 == x1) rects.back().y1 = y1;
+    else rects.push_back({x0, y0, x1, y1});
+  }
+  tiles.swap(fresh);
+  return rects;
+}
+
 void Editor::present_changed() {
   const bool all = present_all_ || fb_.width != present_w_ || fb_.height != present_h_;
   present_w_ = fb_.width, present_h_ = fb_.height;
-  const std::vector<std::pair<int, int>> runs = changed_rows(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  /* (Task 0198: changed rects for the card; the system shows whole rows, the rects' bands.) */
+  const std::vector<gpu::Raster::PresentRect> rects = changed_rects(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  std::vector<std::pair<int, int>> runs;
+  for (const gpu::Raster::PresentRect &r : rects) {
+    if (!runs.empty() && runs.back().second == r.y0) runs.back().second = r.y1;
+    else runs.emplace_back(r.y0, r.y1);
+  }
   present_all_ = false;
+  /* Task 0193: the card shows the window - the views it holds, the canvas over them - when it presents this one. */
+  if (card_present_ && card_win_ >= 0 && gpu_view_) {
+    card_present_ = false;  // (until the next frame decides again: nothing drawn between frames keeps a view there)
+    std::string err;
+    const gpu::Raster::PresentResult r =
+        gpu_view_->present_window(card_win_, fb_.pixels.data(), fb_.width, fb_.height, rects, all || card_ui_stale_, card_views_, &err);
+    if (r == gpu::Raster::Shown) {
+      card_ui_stale_ = false;
+      card_views_shown_ = card_views_;
+      card_frames_++;
+      return;
+    }
+    present_all_ = true;  // (skipped or failed: all of it next time)
+    if (r == gpu::Raster::Skipped) return;  // (minimised, mid-resize: nothing wrong, nothing to show now)
+    card_present_failed(err);
+    if (!card_views_.empty()) return;  // (the canvas has holes where the card's pictures were: the next frame draws them here)
+  }
+  card_views_shown_.clear();
+  if (card_win_ >= 0) card_ui_stale_ = true;  // (task 0198: the card's UI image doesn't have this frame's changes)
   if (all) return present(window_, fb_.pixels.data(), fb_.width, fb_.height);
   present_rows(window_, fb_.pixels.data(), fb_.width, fb_.height, runs);
 }
@@ -291,9 +359,12 @@ int Editor::run() {
     if (continuous) timeout = 0;  // (the pacer below waits for the frame's turn, precisely)
     else if (ui_.next_wakeup > 0) timeout = std::max(1, (int)((ui_.next_wakeup - now) * 1000.0) + 1);
     if (ui_.redraw || first) timeout = 0;
+    if (!windows_.empty()) timeout = std::min(timeout, 50);  // (X11 and Cocoa wake for the main window's events only)
     poll_events(window_, events, timeout);
+    gather_window_events();
     now = now_seconds();
     bool need = first || !events.empty() || ui_.redraw || continuous || (ui_.next_wakeup > 0 && now >= ui_.next_wakeup);
+    for (auto &w : windows_) need = need || !w->pending.empty() || w->ui.redraw || (w->ui.next_wakeup > 0 && now >= w->ui.next_wakeup);
     /* Pick up log lines written from other threads/systems. */
     std::vector<LogEntry> tmp;
     if (Log::fetch(log_seen_ + log_.size(), tmp) > log_seen_ + log_.size()) need = true;
@@ -336,8 +407,8 @@ void Editor::request_close() {
 
 void Editor::process_events(std::vector<Event> &events) {
   auto &in = ui_.in;
-  static double last_click[3] = {-1, -1, -1};
-  static int last_click_x[3], last_click_y[3];
+  double *last_click = in.last_click;  // (each window's own: task 0187)
+  int *last_click_x = in.last_click_x, *last_click_y = in.last_click_y;
   in.pmx = in.mx;
   in.pmy = in.my;
   for (int b = 0; b < 3; b++) in.pressed[b] = in.released[b] = in.double_clicked[b] = false;
@@ -353,6 +424,7 @@ void Editor::process_events(std::vector<Event> &events) {
       case EventType::MouseMove:
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
+        in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
         break;
       case EventType::Gesture:  // (task 0075: two fingers; the Scene view navigates with them)
         if (!in.down[0] && !in.down[1] && !in.down[2]) in.mx = e.x, in.my = e.y;  // (a held button's drag keeps its own point)
@@ -363,9 +435,11 @@ void Editor::process_events(std::vector<Event> &events) {
         in.touch_rotate += e.rotate;
         break;
       case EventType::MouseDown: {
+        pointer_window_ = active_window_;  // (the window the press is in owns its drags)
         int b = e.button;
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
+        in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
         in.down[b] = true;
         in.pressed[b] = true;
         double t = now_seconds();
@@ -428,7 +502,7 @@ void Editor::process_events(std::vector<Event> &events) {
 }
 
 void Editor::apply_ui_scale() {
-  float s = ui_scale_pref_ > 0 ? ui_scale_pref_ : std::max(1.0f, dpi_);
+  float s = (ui_scale_pref_ > 0 ? ui_scale_pref_ : std::max(1.0f, dpi_)) * (tablet_ ? 1.5f : 1.0f);  // (Tablet: bigger targets, task 0188)
   ui_.scale = s;
   if (ui_.font.source().empty()) ui_.font.load_system_ui_font(13.0f * s);
   else ui_.font.set_pixel_height(13.0f * s);
@@ -439,6 +513,13 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
+  in_frame_ = true;
+  frame_body(events);
+  in_frame_ = false;
+  if (save_prefs_pending_) save_prefs();  // (asked for while another window drew: its state was in place then)
+}
+
+void Editor::frame_body(std::vector<Event> &events) {
   /* The system asked for the window to be painted, or it changed: present all of it (what it showed may be gone). */
   for (const Event &e : events)
     if (e.type == EventType::Repaint || e.type == EventType::Resize || e.type == EventType::DpiChanged) present_all_ = true;
@@ -451,11 +532,12 @@ void Editor::frame(std::vector<Event> &events) {
   process_events(events);
   update_procedural_shapes();
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
-  if (texture_touch_pending_ && !ui_.in.down[0]) {
+  if (texture_touch_pending_ && !any_button_down()) {
     procedural_texture_clear_previews();
     invalidate_material_textures();
     texture_touch_pending_ = false;
   }
+  if (scene_) gpu::set_backend(scene_->render.gpu_backend);  // (task 0170: before the prewarm, so its spares are the right kind)
   if (scene_ && scene_->render.device >= 1) gpu::prewarm(!headless_, scene_->render.hardware_rt);  // once; the GPU kernel and devices off the UI thread
   /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
    * mesh instead, or leave Edit Mode for anything without one. */
@@ -487,7 +569,7 @@ void Editor::frame(std::vector<Event> &events) {
       play_time_ += dt;
       ctx.time = play_time_;
       ctx.dt = dt;
-      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && ui_.in.key_down[k]; };
+      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && key_down_any(k); };
       scene_->update(ctx);
       play_dt = dt;
       step_requested_ = false;
@@ -498,6 +580,7 @@ void Editor::frame(std::vector<Event> &events) {
   if (play_dt > 0.0f && assist_on(Assist::Locomotion)) locomotion::step(*scene_, play_dt, play_ground_);
   if (solve_constraints(*scene_)) ui_.redraw = true;
   if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
+  else if (play_dt > 0.0f) spring::tick(*scene_, play_dt);  // (the simulated clock still runs: the Jiggle modifier reads it; task 0153)
   if (cam_.update(now)) ui_.redraw = true;
   update_camera_focus();
   /* Live preview: re-render the preview when anything it depends on changes
@@ -523,6 +606,7 @@ void Editor::frame(std::vector<Event> &events) {
   Log::fetch(log_.size(), log_);
 
   ui_.begin_frame(&fb_, now);
+  begin_card_frame();  // (task 0193: whether the card presents this window this frame)
   auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
   /* While a GPU opens in the background, wake a few times a second so a waiting view takes it (task 0037; after
    * begin_frame, which clears the wake-up). */
@@ -559,65 +643,23 @@ void Editor::frame(std::vector<Event> &events) {
   seqr_.drawn = false;
   sync_material_asset_names();
   draw_toolbar(toolbar);
+  dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
   draw_statusbar(status);
   draw_menubar(menubar);  // last so its popups are declared after windows (they draw on top anyway)
+  draw_command_palette();  // (task 0189: Ctrl+K, Shift+Q)
   draw_dialogs();
-  update_asset_drag();
+  if (pointer_window_ == active_window_) update_asset_drag();  // (a drag belongs to the window it started in: task 0187)
   handle_drop();
   handle_shortcuts();
 
-  /* Tab drag & drop between dock areas. */
-  if (tab_drag_ != WindowKind::Count) {
-    auto &in = ui_.in;
-    if (!tab_dragging_ && (std::abs(in.mx - tab_press_x_) > ui_.px(8) || std::abs(in.my - tab_press_y_) > ui_.px(8)))
-      tab_dragging_ = true;
-    if (tab_dragging_) {
-      DockNode *leaf = dock_leaf_at(in.mx, in.my);
-      int zone = 0;
-      Recti pr;
-      if (leaf) {
-        Recti r = leaf->rect;
-        int tbh = ui_.row_h() + ui_.px(4);
-        float fx = (in.mx - r.x) / (float)r.w, fy = (in.my - r.y - tbh) / (float)std::max(1, r.h - tbh);
-        if (in.my < r.y + tbh) zone = 0;
-        else if (fx < 0.25f) zone = 1;
-        else if (fx > 0.75f) zone = 2;
-        else if (fy < 0.25f) zone = 3;
-        else if (fy > 0.75f) zone = 4;
-        pr = r;
-        if (zone == 1) pr.w /= 2;
-        if (zone == 2) { pr.x += pr.w / 2; pr.w /= 2; }
-        if (zone == 3) pr.h /= 2;
-        if (zone == 4) { pr.y += pr.h / 2; pr.h /= 2; }
-      }
-      WindowKind k = tab_drag_;
-      ui_.overlay([this, pr, leaf, k] {
-        auto &cv = ui_.canvas;
-        if (leaf) {
-          cv.fill_rect(pr, Color::hex(0x3A79BB, 70));
-          cv.rect_outline(pr, Color::hex(0x3A79BB), ui_.px(2));
-        }
-        std::string t = window_title(k);
-        Recti tr{ui_.in.mx + ui_.px(10), ui_.in.my + ui_.px(6), ui_.font.text_width(t) + ui_.px(16), ui_.row_h()};
-        ui_.frame(tr, ui_.theme.tab_active, ui_.theme.focus, ui_.px(3));
-        cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
-      });
-      if (in.released[0]) {
-        if (leaf) dock_move(k, leaf, zone);
-        tab_dragging_ = false;
-        tab_drag_ = WindowKind::Count;
-      }
-    }
-    else if (!in.down[0]) {
-      tab_drag_ = WindowKind::Count;
-    }
-  }
+  update_tab_drag();
 
-  finish_hierarchy_drag();
+  if (pointer_window_ == active_window_) finish_hierarchy_drag();
+  take_favorite_request();
   poll_skin_job();
   anim_tick();
   seq_tick();
@@ -625,10 +667,11 @@ void Editor::frame(std::vector<Event> &events) {
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();
   lighting_update_step();
+  livelink_tick();  // (task 0172: what changed this frame goes out; nothing without a client)
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
-  if (pending_change_ && !ui_.in.down[0] && !ui_.in.down[1] && !ui_.in.down[2] && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
+  if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
 
   std::string title = scene_display_name() + (scene_dirty_ ? "*" : "") + " - Blendity" + (playing_ ? " [Playing]" : "");
   if (title != last_title_ && window_) {
@@ -637,6 +680,7 @@ void Editor::frame(std::vector<Event> &events) {
   }
   ui_ms_ = (float)frame_timer.ms();
   if (window_) present_changed();
+  draw_secondary_windows(now);  // (task 0187: after the main window, with its own input each)
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
   /* A move just ended (task 0103 / 0104): one more frame, whatever ends it, so no held or cheap picture stays up. */
@@ -666,6 +710,59 @@ void Editor::frame(std::vector<Event> &events) {
       else i++;
     for (Deferred &d : due) d.fn();
     ui_.redraw = true;
+  }
+}
+
+/* Tab drag & drop between dock areas; a tab dropped outside its window gets a window of its own (from a secondary
+ * window: back into the main one). */
+void Editor::update_tab_drag() {
+  if (tab_drag_ == WindowKind::Count || tab_drag_window_ != active_window_) return;
+  auto &in = ui_.in;
+  if (!tab_dragging_ && (std::abs(in.mx - tab_press_x_) > ui_.px(8) || std::abs(in.my - tab_press_y_) > ui_.px(8)))
+    tab_dragging_ = true;
+  if (!tab_dragging_) {
+    if (!in.down[0]) tab_drag_ = WindowKind::Count;
+    return;
+  }
+  {
+    DockNode *leaf = dock_leaf_at(in.mx, in.my);
+    int zone = 0;
+    Recti pr;
+    if (leaf) {
+      Recti r = leaf->rect;
+      int tbh = ui_.row_h() + ui_.px(4);
+      float fx = (in.mx - r.x) / (float)r.w, fy = (in.my - r.y - tbh) / (float)std::max(1, r.h - tbh);
+      if (in.my < r.y + tbh) zone = 0;
+      else if (fx < 0.25f) zone = 1;
+      else if (fx > 0.75f) zone = 2;
+      else if (fy < 0.25f) zone = 3;
+      else if (fy > 0.75f) zone = 4;
+      pr = r;
+      if (zone == 1) pr.w /= 2;
+      if (zone == 2) { pr.x += pr.w / 2; pr.w /= 2; }
+      if (zone == 3) pr.h /= 2;
+      if (zone == 4) { pr.y += pr.h / 2; pr.h /= 2; }
+    }
+    WindowKind k = tab_drag_;
+    ui_.overlay([this, pr, leaf, k] {
+      auto &cv = ui_.canvas;
+      if (leaf) {
+        cv.fill_rect(pr, Color::hex(0x3A79BB, 70));
+        cv.rect_outline(pr, Color::hex(0x3A79BB), ui_.px(2));
+      }
+      std::string t = window_title(k);
+      Recti tr{ui_.in.mx + ui_.px(10), ui_.in.my + ui_.px(6), ui_.font.text_width(t) + ui_.px(16), ui_.row_h()};
+      ui_.frame(tr, ui_.theme.tab_active, ui_.theme.focus, ui_.px(3));
+      cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
+    });
+    if (in.released[0]) {
+      const bool outside = in.mx < 0 || in.my < 0 || in.mx >= fb_.width || in.my >= fb_.height;
+      if (leaf) dock_move(k, leaf, zone);
+      else if (outside && active_window_ != 0) window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
+      else if (outside) queue_new_window_at_mouse(k);
+      tab_dragging_ = false;
+      tab_drag_ = WindowKind::Count;
+    }
   }
 }
 
@@ -707,6 +804,13 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("New Scene", "Ctrl+N")) new_scene();
     if (u.menu_item("Open Scene...", "Ctrl+O")) open_scene_dialog();
+    if (!recent_scenes_.empty())
+      u.submenu("Open Recent", u.px(320), [this] {
+        for (const std::string &p : std::vector<std::string>(recent_scenes_))
+          if (ui_.menu_item(fs::filename(p), nullptr, false, fs::exists(p))) defer([this, p] { open_scene(p); });  // (after the frame: windows hold pointers into this scene)
+        ui_.menu_separator();
+        if (ui_.menu_item("Clear Recent")) recent_scenes_.clear();
+      });
     u.menu_separator();
     if (u.menu_item("Save", "Ctrl+S")) save_scene_cmd(false);
     if (u.menu_item("Save As...", "Ctrl+Shift+S")) save_scene_cmd(true);
@@ -746,7 +850,7 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("Work like Unity, Unreal, Blender or Maya: their keys and their Scene view mouse navigation.");
     u.menu_separator();
     if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), "Ctrl+Z", false, !undo_.empty() || pending_change_)) undo();
-    if (u.menu_item("Redo", "Ctrl+Y", false, !redo_.empty())) redo();
+    if (u.menu_item(redo_.empty() ? std::string("Redo") : "Redo " + redo_.back().label, "Ctrl+Y", false, !redo_.empty())) redo();
     u.menu_separator();
     if (u.menu_item("Select All", "Ctrl+A")) {
       if (edit_mode_) edit_select_all(true);
@@ -979,6 +1083,7 @@ void Editor::draw_menubar(const Recti &r) {
       auto &u = ui_;
       if (u.menu_item("Unwrap", "U")) uv_op("unwrap");
       if (u.menu_item("Smart UV Project")) uv_op("smart");
+      if (u.menu_item("Part Unwrap")) uv_op("parts");
       if (u.menu_item("Cube Projection")) uv_op("cube");
       if (u.menu_item("Cylinder Projection")) uv_op("cylinder");
       if (u.menu_item("Sphere Projection")) uv_op("sphere");
@@ -1007,12 +1112,14 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
-          u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
+          u.menu_item(window_title((WindowKind)k), keys[k], dock_find_anywhere((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
+    if (!windows_.empty() && u.menu_item(strprintf("Bring Back %zu Window%s", windows_.size(), windows_.size() == 1 ? "" : "s")))
+      for (auto &w : windows_) w->close = true;  // (their tabs return to this window: task 0187)
     u.menu_separator();
     u.submenu("Layouts", u.px(230), [this] {
       /* The stages of the work first, then the arrangements and the user's own (task 0055). */
@@ -1047,6 +1154,11 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
     if (u.menu_item("Open Manual")) open_manual();
+    if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty())) {
+      guides_seen_.clear();
+      save_prefs();
+    }
+    u.tooltip("Show each layout's first-run guide again (what it is for, its next three steps).");
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
     if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
@@ -1165,21 +1277,12 @@ void Editor::draw_toolbar(const Recti &r) {
   draw_layout_dialogs();  // Save / Delete Layout (task 0055)
 }
 
+/* The status bar: the last message (left), what the mouse does and the last action's Undo (middle), the frame's numbers
+ * (right). The right part is measured first; the hint gets what is left between and is cut with an ellipsis. */
 void Editor::draw_statusbar(const Recti &r) {
   auto &u = ui_;
   u.canvas.fill_rect(r, u.theme.tabbar);
   u.canvas.hline(r.x, r.right(), r.y, u.theme.border);
-  int x = r.x + u.px(8);
-  if (!log_.empty()) {
-    const LogEntry &e = log_.back();
-    Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
-    uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
-    int a = u.font.line_height() - u.px(4);
-    u.draw_icon(ic, {x, r.y + (r.h - a) / 2, a, a}, col);
-    Recti tr{x + a + u.px(6), r.y, r.w / 2, r.h};
-    u.label(tr, e.text, u.theme.text);
-    if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
-  }
   std::string lighting = baking_                 ? bake_status_ + "  |  "
                          : lighting_out_of_date()  ? std::string("Lighting out of date  |  ")
                          : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: Ctrl+Shift+L)  |  ")
@@ -1187,7 +1290,26 @@ void Editor::draw_statusbar(const Recti &r) {
   std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
                                 playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
                                 scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
+  const int right_w = u.font.text_width(right) + u.px(20);
   u.label({r.x, r.y, r.w - u.px(10), r.h}, right, u.theme.text_dim, ui::Align::Right);
+  const int x = r.x + u.px(8), log_w = r.w * 7 / 20;
+  draw_statusbar_log({x, r.y, log_w, r.h});
+  const int mid_x = x + log_w + u.px(12);
+  draw_statusbar_hint({mid_x, r.y, std::max(0, r.right() - right_w - mid_x), r.h});
+}
+
+/* The last message: its icon and text; a click opens the Console. */
+void Editor::draw_statusbar_log(const Recti &r) {
+  auto &u = ui_;
+  if (log_.empty()) return;
+  const LogEntry &e = log_.back();
+  Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
+  uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
+  int a = u.font.line_height() - u.px(4);
+  u.draw_icon(ic, {r.x, r.y + (r.h - a) / 2, a, a}, col);
+  Recti tr{r.x + a + u.px(6), r.y, std::max(0, r.w - a - u.px(6)), r.h};
+  u.canvas.text_ellipsis(u.font, tr.x, tr.y + (tr.h - u.font.line_height()) / 2, tr.w, e.text, u.theme.text);
+  if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
 }
 
 /* ===================================================================== */
@@ -1199,8 +1321,12 @@ void Editor::handle_drop() {
   for (const std::string &path : ui_.in.dropped) {
     std::string ext = fs::extension(path);
     std::string name = fs::filename(path);
-    if (model_extension_supported(ext)) {
-      import_model_file(path, true);  // copies model + textures into Assets like Unity
+    if ((image_extension_supported(ext) || ext == ".edit") && edit_window_has_mouse()) {  // (dropped on the Editing window: opened there, task 0181)
+      edit_open_file(path);
+      continue;
+    }
+    if (model_extension_supported(ext) || motion_extension_supported(ext)) {
+      import_model_file(path, true);  // copies model + textures into Assets like Unity (a motion: onto the character)
     }
     else if (image_extension_supported(ext)) {
       std::string dir = fs::join(assets_dir_, "Textures");
@@ -1297,6 +1423,10 @@ void Editor::dock_fix_parents(DockNode *n, DockNode *parent) {
 }
 
 void Editor::dock_reset(const std::string &preset) {
+  if (active_window_ != 0) {  // (a layout is the main window's: task 0187)
+    Log::warn("Layouts arrange the main window: choose one there");
+    return;
+  }
   /* Window ids: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 7 Research 8 Profiler */
   /* A layout by name (the table in workspaces.cpp: its windows and its focus, task 0055), a raw dock string, or
    * Default. */
@@ -1310,6 +1440,12 @@ void Editor::dock_reset(const std::string &preset) {
   size_t pos = 0;
   dock_ = dock_parse(s, pos);
   dock_fix_parents(dock_.get(), nullptr);
+  for (auto &w : windows_) {  // (a tab another window holds stays there, not twice)
+    std::vector<WindowKind> held;
+    collect_dock_tabs(w->dock.get(), held);
+    for (WindowKind k : held)
+      if (dock_find(k) && (dock_->split || dock_->tabs.size() > 1)) dock_remove(k);
+  }
   /* A layout saved before the Research window was retired (task 0034): its tab goes, and an area that held only it
    * closes. */
   while (DockNode *leaf = dock_find(WindowKind::Research)) {
@@ -1340,18 +1476,19 @@ void Editor::dock_layout(DockNode *n, const Recti &r) {
 void Editor::dock_draw(DockNode *n) {
   auto &u = ui_;
   if (n->split) {
-    dock_draw(n->a.get());
-    dock_draw(n->b.get());
     Recti sr = n->vertical ? Recti{n->rect.x, n->a->rect.bottom(), n->rect.w, n->b->rect.y - n->a->rect.bottom()}
                            : Recti{n->a->rect.right(), n->rect.y, n->b->rect.x - n->a->rect.right(), n->rect.h};
-    u.canvas.fill_rect(sr, u.theme.border);  // (the frame no longer clears the whole framebuffer)
-    Recti hit = n->vertical ? Recti{sr.x, sr.y - u.px(2), sr.w, sr.h + u.px(4)} : Recti{sr.x - u.px(2), sr.y, sr.w + u.px(4), sr.h};
-    bool hot = u.hovered(hit) && !u.any_active();
-    if (hot || split_drag_ == n) u.cursor = n->vertical ? Cursor::ResizeV : Cursor::ResizeH;
-    if (hot && u.in.pressed[0]) {
+    const int grab = std::max(u.px(4), 4);  // (task 0189: an 8-pixel-wide target at any scale, Fitts)
+    Recti hit = n->vertical ? Recti{sr.x, sr.y - grab, sr.w, sr.h + 2 * grab} : Recti{sr.x - grab, sr.y, sr.w + 2 * grab, sr.h};
+    const bool hot = u.hovered(hit) && !u.any_active() && !u.any_popup_open();
+    if (hot && u.in.pressed[0]) {  // (taken before the areas beside it draw: they'd act on the same press)
       split_drag_ = n;
       u.consume_click();
     }
+    dock_draw(n->a.get());
+    dock_draw(n->b.get());
+    u.canvas.fill_rect(sr, u.theme.border);  // (the frame no longer clears the whole framebuffer)
+    if ((hot && !u.any_active()) || split_drag_ == n) u.cursor = n->vertical ? Cursor::ResizeV : Cursor::ResizeH;
     if (split_drag_ == n) {
       float t = n->vertical ? (u.in.my - n->rect.y) / (float)n->rect.h : (u.in.mx - n->rect.x) / (float)n->rect.w;
       n->ratio = clampf(t, 0.06f, 0.94f);
@@ -1387,6 +1524,7 @@ void Editor::dock_draw(DockNode *n) {
       tab_press_x_ = u.in.mx;
       tab_press_y_ = u.in.my;
       tab_dragging_ = false;
+      tab_drag_window_ = active_window_;
     }
     if (hot && u.in.pressed[2]) {
       tab_close_queue_.push_back(k);  // closed after dock_draw: removing now would free nodes still on the stack
@@ -1396,10 +1534,11 @@ void Editor::dock_draw(DockNode *n) {
     if (hot && u.in.pressed[1]) u.open_popup(u.id("tabmenu") ^ (uint64_t)k, {u.in.mx, u.in.my, 0, 0});
     u.popup(u.id("tabmenu") ^ (uint64_t)k, u.px(200), [this, k] {
       if (ui_.menu_item("Close Tab")) tab_close_queue_.push_back(k);
+      draw_tab_menu_windows(k);
       ui_.menu_separator();
       ui_.menu_label("Add Tab");
       for (int w = 0; w < (int)WindowKind::Count; w++)
-        if ((WindowKind)w != WindowKind::Research && !dock_find((WindowKind)w) &&  // (retired, task 0034)
+        if ((WindowKind)w != WindowKind::Research && !dock_find_anywhere((WindowKind)w) &&  // (retired, task 0034)
             ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
           DockNode *leaf = dock_find(k);
           if (leaf) {
@@ -1443,6 +1582,8 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Rigging: draw_rigging_window(r); break;
     case WindowKind::Animation: draw_animation_window(r); break;
     case WindowKind::Sequencer: draw_sequencer_window(r); break;
+    case WindowKind::LiveLink: draw_livelink_window(r); break;
+    case WindowKind::Editing: draw_editing_window(r); break;
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1510,6 +1651,12 @@ void Editor::dock_open(WindowKind k, bool focus) {
     return;
   }
   DockNode *leaf = dock_find(k);
+  EditorWindow *owner = nullptr;
+  if (!leaf && (leaf = dock_find_elsewhere(k, &owner)) != nullptr) {  // (in another window, task 0187: shown there)
+    leaf->active = (int)(std::find(leaf->tabs.begin(), leaf->tabs.end(), k) - leaf->tabs.begin());
+    if (focus) focused_ = k;
+    return;
+  }
   if (!leaf) {
     /* The Textures window goes beside the Materials window when it is docked (not over the Scene view, which a
      * thumbnail is dragged onto); everything else into the largest area. */
@@ -1601,12 +1748,14 @@ GameObject *Editor::active_object() const { return active_ ? scene_->find(active
 
 std::vector<GameObject *> Editor::selected_objects(bool top_level_only) const {
   std::vector<GameObject *> out;
+  std::unordered_set<uint64_t> chosen;  // (task 0207: each ancestor looked up, not searched for, in a selection of thousands)
+  if (top_level_only) chosen.insert(selection_.begin(), selection_.end());
   for (uint64_t id : selection_) {
     GameObject *g = scene_->find(id);
     if (!g) continue;
     if (top_level_only) {
       bool covered = false;
-      for (GameObject *p = g->parent; p && !covered; p = p->parent) covered = is_selected(p->id);
+      for (GameObject *p = g->parent; p && !covered; p = p->parent) covered = chosen.count(p->id) > 0;
       if (covered) continue;
     }
     out.push_back(g);
@@ -1648,6 +1797,31 @@ void Editor::settle_meshes() {
   if (any) ui_.redraw = true;
 }
 
+EditSelection Editor::edit_selection() const {
+  EditSelection e;
+  if (!edit_mode_) return e;
+  e.obj = edit_obj_;
+  e.verts = vert_sel_, e.faces = face_sel_;
+  e.edges.assign(edge_sel_.begin(), edge_sel_.end());
+  return e;
+}
+
+/* The first change since the last undo step: the selection as it is now is the one the step gives back. */
+void Editor::note_edit_selection_before() {
+  if (!pending_change_) edit_sel_before_ = edit_selection();
+}
+
+/* A state's Edit Mode selection back, when it is the edited object's and fits its mesh (else the selection stays). */
+void Editor::restore_edit_selection(const EditSelection &e) {
+  if (!edit_mode_ || e.obj == 0 || e.obj != edit_obj_) return;
+  const MeshPtr *mp = edit_mesh_ptr();
+  if (!mp || !*mp || e.verts.size() != (*mp)->vert_count() || e.faces.size() != (*mp)->face_count()) return;
+  vert_sel_ = e.verts, face_sel_ = e.faces;
+  edge_sel_ = std::unordered_set<uint64_t>(e.edges.begin(), e.edges.end());
+  /* (Task 0208: a selection made outside Edge mode keeps no edges of its own; Edge mode works them out, as switching does.) */
+  if (elem_ == EditElement::Edge && edge_sel_.empty() && std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end()) edges_from_verts();
+}
+
 void Editor::commit_undo() {
   if (!pending_change_) return;
   settle_meshes();
@@ -1657,6 +1831,8 @@ void Editor::commit_undo() {
   s.selection = selection_;
   s.active = active_;
   s.label = pending_label_;
+  s.edit_sel = std::move(edit_sel_before_);
+  edit_sel_before_ = EditSelection{};
   s.textures = std::move(texture_before_);
   texture_before_.clear();
   s.clips = std::move(clip_before_);
@@ -1667,8 +1843,11 @@ void Editor::commit_undo() {
      * objects and its texture texts. */
     s.scene->for_each([&](GameObject &g) {
       s.bytes += 600;  // an object and its components, about (stress `memory`)
-      if (const MeshFilter *mf = g.mesh_filter())
-        if (mf->mesh && mf->mesh.use_count() == 1) s.bytes += mf->mesh->memory_bytes();
+      const MeshFilter *mf = g.mesh_filter();
+      if (!mf || !mf->mesh) return;
+      /* The last operator's `before` shares the step's mesh without owning it (task 0165): the step still pays. */
+      const long others = mf->mesh == last_op_.before ? 1 : 0;
+      if (mf->mesh.use_count() - others == 1) s.bytes += mf->mesh->memory_bytes();
     });
   }
   for (const auto &t : s.textures) s.bytes += t.first.size() + t.second.size();
@@ -1711,15 +1890,22 @@ void Editor::undo() {
   if (undo_.empty()) return;
   UndoState s = std::move(undo_.back());
   undo_.pop_back();
+  restore_state(std::move(s), redo_, "Undo");
+}
+
+/* The scene and selection of `s` become the editor's; what they replace goes onto `into` (undo's redo, redo's undo). */
+void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char *verb) {
+  ProfileScope prof{prof_.ms_undo, {}};
   UndoState cur;
   cur.scene = std::move(scene_);
   detach_material_assets(*cur.scene);  // (its .mat slots: its own values, whatever the restored state writes)
   cur.selection = selection_;
   cur.active = active_;
   cur.label = s.label;
+  cur.edit_sel = edit_selection();
   restore_texture_texts(s.textures, &cur.textures);
   restore_clip_texts(s.clips, &cur.clips);
-  redo_.push_back(std::move(cur));
+  into.push_back(std::move(cur));
   scene_ = std::move(s.scene);
   selection_ = s.selection;
   active_ = s.active;
@@ -1731,10 +1917,11 @@ void Editor::undo() {
   anim_clip_changed();
   seq_drag_cancel();
   stable_ = scene_->clone();
+  restore_edit_selection(s.edit_sel);
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
   scene_dirty_ = true;
-  Log::info("Undo %s", s.label.c_str());
+  Log::info("%s %s", verb, s.label.c_str());
 }
 
 void Editor::redo() {
@@ -1746,30 +1933,7 @@ void Editor::redo() {
   wp_abort_stroke();
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
-  UndoState cur;
-  cur.scene = std::move(scene_);
-  detach_material_assets(*cur.scene);  // (its .mat slots: its own values, whatever the restored state writes)
-  cur.selection = selection_;
-  cur.active = active_;
-  cur.label = s.label;
-  restore_texture_texts(s.textures, &cur.textures);
-  restore_clip_texts(s.clips, &cur.clips);
-  undo_.push_back(std::move(cur));
-  scene_ = std::move(s.scene);
-  selection_ = s.selection;
-  active_ = s.active;
-  relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
-  save_dirty_material_assets();
-  save_dirty_texture_assets();
-  save_dirty_clip_assets();
-  save_dirty_sequence_assets();
-  anim_clip_changed();
-  seq_drag_cancel();
-  stable_ = scene_->clone();
-  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
-  prune_selection();
-  scene_dirty_ = true;
-  Log::info("Redo %s", s.label.c_str());
+  restore_state(std::move(s), undo_, "Redo");
 }
 
 /* ===================================================================== */
@@ -1825,6 +1989,7 @@ bool Editor::open_scene(const std::string &path) {
   redo_.clear();
   clear_selection();
   scene_dirty_ = false;
+  note_recent_scene(path);
   Log::info("Opened %s (%zu objects)", fs::filename(path).c_str(), scene_->object_count());
   return true;
 }
@@ -1873,10 +2038,10 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 
 void Editor::import_dialog() {
   defer([this] {
-    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda"}}};
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}}};
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
-    switch (pick_open_path("Import Model", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {
+    switch (pick_open_path("Import Model or Motion", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {
       case PathPick::Cancelled: return;
       case PathPick::Unavailable: dialog_ = Dialog::ImportObj; return;  // the Assets list
       case PathPick::Chosen: break;
@@ -2356,8 +2521,78 @@ void Editor::screenshot(const std::string &path_in) {
     std::strftime(buf, sizeof(buf), "blendity_%Y%m%d_%H%M%S.png", std::localtime(&t));
     path = fs::join(screenshots_dir_, buf);
   }
-  if (write_png(path, fb_.pixels.data(), fb_.width, fb_.height, fb_.width)) Log::info("Screenshot saved: %s", path.c_str());
+  const std::vector<uint32_t> pixels = window_pixels();  // (the card's frame when it shows the views: task 0193)
+  if (write_png(path, pixels.data(), fb_.width, fb_.height, fb_.width)) Log::info("Screenshot saved: %s", path.c_str());
   else Log::error("Could not save screenshot to %s", path.c_str());
+}
+
+/* Task 0193: the editor in its real window - frames until the GPU is open (at most `frames`), then `frames` frames with
+the views drawn again each one (as an orbit does), presented by the card, and as many presented by the system; each
+part's mean frame time printed, the window as the card showed it saved to `out`. */
+int Editor::windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands) {
+  windowed_check_ = true;
+  for (const std::string &c : commands) command(c);  // (task 0199: the scene to measure)
+  std::vector<Event> events;
+  auto step = [&](bool redraw_views, bool every_row = false) {
+    events.clear();
+    if (window_) poll_events(window_, events, 0);
+    ui_.redraw = true;
+    if (redraw_views) scene_cache_.key = game_cache_.key = 0;
+    if (every_row) present_all_ = true;  // (task 0198: the whole canvas presented, as after a resize)
+    ScopedTimer t;
+    frame(events);
+    return t.ms();
+  };
+  for (int i = 0; i < frames && running_ && !card_present_; i++) {
+    step(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  auto part = [&](bool card, std::vector<uint32_t> *pixels) {
+    card_present_pref_ = card;
+    double sum = 0;
+    size_t views = 0;
+    for (int i = 0; i < 10; i++) step(true);  // (settled first)
+    const FrameProfile p0 = frame_profile_totals();
+    for (int i = 0; i < frames && running_; i++) {
+      sum += step(true);
+      views += card_views_shown_.size();
+    }
+    if (pixels) *pixels = window_pixels();
+    const double n = std::max(1, frames);
+    std::printf("  presented by the %s: %.2f ms a frame over %d frames, %.1f views a frame on the card%s%s\n", card ? "card" : "system", sum / n, frames,
+                (double)views / n, gpu_view_reason_.empty() ? "" : "; on the CPU: ", gpu_view_reason_.c_str());
+    /* Task 0203: where the frame went (the Profiler's parts, a frame's mean): what makes a row slow. The parts nest: the
+     * overlays, gathering, hashing and the Scene view's own GPU path are inside the Scene view; the GPU path counts every
+     * view's; the UI is the rest of the panels. */
+    const FrameProfile p1 = frame_profile_totals();
+    std::printf("    of it (nested, not to add up): the Scene view %.2f (its overlays %.2f), the views' GPU path %.2f (the card's passes %.2f; "
+                "uploads, copies back and the wait %.2f), gathering %.2f, hashing %.2f; the UI %.2f, presenting %.2f ms; %.1f meshes sent a frame\n",
+                (p1.ms_scene3d - p0.ms_scene3d) / n, (p1.ms_overlays - p0.ms_overlays) / n, (p1.ms_gpu - p0.ms_gpu) / n,
+                (p1.ms_gpu_shadow - p0.ms_gpu_shadow + p1.ms_gpu_gbuffer - p0.ms_gpu_gbuffer + p1.ms_gpu_lighting - p0.ms_gpu_lighting) / n,
+                (p1.ms_gpu_readback - p0.ms_gpu_readback) / n,
+                (p1.ms_collect - p0.ms_collect) / n, (p1.ms_hash - p0.ms_hash) / n, (p1.ms_ui - p0.ms_ui) / n, (p1.ms_present - p0.ms_present) / n,
+                (double)(p1.gpu_mesh_uploads - p0.gpu_mesh_uploads + p1.gpu_mesh_updates - p0.gpu_mesh_updates) / n);
+  };
+  std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),
+              card_present_ ? "presents the window" : "doesn't present it", card_reason_.empty() ? "" : ": ", card_reason_.c_str());
+  std::vector<uint32_t> pixels;
+  part(true, &pixels);
+  part(false, nullptr);
+  /* Task 0198: the canvas alone - idle frames, then frames presenting every row - the views unchanged. */
+  auto canvas = [&](bool card, bool every_row) {
+    card_present_pref_ = card;
+    for (int i = 0; i < 10; i++) step(false, every_row);
+    double sum = 0;
+    for (int i = 0; i < frames && running_; i++) sum += step(false, every_row);
+    std::printf("  the canvas %s, presented by the %s: %.2f ms a frame (the views unchanged)\n", every_row ? "presented whole" : "idle",
+                card ? "card" : "system", sum / std::max(1, frames));
+  };
+  for (bool every_row : {false, true})
+    for (bool card : {true, false}) canvas(card, every_row);
+  card_present_pref_ = true;
+  const bool wrote = !pixels.empty() && write_png(out, pixels.data(), fb_.width, fb_.height, fb_.width);
+  std::printf("  %s %s\n", wrote ? "wrote" : "could not write", out.c_str());
+  return wrote ? 0 : 1;
 }
 
 void Editor::screenshot_dialog() {
@@ -2365,7 +2600,7 @@ void Editor::screenshot_dialog() {
    * before the dialog opens over the window. */
   defer(
       [this] {
-        const std::vector<uint32_t> pixels = fb_.pixels;
+        const std::vector<uint32_t> pixels = window_pixels();
         const int w = fb_.width, h = fb_.height;
         fs::make_dirs(screenshots_dir_);
         std::time_t t = std::time(nullptr);
@@ -2659,7 +2894,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
 void Editor::duplicate_selected() {
   if (edit_mode_) return;
   std::vector<uint64_t> fresh;
-  for (GameObject *g : selected_objects(true)) fresh.push_back(scene_->duplicate(g)->id);
+  for (GameObject *g : scene_->duplicate_many(selected_objects(true))) fresh.push_back(g->id);
   if (fresh.empty()) return;
   selection_ = fresh;
   active_ = fresh.back();
@@ -2692,6 +2927,12 @@ void Editor::delete_selected() {
 }
 
 void Editor::add_component_to_selection(const std::string &name) {
+  if (!selected_objects(false).empty() && (name == "Retro Console Filter" || find_component_info(name))) {  // (Add Component's Recent: what was added, task 0189)
+    auto &recent = add_component_recent_;
+    recent.erase(std::remove(recent.begin(), recent.end(), name), recent.end());
+    recent.insert(recent.begin(), name);
+    if (recent.size() > 5) recent.resize(5);
+  }
   if (name == "Retro Console Filter") {  // task 0004's component: now an effect in the filter stack
     for (GameObject *g : selected_objects(false)) filter_stack_op(g->id, "add", 0, 0, RetroConsoleFilter::kName);
     return;
@@ -2888,6 +3129,14 @@ void Editor::mesh_op(const std::string &op) {
       continue;
     }
     if (op == "apply_modifiers") {
+      bool modified = false;
+      for (const auto &c : g->components) modified = modified || c->is_modifier();
+      if (!modified) continue;
+      /* Blender's rule: shape keys are offsets of this mesh's vertices, which a modifier's result doesn't share. */
+      if (!mf->mesh->shape_keys.empty()) {
+        Log::warn("Apply Modifiers: '%s' has shape keys (remove them first: shape remove <name>)", g->name.c_str());
+        continue;
+      }
       const Mesh *ev = g->evaluated_mesh();
       if (ev == mf->mesh.get()) continue;
       mf->mesh = std::make_shared<Mesh>(*ev);
@@ -2968,6 +3217,87 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
   Log::info("Spawned %d %s objects in %.1f ms (%zu tris each)", count, kind.c_str(), t.ms(), shared ? shared->render_mesh().tri_count() : (size_t)0);
 }
 
+/* Task 0202: the scenes Blender's viewport is timed on (tools/bench_blender.py --parity-ui builds the same), each in a
+ * new scene emptied but for its light (Blender's is emptied likewise), the Scene view framing it at once (no camera
+ * animation under the timings), nothing selected but the sphere (or, for keyed1k, one box, whose parent's clip plays):
+ * - sphere50k / sphere500k: one UV sphere of 256 x 196 / 1024 x 490 segments, "Parity Sphere", selected;
+ * - million: ten of the 50k spheres (one shared mesh) in a row 2.5 m apart, about a million triangles;
+ * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square;
+ * - keyed1k: 1,000 cubes under "Keyed", each keyed on frames 1, 30 and 60 (Position), the clip at frame 1. */
+bool Editor::bench_scene(const std::string &name) {
+  const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "keyed1k";
+  if (!known) return false;
+  new_scene();
+  for (const char *starter : {"Utah Teapot", "Plane", "Main Camera"})
+    if (GameObject *g = scene_->find_by_name(starter)) scene_->destroy(g);
+  std::vector<uint64_t> made;
+  auto object = [&](const std::string &n, MeshPtr mesh, Vec3 at, GameObject *parent = nullptr) {
+    GameObject *g = scene_->create(n, parent);
+    g->set_local_position(at);
+    g->add<MeshFilter>()->mesh = std::move(mesh);
+    g->add<MeshRenderer>();
+    made.push_back(g->id);
+    return g;
+  };
+  if (name == "sphere50k" || name == "sphere500k") {
+    const bool big = name == "sphere500k";
+    object("Parity Sphere", primitives::uv_sphere(1.0f, big ? 1024 : 256, big ? 490 : 196), {0, 0, 0});
+  }
+  else if (name == "million") {
+    MeshPtr sphere = primitives::uv_sphere(1.0f, 256, 196);
+    for (int i = 0; i < 10; i++) object(strprintf("Sphere %d", i), sphere, {(i - 4.5f) * 2.5f, 1.0f, 0.0f});
+  }
+  else if (name == "cubes10k") {
+    MeshPtr cube = primitives::cube();
+    for (int i = 0; i < 10000; i++) object(strprintf("Cube %d", i), cube, {(i % 100 - 50) * 1.6f, 0.0f, (i / 100 - 50) * 1.6f});
+  }
+  else {
+    GameObject *root = scene_->create("Keyed");
+    MeshPtr cube = primitives::cube();
+    for (int i = 0; i < 1000; i++) object(strprintf("Box %d", i), cube, {(i % 32 - 16) * 1.6f, 0.0f, (i / 32 - 16) * 1.6f}, root);
+    selection_ = {root->id};
+    active_ = root->id;
+    if (anim_new_clip(root, "Keyed")) {
+      anim_edit_keys("Keys", [&](AnimationClip &clip) {
+        for (size_t k = 0; k < made.size(); k++) {
+          GameObject *g = scene_->find(made[k]);
+          const Vec3 p = g->local().position;
+          const std::string path = anim_path(*root, *g);
+          for (int axis = 0; axis < 3; axis++) {
+            AnimTrack &t = clip.track(path, "Position", axis);
+            t.set_key(1.0f, p[axis]);
+            t.set_key(30.0f, p[axis] + (axis == 1 ? (float)(k % 7) : 0.0f));
+            t.set_key(60.0f, p[axis]);
+          }
+        }
+      });
+      anim_set_frame(1.0f);
+    }
+  }
+  selection_ = made;
+  active_ = made.back();
+  frame_selected();
+  cam_.update(now_seconds() + 10.0);  // (the framing's animation finished now)
+  if (name == "keyed1k") selection_ = {made[0]}, active_ = made[0];  // (one box: the Animation window plays its parent's clip)
+  else if (name != "sphere50k" && name != "sphere500k") clear_selection();
+  mark_changed("Bench Scene");
+  Log::info("Bench scene %s: %zu objects", name.c_str(), made.size());
+  return true;
+}
+
+/* Task 0202: Blendity --startup-check - init, the first frames until one is on the screen (the card presents one frame
+ * behind: three frames), quit; tools/bench_ui.py times the process. */
+int Editor::startup_check() {
+  std::vector<Event> events;
+  for (int i = 0; i < 3; i++) {
+    events.clear();
+    if (window_) poll_events(window_, events, 0);
+    ui_.redraw = true;
+    frame(events);
+  }
+  return 0;
+}
+
 void Editor::enter_play() {
   set_weight_paint(false);
   cancel_skin_job();  // (Stop would throw its result away)
@@ -3006,1120 +3336,6 @@ void Editor::exit_play() {
   Log::info("Exited Play mode (scene restored).");
 }
 
-/* `set Camera.FocalLength 85`: sets a reflected field by name (letters and
- * digits only, case-insensitive; a unique prefix will do). Enumerations take
- * an index or the option's text. Blender's Python: bpy.data...prop = value. */
-namespace {
-std::string field_key(const std::string &s) {
-  std::string k;
-  for (char c : s)
-    if (std::isalnum((unsigned char)c)) k += (char)std::tolower((unsigned char)c);
-  return k;
-}
-
-struct SetFieldReflector : Reflector {
-  std::string key, value;
-  std::vector<std::string> names;  // pass 1: every field
-  std::string target;              // pass 2: the field to set
-  bool done = false;
-  bool all_fields() const override { return true; }
-  bool hit(const char *n) {
-    if (target.empty()) {
-      names.push_back(n);
-      return false;
-    }
-    if (done || target != n) return false;
-    done = true;
-    return true;
-  }
-  void field(const char *n, float &v, float, float mn, float mx) override {
-    if (hit(n)) v = std::max(mn, std::min(mx, (float)std::atof(value.c_str())));
-  }
-  void field(const char *n, int &v, int mn, int mx) override {
-    if (hit(n)) v = std::max(mn, std::min(mx, std::atoi(value.c_str())));
-  }
-  void field(const char *n, bool &v) override {
-    if (hit(n)) v = value == "1" || field_key(value) == "true" || field_key(value) == "on";
-  }
-  void field(const char *n, Vec3 &v) override {
-    if (!hit(n)) return;
-    float x = v.x, y = v.y, z = v.z;
-    if (std::sscanf(value.c_str(), "%f %f %f", &x, &y, &z) == 3) v = {x, y, z};
-  }
-  void color(const char *n, Vec3 &v) override { field(n, v); }
-  void enumeration(const char *n, int &v, const char *const *opts, int count) override {
-    if (!hit(n)) return;
-    for (int k = 0; k < count; k++)
-      if (field_key(opts[k]).rfind(field_key(value), 0) == 0 && !field_key(value).empty()) {
-        v = k;
-        return;
-      }
-    if (!value.empty() && std::isdigit((unsigned char)value[0])) v = std::max(0, std::min(count - 1, std::atoi(value.c_str())));
-  }
-  void text(const char *n, std::string &v) override {
-    if (hit(n)) v = value;
-  }
-  void mesh(const char *, MeshPtr &) override {}
-};
-}  // namespace
-
-/* views follow on|off (task 0103): the Game view and Camera Preview follow drags as they happen, or catch up on release.
- * views simpler on|off (task 0104): the CPU views' shadows cheaper while you move, exact when you stop. No value: the
- * other way round; anything but "on" is off. */
-void Editor::views_command(const std::string &what, const std::string &value) {
-  if (what == "simpler") {  // views simpler on|off (task 0104): the CPU views' shadows cheaper while you interact, exact when you stop
-    simpler_while_moving_ = value.empty() ? !simpler_while_moving_ : value == "on";
-    save_prefs();
-    Log::info("Simpler while moving: %s", simpler_while_moving_ ? "on" : "off");
-    return;
-  }
-  if (what != "follow") {
-    Log::warn("views follow|simpler on|off");
-    return;
-  }
-  other_views_follow_ = value.empty() ? !other_views_follow_ : value == "on";
-  save_prefs();
-  Log::info("Other views follow drags: %s", other_views_follow_ ? "on" : "off (they catch up on release)");
-}
-
-bool Editor::set_field_command(const std::string &path, const std::string &value) {
-  size_t dot = path.find('.');
-  if (dot == std::string::npos) {
-    Log::warn("set: use set <Component>.<Field> <value>, e.g. set Camera.FStop 1.4 (or Render.Samples, World.Strength)");
-    return false;
-  }
-  const std::string owner = field_key(path.substr(0, dot));
-  SetFieldReflector sr;
-  sr.key = field_key(path.substr(dot + 1));
-  sr.value = value;
-  auto apply = [&](const std::function<void(Reflector &)> &reflect) {
-    sr.target.clear();
-    sr.names.clear();
-    sr.done = false;
-    reflect(sr);
-    for (int pass = 0; pass < 2 && sr.target.empty(); pass++)
-      for (const std::string &n : sr.names)
-        if (pass == 0 ? field_key(n) == sr.key : field_key(n).rfind(sr.key, 0) == 0) {
-          sr.target = n;
-          break;
-        }
-    if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
-    reflect(sr);
-    return sr.done;
-  };
-  int n = 0;
-  if (owner == "render") n += apply([&](Reflector &r) { scene_->render.reflect(r); });
-  else if (owner == "world") n += apply([&](Reflector &r) { scene_->environment.reflect(r); });
-  else if (owner == "lighting") n += apply([&](Reflector &r) { scene_->lighting.reflect(r); });
-  else
-    for (GameObject *g : selected_objects(false))
-      for (auto &c : g->components)
-        if (field_key(c->type_name()) == owner) n += apply([&](Reflector &r) { c->reflect(r); });
-  if (!n)  // a filter effect by its type ("set RetroConsole.Width 160"; task 0004's "RetroConsoleFilter" too)
-    for (GameObject *g : selected_objects(false))
-      if (auto *cf = g->get<CameraFilters>())
-        for (auto &e : cf->effects)
-          if (field_key(e->type_name()) == owner || (owner == "retroconsolefilter" && dynamic_cast<RetroConsoleFilter *>(e.get()))) {
-            n += apply([&](Reflector &r) { e->reflect(r); });
-            break;
-          }
-  if (!n) {
-    Log::warn("set: no field '%s' on %s (selected objects)", path.substr(dot + 1).c_str(), path.substr(0, dot).c_str());
-    return false;
-  }
-  mark_changed("Set " + path);
-  return true;
-}
-
-/* matdelete <name>[, <name>...] / texdelete <name>[, <name>...]: delete material or texture assets by name, at once
- * (task 0053; the windows ask first). Names are comma-separated, so they may hold spaces ("Wood Floor"). The scene side
- * is one undo step. */
-void Editor::delete_assets_command(const std::string &cmd, const std::string &line) {
-  const size_t at = line.find(cmd);
-  const std::vector<std::string> names = split_list(at == std::string::npos ? std::string() : line.substr(at + cmd.size()), ',');
-  /* Each kind deletes one by name, or says there is none. */
-  auto delete_material_named = [this](const std::string &name) {
-    const MaterialPtr m = material_by_name(name);
-    if (m) delete_material(m);
-    return m != nullptr;
-  };
-  auto delete_texture_named = [this](const std::string &name) {
-    const ProceduralTexturePtr t = texture_by_name(name);
-    if (t) delete_texture_asset(t);
-    return t != nullptr;
-  };
-  const bool materials = cmd == "matdelete";
-  int n = 0;
-  for (const std::string &name : names) {
-    if (materials ? delete_material_named(name) : delete_texture_named(name)) n++;
-    else Log::warn("%s: no %s named '%s'", cmd.c_str(), materials ? "material" : "texture", name.c_str());
-  }
-  Log::info("%s: %d deleted", cmd.c_str(), n);
-}
-
-/* The user manual (task 0060): the project's copy when it has one (a source checkout), else GitHub's. */
-void Editor::open_manual() {
-  const std::string local = fs::join(project_root_, "docs/MANUAL.md");
-  const bool here = fs::exists(local);
-  fs::open_external(here ? local : std::string("https://github.com/EmilianoManaloIV/blendity/blob/main/docs/MANUAL.md"));
-  Log::info("Manual: %s (open it with any Markdown viewer or a text editor)", here ? local.c_str() : "on GitHub");
-}
-
-void Editor::run_console_command(const std::string &line) {
-  auto t = split_ws(line);
-  if (t.empty()) return;
-  Log::info("> %s", line.c_str());
-  const std::string &c = t[0];
-  auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
-  if (c == "layout") {
-    /* layout <name> | layout save <name> | layout delete <name> (task 0055); a raw dock string still works */
-    const std::string rest = line.substr(line.find(' ') + 1);
-    if (to_lower(arg(1, "")) == "save" && t.size() > 2) save_user_layout(rest.substr(rest.find(' ') + 1));
-    else if (to_lower(arg(1, "")) == "delete" && t.size() > 2) delete_user_layout(rest.substr(rest.find(' ') + 1));
-    else if (!apply_workspace(rest)) {
-      if (rest.size() > 1 && rest[1] == '(') {  // a raw dock string: every tool shows
-        dock_reset(rest);
-        focus_ = FocusAll;
-        workspace_ = "Custom";
-      }
-      else Log::warn("layout: no layout named '%s' (Window > Layouts lists them)", rest.c_str());
-    }
-    return;
-  }
-  if (c == "alltools") {  // alltools on|off (task 0055)
-    show_all_tools_ = to_lower(arg(1, "on")) != "off";
-    return;
-  }
-  if (c == "refimage") {  // refimage <path> [front|side|top] (task 0055); the path may hold spaces
-    std::string rest = line.size() > c.size() ? line.substr(line.find(c) + c.size() + 1) : std::string(), view = "front";
-    for (const char *v : {" front", " side", " top"}) {
-      const size_t l = std::strlen(v);
-      if (rest.size() > l && to_lower(rest.substr(rest.size() - l)) == v) {
-        view = v + 1;
-        rest.resize(rest.size() - l);
-        break;
-      }
-    }
-    create_reference_image(rest, view);
-    return;
-  }
-  if (c == "matdelete" || c == "texdelete") {
-    delete_assets_command(c, line);
-    return;
-  }
-  if (c == "theme") {  // theme <Dark|Light|Emiliano Light|Emiliano Dark> (task 0073)
-    std::string n;
-    for (size_t i = 1; i < t.size(); i++) n += (i > 1 ? " " : "") + t[i];
-    if (n.empty()) Log::info("Theme: %s (Dark, Light, Emiliano Light, Emiliano Dark)", theme_name_.c_str());
-    else set_theme(n);
-    return;
-  }
-  if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
-  if (c == "moonray") return moonray_command(t);  // moonray status | install [archive] | remove | folder [path] | check (task 0112)
-  if (c == "body") return body_command(t);
-  if (c == "spring") return spring_command(t);
-  if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)
-  if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
-  if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
-  if (c == "walk") return walk_command(t);          // walk cycle | set | save | load | presets (task 0125)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
-  if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
-  if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
-    if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
-    set_editor_feel(t[1]);
-    return;
-  }
-  if (c == "seq") {
-    seq_command(t);
-    return;
-  }
-  if (c == "anim") {
-    anim_command(t);
-    return;
-  }
-  if (c == "manual") {
-    open_manual();
-    return;
-  }
-  if (c == "autorig") {
-    autorig_command(t);
-    return;
-  }
-  if ((c == "ik" || c == "fk") && rig_control_command(t)) return;  // ik remove, fk add|remove (task 0067)
-  if (c == "bone" || c == "armature" || c == "skin" || c == "ik" || c == "rig") {
-    rig_command(t);
-    return;
-  }
-  if (c == "weightpaint" || c == "wpbrush" || c == "wpfalloff" || c == "wpmirror" || c == "wpfront" || c == "wpstroke" || c == "wpnormalize" ||
-      c == "wpclean") {
-    weight_paint_command(t);
-    return;
-  }
-  if (c == "vgroup") {
-    /* vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (task 0045). */
-    vgroup_op(to_lower(arg(1, "")), arg(2, ""), arg(3, ""), (float)std::atof(arg(3, "1").c_str()));
-    return;
-  }
-  if (c == "meshdeform") {
-    /* meshdeform bind|unbind [object]: the first Mesh Deform modifier on the object (the active one by default). Here,
-     * before the long chain below: it is at the compiler's nesting limit. */
-    std::string name;
-    for (size_t i = 2; i < t.size(); i++) name += (i > 2 ? " " : "") + t[i];
-    GameObject *g = name.empty() ? active_object() : scene_->find_by_name(name);
-    MeshDeformModifier *md = g ? g->get<MeshDeformModifier>() : nullptr;
-    const std::string verb = to_lower(arg(1, "bind"));
-    if (verb != "bind" && verb != "unbind") Log::warn("meshdeform: bind | unbind [object]");
-    else if (!md) Log::warn("meshdeform: %s has no Mesh Deform modifier", g ? g->name.c_str() : "no object");
-    else mesh_deform_bind(g, md, verb == "bind");
-    return;
-  }
-  if (c == "help") {
-    Log::info("Commands: help, clear, create <Cube|Sphere|...> [count], stress <count> [Cube|Sphere|Icosphere|Torus], select <name>,");
-    Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
-    Log::info("  screenshot [file.png], bench [frames], lesson <n>, references, window <name>, tool <move|rotate|...>,");
-    Log::info("  edit [vertex|edge|face|off] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
-    Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation),");
-    Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
-    Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
-    Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
-    Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
-    Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
-    Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
-    Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] [inpaint|envelope], skin transfer <body> [mesh] (rigging)");
-    Log::info("  autorig humanoid|quadruped, autorig mark <marker> <x> <y> <z>, autorig build|cancel (the marker auto-rig)");
-    Log::info("  anim new|key|interp|frame|preview|record|play|stop (the Animation window); manual (the user manual)");
-    Log::info("  seq new|add|move|trim|speed|rename|remove|track|trigger|jump|frame|preview|play|stop (the Sequencer window)");
-    Log::info("  vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (vertex groups)");
-    Log::info("  weightpaint on|off, wpbrush add|subtract|draw|blur [radius] [strength] [weight], wpfalloff <curve>, wpmirror on|off,");
-    Log::info("  wpfront on|off, wpstroke x y x y ..., wpnormalize, wpclean [threshold] (Weight Paint)");
-  }
-  else if (c == "clear") Log::clear();
-  else if (c == "create") {
-    /* create <kind words...> [count]: "create Spot Light", "create Cube 3" */
-    std::string kind;
-    int n = 1;
-    for (size_t i = 1; i < t.size(); i++) {
-      if (i + 1 == t.size() && !t[i].empty() && std::isdigit((unsigned char)t[i][0])) n = std::max(1, std::atoi(t[i].c_str()));
-      else kind += (kind.empty() ? "" : " ") + t[i];
-    }
-    for (int i = 0; i < n; i++) create_object(kind.empty() ? "Cube" : kind);
-  }
-  else if (c == "stress") spawn_stress_grid(std::max(1, std::atoi(arg(1, "1000").c_str())), arg(2, "Sphere"));
-  else if (c == "select") {
-    if (GameObject *g = scene_->find_by_name(line.substr(line.find(' ') + 1))) select(g->id);
-    else Log::warn("No object named that");
-  }
-  else if (c == "delete") delete_selected();
-  else if (c == "subdivide") {
-    int n = std::max(1, std::atoi(arg(1, "1").c_str()));
-    for (int i = 0; i < n; i++) mesh_op("subdivide");
-  }
-  else if (c == "smooth") mesh_op("smooth");
-  else if (c == "stats") {
-    size_t verts = 0, faces = 0;
-    scene_->for_each([&](GameObject &g) {
-      if (const Mesh *m = g.evaluated_mesh()) { verts += m->vert_count(); faces += m->face_count(); }
-    });
-    Log::info("%zu objects, %zu verts, %zu faces, scene memory ~%s, undo steps %zu", scene_->object_count(), verts, faces,
-              format_bytes(scene_->memory_bytes()).c_str(), undo_.size());
-  }
-  else if (c == "play") enter_play();
-  else if (c == "stop") exit_play();
-  else if (c == "scale") { ui_scale_pref_ = (float)std::atof(arg(1, "0").c_str()); apply_ui_scale(); }
-  else if (c == "screenshot") screenshot(t.size() > 1 ? line.substr(line.find(' ') + 1) : "");
-  else if (c == "lesson") { lesson_ = std::atoi(arg(1, "0").c_str()); dock_open(WindowKind::Learn); }
-  else if (c == "research" || c == "references") open_references();  // (the Research window is retired: task 0034)
-  else if (c == "window") {
-    std::string w = line.substr(line.find(' ') + 1);
-    for (int k = 0; k < (int)WindowKind::Count; k++)
-      if (to_lower(w) == to_lower(window_title((WindowKind)k))) dock_open((WindowKind)k);
-  }
-  else if (c == "tool") {
-    std::string w = to_lower(arg(1, "move"));
-    tool_ = w == "view" ? Tool::View : w == "rotate" ? Tool::Rotate : w == "scale" ? Tool::Scale : w == "transform" ? Tool::Transform
-            : Tool::Move;
-  }
-  else if (c == "edit" && arg(1, "") == "off") {
-    if (edit_mode_) exit_edit_mode();
-  }
-  else if (c == "edit") {
-    if (!edit_mode_) enter_edit_mode();
-    if (arg(1, "") == "face") elem_ = EditElement::Face;
-    if (arg(1, "") == "edge") elem_ = EditElement::Edge;
-    if (arg(1, "") == "vertex") elem_ = EditElement::Vertex;
-    if (arg(1, "") == "all" || arg(2, "") == "all") edit_select_all(true);
-  }
-  else if (c == "pickfocus") {
-    /* pickfocus: the selected Camera's focus eyedropper (then click in the Scene view) */
-    GameObject *a = active_object();
-    if (a && (a->get<Camera>() || a->get<Light>())) focus_pick_cam_ = a->id;  // a Light: aim it at the clicked point
-    else Log::warn("pickfocus: select a Camera or a Light first");
-  }
-  else if (c == "export") {
-    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [path]: the selection (or the whole scene) */
-    std::string fmt = to_lower(arg(1, "obj"));
-    if (fmt.empty() || fmt[0] != '.') fmt = "." + fmt;
-    const int fi = export_format_from_extension(fmt);
-    if (fi < 0) Log::warn("export: formats are obj, fbx, glb, gltf, stl, ply, usda");
-    else {
-      ExportOptions o = export_defaults(fi);
-      size_t at = 2;
-      o.selection_only = !(t.size() > at && to_lower(t[at]) == "all");
-      if (!o.selection_only) at++;
-      if (t.size() > at && to_lower(t[at]) == "ascii") o.ascii = true, at++;
-      std::string path;
-      for (size_t k = at; k < t.size(); k++) path += (path.empty() ? "" : " ") + t[k];
-      export_model(o, path);
-    }
-  }
-  else if (c == "join") join_selected();
-  else if (c == "baketex") bake_object_textures(std::atoi(arg(1, "1024").c_str()), to_lower(arg(2, "")) == "keepuvs");  // baketex [size] [keepuvs]
-  else if (c == "meshop") mesh_op(arg(1, ""));
-  else if (c == "drawfillet") draw_fillet_ = std::max(0.0f, (float)std::atof(arg(1, "0").c_str()));  // corner radius of drawn shapes
-  else if (c == "pilot") toggle_pilot_camera();  // fly the selected camera with the Scene view
-  else if (c == "alignview") align_camera_to_view();
-  else if (c == "droponsurface") {
-    /* droponsurface <x> <y>: drop the selection onto the surface under that Scene view pixel */
-    drop_objects_on_surface(selected_objects(true), std::atoi(arg(1, "0").c_str()), std::atoi(arg(2, "0").c_str()));
-  }
-  else if (c == "surfacealign") surface_align_ = to_lower(arg(1, surface_align_ ? "off" : "on")) == "on";  // meshop <apply_transform|mirror_x|...>: an object-level mesh operator
-  else if (c == "aimlight") {
-    /* aimlight <x> <y> <z>: turn the selected light to shine at that point */
-    GameObject *a = active_object();
-    if (a && a->get<Light>())
-      aim_light(*a, Vec3((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str())));
-    else Log::warn("aimlight: select a Light first");
-  }
-  else if (c == "newmat") {
-    /* newmat [name]: a Material asset in Assets/Materials (a copy of the selection's first material) */
-    GameObject *a = active_object();
-    MaterialPtr src = a && a->get<MeshRenderer>() && !a->get<MeshRenderer>()->materials.empty() ? a->get<MeshRenderer>()->materials[0] : nullptr;
-    MaterialPtr base = src ? std::make_shared<Material>(*src) : make_material("New Material", Vec3(0.8f));
-    if (t.size() > 1) base->name = line.substr(line.find(' ') + 1);
-    base->asset_path.clear();
-    new_material_asset(base, false);
-  }
-  else if (c == "bevelprofile") bevel_profile_ = clampf((float)std::atof(arg(1, "0.5").c_str()), 0.0f, 1.0f);  // bevelprofile <0..1>
-  else if (c == "pushpull") {
-    /* pushpull individual on|off: Push/Pull Each Face */
-    if (to_lower(arg(1, "")) == "individual") pp_individual_ = to_lower(arg(2, "on")) != "off";
-  }
-  else if (c == "hs") {
-    /* hs grid <cols> <rows> | pipe <radius> <sides> | array <count> <spacing> <axis 0-2> | taper <distance> <scale> |
-     * recess <border> <depth>: the hard-surface tools' settings */
-    const std::string s = to_lower(arg(1, ""));
-    auto f = [&](int i, float d) { return t.size() > (size_t)i ? (float)std::atof(t[(size_t)i].c_str()) : d; };
-    if (s == "grid") grid_cols_ = (int)f(2, 4), grid_rows_ = (int)f(3, 4);
-    else if (s == "pipe") pipe_radius_ = f(2, 0.05f), pipe_sides_ = (int)f(3, 12);
-    else if (s == "array") array_count_ = (int)f(2, 3), array_spacing_ = f(3, 0.5f), array_axis_ = (int)f(4, 0);
-    else if (s == "taper") taper_distance_ = f(2, 0.3f), taper_scale_ = f(3, 0.6f);
-    else if (s == "recess") recess_border_ = f(2, 0.05f), recess_depth_ = f(3, 0.05f);
-    else Log::warn("hs grid|pipe|array|taper|recess <values>");
-  }
-  else if (c == "overlaps") {
-    /* overlaps [select|merge|show on|off]: overlapping vertices and edges of the mesh being edited */
-    const std::string s = to_lower(arg(1, ""));
-    if (s == "select") overlap_select();
-    else if (s == "merge") overlap_merge();
-    else if (s == "show") overlap_show_ = to_lower(arg(2, "on")) != "off";
-    else {
-      overlap_refresh(true);
-      Log::info("%zu overlapping vertex pair(s), %zu overlapping edge pair(s)", overlap_.verts.size(), overlap_.edges.size());
-    }
-  }
-  else if (c == "deletemat") {
-    /* deletemat <name | Assets/Materials/x.mat>: delete a material without asking (slots emptied, the file trashed) */
-    const std::string what = t.size() > 1 ? line.substr(line.find(' ') + 1) : std::string();
-    MaterialPtr m = what.find(".mat") != std::string::npos ? material_asset(what) : nullptr;
-    if (!m)
-      for (const MaterialPtr &c2 : pickable_materials(nullptr))
-        if (c2->name == what) m = c2;
-    if (m) delete_material(m);
-    else Log::warn("deletemat: no material %s", what.c_str());
-  }
-  else if (c == "assignmat") {
-    /* assignmat <Assets/Materials/x.mat> [slot]: put the asset in a slot of every selected object */
-    MaterialPtr m = material_asset(arg(1, ""));
-    if (!m) Log::warn("assignmat: no material asset %s", arg(1, "").c_str());
-    else
-      for (GameObject *g : selected_objects(false)) assign_material(g, std::atoi(arg(2, "0").c_str()), m);
-  }
-  else if (c == "removeslot") {
-    if (GameObject *a = active_object()) remove_material_slot(a, std::atoi(arg(1, "0").c_str()));
-  }
-  else if (c == "removeunusedslots") {
-    if (GameObject *a = active_object()) remove_unused_material_slots(a);
-  }
-  else if (c == "draw") {
-    /* draw <polyline|rectangle|circle|arc|polygon|guide> [segments / sides] */
-    const std::string s = to_lower(arg(1, "polyline"));
-    int k = 0;
-    for (int i = 0; i < kDrawShapeCount; i++)
-      if (s == to_lower(kDrawShapes[i])) k = i;
-    if (t.size() > 2) (k == 4 ? draw_sides_ : draw_segments_) = std::max(3, std::atoi(t[2].c_str()));
-    draw_begin(k);
-  }
-  else if (c == "drawmode") {
-    /* drawmode rect <corner|center|3point>, drawmode circle <center|2point|3point>, drawmode square <on|off> */
-    const std::string s = to_lower(arg(1, "")), v = to_lower(arg(2, ""));
-    if (s == "square") draw_uniform_ = v != "off";
-    else if (s == "axes") draw_global_axes_ = v == "global" || v == "world";
-    else if (s == "perp") draw_perp_snap_ = v != "off";  // drawmode perp on|off
-    else if (s == "facecenter") draw_face_center_ = v != "off";
-    else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
-    else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
-    else Log::warn("drawmode rect <corner|center|3point> | circle <center|2point|3point> | square <on|off>");
-  }
-  else if (c == "raster" && t.size() >= 3) {
-    /* raster simd|uniform on|off: the shader's 8-wide path (task 0091) and plain materials once per triangle (0088) */
-    const bool on = to_lower(t[2]) != "off";
-    const std::string what = to_lower(t[1]);
-    if (what == "simd") raster_opt_.simd_shading = on;
-    else if (what == "uniform") raster_opt_.uniform_shading = on;
-    else Log::warn("raster simd|uniform on|off");
-    ui_.redraw = true;
-  }
-  else if (c == "views" || (c == "viewport" && to_lower(arg(1, "")) == "device")) {
-    /* views follow|simpler on|off (tasks 0103, 0104): in this branch, not one of its own (MSVC's nesting limit) */
-    if (c == "views") {
-      views_command(to_lower(arg(1, "")), to_lower(arg(2, "")));
-      return;
-    }
-    /* viewport device auto|cpu|gpu (task 0096): where the views' 3D is drawn */
-    const std::string d = to_lower(arg(2, "auto"));
-    if (d != "auto" && d != "cpu" && d != "gpu") Log::warn("viewport device auto|cpu|gpu (not '%s')", d.c_str());
-    else {
-      set_viewport_device(d == "cpu" ? 1 : d == "gpu" ? 2 : 0);
-      save_prefs();
-      Log::info("Viewport Device: %s", d == "cpu" ? "CPU" : d == "gpu" ? "GPU" : "Auto");
-    }
-  }
-  else if (c == "fps") {
-    /* fps <n | 0 / unlimited>: the editor's frame rate cap */
-    const std::string v = to_lower(arg(1, "120"));
-    max_fps_ = v == "unlimited" || v == "off" ? 0 : std::max(0, std::min(1000, std::atoi(v.c_str())));
-    Log::info("Editor frame rate: %s", max_fps_ ? strprintf("up to %d fps", max_fps_).c_str() : "unlimited");
-  }
-  else if (c == "redraw") always_redraw_ = to_lower(arg(1, "changes")) == "always";  // redraw always | changes
-  else if (c == "quality") {
-    /* quality low|medium|high|custom: the editor's quality tier (task 0050) */
-    const std::string v = to_lower(arg(1, ""));
-    const int t = v == "low" ? TierLow : v == "medium" ? TierMedium : v == "high" ? TierHigh : v == "custom" ? TierCustom : -1;
-    if (t < 0) Log::warn("quality low|medium|high|custom");
-    else {
-      set_quality_tier(t);
-      Log::info("Quality: %s (views at %.0f%%)", v.c_str(), view_scale_ * 100.0f);
-    }
-  }
-  else if (c == "viewscale") {  // viewscale <50..100>: Viewport Resolution Scale in percent (the tier becomes Custom)
-    set_view_scale((float)std::atof(arg(1, "100").c_str()) / 100.0f);
-    quality_tier_ = TierCustom;
-  }
-  else if (c == "threads") set_cpu_threads(std::atoi(arg(1, "0").c_str()));  // threads <n | 0 = all>
-  else if (c == "preferences") dialog_ = Dialog::Preferences;
-  else if (c == "newscene") new_scene();  // File > New Scene
-  else if (c == "guide") {
-    /* guide <px> <py> <pz> <dx> <dy> <dz>: a construction line through p along d */
-    auto f = [&](int i) { return (float)std::atof(arg(i, "0").c_str()); };
-    const Vec3 d(f(4), f(5), f(6));
-    if (length(d) > 1e-9f) {
-      scene_->guides.push_back({Vec3(f(1), f(2), f(3)), normalize(d)});
-      show_guides_ = true;
-      mark_changed("Add Guide Line");
-    }
-  }
-  else if (c == "clearguides") {
-    scene_->guides.clear();
-    mark_changed("Clear Guides");
-  }
-  else if (c == "guidesfromedges") guides_from_selected_edges();
-  else if (c == "mkfolder") {  // mkfolder [Assets/dir]: that folder, or "New Folder" in Assets
-    if (arg(1, "").empty()) create_project_folder(assets_dir_);
-    else if (fs::make_dirs(fs::join(project_root_, arg(1, "")))) invalidate_project_listing();
-  }
-  else if (c == "moveasset") move_project_entry(fs::join(project_root_, arg(1, "")), fs::join(project_root_, arg(2, "Assets")));  // moveasset <Assets/x> <Assets/dir>
-  else if (c == "renameasset") rename_project_entry(fs::join(project_root_, arg(1, "")), arg(2, ""));  // renameasset <Assets/x.mat> <new name>
-  else if (c == "deleteasset") delete_project_entry(fs::join(project_root_, arg(1, "")));  // deleteasset <Assets/x>: to the Recycle Bin / Trash
-  else if (c == "newslotmat") {
-    /* newslotmat <slot> [preset]: the Inspector's New Material (of Type) on a slot of the selection */
-    if (GameObject *a = active_object()) {
-      const int slot = std::max(0, std::atoi(arg(1, "0").c_str()));
-      auto *mr = a->get<MeshRenderer>();
-      MaterialPtr cur = mr && slot < (int)mr->materials.size() ? mr->materials[(size_t)slot] : nullptr;
-      std::string preset = t.size() > 2 ? line.substr(line.find(t[2])) : "";
-      assign_material(a, slot, new_slot_material(preset.empty() ? cur : nullptr, preset));
-    }
-  }
-  else if (c == "facemat") {
-    /* facemat <Assets/x.mat | scene material name>: the selected faces use that material */
-    MaterialPtr m = material_asset(arg(1, ""));
-    if (!m)
-      for (const MaterialPtr &sm : scene_materials())
-        if (sm->name == arg(1, "")) m = sm;
-    if (m) assign_material_to_selected_faces(m);
-    else Log::warn("facemat: no material %s", arg(1, "").c_str());
-  }
-  else if (c == "drawpoint") {
-    /* drawpoint <x> <y> <z> [close|finish]: a click of the drawing tool at a world point (scripts, tests) */
-    if (draw_.active) {
-      const Vec3 p((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
-      draw_point(p, to_lower(arg(4, "")));
-    }
-  }
-  else if (c == "exportoptions") {
-    /* exportoptions <obj|fbx|glb|gltf|stl|ply|usda>: File > Export > that format (the options, then Save As) */
-    std::string fmt = to_lower(arg(1, "obj"));
-    if (fmt[0] != '.') fmt = "." + fmt;
-    const int fi = export_format_from_extension(fmt);
-    if (fi >= 0) open_export_dialog(fi);
-  }
-  else if (c == "selectadd") {
-    /* selectadd <name>: Ctrl+click it (it becomes the active object) */
-    if (GameObject *g = scene_->find_by_name(line.substr(line.find(' ') + 1))) select(g->id, SEL_ADD);
-    else Log::warn("No object named that");
-  }
-  else if (c == "boolean") {
-    /* boolean <difference|union|intersect> [modifier]: the active object is cut by the other selected ones */
-    const std::string o = to_lower(arg(1, "difference"));
-    boolean_selected(o == "union" ? 1 : o == "intersect" ? 2 : 0, to_lower(arg(2, "")) != "modifier");
-  }
-  else if (c == "separate") separate(to_lower(arg(1, "loose")) == "selection" ? "selection" : "loose");
-  else if (c == "esel") {
-    /* esel <a> <b> [<c> <d> ...]: select exactly these edges (vertex pairs), edge mode */
-    if (!edit_mode_) enter_edit_mode();
-    if (edit_object()) {
-      if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
-      edge_sel_.clear();
-      for (size_t i = 1; i + 1 < t.size(); i += 2)
-        edge_sel_.insert(Mesh::edge_key((uint32_t)std::strtoul(t[i].c_str(), nullptr, 10), (uint32_t)std::strtoul(t[i + 1].c_str(), nullptr, 10)));
-      verts_from_edges();
-    }
-  }
-  else if (c == "vsel") {
-    /* vsel <v0> <v1> ... : select exactly these vertices (edit mode) */
-    if (!edit_mode_) enter_edit_mode();
-    if (edit_object()) {
-      vert_sel_.assign((*edit_mesh_ptr())->vert_count(), 0);
-      for (size_t i = 1; i < t.size(); i++) {
-        size_t v = std::strtoull(t[i].c_str(), nullptr, 10);
-        if (v < vert_sel_.size()) vert_sel_[v] = 1;
-      }
-      sync_vert_face_selection(false);
-    }
-  }
-  else if (c == "position" && t.size() >= 4) {
-    /* position <x> <y> <z>: the selected objects' world position */
-    const Vec3 p((float)std::atof(t[1].c_str()), (float)std::atof(t[2].c_str()), (float)std::atof(t[3].c_str()));
-    for (GameObject *g : selected_objects(false)) g->set_world_position(p);
-    mark_changed("Position");
-  }
-  else if (c == "focus") {
-    /* focus <x> <y> <z> [fstop]: the selected camera keeps that point in focus (depth of field on) */
-    GameObject *a = active_object();
-    Camera *cam = a ? a->get<Camera>() : nullptr;
-    if (!cam) Log::warn("focus: select a camera");
-    else {
-      cam->dof = true;
-      cam->focus_track = true;
-      cam->focus_point = Vec3((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
-      if (t.size() > 4) cam->f_stop = std::max(0.1f, (float)std::atof(t[4].c_str()));
-      update_camera_focus();
-      mark_changed("Camera Focus");
-    }
-  }
-  else if (c == "autosmooth") {
-    /* autosmooth on|off [angle]: Auto Smooth for new curved surfaces */
-    auto_smooth_ = to_lower(arg(1, "on")) != "off";
-    if (t.size() > 2) auto_smooth_angle_ = std::max(1.0f, std::min(180.0f, (float)std::atof(t[2].c_str())));
-  }
-  else if (c == "set_extrude_individual") extrude_individual_ = arg(1, "1") == "1";
-  else if (c == "duplicate") duplicate_selected();
-  else if (c == "uvsel") {
-    /* uvsel all|none|invert|islands | uvsel face <f> | uvsel island <f> | uvsel mode vertex|face|island */
-    const std::string w = to_lower(arg(1, "all"));
-    if (w == "mode") {
-      const std::string md = to_lower(arg(2, "vertex"));
-      uv_select_mode_ = md == "face" ? 1 : md == "island" ? 2 : 0;
-    }
-    else uv_select(w, std::atoi(arg(2, "-1").c_str()));
-  }
-  else if (c == "uvxf") {
-    /* uvxf rotate <deg> | scale <k> [ky] | move <du> <dv> | flip_u | flip_v | fit | center | align_left ... */
-    uv_transform(to_lower(arg(1, "")), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
-  }
-  else if (c == "zfight") {
-    /* zfight [scene] | zfight fix [index] */
-    if (to_lower(arg(1, "")) == "fix") zfight_fix(t.size() > 2 ? std::atoi(t[2].c_str()) : -1);
-    else if (to_lower(arg(1, "")) == "clear") zfight_.clear();
-    else {
-      zfight_scan(to_lower(arg(1, "")) == "scene");
-      zfight_from_panel_ = true;
-    }
-  }
-  else if (c == "keymap") {
-    /* keymap <Unity|Blender|Maya|3ds Max|SketchUp> | keymap bind <action> <chord>[|<chord>] | keymap clear <action> */
-    const std::string sub = to_lower(arg(1, ""));
-    if (sub == "bind" && t.size() >= 4) {
-      std::vector<KeyChord> chords;
-      std::string spec = t[3];
-      size_t p = 0;
-      while (p <= spec.size()) {
-        size_t q = spec.find('|', p);
-        if (q == std::string::npos) q = spec.size();
-        const KeyChord ch = parse_chord(spec.substr(p, q - p));
-        if (ch.key) chords.push_back(ch);
-        p = q + 1;
-      }
-      set_binding(t[2], chords);
-    }
-    else if (sub == "clear" && t.size() >= 3) set_binding(t[2], {});
-    else if (!sub.empty()) {
-      const std::string name = line.substr(line.find(' ') + 1);
-      for (const char *pn : kKeymapPresets)
-        if (to_lower(pn) == to_lower(name)) set_keymap_preset(pn);
-    }
-  }
-  else if (c == "rendersequence") {
-    /* rendersequence [folder] | rendersequence stop: every In Sequence camera, each saved */
-    if (to_lower(arg(1, "")) == "stop") stop_render_sequence();
-    else start_render_sequence(arg(1, "").empty() ? "" : fs::join(project_root_, arg(1, "")));
-  }
-  else if (c == "insetmode") {
-    /* insetmode individual|region [amount]: Inset's Individual switch and its amount (a fraction) or thickness */
-    inset_individual_ = to_lower(arg(1, "individual")) != "region";
-    if (t.size() > 2) (inset_individual_ ? inset_amount_ : inset_thickness_) = std::max(0.0f, (float)std::atof(t[2].c_str()));
-  }
-  else if (c == "edittool") edit_tool(arg(1, "fill"));  // edittool <op>: as the menus and buttons start it (helpers included)
-  else if (c == "editop") {
-    const std::string op = arg(1, "fill");
-    if (op == "knife" || op == "origin_to_selection") edit_tool(op);  /* tools, not mesh operators */
-    else edit_op(op);
-  }
-  else if (c == "ngon") ngon_mode_ = to_lower(arg(1, ngon_mode_ ? "off" : "on")) == "on";  // ngon [on|off]: SketchUp-style faces
-  else if (c == "material") {
-    /* material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>: new material on the selection. */
-    std::string preset = line.size() > 9 ? line.substr(9) : "Solid";
-    int n = 0;
-    for (GameObject *g : selected_objects(false))
-      if (auto *mr = g->get<MeshRenderer>()) {
-        if (mr->materials.empty()) mr->materials.resize(1);
-        mr->materials[0] = make_material_preset(preset);
-        n++;
-      }
-    if (n) mark_changed("Material " + preset);
-    else Log::warn("Select objects with a MeshRenderer first");
-  }
-  else if (c == "preview") start_final_render(true);
-  else if (c == "device") {
-    /* device cpu | device gpu [+cpu] [nort] | device auto: Render Properties > Device (path tracing). */
-    RenderSettings &rs = scene_->render;
-    rs.device = arg(1, "cpu") == "gpu" ? 1 : arg(1, "cpu") == "auto" ? 2 : 0;
-    rs.gpu_with_cpu = line.find("+cpu") != std::string::npos;
-    rs.hardware_rt = line.find("nort") == std::string::npos;
-    mark_changed("Render Device");
-    Log::info("Device: %s%s", rs.device == 2 ? "GPU + CPU (Auto)" : rs.device ? "GPU Compute" : "CPU",
-              rs.device == 1 ? (rs.gpu_with_cpu ? " + CPU" : "") : "");
-    Log::info("%s", gpu::status().c_str());
-  }
-  else if (c == "pushpull") {
-    /* pushpull <distance>: Push/Pull the selected faces (edit mode), like the P tool. */
-    pp_last_distance_ = (float)std::atof(arg(1, "0.5").c_str());
-    edit_op("push_pull");
-  }
-  else if (c == "camerapreview") {
-    /* camerapreview rendered|shaded|lock|unlock (the Scene view's Camera Preview inset) */
-    const std::string w = to_lower(arg(1, "rendered"));
-    if (w == "lock") {
-      GameObject *a = active_object();
-      if (a && a->get<Camera>()) cam_preview_lock_ = a->id;
-    }
-    else if (w == "unlock") cam_preview_lock_ = 0;
-    else {
-      cam_preview_rendered_ = w == "rendered";
-      cam_preview_pt_hash_ = 0;
-    }
-  }
-  else if (c == "set") {
-    /* set <Component>.<Field> <value...> (a Vec3 takes three numbers) */
-    size_t at = t.size() > 2 ? line.find(t[2], line.find(t[1]) + t[1].size()) : std::string::npos;
-    set_field_command(arg(1, ""), at == std::string::npos ? "" : line.substr(at));
-  }
-  else if (c == "origin") {
-    /* origin bounds|median|surface|volume|bottom|selection|pivot|geometry, or origin point <x> <y> <z> */
-    static const char *names[kOriginModeCount] = {"bounds", "median", "surface", "volume", "bottom", "point", "selection", "pivot", "geometry"};
-    /* origin mode <name>: choose the Inspector's mode without applying it (the Scene view previews it). */
-    const bool choose = to_lower(arg(1, "")) == "mode";
-    if (to_lower(arg(1, "")) == "edit") {  // origin edit [on|off]: move the origin with the gizmo / click to snap
-      const std::string v = to_lower(arg(2, ""));
-      origin_edit_ = v.empty() ? !origin_edit_ : v == "on";
-      return;
-    }
-    std::string w = to_lower(arg(choose ? 2 : 1, "bounds"));
-    int mode = -1;
-    for (int k = 0; k < kOriginModeCount; k++)
-      if (w == names[k]) mode = k;
-    if (mode < 0) Log::warn("origin: use bounds, median, surface, volume, bottom, selection, pivot, geometry or point x y z");
-    else if (choose) origin_mode_ = mode;
-    else
-      set_origin(mode, Vec3((float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str())));
-  }
-  else if (c == "fsel") {
-    /* fsel <f0> <f1> ... | fsel facing <x> <y> <z> [more directions...]: select faces (edit mode). */
-    if (!edit_mode_) enter_edit_mode();
-    if (edit_object()) {
-      const Mesh &m = **edit_mesh_ptr();
-      elem_ = EditElement::Face;
-      face_sel_.assign(m.face_count(), 0);
-      if (arg(1, "") == "facing") {
-        for (size_t i = 2; i + 2 < t.size(); i += 3) {
-          Vec3 d = normalize(Vec3((float)std::atof(t[i].c_str()), (float)std::atof(t[i + 1].c_str()), (float)std::atof(t[i + 2].c_str())));
-          for (size_t f = 0; f < m.face_count(); f++)
-            if (dot(m.face_normal(f), d) > 0.99f) face_sel_[f] = 1;
-        }
-      }
-      else
-        for (size_t i = 1; i < t.size(); i++) {
-          size_t f = std::strtoull(t[i].c_str(), nullptr, 10);
-          if (f < face_sel_.size()) face_sel_[f] = 1;
-        }
-      sync_vert_face_selection(true);
-    }
-  }
-  else if (c == "redo" && t.size() == 1) redo();  // no arguments: redo the last undo (Ctrl+Y)
-  else if (c == "redo") {
-    /* redo <amount|segments|twist|smooth|path|normal|orientation|fuse> <value> | redo move <x> <y> <z>:
-     * change the last edit operator's parameters (the Adjust Last Operation panel). */
-    if (!last_op_valid()) { Log::warn("Nothing to adjust: run an edit operator first"); return; }
-    std::string k = arg(1, "");
-    float v = (float)std::atof(arg(2, "0").c_str());
-    if (k == "amount") last_op_.amount = v;
-    else if (k == "segments") last_op_.segments = (int)v;
-    else if (k == "twist") last_op_.twist = (int)v;
-    else if (k == "smooth") last_op_.smooth = v;
-    else if (k == "path") last_op_.path = (int)v;
-    else if (k == "normal") last_op_.along_normal = v;
-    else if (k == "orientation") last_op_.orientation = (int)v;
-    else if (k == "fuse") last_op_.fuse = v != 0;
-    else if (k == "clamp") last_op_.clamp = v != 0;
-    else if (k == "move") last_op_.move = Vec3(v, (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str()));
-    else { Log::warn("redo: unknown parameter '%s'", k.c_str()); return; }
-    run_last_op(false);
-  }
-  else if (c == "loopcuts") {
-    loop_cuts_ = std::max(1, std::atoi(arg(1, "1").c_str()));
-    loop_slide_ = (float)std::atof(arg(2, "0.5").c_str());
-  }
-  else if (c == "proportional") {
-    proportional_ = arg(1, "on") != "off";
-    prop_radius_ = (float)std::atof(arg(2, "1").c_str());
-  }
-  else if (c == "component") {
-    /* Names may have spaces ("Retro Console Filter"): the rest of the line. */
-    std::string name;
-    for (size_t i = 1; i < t.size(); i++) name += (i > 1 ? " " : "") + t[i];
-    add_component_to_selection(name.empty() ? "MirrorModifier" : name);
-  }
-  else if (c == "applymods") mesh_op("apply_modifiers");
-  else if (c == "libs") {
-    /* Which of Blender's libraries this build uses (deps/deps.h). */
-    for (const deps::Library &l : deps::libraries())
-      Log::info("%-18s %-10s %s%s", l.name, l.enabled ? l.version.c_str() : "-", l.enabled ? l.used_for : "not built in; using ",
-                l.enabled ? "" : l.fallback);
-    Log::info("%s", gpu::status().c_str());
-  }
-  else if (c == "camera" && t.size() >= 4) {
-    cam_.yaw = (float)std::atof(t[1].c_str());
-    cam_.pitch = (float)std::atof(t[2].c_str());
-    cam_.distance = (float)std::atof(t[3].c_str());
-    if (t.size() >= 7) cam_.pivot = {(float)std::atof(t[4].c_str()), (float)std::atof(t[5].c_str()), (float)std::atof(t[6].c_str())};
-  }
-  else if (c == "world") {
-    std::string w = to_lower(arg(1, "gradient"));
-    scene_->environment.mode = w == "sky" ? 1 : w == "hdri" ? 2 : w == "color" ? 3 : 0;
-    if (w == "hdri" && t.size() > 2) scene_->environment.hdri.path = line.substr(line.find(t[2]));
-    mark_changed("World");
-  }
-  else if (c == "engine") {
-    const std::string e = to_lower(arg(1, "raster"));  // raster | path | moonray (task 0114)
-    scene_->render.engine = e.rfind("path", 0) == 0 ? 1 : e.rfind("moon", 0) == 0 ? 2 : 0;
-    mark_changed("Render Engine");
-  }
-  else if (c == "samples") {
-    scene_->render.samples = std::max(1, std::atoi(arg(1, "64").c_str()));
-  }
-  else if (c == "texture") {
-    std::string p = t.size() > 1 ? line.substr(line.find(t[1])) : "generated:UV Grid";
-    if (p == "uvgrid") p = "generated:UV Grid";
-    if (p == "colorgrid") p = "generated:Color Grid";
-    assign_texture_to_selection(p);
-  }
-  else if (c == "selectall") {
-    selection_.clear();
-    scene_->for_each([&](GameObject &g) { if (g.get<MeshRenderer>()) selection_.push_back(g.id); });
-  }
-  else if (c == "uv") uv_op(arg(1, "unwrap"));
-  else if (c == "seam") {
-    /* seam <v0> <v1> ... : select those vertices (edit mode) and mark seams between them */
-    if (!edit_mode_) enter_edit_mode();
-    if (GameObject *g = edit_object()) {
-      const Mesh &m = **edit_mesh_ptr();
-      vert_sel_.assign(m.vert_count(), 0);
-      for (size_t i = 1; i < t.size(); i++) {
-        size_t v = std::strtoull(t[i].c_str(), nullptr, 10);
-        if (v < vert_sel_.size()) vert_sel_[v] = 1;
-      }
-      (void)g;
-      uv_op("mark_seam");
-    }
-  }
-  else if (c == "render") start_final_render();
-  else if (c == "probes") {
-    /* probes show|hide: the probe volume's probes in the Scene view. */
-    scene_->lighting.show_probes = to_lower(arg(1, "show")) != "hide";
-    mark_changed("Show Probes");
-  }
-  else if (c == "bake") {
-    /* bake [start|cancel|clear]: Generate Lighting, as the Lighting window's buttons. */
-    const std::string w = to_lower(arg(1, "start"));
-    if (w == "cancel") bake_cancel();
-    else if (w == "clear") bake_clear();
-    else bake_start();
-  }
-  else if (c == "saverender") save_render();
-  else if (c == "lighting") {
-    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) */
-    const std::string sub = to_lower(arg(1, "update"));
-    if (sub == "update") lighting_update();
-    else if (sub == "preview") {
-      scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
-      mark_changed("Preview Lighting");
-    }
-    else if (sub == "mode") {
-      const std::string m = to_lower(arg(2, "manual"));
-      scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
-      mark_changed("Lighting Updates");
-    }
-    else Log::warn("lighting: update | preview on|off | mode manual|automatic");
-  }
-  else if (c == "shading") {
-    std::string w = to_lower(arg(1, "shaded"));
-    if (w == "rendered")
-      Log::warn("shading: the Scene view has no Rendered mode (too slow to edit in); showing Shaded. Path trace with F12, the "
-                "Render window or `camerapreview rendered`.");
-    shading_ = w == "wire" || w == "wireframe" ? Shading::Wireframe
-               : w == "both"                      ? Shading::ShadedWireframe
-               : w == "solid"                     ? Shading::Solid
-                                                   : Shading::Shaded;
-  }
-  else if (c == "filter") {
-    /* filter add <name> | look <Anime|Manga> | remove <i> | move <i> <j> | reset <i> | list: the selection's Camera Filters stacks. */
-    const std::string sub = to_lower(arg(1, "list"));
-    std::string name;
-    for (size_t k = 2; k < t.size(); k++) name += (k > 2 ? " " : "") + t[k];
-    const int i = std::atoi(arg(2, "0").c_str()), j = std::atoi(arg(3, "0").c_str());
-    if ((sub == "remove" || sub == "reset" || sub == "move") && t.size() < (sub == "move" ? 4u : 3u)) {
-      Log::warn("filter %s: give the filter's number%s (filter list shows them)", sub.c_str(), sub == "move" ? " and where to" : "");
-      return;
-    }
-    for (GameObject *g : selected_objects(false)) {
-      if (sub == "list") {
-        const auto *cf = g->get<CameraFilters>();
-        Log::info("%s: %zu filter(s)", g->name.c_str(), cf ? cf->effects.size() : (size_t)0);
-        if (cf)
-          for (size_t k = 0; k < cf->effects.size(); k++)
-            Log::info("  %zu %s%s", k, cf->effects[k]->type_name(), cf->effects[k]->enabled ? "" : " (off)");
-        if (!cf || cf->effects.empty()) {
-          std::string all;
-          for (const FilterEffectInfo &fi : filter_effect_infos()) all += (all.empty() ? "" : ", ") + fi.category + " > " + fi.name;
-          Log::info("  available: %s", all.c_str());
-        }
-      }
-      else filter_stack_op(g->id, sub, i, j, name);
-    }
-  }
-  else if (c == "undo") undo();  // Ctrl+Z
-  else if (c == "newtex") {
-    /* newtex <name> [preset]: a new Assets/Textures/<name>.ptex (presets: Bricks, Wood Floor, Tatami, Tiles, Noise, Checker). */
-    const std::string name = arg(1, "");
-    if (name.empty()) {
-      Log::warn("newtex <name> [preset]");
-      return;
-    }
-    std::string preset;
-    for (size_t i = 2; i < t.size(); i++) preset += (i > 2 ? " " : "") + t[i];
-    ProceduralTexture src;
-    src.name = name;
-    if (!preset.empty() && !apply_texture_preset(src, preset)) Log::warn("newtex: no preset '%s' (Bricks, Wood Floor, Tatami, Tiles, Noise, Checker)", preset.c_str());
-    const std::string rel = "Assets/Textures/" + name + ".ptex";
-    if (ProceduralTexturePtr pt = create_texture_asset(src, rel)) {
-      Log::info("Created %s (%zu layer%s)", rel.c_str(), pt->layers.size(), pt->layers.size() == 1 ? "" : "s");
-      project_listed_ = -100;
-    }
-    else Log::error("Could not write %s", rel.c_str());
-  }
-  else if (c == "texlist") {
-    for (const auto &kv : loaded_texture_assets())
-      Log::info("%s: %dx%d, %zu layer(s)%s", kv.first.c_str(), kv.second->width, kv.second->height, kv.second->layers.size(),
-                kv.second->layers.empty() ? "" : (": " + [&] {
-                  std::string s;
-                  for (size_t i = 0; i < kv.second->layers.size(); i++) s += (i ? ", " : "") + std::string(kv.second->layers[i]->type_name());
-                  return s;
-                }()).c_str());
-    const std::string dir = fs::join(assets_dir_, "Textures");
-    for (const DirEntry &de : fs::list(dir))
-      if (!de.is_dir && fs::extension(de.name) == ".ptex") texture_asset(make_asset_relative(fs::join(dir, de.name)));
-  }
-  else if (c == "texlayer") {
-    /* texlayer <asset> add <type> | remove <i> | move <i> <j> | reset <i> | list */
-    ProceduralTexturePtr pt = texture_asset(arg(1, "").find('/') == std::string::npos ? "Assets/Textures/" + arg(1, "") + ".ptex" : arg(1, ""));
-    if (!pt) {
-      Log::warn("texlayer: no texture asset '%s' (a name in Assets/Textures, or a project path)", arg(1, "").c_str());
-      return;
-    }
-    const std::string sub = to_lower(arg(2, "list"));
-    std::string name;
-    for (size_t k = 3; k < t.size(); k++) name += (k > 3 ? " " : "") + t[k];
-    const int i = std::atoi(arg(3, "0").c_str()), j = std::atoi(arg(4, "0").c_str());
-    const int n = (int)pt->layers.size();
-    if (sub == "list") {
-      for (int k = 0; k < n; k++) Log::info("  %d: %s%s", k, pt->layers[(size_t)k]->type_name(), pt->layers[(size_t)k]->enabled ? "" : " (off)");
-      if (!n) Log::info("%s: no layers", pt->name.c_str());
-    }
-    else if (sub == "add" || sub == "remove" || sub == "move" || sub == "reset") {
-      if (texture_stack_op(pt->asset_path, sub, i, j, name) && sub == "add") Log::info("%s: added %s (%zu layers)", pt->name.c_str(), name.c_str(), pt->layers.size());
-    }
-    else Log::warn("texlayer: add <type> | remove <i> | move <i> <j> | reset <i> | list");
-  }
-  else if (c == "settex") {
-    /* settex <asset> <Field> <value...>: a texture asset's field, or a layer's as "L0 Rows" / L0Rows. */
-    ProceduralTexturePtr pt = texture_asset(arg(1, "").find('/') == std::string::npos ? "Assets/Textures/" + arg(1, "") + ".ptex" : arg(1, ""));
-    if (!pt || t.size() < 4) {
-      Log::warn("settex <asset> <Field> <value...> (e.g. settex Bricks L0Rows 12)");
-      return;
-    }
-    size_t at = line.find(t[3], line.find(t[2], line.find(t[1]) + t[1].size()) + t[2].size());
-    SetFieldReflector sr;
-    sr.key = field_key(t[2]);
-    sr.value = at == std::string::npos ? "" : line.substr(at);
-    sr.target.clear();
-    sr.names.clear();
-    sr.done = false;
-    pt->reflect(sr);
-    for (int pass = 0; pass < 2 && sr.target.empty(); pass++)
-      for (const std::string &nm : sr.names)
-        if (pass == 0 ? field_key(nm) == sr.key : field_key(nm).rfind(sr.key, 0) == 0) {
-          sr.target = nm;
-          break;
-        }
-    if (sr.target.empty()) {
-      Log::warn("settex: no field '%s' on %s", t[2].c_str(), pt->name.c_str());
-      return;
-    }
-    note_texture_edit(*pt);
-    const float size_before = pt->physical_size;
-    pt->reflect(sr);
-    if (sr.done) {
-      if (pt->physical_size != size_before) retile_texture_users(pt->asset_path, size_before, pt->physical_size);  // (task 0072)
-      pt->touch();
-      mark_changed("Set " + pt->name + " " + sr.target);
-    }
-  }
-  else if (c == "guides") {
-    /* guides list | guides off | guides <thirds|center|diagonal|golden|goldena|goldenb|harmonya|harmonyb|title|action|show> [on|off]:
-     * the composition guides of the selected cameras, else the camera the Game view shows (task 0033). */
-    std::vector<Camera *> cams;
-    for (GameObject *g : selected_objects(false))
-      if (Camera *cm = g->get<Camera>()) cams.push_back(cm);
-    if (cams.empty())
-      if (Camera *mc = main_camera(*scene_)) cams.push_back(mc);
-    if (cams.empty()) {
-      Log::warn("guides: no camera");
-      return;
-    }
-    const std::string what = to_lower(arg(1, "list")), v = to_lower(arg(2, "on"));
-    const bool on = v == "on" || v == "1" || v == "true", off_ = v == "off" || v == "0" || v == "false";
-    if (what != "list" && what != "off" && !on && !off_) {
-      Log::warn("guides %s: on or off", what.c_str());
-      return;
-    }
-    bool changed = false;
-    for (Camera *cm : cams) {
-      struct G {
-        const char *name;
-        bool *flag;
-      } all[] = {{"thirds", &cm->guide_thirds},        {"center", &cm->guide_center},           {"diagonal", &cm->guide_center_diagonal},
-                 {"golden", &cm->guide_golden},        {"goldena", &cm->guide_golden_tri_a},    {"goldenb", &cm->guide_golden_tri_b},
-                 {"harmonya", &cm->guide_harmony_a},   {"harmonyb", &cm->guide_harmony_b},      {"title", &cm->guide_title_safe},
-                 {"action", &cm->guide_action_safe},   {"show", &cm->show_guides}};
-      if (what == "list") {
-        std::string on;
-        for (const G &gg : all)
-          if (*gg.flag) on += std::string(on.empty() ? "" : ", ") + gg.name;
-        Log::info("guides of %s: %s (shown: %s)", cm->owner ? cm->owner->name.c_str() : "?", on.empty() ? "none" : on.c_str(), cm->show_guides ? "yes" : "no");
-        continue;
-      }
-      if (what == "off") {
-        changed = changed || cm->show_guides;
-        cm->show_guides = false;
-        continue;
-      }
-      bool found = false;
-      for (const G &gg : all)
-        if (what == gg.name) {
-          changed = changed || *gg.flag != on;
-          *gg.flag = on;
-          if (gg.flag != &cm->show_guides && on) changed = changed || !cm->show_guides, cm->show_guides = true;
-          found = true;
-        }
-      if (!found) {
-        Log::warn("guides: thirds, center, diagonal, golden, goldena, goldenb, harmonya, harmonyb, title, action, show, off or list");
-        return;
-      }
-    }
-    if (changed) mark_changed("Guides");
-  }
-  else if (c == "curve" || c == "points") points_command(t);  // its own function: this chain is near the compiler's nesting limit
-  else if (c == "activecamera") {
-    /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
-    std::string name;
-    for (size_t i = 1; i < t.size(); i++) name += (i > 1 ? " " : "") + t[i];
-    if (name.empty()) {
-      GameObject *shown = nullptr;
-      main_camera(*scene_, &shown);
-      Log::info("Active Camera: %s%s", shown ? shown->name.c_str() : "none",
-                shown && shown->id != scene_->active_camera ? " (by name; none chosen)" : "");
-    }
-    else if (to_lower(name) == "none") set_active_camera(nullptr);
-    else if (GameObject *g = scene_->find_by_name(name)) {
-      if (g->camera()) set_active_camera(g);
-      else Log::warn("activecamera: '%s' has no Camera component", name.c_str());
-    }
-    else Log::warn("activecamera: no object named '%s'", name.c_str());
-  }
-  else if (c == "filters") {
-    /* The main camera's filters on the Scene view (Shaded): on / off / toggle. */
-    const std::string w = to_lower(arg(1, "toggle"));
-    scene_filters_ = w == "on" || w == "1" ? true : w == "off" || w == "0" ? false : !scene_filters_;
-    Log::info("Camera filters in the Scene view: %s", scene_filters_ ? "on" : "off");
-  }
-  else if (c == "bench") {
-    int frames = std::max(1, std::atoi(arg(1, "30").c_str()));
-    if (scene_rt_.width <= 0) { Log::warn("Open the Scene view first"); return; }
-    RasterOptions saved = raster_opt_;
-    struct Cfg { const char *name; bool mt, cull, frus; };
-    for (Cfg cfg : {Cfg{"all optimizations", true, true, true}, Cfg{"single thread", false, true, true},
-                    Cfg{"no backface culling", true, false, true}, Cfg{"no frustum culling", true, true, false}}) {
-      raster_opt_.multithreaded = cfg.mt;
-      raster_opt_.backface_culling = cfg.cull;
-      raster_opt_.frustum_culling = cfg.frus;
-      ScopedTimer bt;
-      for (int i = 0; i < frames; i++) render_scene_view(scene_rect_);
-      Log::info("bench %-22s %7.2f ms/frame  (%zu tris)", cfg.name, bt.ms() / frames, scene_stats_.tris_submitted);
-    }
-    raster_opt_ = saved;
-  }
-  else Log::warn("Unknown command '%s' (type help)", c.c_str());
-}
-
 /* ===================================================================== */
 /* Dialogs                                                                */
 /* ===================================================================== */
@@ -4136,6 +3352,7 @@ static void scan_files(const std::string &dir, const std::string &ext, std::vect
 static int g_dialog_shown = 0;  // which dialog has had its popup opened
 
 void Editor::draw_dialogs() {
+  if (ipv_.open && dialog_ != Dialog::ImportPreview) finish_import_preview(false);  // (the preview clicked away: as Cancel, task 0152)
   if (dialog_ == Dialog::None) {
     g_dialog_shown = 0;
     return;
@@ -4144,7 +3361,7 @@ void Editor::draw_dialogs() {
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
   const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
                     dialog_ == Dialog::MoonRay || dialog_ == Dialog::Ai;
-  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -4212,6 +3429,10 @@ void Editor::draw_dialogs() {
         }
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
+        break;
+      }
+      case Dialog::ImportPreview: {
+        draw_import_preview_dialog(close);
         break;
       }
       case Dialog::Export: {
@@ -4311,6 +3532,28 @@ void Editor::draw_dialogs() {
         draw_assist_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
+        /* (After the keymap: its preset list opens below its field, and a row above would push the field down until the
+         * list had to open upward - task 0152.) */
+        Recti ri = u.popup_row(u.row_h() + u.px(4));  // (task 0152)
+        u.label({ri.x + u.px(12), ri.y, u.px(140), ri.h}, "Import");
+        if (u.checkbox({ri.x + u.px(160), ri.y + u.px(2), ri.h - u.px(4), ri.h - u.px(4)}, import_preview_pref_)) save_prefs();
+        u.label({ri.x + u.px(160) + ri.h, ri.y, u.px(160), ri.h}, "Preview before importing");
+        u.tooltip("A dropped or opened model is shown first, with its shading switchable (the file's, PBR, a toon style) and an\n"
+                  "outline; Import then writes it into Assets. Off: it comes in at once, as before.");
+        {
+          std::vector<const char *> names;
+          for (const std::string &n : import_shading_names()) names.push_back(n.c_str());
+          if (u.combo(u.id("pref_import_shading"), {ri.x + u.px(360), ri.y + u.px(2), u.px(150), ri.h - u.px(4)}, import_shading_pref_, names.data(), (int)names.size())) save_prefs();
+          u.tooltip("The shading the preview opens with.");
+        }
+        Recti rcs = u.popup_row(u.row_h() + u.px(4));  // (after the keymap, as the Import row: task 0156)
+        u.label({rcs.x + u.px(12), rcs.y, u.px(140), rcs.h}, "Rig Control Size");
+        float cs = rig_control_scale_;
+        if (u.float_field(u.id("pref_control_size"), {rcs.x + u.px(160), rcs.y + u.px(2), u.px(80), rcs.h - u.px(4)}, cs, 0.05f, 0.1f, 5.0f, "%.2f")) {
+          rig_control_scale_ = cs;
+          save_prefs();
+        }
+        u.tooltip("How big the rig's IK and FK handles are drawn, times their own size (1: a fifth of the bone). Console: overlay controls size <x>.");
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -4348,14 +3591,29 @@ void Editor::load_prefs() {
     if (assist_pref(k, v)) continue;
     if (ai_pref(k, v)) continue;
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
+    else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
+    else if (k == "windows") windows_pref_ = v;
+    else if (k == "recent_scenes") recent_scenes_ = split_list(v, ';');
+    else if (k == "guides_seen") for (const std::string &g : split_list(v, ';')) guides_seen_.insert(g);
+    else if (k == "inspector_essentials") inspector_essentials_ = v != "0";
+    else if (k == "guides") guides_enabled_ = v != "0";
+    else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
+    else if (k == "favorites") load_favorites_pref(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
+    else if (k == "overlays_off") {  // the layers hidden last time (task 0146)
+      for (const std::string &w : split_ws(v))
+        for (const OverlayLayer &l : overlay_layers())
+          if (w == l.key) *l.flag = false;
+    }
     else if (k == "ffmpeg") ffmpeg_path_ = v;
     else if (k == "update_check") update_check_ = v != "0";
     else if (k == "update_previews") update_previews_ = v != "0";
+    else if (k == "import_preview") import_preview_pref_ = v != "0";  // (task 0152)
+    else if (k == "import_shading") import_shading_pref_ = std::max(0, std::min((int)import_shading_names().size() - 1, std::atoi(v.c_str())));
     else if (k == "update_last") update_last_check_ = std::atof(v.c_str());
     else if (k == "update_skip") update_skip_ = v;
     else if (k == "use_libs") use_libs_ = v != "0";
@@ -4370,6 +3628,7 @@ void Editor::load_prefs() {
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str()))), had_fps = true;
     else if (k == "viewport_device") set_viewport_device(std::atoi(v.c_str()));
     else if (k == "other_views_follow") other_views_follow_ = v == "1";
+    else if (k == "cpu_fallback_noticed") cpu_fallback_noticed_ = v == "1";
     else if (k == "simpler_while_moving") simpler_while_moving_ = v == "1";
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
@@ -4432,6 +3691,8 @@ void Editor::load_prefs() {
 
 void Editor::save_prefs() {
   if (headless_ && !prefs_for_test_) return;
+  save_prefs_pending_ = active_window_ != 0;  // (another window is drawing: its dock is in the main one's place)
+  if (save_prefs_pending_) return;
   std::string done;
   for (int l : lessons_done_) done += std::to_string(l) + " ";
   std::string off;
@@ -4439,25 +3700,33 @@ void Editor::save_prefs() {
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
                             "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\nauto_smooth=%d\nauto_smooth_angle=%g\n"
                             "keymap_preset=%s\nkeymap=%s\ndraw_axes=%s\ncamera_filters=%d\nquality_tier=%d\nview_scale=%g\n"
-                            "cpu_threads=%d\ntier_caps=%d %d %d\n",
+                            "cpu_threads=%d\ntier_caps=%d %d %d\nrig_control_scale=%g\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
                             show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0, max_fps_,
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
-                            view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
+                            view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_, rig_control_scale_);
+  std::string overlays_off;
+  for (const OverlayLayer &l : overlay_layers())
+    if (!*l.flag) overlays_off += std::string(overlays_off.empty() ? "" : " ") + l.key;
+  s += "overlays_off=" + overlays_off + "\n";
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();
-  s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\n", viewport_device_, other_views_follow_ ? 1 : 0,
-                 simpler_while_moving_ ? 1 : 0);
+  s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
+                 other_views_follow_ ? 1 : 0, simpler_while_moving_ ? 1 : 0, cpu_fallback_noticed_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
+  s += strprintf("import_preview=%d\nimport_shading=%d\n", import_preview_pref_ ? 1 : 0, import_shading_pref_);  // (task 0152)
   s += strprintf("use_libs=%d\nlibs_never_ask=%d\nlibs_last=%.0f\n", use_libs_ ? 1 : 0, libs_never_ask_ ? 1 : 0, libs_last_check_);
   s += strprintf("moonray_never_ask=%d\nmoonray_last=%.0f\nmoonray_folder=%s\nmoonray_installed=%d\n", mr_never_ask_ ? 1 : 0, mr_last_ask_,
                  mr_folder_.c_str(), mr_installed_ ? 1 : 0);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
+  s += "windows=" + windows_layout() + "\n";  // (task 0187)
+  s += favorites_prefs_text();  // (task 0189)
+  s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
 }
 
@@ -4564,6 +3833,8 @@ void Editor::carry_vertex_groups(const Scene &before) {
     const GameObject *old = before.find(g.id);
     const MeshFilter *of = old ? old->mesh_filter() : nullptr;
     const Mesh *om = of && of->mesh && of->mesh.get() != mf->mesh.get() ? of->mesh.get() : nullptr;
+    carry_shape_keys(mf->mesh, om);
+    carry_custom_normals(mf->mesh, om);
     /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
      * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
     if (mf->mesh->groups_fit()) return;
@@ -4573,6 +3844,26 @@ void Editor::carry_vertex_groups(const Scene &before) {
       for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);  // nothing to carry from: fit the sizes
     m.touch();
   });
+}
+
+/* Shape keys (task 0135) after an edit: no operator carries them, so any edit that renumbered the vertices (even to
+ * the same count: a delete and an add) gets them from the mesh before, by position. A move keeps them as they are. */
+void Editor::carry_shape_keys(MeshPtr &mesh, const Mesh *before) {
+  if (!before || before->shape_keys.empty()) return;
+  /* The same faces on the same vertices: the edit moved vertices or changed the keys themselves (shape add, remove). */
+  if (mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before) && meshops::shape_keys_fit(*mesh)) return;
+  Mesh &m = *mesh_make_mutable(mesh);
+  meshops::transfer_shape_keys(*before, m);
+  m.touch();
+}
+
+/* Custom normals (task 0149) after an edit: a move keeps them; a renumbering gets them from the mesh before, by position. */
+void Editor::carry_custom_normals(MeshPtr &mesh, const Mesh *before) {
+  if (!before || before->custom_normals.empty()) return;
+  if (mesh->custom_normals_fit() && mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before)) return;
+  Mesh &m = *mesh_make_mutable(mesh);
+  meshops::transfer_custom_normals(*before, m);
+  m.touch();
 }
 
 bool Editor::vgroup_op(const std::string &verb, const std::string &name_in, const std::string &arg2, float weight) {

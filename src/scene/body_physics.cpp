@@ -294,10 +294,8 @@ std::vector<Vec3> com_trajectory(Scene &scene, GameObject &anim_root, const Anim
 }
 
 uint64_t body_key(const Scene &scene, const GameObject &armature) {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   /* The bones: each one's rest and length, whether it deforms, and where the armature stands. */
   std::vector<ArmatureBone> bones;
   armature_bones(armature, bones);
@@ -341,7 +339,7 @@ std::vector<Effector> effectors(Scene &scene, GameObject &anim_root, const GameO
     if (!g->get<Bone>() || !ik || !ik->enabled) continue;
     Effector e;
     e.bone = g;
-    e.target = ik->target.empty() ? nullptr : scene.find_by_name(ik->target);
+    e.target = ik_target_of(scene, *g);
     if (e.target && (e.target == &anim_root || scene.is_ancestor(&anim_root, e.target))) e.target_path = anim_path(anim_root, *e.target);
     else if (e.target) e.target_path.clear();
     out.push_back(e);

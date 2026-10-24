@@ -32,6 +32,7 @@ const Editor::Workspace kWorkspaces[] = {
      Editor::FocusObject | Editor::FocusMaterial, true},
     {"Lighting & Rendering", "H(0.74,V(0.62,H(0.55,L(0:0),L(1:0)),L(9,4,5:0)),V(0.55,L(13:0),L(3,2:0)))",
      Editor::FocusObject | Editor::FocusLight | Editor::FocusMaterial, true},
+    {"Editing", "H(0.8,V(0.8,L(19,9:0),L(4,5:0)),L(3,2:0))", Editor::FocusObject | Editor::FocusMaterial, true},
     {"Rigging", "H(0.72,V(0.74,H(0.22,L(2:0),L(0,1:0)),L(4,5:0)),L(15,3:0))",
      Editor::FocusCreate | Editor::FocusObject | Editor::FocusRig | Editor::FocusDeform, true},
     {"Skinning & Weight Painting", "H(0.7,V(0.78,H(0.22,L(2:0),L(0:0)),L(4,5:0)),L(15,3:0))", Editor::FocusObject | Editor::FocusRig, true},
@@ -73,6 +74,10 @@ std::vector<std::string> Editor::workspace_names() const {
 bool Editor::apply_workspace(const std::string &name) {
   const Workspace *w = find_workspace(name);
   if (!w) return false;
+  if (active_window_ != 0) {  // (another window is drawing: a layout arranges the main window, task 0187)
+    Log::warn("Layouts arrange the main window: choose one there");
+    return false;
+  }
   dock_reset(w->dock);
   focus_ = w->focus;
   workspace_ = w->name;

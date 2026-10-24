@@ -1,5 +1,233 @@
 # Performance, limits and efficiencies
 
+## Pass 15: every editor feature against Blender 5.2 (tasks 0201-0212)
+
+The stress section `blender_parity` and `tools/bench_blender.py --parity` (task 0201) time the same 59 operations in
+both programs, on scenes built alike, under the same names. Run `tools/bench.bat` on a quiet machine.
+- **An editor row** in Blendity: the console command, the frame that shows it and the frame after, each less an idle
+  frame, with the views on the GPU. "Of it the operator alone" is the command without its frames.
+- **In Blender:** the operator, the undo step its editor pushes, and the depsgraph update, run headless.
+
+Each row's two methods are in its last columns. Task 0203 (docs/tasks/0203-parity-causes.md) gives the cause of every
+row where Blendity is 1.25x or more behind, and the task that fixes it.
+
+<!-- pass15-table -->
+59 rows; Blendity behind on 22.
+
+**Files**
+
+| row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|---|
+| Save a scene: 10,000 cubes | 25.4 ms | - | 23.0 ms | Blendity 1.1x behind | the scene's text written to a file (3.2 MB); Blendity's .scene | wm.save_as_mainfile, uncompressed (15.2 MB written); Blendity's row: its .scene text written |
+| Open it: 10,000 cubes | 75.2 ms | - | 534.2 ms | Blendity 7.1x ahead | the file read and parsed into a scene (not swapped into an editor) | wm.open_mainfile without its UI; Blendity's row: the file read and parsed into a scene, not swapped into an editor |
+| Save a scene: a 500k-face mesh | 266.7 ms | - | 21.6 ms | Blendity 12.3x behind | the scene's text written to a file (76.2 MB); Blendity's .scene | wm.save_as_mainfile, uncompressed (48.6 MB written); Blendity's row: its .scene text written |
+| Open it: a 500k-face mesh | 475.5 ms | - | 26.7 ms | Blendity 17.8x behind | the file read and parsed into a scene (not swapped into an editor) | wm.open_mainfile without its UI; Blendity's row: the file read and parsed into a scene, not swapped into an editor |
+| Export the 50k sphere as OBJ | 798.9 ms | - | 44.7 ms | Blendity 17.9x behind | export_file, 16.2 MB written | the exporter's operator at its defaults (7.4 MB written) |
+| Import the 50k sphere from OBJ | 105.0 ms | - | 36.7 ms | Blendity 2.9x behind | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+| Export the 50k sphere as FBX | 327.7 ms | - | 75.5 ms | Blendity 4.3x behind | export_file, 10.5 MB written | the exporter's operator at its defaults (2.0 MB written) |
+| Import the 50k sphere from FBX | 15.2 ms | - | 76.0 ms | Blendity 5.0x ahead | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+| Export the 50k sphere as glTF (GLB) | 330.2 ms | - | 82.1 ms | Blendity 4.0x behind | export_file, 3.5 MB written | the exporter's operator at its defaults (7.6 MB written) |
+| Import the 50k sphere from glTF (GLB) | 48.0 ms | - | 362.6 ms | Blendity 7.5x ahead | import_model, an object made for each mesh (99.8k faces read) | the importer's operator at its defaults + the depsgraph update (99840 faces read) |
+| Export the 50k sphere as STL | 370.6 ms | - | 12.4 ms | Blendity 29.9x behind | export_file, 4.8 MB written | the exporter's operator at its defaults (5.0 MB written) |
+| Import the 50k sphere from STL | 42.9 ms | - | 20.5 ms | Blendity 2.1x behind | import_model, an object made for each mesh (99.8k faces read) | the importer's operator at its defaults + the depsgraph update (99840 faces read) |
+| Export the 50k sphere as PLY | 337.2 ms | - | 7.2 ms | Blendity 47.0x behind | export_file, 3.2 MB written | the exporter's operator at its defaults (1.9 MB written) |
+| Import the 50k sphere from PLY | 66.9 ms | - | 6.0 ms | Blendity 11.2x behind | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+| Export the 50k sphere as USD (USDA) | 790.6 ms | - | 253.1 ms | Blendity 3.1x behind | export_file, 14.7 MB written | the exporter's operator at its defaults (13.8 MB written) |
+| Import the 50k sphere from USD (USDA) | 103.5 ms | - | 213.5 ms | Blendity 2.1x ahead | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+
+**Objects**
+
+| row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|---|
+| Select all, 10,000 objects | 2.9 ms | 0.690 ms | 32.7 ms | Blendity 11.3x ahead | selectall (every object with a mesh) | object.select_all + the depsgraph update; Blendity's row: selectall and the frame that shows it |
+| Duplicate 10,000 objects | 72.2 ms | 14.7 ms | 1525.2 ms | Blendity 21.1x ahead | duplicate on every object selected (Blendity's copies share their meshes, copy on write), one run; undone outside the timer | object.duplicate linked (Alt+D: the copies share the mesh, as Blendity's copy-on-write copies do; Shift+D would copy 10,000 meshes) + its undo step + the depsgraph update; undone outside the timer |
+| Delete 10,000 objects | 13.6 ms | 13.6 ms | 7714.0 ms | Blendity 566.0x ahead | delete on every object selected; undone outside the timer | object.delete + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the delete, 10,000 objects | 25.0 ms | 6.5 ms | 387.3 ms | Blendity 15.5x ahead | undo of the delete (the scene's snapshot restored) | ed.undo of the delete (the memfile step read back) + the depsgraph update |
+
+**Edit Mode, 50k faces**
+
+| row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|---|
+| Enter Edit Mode (50k faces) | 13.1 ms | 0.040 ms | 15.7 ms | Blendity 1.2x ahead | edit vertex, its caches cold (a fresh copy of the mesh) | mode_set(EDIT) + the depsgraph update (the Mesh made a BMesh); headless Blender builds no draw cache |
+| Select all (50k faces) | 4.0 ms | 0.020 ms | 2.6 ms | Blendity 1.5x behind | Edit Mode's Select All (its shortcut's action, Ctrl+A / A) | mesh.select_all + the depsgraph update (no undo step timed: Blendity's selection pushes none) |
+| Select linked from one face (50k faces) | 21.0 ms | 15.6 ms | 15.7 ms | Blendity 1.3x behind | editop select_linked from face 100 (the whole sphere) | mesh.select_linked from face 100 + the depsgraph update |
+| Extrude three faces (50k faces) | 24.6 ms | 2.9 ms | 30.0 ms | Blendity 1.2x ahead | editop extrude on faces 100-102 (0.5 along their normal) | mesh.extrude_region_shrink_fatten on faces 100-102, 0.5 along their normals + its undo step + the depsgraph update; undone outside the timer |
+| Inset three faces (50k faces) | 25.9 ms | 4.1 ms | 24.1 ms | Blendity 1.1x behind | editop inset, region, thickness 0.01 | mesh.inset, region, thickness 0.01 + its undo step + the depsgraph update; undone outside the timer |
+| Bevel three faces' edges (50k faces) | 30.0 ms | 8.4 ms | 31.7 ms | Blendity 1.1x ahead | editop bevel on faces 100-102's edges, width 0.005, 3 segments | mesh.bevel on faces 100-102's edges, offset 0.005, 3 segments + its undo step + the depsgraph update; undone outside the timer |
+| Loop cut (50k faces) | 31.4 ms | 12.3 ms | 61.9 ms | Blendity 2.0x ahead | editop loopcut, 1 cut, through a meridian edge at the equator (a ring of 256 faces cut) | mesh.loopcut_slide, 1 cut, through the meridian edge at the equator (a ring of 256 faces) + its undo step + the depsgraph update; undone outside the timer |
+| Subdivide every edge (50k faces) | 132.8 ms | 83.4 ms | 205.1 ms | Blendity 1.5x ahead | editop subdivide_edges, 1 cut, everything selected | mesh.subdivide, 1 cut, everything selected + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the subdivide (50k faces) | 14.8 ms | 14.2 ms | 33.8 ms | Blendity 2.3x ahead | undo of subdivide_edges (the mesh before it restored) | ed.undo of mesh.subdivide + the depsgraph update |
+| Merge by distance, everything (50k faces) | 49.4 ms | 29.8 ms | 41.2 ms | Blendity 1.2x behind | editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001) | mesh.remove_doubles, 0.001, everything selected (the rings beside the poles merge) + its undo step + the depsgraph update; undone outside the timer |
+| Triangulate every face (50k faces) | 39.7 ms | 12.6 ms | 68.3 ms | Blendity 1.7x ahead | editop triangulate_faces, everything selected | mesh.quads_convert_to_tris, everything selected + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the triangulate (50k faces) | 6.5 ms | 0.110 ms | 22.9 ms | Blendity 3.5x ahead | undo of triangulate_faces | ed.undo of mesh.quads_convert_to_tris + the depsgraph update |
+| Exit Edit Mode (50k faces) | 2.0 ms | 0.010 ms | 4.0 ms | Blendity 2.0x ahead | edit off | mode_set(OBJECT) + the depsgraph update (the BMesh written back to the Mesh) |
+
+**Edit Mode, 500k faces**
+
+| row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|---|
+| Enter Edit Mode (500k faces) | 94.8 ms | 0.040 ms | 182.0 ms | Blendity 1.9x ahead | edit vertex, its caches cold (a fresh copy of the mesh) | mode_set(EDIT) + the depsgraph update (the Mesh made a BMesh); headless Blender builds no draw cache |
+| Select all (500k faces) | 28.1 ms | 0.070 ms | 23.1 ms | Blendity 1.2x behind | Edit Mode's Select All (its shortcut's action, Ctrl+A / A) | mesh.select_all + the depsgraph update (no undo step timed: Blendity's selection pushes none) |
+| Select linked from one face (500k faces) | 113.2 ms | 84.4 ms | 184.9 ms | Blendity 1.6x ahead | editop select_linked from face 100 (the whole sphere) | mesh.select_linked from face 100 + the depsgraph update |
+| Extrude three faces (500k faces) | 218.8 ms | 36.0 ms | 353.1 ms | Blendity 1.6x ahead | editop extrude on faces 100-102 (0.5 along their normal) | mesh.extrude_region_shrink_fatten on faces 100-102, 0.5 along their normals + its undo step + the depsgraph update; undone outside the timer |
+| Inset three faces (500k faces) | 259.4 ms | 48.5 ms | 229.8 ms | Blendity 1.1x behind | editop inset, region, thickness 0.01 | mesh.inset, region, thickness 0.01 + its undo step + the depsgraph update; undone outside the timer |
+| Merge by distance, everything (500k faces) | 584.2 ms | 393.7 ms | 495.6 ms | Blendity 1.2x behind | editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001) | mesh.remove_doubles, 0.001, everything selected (the rings beside the poles merge) + its undo step + the depsgraph update; undone outside the timer |
+| Triangulate every face (500k faces) | 480.5 ms | 138.0 ms | 679.7 ms | Blendity 1.4x ahead | editop triangulate_faces, everything selected | mesh.quads_convert_to_tris, everything selected + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the triangulate (500k faces) | 72.1 ms | 0.190 ms | 245.9 ms | Blendity 3.4x ahead | undo of triangulate_faces | ed.undo of mesh.quads_convert_to_tris + the depsgraph update |
+| Exit Edit Mode (500k faces) | 8.8 ms | 0.010 ms | 40.9 ms | Blendity 4.7x ahead | edit off | mode_set(OBJECT) + the depsgraph update (the BMesh written back to the Mesh) |
+
+**Modifiers**
+
+| row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|---|
+| Modifier: Subdivision level 1 on the 50k sphere | 7.9 ms | - | 107.6 ms | Blendity 13.6x ahead | SubdivisionSurface levels 1 (Blendity's own Catmull-Clark); 200.2k faces out | Subdivision Surface, viewport level 1, the limit surface off (OpenSubdiv on the CPU; the sphere's poles have 256 edges), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 200192 faces out |
+| Modifier: Subdivision level 2 on the 50k sphere | 36.7 ms | - | 799.0 ms | Blendity 21.8x ahead | SubdivisionSurface levels 2; 800.8k faces out | Subdivision Surface, viewport level 2, the limit surface off, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 800768 faces out |
+| Modifier: Mirror on the 50k sphere | 3.4 ms | - | 7.0 ms | Blendity 2.1x ahead | MirrorModifier on X, merging at 0.001; 100.3k faces out | Mirror on X, merging at 0.001, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 100344 faces out |
+| Modifier: Array x10 on the 50k sphere | 23.7 ms | - | 11.2 ms | Blendity 2.1x behind | ArrayModifier, 10 copies a mesh-size apart; 501.8k faces out | Array, 10 copies a mesh-size apart, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 501760 faces out |
+| Modifier: Solidify on the 50k sphere | 7.4 ms | - | 11.6 ms | Blendity 1.6x ahead | SolidifyModifier, 0.01 thick, rim filled; 100.4k faces out | Solidify, 0.01 thick, rim filled, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 100352 faces out |
+| Modifier: Bevel on the 50k sphere | 638.2 ms | - | 522.5 ms | Blendity 1.2x behind | BevelModifier, width 0.001, 1 segment, every edge (no angle limit); 200.2k faces out | Bevel, width 0.001, 1 segment, every edge (no limit), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 200194 faces out |
+| Modifier: Decimate 0.5 on the 50k sphere | 55.0 ms | - | 162.3 ms | Blendity 3.0x ahead | DecimateModifier collapse, ratio 0.5 (meshoptimizer); 49.9k faces out | Decimate collapse, ratio 0.5, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 32109 faces out |
+| Modifier: Boolean union with a second 50k sphere on the 50k sphere | 267.0 ms | - | 79.8 ms | Blendity 3.3x behind | BooleanModifier union (Manifold, with Blender's libraries); 70.0k faces out | Boolean union, the Manifold solver (Blendity's too), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 69952 faces out |
+| Modifier: Subdivision level 1 on a 24,576-quad cube | 4.2 ms | - | 48.9 ms | Blendity 11.6x ahead | SubdivisionSurface levels 1 on a cube cut 64 x 64 a side; 98.3k faces out | Subdivision Surface level 1, the limit surface off, on a cube cut 64 x 64 a side; 98304 faces out |
+| Modifier stack again after a vertex moved (Subdivision 1 + Mirror) | 26.5 ms | - | 97.5 ms | Blendity 3.7x ahead | one vertex moved, the stack evaluated again | one vertex moved, mesh.update, the depsgraph update and the evaluated mesh read |
+
+**UV, animation, physics**
+
+| row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|---|
+| Unwrap the 50k sphere | 659.8 ms | - | 2549.3 ms | Blendity 3.9x ahead | unwrap_lscm (Blender's Conformal), a seam down one meridian, margin 0.02 (Eigen sparse Cholesky; 1 charts) | uv.unwrap, Conformal (LSCM, Blendity's), a seam down one meridian, margin 0.02 |
+| A frame of 1,000 keyframed objects | 0.400 ms | - | 3.8 ms | Blendity 9.4x ahead | apply_clip at a new frame each time (3 Position tracks of 3 keys per object) | scene.frame_set at a new frame each time (location keys on frames 1, 30, 60), the depsgraph update included |
+| Ten shape keys on the 50k sphere, evaluated | 0.560 ms | - | 0.984 ms | Blendity 1.8x ahead | the basis copied and apply_shape_keys, every key at 0.5 | one key's value changed, the depsgraph update that mixes all ten |
+| 1,000 rigid boxes falling: a frame | 0.460 ms | - | 10.0 ms | Blendity 21.7x ahead | Scene::update at 60 Hz, one step a frame, mean of the first 30 frames (Jolt) | scene.frame_set through the first 30 frames at 60 fps (Bullet, 1 substep a frame, 10 solver iterations), mean |
+
+**Rendering and memory**
+
+| row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|---|
+| Memory: 10,000 cubes | 8.3 MB | - | 338.3 MB | Blendity 41.0x ahead | the resident set's growth when the scene is made (one shared cube mesh; objects with transforms, no editor state; run first in the section, but after any section before it) | the resident set's growth when the scene is made (one shared cube mesh) and evaluated |
+| Memory: a 500k-face mesh | 150.3 MB | - | 464.6 MB | Blendity 3.1x ahead | the resident set's growth for the mesh and its render mesh | the resident set's growth for the mesh and its evaluated copy (headless: no draw cache) |
+| F12 at 1920x1080, 400 spheres (raster) | 76.2 ms | - | 215.7 ms | Blendity 2.8x ahead | render, engine raster (the CPU's reference raster, supersampled), stress 400 Sphere (an 8 x 8 x 7 grid of 24 x 16 spheres, 8 materials) under the starter scene's light | render.render with EEVEE at its default 64 samples, Blendity's stress 400 Sphere built alike (a sun for its starter light) |
+<!-- /pass15-table -->
+
+**With a window** (task 0202, `tools/bench_ui.py`): both programs at the same window size and on the same scenes.
+- **Blendity:** draws its views again every frame, presented by the card.
+- **Blender:** draws its window once a frame, the view nudged between frames: with a still view it shows its
+  finished picture instead of drawing the scene.
+
+(After task 0206, playback without the bookkeeping: 1,000 keyframed objects 11.7 -> 4.0 ms; Blender 11.3.)
+(After task 0205, Edit Mode's cage kept on the card: on the 500k sphere 11.7 -> 6.0 ms, Face mode 22.1 -> 8.2.)
+(After task 0204, the views' frames left running on the card. Before it: the 50k sphere 6.0 ms, the 500k 8.2, a million
+triangles 6.3 / 6.4, 10,000 cubes 20.1, Edit Mode 6.2 / 16.6, playback 17.4.)
+
+<!-- pass15-ui-table -->
+| row | Blendity | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|
+| Window: 50k-face sphere, Solid | 3.0 ms | 4.8 ms | Blendity 1.6x ahead | --windowed-check --command "benchscene sphere50k" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: 500k-face sphere, Solid | 3.9 ms | 4.6 ms | Blendity 1.2x ahead | --windowed-check --command "benchscene sphere500k" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: a million triangles, Solid | 3.3 ms | 4.2 ms | Blendity 1.3x ahead | --windowed-check --command "benchscene million" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: a million triangles, Material Preview / Shaded | 3.5 ms | 5.7 ms | Blendity 1.6x ahead | --windowed-check --command "benchscene million" --command "shading shaded": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: 10,000 cubes, Solid | 13.5 ms | 24.0 ms | Blendity 1.8x ahead | --windowed-check --command "benchscene cubes10k" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: Edit Mode on the 50k sphere | 3.2 ms | 5.2 ms | Blendity 1.6x ahead | --windowed-check --command "benchscene sphere50k" --command "shading solid" --command "edit vertex": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: Edit Mode on the 500k sphere | 6.0 ms | 5.5 ms | Blendity 1.1x behind | --windowed-check --command "benchscene sphere500k" --command "shading solid" --command "edit vertex": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: playing 1,000 keyframed objects | 11.7 ms | 11.4 ms | Blendity 1.0x behind | --windowed-check --command "benchscene keyed1k" --command "shading solid" --command "anim play": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | each frame scene.frame_set (the next of 60) and wm.redraw_timer DRAW_WIN_SWAP once, the view nudged 1e-4, 200 frames, the window 2560x1361 |
+| Starting up: the first frame, then quit | 501.7 ms | 2787.1 ms | Blendity 5.6x ahead | Blendity --startup-check (the scratch project, three frames: the card presents one behind), the process's wall time, mean of 3 | blender --factory-startup drawing and swapping its window once at its first event loop, then os._exit, the process's wall time, mean of 3 |
+<!-- /pass15-ui-table -->
+
+## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
+The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
+
+### After task 0199 (Blender's own viewport against Blendity's window)
+- A whole window drawn and shown, a frame: Blender 5.2.2 `tools/bench_blender.py --viewport` (`wm.redraw_timer`
+  DRAW_WIN_SWAP, 200 after 10 warm, its window 2560 x 1361) against `Blendity --windowed-check` (400 frames, the
+  Scene view drawn each, 2560 x 1369):
+
+  | Scene | Blender 5.2.2 | Blendity, the card | Blendity, the system presenting |
+  |---|---|---|---|
+  | The starter scene (a cube; Blender's Solid) | 4.66 ms | 5.57 ms | 6.81 ms |
+  | 400 spheres through the camera, Solid | 5.00 ms | 7.42 ms | 8.68 ms |
+  | 400 spheres, Material Preview / Shaded | 6.70 ms | 7.51 ms | 8.62 ms |
+
+- Corrected in task 0202: Blender's column first timed a still view (3.98-4.70, 4.34-4.39 and 4.41-5.23 ms), where
+  Workbench and EEVEE show their finished picture without drawing the scene. The view is now nudged between frames.
+- Blendity's canvas alone, idle: 1.69-1.98 ms by the card.
+
+### After task 0198 (the UI's 2D measured; presenting made cheaper)
+- `Blendity --windowed-check` (a real 2560 x 1369 window, RTX 4070 SUPER), the views unchanged:
+
+  | A frame | The card | The system |
+  |---|---|---|
+  | The canvas idle | 1.69 ms (2.04-2.11 before) | 1.55-1.60 ms |
+  | The canvas presented whole | 3.03 ms (6.02-6.42 before) | 2.61-2.98 ms |
+  | The Scene view drawn every frame | 5.54 ms (6.32 before) | 6.84 ms |
+
+- stress `ui_2d` at 4K (2,000 objects in the Hierarchy): the canvas 2.0-2.7 ms.
+  - Scrolling: 63 % of rows changed, but 5 % of the pixels by tiles; 6.38 -> 3.41 ms in all.
+  - Resizing: 5.92 ms.
+- The card's first open after a shader change: 35.3 -> 32.8 s (in parallel; spirv-opt on four large fragment
+  shaders). Warm: 120-133 ms.
+
+### After task 0197, part 2 (camera filters over the card's picture)
+- stress editor_render, this round's scene: colour grading, bloom and edge outline on the Main Camera, an icosphere moved
+  each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 44.53 ms a frame;
+  - views on the card: 42.09 ms, 33 views on the card and none on the CPU.
+- The filters' own passes, which stay the CPU's, are most of the Game view's time: 24.49 ms against 25.41.
+- The Scene view's 3D: 9.72 ms against 5.50.
+
+### After task 0197, part 1 (lightmaps and probes on the card)
+- tests/test_gpu.cpp round 216, the Scene view's own time a frame, warm (RTX 4070 SUPER, a test run, not a quiet
+  machine):
+
+  | Scene | CPU | Card |
+  |---|---|---|
+  | Baked floor, wall and box with a probe-lit ball | 1.49 ms | 0.69 ms |
+  | Realtime lightmaps | 4.16 ms | 1.80 ms |
+
+- Cold, the card's first frames cost 21-26 ms each: the lightmap pages go up, and the plane and probe volume are made.
+- A probe volume is re-sent whole on every live update. For the volumes the card takes (up to 262,144 probes, 54 MB)
+  that is a copy of up to that much a frame while live probes catch up.
+
+### After task 0196 (toon maps and live procedurals on the card)
+- stress editor_render, this round's scene: toon materials with a shade map, inner lines, a specular mask and the hair
+  highlight on the icospheres, one moved each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 24.10 ms a frame;
+  - views on the card: 11.19 ms, 33 views on the card and none on the CPU;
+  - the Scene view's own share: 9.31 ms against 4.43.
+
+### After task 0195 (fewer views on the CPU)
+- stress editor_render, this round's scene: glass, transparent and axis-material icospheres, one moved each frame, with
+  the 50k-face sphere (RTX 4070 SUPER, headless, so every picture is read back):
+
+  | Shading | Views on the CPU (all of them, before this round) | Views on the card | Views on the card / on the CPU |
+  |---|---|---|---|
+  | Shaded | 33.27 ms a frame | 27.07 ms | 33 / 0 |
+  | Solid | 28.81 ms | 25.07 ms | 33 / 0 |
+
+- The Scene view's own share:
+  - Shaded: 14.14 ms on the CPU against 9.68 on the card.
+  - Solid: 8.34 against 8.85. The CPU's Gouraud Solid is cheap, and headless the card's picture is copied back, which
+    the presented window of task 0193 doesn't do.
+
+### After task 0193 (the card presents the windows)
+- `Blendity --windowed-check` (a real 2560 x 1369 window, the starter scene, the Scene view drawn every frame, RTX 4070
+  SUPER): 3.27 ms a frame presented by the card, 3.69 ms presented by the system.
+- stress gpu_raster (a 1080p window, the editor_render scene, drawn and presented each frame): RTX 4070 SUPER 0.65 ms,
+  RTX 3060 Ti 2.23 ms; the CPU's view drawn and its rows presented through GDI 16.75 ms.
+- The first open of the card in a fresh profile: 5.7 s (shaders compiled cold); the views draw on the CPU until then.
+
+### After task 0192 (the overlays on the card)
+- With GPU views (stress editor_render, the RTX 4070 SUPER), the overlays' CPU time:
+  - Edit Mode's Face mode: 3.2-3.6 -> 0.2 ms a frame (the card draws the grid, the wires, the outline and the face
+    dots with the picture);
+  - entering Edit Mode: 0.2 ms.
+- The Edit Mode rows with GPU views:
+  - entering: 16.2-18.6 ms (was 18.6-21.5);
+  - extrude: 37.5-38.8 (38.1-41.6);
+  - undo: 11.6-14.8 (13.0-14.5);
+  - Select More: 8.3-8.6 (8.6-11.0);
+  - a Move gizmo drag's GPU path: 1.44 ms a frame.
+
+
 All numbers come from `blendity_stress` (full run, about 130 s with Blender's libraries, which add the library-vs-fallback comparisons) on the development machine: **AMD Ryzen 9 5900XT (16 cores / 32 threads), Windows 11, MSVC 14.51 `/O2`**. Re-run it on your own machine:
 
 ```
@@ -9,6 +237,114 @@ dist/windows/blendity_stress --only raster
 ```
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
+
+## Pass 13: Blender 5.2 as the benchmark, measured on this machine (task 0178)
+
+The user asked for Blender as the benchmark. Until this pass the passes compared mechanisms with Blender's, never
+numbers measured side by side. `tools/bench.bat` now runs Blendity's stress sections (`editor_render`, `gpu`, `uv`,
+`bake`, `serialization`) and `tools/bench_blender.py` inside the installed Blender 5.2 headless, on the same scenes,
+and `tools/bench_table.py` writes the table below between its markers. Every row's method column says what each
+side does that the other doesn't (the Edit Mode rows take Blendity's operator alone: its frame less the frame
+after; headless Blender draws no viewport, so there is no playback row). Numbers are from a quiet machine (AMD
+5900XT, one card used, the RTX 4070 SUPER, a 3060 Ti beside it idle, Blender 5.2.2); a busy one inflates Blender's many times over. Later performance tasks
+quote their row before / after / Blender.
+
+<!-- pass13-table -->
+| row | Blendity | Blender 5.2.2 LTS | ratio | the method's difference |
+|---|---|---|---|---|
+| Entering Edit Mode, 50k faces, caches cold (Blendity: the frame it costs less the frame after) | 24.7 ms | 17.9 ms | Blendity 1.4x behind | mode_set(EDIT) + the depsgraph update, mean of 3 (the exit, Mesh <- BMesh, outside the timer); headless Blender builds no draw cache; Blendity's row: entering with its cage cache cold, the frame that draws it included, less the frame after |
+| Extrude three faces, 50k faces (Blendity: its frame less the frame after) | 96.5 ms | 32.6 ms | Blendity 3.0x behind | bpy.ops.mesh.extrude_region_move on faces 100-102 + its undo step pushed (as Blendity's editop records one) + the depsgraph update, mean of 3, undone outside the timer; Blendity's row: editop extrude on the same three faces, the frame that draws it included, less the frame after |
+| Select More, 50k faces (Blendity: its frame less the frame after) | 51.0 ms | 15.5 ms | Blendity 3.3x behind | bpy.ops.mesh.select_more from face 100 + the depsgraph update, mean of 3; Blendity's row: edittool select_more after the undo, the frame that draws it included, less the frame after |
+| Undo of the extrude (the frame that restores the mesh; the cage rebuilt in the frame after, about 14 ms more, is not counted) | 23.8 ms | 16.4 ms | Blendity 1.5x behind | ed.undo of the extrude's step (pushed by hand: headless Blender's operators push none) + the depsgraph update, mean of 3, the face count checked to come back; Blendity's row: undo of the extrude (a whole-mesh copy restored), the frame that restores it; the cage rebuilt in the frame after (about 14 ms more) not counted |
+| Path tracing the stress gpu scene at 1280x720 on the card's ray-tracing hardware (Cycles: OptiX) | 823.8 samples/s | 115.9 samples/s | Blendity 7.1x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 311 ms, drops out as Blendity's row leaves out its upload; worst fit residual 8 ms); the card's ray-tracing hardware, like Blendity's ray-query row; one card: the 4070. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Path tracing the same scene with a software BVH (Blendity: a compute shader; Cycles: CUDA) | 122.0 samples/s | 87.0 samples/s | Blendity 1.4x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 272 ms, drops out as Blendity's row leaves out its upload; worst fit residual 15 ms); Cycles' BVH2 in CUDA, a software BVH like Blendity's compute row; one card: the 4070. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Path tracing the same scene on the CPU (Blendity: Embree; Cycles: its CPU kernels) | 19.0 samples/s | 8.1 samples/s | Blendity 2.4x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 192 ms, drops out as Blendity's row leaves out its upload; worst fit residual 23 ms); Cycles' CPU kernels, like Blendity's CPU row (Embree); the CPU, no card. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Smart UV Project, 50k faces | 42.1 ms | 50.1 ms | Blendity 1.2x ahead | bpy.ops.uv.smart_project at 66 degrees on the sphere in Edit Mode, mean of 3 after a warm call (its own pack is by bounding box); Blendity's row: uvops::smart_project on the same sphere, mean of 3 after a warm call |
+| Pack Islands, 50k faces (both by bounding box) | 21.8 ms | 35.9 ms | Blendity 1.6x ahead | bpy.ops.uv.pack_islands after the project with shape_method AABB (bounding boxes, as Blendity packs) and rotation on, mean of 3; Blendity's row: uvops::pack_islands, mean of 3 |
+| Lightmap bake, texels a second, both on the CPU (100 objects; Blendity: 122k texels in its charts; Blender: the same objects in one 1024 atlas, its charts' texels) | 561968.0 texels/s | 32030.8 texels/s | Blendity 17.5x ahead | bpy.ops.object.bake DIFFUSE direct + indirect, Cycles on the CPU (Blendity bakes on the CPU too), 64 samples, 2 bounces, under a sun and a constant sky, the floor and 100 cubes and spheres (each its own mesh) packed together into one 1024x1024 atlas by lightmap_pack outside the timer, after a warm 1-sample bake: 22.2 s for the 710,272 texels the charts cover (the atlas is 1,048,576), baked object by object; Blendity's row: stress bake's 100-object scene at 10 texels/m (122k texels), 64 indirect samples, 2 bounces, its UV generation and packing inside the timer |
+| GLB export, 256 icospheres of 1,280 faces | 307.3 ms | 707.7 ms | Blendity 2.3x ahead | bpy.ops.export_scene.gltf GLB of 256 icospheres of 1,280 faces, smooth-shaded, each its own mesh data as Blendity's export writes them (6.2 MB written, with UVs), mean of 3 after a warm call; Blendity's row: export_file GLB of the same scene, mean of 3 after a warm call; Blendity wrote 13.2 MB |
+<!-- /pass13-table -->
+
+### GPU busy before the async pipeline (task 0159, the baseline for 0160-0163)
+- The views on the GPU, moving an object (stress editor_render): the card worked 0.28 ms of the 4.09 ms GPU path a frame (7 %; shadow 0.09, g-buffer 0.14, lighting 0.06), the read-back 0.85 ms, the rest waiting.
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): 122.9 samples/s, the card busy 99.8 % (1034.1 of 1035.9 ms) inside its submissions (busy + wait).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): 821.0 samples/s, the card busy 99.5 % (149.6 of 150.5 ms) inside its submissions (busy + wait).
+- F12 of the default scene from the editor's frame loop (40 ms slices, headless): the card busy 21 % (256 samples of the default scene in 0.4 s on GPU Compute with both cards, their busy summed) of the render's wall time - the idle time is between submissions (uploads, merges, the UI), which tasks 0160-0162 remove.
+
+### After task 0160 (a GPU view in one submission, ADR 0051)
+- Moving an object with the views on the GPU (stress editor_render, the RTX 4070 SUPER): the GPU path a frame 3.70 ms, was 4.09 ms; the card's own work 0.29 ms (8 % of the path, was 7 %); the copies out and the fence wait 0.52 ms, where the read-back was its own submission of 0.85 ms.
+- The frame's view count and the picture are unchanged (33 views on the card over the row, 0 on the CPU).
+
+### After task 0161 (the cards work between frames, ADR 0052)
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): 122.1 samples/s (was 122.9); the card busy 100.0 % (1037.6 of 1037.6 ms) inside its submissions (was 99.8 % (1034.1 of 1035.9 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): 799.9 samples/s (was 821.0); the card busy 100.0 % (149.9 of 149.9 ms) inside its submissions (was 99.5 % (149.6 of 150.5 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 3060 Ti (compute, Blendity BVH): 62.0 samples/s (was 62.9); the card busy 100.0 % (2050.8 of 2051.0 ms) inside its submissions (was 99.8 % (2022.9 of 2026.2 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 3060 Ti (ray tracing hardware): 402.7 samples/s (was 411.8); the card busy 100.0 % (304.2 of 304.2 ms) inside its submissions (was 99.6 % (302.8 of 303.9 ms)).
+- Path tracing the stress gpu scene at 1280x720, All GPUs: 1020.9 samples/s (was 1043.5); the card busy 100.0 % (218.8 of 218.9 ms) inside its submissions (was 99.2 % (221.8 of 223.7 ms)).
+- Path tracing the stress gpu scene at 1280x720, CPU + all GPUs: 1081.7 samples/s (was 1079.8); the card busy 98.9 % (200.1 of 202.4 ms) inside its submissions (was 99.1 % (205.1 of 207.1 ms)).
+- F12 of the default scene from the editor's frame loop (headless, GPU Compute with both cards): the cards busy 49 % of the render's wall time, was 41-43 % (82-85 % with the two cards' busy summed, as task 0159 reported it); 2048 samples in 0.6 s, was 0.7 s.
+
+### After task 0162 (incremental scene uploads)
+- NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 11.4 ms in 1 submissions; one object moved 4.9 ms in 1; one material edited 4.7 ms in 1.
+- NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 14.0 ms in 5 submissions; one object moved 6.1 ms in 3; one material edited 4.9 ms in 1.
+- NVIDIA GeForce RTX 3060 Ti (compute, Blendity BVH): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 11.1 ms in 1 submissions; one object moved 5.2 ms in 1; one material edited 5.2 ms in 1.
+- NVIDIA GeForce RTX 3060 Ti (ray tracing hardware): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 14.5 ms in 5 submissions; one object moved 6.3 ms in 3; one material edited 4.3 ms in 1.
+- Before this round a whole upload was a submission a buffer (13) plus one an acceleration structure, and every build sent the whole scene.
+
+### After task 0165 (Edit Mode operators without the wasted work, ADR 0053)
+- The stress row "An operator: extrude three faces" with the views on the CPU: 48.9 ms a frame, was 130.6 (the operator itself 7.8 ms, mesh copies in the frame 1.0 of 3.4 ms; the frame after 2.2 ms, was 2.2).
+- The stress row "An operator: extrude three faces" with the views on the GPU: 48.5 ms a frame, was 115.3 (the operator itself 7.3 ms, mesh copies in the frame 1.0 of 3.4 ms; the frame after 2.0 ms, was 2.1).
+- The probe before this task (the task doc): the command alone 60 ms (Auto Smooth's count 23 ms twice, three copies 10.5 ms), the frame after it 38 ms; after: the command 6.9 ms with one copy of 3.5 ms, the frame after unchanged (the render meshes rebuilt 13.5 ms, the shadow map and the views). Blender 5.2.2's row: 32.6 ms (PERFORMANCE.md Pass 13).
+
+### After task 0166 (a selection changes the selection, not the mesh)
+- The stress row "A selection operator after the undo (Select More)" with the views on the CPU: 15.4 ms a frame, was 32.2 (mesh copies in the frame 0.0; the frame after 1.7 ms).
+- The stress row "A selection operator after the undo (Select More)" with the views on the GPU: 7.9 ms a frame, was 32.5 (mesh copies in the frame 0.0; the frame after 1.6 ms).
+- Blender 5.2.2's row: 15.5 ms (PERFORMANCE.md Pass 13). The probe before this task: a plain selection change's frame 9 ms (the 3D layer about 3 ms, the cage overlay 4 ms), Select More's command 8 ms (the adjacency built per call), its frame after an undo a mesh copy, two in-place render-mesh updates, the shadow map and the Game view drawn again.
+
+### After task 0167 (undo measured honestly; it gives back Edit Mode's selection)
+- The stress rows with the views on the CPU: "Undo of an extrude" 27.7 ms a frame (the frame after 2.0), "Redo of it" 21.0 ms (the frame after 1.9); the old row "Undo after it" - three different undos averaged - was 25.5 ms with the frame after 15.3.
+- The stress rows with the views on the GPU: "Undo of an extrude" 11.0 ms a frame (the frame after 1.7), "Redo of it" 10.8 ms (the frame after 1.8); the old row "Undo after it" - three different undos averaged - was 11.6 ms with the frame after 7.5.
+- The probe before this task (task 0165's): one undo's frame 12.5 ms on the CPU - the Scene view 7.9 ms, the shadow map 3.9, the Game view 3.4 - with `undo` itself 0.1 ms. Blender 5.2.2's row: 16.4 ms (PERFORMANCE.md Pass 13).
+
+### After task 0168 (strands as XPBD rods)
+- 100 spring chains of 3 bones, ms a frame (stress physics): 0.366 plain, 0.454 with collision, 0.559 with separation too; was 0.548, 0.485, 0.730.
+- 100 spring chains of 10 bones, ms a frame (stress physics): 1.445 plain, 1.752 with collision, 2.276 with separation too; was 2.020, 2.175, 2.862.
+- 100 spring chains of AutoPhysics clip (100 frames), ms a frame (stress physics): solved plain, passes with collision, steps with separation too; was solved, passes, steps.
+- 100 spring chains of a jump, ms a frame (stress physics): yes plain, 5 with collision, 4230 with separation too; was yes, 5, 4230.
+- 100 spring chains of a run, ms a frame (stress physics): yes plain, 5 with collision, 8040 with separation too; was yes, 5, 8040.
+
+### After task 0170 (the OptiX device, opt-in)
+- The stress gpu_optix scene (1920x1080, 256 icospheres and a floor, a sun, 4 bounces, 64 samples, each backend's best of two runs, a quiet machine):
+  - NVIDIA GeForce RTX 4070 SUPER - GPU Compute: 568.5 samples a second (1.76 ms a sample), its upload 406.4 ms.
+  - NVIDIA GeForce RTX 4070 SUPER - OptiX: 182.9 samples a second (5.47 ms a sample), its upload 352.6 ms, 0.32x GPU Compute's, the pictures 0.00000 apart.
+  - NVIDIA GeForce RTX 3060 Ti - GPU Compute: 351.8 samples a second (2.84 ms a sample), its upload 206.5 ms.
+  - NVIDIA GeForce RTX 3060 Ti - OptiX: 70.1 samples a second (14.28 ms a sample), its upload 12922.0 ms, 0.20x GPU Compute's, the pictures 0.00000 apart.
+- Before the inlining and the register limit: 0.09x on both cards; the first open of a card compiles the 3.6 MB PTX in about 20 s without the driver's cache.
+
+### After task 0185, round 3 (entering Edit Mode)
+- The stress row "Entering Edit Mode on the 50k-face mesh, its caches cold" with the views on the CPU: 18.0-18.4 ms a
+  frame, was 23.0-24.1 after round 2 (24.5 in the table); Blender 5.2.2's row 18.1 ms. The Game view no longer draws
+  again (0.2 ms, was 5.3): the scene's render hash leaves Edit Mode to the Scene view's key.
+- The pass's three rows after it: undo of the extrude about 21.0 ms (15.7 Blender), extrude 40.1-41.5 (31.7), Edit
+  Mode entry 18.0-18.4 (18.1).
+
+### After task 0185, round 2 (extrude three faces)
+- The stress row "An operator: extrude three faces" with the views on the CPU: 41.5 ms a frame (40.2-42.6 over seven
+  runs), was 47.5 the same day (48.2 in the table); Blender 5.2.2's row 31.7 ms. The target was half the gap (40.0):
+  41 % closed.
+- Its parts: the operator 3.3 ms, was 7.1 (its copy 0.5, was 3.3: the caches no longer copied; Auto Fuse's check about
+  0.5, was 3); the two render-mesh builds 9.1-10.3 ms, was 11.2 (the triangles and corner table shared, smooth normals on
+  every thread); the edge table 0.4 ms, was 1.4.
+- Edit Mode entry, caches cold: 23.0-24.0 ms, was 26.3-26.9. With the views on the GPU, extrude 38.1-39.8 ms (was
+  41.1-43.1).
+
+### After task 0185, round 1 (undo of an extrude)
+- The stress row "Undo of an extrude" with the views on the CPU: 21.2 ms a frame (21.0-21.5 over five runs), was 25.9;
+  Blender 5.2.2's row 15.7 ms. The target was half the gap (20.7): 45 % closed from the table's 25.7.
+- Its parts before: the restore 0.3 ms, the Scene view 17.6 (the cage overlay 7.2, the shadow map 4.0 inside it), the
+  Game view 4.6, the UI 2.6. After: the shadow map isn't drawn (its key no longer holds material addresses, which an
+  undo's restored copies changed), the Scene view 12.9-13.8.
+- With the views on the GPU: 13.1-14.2 ms, unchanged. Edit Mode entry, extrude and Select More unchanged within noise.
 
 ## Pass 12: Edit Mode's frames that aren't drags, compared with Blender (tasks 0107-0110)
 
@@ -91,9 +427,9 @@ The user asked "What should be more optimization gains?" and chose all four area
   device is the user's call (ADR 0037's note).
 - **Costs:** the Scene view on the card draws at full size (Play about 1 ms dearer); vertices on the card are 48 bytes;
   a mesh with several materials or a normal map sends the whole mesh during a drag.
-- **Still on the CPU:** realtime GI, probes and lightmaps, area lights, axis, see-through and cutout materials, live
+- **Still on the CPU:** realtime GI, probes and lightmaps, axis and see-through materials (area lights and cutouts on the card since task 0163), live
   procedural textures, camera filters.
-- **Next candidates:** realtime GI and probes on the card (the last big reason a view falls back); area lights;
+- **Next candidates:** realtime GI and probes on the card (the last big reason a view falls back); area lights (done, task 0163);
   route (B) of ADR 0036 (the views straight to a swapchain: spike 2 read back a 1080p view in 2.7-5.7 ms, a swapchain
   showed it in 0.5-2.2); the cage's
   overlay drawing for the CPU path (still 4 ms of a CPU drag); an OptiX device if the user wants one.
@@ -769,6 +1105,13 @@ Each row was a measurable bottleneck in the first stress run. The old implementa
 - **Streaming kernels don't scale with cores.** Transforming 8M vertices (≈190 MB of traffic) stops at **~2.2× from 3 threads onward**: it's memory-bandwidth bound. The 2M-vertex version that fits in cache reached 9.2× in the quick run. Lesson (GEA Vol. I 3.5): keep hot data small and touch it once.
 - **Flat hierarchies** gain little from dirty flags (1.6–1.8×). The benefit grows with depth.
 - Object-heavy scene loading is now limited by per-object work (component creation, a `std::map` per component), not parsing: ~3.7 µs per object.
+
+## The kernel's id bound (task 0157)
+shaderc's optimiser inlines every function of the megakernel exhaustively, so each call of `trace` from `main`
+costs a whole copy of the integrator. With two call sites (the camera's samples, a bake's) the software-BVH
+variant reached 4,191,309 ids of SPIR-V's 4,194,303 and two more lines overflowed it - the compile failed and the
+path tracer fell back to the CPU in silence. One call site: 2,216,807 ids (ray queries 2,197,372), the optimiser
+19 s instead of 57-83 s, the same pictures. The "every device" test checks the GPU did the work now.
 
 ## GPU first use (task 0037)
 The first GPU render of a session builds the kernel's pipeline (2.4 MB of SPIR-V). On the user's machine a cold

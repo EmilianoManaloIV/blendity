@@ -27,8 +27,6 @@ const std::vector<RigMarker> &rig_markers(RigKind kind);
 
 using MarkerMap = std::map<std::string, Vec3>;
 
-/* Each placed marker's twin that isn't placed yet, mirrored across x = middle (Symmetry). */
-void mirror_markers(RigKind kind, MarkerMap &m, float middle_x);
 /* Every marker placed? `missing` gets the first one that isn't. */
 bool markers_complete(RigKind kind, const MarkerMap &m, std::string *missing = nullptr);
 

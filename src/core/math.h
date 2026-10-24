@@ -9,6 +9,8 @@
 // Blender itself is right-handed and Z-up; the OBJ importer/exporter converts.
 #pragma once
 
+#include "hash.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -369,6 +371,21 @@ inline float ray_triangle(const Ray &r, Vec3 a, Vec3 b, Vec3 c) {
   return t > 0.0f ? t : -1.0f;
 }
 
+/* The point of segment ab nearest p (task 0177: one copy; the skin weights, the spring bones and the gizmos had their own). */
+inline Vec3 closest_on_segment(Vec3 p, Vec3 a, Vec3 b) {
+  const Vec3 ab = b - a;
+  const float t = clampf(dot(p - a, ab) / std::max(1e-12f, dot(ab, ab)), 0.0f, 1.0f);
+  return a + ab * t;
+}
+/* The distance from p to segment ab in 2D, and where along it (0-1) when asked. */
+inline float dist_to_segment_2d(Vec2 p, Vec2 a, Vec2 b, float *t_out = nullptr) {
+  const Vec2 ab = b - a;
+  const float l2 = dot(ab, ab);
+  const float t = l2 > 0.0f ? clampf(dot(p - a, ab) / l2, 0.0f, 1.0f) : 0.0f;
+  if (t_out) *t_out = t;
+  return length(p - (a + ab * t));
+}
+
 /* Closest-point parameters between ray and an infinite line (used by gizmos). */
 inline float closest_on_line_to_ray(Vec3 line_o, Vec3 line_d, const Ray &r) {
   Vec3 w = line_o - r.origin;
@@ -406,6 +423,19 @@ struct Color {
     uint32_t rb = (((src & 0xFF00FF) * a + (dst & 0xFF00FF) * ia) >> 8) & 0xFF00FF;
     uint32_t g = (((src & 0x00FF00) * a + (dst & 0x00FF00) * ia) >> 8) & 0x00FF00;
     return 0xFF000000 | rb | g;
+  }
+  /* src over dst keeping dst's coverage (task 0193): over an opaque dst exactly blend(); over a transparent or partly
+   * covered one - a hole where the card's picture of a view shows through the window's UI - Porter-Duff "over" in
+   * straight alpha, so the card can put the result over its picture and get what blend() would have made over it. */
+  static uint32_t over(uint32_t dst, uint32_t src) {
+    const uint32_t da = dst >> 24, a = src >> 24;
+    if (da == 255 || a == 255 || a == 0) return da == 255 ? blend(dst, src) : a == 0 ? dst : src;
+    const float sa = a / 255.0f, db = da / 255.0f * (1.0f - sa), oa = sa + db;
+    auto ch = [&](int k) {
+      const float v = (((src >> k) & 255) * sa + ((dst >> k) & 255) * db) / oa;
+      return (uint32_t)std::min(255.0f, v + 0.5f) << k;
+    };
+    return (uint32_t)std::min(255.0f, oa * 255.0f + 0.5f) << 24 | ch(16) | ch(8) | ch(0);
   }
   static uint32_t with_alpha(uint32_t c, float a) { return (c & 0xFFFFFF) | ((uint32_t)(saturate(a) * 255.0f) << 24); }
   static uint32_t mix(uint32_t a, uint32_t b, float t) {

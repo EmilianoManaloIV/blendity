@@ -92,6 +92,29 @@ int main(int argc, char **argv) {
   if (const int code = launch::hand_over(argc, argv); code >= 0) return code;
   for (int i = 1; i < argc; i++)
     if (std::strcmp(argv[i], "--headless-screenshot") == 0) return headless(argc, argv);
+  /* Task 0202: --startup-check - the editor opened and its first frame drawn, then quit (the process timed from outside). */
+  for (int i = 1; i < argc; i++) {
+    if (std::strcmp(argv[i], "--startup-check") != 0) continue;
+    Editor *editor = new Editor;  // (never destroyed, as the windowed check's)
+    const int result = editor->init(argc, argv) ? editor->startup_check() : 1;
+    std::fflush(nullptr);
+    std::_Exit(result);
+  }
+  /* Task 0193: --windowed-check out.png [--frames N] [--command "..."]... - a real window's frames, the window as shown
+   * saved; task 0199: console commands run first (a scene to measure: `stress 400 Sphere`, `shading solid`). */
+  for (int i = 1; i + 1 < argc; i++) {
+    if (std::strcmp(argv[i], "--windowed-check") != 0) continue;
+    int frames = 120;
+    std::vector<std::string> commands;
+    for (int k = 1; k + 1 < argc; k++) {
+      if (std::strcmp(argv[k], "--frames") == 0) frames = std::atoi(argv[k + 1]);
+      if (std::strcmp(argv[k], "--command") == 0) commands.push_back(argv[k + 1]);
+    }
+    Editor *editor = new Editor;  // (never destroyed: a check leaves the preferences and the project as they were)
+    const int result = editor->init(argc, argv) ? editor->windowed_check(frames, argv[i + 1], commands) : 1;
+    std::fflush(nullptr);
+    std::_Exit(result);  // (a GPU may still be opening: as below)
+  }
   int code = 0;
   {
     Editor editor;

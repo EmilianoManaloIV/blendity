@@ -75,10 +75,21 @@ struct Reflector {
   virtual void mesh(const char *name, MeshPtr &m) = 0;
   /* Help text for the previous field (shown as an Inspector tooltip). */
   virtual void help(const char *) {}
+  /* A collapsible group of fields (task 0145): the Inspector draws a foldout row and skips the fields while it is
+   * closed; every other reader (files, undo, hashing, `set`, clips) sees them and gets true. Each group() is paired
+   * with a group_end(), whatever it returned. */
+  virtual bool group(const char *name, bool open_by_default = true) {
+    (void)name, (void)open_by_default;
+    return true;
+  }
+  virtual void group_end() {}
   /* Texture slot: path + colour space. Defaults to a plain text field. */
   virtual void texture(const char *name, TextureRef &t) { text(name, t.path); }
   /* Material slots (Unity MeshRenderer.materials / Blender material slots). */
   virtual void material_list(const char *, std::vector<MaterialPtr> &) {}
+  /* Named weights (a renderer's shape keys, task 0135): files and hashing see the whole list, by exact name; the
+   * Inspector and clips see a slider per key of the mesh instead. */
+  virtual void weight_list(const char *, std::vector<std::pair<std::string, float>> &) {}
   /* Another material by its .mat asset path (an axis material's Top / Side / Bottom, ADR 0018). Files, undo and
    * hashing see the path as text; the Inspector draws a material picker. */
   virtual void material_ref(const char *name, std::string &asset_path) { text(name, asset_path); }
@@ -97,6 +108,8 @@ struct Reflector {
   /* True for the change-detection hash (render caches): fields that only change what is drawn over a picture
    * (a camera's composition guides) leave it alone, so toggling them doesn't re-render. */
   virtual bool hashing() const { return false; }
+  /* True for files and hashes, which read and write lists whole (weight_list) rather than one field per entry. */
+  virtual bool serializing() const { return false; }
 };
 
 struct PlayContext {
@@ -148,7 +161,8 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector };
+  // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
@@ -202,6 +216,11 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
   float scale_in_lightmap = 1.0f;
   bool generate_lightmap_uvs = true;
   int receive_gi = 0;  // a Contribute GI object's indirect light: 0 Lightmaps, 1 Light Probes (others always probes)
+  /* The mesh's shape keys' weights (task 0135), by name (Unity: the Skinned Mesh Renderer's BlendShapes; Blender: the
+   * keys' values): 0 none of it, 1 all; animatable as MeshRenderer.BlendShape/<name>. */
+  std::vector<std::pair<std::string, float>> shape_weights;
+  float shape_weight(const std::string &name) const;
+  void set_shape_weight(const std::string &name, float w);
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();
@@ -452,7 +471,7 @@ struct SharpenEffect : FilterEffectBase<SharpenEffect> {
   void contribute(FilterStack &stack) const override;
 };
 
-/* Anime and manga looks (task 0039). Sizes in pixels at 1080p. */
+/* Anime and manga effects (task 0039). Sizes in pixels at 1080p. */
 struct HalftoneEffect : FilterEffectBase<HalftoneEffect> {
   static constexpr const char *kName = "Halftone";
   float cell = 8.0f, angle = 45.0f, contrast = 1.0f;
@@ -493,7 +512,27 @@ struct ColorRampEffect : FilterEffectBase<ColorRampEffect> {
   void reflect(Reflector &r) override;
   void contribute(FilterStack &stack) const override;
 };
-/* Ready-made stacks (task 0039): "Anime" and "Manga", appended to a camera's filters. False for an unknown name. */
+/* The Anime and Manga looks as single effects (task 0154): one row in the stack with one set of fields, running
+ * the passes the Looks menu once appended as three or four effects (Line Art + Color Grading + Bloom; Grayscale +
+ * Halftone + Line Art + Paper). Those parts stay effects of their own, so older scenes' stacks still load. */
+struct AnimeEffect : FilterEffectBase<AnimeEffect> {
+  static constexpr const char *kName = "Anime";
+  bool lines = true;
+  Vec3 line_color{0, 0, 0};
+  float line_thickness = 1.2f, crease_angle = 50.0f, saturation = 0.15f, contrast = 0.08f, bloom = 0.25f, bloom_threshold = 1.2f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct MangaEffect : FilterEffectBase<MangaEffect> {
+  static constexpr const char *kName = "Manga";
+  bool grayscale = true, dots = true, lines = true;
+  int tones = 0;  // 0: smooth greys; 2-8: flat tones before the dots
+  float dot_cell = 6.0f, dot_contrast = 1.2f, line_thickness = 1.5f, paper = 0.35f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+/* Ready-made looks (task 0039): "Anime" and "Manga", appended to a camera's filters - since task 0154 one effect
+ * each. False for an unknown name. */
 const std::vector<std::string> &filter_looks();
 bool apply_filter_look(CameraFilters &cf, const std::string &name);
 
@@ -515,13 +554,27 @@ struct Outline : ComponentBase<Outline> {
   float thickness = 0.02f;  // metres (World Space) or the object's own units
   bool world_space = true;
   Vec3 color{0.02f, 0.02f, 0.03f};
+  /* Task 0149: a vertex group scaling the line's width per vertex (Guilty Gear's painted line width; empty: 1
+   * everywhere), a fade with the distance (the line thinner far away: thickness / (1 + fade x metres)), and the
+   * line's width on screen kept between min and max pixels (0: no limit) - by the object's distance, in the views. */
+  std::string thickness_group;
+  float distance_fade = 0.0f;
+  static constexpr int kNoStep = -1000000;
+  mutable int last_step_[2] = {kNoStep, kNoStep};  // (task 0164: the last 2 % step each view chose - the Scene view's, the Game view's and Camera Preview's - for the hysteresis)
+  float min_pixels = 1.0f, max_pixels = 0.0f;  // (task 0164: a new outline keeps a pixel; a loaded one without the field gets 0, as it was)
   void reflect(Reflector &r) override;
   RenderRole render_role() const override { return RenderRole::Outline; }
   /* The shell of this (evaluated) mesh for an object of this world scale, cached; null when nothing to draw. slot:
    * which use (the evaluated mesh's kind 0..2, 3 exports): each keeps its own, so a path tracer still holding one
-   * view's shell isn't left with a freed mesh when another view builds its own. */
-  static constexpr int kShellSlots = 4;
-  const Mesh *shell(const Mesh &src, float world_scale, int slot = 0) const;
+   * view's shell isn't left with a freed mesh when another view builds its own. thickness_scale: the view's scale
+   * for the distance (outline_distance_scale). */
+  static constexpr int kShellSlots = 6;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones)
+  const Mesh *shell(const Mesh &src, float world_scale, int slot = 0, float thickness_scale = 1.0f) const;
+  /* The scale of the thickness for an object `distance` metres from the eye, with `px_per_m` pixels per metre at
+   * one metre (half the view's height times the projection's focal term; an orthographic view passes distance 1):
+   * the fade, then the pixel limits, in 2 % steps. `world_scale`: the object's, for a thickness in its own units.
+   * 1 with no eye (exports, bakes). */
+  float outline_distance_scale(float distance, float px_per_m, float world_scale = 1.0f, int view = 0) const;  // view: 0 the Scene view, 1 the Game view / Camera Preview (task 0164: its own hysteresis)
   /* Its one material: unlit, the colour, casts no shadow, an outline hull. */
   const std::vector<MaterialPtr> &materials() const;
 
@@ -530,6 +583,7 @@ struct Outline : ComponentBase<Outline> {
     MeshPtr mesh;
     uint64_t serial = 0;
     float offset = -1.0f;
+    std::string group;  // the thickness group it was built with (task 0149)
   };
   mutable ShellCache shells_[kShellSlots];
   mutable std::vector<MaterialPtr> mats_;
@@ -539,6 +593,7 @@ struct Outline : ComponentBase<Outline> {
 struct Rotator : ComponentBase<Rotator> {
   static constexpr const char *kName = "Rotator";
   Vec3 degrees_per_second{0, 45, 0};
+  RenderRole render_role() const override { return RenderRole::Effector; }
   void reflect(Reflector &r) override;
   void update(PlayContext &ctx) override;
 };
@@ -549,6 +604,7 @@ struct Oscillator : ComponentBase<Oscillator> {
   float amplitude = 0.5f;
   float frequency = 0.5f;
   Vec3 origin;
+  RenderRole render_role() const override { return RenderRole::Effector; }
   void reflect(Reflector &r) override;
   void start(PlayContext &ctx) override;
   void update(PlayContext &ctx) override;
@@ -597,6 +653,74 @@ struct SmoothModifier : ComponentBase<SmoothModifier> {
   bool is_modifier() const override { return true; }
   bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* The 2D look's normals (task 0149, ADR 0048): both write the evaluated mesh's custom normals and move nothing.
+ * Smooth Normals: each vertex's normal averaged with its neighbours' N times (an anime face loses its bumps' shading
+ * while keeping its shape); Normal Transfer: the normals of a proxy's surface (a sphere or capsule round the head,
+ * Blender's Data Transfer trick) at the nearest point. */
+struct SmoothNormalsModifier : ComponentBase<SmoothNormalsModifier> {
+  static constexpr const char *kName = "SmoothNormalsModifier";
+  std::string vertex_group;
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  float factor = 1.0f;
+  int iterations = 6;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+struct NormalTransferModifier : ComponentBase<NormalTransferModifier> {
+  static constexpr const char *kName = "NormalTransferModifier";
+  std::string object;  // the proxy, by name
+  std::string vertex_group;
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  float blend = 1.0f;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;
+  uint64_t modifier_dependency_hash() const override;
+  bool unique() const override { return false; }
+};
+
+/* Skin jiggle without bones (task 0153): a vertex group's vertices moved together by a damped spring on the group's
+ * centre, driven by the centre's acceleration (the tissue trails a landing, a step), as a jiggle bone would move them;
+ * for meshes whose rig has no such bones. It runs on the simulated clock (Play, spring::step), so it rests in the
+ * editor. */
+struct JiggleModifier : ComponentBase<JiggleModifier> {
+  static constexpr const char *kName = "JiggleModifier";
+  std::string vertex_group;
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  float stiffness = 0.5f;  // 0..1: how fast it returns
+  float damping = 0.3f;    // 0..1: how fast the bounce dies
+  float lag = 0.5f;        // 0..1: how much of the body's acceleration it trails
+  float limit = 0.05f;     // metres: how far it may move
+  /* Runtime (not saved): the group's centre and speed a step ago, the offset and its speed, the clock it was stepped
+   * at, and how much is known (1 the centre, 2 its speed too: no kick on the first steps). */
+  mutable Vec3 centre_prev, vel_prev, offset, offset_vel;
+  mutable double clock_prev = -1.0;
+  mutable int primed = 0;
+  void step_spring(Vec3 centre, double clock) const;  // spring_bones.cpp
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // spring_bones.cpp
+  uint64_t modifier_dependency_hash() const override;  // spring_bones.cpp
   bool unique() const override { return false; }
 };
 
@@ -978,6 +1102,9 @@ struct BoneSegment;  // skin_weights.h
 /* Each deforming bone of the modifier's armature at rest, head to tail, in the mesh's space (task 0057). */
 bool skin_bone_segments(const SkinModifier &s, std::vector<BoneSegment> &out, std::string *error = nullptr);
 Quat slerp(Quat a, Quat b, float t);  // skin.cpp
+/* How long one unit of a bone's length is in the world: its world scale along its +Y (a Blender FBX armature is scaled
+ * x100 or x0.01, and a bone's `length` is in its own units). 1 when the matrix is degenerate (task 0144). */
+float bone_world_unit(const GameObject &bone);  // skin.cpp
 
 /* Blender: Inverse Kinematics bone constraint (task 0048). On a chain's end bone: the chain turns so the end's tip
  * reaches the target object; two bones are solved exactly in the pole's plane, longer chains by CCD (ik.cpp). */
@@ -988,12 +1115,17 @@ struct IKConstraint : ComponentBase<IKConstraint> {
   int chain_length = 2;
   int iterations = 20;
   float weight = 1.0f;
+  /* Task 0156: the end bone (the foot below a shin, the hand below a forearm) takes the target's rotation times the
+   * offset captured when the IK was made - Blender's IK "Rotation", Maya's orient constraint on the handle. */
+  bool rotate_end = false;
+  Quat end_offset;
+  bool end_set = false;  // the offset captured (Add IK, ik orient, or the first solve after Rotate End is ticked)
   uint64_t last_key = 0;               // the inputs of the last solve (unchanged: nothing to do)
   uint64_t target_id = 0, pole_id = 0;  // where the names were last found
   static std::atomic<int> live;        // constraints in existence: none, and the per-frame solve walks nothing
   IKConstraint() { live.fetch_add(1, std::memory_order_relaxed); }
   IKConstraint(const IKConstraint &o) : ComponentBase<IKConstraint>(o), target(o.target), pole(o.pole), chain_length(o.chain_length),
-                                         iterations(o.iterations), weight(o.weight) {
+                                         iterations(o.iterations), weight(o.weight), rotate_end(o.rotate_end), end_offset(o.end_offset), end_set(o.end_set) {
     live.fetch_add(1, std::memory_order_relaxed);
   }
   IKConstraint &operator=(const IKConstraint &) = default;
@@ -1033,6 +1165,15 @@ int rig_control_side(const GameObject &g, const RigControl &c);
  * when bones turned. The solved rotations are a pose, not an edit: they make no undo step of their own. */
 bool solve_constraints(Scene &scene);
 bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK chain turns this bone (the gizmo refuses it)
+/* The bone below an IK chain's end (the foot, the hand: the child bone whose head sits at the end's tip - a twist
+ * bone beside it starts elsewhere), or null (task 0156). */
+GameObject *ik_end_bone(GameObject &end);
+/* The bones an enabled IK constraint turns: its chain, and the end bone when Rotate End is on (task 0156). */
+std::vector<GameObject *> ik_turned_bones(GameObject &owner, const IKConstraint &ik);
+/* True when `bone` is the end bone a Rotate End IK turns (the gizmo says to turn the handle, not move it). */
+bool ik_end_driven(const Scene &scene, const GameObject &bone);
+/* Rotate End on, with the offset that keeps the end bone as it is now against the target's rotation (task 0156). */
+bool ik_orient_end(Scene &scene, GameObject &bone);
 /* Rig presets: a skeleton with an Armature, IK on its limbs with target and pole objects. Its root is returned. */
 GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
 /* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */
@@ -1042,6 +1183,8 @@ int add_humanoid_ik(Scene &scene, GameObject *root);
 bool limb_of(const std::string &name, int &side, int &limb);
 /* IK on a bone and its parent with a new target at its tip and a pole off its bend (the Rigging window's Add IK). */
 IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
+/* The object the IK constraint on `bone` aims at, looked for in its own character first (two copies share names). */
+GameObject *ik_target_of(const Scene &scene, const GameObject &bone);
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {
@@ -1189,6 +1332,21 @@ class GameObject {
   friend class Scene;
 };
 
+/* The armature a bone belongs to (the nearest Armature up from it, itself included). */
+inline const Armature *bone_armature(const GameObject &g) {
+  for (const GameObject *p = &g; p; p = p->parent)
+    if (const Armature *a = p->get<Armature>()) return a;
+  return nullptr;
+}
+inline bool is_bone(const GameObject *g) { return g && g->get<Bone>(); }
+/* The bones among an object's children (task 0177: the gait and the spring bones had their own). */
+inline std::vector<GameObject *> bone_children(const GameObject &g) {
+  std::vector<GameObject *> out;
+  for (GameObject *c : g.children)
+    if (is_bone(c)) out.push_back(c);
+  return out;
+}
+
 /* ----------------------------------------------------------------- Scene */
 
 /* Blender: World properties. Unity: Lighting window > Environment. */
@@ -1284,6 +1442,7 @@ struct RenderSettings {
   int device = 0;             // 0 CPU, 1 GPU Compute, 2 GPU + CPU by speed (Cycles: Render Properties > Device)
   bool gpu_with_cpu = false;  // GPU Compute: the CPU renders samples too (combined)
   bool hardware_rt = true;    // GPU Compute: ray tracing hardware (RT cores) when a GPU has it
+  int gpu_backend = 0;        // task 0170: 0 Auto (GPU Compute for now: OptiX measured slower), 1 Vulkan (GPU Compute), 2 OptiX
   int raster_aa = 2;          // supersampling factor for the rasterized engine
   bool shadows = true;
   int shadow_resolution = 2048;
@@ -1345,6 +1504,8 @@ class Scene {
   void set_parent(GameObject *child, GameObject *new_parent, int index = -1, bool keep_world = true);
   bool is_ancestor(const GameObject *ancestor, const GameObject *node) const;
   GameObject *duplicate(GameObject *go);
+  /* Task 0207: several duplicated at once (Duplicate on a selection) - each named and placed as duplicate() does it. */
+  std::vector<GameObject *> duplicate_many(const std::vector<GameObject *> &gos);
   std::unique_ptr<Scene> clone() const;
   void clear();
 
@@ -1438,6 +1599,10 @@ uint64_t hash_component(Component &c);
 /* Hash of every field a reflect function visits (settings change detection). A template rather than a
  * std::function: the views hash the settings blocks every frame. */
 uint64_t hash_reflect_fn(void (*fn)(void *, Reflector &), void *ctx);
+/* What a reflect function shows as one JSON object on one line, {"Field Name": value, ...} (task 0172: Live Link's
+ * lights, cameras and toon materials): numbers, booleans, colours and vectors as [x,y,z], enumerations as their index,
+ * text and texture paths as strings; every field, as files see them. */
+std::string reflect_to_json(const std::function<void(Reflector &)> &fn);
 template<class F> uint64_t hash_reflect(F &&fn) {
   using Fn = std::remove_reference_t<F>;
   return hash_reflect_fn([](void *ctx, Reflector &r) { (*static_cast<Fn *>(ctx))(r); }, (void *)&fn);

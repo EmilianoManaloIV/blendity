@@ -60,3 +60,18 @@ shaders." So the images stay (exports, bakes, the GPU path tracer, distant pixel
   each frame and at the set resolution on release.
 - The first consequence above ("no per-pixel procedural evaluation in the renderers") no longer holds for
   the CPU rasterizer; the GPU kernel still needs no change.
+
+## Amendment (2026-10-21, task 0150): a cover plane for the cards
+The anime background generators include cards - Leaves, Grass, Clouds - that cover only their shapes. Their cover
+needs to reach a Cutout material as alpha, and the mask plane is the wrong carrier: Mask by Height shapes it for
+the layers above, a layer's Use Mask reads it, and a second card would replace the first's. So:
+- **The planes gain a cover plane** (`TexPlanes::alpha`, `TexPoint::alpha`), written only by generators with the
+  Alpha target (the cards): the first card sets it, later cards add to it (a union), and Warp and Tile move it with
+  the colour. Mask by Height and Use Mask are unaffected: a card with Use Mask reads the mask below it, as before,
+  and covers only where that mask allows.
+- **A texture's Alpha From Cover** puts that plane into the albedo image's alpha and into live shading's; off, the
+  alpha is 1 as it always was. Old textures have no card, so nothing changes for them.
+- **A card's colour lands everywhere** (its height and roughness only where it covers), so the holes carry its
+  background colour and the cut's filtered edge has no grey fringe.
+- The texture's hand-written copy carries the output switches and this flag (it dropped the switches before: a
+  preset without a normal map got one back as an asset).

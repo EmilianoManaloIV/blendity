@@ -14,6 +14,7 @@
 #include <cstring>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace bl {
 
@@ -336,6 +337,40 @@ void clear_clip_assets() { clip_library().clear(); }
 
 bool is_transform_property(const std::string &p) { return p == "Position" || p == "Rotation" || p == "Scale"; }
 
+float best_frame_rate(const std::vector<float> &times) {
+  float best = 30.0f, best_err = 1e30f;
+  for (float rate : {24.0f, 25.0f, 30.0f, 50.0f, 60.0f, 120.0f}) {
+    float err = 0.0f;
+    for (float t : times) err += std::fabs(t * rate - std::round(t * rate));
+    err = times.empty() ? 1.0f : err / (float)times.size();
+    if (err < best_err - 1e-4f) best_err = err, best = rate;
+  }
+  return best_err < 0.05f ? best : 30.0f;
+}
+
+void reduce_keys(std::vector<AnimKey> &keys, float tolerance) {
+  if (keys.size() < 3) return;
+  std::vector<AnimKey> kept{keys[0]};
+  for (size_t i = 1; i + 1 < keys.size(); i++) {
+    const AnimKey &a = kept.back(), &b = keys[i + 1], &k = keys[i];
+    const float span = b.frame - a.frame;
+    const float on_line = span > 1e-6f ? a.value + (b.value - a.value) * (k.frame - a.frame) / span : a.value;
+    if (std::fabs(k.value - on_line) > tolerance) kept.push_back(k);
+  }
+  kept.push_back(keys.back());
+  keys = std::move(kept);
+}
+
+Vec3 euler_near(Quat q, Vec3 near) {
+  const Vec3 a = q.to_euler(), b(180.0f - a.x, a.y + 180.0f, a.z + 180.0f);
+  auto fold = [&](Vec3 e) {
+    for (int k = 0; k < 3; k++) e[k] += 360.0f * std::round((near[k] - e[k]) / 360.0f);
+    return e;
+  };
+  const Vec3 fa = fold(a), fb = fold(b);
+  return length(fa - near) <= length(fb - near) ? fa : fb;
+}
+
 namespace {
 GameObject *child_named(GameObject *g, const std::string &name) {
   const auto it = std::find_if(g->children.begin(), g->children.end(), [&](const GameObject *c) { return c->name == name; });
@@ -448,8 +483,33 @@ bool write_anim_value(GameObject &g, const std::string &property, int axis, floa
 }
 
 void apply_clip(const AnimationClip &clip, GameObject &root, float frame) {
-  /* Each object found once and its transform set once, however many of its numbers are animated. */
+  /* Each object found once and its transform set once, however many of its numbers are animated. Task 0206: with many
+   * tracks, the objects found in one walk of the branches the tracks name (searching a parent's children by name for
+   * each track was half a million name compares a frame under a thousand children). It follows what anim_target
+   * follows - the first child of a name - and leaves to it the paths a walk can't spell (a name empty or with a '/'). */
   std::unordered_map<std::string, GameObject *> found;
+  if (clip.tracks.size() > 64) {
+    std::unordered_set<std::string> named;  // every track's path and the paths above it
+    for (const AnimTrack &t : clip.tracks)
+      for (size_t e = t.path.find('/');; e = t.path.find('/', e + 1)) {
+        named.insert(t.path.substr(0, e));
+        if (e == std::string::npos) break;
+      }
+    std::vector<std::pair<GameObject *, std::string>> stack{{&root, std::string()}};
+    std::unordered_set<std::string> seen;
+    while (!stack.empty()) {
+      auto [g, path] = std::move(stack.back());
+      stack.pop_back();
+      seen.clear();
+      for (GameObject *c : g->children) {
+        if (!seen.insert(c->name).second || c->name.empty() || c->name.find('/') != std::string::npos) continue;  // (child_named finds only the first)
+        std::string p = g == &root ? c->name : path + "/" + c->name;
+        if (!named.count(p)) continue;
+        found.emplace(p, c);
+        stack.push_back({c, std::move(p)});
+      }
+    }
+  }
   std::unordered_map<GameObject *, Transform> poses;
   for (const AnimTrack &t : clip.tracks) {
     if (t.keys.empty()) continue;
@@ -498,6 +558,12 @@ void Animation::reflect(Reflector &r) {
   static const char *kWrap[] = {"Loop", "Once", "Ping Pong", "Clamp Forever"};
   r.enumeration("Wrap", wrap, kWrap, 4);
   r.help("At the clip's end: start again, stop on the last frame, play back and forth, or hold the last frame.");
+  static const char *kHold[] = {"1s", "2s", "3s", "4s"};
+  int h = std::max(0, std::min(3, hold - 1));
+  r.enumeration("Hold", h, kHold, 4);
+  r.help("Animation on 2s or 3s (task 0149): the pose changes every 2 or 3 frames of the clip, as hand-drawn animation is\n"
+         "shot, while the camera and the rest of the scene move every frame. Renders hold the same frames.");
+  hold = h + 1;
 }
 
 void Animation::start(PlayContext &) {
@@ -513,7 +579,7 @@ void Animation::update(PlayContext &ctx) {
   if (!c) return;
   time += ctx.dt * speed;
   const int w = wrap == 0 && !c->loop ? 1 : wrap;  // a clip that doesn't loop holds its end under Loop
-  apply_clip(*c, *owner, wrap_frame(time * c->frame_rate, c->end_frame(), w));
+  apply_clip(*c, *owner, hold_frame(wrap_frame(time * c->frame_rate, c->end_frame(), w), hold));
 }
 
 }  // namespace bl

@@ -206,13 +206,6 @@ bool conjugate_gradients(const Csr &A, const std::vector<double> &b, std::vector
   return true;
 }
 
-/* The closest point of segment ab to p. */
-Vec3 closest_on_segment(Vec3 p, Vec3 a, Vec3 b) {
-  const Vec3 d = b - a;
-  const float t = std::max(0.0f, std::min(1.0f, dot(p - a, d) / std::max(1e-12f, dot(d, d))));
-  return a + d * t;
-}
-
 /* A bounding-volume hierarchy of the mesh's triangles, for "does this segment cross the mesh?". */
 struct TriBvh {
   struct Node {
@@ -654,7 +647,7 @@ std::vector<Nearest> nearest_bones(const Mesh &m, const std::vector<BoneSegment>
       Vec3 c1 = p;
       Nearest &n = out[(size_t)vi];
       for (size_t i = 0; i < bones.size(); i++) {
-        const Vec3 c = skinweights::closest_on_segment(p, bones[i].head, bones[i].tail);
+        const Vec3 c = closest_on_segment(p, bones[i].head, bones[i].tail);
         const float d = length(p - c);
         if (!finite_bits(d)) continue;
         if (d < d1) d2 = d1, d1 = d, n.bone = (uint32_t)i, c1 = c;
@@ -677,14 +670,14 @@ void trust_nearest_to(const Mesh &m, const BoneSegment &bone, uint32_t index, co
   float best = 1e30f;
   for (size_t v = 0; v < n; v++) {
     if (known[v] || mask[v] || !skinweights::finite3(m.positions[v])) continue;
-    const Vec3 c = skinweights::closest_on_segment(m.positions[v], bone.head, bone.tail);
+    const Vec3 c = closest_on_segment(m.positions[v], bone.head, bone.tail);
     d[v] = length(m.positions[v] - c);
     if (d[v] < best && !bvh.blocked(c, m.positions[v], (uint32_t)v)) best = d[v];
   }
   if (!(best < 1e29f)) return;
   for (size_t v = 0; v < n; v++) {
     if (d[v] > best * 1.02f + 1e-6f) continue;
-    const Vec3 c = skinweights::closest_on_segment(m.positions[v], bone.head, bone.tail);
+    const Vec3 c = closest_on_segment(m.positions[v], bone.head, bone.tail);
     if (bvh.blocked(c, m.positions[v], (uint32_t)v)) continue;
     known[v] = 1;
     near[v].bone = index;

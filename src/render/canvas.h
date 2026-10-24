@@ -59,6 +59,8 @@ class Font {
  public:
   Font();
   ~Font();
+  Font(Font &&) noexcept;  // (movable: a window's UI context is swapped in while it draws, task 0187)
+  Font &operator=(Font &&) noexcept;
   /* Loads a .ttf/.ttc and sets the pixel size. Returns false on failure. */
   bool load_file(const std::string &path, float pixel_height);
   /* Searches the usual OS font folders. Falls back to the built-in 8x8 font. */
@@ -131,7 +133,7 @@ class Canvas {
     if (a <= 0.0f || !clip_.contains(x, y)) return;
     uint32_t ca = (uint32_t)((color >> 24) * saturate(a));
     uint32_t &d = img_->pixels[(size_t)y * img_->width + x];
-    d = Color::blend(d, (color & 0xFFFFFF) | (ca << 24));
+    d = Color::over(d, (color & 0xFFFFFF) | (ca << 24));
   }
 
  private:

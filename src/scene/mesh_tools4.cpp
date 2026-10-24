@@ -103,17 +103,23 @@ bool follow(Mesh &m, size_t face, std::string *error) {
   for (auto &kv : nb)
     if (kv.second.size() == 1 && length(m.positions[kv.first] - c) < best) best = length(m.positions[kv.first] - c), start = kv.first;
   if (start == UINT32_MAX) return fail("the path must be an open line of wire edges");
+  return follow_impl(m, face, walk_wire_path(nb, start), true, error);
+}
+
+std::vector<uint32_t> walk_wire_path(const std::unordered_map<uint32_t, std::vector<uint32_t>> &nb, uint32_t start) {
   std::vector<uint32_t> path = {start};
   for (uint32_t prev = UINT32_MAX, cur = start;;) {
     uint32_t next = UINT32_MAX;
-    for (uint32_t w : nb[cur])
+    const auto it = nb.find(cur);
+    if (it == nb.end()) break;
+    for (uint32_t w : it->second)
       if (w != prev) next = w;
     if (next == UINT32_MAX || std::find(path.begin(), path.end(), next) != path.end()) break;
     path.push_back(next);
     prev = cur;
     cur = next;
   }
-  return follow_impl(m, face, path, true, error);
+  return path;
 }
 
 /* The sweep along the path where it is: a path of the mesh's own edges (UModeler: pick the edges)
@@ -574,7 +580,15 @@ long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop_in, Vec3 n, std:
  * they are, and a ring of quads joins the old outline to the new one. */
 namespace {
 /* One inset of the region; src gets each new face's source face. */
-void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness, std::vector<uint32_t> &src) {
+/* (Task 0208: each vertex the inset adds - where it starts, its direction and the divisor of the thickness - so a
+ * thickness can be tried again by moving them alone.) */
+struct InsetMove {
+  uint32_t vertex, from;
+  Vec3 dir;
+  float div;
+};
+
+void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness, std::vector<uint32_t> &src, std::vector<InsetMove> *moves = nullptr) {
   face_sel.resize(m.face_count(), 0);
   src.clear();
   if (!std::isfinite(thickness)) return;
@@ -612,7 +626,9 @@ void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness,
     const Vec3 d = kv.second / l;
     float c = 1.0f;
     for (const Vec3 &e : dirs[kv.first]) c = std::min(c, dot(d, e));
-    inner[kv.first] = m.add_vert(m.positions[m.corner_verts[kv.first]] + d * (thickness / std::max(0.25f, c)));
+    const uint32_t from = m.corner_verts[kv.first];
+    inner[kv.first] = m.add_vert(m.positions[from] + d * (thickness / std::max(0.25f, c)));
+    if (moves) moves->push_back({inner[kv.first], from, d, std::max(0.25f, c)});
   }
   FaceBuilder fb(m);
   std::vector<uint8_t> sel;
@@ -667,13 +683,23 @@ void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness) {
     face_sel.resize(m.face_count(), 0);
     return;
   }
+  /* Task 0208: the inset built once. Its shape doesn't depend on the thickness - only where its new vertices sit does -
+   * so each thickness the bisection tries moves those vertices alone and checks the faces the inset made (it rebuilt
+   * and checked the whole mesh each time: 17 tries on a 50k-face mesh were 107 ms). */
   std::vector<uint32_t> src;
-  auto attempt = [&](float th, Mesh &r, std::vector<uint8_t> &sel) {
-    r = m;
-    sel = face_sel;
-    inset_region_once(r, sel, th, src);
-    for (size_t f = 0; f < r.face_count() && f < src.size(); f++) {
-      if (src[f] == UINT32_MAX) continue;
+  std::vector<InsetMove> moves;
+  Mesh r = m;
+  std::vector<uint8_t> sel = face_sel;
+  inset_region_once(r, sel, thickness, src, &moves);
+  std::vector<uint32_t> made;  // the faces the inset made or moved
+  for (size_t f = 0; f < r.face_count() && f < src.size(); f++)
+    if (src[f] != UINT32_MAX) made.push_back((uint32_t)f);
+  auto place = [&](float th) {
+    for (const InsetMove &mv : moves) r.positions[mv.vertex] = m.positions[mv.from] + mv.dir * (th / mv.div);
+  };
+  auto attempt = [&](float th) {
+    place(th);
+    for (uint32_t f : made) {
       /* Area vectors (Newell's), not the unit normals: their lengths are twice the areas. */
       auto area_vec = [](const Mesh &mm, size_t ff) {
         Vec3 a(0.0f);
@@ -700,20 +726,17 @@ void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness) {
     }
     return true;
   };
-  Mesh r;
-  std::vector<uint8_t> sel;
-  if (!attempt(thickness, r, sel)) {
+  if (!attempt(thickness)) {
     float lo = 0.0f, hi = thickness;
     for (int k = 0; k < 16; k++) {
       const float mid = 0.5f * (lo + hi);
-      Mesh t;
-      std::vector<uint8_t> ts;
-      if (attempt(mid, t, ts)) lo = mid;
+      if (attempt(mid)) lo = mid;
       else hi = mid;
     }
     if (lo <= 1e-3f * std::fabs(thickness)) return;  // folds at any thickness: no inset (rather than one of zero width)
-    attempt(lo, r, sel);
+    place(lo);
   }
+  r.touch();
   m = std::move(r);
   face_sel = std::move(sel);
 }
@@ -1523,18 +1546,23 @@ SmartFillResult smart_fill(Mesh &m, const std::vector<uint8_t> *vert_sel, float 
 /* Edges whose two faces meet at more than 1 degree and less than angle_deg: the
  * facets of a curved surface (a bevel's segments, a pulled circle's walls). */
 size_t shallow_edges(const Mesh &m, float angle_deg) {
-  std::unordered_map<uint64_t, std::pair<int, int>> ef;
+  /* Each face's normal once, the edges as a sorted table of (edge, face) - an edge's faces sit together - instead of
+   * a hash map and a normal per edge end (task 0165: 23 ms on 50k faces before, about 4 after). */
+  std::vector<Vec3> normals(m.face_count());
+  for (size_t f = 0; f < m.face_count(); f++) normals[f] = normalize(m.face_normal(f));
+  std::vector<std::pair<uint64_t, uint32_t>> ef;
+  ef.reserve(m.corner_count());
   for (size_t f = 0; f < m.face_count(); f++)
-    for (uint32_t k = 0; k < m.face_size(f); k++) {
-      auto &e = ef.emplace(Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]), std::make_pair(-1, -1)).first->second;
-      (e.first < 0 ? e.first : e.second) = (int)f;
-    }
+    for (uint32_t k = 0; k < m.face_size(f); k++)
+      ef.emplace_back(Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]), (uint32_t)f);
+  std::sort(ef.begin(), ef.end());
   const float lo = std::cos(1.0f * kDeg2Rad), hi = std::cos(angle_deg * kDeg2Rad);
   size_t n = 0;
-  for (auto &kv : ef) {
-    if (kv.second.second < 0) continue;
-    const float c = dot(normalize(m.face_normal((size_t)kv.second.first)), normalize(m.face_normal((size_t)kv.second.second)));
+  for (size_t i = 0; i + 1 < ef.size(); i++) {
+    if (ef[i].first != ef[i + 1].first) continue;
+    const float c = dot(normals[ef[i].second], normals[ef[i + 1].second]);
     if (c < lo && c > hi) n++;
+    while (i + 1 < ef.size() && ef[i + 1].first == ef[i].first) i++;  // (an edge with more faces counts once)
   }
   return n;
 }

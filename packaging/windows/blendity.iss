@@ -2,7 +2,7 @@
 ; Blendity's Windows installer (task 0076), for Inno Setup 6: a per-user install (no administrator needed) into
 ; %LOCALAPPDATA%\Programs\Blendity, Start menu and optional desktop shortcuts, .scene files opening in Blendity, and an
 ; uninstaller in Settings > Apps. Built by `build.bat installer` or the release workflow:
-;   ISCC /DAppVersion=0.10.0 /DDist=..\..\dist\windows /DIcons=<dir with blendity.ico> packaging\windows\blendity.iss
+;   ISCC /DAppVersion=0.11.0 /DDist=..\..\dist\windows /DIcons=<dir with blendity.ico> packaging\windows\blendity.iss
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif

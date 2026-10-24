@@ -6,6 +6,7 @@
 
 #include "scene.h"
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -96,8 +97,21 @@ bool read_anim_value(GameObject &g, const std::string &property, int axis, float
 bool write_anim_value(GameObject &g, const std::string &property, int axis, float value);
 /* The whole clip at `frame` onto the hierarchy under `root`. */
 void apply_clip(const AnimationClip &clip, GameObject &root, float frame);
+/* The Euler angles (degrees, Unity's order) for q nearest `near`: each angle by whole turns, and the second solution
+ * (180 - x, y + 180, z + 180). A chain of keys converted this way never wraps (tasks 0137, 0139). */
+Vec3 euler_near(Quat q, Vec3 near);
+/* Keys a straight line already gives (within `tolerance` of the line between their neighbours) dropped: a clip baked a
+ * frame at a time keeps only the frames that matter (Unity's importer does the same). The first and last stay. */
+void reduce_keys(std::vector<AnimKey> &keys, float tolerance);
+/* The frame rate key times fit best (keys on whole frames at 24, 25, 30, 50, 60 or 120 fps), else 30 (task 0139). */
+float best_frame_rate(const std::vector<float> &times);
 /* A time in frames, wrapped: 0 Loop, 1 Once (holds the end), 2 Ping Pong, 3 Clamp Forever. */
 float wrap_frame(float frame, float end, int wrap);
+/* Animation on 2s or 3s (task 0149): the frame held to multiples of `hold` (1: every frame; 2: a new pose every other
+ * frame, as hand-drawn animation is shot). */
+inline float hold_frame(float frame, int hold) { return hold > 1 ? std::floor(frame / (float)hold + 1e-4f) * (float)hold : frame; }  // (+1e-4: 1.9999 frames is frame 2)
+/* A render range's frame held from the range's first frame, so a range starting at 3 on 2s shows 3, 3, 5, 5. */
+inline float hold_frame_from(float first, float frame, int hold) { return first + hold_frame(frame - first, hold); }
 
 /* Unity's legacy Animation component: plays its clip in Play. */
 struct Animation : ComponentBase<Animation> {
@@ -106,6 +120,7 @@ struct Animation : ComponentBase<Animation> {
   bool play_automatically = true;
   float speed = 1.0f;
   int wrap = 0;  // Loop, Once, Ping Pong, Clamp Forever
+  int hold = 1;  // on 1s, 2s or 3s (task 0149): the pose changes every hold frames of the clip, the rest of the scene moves on
   float time = 0.0f;  // seconds since it started (Play only)
   bool playing = false;
   void reflect(Reflector &r) override;

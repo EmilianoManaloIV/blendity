@@ -11,7 +11,7 @@ namespace {
  * rests, the mass, the skinned meshes and where they stand - by value, so posing and putting back doesn't count). */
 uint64_t path_key(const Scene &scene, const GameObject &root, const GameObject &arm, const AnimationClip &clip) {
   uint64_t h = body::body_key(scene, arm);
-  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+  auto mix = [&](uint64_t v) { h = hash_mix(h, v); };
   mix(root.id);
   mix((uint64_t)(uintptr_t)&clip);
   mix(clip.version);

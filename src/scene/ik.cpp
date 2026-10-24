@@ -39,16 +39,35 @@ Vec3 bone_tail(const GameObject &g) {
   return g.world_matrix().point(Vec3(0, b && finite_bits(b->length) ? b->length : 1.0f, 0));
 }
 
-/* An object by name, remembered by id (a hash lookup each frame instead of a walk over every object). */
-GameObject *resolve(const Scene &scene, const std::string &name, uint64_t &id) {
+GameObject *named_below(GameObject &g, const std::string &name) {
+  if (g.name == name) return &g;
+  for (GameObject *c : g.children)
+    if (GameObject *f = named_below(*c, name)) return f;
+  return nullptr;
+}
+
+/* An object by name, remembered by id (a hash lookup each frame instead of a walk over every object). Looked for first
+ * in the character `from` is part of (its topmost object): two copies of one character have the same names, and each
+ * one's IK aims at its own controls. */
+GameObject *resolve(const Scene &scene, const GameObject &from, const std::string &name, uint64_t &id) {
   if (GameObject *g = id ? scene.find(id) : nullptr)
     if (g->name == name) return g;
-  GameObject *g = scene.find_by_name(name);
+  const GameObject *top = &from;
+  while (top->parent) top = top->parent;
+  GameObject *g = named_below(*const_cast<GameObject *>(top), name);
+  if (!g) g = scene.find_by_name(name);
   id = g ? g->id : 0;
   return g;
 }
 
 }  // namespace
+
+GameObject *ik_target_of(const Scene &scene, const GameObject &bone) {
+  const IKConstraint *ik = bone.get<IKConstraint>();
+  if (!ik || ik->target.empty()) return nullptr;
+  uint64_t id = ik->target_id;
+  return resolve(scene, bone, ik->target, id);
+}
 
 /* The rotation taking unit direction a to unit direction b (the shortest arc). */
 Quat rotation_between(Vec3 a, Vec3 b) {
@@ -70,6 +89,69 @@ void IKConstraint::reflect(Reflector &r) {
   r.field("Iterations", iterations, 1, 500);
   r.help("For chains longer than 2 (cyclic coordinate descent); 2 bones are solved exactly.");
   r.field("Weight", weight, 0.01f, 0.0f, 1.0f);
+  r.field("Rotate End", rotate_end);
+  r.help("The bone below the chain's end (the foot, the hand) turns with the target: turn the handle to point the foot\n"
+         "(Blender: IK > Rotation). Off: it keeps its own pose and swings with the shin or forearm.");
+  if (r.all_fields()) {  // files, undo, hashing: the offset captured when the IK was made
+    Vec3 xyz(end_offset.x, end_offset.y, end_offset.z);
+    float w = end_offset.w;
+    r.field("End Offset Quat", xyz);
+    r.field("End Offset W", w, 0.01f, -1.0f, 1.0f);
+    r.field("End Offset Set", end_set);
+    if (xyz.x != end_offset.x || xyz.y != end_offset.y || xyz.z != end_offset.z || w != end_offset.w) end_offset = normalize(Quat(xyz.x, xyz.y, xyz.z, w));
+  }
+}
+
+GameObject *ik_end_bone(GameObject &end) {
+  const Vec3 tail = bone_tail(end);
+  GameObject *best = nullptr;
+  float best_d = 0.0f;
+  for (GameObject *c : end.children) {
+    if (!c->get<Bone>()) continue;
+    const float d = length(c->world_position() - tail);
+    if (!best || d < best_d) best = c, best_d = d;
+  }
+  return best;
+}
+
+std::vector<GameObject *> ik_turned_bones(GameObject &owner, const IKConstraint &ik) {
+  std::vector<GameObject *> out = ik_chain(owner, ik.chain_length);
+  if (ik.rotate_end)
+    if (GameObject *foot = ik_end_bone(owner)) out.push_back(foot);
+  return out;
+}
+
+bool ik_end_driven(const Scene &scene, const GameObject &bone) {
+  const GameObject *end = bone.parent;
+  const IKConstraint *ik = end ? end->get<IKConstraint>() : nullptr;
+  if (!ik || !ik->enabled || !ik->rotate_end || ik->target.empty()) return false;
+  uint64_t id = ik->target_id;
+  return resolve(scene, *end, ik->target, id) && ik_end_bone(*const_cast<GameObject *>(end)) == &bone;
+}
+
+namespace {
+/* The end bone turned to the target's rotation times the offset, by the constraint's weight (task 0156). An offset
+ * never captured (Rotate End ticked in the Inspector) is taken now: the bone stays as it is against the handle. */
+void orient_end(IKConstraint &ik, GameObject &end, const GameObject &target, float weight) {
+  GameObject *foot = ik_end_bone(end);
+  if (!foot) return;
+  if (!ik.end_set) ik.end_offset = normalize(target.world_rotation().conjugate() * foot->world_rotation()), ik.end_set = true;
+  const Quat before = foot->local().rotation;
+  foot->set_world_rotation(normalize(target.world_rotation() * ik.end_offset));
+  if (weight < 1.0f) foot->set_local_rotation(slerp(before, foot->local().rotation, weight));
+}
+}  // namespace
+
+bool ik_orient_end(Scene &scene, GameObject &bone) {
+  IKConstraint *ik = bone.get<IKConstraint>();
+  GameObject *foot = ik ? ik_end_bone(bone) : nullptr;
+  GameObject *target = ik && !ik->target.empty() ? resolve(scene, bone, ik->target, ik->target_id) : nullptr;
+  if (!foot || !target) return false;
+  ik->rotate_end = true;
+  ik->end_offset = normalize(target->world_rotation().conjugate() * foot->world_rotation());
+  ik->end_set = true;
+  ik->last_key = 0;
+  return true;
 }
 
 /* Solves one constraint (its inputs unchanged since the last time: nothing to do). True when bones turned. */
@@ -77,21 +159,21 @@ static bool solve_one(IKConstraint &ik) {
   GameObject *end = ik.owner;
   Scene *scene = end ? end->scene : nullptr;
   if (!scene || !ik.enabled || ik.target.empty()) return false;
-  GameObject *target = resolve(*scene, ik.target, ik.target_id);
-  GameObject *pole = ik.pole.empty() ? nullptr : resolve(*scene, ik.pole, ik.pole_id);
+  GameObject *target = resolve(*scene, *end, ik.target, ik.target_id);
+  GameObject *pole = ik.pole.empty() ? nullptr : resolve(*scene, *end, ik.pole, ik.pole_id);
   std::vector<GameObject *> chain = ik_chain(*end, ik.chain_length);
   if (!target || chain.empty()) return false;
   for (GameObject *g : chain)  // a target or pole that the chain itself carries would be chased for ever
     if (scene->is_ancestor(g, target) || (pole && scene->is_ancestor(g, pole))) return false;
   const Vec3 T = target->world_position();
   if (!finite3(T)) return false;
+  const Quat TR = target->world_rotation();
+  if (ik.rotate_end && !(std::isfinite(TR.x) && std::isfinite(TR.y) && std::isfinite(TR.z) && std::isfinite(TR.w))) return false;  // (a NaN handle turns nothing)
   /* The inputs: the target, the pole, where the chain hangs from, the bones' own transforms and lengths, the settings.
    * The bones' rotations are in it as the solve left them, so a Reset Pose or an undo that turns them solves again. */
   auto inputs = [&]() {
-    uint64_t key = 1469598103934665603ull;
-    auto mix = [&](const void *p, size_t n) {
-      for (size_t i = 0; i < n; i++) key = (key ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-    };
+    uint64_t key = kFnvBasis;
+    auto mix = [&](const void *p, size_t n) { key = fnv1a(p, n, key); };
     mix(&T, sizeof(T));
     if (pole) {
       const Vec3 P = pole->world_position();
@@ -106,9 +188,18 @@ static bool solve_one(IKConstraint &ik) {
       mix(&t.scale, sizeof(Vec3));
       mix(&g->get<Bone>()->length, sizeof(float));
     }
-    const int head[2] = {ik.chain_length, ik.iterations};
+    const int head[3] = {ik.chain_length, ik.iterations, ik.rotate_end ? 1 : 0};
     mix(head, sizeof(head));
     mix(&ik.weight, sizeof(float));
+    if (ik.rotate_end) {  // (the target's turn and the end bone's own pose: a turned handle or a reset solves again)
+      const Quat R = target->world_rotation();
+      mix(&R, sizeof(R));
+      mix(&ik.end_offset, sizeof(Quat));
+      if (const GameObject *foot = ik_end_bone(*end)) {
+        const Quat F = foot->local().rotation;
+        mix(&F, sizeof(F));
+      }
+    }
     return key;
   };
   if (inputs() == ik.last_key) return false;
@@ -164,6 +255,7 @@ static bool solve_one(IKConstraint &ik) {
   const float w = finite_bits(ik.weight) ? std::max(0.0f, std::min(ik.weight, 1.0f)) : 1.0f;
   if (w < 1.0f)
     for (size_t i = 0; i < chain.size(); i++) chain[i]->set_local_rotation(slerp(base[i], chain[i]->local().rotation, w));
+  if (ik.rotate_end) orient_end(ik, *end, *target, w);
   return true;
 }
 
@@ -211,12 +303,12 @@ static bool solve_fk(Scene &scene) {
     scene.for_each([&](GameObject &g) {
       const IKConstraint *ik = g.get<IKConstraint>();
       if (ik && ik->enabled && !ik->target.empty())
-        for (GameObject *b : ik_chain(g, ik->chain_length)) ik_bones.insert(b);
+        for (GameObject *b : ik_turned_bones(g, *ik)) ik_bones.insert(b);
     });
   scene.for_each([&](GameObject &g) {
     RigControl *rc = g.get<RigControl>();
     if (!rc || !rc->enabled || rc->role != RigControl::FK || rc->drives.empty()) return;
-    GameObject *b = resolve(scene, rc->drives, rc->drives_id);
+    GameObject *b = resolve(scene, g, rc->drives, rc->drives_id);
     if (!b || b == &g || !b->get<Bone>() || ik_bones.count(b)) return;
     const Quat want = g.world_rotation();
     const Quat have = b->world_rotation();
@@ -245,8 +337,8 @@ bool ik_drives(const Scene &scene, const GameObject &bone) {
     for (auto &c : g.components)
       if (std::strcmp(c->type_name(), IKConstraint::kName) == 0 && c->enabled) {
         IKConstraint &ik = *static_cast<IKConstraint *>(c.get());
-        if (ik.target.empty() || !resolve(scene, ik.target, ik.target_id)) continue;  // a lost target turns nothing
-        for (GameObject *b : ik_chain(g, ik.chain_length)) driven = driven || b == &bone;
+        if (ik.target.empty() || !resolve(scene, g, ik.target, ik.target_id)) continue;  // a lost target turns nothing
+        for (GameObject *b : ik_turned_bones(g, ik)) driven = driven || b == &bone;
       }
   });
   return driven;
@@ -279,9 +371,13 @@ std::string unique_name(Scene &s, const std::string &base) {
   return n;
 }
 
-/* IK on a two-bone limb whose end is `lower`: a target at its tip, a pole off its bend along `pole_dir`. */
+/* IK on a two-bone limb whose end is `lower`: a target at its tip, a pole off its bend along `pole_dir`. The sizes
+ * are metres (a control is drawn without its parents' scale, task 0156): a fifth of the lower bone, however the
+ * armature is scaled. The target turns the end bone (Rotate End): it starts world-aligned and the offset carries the
+ * end bone's own rotation, so the handle's keyed angles stay away from the gimbal (a foot points 90 degrees about
+ * X: keyed as the handle's own angles it lost a degree, and planted feet slid). */
 void add_limb_ik(Scene &s, GameObject *root, GameObject *lower, const std::string &target_name, const std::string &pole_name, Vec3 pole_dir) {
-  const float len = std::max(0.05f, lower->get<Bone>()->length);
+  const float len = std::max(0.001f, length(bone_tail(*lower) - lower->world_position()));  // (metres: a scaled armature's bone units aren't)
   GameObject *t = make_empty(s, unique_name(s, target_name), root, bone_tail(*lower));  // a second rig's targets are its own
   GameObject *p = make_empty(s, unique_name(s, pole_name), root, lower->world_position() + pole_dir * (len * 1.5f));
   /* Drawn as controls (task 0067): the target a box, the pole a diamond, coloured by side. */
@@ -293,6 +389,11 @@ void add_limb_ik(Scene &s, GameObject *root, GameObject *lower, const std::strin
   ik->target = t->name;
   ik->pole = p->name;
   ik->chain_length = 2;
+  if (GameObject *foot = ik_end_bone(*lower)) {
+    ik->rotate_end = true;
+    ik->end_offset = normalize(t->world_rotation().conjugate() * foot->world_rotation());
+    ik->end_set = true;
+  }
 }
 
 }  // namespace rigbuild

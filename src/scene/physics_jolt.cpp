@@ -19,6 +19,7 @@
 
 #ifdef BL_WITH_JOLT
 #  include <Jolt/Jolt.h>
+#  include "physics_jolt_layers.h"
 
 #  include <Jolt/Core/Factory.h>
 #  include <Jolt/Core/JobSystemThreadPool.h>
@@ -46,29 +47,7 @@ bool physics_jolt_available() {
 namespace {
 using namespace JPH;
 
-/* Two object layers (static / moving) mapped onto two broad-phase layers -
- * the standard Jolt setup. */
-namespace Layers {
-constexpr ObjectLayer kStatic = 0, kMoving = 1, kCount = 2;
-}
-class BroadPhaseLayers final : public BroadPhaseLayerInterface {
- public:
-  uint GetNumBroadPhaseLayers() const override { return 2; }
-  BroadPhaseLayer GetBroadPhaseLayer(ObjectLayer layer) const override { return BroadPhaseLayer((uint8)layer); }
-#  if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
-  const char *GetBroadPhaseLayerName(BroadPhaseLayer layer) const override { return layer.GetValue() == 0 ? "static" : "moving"; }
-#  endif
-};
-class ObjectVsBroadPhase final : public ObjectVsBroadPhaseLayerFilter {
- public:
-  bool ShouldCollide(ObjectLayer layer, BroadPhaseLayer bp) const override {
-    return layer == Layers::kMoving || bp.GetValue() == Layers::kMoving;
-  }
-};
-class ObjectPairs final : public ObjectLayerPairFilter {
- public:
-  bool ShouldCollide(ObjectLayer a, ObjectLayer b) const override { return a == Layers::kMoving || b == Layers::kMoving; }
-};
+using namespace bl::jolt_layers;  // (the two layers and their filters: physics_jolt_layers.h)
 
 void jolt_init() {
   static std::once_flag once;

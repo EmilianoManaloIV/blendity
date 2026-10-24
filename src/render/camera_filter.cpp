@@ -3,6 +3,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../image/grade.h"
 #include "../image/image.h"
 #include "display.h"
 
@@ -223,7 +224,6 @@ void apply_retro_image(RenderTarget &rt, const RetroImageParams &p, const Filter
 namespace {
 
 float fin(float v, float neutral) { return finite_bits(v) ? v : neutral; }
-float clampf01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
 int clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 int clamp8f(float v) { return finite_bits(v) ? clamp8((int)std::lround(v)) : 0; }
 uint32_t pack(uint32_t alpha_of, int r, int g, int b) {
@@ -332,12 +332,7 @@ void apply_color_grading(RenderTarget &rt, const ColorGradingParams &p) {
     const bool through_hdr = !done.empty() && done[(size_t)y * rt.width + x];
     Vec3 c{lin[(px >> 16) & 255], lin[(px >> 8) & 255], lin[px & 255]};
     c = c * wb * (through_hdr ? 1.0f : ex);
-    if (contrast != 0.0f)  // a power curve through middle grey (0.18), as ACES / Unity grade contrast
-      for (int k = 0; k < 3; k++) c[k] = c[k] > 0.0f ? 0.18f * std::pow(c[k] / 0.18f, 1.0f + contrast) : 0.0f;
-    if (sat != 1.0f) {
-      const float y = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-      c = Vec3(y) + (c - Vec3(y)) * sat;
-    }
+    c = grade::saturate_by(grade::contrast(c, contrast), sat);  // (the Editing window's Contrast and Saturation too)
     if (lgg)  // ASC CDL style: lift raises the blacks, gain scales, gamma bends the middle (no clamp above 1:
       for (int k = 0; k < 3; k++) {  // exposure's headroom survives a gain below 1)
         float v = std::max(0.0f, c[k]);
@@ -359,7 +354,7 @@ void apply_posterize(RenderTarget &rt, int levels) {
 }
 
 void apply_grayscale(RenderTarget &rt, bool sepia, float amount) {
-  const float a = clampf01(fin(amount, 0.0f));
+  const float a = saturate(fin(amount, 0.0f));
   if (a <= 0.0f) return;
   each_pixel(rt, [&](int, int, uint32_t &px) {
     const float r = (float)((px >> 16) & 255), g = (float)((px >> 8) & 255), b = (float)(px & 255);
@@ -375,7 +370,7 @@ void apply_grayscale(RenderTarget &rt, bool sepia, float amount) {
 }
 
 void apply_invert(RenderTarget &rt, float amount) {
-  const float a = clampf01(fin(amount, 0.0f));
+  const float a = saturate(fin(amount, 0.0f));
   if (a <= 0.0f) return;
   each_pixel(rt, [&](int, int, uint32_t &px) {
     auto f = [&](int v) { return clamp8f(v + (255 - 2 * v) * a); };
@@ -384,17 +379,12 @@ void apply_invert(RenderTarget &rt, float amount) {
 }
 
 void apply_vignette(RenderTarget &rt, const VignetteParams &p) {
-  const float in = clampf01(fin(p.intensity, 0.0f)), sm = std::max(0.01f, clampf01(fin(p.smoothness, 0.5f))), rd = clampf01(fin(p.roundness, 1.0f));
+  const float in = saturate(fin(p.intensity, 0.0f)), sm = std::max(0.01f, saturate(fin(p.smoothness, 0.5f))), rd = saturate(fin(p.roundness, 1.0f));
   if (in <= 0.0f || rt.width <= 0 || rt.height <= 0) return;
-  const float ax = 1.0f + ((float)rt.width / rt.height - 1.0f) * rd;  // 1: follows the frame; the aspect: a circle
-  const float corner = std::sqrt(ax * ax + 1.0f);
   const int cr = clamp8f(fin(p.color.x, 0.0f) * 255.0f), cg = clamp8f(fin(p.color.y, 0.0f) * 255.0f), cb = clamp8f(fin(p.color.z, 0.0f) * 255.0f);
   const float W = (float)rt.width, H = (float)rt.height;
   each_pixel(rt, [&](int x, int y, uint32_t &px) {
-    const float dx = ((x + 0.5f) / W * 2.0f - 1.0f) * ax, dy = (y + 0.5f) / H * 2.0f - 1.0f;
-    const float r = std::sqrt(dx * dx + dy * dy) / corner;  // 0 at the centre, 1 in the corners
-    float t = clampf01((r - (1.0f - sm)) / sm);
-    t = t * t * (3.0f - 2.0f * t) * in;
+    const float t = grade::vignette_weight((x + 0.5f) / W, (y + 0.5f) / H, W / H, sm, rd) * in;  // (shared with the Editing window)
     if (t <= 0.0f) return;
     const int pr = (px >> 16) & 255, pg = (px >> 8) & 255, pb = px & 255;
     px = pack(px, clamp8f(pr + (cr - pr) * t), clamp8f(pg + (cg - pg) * t), clamp8f(pb + (cb - pb) * t));
@@ -402,7 +392,7 @@ void apply_vignette(RenderTarget &rt, const VignetteParams &p) {
 }
 
 void apply_chromatic_aberration(RenderTarget &rt, float intensity) {
-  const float k = clampf01(fin(intensity, 0.0f));
+  const float k = saturate(fin(intensity, 0.0f));
   if (k <= 0.0f || rt.width <= 0 || rt.height <= 0) return;
   const Source src(rt);
   const float W = (float)rt.width, H = (float)rt.height, spread = k * 0.02f * std::max(W, H);  // up to 1% of the frame at the edge
@@ -421,10 +411,10 @@ static int scaled_px(float n, const FilterFrame *frame, int hi) {
 }
 
 void apply_film_grain(RenderTarget &rt, const GrainParams &p, const FilterFrame *frame) {
-  const float in = clampf01(fin(p.intensity, 0.0f));
+  const float in = saturate(fin(p.intensity, 0.0f));
   if (in <= 0.0f) return;
   const int cell = scaled_px(std::max(1.0f, std::min(16.0f, fin(p.size, 1.0f))), frame, 64);
-  const float resp = clampf01(fin(p.response, 0.8f));
+  const float resp = saturate(fin(p.response, 0.8f));
   /* A new pattern 24 times a second while playing; a fixed one otherwise (reproducible frames). */
   const uint32_t seed = frame && frame->animate && finite_bits(frame->time)
                             ? (uint32_t)(int64_t)std::floor(std::fmod((double)frame->time, 86400.0) * 24.0)  // a day's worth: always in range
@@ -525,7 +515,7 @@ void apply_edge_outline(RenderTarget &rt, const OutlineParams &p, const FilterFr
 
 static inline float smooth01(float e0, float e1, float x) {
   if (e1 - e0 < 1e-6f) return x >= e0 ? 1.0f : 0.0f;
-  const float t = clampf01((x - e0) / (e1 - e0));
+  const float t = saturate((x - e0) / (e1 - e0));
   return t * t * (3.0f - 2.0f * t);
 }
 static inline Vec3 fin3(Vec3 v, Vec3 d) { return {fin(v.x, d.x), fin(v.y, d.y), fin(v.z, d.z)}; }
@@ -545,7 +535,7 @@ void apply_halftone(RenderTarget &rt, const HalftoneParams &p, const FilterFrame
   const float angles[3] = {base, base + 30.0f * kDeg2Rad, base - 30.0f * kDeg2Rad};
   /* A dot's radius (in cells) for each 0..255 value: area ~ darkness, after the contrast. */
   float radius[256];
-  for (int v = 0; v < 256; v++) radius[v] = 0.7071f * std::sqrt(1.0f - clampf01(0.5f + (v / 255.0f - 0.5f) * contrast));
+  for (int v = 0; v < 256; v++) radius[v] = 0.7071f * std::sqrt(1.0f - saturate(0.5f + (v / 255.0f - 0.5f) * contrast));
   const float inv = 1.0f / cell, aa = 0.75f / cell;  // a pixel's width of anti-aliasing, in cells
   /* First every cell's dot from the untouched picture (the value at the cell's centre), into a small grid; then
    * the pixels, which only look their cell up (no copy of the picture, one read per cell). */
@@ -617,7 +607,7 @@ void apply_halftone(RenderTarget &rt, const HalftoneParams &p, const FilterFrame
 }
 
 void apply_hatching(RenderTarget &rt, const HatchingParams &p, const FilterFrame *frame) {
-  const float strength = clampf01(fin(p.strength, 1.0f));
+  const float strength = saturate(fin(p.strength, 1.0f));
   if (!rt.color || rt.width <= 0 || rt.height <= 0 || strength <= 0.0f) return;
   const float s = frame && finite_bits(frame->pixel_scale) && frame->pixel_scale > 0.0f ? frame->pixel_scale : 1.0f;
   const float spacing = std::max(2.0f, std::min(256.0f, fin(p.spacing, 6.0f) * s));
@@ -639,7 +629,7 @@ void apply_hatching(RenderTarget &rt, const HatchingParams &p, const FilterFrame
     for (int k = 0; k < layers && on[k][l] > 0.0f; k++) {
       const float t = (x + 0.5f) * cs[k] + (y + 0.5f) * sn[k];
       const float dpx = std::fabs(t - std::floor(t) - 0.5f) * spacing;  // pixels from the nearest line's middle
-      const float line = clampf01(half + 0.5f - dpx);                   // a pixel-wide anti-aliased edge
+      const float line = saturate(half + 0.5f - dpx);                   // a pixel-wide anti-aliased edge
       cov = std::max(cov, on[k][l] * line);
     }
     if (cov <= 0.0f && keep) return;
@@ -781,7 +771,7 @@ void apply_line_art(RenderTarget &rt, const LineArtParams &p, const FilterFrame 
 }
 
 void apply_paper(RenderTarget &rt, const PaperParams &p, const FilterFrame *frame) {
-  const float strength = clampf01(fin(p.strength, 0.0f));
+  const float strength = saturate(fin(p.strength, 0.0f));
   if (!rt.color || rt.width <= 0 || rt.height <= 0 || strength <= 0.0f) return;
   const float s = frame && finite_bits(frame->pixel_scale) && frame->pixel_scale > 0.0f ? frame->pixel_scale : 1.0f;
   const float scale = std::max(0.05f, std::min(50.0f, fin(p.scale, 1.0f))) * s;
@@ -852,7 +842,7 @@ void apply_color_ramp(RenderTarget &rt, const ColorRampParams &p) {
     float pos;
     Vec3 col;
   } st[4];
-  for (int k = 0; k < n; k++) st[k] = {clampf01(fin(p.position[k], k / (float)(n - 1))), fin3(p.color[k], Vec3(k / (float)(n - 1)))};
+  for (int k = 0; k < n; k++) st[k] = {saturate(fin(p.position[k], k / (float)(n - 1))), fin3(p.color[k], Vec3(k / (float)(n - 1)))};
   std::sort(st, st + n, [](const Stop &a, const Stop &b) { return a.pos < b.pos; });
   const bool linear = p.interpolation == 1;
   /* The ramp for every luma value, then a lookup per pixel. */
@@ -878,8 +868,8 @@ void apply_color_ramp(RenderTarget &rt, const ColorRampParams &p) {
 }
 
 void apply_crt(RenderTarget &rt, const CrtParams &p, const FilterFrame *frame) {
-  const float scan = clampf01(fin(p.scanlines, 0.0f)), curve = clampf01(fin(p.curvature, 0.0f)), mask = clampf01(fin(p.mask, 0.0f));
-  const float flick = clampf01(fin(p.flicker, 0.0f));
+  const float scan = saturate(fin(p.scanlines, 0.0f)), curve = saturate(fin(p.curvature, 0.0f)), mask = saturate(fin(p.mask, 0.0f));
+  const float flick = saturate(fin(p.flicker, 0.0f));
   if ((scan <= 0.0f && curve <= 0.0f && mask <= 0.0f && flick <= 0.0f) || rt.width <= 0 || rt.height <= 0) return;
   /* Flicker only while playing: a random brightness every 1/30 s (a sine sampled at the display's
    * 60 Hz would land on its zero crossings and never flicker). */
@@ -973,8 +963,8 @@ void apply_bloom(RenderTarget &rt, const BloomParams &p) {
   const float intensity = std::max(0.0f, std::min(100.0f, fin(p.intensity, 0.0f)));
   if (!rt.color || W <= 0 || H <= 0 || intensity <= 0.0f) return;
   const float threshold = std::max(0.0f, std::min(1e6f, fin(p.threshold, 1.0f)));
-  const float knee = threshold * clampf01(fin(p.soft_knee, 0.5f));
-  const float scatter = clampf01(fin(p.scatter, 0.7f));
+  const float knee = threshold * saturate(fin(p.soft_knee, 0.5f));
+  const float scatter = saturate(fin(p.scatter, 0.7f));
   const float cap = std::max(0.0f, fin(p.clamp, 65000.0f));
   const Vec3 tint{std::max(0.0f, fin(p.tint.x, 1.0f)), std::max(0.0f, fin(p.tint.y, 1.0f)), std::max(0.0f, fin(p.tint.z, 1.0f))};
   const bool have_hdr = rt.hdr.size() >= (size_t)W * H;

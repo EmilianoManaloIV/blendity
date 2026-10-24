@@ -154,11 +154,8 @@ void voxel_grid_fit(VoxelGrid &g, const AABB &bounds, int n, bool allocate) {
   g.n = n;
   const float snap = 8.0f * v;
   g.origin = Vec3(std::floor(bounds.min.x / snap) * snap, std::floor(bounds.min.y / snap) * snap, std::floor(bounds.min.z / snap) * snap);
-  uint64_t k = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t sz) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < sz; i++) k = (k ^ b[i]) * 1099511628211ull;
-  };
+  uint64_t k = kFnvBasis;
+  auto mix = [&](const void *p, size_t sz) { k = fnv1a(p, sz, k); };
   mix(&g.origin, sizeof(Vec3));
   mix(&g.voxel, sizeof(float));
   mix(&g.n, sizeof(int));

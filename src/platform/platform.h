@@ -50,6 +50,10 @@ struct Event {
    * pixels, their turn in degrees (counter-clockwise). */
   float zoom = 1.0f, pan_x = 0.0f, pan_y = 0.0f, rotate = 0.0f;
   float pressure = 1.0f;  // MouseMove / MouseDown from a pen: how hard it presses (0..1); 1 for a mouse or a finger
+  /* From a pen (task 0188): its tilt from upright in degrees (x toward the right, y toward the user), and whether it
+   * is the eraser end. */
+  bool pen = false, eraser = false;
+  float tilt_x = 0.0f, tilt_y = 0.0f;
 };
 
 enum class Cursor { Arrow, IBeam, ResizeH, ResizeV, Move, Hand };
@@ -57,7 +61,26 @@ enum class Cursor { Arrow, IBeam, ResizeH, ResizeV, Move, Hand };
 struct Window;
 
 Window *create_window(const char *title, int width, int height);
+/* Another window beside the first (task 0187): its client area at (x, y) on the screen, width x height pixels, not
+ * maximised, as small as 240 x 160. Events for it are gathered by polling the first window and collected by polling
+ * this one (with no wait). */
+Window *create_secondary_window(const char *title, int x, int y, int width, int height);
 void destroy_window(Window *w);
+
+/* A display: its desktop rectangle in pixels, its scale (1 = 96 dpi) and name; the primary one first. */
+struct Monitor {
+  int x = 0, y = 0, width = 0, height = 0;
+  float dpi = 1.0f;
+  std::string name;
+  bool primary = false;
+};
+/* Every display, at least one (X11 without RandR: the screen as one display). */
+std::vector<Monitor> monitors();
+/* The window's client area on the desktop, and moving / resizing it there. */
+void get_window_rect(Window *w, int &x, int &y, int &width, int &height);
+void set_window_rect(Window *w, int x, int y, int width, int height);
+/* Borderless over its whole display (task 0188: a render shown on a second screen), and back. */
+void set_fullscreen(Window *w, bool on);
 
 /* Collects pending events. If none are queued it blocks for up to timeout_ms
  * (0 = never block). This is how the idle editor uses ~0% CPU. */
@@ -72,8 +95,10 @@ void present(Window *w, const uint32_t *pixels, int width, int height);
 void present_rows(Window *w, const uint32_t *pixels, int width, int height, const std::vector<std::pair<int, int>> &rows);
 
 void get_framebuffer_size(Window *w, int &width, int &height);
-/* The system's own handle (Win32: the HWND), for a GPU swapchain (task 0095's spike); null where there is none yet. */
+/* The system's own handles for a GPU swapchain (task 0193): the window (Win32: the HWND; X11: the Window id) and its
+ * display (X11: the Display*; null elsewhere). Null where the card can't present yet (macOS: task 0194). */
 void *native_handle(Window *w);
+void *native_display(Window *w);
 float dpi_scale(Window *w);
 void set_title(Window *w, const std::string &title);
 void set_cursor(Window *w, Cursor c);

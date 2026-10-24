@@ -12,7 +12,8 @@ non-trivial.
 - `src/image`, `src/render` codecs, canvas, rasterizer, path tracer, GPU devices
 - `src/scene` Mesh (Blender layout), `meshops` operators (`mesh_tools*.cpp`), scene, IO, modifiers
 - `src/editor` IMGUI toolkit, docking, Scene view, tools (`draw_tool.cpp`, `scene_view.cpp`), panels, keymaps
-- `tests/test_main.cpp` unit checks; `stress/stress_main.cpp` stress / robustness sections
+- `tests/test_<group>.cpp` unit checks (one file a subsystem, `test_common.h` shared; `test_main.cpp` runs them);
+  `stress/stress_main.cpp` stress / robustness sections
 - `extern/` code copied from Blender's tree; `licenses/` notices; `docs/` design documentation
 - Not ours to edit without asking: `Assets/` (the user's project), `Renders/`, `Screenshots/`, `research/`
 
@@ -31,9 +32,14 @@ non-trivial.
   `BLENDITY_TRASH` pointing at a scratch copy, never the real `Assets/`.
 
 ## Testing rules
-- Every behaviour change or bug fix gets a unit test in `tests/test_main.cpp`, named for what the user
-  sees, in the current round's group. Prefer real events (`step_frame_headless` with mouse / key events)
-  for UI behaviour, `meshops` calls for geometry. Run one with `BLENDITY_TEST_FILTER="part of name"`.
+- Every behaviour change or bug fix gets a unit test in the `tests/test_<group>.cpp` of its subsystem, named
+  for what the user sees, in the current round's group at the end of the file. Prefer real events
+  (`step_frame_headless` with mouse / key events) for UI behaviour, `meshops` calls for geometry. Run one with
+  `BLENDITY_TEST_FILTER="part of name"`, a file's with `--group <name>` (`--list-groups`).
+- A unit test pins a behaviour; a measurement is a stress row (ADR 0056): a test may print a time, it never
+  asserts one, and a sweep keeps a sample of its cases in the suite with the whole sweep in stress. A spike's
+  test goes when its ADR is written. `python tools/test_coverage_map.py --check` must find no console command,
+  keymap action or window without a test.
 - Before a change is done: the full unit suite passes on Windows and Linux.
 - Geometry changes also run the matching stress sections (`blendity_stress --only pushpull |
   modifiers_ngon | curved | editor`). Problem counts and "faces newly on top of each other" counts must

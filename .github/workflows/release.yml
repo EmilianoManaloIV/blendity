@@ -70,6 +70,9 @@ jobs:
         run: bash packaging/fetch_blender_libs.sh windows_x64
       - name: Build Blendity-full (with the libraries), then Blendity (dependency-free)
         shell: cmd
+        # Task 0169 (ADR 0054): both carry the OptiX device (its host headers fetched from NVIDIA at a pinned tag).
+        env:
+          BLENDITY_FETCH_OPTIX: "1"
         run: |
           set BLENDITY_OUT=dist\windows\Blendity-full.exe
           call build.bat release app || exit /b 1
@@ -141,6 +144,8 @@ jobs:
       - name: Fetch Blender's libraries
         run: bash packaging/fetch_blender_libs.sh linux_x64
       - name: Build Blendity-full (with the libraries), then Blendity (dependency-free)
+        env:
+          BLENDITY_FETCH_OPTIX: "1"  # (task 0169: the OptiX device, as on Windows)
         run: |
           BLENDITY_APP=Blendity-full ./build.sh release app
           BLENDITY_NO_LIBS=1 ./build.sh release app

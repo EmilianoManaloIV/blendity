@@ -24,8 +24,10 @@
 #include "shading.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -89,6 +91,7 @@ struct PTSettings {
   bool use_cpu = true;
   std::vector<int> gpus;         // gpu::devices() indices (empty = CPU only)
   bool gpu_hardware_rt = true;   // use ray tracing hardware where a GPU has it
+  int gpu_backend = -1;          // task 0170: 0 Auto (GPU Compute for now), 1 Vulkan, 2 OptiX; -1 leave gpu::backend() as it is
   double merge_interval_ms = 100.0;  // how often GPU results are read back for display
   float guiding_probability = 0.5f;  // Cycles' "Surface Guiding Probability"
   int guiding_training_samples = 128;
@@ -116,6 +119,14 @@ struct PTStats {
   int cpu_samples = 0;             // samples per device (combined rendering)
   std::vector<int> gpu_samples;
   double max_submit_ms = 0;        // the longest single GPU submission (task 0051: under 100 ms after the first)
+  /* Task 0159: over the GPUs' submissions since the last reset, the cards' own time (timestamp queries) and the rest
+   * of the calls' wall time - the wait on the CPU side: submitting, the fence, the driver. busy stays -1 while no
+   * device reported a time (no timestamps). */
+  double gpu_busy_ms = -1, gpu_wait_ms = 0;
+  /* Task 0162: how the scene reached the cards since the last build that sent it whole - whole uploads, and the
+   * sections replaced alone (a moved object, a material edit, a light edit). */
+  int upload_calls = 0, instance_updates = 0, material_updates = 0, light_updates = 0;
+  double upload_ms = 0;  // the last upload_gpus (flattening, hashing, sending)
 };
 
 class PathTracer {
@@ -123,7 +134,7 @@ class PathTracer {
   /* Scene input (world space). Environment and lights are copied. */
   void build(const std::vector<PTObject> &objects, const std::vector<RenderLight> &lights, const Environment &env);
   void set_camera(const Mat4 &view, const Mat4 &proj, int width, int height, const PTLens &lens = PTLens());
-  void set_settings(const PTSettings &s) { settings_ = s; }
+  void set_settings(const PTSettings &s);  // (pauses the cards' workers first: they read the settings)
   const PTSettings &settings() const { return settings_; }
   /* What the camera sees first through each pixel's centre (no jitter, no lens), as the rasterizer's depth and id
    * planes hold it: the distance along that ray (1e6 for the sky) and the object's id (0 for the sky). Traced once
@@ -133,8 +144,21 @@ class PathTracer {
   void reset();
 
   /* Adds samples for up to `budget_ms` (at least one full sample pass).
-   * Returns the number of completed samples per pixel. */
+   * Returns the number of completed samples per pixel. With GPUs (task 0161, ADR 0052) the cards work on their
+   * own threads between calls: the call starts them toward max_samples, renders the CPU's own samples for the
+   * budget when the CPU is a device, else waits at most the budget for the cards, merges what they have finished
+   * when a merge is due, and returns the samples finished so far. */
   int render(double budget_ms, int max_samples);
+  /* The cards' threads stopped (their submissions finished); the stats and sums settled. Called before anything
+   * that touches a device or the sums; cheap when nothing runs. */
+  void pause();
+  bool gpu_async() const { return !gpus_.empty(); }  // (the cards work between render() calls)
+  uint64_t gpu_submits() const {  // (task 0162: the cards' queue submissions so far, summed; tests and stress)
+    uint64_t n = 0;
+    for (const auto &g : gpus_) n += g->r->submits();
+    return n;
+  }
+  ~PathTracer();
   int samples() const { return samples_; }
   int width() const { return w_; }
   int height() const { return h_; }
@@ -165,13 +189,24 @@ class PathTracer {
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false); }
+  /* The same with the solid-angle pdf of r's direction (a cosine gather's cos / pi): an emissive surface the ray hits
+   * first is weighted against sample_mesh_light (MIS), so a bake that samples emitters at the texel counts each
+   * once (task 0157). */
+  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays, float first_pdf) const {
+    return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false, first_pdf);
+  }
+  /* One emissive triangle by power and a uniform point on it, seen from `origin` with normal `n`: the direction, the
+   * distance, the emitted radiance and the solid-angle pdf (the texel's next-event estimation of emissive meshes,
+   * task 0157). False when there are none or the point is behind the surface or the emitter. */
+  bool has_mesh_lights() const { return !mesh_lights_.empty(); }
+  bool sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u = -1.0f) const;  // light_u in [0,1): the emitter choice given (stratified), else random
   bool occluded(const Ray &r, float tmax) const;
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
    * cosine-weighted around dirs[i] as a normal (the mean is irradiance / pi, as incoming_radiance's
    * cosine gather), mode 2: along dirs[i]. `hit` (optional) gets the share of paths whose first ray hit
    * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
-                  std::vector<float> *hit, std::string *error) const;
+                  std::vector<float> *hit, std::string *error, bool mis_first_hit = false) const;
   /* Light passing along a shadow ray: 0 when blocked, partial through
    * transparent surfaces, full through cutout holes. */
   Vec3 transmittance(const Ray &r, float tmax) const;
@@ -255,7 +290,7 @@ class PathTracer {
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
   /* camera: a camera's ray (the bakes' gathers are not: toon tones, outlines and the Retro stages are for the eye). */
   Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint32_t *id, uint64_t &rays, PTGuidingThread *guide,
-             bool camera = true) const;
+             bool camera = true, float first_pdf = 0.0f) const;
   /* The Retro stages (task 0032): where p lands on the filter's internal image; a triangle's UVs interpolated
    * there in screen space. */
   bool retro_screen(Vec3 p, Vec2 &s) const;
@@ -267,9 +302,44 @@ class PathTracer {
     std::unique_ptr<gpu::Renderer> r;
     int index = 0;
     bool hw_rt = false;
-    int samples = 0;
+    bool optix = false;      // task 0170: the OptiX device (its info().type)
+    /* Task 0161 (ADR 0052): the card's worker thread and its state. Under work_mutex_: samples, ms_per_sample,
+     * failed, error, active, merge_wanted, quit and the timing sums; under host_mutex: the host copy of the sums. */
+    int samples = 0;         // finished on the card
     double ms_per_sample = 0;
+    std::thread worker;
+    bool active = false;     // in its render loop (counted from start_workers, so a poll never sees it idle before it wakes)
+    bool merge_wanted = false;
+    bool quit = false;
+    bool failed = false;
+    std::string error;
+    double busy_ms = 0, wait_ms = 0, max_submit_ms = 0;  // since the last gather (the stats are the main thread's)
+    std::vector<float> host_accum;  // the card's sums as last downloaded
+    int host_samples = 0;           // how many samples host_accum holds
+    bool host_fresh = false;
+    std::mutex host_mutex;
   };
+  void start_workers(int max_samples);
+  void stop_worker(GpuSlot &g);
+  void stop_all_workers();
+  void render_cpu_beside_gpus(double budget_ms, int max_samples);
+  void wait_for_workers(double budget_ms);
+  void gather_workers(int max_samples);
+  void drop_failed_gpus(const std::vector<size_t> &failed);
+  int finished_samples_locked() const;
+  bool workers_idle_locked() const;
+  void worker_loop(GpuSlot &g);
+  void worker_render(GpuSlot &g);
+  bool worker_submit_chunk(GpuSlot &g, int &n);
+  void worker_finish_oldest(GpuSlot &g, int n);
+  void worker_drain(GpuSlot &g, std::vector<int> &flight);
+  void worker_download(GpuSlot &g);
+  int worker_chunk(const GpuSlot &g);
+  std::atomic<int> next_sample_{0};
+  int target_samples_ = 0;      // (under work_mutex_)
+  bool workers_go_ = false;     // (under work_mutex_)
+  std::mutex work_mutex_;
+  std::condition_variable work_cv_, idle_cv_;
   std::vector<std::unique_ptr<GpuSlot>> gpus_;
   mutable std::unique_ptr<gpu::Renderer> bake_gpu_;  // gpu_gather's device, and the build its scene came from
   mutable int bake_gpu_index_ = -1;
@@ -312,6 +382,13 @@ class PathTracer {
    * back. What the last upload took and the frame size it allowed for, and the card's memory. */
   std::vector<std::unique_ptr<GpuSlot>> parked_gpus_;
   uint64_t gpu_upload_bytes_ = 0, gpu_vram_mb_ = 0;
+  /* Task 0162: the uploaded scene's sections, hashed, so the next upload sends only what changed. */
+  struct GpuSections {
+    uint64_t geometry = 0, instances = 0, materials = 0, lights = 0, textures = 0;
+    bool valid = false;
+  } gpu_sections_;
+  static GpuSections gpu_scene_sections(const gpu::Scene &s);
+  bool upload_gpus_partial(const gpu::Scene &gs, const GpuSections &now);
   int gpu_fit_w_ = -1, gpu_fit_h_ = -1;
   void sync_gpus();
   bool background_gpu_open_ = gpu::background_open_default();
@@ -325,6 +402,9 @@ class PathTracer {
   bool see_through_ = false;  // any Cutout / Transparent / Glass material (shadow rays must look closer)
   std::vector<Mat4> normal_mats_;
   std::vector<RenderLight> lights_;
+  std::vector<Vec3> local_keys_;  // the key light's direction in each object's space (task 0149: the face shadow map)
+  int toon_key_ = -1;         // task 0148: the key light among lights_ (the brightest sun), found at build
+  Vec3 toon_key_L_{0, 1, 0};  // the direction toward it (up without one)
   Environment env_;
   std::unordered_map<const RenderMesh *, std::unique_ptr<Blas>> blas_cache_;
   std::vector<Instance> instances_;  // top-level BVH order

@@ -32,6 +32,12 @@ couldn't take that path without each of them learning a second counter.
   on it don't see a change that isn't one.
 - **Edge tables** and the smooth fans' edge adjacency are kept per topology too.
 
+## Amendment (task 0185, round 208): an operator's copy without the caches
+An Edit Mode operator now copies the mesh without its caches (`mesh_copy_bare`, ADR 0053's amendment). When the
+operator turns out to have kept the topology, `Mesh::adopt_caches` takes the old mesh's caches, and the render meshes
+follow in place as a plain copy's did. The triangles and the corner table both render caches' builds share
+(`Mesh::tessellation`, `corners_by_vertex`) are made again in a copy, not carried.
+
 ## Consequences
 - A gizmo drag on 50k faces: 98 → 69 ms a frame on the laptop setting; no render mesh, edge table or adjacency is
   built during it.

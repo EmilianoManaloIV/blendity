@@ -20,7 +20,7 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 
 Blendity is free. You don't need Blender or anything else: the installer brings everything Blendity uses.
 
-> Blendity is a **pre-release** (0.10.0): it works, but it is still being refined, so expect rough edges. Save
+> Blendity is a **pre-release** (0.11.0): it works, but it is still being refined, so expect rough edges. Save
 > your work often.
 
 ### 1. Download
@@ -129,14 +129,21 @@ everything):
   50k-face mesh enters it in about a frame, its overlapping-vertex check off the main thread), a
   modifier stack (Array, Bevel, Boolean, Mirror, Subdivision, Lattice, Curve, Mesh Deform...), curves and lattices
   edited with the same keys.
-- **UV Unwrapping** - a UV Editor with LSCM unwrap, Smart UV Project, projections and island packing.
+- **UV Unwrapping** - a UV Editor with LSCM unwrap, Smart UV Project, Part Unwrap (PartUV's charts by parts, ABF++),
+  projections and island packing.
 - **Texturing & Materials** - Principled materials and material assets, layered **procedural textures**, axis
-  materials, toon shading, texture baking.
+  materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
+  map, inner lines and hatching, custom normals from a head proxy, hold frames on 2s / 3s), anime background
+  generators (leaves, grass, walls, windows, roofs, sky, clouds, rocks, water; cards cut out by their cover), an
+  import preview with the shading switchable before anything lands in the project, hair that keeps its curl, parts into
+  strands and moves in the wind (and is rigged from its own mesh in one step), soft tissue that trails the body's
+  acceleration and keeps its volume, texture baking.
 - **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps, probe volumes and voxel realtime GI;
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
   the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour
-  grading to PlayStation and manga looks.
+  grading to PlayStation and manga looks; the **Editing** tab develops a render or an image (exposure, white balance,
+  curves, HSL, clarity, dehaze, crop; presets), non-destructively.
 - **Rigging**, and **Skinning & Weight Painting** - bones (drag their heads and tails, Extrude new ones), Blender/Maya-style
   **rig controls** (IK boxes and poles, FK circles, coloured by side), characters under one root as Unity imports them,
   skins, weight paint and IK in a Rigging window; **automatic
@@ -155,12 +162,21 @@ everything):
   for two legs or four), **Footsteps** walks a character along a curve on footprints you can move (onto stairs and
   slopes), and **Locomotion** walks and runs it live in Play wherever it is moved. **AI Inbetweening** (an optional download:
   ONNX Runtime and a network Blendity trained on ten hours of CMU motion capture) fills the motion between two keys
-  in a style, shown as a ghost before it is applied, and can be fitted to your own clips. Every such assistant is a
+  in a style, shown as a ghost before it is applied, and can be fitted to your own clips. Imported models arrive with
+  their materials as `.mat` assets and textures found or extracted (the finder reads the folders around the model and
+  pairs each bare material with the texture set its name is likeliest to own), and with their **shape keys**.
+  **MikuMikuDance** characters (`.pmx`, `.pmd`) come in rigged: leg IK, their hair and skirts as spring chains, their
+  faces as shape keys, toon-shaded with their outline, and their `.vmd` dances play on them. **VRM** avatars (0.x,
+  1.0) come in with their humanoid names, expressions, spring bones and MToon look. A model's **animations** (FBX
+  stacks, glTF animations) become clips in `Assets/Animations/<model>/`, the first playing on it; **BVH** motion
+  capture comes in as a skeleton with its clip; **Collada** scenes with their skins and animations. Every such assistant is a
   switch in Preferences: hand animation never changes.
 
-Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2. The keymap starts
+Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2; **Live Link** sends the
+scene as you change it to Blender, Unity, Godot or Unreal on the same computer (`docs/LIVELINK.md`). The keymap starts
 from Unity, Unreal, Blender, Maya, 3ds Max or SketchUp, and **Edit > Editor Feel** switches the keys and the Scene view's
-mouse navigation together to Unity's, Unreal's, Blender's or Maya's.
+mouse navigation together to Unity's, Unreal's, Blender's or Maya's. Any tab can have a window of its own, on any
+display (drag it out of the editor). Ctrl+K finds any command by name.
 
 ## Machines
 
@@ -201,7 +217,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (10882 unit checks in 827 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (11997 unit checks in 1000 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

@@ -20,6 +20,7 @@
 #include "canvas.h"
 #include "shading.h"
 
+#include <atomic>
 #include <functional>
 #include <vector>
 
@@ -58,6 +59,24 @@ struct RenderMesh {
 struct Lightmap {
   int width = 0, height = 0;
   std::vector<Vec3> texels;
+  /* Task 0197: which page this is - a new number for every page made, copied or moved into (the GPU views keep their
+   * copy by it: pages are published whole, never written after they are shown). */
+  uint64_t serial = next_serial();
+  Lightmap() = default;
+  Lightmap(const Lightmap &o) : width(o.width), height(o.height), texels(o.texels) {}
+  Lightmap(Lightmap &&o) noexcept : width(o.width), height(o.height), texels(std::move(o.texels)) {}
+  Lightmap &operator=(const Lightmap &o) {
+    width = o.width, height = o.height, texels = o.texels, serial = next_serial();
+    return *this;
+  }
+  Lightmap &operator=(Lightmap &&o) noexcept {
+    width = o.width, height = o.height, texels = std::move(o.texels), serial = next_serial();
+    return *this;
+  }
+  static uint64_t next_serial() {
+    static std::atomic<uint64_t> n{1};
+    return n++;
+  }
   /* Bilinear, clamped at the edges; texel centres at ((i + 0.5) / width, (j + 0.5) / height). */
   Vec3 sample(Vec2 uv) const;
 };
@@ -77,11 +96,35 @@ struct RenderLight {
   bool shadows = true;
 };
 
+/* An area light is an emissive plane (task 0155, ADR 0050): a Lambertian emitter of radiance intensity x pi over its
+ * whole surface - a quad with an emissive material of strength pi x Intensity gives the same light, and a bigger
+ * panel gives more. What a point q of it sends toward p, besides N.L and the panel's area: the light's facing
+ * cosine, the inverse square of the distance (no nearer than 1 cm, so a surface touching the panel stays finite)
+ * and the Range as a window that fades to nothing at Range (Unreal's), not as the falloff. */
+inline float area_light_falloff(const RenderLight &l, Vec3 q, Vec3 p) {
+  const Vec3 d = p - q;
+  const float r2 = dot(d, d);
+  const float c = dot(l.direction, d);  // the facing distance: the light's normal toward p
+  if (!(c > 0.0f) || !finite_bits(r2)) return 0.0f;
+  const float r = std::sqrt(r2), rr = r / (l.range > 1e-3f ? l.range : 1e-3f), rr2 = rr * rr;
+  float w = 1.0f - rr2 * rr2;
+  w = w > 0.0f ? w * w : 0.0f;
+  return (c / r) * w / (r2 > 1e-4f ? r2 : 1e-4f);
+}
+/* The panel's area in square metres (an ellipse's pi / 4 of its box); a light scaled to nothing keeps a square
+ * centimetre, so it still shows where it is. */
+inline float area_light_area(const RenderLight &l) {
+  const float a = std::fabs(l.width * l.height) * (l.disk ? 0.25f * kPi : 1.0f);
+  return finite_bits(a) && a > 1e-4f ? a : 1e-4f;
+}
+
 /* How much of a point, spot or area light reaches p, besides the N.L term:
  * the range falloff (Unity's built-in curve), the spot cone with its soft
- * edge, and an area light's one-sided cosine. L points from p toward the light. */
+ * edge; an area light taken at its centre (area_light_falloff: its facing, the
+ * inverse square, the window). L points from p toward the light. */
 inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
   if (l.type == RenderLight::Directional) return 1.0f;
+  if (l.type == RenderLight::Area) return area_light_area(l) * area_light_falloff(l, l.position, p);
   const float dist = length(l.position - p);
   float f = 1.0f - dist / (l.range > 1e-3f ? l.range : 1e-3f);
   f = f > 0.0f ? f * f : 0.0f;
@@ -92,15 +135,7 @@ inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
     t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
     f *= t * t * (3.0f - 2.0f * t);
   }
-  else if (l.type == RenderLight::Area) f *= c > 0.0f ? c : 0.0f;
   return f;
-}
-
-/* The range part of light_falloff alone, taken at the light's centre (as every renderer takes it). */
-inline float light_range_falloff(const RenderLight &l, Vec3 p) {
-  if (l.type == RenderLight::Directional) return 1.0f;
-  float f = 1.0f - length(l.position - p) / (l.range > 1e-3f ? l.range : 1e-3f);
-  return f > 0.0f ? f * f : 0.0f;
 }
 
 /* A point on an area light: a, b in [-0.5, 0.5] across its width and its height. A disk maps the square
@@ -120,15 +155,15 @@ inline Vec3 area_light_point(const RenderLight &l, float a, float b) {
   return l.position + l.right * (a * l.width) + up * (b * l.height);
 }
 
-/* An area light's facing-weighted cosine at p, unshadowed: the mean over its surface of
- * max(0, n.L) * max(0, the light's facing toward p), on a k x k midpoint grid with k from the light's
- * angular size (2..8). What the path tracer's next-event estimate converges to without shadows (its range
- * falloff aside, which is light_range_falloff). A large light near a surface lights faces turned away from
+/* An area light's irradiance at p over intensity x pi, unshadowed: the integral over its surface of
+ * max(0, n.L) x area_light_falloff (the facing cosine, the inverse square, the window), by Gauss quadrature
+ * with the horizon clipped out. What the path tracers' next-event estimate converges to without shadows, with no
+ * noise (the lightmaps, probes and views take it). A large light near a surface lights faces turned away from
  * its centre, which a point at the centre doesn't (task 0030: black sides on a cube under a 10 m light). */
-float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n);
+float area_light_irradiance(const RenderLight &l, Vec3 p, Vec3 n);
 /* The direction to an area light's representative point for a specular lobe (Karis 2013): the point of
- * the light nearest the reflection ray R, else the nearest to p. Also its facing toward p. */
-Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing);
+ * the light nearest the reflection ray R, else the nearest to p. Also its facing toward p, and the point itself. */
+Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing, Vec3 *point = nullptr);
 
 struct VoxelGIFrame;  // voxel_gi.h
 struct Rsm;
@@ -177,6 +212,7 @@ struct DrawItem {
   bool realtime_lm = false;
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
   bool always_cull = false;  // an outline's inverted hull (ADR 0020): back faces culled whatever the view's setting
+  Vec3 local_key{0, 1, 0};   // the key light's direction in the item's own space (task 0149: the face shadow map), set by the renderer
   /* Gouraud mode: a colour per render vertex instead of albedo (Weight Paint's weight colours, task 0046). */
   const std::vector<Vec3> *vertex_colors = nullptr;
 };
@@ -297,6 +333,23 @@ class Renderer3D {
   }
   /* Orange outline around pixels whose id is in `selected`, Unity/Blender style. */
   void outline_ids(const std::vector<uint32_t> &selected_sorted, uint32_t color, int width = 2);
+  /* Task 0192 (ADR 0061): while a record is set, line(), point(), lines(), points() and outline_ids() are kept in it,
+   * in the world and in order, instead of drawn - for the card to draw, or replay() to draw here as they would have. */
+  struct OverlayRecord {
+    struct Op {
+      enum Kind : uint8_t { Line, Point, Outline } kind = Line;
+      Vec3 a, b;
+      uint32_t color = 0;
+      float value = 0.0f;  // a line's bias, a dot's radius
+      bool depth_test = true;
+      uint32_t first = 0, count = 0;  // an outline's ids in `ids`; its width in `value`
+    };
+    std::vector<Op> ops;
+    std::vector<uint32_t> ids;
+    void clear() { ops.clear(), ids.clear(); }
+  };
+  void record_overlays(OverlayRecord *r) { record_ = r; }
+  void replay(const OverlayRecord &r);
 
   bool project(Vec3 world, Vec2 &screen, float &depth) const;
   Ray screen_ray(float x, float y) const;
@@ -346,6 +399,8 @@ class Renderer3D {
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;
   LightingEnv env_;
+  int toon_key_ = -1;             // task 0148: the key light (the brightest sun) of this frame's lights, found once in begin()
+  Vec3 toon_key_L_{0, 1, 0};      // the direction toward it (up without one)
   RasterOptions opt_;
   RasterStats stats_;
   std::vector<DrawItem> items_;
@@ -367,6 +422,7 @@ class Renderer3D {
   };
   bool batching_ = false;
   std::vector<OverlayCmd> overlay_cmds_;
+  OverlayRecord *record_ = nullptr;  // (task 0192)
   /* flush() scratch, kept between flushes (cleared, not freed): per item, is it visible, is it big enough
    * for the separate vertex stage, does it have see-through materials; the vertex-stage jobs. */
   std::vector<uint8_t> visible_, big_, see_through_;

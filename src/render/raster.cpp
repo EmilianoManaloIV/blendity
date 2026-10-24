@@ -62,6 +62,7 @@ void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, con
   vp_ = proj * view;
   inv_vp_ = vp_.inverse();
   env_ = env;
+  toon_key_ = toon_key_light(env_.lights, &toon_key_L_);
   opt_ = opt;
   opt_.tile_size = std::max(8, opt_.tile_size);
   stats_ = {};
@@ -276,26 +277,31 @@ static inline void quad_tan(float t, float &tan_t, float &sec2) {
   sec2 = rc * rc;
 }
 
-float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n) {
+float area_light_irradiance(const RenderLight &l, Vec3 p, Vec3 n) {
   /* In the light's own metres: U along right (width W), V along up (height H). The quantity is
-   *   mean over the light of max(0, n.L) * max(0, facing) = (1 / area) * integral of max(0, n.d) * h / |d|^2,
-   * d = q - p, h = the light's facing distance dir.(p - pos), the same for every point of the light. */
+   *   the integral over the light of max(0, n.L) * area_light_falloff = integral of max(0, n.d) * h * w / |d|^4,
+   * d = q - p, h = the light's facing distance dir.(p - pos), the same for every point of the light, w the Range
+   * window and |d|^2 no smaller than 1e-4 (task 0155: an emissive plane, the inverse square from each point). */
   const Vec3 up = normalize(cross(l.direction, l.right));
   const float W = std::fabs(l.width), H = std::fabs(l.height);
   const Vec3 rel = p - l.position;
   const float h = dot(l.direction, rel);  // > 0: p in front of the light
   if (!finite_bits(h) || !finite_bits(W) || !finite_bits(H) || !(h > 0.0f)) return 0.0f;
   const float c0 = -dot(n, rel), al = dot(n, l.right), be = dot(n, up);  // n.d = c0 + al U + be V
-  if (!(W * H > 1e-10f)) {  // no size (a zero scale): the centre, as a point
+  if (!(W * H * (l.disk ? 0.25f * kPi : 1.0f) > 1e-4f)) {  // under a square centimetre (a zero scale): the centre, as a point of the smallest area, as the path tracers take it
     const float dl = length(rel);
-    return dl > 1e-6f ? std::max(0.0f, c0 / dl) * (h / dl) : 0.0f;
+    return dl > 1e-6f ? area_light_area(l) * std::max(0.0f, c0 / dl) * area_light_falloff(l, l.position, p) : 0.0f;
   }
   const float fu = dot(l.right, rel), fv = dot(up, rel), h2 = h * h;
+  const float range = l.range > 1e-3f ? l.range : 1e-3f, inv_range2 = 1.0f / (range * range);
   auto f = [&](float U, float V) {
     const float g = c0 + al * U + be * V;
     if (!(g > 0.0f)) return 0.0f;
     const float u = U - fu, v = V - fv;
-    return g * h / (h2 + u * u + v * v);
+    const float r2 = h2 + u * u + v * v, rr = r2 * inv_range2;
+    float w = 1.0f - rr * rr;
+    w = w > 0.0f ? w * w : 0.0f;
+    return g * h * w / (r2 * (r2 > 1e-4f ? r2 : 1e-4f));
   };
   float sum = 0.0f;
   /* Within a quarter of its size from a large light the falloff is sharp: more points there only. */
@@ -357,7 +363,7 @@ float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n) {
         sum += wo * row;
       }
     }
-    return sum / (W * H);
+    return sum;  // (the integral: the quadrature's weights are in metres)
   }
   /* An ellipse: rays from its centre at evenly spaced angles (periodic: few are needed), each ray's part in
    * front of the horizon (n.d is linear along it) integrated by Gauss in the area fraction r^2. */
@@ -381,10 +387,10 @@ float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n) {
       sum += (s1 - s0) * g.w[a] * f(r * du, r * dv);
     }
   }
-  return sum / na;  // the area fraction already integrates to 1 over r^2 in [0, 1] and the angles average
+  return sum / na * area_light_area(l);  // the mean (the area fraction integrates to 1 over r^2 in [0, 1], the angles average) times the area
 }
 
-Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing) {
+Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing, Vec3 *point) {
   const Vec3 up = normalize(cross(l.direction, l.right));
   Vec3 q = p - l.direction * dot(p - l.position, l.direction);  // p projected onto the light's plane
   const float denom = dot(R, l.direction);
@@ -408,7 +414,9 @@ Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing
     x = clampf(x, -hw, hw);
     y = clampf(y, -hh, hh);
   }
-  Vec3 L = l.position + l.right * x + up * y - p;
+  const Vec3 rep = l.position + l.right * x + up * y;
+  if (point) *point = rep;
+  Vec3 L = rep - p;
   const float dl = length(L);
   L = dl > 1e-6f ? L / dl : -l.direction;
   facing = std::max(0.0f, -dot(l.direction, L));
@@ -426,17 +434,17 @@ static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Ve
     float atten = l.intensity;
     if (l.type == RenderLight::Area) {
       /* The whole surface of the light (not its centre: large lights light faces turned from it). */
-      atten *= light_range_falloff(l, wp);
       if (atten <= 0.0f) continue;
-      diff += l.color * (atten * area_light_cosine(l, wp, n));
+      diff += l.color * (atten * area_light_irradiance(l, wp, n));
       if (specular > 0) {
         float c;
-        L = area_light_specular_dir(l, wp, n * (2.0f * dot(n, v)) - v, c);
+        Vec3 q;
+        L = area_light_specular_dir(l, wp, n * (2.0f * dot(n, v)) - v, c, &q);
         if (dot(n, L) > 0.0f) {
           Vec3 h = normalize(L + v);
           float nh = std::max(0.0f, dot(n, h));
           float s = nh * nh; s *= s; s *= s; s *= s; s *= s;
-          spec += l.color * (s * specular * atten * c);
+          spec += l.color * (s * specular * atten * std::min(2.0f * kPi, area_light_area(l) * area_light_falloff(l, q, wp)));  // (at most the hemisphere)
         }
       }
       continue;
@@ -625,7 +633,13 @@ void Renderer3D::flush() {
   normal_mats_.resize(n_items);
   js.parallel_for((int64_t)n_items, 64, [&](int64_t i0, int64_t i1) {
     for (int64_t i = i0; i < i1; i++)
-      if (visible[i]) normal_mats_[i] = items_[i].model.inverse().transposed();
+      if (visible[i]) {
+        const Mat4 inv = items_[i].model.inverse();
+        normal_mats_[i] = inv.transposed();
+        const Vec3 lk = inv.dir(toon_key_L_);  // (task 0149: the face shadow map reads the key light in the object's space)
+        const float len = length(lk);
+        items_[i].local_key = finite_bits(len) && len > 1e-12f ? lk / len : Vec3(0, 1, 0);
+      }
   });
   /* Clip-space and screen positions (and Gouraud vertex colours) for
    * vertices [b, e). The perspective divide happens once per vertex here
@@ -1097,7 +1111,7 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
         float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
         if (a <= 0) continue;
         uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
-        d = Color::blend(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));
+        d = Color::over(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));  // (over: task 0193)
       }
     return;
   }
@@ -1108,7 +1122,7 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
     if (c.depth_test && z - c.bias > rt_->depth[(size_t)y * Wi + x]) return;
     uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
     uint32_t ca8 = (uint32_t)((color >> 24) * saturate(a));
-    d = Color::blend(d, (color & 0xFFFFFF) | (ca8 << 24));
+    d = Color::over(d, (color & 0xFFFFFF) | (ca8 << 24));
   };
   float nx0 = c.x0, ny0 = c.y0, nz0 = c.z0, nx1 = c.x1, ny1 = c.y1, nz1 = c.z1;
   float ldx = nx1 - nx0, ldy = ny1 - ny0;
@@ -1130,6 +1144,12 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
 }
 
 void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias) {
+  if (record_) {
+    OverlayRecord::Op op;
+    op.kind = OverlayRecord::Op::Line, op.a = a, op.b = b, op.color = color, op.value = bias, op.depth_test = depth_test;
+    record_->ops.push_back(op);
+    return;
+  }
   OverlayCmd c;
   if (!prepare_line(a, b, color, depth_test, bias, c)) return;
   if (batching_) overlay_cmds_.push_back(c);
@@ -1137,6 +1157,12 @@ void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bia
 }
 
 void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
+  if (record_) {
+    OverlayRecord::Op op;
+    op.kind = OverlayRecord::Op::Point, op.a = p, op.color = color, op.value = r, op.depth_test = depth_test;
+    record_->ops.push_back(op);
+    return;
+  }
   OverlayCmd c;
   if (!prepare_point(p, r, color, depth_test, c)) return;
   if (batching_) overlay_cmds_.push_back(c);
@@ -1169,6 +1195,14 @@ void Renderer3D::record_many(size_t n, const Prepare &prepare) {
 }
 
 void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias) {
+  if (record_) {
+    for (size_t i = 0; i < n; i++) {
+      Vec3 a, b;
+      uint32_t color = 0;
+      if (get(i, a, b, color)) line(a, b, color, depth_test, bias);
+    }
+    return;
+  }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
     Vec3 a, b;
     uint32_t color = 0;
@@ -1177,11 +1211,30 @@ void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &
 }
 
 void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test) {
+  if (record_) {
+    for (size_t i = 0; i < n; i++) {
+      Vec3 p;
+      uint32_t color = 0;
+      if (get(i, p, color)) point(p, r, color, depth_test);
+    }
+    return;
+  }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
     Vec3 p;
     uint32_t color = 0;
     return get(i, p, color) && prepare_point(p, r, color, depth_test, cmd);
   });
+}
+
+/* What was recorded, drawn here as it would have been (task 0192: the card couldn't take it). */
+void Renderer3D::replay(const OverlayRecord &r) {
+  for (const OverlayRecord::Op &op : r.ops) switch (op.kind) {
+      case OverlayRecord::Op::Line: line(op.a, op.b, op.color, op.depth_test, op.value); break;
+      case OverlayRecord::Op::Point: point(op.a, op.value, op.color, op.depth_test); break;
+      case OverlayRecord::Op::Outline:
+        outline_ids(std::vector<uint32_t>(r.ids.begin() + op.first, r.ids.begin() + op.first + op.count), op.color, (int)op.value);
+        break;
+    }
 }
 
 void Renderer3D::begin_overlay_batch() {
@@ -1217,6 +1270,14 @@ void Renderer3D::end_overlay_batch() {
 }
 
 void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, int width) {
+  if (record_ && !sel.empty()) {
+    OverlayRecord::Op op;
+    op.kind = OverlayRecord::Op::Outline, op.color = color, op.value = (float)width;
+    op.first = (uint32_t)record_->ids.size(), op.count = (uint32_t)sel.size();
+    record_->ids.insert(record_->ids.end(), sel.begin(), sel.end());
+    record_->ops.push_back(op);
+    return;
+  }
   if (sel.empty() || rt_->ids.empty()) return;  // (a view's target: a shadow map has no ids)
   if (batching_) {  // overlays recorded so far go under the outline
     end_overlay_batch();
@@ -1451,6 +1512,7 @@ void Renderer3D::shade_deferred() {
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
+    bool footprint = false;  // (task 0164) the footprint is read: a live texture, a Box / Generated mapping, a procedural
     /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
      * with its own normal - what evaluate_material would give it - and skips the texture-space work nothing reads. */
     bool uniform = false;
@@ -1525,6 +1587,8 @@ void Renderer3D::shade_deferred() {
     for (int a = 0; a < 4; a++)
       if (const Material::Resolved *at = T.tex->axis_tx[a])
         for (int k = 0; k < 5; k++) T.live = T.live || at->live[k] != nullptr;
+    /* Task 0164: a Box or Generated mapping and the procedurals read the pixel's footprint too (their lod, the fade). */
+    T.footprint = T.live || T.mat->mapping != (int)MaterialMapping::UV || T.mat->procedural != 0 || T.mat->axis_mode != 0;
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
@@ -1721,8 +1785,8 @@ void Renderer3D::shade_deferred() {
         if (opt_.tex.active()) sp.tex = &opt_.tex;
         /* Live procedural textures (task 0031): the object-space size of this pixel, so a texture whose texel
          * is larger is evaluated here instead of magnified. Not for the reflective shadow map. */
-        if (!rsm_out_ && T.live && !T.uniform) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
-          sp.live_textures = true;
+        if (!rsm_out_ && T.footprint && !T.uniform) {  // (only a material that reads it: a pixel spared four lengths and two divisions)
+          sp.live_textures = T.live;
           auto lp = [&](Vec3 b) { return T.p[0] * b.x + T.p[1] * b.y + T.p[2] * b.z; };
           auto wp = [&](Vec3 b) { return T.wp[0] * b.x + T.wp[1] * b.y + T.wp[2] * b.z; };
           const Vec3 bx = ratio(N + T.na, S + T.sa), by = ratio(N + T.nb, S + T.sb);
@@ -1733,6 +1797,12 @@ void Renderer3D::shade_deferred() {
         if (T.has_lm) {
           sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
           sp.has_lightmap = true;
+        }
+        if (T.mat->shading_model == 1) {  // (task 0164: the normal at the next pixel right and below, for the band edges; painted toon materials are not uniform, so the material decides)
+          auto wn_at = [&](Vec3 b) { return normalize(T.wn[0] * b.x + T.wn[1] * b.y + T.wn[2] * b.z); };
+          sp.normal_dx = wn_at(ratio(N + T.na, S + T.sa)) - sp.normal;
+          sp.normal_dy = wn_at(ratio(N + T.nb, S + T.sb)) - sp.normal;
+          if (!finite_bits(dot(sp.normal_dx, sp.normal_dx)) || !finite_bits(dot(sp.normal_dy, sp.normal_dy))) sp.normal_dx = sp.normal_dy = Vec3(0.0f);
         }
         if (T.has_tangent && !T.uniform) {  // (a normal map's: a uniform material has none)
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
@@ -1797,7 +1867,11 @@ void Renderer3D::shade_deferred() {
           }
         }
         SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
-        if (T.uniform) s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
+        if (T.uniform) {
+          s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
+          s.toon_n_dx = sp.normal_dx;  // (task 0164: the pixel's own, which the shared sample can't hold)
+          s.toon_n_dy = sp.normal_dy;
+        }
         if (rsm_out_) {
           /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
           const size_t k = (size_t)y * W + x;
@@ -1833,7 +1907,8 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
     if (s.toon) {
       /* Toon (ADR 0020): N.L x the shadow x the falloff (range, spot cone, an area's facing), in tones; the dark side
-       * takes the shadow colour. As the path tracers' light sampling. */
+       * takes the shadow colour. As the path tracers' light sampling. With Key Light Only (task 0148) the brightest
+       * sun alone bands; the others add smooth fill. */
       Vec3 L;
       float fall = 1.0f;
       if (l.type == RenderLight::Directional) L = -l.direction;
@@ -1844,33 +1919,40 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
         fall = light_falloff(l, sp.position, L);
       }
       if (!(fall > 0.0f) || !(l.intensity > 0.0f)) continue;
-      const float ndl = dot(n, L);
+      const float ndl = toon_wrap_ndl(*s.toon, dot(n, L));  // (the light wrap moves the terminator)
       float vis = 1.0f;
       if (ndl > 0 && (int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
         vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
-      lo += shade_toon(s, n, V, L, std::max(ndl, 0.0f) * vis * std::min(fall, 1.0f)) * l.color * l.intensity;
+      /* The face shadow map (task 0149) gives the key light's lit term instead of N.L. */
+      const float face = (int)li == toon_key_ ? toon_face_lit(*s.toon, s, it.local_key) : -1.0f;
+      const float lit = (face >= 0.0f ? face : std::max(ndl, 0.0f) * vis) * std::min(fall, 1.0f);  // (the map is the face's shadow: no cast shadow on top)
+      const int key = s.toon->toon_key_light_only ? toon_key_ : -1;
+      lo += (key >= 0 && (int)li != key ? toon_fill(s, lit) : shade_toon(s, n, V, L, lit)) * l.color * l.intensity;
       continue;
     }
     Vec3 L;
     float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
     if (l.type == RenderLight::Area) {
-      /* Diffuse from the light's whole surface (area_light_cosine: what the path tracer converges to,
+      /* Diffuse from the light's whole surface (area_light_irradiance: what the path tracer converges to,
        * unshadowed), the specular from its representative point with the lobe widened by the light's size
-       * and renormalised (Karis 2013, "Real Shading in Unreal Engine 4"). */
-      atten *= light_range_falloff(l, sp.position);
+       * and renormalised (Karis 2013, "Real Shading in Unreal Engine 4"), its strength the centre's falloff. */
       if (atten <= 0.0f) continue;
-      const float dcos = area_light_cosine(l, sp.position, n);
+      const float dcos = area_light_irradiance(l, sp.position, n);
       float c;
-      const Vec3 Lr = area_light_specular_dir(l, sp.position, n * (2.0f * dot(n, V)) - V, c);
+      Vec3 q;
+      const Vec3 Lr = area_light_specular_dir(l, sp.position, n * (2.0f * dot(n, V)) - V, c, &q);
+      /* What the representative point sends (its own inverse square): no more than the whole hemisphere's worth, so a
+       * glossy floor a hand under a wide panel doesn't flare past its diffuse. */
+      const float cfall = std::min(2.0f * kPi, area_light_area(l) * area_light_falloff(l, q, sp.position));
       /* The lobe at the original roughness toward the representative point, scaled by (a / a')^2 where a'
-       * is the roughness widened by the light's apparent size: the energy the wider lobe would spread
-       * (Karis's normalisation; widening the lobe as well would count it twice). */
+       * is the roughness widened by the light's apparent size at that point: the energy the wider lobe would
+       * spread (Karis's normalisation; widening the lobe as well would count it twice). */
       const float a = std::max(s.roughness * s.roughness, 0.002f);
       const float radius = std::sqrt(std::fabs(l.width * l.height) / kPi);
-      const float a2 = std::min(1.0f, a + radius / (2.0f * std::max(1e-3f, length(l.position - sp.position))));
+      const float a2 = std::min(1.0f, a + radius / (2.0f * std::max(1e-3f, length(q - sp.position))));
       Vec3 dpart, spart;
       brdf_eval_parts(s, n, V, Lr, dpart, spart);
-      lo += (dpart * dcos + spart * (c * (a / a2) * (a / a2))) * l.color * atten;
+      lo += (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color * atten;
       continue;
     }
     if (l.type == RenderLight::Directional) L = -l.direction;
@@ -1923,7 +2005,7 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
     }
     else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
     else amb = env.irradiance(n);
-    return lo + amb * s.albedo + toon_rim(*s.toon, n, V) + s.emission;
+    return lo + amb * s.albedo + toon_rim(s, n, V, toon_key_L_) + s.emission;
   }
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;

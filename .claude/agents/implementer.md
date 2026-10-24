@@ -16,7 +16,7 @@ in every respect (build commands, scratch project, code standards, documentation
 ## What you do
 1. Make the change the spec asks for, in the files it names (plus the tests and docs that go with them).
    Reuse existing functions; read the surrounding code and match its style.
-2. Add or update unit tests in `tests/test_main.cpp` that cover each acceptance criterion.
+2. Add or update unit tests in the `tests/test_<group>.cpp` of the subsystem that cover each acceptance criterion.
 3. Build: Windows `build.bat release all` (rename a locked `dist\windows\Blendity.exe` aside, never kill
    it). Also build and test on Linux (WSL) when the change touches platform code, headers, templates or
    anything GCC-sensitive.

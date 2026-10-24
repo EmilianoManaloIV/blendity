@@ -4,6 +4,7 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../scene/animation.h"
 #include "../scene/import.h"
 
 #include <algorithm>
@@ -11,6 +12,38 @@
 #include <unordered_set>
 
 namespace bl {
+
+namespace {
+/* A file name from a material or model name: letters, digits, spaces, - _ . ( ) kept, anything else _. */
+std::string safe_file_name(const std::string &name) {
+  std::string s;
+  for (char c : name) s += std::isalnum((unsigned char)c) || c == ' ' || c == '-' || c == '_' || c == '.' || c == '(' || c == ')' || (unsigned char)c >= 0x80 ? c : '_';
+  while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
+  return s.empty() ? std::string("Material") : s;
+}
+
+/* A clip's file name: nothing Windows refuses (Blender's stacks are "Armature|ArmatureAction"). */
+std::string clip_file_name(std::string n) {
+  for (char &ch : n)
+    if (std::strchr("/\\:*?\"<>|", ch)) ch = '_';
+  while (!n.empty() && (n.front() == '.' || n.front() == ' ')) n.erase(n.begin());
+  while (!n.empty() && (n.back() == '.' || n.back() == ' ')) n.pop_back();
+  return n.empty() ? std::string("Clip") : n;
+}
+
+bool same_file_content(const std::string &a, const std::string &b) {
+  std::string x, y;
+  return fs::read_file(a, x) && fs::read_file(b, y) && x == y;
+}
+
+/* `dir/name`, or `dir/name 2.ext`... when another file of that name is there already. */
+std::string free_name(const std::string &dir, const std::string &file, const std::vector<std::string> &taken) {
+  std::string p = fs::join(dir, file);
+  for (int k = 2; fs::exists(p) || std::find(taken.begin(), taken.end(), p) != taken.end(); k++)
+    p = fs::join(dir, fs::stem(file) + " " + std::to_string(k) + fs::extension(file));
+  return p;
+}
+}  // namespace
 
 const std::vector<std::string> &Editor::image_assets() {
   if (ui_.time - image_assets_time_ < 3.0) return image_assets_;
@@ -41,34 +74,65 @@ std::vector<MaterialPtr> Editor::scene_materials() {
 }
 
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
+  if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion: onto a character)
+  if (import_preview_pref_ && (ipv_force_ || !headless_) && begin_import_preview(path, copy_into_assets)) return;  // (task 0152: the dialog first)
   ScopedTimer t;
   ImportResult r;
   if (!import_model(path, r)) {
     Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
     return;
   }
-  /* Unity copies imported files into Assets: model -> Assets/Meshes,
-   * referenced textures -> Assets/Textures, and materials point at the copies. */
-  std::unordered_map<std::string, std::string> tex_map;
-  if (copy_into_assets) {
-    std::string mesh_dir = fs::join(assets_dir_, "Meshes"), tex_dir = fs::join(assets_dir_, "Textures");
-    fs::make_dirs(mesh_dir);
-    std::string dst = fs::join(mesh_dir, fs::filename(path));
-    if (fs::normalize(dst) != fs::normalize(path)) fs::copy_file(path, dst);
-    std::string ext = fs::extension(path);
-    if (ext == ".obj" || ext == ".gltf") {
-      /* Bring the .mtl (OBJ) or the .bin buffer (glTF) along too. */
-      std::string side = fs::join(fs::parent(path), fs::stem(path) + (ext == ".obj" ? ".mtl" : ".bin"));
-      if (fs::exists(side)) fs::copy_file(side, fs::join(mesh_dir, fs::filename(side)));
-    }
-    for (const std::string &tp : r.textures) {
-      if (!fs::exists(tp) || tex_map.count(tp)) continue;
-      fs::make_dirs(tex_dir);
-      std::string td = fs::join(tex_dir, fs::filename(tp));
-      if (fs::normalize(td) != fs::normalize(tp)) fs::copy_file(tp, td);
-      tex_map[tp] = make_asset_relative(td);
-    }
+  finish_import(path, copy_into_assets, r, t, ImportOutline::Keep, 0.0f, false);
+}
+
+static bool import_meshes_with_materials(ImportResult &r);  // (below, with the preview)
+
+/* The console's import <file> <shading> (task 0152): the shading applied and the import finished at once, no dialog. */
+void Editor::import_with_shading(const std::string &path, bool copy_into_assets, int shading) {
+  if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion has no materials to shade)
+  ScopedTimer t;
+  ImportResult r;
+  if (!import_model(path, r)) {
+    Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
+    return;
   }
+  import_meshes_with_materials(r);
+  std::vector<std::string> originals;
+  for (const MaterialPtr &m : r.materials) originals.push_back(m ? save_material_text(*m) : std::string());
+  apply_import_shading(r.materials, originals, shading);
+  finish_import(path, copy_into_assets, r, t, ImportOutline::Keep, 0.0f, shading != 0);
+}
+
+/* The preview's Outline switch on the imported objects: the file's own left alone, every outline removed, or one of
+ * this width on every mesh (over a file's own). */
+static void import_outlines(const std::vector<GameObject *> &objects, ImportOutline mode, float width) {
+  if (mode == ImportOutline::Keep) return;
+  for (GameObject *g : objects) {
+    if (!g || !g->get<MeshRenderer>()) continue;
+    Outline *ol = g->get<Outline>();
+    if (mode == ImportOutline::Off) {
+      if (ol) g->remove_component(ol);
+      continue;
+    }
+    if (!ol) ol = g->add<Outline>();
+    ol->thickness = width;
+    ol->world_space = true;
+  }
+}
+
+/* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets,
+ * the .mat files, the objects (an Outline on each mesh when `outline_width` is set), the clips. */
+void Editor::finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
+                           bool rewrite_materials) {
+  /* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
+   * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
+   * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). */
+  std::unordered_map<std::string, std::string> tex_map;
+  std::vector<std::string> sources{path};
+  if (copy_into_assets || !inside_assets(path)) sources.push_back(copy_model_into_assets(path));
+  const bool again = import_folder_reused(sources, fs::stem(path));
+  const std::string model = import_folder(sources, fs::stem(path));
+  copy_import_textures(r, model, again, tex_map);
   auto fix = [&](TextureRef &ref) {
     if (ref.empty()) return;
     auto it = tex_map.find(ref.path);
@@ -76,22 +140,541 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   };
   size_t missing = 0;
   for (auto &m : r.materials) {
-    for (TextureRef *ref : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map}) {
+    for (TextureRef *ref : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
+                            &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map, &m->face_shadow_map, &m->line_map, &m->hatch_map}) {
       if (!ref->empty() && !fs::exists(resolve_asset_path(ref->path)) && !fs::exists(ref->path)) missing++;
       fix(*ref);
     }
   }
-  GameObject *root = instantiate_import(*scene_, r, fs::stem(path), nullptr);
+  const size_t made = import_material_assets(r, model, rewrite_materials);
+  std::vector<GameObject *> objects;
+  GameObject *root = instantiate_import(*scene_, r, fs::stem(path), nullptr, &objects);
   if (root) {
     root->set_world_position(cam_.pivot);
     select(root->id);
+  }
+  import_outlines(objects, outline, outline_width);  // (the preview's Outline switch, task 0152)
+  /* Its animations as clips (task 0139), the first playing on the root. The tracks name the nodes; the objects made
+   * may differ (an armature renamed for uniqueness): each path is rewritten onto its object. */
+  std::vector<std::string> clip_paths;
+  std::unordered_map<std::string, int> node_of_path;
+  for (size_t i = 0; i < r.nodes.size(); i++) node_of_path.emplace(import_node_path(r, (int)i), (int)i);
+  for (size_t i = 0; root && i < r.clips.size(); i++) {
+    AnimationClip clip = r.clips[i];
+    for (AnimTrack &t : clip.tracks) {
+      const auto it = node_of_path.find(t.path);
+      if (it != node_of_path.end() && objects[(size_t)it->second]) t.path = anim_path(*root, *objects[(size_t)it->second]);
+      else if (it != node_of_path.end()) t.keys.clear();  // (a folded end bone's track: nothing to move)
+    }
+    /* Tracks with no keys dropped: the folded nodes' (cleared above) and any a reader left empty. */
+    clip.tracks.erase(std::remove_if(clip.tracks.begin(), clip.tracks.end(), [](const AnimTrack &t) { return t.keys.empty(); }), clip.tracks.end());
+    const std::string rel = save_imported_clip(*root, clip, model, i == 0);
+    if (!rel.empty()) clip_paths.push_back(rel);
+    else Log::warn("Import: the clip '%s' couldn't be written under Assets/Animations/%s", clip.name.c_str(), model.c_str());
   }
   mark_changed("Import " + fs::filename(path));
   project_listed_ = -100;
   image_assets_time_ = -100;
   invalidate_material_textures();
   Log::info("Imported %s: %s in %.0f ms", fs::filename(path).c_str(), r.summary.c_str(), t.ms());
+  if (made) Log::info("Materials: %zu in Assets/Materials/%s (an edited one is kept when the model is imported again)", made, model.c_str());
+  for (const std::string &c : clip_paths) Log::info("Clip: %s%s", c.c_str(), c == clip_paths.front() ? " (playing on the root: Window > Animation)" : "");
+  for (const std::string &n : r.notes) Log::info("Import: %s", n.c_str());
   if (missing) Log::warn("%zu texture reference(s) could not be found next to the model", missing);
+}
+
+/* The character a motion goes onto: the one the selection is in (its topmost object), else the scene's only one. */
+GameObject *Editor::motion_target() {
+  auto has_rig = [](GameObject &top) {
+    bool found = false;
+    std::function<void(GameObject &)> walk = [&](GameObject &g) {
+      found = found || g.get<Armature>() || g.get<Bone>();
+      for (GameObject *c : g.children)
+        if (!found) walk(*c);
+    };
+    walk(top);
+    return found;
+  };
+  GameObject *top = active_object();
+  while (top && top->parent) top = top->parent;
+  if (top && has_rig(*top)) return top;
+  GameObject *only = nullptr;
+  int count = 0;
+  for (GameObject *g : scene_->roots)
+    if (has_rig(*g)) only = g, count++;
+  return count == 1 ? only : nullptr;
+}
+
+/* ---------------------------------------------------------------- the import preview (task 0152) */
+
+const std::vector<std::string> &import_shading_names() {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> n = {"As Imported", "PBR"};
+    for (const std::string &style : toon_style_names()) n.push_back(style);
+    return n;
+  }();
+  return names;
+}
+int import_shading_index(const std::string &word) {
+  std::string w = to_lower(word);
+  w.erase(std::remove(w.begin(), w.end(), ' '), w.end());
+  if (w == "asis" || w == "asimported" || w == "file") return 0;
+  if (w == "pbr") return 1;
+  if (w == "soft") return 2 + toon_style_index("Soft Anime");  // (the short forms the console help lists)
+  if (w == "gg" || w == "guilty") return 2 + toon_style_index("Guilty Gear");
+  const int style = toon_style_index(word);
+  return style >= 0 ? 2 + style : -1;
+}
+
+/* The file's materials under a shading: each starts again from the text the file gave (so a style picked earlier is
+ * undone), then PBR's model or a toon style's preset over it - the maps stay the file's (an MToon shade map stays
+ * under Soft Anime). The preview scene and the import share these materials. */
+void Editor::apply_import_shading(std::vector<MaterialPtr> &mats, const std::vector<std::string> &originals, int shading) {
+  for (size_t i = 0; i < mats.size() && i < originals.size(); i++) {
+    const MaterialPtr &m = mats[i];
+    if (!m || originals[i].empty()) continue;
+    load_material_text(originals[i], *m);
+    if (shading == 1) m->shading_model = 0;
+    else if (shading >= 2) apply_toon_style(*m, shading - 2);
+    m->touch();
+  }
+}
+
+/* Every mesh node gets a material of its own in `r` (the instantiation would make one outside the list, which no
+ * shading could reach); true when any node has a mesh at all. */
+static bool import_meshes_with_materials(ImportResult &r) {
+  bool any = false;
+  for (ImportedNode &n : r.nodes) {
+    if (!n.mesh) continue;
+    any = true;
+    if (!n.materials.empty()) continue;
+    MaterialPtr m = make_material(n.name, Vec3(0.8f));
+    n.materials.push_back(m);
+    r.materials.push_back(m);
+  }
+  return any;
+}
+
+bool Editor::begin_import_preview(const std::string &path, bool copy_into_assets) {
+  if (ipv_.open) {  // one at a time: this one waits for Import or Cancel
+    ipv_queue_.push_back({path, copy_into_assets});
+    Log::info("Import: %s waits for the preview of %s", fs::filename(path).c_str(), fs::filename(ipv_.path).c_str());
+    return true;
+  }
+  ImportResult r;
+  if (!import_model(path, r)) {
+    Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
+    return true;
+  }
+  if (!import_meshes_with_materials(r)) return false;  // nothing to look at (a motion-only file): the plain import
+  ipv_ = ImportPreview();
+  ImportPreview &pv = ipv_;
+  pv.open = true;
+  pv.path = path;
+  pv.copy_into_assets = copy_into_assets;
+  pv.result = std::move(r);
+  for (const MaterialPtr &m : pv.result.materials) pv.originals.push_back(m ? save_material_text(*m) : std::string());
+  pv.scene = std::make_unique<Scene>();
+  instantiate_import(*pv.scene, pv.result, fs::stem(path), nullptr, nullptr);
+  /* The file's own outlines (an MMD model's) as the switch's starting state. */
+  pv.scene->for_each([&](GameObject &g) {
+    if (const Outline *ol = g.get<Outline>()) pv.outline = true, pv.outline_width = ol->thickness;
+  });
+  pv.shading = std::max(0, std::min((int)import_shading_names().size() - 1, import_shading_pref_));
+  if (pv.shading != 0) apply_import_shading(pv.result.materials, pv.originals, pv.shading);
+  pv.last_time = now_seconds();
+  dialog_ = Dialog::ImportPreview;
+  return true;
+}
+
+void Editor::import_preview_outline(bool on, float width) {
+  ImportPreview &pv = ipv_;
+  pv.outline = on;
+  pv.outline_touched = true;
+  pv.outline_width = finite_bits(width) ? std::max(0.0005f, std::min(1.0f, width)) : 0.01f;
+  pv.version++;
+  if (!pv.scene) return;
+  pv.scene->for_each([&](GameObject &g) {
+    if (!g.get<MeshRenderer>()) return;
+    Outline *ol = g.get<Outline>();
+    if (!on) {
+      if (ol) g.remove_component(ol);
+      return;
+    }
+    if (!ol) ol = g.add<Outline>();
+    ol->thickness = pv.outline_width;
+    ol->world_space = true;
+  });
+}
+
+/* The preview's picture: the model on a turntable, lit from the preview's own camera, drawn by the CPU rasterizer
+ * (every material, painted maps included) into its own image; drawn again only when something it shows changed
+ * (the turn in 2-degree steps, so a spin isn't a render every frame). */
+void Editor::render_import_preview(int w, int h) {
+  ImportPreview &pv = ipv_;
+  if (!pv.scene || w < 8 || h < 8) return;
+  ImportPreview::Key key;
+  key.yaw_q = (int)std::lround(pv.yaw / 2.0f);
+  key.w = w, key.h = h, key.shading = pv.shading, key.version = pv.version, key.outline = pv.outline;
+  key.width_q = (int)std::lround(pv.outline_width * 1000.0f);
+  if (key == pv.key && ipv_img_.width == w && ipv_img_.height == h) return;
+  pv.key = key;
+  AABB b;
+  pv.scene->for_each([&](GameObject &g) {
+    if (g.get<MeshRenderer>()) b.add(g.world_bounds());
+  });
+  if (!b.valid()) b.add(Vec3(-0.5f)), b.add(Vec3(0.5f));
+  const Vec3 c = b.center();
+  const float rad = std::max(0.05f, length(b.extent()));
+  const Quat q = Quat::euler(Vec3(15.0f, (float)(key.yaw_q * 2), 0.0f));
+  const Vec3 eye = c - q.rotate(Vec3(0, 0, 1)) * (rad * 2.4f);
+  const Mat4 v = Mat4::look_at(eye, c, Vec3(0, 1, 0)), p = Mat4::perspective(40.0f * kDeg2Rad, w / (float)h, rad * 0.05f, rad * 10.0f);
+  ipv_img_.resize(w, h);
+  ipv_rt_.attach(ipv_img_, {0, 0, w, h});
+  /* The headlight from the preview's camera, a little above and to its right, so the turn never shows a back-lit side;
+   * plain tone mapping (the scene's view transform and exposure are the scene's, not the file's). */
+  LightingEnv env = make_lighting(eye, false, true);
+  if (!env.lights.empty()) env.lights[0].direction = normalize(q.rotate(Vec3(0.2f, -0.3f, 1.0f)));
+  env.view_transform = ViewTransform::Standard;
+  env.exposure = 0.0f;
+  std::vector<DrawItem> items;
+  pv.scene->for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    const MeshFilter *mf = g.get<MeshFilter>();
+    if (!g.active_in_hierarchy() || !mr || !mr->enabled || !mf || !mf->mesh) return;
+    const Mesh *m = g.evaluated_mesh(1);
+    if (!m) return;
+    items.push_back(mesh_draw_item(g, *m, *mr, true, false));
+    DrawItem o;
+    if (outline_draw_item(g, *m, items.back(), 1, 1.0f, o)) items.push_back(o);
+  });
+  RasterOptions opt;  // (the defaults, not the Scene view's debug and overlay options)
+  opt.shade = ShadeMode::Deferred;
+  ipv_r3d_.begin(&ipv_rt_, v, p, env, opt);
+  ipv_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
+  for (const DrawItem &it : items) ipv_r3d_.add(it);
+  ipv_r3d_.flush();
+}
+
+void Editor::finish_import_preview(bool do_import) {
+  ImportPreview &pv = ipv_;
+  if (!pv.open) return;
+  if (do_import) {
+    ScopedTimer t;
+    const ImportOutline outline = !pv.outline_touched ? ImportOutline::Keep : pv.outline ? ImportOutline::Set : ImportOutline::Off;
+    finish_import(pv.path, pv.copy_into_assets, pv.result, t, outline, pv.outline_width, pv.shading != 0);
+  }
+  else Log::info("Import of %s cancelled: nothing was written", fs::filename(pv.path).c_str());
+  ipv_ = ImportPreview();
+  ipv_img_ = Image();
+  if (dialog_ == Dialog::ImportPreview) dialog_ = Dialog::None;
+  if (ipv_queue_.empty()) return;
+  const std::pair<std::string, bool> next = ipv_queue_.front();  // the next dropped file's turn
+  ipv_queue_.erase(ipv_queue_.begin());
+  import_model_file(next.first, next.second);
+}
+
+void Editor::draw_import_preview_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  if (!pv.open) {
+    close();
+    return;
+  }
+  {
+    Recti r = u.popup_row(u.row_h() + u.px(6));
+    u.label({r.x + u.px(10), r.y, r.w, r.h}, "Import " + fs::filename(pv.path), u.theme.text_bright);
+    u.canvas.hline(r.x, r.right(), r.bottom() - 1, u.theme.separator);
+  }
+  draw_ipv_picture();
+  auto line = [&](const std::string &text, uint32_t color) {
+    const Recti r = u.popup_row();
+    u.label({r.x + u.px(10), r.y, r.w - u.px(20), r.h}, text, color);
+  };
+  line(pv.result.summary, u.theme.text);
+  for (size_t i = 0; i < pv.result.notes.size() && i < 5; i++) line(pv.result.notes[i], u.theme.text_dim);
+  if (pv.result.notes.size() > 5) line(strprintf("... and %zu more notes (the Console lists them after the import)", pv.result.notes.size() - 5), u.theme.text_dim);
+  draw_ipv_shading_row();
+  draw_ipv_outline_row();
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti ok{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["ipv:Import"] = ok, u.button_rects["ipv:Cancel"] = cancel;
+  if (u.button(ok, "Import")) {
+    finish_import_preview(true);
+    close();
+    return;
+  }
+  if (u.button(cancel, "Cancel")) {
+    finish_import_preview(false);
+    close();
+  }
+}
+
+/* The picture: turning on its own (30 degrees a second, by the clock) until dragged, then where the drag left it. */
+void Editor::draw_ipv_picture() {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  const int ph = std::min(u.px(300), fb_.height / 3);  // (a short window keeps the buttons below in reach)
+  Recti row = u.popup_row(ph + u.px(8));
+  const Recti pic{row.x + u.px(10), row.y + u.px(4), row.w - u.px(20), ph};
+  if (u.hovered(pic) && u.in.down[0]) {
+    if (pv.dragging) pv.yaw += (u.in.mx - pv.drag_x) * 0.5f;
+    pv.dragging = true;
+    pv.turning = false;
+  }
+  else pv.dragging = false;
+  pv.drag_x = u.in.mx;
+  const double now = now_seconds();
+  if (pv.turning) pv.yaw += (float)std::min(0.25, std::max(0.0, now - pv.last_time)) * 30.0f;
+  pv.last_time = now;
+  pv.yaw = std::fmod(pv.yaw + 360.0f, 360.0f);
+  render_import_preview(pic.w, pic.h);
+  if (ipv_img_.width == pic.w && ipv_img_.height == pic.h) {  // (a picture of another size: nothing drawn this frame)
+    Image *fb = u.canvas.target();
+    const Recti dst = pic.intersect(u.canvas.clip());
+    for (int y = dst.y; y < dst.bottom(); y++) std::memcpy(fb->row(y) + dst.x, ipv_img_.row(y - pic.y) + (dst.x - pic.x), sizeof(uint32_t) * (size_t)std::max(0, dst.w));
+  }
+  u.tooltip("Drag to turn the model.");
+  if (pv.turning) u.redraw = true;
+}
+
+/* The shading: every material of the preview under one of them. */
+void Editor::draw_ipv_shading_row() {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  const Recti r = u.popup_row(u.row_h() + u.px(6));
+  u.label({r.x + u.px(10), r.y, u.px(70), r.h}, "Shading");
+  const std::vector<std::string> &names = import_shading_names();
+  int x = r.x + u.px(80);
+  for (size_t i = 0; i < names.size(); i++) {
+    const int bw = u.font.text_width(names[i]) + u.px(14);
+    const Recti br{x, r.y + u.px(2), bw, r.h - u.px(4)};
+    if (u.record_buttons) u.button_rects["ipv:" + names[i]] = br;
+    if (u.button(br, names[i], pv.shading == (int)i) && pv.shading != (int)i) {
+      pv.shading = (int)i;
+      apply_import_shading(pv.result.materials, pv.originals, (int)i);
+      pv.version++;
+    }
+    x += bw + u.px(4);
+  }
+  u.tooltip("How every material of the model is shaded: as the file made it, PBR, or a toon style over the file's\n"
+            "materials (their maps stay). The .mat files are written with this (existing ones too, unless As Imported);\n"
+            "the Materials window edits them after.");
+}
+
+void Editor::draw_ipv_outline_row() {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  const Recti r = u.popup_row(u.row_h() + u.px(6));
+  bool on = pv.outline;
+  const Recti cb{r.x + u.px(10), r.y + u.px(2), r.h - u.px(4), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["ipv:Outline"] = cb;
+  const bool toggled = u.checkbox(cb, on);
+  u.label({cb.right() + u.px(6), r.y, u.px(70), r.h}, "Outline");
+  float width = pv.outline_width;
+  const bool changed = u.float_field(u.id("ipv_outline_width"), {r.x + u.px(110), r.y + u.px(2), u.px(90), r.h - u.px(4)}, width, 0.001f, 0.0005f, 1.0f, "%.3f m");
+  if (toggled || changed) import_preview_outline(on, width);
+  u.tooltip("A toon outline (the inverted hull) on every mesh, this thick in metres. Untouched, a file's own outlines (an\n"
+            "MMD model's) come in as they are.");
+}
+
+/* A motion file (task 0137: MMD's .vmd) onto a character: Assets/Animations/<character>/<motion>.anim, played by the
+ * character's Animation component (Unity's way), shown in the Animation window. */
+void Editor::import_motion_file(const std::string &path) {
+  if (playing_) return Log::warn("Import Motion: stop Play first");
+  GameObject *root = motion_target();
+  if (!root) return Log::warn("Import %s: select the character it moves (an object with bones)", fs::filename(path).c_str());
+  AnimationClip clip;
+  std::vector<std::string> notes;
+  std::string error;
+  if (!import_vmd_file(path, *root, clip, notes, error)) return Log::error("Import failed (%s): %s", fs::filename(path).c_str(), error.c_str());
+  const std::string rel = save_imported_clip(*root, clip, root->name, true);
+  if (rel.empty()) return Log::warn("Import Motion: couldn't write the clip for %s", fs::filename(path).c_str());
+  const std::string copy = fs::join(fs::parent(resolve_asset_path(rel)), fs::filename(path));  // (the motion kept beside its clip, as models are)
+  if (fs::normalize(copy) != fs::normalize(path)) fs::copy_file(path, copy);
+  mark_changed("Import Motion");
+  Log::info("Imported %s onto '%s': %s", fs::filename(path).c_str(), root->name.c_str(), rel.c_str());
+  for (const std::string &n : notes) Log::info("Import: %s", n.c_str());
+}
+
+std::string Editor::save_imported_clip(GameObject &root, const AnimationClip &clip, const std::string &folder, bool play) {
+  const std::string dir = "Assets/Animations/" + clip_file_name(folder), base = clip_file_name(clip.name);
+  std::string rel = dir + "/" + base + ".anim";
+  for (int k = 2; fs::exists(resolve_asset_path(rel)); k++) rel = dir + "/" + base + " " + std::to_string(k) + ".anim";
+  fs::make_dirs(fs::parent(resolve_asset_path(rel)));
+  AnimationClipPtr c = create_clip_asset(rel, clip.name);
+  if (!c) return "";
+  const std::string asset_path = c->asset_path;
+  *c = clip;
+  c->asset_path = asset_path;
+  c->touch();
+  save_dirty_clip_assets();
+  anim_clip_paths_listed_ = -100;
+  invalidate_project_listing();
+  if (!play) return rel;
+  Animation *an = root.get<Animation>();
+  if (!an) an = root.add<Animation>();
+  an->clip = rel;
+  anim_.root = root.id;
+  return rel;
+}
+
+/* shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135): the selected object's shape keys.
+ * add makes a key pushing every vertex out along its normal by `amount` (0.1 m): an inflate morph to animate. */
+void Editor::shape_command(const std::vector<std::string> &t) {
+  GameObject *g = active_object();
+  MeshFilter *mf = g ? g->mesh_filter() : nullptr;
+  if (!mf || !mf->mesh) return Log::warn("shape: select an object with a mesh");
+  const std::string sub = t.size() > 1 ? to_lower(t[1]) : "list";
+  MeshRenderer *mr = g->get<MeshRenderer>();
+  if (sub == "list") {
+    if (mf->mesh->shape_keys.empty()) return Log::info("%s has no shape keys (shape add <name>)", g->name.c_str());
+    for (const ShapeKey &k : mf->mesh->shape_keys)
+      Log::info("  %-24s %.3f%s", k.name.c_str(), mr ? mr->shape_weight(k.name) : 0.0f, k.delta.size() == mf->mesh->vert_count() ? "" : " (the mesh was edited since: off)");
+    return;
+  }
+  if (t.size() < 3) return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  const std::string name = t[2];
+  if (sub == "set") {
+    if (!mr) mr = g->add<MeshRenderer>();
+    mr->set_shape_weight(name, t.size() > 3 ? (float)std::atof(t[3].c_str()) : 1.0f);
+    return mark_changed("Shape Key Weight");
+  }
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  if (sub == "remove") {
+    const int i = m.find_shape(name);
+    if (i < 0) return Log::warn("shape: no key '%s'", name.c_str());
+    m.shape_keys.erase(m.shape_keys.begin() + i);
+    m.touch();
+    return mark_changed("Remove Shape Key");
+  }
+  if (sub != "add") return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  if (m.find_shape(name) >= 0) return Log::warn("shape: '%s' is there already", name.c_str());
+  const float amount = t.size() > 3 ? (float)std::atof(t[3].c_str()) : 0.1f;
+  const std::vector<Vec3> n = meshops::vertex_normals(m);
+  ShapeKey k{name, std::vector<Vec3>(m.vert_count(), Vec3(0.0f))};
+  for (size_t i = 0; i < k.delta.size() && i < n.size(); i++) k.delta[i] = n[i] * amount;
+  m.shape_keys.push_back(std::move(k));
+  m.touch();
+  if (!mr) g->add<MeshRenderer>();
+  mark_changed("Add Shape Key");
+  Log::info("Shape key '%s' on %s: its weight in the Inspector (MeshRenderer > BlendShape/%s), animatable", name.c_str(), g->name.c_str(), name.c_str());
+}
+
+/* A file in the project's Assets already. */
+bool Editor::inside_assets(const std::string &path) const {
+  const std::string a = to_lower(fs::normalize(assets_dir_)), p = to_lower(fs::normalize(path));
+  return p.size() > a.size() && p.compare(0, a.size(), a) == 0 && (p[a.size()] == '/' || p[a.size()] == '\\');
+}
+
+/* The model file into Assets/Meshes, with its .mtl (OBJ) or .bin (glTF) beside it; where it went. A different model
+ * of the same name there already (every Sketchfab download is scene.gltf) puts this one in a folder of its own,
+ * Meshes/<name> 2/, so the file still finds its .bin by the name it gives it. */
+std::string Editor::copy_model_into_assets(const std::string &path) {
+  std::string mesh_dir = fs::join(assets_dir_, "Meshes");
+  std::string dst = fs::join(mesh_dir, fs::filename(path));
+  for (int k = 2; fs::exists(dst) && fs::normalize(dst) != fs::normalize(path) && !same_file_content(dst, path); k++) {
+    mesh_dir = fs::join(fs::join(assets_dir_, "Meshes"), fs::stem(path) + " " + std::to_string(k));
+    dst = fs::join(mesh_dir, fs::filename(path));
+  }
+  fs::make_dirs(mesh_dir);
+  if (fs::normalize(dst) != fs::normalize(path)) fs::copy_file(path, dst);
+  const std::string ext = fs::extension(path);
+  if (ext != ".obj" && ext != ".gltf") return dst;
+  const std::string side = fs::join(fs::parent(path), fs::stem(path) + (ext == ".obj" ? ".mtl" : ".bin"));
+  if (fs::exists(side)) fs::copy_file(side, fs::join(mesh_dir, fs::filename(side)));
+  return dst;
+}
+
+/* The folder name under Assets/Materials and Assets/Textures for a model's import: its name, or "<name> 2"... when
+ * that folder came from another model of the same name. Each folder lists the files it was imported from
+ * (.import-source), so importing the same model again reuses its folder - and the .mat files edited since. */
+std::string Editor::import_folder(const std::vector<std::string> &sources, const std::string &stem) {
+  const std::string base = safe_file_name(stem);
+  std::string name = base;
+  for (int k = 2; k < 1000; k++) {
+    const std::string dir = fs::join(fs::join(assets_dir_, "Materials"), name);
+    if (!fs::exists(dir) || import_folder_matches(dir, sources)) break;
+    name = base + " " + std::to_string(k);
+  }
+  const std::string dir = fs::join(fs::join(assets_dir_, "Materials"), name), marker = fs::join(dir, ".import-source");
+  std::string text;
+  fs::read_file(marker, text);
+  for (const std::string &s : sources)
+    if (!import_folder_matches(dir, {s})) text += to_lower(fs::normalize(s)) + "\n";
+  fs::make_dirs(dir);
+  fs::write_file(marker, text);
+  return name;
+}
+
+bool Editor::import_folder_matches(const std::string &dir, const std::vector<std::string> &sources) const {
+  std::string text;
+  if (!fs::read_file(fs::join(dir, ".import-source"), text)) return false;
+  for (const std::string &s : sources)
+    if (("\n" + text).find("\n" + to_lower(fs::normalize(s)) + "\n") != std::string::npos) return true;
+  return false;
+}
+
+/* Whether this model was imported before (its folder is there): its textures are kept as they are then. */
+bool Editor::import_folder_reused(const std::vector<std::string> &sources, const std::string &stem) const {
+  const std::string base = safe_file_name(stem);
+  for (int k = 1; k < 1000; k++) {
+    const std::string dir = fs::join(fs::join(assets_dir_, "Materials"), k == 1 ? base : base + " " + std::to_string(k));
+    if (!fs::exists(dir)) return false;
+    if (import_folder_matches(dir, sources)) return true;
+  }
+  return false;
+}
+
+/* Textures outside the project into Assets/Textures/<folder>/: two of one name get two files ("body 2.png"); a texture
+ * from an earlier import of this model is kept (it may have been edited, as the .mat files are). */
+void Editor::copy_import_textures(const ImportResult &r, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map) {
+  const std::string tex_dir = fs::join(fs::join(assets_dir_, "Textures"), folder);
+  std::vector<std::string> taken;
+  for (const std::string &tp : r.textures) {
+    if (!fs::exists(tp) || tex_map.count(tp) || inside_assets(tp)) continue;
+    fs::make_dirs(tex_dir);
+    const std::string same = fs::join(tex_dir, fs::filename(tp));
+    const bool keep = again && fs::exists(same) && std::find(taken.begin(), taken.end(), same) == taken.end();
+    const std::string td = keep || (fs::exists(same) && same_file_content(same, tp)) ? same : free_name(tex_dir, fs::filename(tp), taken);
+    if (td != same || !fs::exists(td)) fs::copy_file(tp, td);
+    taken.push_back(td);
+    tex_map[tp] = make_asset_relative(td);
+  }
+}
+
+/* Unity's Extract Materials, on import (task 0134): every material of the model as Assets/Materials/<model>/<name>.mat,
+ * the model's renderers using those assets. A .mat already there (an earlier import, maybe edited since) is used as it
+ * is, never overwritten. The count made or reused. */
+size_t Editor::import_material_assets(ImportResult &r, const std::string &model, bool rewrite) {
+  std::unordered_map<const Material *, MaterialPtr> asset_of;
+  std::unordered_set<std::string> names;
+  for (const MaterialPtr &m : r.materials) {
+    if (!m || asset_of.count(m.get())) continue;
+    std::string base = safe_file_name(m->name.empty() ? model : m->name), name = base;
+    for (int k = 2; names.count(to_lower(name)); k++) name = base + " " + std::to_string(k);  // (two of one name)
+    names.insert(to_lower(name));
+    const std::string rel = "Assets/Materials/" + safe_file_name(model) + "/" + name + ".mat";
+    MaterialPtr a = fs::exists(resolve_asset_path(rel)) ? material_asset(rel) : nullptr;
+    if (a && rewrite) {
+      /* A look chosen at import (task 0152) lands in the existing file too; As Imported keeps what was edited. */
+      load_material_text(save_material_text(*m), *a);
+      a->touch();
+    }
+    if (!a) {
+      fs::make_dirs(fs::parent(resolve_asset_path(rel)));
+      a = create_material_asset(*m, rel);
+    }
+    if (a) asset_of[m.get()] = a;
+  }
+  auto swap = [&](MaterialPtr &m) {
+    const auto it = m ? asset_of.find(m.get()) : asset_of.end();
+    if (it != asset_of.end()) m = it->second;
+  };
+  for (ImportedNode &n : r.nodes)
+    for (MaterialPtr &m : n.materials) swap(m);
+  for (MaterialPtr &m : r.materials) swap(m);
+  return asset_of.size();
 }
 
 void Editor::assign_texture_to_selection(const std::string &asset_path) {

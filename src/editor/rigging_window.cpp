@@ -128,26 +128,7 @@ void Editor::draw_rigging_window(const Recti &r) {
     if (u.hovered(h) && u.in.pressed[0]) open = !open;
     return open;
   };
-  struct B {
-    std::string label, tip;
-    bool enabled;
-    std::function<void()> fn;
-  };
-  auto grid = [&](const std::vector<B> &bs, int per) {
-    for (size_t i = 0; i < bs.size(); i += (size_t)per) {
-      Recti row = lay.row(u.row_h() + u.px(2));
-      const int bw = (row.w - u.px(4) * (per + 1)) / per;
-      for (size_t k = i; k < std::min(bs.size(), i + (size_t)per); k++) {
-        Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
-        if (!bs[k].enabled) {
-          u.frame(br, u.theme.strip, u.theme.border, u.px(3));
-          u.label(br, bs[k].label, u.theme.text_dim, ui::Align::Center);
-        }
-        else if (u.button(br, bs[k].label)) bs[k].fn();
-        u.tooltip(bs[k].tip);
-      }
-    }
-  };
+  auto grid = [&](const std::vector<GridButton> &bs, int per) { button_grid(lay, bs, per); };
   if (section("Skeleton")) {
     /* (The buttons act on the objects themselves, not by name: two imported characters share bone names.) */
     grid({{"Add Armature", "A root and one bone; a selected mesh is bound to it (Blender: Add > Armature).", true, [this] { create_object("Armature"); }},
@@ -158,7 +139,13 @@ void Editor::draw_rigging_window(const Recti &r) {
           {"Reset Pose", "Every bone back to its rest (Blender: Pose > Clear Transform > All). Console: armature reset.", root != nullptr,
            [this, root] { armature_pose(root, false); }},
           {"Apply as Rest", "This pose becomes the rest pose; skins show the mesh unposed in it (Blender: Apply > Pose as Rest Pose).",
-           root != nullptr, [this, root] { armature_pose(root, true); }}},
+           root != nullptr, [this, root] { armature_pose(root, true); }},
+          {"Anime Face Normals", "A sphere proxy fitted to the head and a Normal Transfer modifier reading it, so the face shades like a ball\n"
+                                 "(anime's flat face; task 0149). Console: facenormals.",
+           mf != nullptr, [this, mesh_obj] { add_face_normals(mesh_obj); }},
+          {"Rig Hair from Mesh", "The mesh's loose parts (hair cards, up to 64), or one shell cut into eight locks, each a chain of three bones\n"
+                                 "from the scalp with Spring Bones, the mesh skinned to them (task 0153). Console: hair rig [locks] [bones].",
+           mf != nullptr, [this, mesh_obj] { rig_hair_from_mesh(mesh_obj, 0, 3); }}},
          2);
     if (root)
       if (Armature *arm = root->get<Armature>()) {
@@ -231,8 +218,11 @@ void Editor::draw_rigging_window(const Recti &r) {
            }}},
          2);
     grid({{"Remove IK", "The selected bone's IK goes, with its target and pole (when no other IK uses them). Console: ik remove <bone>.",
-           a && a->get<IKConstraint>(), [this, a] { remove_ik(a); }}},
-         1);
+           a && a->get<IKConstraint>(), [this, a] { remove_ik(a); }},
+          {"Fit Control Sizes", "Every IK and FK handle of this rig sized from its bone again, in metres (a fifth of the bone for a target):\n"
+                                "handles a scaled rig made too big or too small come right (task 0156). Console: ik fitsizes.",
+           root != nullptr, [this, root] { Log::info("Fit Control Sizes: %d control(s) resized", fit_control_sizes(root)); }}},
+         2);
     if (a)
       if (IKConstraint *ik = a->get<IKConstraint>()) {
         u.push_id((ui::Id)(uintptr_t)ik);

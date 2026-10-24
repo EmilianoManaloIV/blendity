@@ -139,7 +139,8 @@ size_t Editor::materials_using_texture(const ProceduralTexturePtr &t) {
   std::unordered_set<const Material *> users;
   auto check = [&](const Material *m) {
     if (!m) return;
-    for (const TextureRef *map : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map})
+    for (const TextureRef *map : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
+                                  &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map, &m->face_shadow_map, &m->line_map, &m->hatch_map})
       if (map->path.compare(0, prefix.size(), prefix) == 0) users.insert(m);
   };
   slots_using([&](const MaterialPtr &m) {
@@ -210,6 +211,14 @@ void Editor::draw_textures_window(const Recti &r) {
     if (u.button(ab, "Assign to Selection", false)) assign_texture_asset_to_selection(texture_selected_->asset_path);
     u.tooltip("The selected objects' first material gets this texture's albedo, normal and roughness, tiled by its physical size.");
     x = ab.right() + u.px(6);
+    const Recti eb{x, bar.y + u.px(3), u.px(60), bh - u.px(6)};
+    texture_ui_rects_["edit"] = eb;
+    if (u.button(eb, "Edit", false)) {
+      dock_open(WindowKind::Editing);
+      edit_open_texture(texture_selected_->asset_path);
+    }
+    u.tooltip("Open this texture's colour in the Editing tab; Apply to Texture puts the result back as a layer on top.");
+    x = eb.right() + u.px(6);
     const Recti db{x, bar.y + u.px(3), u.px(80), bh - u.px(6)};
     texture_ui_rects_["delete"] = db;
     if (u.button(db, "Delete", false) && !asking) request_texture_delete();

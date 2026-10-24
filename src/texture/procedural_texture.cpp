@@ -26,6 +26,8 @@ void TexPlanes::reset(int width, int height_) {
   rough.assign(size(), 0.5f);
   mask.assign(size(), 1.0f);
   albedo.assign(size(), Vec3(0.5f));
+  alpha.assign(size(), 1.0f);
+  alpha_written = false;
 }
 
 uint32_t texture_hash(uint32_t a, uint32_t b, uint32_t c) {
@@ -51,7 +53,7 @@ static void reflect_targets(Reflector &r, int &targets) {
   r.field("Writes Albedo", a);
   r.field("Writes Height", h);
   r.field("Writes Roughness", ro);
-  targets = (a ? TargetAlbedo : 0) | (h ? TargetHeight : 0) | (ro ? TargetRoughness : 0) | (targets & TargetMask);
+  targets = (a ? TargetAlbedo : 0) | (h ? TargetHeight : 0) | (ro ? TargetRoughness : 0) | (targets & (TargetMask | TargetAlpha));
 }
 
 void TextureLayer::reflect_common(Reflector &r, bool with_enabled) {
@@ -106,39 +108,57 @@ void TextureLayer::apply_point(TexPoint &p, float u, float v, const LayerContext
   const float op = clampf(fin1(opacity, 1.0f), 0.0f, 1.0f);
   if (op <= 0.0f || !is_generator()) return;
   const LayerSample s = sample(u, v, c);
-  float k = op * clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f);
-  if (use_mask) k *= p.mask;
-  if (k <= 0.0f) return;
-  if (targets & TargetHeight) p.height = clampf(lerpf(p.height, texture_blend(blend, p.height, fin1(s.height, 0.0f)), k), 0.0f, 1.0f);
-  if (targets & TargetRoughness) p.rough = clampf(lerpf(p.rough, texture_blend(blend, p.rough, fin1(s.rough, 0.5f)), k), 0.0f, 1.0f);
-  if (targets & TargetAlbedo) {
+  const float cover = clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f), below = p.mask;  // (the mask read before anything here writes)
+  const bool card = targets & TargetAlpha;
+  if (card) {
+    /* A card's cover joins the cover plane (task 0150): the first card sets it, the next adds to it; with Use Mask
+     * only where the mask below allows. */
+    const float cov = use_mask ? cover * below : cover;
+    p.alpha = p.alpha_written ? std::max(p.alpha, cov) : cov;
+    p.alpha_written = true;
+  }
+  /* A card's colour lands everywhere (the holes keep its background colour, so the cut's filtered edge has no grey
+   * fringe); its height and roughness, and every plane of other generators, by the cover. */
+  float k = op * cover, ka = card ? op : k;
+  if (use_mask) k *= below, ka *= below;
+  if (k <= 0.0f && ka <= 0.0f) return;
+  if (k > 0.0f && (targets & TargetHeight)) p.height = clampf(lerpf(p.height, texture_blend(blend, p.height, fin1(s.height, 0.0f)), k), 0.0f, 1.0f);
+  if (k > 0.0f && (targets & TargetRoughness)) p.rough = clampf(lerpf(p.rough, texture_blend(blend, p.rough, fin1(s.rough, 0.5f)), k), 0.0f, 1.0f);
+  if (ka > 0.0f && (targets & TargetAlbedo)) {
     const Vec3 a{fin1(s.albedo.x, 0.5f), fin1(s.albedo.y, 0.5f), fin1(s.albedo.z, 0.5f)};
-    p.albedo = vmax(Vec3(0.0f), vmin(Vec3(1.0f), lerp(p.albedo, blend_color(blend, p.albedo, a), k)));
+    p.albedo = vmax(Vec3(0.0f), vmin(Vec3(1.0f), lerp(p.albedo, blend_color(blend, p.albedo, a), ka)));
   }
 }
 
 void TextureLayer::apply(TexPlanes &p, const LayerContext &c) const {
   const float op = clampf(fin1(opacity, 1.0f), 0.0f, 1.0f);
   if (op <= 0.0f) return;
-  const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness;
+  const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness, card = targets & TargetAlpha;
+  const bool first_card = card && !p.alpha_written;  // (as apply_point: the first card sets the cover plane, the next adds)
   JobSystem::global().parallel_for(p.h, 8, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) {
       const float v = (y + 0.5f) / p.h;
       for (int x = 0; x < p.w; x++) {
         const size_t i = (size_t)y * p.w + x;
         const LayerSample s = sample((x + 0.5f) / p.w, v, c);
-        float k = op * clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f);
-        if (use_mask) k *= p.mask[i];
-        if (k <= 0.0f) continue;
-        if (wh) p.height[i] = clampf(lerpf(p.height[i], texture_blend(blend, p.height[i], fin1(s.height, 0.0f)), k), 0.0f, 1.0f);
-        if (wr) p.rough[i] = clampf(lerpf(p.rough[i], texture_blend(blend, p.rough[i], fin1(s.rough, 0.5f)), k), 0.0f, 1.0f);
-        if (wa) {
+        const float cover = clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f), below = p.mask[i];
+        if (card) {
+          const float cov = use_mask ? cover * below : cover;  // (with Use Mask: only where the mask below allows)
+          p.alpha[i] = first_card ? cov : std::max(p.alpha[i], cov);
+        }
+        float k = op * cover, ka = card ? op : k;
+        if (use_mask) k *= below, ka *= below;
+        if (k <= 0.0f && ka <= 0.0f) continue;
+        if (k > 0.0f && wh) p.height[i] = clampf(lerpf(p.height[i], texture_blend(blend, p.height[i], fin1(s.height, 0.0f)), k), 0.0f, 1.0f);
+        if (k > 0.0f && wr) p.rough[i] = clampf(lerpf(p.rough[i], texture_blend(blend, p.rough[i], fin1(s.rough, 0.5f)), k), 0.0f, 1.0f);
+        if (ka > 0.0f && wa) {
           const Vec3 a{fin1(s.albedo.x, 0.5f), fin1(s.albedo.y, 0.5f), fin1(s.albedo.z, 0.5f)};
-          p.albedo[i] = vmax(Vec3(0.0f), vmin(Vec3(1.0f), lerp(p.albedo[i], blend_color(blend, p.albedo[i], a), k)));
+          p.albedo[i] = vmax(Vec3(0.0f), vmin(Vec3(1.0f), lerp(p.albedo[i], blend_color(blend, p.albedo[i], a), ka)));
         }
       }
     }
   });
+  if (card) p.alpha_written = true;
 }
 
 /* ===================================================================== */
@@ -153,6 +173,8 @@ struct LayerPrefixReflector : Reflector {
   std::string n(const char *name) const { return prefix + name; }
   bool all_fields() const override { return in.all_fields(); }
   bool hashing() const override { return in.hashing(); }
+  bool group(const char *name, bool open) override { return in.group(name, open); }
+  void group_end() override { in.group_end(); }
   void field(const char *name, float &v, float speed, float mn, float mx) override { in.field(n(name).c_str(), v, speed, mn, mx); }
   void field(const char *name, int &v, int mn, int mx) override { in.field(n(name).c_str(), v, mn, mx); }
   void field(const char *name, bool &v) override { in.field(n(name).c_str(), v); }
@@ -211,6 +233,8 @@ ProceduralTexture &ProceduralTexture::operator=(const ProceduralTexture &o) {
   seed = o.seed;
   version = o.version;
   live_shading = o.live_shading;
+  use_normal = o.use_normal, use_roughness = o.use_roughness, use_height = o.use_height;  // (the output switches were left behind: a preset without a normal map got one back)
+  alpha_from_cover = o.alpha_from_cover;
   layers.clear();
   for (const auto &l : o.layers) layers.push_back(l->clone());
   return *this;
@@ -242,6 +266,10 @@ void ProceduralTexture::reflect(Reflector &r) {
   r.field("Live Shading", live_shading);
   r.help("Up close the views evaluate the layers per pixel, like a shader (sharp at any distance), instead of\n"
          "reading the image; further away, and in path-traced renders and exports, the image at this size.");
+  r.field("Alpha From Cover", alpha_from_cover);
+  r.help("The albedo image's alpha is what the cards cover (task 0150): a Leaves, Grass or Clouds generator covers only\n"
+         "its shapes, so a Cutout material shows holes between them (a foliage card, a cloud card). Stacked cards add\n"
+         "up; Warp and Tile move the cover with the colour; Mask by Height shapes the mask, not this.");
   r.layer_list("Layers", layers);
   /* After the stack (the part most used stays at the top of the window). */
   r.field("Normal Map", use_normal);
@@ -374,7 +402,11 @@ TexPoint LiveTexture::eval(size_t n, float u, float v, bool height_only) const {
       const TexPoint m = eval(i, mu, mv, height_only);
       if (l.targets & TargetHeight) p.height = lerpf(p.height, m.height, k);
       if (l.targets & TargetRoughness) p.rough = lerpf(p.rough, m.rough, k);
-      if (l.targets & TargetAlbedo) p.albedo = lerp(p.albedo, m.albedo, k);
+      if (l.targets & TargetAlbedo) {
+        p.albedo = lerp(p.albedo, m.albedo, k);
+        p.alpha = lerpf(p.alpha, m.alpha, k);  // (the cover moves with the colour, task 0150)
+        p.alpha_written = p.alpha_written || m.alpha_written;
+      }
       continue;
     }
     l.apply_point(p, u, v, ctx_, aux_[i].empty() ? nullptr : &aux_[i]);
@@ -414,7 +446,7 @@ Bitmap ProceduralTexture::output(int which, const TexPlanes &p) const {
       for (int x = 0; x < p.w; x++) {
         const size_t i = (size_t)y * p.w + x;
         uint8_t *o = &b.rgba8[i * 4];
-        o[3] = 255;
+        o[3] = which == 0 && alpha_from_cover ? (uint8_t)std::lround(clampf(p.alpha[i], 0.0f, 1.0f) * 255.0f) : (uint8_t)255;
         switch ((TextureOutput)which) {
           case TextureOutput::Albedo:
             o[0] = display::linear_to_srgb8(p.albedo[i].x);
@@ -535,6 +567,12 @@ void procedural_texture_set_preview(const std::string &asset_path, bool on) {
   if (on) g_previews.insert(asset_path);
   else g_previews.erase(asset_path);
 }
+void procedural_texture_cache_forget(const std::string &asset_path) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  g_cache.erase(asset_path);
+  g_cache.erase(asset_path + "#preview");
+}
+
 void procedural_texture_clear_previews() {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_previews.clear();
@@ -554,8 +592,30 @@ void procedural_texture_cache_clear() {
 /* ===================================================================== */
 
 const std::vector<std::string> &texture_preset_names() {
-  static const std::vector<std::string> names = {"Bricks", "Wood Floor", "Tatami", "Tiles", "Noise", "Checker"};
+  static const std::vector<std::string> names = {"Bricks", "Wood Floor", "Tatami", "Tiles", "Noise", "Checker", "Anime Leaves", "Anime Grass", "Anime Wall",
+                                                 "Anime Windows", "Anime Roof", "Anime Sky", "Anime Clouds", "Anime Rock", "Anime Water"};
   return names;
+}
+/* The anime background presets (task 0150): one cel-toned generator each; the cards (leaves, grass, clouds) cut out
+ * by their cover. Returns false for other names. */
+static bool anime_texture_preset(ProceduralTexture &t, const std::string &preset) {
+  struct P {
+    const char *name, *layer;
+    float size;
+    bool alpha;  // a card: the albedo's alpha from its cover
+  };
+  static const P presets[] = {{"anime leaves", "Leaves", 1.0f, true}, {"anime grass", "Grass", 1.0f, true}, {"anime wall", "Plaster", 2.0f, false},
+                              {"anime windows", "Window Grid", 6.0f, false}, {"anime roof", "Roof Tiles", 2.0f, false}, {"anime sky", "Sky Gradient", 100.0f, false},
+                              {"anime clouds", "Clouds", 20.0f, true}, {"anime rock", "Rocks", 2.0f, false}, {"anime water", "Water", 4.0f, false}};
+  for (const P &p : presets) {
+    if (preset != p.name) continue;
+    t.physical_size = p.size;
+    t.alpha_from_cover = p.alpha;
+    t.use_normal = false;  // (a drawn look: flat, the tones do the shading)
+    t.add(p.layer);
+    return true;
+  }
+  return false;
 }
 
 bool apply_texture_preset(ProceduralTexture &t, const std::string &preset_in) {
@@ -587,7 +647,7 @@ bool apply_texture_preset(ProceduralTexture &t, const std::string &preset_in) {
   else if (preset == "checker") {
     t.add("Checker");
   }
-  else {
+  else if (!anime_texture_preset(t, preset)) {
     t.touch();
     return false;
   }

@@ -9,6 +9,7 @@
 // fusing (an extruded face that lands on another face merges into it).
 #include "mesh.h"
 #include "mesh_internal.h"
+#include "../core/jobs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -39,6 +40,24 @@ bool edge_selected(uint32_t a, uint32_t b, const std::vector<uint8_t> &vert_sel)
 }
 
 namespace {
+/* The closed loops (3+ vertices) of a next-vertex map: each walked once, from its first vertex (task 0177: one walk). */
+std::vector<std::vector<uint32_t>> closed_loops(const std::unordered_map<uint32_t, uint32_t> &next) {
+  std::vector<std::vector<uint32_t>> loops;
+  std::unordered_set<uint32_t> used;
+  for (auto &[start, _] : next) {
+    if (used.count(start)) continue;
+    std::vector<uint32_t> loop;
+    uint32_t v = start;
+    for (auto it = next.find(v); !used.count(v) && it != next.end(); it = next.find(v)) {
+      used.insert(v);
+      loop.push_back(v);
+      v = it->second;
+    }
+    if (v == start && loop.size() >= 3) loops.push_back(std::move(loop));
+  }
+  return loops;
+}
+
 
 /* Unnormalised Newell normal of a vertex loop (length = 2 x area). */
 Vec3 loop_newell(const Mesh &m, const std::vector<uint32_t> &loop) {
@@ -69,20 +88,56 @@ struct Region {
   Vec3 center;
 };
 
+/* The selected faces at each vertex (CSR, faces ascending; a face using a vertex twice is listed twice). */
+struct SelectedAt {
+  std::vector<uint32_t> off, faces;
+};
+SelectedAt selected_faces_at_vertices(const Mesh &m, const std::vector<uint8_t> &fsel) {
+  SelectedAt s;
+  const size_t nv = m.vert_count(), nf = std::min(m.face_count(), fsel.size());
+  s.off.assign(nv + 1, 0);
+  auto each_corner = [&](auto &&fn) {
+    for (size_t f = 0; f < nf; f++) {
+      if (!fsel[f]) continue;
+      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++)
+        if (m.corner_verts[c] < nv) fn((uint32_t)f, m.corner_verts[c]);
+    }
+  };
+  each_corner([&](uint32_t, uint32_t v) { s.off[v + 1]++; });
+  for (size_t v = 0; v < nv; v++) s.off[v + 1] += s.off[v];
+  s.faces.resize(s.off[nv]);
+  std::vector<uint32_t> fill(s.off.begin(), s.off.end() - 1);
+  each_corner([&](uint32_t f, uint32_t v) { s.faces[fill[v]++] = f; });
+  return s;
+}
+
+/* Whether face g has the edge (a, b), either way round. */
+bool face_has_edge(const Mesh &m, uint32_t g, uint32_t a, uint32_t b) {
+  const uint32_t *v = m.face_verts(g), n = m.face_size(g);
+  for (uint32_t i = 0; i < n; i++)
+    if (v[i] == a && (v[(i + 1) % n] == b || v[(i + n - 1) % n] == b)) return true;
+  return false;
+}
+
 std::vector<Region> face_regions(const Mesh &m, const std::vector<uint8_t> &fsel) {
   const size_t nf = m.face_count();
   std::vector<uint32_t> parent(nf);
   for (size_t i = 0; i < nf; i++) parent[i] = (uint32_t)i;
   std::function<uint32_t(uint32_t)> find = [&](uint32_t x) { return parent[x] == x ? x : parent[x] = find(parent[x]); };
-  EdgeFaces ef(m);
-  for (size_t f = 0; f < nf; f++) {
-    if (f >= fsel.size() || !fsel[f]) continue;
-    const uint32_t *v = m.face_verts(f);
-    uint32_t n = m.face_size(f);
+  /* Selected faces sharing an edge join, in the order EdgeFaces listed them (task 0185: through the selected faces'
+   * own corners, not a table of the whole mesh). The same regions, numbered the same - except that EdgeFaces looked at
+   * an edge's first six faces only, so a seventh selected face on a non-manifold edge is now joined across it. */
+  const SelectedAt at = selected_faces_at_vertices(m, fsel);
+  auto join_across_edges = [&](uint32_t f) {
+    const uint32_t *v = m.face_verts(f), n = m.face_size(f);
     for (uint32_t i = 0; i < n; i++)
-      for (uint32_t g : ef.at(v[i], v[(i + 1) % n]))
-        if (g != f && g < fsel.size() && fsel[g]) parent[find((uint32_t)f)] = find(g);
-  }
+      for (uint32_t k = at.off[v[i]]; k < at.off[v[i] + 1]; k++) {
+        const uint32_t g = at.faces[k];
+        if (g != f && (k == at.off[v[i]] || at.faces[k - 1] != g) && face_has_edge(m, g, v[i], v[(i + 1) % n])) parent[find(f)] = find(g);
+      }
+  };
+  for (size_t f = 0; f < nf; f++)
+    if (f < fsel.size() && fsel[f]) join_across_edges((uint32_t)f);
   std::map<uint32_t, Region> by_root;
   for (size_t f = 0; f < nf; f++)
     if (f < fsel.size() && fsel[f]) by_root[find((uint32_t)f)].faces.push_back((uint32_t)f);
@@ -118,18 +173,7 @@ std::vector<Region> face_regions(const Mesh &m, const std::vector<uint8_t> &fsel
     r.normal = length_sq(nsum) > 1e-20f ? normalize(nsum) : Vec3(0, 1, 0);
     r.center = asum > 0 ? csum / asum : m.face_center(r.faces[0]);
     if (!pinched) {
-      std::unordered_set<uint32_t> used;
-      for (auto &[start, _] : next) {
-        if (used.count(start)) continue;
-        std::vector<uint32_t> loop;
-        uint32_t v = start;
-        while (!used.count(v) && next.count(v)) {
-          used.insert(v);
-          loop.push_back(v);
-          v = next[v];
-        }
-        if (v == start && loop.size() >= 3) r.loops.push_back(std::move(loop));
-      }
+      for (std::vector<uint32_t> &loop : closed_loops(next)) r.loops.push_back(std::move(loop));
     }
     out.push_back(std::move(r));
   }
@@ -764,7 +808,13 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
   std::map<std::tuple<uint32_t, uint32_t, uint32_t>, uint32_t> near;
   const size_t nf0 = m.face_count();
   std::vector<std::vector<uint32_t>> new_faces(nf0);
+  /* Task 0208: only the faces at a beveled vertex change; the rest are copied as they are (each of a 50k-face mesh's
+   * faces was walked, expanded and rebuilt corner by corner to change a few). */
+  std::vector<uint8_t> touched(nf0, 0);
   for (size_t f = 0; f < nf0; f++) {
+    const uint32_t *fvp = m.face_verts(f);
+    for (uint32_t i = 0; i < m.face_size(f) && !touched[f]; i++) touched[f] = at_vert[fvp[i]];
+    if (!touched[f]) continue;
     std::vector<uint32_t> fv = face_loop(m, f);
     const size_t n = fv.size();
     auto &out = new_faces[f];
@@ -862,6 +912,10 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
   FaceBuilder fb(m);
   std::vector<std::pair<uint32_t, float>> ex;
   for (size_t f = 0; f < nf0; f++) {
+    if (!touched[f]) {  // (no corner of it moved, no arc runs along it: the face as it was)
+      fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+      continue;
+    }
     expand(new_faces[f], ex);
     std::vector<uint32_t> verts;
     for (auto &e : ex) verts.push_back(e.first);
@@ -915,47 +969,45 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
     std::unordered_set<uint64_t> directed;
     auto dkey = [](uint32_t x, uint32_t y) { return ((uint64_t)x << 32) | y; };
     for (size_t f = 0; f < m.face_count(); f++) {
+      if (f < nf0 && !touched[f]) continue;  // (task 0208: an open edge between two new vertices lies only in faces that have them)
       const uint32_t *v = m.face_verts(f);
       uint32_t n = m.face_size(f);
       for (uint32_t i = 0; i < n; i++) directed.insert(dkey(v[i], v[(i + 1) % n]));
     }
-    std::unordered_map<uint32_t, uint32_t> next;
+    /* Task 0208: the open edges in a fixed order, and each patch from its smallest vertex, patches in order of it - the
+     * hash set's order had decided which patch came first, where it started, and which twin a fold kept. */
+    std::vector<uint64_t> open;
     for (uint64_t d : directed) {
       uint32_t x = (uint32_t)(d >> 32), y = (uint32_t)(d & 0xFFFFFFFF);
       if (directed.count(dkey(y, x))) continue;
       auto ox = origin.find(x), oy = origin.find(y);
       if (ox == origin.end() || oy == origin.end() || ox->second != oy->second) continue;
-      next[y] = x;  // the patch runs opposite to the open edge
+      open.push_back(d);
     }
-    std::unordered_set<uint32_t> used;
+    std::sort(open.begin(), open.end());
+    std::unordered_map<uint32_t, uint32_t> next;
+    for (uint64_t d : open) next[(uint32_t)(d & 0xFFFFFFFF)] = (uint32_t)(d >> 32);  // the patch runs opposite to the open edge
+    std::vector<std::vector<uint32_t>> patches = closed_loops(next);
+    for (std::vector<uint32_t> &loop : patches) std::rotate(loop.begin(), std::min_element(loop.begin(), loop.end()), loop.end());
+    std::sort(patches.begin(), patches.end());
     std::unordered_map<uint32_t, uint32_t> weld;  // twin corner -> the one kept
     std::vector<std::vector<uint32_t>> folded;
     const float sc = mesh_scale(m);
-    for (auto &[start, _] : next) {
-      if (used.count(start)) continue;
-      std::vector<uint32_t> loop;
-      uint32_t v = start;
-      while (!used.count(v) && next.count(v)) {
-        used.insert(v);
-        loop.push_back(v);
-        v = next[v];
+    for (const std::vector<uint32_t> &loop : patches) {
+      /* Folded flat: the patch runs out along one arc and back along its twin (a corner
+       * where two bevels meet on a curved surface). No face; the twins become one. */
+      Vec3 nw(0.0f);
+      const Vec3 p0 = m.positions[loop[0]];
+      for (size_t k = 0; k < loop.size(); k++) nw += cross(m.positions[loop[k]] - p0, m.positions[loop[(k + 1) % loop.size()]] - p0);
+      if (0.5f * length(nw) < 1e-9f * sc * sc) {
+        for (size_t i = 0; i < loop.size(); i++)
+          for (size_t j = i + 1; j < loop.size(); j++)
+            if (loop[i] != loop[j] && !weld.count(loop[j]) && length(m.positions[loop[i]] - m.positions[loop[j]]) < 1e-6f * sc) weld[loop[j]] = loop[i];
+        folded.push_back(loop);
+        continue;
       }
-      if (v == start && loop.size() >= 3) {
-        /* Folded flat: the patch runs out along one arc and back along its twin (a corner
-         * where two bevels meet on a curved surface). No face; the twins become one. */
-        Vec3 nw(0.0f);
-        const Vec3 p0 = m.positions[loop[0]];
-        for (size_t k = 0; k < loop.size(); k++) nw += cross(m.positions[loop[k]] - p0, m.positions[loop[(k + 1) % loop.size()]] - p0);
-        if (0.5f * length(nw) < 1e-9f * sc * sc) {
-          for (size_t i = 0; i < loop.size(); i++)
-            for (size_t j = i + 1; j < loop.size(); j++)
-              if (loop[i] != loop[j] && !weld.count(loop[j]) && length(m.positions[loop[i]] - m.positions[loop[j]]) < 1e-6f * sc) weld[loop[j]] = loop[i];
-          folded.push_back(loop);
-          continue;
-        }
-        m.add_face(loop.data(), loop.size(), nullptr, 0);
-        bevel_faces.push_back((uint32_t)m.face_count() - 1);
-      }
+      m.add_face(loop.data(), loop.size(), nullptr, 0);
+      bevel_faces.push_back((uint32_t)m.face_count() - 1);
     }
     if (!weld.empty()) {
       const std::vector<uint32_t> before = m.corner_verts;
@@ -1065,14 +1117,24 @@ void build_tube(Mesh &m, std::vector<uint32_t> A, std::vector<uint32_t> B, int s
 bool try_fuse(Mesh &m, const std::vector<uint32_t> &region_faces, const std::vector<uint32_t> &loop, Vec3 nR,
               const std::vector<uint8_t> &excluded, std::vector<uint8_t> &drop, std::vector<uint32_t> &made) {
   const float eps = 1e-4f * mesh_scale(m);
-  for (size_t t = 0; t < m.face_count(); t++) {
-    if (excluded[t] || drop[t]) continue;
+  /* The faces facing the region on its plane, found on every thread (task 0185); then looked at in order as before.
+   * Only the faces the pass started with: an earlier region's fuse appends faces past `excluded` and `drop`. */
+  const size_t nf = std::min({m.face_count(), excluded.size(), drop.size()});
+  std::vector<uint8_t> facing(nf, 0);
+  JobSystem::global().parallel_for((int64_t)nf, 4096, [&](int64_t a, int64_t b) {
+    for (int64_t t = a; t < b; t++) {
+      if (excluded[(size_t)t]) continue;
+      const Vec3 nT = m.face_normal((size_t)t);
+      if (dot(nT, nR) > -0.98f) continue;
+      const Vec3 pT = m.positions[m.face_verts((size_t)t)[0]];
+      bool coplanar = true;
+      for (uint32_t v : loop) coplanar = coplanar && std::fabs(dot(m.positions[v] - pT, nT)) <= eps * 10;
+      facing[(size_t)t] = coplanar;
+    }
+  });
+  for (size_t t = 0; t < nf; t++) {
+    if (!facing[t] || drop[t]) continue;
     Vec3 nT = m.face_normal(t);
-    if (dot(nT, nR) > -0.98f) continue;
-    Vec3 pT = m.positions[m.face_verts(t)[0]];
-    bool coplanar = true;
-    for (uint32_t v : loop) coplanar = coplanar && std::fabs(dot(m.positions[v] - pT, nT)) <= eps * 10;
-    if (!coplanar) continue;
     std::vector<uint32_t> tl = face_loop(m, t);
     bool l_in_t = true, t_in_l = true;
     for (uint32_t v : loop) l_in_t = l_in_t && inside_loop(m, tl, m.positions[v], nT, eps * 10);
@@ -1164,18 +1226,7 @@ bool bridge(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_
         if (edge_selected(a, b, vert_sel) && ef.at(a, b).size() == 1) next[b] = a;
       }
     }
-    std::unordered_set<uint32_t> used;
-    for (auto &[start, _] : next) {
-      if (used.count(start)) continue;
-      std::vector<uint32_t> loop;
-      uint32_t v = start;
-      while (!used.count(v) && next.count(v)) {
-        used.insert(v);
-        loop.push_back(v);
-        v = next[v];
-      }
-      if (v == start && loop.size() >= 3) loops.push_back(loop);
-    }
+    loops = closed_loops(next);
     if (loops.size() != 2) {
       if (err) *err = "Bridge needs two selected faces, or two open edge loops (holes)";
       return false;

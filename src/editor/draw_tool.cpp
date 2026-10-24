@@ -1000,13 +1000,7 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
 void Editor::draw_preview(const Recti &view) {
   if (!draw_.active) return;
   auto &u = ui_;
-  auto to_screen = [&](Vec3 p, Vec2 &s) {
-    float z;
-    if (!scene_r3d_.project(p, s, z)) return false;
-    s.x += view.x;
-    s.y += view.y;
-    return true;
-  };
+  auto to_screen = [&](Vec3 p, Vec2 &s) { return project_to_view(view, p, s); };
   u.canvas.push_clip(view);
   const DrawHit h = scene_hovered_ ? draw_hit(view, u.in.mx, u.in.my) : DrawHit{};
   if (!draw_.pts.empty() || h.ok) {

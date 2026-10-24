@@ -15,3 +15,5 @@ Assets/**/*.bak
 tools/inbetween/.venv/
 tools/inbetween/runs/
 tools/inbetween/__pycache__/
+# Python caches (the Blender bridge's add-on folder is zipped as it is)
+__pycache__/

@@ -50,6 +50,12 @@ bool rigid(const Mat4 &m) {
 
 }  // namespace
 
+float bone_world_unit(const GameObject &bone) {
+  const Mat4 &w = bone.world_matrix();
+  const float unit = length(w.point(Vec3(0, 1, 0)) - w.point(Vec3(0.0f)));
+  return unit > 1e-8f && std::isfinite(unit) ? unit : 1.0f;
+}
+
 Quat slerp(Quat a, Quat b, float t) {
   float c = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
   if (c < 0.0f) b = {-b.x, -b.y, -b.z, -b.w}, c = -c;  // the short way round
@@ -149,10 +155,8 @@ static const GameObject *armature_target(const SkinModifier &s) {
 uint64_t SkinModifier::modifier_dependency_hash() const {
   const GameObject *root = armature_target(*this);
   if (!root) return 0;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   const Armature &a = *root->get<Armature>();
   const int head[2] = {a.deform, a.rest_position ? 1 : 0};
   mix(head, sizeof(head));
@@ -210,6 +214,7 @@ void SkinModifier::modify(Mesh &m) const {
   }
   const int kmax = std::max(1, std::min(max_influences, 8));
   const bool dq = arm.deform == 1;
+  const bool has_cn = m.custom_normals_fit();  // custom normals (task 0149) turn with the same blend
   JobSystem::global().parallel_for((int64_t)m.vert_count(), 1024, [&](int64_t b, int64_t e) {
     int idx[8];
     float wt[8];
@@ -237,6 +242,7 @@ void SkinModifier::modify(Mesh &m) const {
       bool all_rigid = dq;
       for (int k = 0; k < n && all_rigid; k++) all_rigid = is_rigid[(size_t)idx[k]] != 0;
       Vec3 out(0.0f);
+      Quat turn(0, 0, 0, 1);  // the blended rotation (dual quaternions), for the custom normal
       if (all_rigid) {
         /* Dual quaternion blend, each kept on the first's side (q and -q are the same turn). */
         const DualQuat &q0 = duals[(size_t)idx[0]];
@@ -255,11 +261,22 @@ void SkinModifier::modify(Mesh &m) const {
         /* Translation = 2 d r*; then rotate and move. */
         const Quat t = d * r.conjugate();
         out = r.rotate(rest) + Vec3(t.x, t.y, t.z) * 2.0f;
+        turn = r;
       }
       else
         for (int k = 0; k < n; k++) out += mats[(size_t)idx[k]].point(rest) * (wt[k] / sum);
       out = owner_inv.point(out);
       if (finite3(out)) p = out;
+      if (!has_cn) continue;
+      /* The custom normal through the same blend: the rotation of the dual quaternion, or the matrices' directions. */
+      const Vec3 nw = owner.dir(m.custom_normals[(size_t)v]);
+      Vec3 on(0.0f);
+      if (all_rigid) on = turn.rotate(nw);
+      else
+        for (int k = 0; k < n; k++) on += mats[(size_t)idx[k]].dir(nw) * (wt[k] / sum);
+      on = owner_inv.dir(on);
+      const float nlen = length(on);
+      if (finite_bits(nlen) && nlen > 1e-12f) m.custom_normals[(size_t)v] = on / nlen;
     }
   });
   m.touch();

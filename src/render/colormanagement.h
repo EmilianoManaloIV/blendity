@@ -19,7 +19,6 @@ namespace bl::colormanagement {
 
 /* OpenColorIO is compiled in and Blender's config was found. */
 bool available();
-std::string config_path();
 /* View names of the "sRGB" display, in config order. */
 const std::vector<std::string> &views();
 int view_index(const std::string &name);  // -1 if missing

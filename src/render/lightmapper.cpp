@@ -20,16 +20,8 @@ namespace bl {
 /* --------------------------------------------------------------- hashing */
 
 uint64_t lightmap_mesh_hash(const Mesh &m) {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasisLegacy;  // (part of the key saved with a bake)
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   mix(m.positions.data(), m.positions.size() * sizeof(Vec3));
   mix(m.corner_verts.data(), m.corner_verts.size() * sizeof(uint32_t));
   mix(m.face_offsets.data(), m.face_offsets.size() * sizeof(uint32_t));
@@ -46,12 +38,7 @@ uint64_t lightmap_mesh_hash(const Mesh &m) {
 
 uint64_t lightmap_placed_hash(uint64_t mesh_hash, const Mat4 &model) {
   uint64_t h = mesh_hash * 0x9E3779B97F4A7C15ull + 0x632BE59BD9B4E019ull;
-  for (float f : model.m) {
-    uint32_t b;
-    std::memcpy(&b, &f, 4);
-    h = (h ^ b) * 1099511628211ull;
-    h ^= h >> 29;
-  }
+  for (float f : model.m) h = mix_float(h, f);
   return h ? h : 1;
 }
 
@@ -84,14 +71,6 @@ inline float rnd01(uint32_t &s) {
   s ^= s >> 17;
   s ^= s << 5;
   return (s >> 8) * (1.0f / 16777216.0f);
-}
-inline uint32_t hash32(uint32_t x) {
-  x ^= x >> 16;
-  x *= 0x7feb352du;
-  x ^= x >> 15;
-  x *= 0x846ca68bu;
-  x ^= x >> 16;
-  return x ? x : 1u;
 }
 inline void basis(Vec3 n, Vec3 &t, Vec3 &b) {
   t = std::fabs(n.x) > 0.9f ? normalize(cross(n, Vec3(0, 1, 0))) : normalize(cross(n, Vec3(1, 0, 0)));
@@ -286,6 +265,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   covered_ = std::move(lay.covered);
   owner_ = std::move(lay.owner);
   values_.assign(texels_.size(), Vec3(0.0f));
+  gather_.assign(texels_.size(), Vec3(0.0f));
   total_ = texels_.size();
   for (const BakeLight &l : lights_)
     if (l.mode == 1 || l.mode == 2) out_.light_modes[l.id] = l.mode;
@@ -299,7 +279,8 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
     if (l.mode != 0) pt_lights.push_back(l.light);
   PTSettings ps;
   /* The gather's own hit is the first bounce (its direct light comes by next-event estimation): the
-   * path tracer adds the rest. Bounces 0 = the sky and the Baked lights' direct light only. */
+   * path tracer adds the rest. Bounces 0 = the sky, the Baked lights' direct light and (task 0157) the emissive
+   * meshes sampled at the texel, nothing bounced. */
   ps.max_bounces = std::max(0, s_.bounces - 1);
   ps.denoise = false;
   ps.use_guiding = false;
@@ -309,7 +290,28 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   if (total_ == 0) finish();
 }
 
-Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect) {
+/* Emissive meshes sampled at the texel (task 0157): one emitter point a sample, weighted against the hemisphere
+ * gather that may hit the same emitter (the power heuristic, both ways), so a small bright object lights its
+ * surroundings smoothly instead of where a hemisphere ray chanced on it. The mean is irradiance / pi, as the gather's. */
+Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const {
+  Vec3 esum(0.0f);
+  const float shift = rnd01(rng);  // (the emitter choice stratified over the samples: a lamp's triangles taken in turn, shifted at random per texel)
+  for (int k = 0; k < samples; k++) {
+    Vec3 dir, Le;
+    float dist, pl;
+    const float light_u = std::fmod(((float)k + shift) / (float)samples, 1.0f);
+    if (!pt_->sample_mesh_light(rng, o, n, dir, dist, Le, pl, light_u)) continue;
+    rays++;
+    const Vec3 Tr = pt_->transmittance({o, dir}, dist * (1.0f - 1e-4f));
+    if (!(std::max({Tr.x, Tr.y, Tr.z}) > 0.0f)) continue;
+    const float cosn = dot(n, dir), pb = gather_sees_emitters ? cosn / kPi : 0.0f;
+    const float w = pl * pl / (pl * pl + pb * pb);
+    esum += Le * Tr * (cosn * w / pl);
+  }
+  return esum * (1.0f / (kPi * (float)std::max(1, samples)));
+}
+
+Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out) {
   uint32_t rng = hash32(seed);
   const Vec3 n = t.normal;
   /* Off the surface a little, scaled to where it is (far from the origin floats are coarse). */
@@ -322,20 +324,27 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
    * pi: the mean is irradiance / pi). */
   Vec3 sum(0.0f);
   const int N = indirect ? s_.indirect_samples : 0;  // (no indirect: the GPU gathered it)
+  const bool emissive = s_.sample_emissive && pt_->has_mesh_lights();
+  const bool gather_sees_emitters = s_.bounces > 0;  // (bounces 0: the gather sees the sky only)
   for (int i = 0; i < N; i++) {
     const float r1 = rnd01(rng), r2 = rnd01(rng);
     const float r = std::sqrt(r1), phi = 2.0f * kPi * r2;
-    const Vec3 d = normalize(tu * (r * std::cos(phi)) + tv * (r * std::sin(phi)) + n * std::sqrt(std::max(0.0f, 1.0f - r1)));
+    const float cosn = std::sqrt(std::max(0.0f, 1.0f - r1));
+    const Vec3 d = normalize(tu * (r * std::cos(phi)) + tv * (r * std::sin(phi)) + n * cosn);
     uint32_t prng = rng ^ (uint32_t)i * 0x9E3779B9u;
     Vec3 L;
     if (s_.bounces == 0) {
       rays++;
       L = pt_->occluded({o, d}, 1e30f) ? Vec3(0.0f) : env_.radiance(d);
     }
-    else L = pt_->incoming_radiance({o, d}, prng, rays);
+    else L = pt_->incoming_radiance({o, d}, prng, rays, emissive ? cosn / kPi : 0.0f);
     if (finite3(L)) sum += L;
   }
   Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
+  if (gather_out) *gather_out = value;
+  /* Twice the gather's rays (shadow rays are cheap), at most 256; on the GPU path these run on the CPU beside the
+   * gathered batch, so 64 is the cap there. */
+  if (emissive) value += emissive_at(o, n, rng, std::max(16, std::min(2 * s_.indirect_samples, indirect ? 256 : 64)), gather_sees_emitters, rays) * s_.indirect_intensity;
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
   for (const BakeLight &bl : lights_) {
@@ -350,14 +359,14 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       continue;
     }
     if (l.type == RenderLight::Area) {
-      /* An area light: its unshadowed light computed (area_light_cosine, no noise), times the share of it
-       * the shadow rays find unblocked, each ray weighted by its cosines (a ratio estimator: Heitz et al.
-       * 2018, "Combining Analytic Direct Illumination and Stochastic Shadows"). Open surfaces come out exact;
-       * only penumbrae are sampled. The rays go to a jittered grid over the light (stratified), shifted by
-       * a random offset per texel (Cranley-Patterson rotation). The range falloff is the centre's, as in
-       * the path tracer and the rasterizer (task 0030: taking it at each random point made a 10 m light's
-       * maps blotchy, its falloff varying tenfold across the light). */
-      const float unshadowed = area_light_cosine(l, o, n) * light_range_falloff(l, t.position);
+      /* An area light: its unshadowed light computed (area_light_irradiance, no noise), times the share of it
+       * the shadow rays find unblocked, each ray weighted by what its point of the light sends (the cosines,
+       * the inverse square: a ratio estimator, Heitz et al. 2018, "Combining Analytic Direct Illumination and
+       * Stochastic Shadows"). Open surfaces come out exact; only penumbrae are sampled. The rays go to a
+       * jittered grid over the light (stratified), shifted by a random offset per texel (Cranley-Patterson
+       * rotation). Since task 0155 the light is an emissive plane: each point's own falloff (the near part of
+       * a wide light weighs more), the noise kept down by the exact unshadowed term. */
+      const float unshadowed = area_light_irradiance(l, o, n);
       if (!(unshadowed > 0.0f)) continue;
       const int ns = std::max(1, s_.direct_samples);
       const int nx = std::max(1, (int)std::ceil(std::sqrt((double)ns)));
@@ -367,11 +376,11 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       for (int k = 0; k < ns; k++) {
         const float a = std::fmod(((k % nx) + rnd01(rng)) / (float)nx + sx, 1.0f) - 0.5f;
         const float b = std::fmod(((k / nx) + rnd01(rng)) / (float)ny + sy, 1.0f) - 0.5f;
-        const Vec3 dvec = area_light_point(l, a, b) - o;
+        const Vec3 q = area_light_point(l, a, b), dvec = q - o;
         const float dist = length(dvec);
         if (!(dist > 1e-5f)) continue;
         const Vec3 L = dvec / dist;
-        const float w = dot(n, L) * -dot(l.direction, L);
+        const float w = dot(n, L) * area_light_falloff(l, q, o);
         if (!(w > 0.0f) || dot(n, L) <= 0.0f) continue;
         rays++;
         wsum += w;
@@ -425,7 +434,8 @@ bool Lightmapper::step(double budget_ms) {
         normals[i] = tx.normal;
       }
       std::string err;
-      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err) || ind.size() != batch) {
+      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, s_.sample_emissive && pt_->has_mesh_lights()) ||
+          ind.size() != batch) {
         if (pt_->gpu_gather_waiting()) {
           gpu_waiting = true;
           break;
@@ -440,6 +450,7 @@ bool Lightmapper::step(double budget_ms) {
           const size_t k = base + (size_t)i;
           Vec3 v = ind[(size_t)i] * s_.indirect_intensity;
           if (!finite3(v)) v = Vec3(0.0f);
+          gather_[k] = v;
           v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u, false);
           values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
         }
@@ -465,7 +476,7 @@ bool Lightmapper::step(double budget_ms) {
     JobSystem::global().parallel_for((int64_t)batch, 8, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         const size_t k = base + (size_t)i;
-        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u);
+        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u, true, &gather_[k]);
       }
     });
     done_ += batch;
@@ -489,17 +500,57 @@ void Lightmapper::cancel() {
   out_ = LightingData{};
 }
 
+namespace {
+float lum_of(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+/* The mean luminance of a texel's 5x5 chart neighbours facing its way (the filter's own test), -1 with fewer than four. */
+float neighbour_mean_lum(const std::vector<Vec3> &in, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &normals, int W, int H,
+                         int x, int y) {
+  const size_t i = (size_t)y * W + x;
+  float sum = 0.0f;
+  int n = 0;
+  for (int dy = -2; dy <= 2; dy++)
+    for (int dx = -2; dx <= 2; dx++) {
+      const int xx = x + dx, yy = y + dy;
+      if ((dx == 0 && dy == 0) || xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+      const size_t j = (size_t)yy * W + xx;
+      if (!cov[j] || own[j] != own[i] || dot(normals[i], normals[j]) < 0.9f) continue;
+      sum += lum_of(in[j]), n++;
+    }
+  return n < 4 ? -1.0f : sum / (float)n;
+}
+}  // namespace
+
+/* A gathered value far brighter than its chart neighbours' (a hemisphere ray that chanced on a bright emitter, a
+ * caustic) brought down to eight times their mean before the filter spreads it into a blotch (task 0157). Only
+ * the hemisphere gather is clamped: the direct terms are noise-free, and a real highlight in them stays. */
+void Lightmapper::clamp_fireflies(std::vector<Vec3> &src, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &normals, int W,
+                                  int H) const {
+  const std::vector<Vec3> in = src;
+  JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        if (!cov[i]) continue;
+        const float mean = neighbour_mean_lum(in, cov, own, normals, W, H, x, (int)y);
+        if (mean < 0.0f) continue;
+        const float lum = lum_of(in[i]), limit = 8.0f * mean + 1e-3f;
+        if (lum > limit) src[i] = in[i] * (limit / lum);
+      }
+  });
+}
+
 void Lightmapper::finish() {
   ScopedTimer ft;
   /* Into the pages, then (optionally) a filter that keeps to one object's chart and a surface's
    * facing, then dilation into the padding so bilinear reads at chart edges find light, not black. */
-  std::vector<std::vector<Vec3>> normals(out_.pages.size());
-  for (size_t p = 0; p < out_.pages.size(); p++) normals[p].assign(out_.pages[p].texels.size(), Vec3(0.0f));
+  std::vector<std::vector<Vec3>> normals(out_.pages.size()), gathered(out_.pages.size());
+  for (size_t p = 0; p < out_.pages.size(); p++) normals[p].assign(out_.pages[p].texels.size(), Vec3(0.0f)), gathered[p].assign(out_.pages[p].texels.size(), Vec3(0.0f));
   for (size_t k = 0; k < texels_.size(); k++) {
     const LightmapTexel &tx = texels_[k];
     const size_t idx = (size_t)tx.y * out_.pages[(size_t)tx.page].width + tx.x;
     out_.pages[(size_t)tx.page].texels[idx] = values_[k];
     normals[(size_t)tx.page][idx] = tx.normal;
+    gathered[(size_t)tx.page][idx] = k < gather_.size() ? gather_[k] : Vec3(0.0f);
   }
   for (size_t p = 0; p < out_.pages.size(); p++) {
     Lightmap &lm = out_.pages[p];
@@ -507,7 +558,10 @@ void Lightmapper::finish() {
     std::vector<uint8_t> &cov = covered_[p];
     const std::vector<int32_t> &own = owner_[p];
     if (s_.denoise) {
-      std::vector<Vec3> src = lm.texels;
+      /* The gathered part clamped, the direct part put back on top: a firefly is a gather's outlier, a sun spot is not. */
+      std::vector<Vec3> src = gathered[p];
+      clamp_fireflies(src, cov, own, normals[p], W, H);
+      for (size_t i = 0; i < src.size(); i++) src[i] = src[i] + (lm.texels[i] - gathered[p][i]);
       JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
         for (int64_t y = y0; y < y1; y++)
           for (int x = 0; x < W; x++) {

@@ -128,14 +128,12 @@ void Context::end_frame() {
 }
 
 Id Context::id(const char *label) const {
-  uint64_t h = id_stack_.empty() ? 1469598103934665603ull : id_stack_.back();
-  for (const char *p = label; *p; p++) { h ^= (uint8_t)*p; h *= 1099511628211ull; }
+  const uint64_t h = fnv1a_str(label, id_stack_.empty() ? kFnvBasis : id_stack_.back());
   return h ? h : 1;
 }
 
 Id Context::id(uint64_t n) const {
-  uint64_t h = id_stack_.empty() ? 1469598103934665603ull : id_stack_.back();
-  for (int i = 0; i < 8; i++) { h ^= (n >> (i * 8)) & 255; h *= 1099511628211ull; }
+  const uint64_t h = fnv1a(&n, 8, id_stack_.empty() ? kFnvBasis : id_stack_.back());
   return h ? h : 1;
 }
 
@@ -829,11 +827,13 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   if (popup_open(i)) {
     std::vector<std::string> opts(options, options + std::max(0, count));
     popup(i, std::max(r.w, px(120)), [this, i, v, opts = std::move(opts)] {
-      for (int k = 0; k < (int)opts.size(); k++)
+      for (int k = 0; k < (int)opts.size(); k++) {
         if (menu_item(opts[(size_t)k].c_str(), nullptr, k == v)) {
           int_results_[i] = k;
           redraw = true;
         }
+        if (favorite_request == opts[(size_t)k]) favorite_request.clear();  // (an option, not a command: no favorite)
+      }
     });
   }
   last_widget_ = r;
@@ -1253,6 +1253,7 @@ bool Context::menu_item(const std::string &text, const char *shortcut, bool chec
   }
   last_widget_ = r;
   last_hovered_ = hot;
+  if (hot && enabled && in.pressed[1]) favorite_request = text;  // (right-click: "add to Quick Favorites", task 0189)
   if (hot && enabled && in.released[0]) {
     /* A dropdown inside a dialog closes alone; anything else closes every popup. */
     if (current_layer_ > 0 && current_layer_ - 1 < (int)popups_.size() && popups_[current_layer_ - 1].dropdown) {
@@ -1405,6 +1406,15 @@ void Context::rasterize_icon(Canvas &canvas, Icon icon, const Recti &r, uint32_t
     case Icon::Flask: L(6, 2, 10, 2); L(6.5f, 2, 6.5f, 7); L(9.5f, 2, 9.5f, 7); L(6.5f, 7, 2, 14); L(9.5f, 7, 14, 14); L(2, 14, 14, 14); T(4, 11, 12, 11, 13.5f, 13.5f); T(4, 11, 13.5f, 13.5f, 2.5f, 13.5f); break;
     case Icon::Search: C(6.5f, 6.5f, 4.5f, false); L(10, 10, 14, 14, 2); break;
     case Icon::Menu: R(2, 3, 12, 2); R(2, 7, 12, 2); R(2, 11, 12, 2); break;
+    case Icon::Wind:  /* three gusts, the middle one longest (task 0158) */
+      L(2, 5, 10, 5); L(10, 5, 12, 3.5f); L(2, 8.5f, 13, 8.5f); L(13, 8.5f, 15, 7); L(2, 12, 9, 12); L(9, 12, 11, 13.5f);
+      break;
+    case Icon::Spin:  /* a ring with an arrowhead: a Rotator */
+      C(8, 8, 5, false); L(13, 8, 13, 4.5f); L(13, 4.5f, 9.8f, 5.5f);
+      break;
+    case Icon::Wave:  /* a wave: an Oscillator */
+      L(1.5f, 8, 4, 4); L(4, 4, 6.5f, 8); L(6.5f, 8, 9, 12); L(9, 12, 11.5f, 8); L(11.5f, 8, 14.5f, 4);
+      break;
     case Icon::PushPull:  /* a slab with a face lifted off it (SketchUp's Push/Pull) */
       L(2, 11, 9, 14); L(9, 14, 14, 11); L(2, 11, 2, 13); L(14, 11, 14, 13); L(2, 13, 9, 15.5f); L(9, 15.5f, 14, 13);
       L(2, 7, 9, 10); L(9, 10, 14, 7); L(14, 7, 7, 4); L(7, 4, 2, 7);

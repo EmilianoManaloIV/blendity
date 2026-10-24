@@ -4,6 +4,7 @@
 // (blender/source/blender/blenloader/intern/writefile.cc) and
 // blender/source/blender/io/wavefront_obj.
 #include "scene.h"
+#include "spring_bones.h"
 #include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
@@ -147,6 +148,7 @@ Out &operator<<(Out &o, F f) {
 
 struct WriteReflector : Reflector {
   bool all_fields() const override { return true; }
+  bool serializing() const override { return true; }
   Out &os;
   const std::unordered_map<const Mesh *, int> &mesh_ids;
   const std::unordered_map<const Material *, int> *mat_ids = nullptr;
@@ -178,10 +180,16 @@ struct WriteReflector : Reflector {
     }
     line(n, v);
   }
+  void weight_list(const char *n, std::vector<std::pair<std::string, float>> &list) override {
+    std::string v = std::to_string(list.size());
+    for (auto &[name, w] : list) v += " " + quote(name) + " " + fmt(w);
+    line(n, v);
+  }
 };
 
 struct ReadReflector : Reflector {
   bool all_fields() const override { return true; }
+  bool serializing() const override { return true; }
   std::map<std::string, std::vector<std::string>> values;
   const std::unordered_map<int, MeshPtr> &meshes;
   const std::unordered_map<int, MaterialPtr> *materials = nullptr;
@@ -231,6 +239,16 @@ struct ReadReflector : Reflector {
     for (size_t i = 0; i < count && i + 1 < t->size(); i++) {
       auto it = materials->find(std::atoi((*t)[i + 1].c_str()));
       mats.push_back(it == materials->end() ? nullptr : it->second);
+    }
+  }
+  void weight_list(const char *n, std::vector<std::pair<std::string, float>> &list) override {
+    auto *t = get(n, 1);
+    if (!t) return;
+    const size_t count = std::strtoull((*t)[0].c_str(), nullptr, 10);
+    list.clear();
+    for (size_t i = 0; i < count && 2 * i + 2 < t->size(); i++) {
+      const float w = std::strtof((*t)[2 * i + 2].c_str(), nullptr);
+      if (std::isfinite(w) && !(*t)[2 * i + 1].empty()) list.push_back({(*t)[2 * i + 1], w});
     }
   }
 };
@@ -338,6 +356,23 @@ std::string save_scene_text(const Scene &scene) {
       for (float w : vg.weights) os << ' ' << F{w};
       os << '\n';
     }
+    /* Custom normals (task 0149): one per vertex. */
+    if (m.custom_normals_fit()) {
+      os << "cn";
+      for (const Vec3 &n : m.custom_normals) os << ' ' << F{n.x} << ' ' << F{n.y} << ' ' << F{n.z};
+      os << '\n';
+    }
+    /* Shape keys (task 0135): a name, how many vertices move, then each one's index and offset (only those). */
+    for (const ShapeKey &k : m.shape_keys) {
+      if (k.delta.size() != m.vert_count()) continue;
+      size_t moved = 0;
+      for (const Vec3 &d : k.delta) moved += d.x != 0.0f || d.y != 0.0f || d.z != 0.0f;
+      os << "sk " << quote(k.name) << ' ' << moved;
+      for (size_t i = 0; i < k.delta.size(); i++)
+        if (k.delta[i].x != 0.0f || k.delta[i].y != 0.0f || k.delta[i].z != 0.0f)
+          os << ' ' << i << ' ' << F{k.delta[i].x} << ' ' << F{k.delta[i].y} << ' ' << F{k.delta[i].z};
+      os << '\n';
+    }
     os << "end\n";
   }
   scene.for_each_ordered([&](GameObject &g, int) {
@@ -427,6 +462,11 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
         if (comp) comp->reflect(*rr);
         else if (pending_mat) pending_mat->reflect(*rr);
         else pending_block(*rr);
+        /* Task 0164: an outline saved before Min Pixels existed draws as it did then (0); the file writes the key with
+         * underscores, as key_of makes it. */
+        if (comp && std::string(comp->type_name()) == "Outline" && !rr->values.count(key_of("Min Pixels"))) static_cast<Outline *>(comp)->min_pixels = 0.0f;
+        /* Task 0168: a spring chain saved before Density and Air takes its label's (a tail is heavier than hair). */
+        if (comp && std::string(comp->type_name()) == "SpringBone" && !rr->values.count(key_of("Density"))) spring::label_mass_defaults(*static_cast<SpringBone *>(comp));
         comp = nullptr;
         pending_mat = nullptr;
         pending_block = nullptr;
@@ -549,6 +589,54 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
           }
           vg.weights.resize(nv, 0.0f);
           if (!vg.name.empty() && m->find_group(vg.name) < 0) m->vertex_groups.push_back(std::move(vg));
+        }
+        else if (line.substr(0, 3) == "sk ") {
+          /* A shape key: its quoted name, the count, then index dx dy dz for each vertex it moves (others 0). */
+          ShapeKey k;
+          size_t at = 3;
+          k.name = unquote_word(line, at);
+          k.delta.assign(nv, Vec3(0.0f));
+          const char *q = line.data() + std::min(at, line.size());
+          /* Counts and indices as integers (a float can't name a vertex past 2^24, and a huge one can't be cast). */
+          auto index = [&](size_t &out) {
+            while (q < le && (*q == ' ' || *q == '\t')) q++;
+            if (q >= le || *q < '0' || *q > '9') return false;
+            char *e = nullptr;
+            const unsigned long long v = std::strtoull(q, &e, 10);
+            if (!e || e == q || e > le) return false;
+            q = e;
+            out = v > (unsigned long long)nv ? nv : (size_t)v;  // (past the end: out of range below)
+            return true;
+          };
+          size_t count = 0;
+          if (!index(count)) count = 0;
+          for (size_t n = 0; n < count; n++) {
+            size_t idx = 0;
+            if (!index(idx)) break;
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            q = parse_float(parse_float(parse_float(q, le, x), le, y), le, z);
+            if (idx < nv && finite_bits(x) && finite_bits(y) && finite_bits(z)) k.delta[idx] = Vec3(x, y, z);
+          }
+          if (!k.name.empty() && m->find_shape(k.name) < 0) m->shape_keys.push_back(std::move(k));
+        }
+        else if (line.substr(0, 3) == "cn ") {  // custom normals (task 0149): x y z per vertex
+          const char *q = line.data() + 3;
+          char *e = nullptr;
+          std::vector<Vec3> cn;
+          for (;;) {
+            Vec3 n;
+            n.x = std::strtof(q, &e);
+            if (e == q) break;
+            q = e;
+            n.y = std::strtof(q, &e);
+            if (e == q) break;
+            q = e;
+            n.z = std::strtof(q, &e);
+            if (e == q) break;
+            q = e;
+            cn.push_back(n);
+          }
+          if (cn.size() == m->vert_count()) m->custom_normals = std::move(cn);
         }
         else if (line.substr(0, 10) == "seamsharp ") m->seams_sharp = true;
         else if (line.substr(0, 6) == "angle ") {

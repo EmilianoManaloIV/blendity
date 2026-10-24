@@ -2,6 +2,2714 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 229): exporting and importing the 50k sphere (task 0209)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 6.
+
+**Changed**
+- **Exporting:** each corner's normal is worked out once per fan of faces round a vertex, not by a flood from every
+  corner. At the sphere's poles 256 corners each flooded across 256 faces: 271 ms of every export.
+- **Numbers** in OBJ, PLY and USD text are written by `std::to_chars`, the same text as `%.7g`.
+- **PLY import:** each property's type is looked up once, not compared by name for every value.
+
+**Measured** (Pass 15, the 50k sphere; before -> after, Blender 5.2):
+- export OBJ 791 -> 108 ms (45), FBX 322 -> 24 (76), glTF 329 -> 32 (82), STL 365 -> 30 (12), PLY 336 -> 38 (7),
+  USD 827 -> 112 (253);
+- import PLY 65 -> 43 ms (6).
+
+**Checked**
+- The numbers are `%.7g`'s text, and every corner's normal matches the old flood on a sphere with sharp edges, flat
+  faces and a smooth angle (tests/test_assets.cpp).
+- An Opus review found two things, both fixed:
+  - two faces back to back (sharing two edges at a vertex) joined or not depending on which the flood started from;
+    each shared edge is now tested on its own, as the old flood did;
+  - a PLY face with two lists of corners kept both; it keeps the last again.
+- Unit checks (round 229): Windows, in render-cache verify mode, 11,997, 0 failed (1000 tests), 0 stale
+  pictures. Linux with libraries: 11,540, 0 failed. Sanitizer build: 11,416, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (The gpu group's slow-open test and the sanitizer build's animation Play test failed under the parallel load and passed alone.)
+
+## 2026-10-24 (round 228): Edit Mode's Select All, Inset and Bevel on big meshes (task 0208)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 5.
+
+**Changed**
+- **Select All:** it keeps the edges' own selection only in Edge mode, where it is read. Switching to Edge mode works
+  it out, now from the console's `edit edge` too.
+- **Inset:** a thickness too big for small faces is narrowed by moving the inset's new vertices alone. Before, every
+  try rebuilt the whole mesh; the result is the same.
+- **Bevel:** only the faces at a bevelled corner are rebuilt, and the corner patches come out in a fixed order.
+
+**Measured** (Pass 15):
+- Select All on 50k faces: 14.9 -> 4.0 ms (Blender 2.6);
+- Inset: 75.7 -> 25.9 ms (24.1); on 500k faces 930 -> 259 ms (230);
+- Bevel: 96.1 -> 30.0 ms (31.7).
+
+**Checked**
+- Edge mode after a Select All has every edge, Inset folds nothing, and Bevel gives the same mesh twice
+  (tests/test_modeling.cpp).
+- An Opus review confirmed Inset's result is bit for bit the old one, and found three things, all fixed:
+  - Bevel's corner patches in a different order (now a fixed one);
+  - the console's `edit edge` leaving Edge mode without edges after a Select All;
+  - an undo into Edge mode restoring no edges.
+
+  On a face that uses one vertex twice, Bevel now keeps each corner's own UV; before, both took the first's.
+- Unit checks (round 228): Windows, in render-cache verify mode, 11,993, 0 failed (998 tests), 0 stale
+  pictures. Linux with libraries: 11,536, 0 failed. Sanitizer build: 11,412, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `modeling`, `modifiers_ngon`, `pushpull`, `curved`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (The gpu group's slow-open test failed under the parallel load and passed alone. Curved: 5,032 operations, 7 problems, 67 results with faces newly on top of each other, down from 5,034, 8 and 79 on the build before this round (measured on it): Bevel's corner patches in their new fixed order renumber the faces of the rounded box (made by Bevel), so the section's random operations land on other faces; no count rose.)
+
+## 2026-10-24 (round 227): duplicating many objects (task 0207)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 4.
+
+**Fixed:** Duplicate on 10,000 objects took 648 seconds. Each copy's name was tried against every sibling ("Cube
+(1)", "Cube (2)" ...) and each copy moved through the list. Now the selection is duplicated at once: names gathered
+once per parent, each list rebuilt once. 648 s -> 70 ms, against Blender's 1.5 s. The names and places are as before.
+
+**Measured** (Pass 15, again after tasks 0204-0207):
+- Duplicate 10,000 objects: 647,887 -> 70 ms (Blender 1,525);
+- a frame of 1,000 keyframed objects: 1.7 -> 0.40 ms (Blender 3.8);
+- select all 10,000 objects: 8.1 -> 3.4 ms (Blender 32.7).
+
+**Checked**
+- The names and places one at a time gave, for 3 and for 2,000 objects (tests/test_editor.cpp).
+- An Opus review found no fault on the editor's path. It found three orders that differed from one at a time for
+  lists the editor never passes (the same object twice, a child before its parent, an original missing from its
+  list), all fixed, and the selection's ancestors searched for one by one (now looked up).
+- Unit checks (round 227): Windows, in render-cache verify mode, 11,987, 0 failed (997 tests), 0 stale
+  pictures. Linux with libraries: 11,530, 0 failed. Sanitizer build: 11,406, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test and Linux's global sequencer Play test (wall clock) failed under the parallel load and passed alone. The first run of this chain found the build broken: a Learn question's text ended its raw string; fixed, and the chain now stops when the Windows build fails instead of testing the old binaries.)
+
+## 2026-10-24 (round 226): playback without the bookkeeping (task 0206)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 3.
+
+**Changed**
+- Playing a clip remembers what is shown for Record only while Record is on: every animated number of 1,000 objects
+  had been looked up each frame. Turning Record on remembers it.
+- A clip of many tracks finds its objects in one walk of the branches it names, not by searching each parent's
+  children per track.
+
+**Measured:** playing 1,000 keyframed objects in a 2560 x 1369 window, 11.7 -> 4.0 ms a frame (Blender 11.3).
+
+**Checked**
+- The same objects posed as before (duplicate names, the root's own track, names a path can't spell), and Record
+  still keys a move after playing (tests/test_animation.cpp).
+- An Opus review found, all fixed:
+  - the one-walk lookup following a second object of a name where the search found none;
+  - the root's own track lost to a child with an empty name;
+  - a name with a '/' reachable where the search couldn't reach it;
+  - a big rig with few keyed bones walked whole every frame (now only the branches the tracks name).
+- Unit checks (round 226): Windows, in render-cache verify mode, 11,980, 0 failed (996 tests), 0 stale
+  pictures. Linux with libraries: 11,523, 0 failed. Sanitizer build: 11,399, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open timing test failed under the parallel load and passed alone.)
+
+## 2026-10-24 (round 225): Edit Mode's cage kept on the card (task 0205)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 2.
+
+**Changed**
+- The Edit Mode cage's vertices are worked out again only when the mesh, the object's matrix, the mode or the
+  selection changes. Before, they were worked out again every frame and compared with the card's copy.
+- Face mode's dots are kept on the card with the cage. Before, they were worked out and sent every frame.
+
+**Measured** (a 2560 x 1369 window, a frame):
+- Edit Mode on the 500k-face sphere: 11.7 -> 6.0 ms (Blender 5.5);
+- in Face mode: 22.1 -> 8.2 ms;
+- on the 50k sphere: 3.6 -> 3.2 ms (Blender 5.2).
+
+**Checked**
+- A frame that only draws again rebuilds and sends nothing, and a face selected sends 96 bytes; Face mode on the card
+  matches the CPU's picture (tests/test_gpu.cpp).
+- An Opus review found, all fixed:
+  - Face mode's dot radius kept from the last rebuild (a change of UI scale wouldn't show);
+  - a test that the old code also passed (now the Profiler counts the cage's rebuilds, and the test checks there are
+    none while only drawing again);
+  - Face mode sent to the CPU without the overlays' pipelines, which it no longer needs.
+- Unit checks (round 225): Windows, in render-cache verify mode, 11,972, 1 failed under load (994 tests; below), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-card timing tests failed under the chain's load - the slow GPU open, and F12 on a slow card with frames of 58-201 ms, also when run alone while the Linux legs built - and passed twice alone on a quiet machine (frames of 1.3-14 ms)..)
+
+## 2026-10-24 (round 224): the views without the wait (task 0204)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 1.
+
+**Changed**
+- Each view's frame is left running on the card while the editor goes on. Before, the editor waited for it every
+  frame.
+- The Scene view's depth and ids stay on the card until a click, a box select, the knife or a material drop asks
+  for them.
+
+**Measured** (a 2560 x 1369 window, a frame, against Blender 5.2):
+- the 500k-face sphere 8.2 -> 3.9 ms (Blender 5.0);
+- a million triangles 6.3 -> 3.5 ms (4.2), Shaded 6.4 -> 3.3 (Material Preview 5.5);
+- 10,000 cubes 20.1 -> 13.9 ms (24.2);
+- Edit Mode on 50k faces 6.2 -> 3.6 ms (5.1), on 500k 16.6 -> 11.7 (5.5);
+- playing 1,000 keyed objects 17.4 -> 11.4 ms (11.3).
+
+Blendity is ahead on the viewport rows now, 1.2-1.7x. Edit Mode on big meshes is task 0205's.
+
+**Checked**
+- A frame drawn again is left running with its planes on the card; a click picks what is there now, on the card and
+  after a switch to the CPU (tests/test_gpu.cpp).
+- An Opus review found, all fixed:
+  - the planes' slot not forgotten when the next frame was drawn some other way, or when another view took it: a
+    click could read old planes, or write past a target that shrank;
+  - the CPU's cage tested against old depth when the card couldn't draw it;
+  - a failed wait ignored (now the card is marked lost and the editor draws on the CPU);
+  - the Profiler's times landing on the wrong frame;
+  - a test that could pass with a stale pick.
+- Unit checks (round 224): Windows, in render-cache verify mode, 11,963, 1 failed under load (994 tests; below), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open timing test failed under the chain's load - a 153 ms frame against its 100 ms limit, again when run alone while the Linux legs built - and passed twice alone on a quiet machine (its slowest frame 20-22 ms). The sanitizer build's animation and autopose timing checks failed under its load and passed alone.)
+
+## 2026-10-24 (round 223): why Blendity trails Blender where it does (task 0203)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round finds the causes. docs/tasks/0203-parity-causes.md ranks every gap of 1.25x or more by what
+the user feels, with its cause and its fix task:
+1. **The views wait for the card every frame (0204).** The Scene view copies its ids and depth back for picking only
+   a click needs.
+2. **Edit Mode's cage on big meshes (0205):** the edge shader's antialiasing strip, and the cage rebuilt on the CPU
+   each frame.
+3. **Playback (0206):** the clip applied and the scene's matrices and hash worked out again each frame.
+4. **Duplicating many objects (0207):** names tried against every sibling, n³ in all.
+5. **Select All, Inset and Bevel (0208):** the edge selection as a hash set of every edge; whole-mesh copies and
+   rebuilds to change three faces.
+6. **Files (0209):** the exporter's per-corner normal flood (271 ms at the sphere's poles); the importers' per-value
+   type checks.
+7. **Big scenes saved and opened (0210):** a text format.
+8. **Boolean and Array (0211):** map-based conversions; vertices and faces added one at a time.
+
+**Changed**
+- `--windowed-check` prints where each frame goes: the Scene view, the views' GPU path (the card's passes; uploads,
+  copies back and the wait), the UI and presenting.
+- Pass 15's Select All row runs Edit Mode's own Select All. It had timed two operators standing in for it, and the
+  real one is slower: 14.9 ms against Blender's 2.6 on 50k faces, 249 against 23 on 500k.
+
+**Checked**
+- An Opus review checked each cause against the code it names and corrected the document:
+  - Blender too draws edit-mesh edges as screen-space quads (rank 2 now names the edge shader's strip and the cage's
+    per-frame rebuild);
+  - `Mesh::corner_normals` is not the exporter's normals under 180 degrees (rank 6);
+  - dropping the copies back would leave the fence wait (rank 1);
+  - Select All's edge set is walked every frame after it (rank 5);
+  - the breakdown's parts nest, and its "copies back" includes the uploads (both now labelled).
+- Unit checks (round 223): Windows, in render-cache verify mode, 11,957, 0 failed (993 tests), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
+## 2026-10-24 (round 222): Blender's viewport, playback and start-up against Blendity's window (task 0202)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round measures what needs a window.
+
+**Added**
+- `benchscene sphere50k|sphere500k|million|cubes10k|keyed1k`: the benchmark scenes, built in the editor.
+- `Blendity --startup-check`.
+- `tools/bench_ui.py` and `tools/bench_blender.py --parity-ui`: both programs' windows at the same size and the same
+  scenes, into PERFORMANCE.md Pass 15's window table.
+
+**Measured** (a 2560 x 1369 window, a frame):
+- Blendity is behind with big meshes: the 500k sphere 8.2 ms against 4.1, a million triangles 6.3 against 4.4, and
+  Edit Mode on 500k faces 16.6 against 5.4.
+- Playing 1,000 keyframed objects: 17.4 ms against 11.3.
+- Blendity is ahead with 10,000 cubes (20.1 against 24.1 ms) and starting up (0.5 s against 2.8).
+
+**Corrected:** round 219's Blender viewport rows timed Blender's finished picture shown again, not the scene drawn:
+a still view stops Workbench and EEVEE drawing. With the view nudged, as an orbit does:
+- the starter scene: 4.66 ms;
+- 400 spheres, Solid: 5.00 ms (was 4.34-4.39);
+- 400 spheres, Material Preview: 6.70 ms (was 4.41-5.23).
+
+Blender is ahead there 1.1-1.5x, not 1.2-1.7x.
+
+**Checked**
+- `benchscene`'s scenes (tests/test_editor.cpp).
+- An Opus review found, all fixed:
+  - Blender's rows timing a finished picture (a still view: the scene isn't drawn again) - round 219's rows too,
+    corrected;
+  - its playback row stepping frames without drawing the window;
+  - the selections differing (10,000 selected cubes' outlines in Blender's row);
+  - the scenes differing (a cube around the sphere, the starter scene's teapot);
+  - the start-up row timing Blender's exit;
+  - the runner trusting an old result and a failed run.
+- The review's fix of the selection stopped Blendity's playback, so the box row was found playing nothing: the
+  Animation window plays the clip of the selection's parent, so one box stays selected.
+- Unit checks (round 222): Windows, in render-cache verify mode, 11,957, 0 failed (993 tests), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
+## 2026-10-24 (round 221): every editor feature measured against Blender 5.2 (task 0201)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round measures. The causes and the fixes follow in tasks 0203-0211.
+
+**Added**
+- The stress section `blender_parity` and `tools/bench_blender.py --parity`: 59 rows timed in both programs on the
+  same scenes, under the same names, joined by `tools/bench_table.py` into PERFORMANCE.md's Pass 15.
+  - Files: save and open, and six formats' export and import.
+  - Objects: 10,000 of them.
+  - Edit Mode: 13 operators on a 50k-face mesh, 9 on a 500k one.
+  - Modifiers, UV, animation, physics, F12 and memory.
+- `tools/bench.bat` runs both sides.
+
+**Fixed:** `redo <field> <value>` from the console keeps the numbers for the tool's next use, as the F9 panel does.
+
+**Measured:** Blendity is behind on 23 rows of 59.
+- Duplicating 10,000 objects takes 648 s against Blender's 1.5 s. Each copy's name is found by trying "Cube (1)",
+  "Cube (2)" ... against every sibling.
+- Exporting the 50k sphere is 3-47x slower in every format.
+- Saving and opening a 500k-face mesh's scene is 12-18x slower.
+- Bevel, Inset, Boolean, Array, Select All and Merge by Distance are 1.2-3.7x slower.
+
+Blendity is ahead on delete (316x), opening many objects, three importers, Edit Mode's entry and most of its
+operators, Subdivision, UV unwrap, animation, physics, memory and F12.
+
+**Checked**
+- An Opus review found, all fixed:
+  - the bevel row running the old width: the console's `redo` didn't keep its numbers (fixed in the editor, with a
+    test);
+  - Blender's subdivision evaluating its limit surface (17 s on the sphere's 256-edge poles), where Blendity
+    subdivides a step;
+  - the Bevel modifier rows bevelling nothing (every edge under the angle limit);
+  - a Boolean that fails timed as a success;
+  - physics simulating different time (Blender at 24 fps with 10 substeps);
+  - "less the frame after" hiding work left for that frame;
+  - a failed import overwriting its export's row, `.blend1` backups saved inside the timer, temp folders left;
+  - a duplicate of linked meshes against shared ones;
+  - quick runs too heavy for CI.
+- Unit checks (round 221): Windows, in render-cache verify mode, 11,948, 0 failed (992 tests), 0 stale
+  pictures. Linux with libraries: 11,506, 0 failed. Sanitizer build: 11,382, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `blender_parity`: 0 problems. (The gpu group's slow-open test failed under the parallel load and the sanitizer build's autopose timing check under its load; each passed alone.)
+
+## 2026-10-23 (round 220): the views native on the GPU, written up (task 0200)
+
+**Asked:** "Why is it that the view still runs on the CPU? Shouldn't it run on the GPU natively like Blender?", with
+the CPU as the fallback. This round writes up the roadmap that answered it (tasks 0192-0199, rounds 211-219, PRs
+#156-#164).
+
+**Added:** docs/tasks/0200-native-gpu-views-write-up.md:
+- every task with its round, PR and numbers;
+- the CPU fallbacks before and after: of the eleven features that sent a whole view to the CPU, only realtime GI's
+  per-pixel gather still does, with a few narrow cases (a retro filter's rasterizer stage, a live procedural seen very
+  close, see-through toon materials, bloom over see-through surfaces, probe volumes over 262,144 probes);
+- Blender's viewport against Blendity's window: Blender 3.98-5.23 ms, Blendity 5.57-7.51 ms (the card presenting);
+- what stays on the CPU and why, and the follow-ups (the card's 33-second first open after a shader change; one draw
+  call for many copies of a mesh; the UI on the card).
+
+**Checked:** documentation only; no code changed.
+
+## 2026-10-23 (round 219): the GPU as the default, said per window; Blender's viewport timed (task 0199)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback ("most computers would
+have a GPU"). This round makes the choice visible and measures Blendity's window against Blender's own viewport.
+
+**Changed**
+- Preferences > Viewport Device says, for each window, where its views draw and who shows it: "views on the GPU (the
+  card), shown by the card", or "views on the CPU, shown by the system" with the reason.
+- With no card, Auto's fall back to the CPU is said once, the first time, not every start.
+- **Fixed:** switching Viewport Device kept the views' cached pictures until something changed, so the other
+  device's picture stayed on screen. The views now draw again on a switch.
+
+**Added**
+- The local chain runs the editor, render and lighting groups a second time with the views on the card, in verify
+  mode. CI is unchanged (it has no card).
+- `tools/bench_blender.py --viewport` times Blender's viewport with its window (`wm.redraw_timer`, DRAW_WIN_SWAP);
+  `Blendity --windowed-check` takes `--command` to set up the same scene.
+
+**Measured** (a 2560 x 1369 window, RTX 4070 SUPER), a whole window drawn and shown:
+- the starter scene: Blender 3.98-4.70 ms (two runs), Blendity 5.57 ms (the system presenting: 6.81);
+- 400 spheres, Solid: Blender 4.34-4.39 ms, Blendity 7.42 ms (8.68);
+- 400 spheres, Material Preview / Shaded: Blender 4.41-5.23 ms (EEVEE reuses its last sample), Blendity 7.51 ms (8.62).
+
+Blender is 1.2-1.4x ahead on the starter scene and 1.4-1.7x on 400 spheres. Its UI is drawn on the card; Blendity's is the
+CPU's (2-2.7 ms at 4K, task 0198), and Blendity's card draws each sphere with a draw call of its own.
+
+**Checked**
+- Each window's line and the once-only notice (tests/test_gpu.cpp); the Edit Mode drag on the card compares both
+  meshes, the smooth one after the release.
+- The Preferences dropdown test (tests/test_modeling.cpp) reads where the list opened: the new window lines moved
+  the keymap field near the window's bottom, and on Linux its list opens above it.
+- An Opus review found, all fixed:
+  - the window lines saying "views on the GPU" after choosing CPU (the card stays open; it isn't drawing them);
+  - the labels swapped when Preferences is drawn in a secondary window;
+  - the drag test passing without its after-release compares;
+  - a windowed check writing the user's preferences (the notice);
+  - Blender's Material Preview row timed while EEVEE still compiled its shaders, and a failed write leaving Blender
+    running.
+- Unit checks (round 219): Windows, in render-cache verify mode, 11,946, 0 failed (991 tests), 0 stale
+  pictures. Linux with libraries: 11,504, 0 failed. Sanitizer build: 11,380, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `ui_2d`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone. The GPU leg: 7,965 checks with the views on the card, 0 failed.)
+
+## 2026-10-23 (round 218): the UI's 2D measured - it stays the CPU's; presenting made cheaper (task 0198)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round measures
+whether the UI itself should be drawn by the card (go only if the frames that change much of it cost over 4 ms at
+4K).
+
+**Decided:** no. The UI stays drawn by the CPU and taken up to the card where it changed. The measuring found the
+card's presenting slower than it should be, so that was fixed instead (docs/tasks/0198):
+- **Presents no longer wait for the card:** they run one frame behind. In a real 2560 x 1369 window, presenting the
+  whole canvas (a resize) went from 6.0 to 3.0 ms a frame; an idle frame from 2.1 to 1.7 ms.
+- **Only the changed columns go up, not whole rows:** scrolling a long Hierarchy at 4K costs the UI 3.41 ms a frame
+  in all, down from 6.38.
+- The card's first open after its shaders change compiles them in parallel: 35.3 -> 32.8 s on this machine. The views
+  draw on the CPU meanwhile; a warm open takes about 130 ms. Compiling them when Blendity is built would end the wait:
+  a follow-up.
+
+**Measured**
+- Real window (2560 x 1369, `Blendity --windowed-check`):
+  - the canvas idle, by the card 1.69 ms (the system 1.58);
+  - the canvas presented whole, 3.03 ms (2.61);
+  - the Scene view drawn every frame, 5.54 ms (6.84).
+- Headless 4K (stress `ui_2d`):
+  - the canvas's drawing 2.0-2.7 ms;
+  - scrolling 3.41 ms in all;
+  - resizing 5.92 ms - over the line, but a resize repaints everything whoever draws the UI.
+
+**Checked**
+- `changed_rects` takes up only the changed tiles' columns (tests/test_editor.cpp).
+- The views and their presenting checks pass (the gpu group).
+- An Opus review found no synchronisation fault in the presents run one frame behind. It did find:
+  - the stress window section taking nothing up (its row pair read as an empty rect);
+  - a second staging buffer the offscreen compose never used;
+  - the shader cache written in place (now written beside it and renamed);
+  - shaders compiled for passes a card can't make;
+  - the card's UI image missing changes the system presented meanwhile.
+
+  All are fixed.
+- Unit checks (round 218): Windows, in render-cache verify mode, 11,941, 0 failed (990 tests), 0 stale
+  pictures. Linux with libraries: 11,499, 0 failed. Sanitizer build: 11,375, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `ui_2d`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
+## 2026-10-23 (round 217): camera filters over the card's picture (task 0197, part 2)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round lets
+filtered cameras' views draw their 3D on the card.
+
+**Changed**
+- **A camera filter no longer sends its view to the CPU:** the card draws the 3D, and the filter's passes run over
+  its picture. Colour grading, vignette, grain, pixelate, edge outline, CRT, sharpen, halftone, hatching, line art,
+  paper, colour ramp and bloom give the same picture as before.
+- **Bloom's linear-light picture comes from the card**, from an HDR variant of its lighting pass.
+- Still on the CPU, saying why:
+  - a filter's rasterizer stage (Retro Console's snapped vertices, affine UVs, texture rules, screen door);
+  - bloom over see-through surfaces;
+  - realtime GI's per-pixel light.
+
+**Measured**
+- stress editor_render, this round's scene: colour grading, bloom and edge outline on the Main Camera, an icosphere moved
+  each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 44.53 ms a frame;
+  - views on the card: 42.09 ms, 33 views on the card and none on the CPU.
+- The filters' own passes, which stay the CPU's, are most of the Game view's time: 24.49 ms against 25.41.
+- The Scene view's 3D: 9.72 ms against 5.50.
+
+**Checked**
+- Card against CPU, the Game view through the Main Camera's filters (RTX 4070 SUPER):
+  - colour grading, vignette and bloom: mean 0.053 / 255, 100 % within 3;
+  - edge outline and sharpen: 0.093;
+  - halftone: 0.037;
+  - line art: 0.094.
+- Each stack changes the plain picture: the filters ran.
+- Retro Console's view goes to the CPU with its reason.
+- An Opus review found:
+  - a transparent render's bloom seeing "no light" where the CPU sees 0;
+  - the card's colour one step off the CPU's own encoding of its linear light (colour grading's exposure and bloom
+    treated those pixels as touched);
+  - a test that couldn't show bloom read the card's linear light;
+  - the read-back's failure path;
+  - an extra full-size buffer each frame;
+  - unchecked framebuffers.
+
+  All are fixed. The colour is now encoded from the linear light as the CPU does, and an emissive cube's bloom
+  matches (mean 0.051 / 255).
+- Unit checks (round 217): Windows, in render-cache verify mode, 11,935, 0 failed (989 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
+## 2026-10-23 (round 216): baked light on the card - lightmaps and probes (task 0197, part 1)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the
+baked lighting's reasons to fall back, which kept most views of a baked scene - the user's project's - on the CPU.
+
+**Changed**
+- **Baked lightmaps, realtime lightmaps (Receive GI: Lightmaps) and the probe volume draw on the card.** A baked pass
+  reads each visible pixel's ambient light the way the CPU does: the lightmap at the pixel's lightmap UVs, the
+  realtime maps' bounce and sky share, or the probes around the point. The lighting then ranks them as the CPU does,
+  and skips the lights in Baked mode where a lightmap or baked probes already hold them.
+- Lightmap pages go up to the card once, and again only when a bake or a realtime pass publishes new ones.
+- Still on the CPU, saying why: realtime GI's per-pixel light for objects without realtime lightmaps. The CPU gathers
+  it from its own picture of the frame. Camera filters and the picture kept in linear light are the next round's.
+
+**Measured**
+- tests/test_gpu.cpp round 216, the Scene view's own time a frame, warm (RTX 4070 SUPER, a test run, not a quiet
+  machine):
+
+  | Scene | CPU | Card |
+  |---|---|---|
+  | Baked floor, wall and box with a probe-lit ball | 1.49 ms | 0.69 ms |
+  | Realtime lightmaps | 4.16 ms | 1.80 ms |
+
+- Cold, the card's first frames cost 21-26 ms each: the lightmap pages go up, and the plane and probe volume are made.
+- A probe volume is re-sent whole on every live update. For the volumes the card takes (up to 262,144 probes, 54 MB)
+  that is a copy of up to that much a frame while live probes catch up.
+
+**Checked**
+- Card against CPU (RTX 4070 SUPER):
+  - a baked floor, wall and box with a probe-lit ball: mean 0.060 / 255, 99.99 % within 3;
+  - realtime lightmaps: 0.051, 100 %.
+- Clearing the bake changes 166,098 of the card's pixels: the card isn't blind to it.
+- With an object that takes the per-pixel light, the view goes to the CPU with its reason.
+- An Opus review found:
+  - a card opened again (after a GPU error) never getting the probe volume back;
+  - replaced lightmap pages kept on the card and in memory;
+  - the probe volume's indices as floats past 2^24, and no cap on its size;
+  - a rebake with the same key unnoticed;
+  - the baked pass's cutout test without the world footprint;
+  - the bounce-onto-lightmap flag without the CPU's grid check.
+
+  All are fixed.
+- Unit checks (round 216): Windows, in render-cache verify mode, 11,920, 0 failed (988 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test, and on Linux the global sequencer's Play test, failed under the parallel load and passed alone.)
+
+## 2026-10-23 (round 215): toon maps and live procedurals on the card (task 0196)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the
+toon materials' and live procedural textures' reasons to fall back.
+
+**Changed**
+- **Toon materials' painted maps draw on the card:** the shade map, the shadow bias, the specular and rim masks, the
+  face shadow map, the inner lines and the hatching, and the hair's highlight across the strands. A toon pass reads
+  them at each visible pixel, and the toon lighting uses them as the CPU does.
+- **Live procedural textures draw on the card** wherever the CPU reads their image too. Only close up, where one of
+  the texture's texels covers more than a pixel and the CPU evaluates the procedural point by point, does the view
+  draw on the CPU, saying "a live procedural texture seen close up".
+- Still on the CPU: see-through toon materials, toon axis materials, lightmaps, probes, realtime GI and camera filters
+  (the next round).
+
+**Measured**
+- stress editor_render, this round's scene: toon materials with a shade map, inner lines, a specular mask and the hair
+  highlight on the icospheres, one moved each frame, with the 50k-face sphere (RTX 4070 SUPER, headless):
+  - views on the CPU (all of them before this round): 24.10 ms a frame;
+  - views on the card: 11.19 ms, 33 views on the card and none on the CPU;
+  - the Scene view's own share: 9.31 ms against 4.43.
+
+**Checked**
+- Card against CPU (RTX 4070 SUPER):
+  - a toon sphere with every painted map: mean 0.34 / 255, 99.96 % of pixels within 3;
+  - one with the face shadow map, the hair highlight and lines in the shadow only: 0.47, 99.95 %;
+  - a live Bricks texture from 6 m: 0.33, 99.99 %.
+- The same texture close up sends the Scene view to the CPU with its reason.
+- An Opus review found:
+  - a failed toon-shader compile drawing the normals as maps instead of falling back;
+  - the toon pass's depth loaded from an undefined layout;
+  - the close-up estimate too generous off the frame's centre and under shear, and wrong on UVs in a line;
+  - toon cutouts losing their inner lines in Solid;
+  - a NaN rim mask, and a negative face map value.
+
+  All are fixed.
+- Unit checks (round 215): Windows, in render-cache verify mode, 11,910, 0 failed (986 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
+## 2026-10-23 (round 214): fewer views on the CPU - many lights, Solid, see-through and axis materials (task 0195)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round removes the
+first set of reasons a view still went back to the CPU.
+
+**Changed**
+- **More than 16 lights** draw on the card: the lights are a buffer of their own, any number of them.
+- **Solid and Wireframe shading** in the Scene view draw on the card. Solid lights each vertex with the CPU's own
+  formula and blends the colours across the face, as the CPU does, without the view transform.
+- **Weight Paint's colours** draw on the card too.
+- **Transparent and Glass materials** draw on the card: sorted back to front as the CPU sorts them, blended over the
+  lit picture the CPU's way (a Transparent surface by its alpha; Glass tinting what is behind and adding its
+  reflection). A click picks them as on the CPU, the selection outline goes round them, and they cast no shadow.
+- **Axis materials** draw on the card: their Top, Side, Bottom and High parts blended by slope and height, with the
+  noisy border, each projected triplanar.
+- What still draws on the CPU, saying why: see-through toon materials, toon maps and the hair highlight, live
+  procedural textures (next round), lightmaps, probes, realtime GI and camera filters (the round after), and cards
+  without dual-source blending.
+
+**Measured**
+- stress editor_render, this round's scene: glass, transparent and axis-material icospheres, one moved each frame, with
+  the 50k-face sphere (RTX 4070 SUPER, headless, so every picture is read back):
+
+  | Shading | Views on the CPU (all of them, before this round) | Views on the card | Views on the card / on the CPU |
+  |---|---|---|---|
+  | Shaded | 33.27 ms a frame | 27.07 ms | 33 / 0 |
+  | Solid | 28.81 ms | 25.07 ms | 33 / 0 |
+
+- The Scene view's own share:
+  - Shaded: 14.14 ms on the CPU against 9.68 on the card.
+  - Solid: 8.34 against 8.85. The CPU's Gouraud Solid is cheap, and headless the card's picture is copied back, which
+    the presented window of task 0193 doesn't do.
+
+**Checked**
+- Card against CPU (RTX 4070 SUPER):
+  - 24 lights in Shaded, Solid and Wireframe: mean 0.19-0.22 / 255;
+  - Weight Paint: mean 0.36 / 255;
+  - Transparent, Glass and a textured Transparent sphere: 99.9 % of pixels within 3 / 255;
+  - glass and faint panes in Shaded and Solid, and the glass pane selected: 100 %;
+  - axis materials in World mode (with the band and noise) and Local mode: 99.96 % and 99.69 %.
+- A click on the glass pane picks it, and through the faint pane the cube behind, on both devices.
+- An Opus review found:
+  - the outline missing round see-through objects over the sky;
+  - derivatives taken after a discard;
+  - an unknown surface value drawn opaque (the CPU draws it as Glass);
+  - Solid building axis parts it doesn't use.
+
+  All are fixed. Two small orderings differ from the CPU and are written up in docs/tasks/0195: a cutout drawn in the
+  CPU's see-through sort, and a triangle cut by the near plane sorted as one.
+- Unit checks (round 214): Windows, in render-cache verify mode, 11,904, 0 failed (985 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
+## 2026-10-23 (round 213): macOS and the card, decided (task 0194)
+
+**Asked:** the native-GPU roadmap's macOS step: the card presenting windows there too, if Blender's libraries make it
+possible.
+
+**Decided**
+- **No-go:** Blender's dependency build has the Vulkan loader on every platform but no MoltenVK (Vulkan over Metal), and
+  its developers don't expect to ship it. Under ADR 0001 Blendity doesn't add it, and with no Mac here nothing could
+  be run. macOS keeps the system's present and draws on the CPU what it can't draw on the card, as before.
+- Revisited if Blender bundles MoltenVK; a Metal backend would be a roadmap of its own (docs/tasks/0194).
+
+**Checked**
+- Documentation only: no code changed, no suite run (the round before ran the whole chain).
+
+## 2026-10-23 (round 212): the card presents the windows (task 0193, ADR 0061)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback. This round is the
+second step: the window shown by the card.
+
+**Changed**
+- **The card shows the window** (Windows and Linux): a swapchain on each OS window. A view drawn on the card stays
+  there: its picture isn't copied back, the window's canvas is left transparent over it, and the card puts the canvas
+  over the views' pictures and shows the frame. Only the canvas rows that changed go up each frame.
+- What the processor draws over a view - icons, gizmo handles, wires, panels, text - keeps its coverage
+  (`Color::over`, the same as before over anything opaque).
+- When the card can't present a window, or a present fails, the system shows it as before, every view drawn again.
+  `viewport present card|system` chooses.
+- Screenshots take the frame the card showed.
+- `Blendity --windowed-check out.png [--frames N]` runs the editor in a real window and measures card against system;
+  `BLENDITY_PREFS_DIR` gives such a run its own preferences.
+- `RasterInstance` has default material values: the card's texture-store test left them unset and was flaky.
+
+**Measured**
+- A real 2560 x 1369 window with the Scene view drawn every frame (RTX 4070 SUPER): 3.27 ms a frame presented by the
+  card, 3.69 ms by the system.
+- A 1080p window drawn and presented each frame (stress gpu_raster): 0.65 ms on the RTX 4070 SUPER, 2.23 ms on the
+  3060 Ti; the CPU's view and GDI present 16.75 ms.
+- The card's frame against the system's: mean 0.007 / 255.
+
+**Checked**
+- Color::over equals blend() over opaque pixels; layers drawn over a hole and composited match drawing directly within
+  2 / 255 a layer (tests/test_render.cpp).
+- A frame the card presents equals the system's, drawn fresh and from the caches; back on the system no transparent
+  pixel is left (tests/test_gpu.cpp).
+- A cached picture whose slot was drawn over draws again; a camera's depth of field keeps its view off the card and the
+  frame still matches; a real window through `--windowed-check`; the card's texture-store test 10 of 10 runs.
+- An Opus review found that minimising a window turned the card off for good, a mid-resize swapchain drawn at the old
+  size, the swapchain left on a window the system then presented, depth of field lost on card views, closed windows'
+  swapchains not let go, a failed present showing the views black and presents waiting for the display. All are fixed.
+- Unit checks (round 212): Windows, in render-cache verify mode, 11,874, 0 failed (980 tests), 0 stale
+  pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-23 (round 211): the 3D overlays on the card (task 0192, ADR 0061)
+
+**Asked:** the views native on the GPU, like Blender's viewport, with the CPU as the fallback when there's no GPU.
+This round is the first step: the overlays.
+
+**Changed**
+- **With the views on the GPU, the card now draws the Scene view's overlays** in the same submission as the picture:
+  the grid and its axes, wireframes, dots, the selection outline, and Face mode's dot on every face. The CPU used to
+  draw them over the read-back picture every frame. Bone, curve and lattice wires, icons and gizmos are still the
+  CPU's (task 0193 takes them on).
+- The CPU path is unchanged. When the card can't take them (an error, a scaled frame), the overlays recorded for it
+  are drawn by the CPU, exactly as before.
+
+**Measured** (stress editor_render, the views on the GPU, RTX 4070 SUPER)
+- The overlays' CPU time in Edit Mode's Face mode: 3.2-3.6 -> 0.2 ms a frame.
+- Edit Mode with GPU views: entering 18.6-21.5 -> 16.2-18.6 ms, Select More 8.6-11.0 -> 8.3-8.6, extrude
+  38.1-41.6 -> 37.5-38.8, undo 13.0-14.5 -> 11.6-14.8.
+- The card's overlays against the CPU's: the outline identical. The grid and wireframes are mostly within 1 / 255 (the
+  card blends at 8 bits, as task 0100's cage): mean 0.79 / 255, 99.09 % within 3.
+
+**Checked**
+- Recording the overlays and replaying them draws exactly what drawing them does; the card draws the grid, a
+  wireframe and the outline as the CPU does; refused, they're replayed here; the cage test gains Face and N-gon Face
+  modes (tests/test_render.cpp, tests/test_gpu.cpp).
+- Every kind of overlay interleaved - dots of several sizes over and under lines, translucent, without the depth test,
+  an outline between them - drawn by the card: mean 0.82 / 255, 99.83 % within 3; the card drew Face mode's dots.
+- An Opus review found an over-read of the outline table when there's none, and recording on frames the card would
+  refuse (which would also have drawn the probes' dots from the previous frame). Both are fixed, along with its other
+  points: the CPU's interleaved order, fewer copies, the tests above. The CPU path records nothing.
+- Unit checks (round 211): Windows, in render-cache verify mode, 11,861, 0 failed (978 tests), 0 stale
+  pictures. Linux with libraries: 11,491, 0 failed. Sanitizer build: 11,367, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-23 (round 210): the roadmap of tasks 0156-0191 written up (task 0176)
+
+**Asked:** the roadmap's last task: every task with its round, PR and numbers against the Blender column.
+
+**Added**
+- docs/tasks/0176-roadmap-write-up.md: the 36 tasks of rounds 174-209 (PRs #119-#154) stack by stack - what changed
+  and what was measured, the targets missed marked as missed (OptiX 0.32x / 0.20x GPU Compute against 1.4x / 1.8x; the
+  first Editing stack's 683 ms at 4K before task 0191; the interaction audit's 4 % against 30 %; two of the three
+  performance rows short of half their gap), and what stayed open.
+- Tasks 0159, 0160 and 0178 were still marked "in progress" though their rounds landed: marked done.
+
+**Checked**
+- Documentation only: no code changed, no suite run (the round before ran the whole chain: 11,841 checks on Windows,
+  11,488 on Linux, 11,364 with sanitizers, all passing).
+
+## 2026-10-23 (round 209): entering Edit Mode redraws only the Scene view (task 0185, round 3 of 3)
+
+**Asked:** the performance pass against Blender's numbers, its third row: entering Edit Mode on a 50k-face mesh.
+
+**Fixed**
+- **Entering or leaving Edit Mode redrew the Game view** (and changed the Camera Preview's and the lighting's keys)
+  though nothing in them changes: the scene's render hash held the edit state, which only the Scene view draws and
+  its own key already holds.
+
+**Measured** (stress editor_render, the views on the CPU, a quiet machine)
+- Entering Edit Mode, caches cold: 23.0-24.1 -> 18.0-18.4 ms (24.5 in the table before the pass); Blender 5.2.2's row
+  18.1 ms: level with it, the target of half the gap met.
+- The pass, three rounds: undo 25.7 -> about 21.0 ms (Blender 15.7), extrude 48.2 -> 40.1-41.5 (31.7), Edit Mode entry
+  24.5 -> 18.0-18.4 (18.1); the first two short of half their gap, the third closed. What is left is drawing on the CPU.
+
+**Checked**
+- Entering and leaving Edit Mode renders the Scene view only and leaves the scene's render hash as it was
+  (tests/test_editor.cpp); render-cache verify mode (every cached picture drawn again and compared) found no stale
+  picture.
+- Unit checks (round 209): Windows, in render-cache verify mode, 11,841, 0 failed (974 tests), 0 stale
+  pictures. Linux with libraries: 11,488, 0 failed. Sanitizer build: 11,364, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone; Edit Mode entry 17.9 ms in the chain's stress run.)
+
+## 2026-10-23 (round 208): an extrude without the whole-mesh work (task 0185, round 2 of 3, ADR 0053 amended)
+
+**Asked:** the performance pass against Blender's numbers, its second row: extruding three faces of a 50k-face mesh.
+
+**Changed** (results the same to the bit)
+- **An Edit Mode operator's copy of the mesh leaves its caches behind** (the render meshes, edge table and topology
+  snapshot: most of the 3.3 ms copy); an operator that only moved vertices takes them back, so it still follows in place.
+- **The flat and the smooth render meshes share their triangles and corner table**; smooth normals and the edge table
+  are worked out on every thread.
+- **Auto Fuse's check after an extrude** no longer builds a table of the whole mesh or computes every face's normal on
+  one thread.
+
+**Measured** (stress editor_render, the views on the CPU, a quiet machine)
+- Extrude three faces of the 50k-face sphere: 47.5 -> 41.5 ms (40.2-42.6 over seven runs); the operator 7.1 -> 3.3 ms,
+  the two builds 11.2 -> 9.1-10.3, the edge table 1.4 -> 0.4. Blender 5.2.2's row 31.7 ms: 41 % of the gap closed,
+  short of the half (40.0 ms) by 1.5 ms.
+- Edit Mode entry gained too: 23.0-24.0 ms, was 26.3-26.9 (its build reuses the triangles). Undo 20.5-21.2 and Select
+  More 14.3-14.4 unchanged.
+
+**Checked**
+- After an extrude both render caches match builds from nothing; Smooth Vertices still builds nothing (moves in
+  place); the edge table from the corners is edges()'s on a sphere, a cube, an extrude, n-gons, a face repeating a
+  vertex, faces of one and two corners and corners in no face; smooth normals equal each vertex's faces' sum; two
+  faces fused onto one floor face leave a whole mesh (tests/test_modeling.cpp); the threaded-vs-serial build tests pass.
+- An Opus review found an out-of-range write the new Auto Fuse loop made reachable (a second region landing on the
+  faces the first fuse added: now only the faces the pass started with are looked at), and that the shared tables
+  travelled with every copy (they now start empty in a copy, as the normals' state does, and count in the mesh's
+  memory); its other points are taken (the corner table lists face corners only, the regions through a table of the
+  selected faces, the tests above).
+- Unit checks (round 208): Windows, in render-cache verify mode, 11,837, 0 failed (973 tests), 0 stale
+  pictures. Linux with libraries: 11,484, 0 failed. Sanitizer build: 11,360, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `curved`, `editor_render`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone; curved's 8 problems and 79 overlapping results are the same as the build before this round.)
+
+## 2026-10-22 (round 207): undo no longer redraws the shadow map (task 0185, round 1 of 3)
+
+**Asked:** the performance pass against Blender's numbers: the three rows furthest behind, half of each gap a round.
+
+**Fixed**
+- **Undo drew the shadow map again every time.** The map's cache key mixed in each material's address; undo restores
+  the scene's snapshot, whose materials are copies, so it always missed (redo restores the live objects and hit). The
+  key now holds only what the depth pass reads: each material's surface type and Cast Shadows.
+
+**Measured** (stress editor_render, the views on the CPU, a quiet machine)
+- Undo of an extrude on the 50k-face sphere: 25.9 -> 21.2 ms (21.0-21.5 over five runs, 21.9 in the chain's stress run; the table had 25.7); Blender 5.2.2's row 15.7 ms.
+  45 % of the gap closed, short of the half (20.7 ms). With the views on the GPU it was, and stays, about 13.6 ms.
+- The stress rows now print each Edit Mode frame's parts (the restore, each view, the overlays, shadows, the UI): the
+  undo frame's restore is 0.3 ms; the rest is drawing the restored mesh, which headless Blender doesn't do.
+- Tried and reverted: the overlay batch's sort and copy in parallel (no measurable change).
+- The other rows within noise of the same day's run before the fix: Edit Mode entry 25.5-26.8 ms (was 26.3-26.9), extrude 46.7-49.0 (48.4), Select More 14.3-14.7 (14.7).
+
+**Checked**
+- An undo of a colour change keeps the shadow map while the views draw it (fails on the old key; tests/test_editor.cpp).
+- An Opus review found no bug; its points are taken: the test pinned to the CPU views and checking they redrew, the
+  stress parts labelled as nested, the baseline drift stated; two other caches keyed by material addresses are noted
+  in the task doc.
+- Unit checks (round 207): Windows, in render-cache verify mode, 11,824, 0 failed (969 tests), 0 stale
+  pictures. Linux with libraries: 11,471, 0 failed. Sanitizer build: 11,347, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load (and once alone while another build ran) and passed run alone on a quiet machine.)
+
+## 2026-10-22 (round 206): essentials first, a guide per layout, Open Recent, typed gizmo moves (task 0190, ADR 0060 amended)
+
+**Asked:** the interaction pass's second round.
+
+**Changed**
+- **The Inspector shows each component's first seven fields**, the rest under "Show N more" (Show less folds them
+  again); its All Fields switch shows everything (kept in the preferences; `inspector essentials on|off`).
+- **A first-run guide per layout:** the first time you use a stage layout, a strip above the windows says what it is
+  for and offers its next three steps (UV Unwrapping: Smart UV Project, Part Unwrap, Pack Islands); Got it hides it
+  for good; Help > Reset Guides brings them back.
+- **File > Open Recent** (the last eight scenes); **Edit > Redo** names the action as Undo does.
+- **Typing a number while dragging a gizmo's arrow** moves exactly that far along it (2*1.25 works), as Blender's
+  numeric input; Push/Pull already took typed distances.
+
+**Checked**
+- A Camera's Inspector shows Show more until opened and nothing hidden with All Fields; the UV Unwrapping guide shows
+  its steps until Got it, then never; every guide's steps are palette commands; an opened scene leads Open Recent;
+  Redo carries the action's name; "2*1.25" typed during an axis drag moves 2.5 (tests/test_editor.cpp).
+- The audit's action counts don't change for these (they reduce what is on screen and what must be remembered, not
+  path length): a study with newcomers would measure them.
+- An Opus review's findings are fixed: digits typed during a gizmo drag also ran shortcuts (Maya's Backspace deleted
+  the selection; a test now drags a real arrow and types), the Camera Filters stack was cut inside its effects, Open
+  Recent swapped the scene mid-frame, a 2-pixel band under the guide strip wasn't painted, Show less where nothing was
+  hidden, the guides switch and All Fields not saved at once. Known limit: the seven are the first seven in each
+  component's order, so an Area Light with colour temperature on hides Intensity until Show more.
+- Unit checks (round 206): Windows, in render-cache verify mode, 11,818, 0 failed (968 tests), 0 stale
+  pictures. Linux with libraries: 11,465, 0 failed. Sanitizer build: 11,341, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 205): find any command - the palette, Quick Favorites, the status bar's hints (task 0189, ADR 0060)
+
+**Asked:** an interaction pass grounded in HCI research: keep the Unity feel, cut the friction; measure first.
+
+**Changed**
+- **Command palette** (Ctrl+K, or F3 as in Blender): type a few words and every keymap action, window, layout,
+  creatable object and console-backed command that matches is listed with its shortcut, the recent ones first; Enter
+  runs it. It reaches tools the current layout hides. Console `palette <words>` lists, `palette run <words>` runs.
+- **Quick Favorites** (Shift+Q): right-click a palette row or a menu row to keep its command there; each layout has
+  its own list; `favorite <name>` from the console. The preferences keep them and the palette's recent list.
+- **The status bar** says what the mouse and keys do where the mouse is (the Scene view's tool or Edit Mode, the
+  feel's navigation) and offers Undo for the last action by name.
+- **Add Component** lists the last five added above the categories; **splitters** take a grab 4 pixels either side.
+
+**Checked**
+- "hair" puts Rig Hair from Mesh first and Enter runs it; every keymap action is in the palette; `palette run create
+  cube` makes a cube; a favorite shows under Shift+Q and only in its layout; the status bar's text follows the tool;
+  Add Component's Recent; the splitter grabbed 3 pixels inside the area beside it; Esc closes the palette; every
+  palette name is unique; `palette run bring windows back` closes a secondary window (tests/test_editor.cpp).
+- The audit (docs/tasks/0189-interaction-pass-1.md): 12 common tasks walked through before and after - 28 actions to
+  27 (4 %), far from the roadmap's 30 %: the paths were already two or three actions, like Unity's and Blender's. The
+  first count (33 -> 28 with dead ends removed) was wrong, an Opus review found; the corrected one is published. What
+  the palette changes is recall - knowing where a command lives - which needs people to measure.
+- An Opus review's findings are fixed: Esc didn't close the palette, a favorite couldn't be removed from Shift+Q,
+  Shift+Q opened while flying (Unity's "down, fast"), palette names repeated (each is unique now), a menu row mapped to
+  the wrong command (layouts before windows; combo options never), the status bar's hint cut and the message squeezed
+  (measured now, cut with an ellipsis), a splitter press also reaching the area beside it, a layout chosen from a
+  secondary window changing state without its dock, Tab moving the keyboard behind the palette, and hints that said
+  "add" where a click toggles.
+- Unit checks (round 205): Windows, in render-cache verify mode, 11,785, 0 failed (966 tests), 0 stale
+  pictures. Linux with libraries: 11,432, 0 failed. Sanitizer build: 11,308, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 204): a render-only window and a pen tablet (task 0188, ADR 0059 amended)
+
+**Asked:** a second screen showing the render large; a pen display for the Editing tab.
+
+**Changed**
+- A Render or Game tab in a window of its own: right-click its tab > Render Only shows the picture alone, fitted to
+  the window (the Game view live until a render exists); its controls (Show Tabs, Full Screen) appear in a strip when
+  the mouse is at the top. Full Screen fills the window's display without a frame (Esc leaves): Win32 borderless,
+  X11's _NET_WM_STATE_FULLSCREEN, macOS full screen.
+- Pens: the tilt and the eraser end come with the pressure (Windows' pointer messages); the Editing tab's brush gets
+  thinner with lighter pressure and wider when the pen is tilted, as a pencil; the eraser end erases. A palm on the
+  screen while the pen is in range is ignored (no stray clicks or pinch-zooms).
+- Tablet Mode (a tab's right-click menu, or `window tablet on [id]`): that window's UI half as big again - bigger
+  targets for a pen or a finger.
+- Console `window renderonly|fullscreen|tablet on|off [id]`.
+
+**Checked**
+- Render-only draws no controls until the mouse reaches the top, the picture fills the window's width or height within
+  2 pixels, Show Tabs and Full Screen appear at the top; full screen takes the display's rectangle and gives the old
+  one back; Tablet scales one window's UI by 1.5 and not the main one's; a pen at half pressure and 30 degrees of tilt
+  makes a 0.875-times-wide dab, a mouse the size set, the eraser end reaches the brush; the strip's Full Screen acts
+  on its own window (not the main one), Esc and Show Tabs leave full screen, an unknown window id is refused
+  (tests/test_editor.cpp).
+- An Opus review's findings are fixed: the strip's buttons and the console's window modes acted on the main window
+  (a window's state is swapped in while it draws: the modes now wait for the frame's end, as tab moves do); a window
+  could stay full screen with no way out; a finger's button-up could be dropped while a pen came near; any pointer
+  leaving cleared the pen's nearness; full screen restored a maximised window's rectangle wrongly.
+- Unit checks (round 204): Windows, in render-cache verify mode, 11,675, 0 failed (964 tests), 0 stale
+  pictures. Linux with libraries: 11,322, 0 failed. Sanitizer build: 11,198, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 203): windows beside the main one, on any display (task 0187, ADR 0059)
+
+**Asked:** windows outside the main editor - the Render tab on a second screen, the Editing tab on a pen display.
+
+**Changed**
+- Drag a tab out of the editor and it gets a window of its own where you let go; its tab menu has Move to New Window,
+  Move to Main Window and Move to Display N; Window > Bring Back N Windows; closing such a window gives its tabs back.
+  A window holds a dock like the main one (split it, add tabs); each window type is still in one place at a time.
+- One scene and one simulation: a window draws with its own input, popups, keyboard focus and DPI (a display at 150%
+  scales its window only), and a drag (an asset, a Hierarchy row) belongs to the window it started in.
+- The windows are remembered with the layout and open again where they were (fitted to a display that is there).
+- Console `dock move <Window> newwindow | main | monitor <n>`, `dock windows`.
+
+**Checked**
+- `dock move Render newwindow`: a second window holds the Render tab and both draw; its tab's right-click menu opens
+  in it, not in the main window; a UI scale on it alone; closing it gives the tab back; the layout string brings it
+  back; a layout for the main window leaves it there; a broken or oversized saved window is refused or fitted; a tab
+  moved to display 2's middle and back; a tab dragged out of the editor gets a window (tests/test_editor.cpp).
+- A real window on this PC's three displays (stress `windows`, run by hand: it opens a window): made at (120, 120)
+  640 x 400, moved to (200, 160) 800 x 500 and onto display 2, each reported back exactly where asked.
+- An Opus review's findings are fixed (the UI context's font wasn't movable; a poll inside a frame could paint the main
+  window into a secondary one; drags and undo read the main window's mouse; prefs and layouts saved or applied from a
+  secondary window; Win32 DPI and Cocoa's points in placement; X11 copy and paste between windows).
+- Unit checks (round 203): Windows, in render-cache verify mode, 11,657, 0 failed (962 tests), 0 stale
+  pictures. Linux with libraries: 11,304, 0 failed. Sanitizer build: 11,180, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone; macOS compiles the Cocoa calls in CI only.)
+
+## 2026-10-22 (round 202): the Editing tab's room to grow, specified (task 0184)
+
+**Asked:** the roadmap's last Editing task: layers with blend modes, text, healing and clone, content-aware fill -
+specified now, built when asked.
+
+**Changed**
+- docs/tasks/0184-editing-room-to-grow.md: where each attaches (the adjustment registry, masks, the document's cache
+  keyed by text, so a step holding pixels needs a revision in its text) and the research each would follow - the
+  W3C / Photoshop blend modes Blender's Mix node shares, Poisson image editing (Pérez et al. 2003) for healing,
+  PatchMatch (Barnes et al. 2009) with Wexler et al.'s voting for content-aware fill, Criminisi et al.'s exemplar
+  inpainting as the simpler first step - an order, and what isn't planned (generative fill: a model and licence
+  question to ask first).
+
+**Checked**
+- Documentation only: no code changed, the check chain wasn't run again (round 201's checks hold).
+
+## 2026-10-22 (round 201): the Editing tab at 4K - a preview the window's size, tables for the display axis (task 0191, ADR 0058 amended)
+
+**Asked:** (round 198's measured miss) an 11-step stack on a 4K render took 683 ms, and a slider near the top of the
+stack stalled the editor as long.
+
+**Changed**
+- The Editing window works on a preview the canvas's size (its longest side in steps of 512 pixels), as Lightroom's
+  Develop module does; zoomed in past it, the window shows the full picture. Export, Apply to Texture and the camera
+  look use the full picture. The status line says when a preview is shown.
+- The display axis through tables (no `pow` per pixel in Highlights / Shadows / Whites / Blacks, Clarity, HSL, Noise
+  Reduction); the Tone Curve as one table per channel; Noise Reduction's tones once a pixel and its weights from
+  tables; result buffers reused instead of allocated and cleared for each step.
+- A step's input size is worked out from the crops and turns before it, not by running them (adding a mask after a
+  crop no longer evaluates the stack at full size).
+
+**Checked**
+- The preview matches the full result made small for pointwise steps (mean difference 0.00014); a crop on it is the
+  crop at its scale; results written into reused buffers equal a fresh document's; Noise Reduction still smooths
+  (tests/test_editor.cpp). An Opus review's findings are fixed (spare buffers of an old size kept, a resize remaking
+  the preview each frame, an infinite pixel in Noise Reduction, a tiny crop becoming the whole picture).
+- Measured (stress `editing`, 3840 x 2160): what the window evaluates while you work, its 1600-pixel preview - the 11-step stack 65.4 ms, a slider on its last step 2.4 ms (task 0181's targets: 150 and 40). At full size, for export: the stack 412.0 ms (683 before), a slider on its first step 392.0 ms (707), on its last 14.0 ms (31); the Tone Curve alone 29.8 ms (347), Noise Reduction 252.1 ms (468).
+- Unit checks (round 201): Windows, in render-cache verify mode, 11,634, 0 failed (960 tests), 0 stale
+  pictures. Linux with libraries: 11,281, 0 failed. Sanitizer build: 11,157, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 200): textures through the Editing tab, and the stack as a camera look (task 0183, ADR 0058 amended)
+
+**Asked:** the Editing tab for textures (results kept as texture assets), and a look made there carried live by the
+camera.
+
+**Changed**
+- Textures window > Edit (or `develop open texture <name>`): the texture's albedo in the Editing tab. Apply to Texture
+  (`develop apply`) writes the result beside the asset as `<texture> edit.png` and puts an Image layer on top of the
+  texture's stack that writes the albedo only - the procedural layers stay underneath, the layer can be turned off,
+  and the asset is saved as any edit of it is. Editing the texture again starts from the albedo under that layer with
+  the same adjustments (kept beside the image as `.edit`), so edits go on rather than pile up.
+- Use as Camera Look (`develop look`): the stack's global adjustments become the Main Camera's filters, so the Game
+  view and F12 carry the look live: Exposure, Contrast, Saturation, Temperature / Tint and the Tone Curve (as lift,
+  gamma and gain through black, middle grey and white) into one Color Grading; a darkening Vignette and Sharpen as
+  their own. Masked steps and the ones no camera filter does (Highlights, Clarity, HSL...) are left out and named.
+  Using it again replaces the look it gave before (the camera's first Color Grading, Vignette and Sharpen are reused).
+- Fixed: a texture's Image layer read its file upside down (the layer's rows from the top, the image's from the
+  bottom). Image layers now show their file the way up it is; a texture made with one before shows it flipped back.
+
+**Checked**
+- An Image layer's top row is its file's top row. A Bricks texture edited and applied: its albedo matches the
+  Editing export exactly (0 / 255 apart); editing again reopens the
+  same adjustments and Apply reuses the layer; an exposure +1 stack gives the camera a Color Grading with exposure 1
+  that doubles a mid-grey pixel; contrast, saturation, a curve (through its black, grey and white), a vignette and
+  sharpening carry over, a masked step and Clarity are left out, a second look replaces the first, a stack with
+  nothing a camera does is refused (tests/test_editor.cpp). An Opus review's findings are fixed (the flipped Image
+  layer, a second Apply not reaching materials, looks piling up, the curve's ends, the vignette's strength).
+- Unit checks (round 200): Windows, in render-cache verify mode, 11,625, 0 failed (959 tests), 0 stale
+  pictures. Linux with libraries: 11,272, 0 failed. Sanitizer build: 11,148, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `textures`, `filters`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 199): masks for the Editing tab's adjustments (task 0182, ADR 0058 amended)
+
+**Asked:** local adjustments: each adjustment limited by a mask - a gradient, a luminance or colour range, a painted
+mask - and masks combined.
+
+**Changed**
+- Each adjustment (but Crop / Straighten and Flip / Rotate) takes a mask: Add Mask > Linear Gradient, Radial
+  Gradient, Luminance Range, Color Range or Brush. Parts combine top to bottom by Add (either), Subtract or Intersect
+  (both), each invertible; a masked adjustment blends with what came before it by the mask's weight.
+- On the picture: the selected part's handles (a radial's centre and outline, a gradient's two ends) drag; a Brush
+  part paints with the mouse or a pen (pressure lightens the stroke; Erase or Alt removes), one undo step a stroke;
+  Show tints where the adjustment acts in red.
+- Masks are fractions of the picture, saved in the `.edit` file (a brush as run-length hex at 512 pixels on its
+  longest side). Console `develop mask <step> add|subtract|intersect <kind> [numbers] | paint <u> <v> <radius> |
+  invert | remove | clear`, `develop mask show on|off`.
+
+**Checked**
+- A radial mask keeps an exposure change inside its radius (a pixel outside within 1e-4 of the source); a luminance
+  range doubles a shadow and leaves a highlight; subtract and intersect; invert; a colour range picks red and not blue
+  or grey; a brush dab and its erase; the text form of every kind; a crop ignores a mask; the console's mask commands,
+  undo, the .edit file and Show (tests/test_editor.cpp).
+- Unit checks (round 199): Windows, in render-cache verify mode, 11,603, 0 failed (957 tests), 0 stale
+  pictures. Linux with libraries: 11,250, 0 failed. Sanitizer build: 11,126, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 198): the Editing tab - develop a render or an image, non-destructively (task 0181, ADR 0058)
+
+**Asked:** a new Editing tab with basic Lightroom / Photoshop adjustments on renders, images and textures,
+extensible.
+
+**Changed**
+- Window > Editing (and the Editing layout): a picture with an adjustment stack beside it. Open an image (or drop one
+  on the window), or the Render window's last render - its light, shown through the render's own view transform.
+  Seventeen adjustments, applied top to bottom in linear light: Exposure, Contrast, Highlights, Shadows, Whites,
+  Blacks, Temperature / Tint, Vibrance / Saturation, Clarity, Dehaze, Tone Curve (RGB and per channel: click, drag,
+  right-click), HSL (eight hue bands), Sharpen, Noise Reduction, Vignette, Crop / Straighten, Flip / Rotate. Each step
+  turns off, moves or goes; Undo / Redo; a Before / After line dragged across the picture; presets (Neutral, Film,
+  Anime Pop, Manga Contrast, Cinematic Teal-Orange).
+- Non-destructive: the source is never written. Save keeps the stack as an `.edit` text file beside the image (a
+  render's pixels beside it as EXR, or HDR where the build writes no EXR); Export writes PNG / JPEG through the view, or EXR / HDR in linear light.
+- A slider reruns only the steps from the one changed (each step's result is cached).
+- The camera filters' Color Grading and Vignette share their formulas with the Editing tab (`image/grade.h`).
+- The console: `develop open <file>|render`, `add`, `set <Type>.<Field> <value>`, `remove`, `move`, `enable`, `curve`,
+  `preset`, `undo`, `redo`, `export`, `save`, `split`, `list` (`edit` stays Edit Mode's).
+
+**Checked**
+- Exposure +1 doubles a mid-grey pixel; Contrast 0 is the identity; Highlights -100 lowers 0.9 and leaves 0.2; a tone
+  curve through (0.5, 0.75) lifts 0.5 to 0.75; HSL red -100 greys red and leaves blue; every adjustment is the
+  identity at its defaults and survives its text form; crop, straighten, flips and quarter turns move the right
+  pixels; a slider on the last step reruns one step; undo; save and reopen reproduce the export byte for byte; every
+  preset; the window through the console, the split, export (tests/test_editor.cpp).
+- Measured (stress `editing`, 3840 x 2160): the 11-step develop stack 683.2 ms in full, a slider on its last step 30.7 ms (1 step rerun), on its first 706.8 ms; the slowest adjustment alone Noise Reduction 467.8 ms. Task 0181's targets at 3840 x 2160: the full stack 683.2 ms (at most 150: missed), a slider on the last step 30.7 ms (at most 40: met). The full stack is the Tone Curve (347 ms alone) and Noise Reduction (468 ms) at full resolution: a following round takes it up (a preview at the screen's size, as Lightroom's, and look-up tables).
+- Unit checks (round 198): Windows, in render-cache verify mode, 11,569, 0 failed (955 tests), 0 stale
+  pictures. Linux with libraries: 11,216, 0 failed. Sanitizer build: 11,092, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `filters`, `editing`: 0 problems. (the sanitizer leg's autopose timing check failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 197): the UV Editor on one material's faces (task 0186)
+
+**Asked:** the UV Editor showing one material's islands: a Material filter, the others dimmed or hidden; "Edit UVs"
+from the Materials window; the background following the chosen material.
+
+**Changed**
+- UV Editor > the Material picker (All materials, then each slot): only that material's faces are drawn as editable,
+  picked, selected, moved, unwrapped (Unwrap, Smart UV, Part Unwrap, projections) and packed; the others are a faint
+  outline behind, or hidden (`uv others hide`), and keep their UVs. The Material Texture background is the chosen
+  slot's. Console `uv material <name>` / `+<name>` (adds a material) / `all`; Materials window > Edit UVs.
+
+**Checked**
+- On a cube with two materials, the second chosen: Unwrap changes only its faces, Select All selects only its corners,
+  Pack puts them in 0-1 and leaves the first material's UVs exactly; dimmed, hidden, adding a material, All, an unknown
+  name refused (tests/test_modeling.cpp).
+- Unit checks (round 197): Windows, in render-cache verify mode, 11,460, 0 failed (951 tests), 0 stale
+  pictures. Linux with libraries: 11,107, 0 failed. Sanitizer build: 10,984, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `uv`: 0 problems.
+
+## 2026-10-22 (round 196): PartField's part tree for Part Unwrap, opt-in (task 0180, ADR 0057 amended)
+
+**Asked:** an opt-in "semantic parts" switch: PartField's learned per-face features (NVIDIA; non-commercial weights,
+never downloaded by Blendity) in place of the geometric part tree, as PartUV uses them.
+
+**Changed**
+- `uv parts semantic on|off` (off by default): Part Unwrap's part tree from PartField's features when the user has
+  installed a conversion of the model (`~/.blendity/ai/partfield/partfield.onnx`, through the ONNX Runtime of the AI
+  install); the geometric tree otherwise, the Console saying which and why. `src/scene/partfield.*`: the model's
+  contract (face centroids and normals in -> a feature per face out), rows scaled to unit length; the part tree takes
+  features of any width (wider than 32 through a fixed random projection).
+- `tools/partfield/`: the conversion script the user runs with PartField's code and their weights, and its README.
+
+**Not done:** the roadmap's spike - does PartField export to ONNX? - needs PartField's code and weights, which are
+NVIDIA's under a non-commercial licence; downloading them is the user's decision, so it wasn't run. The export script
+is written against the contract with placeholder names for PartField's encoder and feature query (its README says so,
+and names the fallback: features written by PartField in Python, read the same way).
+
+**Checked**
+- With a stand-in model, the features reach the part tree: the teapot's charts come out otherwise (10 against the
+  geometric tree's 11), every chart under the bound, also with features 448 wide; the switch is off by default, the
+  geometric tree is used exactly when nothing is installed, the editor's result is the stand-in's exactly
+  (tests/test_modeling.cpp).
+- Unit checks (round 196): Windows, in render-cache verify mode, 11,450, 0 failed (949 tests), 0 stale
+  pictures. Linux with libraries: 11,097, 0 failed. Sanitizer build: 10,974, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `uv`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test (a GPU opening in the background, timed) failed under the parallel load, then in two of three runs alone (one while another build loaded the machine, one on a quiet machine) and passed in the third: a flaky timing test, not changed by this round; the sanitizer leg's autopose timing likewise failed under load and passed alone.)
+
+## 2026-10-22 (round 195): unwrap by parts - PartUV's search on a geometric part tree, ABF++ beside LSCM (task 0179, ADR 0057)
+
+**Asked:** a part-based unwrapper after PartUV (SIGGRAPH Asia 2025): its geometric core (the PartField model is task
+0180, opt-in).
+
+**Changed**
+- UV Editor > Part Unwrap (also the UV menu, Modeling Tools, console `uv parts [bound] [multi|single]`): as few charts
+  as keep every chart's distortion - the area-weighted mean of max(s, 1/s) over its faces, s a face's share of the UV
+  area over its share of the 3D area - under the bound (PartUV's 1.25). A part tree clustered from the geometry
+  (normal and position, across manifold edges only; material slots joined last) is searched top down: a part becomes
+  one chart if it passes, else the fewest charts of PartUV's Normal heuristic (clustered by normal, 2..10) or Merge
+  heuristic (the part's oriented-box labels, merged greedily) that all pass, else its two children. A chart never spans
+  two material slots; a chart whose outline crosses itself or whose triangle flips fails; a non-manifold edge is a cut.
+- ABF++ (`src/scene/uv_abf.cpp`, ported from Blender's Angle Based unwrap: angles moved least so a flat layout exists)
+  then LSCM on a chart that LSCM alone nearly passes (within 1.5 x the bound), kept when better; LSCM screens every
+  candidate (one solve). LSCM takes per-triangle angles (`uv_internal.h`).
+- Each part's charts packed together as one block, the blocks at one texel density with a gap between them; or each
+  separate piece on its own UDIM tile (u 0-9, then a row up). The top-level parts are solved on threads.
+- `uv report`: any UV map measured PartUV's way - charts, seam length, distortion.
+- The tests' scratch folder comes from `BLENDITY_TEST_DIR` when set: the check chain runs the test groups as parallel
+  processes, and a shared temporary folder had let one group's files become another's (a texture deletion and an
+  export read-back failed under load in round 192's chain, then passed run alone).
+
+**Measured** (stress `uv`, "Part Unwrap (task 0179)")
+- cube + boss + torus (416 faces): Smart UV Project 22 charts, seams 32.56 m, distortion 1.05 / 1.17, 0.4 ms; Part Unwrap 6 charts, seams 16.90 m, distortion 1.13 / 1.22, 35.9 ms (3 parts, 42 tried, 1 ABF++).
+- teapot (2.0k faces): Smart UV Project 58 charts, seams 42.94 m, distortion 1.08 / 1.20, 1.5 ms; Part Unwrap 11 charts, seams 15.74 m, distortion 1.13 / 1.18, 108.0 ms (4 parts, 101 tried, 2 ABF++).
+- 50k-face sphere, 12 slots (50.2k faces): Smart UV Project 8 charts, seams 22.90 m, distortion 1.09 / 1.10, 40.5 ms; Part Unwrap 12 charts, seams 37.70 m, distortion 1.03 / 1.03, 265.9 ms (12 parts, 12 tried, 0 ABF++).
+
+**Checked**
+- A cube with a cylinder boss and a torus: six charts, the fewest face sets allow (each closed piece needs two), a
+  third of Smart UV Project's 22, half its seam length, every chart under the bound, no folds or overlaps, ABF++ used;
+  a 12-slot sphere's charts each one slot; a non-manifold fin a cut; twelve pieces on twelve UDIM tiles; the Edit Mode
+  mask; ABF++ closing every triangle at pi and every interior vertex at 2 pi with less angle error than LSCM alone; the
+  console's `uv parts` (a non-number refused), `uv report` and undo (tests/test_modeling.cpp). An Opus review's
+  findings (neighbours lost in the clustering, a wasted Merge pass, UDIM numbering, blocks touching, self-overlap,
+  the bound's parsing, threads and packing costs) are fixed.
+- Unit checks (round 195): Windows, in render-cache verify mode, 11,438, 0 failed (948 tests), 0 stale
+  pictures. Linux with libraries: 11,085, 0 failed. Sanitizer build: 10,962, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `uv`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 194): the Godot and Unreal bridges, specified (task 0175)
+
+**Asked:** Godot and Unreal bridges on the same protocol, after Blender's and Unity's.
+
+**Changed**
+- `docs/tasks/0175-godot-unreal-bridges.md`: what each bridge does against `blendity-livelink/1` unchanged - Godot 4
+  as a GDScript editor plug-in (`StreamPeerTCP`, an own glTF reader into `ArrayMesh` surfaces, `StandardMaterial3D`
+  with Godot's toon diffuse and specular, the cameras and lights turned onto Godot's -Z), Unreal 5 as a C++ editor
+  module (`FSocket`, `FMeshDescription` to a static mesh and a dynamic mesh once vertices move, a master material's
+  instances, Unreal's centimetres and the basis its own glTF importer uses), each with a smoke test replaying the
+  recorded session. Each gets its own task when started; the protocol needed nothing new.
+
+**Checked**
+- Documentation only: no code changed, the check chain wasn't run again (round 192's checks hold).
+
+## 2026-10-22 (round 193): the Unity bridge - Blendity's scene live in the Unity Editor (task 0174)
+
+**Asked:** a Unity bridge for Live Link, after Blender's.
+
+**Changed**
+- `bridges/unity/com.blendity.livelink/`: a Unity 2022.3 package - Window > Blendity Live Link: Port, Connect.
+  GameObjects under "Blendity Live Link" with a `BlendityLink` (the id); Blendity is Unity's own left-handed Y up, so
+  mirroring glTF's X back gives Blendity's numbers exactly. Meshes with a submesh per slot and each vertex's mesh
+  vertex kept for deforms; URP Lit or Standard materials with base and normal maps; Toon fields per slot in a
+  `BlendityToon` component; lights with Blendity's intensity as Unity's; cameras (disabled, so the Game view stays
+  yours); bones as posed GameObjects. An own glTF reader (`GlbReader.cs`; glTFast drops the `_VERT` attribute).
+- `bridges/unity/ReplayCheck`: the package's framing, JSON and glTF reading on the recorded session with any C#
+  compiler.
+
+**Checked**
+- ReplayCheck, compiled with the .NET Framework's C# compiler, replays the recorded session: 32 messages, every
+  mesh's vertices within its mesh, the deform applied. Not checked: the Unity-side code (the applier, the window, the
+  EditMode test) has not been compiled or run - Unity isn't installed on this PC; the README's Test section is the
+  first run.
+- No C++ changed: the check chain wasn't run again (round 192's checks hold).
+
+## 2026-10-22 (round 192): the Blender bridge - Blendity's scene live in Blender (task 0173)
+
+**Asked:** a Blender bridge for Live Link (one way), the first of the four.
+
+**Changed**
+- `bridges/blender/blendity_livelink/`: an add-on (and a Blender 4.2+ extension) - View3D > Sidebar > Blendity: Port,
+  Connect. The objects live in a collection "Blendity Live Link" (custom property `blendity_id`); hierarchy,
+  transforms (glTF's Y up to Blender's Z up as Blender's glTF importer converts), meshes with Blendity's own vertices
+  (the binary's split vertices folded back by `_VERT`, so moving vertices land in place), UVs, Blendity's hard edges as sharp edges (so the
+  normals follow moving vertices), a material per slot; Principled materials with their image textures (tint, alpha
+  and cutouts included); Toon materials as an EEVEE cel setup (Shader to
+  RGB, a constant ramp of Toon Bands) with every field kept as `blendity_toon`; suns, points, spots and area lights in
+  Cycles' units matched to Blendity's path tracer (as the MoonRay export matches them); cameras; bones as posed
+  empties. A timer reads the socket with a 20 ms budget a tick and leaves the rest in it, so Blendity's queue keeps
+  replacing stale updates.
+- Meshes are read by the add-on (numpy), not through `bpy.ops.import_scene.gltf` as the roadmap planned: the importer
+  splits vertices by normal and UV (a deform would have nothing to land on) and needs a window context a timer lacks.
+
+**Checked**
+- `bridges/blender/smoke_test.py` in Blender 5.2.2 headless replays the recorded session: every object, the Sphere
+  deleted, the Box at Blender (-1, -3, 2), its Cel material recoloured with its cel setup, the moved vertex, the
+  cube's 12 hard edges sharp, the camera's 60 degrees and direction, the sun at pi W/m2, the bone hierarchy and its
+  30 degree pose, an object deleted in Blender made again by its next message. An Opus review's findings (camera and
+  light scale, stale references, tint and cutouts, normals after deforms, inactive parents) are fixed. Live: the add-on
+  connected to a running Blendity and received the sync with every mesh. Blender's extension validator accepts the
+  manifest.
+- Unit checks (round 192): Windows, in render-cache verify mode, 11,417, 0 failed (943 tests), 0 stale
+  pictures. Linux with libraries: 11,064, 0 failed. Sanitizer build: 10,944, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (in the parallel runs, the gpu group's slow-open test, a Linux texture-deletion test and a sanitizer export read-back failed under load and passed run again alone.)
+
+## 2026-10-22 (round 191): Live Link - the scene sent live to Blender, Unity, Godot or Unreal (task 0172, ADR 0055)
+
+**Asked:** "bridges" in Blender, Unity, Godot and Unreal applying Blendity's changes in real time, Blender and Unity
+first, one way. This round is the editor's side and the protocol; the Blender bridge is next (task 0173).
+
+**Changed**
+- Window > Live Link and the console's `livelink start [port] | stop | status`: a TCP server on 127.0.0.1 (port
+  40100 by default; `src/core/net_server.*`, WinSock or BSD sockets, no library). A client gets the whole scene, then
+  every change as it happens: objects and their hierarchy, transforms, a rig's pose, meshes as glTF binaries (built on
+  a worker thread), vertices that moved as a `deform` (float32 positions: an Edit Mode drag, skinning, physics),
+  materials (glTF's object, the toon fields, texture paths), lights, cameras, deletes, Play. The protocol,
+  `blendity-livelink/1`, is in `docs/LIVELINK.md`; `tools/livelink_dump.py` is a 50-line client that prints it.
+- What changed is found by comparing the scene with what was sent, at most 60 times a second and only while a client
+  is connected (the roadmap had planned a diff at each undo step: comparing carries a drag while it happens, and undo,
+  Stop and reloads need nothing of their own; ADR 0055).
+- Each client has its own queue and thread; a newer transform, pose, deform, material, light or camera replaces one
+  still queued (never past an object, mesh or delete), so a slow client skips to the present; a slow client is waited
+  for, never timed out; one past 256 MB queued is closed. Sockets aren't inherited by programs the editor starts.
+- glTF export: each primitive names its material slot (`extras.slot`), an optional `_VERT` attribute (each vertex's
+  mesh vertex), and a Toon material carries the extension `BLENDITY_toon` with every field by its Inspector name (in
+  exported files too: other readers ignore it). `JsonWriter` in json.h; `reflect_to_json`.
+- `tests/fixtures/livelink_stream.bin`: a recorded session (the sync, a move, a recolour, moved vertices, a pose, a
+  delete, Play and Stop) that the suite records again and compares message by message, and the bridges replay.
+- The check chain, faster: `build.bat check` compiles every source once and links the unit and stress tests from the
+  same objects (92 s against 112 s for the two builds); the unit suite runs once, in render-cache verify mode (the
+  plain run checked nothing verify mode doesn't), its groups as parallel processes with a failed group run again
+  alone; the Linux and sanitizer legs start with the Windows build and run their groups in parallel too, and their
+  copy of the sources skips tools/inbetween's Python environment (24k files: the sync's 4 minutes). The stress
+  sections still run on a quiet machine, after the Linux legs. `BLENDITY_NO_LTCG=1` builds without whole-program
+  optimization for quick local runs only: with /fp:fast, MSVC then compiles two code paths differently that two
+  tests compare bit for bit.
+
+**Measured** (stress `livelink`, the RTX 4070 SUPER PC, 1,000 cubes moved every frame)
+- A frame (mean / most, ms) with the link off 11.49 / 13.14, on without a client 11.46 / 12.93, with one client draining 12.50 / 14.16, with two 13.10 / 31.04.
+- Comparing the scene with what was sent (1,000 moved objects: 1,000 transforms) 1.23 / 1.50 ms mean / most with one client, 1.42 / 3.50 with two; 60240 and 120491 messages, 5.49 and 10.98 MB in the 120 frames.
+- A client's sync with a 95232-face mesh: the frames at most 11.42 ms; the worker built 1005 glTF binaries in 182 ms; the sync took 777 ms of frames.
+- A vertex of the 95232-face mesh moved every frame: 14.57 ms a frame, 64 deforms, 69.76 MB (95234 vertices: 1.09 MB a deform).
+- A client that leaves while a mesh is going out: the frames at most 2.17 ms over the next 30 frames; 0 client(s) left connected.
+- One client cost the frame 1.00 ms on average against the link off (12.50 vs 11.49 ms; the views' rendering is most of a frame).
+
+**Checked**
+- A client gets hello, the sync with the scene's object count and every mesh as a valid glTF binary (indices 3 x the
+  triangles, `_VERT` for every vertex); a move is one transform in glTF's axes, a recolour one material, moved vertices
+  one deform, new faces one mesh, a posed rig one pose with every bone, a deletion one delete, no change nothing; in
+  Play at most 60 transforms a second, in order, the last where the object ended; two clients get the same stream; a
+  client that leaves mid-send is dropped and a new one syncs; held queues replace a keyed message only after the last
+  barrier (tests/test_livelink.cpp). Play then Stop sends only the two play messages.
+- Unit checks (round 191): Windows, in render-cache verify mode, 11,417, 0 failed (943 tests), 0 stale
+  pictures. Linux with libraries: 11,064, 0 failed. Sanitizer build: 10,944, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `livelink`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+
+## 2026-10-22 (round 190): the OptiX render device - the same picture as GPU Compute, opt-in (tasks 0170-0171, ADR 0054 amended)
+
+**Asked:** an OptiX render device with PBR parity (a picture within 0.01 of GPU Compute's, 1.4x its samples a second on
+the RTX 4070 SUPER and 1.8x on the 3060 Ti), and the toon shading on it (task 0171).
+
+**Changed**
+- One integrator for both devices: `tools/glsl_to_cuda.py` translates the GPU path tracer's own GLSL (gpu_kernel.h,
+  gpu_glsl.h) to CUDA when the PTX is embedded - buffers as launch-parameter pointers, `out` parameters as references,
+  GLSL's constructors as braces, every function inlined, the kernel a struct over `src/render/optix/glsl.cuh`'s GLSL
+  types and built-ins. Only the rays differ: optixTrace through structures the driver builds, where GPU Compute walks its
+  BVH or uses Vulkan's ray queries. Toon shading (task 0171), the lods of 0164 and the area lights of 0163 come with it.
+- The OptiX device (`src/render/optix_device.cpp`, in place of task 0097's spike): a `gpu::Renderer` with the Vulkan
+  device's buffers, a triangle structure per mesh, the objects as instances, eight samples a launch, the card's time from
+  events, the bake points. The committed PTX is now text in pieces (3.6 MB).
+- Render Settings > GPU Backend: Auto, Vulkan, OptiX. **OptiX is opt-in: Auto keeps GPU Compute** - measured slower,
+  below. The renderer pool keys on the backend, the tracer reopens a card when it changes, the device summary says
+  "(OptiX)"; `BLENDITY_GPU_BACKEND` overrides it (the tests and the stress run pin Vulkan; the OptiX tests ask for it).
+
+**Measured**
+- The stress gpu_optix scene (1920x1080, 256 icospheres and a floor, a sun, 4 bounces, 64 samples, each backend's best of two runs, a quiet machine):
+  - NVIDIA GeForce RTX 4070 SUPER - GPU Compute: 568.5 samples a second (1.76 ms a sample), its upload 406.4 ms.
+  - NVIDIA GeForce RTX 4070 SUPER - OptiX: 182.9 samples a second (5.47 ms a sample), its upload 352.6 ms, 0.32x GPU Compute's, the pictures 0.00000 apart.
+  - NVIDIA GeForce RTX 3060 Ti - GPU Compute: 351.8 samples a second (2.84 ms a sample), its upload 206.5 ms.
+  - NVIDIA GeForce RTX 3060 Ti - OptiX: 70.1 samples a second (14.28 ms a sample), its upload 12922.0 ms, 0.20x GPU Compute's, the pictures 0.00000 apart.
+- Before the inlining and the register limit: 0.09x on both cards; the first open of a card compiles the 3.6 MB PTX in about 20 s without the driver's cache.
+
+**Checked**
+- OptiX and GPU Compute render the same picture at 64 samples - spheres, a glass ball, a toon ball, a checker floor, a
+  sun and a point light - mean difference 0.00000 a channel, with content in it (luminance 0.09 to 3.2); a build
+  without OptiX or a card that isn't there is refused with the reason (tests/test_gpu.cpp).
+- Unit checks (round 190): Windows 11,305, 0 failed (933 tests); render-cache verify mode 11,306, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,961, 0 failed. Sanitizer build: 10,841, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 189): OptiX ships - committed PTX, NVIDIA's headers at build, the driver at run time (task 0169, ADR 0054)
+
+**Asked:** OptiX "as seamless as Blender's Cycles", shipped by embedding PTX compiled on the user's PC.
+
+**Changed**
+- The OptiX kernel's PTX is committed (`src/render/optix/optix_kernel_ptx.h`: 34,373 bytes from OptiX 9.1.0, with
+  the FNV-1a hash of `optix_kernel.cu` and `optix_params.h` and the OptiX version). `tools/optix_ptx_embed.bat`
+  writes it on a machine with the CUDA Toolkit and the SDK (`tools/ptx_compile.cpp --header=`); a unit test fails
+  when the kernel changes without it.
+- A build needs only OptiX's host headers now, no CUDA Toolkit: `OPTIX_ROOT_DIR`, NVIDIA's ProgramData folder, or -
+  only with `BLENDITY_FETCH_OPTIX=1` - NVIDIA's public `optix-dev` headers cloned at `v9.1.0` into `build/optix/sdk`
+  (taken from NVIDIA under NVIDIA's terms; nothing NVIDIA's is committed but the PTX built from Blendity's kernel).
+  `build.bat` and `build.sh` (Linux) both; CI's Windows and Linux jobs and the release workflow set the switch, so
+  the installers carry the OptiX device (ADR 0037's "never" ends).
+- `BLENDITY_NO_OPTIX=1` also turns OptiX off at run time; the console's `gpu list` names every card Vulkan sees and
+  OptiX's state (not in this build, turned off, no driver and why, or its devices).
+- The fetch path is written but has not been run on this PC (it downloads); CI runs it.
+
+**Measured**
+- The committed PTX: 34,373 bytes from OptiX 9.1.0 (the header 114 KB of text); its hash matches the sources.
+- A Windows build with `CUDA_PATH` empty (no CUDA Toolkit) and the SDK's headers from ProgramData: OptiX built in,
+  `gpu list` names the RTX 4070 SUPER and the RTX 3060 Ti.
+- The Linux build (WSL, `OPTIX_ROOT_DIR` at the Windows SDK's headers): OptiX built in from the committed PTX, and
+  through WSL's NVIDIA driver the same two devices; the OptiX tests pass there.
+- Not run here: the fetch of NVIDIA's `optix-dev` headers (`BLENDITY_FETCH_OPTIX=1`: it downloads; CI runs it).
+
+**Checked**
+- The committed PTX's hash matches the kernel's sources; `gpu list`'s OptiX line names the RTX 4070 SUPER and the
+  RTX 3060 Ti here; `BLENDITY_NO_OPTIX=1` turns it off at run time (tests/test_gpu.cpp).
+- Unit checks (round 189): Windows 11,299, 0 failed (931 tests); render-cache verify mode 11,300, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,961, 0 failed. Sanitizer build: 10,841, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 188): hair as mass-weighted XPBD rods - film feel, not jello (task 0168, ADR 0049 amended)
+
+**Asked:** hair physics "stiff and jello-like"; Blender-hair-dynamics / film feel, research based, for hair and other
+dynamic parts.
+
+**Why it felt that way (measured):** each substep blended a tip toward the animated pose by a stiff per-substep
+factor - about a 5 Hz spring at hair's 0.15 - which pinned a strand to the pose (a 40 cm strand held horizontal
+sagged 1.6 cm) and rang against it (14 wiggles of over 2 mm before it settled, 15 after a head turn).
+
+**Changed** (Macklin et al. 2016 and 2019, Müller et al. 2007, Kugelstadt & Schömer 2016, Blender's hair dynamics)
+- Strands (hair, ears, tails, cloth) are mass-weighted XPBD rods: each tip a mass from its bone's length and the
+  chain's new **Density** (kg/m: hair 0.01, an ear 0.02, cloth 0.05, a tail 0.1), substeps at 240 Hz with one
+  iteration each, velocities from positions.
+- Stiffness and Bend are compliant constraints: a slider is a spring of 20 Hz x s^1.5 for hair's mass (1 rigid),
+  applied as XPBD's w / (w + alpha / h^2), so the feel doesn't change with the frame rate and a heavier strand is
+  pulled less by the same slider.
+- Damping is a decay of the motion relative to where each tip's animation is going (a move or a turn alike; per
+  bone from its effective spring, so free tips aren't overdamped): a lag that doesn't ring. The air's drag is always
+  on (new **Air**, 1/s for hair's density; a heavier chain feels less); a Wind pulls every chain toward its motion
+  by the chain's Wind, as before. The velocity is rescaled when a frame's substeps change length.
+- Old scenes keep their sliders (which now mean the new spring) and load their label's Density and Air.
+- The lengths are mass-weighted distance constraints before the exact root-first pass; the bend is applied after
+  them, so the lower bones' weight doesn't open a curl's upper joints.
+- Hair's defaults: Stiffness 0.3 and Damping 0.5 (were 0.15 / 0.15), near critical damping for the new spring. A
+  scene saved before keeps its sliders, which now mean the new spring.
+- Soft tissue keeps its own spring (the verlet code it was tuned with, its wind included).
+
+**Measured**
+- A 40 cm strand of eight bones (hair's defaults) released horizontally: settled within 1 cm after 0.75 s with no
+  overshoot, its tip hanging 0.177 m below the head; before: 0.80 s with 14 overshoots of over 2 mm, the tip held at
+  0.016 m (pinned to the pose).
+- A head turned 90 degrees in 0.3 s with the strand pointing back: the tip lagged the turn by up to 9.3 degrees and
+  came within 1 cm of its rest 0.73 s after it, one overshoot. (Before, measured with the strand hanging down: 0.88 s,
+  15 overshoots.)
+- The tip 0.25 s after release, mid-fall: 0.0060 / 0.0006 / 0.0004 m from 60 fps's at 30 / 144 / a frame time
+  wavering between 1/60 and 1/59 s; the hanging tip after 4 s: 0.0000 m apart at all three (before 0.0027 at 144).
+- Ten times hair's density: the tip sags 0.386 m (0.177 at hair's) and settles after 0.98 s (0.75).
+- A curl of 30 degrees a joint with Bend 0.5 hanging from its root for 4 s keeps 89 % of it; Bend 1 keeps its joints
+  at 40.0 degrees.
+- 100 spring chains of 3 bones, ms a frame (stress physics): 0.366 plain, 0.454 with collision, 0.559 with separation too; was 0.548, 0.485, 0.730.
+- 100 spring chains of 10 bones, ms a frame (stress physics): 1.445 plain, 1.752 with collision, 2.276 with separation too; was 2.020, 2.175, 2.862.
+- 100 spring chains of AutoPhysics clip (100 frames), ms a frame (stress physics): solved plain, passes with collision, steps with separation too; was solved, passes, steps.
+- 100 spring chains of a jump, ms a frame (stress physics): yes plain, 5 with collision, 4230 with separation too; was yes, 5, 4230.
+- 100 spring chains of a run, ms a frame (stress physics): yes plain, 5 with collision, 8040 with separation too; was yes, 5, 8040.
+
+**Checked**
+- A 40 cm strand released horizontally settles within 1 cm in 1.5 s with at most one overshoot; a head turned 90
+  degrees in 0.3 s swings a strand pointing back through its arc, lagging the turn, and brings it round within 1 s
+  with at most one overshoot; the same motion at 30, 60 and 144 frames a second and with the frame time wavering;
+  a curl with Bend 0.5 keeps a share of its curl hanging under its weight; ten times hair's density sags further and
+  settles more slowly; Density and Air are saved, an old scene's chain loads its label's (tests/test_physics.cpp). The
+  round 153 Bend test measures the joints' angles now (40.0 and 40.0 degrees held with Bend 1): with no pull and a
+  free root the curl turns about its root until its weight hangs below, as a real one does.
+- Unit checks (round 188): Windows 11,293, 0 failed (929 tests); render-cache verify mode 11,294, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,955, 0 failed. Sanitizer build: 10,835, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 187): undo measured honestly, and it gives back Edit Mode's selection (task 0167, ADR 0053 amended)
+
+**Asked:** the roadmap's "undo steps sharing unchanged arrays" (each undo ≤ 10 ms, was 30-38).
+
+**Measured first** (the task doc): the undo stack already shares meshes by pointer (ADR 0003) - a scene clone is
+0.02 ms and `undo` itself 0.1 ms. An undo's cost is its frame: every view and the shadow map drawn again. The stress
+row "Undo after it" averaged three different undos (the extrude, the selection step, the Edit Mode entry), so its
+21-25 ms was not an undo's frame.
+
+**Tried and not kept:** view caches two pictures deep (and four shadow maps), so an undo would copy the pictures of
+the state before. A restored snapshot never matched its earlier key: `Scene::clone` gives the snapshot a new serial
+and copies its materials, and the keys hash both. Keys by content for the scene's identity and its materials would
+touch every render cache's exact-picture rule (ADR 0009); ADR 0053's amendment records it as the next step. The
+first build also showed that a cached Scene view picture must carry its depth and id planes (picking reads them):
+verify mode caught the older picture over the newer planes.
+
+**Changed**
+- Undo gives back Edit Mode's selection as it was before the operator, as Blender does; redo the operator's. It
+  stayed as the operator left it, sized for the bigger mesh.
+- The stress rows "Undo of an extrude" (each rep undoes an extrude it made itself) and "Redo of it" replace "Undo
+  after it"; `tools/bench_table.py` reads the new row into Pass 13.
+
+**Measured**
+- The stress rows with the views on the CPU: "Undo of an extrude" 27.7 ms a frame (the frame after 2.0), "Redo of it" 21.0 ms (the frame after 1.9); the old row "Undo after it" - three different undos averaged - was 25.5 ms with the frame after 15.3.
+- The stress rows with the views on the GPU: "Undo of an extrude" 11.0 ms a frame (the frame after 1.7), "Redo of it" 10.8 ms (the frame after 1.8); the old row "Undo after it" - three different undos averaged - was 11.6 ms with the frame after 7.5.
+- The probe before this task (task 0165's): one undo's frame 12.5 ms on the CPU - the Scene view 7.9 ms, the shadow map 3.9, the Game view 3.4 - with `undo` itself 0.1 ms. Blender 5.2.2's row: 16.4 ms (PERFORMANCE.md Pass 13).
+
+**Checked**
+- After an extrude of three faces, undo selects the three faces again and redo the extruded ones
+  (tests/test_editor.cpp).
+- Unit checks (round 187): Windows 11,283, 0 failed (926 tests); render-cache verify mode 11,284, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,945, 0 failed. Sanitizer build: 10,825, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 186): a selection changes the selection, not the mesh (task 0166)
+
+**Asked:** the roadmap's "selection changes redraw flags, not the view" (Select More on 50k faces 55-68 ms against
+Blender's 15.5 ms).
+
+**Measured first** (the task doc has the probe): Select More's frame after an undo copied the mesh (the selection-only
+operators ran inside the operator path, after the mutable copy), so every view saw a "new" mesh - two render meshes
+updated in place, the shadow map and the Game view drawn again - and the command itself built a vertex adjacency on
+each call (8 ms). With the views on the card, a face selection sent the whole edit object to the CPU ("Edit Mode's
+face highlight" was a fallback reason). A plain selection change's frame is 9 ms, of which the Scene view's 3D layer
+about 3 ms and its cage overlay 4 ms: the overlays are part of the cached layer, so the planned "selection out of
+the cache key" would save the 3 ms and cost the cage every idle frame, or a second cached layer. Not done; the
+frame's cost is the cage, which is already drawn in parallel.
+
+**Changed**
+- The selection-only operators (Select Similar / By Material / Sharp / Z-Fighting / Coplanar / Linked / More / Less /
+  Invert / Non-Manifold / Ring / Loop) run before any copy, on the mesh the undo step shares, as `const Mesh &`
+  (`Editor::select_op`): no copy, no "new" mesh, only the Scene view - whose cage shows the selection - draws again.
+  Loop Cut and Select Loop share `selected_edge`.
+- Select More / Less are one pass over the cached edge table (`grow_selection` built an adjacency per call).
+- The card draws Edit Mode's face highlight: a bit per triangle of the edited mesh (`RasterFrame::highlight_bits`,
+  `RasterInstance::highlight`, binding 16) that the g-buffer pass mixes into a set triangle's albedo as the CPU
+  raster does (in the card's triangle order, grouped by slot with several materials); a face selection is no
+  longer a reason to draw the edit object on the CPU where the card has Vulkan's geometryShader feature
+  (`gl_PrimitiveID` needs it; without it the fallback stays). A selection operator ends the F9 panel as before.
+
+**Measured**
+- The stress row "A selection operator after the undo (Select More)" with the views on the CPU: 15.4 ms a frame, was 32.2 (mesh copies in the frame 0.0; the frame after 1.7 ms).
+- The stress row "A selection operator after the undo (Select More)" with the views on the GPU: 7.9 ms a frame, was 32.5 (mesh copies in the frame 0.0; the frame after 1.6 ms).
+- Blender 5.2.2's row: 15.5 ms (PERFORMANCE.md Pass 13). The probe before this task: a plain selection change's frame 9 ms (the 3D layer about 3 ms, the cage overlay 4 ms), Select More's command 8 ms (the adjacency built per call), its frame after an undo a mesh copy, two in-place render-mesh updates, the shadow map and the Game view drawn again.
+
+**Checked**
+- Select More on the 50k-face sphere keeps the very mesh pointer, copies nothing, draws no shadow map or Game view
+  again and renders one view; Select Less takes it back; Select Loop, Linked and Invert copy nothing
+  (tests/test_editor.cpp). `grow_selection` matches the adjacency walk growing and shrinking (tests/test_modeling.cpp).
+  A cube with its top face selected draws on the card without a fallback, its tint (the orange pixels beyond the
+  picture with nothing selected) within 20 % of the CPU's, with one material and with two (tests/test_gpu.cpp);
+  Select Loop from one edge and grow / shrink with a loose edge and an isolated vertex covered.
+- Unit checks (round 186): Windows 11,280, 0 failed (925 tests); render-cache verify mode 11,281, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,942, 0 failed. Sanitizer build: 10,822, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 185): Edit Mode operators without the wasted work (task 0165, ADR 0053)
+
+**Asked:** the roadmap's "Edit Mode operators without a whole-mesh copy" (Extrude on 50k faces 96-118 ms against
+Blender's 32.6 ms).
+
+**Measured first** (the task doc has the probe): the command `editop extrude` was 60 ms on the 50k-face sphere, of
+which Auto Smooth's shallow-edge count 23 ms taken twice (47 ms), three whole-mesh copies 10.5 ms, the extrude
+itself 1 ms; the frame after it 38 ms (both render meshes rebuilt 13 ms, the shadow map and the views redrawn). A
+whole copy is 3.5 ms, and an extrude writes every array, so the planned per-array copy-on-write would have copied
+them all anyway: ADR 0053 records the decision against it, with the arithmetic.
+
+**Changed**
+- A redoable operator (Extrude, Inset, Bevel, F9's family) keeps the mesh before it as the undo step's own pointer -
+  never written, copy-on-write guards every edit - and `run_last_op` makes the one copy it works on (three copies
+  before: a mutable one, the `before` one, the working one). A cancelled modal gives the pointer back; undo
+  restores the very mesh.
+- Auto Smooth's shallow-edge count is taken once per operator (`LastOp::shallow_before`, reused by F9) and only
+  when it can decide anything (`Editor::shallow_before`: not for a mesh already smooth or shaded per face), and
+  `shallow_edges` works from a sorted (edge, face) table with each face normal computed once (a hash map over
+  200k edge ends and two normals per edge before): 23 ms to about 4 ms on 50k faces.
+- `edit_op` is the common start, `begin_redoable_op` and `edit_op_rest`; the selection flush is
+  `edit_selection_faces`.
+- An operator cancelled with Esc (or one that fails) gives back a copy of the mesh before it, not the undo step's
+  very pointer: the pointer brought back an earlier render-cache key whose picture had been drawn with state the key
+  doesn't hold (verify mode found a stale Scene view picture after an Esc; the key's gap is ADR 0053's follow-up).
+- `FrameProfile::ms_edit_op` - the operator's own time inside the command that ran it - in the Profiler's "Edit
+  Mode: operator / mesh writes / overlap check" row and the stress edit_frame notes (the operator itself, its mesh
+  copies).
+- The roadmap's 0167 ("undo steps sharing unchanged arrays") is already how ADR 0003 works - the undo stack shares
+  meshes by pointer and a scene clone is 0.02 ms - so its round goes to the undo frame's own cost instead.
+
+**Measured**
+- The stress row "An operator: extrude three faces" with the views on the CPU: 48.9 ms a frame, was 130.6 (the operator itself 7.8 ms, mesh copies in the frame 1.0 of 3.4 ms; the frame after 2.2 ms, was 2.2).
+- The stress row "An operator: extrude three faces" with the views on the GPU: 48.5 ms a frame, was 115.3 (the operator itself 7.3 ms, mesh copies in the frame 1.0 of 3.4 ms; the frame after 2.0 ms, was 2.1).
+- The probe before this task (the task doc): the command alone 60 ms (Auto Smooth's count 23 ms twice, three copies 10.5 ms), the frame after it 38 ms; after: the command 6.9 ms with one copy of 3.5 ms, the frame after unchanged (the render meshes rebuilt 13.5 ms, the shadow map and the views). Blender 5.2.2's row: 32.6 ms (PERFORMANCE.md Pass 13).
+
+**Checked**
+- An extrude of three faces on the 50k-face sphere makes one mesh copy; the mesh before it is the very pointer
+  undo gives back, and redo re-applies it; the Profiler counts the operator's own time (tests/test_editor.cpp).
+  `shallow_edges` counts what the hash map did on a cube (none), a 12-sided cylinder (its 12 sides), a sphere, and
+  an edge shared by three faces counted once (tests/test_modeling.cpp); Auto Smooth still shades a bevelled cube
+  smooth and leaves a per-face-shaded one alone (the round 142 test).
+- Unit checks (round 185): Windows 11,248, 0 failed (922 tests); render-cache verify mode 11,249, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,916, 0 failed. Sanitizer build: 10,796, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 184): no artifacts at distance for Toon materials (task 0164, ADR 0048 amended)
+
+**Asked:** "artifacts when backing away from a Toon material with painted maps".
+
+**Fixed**
+- Every toon map was read at level 0 whatever the distance: the hatching now reads at the lod of the UV
+  derivatives scaled by its Hatch Scale, the face shadow map at its own lod (its hard threshold at softness 0 no
+  longer sparkles far away), the toon ramp over the pixel's span of lit; a Generated mapping takes its derivatives
+  from the pixel's footprint over the bounds and a Box projection its lod from the footprint times the tiling (both
+  were level 0); the built-in Checker and Noise fade to their mean once a cell is under a pixel (the derivatives,
+  or the footprint, say when), as Blender's Checker does.
+- A cel edge fell on whichever side the pixel centre landed, so a far band edge sparkled: the deferred pass now
+  hands the shading normal's change to the next pixel right and below (`SurfacePoint::normal_dx / dy`), and
+  `shade_toon` softens each band edge by half the pixel's span of lit along the light (the GPU raster takes the
+  same from the neighbouring G-buffer normals), so the edge is one antialiased pixel at any distance and the 2 m
+  look is unchanged where the softness already covers it.
+- An outline shrank below a pixel far away and the silhouette went dotted: a new Outline has Min Pixels 1 (a loaded
+  one saved before the field keeps 0, as it drew), and the shell's 2 % steps get a hysteresis of a third of a step
+  so a dolly on a boundary doesn't pop.
+- Reversed-Z measured and declined for now: the D32 buffer resolves about 2 mm at 100 m with near 0.3 / far 1000,
+  well under a shell's offset; the task doc records the calculation.
+- The path tracers keep level 0: their samples average the pixel, and the GPU kernel's Material must not grow.
+
+**Measured**
+- High-frequency energy inside the object (the mean absolute Laplacian over its interior pixels) at 20 m against
+  its 2 m picture downsampled ten times: the hatched plane 0.00 against 4.72, the box-mapped cube 12.3 against
+  17.7, the face-shadow sphere at softness 0 24.4 against 13.2 (1.8 times: inside the factor of 2, the sphere's
+  shading itself is most of it at 300 pixels), the two-tone sphere 2.8 against 4.3 on the CPU and 2.8 against 3.9 on
+  the card. The hatched plane and the face-shadow sphere draw on the CPU in the card's views too (ADR 0048), so
+  their numbers are the same on both.
+- The two-tone sphere's band edge: at 2 m 848 of 48,714 pixels between the two tones (the edge's own pixels), at 20 m
+  139 of 295 - the edge one antialiased pixel wide, where a hard edge gives none.
+- The outlined sphere at 60 m, nine pixels wide: 27 outline pixels around its 48 (2,284 at 2 m); a saved Outline
+  keeps its Min Pixels through a round trip (3), a scene saved before the field loads it as 0.
+
+**Checked**
+- A hatched plane, a face-shadow sphere at softness 0 and a box-mapped cube at 20 m carry no more high-frequency
+  energy inside them than their 2 m pictures downsampled ten times (the box-mapped cube and the sphere on the card
+  as well; a hatched or face-shadowed toon material still draws on the CPU, ADR 0048), and so does a two-tone
+  sphere, whose far band edge shows the mid tones of one antialiased pixel; an outlined sphere at 60 m - nine
+  pixels wide - keeps a one-pixel ring of 27 pixels, an old scene's outline loads with Min Pixels 0 and a saved one
+  keeps its own (tests/test_render.cpp); the anime picture tests at 2 m unchanged.
+- Unit checks (round 184): Windows 11,227, 0 failed (920 tests); render-cache verify mode 11,228, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,895, 0 failed. Sanitizer build: 10,775, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 183): fewer CPU fallbacks for the GPU views - area lights and cutouts on the card (task 0163)
+
+**Asked:** the roadmap's "fewer CPU fallbacks for the GPU views": a view with an area light or a cutout material
+drew on the CPU.
+
+**Changed**
+- Area lights on the card: `area_light_irradiance` (the Gauss quadrature over the panel with the horizon clipped)
+  and `area_light_specular_dir` (the representative point, Karis 2013) ported line for line into the lighting
+  pass; the light block grows to six vec4s (right / width, up / height, the disc flag); the toon branch takes an
+  area light at its centre as the CPU's `light_falloff` does. `gpu_view_unsupported` no longer refuses them.
+- Cutout materials on the card: the instance carries the threshold and the material's alpha, the surface
+  evaluation carries the base map's alpha, and the G-buffer discards under the threshold - no colour, depth or id,
+  so what is behind shows and picks, as the CPU's rasteriser punches its holes.
+- The Profiler's GPU block lists each view slot's fallback reason ("View slot N on the CPU: a camera filter").
+- Still on the CPU, named: see-through and glass materials, toon materials with painted maps, camera filters, GI
+  and probes, lightmaps, vertex colours, live procedurals, more than 16 lights.
+
+**Measured**
+- The g-buffer pass with the cutout test and the area lights in the lighting shader (stress editor_render, the
+  views on the card, a quiet machine, RTX 4070 SUPER): g-buffer 0.15 ms a frame (was 0.14), lighting 0.07 (was
+  0.06), the GPU path 3.50 ms a frame (was 3.58): the discard and the area-light loop cost nothing measurable on a
+  scene without them.
+- The tests' own numbers: an area-lit room on the card against the CPU, mean difference 0.110 / 255 per channel;
+  turning the light's panel off changes about 160,000 pixels (the card draws it, not a fallback). A cutout wall's
+  hole: the pixel at its centre 0x5771A5 on both devices (the sphere behind), beside it 0x892D1D (the wall); a click
+  through the hole picks the object behind.
+
+**Checked**
+- An area-light scene (a rectangle, then a disc) draws on the card with no fallback and matches the CPU within the
+  views' threshold; a cutout's holes show the cube behind and a click through one picks it on the card; the
+  Profiler names a Game view's filter fallback by its slot (tests/test_gpu.cpp).
+- Unit checks (round 183): Windows 11,201, 0 failed (917 tests); render-cache verify mode 11,202, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 182): incremental scene uploads, one submission per upload (task 0162)
+
+**Asked:** the roadmap's "incremental scene uploads, one submission per upload" - every build re-uploaded the whole
+scene to each card buffer by buffer, a fence wait each, and a submission per acceleration structure.
+
+**Changed**
+- The scene's buffers go up in one submission: the Vulkan device copies every section from one staging arena
+  (`Batch`); every BLAS is built in one submission and the TLAS in its own, each with its input buffer sent before
+  it, and the parameters and the clear follow: the test counts 9 submissions for a first whole upload on ray
+  tracing hardware and 5 for an instance update (5 and 3 with Blendity's BVH; it was 13 for the buffers alone plus
+  one an acceleration structure); `Renderer::submits()` counts them and the stress gpu section's upload row shows
+  them.
+- Only what changed goes up: `upload_gpus` hashes the scene's sections (the geometry, the instances with the
+  software TLAS, the materials, the lights, the texture arena, the parameters) and, when every card holds the
+  geometry and the textures, sends the instances (`update_instances`: the instance buffer, the TLAS's nodes and
+  order; on ray tracing hardware the TLAS rebuilt over the kept BLASes), the materials or the lights alone; a card
+  that joins gets the whole scene. `PTStats` counts `upload_calls / instance_updates / material_updates /
+  light_updates` and times `upload_ms`. An object added that reuses a mesh is still a whole upload (the mesh
+  table changes); a partial update re-points the descriptors and leaves the pixel buffers alone (the whole
+  upload used to re-make them at one pixel and again at the frame's size).
+- Not done: the scene is still flattened whole on the CPU each build (the hashes read the bytes); a changed texture
+  arena is a whole upload.
+
+**Measured (RTX 4070 SUPER, docs/PERFORMANCE.md Pass 13)**
+- NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 11.4 ms in 1 submissions; one object moved 4.9 ms in 1; one material edited 4.7 ms in 1.
+- NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 14.0 ms in 5 submissions; one object moved 6.1 ms in 3; one material edited 4.9 ms in 1.
+- NVIDIA GeForce RTX 3060 Ti (compute, Blendity BVH): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 11.1 ms in 1 submissions; one object moved 5.2 ms in 1; one material edited 5.2 ms in 1.
+- NVIDIA GeForce RTX 3060 Ti (ray tracing hardware): a whole upload of the stress gpu scene (400 spheres, the checker floor, their textures) 14.5 ms in 5 submissions; one object moved 6.3 ms in 3; one material edited 4.3 ms in 1.
+- Before this round a whole upload was a submission a buffer (13) plus one an acceleration structure, and every build sent the whole scene.
+
+**Checked**
+- Moving one object: no whole upload, one instance update, a fixed-seed sample within 1e-5 of a fresh upload's; a
+  material edit one material update with the BVH under 5 ms; a light edit one light update; a new mesh a whole
+  upload (tests/test_gpu.cpp).
+- Unit checks (round 182): Windows 11,184, 0 failed (914 tests); render-cache verify mode 11,185, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 181): the path tracer off the main thread, two submissions in flight (task 0161, ADR 0052)
+
+**Asked:** "feels slower", "CPU and GPU usage look low" - task 0159 measured a card 99 % busy inside each submission
+and 21 % busy over an F12 render: the path tracer ran the cards only inside the editor's 40 ms slice a frame and
+waited for every submission.
+
+**Changed**
+- A worker thread per card, for the life of its slot: it idles until a render starts, claims chunks of whole
+  samples from the shared counter (the guided self-scheduling stays; the chunk cap halves to 50 ms from task 0051's
+  100 ms, so a pause waits for at most two of them) and keeps two submissions in flight on its device
+  (`Renderer::submit`, `wait_oldest`, `wait_all`, `take_busy_ms`: two command buffers, fences and timestamp pairs;
+  `render()` is submit then wait). It downloads the card's sums into a host copy when a merge is wanted (its flights
+  drained first) and when it stops. Each slot's state is under one lock, a slot counts as active from the start so
+  a poll never sees the cards idle before they wake, and the stats are the main thread's alone.
+- `PathTracer::render()` polls: it starts the workers toward the target if needed (the counter restarts from the
+  cards' finished counts), renders the CPU's own samples for the budget when the CPU is a device, waits what is
+  left of the budget for the cards, takes the counts, merges the host copies when due. The editor passes 4 ms for
+  F12 and 2 ms for the Camera Preview when cards work and resolves F12's picture only when samples were merged, so
+  the frame stays quick (6-8 ms headless; the frame that merges and resolves the 1280x720 picture about 12 ms more)
+  and the cards render between frames; the CPU-only path is unchanged.
+- `pause()` before anything touches a device or the sums (reset, set_settings, set_params, uploads, sync,
+  merge_aux, the editor's Stop and the sequence / animation stops, the destructor): the workers' claims stop, every
+  submission in flight finishes, the workers idle. A slot that leaves has its worker stopped by its own quit flag.
+  The merge counts the samples its copies hold, so the picture is always a consistent average; a reset clears the
+  host copies with the sums.
+- The test hook `BLENDITY_GPU_FAKE_SLOW=<ms>` makes every submission take that long on the worker's side.
+- The lesson "Combined rendering" gains "The cards work between frames".
+
+**Measured (RTX 4070 SUPER, docs/PERFORMANCE.md Pass 13)**
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): 122.1 samples/s (was 122.9); the card busy 100.0 % (1037.6 of 1037.6 ms) inside its submissions (was 99.8 % (1034.1 of 1035.9 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): 799.9 samples/s (was 821.0); the card busy 100.0 % (149.9 of 149.9 ms) inside its submissions (was 99.5 % (149.6 of 150.5 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 3060 Ti (compute, Blendity BVH): 62.0 samples/s (was 62.9); the card busy 100.0 % (2050.8 of 2051.0 ms) inside its submissions (was 99.8 % (2022.9 of 2026.2 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 3060 Ti (ray tracing hardware): 402.7 samples/s (was 411.8); the card busy 100.0 % (304.2 of 304.2 ms) inside its submissions (was 99.6 % (302.8 of 303.9 ms)).
+- Path tracing the stress gpu scene at 1280x720, All GPUs: 1020.9 samples/s (was 1043.5); the card busy 100.0 % (218.8 of 218.9 ms) inside its submissions (was 99.2 % (221.8 of 223.7 ms)).
+- Path tracing the stress gpu scene at 1280x720, CPU + all GPUs: 1081.7 samples/s (was 1079.8); the card busy 98.9 % (200.1 of 202.4 ms) inside its submissions (was 99.1 % (205.1 of 207.1 ms)).
+- F12 of the default scene from the editor's frame loop (headless, GPU Compute with both cards): the cards busy 49 % of the render's wall time, was 41-43 % (82-85 % with the two cards' busy summed, as task 0159 reported it); 2048 samples in 0.6 s, was 0.7 s.
+
+**Checked**
+- With a 30 ms card, twenty polls each return in under 10 ms while it renders, the render completes with every
+  sample, pause() mid-render returns within 150 ms; the editor's F12 on that card keeps twenty frames under 10 ms
+  each and finishes; the GPU Compute pictures still match the CPU's (tests/test_gpu.cpp).
+- Unit checks (round 181): Windows 11,166, 0 failed (913 tests); render-cache verify mode 11,167, 2 failed in the full run (the GPU-opening frame
+  budget and the pipeline-cache test, both under the chain's build load; each passes alone), 0 stale pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 180): a GPU view in one submission (task 0160, ADR 0051)
+
+**Asked:** the roadmap's "views in one submission, read-back double-buffered", after task 0159 showed the card busy
+for 7 % of the frame's GPU path.
+
+**Changed**
+- A view on the card is one submission and one fence wait: `Raster::render_read()` records the planes' copies
+  behind the frame's passes (after their last barrier) and submits once; before, `render()` and `read_back()` were
+  two submissions each waited for, six round trips for three views. `render()` / `read_back()` stay for tests,
+  stress and route B, sharing `record_frame` / `readback_buffer` / `record_planes` / `unpack_planes`;
+  `Raster::submits()` counts the queue's submissions. The Profiler's "read-back" row becomes "copies out + fence":
+  the submission's wall time beyond the card's passes (the device reports `submit_wall`); the lesson, the stress
+  note and `bench` say so, and the round-179 wording that called it the CPU's timer around the copy is amended.
+- Not done, and why (ADR 0051): the deferred flush (every view recorded, one submission a frame, two frames in
+  flight). Each view's planes are needed the moment its window draws (the overlays are depth-tested against
+  them, the camera's filters and depth of field read the depth, the upscale and the view cache copy the pixels),
+  so one flush a frame without a frame of latency means splitting the frame into a record phase before the
+  windows draw and a resolve phase inside them - a real restructure of the immediate-mode views, with the
+  rasteriser's per-device uniform, instance and read-back buffers made per slot. And during a drag the other
+  views are held (`hold_other_views`), so one view renders a frame in the plan's target case and batching views
+  would save nothing there. The plan's "50k-face drag ≤ 10 ms on the laptop setting" is measured as the stress
+  rows below, not promised; "read_back before a flush returns false" has no meaning without a flush.
+
+**Measured (RTX 4070 SUPER, stress editor_render, docs/PERFORMANCE.md Pass 13)**
+- Moving an object with the views on the GPU (stress editor_render, the RTX 4070 SUPER): the GPU path a frame 3.70 ms, was 4.09 ms; the card's own work 0.29 ms (8 % of the path, was 7 %); the copies out and the fence wait 0.52 ms, where the read-back was its own submission of 0.85 ms.
+- The frame's view count and the picture are unchanged (33 views on the card over the row, 0 on the CPU).
+
+**Checked**
+- A frame with the Scene and Game views on the card costs two submissions (was four) and the picture is bit for bit
+  the two-submission path's (a test switch keeps that path; tests/test_gpu.cpp).
+- Unit checks (round 180): Windows 11,158, 0 failed (910 tests); render-cache verify mode 11,159, 1 failed, 0 stale
+  pictures (the pipeline-cache test: a spare opening in the background rewrote its file under it; it passes alone three
+  times, and round 182 makes it wait for the spare). Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 179): GPU time in the Profiler (task 0159)
+
+**Asked:** "CPU and GPU usage look low" when rendering - and until now nothing in Blendity could say what the card
+was doing. The frame profile held how long a frame spent in the GPU path (upload, dispatch, wait, read-back) as one
+wall-time number the Profiler never showed, and the path tracer's stats had no GPU time at all.
+
+**Added**
+- The card's own clock: two timestamp queries around every path-tracer submission (`Renderer::last_gpu_ms()`, -1
+  where the queue has none), summed into `PTStats::gpu_busy_ms` and `gpu_wait_ms` (the submission's wall time less
+  the busy); the views' pass times (shadow, g-buffer, lighting, read-back) from the raster device's existing
+  timestamps into the frame profile (`FrameProfile::ms_gpu_shadow / gbuffer / lighting / readback`, `gpu_busy_ms()`).
+- The Profiler window's GPU block: the GPU path's wall time, the views' busy time and its three passes, read-back
+  (the CPU's timer) and wait, "GPU busy in the frame" as a share of the frame, and for a running F12 or Camera
+  Preview the path tracer's busy / wait inside its submissions and its busy share over the render so far (F12) or
+  the frame (Camera Preview) - the card is idle between submissions, which the submissions' own wait never shows;
+  a card without timestamps shows "n/a". `bench` prints "bench GPU busy ... a frame in the GPU path" over its own
+  frames, "Render finished" logs the busy share over the render.
+- The lesson "The views on the GPU" gains "The Profiler's GPU block".
+
+**Measured (the baseline for tasks 0160-0163, RTX 4070 SUPER, docs/PERFORMANCE.md Pass 13)**
+- The views on the GPU, moving an object (stress editor_render): the card worked 0.28 ms of the 4.09 ms GPU path a frame (7 %; shadow 0.09, g-buffer 0.14, lighting 0.06), the read-back 0.85 ms, the rest waiting.
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): 122.9 samples/s, the card busy 99.8 % (1034.1 of 1035.9 ms) inside its submissions (busy + wait).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): 821.0 samples/s, the card busy 99.5 % (149.6 of 150.5 ms) inside its submissions (busy + wait).
+- F12 of the default scene from the editor's frame loop (40 ms slices, headless): the card busy 21 % (256 samples of the default scene in 0.4 s on GPU Compute with both cards, their busy summed) of the render's wall time - the idle time is between submissions (uploads, merges, the UI), which tasks 0160-0162 remove.
+
+**Checked**
+- The views' three pass times are positive where the card has timestamps and busy plus read-back stays inside
+  the GPU path's wall time; a path tracer on the card reports busy and wait within its wall time, on the CPU -1 / 0;
+  the Profiler's rows are there and `bench` prints the line (two tests in tests/test_gpu.cpp).
+- Unit checks (round 179): Windows 11,154, 0 failed (910 tests); render-cache verify mode 11,155, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 178): Blender 5.2 as the benchmark - a headless harness and Pass 13's reference column (task 0178)
+
+**Asked:** "Always refer to Blender's rendering and editor performance as a benchmark" - with Blender 5.2 run headless
+on this machine for the numbers, not estimates.
+
+**Added**
+- `tools/bench_blender.py`, run inside the installed Blender (`blender -b --python tools/bench_blender.py -- --out
+  <json> [--quick] [--gpu 4070]`): the scenes and operations Blendity's stress rows time, in Blender's Python API with
+  `perf_counter`, the mean of three runs after a warm call - entering Edit Mode on the 50k-face sphere (the exit
+  outside the timer), the extrude operator on faces 100-102 with its undo step, Select More, undo of the extrude;
+  Cycles on the stress gpu scene (400 textured spheres, every 7th glass, a checker floor, a sun) at 1280x720 on
+  OptiX, CUDA and the CPU, one card, samples a second from the slope of time over three sample counts (a render's
+  fixed cost drops out as Blendity's row leaves out its upload), the picture's coverage checked; Smart UV Project and
+  Pack Islands by bounding box on the sphere; the stress bake's 100-object scene (each object its own mesh: Blender's
+  lightmap_pack packs unique meshes only) packed into one 1024 atlas and baked with Cycles on the CPU, texels a
+  second over the texels its charts cover; a GLB export of 256 icospheres of 1,280 faces, smooth-shaded with their
+  own mesh data, both file sizes in the table. Headless Blender's operators push no undo step, so the harness pushes
+  them and checks the face count comes back; the Cycles rows check the picture's coverage over a transparent film. Blendity's left-handed
+  Y-up scenes are mirrored into Blender's Z-up ((x, y, z) to (x, z, y)). Headless Blender draws no viewport, so there
+  is no playback row.
+- `tools/bench.bat` runs Blendity's stress sections on the same scenes and Blender, and `tools/bench_table.py`
+  writes both into `docs/PERFORMANCE.md`'s Pass 13 table (between its markers) with a method column per row; the
+  Edit Mode rows take Blendity's operator alone (its frame less the frame after); `BLENDER=path` overrides where
+  Blender is, `BENCH_GPU` which card; a `--quick` run never writes the doc.
+- Stress rows for the comparison: Smart UV Project and Pack Islands on the 50k-face sphere (`uv`), a GLB export of
+  the 256-icosphere scene (`serialization`), each the mean of three after a warm call.
+
+**Fixed**
+- The `bake` stress section had reported 0 texels since the probe volumes (task 0037) added `want_lightmap` to
+  `BakeObject`: its positional initialisers' trailing 0 (meant for the hash) had been turning every chart off, in the
+  odd-settings fuzz too. A `bake_object()` helper sets the fields by name at every site; it bakes again (100 objects:
+  122k texels in 0.22 s, 562k texels/s, 56 Mrays/s).
+
+**Measured (Pass 13's first table, this machine: Ryzen 9 5900XT, one card used, the RTX 4070 SUPER, Blender 5.2.2)**
+| row | Blendity | Blender 5.2.2 LTS | ratio | the method's difference |
+|---|---|---|---|---|
+| Entering Edit Mode, 50k faces, caches cold (Blendity: the frame it costs less the frame after) | 24.7 ms | 17.9 ms | Blendity 1.4x behind | mode_set(EDIT) + the depsgraph update, mean of 3 (the exit, Mesh <- BMesh, outside the timer); headless Blender builds no draw cache; Blendity's row: entering with its cage cache cold, the frame that draws it included, less the frame after |
+| Extrude three faces, 50k faces (Blendity: its frame less the frame after) | 96.5 ms | 32.6 ms | Blendity 3.0x behind | bpy.ops.mesh.extrude_region_move on faces 100-102 + its undo step pushed (as Blendity's editop records one) + the depsgraph update, mean of 3, undone outside the timer; Blendity's row: editop extrude on the same three faces, the frame that draws it included, less the frame after |
+| Select More, 50k faces (Blendity: its frame less the frame after) | 51.0 ms | 15.5 ms | Blendity 3.3x behind | bpy.ops.mesh.select_more from face 100 + the depsgraph update, mean of 3; Blendity's row: edittool select_more after the undo, the frame that draws it included, less the frame after |
+| Undo of the extrude (the frame that restores the mesh; the cage rebuilt in the frame after, about 14 ms more, is not counted) | 23.8 ms | 16.4 ms | Blendity 1.5x behind | ed.undo of the extrude's step (pushed by hand: headless Blender's operators push none) + the depsgraph update, mean of 3, the face count checked to come back; Blendity's row: undo of the extrude (a whole-mesh copy restored), the frame that restores it; the cage rebuilt in the frame after (about 14 ms more) not counted |
+| Path tracing the stress gpu scene at 1280x720 on the card's ray-tracing hardware (Cycles: OptiX) | 823.8 samples/s | 115.9 samples/s | Blendity 7.1x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 311 ms, drops out as Blendity's row leaves out its upload; worst fit residual 8 ms); the card's ray-tracing hardware, like Blendity's ray-query row; one card: the 4070. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Path tracing the same scene with a software BVH (Blendity: a compute shader; Cycles: CUDA) | 122.0 samples/s | 87.0 samples/s | Blendity 1.4x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 272 ms, drops out as Blendity's row leaves out its upload; worst fit residual 15 ms); Cycles' BVH2 in CUDA, a software BVH like Blendity's compute row; one card: the 4070. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Path tracing the same scene on the CPU (Blendity: Embree; Cycles: its CPU kernels) | 19.0 samples/s | 8.1 samples/s | Blendity 2.4x ahead | the stress gpu scene at 1280x720 (67 % of the frame covered), bpy.ops.render.render with 32, 64 and 128 samples (adaptive sampling and denoising off, 4 bounces), mean of 2 each after a warm render; samples/s from the slope of time over samples (the render's fixed cost, 192 ms, drops out as Blendity's row leaves out its upload; worst fit residual 23 ms); Cycles' CPU kernels, like Blendity's CPU row (Embree); the CPU, no card. A sample is not the same work on both sides: Cycles runs its Principled BSDF, light tree and image textures under a constant-colour world, Blendity its own integrator under its gradient sky |
+| Smart UV Project, 50k faces | 42.1 ms | 50.1 ms | Blendity 1.2x ahead | bpy.ops.uv.smart_project at 66 degrees on the sphere in Edit Mode, mean of 3 after a warm call (its own pack is by bounding box); Blendity's row: uvops::smart_project on the same sphere, mean of 3 after a warm call |
+| Pack Islands, 50k faces (both by bounding box) | 21.8 ms | 35.9 ms | Blendity 1.6x ahead | bpy.ops.uv.pack_islands after the project with shape_method AABB (bounding boxes, as Blendity packs) and rotation on, mean of 3; Blendity's row: uvops::pack_islands, mean of 3 |
+| Lightmap bake, texels a second, both on the CPU (100 objects; Blendity: 122k texels in its charts; Blender: the same objects in one 1024 atlas, its charts' texels) | 561968.0 texels/s | 32030.8 texels/s | Blendity 17.5x ahead | bpy.ops.object.bake DIFFUSE direct + indirect, Cycles on the CPU (Blendity bakes on the CPU too), 64 samples, 2 bounces, under a sun and a constant sky, the floor and 100 cubes and spheres (each its own mesh) packed together into one 1024x1024 atlas by lightmap_pack outside the timer, after a warm 1-sample bake: 22.2 s for the 710,272 texels the charts cover (the atlas is 1,048,576), baked object by object; Blendity's row: stress bake's 100-object scene at 10 texels/m (122k texels), 64 indirect samples, 2 bounces, its UV generation and packing inside the timer |
+| GLB export, 256 icospheres of 1,280 faces | 307.3 ms | 707.7 ms | Blendity 2.3x ahead | bpy.ops.export_scene.gltf GLB of 256 icospheres of 1,280 faces, smooth-shaded, each its own mesh data as Blendity's export writes them (6.2 MB written, with UVs), mean of 3 after a warm call; Blendity's row: export_file GLB of the same scene, mean of 3 after a warm call; Blendity wrote 13.2 MB |
+
+**Checked**
+- The harness runs end to end (`tools\bench.bat`), every Blendity row has a Blender number, each row's method is
+  in the table and in docs/tasks/0178; the numbers above are from a quiet machine (a build and a WSL test run beside
+  a trial run made Blender's Select More 112 ms instead of 12).
+- Unit checks (round 178): Windows 11,144, 0 failed (908 tests); render-cache verify mode 11,145, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-22 (round 177): one test per behaviour, timings to stress; the suite in files; dead code out (task 0177, ADR 0056)
+
+**Asked:** "check on unneeded tests and remove them. Compact the code-base as needed" (and chose: one test per
+behaviour, timings to stress).
+
+**Measured first**
+- The suite on a quiet machine: 910 tests, 11,406 checks, 204.6 s of test time; 23 tests over a second took
+  124.1 s of it. The slowest was task 0157's find (the software-BVH kernel on the CPU, 70 s: fixed there); then the
+  240-file MMD fuzz (10.2 s), a 3 s pretend GPU open (6.8 s), every truncation of a probe-volume file (3.8 s), a
+  render-cache script the stress fuzz already runs (3.3 s). The "Materials previews" guess for the 13 s material
+  tests of round 174's run was wrong: alone they take 0.8 s (a build was running beside that suite).
+
+**Changed**
+- **The suite is one file a subsystem** (`tests/test_modeling.cpp`, `test_render.cpp`, `test_lighting.cpp`,
+  `test_gpu.cpp`, `test_assets.cpp`, `test_animation.cpp`, `test_physics.cpp`, `test_editor.cpp`; the harness and the
+  helpers several rounds share in `tests/test_common.h`; `test_main.cpp` runs them): `blendity_tests --group render`
+  runs one, `--list-groups` names them; eight translation units build side by side (a test build: 55 s on 32 threads, was 58).
+- **Trimmed:** the MMD fuzz keeps 24 of its 240 damaged files (the 240 are a stress `codecs` row, the synthetic
+  models in `tests/fixtures/synthetic_mmd.h`); the probe-volume sweep keeps every 8th truncation and 30 of 150
+  corruptions (the whole sweep a stress `probes` row); the GPU-opening pretend delays are 1 s and 0.6 s (were 3 and
+  1.5); the four pacing tests are one.
+- **Removed:** the GPU view spike's two tests (ADR 0036 holds the verdict; stress `gpu_raster` still measures route
+  (B)), the OptiX picture test (stress `gpu_optix`'s row), the 30-action render-cache script (stress `editor_fuzz`
+  runs 6,000 frames in verify mode), and the four `NDEBUG` timing checks (the overlap check's 3x, AutoPhysics' 5 s,
+  Locomotion's 0.2 ms, 100 spring chains' 1 ms), which are stress rows now (`modeling`, `physics`, `animation`),
+  each with its target beside the number.
+- **Added:** `tools/test_coverage_map.py` lists every console command, keymap action and window against the tests
+  that exercise it (259 entries; `--check` fails on an empty one); the 72 it found empty got two tests: every
+  keymap action id through `run_action` (a renamed or dropped id is caught) and the console commands no test drove
+  (`samples`, `world`, `scale`, `threads`, `proportional`, `loopcuts`, `selectall`, `subdivide`, `seam`, `focus`,
+  `export`, `exportoptions`, `screenshot`, `deleteasset`, `alignview`, `droponsurface`, `guidesfromedges`, `raster`,
+  `surfacealign`, the printing ones).
+- **Code:** `core/hash.h` (one FNV-1a, one 8-bytes-a-step mixer, `hash32`) replaces the hash loops written out in
+  33 files - with the mistyped FNV basis corrected, except in the three places a bake saves the key, which keep the
+  old constant on purpose, so every bake stays valid (a test pins the two saved keys); the corrected basis renames
+  the GPU kernel's cache file (one recompile, 19 s), the pipeline cache's trailer (rewritten once), the import
+  cache folders (`~/.blendity/cache/import`, re-made once) and MoonRay's converted texture names (re-converted
+  once); `closest_on_segment` and the 2D segment distance in `core/math.h` (four copies gone);
+  `clampf01` and a second `lerpf` gone; `config_path`, `mirror_markers`, `sample_clip_values` and the GLSL
+  `safe_normalize` deleted (never called); `is_bone` / `bone_children` and `bone_armature` once (`scene.h`); the
+  Jolt layer classes once (`scene/physics_jolt_layers.h`); `move_to_trash`'s test-folder prefix once; undo and
+  redo through one `restore_state`; the button grid of the Rigging and Tools windows once (`button_grid`); the
+  `to_screen` lambdas through `project_to_view`; the closed-loop walk of the mesh tools and Follow's wire-path walk
+  once. `editor.cpp`'s console (the `set` reflector, the command handlers, `run_console_command`) is
+  `editor_commands.cpp`; `scene_view.cpp`'s picking is `scene_pick.cpp` and its overlays and icons
+  `scene_overlays.cpp`. `tools/clean.bat` and `tools/README.md`.
+- Not done, and why: the Vulkan boilerplate `gpu_device.cpp` and `gpu_raster.cpp` share (tasks 0160 / 0161
+  restructure both), the rasterizer's duplicated triangle setup (hot code), the OptiX spike (Stack 5 turns it into
+  the device). The plan's "1,000 lines fewer in src" was an estimate: the duplication scan found nothing over 17
+  lines in two places, and the moves are neutral, so src is 137 lines smaller (the hash loops, the helpers
+  and the dead code), with the tests' files the same size as the one file was.
+
+**Changed after the review**
+- The GPU pipeline-cache test forged its foreign file's trailer with the old basis, so the trailer check refused it
+  before the header check it was testing could (the trailer uses the new hash now); the shared test helpers are
+  `inline` (nine translation units include them: GCC warned on every unused `static` one); the coverage map reads
+  test bodies without their titles and comments, matches a command only as an argument and an action only as a whole
+  id (`manual`, which opens the browser, is listed as not driven by tests); the F12 test waits for the render and
+  checks its picture; the keymap test covers every id, including `file.save`, `mode.edit_toggle`, the three
+  `transform.*` and `lighting.update`, and checks a drawing began after a `draw.*` id (`run_action` says yes to any
+  of them); a test pins the two keys a bake saves (`lightmap_mesh_hash`, `lightmap_placed_hash`) to their values, so
+  a later change to the mixers can't mark every bake out of date, and hash.h's comment says so; `mix` is `hash_mix`
+  (the name meant lerp elsewhere); `walk_wire_path` takes a const map; `bone_armature` is declared once;
+  `button_grid` lives in tools_window.cpp; the empty round-121 group is gone; the stress rows are functions
+  (`mmd_damage_row`, `probe_file_damage_row`, `spring_chain_row`, `autophysics_row`, `locomotion_row`), the Euler
+  residual's unit corrected to body weights; `sequence.cpp`'s FNV loop uses the header; the spring test's 100-chain
+  timing loop went with its check (the row has it); `tools/clean.bat` keeps the training runs unless `--all`; the
+  task doc drops two claims the tree didn't hold (the toolbar button was left as it is; `merge_by_distance_naive`
+  stays in src, it shares `finish_merge`); the CHANGELOG says which caches the corrected basis refreshes once.
+  Noted, not changed: `closest_on_segment` passes a NaN through where two of the old copies clamped it to the far end
+  (their callers guard against non-finite input).
+
+**Checked**
+- The suite: 908 tests, 11,144 checks, 117.4 s of test time (was 204.6 s; the target 160 s); the check
+  count down by 272 - more than the plan's 60, and almost all of it one behaviour: the probe-volume sweep
+  asserted at every truncation point (349 checks, now 30 for the same behaviour), then the GPU view spike (11),
+  the render-cache script (4), the four timing checks (4), the OptiX picture (2); the MMD fuzz and the pacing
+  merge change nothing; the two coverage tests add 85. The stress run grows by the new rows: 32.6 s (codecs 1.0 s, probes
+  29 s, physics 0.4 s, animation 0.1 s, modeling 0.7 s).
+- `tools/test_coverage_map.py --check`: 259 entries, none empty.
+- The new rows' first numbers (this machine): 240 damaged MMD files in 1.0 s (66 refused, 174 imported, no bad
+  mesh); a 4 MB ProbeVolume.bin cut at 4,603 points (none accepted) and corrupted 150 ways (all loaded and
+  sampled safely); 100 spring chains of 3 bones 0.27 / 0.31 / 0.41 ms a frame (target 1.0), of 10 bones
+  1.05 / 1.20 / 1.70 ms a frame (target 5.0); AutoPhysics' jump 278 ms (target 1,000), the run 307 ms; Locomotion 0.017 ms a frame (target
+  0.2); the overlap check 14.1x its reference on 50k faces (target 3x).
+- Unit checks (round 177): Windows 11,144, 0 failed (908 tests); render-cache verify mode 11,145, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 176): the Wind gizmo and icons for the effectors (task 0158)
+
+**Asked:** a gizmo for the Wind component, as task 0153's spec left out.
+
+**Added**
+- A Wind, a Rotator and an Oscillator show an icon in the Scene view (the icons layer, now "Light, Camera &
+  Effector Icons"), clicked to select them like a light's. A selected Wind draws its arrow along its forward,
+  half a metre plus a quarter metre per m/s of Strength, wavy streamlines beside it with Turbulence, three rings
+  instead when Spherical; the gizmo and the simulation read one `wind_direction`.
+- The lesson "Winds you can see".
+
+**Changed after the review**
+- A true orthonormal basis for a near-vertical wind (the barbs and rings came out skewed), the strength and
+  turbulence read through the simulation's own finite, clamped accessors (`std::isfinite` folds away under
+  `/fp:fast`), three streamlines, the gizmo beside the rig controls' shape helpers, and an Effector render role
+  so the icon pass costs one virtual call an object instead of three casts.
+
+**Checked**
+- New tests (round 176): a 3 m/s wind turned to +X draws its arrow to 1.25 m along X in three segments,
+  turbulence adds three streamlines, spherical three rings of 1.25 m, a wind pitched 80 degrees keeps true rings
+  and square barbs; the three effectors have icons and a plain object none; a click on the wind's icon selects
+  it and selects nothing with the layer off.
+- Unit checks (round 176): Windows 11,416, 0 failed (912 tests); render-cache verify mode 11,417, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,141, 0 failed. Sanitizer build: 11,017, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 175): baked emission without blocks (task 0157)
+
+**Asked:** "Emissions off some objects when baked under the lighting tab still look blocky or pixelated."
+
+**Fixed**
+- A bake found emissive meshes only when a hemisphere ray chanced on them (a 10 cm lamp: one ray in sixty), so a
+  small bright object came out as a scatter of blocks. Each texel samples the emitters directly now (one emitter
+  point a ray, the emitter choice stratified over the rays, a shadow ray each), weighted against the hemisphere
+  gather by the power heuristic - the gather's own emitter hits are weighted the other way, on the CPU and in the
+  GPU kernel's bake entry - so nothing is counted twice. A 10 cm lamp over a floor: 1.4 % RMS from the analytic
+  irradiance (was noise-limited), 274x smoother than the hemisphere alone, the GPU gather within 4 % of the CPU.
+- A firefly clamp before the lightmap's filter (a texel over eight times its chart neighbours' mean), so a lone
+  bright hit is no longer spread into a blotch.
+- Preview Lighting bakes at half the density (a quarter showed blocks) and 32 rays first (was 16).
+
+**Changed after the review**
+- The emitter-hit weight carries the distance through see-through passes (a cutout leaf between a texel and a lamp
+  made the hit weigh too much); a sampled emitter point respects its alpha (a cutout's hole emits nothing, a
+  transparent emitter by its alpha), in the path tracer's own light sampling too; the firefly clamp touches the
+  hemisphere gather only, with the filter's facing test (a one-texel sun spot or a lamp's contact peak is real
+  light); the emitter rays are capped at 64 on the GPU path; the Lighting window says emitters are sampled; the
+  preview's status says 32.
+- The chain found the GPU's software-BVH kernel no longer compiling: shaderc's optimiser stopped with "ID overflow"
+  (SPIR-V allows 4,194,303 ids; round 174's kernel used 4,191,309, and the two lines above took it over), and the
+  path tracer handed the GPU's samples to the CPU without a word - the "every device" test took 70 s and passed on
+  the CPU's pixels. The kernel's `main` now calls `trace` from one place (the camera's samples and a bake's share
+  the loop), so the optimiser inlines the integrator once: 2,216,807 ids (2,197,372 with ray queries), the
+  optimiser in 19 s instead of 57-83, the same pictures (the seeds and the maths are unchanged), and room for
+  the kernel to grow again. The test now checks the device did the work (no GPU error, no CPU samples): 2.0 s.
+
+**Added**
+- `BakeSettings::sample_emissive` (on); the Lightmap Resolution help names 80 texels/m for small emitters; the
+  lesson "Baked emission: a small lamp without blocks".
+
+**Checked**
+- New test (round 175): a 10 cm emissive cube 0.5 m over a floor baked at 12 texels/m with 64 rays: 1.4 % RMS from
+  the cube's faces integrated analytically, 274x smoother than the hemisphere-only bake, the same twice, the GPU
+  gather's bake within 3.5 % of the CPU's; the preview tests expect 32 rays first, and the preview's first pass on
+  the lamp scene shows no texel over 3x its lit neighbours' mean.
+- Unit checks (round 175): Windows 11,406, 0 failed (910 tests); render-cache verify mode 11,407, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,131, 0 failed. Sanitizer build: 11,007, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 174): IK handles in metres, a size preference, rotatable targets (task 0156, ADR 0031)
+
+**Asked:** "the IK handles are way too big"; "I should be able to rotate the handles".
+
+**Fixed**
+- A rig control's wire is drawn at its Size in metres round its position and rotation, with no scale from the
+  control or its parents: a centimetre import (root scale 100) drew its handles a hundred times too big, a 0.01
+  rig a hundred times too small. FK circles are sized from the bone's world length (they were in the bone's own
+  units).
+
+**Added**
+- **Preferences > Rig Control Size** (0.1-5, `overlay controls size <x>`): every handle's wire and pick distance
+  scaled at once. **Rigging > Fit Control Sizes** (`ik fitsizes [root]`): every handle sized from its bone again
+  (a target a fifth of the lower bone, a pole 0.12, an FK circle 0.3) - loaded rigs whose handles were in another
+  unit come right.
+- **Rotate End** on an IK constraint: the foot or hand below the chain takes the handle's rotation (times an
+  offset captured when the IK was made). New IK starts a world-aligned target with Rotate End on (the offset
+  carries the foot's rotation, so the handle's keyed angles stay clear of the gimbal);
+  `ik orient <bone>` turns it on for an existing IK, keeping the bone as it is. The end bone counts as driven:
+  the gizmo says to turn its handle instead.
+- The lesson "IK handles: size and turn".
+
+**Changed after the review**
+- An FK control on the foot fought Rotate End every frame: the bones IK turns (the chain and the end bone) come
+  from one helper, used by the FK solve, Add FK, the tint and the gizmo. Rotate End ticked in the Inspector
+  captures its offset on the first solve (it snapped the foot to the handle); Weight blends the foot; the end bone
+  is the child at the chain's tip (not a twist bone beside it); Fit Control Sizes matches a control's IK on its own
+  rig and warns on a mistyped name; the floors are a millimetre, so a rig at 0.01 keeps a fifth of its shin; the
+  wire keeps a mirrored parent's mirroring; the gizmo says "turn its target instead" for the foot. The walk and
+  footstep generators turn the handle to the foot's roll (Rotate End overrode the keyed foot: 43 mm of sliding,
+  then 1.7 mm from the handle's Euler keys near the gimbal; 0.001 mm now).
+
+**Checked**
+- New tests (round 174): a humanoid rig at scale 1, 100 and 10 draws the foot target's box at 0.4 of the shin's
+  world length; an FK circle at 0.3 of its bone, an old-style size on a scaled rig at 0.003 until Fit Control
+  Sizes; the preference doubling the wire, a control's own scale not changing it; a fresh target starting with the
+  rotation through its offset, the foot turning 30 degrees with the handle while the knee stays, Rotate End off leaving the
+  rest, `ik orient` keeping a pitched foot through a turn, the foot refusing the gizmo, the fields saved; IK added
+  on a rig already at scale 100 sized at once; Rotate End ticked later keeping the foot, Weight 0 leaving it at
+  rest, a twist bone beside the foot not taken for it, FK on the foot refused and the solve settling, a file
+  without the field loading with it off.
+- Unit checks (round 174): Windows 11,395, 0 failed (908 tests); render-cache verify mode 11,396, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,126, 0 failed. Sanitizer build: 11,002, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 173): the anime pass written up (task 0151)
+
+**Asked:** the anime pass (tasks 0145-0155) documented in one place.
+
+**Added**
+- `docs/tasks/0151-anime-pass-write-up.md`: every task of the pass with its round and PR, where the code lives,
+  the research and what was taken from it, the short path through the tools.
+- ADR 0048 and ADR 0049 gain their References sections (Arc System Works GDC 2015, HoYoverse's face maps, VRM
+  MToon, Pixar's procedural patterns; Jakobsen 2001, Kugelstadt & Schoemer 2016, Macklin 2016 / 2019, Daviet
+  2023, Akyuerek & Sahillioglu 2025).
+
+**Checked**
+- Docs only: the docs test (the manual's chapters and Learn citations) and the suite unchanged.
+- The docs test (the manual's chapters and Learn citations): 5 checks, 0 failed; the suite as round 172's.
+
+## 2026-10-21 (round 172): soft tissue, the Jiggle modifier, hair rigged from its mesh (task 0153, ADR 0049)
+
+**Asked:** realistic hair and soft-tissue physics for Spring Bones, research based. This round: the soft tissue and
+the hair rig.
+
+**Added**
+- **Soft**, a fifth Spring Bones label for a single bone (a breast, a thigh, a belly): the bone trails the body's
+  **acceleration** by **Lag** (a landing throws it down, a step up; a slow walk hardly moves it), Stiffness pulls
+  it back and Damping settles it, **Limit** keeps it within a cone (degrees) about the animation's direction, and
+  **Volume** narrows it across as it stretches along its length (the product of the scales stays 1), the stretch
+  given back when Play stops or a bake ends. Found by name: breast / bust / boob / belly / stomach / butt / glute,
+  a thigh / hip / chest / cheek with jiggle / soft / phys / dyn / spring / sec / bounce, MMD's 胸 / 尻 / 太もも,
+  VRM's `J_Sec_L_Bust` (it read as hair before). `spring add <bone> soft`, `spring label <bone> soft`.
+- **Jiggle**, a deform modifier (Add Component > Mesh) for a mesh whose rig has no such bones: a vertex group's
+  vertices trail the body's acceleration together on a damped spring (Springiness, Damping, Lag, a Limit in
+  metres), stepped on the simulated clock (Play), still in the editor.
+- **Rig Hair from Mesh** (the Rigging window's Skeleton buttons; `hair rig [locks] [bones]`): the selected mesh's
+  loose parts (hair cards) - or one shell cut into locks round its upright axis - each a chain of bones from the
+  scalp to the tip under a new hair armature (under the character's head bone when the mesh is skinned to one, so
+  it follows the head), the mesh skinned to the chains, Spring Bones (hair) on each; one undo step.
+- The lessons "Soft tissue: breasts, thighs and bellies that move" and "Rig hair from its mesh", after Strands.
+
+**Changed after the review**
+- The Jiggle modifier evaluated for the Scene and the Game view at one clock applies one offset (it reset itself on
+  the second evaluation), moves every vertex by the offset and lets the stack scale it by the group (it squared the
+  weights), stops when its group is missing, and runs on the clock whether or not the Physics assistant is on;
+  Springiness is Stiffness, as on a chain. It isn't baked into clips (said in its help).
+- Soft tissue: the acceleration is known from the third step, not read from a speed on the second (a body already
+  moving when Play starts gave a kick); a teleport forgets it; the stretch and its counter-scale go on a chain's
+  last bone only (a non-uniform scale on a parent shears what hangs below it), the scale base is re-taken when
+  the animation or the Inspector sets it, a chain relabelled or taken off gives its scale back, and a bake writes
+  the stretch as Scale keys. Soft chains don't collide by default (the torso's capsule pushed them off their
+  pose). The cone picks a side for a bone pointing straight back. Lag / Limit / Volume show for Soft only.
+- The names: 尻尾 is a tail and 胸リボン a ribbon before 尻 and 胸 are soft; Chest, Hips, UpperChest stay the body's;
+  MMD's Japanese physics bones get the soft label at import too.
+- Rig Hair from Mesh: every card its own lock (up to 64; a count given merges them into that many sectors by their
+  roots), a shell into eight; bone lengths in the bones' own units under a scaled armature; a posed head refuses
+  (the rig would float when it returns to rest); a skinned mesh with no head bone refuses; the old armature's
+  groups go when the skin moves to the rig; each vertex is weighted to its own lock's two nearest joints (the
+  envelope bind weighted a card to its neighbours' bones); bone names carry the mesh's name; the head is found by
+  the whole word (not Forehead) or 頭. A hair rig under a head bone collides with the character's body (the
+  chain's armature is the outermost).
+- Speed: the body-bone name test is cached (every chain walk split every bone's name into words: 3 ms a frame for
+  a thousand bones), each chain is walked once a step, the separation pass works cell by cell on a sorted array
+  (each pair once, by squared distance) over a dense grid of the tips' box. 100 chains of 3 bones, strands touching: 0.4 ms a
+  frame with separation and collision; of 10 bones: 1.7 ms.
+
+**Checked**
+- New tests (round 172): a bust bone on a 3 Hz run trailing its acceleration by over 2 mm more than with Lag 0,
+  within 25 degrees (and within 5 with Limit 5), the scales' product within 1 % of 1, at rest within 1 mm a second
+  after the run stops, the scales back to 1 on reset, Lag / Limit / Volume saved; a Jiggle on a cube's top half
+  moving it up to its 30 mm limit under a 4 Hz shake, the bottom half not at all, at rest a second after; twelve
+  hair cards rigged as twelve chains of three bones under a hair rig with 36 vertex groups whose weights sum to 1,
+  undone in one step, and a cube cut into four locks of two bones; the soft names (Breast_L, chest_jiggle, Belly,
+  ThighSoft.L, 左胸, J_Sec_L_Bust1; 尻尾 a tail, 胸リボン cloth, Chest and Hips the body's); a landing throwing a
+  bust bone 3 mm further down with Lag 0.5 than with 0, no kick from a body already moving, a two-bone chain
+  stretching only its last bone and the bake's Scale keys, Volume 0 changing the volume, 100 chains of 3 bones
+  under 0.5 ms; the Jiggle the same for both views and half as far on a half weight; a skinned hair mesh rigged
+  under a scaled character's Head bone with the body's group gone and the body's capsule seen, a posed head
+  refused, forty cards merged into eight locks.
+- Unit checks (round 172): Windows 11,369, 0 failed (905 tests); render-cache verify mode 11,370, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,100, 0 failed. Sanitizer build: 10,976, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 171): strands - bend, root to tip, wind, colliders fitted to the skin, separation (task 0153, ADR 0049)
+
+**Asked:** realistic hair and soft-tissue physics for Spring Bones, research based. This round: the strands.
+
+**Added**
+- **Bend** on a Spring Bones chain: each bone keeps its animated angle to the one before it, by this much - a curl
+  keeps its shape, a strand bends where it was bent (0: the old behaviour, a curl straightens). **Root To Tip**: the
+  pull toward the animation fades toward the tip, so long hair's tips swing free while the root follows.
+- **Wind**, a component (Add Component > Scripts): a wind along the object's forward (or away from it, Spherical) of
+  a strength in m/s, with turbulence (eddies by place and time) and gusts (the strength breathing over seconds) from
+  periodic noise of the simulated time, so a bake comes out the same twice. A chain's **Wind** scales its response.
+- **Colliders fitted to the skin:** a body bone's capsule is as wide as the vertices its vertex group moves (the 85th
+  percentile of their distances from the bone in the rest pose, from the skinned meshes bound to the armature),
+  cached per armature until a mesh changes; a seventh of the length without a skin, as before. A skirt rests on a
+  thigh's real width.
+- **Separate:** a chain is kept apart from other chains by its Radius (every stepped chain's tips in a uniform grid,
+  two rounds of pushing apart and putting the lengths back), so a ponytail's strands and a skirt's pleats don't pass
+  through each other.
+- The labels' defaults set the new fields (hair: bend 0.2, the tips free, apart; an ear stiffer; a tail its curve;
+  cloth free and apart); old chains keep the old behaviour (bend 0, root to tip 0, wind 1, no Wind in the scene).
+- The Learn tab's lesson "Strands: a curl that holds, wind, the body's real width", after Spring Bones.
+
+**Changed after the review**
+- The bend held a world-space turn, so a curl unwound once the chain swung out of its animated plane: the animated
+  angle is carried through the simulated bone's own swing now, and not held after a bone of no length. Root To Tip
+  fades by the length along the chain, not the bone count. Separate never pushes strands further apart than the
+  animation laid them (hair roots are closer than their radii), skips a NaN tip, and the body's collision runs again
+  after it. The fitted radii pick one bone per vertex in one pass (ties to the lower group), take the narrowest skin
+  per bone (a hair shell skinned to the head doesn't widen it), match a skin's armature the way the skin does, and
+  are keyed by the bones' rest, names and lengths, the skins' ids, mesh versions and relative matrices (an undo or a
+  rest edit refreshes them). The wind's clock is per scene and a bake runs its own; the drag converges at any step;
+  the gusts are worked out once a substep.
+
+**Checked**
+- New tests (round 171): a curled chain holding its curl with bend 1 and hanging straight with 0; root to tip 1 lagging
+  the tip more while the first bone lags alike; a 5 m/s wind deflecting a chain by over 5 cm, nothing at 0 m/s or with
+  the chain's Wind 0, turbulence stirring it, a bake under the wind the same twice; a 0.2 m tube's bone fitted to
+  0.2 m (a seventh without the skin) and a chain resting outside it; two strands kept apart by their radii; the same
+  swing at 30, 60 and 144 fps with bend, wind and separation on; no NaN after a thousand 10 m jerks; the settings and
+  the Wind saved and loaded; the lengths within 0.1 % under a move with bend; a curl held out of its plane; strands
+  laid out closer than their radii staying as laid out; the hair label's defaults.
+- Unit checks (round 171): Windows 11,350, 0 failed (899 tests); render-cache verify mode 11,351, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,081, 0 failed. Sanitizer build: 10,958, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 170): the import preview with switchable shading (task 0152)
+
+**Asked:** a preview when importing a model, with the shading switchable before anything lands in the project, so an
+anime character arrives looking like one.
+
+**Added**
+- **Import Preview:** a dropped or opened model is read and shown in a dialog first - on a slow turntable (drag to
+  turn it) under the editor's light, drawn by the CPU rasterizer (every material, painted maps included), with the
+  import's summary and notes - and nothing is written until Import. The **Shading** row applies one look to every
+  material of the model: As Imported (what the file made: MToon, MMD's toon), PBR, or a toon style (Classic, Guilty
+  Gear, Soft Anime, Painterly, Manga) over the file's materials, their maps kept; **Outline** puts a line of the
+  given width on every mesh. Import writes the model, its textures and the .mat files with that look, and the
+  objects with their outlines; Cancel writes nothing.
+- **Preferences > Import:** "Preview before importing" (off: the model comes in at once, as before; headless runs
+  never show it) and the shading the preview opens with.
+- **Console:** `import <file> [asis|pbr|classic|guiltygear|soft|painterly|manga]` imports at once with that shading
+  (scripts and tests); without the word, the dialog when the preference is on.
+- The Importing lesson gains "Importing: preview the look".
+
+**Changed after the review**
+- A look chosen at import rewrites a model's existing .mat files (As Imported keeps what was edited); several files
+  dropped at once take their turns; the Outline switch reaches a file's own outlines; the turntable turns by the
+  clock in 2-degree render steps, lit from its own camera; `soft` and the two-word style names work on the console;
+  a file with no mesh imports at once; meshes without a material are shaded too; the views and the preview build
+  their draw items with one pair of helpers.
+
+**Checked**
+- New tests (round 170): `import <glb> guiltygear` writing a .mat with Guilty Gear's fields, then `pbr` and `asis`
+  rewriting it; the shading words; the dialog opening without writing a file or adding an object, its picture lit,
+  the preference's shading applied, the Shading row's buttons switching the preview's materials (Guilty Gear, PBR,
+  As Imported with the file's colour back), the Outline checkbox, Cancel leaving no trace, Import with Guilty Gear and
+  an outline giving the objects, the .mat and the Outline; a re-import rewriting the .mat with the look (As Imported
+  keeping it); `soft` and `guilty gear`; the preference's round trip and clamp; the plain import opening the dialog
+  with the preference on, a second file waiting, the popup clicked away as a Cancel, the preference off importing at
+  once.
+- Unit checks (round 170): Windows 11,337, 0 failed (894 tests); render-cache verify mode 11,338, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,068, 0 failed. Sanitizer build: 10,945, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 169): procedural anime textures (task 0150)
+
+**Asked:** "procedural textures for anime backgrounds": foliage (leaves, grass), buildings (walls, windows, roofs), sky
+and clouds, ground and water.
+
+**Added**
+- **Nine generators** in the Textures window, drawn as a background painter draws - two or three flat tones and a
+  line, no gradients: Leaves (clusters of leaf shapes with a lit top, a shaded underside and a dark rim), Grass
+  (blades from the bottom in three tones), Plaster (one tone with soft patches of a second and a few cracks), Window
+  Grid (frames, lit and dark glass, a wall tone), Roof Tiles (overlapping rows with a shadow band and lines), Sky
+  Gradient (zenith to horizon, a sun's disc and glow), Clouds (a white top over a flat shaded underside, an outline),
+  Rocks (stones lit on their upper left with a ground line between) and Water (one tone with bent highlight lines).
+  Every tone is a colour field; all repeat in the tile (Grass and Sky Gradient are cards: across only).
+- **Alpha From Cover** on a texture: the albedo image's alpha is what the cards cover, in the image and in live
+  shading. The cards (Leaves, Grass, Clouds) cover only their shapes and write that cover into a cover plane of
+  their own (stacked cards add up; Warp and Tile move it with the colour; Mask by Height and Use Mask keep the mask
+  as before), so a Cutout material shows holes between the leaves: a foliage card, a cloud over the sky (ADR 0017's
+  amendment).
+- **Presets** Anime Leaves, Anime Grass, Anime Wall, Anime Windows, Anime Roof, Anime Sky, Anime Clouds, Anime Rock and
+  Anime Water (the Textures window's New list, `newtex <name> <preset>`), each with its tile size and no normal map.
+- **`animemat <preset>`** on the console: the preset's texture asset and a flat-toned Toon material reading it (a
+  double-sided Cutout for a card) on the selected objects, one undo step.
+- The Textures lesson gains "Anime backgrounds: procedural textures".
+
+**Changed after the review**
+- The cover left the mask plane for its own (a second card replaced the first's cover, a Mask by Height above a card
+  replaced the alpha, a card's Use Mask read its own cover, Warp and Tile moved the colour but not the cover, and
+  live shading reset it); a card's colour lands everywhere so the cut has no grey fringe; Roof Tiles rounds its rows
+  up to an even number (an odd count broke the stagger one tile over); the Sky Gradient's sun reaches round the
+  seam; a Plaster crack is one edge between two cells, not a cell's outline; Grass leans no further than the scan
+  looks; the Voronoi, Plaster and Rocks generators share one cell scan; `animemat` makes nothing when nothing with a
+  MeshRenderer is selected; the texture's hand-written copy carries its output switches (a preset without a normal
+  map got one back as an asset).
+
+**Checked**
+- New tests (round 169): each generator deterministic, periodic one tile over (the cards across only; Roof Tiles with
+  odd rows and a sun at the sky's seam too), at most four tones over what it covers (the Window Grid's six are three
+  pairs), covering over a tenth of the tile; each preset's layer and card flag; a leaf card's albedo with clear and
+  solid texels (none clear with the flag off); `animemat Anime Leaves` on a Quad giving a Cutout toon material with
+  holes between the leaves at sampled points, an unknown preset warning, undo, nothing made without a selection; the
+  texture copy keeping its switches and hash; live shading's alpha agreeing with the image's; two cards adding up; a
+  card's Use Mask reading the mask below; a Tile moving the cover with the colour in the image and the live path.
+- Unit checks (round 169): Windows 11,300, 0 failed (892 tests); render-cache verify mode 11,301, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,031, 0 failed. Sanitizer build: 10,909 (one timing check at 0.204 ms a frame against its 0.2 limit, with a Windows build running beside it; it now skips sanitizer builds like the suite's other timing checks), 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 168): the 2D look - custom normals, a face shadow map, inner lines and hatching, hold frames (task 0149, ADR 0048)
+
+**Asked:** renders that "look more 2D while posed in 3D", research-based: shadow control with smooth normals, a face
+shadow map, inner lines and hatching, animation on 2s and 3s.
+
+**Added**
+- **Custom normals:** a mesh can carry its own shading normals, one per vertex, which replace the smooth / flat /
+  sharp-edge normals at every corner; saved with the mesh, carried through edits by position as shape keys are. An
+  FBX or glTF whose normals an artist edited keeps them (when over 1 % differ from the recomputed ones by a degree;
+  the import says so); exports write them as they are.
+- **Smooth Normals and Normal Transfer modifiers** (Add Component > Mesh): the shading normals averaged over the
+  surface N times (an anime face keeps its shape and loses its bumps' shading), or taken from a proxy object's
+  surface at the nearest point (a sphere round the head: Blender's Data Transfer trick), both limited by a vertex
+  group and moving no vertex. **Rigging > Anime Face Normals** (console `facenormals`) adds a sphere proxy fitted to
+  the Head group (or the top of the mesh), without a renderer, and the modifier reading it.
+- **Face Shadow Map** on a toon material: the key light's angle round the face (0 from the front, 1 from behind)
+  read against the map decides the lit side instead of N.L - HoYo's SDF faces; the map is mirrored for a light on
+  the other side; Face Shadow Softness and Face Forward (+Z, -Z, +X, -X: VRM faces +Z, MMD -Z). The Textures window's
+  **Face Shadow** generator makes the plain sweep to paint over. The same in the rasterized views, F12 raster and
+  both path tracers (the GPU viewport hands it to the CPU like the other painted maps).
+- **Line Map** (inner contour lines multiplied into the colour, or only into the shadow tones with Lines Only In
+  Shadow) and **Hatch Map** with Hatch Scale (strokes tiled over the UVs, shown in the shadow tones).
+- **Outline:** Thickness Group (a vertex group scaling the line's width per vertex, Guilty Gear's painted line width),
+  Distance Fade (thinner far away) and Min / Max Pixels (the width kept between them on screen, by the object's
+  distance, in the views and raster renders).
+- **Hold** on the Animation and Sequencer components: 1s, 2s, 3s or 4s - the pose changes every so many frames while
+  the camera and the rest of the scene move every frame; Render Animation holds the same frames (from the range's
+  first frame).
+- Console `customnormals show|clear` (the way back from kept or transferred normals). A Skin modifier turns custom
+  normals with its bones; the face shadow map takes no cast shadow on top (the map is the face's shadow); a file's
+  normals are kept only when they are smooth and differ from both the area- and the angle-weighted recomputed ones
+  (ADR 0048's notes).
+
+**Changed after the review**
+- Normal Transfer reads the proxy's render mesh (its own vertices and shading normals), with the closest-point
+  search extracted; a normal modifier starts from the head's normals on every evaluation (it compounded); Anime Face
+  Normals places the modifier before the Skin and makes a 16 x 12 proxy; the Outline's distance scale moves in 2 %
+  steps, has its own shell slots per view (a path tracer kept a freed shell otherwise), honours an orthographic view
+  and an object-unit thickness; the hold's float frame rounds up at 1e-4; the GPU material's packed ids are built
+  unsigned; the FBX reader turns normals by the geometry's normal matrix.
+- The Learn tab's Materials lesson gains "The 2D look".
+
+**Checked**
+- New tests (round 168): custom normals at every corner, saved and loaded, transferred by position, through a glTF
+  round trip with the note, the file's normals kept only when they differ; Smooth Normals closing the sharpest edge
+  and moving nothing, limited by a group; Normal Transfer radial from a sphere and following it; `facenormals` and its
+  undo; `toon_face_lit`'s six cases and the generator's sweep; a sphere one lit tone from the front and one shadow tone
+  from behind in the rasterizer, the CPU path tracer and the GPU's; the shadow multiplier, a grey line map (both ways)
+  and a hatch map at a point; the Outline's group, cache key and distance scale; 23 frames on 1s / 2s / 3s; Hold saved.
+- Unit checks (round 168): Windows 11,236, 0 failed (890 tests); render-cache verify mode 11,237, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,967, 0 failed. Sanitizer build: 10,845, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change (the
+  glTF weld is as before; custom normals touch no geometry).
+
+## 2026-10-21 (round 167): toon styles (task 0148, ADR 0048)
+
+**Asked:** "Is there any way to add more toon shading details in good engine" - "The Guilty Gear / Arc System Works
+is a really good baseline. I want different options of toon shading to get versatility in style."
+
+**Added**
+- **Toon styles:** a Toon Style field at the top of a material's Toon group - Classic, Guilty Gear (Arc System Works'
+  hard two-tone, the key light alone, the highlight where it is painted, no rim), Soft Anime (three tones, light
+  wrap, a lit-side rim), Painterly (four soft tones under the sky's gradient), Manga (a hard grey two-tone). Picking
+  one sets the fields; every field stays editable and the maps are yours. Console `toonstyle <style>` on the
+  selected materials; with several selected, the style lands on all of them.
+- **Painted control**, as the studios do it, through textures: a Shadow Bias Map (grey neutral, white keeps a point
+  lit, black in shadow), a Toon Specular Map (where the spot may show) with the spot's own colour, a Toon Rim Map and
+  a rim that shows on the lit side, the shadow side or both of the key light, and a Shade Map - the shadow side's own
+  picture (VRM's MToon shade texture now comes in).
+- **A Toon Ramp** instead of the bands: an image read by how lit the point is (left dark, right lit, or bottom dark,
+  top lit), made by the Textures window's new Toon Ramp generator (2 to 5 tones, hard or soft); MMD's toon images
+  land there.
+- **Toon Hair Highlight** turns the spot into the band across the hair that anime draws; **Toon Light Wrap** lets
+  the light reach round the form before the tones step; **Toon Key Light Only** keeps several lights from banding
+  like a disco ball: the brightest sun bands, the others fill smoothly.
+- All of it the same in the rasterized views, F12 raster, the CPU and GPU path tracers; the GPU viewport draws the
+  plain settings and the ramp, and hands a material with painted maps or a hair highlight to the CPU, saying so (a
+  VRM avatar with a shade texture draws on the CPU there; MMD models stay on the card). A lesson section "Toon
+  styles" with Try-its.
+
+**Checked**
+- New tests (round 167): each style's fields, names in any spelling, `toonstyle` undone as one step, a .mat keeping
+  every field; the shared shading (the spot's colour and map, the bias's ends, the shade map, the wrap, horizontal
+  and vertical ramps, the hair band, the rim's sides and mask, the key light); on a sphere wrap 0.5 grows the lit
+  share by over 10 %, the rasterizer and the CPU path tracer share the tones within 4 % (the GPU's within 3 % of the
+  CPU's), a second light bands unless Key Light Only (rasterizer and path tracer within 4 %); the Toon Ramp
+  generator's steps and a material reading it showing exactly two tones; MMD's ramp reading lit at the top; VRM's
+  shade texture in Shade Map; MMD's ramp in Toon Ramp.
+- Unit checks (round 167): Windows 11,182, 0 failed (885 tests); render-cache verify mode 11,183, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,914, 0 failed. Sanitizer build: 10,792, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
+## 2026-10-21 (round 166): multi-edit materials (task 0147)
+
+**Asked:** "add the ability to multi-edit materials if they share the same properties (such as shading model). For
+example I can modify toon threshold universally amongst selected materials."
+
+**Added**
+- **Editing several materials at once** (Unity's multi-object editing, for materials): select several in the
+  Materials window (Ctrl-click, Shift for a range), several `.mat` files in the Project window, or several objects
+  in the Scene, and a change made in the fields reaches every one of them that has the field - a Toon Threshold
+  lands on the toon materials and leaves a PBR one alone, an axis field on the axis ones, Shading Model on all (that
+  is how a set is converted). A dash marks a field whose values differ (hover it to see the active one's); what you
+  type lands on all; `+=0.1` or `*=2` moves each from its own value. One undo step; the edited assets are written
+  back. Console: `matset <Field> <value>` on the selection. The anime lesson says so, with a Try-it.
+
+**Checked**
+- New tests (round 166): three toon materials and a PBR one selected in the Materials window: Toon Bands typed 3
+  lands on the three, not the PBR one; `+=1` moves each from its own value; the differing fields are named;
+  `matset ToonThreshold 0.4` reaches the three, `matset ShadingModel 1` all four, an unknown field warns; the `.mat`
+  file on disk holds the values. Three objects selected (two toon, one PBR): Toon Bands typed in the active one's
+  Inspector reaches the other toon object's material, not the PBR one, and one undo takes it back on both; `matset`
+  on the selected objects the same.
+- Unit checks (rounds 164-166 together): Windows 11,126, 0 failed (880 tests); render-cache verify mode 11,127,
+  0 failed, 0 stale pictures. Linux with libraries: 10,862, 0 failed. Sanitizer build: 10,740, 0 failed, no reports.
+  `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`,
+  `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-21 (round 165): Inspector drop-downs, overlay layers, Anime and Manga as one effect each (tasks 0145, 0146, 0154)
+
+**Asked:** "For the guides in the camera, have a drop down stack so it doesn't occupy too much of the inspector's
+camera tab"; "the ability to hide certain objects like bone controls so I can see the mesh without too much
+overstimulation ... I can hide the bone layer, but can still see IK/FK handles"; "For the camera 'Anime' and 'Manga'
+filter. Make its own separate filters not a group composite and make it one unit."
+
+**Added**
+- **Drop-downs in the Inspector** (task 0145): a component's fields can sit under a foldout header, closed or open,
+  that only the Inspector sees - files, undo, the hash, `set` and clips read the fields as before. The camera's
+  Composition Guides are one closed drop-down now; a material's Toon fields sit in a Toon group and the axis ones in
+  Axis Material.
+- **Overlay layers** (task 0146): an Overlays menu in the Scene view's bar (Blender's Overlays popover) with a check
+  per layer - Bones, Rig Controls (IK / FK handles), Light & Camera Icons, Curve & Lattice Points, Object Origins,
+  Footprints & Contacts, Selection Outline, Grid, Gizmos, Statistics - and All Overlays. Hide the bones and keep the
+  rig controls to pose a character by its handles while seeing its mesh. A hidden layer isn't clicked either (a click
+  lands on what is behind), the bones' head and tail handles go with their layer, the Hierarchy and the gizmo still
+  work on anything. Console `overlay list | all|<layer> [on|off]`; the choice is kept in the preferences. A lesson:
+  "Overlays: See the Mesh, Hide the Rig".
+- **Anime and Manga as single effects** (task 0154): the Looks menu adds one Anime effect (Lines, Line Color, Line
+  Thickness, Crease Angle, Saturation, Contrast, Bloom, Bloom Threshold) or one Manga effect (Grayscale, Tones, Dots,
+  Dot Cell, Dot Contrast, Lines, Line Thickness, Paper) instead of three or four. Each draws exactly what the stack it
+  replaces drew (the parts run inside it), so a scene saved with the old composite looks the same, and the parts stay
+  effects of their own for stacks of your own.
+
+**Checked**
+- New tests (round 165): the camera's Composition Guides header is there and closed, `set Camera.Thirds` lands, the
+  file keeps it, the render hash ignores it, a click opens it (the Add Filter button below moves down by 12 rows) and
+  another closes it; a Toon material shows an open Toon group and a closed Axis Material group, a PBR one no Toon
+  group, and a plain reader still sees both groups' fields. A humanoid rig: a click on a bone selects it; Bones off:
+  the handles vanish, the same click selects what is behind, the console still selects it, the rig controls stay;
+  all off / all on; icons off: a click on the sun's icon selects nothing; the menu's Bones row turns the layer off
+  and closes; the preferences keep `overlays_off=bones`. Anime against the old Line Art + Color Grading + Bloom stack
+  and Manga against Grayscale + Halftone + Line Art + Paper: the largest channel difference 0; Lines off and Tones 3
+  change the picture; the effects save and load; the old composite loads as four effects; the registry table test
+  covers both.
+- Checked with round 166's chain (see its entry).
+
+## 2026-10-21 (round 164): area lights as emissive planes (task 0155, ADR 0050)
+
+**Asked:** "The area light is still treated like a point light. The area light needs to act like a planar mesh using
+an emissive material that has varying intensity." Chosen: the path-traced renders and the lightmap bakes / probes,
+with physical falloff.
+
+**Changed**
+- **An area light is a glowing panel now.** Every renderer already sampled its rectangle or disc, but its brightness
+  was Unity's range curve from the light's centre, with no inverse square from the points of its surface - so a wide
+  panel close to a floor lit it like a lamp at its middle. Now each point of the panel sends light with its facing
+  cosine and the inverse square of its distance, exactly what a quad with an emissive material gives (a test renders
+  the two side by side: the same floor within 3 %). `Intensity` is how brightly the panel glows per square metre (an
+  emissive material of strength pi x Intensity gives the same light), so a bigger panel gives more light; a 1 x 1 m
+  panel a couple of metres from a wall gives about what it gave before.
+- **Range is a window, not the falloff:** the light fades to nothing at Range (Unreal's window) and falls as the
+  inverse square before it. Point and spot lights keep their curve.
+- The path tracers (CPU and GPU), the rasterized views' exact term, the lightmaps (the shadow rays weigh each point of
+  the light by its own falloff), the probes and MoonRay's export (the panel's radiance as it is) all take the one
+  formula; a surface touching the panel stays finite (the inverse square stops at 1 cm).
+- **Scenes lit by area lights change on purpose:** a 1 m panel 3 m away gives about a quarter of what it gave, the
+  same panel 30 cm away about five times more, and a 10 m panel ten times a 1 m one (it gave the same). Raise or
+  lower old scenes' area-light intensities to taste.
+
+**Checked**
+- New tests (round 164): a 20 cm panel 1 m up gives albedo x intensity x its area, 2 m up a quarter; a 10 x 10 m
+  panel 3.5 m up against a 10 x 10 m emissive quad and the exact term, under the centre and 3 m out; the falloff past
+  the panel's edge has no step; a floor 10 cm under a panel matches the exact term and a millimetre under it stays
+  finite; Range 4 m ends at 4 m and is within 2 % of unlimited at 1 m; MoonRay's RectLight intensity is pi for
+  intensity 1; the Light's help says so.
+- Task 0030's references rewritten for the new integrand: the exact term within 1 % of a million-sample Monte Carlo
+  over thirteen placements (strips, discs, 30 cm below a 10 m light), the rasterizer within 10 % of the path tracer,
+  the bake within 5 %; task 0022's bake noise and the toon-under-area-light shares unchanged. Task 0022's Preview
+  Lighting test cuts its "lit top" at half the chart's peak instead of an absolute value (the brighter panel let the
+  dim sides in with their larger noise: macOS CI).
+- Checked with round 166's chain (see its entry).
+
+## 2026-10-19 (round 163): bone handles the right size on import (task 0144, ADR 0047)
+
+**Asked:** the Carmen import's bone handles looked huge: "is there a way to fix that when we import any model format?"
+
+**Fixed**
+- A bone's length is in its own units, and a leaf bone (no bone below it) got a default of 0.1 of them. Blender's FBX
+  export scales the armature x100 and writes an `_end` leaf under every chain, so each became a 10 m spike (and
+  under a x0.01 armature bones vanished). Now a leaf's length is in metres whatever the scale: half its parent's,
+  else 10 cm.
+- Weightless end bones are folded into their parents: Blender's `_end` leaves (`Eye.L_end`, `HairBase.006_end`...),
+  Mixamo's `HeadTop_End`, BVH's end sites, VRoid's `_end` spring tails: the parent's tail reaches them and no object
+  is made for them. The Console says how many. Every format goes through the same code (MMD gives its own tails;
+  a Collada leaf with no end site takes the metres default).
+- A baked clip's "this number never moves" test allowed a millionth of a degree; on macOS the angles read back from
+  quaternions jitter by more, so a turning bone got two extra flat tracks (#109's macOS run). A thousandth of a
+  degree now, a hundredth of a millimetre for moves.
+- Three tools read a bone's length as metres (the spring chains' collision radius, Add IK's pole distance, the body's
+  capsules): under a scaled armature they were a hundred times off; they measure the bone in the world now.
+
+**Checked**
+- New tests (round 163): a glTF with an armature scaled x100: Upper 1 m to Lower, Lower 0.5 m to its folded `_end`,
+  Tip 25 cm (half its parent's), the fold noted; Blender's four rig fixtures: no bone longer than its chain, no leaf
+  longer than half its parent nor shorter than 2 cm; a leaf's tail dragged to 0.3 m reads 0.3 m.
+- The Rigging, IK, skin and spring groups unchanged; after the review every leaf is checked against half its parent
+  and Mixamo's `HeadTop_End` folds.
+- Unit checks (rounds 162-163 together): Windows 11,014, 0 failed (865 tests); render-cache verify mode 11,015,
+  0 failed, 0 stale pictures. Linux with libraries: 10,750, 0 failed. Sanitizer build: 10,628, 0 failed, no reports.
+  `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`,
+  `modifiers_ngon`, `editor_render`: 0 problems, no change.
+- The user's folder, imported headless by the rebuilt app: CarmenB, CarmenF and CarmenH textured from `textures/`,
+  OL bare, 16 end bones folded, the handles the size of the bones.
+
+## 2026-10-19 (round 162): the texture finder (task 0143, ADR 0047)
+
+**Asked:** a Sketchfab download (`carmen-limbus-company/source/CarmenSF.fbx` with `textures/Carmen{B,F,H}_Base_color.png`)
+came in untextured: "why isn't the textures importing?", and then "a system where this can automatically find relevant
+textures in a folder, so that I don't have to look for them and import them manually".
+
+**Fixed**
+- The FBX links no textures at all, and the matcher of round 154 looked only in the model's own folder (`source/`)
+  and read `CarmenB_Base_color` as a map called "color" of `CarmenB_Base`, never `CarmenB`.
+
+**Added**
+- **The texture finder:** every import looks through the folders around the model - its own folder and three levels
+  below, then the folders beside it two levels down (Sketchfab's `source/` + `textures/`, Unity packages); never
+  into Downloads, Desktop, Documents, a home folder or a drive root, and not into folders full of other files; at
+  most 2,000 images.
+- **Names read as people write them:** two-word kinds (`Base_color`, `Normal_OpenGL`, `Roughness_map`,
+  `Metallic_Smoothness`), sizes and tiles dropped (`_2k`, `_4096`, `.1001`), AO / opacity / height maps recognised
+  (and reported: Blendity has no slot for them).
+- **Pairing by likeness:** each bare material is scored against every set (the same name; one inside the other;
+  the words they share) through its own name and its meshes'; the best above 0.6 wins, nearest folder first. When
+  as many materials as sets are left and each has its own best, they pair by that; a lone material with a lone set
+  always does.
+- **The Console says** which file went to which material and from where, what stayed bare, what was seen but not
+  used, and that a wrong guess is one slot to change in the Inspector.
+- **Learn:** the "Importing models" lesson says so.
+
+**Checked**
+- New tests (round 162):
+  - Sketchfab's layout with two-word names: RobeA and RobeB textured (RobeB's normal and roughness too), Trim's own
+    colour kept, the AO map reported;
+  - `Body` pairs with `T_character_body_2k_BaseColor` (and its normal); `Hand_R.png` alone textures nothing;
+  - a model loose in a folder called Downloads takes nothing from the folders around it; in a folder of its own
+    under Downloads it looks around as usual;
+  - dropped into the editor: the textures copied into `Assets/Textures/robe/`, the `.mat` files using them.
+- Round 154's tests unchanged (the moved link, the lone `Rock_d`, `Hand_R`, the flat colours).
+- After the review: a Unity Textures folder of `.meta` sidecars is read; a height-only set leaves its material bare
+  and is reported; `Wood_01` and `Rock_01` don't pair; `Arm` doesn't take `Armor`'s set; the user's folder made
+  synthetic (CarmenB/F/H textured, OL bare).
+- **Fixed on review:** a Unity texture folder (one `.meta` a texture) was skipped as "a folder of other files"; the
+  crawl had no bound on folder listings (a library on a slow disk could stall the drop: now 400 listings or 150 ms);
+  a set of only AO or height maps could "win" a material and leave it bare without a word.
+- Checked with round 163's chain (see its entry).
+
+## 2026-10-19 (round 161): Collada (task 0141, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": Collada, what Blender, Maya, SketchUp and Mixamo export.
+
+**Added**
+- **Collada (.dae) import** through Blendity's own XML reader (`core/xml.h`): geometry (triangles, polylists,
+  polygons) with its materials (the effect's diffuse colour or texture, emission, shininess as roughness,
+  transparency), skins with their joints and bind matrices, the node hierarchy, and the animations (matrix channels,
+  or translate / rotate / scale channels by name) as one clip. The file's up axis and unit are honoured, so a Z-up
+  model in centimetres stands the right way up at the right size.
+- **Learn:** "Collada: .dae scenes".
+
+**Checked**
+- New tests (round 161), on a Collada file the tests write themselves (Z up, centimetres, a textured square skinned to
+  two joints, a matrix animation):
+  - standing in metres and facing +Z, its texture found in `tex/`, its emission and roughness read, its groups named
+    after the joints, at rest unmoved;
+  - the clip of 24 frames: at its end the upper joint has turned 90 degrees and the square's top with it;
+  - 40 files cut short refuse or import without harm;
+  - dropped into the editor: `Skin.mat` with the texture copied in, the clip playing on the root; the lesson's Try-it;
+  - after the review: a Y-up metre cube with a byte-order mark and CDATA comes in facing out, its translate and rotate
+    component channels moving it 2 m and turning it 90 degrees.
+- **Fixed on review:** the `<source>` cache outlived its file (a later import could read another file's UVs); CDATA cut
+  short read past the buffer; a skin over Blender's morph controller lost its mesh; X-up files came in inside out.
+- Unit checks (the whole stack, rounds 156-161): Windows 10,985, 0 failed (859 tests); render-cache verify mode
+  10,986, 0 failed, 0 stale pictures. Linux with libraries: 10,721, 0 failed. Sanitizer build: 10,599, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`,
+  `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-19 (round 160): BVH motion capture (task 0140, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": motion capture.
+
+**Added**
+- **BVH import:** a `.bvh` (Biovision motion capture: CMU, Mixamo's exports, Rokoko) comes in as a skeleton of bones at
+  the file's offsets and its motion as a clip (`Assets/Animations/<file>/<file>.anim`) playing on it, at the file's
+  frame rate. Rotation channels are composed in the file's order; a skeleton taller than 10 units is taken to be in
+  centimetres.
+- **Learn:** "Motion capture: BVH".
+- Out (said in the Console): retargeting onto another character (bake the clip or copy its keys by name).
+
+**Checked**
+- New tests (round 160), on a BVH the tests write themselves (hips, spine, head and an end site; the hips walking a
+  metre forward and the spine bending 90 degrees over 24 frames at 24 fps, in centimetres):
+  - the skeleton in metres (the hips 1 m up, the head above the spine), the clip of 24 frames at 24 fps;
+  - at its end the hips have moved 1 m towards +Z and the spine has turned 90 degrees (within 0.1 degree);
+  - damaged files (cut anywhere, a brace too many, a NaN) refuse or import without harm;
+  - dropped into the editor: the clip made and playing on the skeleton's root; the lesson's Try-it;
+  - after the review: CRLF, tabs and `Frames:25` read the same; what a damaged file gives is whole.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-19 (round 159): animation clips from FBX and glTF (task 0139, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": a model's own animations (Mixamo, Blender actions, glTF).
+
+**Added**
+- **A model's animations come in as clips**, as Unity's importer makes them: `Assets/Animations/<model>/<clip>.anim`
+  for each, the first playing on the model's root through an Animation component.
+  - **FBX:** each animation stack, at the file's frame rate, every node's turn, move and scale a frame at a time (a
+    track for each that changes); blend-shape channels as BlendShape tracks.
+  - **glTF:** each animation at the frame rate its keys fit (24, 25, 30, 50, 60, 120; else 30); moves, scales and
+    morph weights at the file's own keys (step and linear; cubic splines baked), turns baked a frame at a time from
+    the file's slerp.
+  - Euler angles chosen nearest the frame before: no wraps.
+- **Learn:** "Imported animations: a model's clips".
+
+**Checked**
+- New tests (round 159), on Blender's FBX and GLB of a two-bone arm (`tests/fixtures/anim_arm.*`, `make_anim.py`):
+  - one clip of 24 frames at 24 fps from each; at its end the upper bone has turned 90 degrees (within a degree) and
+    the shape key is at 1; at its start nothing has moved;
+  - dropped into the editor: the FBX's `Armature|ArmatureAction` saved as `Armature_ArmatureAction.anim` and playing
+    on the root; a second copy of the model plays its own clip (its armature renamed); the lesson's Try-it.
+- **Fixed on review:** Blender's clip names (`Armature|ArmatureAction`) couldn't be written on Windows, so every FBX
+  action was dropped silently; a second import of a model lost its clip to the armature's uniqueness rename; baked
+  clips kept every frame (now reduced to the frames that matter); a glTF clip started a frame early.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-19 (round 158): VRM characters (task 0138, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": VRM, the VTuber avatar format.
+
+**Added**
+- **VRM import** (0.x and 1.0; VRoid Studio, UniVRM): a `.vrm` dropped onto the window comes in as a character facing
+  +Z.
+  - **Bones:** the humanoid's bones named for the rig tools (`leftUpperLeg` -> `LeftUpLeg`).
+  - **Expressions** (A, I, U, E, O, blink, joy...) as shape keys on the meshes they move, each the weighted mix of
+    morph targets the file binds.
+  - **Spring bones** as Spring Bones chains with the file's stiffness, drag, gravity and hit radius.
+  - **MToon** as Toon shading (the shade colour, toony edge, shift; cutout and transparent modes; unlit shaders) with
+    an Outline of the file's width.
+  - **Meta:** the title, author and license in the Console.
+  - **Not carried over:** shade textures, rim light, matcaps, first-person and look-at settings.
+- **Learn:** "VRM characters: VRoid and UniVRM avatars".
+
+**Checked**
+- New tests (round 158), on an avatar the tests write themselves as a GLB, in 0.x and 1.0 form:
+  - the bones named; the left leg on the character's left and the hair behind the head in both (the 0.x model turned
+    half a turn);
+  - `a` / `aa` the whole first morph (5 cm), `blink` half the second; the face facing +Z;
+  - the hair's chain with stiffness 0.5, damping 0.4, gravity 0.5, radius 3 cm;
+  - the material Toon with a shadow ratio of 0.5, a 5 mm outline in the file's colour; the meta in the notes;
+  - dropped into the editor: `Skin.mat` (Toon), the outline, the lesson's Try-it;
+  - after the review: bound with inverse bind matrices, the face stays at rest and follows the head; the hair outside
+    the skin's joints still gets its chain; a 0.x shadow comes in at its sRGB-corrected ratio.
+- **Fixed on review:** 0.x colours are sRGB (a VRoid shadow came in much too light); a forking spring root got one
+  chain (every strand below it hung rigid); a spring on an accessory node outside the skin was dropped.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-19 (round 157): MMD motions (task 0137, ADR 0047)
+
+**Asked:** round 154's MMD request: its dances.
+
+**Added**
+- **VMD import:** drop a `.vmd` onto the Scene view with an MMD character selected (or File > Import, the Project
+  window, the console's `import <file>`), and it becomes `Assets/Animations/<character>/<motion>.anim`, played by the
+  character's Animation component.
+  - **Bones** by MMD's names (`左ひざ`, `頭`): a motion fits any model with the standard bones. The keys are turned
+    from MMD's rest-frame quaternions into each bone's own rotation (Blendity's bones point at their tails).
+  - **Timing:** MMD's Bezier curves become the keys' slopes; a run the curves can't follow within half a degree or a
+    millimetre is keyed every frame from the true arc.
+  - **Faces:** morph keys on the BlendShape sliders of every mesh with that morph.
+  - **IK:** the legs' IK switched off and on keys the constraint's Weight.
+  - **Reported:** bones and morphs the character hasn't; the motion's camera (not imported).
+- **Learn:** "MMD motions: VMD dances on your character".
+
+**Checked**
+- New tests (round 157), on a motion the tests write themselves:
+  - the hips' 90-degree turn within 0.6 degrees at every checked frame; the ankle's eased 170-degree turn half done at
+    its midpoint, exact at its end;
+  - the centre moved 0.2 m towards +Z; `あ` at 0.5 halfway; the IK weight 1 then 0; the missing bone reported;
+  - dropped into the editor: the `.anim` made and played (the hips turn in Play), the `.vmd` copied in beside it, and
+    the lesson's Try-it.
+- **Fixed on review:** keys are built per track and assigned whole (a long dance was inserting each of thousands of
+  keys into a growing list); a densified run can't flick into its last key; a bone keyed at its rest gets no track
+  (its hair would have fought its spring); the motion file is kept beside its clip.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-18 (round 156): MMD models (task 0136, ADR 0047)
+
+**Asked:** round 154's "make the program be able to handle mmd models as well".
+
+**Added**
+- **PMX (2.0, 2.1) and PMD import**, read by Blendity's own code. Drop a `.pmx` or `.pmd` onto the window.
+  - **Scale and facing:** scaled from MMD's 8 cm unit to metres and turned to face +Z like every other character.
+  - **Skin:** skinned to its bones (BDEF1/2/4; SDEF and QDEF read as linear).
+  - **Bones:** each bone points at its tail. The standard bones get the names the rig tools read (`左ひざ` ->
+    `LeftLeg`), so Walk Cycle and the physics tools find its legs.
+  - **Leg IK:** an IKConstraint on each knee, aimed at the foot's IK bone, with a pole in front of the knee.
+  - **Physics:** the bones MMD simulates (hair, skirts) become Spring Bones chains.
+  - **Faces:** vertex and group morphs become shape keys.
+  - **Materials:** Toon shading with MMD's colours, textures and toon ramp; the model's edge becomes an Outline.
+  - **Not carried over** (listed in the Console): bone, UV and material morphs, and inherited rotation.
+- **Japanese text:** PMX's UTF-16 or UTF-8, and PMD's Shift-JIS, decoded by the operating system (Windows' code page
+  932, iconv on Linux and macOS).
+- **Learn:** "MMD models: PMX and PMD".
+
+**Checked**
+- New tests (round 156), on a character the tests write themselves (no third-party model):
+  - Shift-JIS and UTF-16 names decode;
+  - the PMX, in UTF-16 and UTF-8:
+    - placed to the micrometre, the thigh pointing down its length;
+    - the knee's IK on `LeftFootIK` with its pole in front, the hair a spring chain of its body's radius;
+    - its front faces +Z, and a turned knee moves the vertices it carries;
+    - the morphs lift 8 cm and 4 cm;
+    - a Toon material of MMD's lit colour with its texture and its ramp's shadow, and a 6 mm outline;
+  - the PMD twin, Shift-JIS names and all, the same;
+  - 240 damaged files (cut short, bytes flipped) imported or refused without harm;
+  - dropped into the editor: `肌.mat`, its texture in Assets, the walking analysis finding the hips and both legs, and
+    the lesson's Try-it;
+  - after the review: the kitchen sink (every optional PMX record, vertex indices past 127, the skin on D bones, the
+    triangles the other way round) imports the same; two copies of one character each aim their IK at their own
+    controls, through a save and a load too; a forked hair gets three chains; a shared toon ramp is reported; a hard
+    edge stays split; 5,000 morphs are capped at 4,096 keys; 1,000 nested bones and a vertex at 1e30 are refused; a
+    parent loop is broken.
+- **Fixed on review:** IK constraints found their target by name anywhere in the scene, so a second copy of a
+  character aimed its legs at the first (now its own character first, `ik_target_of`); the "D bones" most PMX models
+  weight their legs to now hand their weights to the bones IK and walking drive.
+- Checked with round 161's chain (see its entry); round 156's own chain on task 0136 alone: Windows 10,939, 0 failed
+  (848 tests), verify 10,940, 0 stale; Linux 10,675; sanitizers 10,553; stress no change.
+
+## 2026-10-18 (round 155): shape keys (task 0135, ADR 0047)
+
+**Asked:** round 154's MMD question: its faces, and VRM's and many FBX faces, are shape keys.
+
+**Added**
+- **Shape keys** (blend shapes, morph targets, vertex morphs): named offsets on a mesh, weighted per renderer.
+  - The MeshRenderer's BlendShape sliders, animatable as `MeshRenderer.BlendShape/<name>`.
+  - Added to the basis before every modifier (the skin bends an expression with the head), on the fast deform path,
+    so an animated face doesn't rebuild the mesh.
+  - Saved with the scene (sparsely), the weights by their exact names.
+  - Carried through edits that add or renumber vertices (subdivide, triangulate, extrude), as vertex groups are.
+  - Edit Mode shows the basis being edited. Apply Modifiers refuses a mesh with keys, as Blender does, rather than
+    adding them twice.
+- **Imports:** FBX blend shapes and glTF morph targets with their names and values.
+- **Console:** `shape list | add <name> [amount] | set <name> <weight> | remove <name>`.
+- **Learn:** "Shape keys: faces and morphs".
+
+**Checked**
+- New tests (round 155):
+  - a weight of 0.5 adds exactly half (0 error), the mesh itself when none is in use;
+  - saved and loaded; a clip's track at frame 5 of 10 gives 0.5;
+  - a key on a bone turned 90 degrees turns with it (1e-7);
+  - Blender's FBX and GLB keys, the 0.5 m lift and the value 0.3 come in;
+  - the lesson's Try-it;
+  - a changing weight deforms the same mesh again (no copy per frame); Edit Mode's cage is the basis;
+  - Apply Modifiers refused with keys;
+  - keys kept through a triangulate and a subdivide, every old vertex with its offset (0 error);
+  - "Smile Left" and "Smile_Left" saved apart; a damaged key line (a count past any integer, an index past the mesh)
+    loads without harm.
+- **Fixed while checking:** the views keyed their pictures on the meshes without the shape keys' weights, so after
+  `shape set` the Scene view could show the shape from before (render-cache verify mode found it, in the lesson's
+  Try-it). `GameObject::evaluated_keys` now mixes them in, as `evaluated_mesh` does.
+- Unit checks: Windows 10,907, 0 failed (841 tests); render-cache verify mode: one stale picture (above), and after
+  the fix 10,908, 0 failed, 0 stale pictures. Linux with libraries: 10,643, 0 failed. Sanitizer build: 10,521,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`,
+  `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 154): materials made and applied on import (task 0134, ADR 0047)
+
+**Asked:** "When importing external fbx models, can the program auto create a material and apply it. Furthermore,
+make the program be able to handle mmd models as well. Feel free to implement other rigged character formats as
+needed." The user chose full MMD support, VRM, FBX/glTF animations, BVH and Collada, materials as .mat assets, and
+synthetic test files (tasks 0134-0142).
+
+**Added**
+- **Every import makes `.mat` assets** in `Assets/Materials/<model>/`, applied to the model. An edited one is kept on
+  re-import.
+- **Textures:**
+  - copied into `Assets/Textures/<model>/`, including the ones packed inside an FBX (they were dropped);
+  - a link to another machine's path found by name beside the model, in its `.fbm`, `textures` or `images` folder;
+  - a bare material given the texture set beside it by name (`Body_BaseColor`, `T_Body_N`, `_ORM`...).
+- **Maps:** gloss, smoothness and packed maps (glTF's metallic-roughness, which wasn't read at all, Unity's
+  metallic-smoothness, Unreal's ORM) are split into the maps Blendity reads.
+- **Materials:** every mesh gets one; FBX transparency and double-sided are read.
+- **Two models of one name** (every Sketchfab download is `scene.gltf`) get folders of their own
+  (`Materials/scene 2/`); importing the same one again reuses its folder. A texture or embedded image sharing a name
+  with another gets its own file.
+- **Matching by name is careful:** a single-letter suffix (`_d`, `_n`, `_r`) counts only in a set of two maps or more
+  (`Hand_R.png` is not roughness); a folder's only set goes only to materials the import made, never over a file's
+  own flat colours.
+- **File > Import** from outside the project copies the model in, as dropping it does. The console has
+  `import <file>`.
+- **The FBX exporter's Embed Textures:** the images go inside the file, as Blender's do.
+- **Learn:** "Importing models: their materials made for you".
+
+**Checked**
+- New tests (round 154):
+  - Blender's FBX with embedded textures comes in textured (red 204);
+  - its GLB's packed map split exactly: roughness 64, metallic 255;
+  - a moved link found, a texture set matched by name, a gloss map inverted (63);
+  - every STL mesh gets a material;
+  - Blendity's embedded FBX reads back with its image deleted;
+  - `Skin.mat` made and used, and an edit to it kept on re-import;
+  - two models called `r154twin.obj` imported into two folders, each its own texture (red 255, blue), the first
+    imported again into its own;
+  - flat Red and Blue kept beside an unrelated texture; an `.mtl` in a subfolder finds its texture there;
+  - a packed map split once for every material using it; two embedded `diffuse.png` kept apart;
+  - the tests' import cache in a scratch home.
+- Checked with round 155's chain (see its entry).
+
 ## 2026-10-18 (round 153): MoonRay's image fills in while it renders
 
 **Asked:** "Why does MoonRay doesn't seem to render?" It did: a 1280x720 frame at 128 samples takes about a minute,

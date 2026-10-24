@@ -15,7 +15,7 @@ testing rules).
   the tests check the requirement rather than restate the code.
 
 ## What you do
-1. For each acceptance criterion, write at least one test in `tests/test_main.cpp` (in the current
+1. For each acceptance criterion, write at least one test in the `tests/test_<group>.cpp` of the subsystem (in the current
    round's group). Name tests for what the user sees.
 2. Add edge cases the spec implies: degenerate and zero-area faces, non-manifold edges, open surfaces,
    curved and non-planar regions, huge / tiny scales, NaN or empty inputs, undo / F9 re-runs, and both

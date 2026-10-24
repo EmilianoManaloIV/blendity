@@ -90,7 +90,6 @@ struct AnimValues {
 uint64_t anim_value_key(const std::string &path, const std::string &property, int axis);
 /* Rotation (Euler degrees) blends the shorter way round each axis; anything else linearly. */
 float blend_anim_value(const std::string &property, float a, float b, float t);
-void sample_clip_values(const AnimationClip &clip, float frame, AnimValues &out);
 /* The sequence at `frame`: per track bottom-up, the instances there (two overlapping: crossfaded), the higher tracks'
  * numbers replacing the lower ones'. */
 void sample_sequence(const Sequence &s, float frame, AnimValues &out, const Scene *scene = nullptr);  // (scene: bars' targets found in it)
@@ -110,6 +109,7 @@ struct Sequencer : ComponentBase<Sequencer> {
   bool play_automatically = true;
   float speed = 1.0f;
   int wrap = 0;  // Loop, Once
+  int hold = 1;  // on 1s, 2s or 3s (task 0149): the timeline's frame held to multiples of this
   float time = 0.0f;  // seconds into the timeline (Play only)
   bool playing = false;
   /* A jump's blend: from the values of the moment to the sequence's own over blend_total seconds (by key only: the

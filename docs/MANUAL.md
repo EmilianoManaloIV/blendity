@@ -82,6 +82,25 @@ and Animation (chapter 9).
 
 **Undo** (Ctrl+Z / Ctrl+Y) covers the scene, materials, textures and animation clips.
 
+**Find any command.** Ctrl+K (or F3) opens the command palette: type a few words and every action, window, layout,
+creatable object and console command that matches is listed with its shortcut; Enter runs it, even a tool the current
+layout hides. Right-click a row (or a menu row) to keep it in Quick Favorites (Shift+Q, one list per layout). The
+status bar says what the mouse and keys do where the mouse is, and offers Undo for the last action. The Inspector shows
+each component's first seven fields (Show more for the rest, All Fields for everything); each stage layout's first use
+shows a guide strip with its next three steps. While dragging a gizmo arrow, type a number to move exactly that far.
+
+**Windows on other screens.** Drag any tab out past the editor's edge and it gets a window of its own where you let
+go; right-click a tab for Move to New Window, Move to Display N or Move to Main Window. Each window is a dock of its
+own, at its own display's scale; the scene, selection and undo stay one, and the windows come back with the layout.
+A Render or Game tab in its own window can be Render Only (the picture alone, fitted, its controls at the top) and Full
+Screen on that display - a second monitor showing the render large. **Tablet Mode** (the tab menu) makes a window's
+UI half as big again for a pen or a finger; a pen's pressure and tilt shape the Editing tab's brush, its eraser end
+erases, and a palm resting on the screen is ignored.
+
+**Example: the render on a second screen**
+1. Drag the Render tab out of the editor onto your second display (or right-click it > Move to Display 2).
+2. Right-click its tab > Render Only, then at the top of the window, Full Screen. F12 renders into it.
+
 > Learn: *Welcome to Blendity*, *The Editor Layout*, *Navigating the Scene View*, *GameObjects, Components and Objects*,
 > *Hierarchy, Parenting and the Scene Graph*, *Move, Rotate, Scale*.
 
@@ -328,10 +347,20 @@ Generate Lighting bakes on the GPU too.
 1. Select the camera, Add Component > Camera Filters, Add Filter > Retro Console, Console: PlayStation (PS1).
 2. F12: the wobbling vertices, affine textures and dithered colour show in the path-traced render too.
 
+**Developing a render.** Window > Editing (or the Editing layout) develops a render or an image the way Lightroom does:
+a stack of adjustments - Exposure, Contrast, Highlights / Shadows, white balance, a Tone Curve, HSL, Clarity, Dehaze,
+Sharpen, Noise Reduction, Vignette, Crop - each limited by a mask if you like (a gradient, a tone or colour range, a
+brush), applied in linear light and never written into the source: Save keeps the stack beside the image, Export writes
+the result. Use as Camera Look gives the camera the same look live; Apply to Texture puts an edit on a texture.
+
+**Example: develop the last render**
+1. F12, then in the Editing tab press Render; Preset > Film.
+2. Add Adjustment > Exposure, Add Mask > Radial Gradient over the subject, raise Exposure; Export....
+
 **Use cases:** product shots and turntables (path traced); game levels with baked light; stylised and retro looks.
 
 > Learn: *How This Editor Renders*, *Lights and Materials*, *Render Engines*, *Light, Sky and Tone Mapping*,
-> *Baked and Realtime Lighting*, *Rendering on the GPU*.
+> *Baked and Realtime Lighting*, *Rendering on the GPU*, *Editing: Develop a Render*.
 
 ---
 
@@ -384,6 +413,14 @@ orange head); the bones below keep their places. Ctrl+E (E with Blender's keys) 
 the mouse, click to keep it. IK targets are boxes and poles diamonds, coloured by side (left blue, right red, middle
 yellow); Rigging > FK Controls puts circles on bones to turn them by. Remove IK and Remove FK Controls take them away.
 A character made with GameObject > Armature or the auto-rig lives under one root ("Robot Rig"), as Unity imports one.
+
+**Spring Bones** (Rigging window, with a bone selected; or on an imported character automatically by the bones'
+names) make hair, ears, tails and cloth strips swing after the animation: Stiffness pulls a chain back to its pose,
+Damping settles it, Gravity hangs it, Radius and Collide keep it outside the body's bones, whose capsules are as wide
+as the skin each bone moves. Bend holds each bone's animated angle to the one before it (a curl keeps its shape),
+Root To Tip frees the tips while the root follows, Separate keeps a chain apart from the others (a ponytail's
+strands), and a Wind component (Add Component > Scripts: strength in m/s along the object's forward or away from it,
+turbulence, gusts) blows every chain by its own Wind. Bake writes the swing into a clip, the same twice.
 
 **Use cases:** game characters and creatures; posed renders; clothing and armour for an existing rig.
 
@@ -461,7 +498,10 @@ clip, blend seconds) jump to a clip in Play, blending from the pose of the momen
 ## 10. Files: import and export
 
 **Import** (File > Import Model, or drop files on the window): OBJ + MTL, FBX, glTF, STL, PLY and USD text; their
-materials and textures come along, and rigged files come with their skeletons and skins.
+materials and textures come along, and rigged files come with their skeletons and skins. The model is shown first in
+the Import Preview (Preferences > Import turns it off): its shading switchable before anything is written - As
+Imported, PBR, or a toon style over the file's materials - and an Outline switch; Import writes it, Cancel nothing.
+The console's `import <file> [asis|pbr|classic|guiltygear|soft|painterly|manga]` imports at once with that shading.
 
 **Export** (File > Export): every mesh format Blender 5.2 exports - OBJ, FBX (binary or ASCII), glTF (.glb or
 .gltf), STL, PLY, USD - with Blender's options (Selected Only, Apply Modifiers, Scale, Up Axis, Triangulate...).
@@ -475,7 +515,7 @@ checked both ways against Blender 5.2.
 > Learn: *Assets, Scenes and Files*, *Coordinate Systems and Handedness*.
 
 **Updates** (Help > Check for Updates, Help > Version History; Preferences > Updates): once a day, when online,
-Blendity looks for a newer release (before 1.0 called pre-releases, as 0.10.0 is; with Preferences > Updates' previews
+Blendity looks for a newer release (before 1.0 called pre-releases, as 0.11.0 is; with Preferences > Updates' previews
 on, also preview builds of single pull requests) and shows what it brings with **Install** / **Not now** / **Skip this one**. Installs are checked against the release's SHA-256
 list. Version History installs any build, older ones too (the one before a certain change). Console: `update check`,
 `update history`, `update install <tag>`.
