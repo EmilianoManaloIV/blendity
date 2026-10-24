@@ -2819,6 +2819,21 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     }
     if (!line.empty()) flush();
   };
+  /* Pen and touch (tasks 0216-0218): what a 2-in-1 needs. */
+  {
+    Recti ph = row(u.row_h() + u.px(4));
+    u.label(ph, "Pen and touch", u.theme.text_bright);
+    static const char *kNav[] = {"In Tablet Mode", "Always"};
+    int ni = nav_buttons_always_ ? 1 : 0;
+    Recti p1 = row(u.row_h() + u.px(4));
+    u.label({p1.x, p1.y, u.px(150), p1.h}, "Navigation buttons");
+    if (u.combo(u.id("pref_navbuttons"), {p1.x + u.px(150), p1.y + u.px(2), u.px(160), p1.h - u.px(4)}, ni, kNav, 2)) {
+      nav_buttons_always_ = ni == 1;
+      save_prefs();
+    }
+    u.tooltip("The hand (drag to pan) and the magnifier (drag to zoom) under the Scene Gizmo, for a pen without a\n"
+              "keyboard or middle button. Dragging the Scene Gizmo itself orbits. Blender shows them always.");
+  }
   /* Quality tier, viewport scale and CPU threads (task 0050): what the minimum machine (4 cores / 8 threads, a GTX
    * 1050 Ti, 8 GB) needs, one choice away. */
   {

@@ -689,6 +689,16 @@ void Editor::run_console_command(const std::string &line) {
     save_prefs();
     return;
   }
+  if (c == "navbuttons") {  // navbuttons tablet|always: when the Scene Gizmo's hand and magnifier show (task 0216)
+    const std::string v = to_lower(arg(1, ""));
+    if (v != "tablet" && v != "always") {
+      Log::info("usage: navbuttons tablet|always (now %s)", nav_buttons_always_ ? "always" : "tablet");
+      return;
+    }
+    nav_buttons_always_ = v == "always";
+    save_prefs();
+    return;
+  }
   if (c == "inspector") {  // inspector essentials on|off (task 0190)
     inspector_essentials_ = to_lower(arg(2, arg(1, "on"))) != "off";
     save_prefs();

@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 236): navigating with the pen alone (task 0216)
+
+**Asked:** the plan for a 2-in-1 - with no keyboard or middle button, the pen still orbits, pans and zooms.
+
+**Added**
+- **The Scene Gizmo dragged orbits;** a click still looks along an axis or switches the projection.
+- **A hand (pan) and a magnifier (zoom)** under it, as Blender's: shown in Tablet Mode, or always (Preferences > Pen and
+  touch > Navigation buttons, `navbuttons always`).
+- **The pen's side button held:** a drag orbits in every editor feel; Shift pans, Ctrl zooms.
+
+**Checked**
+- Scripted pen drags on the gizmo, the hand, the magnifier and with the side button, as the right button and as the
+  left (tests/test_input.cpp).
+- An Opus review found three things, all fixed:
+  - a side button that some drivers send as the left button orbited and also reached the tools (it painted weights
+    and dragged bone handles while orbiting); now navigation alone takes that press;
+  - a press on the Scene Gizmo whose release wasn't seen (the view hidden meanwhile) switched the view much later; it
+    is dropped now;
+  - a click on the empty strip beside the hand and the magnifier switched the projection.
+- Unit checks (round 236): Windows, in render-cache verify mode, 12,087, 0 failed (1019 tests), 0 stale
+  pictures. Linux with libraries: 11,629, 0 failed. Sanitizer build: 11,499, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 235): panels follow the finger (task 0215)
 
 **Asked:** the plan for a 2-in-1 - in Tablet Mode a finger scrolls lists, and targets are sized for it.

@@ -645,7 +645,53 @@ void Editor::draw_origins(const Recti &view) {
 Recti Editor::view_gizmo_rect(const Recti &view) const {
   const int size = ui_.px(84);
   const float cx = view.right() - size * 0.62f, cy = view.y + size * 0.62f;
-  return {(int)(cx - size * 0.6f), (int)(cy - size * 0.6f), (int)(size * 1.2f), (int)(size * 1.2f) + ui_.row_h() + ui_.px(4)};
+  const int buttons = nav_buttons_shown() ? ui_.px(34) : 0;  // (the hand and the magnifier under the label)
+  return {(int)(cx - size * 0.6f), (int)(cy - size * 0.6f), (int)(size * 1.2f), (int)(size * 1.2f) + ui_.row_h() + ui_.px(4) + buttons};
+}
+
+/* The hand (0) and the magnifier (1), side by side under the Scene Gizmo's label (task 0216). */
+Recti Editor::nav_button_rect(const Recti &view, int which) const {
+  const Recti a = view_gizmo_rect(view);
+  const int d = ui_.px(28), y = a.bottom() - ui_.px(32);
+  const int cx = a.x + a.w / 2;
+  return {which == 0 ? cx - d - ui_.px(3) : cx + ui_.px(3), y, d, d};
+}
+
+/* A drag that began on the Scene Gizmo or its buttons (task 0216): it goes on wherever the pointer goes until it is let
+ * go. A press on the gizmo that never moved is a click: look along the axis, or switch the projection. */
+void Editor::view_gizmo_drag(const Recti &view) {
+  auto &in = ui_.in;
+  if (gizmo_nav_ == GizmoNav::None) return;
+  const int dx = in.dx(), dy = in.dy();
+  if (gizmo_nav_ == GizmoNav::Pending && std::max(std::abs(in.mx - gizmo_nav_x_), std::abs(in.my - gizmo_nav_y_)) > ui_.px(3)) gizmo_nav_ = GizmoNav::Orbit;
+  if (!in.down[0]) {
+    if (gizmo_nav_ == GizmoNav::Pending && !in.cancelled) view_gizmo_click(gizmo_nav_hot_);
+    gizmo_nav_ = GizmoNav::None;
+    return;
+  }
+  cam_.animating = false;
+  ui_.redraw = true;
+  if (gizmo_nav_ == GizmoNav::Orbit) {
+    cam_.yaw += dx * 0.3f;
+    cam_.pitch = clampf(cam_.pitch + dy * 0.3f, -89.9f, 89.9f);
+  }
+  if (gizmo_nav_ == GizmoNav::Pan) {
+    const float k_pan = (2.0f * cam_.distance * std::tan(cam_.fov * 0.5f * kDeg2Rad)) / std::max(1, view.h);
+    cam_.pivot -= cam_.right() * (dx * k_pan);
+    cam_.pivot += cam_.up() * (dy * k_pan);
+  }
+  if (gizmo_nav_ == GizmoNav::Zoom) cam_.distance = clampf(cam_.distance * std::exp(dy * 0.008f), 0.01f, 100000.0f);  // (up: closer)
+}
+
+/* The Scene Gizmo clicked: an axis looks along it (isometric), anywhere else switches the projection. */
+void Editor::view_gizmo_click(int axis) {
+  static const float kYaw[6] = {-90, 90, 0, 0, 180, 0}, kPitch[6] = {0, 0, 90, -90, 0, 0};
+  if (axis < 0 || axis >= 6) {
+    cam_.ortho = !cam_.ortho;
+    return;
+  }
+  cam_.animate_to(cam_.pivot, kYaw[axis], kPitch[axis], cam_.distance, clock_now());
+  cam_.ortho = true;
 }
 
 void Editor::draw_view_gizmo(const Recti &view) {
@@ -706,16 +752,32 @@ void Editor::draw_view_gizmo(const Recti &view) {
     u.canvas.fill_round_rect({lr.x + (lr.w - tw) / 2, lr.y + u.px(1), tw, lr.h - u.px(2)}, u.px(3), Color::hex(0x000000, hot_label ? 150 : 100));
   }
   u.label(lr, label, hot_label ? u.theme.text_bright : u.theme.text, ui::Align::Center);
-  if (hover_area && u.in.pressed[0] && drag_ == Drag::None) {
+  /* The hand and the magnifier (task 0216). */
+  int hot_button = -1;
+  for (int b = 0; nav_buttons_shown() && b < 2; b++) {
+    const Recti br = nav_button_rect(view, b);
+    const bool hb = u.hovered(br) || (gizmo_nav_ == (b == 0 ? GizmoNav::Pan : GizmoNav::Zoom));
+    if (u.hovered(br)) hot_button = b;
+    u.canvas.fill_circle(br.x + br.w * 0.5f, br.y + br.h * 0.5f, br.w * 0.5f, Color::hex(0x000000, hb ? 150 : 90));
+    const int s = br.w - u.px(10);
+    u.draw_icon(b == 0 ? ui::Icon::Hand : ui::Icon::Search, {br.x + (br.w - s) / 2, br.y + (br.h - s) / 2, s, s}, hb ? u.theme.text_bright : u.theme.text);
+  }
+  /* (Only the gizmo's own disc, its label and its buttons take a press: the strip beside the buttons is the view's.) */
+  const bool on_disc = length(Vec2((float)u.in.mx, (float)u.in.my) - Vec2(cx, cy)) < rad + u.px(14);
+  if (hover_area && (on_disc || hot_label || hot_button >= 0) && u.in.pressed[0] && drag_ == Drag::None && gizmo_nav_ == GizmoNav::None) {
     if (hot_label) cam_.ortho = !cam_.ortho;  // Unity: click the label to switch projection
-    else if (hot >= 0) {
-      cam_.animate_to(cam_.pivot, axes[hot].yaw, axes[hot].pitch, cam_.distance, clock_now());
-      cam_.ortho = true;
+    else if (hot_button >= 0) gizmo_nav_ = hot_button == 0 ? GizmoNav::Pan : GizmoNav::Zoom;
+    else {
+      gizmo_nav_ = GizmoNav::Pending;  // (a click looks along the axis; a drag orbits: task 0216)
+      gizmo_nav_hot_ = hot >= 0 ? hot : -1;
+      gizmo_nav_x_ = u.in.mx, gizmo_nav_y_ = u.in.my;
     }
-    else cam_.ortho = !cam_.ortho;
     u.consume_click();
   }
-  if (hover_area) u.tooltip("Scene Gizmo: click an axis to look along it, click the centre to toggle Perspective/Isometric.\nBlender: the navigation gizmo / numpad 1, 3, 7 and 5.");
+  if (hover_area && hot_button == 0) u.tooltip("Drag to pan the view (Blender: the navigation gizmo's hand).");
+  else if (hover_area && hot_button == 1) u.tooltip("Drag up to zoom in, down to zoom out (Blender: the navigation gizmo's magnifier).");
+  else if (hover_area)
+    u.tooltip("Scene Gizmo: click an axis to look along it, click the centre to toggle Perspective/Isometric, drag to orbit.\nBlender: the navigation gizmo / numpad 1, 3, 7 and 5.");
 }
 
 }  // namespace bl

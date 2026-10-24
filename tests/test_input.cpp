@@ -452,8 +452,97 @@ static void tests_round235() {
   });
 }
 
+/* ---------------------------------------------------------------- round 236: navigating with the pen alone (task 0216) */
+static void tests_round236() {
+  using platform::EventType;
+  const platform::Pointer pen = platform::Pointer::Pen;
+  /* A pen drag from (x, y) by (ddx, ddy) in six steps, with `button` and `barrel` and modifiers. */
+  auto pen_drag = [&](Editor &ed, int x, int y, int ddx, int ddy, int button, bool barrel, int mods) {
+    auto ev = [&](EventType t, int px, int py) {
+      platform::Event e = pointer_ev(t, px, py, pen);
+      e.button = button, e.barrel = barrel, e.mods = mods;
+      return e;
+    };
+    ed.step_frame_headless({ev(EventType::MouseMove, x, y)});
+    ed.step_frame_headless({ev(EventType::MouseDown, x, y)});
+    for (int i = 1; i <= 6; i++) ed.step_frame_headless({ev(EventType::MouseMove, x + ddx * i / 6, y + ddy * i / 6)});
+    ed.step_frame_headless({ev(EventType::MouseUp, x + ddx, y + ddy)});
+    ed.step_frame_headless();
+  };
+
+  test("pen: dragging the Scene Gizmo orbits the view; a click on it still switches the projection; nothing is selected either way", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    ed.clear_selection_for_test();
+    const Recti g = ed.view_gizmo_rect_for_test();
+    const int gx = g.x + g.w / 2 + 4, gy = g.y + g.w / 2 + 4;  // (near the middle, off the axes' tips)
+    const SceneCamera a = ed.scene_camera_for_test();
+    pen_drag(ed, gx, gy, 60, 0, 0, false, 0);
+    const SceneCamera b = ed.scene_camera_for_test();
+    std::printf("    the gizmo dragged 60 px: yaw %.1f -> %.1f, isometric %d -> %d\n", a.yaw, b.yaw, a.ortho, b.ortho);
+    CHECK(std::fabs(b.yaw - a.yaw - 60 * 0.3f) < 0.01f && b.ortho == a.ortho && length(b.pivot - a.pivot) < 1e-6f);
+    pen_drag(ed, gx, gy, 0, 0, 0, false, 0);
+    CHECK(ed.scene_camera_for_test().ortho != b.ortho && ed.selected_objects_for_test().empty());
+  });
+
+  test("pen: the hand and the magnifier show in Tablet Mode (or always, by `navbuttons always`); the hand pans, the magnifier dragged up zooms in", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    CHECK(ed.nav_button_rect_for_test(0).w == 0);
+    ed.command("navbuttons always");
+    ed.step_frame_headless();
+    CHECK(ed.nav_button_rect_for_test(0).w > 0);
+    ed.command("navbuttons tablet");
+    ed.command("window tablet on");
+    ed.step_frame_headless();
+    const Recti hand = ed.nav_button_rect_for_test(0), mag = ed.nav_button_rect_for_test(1);
+    CHECK(hand.w > 0 && mag.w > 0 && hand.right() <= mag.x);
+    const SceneCamera a = ed.scene_camera_for_test();
+    pen_drag(ed, hand.x + hand.w / 2, hand.y + hand.h / 2, -80, 0, 0, false, 0);
+    const SceneCamera b = ed.scene_camera_for_test();
+    pen_drag(ed, mag.x + mag.w / 2, mag.y + mag.h / 2, 0, -60, 0, false, 0);
+    const SceneCamera c = ed.scene_camera_for_test();
+    std::printf("    the hand moved the pivot %.3f (the yaw %.1f -> %.1f); the magnifier: distance %.2f -> %.2f\n", length(b.pivot - a.pivot), a.yaw, b.yaw, b.distance, c.distance);
+    CHECK(length(b.pivot - a.pivot) > 0.01f && b.yaw == a.yaw && b.distance == a.distance);
+    CHECK(c.distance < b.distance && length(c.pivot - b.pivot) < 1e-6f);
+  });
+
+  test("pen: with its side button held a drag in the Scene view orbits round the pivot (Unity's right drag would look round instead); Shift pans, Ctrl zooms", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    const SceneCamera a = ed.scene_camera_for_test();
+    pen_drag(ed, cx, cy, 50, 20, 1, true, 0);
+    const SceneCamera b = ed.scene_camera_for_test();
+    CHECK(std::fabs(b.yaw - a.yaw - 50 * 0.3f) < 0.01f && length(b.pivot - a.pivot) < 1e-6f);
+    pen_drag(ed, cx, cy, 50, 0, 1, true, platform::MOD_SHIFT);
+    const SceneCamera c = ed.scene_camera_for_test();
+    CHECK(length(c.pivot - b.pivot) > 0.01f && c.yaw == b.yaw);
+    pen_drag(ed, cx, cy, 0, 40, 1, true, platform::MOD_CTRL);
+    const SceneCamera d = ed.scene_camera_for_test();
+    std::printf("    orbit %.1f degrees; Shift: the pivot moved %.3f; Ctrl: distance %.2f -> %.2f\n", b.yaw - a.yaw, length(c.pivot - b.pivot), c.distance, d.distance);
+    CHECK(d.distance != c.distance && length(d.pivot - c.pivot) < 1e-6f);
+    /* A side button that comes as the left button (some drivers): it orbits too, and doesn't box-select on the way. */
+    ed.clear_selection_for_test();
+    pen_drag(ed, r.x + r.w / 6, r.y + r.h / 6, r.w * 2 / 3, r.h * 2 / 3, 0, true, 0);
+    CHECK(ed.selected_objects_for_test().empty() && ed.scene_camera_for_test().yaw != d.yaw);
+    /* Beside the hand and the magnifier: the view's, not the gizmo's - no projection switch. */
+    ed.command("navbuttons always");
+    ed.step_frame_headless();
+    const Recti g = ed.view_gizmo_rect_for_test();
+    const bool ortho = ed.scene_camera_for_test().ortho;
+    pen_drag(ed, g.x + 2, g.bottom() - 4, 0, 0, 0, false, 0);
+    CHECK(ed.scene_camera_for_test().ortho == ortho);
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
   tests_round235();
+  tests_round236();
 }

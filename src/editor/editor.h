@@ -538,6 +538,8 @@ class Editor {
   bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
   std::string gizmo_typed_for_test() const { return gizmo_typed_; }
   int gizmo_hot_for_test() const { return gizmo_hot_; }
+  Recti nav_button_rect_for_test(int which) const { return nav_buttons_shown() ? nav_button_rect(scene_rect_, which) : Recti{}; }
+  Recti view_gizmo_rect_for_test() const { return view_gizmo_rect(scene_rect_); }
   void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
   void clear_selection_for_test() { clear_selection(); }
   int windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands = {});  // (task 0193: Blendity --windowed-check)
@@ -2375,6 +2377,15 @@ class Editor {
   void finger_orbit_end(const Recti &view, double now);
   void finger_glide(double now);
   void click_select(const Recti &view, int x, int y, int mode);
+  /* Task 0216: navigating with the pen alone. The Scene Gizmo dragged orbits (a click still looks along an axis); a hand
+   * under it pans and a magnifier zooms, dragged - shown in Tablet Mode, or always (Preferences, `navbuttons`). */
+  bool nav_buttons_always_ = false;
+  bool nav_buttons_shown() const { return tablet_ || nav_buttons_always_; }
+  enum class GizmoNav { None, Pending, Orbit, Pan, Zoom } gizmo_nav_ = GizmoNav::None;
+  int gizmo_nav_hot_ = -1, gizmo_nav_x_ = 0, gizmo_nav_y_ = 0;
+  Recti nav_button_rect(const Recti &view, int which) const;  // 0 the hand, 1 the magnifier
+  void view_gizmo_drag(const Recti &view);
+  void view_gizmo_click(int axis);
   /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
   std::vector<PaletteEntry> palette_entries_;
   std::vector<std::string> add_component_recent_;

@@ -44,6 +44,7 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
   scene_navigation(view);
+  view_gizmo_drag(view);  // (a drag begun on the Scene Gizmo or its hand / magnifier: task 0216)
   update_pilot_camera();  // flying a camera: it follows the view
 
   /* Gizmo math and picking need this frame's camera matrices before we
@@ -199,6 +200,11 @@ void Editor::draw_scene_view(const Recti &r) {
 std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   const auto &in = ui_.in;
   const bool unity_like = nav_style_ == NavStyle::Unity || nav_style_ == NavStyle::Unreal;
+  /* Task 0216: a pen with its side button held (Windows sends it as the right button) navigates in every feel - orbit,
+   * Shift pans, Ctrl zooms - as the middle button does in Blender's pen setup. */
+  const int barrel_button = in.pressed[1] ? 1 : in.pressed[0] ? 0 : -1;
+  if (in.pen && in.barrel && barrel_button >= 0 && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal)
+    return {in.shift() ? Drag::Pan : in.ctrl() ? Drag::Zoom : Drag::Orbit, barrel_button};
   if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal) {  // a right-click cancels a running Push/Pull, Inset, Bevel or bone Extrude instead
     if (nav_style_ == NavStyle::Unreal && in.down[0]) return {Drag::Pan, 1};
     if (in.alt() && nav_style_ != NavStyle::Blender) return {Drag::Zoom, 1};
@@ -235,7 +241,11 @@ void Editor::scene_navigation(const Recti &view) {
       fly_last_ = now;
       fly_accel_ = 1.0f;
     }
-    if (drag_button_ == 0 && in.alt() && (drag_ == Drag::Orbit || drag_ == Drag::Pan || drag_ == Drag::AltClick)) {
+    /* A pen's side button that came as the left button: its press is navigation's alone - no tool, bone handle or
+     * brush after this takes it, and no Alt+click loop select (task 0216). */
+    const bool barrel_left = drag_ != Drag::None && drag_button_ == 0 && in.pen && in.barrel;
+    if (barrel_left) in.pressed[0] = false;
+    if (!barrel_left && drag_button_ == 0 && in.alt() && (drag_ == Drag::Orbit || drag_ == Drag::Pan || drag_ == Drag::AltClick)) {
       alt_click_ = true;  // a click without moving selects a loop (Blender's Alt+click) instead
       alt_click_ring_ = in.ctrl();
     }

@@ -501,6 +501,7 @@ void Editor::process_events(std::vector<Event> &events) {
       default: break;
     }
   }
+  if (!in.down[0] && !in.released[0]) gizmo_nav_ = GizmoNav::None;  // (task 0216)
   /* Keep modifiers consistent with key state (some platforms omit them on key events). */
   if (in.key_down[KEY_SHIFT]) in.mods |= MOD_SHIFT;
   if (in.key_down[KEY_CTRL]) in.mods |= MOD_CTRL;
@@ -3607,6 +3608,7 @@ void Editor::load_prefs() {
     else if (k == "recent_scenes") recent_scenes_ = split_list(v, ';');
     else if (k == "guides_seen") for (const std::string &g : split_list(v, ';')) guides_seen_.insert(g);
     else if (k == "inspector_essentials") inspector_essentials_ = v != "0";
+    else if (k == "nav_buttons") nav_buttons_always_ = v == "always";  // (task 0216)
     else if (k == "guides") guides_enabled_ = v != "0";
     else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
     else if (k == "favorites") load_favorites_pref(v);
