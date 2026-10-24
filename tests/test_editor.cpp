@@ -2960,6 +2960,61 @@ static void tests_round222() {
   });
 }
 
+/* ---------------------------------------------------------------- round 227: duplicating many objects (task 0207) */
+static void tests_round227() {
+  test("Duplicate on many objects names each copy as one at a time did - the smallest free number, a name already taken skipped - and puts it right after its original; 2,000 under one parent come out with 2,000 new names", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("newscene");
+    Scene &s = ed.scene();
+    GameObject *parent = s.create("Group");
+    GameObject *a = s.create("Cube", parent), *b = s.create("Cube (2)", parent), *c = s.create("Cube", parent);
+    ed.mark_changed_for_test("Cubes");
+    ed.step_frame_headless();
+    const std::vector<GameObject *> made = s.duplicate_many({a, b, c});
+    std::string order;
+    for (GameObject *g : parent->children) order += (order.empty() ? "" : ", ") + g->name;
+    std::printf("    %s\n", order.c_str());
+    CHECK(made.size() == 3 && made[0]->name == "Cube (1)" && made[1]->name == "Cube (3)" && made[2]->name == "Cube (4)");
+    CHECK(parent->children.size() == 6 && parent->children[1] == made[0] && parent->children[3] == made[1] && parent->children[5] == made[2]);
+    /* Through the editor: 2,000 selected, duplicated in one go. */
+    ed.command("newscene");
+    ed.command("stress 2000 Cube");
+    ed.command("selectall");
+    ScopedTimer t;
+    ed.command("duplicate");
+    const double ms = t.ms();
+    GameObject *root = nullptr;
+    ed.scene().for_each([&](GameObject &g) { if (!root && g.children.size() > 100) root = &g; });
+    std::set<std::string> seen;
+    size_t copies = 0;
+    if (root)
+      for (GameObject *g : root->children) {
+        seen.insert(g->name);
+        copies += g->name.find(" (") != std::string::npos;
+      }
+    std::printf("    2,000 duplicated in %.1f ms: %zu children, %zu names, %zu copies named \"Cube (n)\"\n", ms, root ? root->children.size() : 0,
+                seen.size(), copies);
+    CHECK(root && root->children.size() == 4000 && copies == 2000 && seen.size() == 2001);  // ("Cube" and 2,000 numbered)
+    const std::vector<GameObject *> sel = ed.selected_objects_for_test();  // (the copies: the 2,000 cubes and the starter scene's two)
+    CHECK(sel.size() >= 2000 && std::all_of(sel.begin(), sel.end(), [](GameObject *g) { return g->name.find(" (") != std::string::npos; }));
+    bool paired = root != nullptr;  // (each copy right after its original: originals at even places)
+    for (size_t i = 0; root && i + 1 < root->children.size(); i += 2)
+      paired = paired && root->children[i]->name == "Cube" && root->children[i + 1]->name.find("Cube (") == 0;
+    CHECK(paired);
+    /* The same object twice: the later copy goes right after it, as one at a time put it. */
+    ed.command("newscene");
+    GameObject *one = ed.scene().create("Lamp");
+    const std::vector<GameObject *> twice = ed.scene().duplicate_many({one, one});
+    order.clear();
+    for (GameObject *g : ed.scene().roots) order += (order.empty() ? "" : ", ") + g->name;
+    std::printf("    the same object twice: %s\n", order.c_str());
+    CHECK(twice.size() == 2 && twice[0]->name == "Lamp (1)" && twice[1]->name == "Lamp (2)");
+    auto at = std::find(ed.scene().roots.begin(), ed.scene().roots.end(), one);
+    CHECK(at + 2 < ed.scene().roots.end() && *(at + 1) == twice[1] && *(at + 2) == twice[0]);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2991,5 +3046,6 @@ void run_editor_tests() {
   tests_round207();
   tests_round209();
   tests_round222();
+  tests_round227();
   coverage_tests();
 }

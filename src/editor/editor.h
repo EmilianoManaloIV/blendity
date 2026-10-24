@@ -757,6 +757,7 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
+  std::vector<GameObject *> selected_objects_for_test() const { return selected_objects(false); }
   bool scene_planes_deferred_for_test() const { return scene_planes_slot_ >= 0; }
   Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }

@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 227): duplicating many objects (task 0207)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 4.
+
+**Fixed:** Duplicate on 10,000 objects took 648 seconds. Each copy's name was tried against every sibling ("Cube
+(1)", "Cube (2)" ...) and each copy moved through the list. Now the selection is duplicated at once: names gathered
+once per parent, each list rebuilt once. 648 s -> 70 ms, against Blender's 1.5 s. The names and places are as before.
+
+**Measured** (Pass 15, again after tasks 0204-0207):
+- Duplicate 10,000 objects: 647,887 -> 70 ms (Blender 1,525);
+- a frame of 1,000 keyframed objects: 1.7 -> 0.40 ms (Blender 3.8);
+- select all 10,000 objects: 8.1 -> 3.4 ms (Blender 32.7).
+
+**Checked**
+- The names and places one at a time gave, for 3 and for 2,000 objects (tests/test_editor.cpp).
+- An Opus review found no fault on the editor's path. It found three orders that differed from one at a time for
+  lists the editor never passes (the same object twice, a child before its parent, an original missing from its
+  list), all fixed, and the selection's ancestors searched for one by one (now looked up).
+- Unit checks (round 227): Windows, in render-cache verify mode, 11,987, 0 failed (997 tests), 0 stale
+  pictures. Linux with libraries: 11,530, 0 failed. Sanitizer build: 11,406, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test and Linux's global sequencer Play test (wall clock) failed under the parallel load and passed alone. The first run of this chain found the build broken: a Learn question's text ended its raw string; fixed, and the chain now stops when the Windows build fails instead of testing the old binaries.)
+
 ## 2026-10-24 (round 226): playback without the bookkeeping (task 0206)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with

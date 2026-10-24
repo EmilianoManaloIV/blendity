@@ -1748,12 +1748,14 @@ GameObject *Editor::active_object() const { return active_ ? scene_->find(active
 
 std::vector<GameObject *> Editor::selected_objects(bool top_level_only) const {
   std::vector<GameObject *> out;
+  std::unordered_set<uint64_t> chosen;  // (task 0207: each ancestor looked up, not searched for, in a selection of thousands)
+  if (top_level_only) chosen.insert(selection_.begin(), selection_.end());
   for (uint64_t id : selection_) {
     GameObject *g = scene_->find(id);
     if (!g) continue;
     if (top_level_only) {
       bool covered = false;
-      for (GameObject *p = g->parent; p && !covered; p = p->parent) covered = is_selected(p->id);
+      for (GameObject *p = g->parent; p && !covered; p = p->parent) covered = chosen.count(p->id) > 0;
       if (covered) continue;
     }
     out.push_back(g);
@@ -2890,7 +2892,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
 void Editor::duplicate_selected() {
   if (edit_mode_) return;
   std::vector<uint64_t> fresh;
-  for (GameObject *g : selected_objects(true)) fresh.push_back(scene_->duplicate(g)->id);
+  for (GameObject *g : scene_->duplicate_many(selected_objects(true))) fresh.push_back(g->id);
   if (fresh.empty()) return;
   selection_ = fresh;
   active_ = fresh.back();
