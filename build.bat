@@ -155,6 +155,20 @@ rem BLENDITY_OUT lets you build while a copy of the editor is still running.
 if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
 cl %FLAGS% /Fo%OBJ%\ /Fe:%BLENDITY_OUT% %LIBSRC% src\app\main.cpp %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
 if errorlevel 1 exit /b 1
+rem Task 0211: the GPU shaders compiled now into "shaders" beside the editor, so a new build's first GPU view doesn't
+rem wait for them. Only the build with Blender's libraries has a GPU path (and the dependency-free one, built beside
+rem it, must not remove its shaders); BLENDITY_NO_WARM=1 skips it; without a card the first GPU view compiles them.
+if not "%BLENDITY_NO_LIBS%"=="" goto app_warmed
+if not "%BLENDITY_NO_WARM%"=="" goto app_warmed
+for %%d in ("%BLENDITY_OUT%") do set "SHADERS=%%~dpdshaders"
+if exist "%SHADERS%" rmdir /s /q "%SHADERS%"
+start "" /wait "%BLENDITY_OUT%" --warm-shaders "%SHADERS%"
+if errorlevel 1 goto app_not_warmed
+echo [blendity] GPU shaders compiled into "%SHADERS%"
+goto app_warmed
+:app_not_warmed
+echo [blendity] No GPU shaders compiled ahead: no card opened. The first GPU view compiles them.
+:app_warmed
 if /i "%TARGET%"=="installer" goto installer
 if /i not "%TARGET%"=="all" goto done
 

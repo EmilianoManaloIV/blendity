@@ -35,6 +35,8 @@ std::string status();                  // one line for the Console / libs comman
  * the first GPU render doesn't stall the editor; with open_devices (the
  * interactive editor) it also opens a renderer for each GPU (take_renderer). */
 void prewarm(bool open_devices = false, bool hardware_rt = true);
+/* Task 0211: the kernel compiled now, on this thread (both variants when `ray_query`); false with why when it can't. */
+bool compile_kernels(bool ray_query, std::string *error);
 
 /* --- the flattened scene, in the kernel's std430 layouts (gpu_kernel.h) --- */
 struct GParams {

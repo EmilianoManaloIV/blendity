@@ -2716,23 +2716,44 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
   AABB b = m.bounds();
   Vec3 size = b.max - b.min;
   Vec3 step = Vec3(relative.x * size.x, relative.y * size.y, relative.z * size.z) + constant;
-  const Mesh src = m;
-  const uint32_t nv = (uint32_t)src.vert_count();
-  const bool has_uv = src.has_uvs();
+  /* Task 0211: each copy appended array by array, as Blender's Array copies them (each vertex and face was added one
+   * at a time, from a copy of the whole mesh). What a face gets is what add_face gave it: the source's UVs and
+   * material, the mesh's smooth flag where faces keep their own; a material or smooth list of the wrong length is
+   * fitted to the faces first, as add_face fitted it. The arrays are reserved first, so reading the original's part
+   * while appending is safe. */
+  const uint32_t nv = (uint32_t)m.vert_count();
+  const size_t nc = m.corner_verts.size(), nf = m.face_count();
+  const bool has_uv = m.has_uvs(), has_mat = !m.face_material.empty(), has_smooth = !m.face_smooth.empty();
+  if (has_mat) m.face_material.resize(nf, 0);
+  if (has_smooth) m.face_smooth.resize(nf, m.smooth ? 1 : 0);
+  const std::vector<uint64_t> seams = m.seams;
+  /* Seams between the original's vertices: each copy's follow every earlier one in order. Any other (a stale one)
+   * goes through set_seam, as before. */
+  const bool seams_inside = std::all_of(seams.begin(), seams.end(), [&](uint64_t k) { return (k & 0xFFFFFFFF) < nv; });
   m.positions.reserve(nv * (size_t)count);
+  m.corner_verts.reserve(nc * (size_t)count);
+  m.face_offsets.reserve(nf * (size_t)count + 1);
+  if (has_uv) m.uvs.reserve(nc * (size_t)count);
+  if (has_mat) m.face_material.reserve(nf * (size_t)count);
+  if (has_smooth) m.face_smooth.reserve(nf * (size_t)count);
+  m.seams.reserve(seams.size() * (size_t)count);
   for (int c = 1; c < count; c++) {
-    uint32_t off = (uint32_t)m.vert_count();
+    const uint32_t off = nv * (uint32_t)c, corner_off = (uint32_t)(nc * (size_t)c);
+    const Vec3 shift = step * (float)c;
     for (uint32_t i = 0; i < nv; i++) {
-      m.add_vert(src.positions[i] + step * (float)c);
+      m.positions.push_back(m.positions[i] + shift);
       m.copy_vertex_weights(i);
     }
-    std::vector<uint32_t> fv;
-    for (size_t f = 0; f < src.face_count(); f++) {
-      fv.assign(src.face_verts(f), src.face_verts(f) + src.face_size(f));
-      for (uint32_t &v : fv) v += off;
-      m.add_face(fv.data(), fv.size(), has_uv ? src.uvs.data() + src.face_offsets[f] : nullptr, src.material_of(f));
+    for (size_t i = 0; i < nc; i++) m.corner_verts.push_back(m.corner_verts[i] + off);
+    for (size_t f = 1; f <= nf; f++) m.face_offsets.push_back(m.face_offsets[f] + corner_off);
+    for (size_t i = 0; has_uv && i < nc; i++) m.uvs.push_back(m.uvs[i]);
+    for (size_t f = 0; has_mat && f < nf; f++) m.face_material.push_back(m.face_material[f]);
+    if (has_smooth) m.face_smooth.insert(m.face_smooth.end(), nf, m.smooth ? 1 : 0);
+    for (uint64_t k : seams) {
+      const uint32_t a = (uint32_t)(k >> 32) + off, b = (uint32_t)(k & 0xFFFFFFFF) + off;
+      if (seams_inside) m.seams.push_back(Mesh::edge_key(a, b));
+      else m.set_seam(a, b, true);
     }
-    for (uint64_t k : src.seams) m.set_seam((uint32_t)(k >> 32) + off, (uint32_t)(k & 0xFFFFFFFF) + off, true);
   }
   /* Blender merges only neighbouring copies; welding everything within the
    * distance gives the same result for ordinary arrays. */

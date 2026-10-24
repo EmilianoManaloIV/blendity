@@ -8,7 +8,9 @@
 #include "../core/math.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 #if defined(BL_WITH_VULKAN)
 #  include "gpu_vk.h"
@@ -69,6 +71,11 @@ RasterMatch raster_match(const uint32_t *cpu_color, const uint32_t *cpu_ids, con
 std::unique_ptr<Raster> Raster::create(int, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
   return nullptr;
+}
+
+bool warm_shaders(const std::string &, std::string *report) {
+  if (report) *report = "this build has no GPU rendering";
+  return false;
 }
 
 #else
@@ -4150,6 +4157,45 @@ std::unique_ptr<Raster> Raster::create(int index, std::string *error) {
   auto r = std::make_unique<VulkanRaster>();
   if (!r->init(index, error)) return nullptr;
   return r;
+}
+
+bool warm_shaders(const std::string &dir, std::string *report) {
+  /* Only a new or empty folder: what the run leaves besides the SPIR-V (the driver's pipeline cache) is removed after,
+   * and nothing else of a folder may go with it. */
+  std::error_code dec;
+  if (!std::filesystem::is_empty(std::filesystem::u8path(dir), dec) && !dec) {
+    if (report) *report = "--warm-shaders needs a new or empty folder: " + dir;
+    return false;
+  }
+  /* The compiles' cache pointed at `dir` for this run (cache_dir reads it on every call). */
+  fs::make_dirs(dir);
+#  ifdef _WIN32
+  _putenv_s("BLENDITY_CACHE_DIR", dir.c_str());
+#  else
+  setenv("BLENDITY_CACHE_DIR", dir.c_str(), 1);
+#  endif
+  if (!available() || devices().empty()) {
+    if (report) *report = "no GPU to compile for";
+    return false;
+  }
+  ScopedTimer t;
+  std::string err;
+  bool ok = compile_kernels(devices()[0].hardware_rt, &err);
+  ok = Raster::create(0, &err) != nullptr && ok;
+  /* Only the SPIR-V travels with the build: the driver's pipeline cache belongs to its card. */
+  size_t kept = 0;
+  std::error_code ec;
+  for (const auto &e : std::filesystem::directory_iterator(std::filesystem::u8path(dir), ec)) {
+    const std::string name = e.path().filename().u8string();
+    if (name.rfind("gpu_kernel_", 0) == 0 && name.size() > 4 && name.compare(name.size() - 4, 4, ".spv") == 0) {
+      kept++;
+      continue;
+    }
+    std::error_code rec;
+    std::filesystem::remove(e.path(), rec);
+  }
+  if (report) *report = strprintf("%zu shaders compiled into %s in %.1f s%s%s", kept, dir.c_str(), t.ms() / 1000.0, err.empty() ? "" : ": ", err.c_str());
+  return ok;
 }
 
 #endif
