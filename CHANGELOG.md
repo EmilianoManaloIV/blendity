@@ -2,6 +2,19 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 242): fingers and a pen on a 2-in-1 - the write-up and a check list (task 0222)
+
+**Asked:** "Integrate better support for pen mode. So that if I'm in a 2 in 1 laptop I can navigate more fluidly and
+manipulate the environment", "Include finger and pen support". This round ends that roadmap (tasks 0213-0222).
+
+**Added**
+- docs/tasks/0222-pen-and-touch-write-up.md: the input model, what each task added, what each review caught, what was
+  and wasn't tried on hardware, and a ten-minute check list for the 2-in-1.
+- The README's minimum-machine note says what a 2-in-1 gets.
+
+**Checked**
+- Docs only: the Windows build and the editor group (the manual's Learn links), 0 failed.
+
 ## 2026-10-24 (round 241): the manual, the Learn lesson, the hints for fingers and the pen (task 0221)
 
 **Asked:** the plan for a 2-in-1 - document it where users look.

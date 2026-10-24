@@ -189,7 +189,9 @@ display (drag it out of the editor). Ctrl+K finds any command by name.
 
 The minimum machine starts on the **Low** quality tier (Edit > Preferences..., Quality) and says so on the first run:
 the views draw at 67 % and scale up, with a 1024 shadow map and 60 fps. Editing frames there run at about 35-40 fps,
-orbiting at 60. Renders always use the scene's own settings. Two fingers navigate the Scene view on a touch screen.
+orbiting at 60. Renders always use the scene's own settings. On a 2-in-1, Tablet Mode follows the fold: fingers
+navigate (one orbits, two zoom, pan and twist), the pen works, and its quick menu brings Undo, Delete and the rest
+without a keyboard ([the manual](docs/MANUAL.md), chapter 1).
 
 ## Build it
 
