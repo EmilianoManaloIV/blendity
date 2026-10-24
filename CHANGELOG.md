@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 226): playback without the bookkeeping (task 0206)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 3.
+
+**Changed**
+- Playing a clip remembers what is shown for Record only while Record is on: every animated number of 1,000 objects
+  had been looked up each frame. Turning Record on remembers it.
+- A clip of many tracks finds its objects in one walk of the branches it names, not by searching each parent's
+  children per track.
+
+**Measured:** playing 1,000 keyframed objects in a 2560 x 1369 window, 11.7 -> 4.0 ms a frame (Blender 11.3).
+
+**Checked**
+- The same objects posed as before (duplicate names, the root's own track, names a path can't spell), and Record
+  still keys a move after playing (tests/test_animation.cpp).
+- An Opus review found, all fixed:
+  - the one-walk lookup following a second object of a name where the search found none;
+  - the root's own track lost to a child with an empty name;
+  - a name with a '/' reachable where the search couldn't reach it;
+  - a big rig with few keyed bones walked whole every frame (now only the branches the tracks name).
+- Unit checks (round 226): Windows, in render-cache verify mode, 11,980, 0 failed (996 tests), 0 stale
+  pictures. Linux with libraries: 11,523, 0 failed. Sanitizer build: 11,399, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open timing test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 225): Edit Mode's cage kept on the card (task 0205)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with

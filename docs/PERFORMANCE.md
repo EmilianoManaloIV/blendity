@@ -114,6 +114,7 @@ row where Blendity is 1.25x or more behind, and the task that fixes it.
 - **Blender:** draws its window once a frame, the view nudged between frames: with a still view it shows its
   finished picture instead of drawing the scene.
 
+(After task 0206, playback without the bookkeeping: 1,000 keyframed objects 11.7 -> 4.0 ms; Blender 11.3.)
 (After task 0205, Edit Mode's cage kept on the card: on the 500k sphere 11.7 -> 6.0 ms, Face mode 22.1 -> 8.2.)
 (After task 0204, the views' frames left running on the card. Before it: the 50k sphere 6.0 ms, the 500k 8.2, a million
 triangles 6.3 / 6.4, 10,000 cubes 20.1, Edit Mode 6.2 / 16.6, playback 17.4.)
