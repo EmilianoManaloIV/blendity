@@ -107,6 +107,9 @@ void get_framebuffer_size(Window *w, int &width, int &height);
 void *native_handle(Window *w);
 void *native_display(Window *w);
 float dpi_scale(Window *w);
+/* Task 0218: the laptop in its tablet posture - folded back, or its keyboard detached (Windows' slate mode). False
+ * where the system doesn't say (Linux, macOS, a desktop). */
+bool tablet_posture();
 void set_title(Window *w, const std::string &title);
 void set_cursor(Window *w, Cursor c);
 std::string get_clipboard(Window *w);

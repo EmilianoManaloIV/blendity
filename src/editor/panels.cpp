@@ -2833,6 +2833,13 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     }
     u.tooltip("The hand (drag to pan) and the magnifier (drag to zoom) under the Scene Gizmo, for a pen without a\n"
               "keyboard or middle button. Dragging the Scene Gizmo itself orbits. Blender shows them always.");
+    static const char *kTablet[] = {"Auto (follow the laptop)", "On", "Off"};
+    int ti = tablet_pref_;
+    Recti p2 = row(u.row_h() + u.px(4));
+    u.label({p2.x, p2.y, u.px(150), p2.h}, "Tablet Mode");
+    if (u.combo(u.id("pref_tabletmode"), {p2.x + u.px(150), p2.y + u.px(2), u.px(200), p2.h - u.px(4)}, ti, kTablet, 3)) set_tablet_pref(ti);
+    u.tooltip("Auto: the main window's targets grow and fingers navigate when the keyboard is folded away or detached\n"
+              "(Windows' tablet posture), and go back when it returns. The tab menu's Tablet Mode still switches it by hand.");
   }
   /* Quality tier, viewport scale and CPU threads (task 0050): what the minimum machine (4 cores / 8 threads, a GTX
    * 1050 Ti, 8 GB) needs, one choice away. */

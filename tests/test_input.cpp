@@ -671,10 +671,66 @@ static void tests_round237() {
   });
 }
 
+/* ---------------------------------------------------------------- round 238: Tablet Mode follows the laptop (task 0218) */
+static void tests_round238() {
+  test("tablet: on Auto, Tablet Mode turns on when the keyboard folds away and off when it's back; the tab menu's choice holds until the next fold", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    /* Started folded: nothing changes (Auto acts on a fold, not on the state it starts in - a machine that only reads as
+     * folded is never touched). */
+    ed.set_tablet_posture_for_test(1);
+    ed.command("tabletmode auto");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(!ed.tablet_for_test());
+    ed.set_tablet_posture_for_test(0);
+    ed.step_frame_headless();
+    CHECK(!ed.tablet_for_test());
+    ed.set_tablet_posture_for_test(1);  // (folded)
+    ed.step_frame_headless();
+    const bool folded = ed.tablet_for_test();
+    ed.command("window tablet off");  // (the tab menu's choice)
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const bool held_off = !ed.tablet_for_test();
+    ed.set_tablet_posture_for_test(0);
+    ed.step_frame_headless();
+    ed.set_tablet_posture_for_test(1);
+    ed.step_frame_headless();
+    const bool on_again = ed.tablet_for_test();
+    ed.set_tablet_posture_for_test(0);
+    ed.step_frame_headless();
+    std::printf("    folded: %d, the menu's Off held: %d, folded again: %d, open: %d\n", folded, held_off, on_again, ed.tablet_for_test());
+    CHECK(folded && held_off && on_again && !ed.tablet_for_test());
+  });
+
+  test("tablet: Off keeps Tablet Mode off when the laptop folds; On turns it on with the keyboard there; the choice is saved", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("tabletmode off");
+    ed.set_tablet_posture_for_test(1);
+    ed.step_frame_headless();
+    CHECK(!ed.tablet_for_test());
+    ed.command("tabletmode on");
+    ed.set_tablet_posture_for_test(0);
+    ed.step_frame_headless();
+    CHECK(ed.tablet_for_test());
+    ed.set_tablet_posture_for_test(1);
+    ed.step_frame_headless();
+    ed.set_tablet_posture_for_test(0);
+    ed.step_frame_headless();
+    CHECK(ed.tablet_for_test());  // (On: the posture doesn't turn it off)
+    const std::string prefs = ed.prefs_text_for_test();
+    CHECK(prefs.find("tablet_mode=on") != std::string::npos);
+    ed.command("tabletmode auto");
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
   tests_round235();
   tests_round236();
   tests_round237();
+  tests_round238();
 }

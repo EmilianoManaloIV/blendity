@@ -262,6 +262,7 @@ void Editor::draw_secondary_windows(double now) {
   close_finished_windows();
   apply_window_moves();
   apply_window_modes();
+  follow_tablet_posture();
 }
 
 void Editor::draw_secondary_window(EditorWindow &w, double now) {
@@ -373,6 +374,7 @@ void Editor::apply_window_modes() {
   modes.swap(window_modes_);
   for (const WindowMode &m : modes) {
     EditorWindow *w = m.id ? editor_window(m.id) : nullptr;
+    if (m.what == WindowMode::Tablet && m.id == 0) tablet_user_set_ = true;  // (chosen: it holds until the posture changes, task 0218)
     if (m.what == WindowMode::Tablet) set_window_tablet(w, m.on);
     else if (w && m.what == WindowMode::RenderOnly) w->render_only = m.on;
     else if (w) set_window_fullscreen(*w, m.on);
@@ -393,6 +395,32 @@ void Editor::set_window_fullscreen(EditorWindow &w, bool on) {
   const Monitor &m = ms[(size_t)std::max(0, std::min((int)ms.size() - 1, w.monitor))];
   if (on) w.saved_rect = {w.x, w.y, w.fb.width, w.fb.height}, w.x = m.x, w.y = m.y, w.fb.resize(m.width, m.height);
   else w.x = w.saved_rect.x, w.y = w.saved_rect.y, w.fb.resize(w.saved_rect.w, w.saved_rect.h);
+}
+
+/* Task 0218: the main window's Tablet Mode as the preference and the laptop's posture say (between frames). Auto acts
+ * only when the posture changes - never on the state it starts in - so a machine that never folds is never touched. */
+void Editor::follow_tablet_posture() {
+  const bool folded = test_posture_ >= 0 ? test_posture_ == 1 : (!headless_ && platform::tablet_posture());
+  const int now = folded ? 1 : 0;
+  const bool changed = posture_last_ >= 0 && now != posture_last_;
+  posture_last_ = now;
+  if (changed) tablet_user_set_ = false;
+  bool want = tablet_;
+  if (tablet_pref_ != 0 && !tablet_pref_applied_) want = tablet_pref_ == 1;
+  if (tablet_pref_ == 0 && !tablet_user_set_ && changed) want = folded;
+  tablet_pref_applied_ = true;
+  if (want == tablet_) return;
+  set_window_tablet(nullptr, want);
+  ui_.redraw = true, present_all_ = true;  // (this frame drew at the old size: draw it again at the new one at once)
+  if (changed) Log::info(want ? "Tablet Mode on: the keyboard folded away" : "Tablet Mode off: the keyboard is back");
+}
+
+void Editor::set_tablet_pref(int pref) {
+  tablet_pref_ = std::max(0, std::min(2, pref));
+  tablet_pref_applied_ = false;
+  tablet_user_set_ = false;
+  posture_last_ = -1;  // (Auto: follow the posture as it is now)
+  save_prefs();
 }
 
 /* Tablet: a window's UI half as big again (bigger targets for a pen or a finger); null: the main window. Call

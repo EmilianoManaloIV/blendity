@@ -699,6 +699,16 @@ void Editor::run_console_command(const std::string &line) {
       for (const auto &s : quick_menu_slices()) Log::info("%s", s.first.c_str());
     return;
   }
+  if (c == "tabletmode") {  // tabletmode auto|on|off: the main window's Tablet Mode follows the laptop, or is set (task 0218)
+    const std::string v = to_lower(arg(1, ""));
+    const int pref = v == "auto" ? 0 : v == "on" ? 1 : v == "off" ? 2 : -1;
+    if (pref < 0) {
+      Log::info("usage: tabletmode auto|on|off (now %s)", tablet_pref_ == 0 ? "auto" : tablet_pref_ == 1 ? "on" : "off");
+      return;
+    }
+    set_tablet_pref(pref);
+    return;
+  }
   if (c == "navbuttons") {  // navbuttons tablet|always: when the Scene Gizmo's hand and magnifier show (task 0216)
     const std::string v = to_lower(arg(1, ""));
     if (v != "tablet" && v != "always") {

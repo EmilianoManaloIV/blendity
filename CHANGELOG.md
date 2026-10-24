@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 238): Tablet Mode follows the laptop (task 0218)
+
+**Asked:** the plan for a 2-in-1 - Tablet Mode turns itself on when the laptop folds, with an override.
+
+**Added**
+- **Auto (the default):** the main window's Tablet Mode turns on when the keyboard is folded away or detached
+  (Windows' tablet posture), and off when it's back. It acts on a fold only, never on the state at startup.
+- **Preferences > Pen and touch > Tablet Mode:** Auto, On or Off; `tabletmode auto|on|off`.
+- **The tab menu's choice** holds until the posture changes again.
+
+**Checked**
+- A simulated fold and unfold, the tab menu's override, On and Off, and the saved choice (tests/test_input.cpp).
+- An Opus review found two things, both fixed:
+  - Windows' slate reading is wrong on many machines without a convertible's hinge, so Auto would have turned Tablet
+    Mode on for ordinary desktops and laptops at startup. The posture is now trusted only with a touch screen,
+    undocked, on a mobile or slate power role (as Chromium checks it), and Auto acts only on a change, never on the
+    state it starts in;
+  - a posture change took effect after the frame was drawn, leaving the old size on screen against the new targets;
+    the window is drawn again at once.
+- Unit checks (round 238): Windows, in render-cache verify mode, 12,108, 0 failed (1026 tests), 0 stale
+  pictures. Linux with libraries: 11,650, 0 failed. Sanitizer build: 11,520, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 237): the pen quick menu (task 0217)
 
 **Asked:** the plan for a 2-in-1 - a pen quick menu (side button or long press) for tools without a keyboard.

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwchar>
 
 #ifdef _MSC_VER
 #  pragma comment(lib, "user32.lib")
@@ -357,6 +358,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       w->pen_pressure = 1.0f;  // (lifted or gone: nothing presses)
       w->pen_barrel = false;
       break;
+    case WM_SETTINGCHANGE:
+      /* Task 0218: the laptop folded or unfolded - a frame, so Tablet Mode follows at once. */
+      if (lp && std::wcscmp((const wchar_t *)lp, L"ConvertibleSlateMode") == 0) push(w, Event{EventType::Repaint});
+      break;
     case WM_DROPFILES: {
       HDROP drop = (HDROP)wp;
       Event e;
@@ -693,6 +698,19 @@ void get_framebuffer_size(Window *w, int &width, int &height) {
 }
 
 float dpi_scale(Window *w) { return w->dpi; }
+
+/* The convertible's posture: Windows' slate mode means something only on a machine that has one. Many desktops and
+ * ordinary laptops read 0 (slate) too, so - as Chromium does - only a touch screen, undocked, on a mobile or slate
+ * power role is asked. */
+bool tablet_posture() {
+  if (GetSystemMetrics(SM_MAXIMUMTOUCHES) <= 0 || GetSystemMetrics(SM_SYSTEMDOCKED) != 0) return false;
+  using RoleFn = int(WINAPI *)(ULONG);  // (PowerDeterminePlatformRoleEx: 2 mobile, 8 slate)
+  static HMODULE pp = LoadLibraryW(L"powrprof.dll");
+  static auto role_of = pp ? (RoleFn)GetProcAddress(pp, "PowerDeterminePlatformRoleEx") : nullptr;
+  const int role = role_of ? role_of(2 /* POWER_PLATFORM_ROLE_V2 */) : 0;
+  if (role != 2 && role != 8) return false;
+  return GetSystemMetrics(SM_CONVERTIBLESLATEMODE) == 0;  // (0: slate - the keyboard away)
+}
 
 void set_title(Window *w, const std::string &title) { SetWindowTextW(w->hwnd, widen(title).c_str()); }
 

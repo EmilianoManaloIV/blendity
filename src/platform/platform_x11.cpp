@@ -502,6 +502,8 @@ void get_framebuffer_size(Window *w, int &width, int &height) {
 
 float dpi_scale(Window *w) { return w->dpi; }
 
+bool tablet_posture() { return false; }  // (task 0218: X11 doesn't say)
+
 void set_title(Window *w, const std::string &title) {
   XStoreName(w->dpy, w->win, title.c_str());
   Atom net_name = XInternAtom(w->dpy, "_NET_WM_NAME", False);

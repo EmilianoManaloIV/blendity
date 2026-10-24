@@ -3614,6 +3614,7 @@ void Editor::load_prefs() {
     else if (k == "guides_seen") for (const std::string &g : split_list(v, ';')) guides_seen_.insert(g);
     else if (k == "inspector_essentials") inspector_essentials_ = v != "0";
     else if (k == "nav_buttons") nav_buttons_always_ = v == "always";  // (task 0216)
+    else if (k == "tablet_mode") tablet_pref_ = v == "on" ? 1 : v == "off" ? 2 : 0, tablet_pref_applied_ = false;  // (task 0218)
     else if (k == "guides") guides_enabled_ = v != "0";
     else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
     else if (k == "favorites") load_favorites_pref(v);

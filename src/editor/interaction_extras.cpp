@@ -88,7 +88,8 @@ std::string Editor::prefs_text_0190() const {
     if (p.find(';') == std::string::npos) recent += (recent.empty() ? "" : ";") + p;
   for (const std::string &g : guides_seen_) seen += (seen.empty() ? "" : ";") + g;
   return "recent_scenes=" + recent + "\ninspector_essentials=" + (inspector_essentials_ ? "1" : "0") + "\nguides=" + (guides_enabled_ ? "1" : "0") +
-         "\nguides_seen=" + seen + "\nnav_buttons=" + (nav_buttons_always_ ? "always" : "tablet") + "\n";
+         "\nguides_seen=" + seen + "\nnav_buttons=" + (nav_buttons_always_ ? "always" : "tablet") +
+         "\ntablet_mode=" + (tablet_pref_ == 1 ? "on" : tablet_pref_ == 2 ? "off" : "auto") + "\n";
 }
 
 /* Digits typed while dragging a gizmo's axis: the move is exactly that far along it (an expression works: 2*1.5).

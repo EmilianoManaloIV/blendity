@@ -398,6 +398,8 @@ void get_framebuffer_size(Window *w, int &width, int &height) {
 
 float dpi_scale(Window *w) { return (float)[w->window backingScaleFactor]; }
 
+bool tablet_posture() { return false; }  // (task 0218: a Mac has none)
+
 void set_title(Window *w, const std::string &title) {
   [w->window setTitle:[NSString stringWithUTF8String:title.c_str()]];
 }

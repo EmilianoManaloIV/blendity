@@ -538,6 +538,9 @@ class Editor {
   bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
   std::string gizmo_typed_for_test() const { return gizmo_typed_; }
   int gizmo_hot_for_test() const { return gizmo_hot_; }
+  void set_tablet_posture_for_test(int folded) { test_posture_ = folded; }  // (1 folded, 0 open, -1 the system's)
+  bool tablet_for_test() const { return tablet_; }
+  std::string prefs_text_for_test() const { return prefs_text_0190(); }
   bool quick_menu_open_for_test() const { return qm_.open; }
   int quick_menu_hot_for_test() const { return qm_.hot; }
   Recti nav_button_rect_for_test(int which) const { return nav_buttons_shown() ? nav_button_rect(scene_rect_, which) : Recti{}; }
@@ -2382,6 +2385,13 @@ class Editor {
   /* Task 0216: navigating with the pen alone. The Scene Gizmo dragged orbits (a click still looks along an axis); a hand
    * under it pans and a magnifier zooms, dragged - shown in Tablet Mode, or always (Preferences, `navbuttons`). */
   bool nav_buttons_always_ = false;
+  /* Task 0218: Tablet Mode follows the laptop - Auto (0) turns the main window's on when Windows says the keyboard is
+   * folded away and off when it's back; On (1) / Off (2) set it at the start and when chosen. The tab menu's choice
+   * holds until the posture changes again. */
+  int tablet_pref_ = 0, posture_last_ = -1, test_posture_ = -1;
+  bool tablet_user_set_ = false, tablet_pref_applied_ = false;
+  void follow_tablet_posture();
+  void set_tablet_pref(int pref);
   bool nav_buttons_shown() const { return tablet_ || nav_buttons_always_; }
   enum class GizmoNav { None, Pending, Orbit, Pan, Zoom } gizmo_nav_ = GizmoNav::None;
   int gizmo_nav_hot_ = -1, gizmo_nav_x_ = 0, gizmo_nav_y_ = 0;
