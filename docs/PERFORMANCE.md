@@ -108,6 +108,25 @@ Each row's two methods are in its last columns.
 | F12 at 1920x1080, 400 spheres (raster) | 75.4 ms | - | 215.7 ms | Blendity 2.9x ahead | render, engine raster (the CPU's reference raster, supersampled), stress 400 Sphere (an 8 x 8 x 7 grid of 24 x 16 spheres, 8 materials) under the starter scene's light | render.render with EEVEE at its default 64 samples, Blendity's stress 400 Sphere built alike (a sun for its starter light) |
 <!-- /pass15-table -->
 
+**With a window** (task 0202, `tools/bench_ui.py`): both programs at the same window size and on the same scenes.
+- **Blendity:** draws its views again every frame, presented by the card.
+- **Blender:** draws its window once a frame, the view nudged between frames: with a still view it shows its
+  finished picture instead of drawing the scene.
+
+<!-- pass15-ui-table -->
+| row | Blendity | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
+|---|---|---|---|---|---|
+| Window: 50k-face sphere, Solid | 6.0 ms | 4.5 ms | Blendity 1.3x behind | --windowed-check --command "benchscene sphere50k" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: 500k-face sphere, Solid | 8.2 ms | 4.1 ms | Blendity 2.0x behind | --windowed-check --command "benchscene sphere500k" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: a million triangles, Solid | 6.3 ms | 4.4 ms | Blendity 1.4x behind | --windowed-check --command "benchscene million" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: a million triangles, Material Preview / Shaded | 6.4 ms | 5.8 ms | Blendity 1.1x behind | --windowed-check --command "benchscene million" --command "shading shaded": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: 10,000 cubes, Solid | 20.1 ms | 24.1 ms | Blendity 1.2x ahead | --windowed-check --command "benchscene cubes10k" --command "shading solid": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: Edit Mode on the 50k sphere | 6.2 ms | 5.3 ms | Blendity 1.2x behind | --windowed-check --command "benchscene sphere50k" --command "shading solid" --command "edit vertex": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: Edit Mode on the 500k sphere | 16.6 ms | 5.4 ms | Blendity 3.1x behind | --windowed-check --command "benchscene sphere500k" --command "shading solid" --command "edit vertex": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), 200 frames after 10 warm (and EEVEE's shaders compiled), the window 2560x1361 |
+| Window: playing 1,000 keyframed objects | 17.4 ms | 11.3 ms | Blendity 1.5x behind | --windowed-check --command "benchscene keyed1k" --command "shading solid" --command "anim play": the views drawn again every frame, presented by the card, 200 frames, the window 2560x1369 | each frame scene.frame_set (the next of 60) and wm.redraw_timer DRAW_WIN_SWAP once, the view nudged 1e-4, 200 frames, the window 2560x1361 |
+| Starting up: the first frame, then quit | 498.2 ms | 2803.9 ms | Blendity 5.6x ahead | Blendity --startup-check (the scratch project, three frames: the card presents one behind), the process's wall time, mean of 3 | blender --factory-startup drawing and swapping its window once at its first event loop, then os._exit, the process's wall time, mean of 3 |
+<!-- /pass15-ui-table -->
+
 ## Pass 14: the views native on the GPU (tasks 0192-0200, ADR 0061)
 The user asked for the views to run on the GPU natively, like Blender's viewport, with the CPU as the fallback.
 
@@ -118,11 +137,12 @@ The user asked for the views to run on the GPU natively, like Blender's viewport
 
   | Scene | Blender 5.2.2 | Blendity, the card | Blendity, the system presenting |
   |---|---|---|---|
-  | The starter scene (a cube; Blender's Solid) | 3.98-4.70 ms | 5.57 ms | 6.81 ms |
-  | 400 spheres through the camera, Solid | 4.34-4.39 ms | 7.42 ms | 8.68 ms |
-  | 400 spheres, Material Preview / Shaded | 4.41-5.23 ms | 7.51 ms | 8.62 ms |
+  | The starter scene (a cube; Blender's Solid) | 4.66 ms | 5.57 ms | 6.81 ms |
+  | 400 spheres through the camera, Solid | 5.00 ms | 7.42 ms | 8.68 ms |
+  | 400 spheres, Material Preview / Shaded | 6.70 ms | 7.51 ms | 8.62 ms |
 
-- Blender's Material Preview reuses EEVEE's last sample when nothing moved, which `redraw_timer` doesn't change.
+- Corrected in task 0202: Blender's column first timed a still view (3.98-4.70, 4.34-4.39 and 4.41-5.23 ms), where
+  Workbench and EEVEE show their finished picture without drawing the scene. The view is now nudged between frames.
 - Blendity's canvas alone, idle: 1.69-1.98 ms by the card.
 
 ### After task 0198 (the UI's 2D measured; presenting made cheaper)

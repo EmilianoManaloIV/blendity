@@ -539,6 +539,7 @@ class Editor {
   void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
   void clear_selection_for_test() { clear_selection(); }
   int windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands = {});  // (task 0193: Blendity --windowed-check)
+  int startup_check();  // (task 0202: Blendity --startup-check - the first frame drawn, then quit)
   void card_present_for_test(bool on) { card_present_for_test_ = on; }  // (task 0193: headless frames as if the card presented them)
   bool card_frame_for_test(std::vector<uint32_t> &out);                // the frame the card would show (compose_read)
   size_t card_views_for_test() const { return card_views_.size(); }
@@ -2283,6 +2284,7 @@ class Editor {
   void assign_texture_to_selection(const std::string &asset_path);
   void assign_material_to_faces(int slot);
   void spawn_stress_grid(int count, const std::string &kind);
+  bool bench_scene(const std::string &name);  // (task 0202: the Blender parity scenes, built as tools/bench_blender.py builds them)
   void run_console_command(const std::string &cmd);
   bool set_field_command(const std::string &path, const std::string &value);  // console: set Camera.FStop 1.4
   void enter_play();

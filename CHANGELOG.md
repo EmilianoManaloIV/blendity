@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 222): Blender's viewport, playback and start-up against Blendity's window (task 0202)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round measures what needs a window.
+
+**Added**
+- `benchscene sphere50k|sphere500k|million|cubes10k|keyed1k`: the benchmark scenes, built in the editor.
+- `Blendity --startup-check`.
+- `tools/bench_ui.py` and `tools/bench_blender.py --parity-ui`: both programs' windows at the same size and the same
+  scenes, into PERFORMANCE.md Pass 15's window table.
+
+**Measured** (a 2560 x 1369 window, a frame):
+- Blendity is behind with big meshes: the 500k sphere 8.2 ms against 4.1, a million triangles 6.3 against 4.4, and
+  Edit Mode on 500k faces 16.6 against 5.4.
+- Playing 1,000 keyframed objects: 17.4 ms against 11.3.
+- Blendity is ahead with 10,000 cubes (20.1 against 24.1 ms) and starting up (0.5 s against 2.8).
+
+**Corrected:** round 219's Blender viewport rows timed Blender's finished picture shown again, not the scene drawn:
+a still view stops Workbench and EEVEE drawing. With the view nudged, as an orbit does:
+- the starter scene: 4.66 ms;
+- 400 spheres, Solid: 5.00 ms (was 4.34-4.39);
+- 400 spheres, Material Preview: 6.70 ms (was 4.41-5.23).
+
+Blender is ahead there 1.1-1.5x, not 1.2-1.7x.
+
+**Checked**
+- `benchscene`'s scenes (tests/test_editor.cpp).
+- An Opus review found, all fixed:
+  - Blender's rows timing a finished picture (a still view: the scene isn't drawn again) - round 219's rows too,
+    corrected;
+  - its playback row stepping frames without drawing the window;
+  - the selections differing (10,000 selected cubes' outlines in Blender's row);
+  - the scenes differing (a cube around the sphere, the starter scene's teapot);
+  - the start-up row timing Blender's exit;
+  - the runner trusting an old result and a failed run.
+- The review's fix of the selection stopped Blendity's playback, so the box row was found playing nothing: the
+  Animation window plays the clip of the selection's parent, so one box stays selected.
+- Unit checks (round 222): Windows, in render-cache verify mode, 11,957, 0 failed (993 tests), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 221): every editor feature measured against Blender 5.2 (task 0201)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with

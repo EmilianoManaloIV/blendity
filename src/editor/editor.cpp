@@ -3201,6 +3201,87 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
   Log::info("Spawned %d %s objects in %.1f ms (%zu tris each)", count, kind.c_str(), t.ms(), shared ? shared->render_mesh().tri_count() : (size_t)0);
 }
 
+/* Task 0202: the scenes Blender's viewport is timed on (tools/bench_blender.py --parity-ui builds the same), each in a
+ * new scene emptied but for its light (Blender's is emptied likewise), the Scene view framing it at once (no camera
+ * animation under the timings), nothing selected but the sphere (or, for keyed1k, one box, whose parent's clip plays):
+ * - sphere50k / sphere500k: one UV sphere of 256 x 196 / 1024 x 490 segments, "Parity Sphere", selected;
+ * - million: ten of the 50k spheres (one shared mesh) in a row 2.5 m apart, about a million triangles;
+ * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square;
+ * - keyed1k: 1,000 cubes under "Keyed", each keyed on frames 1, 30 and 60 (Position), the clip at frame 1. */
+bool Editor::bench_scene(const std::string &name) {
+  const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "keyed1k";
+  if (!known) return false;
+  new_scene();
+  for (const char *starter : {"Utah Teapot", "Plane", "Main Camera"})
+    if (GameObject *g = scene_->find_by_name(starter)) scene_->destroy(g);
+  std::vector<uint64_t> made;
+  auto object = [&](const std::string &n, MeshPtr mesh, Vec3 at, GameObject *parent = nullptr) {
+    GameObject *g = scene_->create(n, parent);
+    g->set_local_position(at);
+    g->add<MeshFilter>()->mesh = std::move(mesh);
+    g->add<MeshRenderer>();
+    made.push_back(g->id);
+    return g;
+  };
+  if (name == "sphere50k" || name == "sphere500k") {
+    const bool big = name == "sphere500k";
+    object("Parity Sphere", primitives::uv_sphere(1.0f, big ? 1024 : 256, big ? 490 : 196), {0, 0, 0});
+  }
+  else if (name == "million") {
+    MeshPtr sphere = primitives::uv_sphere(1.0f, 256, 196);
+    for (int i = 0; i < 10; i++) object(strprintf("Sphere %d", i), sphere, {(i - 4.5f) * 2.5f, 1.0f, 0.0f});
+  }
+  else if (name == "cubes10k") {
+    MeshPtr cube = primitives::cube();
+    for (int i = 0; i < 10000; i++) object(strprintf("Cube %d", i), cube, {(i % 100 - 50) * 1.6f, 0.0f, (i / 100 - 50) * 1.6f});
+  }
+  else {
+    GameObject *root = scene_->create("Keyed");
+    MeshPtr cube = primitives::cube();
+    for (int i = 0; i < 1000; i++) object(strprintf("Box %d", i), cube, {(i % 32 - 16) * 1.6f, 0.0f, (i / 32 - 16) * 1.6f}, root);
+    selection_ = {root->id};
+    active_ = root->id;
+    if (anim_new_clip(root, "Keyed")) {
+      anim_edit_keys("Keys", [&](AnimationClip &clip) {
+        for (size_t k = 0; k < made.size(); k++) {
+          GameObject *g = scene_->find(made[k]);
+          const Vec3 p = g->local().position;
+          const std::string path = anim_path(*root, *g);
+          for (int axis = 0; axis < 3; axis++) {
+            AnimTrack &t = clip.track(path, "Position", axis);
+            t.set_key(1.0f, p[axis]);
+            t.set_key(30.0f, p[axis] + (axis == 1 ? (float)(k % 7) : 0.0f));
+            t.set_key(60.0f, p[axis]);
+          }
+        }
+      });
+      anim_set_frame(1.0f);
+    }
+  }
+  selection_ = made;
+  active_ = made.back();
+  frame_selected();
+  cam_.update(now_seconds() + 10.0);  // (the framing's animation finished now)
+  if (name == "keyed1k") selection_ = {made[0]}, active_ = made[0];  // (one box: the Animation window plays its parent's clip)
+  else if (name != "sphere50k" && name != "sphere500k") clear_selection();
+  mark_changed("Bench Scene");
+  Log::info("Bench scene %s: %zu objects", name.c_str(), made.size());
+  return true;
+}
+
+/* Task 0202: Blendity --startup-check - init, the first frames until one is on the screen (the card presents one frame
+ * behind: three frames), quit; tools/bench_ui.py times the process. */
+int Editor::startup_check() {
+  std::vector<Event> events;
+  for (int i = 0; i < 3; i++) {
+    events.clear();
+    if (window_) poll_events(window_, events, 0);
+    ui_.redraw = true;
+    frame(events);
+  }
+  return 0;
+}
+
 void Editor::enter_play() {
   set_weight_paint(false);
   cancel_skin_job();  // (Stop would throw its result away)

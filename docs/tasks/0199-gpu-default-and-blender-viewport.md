@@ -45,13 +45,14 @@ swapped, as Blendity's windowed check draws and presents it. It quits when done.
 
 | A whole window drawn and shown, a frame | Blender 5.2.2 (`redraw_timer`, 200 after 10 warm; two runs) | Blendity, the card (400 frames, the Scene view drawn each) | Blendity, the system presenting |
 |---|---|---|---|
-| The starter scene (a cube), Solid in Blender | 3.98-4.70 ms | 5.57 ms | 6.81 ms |
-| 400 spheres through the camera, Solid | 4.34-4.39 ms | 7.42 ms | 8.68 ms |
-| 400 spheres, Material Preview (EEVEE) / Shaded | 4.41-5.23 ms | 7.51 ms | 8.62 ms |
+| The starter scene (a cube), Solid in Blender | 4.66 ms | 5.57 ms | 6.81 ms |
+| 400 spheres through the camera, Solid | 5.00 ms | 7.42 ms | 8.68 ms |
+| 400 spheres, Material Preview (EEVEE) / Shaded | 6.70 ms | 7.51 ms | 8.62 ms |
 
-- Blender is 1.2-1.4x ahead on the starter scene and 1.4-1.7x on 400 spheres. Its Material Preview row is flattered:
-  EEVEE reuses its last sample when nothing moved, which `redraw_timer` doesn't change; Blendity's row draws the
-  views anew every frame.
+(Corrected in task 0202: Blender's column first timed a still view, 3.98-4.70, 4.34-4.39 and 4.41-5.23 ms, where
+Workbench and EEVEE show their finished picture without drawing the scene. The view is now nudged between frames.)
+
+- Blender is 1.2x ahead on the starter scene and 1.1-1.5x on 400 spheres.
 - Where the gap goes, as far as measured: Blendity's UI is drawn by the CPU (2.0-2.7 ms of a 4K canvas, task 0198)
   where Blender's is drawn on the card, and Blendity's card draws the 400 spheres with a draw call each. How
   Blender's draw manager batches them wasn't measured.

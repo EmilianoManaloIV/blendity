@@ -92,6 +92,14 @@ int main(int argc, char **argv) {
   if (const int code = launch::hand_over(argc, argv); code >= 0) return code;
   for (int i = 1; i < argc; i++)
     if (std::strcmp(argv[i], "--headless-screenshot") == 0) return headless(argc, argv);
+  /* Task 0202: --startup-check - the editor opened and its first frame drawn, then quit (the process timed from outside). */
+  for (int i = 1; i < argc; i++) {
+    if (std::strcmp(argv[i], "--startup-check") != 0) continue;
+    Editor *editor = new Editor;  // (never destroyed, as the windowed check's)
+    const int result = editor->init(argc, argv) ? editor->startup_check() : 1;
+    std::fflush(nullptr);
+    std::_Exit(result);
+  }
   /* Task 0193: --windowed-check out.png [--frames N] [--command "..."]... - a real window's frames, the window as shown
    * saved; task 0199: console commands run first (a scene to measure: `stress 400 Sphere`, `shading solid`). */
   for (int i = 1; i + 1 < argc; i++) {

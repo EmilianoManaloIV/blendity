@@ -2918,6 +2918,48 @@ static void tests_round209() {
   });
 }
 
+/* ---------------------------------------------------------------- round 222: the parity scenes (task 0202) */
+static void tests_round222() {
+  test("benchscene builds the scenes Blender's viewport is timed on: the 50k sphere selected, ten spheres sharing one mesh, 10,000 cubes, 1,000 keyed boxes that move; an unknown name builds nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("benchscene sphere50k");
+    GameObject *s = ed.scene().find_by_name("Parity Sphere");
+    CHECK(s && s->get<MeshFilter>() && s->get<MeshFilter>()->mesh->face_count() == 256u * 196u);
+    CHECK(ed.selected_object() == s);
+    CHECK(!ed.scene().find_by_name("Utah Teapot") && !ed.scene().find_by_name("Main Camera"));  // (the starter scene emptied but for its light)
+    ed.command("benchscene million");
+    size_t spheres = 0;
+    const Mesh *shared = nullptr;
+    bool one_mesh = true;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Sphere ", 0) != 0 || !g.get<MeshFilter>()) return;
+      spheres++;
+      if (shared && shared != g.get<MeshFilter>()->mesh.get()) one_mesh = false;
+      shared = g.get<MeshFilter>()->mesh.get();
+    });
+    CHECK(spheres == 10 && one_mesh);
+    CHECK(!ed.scene().find_by_name("Parity Sphere"));  // (a new scene each time)
+    ed.command("benchscene cubes10k");
+    size_t cubes = 0;
+    ed.scene().for_each([&](GameObject &g) { cubes += g.name.rfind("Cube ", 0) == 0; });
+    CHECK(cubes == 10000);
+    ed.command("benchscene keyed1k");
+    GameObject *box = ed.scene().find_by_name("Box 3");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(box && clip && clip->tracks.size() == 3000);
+    if (!box || !clip) return;
+    const float y1 = box->local().position.y;
+    GameObject *root = ed.scene().find_by_name("Keyed");
+    apply_clip(*clip, *root, 30.0f);
+    std::printf("    Box 3 at frame 1: y %.2f, at frame 30: y %.2f\n", y1, box->local().position.y);
+    CHECK(std::fabs(box->local().position.y - (y1 + 3.0f)) < 1e-4f);  // (box k rises k % 7 by frame 30)
+    const size_t objects = ed.scene().object_count();
+    ed.command("benchscene nothing");
+    CHECK(ed.scene().object_count() == objects);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -2948,5 +2990,6 @@ void run_editor_tests() {
   tests_round206();
   tests_round207();
   tests_round209();
+  tests_round222();
   coverage_tests();
 }

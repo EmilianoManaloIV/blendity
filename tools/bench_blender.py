@@ -12,6 +12,10 @@ Task 0201: every editor feature's twin of Blendity's stress `blender_parity` row
 
     "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" -b --python tools/bench_blender.py -- --parity --out build/bench/blender_parity.json
 
+Task 0202: the parity rows that need Blender's window (its viewport and playback), run by tools/bench_ui.py:
+
+    "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" --window-geometry 0 0 2560 1369 --python tools/bench_blender.py -- --parity-ui --out build/bench/blender_parity_ui.json
+
 Each row says what Blender does beside what Blendity's row does (the method per row is in docs/tasks/0178). Times
 are the mean of three runs of perf_counter around the call (Blendity's editor rows are means of three frames too);
 the Cycles rows fit a line through three sample counts so a render's fixed cost drops out. Blendity is left-handed
@@ -423,16 +427,33 @@ def view3d_shading(kind, through_camera):
         sp.overlay.show_overlays = True
         if through_camera and bpy.context.scene.camera: sp.region_3d.view_perspective = "CAMERA"
 
-def redraw_ms(iterations):
-    """The whole window drawn and swapped `iterations` times (wm.redraw_timer DRAW_WIN_SWAP), a frame's mean in ms."""
+def view3d_regions():
     window = bpy.context.window_manager.windows[0]
+    return [a.spaces.active.region_3d for a in window.screen.areas if a.type == "VIEW_3D"]
+
+def redraw_ms(iterations, step=None):
+    """The whole window drawn and swapped once per iteration (wm.redraw_timer DRAW_WIN_SWAP), a frame's mean in ms.
+    Task 0202: between iterations the view's distance is nudged by 1e-4 (an orbit's change, too small to see), so
+    Workbench and EEVEE draw the scene again each time: with a still view they show their finished picture and
+    draw only the overlays. `step(i)`, when given, runs before each draw (a frame of playback)."""
+    window = bpy.context.window_manager.windows[0]
+    views = view3d_regions()
+    def nudge(i):
+        for rv3d in views:
+            rv3d.view_distance += 1e-4 if i % 2 == 0 else -1e-4
+            rv3d.view_camera_zoom += 1e-3 if i % 2 == 0 else -1e-3  # (seen through the camera, the distance does nothing)
     with bpy.context.temp_override(window=window, screen=window.screen):
-        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=10)  # (warm: shaders, batches)
+        for i in range(10):  # (warm: shaders, batches)
+            nudge(i)
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
         for _ in range(600):  # (EEVEE compiles its materials in the background: until they are, it draws placeholders)
             if not bpy.app.is_job_running("SHADER_COMPILATION"): break
             bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=5)
         t0 = time.perf_counter()
-        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=iterations)
+        for i in range(iterations):
+            if step: step(i)
+            nudge(i)
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
         return (time.perf_counter() - t0) * 1000.0 / iterations
 
 def bench_viewport():
@@ -924,6 +945,130 @@ def run_parity():
     print("[bench_blender] wrote", OUT)
 
 
+# ------------------------------------------------------------------ Blender parity, with its window (task 0202)
+# Blender's viewport timed on the scenes Blendity's `benchscene` command builds: the whole window drawn and swapped
+# (wm.redraw_timer DRAW_WIN_SWAP), as Blendity's --windowed-check draws and presents its window with the views drawn
+# again each frame; playback as ANIM_STEP (a frame stepped and the window drawn). Run with the window up (not -b).
+
+def bench_scene(name):
+    """Blendity's `benchscene <name>` built alike, in an empty scene, everything it made selected for the view to
+    frame (the caller then leaves only a sphere selected, as Blendity does)."""
+    made = []
+    if name in ("sphere50k", "sphere500k"):
+        made.append(parity_sphere(name == "sphere500k"))
+    elif name == "million":
+        bpy.ops.mesh.primitive_uv_sphere_add(segments=256, ring_count=196, radius=1.0)
+        proto = bpy.context.active_object
+        for i in range(10):
+            ob = proto if i == 0 else bpy.data.objects.new("Sphere %d" % i, proto.data)
+            if i: bpy.context.collection.objects.link(ob)
+            ob.location = at((i - 4.5) * 2.5, 1.0, 0.0)
+            made.append(ob)
+    elif name == "cubes10k":
+        bpy.ops.mesh.primitive_cube_add(size=1.0)
+        proto = bpy.context.active_object
+        for i in range(10000):
+            ob = proto if i == 0 else bpy.data.objects.new("Cube %d" % i, proto.data)
+            if i: bpy.context.collection.objects.link(ob)
+            ob.location = at((i % 100 - 50) * 1.6, 0.0, (i // 100 - 50) * 1.6)
+            made.append(ob)
+    elif name == "keyed1k":
+        bpy.ops.mesh.primitive_cube_add(size=1.0)
+        proto = bpy.context.active_object
+        for i in range(1000):
+            ob = proto if i == 0 else bpy.data.objects.new("Box %d" % i, proto.data)
+            if i: bpy.context.collection.objects.link(ob)
+            base = Vector(at((i % 32 - 16) * 1.6, 0.0, (i // 32 - 16) * 1.6))
+            for f, dy in ((1, 0.0), (30, float(i % 7)), (60, 0.0)):
+                ob.location = base + Vector((0.0, 0.0, dy))
+                ob.keyframe_insert("location", frame=f)
+            made.append(ob)
+        scene = bpy.context.scene
+        scene.frame_start, scene.frame_end = 1, 60
+        scene.frame_set(1)
+    bpy.ops.object.select_all(action="DESELECT")
+    for ob in made: ob.select_set(True)
+    bpy.context.view_layer.objects.active = made[-1]
+    bpy.context.view_layer.update()
+    return made
+
+def frame_selected():
+    window = bpy.context.window_manager.windows[0]
+    for area in window.screen.areas:
+        if area.type != "VIEW_3D": continue
+        region = next(r for r in area.regions if r.type == "WINDOW")
+        with bpy.context.temp_override(window=window, screen=window.screen, area=area, region=region):
+            bpy.ops.view3d.view_selected()
+
+def redraw_anim_ms(iterations):
+    """Playback: each iteration sets the next frame (1-60, the keys' evaluation) and draws the window."""
+    scene = bpy.context.scene
+    return redraw_ms(iterations, lambda i: scene.frame_set(1 + (i + 1) % 60))
+
+def bench_parity_ui():
+    n = 30 if QUICK else 200
+    window = bpy.context.window_manager.windows[0]
+    size = "%dx%d" % (window.width, window.height)
+    global reset
+    reset = clear_scene  # (with the UI up, read_factory_settings would reload the window)
+    rows_spec = [
+        ("Window: 50k-face sphere, Solid", "sphere50k", "SOLID", False),
+        ("Window: 500k-face sphere, Solid", "sphere500k", "SOLID", False),
+        ("Window: a million triangles, Solid", "million", "SOLID", False),
+        ("Window: a million triangles, Material Preview / Shaded", "million", "MATERIAL", False),
+        ("Window: 10,000 cubes, Solid", "cubes10k", "SOLID", False),
+        ("Window: Edit Mode on the 50k sphere", "sphere50k", "SOLID", True),
+        ("Window: Edit Mode on the 500k sphere", "sphere500k", "SOLID", True),
+    ]
+    def settle(scene_name, edit):
+        made = bench_scene(scene_name)
+        frame_selected()
+        if scene_name not in ("sphere50k", "sphere500k"): bpy.ops.object.select_all(action="DESELECT")
+        if scene_name == "keyed1k": made[0].select_set(True)  # (one box, as Blendity's Animation window needs)
+        if edit:
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.select_all(action="DESELECT")  # (Blendity's Edit Mode starts with nothing selected)
+        return made
+    for label, scene_name, shading, edit in rows_spec:
+        try:
+            clear_scene()
+            settle(scene_name, edit)
+            view3d_shading(shading, False)
+            row(label, redraw_ms(n), "ms",
+                "wm.redraw_timer DRAW_WIN_SWAP once a frame, the view nudged 1e-4 between (so the scene is drawn again, not the finished picture shown), "
+                "%d frames after 10 warm (and EEVEE's shaders compiled), the window %s" % (n, size))
+        except Exception as e:
+            row(label, -1, "ms", "failed: %s" % e)
+        finally:
+            if bpy.context.object and bpy.context.object.mode != "OBJECT": bpy.ops.object.mode_set(mode="OBJECT")
+    try:
+        clear_scene()
+        settle("keyed1k", False)
+        view3d_shading("SOLID", False)
+        row("Window: playing 1,000 keyframed objects", redraw_anim_ms(n), "ms",
+            "each frame scene.frame_set (the next of 60) and wm.redraw_timer DRAW_WIN_SWAP once, the view nudged 1e-4, %d frames, the window %s" % (n, size))
+    except Exception as e:
+        row("Window: playing 1,000 keyframed objects", -1, "ms", "failed: %s" % e)
+
+def run_parity_ui():
+    print("[bench_blender] parity, with the window")
+    try:
+        try:
+            bench_parity_ui()
+        except Exception as e:
+            row("parity ui (failed)", -1, "", "failed: %s" % e)
+        os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
+        with open(OUT, "w", encoding="utf-8") as f:
+            json.dump({"blender": bpy.app.version_string, "quick": QUICK, "gpu": GPU, "rows": rows}, f, indent=1)
+        print("[bench_blender] wrote", OUT)
+    finally:
+        bpy.ops.wm.quit_blender()
+    return None
+
+if arg("--parity-ui", False) is not False:
+    bpy.app.timers.register(run_parity_ui, first_interval=3.0)  # (once the window is up)
+
+
 def run_headless():
     for name, fn in (("edit mode", bench_edit_mode), ("uv", bench_uv), ("export", bench_export), ("cycles", bench_cycles), ("bake", bench_bake)):
         print("[bench_blender]", name)
@@ -937,5 +1082,5 @@ def run_headless():
 
 if arg("--parity", False) is not False:
     run_parity()
-elif arg("--viewport", False) is False:
+elif arg("--viewport", False) is False and arg("--parity-ui", False) is False:
     run_headless()

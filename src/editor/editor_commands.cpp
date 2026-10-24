@@ -795,6 +795,11 @@ void Editor::run_console_command(const std::string &line) {
     anim_command(t);
     return;
   }
+  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|keyed1k (task 0202)
+    if (!bench_scene(to_lower(arg(1, ""))))
+      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|keyed1k: the scenes tools/bench_blender.py --parity-ui builds");
+    return;
+  }
   if (c == "manual") {
     open_manual();
     return;

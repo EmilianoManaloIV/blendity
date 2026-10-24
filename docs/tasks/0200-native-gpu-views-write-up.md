@@ -29,7 +29,7 @@
 | 0196 fallbacks II | 215 | #160 | Toon painted maps, the face shadow, inner lines, hatching, the hair highlight; live procedural textures (except very close up) | The toon stress scene 24.10 -> 11.19 ms |
 | 0197 fallbacks III | 216-217 | #161, #162 | Lightmaps, realtime lightmaps and the probe volume; camera filters run over the card's picture; bloom from linear light | Baked Scene view 1.49 -> 0.69 ms, realtime lightmaps 4.16 -> 1.80; the filtered scene 44.53 -> 42.09 |
 | 0198 the UI's 2D | 218 | #163 | Decided no-go for a batch renderer: the UI stays the CPU's. Presents run one frame behind; only changed tiles' columns go up | A 4K scroll 6.38 -> 3.41 ms in all; a whole 2560 x 1369 canvas 6.0 -> 3.0 ms |
-| 0199 the default, said | 219 | #164 | Each window's device in Preferences; Auto's fall back said once; a device switch draws the views again; the chain's GPU leg; Blender's viewport timed | Blender 3.98-5.23 ms against Blendity 5.57-7.51 ms a window |
+| 0199 the default, said | 219 | #164 | Each window's device in Preferences; Auto's fall back said once; a device switch draws the views again; the chain's GPU leg; Blender's viewport timed | Blender 4.66-6.70 ms against Blendity 5.57-7.51 ms a window (corrected in task 0202) |
 
 ## The fallbacks, before and after
 
@@ -56,13 +56,15 @@ DRAW_WIN_SWAP; Blendity with `--windowed-check`, the Scene view drawn every fram
 
 | Scene | Blender 5.2.2 | Blendity, the card | Blendity, the system presenting |
 |---|---|---|---|
-| The starter scene | 3.98-4.70 ms | 5.57 ms | 6.81 ms |
-| 400 spheres, Solid | 4.34-4.39 ms | 7.42 ms | 8.68 ms |
-| 400 spheres, Material Preview / Shaded | 4.41-5.23 ms | 7.51 ms | 8.62 ms |
+| The starter scene | 4.66 ms | 5.57 ms | 6.81 ms |
+| 400 spheres, Solid | 5.00 ms | 7.42 ms | 8.68 ms |
+| 400 spheres, Material Preview / Shaded | 6.70 ms | 7.51 ms | 8.62 ms |
 
-Blender stays ahead: 1.2-1.4x on the starter scene, 1.4-1.7x on 400 spheres. Its UI is drawn on the card where Blendity's is
+(Blender's column corrected in task 0202: it first timed a still view, where Blender shows its finished picture.)
+
+Blender stays ahead: 1.2x on the starter scene, 1.1-1.5x on 400 spheres. Its UI is drawn on the card where Blendity's is
 the CPU's (about 2 ms at this size); Blendity's card draws each sphere with its own draw call. Blender's Material
-Preview row is flattered: EEVEE reuses its last sample when nothing moves.
+Preview row is the closest: 6.70 ms against 7.51.
 
 ## What stays on the CPU, and why
 - **Realtime GI's per-pixel gather:** its voxel walk per pixel would be a port of the whole GI to shaders; the
