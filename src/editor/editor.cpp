@@ -1818,6 +1818,8 @@ void Editor::restore_edit_selection(const EditSelection &e) {
   if (!mp || !*mp || e.verts.size() != (*mp)->vert_count() || e.faces.size() != (*mp)->face_count()) return;
   vert_sel_ = e.verts, face_sel_ = e.faces;
   edge_sel_ = std::unordered_set<uint64_t>(e.edges.begin(), e.edges.end());
+  /* (Task 0208: a selection made outside Edge mode keeps no edges of its own; Edge mode works them out, as switching does.) */
+  if (elem_ == EditElement::Edge && edge_sel_.empty() && std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end()) edges_from_verts();
 }
 
 void Editor::commit_undo() {

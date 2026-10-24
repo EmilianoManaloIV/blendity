@@ -1397,6 +1397,7 @@ void Editor::edges_from_verts() {
   edge_sel_.clear();
   if (!edit_object()) return;
   const Mesh &m = **edit_mesh_ptr();
+  edge_sel_.reserve(m.edge_cache().size());  // (task 0208: no rehashing as it fills)
   for (auto &e : m.edge_cache())
     if (e.first < vert_sel_.size() && e.second < vert_sel_.size() && vert_sel_[e.first] && vert_sel_[e.second])
       edge_sel_.insert(Mesh::edge_key(e.first, e.second));
@@ -1422,7 +1423,9 @@ void Editor::edit_select_all(bool sel) {
   if (!edit_object()) return;
   std::fill(vert_sel_.begin(), vert_sel_.end(), sel ? 1 : 0);
   std::fill(face_sel_.begin(), face_sel_.end(), sel ? 1 : 0);
-  if (sel) edges_from_verts();
+  /* Task 0208: the edges' own selection only in Edge mode, the one that reads it (switching to it works it out from the
+   * vertices): every edge of a 500k-face mesh into a set took 168 ms, and the Scene view's key walked it every frame. */
+  if (sel && elem_ == EditElement::Edge) edges_from_verts();
   else edge_sel_.clear();
 }
 

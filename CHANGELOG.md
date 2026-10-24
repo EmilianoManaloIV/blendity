@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 228): Edit Mode's Select All, Inset and Bevel on big meshes (task 0208)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 5.
+
+**Changed**
+- **Select All:** it keeps the edges' own selection only in Edge mode, where it is read. Switching to Edge mode works
+  it out, now from the console's `edit edge` too.
+- **Inset:** a thickness too big for small faces is narrowed by moving the inset's new vertices alone. Before, every
+  try rebuilt the whole mesh; the result is the same.
+- **Bevel:** only the faces at a bevelled corner are rebuilt, and the corner patches come out in a fixed order.
+
+**Measured** (Pass 15):
+- Select All on 50k faces: 14.9 -> 4.0 ms (Blender 2.6);
+- Inset: 75.7 -> 25.9 ms (24.1); on 500k faces 930 -> 259 ms (230);
+- Bevel: 96.1 -> 30.0 ms (31.7).
+
+**Checked**
+- Edge mode after a Select All has every edge, Inset folds nothing, and Bevel gives the same mesh twice
+  (tests/test_modeling.cpp).
+- An Opus review confirmed Inset's result is bit for bit the old one, and found three things, all fixed:
+  - Bevel's corner patches in a different order (now a fixed one);
+  - the console's `edit edge` leaving Edge mode without edges after a Select All;
+  - an undo into Edge mode restoring no edges.
+
+  On a face that uses one vertex twice, Bevel now keeps each corner's own UV; before, both took the first's.
+- Unit checks (round 228): Windows, in render-cache verify mode, 11,993, 0 failed (998 tests), 0 stale
+  pictures. Linux with libraries: 11,536, 0 failed. Sanitizer build: 11,412, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`, `modeling`, `modifiers_ngon`, `pushpull`, `curved`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (The gpu group's slow-open test failed under the parallel load and passed alone. Curved: 5,032 operations, 7 problems, 67 results with faces newly on top of each other, down from 5,034, 8 and 79 on the build before this round (measured on it): Bevel's corner patches in their new fixed order renumber the faces of the rounded box (made by Bevel), so the section's random operations land on other faces; no count rose.)
+
 ## 2026-10-24 (round 227): duplicating many objects (task 0207)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with

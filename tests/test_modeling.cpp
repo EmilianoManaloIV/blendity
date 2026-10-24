@@ -8063,6 +8063,59 @@ static void tests_round221() {
   });
 }
 
+/* ---------------------------------------------------------------- round 228: Edit Mode operators on big meshes (task 0208) */
+static void tests_round228() {
+  test("Select All keeps no edge set outside Edge mode, and Edge mode - by the console's edit edge too - still has every edge; Inset on faces too small for its thickness stops short of folding; Bevel twice gives the same mesh, its corner patches in the same order", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 64, 48);
+    big->add<MeshRenderer>();
+    ed.commit_change("add Big");
+    ed.command("select Big");
+    ed.command("edit vertex");
+    ed.run_action_for_test("edit.select_all");
+    const size_t edges = big->get<MeshFilter>()->mesh->edge_cache().size();
+    std::printf("    Vertex mode, all selected: %zu edges kept; the mesh has %zu\n", ed.edge_sel_count_for_test(), edges);
+    CHECK(ed.edge_sel_count_for_test() == 0);
+    ed.command("edit edge");
+    std::printf("    then the console's edit edge: %zu edges selected\n", ed.edge_sel_count_for_test());
+    CHECK(ed.edge_sel_count_for_test() == edges);
+    /* Inset 0.05 on the top cap's tiny triangles folds: it stops at the furthest thickness that doesn't. */
+    ed.command("edit face");
+    ed.command("fsel 10 11 12");
+    ed.command("insetmode region 0.05");
+    const Mesh before = *big->get<MeshFilter>()->mesh;
+    ed.command("editop inset");
+    const Mesh &after = *big->get<MeshFilter>()->mesh;
+    CHECK(after.face_count() > before.face_count());
+    bool turned = false;  // (every face of the top cap - all its corners high up - faces up: none folded over)
+    for (size_t f = 0; f < after.face_count(); f++) {
+      bool cap = true;
+      for (uint32_t k = 0; k < after.face_size(f); k++) cap = cap && after.positions[after.face_verts(f)[k]].y > 0.95f;
+      if (cap) turned = turned || dot(after.face_normal(f), Vec3(0, 1, 0)) <= 0.0f;
+    }
+    CHECK(!turned);
+    ed.command("undo");
+    /* Bevel twice from the same mesh: the same result, patch for patch. */
+    auto bevel_once = [&](Mesh &out) {
+      Mesh m = *primitives::uv_sphere(1.0f, 32, 24);
+      std::vector<uint8_t> vs(m.vert_count(), 0), fs(m.face_count(), 0);
+      for (uint32_t f : {100u, 101u, 102u, 140u}) {
+        fs[f] = 1;
+        for (uint32_t k = 0; k < m.face_size(f); k++) vs[m.face_verts(f)[k]] = 1;
+      }
+      std::string err;
+      const bool ok = meshops::bevel_edges(m, vs, fs, 0.01f, 3, &err, true, 0.5f);
+      out = std::move(m);
+      return ok;
+    };
+    Mesh a, b;
+    CHECK(bevel_once(a) && bevel_once(b));
+    CHECK(a.face_count() == b.face_count() && a.corner_verts == b.corner_verts && a.positions.size() == b.positions.size());
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8098,4 +8151,5 @@ void run_modeling_tests() {
   tests_round197();
   tests_round208();
   tests_round221();
+  tests_round228();
 }

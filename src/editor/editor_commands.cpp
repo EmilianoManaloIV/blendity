@@ -949,9 +949,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "edit") {
     if (!edit_mode_) enter_edit_mode();
-    if (arg(1, "") == "face") elem_ = EditElement::Face;
-    if (arg(1, "") == "edge") elem_ = EditElement::Edge;
-    if (arg(1, "") == "vertex") elem_ = EditElement::Vertex;
+    /* (Task 0208: as the mode buttons switch, so a selection follows - Edge mode works its edges out from the vertices.) */
+    if (arg(1, "") == "face") set_edit_element(EditElement::Face);
+    if (arg(1, "") == "edge") set_edit_element(EditElement::Edge);
+    if (arg(1, "") == "vertex") set_edit_element(EditElement::Vertex);
     if (arg(1, "") == "all" || arg(2, "") == "all") edit_select_all(true);
   }
   else if (c == "pickfocus") {

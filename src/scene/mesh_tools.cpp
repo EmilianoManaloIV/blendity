@@ -808,7 +808,13 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
   std::map<std::tuple<uint32_t, uint32_t, uint32_t>, uint32_t> near;
   const size_t nf0 = m.face_count();
   std::vector<std::vector<uint32_t>> new_faces(nf0);
+  /* Task 0208: only the faces at a beveled vertex change; the rest are copied as they are (each of a 50k-face mesh's
+   * faces was walked, expanded and rebuilt corner by corner to change a few). */
+  std::vector<uint8_t> touched(nf0, 0);
   for (size_t f = 0; f < nf0; f++) {
+    const uint32_t *fvp = m.face_verts(f);
+    for (uint32_t i = 0; i < m.face_size(f) && !touched[f]; i++) touched[f] = at_vert[fvp[i]];
+    if (!touched[f]) continue;
     std::vector<uint32_t> fv = face_loop(m, f);
     const size_t n = fv.size();
     auto &out = new_faces[f];
@@ -906,6 +912,10 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
   FaceBuilder fb(m);
   std::vector<std::pair<uint32_t, float>> ex;
   for (size_t f = 0; f < nf0; f++) {
+    if (!touched[f]) {  // (no corner of it moved, no arc runs along it: the face as it was)
+      fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+      continue;
+    }
     expand(new_faces[f], ex);
     std::vector<uint32_t> verts;
     for (auto &e : ex) verts.push_back(e.first);
@@ -959,22 +969,31 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
     std::unordered_set<uint64_t> directed;
     auto dkey = [](uint32_t x, uint32_t y) { return ((uint64_t)x << 32) | y; };
     for (size_t f = 0; f < m.face_count(); f++) {
+      if (f < nf0 && !touched[f]) continue;  // (task 0208: an open edge between two new vertices lies only in faces that have them)
       const uint32_t *v = m.face_verts(f);
       uint32_t n = m.face_size(f);
       for (uint32_t i = 0; i < n; i++) directed.insert(dkey(v[i], v[(i + 1) % n]));
     }
-    std::unordered_map<uint32_t, uint32_t> next;
+    /* Task 0208: the open edges in a fixed order, and each patch from its smallest vertex, patches in order of it - the
+     * hash set's order had decided which patch came first, where it started, and which twin a fold kept. */
+    std::vector<uint64_t> open;
     for (uint64_t d : directed) {
       uint32_t x = (uint32_t)(d >> 32), y = (uint32_t)(d & 0xFFFFFFFF);
       if (directed.count(dkey(y, x))) continue;
       auto ox = origin.find(x), oy = origin.find(y);
       if (ox == origin.end() || oy == origin.end() || ox->second != oy->second) continue;
-      next[y] = x;  // the patch runs opposite to the open edge
+      open.push_back(d);
     }
+    std::sort(open.begin(), open.end());
+    std::unordered_map<uint32_t, uint32_t> next;
+    for (uint64_t d : open) next[(uint32_t)(d & 0xFFFFFFFF)] = (uint32_t)(d >> 32);  // the patch runs opposite to the open edge
+    std::vector<std::vector<uint32_t>> patches = closed_loops(next);
+    for (std::vector<uint32_t> &loop : patches) std::rotate(loop.begin(), std::min_element(loop.begin(), loop.end()), loop.end());
+    std::sort(patches.begin(), patches.end());
     std::unordered_map<uint32_t, uint32_t> weld;  // twin corner -> the one kept
     std::vector<std::vector<uint32_t>> folded;
     const float sc = mesh_scale(m);
-    for (const std::vector<uint32_t> &loop : closed_loops(next)) {
+    for (const std::vector<uint32_t> &loop : patches) {
       /* Folded flat: the patch runs out along one arc and back along its twin (a corner
        * where two bevels meet on a curved surface). No face; the twins become one. */
       Vec3 nw(0.0f);
