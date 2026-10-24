@@ -58,6 +58,8 @@ Source: "{#Dist}\Blendity.exe"; DestDir: "{app}"; Flags: ignoreversion; Componen
 Source: "{#Dist}\Blendity-full.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: libs
 Source: "{#Dist}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: libs
 Source: "{#Dist}\datafiles\*"; DestDir: "{app}\datafiles"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: libs
+; The GPU shaders the build compiled (task 0211): the first GPU view doesn't wait for them.
+Source: "{#Dist}\shaders\*"; DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: libs
 Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "..\..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion

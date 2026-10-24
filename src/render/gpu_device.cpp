@@ -50,6 +50,7 @@ const std::vector<DeviceInfo> &devices() {
 }
 std::string status() { return "GPU rendering: not built (needs Blender's vulkan + shaderc libraries)"; }
 void prewarm(bool, bool) {}
+bool compile_kernels(bool, std::string *) { return false; }
 std::string pipeline_cache_file(int, bool) { return ""; }
 std::unique_ptr<Renderer> Renderer::create(int, bool, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
@@ -295,6 +296,25 @@ static std::string kernel_cache_path(uint64_t key) {
   return fs::join(dir, strprintf("gpu_kernel_%016llx.spv", (unsigned long long)key));
 }
 
+/* A cached SPIR-V file: its words, then the key's low 32 bits as a trailer (catches a truncated write). Task 0211: the
+ * user's cache first, then the shaders the build compiled beside the executable (`shaders/`, written by
+ * `--warm-shaders`): a new build's first open on the card no longer waits for shaderc. */
+static bool read_cached_spv(uint64_t key, std::vector<uint32_t> &out) {
+  const std::string name = strprintf("gpu_kernel_%016llx.spv", (unsigned long long)key);
+  for (const std::string &dir : {cache_dir(), fs::join(fs::executable_dir(), "shaders")}) {
+    std::string bytes;
+    if (!fs::read_file(fs::join(dir, name), bytes) || bytes.size() < 8 || bytes.size() % 4 != 0) continue;
+    uint32_t magic, trailer;
+    std::memcpy(&magic, bytes.data(), 4);
+    std::memcpy(&trailer, bytes.data() + bytes.size() - 4, 4);
+    if (magic != 0x07230203u || trailer != (uint32_t)key) continue;
+    out.resize(bytes.size() / 4 - 1);
+    std::memcpy(out.data(), bytes.data(), out.size() * 4);
+    return true;
+  }
+  return false;
+}
+
 std::vector<uint32_t> compile_kernel(bool ray_query, std::string *error) {
   static std::mutex &m = *new std::mutex;  // leaked: prewarm() may still be compiling at exit
   static std::vector<uint32_t> *cache = new std::vector<uint32_t>[2];
@@ -310,19 +330,7 @@ std::vector<uint32_t> compile_kernel(bool ray_query, std::string *error) {
   mix(src.data(), src.size());
   mix(opts, std::strlen(opts));
   const std::string path = kernel_cache_path(key);
-  std::string bytes;
-  if (fs::read_file(path, bytes) && bytes.size() >= 8 && bytes.size() % 4 == 0) {
-    /* Words: SPIR-V..., then the key's low 32 bits as a trailer (catches a
-     * truncated write). */
-    uint32_t magic, trailer;
-    std::memcpy(&magic, bytes.data(), 4);
-    std::memcpy(&trailer, bytes.data() + bytes.size() - 4, 4);
-    if (magic == 0x07230203u && trailer == (uint32_t)key) {
-      out.resize(bytes.size() / 4 - 1);
-      std::memcpy(out.data(), bytes.data(), out.size() * 4);
-      return out;
-    }
-  }
+  if (read_cached_spv(key, out)) return out;
   shaderc_compiler_t c = shaderc_compiler_initialize();
   shaderc_compile_options_t o = shaderc_compile_options_initialize();
   shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
@@ -1305,6 +1313,13 @@ std::string status() {
   return s;
 }
 
+bool compile_kernels(bool ray_query, std::string *error) {
+  if (!available()) return false;
+  bool ok = !compile_kernel(false, error).empty();
+  if (ray_query) ok = !compile_kernel(true, error).empty() && ok;
+  return ok;
+}
+
 void prewarm(bool open_devices, bool hardware_rt) {
   static std::atomic<bool> started{false};
   if (started.exchange(true) || !available()) return;
@@ -1380,17 +1395,9 @@ std::vector<uint32_t> compile_glsl(const std::string &src, shaderc_shader_kind k
     mem[key] = out;
   };
   const std::string path = kernel_cache_path(key);
-  std::string bytes;
-  if (fs::read_file(path, bytes) && bytes.size() >= 8 && bytes.size() % 4 == 0) {
-    uint32_t magic, trailer;
-    std::memcpy(&magic, bytes.data(), 4);
-    std::memcpy(&trailer, bytes.data() + bytes.size() - 4, 4);
-    if (magic == 0x07230203u && trailer == (uint32_t)key) {
-      out.resize(bytes.size() / 4 - 1);
-      std::memcpy(out.data(), bytes.data(), out.size() * 4);
-      keep();
-      return out;
-    }
+  if (read_cached_spv(key, out)) {
+    keep();
+    return out;
   }
   shaderc_compiler_t c = shaderc_compiler_initialize();
   shaderc_compile_options_t o = shaderc_compile_options_initialize();

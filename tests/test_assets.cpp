@@ -4209,6 +4209,81 @@ static void tests_round229() {
   });
 }
 
+/* ---------------------------------------------------------------- round 230: big scenes saved and opened (task 0210) */
+static void tests_round230() {
+  test("a scene with a big mesh - its positions, faces and UVs written and read on every core - comes back exactly, writes the same text twice, and a bad vertex deep in its faces is reported at its own line", [] {
+    Scene s;
+    GameObject *g = s.create("Big");
+    MeshPtr big = primitives::uv_sphere(1.0f, 512, 256);  // (131k faces: past the blocks' threshold)
+    g->add<MeshFilter>()->mesh = big;
+    g->add<MeshRenderer>();
+    ScopedTimer ts;
+    const std::string text = save_scene_text(s);
+    const double save_ms = ts.ms();
+    CHECK(save_scene_text(s) == text);
+    Scene back;
+    std::string err;
+    ScopedTimer tl;
+    const bool ok = load_scene_text(text, back, err);
+    const double load_ms = tl.ms();
+    std::printf("    %s of text: saved in %.1f ms, read in %.1f ms\n", format_bytes(text.size()).c_str(), save_ms, load_ms);
+    CHECK(ok);
+    GameObject *bg = back.find_by_name("Big");
+    const Mesh *m = bg && bg->get<MeshFilter>() ? bg->get<MeshFilter>()->mesh.get() : nullptr;
+    CHECK(m && m->positions.size() == big->positions.size() && m->corner_verts == big->corner_verts && m->face_offsets == big->face_offsets);
+    bool same = m != nullptr && m->uvs.size() == big->uvs.size();
+    for (size_t i = 0; same && i < big->positions.size(); i++) same = m->positions[i] == big->positions[i];
+    for (size_t i = 0; same && i < big->uvs.size(); i++) same = m->uvs[i].x == big->uvs[i].x && m->uvs[i].y == big->uvs[i].y;
+    CHECK(same);
+    /* A face 100,000 lines into its block names a vertex that isn't there: the error names that line. */
+    const size_t mesh_at = text.find("\nmesh "), fstart = text.find("\nf ", mesh_at);
+    size_t at = fstart + 1;
+    for (int i = 0; i < 100000; i++) at = text.find('\n', at) + 1;
+    const size_t line_end = text.find('\n', at);
+    std::string bad = text.substr(0, at) + "f 3 0 1 999999999" + text.substr(line_end);
+    const int want = 1 + (int)std::count(bad.begin(), bad.begin() + (ptrdiff_t)at, '\n');
+    Scene broken;
+    std::string berr;
+    CHECK(!load_scene_text(bad, broken, berr));
+    std::printf("    the bad line: %s (want line %d)\n", berr.c_str(), want);
+    CHECK(berr.find(strprintf("line %d:", want)) == 0);
+    /* The same text with Windows line ends and a blank line 70,000 lines into each block reads as the same mesh (the
+     * blocks stop at the blank line, and the rest is read line by line); read back from a file, it is every byte. */
+    std::string odd;
+    for (const char *tag : {"\nv ", "\nf ", "\nt "}) {
+      size_t q = text.find(tag, mesh_at) + 1;
+      for (int i = 0; i < 70000; i++) q = text.find('\n', q) + 1;
+      CHECK(q > 0 && q < text.size());
+    }
+    size_t lines = 0, block_line = 0;
+    for (char ch : text) {
+      if (ch == '\n') {
+        lines++;
+        odd += "\r\n";
+        if (++block_line == 70000) odd += "\r\n", block_line = 0;  // (blank lines all through: inside every block)
+        continue;
+      }
+      odd += ch;
+    }
+    Scene odd_back;
+    std::string oerr;
+    CHECK(load_scene_text(odd, odd_back, oerr));
+    GameObject *og = odd_back.find_by_name("Big");
+    const Mesh *om = og && og->get<MeshFilter>() ? og->get<MeshFilter>()->mesh.get() : nullptr;
+    bool odd_same = om && om->positions == big->positions && om->corner_verts == big->corner_verts && om->face_offsets == big->face_offsets &&
+                    om->uvs.size() == big->uvs.size();
+    for (size_t i = 0; odd_same && i < big->uvs.size(); i++) odd_same = om->uvs[i].x == big->uvs[i].x && om->uvs[i].y == big->uvs[i].y;
+    std::printf("    %zu lines with Windows ends and blank lines: %s\n", lines, odd_same ? "the same mesh" : oerr.c_str());
+    CHECK(odd_same);
+    const std::string dir = fs::join(test_dir(), "test_round230");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "big.scene");
+    std::string read;
+    CHECK(fs::write_file(path, odd) && fs::read_file(path, read) && read == odd);
+    CHECK(fs::write_file(path, "") && fs::read_file(path, read) && read.empty());
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -4223,4 +4298,5 @@ void run_assets_tests() {
   tests_round166_to_round170();
   tests_round169();
   tests_round229();
+  tests_round230();
 }

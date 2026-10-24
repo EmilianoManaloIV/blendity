@@ -2,6 +2,86 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 231): Boolean and Array on big meshes; the GPU shaders compiled by the build (task 0211)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 8, and the shaders' first compile it folded in.
+
+**Changed**
+- **Boolean:** to Manifold and back without a map per corner or per face. It now passes 32-bit positions, as Blender
+  does.
+- **Array:** each copy is appended array by array, not vertex by vertex and face by face. The mesh is the same.
+- **GPU shaders:**
+  - `build.bat` / `build.sh` compile them into a `shaders` folder beside the editor (`Blendity --warm-shaders`);
+  - a shader the user's cache lacks is read from there;
+  - the installer and packages carry the folder.
+
+  A new build's first GPU view no longer waits for them, where the build machine has a card; CI's builds have none.
+
+**Measured** (Pass 15; before -> after, Blender 5.2):
+- a Boolean union of two 50k spheres 276 -> 158 ms (79.8);
+- Array x10 on the 50k sphere 24.2 -> 8.1 ms (11.2);
+- the first GPU view after the shaders changed: about 96 s of compiling -> 0.3 s (this machine).
+
+**Checked**
+- Array gives the old mesh, also for meshes whose lists are out of step with their faces. A union of two spheres is
+  closed and the same twice (tests/test_modeling.cpp).
+- Two Opus reviews:
+  - Boolean's conversions: no defect. Array, for meshes whose lists are out of step with their faces, differed in
+    four ways, all fixed: UVs gained, a loose edge dropped, seams left unsorted, and a vector read while appended to.
+  - The build step found five things, all fixed:
+    - `build.sh` stopped on the unset `BLENDITY_NO_WARM`, which would have failed every Linux and macOS build;
+    - it ran before the libraries were beside the program;
+    - the macOS bundle and the Linux packages left the folder out;
+    - the dependency-free build, made after the full one, removed its shaders;
+    - `--warm-shaders` cleared any folder it was given; now it takes only a new or empty one.
+- Unit checks (round 231): Windows, in render-cache verify mode, 12,023, 0 failed (1003 tests), 0 stale
+  pictures. Linux with libraries: 11,566, 0 failed. Sanitizer build: 11,436, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `modeling`, `modifiers_ngon`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone. The Linux build ran the new shader step and, with no card there, went on without them.)
+
+## 2026-10-24: version 0.11.0, a pre-release
+
+**Asked:** "Do a 0.11.0 pre-release for Windows, Mac, and Linux."
+
+**Changed**
+- `VERSION` is 0.11.0 (#175), as are the README's pre-release note, the manual and the version a build without
+  `VERSION` reports. The app reads its version from that file, so it went to `main` before the tag.
+- The `v0.11.0` tag on `main` after #174. `release.yml` builds, installs and starts the Windows installer, the macOS
+  disk image and the Linux AppImage, then publishes them.
+
+## 2026-10-24 (round 230): saving and opening big scenes (task 0210)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 7.
+
+**Changed**
+- **Saving:** a big mesh's positions, faces and UVs are written on every core, the text byte for byte as before.
+- **Opening:** long runs of them are parsed on every core; anything else in the file is read line by line as before.
+- **Reading a file** asks its size and reads it at once. It went through a stream buffer and a copy, and that was most
+  of opening a big scene. Every importer reads its file this way too.
+
+**Measured** (Pass 15; before -> after, Blender 5.2):
+- a 500k-face mesh's scene: saved 266 -> 140 ms (21.6), opened 474 -> 135 ms (26.7);
+- 10,000 cubes opened 75 -> 63 ms (534);
+- the 50k sphere imported from OBJ 104 -> 46 ms (37), STL 45 -> 26 (21), PLY 43 -> 33 (6).
+
+The `.scene` file is text, so big meshes still trail Blender's binary `.blend` by 5-6x.
+
+**Checked**
+- A 131k-face scene saves the same text twice and reads back exactly. A bad face 100,000 lines in is reported at its
+  own line. Windows line ends and blank lines inside each block read as the same mesh (tests/test_assets.cpp).
+- An Opus review found the parallel save and load the same as the one-core path in every case it tried: Windows line
+  ends, blank lines inside a block, wrong counts, a missing last newline, bad lines and their numbers. It found two
+  things in the new file read, both fixed:
+  - a file that can't seek (a pipe) no longer opened;
+  - a file that says it is empty but isn't (`/proc`) read as empty.
+
+  The test now also reads the scene with Windows line ends and blank lines inside every block, and through a file.
+- Unit checks (round 230): Windows, in render-cache verify mode, 12,010, 0 failed (1001 tests), 0 stale
+  pictures. Linux with libraries: 11,553, 0 failed. Sanitizer build: 11,429, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (The gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 229): exporting and importing the 50k sphere (task 0209)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
@@ -626,7 +706,7 @@ second step: the window shown by the card.
   swapchains not let go, a failed present showing the views black and presents waiting for the display. All are fixed.
 - Unit checks (round 212): Windows, in render-cache verify mode, 11,874, 0 failed (980 tests), 0 stale
   pictures. Linux with libraries: 11,493, 0 failed. Sanitizer build: 11,369, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-23 (round 211): the 3D overlays on the card (task 0192, ADR 0061)
 
@@ -659,7 +739,7 @@ This round is the first step: the overlays.
   points: the CPU's interleaved order, fewer copies, the tests above. The CPU path records nothing.
 - Unit checks (round 211): Windows, in render-cache verify mode, 11,861, 0 failed (978 tests), 0 stale
   pictures. Linux with libraries: 11,491, 0 failed. Sanitizer build: 11,367, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-23 (round 210): the roadmap of tasks 0156-0191 written up (task 0176)
 
@@ -786,7 +866,7 @@ This round is the first step: the overlays.
   component's order, so an Area Light with colour temperature on hides Intensity until Show more.
 - Unit checks (round 206): Windows, in render-cache verify mode, 11,818, 0 failed (968 tests), 0 stale
   pictures. Linux with libraries: 11,465, 0 failed. Sanitizer build: 11,341, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 205): find any command - the palette, Quick Favorites, the status bar's hints (task 0189, ADR 0060)
 
@@ -819,7 +899,7 @@ This round is the first step: the overlays.
   "add" where a click toggles.
 - Unit checks (round 205): Windows, in render-cache verify mode, 11,785, 0 failed (966 tests), 0 stale
   pictures. Linux with libraries: 11,432, 0 failed. Sanitizer build: 11,308, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 204): a render-only window and a pen tablet (task 0188, ADR 0059 amended)
 
@@ -850,7 +930,7 @@ This round is the first step: the overlays.
   leaving cleared the pen's nearness; full screen restored a maximised window's rectangle wrongly.
 - Unit checks (round 204): Windows, in render-cache verify mode, 11,675, 0 failed (964 tests), 0 stale
   pictures. Linux with libraries: 11,322, 0 failed. Sanitizer build: 11,198, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 203): windows beside the main one, on any display (task 0187, ADR 0059)
 
@@ -918,7 +998,7 @@ stack stalled the editor as long.
 - Measured (stress `editing`, 3840 x 2160): what the window evaluates while you work, its 1600-pixel preview - the 11-step stack 65.4 ms, a slider on its last step 2.4 ms (task 0181's targets: 150 and 40). At full size, for export: the stack 412.0 ms (683 before), a slider on its first step 392.0 ms (707), on its last 14.0 ms (31); the Tone Curve alone 29.8 ms (347), Noise Reduction 252.1 ms (468).
 - Unit checks (round 201): Windows, in render-cache verify mode, 11,634, 0 failed (960 tests), 0 stale
   pictures. Linux with libraries: 11,281, 0 failed. Sanitizer build: 11,157, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 200): textures through the Editing tab, and the stack as a camera look (task 0183, ADR 0058 amended)
 
@@ -949,7 +1029,7 @@ camera.
   layer, a second Apply not reaching materials, looks piling up, the curve's ends, the vignette's strength).
 - Unit checks (round 200): Windows, in render-cache verify mode, 11,625, 0 failed (959 tests), 0 stale
   pictures. Linux with libraries: 11,272, 0 failed. Sanitizer build: 11,148, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `textures`, `filters`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `textures`, `filters`, `editing`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 199): masks for the Editing tab's adjustments (task 0182, ADR 0058 amended)
 
@@ -974,7 +1054,7 @@ mask - and masks combined.
   undo, the .edit file and Show (tests/test_editor.cpp).
 - Unit checks (round 199): Windows, in render-cache verify mode, 11,603, 0 failed (957 tests), 0 stale
   pictures. Linux with libraries: 11,250, 0 failed. Sanitizer build: 11,126, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editing`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 198): the Editing tab - develop a render or an image, non-destructively (task 0181, ADR 0058)
 
@@ -1093,7 +1173,7 @@ and names the fallback: features written by PartField in Python, read the same w
 - Unit checks (round 195): Windows, in render-cache verify mode, 11,438, 0 failed (948 tests), 0 stale
   pictures. Linux with libraries: 11,085, 0 failed. Sanitizer build: 10,962, 0 failed, no reports. `editor_fuzz` in
   verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `uv`: 0 problems,
-  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  394 results with faces newly on top of each other in `pushpull`, no change. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 194): the Godot and Unreal bridges, specified (task 0175)
 
@@ -1212,7 +1292,7 @@ first, one way. This round is the editor's side and the protocol; the Blender br
 - Unit checks (round 191): Windows, in render-cache verify mode, 11,417, 0 failed (943 tests), 0 stale
   pictures. Linux with libraries: 11,064, 0 failed. Sanitizer build: 10,944, 0 failed, no reports. `editor_fuzz` in
   verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`, `livelink`: 0 problems,
-  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone.)
+  394 results with faces newly on top of each other in `pushpull`, no change. (The gpu group's slow-open test failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 190): the OptiX render device - the same picture as GPU Compute, opt-in (tasks 0170-0171, ADR 0054 amended)
 
