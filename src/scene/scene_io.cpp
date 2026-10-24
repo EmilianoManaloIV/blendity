@@ -8,6 +8,7 @@
 #include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 #include "../../extern/fast_float/fast_float.h"
 
 #include <algorithm>
@@ -144,6 +145,26 @@ struct F {
 Out &operator<<(Out &o, F f) {
   append_float(o.s, f.v);
   return o;
+}
+
+/* Task 0210: a big array's lines written on every core in pieces, joined in order - the same text one thread writes (a
+ * 500k-face mesh's positions, faces and UVs, 5.5 million numbers, were most of a 266 ms save). */
+constexpr size_t kLinePiece = 32768;
+template<class Line> void lines_parallel(Out &os, size_t n, const Line &line) {
+  if (n < 2 * kLinePiece) {
+    for (size_t i = 0; i < n; i++) line(os, i);
+    return;
+  }
+  const size_t pieces = (n + kLinePiece - 1) / kLinePiece;
+  std::vector<Out> part(pieces);
+  JobSystem::global().parallel_for((int64_t)pieces, 1, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++)
+      for (size_t i = (size_t)k * kLinePiece; i < std::min(n, (size_t)(k + 1) * kLinePiece); i++) line(part[(size_t)k], i);
+  });
+  size_t bytes = 0;
+  for (const Out &o : part) bytes += o.s.size();
+  os.s.reserve(os.s.size() + bytes);
+  for (const Out &o : part) os.s += o.s;
 }
 
 struct WriteReflector : Reflector {
@@ -330,16 +351,18 @@ std::string save_scene_text(const Scene &scene) {
     os << "mesh " << i << " " << quote(m.name) << " " << (m.smooth ? 1 : 0) << " " << m.vert_count() << " "
        << m.face_count() << "\n";
     os.s.reserve(os.s.size() + m.vert_count() * 32 + m.corner_count() * 8);
-    for (const Vec3 &p : m.positions) os << "v " << F{p.x} << ' ' << F{p.y} << ' ' << F{p.z} << '\n';
-    for (size_t f = 0; f < m.face_count(); f++) {
-      os << "f " << m.face_size(f);
-      for (uint32_t k = 0; k < m.face_size(f); k++) os << " " << m.face_verts(f)[k];
-      os << "\n";
-    }
+    lines_parallel(os, m.positions.size(), [&](Out &o, size_t i) {
+      const Vec3 &p = m.positions[i];
+      o << "v " << F{p.x} << ' ' << F{p.y} << ' ' << F{p.z} << '\n';
+    });
+    lines_parallel(os, m.face_count(), [&](Out &o, size_t f) {
+      o << "f " << m.face_size(f);
+      for (uint32_t k = 0; k < m.face_size(f); k++) o << " " << m.face_verts(f)[k];
+      o << "\n";
+    });
     /* Attributes: corner UVs ("t"), face material slots ("g"), seams ("s"). */
     if (m.smooth_angle < 180.0f) os << "angle " << F{m.smooth_angle} << '\n';
-    if (m.has_uvs())
-      for (const Vec2 &t : m.uvs) os << "t " << F{t.x} << ' ' << F{t.y} << '\n';
+    if (m.has_uvs()) lines_parallel(os, m.uvs.size(), [&](Out &o, size_t i) { o << "t " << F{m.uvs[i].x} << ' ' << F{m.uvs[i].y} << '\n'; });
     if (!m.face_material.empty())
       for (int32_t mi : m.face_material) os << "g " << mi << '\n';
     for (uint64_t k : m.seams) os << "s " << (uint32_t)(k >> 32) << ' ' << (uint32_t)(k & 0xFFFFFFFF) << '\n';
@@ -411,6 +434,23 @@ struct LineReader {
     return true;
   }
 };
+
+/* Task 0210: a block of a mesh - this line and the ones after it that start with the same "c " (at most `limit`) - as
+ * where each line starts and ends, the reader moved past them; the block is then read on every core. */
+struct LineSpan {
+  const char *p, *end;
+};
+std::vector<LineSpan> block_of(std::string_view first, LineReader &is, char c, size_t limit) {
+  std::vector<LineSpan> lines{{first.data(), first.data() + first.size()}};
+  while (lines.size() < limit && is.p + 1 < is.end && is.p[0] == c && is.p[1] == ' ') {
+    const char *nl = (const char *)std::memchr(is.p, '\n', (size_t)(is.end - is.p));
+    const char *e = nl ? nl : is.end;
+    lines.push_back({is.p, e > is.p && e[-1] == '\r' ? e - 1 : e});
+    is.p = nl ? nl + 1 : is.end;
+  }
+  return lines;
+}
+constexpr size_t kBlockLines = 65536;  // (smaller blocks are read line by line, as before)
 
 const char *parse_float(const char *p, const char *end, float &out) {
   while (p < end && (*p == ' ' || *p == '\t')) p++;
@@ -522,12 +562,70 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       while (is.next(line)) {
         lineno++;
         const char *p = line.data(), *le = line.data() + line.size();
-        if (line.size() > 1 && p[0] == 'v' && p[1] == ' ') {
+        if (line.size() > 1 && p[0] == 'v' && p[1] == ' ' && m->positions.empty() && nv >= kBlockLines) {
+          const std::vector<LineSpan> block = block_of(line, is, 'v', nv);
+          m->positions.resize(block.size());
+          JobSystem::global().parallel_for((int64_t)block.size(), 4096, [&](int64_t a, int64_t b) {
+            for (int64_t i = a; i < b; i++) {
+              Vec3 &v = m->positions[(size_t)i];
+              const char *q = parse_float(block[(size_t)i].p + 2, block[(size_t)i].end, v.x);
+              q = parse_float(q, block[(size_t)i].end, v.y);
+              parse_float(q, block[(size_t)i].end, v.z);
+            }
+          });
+          lineno += (int)block.size() - 1;
+        }
+        else if (line.size() > 1 && p[0] == 'v' && p[1] == ' ') {
           Vec3 v;
           p = parse_float(p + 2, le, v.x);
           p = parse_float(p, le, v.y);
           parse_float(p, le, v.z);
           m->positions.push_back(v);
+        }
+        else if (line.size() > 1 && p[0] == 'f' && p[1] == ' ' && m->corner_verts.empty() && nf >= kBlockLines) {
+          /* Each piece's faces into its own lists, joined in order; a vertex out of range is reported at its line. */
+          const std::vector<LineSpan> block = block_of(line, is, 'f', nf);
+          const size_t pieces = (block.size() + kBlockLines - 1) / kBlockLines;
+          struct Piece {
+            std::vector<uint32_t> cv, sizes;
+            size_t bad = SIZE_MAX;  // (the first line, in the block, with a vertex out of range)
+          };
+          std::vector<Piece> part(pieces);
+          JobSystem::global().parallel_for((int64_t)pieces, 1, [&](int64_t a, int64_t b) {
+            for (int64_t k = a; k < b; k++) {
+              Piece &pc = part[(size_t)k];
+              for (size_t i = (size_t)k * kBlockLines; i < std::min(block.size(), (size_t)(k + 1) * kBlockLines) && pc.bad == SIZE_MAX; i++) {
+                const char *q = block[i].p + 2, *qe = block[i].end;
+                uint64_t n;
+                q = parse_uint(q, qe, n);
+                uint32_t got = 0;
+                for (uint64_t c = 0; c < n && n != UINT64_MAX; c++) {
+                  uint64_t v;
+                  q = parse_uint(q, qe, v);
+                  if (v >= nv) {
+                    pc.bad = i;
+                    break;
+                  }
+                  pc.cv.push_back((uint32_t)v);
+                  got++;
+                }
+                pc.sizes.push_back(got);
+              }
+            }
+          });
+          for (const Piece &pc : part) {
+            if (pc.bad != SIZE_MAX) {
+              error = strprintf("line %d: vertex index out of range", lineno + (int)pc.bad);
+              return false;
+            }
+            for (uint32_t n : pc.sizes) m->face_offsets.push_back((uint32_t)(m->corner_verts.size() + n)), m->corner_verts.resize(m->corner_verts.size() + n);
+          }
+          size_t at = 0;
+          for (const Piece &pc : part) {
+            std::copy(pc.cv.begin(), pc.cv.end(), m->corner_verts.begin() + (ptrdiff_t)at);
+            at += pc.cv.size();
+          }
+          lineno += (int)block.size() - 1;
         }
         else if (line.size() > 1 && p[0] == 'f' && p[1] == ' ') {
           uint64_t n;
@@ -539,6 +637,17 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
             m->corner_verts.push_back((uint32_t)v);
           }
           m->face_offsets.push_back((uint32_t)m->corner_verts.size());
+        }
+        else if (line.size() > 1 && p[0] == 't' && p[1] == ' ' && m->uvs.empty() && m->corner_verts.size() >= kBlockLines) {
+          const std::vector<LineSpan> block = block_of(line, is, 't', m->corner_verts.size());
+          m->uvs.resize(block.size());
+          JobSystem::global().parallel_for((int64_t)block.size(), 4096, [&](int64_t a, int64_t b) {
+            for (int64_t i = a; i < b; i++) {
+              Vec2 &uv = m->uvs[(size_t)i];
+              parse_float(parse_float(block[(size_t)i].p + 2, block[(size_t)i].end, uv.x), block[(size_t)i].end, uv.y);
+            }
+          });
+          lineno += (int)block.size() - 1;
         }
         else if (line.size() > 1 && p[0] == 't' && p[1] == ' ') {
           Vec2 uv;
