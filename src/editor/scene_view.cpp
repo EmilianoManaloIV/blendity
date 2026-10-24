@@ -81,7 +81,8 @@ void Editor::draw_scene_view(const Recti &r) {
   if (drag_ == Drag::Box) {
     bool moved = box.w > u.px(4) || box.h > u.px(4);
     box_visible = moved;
-    if (in.released[0] || !in.down[0]) {
+    if (in.cancelled) drag_ = Drag::None, box_visible = false;  // (a finger's press taken back: task 0213)
+    if (drag_ == Drag::Box && (in.released[0] || !in.down[0])) {
       int mode = (in.shift() || in.ctrl()) ? SEL_TOGGLE : SEL_REPLACE;
       if (moved) {
         if (edit_mode_) edit_box_select(view, box, mode == SEL_TOGGLE ? SEL_ADD : SEL_REPLACE);
@@ -305,7 +306,8 @@ void Editor::scene_navigation(const Recti &view) {
       break;
     case Drag::AltClick:
       if (!in.down[0]) {
-        alt_click_release(view);
+        if (!in.cancelled) alt_click_release(view);
+        alt_click_ = false;
         drag_ = Drag::None;
       }
       break;
@@ -1090,8 +1092,8 @@ bool Editor::gizmo_update(const Recti &view) {
       drag_ = Drag::None;
       gizmo_axis_ = -1;
       if (autopose_.bone) autopose_end();  // (the pose keyed at the playhead: the same undo step as the drag)
-      /* Faces dropped onto another face of the mesh merge into it. */
-      if (edit_mode_ && auto_fuse_ && elem_ == EditElement::Face)
+      /* Faces dropped onto another face of the mesh merge into it (not when the press was taken back: task 0213). */
+      if (edit_mode_ && auto_fuse_ && elem_ == EditElement::Face && !ui_.in.cancelled)
         if (MeshPtr *mp = edit_mesh_ptr())
           if (try_auto_fuse(*mesh_make_mutable(*mp))) {
             (*mp)->touch();

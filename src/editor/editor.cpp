@@ -412,6 +412,7 @@ void Editor::process_events(std::vector<Event> &events) {
   in.pmx = in.mx;
   in.pmy = in.my;
   for (int b = 0; b < 3; b++) in.pressed[b] = in.released[b] = in.double_clicked[b] = false;
+  in.cancelled = false;
   in.wheel_x = in.wheel_y = 0;
   in.touch_zoom = 1.0f;
   in.touch_pan_x = in.touch_pan_y = in.touch_rotate = 0.0f;
@@ -425,6 +426,7 @@ void Editor::process_events(std::vector<Event> &events) {
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
         in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
+        in.touch = e.pointer == Pointer::Touch, in.barrel = e.barrel;
         break;
       case EventType::Gesture:  // (task 0075: two fingers; the Scene view navigates with them)
         if (!in.down[0] && !in.down[1] && !in.down[2]) in.mx = e.x, in.my = e.y;  // (a held button's drag keeps its own point)
@@ -440,6 +442,7 @@ void Editor::process_events(std::vector<Event> &events) {
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
         in.pressure = e.pressure;
         in.pen = e.pen, in.eraser = e.eraser, in.tilt_x = e.tilt_x, in.tilt_y = e.tilt_y;
+        in.touch = e.pointer == Pointer::Touch, in.barrel = e.barrel;
         in.down[b] = true;
         in.pressed[b] = true;
         double t = now_seconds();
@@ -456,10 +459,13 @@ void Editor::process_events(std::vector<Event> &events) {
       }
       case EventType::MouseUp:
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
+        in.touch = e.pointer == Pointer::Touch, in.barrel = e.barrel;
         in.down[e.button] = false;
         in.released[e.button] = true;
+        in.cancelled = in.cancelled || e.cancel;
         break;
       case EventType::Wheel:
+        in.touch = in.barrel = false;  // (a wheel is the mouse's or a pad's: a finger's tag doesn't outlive its lift)
         in.wheel_x += e.wheel_x;
         in.wheel_y += e.wheel_y;
         in.mods = e.mods;
@@ -755,11 +761,13 @@ void Editor::update_tab_drag() {
       ui_.frame(tr, ui_.theme.tab_active, ui_.theme.focus, ui_.px(3));
       cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
     });
-    if (in.released[0]) {
+    if (in.released[0] && !in.cancelled) {  // (a press taken back leaves the tab where it was: task 0213)
       const bool outside = in.mx < 0 || in.my < 0 || in.mx >= fb_.width || in.my >= fb_.height;
       if (leaf) dock_move(k, leaf, zone);
       else if (outside && active_window_ != 0) window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
       else if (outside) queue_new_window_at_mouse(k);
+    }
+    if (in.released[0]) {
       tab_dragging_ = false;
       tab_drag_ = WindowKind::Count;
     }

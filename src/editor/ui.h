@@ -92,6 +92,9 @@ struct Input {
   bool down[3] = {}, pressed[3] = {}, released[3] = {}, double_clicked[3] = {};
   double last_click[3] = {-1, -1, -1};  // (the double-click's first click, per window: task 0187)
   bool pen = false, eraser = false;  // (task 0188: the pointer is a pen; its eraser end)
+  /* Task 0213: the pointer is a finger; a pen's side button is held; this frame's release took its press back (a
+   * finger joined by a second) - nothing is hovered, so nothing clicks, and drags end without acting. */
+  bool touch = false, barrel = false, cancelled = false;
   float tilt_x = 0.0f, tilt_y = 0.0f;  // (a pen's tilt in degrees)
   int last_click_x[3] = {}, last_click_y[3] = {};
   float wheel_x = 0, wheel_y = 0;

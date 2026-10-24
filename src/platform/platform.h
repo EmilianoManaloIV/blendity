@@ -36,6 +36,9 @@ enum class EventType {
   Gesture  // two fingers on a touch screen or pad (task 0075): zoom, pan, rotate
 };
 
+/* What made a pointer event (task 0213, ADR 0062): one finger comes as the mouse's left button, tagged Touch. */
+enum class Pointer { Mouse, Pen, Touch };
+
 struct Event {
   EventType type = EventType::Invalid;
   int x = 0, y = 0;        // pixels, top-left origin
@@ -54,6 +57,10 @@ struct Event {
    * is the eraser end. */
   bool pen = false, eraser = false;
   float tilt_x = 0.0f, tilt_y = 0.0f;
+  /* Task 0213: what made it (pen is pointer == Pen), a pen's side button held, and a MouseUp that takes its press back
+   * (a finger joined by a second: nothing clicks, a box select is dropped). */
+  Pointer pointer = Pointer::Mouse;
+  bool barrel = false, cancel = false;
 };
 
 enum class Cursor { Arrow, IBeam, ResizeH, ResizeV, Move, Hand };

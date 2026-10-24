@@ -144,6 +144,7 @@ bool Context::covered(int x, int y) const {
 }
 
 bool Context::hovered(const Recti &r) const {
+  if (in.cancelled) return false;  // (a press taken back: task 0213)
   return r.contains(in.mx, in.my) && canvas.clip().contains(in.mx, in.my) && !covered(in.mx, in.my) &&
          (active_ == 0 || current_layer_ > 0 || true);
 }

@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 233): which pointer is which, and fingers read directly (task 0213)
+
+**Asked:** "Integrate better support for pen mode. So that if I'm in a 2 in 1 laptop I can navigate more fluidly and
+manipulate the environment", then "Include finger and pen support." The first of tasks 0213-0222.
+
+**Changed**
+- **Every pointer event says what made it:** the mouse, a pen or a finger. A pen's side button is read, and a
+  finger's press can be taken back.
+- **Fingers go through one recognizer** (`TouchRecognizer`, no OS calls, so Linux can use it too):
+  - one finger presses, moves and lifts; two pinch, pan and twist;
+  - a pinch's second finger landing within 0.12 s means the first finger never pressed anything;
+  - a later second finger takes the press back: nothing clicks, no box select, no drop;
+  - after a pair, a lone finger does nothing until all have lifted, so the view doesn't jump.
+- **Windows** reads fingers from its pointer messages, not its emulated mouse and gestures.
+- **Outside Tablet Mode** a finger still does what the mouse does.
+
+**Added**
+- ADR 0062 (pointer kinds and the touch recognizer), requirement R-14 (fingers and a pen on a 2-in-1), and a new
+  `input` test group.
+
+**Checked**
+- Scripted touches for each case, and in the editor: a tap selects as a click does, and a drag taken back selects,
+  drops and docks nothing (tests/test_input.cpp).
+- The Windows touch path hasn't been tried on a touch screen; the machine has none. Task 0222's check list on the
+  2-in-1 covers it.
+- An Opus review found the recognizer and the Windows messages right, and these, all fixed:
+  - a press taken back still dropped a dragged Project asset (it could move a file), docked a dragged tab or opened a
+    window for it, selected the Hierarchy row pressed, selected an Alt+clicked loop and ran Fuse on Contact after a
+    gizmo drag; none of these does now;
+  - a test checked the wrong recognizer;
+  - a finger's tag outlived its lift (a wheel after it read as a finger).
+
+  A test pins the tab drag.
+- Unit checks (round 233): Windows, in render-cache verify mode, 12,050, 0 failed (1009 tests), 0 stale
+  pictures. Linux with libraries: 11,592, 0 failed. Sanitizer build: 11,462, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `pushpull`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (Linux's global sequencer Play test (wall clock) failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 232): Blendity against Blender 5.2 - the write-up (task 0212)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with

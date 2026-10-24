@@ -183,7 +183,7 @@ void Editor::update_asset_drag() {
     ui_.cursor = platform::Cursor::Hand;
   }
   if (!in.down[0]) {
-    if (d.dragging) {
+    if (d.dragging && !in.cancelled) {  // (a press taken back drops nothing: task 0213)
       /* Onto a folder in the Project window: move it there (a scene material is saved there as an asset). */
       const std::pair<Recti, std::string> *folder = nullptr;
       for (auto &f : drop_folders_)

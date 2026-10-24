@@ -3116,7 +3116,7 @@ bool Editor::asset_field(const char *name, const Recti &f, std::string &path, co
  * Scene view - unless an object field took it; then the drag state goes. */
 void Editor::finish_hierarchy_drag() {
   const ui::Input &in = ui_.in;
-  if (in.released[0] && hier_pending_select_ && !hier_field_took_drop_ && scene_->find(hier_pending_select_)) select(hier_pending_select_);
+  if (in.released[0] && !in.cancelled && hier_pending_select_ && !hier_field_took_drop_ && scene_->find(hier_pending_select_)) select(hier_pending_select_);
   if (!in.down[0]) {
     hier_drag_ = 0;
     hier_dragging_ = false;
