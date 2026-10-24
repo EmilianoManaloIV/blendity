@@ -7,6 +7,7 @@
 #include "scene.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -112,9 +113,17 @@ std::string image_file(const TextureRef &t) {
   return image_extension_supported(to_lower(fs::extension(p))) ? p : "";
 }
 
+/* "%.7g" (task 0209: by to_chars, which prints what printf does - a million calls of the formatter were most of an OBJ
+ * export's time). */
 std::string num(double v) {
   if (std::fabs(v) < 1e-12) return "0";
-  return strprintf("%.7g", v);
+#if defined(__cpp_lib_to_chars) || (defined(_MSC_VER) && _MSC_VER >= 1924)
+  char b[32];
+  const auto r = std::to_chars(b, b + sizeof(b), v, std::chars_format::general, 7);
+  return std::string(b, r.ptr);
+#else
+  return strprintf("%.7g", v);  // (Apple's libc++ has no floating to_chars)
+#endif
 }
 
 /* Our left-handed Y-up into a right-handed file: Y up mirrors X; Z up then
@@ -178,35 +187,49 @@ std::vector<Vec3> split_normals(const Mesh &m) {
     return cn;
   }
   std::vector<Vec3> out(m.corner_count());
-  std::vector<uint32_t> fan;
-  for (size_t f = 0; f < nf; f++)
-    for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
-      if (!m.smooth_of(f)) {
-        out[c] = fn[f];
-        continue;
-      }
-      const uint32_t v = m.corner_verts[c];
-      /* Flood across the faces around v. */
-      fan.assign(1, (uint32_t)f);
-      Vec3 sum = fw[f];
+  /* Task 0209: the faces round a vertex joined across shared, unmarked edges within the angle - a fan - found once per
+   * vertex, every corner of the fan given its normal (a face joins the fan of each of its neighbours, so the flood from
+   * any face of a fan finds the same faces). It flooded again from each corner and searched its list for each face
+   * met: 256 faces round each of a UV sphere's poles made that 271 ms of every export. The sum runs over the fan's
+   * faces in order, so a normal can differ from the flood's in its last bit. */
+  std::vector<uint32_t> fan, fan_of(nf, UINT32_MAX);  // (fan_of: the fan a face is in at the current vertex)
+  for (uint32_t v = 0; v < (uint32_t)nv; v++) {
+    uint32_t fans = 0;
+    for (uint32_t k = off[v]; k < off[v + 1]; k++) {
+      const uint32_t f0 = adj[k];
+      if (!m.smooth_of(f0) || fan_of[f0] != UINT32_MAX) continue;
+      const uint32_t id = fans++;
+      fan.assign(1, f0);
+      fan_of[f0] = id;
       for (size_t i = 0; i < fan.size(); i++) {
         uint32_t p0 = 0, n0 = 0;
         neighbours_at(fan[i], v, p0, n0);
-        for (uint32_t k = off[v]; k < off[v + 1]; k++) {
-          const uint32_t g = adj[k];
-          if (!m.smooth_of(g) || std::find(fan.begin(), fan.end(), g) != fan.end()) continue;
+        for (uint32_t kk = off[v]; kk < off[v + 1]; kk++) {
+          const uint32_t g = adj[kk];
+          if (!m.smooth_of(g) || fan_of[g] != UINT32_MAX) continue;
           uint32_t p1 = 0, n1 = 0;
           neighbours_at(g, v, p1, n1);
-          uint32_t shared = UINT32_MAX;
-          if (p0 == p1 || p0 == n1) shared = p0;
-          else if (n0 == p1 || n0 == n1) shared = n0;
-          if (shared == UINT32_MAX || sharp(v, shared) || dot(fn[fan[i]], fn[g]) < cos_limit) continue;
+          /* Joined across an edge at v the two share that isn't marked - each shared edge on its own, so two faces
+           * back to back join (or not) whichever one the flood starts from. */
+          const bool across = ((p0 == p1 || p0 == n1) && !sharp(v, p0)) || ((n0 == p1 || n0 == n1) && !sharp(v, n0));
+          if (!across || dot(fn[fan[i]], fn[g]) < cos_limit) continue;
+          fan_of[g] = id;
           fan.push_back(g);
-          sum += fw[g];
         }
       }
-      out[c] = length(sum) > 0 ? sum / length(sum) : fn[f];
+      std::sort(fan.begin(), fan.end());
+      Vec3 sum(0.0f);
+      for (uint32_t g : fan) sum += fw[g];
+      const Vec3 n = length(sum) > 0 ? sum / length(sum) : fn[f0];
+      for (uint32_t g : fan)
+        for (uint32_t c = m.face_offsets[g]; c < m.face_offsets[g + 1]; c++)
+          if (m.corner_verts[c] == v) out[c] = length(sum) > 0 ? n : fn[g];
     }
+    for (uint32_t k = off[v]; k < off[v + 1]; k++) fan_of[adj[k]] = UINT32_MAX;
+  }
+  for (size_t f = 0; f < nf; f++)  // (a face shaded flat: its own normal at every corner)
+    if (!m.smooth_of(f))
+      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) out[c] = fn[f];
   return out;
 }
 

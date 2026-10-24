@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 229): exporting and importing the 50k sphere (task 0209)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 6.
+
+**Changed**
+- **Exporting:** each corner's normal is worked out once per fan of faces round a vertex, not by a flood from every
+  corner. At the sphere's poles 256 corners each flooded across 256 faces: 271 ms of every export.
+- **Numbers** in OBJ, PLY and USD text are written by `std::to_chars`, the same text as `%.7g`.
+- **PLY import:** each property's type is looked up once, not compared by name for every value.
+
+**Measured** (Pass 15, the 50k sphere; before -> after, Blender 5.2):
+- export OBJ 791 -> 108 ms (45), FBX 322 -> 24 (76), glTF 329 -> 32 (82), STL 365 -> 30 (12), PLY 336 -> 38 (7),
+  USD 827 -> 112 (253);
+- import PLY 65 -> 43 ms (6).
+
+**Checked**
+- The numbers are `%.7g`'s text, and every corner's normal matches the old flood on a sphere with sharp edges, flat
+  faces and a smooth angle (tests/test_assets.cpp).
+- An Opus review found two things, both fixed:
+  - two faces back to back (sharing two edges at a vertex) joined or not depending on which the flood started from;
+    each shared edge is now tested on its own, as the old flood did;
+  - a PLY face with two lists of corners kept both; it keeps the last again.
+- Unit checks (round 229): Windows, in render-cache verify mode, 11,997, 0 failed (1000 tests), 0 stale
+  pictures. Linux with libraries: 11,540, 0 failed. Sanitizer build: 11,416, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems,
+  394 results with faces newly on top of each other in `pushpull`, no change. (The gpu group's slow-open test and the sanitizer build's animation Play test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 228): Edit Mode's Select All, Inset and Bevel on big meshes (task 0208)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with

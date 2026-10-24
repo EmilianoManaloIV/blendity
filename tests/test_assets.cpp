@@ -4053,6 +4053,162 @@ static void tests_round169() {
 
 }
 
+/* ---------------------------------------------------------------- round 229: files (task 0209) */
+static void tests_round229() {
+  /* An OBJ's "v" numbers, "vn" normals and "f" corners (v index, vn index), read back from the text. */
+  struct Obj {
+    std::vector<std::string> numbers;  // every number of every "v" line, as written
+    std::vector<Vec3> normals;
+    std::vector<std::pair<uint32_t, uint32_t>> corners;
+  };
+  auto read_obj = [](const std::string &text) {
+    Obj o;
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+      std::istringstream l(line);
+      std::string tag;
+      l >> tag;
+      if (tag == "v") {
+        std::string a;
+        while (l >> a) o.numbers.push_back(a);
+      }
+      else if (tag == "vn") {
+        Vec3 n;
+        l >> n.x >> n.y >> n.z;
+        o.normals.push_back(n);
+      }
+      else if (tag == "f") {
+        std::string c;
+        while (l >> c) {
+          const size_t s1 = c.find('/'), s2 = c.rfind('/');
+          o.corners.push_back({(uint32_t)std::stoul(c.substr(0, s1)), (uint32_t)std::stoul(c.substr(s2 + 1))});
+        }
+      }
+    }
+    return o;
+  };
+  auto export_obj = [](MeshPtr mesh) {
+    ExportItem it;
+    it.name = "M";
+    it.mesh = mesh.get();
+    it.world = Mat4::identity();
+    std::string obj, mtl;
+    ExportOptions o = export_defaults((int)ExportFormat::OBJ);
+    o.normals = true;
+    export_obj_mtl({it}, "m.mtl", obj, mtl, o);
+    return obj;
+  };
+  test("export: the numbers are written as printf's %.7g writes them; a smooth sphere's corners at a vertex share one normal, and a cube smooth by angle keeps each face's own", [&] {
+    MeshPtr sphere = primitives::uv_sphere(1.37f, 48, 24);
+    for (Vec3 &v : sphere->positions) v = v * 1234.5678f + Vec3(1e-5f, -3.25f, 0.0f);  // (large, small and negative numbers)
+    const Obj a = read_obj(export_obj(sphere));
+    /* Each "v" number against %.7g of the value the exporter writes (Y up: X mirrored). */
+    auto g7 = [](double x) { return std::fabs(x) < 1e-12 ? std::string("0") : strprintf("%.7g", x); };
+    size_t same = 0;
+    for (size_t i = 0; i < sphere->positions.size() && i * 3 + 2 < a.numbers.size(); i++) {
+      const Vec3 p = sphere->positions[i];
+      same += (a.numbers[i * 3] == g7(-p.x)) + (a.numbers[i * 3 + 1] == g7(p.y)) + (a.numbers[i * 3 + 2] == g7(p.z));
+    }
+    std::printf("    %zu of %zu numbers as %%.7g writes them\n", same, a.numbers.size());
+    CHECK(a.numbers.size() == sphere->positions.size() * 3 && same == a.numbers.size());
+    std::map<uint32_t, uint32_t> normal_at;  // vertex -> the normal its first corner has
+    bool one = true;
+    for (const auto &[v, n] : a.corners) {
+      auto it = normal_at.emplace(v, n).first;
+      const Vec3 x = a.normals[it->second - 1], y = a.normals[n - 1];
+      one = one && length(x - y) < 1e-6f;
+    }
+    CHECK(one && !a.corners.empty());
+    MeshPtr cube = primitives::cube();
+    cube->smooth = true;
+    cube->smooth_angle = 30.0f;
+    const Obj b = read_obj(export_obj(cube));
+    bool own = b.corners.size() == 24;  // (six quads: every corner's normal one of the six axes)
+    for (const auto &[v, n] : b.corners) {
+      const Vec3 x = b.normals[n - 1];
+      own = own && std::fabs(std::fabs(x.x) + std::fabs(x.y) + std::fabs(x.z) - 1.0f) < 1e-5f;
+    }
+    CHECK(own);
+  });
+  test("export: each corner's normal is what flooding from its own face gives - sharp edges, flat faces, the smooth angle, back-to-back faces", [&] {
+    /* The flood the exporter ran per corner before task 0209, kept here as the reference. */
+    auto reference = [](const Mesh &m) {
+      const size_t nf = m.face_count();
+      std::vector<Vec3> fw(nf), fn(nf), out(m.corner_count());
+      for (size_t f = 0; f < nf; f++) {
+        Vec3 s(0.0f);
+        const uint32_t *v = m.face_verts(f), n = m.face_size(f);
+        for (uint32_t k = 0; k < n; k++) {
+          const Vec3 a = m.positions[v[k]], b = m.positions[v[(k + 1) % n]];
+          s += Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+        }
+        fw[f] = s;
+        fn[f] = length(s) > 0 ? s / length(s) : Vec3(0, 1, 0);
+      }
+      const float cl = m.smooth_angle >= 180.0f ? -2.0f : std::cos(m.smooth_angle * kDeg2Rad);
+      auto around = [&](size_t f, uint32_t v, uint32_t &p, uint32_t &n) {
+        const uint32_t *fv = m.face_verts(f), c = m.face_size(f);
+        for (uint32_t k = 0; k < c; k++)
+          if (fv[k] == v) {
+            p = fv[(k + c - 1) % c], n = fv[(k + 1) % c];
+            return;
+          }
+      };
+      for (size_t f = 0; f < nf; f++)
+        for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
+          if (!m.smooth_of(f)) {
+            out[c] = fn[f];
+            continue;
+          }
+          const uint32_t v = m.corner_verts[c];
+          std::vector<uint32_t> fan{(uint32_t)f};
+          for (size_t i = 0; i < fan.size(); i++) {
+            uint32_t p0 = 0, n0 = 0;
+            around(fan[i], v, p0, n0);
+            for (size_t g = 0; g < nf; g++) {
+              bool has = false;
+              for (uint32_t k = 0; k < m.face_size(g); k++) has = has || m.face_verts(g)[k] == v;
+              if (!has || !m.smooth_of(g) || std::find(fan.begin(), fan.end(), (uint32_t)g) != fan.end()) continue;
+              uint32_t p1 = 0, n1 = 0;
+              around(g, v, p1, n1);
+              const bool across = ((p0 == p1 || p0 == n1) && !m.is_sharp(v, p0)) || ((n0 == p1 || n0 == n1) && !m.is_sharp(v, n0));
+              if (!across || dot(fn[fan[i]], fn[g]) < cl) continue;
+              fan.push_back((uint32_t)g);
+            }
+          }
+          Vec3 sum(0.0f);
+          for (uint32_t g : fan) sum += fw[g];
+          out[c] = length(sum) > 0 ? sum / length(sum) : fn[f];
+        }
+      return out;
+    };
+    MeshPtr mesh = primitives::uv_sphere(1.0f, 16, 10);
+    mesh->smooth = true;
+    mesh->smooth_angle = 50.0f;
+    for (uint32_t i = 1; i + 1 < 16; i += 3) mesh->set_sharp(i, i + 1, true);  // (a few sharp edges)
+    mesh->face_smooth.assign(mesh->face_count(), 1);
+    for (size_t f = 0; f < mesh->face_count(); f += 7) mesh->face_smooth[f] = 0;  // (a few flat faces)
+    /* The exporter mirrors X and turns each face round: compare its normals per (face, vertex) with the mirror of the
+     * reference's. */
+    const std::vector<Vec3> want = reference(*mesh);
+    const Obj o = read_obj(export_obj(mesh));
+    size_t checked = 0, close = 0, at = 0;
+    for (size_t f = 0; f < mesh->face_count(); f++) {
+      const uint32_t n = mesh->face_size(f);
+      for (uint32_t k = 0; k < n && at + (n - 1 - k) < o.corners.size(); k++) {
+        const auto [v, ni] = o.corners[at + (n - 1 - k)];  // (written in reverse)
+        const Vec3 w = want[mesh->face_offsets[f] + k], got = o.normals[ni - 1];
+        checked++;
+        close += v == mesh->face_verts(f)[k] + 1 && length(got - Vec3(-w.x, w.y, w.z)) < 1e-5f;
+      }
+      at += n;
+    }
+    std::printf("    %zu of %zu corners' normals as the reference flood gives\n", close, checked);
+    CHECK(checked == mesh->corner_count() && close == checked);
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -4066,4 +4222,5 @@ void run_assets_tests() {
   tests_round154();
   tests_round166_to_round170();
   tests_round169();
+  tests_round229();
 }

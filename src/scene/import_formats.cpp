@@ -741,7 +741,20 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
   }
   size_t body = data.find('\n', hend);
   body = body == std::string::npos ? data.size() : body + 1;
-  struct Prop { std::string name, type, count_type; bool list = false; };
+  /* Task 0209: each property's type as a code, worked out once from its name (it was compared as a string for every
+   * value read: some 24 compares for each of a 50k-face sphere's 800,000 numbers). */
+  enum Ty : int { I8, U8, I16, U16, I32, U32, F32, F64 };
+  auto ty_of = [](const std::string &t) {
+    if (t == "char" || t == "int8") return I8;
+    if (t == "uchar" || t == "uint8") return U8;
+    if (t == "short" || t == "int16") return I16;
+    if (t == "ushort" || t == "uint16") return U16;
+    if (t == "int" || t == "int32") return I32;
+    if (t == "uint" || t == "uint32") return U32;
+    if (t == "double" || t == "float64") return F64;
+    return F32;
+  };
+  struct Prop { std::string name, type, count_type; bool list = false; Ty ty = F32, count_ty = U8; };
   struct Elem { std::string name; size_t count = 0; std::vector<Prop> props; };
   std::vector<Elem> elems;
   int format = 0;  // 0 ascii, 1 binary little endian, 2 big endian
@@ -760,19 +773,15 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
         Prop p;
         if (t.size() > 4 && t[1] == "list") p.list = true, p.count_type = t[2], p.type = t[3], p.name = t[4];
         else if (t.size() > 2) p.type = t[1], p.name = t[2];
+        p.ty = ty_of(p.type), p.count_ty = ty_of(p.count_type);
         elems.back().props.push_back(p);
       }
     }
   }
-  auto type_size = [](const std::string &t) -> size_t {
-    if (t == "char" || t == "uchar" || t == "int8" || t == "uint8") return 1;
-    if (t == "short" || t == "ushort" || t == "int16" || t == "uint16") return 2;
-    if (t == "double" || t == "float64") return 8;
-    return 4;
-  };
+  auto type_size = [](Ty t) -> size_t { return t == I8 || t == U8 ? 1 : t == I16 || t == U16 ? 2 : t == F64 ? 8 : 4; };
   const char *p = data.data() + body, *e = data.data() + data.size();
   bool bad = false;
-  auto read_value = [&](const std::string &t) -> double {
+  auto read_value = [&](Ty t) -> double {
     if (format == 0) {
       while (p < e && std::isspace((unsigned char)*p)) p++;
       double v = 0;
@@ -793,16 +802,16 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
     std::memcpy(b, p, n);
     p += n;
     if (format == 2) std::reverse(b, b + n);
-    if (t == "char" || t == "int8") return (int8_t)b[0];
-    if (t == "uchar" || t == "uint8") return b[0];
-    if (t == "short" || t == "int16") { int16_t v; std::memcpy(&v, b, 2); return v; }
-    if (t == "ushort" || t == "uint16") { uint16_t v; std::memcpy(&v, b, 2); return v; }
-    if (t == "int" || t == "int32") { int32_t v; std::memcpy(&v, b, 4); return v; }
-    if (t == "uint" || t == "uint32") { uint32_t v; std::memcpy(&v, b, 4); return v; }
-    if (t == "double" || t == "float64") { double v; std::memcpy(&v, b, 8); return v; }
-    float v;
-    std::memcpy(&v, b, 4);
-    return v;
+    switch (t) {
+      case I8: return (int8_t)b[0];
+      case U8: return b[0];
+      case I16: { int16_t v; std::memcpy(&v, b, 2); return v; }
+      case U16: { uint16_t v; std::memcpy(&v, b, 2); return v; }
+      case I32: { int32_t v; std::memcpy(&v, b, 4); return v; }
+      case U32: { uint32_t v; std::memcpy(&v, b, 4); return v; }
+      case F64: { double v; std::memcpy(&v, b, 8); return v; }
+      default: { float v; std::memcpy(&v, b, 4); return v; }
+    }
   };
   auto m = std::make_shared<Mesh>();
   m->name = fs::stem(path);
@@ -828,16 +837,19 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
       for (size_t k = 0; k < el.props.size() && !bad; k++) {
         const Prop &pr = el.props[k];
         if (pr.list) {
-          const size_t n = (size_t)read_value(pr.count_type);
+          const size_t n = (size_t)read_value(pr.count_ty);
           if (n > 1000000) {
             bad = true;
             break;
           }
-          std::vector<uint32_t> items;
-          for (size_t j = 0; j < n && !bad; j++) items.push_back((uint32_t)read_value(pr.type));
-          if (face && (pr.name == "vertex_indices" || pr.name == "vertex_index")) list = items;
+          const bool wanted = face && (pr.name == "vertex_indices" || pr.name == "vertex_index");
+          if (wanted) list.clear();  // (the last such list, as before)
+          for (size_t j = 0; j < n && !bad; j++) {
+            const uint32_t item = (uint32_t)read_value(pr.ty);
+            if (wanted) list.push_back(item);
+          }
         }
-        else vals[k] = read_value(pr.type);
+        else vals[k] = read_value(pr.ty);
       }
       if (vert && ix >= 0 && iy >= 0 && iz >= 0) {
         m->add_vert(from_z_up({(float)vals[(size_t)ix], (float)vals[(size_t)iy], (float)vals[(size_t)iz]}));
