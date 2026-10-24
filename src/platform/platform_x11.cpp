@@ -4,6 +4,8 @@
 #if !defined(_WIN32) && !defined(__APPLE__)
 
 #include "platform.h"
+#include "../core/pen_axes.h"
+#include "../core/touch_gestures.h"
 
 #include <X11/XKBlib.h>
 #include <X11/Xatom.h>
@@ -12,8 +14,21 @@
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <sys/select.h>
+#include <time.h>
+
+/* Task 0219: fingers and pens through XInput 2 - its header where the system has it (libxi-dev), the library opened at
+ * run time, so building needs nothing new and a system without libXi keeps the mouse's events. */
+#if defined(__has_include)
+#  if __has_include(<X11/extensions/XInput2.h>)
+#    include <X11/extensions/XInput2.h>
+#    include <dlfcn.h>
+#    define BL_X11_XI2 1
+#  endif
+#endif
 
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -40,7 +55,180 @@ struct Window {
   float dpi = 1.0f;
   int width = 0, height = 0;
   Cursor current = Cursor::Arrow;
+  /* Task 0219: fingers into the recognizer; a pen's axes by device (the tablets found at the start). */
+  TouchRecognizer touch;
+  int xi_opcode = -1;
+  struct PenDevice {
+    int pressure = -1, tilt_x = -1, tilt_y = -1;
+    double pmin = 0, pmax = 1, xmin = 0, xmax = 1, ymin = 0, ymax = 1;
+    bool eraser = false;
+  };
+  std::unordered_map<int, PenDevice> pens;
+  float pen_pressure = 1.0f, pen_tilt_x = 0.0f, pen_tilt_y = 0.0f;
+  bool pen_eraser = false;
+  double pen_seen = -1.0;  // (when a pen's own event last came: the core events just after, where it is, are the pen's)
+  double pen_root_x = 0.0, pen_root_y = 0.0;
 };
+
+static double mono_seconds() {
+  timespec t{};
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec + t.tv_nsec * 1e-9;
+}
+
+/* The recognizer's steps as events (task 0213's model): one finger as the left button tagged Touch, two a Gesture. */
+static void push_touch_steps(Window *w, const std::vector<TouchStep> &steps) {
+  for (const TouchStep &s : steps) {
+    Event e;
+    e.x = (int)s.x, e.y = (int)s.y;
+    e.pointer = Pointer::Touch;
+    switch (s.kind) {
+      case TouchStep::Down: e.type = EventType::MouseDown; break;
+      case TouchStep::Move: e.type = EventType::MouseMove; break;
+      case TouchStep::Up: e.type = EventType::MouseUp; break;
+      case TouchStep::Cancel: e.type = EventType::MouseUp, e.cancel = true; break;
+      case TouchStep::Gesture: e.type = EventType::Gesture, e.zoom = s.zoom, e.pan_x = s.pan_x, e.pan_y = s.pan_y, e.rotate = s.rotate; break;
+    }
+    w->queue.push_back(std::move(e));
+  }
+}
+
+/* A core pointer event just after a pen's own: the pen's, with its pressure, tilt and eraser; its side buttons (2, 3)
+ * as the right button held with the barrel, as Windows sends them. */
+static void tag_pen(Window *w, Event &e, unsigned core_button, double root_x, double root_y) {
+  if (w->pen_seen < 0.0 || mono_seconds() - w->pen_seen > 0.1) return;
+  /* (Only where the pen is: a pen resting or hovering on its tablet keeps sending, and the mouse moved meanwhile is the
+   * mouse's.) */
+  if (std::abs(root_x - w->pen_root_x) > 1.5 || std::abs(root_y - w->pen_root_y) > 1.5) return;
+  e.pointer = Pointer::Pen, e.pen = true;
+  e.pressure = e.type == EventType::MouseUp ? 1.0f : w->pen_pressure;
+  e.tilt_x = w->pen_tilt_x, e.tilt_y = w->pen_tilt_y, e.eraser = w->pen_eraser;
+  if (core_button == 2 || core_button == 3) e.button = 1, e.barrel = true;
+}
+
+#ifdef BL_X11_XI2
+/* libXi's calls, looked up at run time. */
+struct XiApi {
+  Status (*query_version)(Display *, int *, int *) = nullptr;
+  int (*select_events)(Display *, ::Window, XIEventMask *, int) = nullptr;
+  XIDeviceInfo *(*query_device)(Display *, int, int *) = nullptr;
+  void (*free_device_info)(XIDeviceInfo *) = nullptr;
+  bool ok = false;
+};
+
+static XiApi &xi() {
+  static XiApi api = [] {
+    XiApi a;
+    void *h = dlopen("libXi.so.6", RTLD_NOW | RTLD_LOCAL);
+    if (!h) return a;
+    a.query_version = (Status(*)(Display *, int *, int *))dlsym(h, "XIQueryVersion");
+    a.select_events = (int (*)(Display *, ::Window, XIEventMask *, int))dlsym(h, "XISelectEvents");
+    a.query_device = (XIDeviceInfo * (*)(Display *, int, int *)) dlsym(h, "XIQueryDevice");
+    a.free_device_info = (void (*)(XIDeviceInfo *))dlsym(h, "XIFreeDeviceInfo");
+    a.ok = a.query_version && a.select_events && a.query_device && a.free_device_info;
+    return a;
+  }();
+  return api;
+}
+
+/* The tablets: slave pointers with a pressure axis, their axes found by their labels. */
+static void find_pens(Window *w, std::vector<int> &ids) {
+  int n = 0;
+  XIDeviceInfo *devs = xi().query_device(w->dpy, XIAllDevices, &n);
+  for (int i = 0; devs && i < n; i++) {
+    const XIDeviceInfo &d = devs[i];
+    if (d.use != XISlavePointer && d.use != XIFloatingSlave) continue;
+    bool touch_screen = false;
+    for (int c = 0; c < d.num_classes; c++) touch_screen = touch_screen || d.classes[c]->type == XITouchClass;
+    if (touch_screen) continue;  // (its contacts come as touches; a pressure axis doesn't make it a pen)
+    Window::PenDevice pen;
+    for (int c = 0; c < d.num_classes; c++) {
+      if (d.classes[c]->type != XIValuatorClass) continue;
+      const XIValuatorClassInfo *v = (const XIValuatorClassInfo *)d.classes[c];
+      char *name = v->label ? XGetAtomName(w->dpy, v->label) : nullptr;
+      const pen::Axis axis = pen::axis_of(name ? name : "");
+      if (name) XFree(name);
+      if (axis == pen::Axis::Pressure) pen.pressure = v->number, pen.pmin = v->min, pen.pmax = v->max;
+      if (axis == pen::Axis::TiltX) pen.tilt_x = v->number, pen.xmin = v->min, pen.xmax = v->max;
+      if (axis == pen::Axis::TiltY) pen.tilt_y = v->number, pen.ymin = v->min, pen.ymax = v->max;
+    }
+    if (pen.pressure < 0) continue;
+    pen.eraser = pen::eraser_device(d.name ? d.name : "");
+    w->pens[d.deviceid] = pen;
+    ids.push_back(d.deviceid);
+  }
+  if (devs) xi().free_device_info(devs);
+}
+
+static int ignore_x_error(Display *, XErrorEvent *) { return 0; }
+
+/* Touches from the master devices (so X makes no pointer events of them for this window), the tablets' own motion for
+ * their axes (a slave device's: the master's core events still come, carrying the position and buttons), and the
+ * device list's changes (a pen's device added on its first use, a tablet plugged in). */
+static void xi_select(Window *w) {
+  unsigned char touch_bits[XIMaskLen(XI_LASTEVENT)] = {};
+  XISetMask(touch_bits, XI_TouchBegin);
+  XISetMask(touch_bits, XI_TouchUpdate);
+  XISetMask(touch_bits, XI_TouchEnd);
+  unsigned char all_bits[XIMaskLen(XI_LASTEVENT)] = {};
+  XISetMask(all_bits, XI_HierarchyChanged);
+  std::vector<XIEventMask> masks{{XIAllMasterDevices, (int)sizeof(touch_bits), touch_bits}, {XIAllDevices, (int)sizeof(all_bits), all_bits}};
+  std::vector<int> pens;
+  w->pens.clear();
+  find_pens(w, pens);
+  unsigned char pen_bits[XIMaskLen(XI_LASTEVENT)] = {};
+  XISetMask(pen_bits, XI_Motion);
+  XISetMask(pen_bits, XI_ButtonPress);
+  XISetMask(pen_bits, XI_ButtonRelease);
+  for (int id : pens) masks.push_back({id, (int)sizeof(pen_bits), pen_bits});
+  /* (A device gone between the list and the selection is an X error: ignored, not the default handler's exit.) */
+  XSync(w->dpy, False);
+  int (*old)(Display *, XErrorEvent *) = XSetErrorHandler(ignore_x_error);
+  xi().select_events(w->dpy, w->win, masks.data(), (int)masks.size());
+  XSync(w->dpy, False);
+  XSetErrorHandler(old);
+}
+
+static void xi_setup(Window *w) {
+  if (!xi().ok) return;
+  int op = 0, ev = 0, err = 0, major = 2, minor = 2;
+  if (!XQueryExtension(w->dpy, "XInputExtension", &op, &ev, &err)) return;
+  if (xi().query_version(w->dpy, &major, &minor) != Success || major < 2 || (major == 2 && minor < 2)) return;
+  w->xi_opcode = op;
+  xi_select(w);
+}
+
+static void handle_xi(Window *w, const XIDeviceEvent *ev, int type) {
+  const double now = mono_seconds();
+  if (type == XI_HierarchyChanged) {
+    xi_select(w);
+    return;
+  }
+  if (type == XI_TouchBegin || type == XI_TouchUpdate || type == XI_TouchEnd) {
+    std::vector<TouchStep> steps;
+    const bool palm = w->pen_seen >= 0.0 && now - w->pen_seen < 0.3;  // (a pen in use: a touch is a palm)
+    if (palm) w->touch.clear(steps);
+    else if (type == XI_TouchBegin) w->touch.down((uint64_t)ev->detail, (float)ev->event_x, (float)ev->event_y, now, steps);
+    else if (type == XI_TouchUpdate) w->touch.move((uint64_t)ev->detail, (float)ev->event_x, (float)ev->event_y, now, steps);
+    else w->touch.up((uint64_t)ev->detail, (float)ev->event_x, (float)ev->event_y, now, steps);
+    push_touch_steps(w, steps);
+    return;
+  }
+  auto it = w->pens.find(ev->sourceid);
+  if (it == w->pens.end()) it = w->pens.find(ev->deviceid);
+  if (it == w->pens.end()) return;
+  const Window::PenDevice &pen = it->second;
+  const unsigned char *mask = ev->valuators.mask;
+  const int len = ev->valuators.mask_len;
+  double v = 0.0;
+  if (pen::valuator(mask, len, ev->valuators.values, pen.pressure, v)) w->pen_pressure = pen::unit(v, pen.pmin, pen.pmax);
+  if (pen::valuator(mask, len, ev->valuators.values, pen.tilt_x, v)) w->pen_tilt_x = pen::tilt_degrees(v, pen.xmin, pen.xmax);
+  if (pen::valuator(mask, len, ev->valuators.values, pen.tilt_y, v)) w->pen_tilt_y = pen::tilt_degrees(v, pen.ymin, pen.ymax);
+  w->pen_eraser = pen.eraser;
+  w->pen_seen = now;
+  w->pen_root_x = ev->root_x, w->pen_root_y = ev->root_y;
+}
+#endif
 
 void append_utf8(std::string &s, uint32_t cp) {
   if (cp < 0x80) s += (char)cp;
@@ -189,6 +377,9 @@ static Window *make_window(const char *title, int x, int y, int width, int heigh
   if (w->im)
     w->ic = XCreateIC(w->im, XNInputStyle, XIMPreeditNothing | XIMStatusNothing, XNClientWindow, w->win,
                       XNFocusWindow, w->win, nullptr);
+#ifdef BL_X11_XI2
+  xi_setup(w);  // (task 0219)
+#endif
   XMapWindow(dpy, w->win);
   if (x || y) XMoveWindow(dpy, w->win, x, y);
   XFlush(dpy);
@@ -380,6 +571,7 @@ static void handle_event(Window *w, XEvent &xe) {
       e.x = xe.xmotion.x;
       e.y = xe.xmotion.y;
       e.mods = mods_from_state(xe.xmotion.state);
+      tag_pen(w, e, 0, xe.xmotion.x_root, xe.xmotion.y_root);
       w->queue.push_back(e);
       break;
     }
@@ -401,6 +593,7 @@ static void handle_event(Window *w, XEvent &xe) {
       else {
         e.type = xe.type == ButtonPress ? EventType::MouseDown : EventType::MouseUp;
         e.button = b == 1 ? 0 : (b == 3 ? 1 : 2);
+        tag_pen(w, e, b, xe.xbutton.x_root, xe.xbutton.y_root);
       }
       w->queue.push_back(e);
       break;
@@ -444,6 +637,7 @@ static void handle_event(Window *w, XEvent &xe) {
 void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) { poll_events_for(w, out, timeout_ms / 1000.0); }
 
 void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
+  if (w->touch.holding()) seconds = std::min(seconds, 0.02);  // (a finger's held press is let through on time)
   if (XPending(w->dpy) == 0 && w->queue.empty() && seconds > 0.0) {
     int fd = ConnectionNumber(w->dpy);
     fd_set fds;
@@ -457,8 +651,18 @@ void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
     XEvent xe;
     XNextEvent(w->dpy, &xe);
     if (XFilterEvent(&xe, None)) continue;
+#ifdef BL_X11_XI2
+    if (xe.xcookie.type == GenericEvent && xe.xcookie.extension == w->xi_opcode && XGetEventData(w->dpy, &xe.xcookie)) {
+      handle_xi(w, (const XIDeviceEvent *)xe.xcookie.data, xe.xcookie.evtype);
+      XFreeEventData(w->dpy, &xe.xcookie);
+      continue;
+    }
+#endif
     handle_event(w, xe);
   }
+  std::vector<TouchStep> held;
+  w->touch.poll(mono_seconds(), held);
+  push_touch_steps(w, held);
   for (auto &e : w->queue) out.push_back(std::move(e));
   w->queue.clear();
 }

@@ -25,7 +25,7 @@ if [ "$OS" = "Darwin" ]; then
   OUT="dist/macos"
 else
   PLATFORM_SRC="src/platform/platform_x11.cpp"
-  LIBS="-lX11 -static-libstdc++ -static-libgcc"
+  LIBS="-lX11 -ldl -static-libstdc++ -static-libgcc"
   OUT="dist/linux"
 fi
 

@@ -2,6 +2,7 @@
 // Fingers and pens (tasks 0213-0222): the touch recognizer, and what the editor does with each kind of pointer.
 #include "test_common.h"
 
+#include "../src/core/pen_axes.h"
 #include "../src/core/touch_gestures.h"
 
 
@@ -726,6 +727,33 @@ static void tests_round238() {
   });
 }
 
+/* ---------------------------------------------------------------- round 239: Linux - fingers and the pen (task 0219) */
+static void tests_round239() {
+  test("linux pen: a tablet's axes are found by their labels; pressure and tilt come out as 0..1 and degrees; the eraser device is known by its name", [] {
+    CHECK(pen::axis_of("Abs Pressure") == pen::Axis::Pressure && pen::axis_of("ABS_PRESSURE") == pen::Axis::Pressure);
+    CHECK(pen::axis_of("Abs Tilt X") == pen::Axis::TiltX && pen::axis_of("abs_tilt_y") == pen::Axis::TiltY);
+    CHECK(pen::axis_of("Abs X") == pen::Axis::Other && pen::axis_of("") == pen::Axis::Other);
+    CHECK(pen::axis_of("Abs MT Pressure") == pen::Axis::Other && pen::axis_of("ABS_MT_PRESSURE") == pen::Axis::Other);  // (a touch screen's)
+    CHECK(pen::eraser_device("Wacom Intuos Pro M Pen eraser") && !pen::eraser_device("Wacom Intuos Pro M Pen stylus"));
+    CHECK(pen::unit(2048, 0, 4096) == 0.5f && pen::unit(-5, 0, 4096) == 0.0f && pen::unit(9999, 0, 4096) == 1.0f && pen::unit(3, 5, 5) == 0.0f);
+    /* Xorg's drivers give degrees already (-64..63): kept; any other range is stretched over -90..90. */
+    CHECK(pen::tilt_degrees(-64, -64, 63) == -64.0f && pen::tilt_degrees(45, -64, 63) == 45.0f && pen::tilt_degrees(0, -64, 64) == 0.0f);
+    CHECK(pen::tilt_degrees(0, 0, 1000) == -90.0f && pen::tilt_degrees(500, 0, 1000) == 0.0f && pen::tilt_degrees(1000, 0, 1000) == 90.0f);
+  });
+
+  test("linux pen: a valuator is read from an event's mask - only the set bits carry values, in order - and a missing one isn't", [] {
+    unsigned char mask[2] = {0, 0};
+    mask[0] = (1 << 0) | (1 << 1) | (1 << 4);  // (x, y and pressure at 4)
+    mask[1] = 1 << 1;                          // (tilt at 9)
+    const double values[4] = {120.0, 340.0, 3000.0, -20.0};
+    double v = 0.0;
+    CHECK(pen::valuator(mask, 2, values, 4, v) && v == 3000.0);
+    CHECK(pen::valuator(mask, 2, values, 9, v) && v == -20.0);
+    CHECK(pen::valuator(mask, 2, values, 1, v) && v == 340.0);
+    CHECK(!pen::valuator(mask, 2, values, 2, v) && !pen::valuator(mask, 2, values, 16, v) && !pen::valuator(mask, 2, values, -1, v));
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
@@ -733,4 +761,5 @@ void run_input_tests() {
   tests_round236();
   tests_round237();
   tests_round238();
+  tests_round239();
 }

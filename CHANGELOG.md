@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 239): Linux - fingers and the pen through XInput 2 (task 0219)
+
+**Asked:** the plan for a 2-in-1 - the same fingers and pen on Linux.
+
+**Added**
+- **Fingers** through XInput 2's touch events and the same recognizer as Windows: one finger presses, two pinch, pan
+  and twist.
+- **A tablet pen's pressure, tilt and eraser** from its own device's axes. Its side buttons are the barrel.
+- **libXi is opened at run time,** so building needs nothing new. CI installs `libxi-dev` so the code is compiled there.
+
+**Checked**
+- The axis rules as pure functions (tests/test_input.cpp). The X11 code itself wasn't compiled or tried here: no
+  machine here has the XInput 2 header or a Linux touch screen.
+- An Opus review found these, all fixed:
+  - a pen whose device appears after the start (libinput adds one at a pen's first use, and a tablet can be plugged in
+    later) was never seen; the devices are looked at again whenever X says they changed;
+  - tilt was stretched: Xorg's drivers give degrees already, now kept as they are;
+  - a touch screen reporting pressure could be taken for a pen and block every finger; touch screens and "MT" axes
+    are left out;
+  - while a pen hovered, the mouse's events were taken for the pen's; now only events where the pen is are;
+  - `-ldl` for older glibc, and an X error while selecting a device that just went is ignored rather than ending the
+    program.
+- Unit checks (round 239): Windows, in render-cache verify mode, 12,120, 0 failed (1028 tests), 0 stale
+  pictures. Linux with libraries: 11,662, 0 failed. Sanitizer build: 11,532, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group's slow-open test and the sanitizer build's autopose timing check failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 238): Tablet Mode follows the laptop (task 0218)
 
 **Asked:** the plan for a 2-in-1 - Tablet Mode turns itself on when the laptop folds, with an override.
