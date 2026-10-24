@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 231): Boolean and Array on big meshes; the GPU shaders compiled by the build (task 0211)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 8, and the shaders' first compile it folded in.
+
+**Changed**
+- **Boolean:** to Manifold and back without a map per corner or per face. It now passes 32-bit positions, as Blender
+  does.
+- **Array:** each copy is appended array by array, not vertex by vertex and face by face. The mesh is the same.
+- **GPU shaders:**
+  - `build.bat` / `build.sh` compile them into a `shaders` folder beside the editor (`Blendity --warm-shaders`);
+  - a shader the user's cache lacks is read from there;
+  - the installer and packages carry the folder.
+
+  A new build's first GPU view no longer waits for them, where the build machine has a card; CI's builds have none.
+
+**Measured** (Pass 15; before -> after, Blender 5.2):
+- a Boolean union of two 50k spheres 276 -> 158 ms (79.8);
+- Array x10 on the 50k sphere 24.2 -> 8.1 ms (11.2);
+- the first GPU view after the shaders changed: about 96 s of compiling -> 0.3 s (this machine).
+
+**Checked**
+- Array gives the old mesh, also for meshes whose lists are out of step with their faces. A union of two spheres is
+  closed and the same twice (tests/test_modeling.cpp).
+- Two Opus reviews:
+  - Boolean's conversions: no defect. Array, for meshes whose lists are out of step with their faces, differed in
+    four ways, all fixed: UVs gained, a loose edge dropped, seams left unsorted, and a vector read while appended to.
+  - The build step found five things, all fixed:
+    - `build.sh` stopped on the unset `BLENDITY_NO_WARM`, which would have failed every Linux and macOS build;
+    - it ran before the libraries were beside the program;
+    - the macOS bundle and the Linux packages left the folder out;
+    - the dependency-free build, made after the full one, removed its shaders;
+    - `--warm-shaders` cleared any folder it was given; now it takes only a new or empty one.
+- Unit checks (round 231): Windows, in render-cache verify mode, 12,023, 0 failed (1003 tests), 0 stale
+  pictures. Linux with libraries: 11,566, 0 failed. Sanitizer build: 11,436, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `modeling`, `modifiers_ngon`, `editor_render`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone. The Linux build ran the new shader step and, with no card there, went on without them.)
+
 ## 2026-10-24: version 0.11.0, a pre-release
 
 **Asked:** "Do a 0.11.0 pre-release for Windows, Mac, and Linux."

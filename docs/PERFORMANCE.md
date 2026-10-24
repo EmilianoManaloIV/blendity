@@ -12,101 +12,101 @@ Each row's two methods are in its last columns. Task 0203 (docs/tasks/0203-parit
 row where Blendity is 1.25x or more behind, and the task that fixes it.
 
 <!-- pass15-table -->
-59 rows; Blendity behind on 19.
+59 rows; Blendity behind on 17.
 
 **Files**
 
 | row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
 |---|---|---|---|---|---|---|
-| Save a scene: 10,000 cubes | 25.9 ms | - | 23.0 ms | Blendity 1.1x behind | the scene's text written to a file (3.2 MB); Blendity's .scene | wm.save_as_mainfile, uncompressed (15.2 MB written); Blendity's row: its .scene text written |
-| Open it: 10,000 cubes | 63.0 ms | - | 534.2 ms | Blendity 8.5x ahead | the file read and parsed into a scene (not swapped into an editor) | wm.open_mainfile without its UI; Blendity's row: the file read and parsed into a scene, not swapped into an editor |
-| Save a scene: a 500k-face mesh | 140.4 ms | - | 21.6 ms | Blendity 6.5x behind | the scene's text written to a file (76.2 MB); Blendity's .scene | wm.save_as_mainfile, uncompressed (48.6 MB written); Blendity's row: its .scene text written |
-| Open it: a 500k-face mesh | 134.8 ms | - | 26.7 ms | Blendity 5.0x behind | the file read and parsed into a scene (not swapped into an editor) | wm.open_mainfile without its UI; Blendity's row: the file read and parsed into a scene, not swapped into an editor |
-| Export the 50k sphere as OBJ | 108.9 ms | - | 44.7 ms | Blendity 2.4x behind | export_file, 16.2 MB written | the exporter's operator at its defaults (7.4 MB written) |
-| Import the 50k sphere from OBJ | 45.9 ms | - | 36.7 ms | Blendity 1.2x behind | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
-| Export the 50k sphere as FBX | 23.9 ms | - | 75.5 ms | Blendity 3.2x ahead | export_file, 10.5 MB written | the exporter's operator at its defaults (2.0 MB written) |
-| Import the 50k sphere from FBX | 14.6 ms | - | 76.0 ms | Blendity 5.2x ahead | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
-| Export the 50k sphere as glTF (GLB) | 32.4 ms | - | 82.1 ms | Blendity 2.5x ahead | export_file, 3.3 MB written | the exporter's operator at its defaults (7.6 MB written) |
-| Import the 50k sphere from glTF (GLB) | 33.7 ms | - | 362.6 ms | Blendity 10.8x ahead | import_model, an object made for each mesh (99.8k faces read) | the importer's operator at its defaults + the depsgraph update (99840 faces read) |
-| Export the 50k sphere as STL | 30.4 ms | - | 12.4 ms | Blendity 2.5x behind | export_file, 4.8 MB written | the exporter's operator at its defaults (5.0 MB written) |
-| Import the 50k sphere from STL | 26.4 ms | - | 20.5 ms | Blendity 1.3x behind | import_model, an object made for each mesh (99.8k faces read) | the importer's operator at its defaults + the depsgraph update (99840 faces read) |
-| Export the 50k sphere as PLY | 40.4 ms | - | 7.2 ms | Blendity 5.6x behind | export_file, 3.0 MB written | the exporter's operator at its defaults (1.9 MB written) |
-| Import the 50k sphere from PLY | 33.3 ms | - | 6.0 ms | Blendity 5.6x behind | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
-| Export the 50k sphere as USD (USDA) | 115.9 ms | - | 253.1 ms | Blendity 2.2x ahead | export_file, 14.7 MB written | the exporter's operator at its defaults (13.8 MB written) |
-| Import the 50k sphere from USD (USDA) | 52.4 ms | - | 213.5 ms | Blendity 4.1x ahead | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+| Save a scene: 10,000 cubes | 25.5 ms | - | 23.0 ms | Blendity 1.1x behind | the scene's text written to a file (3.2 MB); Blendity's .scene | wm.save_as_mainfile, uncompressed (15.2 MB written); Blendity's row: its .scene text written |
+| Open it: 10,000 cubes | 64.6 ms | - | 534.2 ms | Blendity 8.3x ahead | the file read and parsed into a scene (not swapped into an editor) | wm.open_mainfile without its UI; Blendity's row: the file read and parsed into a scene, not swapped into an editor |
+| Save a scene: a 500k-face mesh | 141.1 ms | - | 21.6 ms | Blendity 6.5x behind | the scene's text written to a file (76.2 MB); Blendity's .scene | wm.save_as_mainfile, uncompressed (48.6 MB written); Blendity's row: its .scene text written |
+| Open it: a 500k-face mesh | 132.3 ms | - | 26.7 ms | Blendity 5.0x behind | the file read and parsed into a scene (not swapped into an editor) | wm.open_mainfile without its UI; Blendity's row: the file read and parsed into a scene, not swapped into an editor |
+| Export the 50k sphere as OBJ | 112.1 ms | - | 44.7 ms | Blendity 2.5x behind | export_file, 16.2 MB written | the exporter's operator at its defaults (7.4 MB written) |
+| Import the 50k sphere from OBJ | 44.7 ms | - | 36.7 ms | Blendity 1.2x behind | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+| Export the 50k sphere as FBX | 23.7 ms | - | 75.5 ms | Blendity 3.2x ahead | export_file, 10.5 MB written | the exporter's operator at its defaults (2.0 MB written) |
+| Import the 50k sphere from FBX | 14.8 ms | - | 76.0 ms | Blendity 5.1x ahead | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+| Export the 50k sphere as glTF (GLB) | 32.3 ms | - | 82.1 ms | Blendity 2.5x ahead | export_file, 3.3 MB written | the exporter's operator at its defaults (7.6 MB written) |
+| Import the 50k sphere from glTF (GLB) | 33.9 ms | - | 362.6 ms | Blendity 10.7x ahead | import_model, an object made for each mesh (99.8k faces read) | the importer's operator at its defaults + the depsgraph update (99840 faces read) |
+| Export the 50k sphere as STL | 30.2 ms | - | 12.4 ms | Blendity 2.4x behind | export_file, 4.8 MB written | the exporter's operator at its defaults (5.0 MB written) |
+| Import the 50k sphere from STL | 24.8 ms | - | 20.5 ms | Blendity 1.2x behind | import_model, an object made for each mesh (99.8k faces read) | the importer's operator at its defaults + the depsgraph update (99840 faces read) |
+| Export the 50k sphere as PLY | 38.2 ms | - | 7.2 ms | Blendity 5.3x behind | export_file, 3.0 MB written | the exporter's operator at its defaults (1.9 MB written) |
+| Import the 50k sphere from PLY | 42.2 ms | - | 6.0 ms | Blendity 7.1x behind | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
+| Export the 50k sphere as USD (USDA) | 113.2 ms | - | 253.1 ms | Blendity 2.2x ahead | export_file, 14.7 MB written | the exporter's operator at its defaults (13.8 MB written) |
+| Import the 50k sphere from USD (USDA) | 51.9 ms | - | 213.5 ms | Blendity 4.1x ahead | import_model, an object made for each mesh (50.2k faces read) | the importer's operator at its defaults + the depsgraph update (50176 faces read) |
 
 **Objects**
 
 | row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
 |---|---|---|---|---|---|---|
-| Select all, 10,000 objects | 2.8 ms | 0.740 ms | 32.7 ms | Blendity 11.7x ahead | selectall (every object with a mesh) | object.select_all + the depsgraph update; Blendity's row: selectall and the frame that shows it |
-| Duplicate 10,000 objects | 70.0 ms | 15.9 ms | 1525.2 ms | Blendity 21.8x ahead | duplicate on every object selected (Blendity's copies share their meshes, copy on write), one run; undone outside the timer | object.duplicate linked (Alt+D: the copies share the mesh, as Blendity's copy-on-write copies do; Shift+D would copy 10,000 meshes) + its undo step + the depsgraph update; undone outside the timer |
-| Delete 10,000 objects | 15.7 ms | 15.7 ms | 7714.0 ms | Blendity 490.4x ahead | delete on every object selected; undone outside the timer | object.delete + its undo step + the depsgraph update; undone outside the timer |
-| Undo of the delete, 10,000 objects | 25.1 ms | 6.5 ms | 387.3 ms | Blendity 15.4x ahead | undo of the delete (the scene's snapshot restored) | ed.undo of the delete (the memfile step read back) + the depsgraph update |
+| Select all, 10,000 objects | 3.3 ms | 0.740 ms | 32.7 ms | Blendity 10.0x ahead | selectall (every object with a mesh) | object.select_all + the depsgraph update; Blendity's row: selectall and the frame that shows it |
+| Duplicate 10,000 objects | 68.5 ms | 14.8 ms | 1525.2 ms | Blendity 22.3x ahead | duplicate on every object selected (Blendity's copies share their meshes, copy on write), one run; undone outside the timer | object.duplicate linked (Alt+D: the copies share the mesh, as Blendity's copy-on-write copies do; Shift+D would copy 10,000 meshes) + its undo step + the depsgraph update; undone outside the timer |
+| Delete 10,000 objects | 14.2 ms | 14.2 ms | 7714.0 ms | Blendity 541.3x ahead | delete on every object selected; undone outside the timer | object.delete + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the delete, 10,000 objects | 24.8 ms | 6.7 ms | 387.3 ms | Blendity 15.6x ahead | undo of the delete (the scene's snapshot restored) | ed.undo of the delete (the memfile step read back) + the depsgraph update |
 
 **Edit Mode, 50k faces**
 
 | row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
 |---|---|---|---|---|---|---|
-| Enter Edit Mode (50k faces) | 12.5 ms | 0.030 ms | 15.7 ms | Blendity 1.3x ahead | edit vertex, its caches cold (a fresh copy of the mesh) | mode_set(EDIT) + the depsgraph update (the Mesh made a BMesh); headless Blender builds no draw cache |
-| Select all (50k faces) | 4.7 ms | 0.020 ms | 2.6 ms | Blendity 1.8x behind | Edit Mode's Select All (its shortcut's action, Ctrl+A / A) | mesh.select_all + the depsgraph update (no undo step timed: Blendity's selection pushes none) |
-| Select linked from one face (50k faces) | 13.1 ms | 9.1 ms | 15.7 ms | Blendity 1.2x ahead | editop select_linked from face 100 (the whole sphere) | mesh.select_linked from face 100 + the depsgraph update |
-| Extrude three faces (50k faces) | 24.8 ms | 3.0 ms | 30.0 ms | Blendity 1.2x ahead | editop extrude on faces 100-102 (0.5 along their normal) | mesh.extrude_region_shrink_fatten on faces 100-102, 0.5 along their normals + its undo step + the depsgraph update; undone outside the timer |
-| Inset three faces (50k faces) | 28.8 ms | 5.0 ms | 24.1 ms | Blendity 1.2x behind | editop inset, region, thickness 0.01 | mesh.inset, region, thickness 0.01 + its undo step + the depsgraph update; undone outside the timer |
-| Bevel three faces' edges (50k faces) | 34.1 ms | 10.4 ms | 31.7 ms | Blendity 1.1x behind | editop bevel on faces 100-102's edges, width 0.005, 3 segments | mesh.bevel on faces 100-102's edges, offset 0.005, 3 segments + its undo step + the depsgraph update; undone outside the timer |
-| Loop cut (50k faces) | 30.9 ms | 11.5 ms | 61.9 ms | Blendity 2.0x ahead | editop loopcut, 1 cut, through a meridian edge at the equator (a ring of 256 faces cut) | mesh.loopcut_slide, 1 cut, through the meridian edge at the equator (a ring of 256 faces) + its undo step + the depsgraph update; undone outside the timer |
-| Subdivide every edge (50k faces) | 129.2 ms | 74.7 ms | 205.1 ms | Blendity 1.6x ahead | editop subdivide_edges, 1 cut, everything selected | mesh.subdivide, 1 cut, everything selected + its undo step + the depsgraph update; undone outside the timer |
-| Undo of the subdivide (50k faces) | 15.4 ms | 15.4 ms | 33.8 ms | Blendity 2.2x ahead | undo of subdivide_edges (the mesh before it restored) | ed.undo of mesh.subdivide + the depsgraph update |
-| Merge by distance, everything (50k faces) | 56.7 ms | 36.8 ms | 41.2 ms | Blendity 1.4x behind | editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001) | mesh.remove_doubles, 0.001, everything selected (the rings beside the poles merge) + its undo step + the depsgraph update; undone outside the timer |
-| Triangulate every face (50k faces) | 40.9 ms | 14.0 ms | 68.3 ms | Blendity 1.7x ahead | editop triangulate_faces, everything selected | mesh.quads_convert_to_tris, everything selected + its undo step + the depsgraph update; undone outside the timer |
-| Undo of the triangulate (50k faces) | 5.1 ms | 0.080 ms | 22.9 ms | Blendity 4.5x ahead | undo of triangulate_faces | ed.undo of mesh.quads_convert_to_tris + the depsgraph update |
-| Exit Edit Mode (50k faces) | 0.570 ms | 0.010 ms | 4.0 ms | Blendity 7.0x ahead | edit off | mode_set(OBJECT) + the depsgraph update (the BMesh written back to the Mesh) |
+| Enter Edit Mode (50k faces) | 12.9 ms | 0.030 ms | 15.7 ms | Blendity 1.2x ahead | edit vertex, its caches cold (a fresh copy of the mesh) | mode_set(EDIT) + the depsgraph update (the Mesh made a BMesh); headless Blender builds no draw cache |
+| Select all (50k faces) | 3.6 ms | 0.010 ms | 2.6 ms | Blendity 1.4x behind | Edit Mode's Select All (its shortcut's action, Ctrl+A / A) | mesh.select_all + the depsgraph update (no undo step timed: Blendity's selection pushes none) |
+| Select linked from one face (50k faces) | 12.0 ms | 8.0 ms | 15.7 ms | Blendity 1.3x ahead | editop select_linked from face 100 (the whole sphere) | mesh.select_linked from face 100 + the depsgraph update |
+| Extrude three faces (50k faces) | 25.1 ms | 3.1 ms | 30.0 ms | Blendity 1.2x ahead | editop extrude on faces 100-102 (0.5 along their normal) | mesh.extrude_region_shrink_fatten on faces 100-102, 0.5 along their normals + its undo step + the depsgraph update; undone outside the timer |
+| Inset three faces (50k faces) | 26.7 ms | 4.8 ms | 24.1 ms | Blendity 1.1x behind | editop inset, region, thickness 0.01 | mesh.inset, region, thickness 0.01 + its undo step + the depsgraph update; undone outside the timer |
+| Bevel three faces' edges (50k faces) | 30.0 ms | 8.2 ms | 31.7 ms | Blendity 1.1x ahead | editop bevel on faces 100-102's edges, width 0.005, 3 segments | mesh.bevel on faces 100-102's edges, offset 0.005, 3 segments + its undo step + the depsgraph update; undone outside the timer |
+| Loop cut (50k faces) | 31.6 ms | 11.8 ms | 61.9 ms | Blendity 2.0x ahead | editop loopcut, 1 cut, through a meridian edge at the equator (a ring of 256 faces cut) | mesh.loopcut_slide, 1 cut, through the meridian edge at the equator (a ring of 256 faces) + its undo step + the depsgraph update; undone outside the timer |
+| Subdivide every edge (50k faces) | 133.9 ms | 80.4 ms | 205.1 ms | Blendity 1.5x ahead | editop subdivide_edges, 1 cut, everything selected | mesh.subdivide, 1 cut, everything selected + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the subdivide (50k faces) | 14.4 ms | 14.4 ms | 33.8 ms | Blendity 2.3x ahead | undo of subdivide_edges (the mesh before it restored) | ed.undo of mesh.subdivide + the depsgraph update |
+| Merge by distance, everything (50k faces) | 53.7 ms | 30.5 ms | 41.2 ms | Blendity 1.3x behind | editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001) | mesh.remove_doubles, 0.001, everything selected (the rings beside the poles merge) + its undo step + the depsgraph update; undone outside the timer |
+| Triangulate every face (50k faces) | 44.8 ms | 14.0 ms | 68.3 ms | Blendity 1.5x ahead | editop triangulate_faces, everything selected | mesh.quads_convert_to_tris, everything selected + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the triangulate (50k faces) | 6.3 ms | 0.080 ms | 22.9 ms | Blendity 3.6x ahead | undo of triangulate_faces | ed.undo of mesh.quads_convert_to_tris + the depsgraph update |
+| Exit Edit Mode (50k faces) | 1.9 ms | 0.010 ms | 4.0 ms | Blendity 2.0x ahead | edit off | mode_set(OBJECT) + the depsgraph update (the BMesh written back to the Mesh) |
 
 **Edit Mode, 500k faces**
 
 | row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
 |---|---|---|---|---|---|---|
-| Enter Edit Mode (500k faces) | 106.4 ms | 0.080 ms | 182.0 ms | Blendity 1.7x ahead | edit vertex, its caches cold (a fresh copy of the mesh) | mode_set(EDIT) + the depsgraph update (the Mesh made a BMesh); headless Blender builds no draw cache |
-| Select all (500k faces) | 28.0 ms | 0.110 ms | 23.1 ms | Blendity 1.2x behind | Edit Mode's Select All (its shortcut's action, Ctrl+A / A) | mesh.select_all + the depsgraph update (no undo step timed: Blendity's selection pushes none) |
-| Select linked from one face (500k faces) | 110.5 ms | 82.4 ms | 184.9 ms | Blendity 1.7x ahead | editop select_linked from face 100 (the whole sphere) | mesh.select_linked from face 100 + the depsgraph update |
-| Extrude three faces (500k faces) | 226.7 ms | 30.5 ms | 353.1 ms | Blendity 1.6x ahead | editop extrude on faces 100-102 (0.5 along their normal) | mesh.extrude_region_shrink_fatten on faces 100-102, 0.5 along their normals + its undo step + the depsgraph update; undone outside the timer |
-| Inset three faces (500k faces) | 263.1 ms | 49.5 ms | 229.8 ms | Blendity 1.1x behind | editop inset, region, thickness 0.01 | mesh.inset, region, thickness 0.01 + its undo step + the depsgraph update; undone outside the timer |
-| Merge by distance, everything (500k faces) | 602.7 ms | 395.4 ms | 495.6 ms | Blendity 1.2x behind | editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001) | mesh.remove_doubles, 0.001, everything selected (the rings beside the poles merge) + its undo step + the depsgraph update; undone outside the timer |
-| Triangulate every face (500k faces) | 489.6 ms | 138.9 ms | 679.7 ms | Blendity 1.4x ahead | editop triangulate_faces, everything selected | mesh.quads_convert_to_tris, everything selected + its undo step + the depsgraph update; undone outside the timer |
-| Undo of the triangulate (500k faces) | 73.3 ms | 0.200 ms | 245.9 ms | Blendity 3.4x ahead | undo of triangulate_faces | ed.undo of mesh.quads_convert_to_tris + the depsgraph update |
-| Exit Edit Mode (500k faces) | 9.1 ms | 0.010 ms | 40.9 ms | Blendity 4.5x ahead | edit off | mode_set(OBJECT) + the depsgraph update (the BMesh written back to the Mesh) |
+| Enter Edit Mode (500k faces) | 99.7 ms | 0.070 ms | 182.0 ms | Blendity 1.8x ahead | edit vertex, its caches cold (a fresh copy of the mesh) | mode_set(EDIT) + the depsgraph update (the Mesh made a BMesh); headless Blender builds no draw cache |
+| Select all (500k faces) | 27.8 ms | 0.080 ms | 23.1 ms | Blendity 1.2x behind | Edit Mode's Select All (its shortcut's action, Ctrl+A / A) | mesh.select_all + the depsgraph update (no undo step timed: Blendity's selection pushes none) |
+| Select linked from one face (500k faces) | 134.0 ms | 103.3 ms | 184.9 ms | Blendity 1.4x ahead | editop select_linked from face 100 (the whole sphere) | mesh.select_linked from face 100 + the depsgraph update |
+| Extrude three faces (500k faces) | 220.8 ms | 29.4 ms | 353.1 ms | Blendity 1.6x ahead | editop extrude on faces 100-102 (0.5 along their normal) | mesh.extrude_region_shrink_fatten on faces 100-102, 0.5 along their normals + its undo step + the depsgraph update; undone outside the timer |
+| Inset three faces (500k faces) | 249.3 ms | 42.9 ms | 229.8 ms | Blendity 1.1x behind | editop inset, region, thickness 0.01 | mesh.inset, region, thickness 0.01 + its undo step + the depsgraph update; undone outside the timer |
+| Merge by distance, everything (500k faces) | 598.7 ms | 394.6 ms | 495.6 ms | Blendity 1.2x behind | editop merge_distance, 0.001, everything selected (the rings beside the poles merge: their vertices are closer than 0.001) | mesh.remove_doubles, 0.001, everything selected (the rings beside the poles merge) + its undo step + the depsgraph update; undone outside the timer |
+| Triangulate every face (500k faces) | 467.0 ms | 125.0 ms | 679.7 ms | Blendity 1.5x ahead | editop triangulate_faces, everything selected | mesh.quads_convert_to_tris, everything selected + its undo step + the depsgraph update; undone outside the timer |
+| Undo of the triangulate (500k faces) | 67.8 ms | 0.210 ms | 245.9 ms | Blendity 3.6x ahead | undo of triangulate_faces | ed.undo of mesh.quads_convert_to_tris + the depsgraph update |
+| Exit Edit Mode (500k faces) | 9.0 ms | 0.020 ms | 40.9 ms | Blendity 4.6x ahead | edit off | mode_set(OBJECT) + the depsgraph update (the BMesh written back to the Mesh) |
 
 **Modifiers**
 
 | row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
 |---|---|---|---|---|---|---|
-| Modifier: Subdivision level 1 on the 50k sphere | 10.4 ms | - | 107.6 ms | Blendity 10.4x ahead | SubdivisionSurface levels 1 (Blendity's own Catmull-Clark); 200.2k faces out | Subdivision Surface, viewport level 1, the limit surface off (OpenSubdiv on the CPU; the sphere's poles have 256 edges), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 200192 faces out |
-| Modifier: Subdivision level 2 on the 50k sphere | 39.5 ms | - | 799.0 ms | Blendity 20.2x ahead | SubdivisionSurface levels 2; 800.8k faces out | Subdivision Surface, viewport level 2, the limit surface off, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 800768 faces out |
-| Modifier: Mirror on the 50k sphere | 3.4 ms | - | 7.0 ms | Blendity 2.1x ahead | MirrorModifier on X, merging at 0.001; 100.3k faces out | Mirror on X, merging at 0.001, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 100344 faces out |
-| Modifier: Array x10 on the 50k sphere | 24.2 ms | - | 11.2 ms | Blendity 2.2x behind | ArrayModifier, 10 copies a mesh-size apart; 501.8k faces out | Array, 10 copies a mesh-size apart, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 501760 faces out |
+| Modifier: Subdivision level 1 on the 50k sphere | 8.1 ms | - | 107.6 ms | Blendity 13.3x ahead | SubdivisionSurface levels 1 (Blendity's own Catmull-Clark); 200.2k faces out | Subdivision Surface, viewport level 1, the limit surface off (OpenSubdiv on the CPU; the sphere's poles have 256 edges), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 200192 faces out |
+| Modifier: Subdivision level 2 on the 50k sphere | 36.6 ms | - | 799.0 ms | Blendity 21.8x ahead | SubdivisionSurface levels 2; 800.8k faces out | Subdivision Surface, viewport level 2, the limit surface off, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 800768 faces out |
+| Modifier: Mirror on the 50k sphere | 3.8 ms | - | 7.0 ms | Blendity 1.9x ahead | MirrorModifier on X, merging at 0.001; 100.3k faces out | Mirror on X, merging at 0.001, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 100344 faces out |
+| Modifier: Array x10 on the 50k sphere | 8.1 ms | - | 11.2 ms | Blendity 1.4x ahead | ArrayModifier, 10 copies a mesh-size apart; 501.8k faces out | Array, 10 copies a mesh-size apart, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 501760 faces out |
 | Modifier: Solidify on the 50k sphere | 7.5 ms | - | 11.6 ms | Blendity 1.5x ahead | SolidifyModifier, 0.01 thick, rim filled; 100.4k faces out | Solidify, 0.01 thick, rim filled, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 100352 faces out |
-| Modifier: Bevel on the 50k sphere | 611.0 ms | - | 522.5 ms | Blendity 1.2x behind | BevelModifier, width 0.001, 1 segment, every edge (no angle limit); 200.2k faces out | Bevel, width 0.001, 1 segment, every edge (no limit), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 200194 faces out |
-| Modifier: Decimate 0.5 on the 50k sphere | 58.5 ms | - | 162.3 ms | Blendity 2.8x ahead | DecimateModifier collapse, ratio 0.5 (meshoptimizer); 49.9k faces out | Decimate collapse, ratio 0.5, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 32109 faces out |
-| Modifier: Boolean union with a second 50k sphere on the 50k sphere | 276.0 ms | - | 79.8 ms | Blendity 3.5x behind | BooleanModifier union (Manifold, with Blender's libraries); 70.0k faces out | Boolean union, the Manifold solver (Blendity's too), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 69952 faces out |
-| Modifier: Subdivision level 1 on a 24,576-quad cube | 4.0 ms | - | 48.9 ms | Blendity 12.4x ahead | SubdivisionSurface levels 1 on a cube cut 64 x 64 a side; 98.3k faces out | Subdivision Surface level 1, the limit surface off, on a cube cut 64 x 64 a side; 98304 faces out |
-| Modifier stack again after a vertex moved (Subdivision 1 + Mirror) | 21.2 ms | - | 97.5 ms | Blendity 4.6x ahead | one vertex moved, the stack evaluated again | one vertex moved, mesh.update, the depsgraph update and the evaluated mesh read |
+| Modifier: Bevel on the 50k sphere | 618.8 ms | - | 522.5 ms | Blendity 1.2x behind | BevelModifier, width 0.001, 1 segment, every edge (no angle limit); 200.2k faces out | Bevel, width 0.001, 1 segment, every edge (no limit), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 200194 faces out |
+| Modifier: Decimate 0.5 on the 50k sphere | 52.6 ms | - | 162.3 ms | Blendity 3.1x ahead | DecimateModifier collapse, ratio 0.5 (meshoptimizer); 49.9k faces out | Decimate collapse, ratio 0.5, the depsgraph update and the evaluated mesh read (a subdivision is built when read); 32109 faces out |
+| Modifier: Boolean union with a second 50k sphere on the 50k sphere | 158.4 ms | - | 79.8 ms | Blendity 2.0x behind | BooleanModifier union (Manifold, with Blender's libraries); 70.0k faces out | Boolean union, the Manifold solver (Blendity's too), the depsgraph update and the evaluated mesh read (a subdivision is built when read); 69952 faces out |
+| Modifier: Subdivision level 1 on a 24,576-quad cube | 5.1 ms | - | 48.9 ms | Blendity 9.6x ahead | SubdivisionSurface levels 1 on a cube cut 64 x 64 a side; 98.3k faces out | Subdivision Surface level 1, the limit surface off, on a cube cut 64 x 64 a side; 98304 faces out |
+| Modifier stack again after a vertex moved (Subdivision 1 + Mirror) | 21.7 ms | - | 97.5 ms | Blendity 4.5x ahead | one vertex moved, the stack evaluated again | one vertex moved, mesh.update, the depsgraph update and the evaluated mesh read |
 
 **UV, animation, physics**
 
 | row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
 |---|---|---|---|---|---|---|
-| Unwrap the 50k sphere | 662.7 ms | - | 2549.3 ms | Blendity 3.8x ahead | unwrap_lscm (Blender's Conformal), a seam down one meridian, margin 0.02 (Eigen sparse Cholesky; 1 charts) | uv.unwrap, Conformal (LSCM, Blendity's), a seam down one meridian, margin 0.02 |
-| A frame of 1,000 keyframed objects | 0.420 ms | - | 3.8 ms | Blendity 8.9x ahead | apply_clip at a new frame each time (3 Position tracks of 3 keys per object) | scene.frame_set at a new frame each time (location keys on frames 1, 30, 60), the depsgraph update included |
+| Unwrap the 50k sphere | 632.4 ms | - | 2549.3 ms | Blendity 4.0x ahead | unwrap_lscm (Blender's Conformal), a seam down one meridian, margin 0.02 (Eigen sparse Cholesky; 1 charts) | uv.unwrap, Conformal (LSCM, Blendity's), a seam down one meridian, margin 0.02 |
+| A frame of 1,000 keyframed objects | 0.400 ms | - | 3.8 ms | Blendity 9.4x ahead | apply_clip at a new frame each time (3 Position tracks of 3 keys per object) | scene.frame_set at a new frame each time (location keys on frames 1, 30, 60), the depsgraph update included |
 | Ten shape keys on the 50k sphere, evaluated | 0.560 ms | - | 0.984 ms | Blendity 1.8x ahead | the basis copied and apply_shape_keys, every key at 0.5 | one key's value changed, the depsgraph update that mixes all ten |
-| 1,000 rigid boxes falling: a frame | 0.450 ms | - | 10.0 ms | Blendity 22.2x ahead | Scene::update at 60 Hz, one step a frame, mean of the first 30 frames (Jolt) | scene.frame_set through the first 30 frames at 60 fps (Bullet, 1 substep a frame, 10 solver iterations), mean |
+| 1,000 rigid boxes falling: a frame | 0.430 ms | - | 10.0 ms | Blendity 23.2x ahead | Scene::update at 60 Hz, one step a frame, mean of the first 30 frames (Jolt) | scene.frame_set through the first 30 frames at 60 fps (Bullet, 1 substep a frame, 10 solver iterations), mean |
 
 **Rendering and memory**
 
 | row | Blendity | of it the operator alone | Blender 5.2.2 LTS | ratio | Blendity's method | Blender's method |
 |---|---|---|---|---|---|---|
-| Memory: 10,000 cubes | 8.3 MB | - | 338.3 MB | Blendity 40.9x ahead | the resident set's growth when the scene is made (one shared cube mesh; objects with transforms, no editor state; run first in the section, but after any section before it) | the resident set's growth when the scene is made (one shared cube mesh) and evaluated |
-| Memory: a 500k-face mesh | 150.2 MB | - | 464.6 MB | Blendity 3.1x ahead | the resident set's growth for the mesh and its render mesh | the resident set's growth for the mesh and its evaluated copy (headless: no draw cache) |
-| F12 at 1920x1080, 400 spheres (raster) | 77.6 ms | - | 215.7 ms | Blendity 2.8x ahead | render, engine raster (the CPU's reference raster, supersampled), stress 400 Sphere (an 8 x 8 x 7 grid of 24 x 16 spheres, 8 materials) under the starter scene's light | render.render with EEVEE at its default 64 samples, Blendity's stress 400 Sphere built alike (a sun for its starter light) |
+| Memory: 10,000 cubes | 8.3 MB | - | 338.3 MB | Blendity 41.0x ahead | the resident set's growth when the scene is made (one shared cube mesh; objects with transforms, no editor state; run first in the section, but after any section before it) | the resident set's growth when the scene is made (one shared cube mesh) and evaluated |
+| Memory: a 500k-face mesh | 150.4 MB | - | 464.6 MB | Blendity 3.1x ahead | the resident set's growth for the mesh and its render mesh | the resident set's growth for the mesh and its evaluated copy (headless: no draw cache) |
+| F12 at 1920x1080, 400 spheres (raster) | 72.3 ms | - | 215.7 ms | Blendity 3.0x ahead | render, engine raster (the CPU's reference raster, supersampled), stress 400 Sphere (an 8 x 8 x 7 grid of 24 x 16 spheres, 8 materials) under the starter scene's light | render.render with EEVEE at its default 64 samples, Blendity's stress 400 Sphere built alike (a sun for its starter light) |
 <!-- /pass15-table -->
 
 **With a window** (task 0202, `tools/bench_ui.py`): both programs at the same window size and on the same scenes.

@@ -256,6 +256,12 @@ struct RasterMatch {
 RasterMatch raster_match(const uint32_t *cpu_color, const uint32_t *cpu_ids, const uint32_t *gpu_color, const uint32_t *gpu_ids, int width,
                          int height);
 
+/* Task 0211: compiles the shaders of the GPU tracer and of a GPU view on the first card into `dir` (the build's
+ * dist/<platform>/shaders, read when the user's own cache lacks one). False, with why, when no card opens. The
+ * shaders a card without some feature never asks for (dual-source blending, geometry shaders) are compiled only when
+ * this card has it; another card compiles those itself, once. */
+bool warm_shaders(const std::string &dir, std::string *report);
+
 class Raster {
  public:
   static constexpr int kSlots = 4;

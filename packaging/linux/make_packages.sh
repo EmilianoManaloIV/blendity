@@ -21,6 +21,7 @@ cp "$DIST/Blendity" "$STAGE/"
 [ -x "$DIST/Blendity-full" ] && cp "$DIST/Blendity-full" "$STAGE/"  # (the full build Blendity hands over to, task 0080)
 [ -d "$DIST/lib" ] && cp -a "$DIST/lib" "$STAGE/"
 [ -d "$DIST/datafiles" ] && cp -a "$DIST/datafiles" "$STAGE/"
+[ -d "$DIST/shaders" ] && cp -a "$DIST/shaders" "$STAGE/"  # (the GPU shaders the build compiled, task 0211)
 cp -a licenses "$STAGE/licenses"
 cp LICENSE "$STAGE/"
 cp docs/MANUAL.md "$STAGE/docs/"

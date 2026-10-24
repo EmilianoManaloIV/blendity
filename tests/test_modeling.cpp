@@ -8116,6 +8116,107 @@ static void tests_round228() {
   });
 }
 
+/* ---------------------------------------------------------------- round 231: modifiers on big meshes (task 0211) */
+static void tests_round231() {
+  test("Array appends its copies array by array: the same mesh as adding each vertex and face - UVs, materials, smooth flags, seams and weights", [] {
+    MeshPtr src = primitives::uv_sphere(1.0f, 24, 12);
+    src->face_material.assign(src->face_count(), 0);
+    for (size_t f = 0; f < src->face_count(); f += 5) src->face_material[f] = 2;
+    src->face_smooth.assign(src->face_count(), 1);
+    for (size_t f = 0; f < src->face_count(); f += 3) src->face_smooth[f] = 0;
+    src->smooth = false;
+    for (uint32_t i = 1; i + 1 < 24; i += 4) src->set_seam(i, i + 1, true);
+    VertexGroup vg;
+    vg.name = "w";
+    for (size_t i = 0; i < src->vert_count(); i++) vg.weights.push_back((float)(i % 7) / 7.0f);
+    src->vertex_groups.push_back(vg);
+    /* What make_array did before task 0211, kept here as the reference. */
+    auto reference = [](Mesh &m, int count, Vec3 relative) {
+      AABB b = m.bounds();
+      Vec3 size = b.max - b.min;
+      Vec3 step = Vec3(relative.x * size.x, relative.y * size.y, relative.z * size.z);
+      const Mesh from = m;
+      const uint32_t nv = (uint32_t)from.vert_count();
+      const bool has_uv = from.has_uvs();
+      for (int c = 1; c < count; c++) {
+        uint32_t off = (uint32_t)m.vert_count();
+        for (uint32_t i = 0; i < nv; i++) {
+          m.add_vert(from.positions[i] + step * (float)c);
+          m.copy_vertex_weights(i);
+        }
+        std::vector<uint32_t> fv;
+        for (size_t f = 0; f < from.face_count(); f++) {
+          fv.assign(from.face_verts(f), from.face_verts(f) + from.face_size(f));
+          for (uint32_t &v : fv) v += off;
+          m.add_face(fv.data(), fv.size(), has_uv ? from.uvs.data() + from.face_offsets[f] : nullptr, from.material_of(f));
+        }
+        for (uint64_t k : from.seams) m.set_seam((uint32_t)(k >> 32) + off, (uint32_t)(k & 0xFFFFFFFF) + off, true);
+      }
+    };
+    Mesh want = *src, got = *src;
+    reference(want, 7, {1.1f, 0.0f, 0.3f});
+    meshops::make_array(got, 7, {1.1f, 0.0f, 0.3f}, {0, 0, 0}, 0.0f);
+    bool same_uvs = got.uvs.size() == want.uvs.size();
+    for (size_t i = 0; same_uvs && i < want.uvs.size(); i++) same_uvs = got.uvs[i].x == want.uvs[i].x && got.uvs[i].y == want.uvs[i].y;
+    CHECK(got.positions == want.positions && got.corner_verts == want.corner_verts && got.face_offsets == want.face_offsets);
+    CHECK(same_uvs && got.face_material == want.face_material && got.face_smooth == want.face_smooth && got.seams == want.seams);
+    CHECK(got.vertex_groups.size() == 1 && got.vertex_groups[0].weights == want.vertex_groups[0].weights);
+    /* Lists out of step with the faces come out as they did: UVs too short (not UVs at all), materials too short, a
+     * smooth list too long, a weight list too short, a seam to a vertex past the mesh, a loose edge. */
+    Mesh odd = *primitives::cube();
+    odd.uvs.resize(4);
+    odd.face_material.assign(3, 1);
+    odd.face_smooth.assign(9, 1);
+    odd.smooth = true;
+    VertexGroup short_group;
+    short_group.name = "s";
+    short_group.weights.assign(5, 0.5f);
+    odd.vertex_groups.push_back(short_group);
+    odd.set_seam(0, 1, true);
+    odd.set_seam(9, 10, true);
+    odd.loose_edges.push_back(Mesh::edge_key(0, 9));
+    Mesh odd_want = odd, odd_got = odd;
+    reference(odd_want, 3, {1, 0, 0});
+    meshops::make_array(odd_got, 3, {1, 0, 0}, {0, 0, 0}, 0.0f);
+    CHECK(odd_got.positions == odd_want.positions && odd_got.corner_verts == odd_want.corner_verts && odd_got.face_offsets == odd_want.face_offsets);
+    CHECK(odd_got.uvs.size() == odd_want.uvs.size() && odd_got.face_material == odd_want.face_material && odd_got.face_smooth == odd_want.face_smooth);
+    CHECK(odd_got.seams == odd_want.seams && odd_got.loose_edges == odd_want.loose_edges && odd_got.vertex_groups[0].weights == odd_want.vertex_groups[0].weights);
+    /* With no materials, flags or UVs nothing is added for them. */
+    Mesh plain = *primitives::cube();
+    plain.uvs.clear();
+    meshops::make_array(plain, 4, {1, 0, 0}, {0, 0, 0}, 0.0f);
+    CHECK(plain.uvs.empty() && plain.face_material.empty() && plain.face_smooth.empty() && plain.face_count() == 24);
+  });
+  test("Boolean's conversions: a union of two UV spheres is closed, the same twice, its faces rebuilt as the spheres' quads where whole, most corners' UVs the inputs' own", [] {
+    if (!meshops::boolean_available()) return;
+    MeshPtr a = primitives::uv_sphere(1.0f, 64, 32), b = primitives::uv_sphere(1.0f, 48, 24);
+    const Mat4 shift = Mat4::translate({0.9f, 0.2f, 0.1f});
+    auto once = [&](Mesh &out) {
+      out = *a;
+      std::string err;
+      return meshops::boolean_op(out, *b, shift, meshops::BooleanOp::Union, &err);
+    };
+    Mesh u, v;
+    ScopedTimer t;
+    CHECK(once(u));
+    std::printf("    union of %zu and %zu faces: %zu faces in %.1f ms\n", a->face_count(), b->face_count(), u.face_count(), t.ms());
+    CHECK(once(v));
+    CHECK(u.corner_verts == v.corner_verts && u.face_offsets == v.face_offsets && u.positions == v.positions);
+    CHECK(closed_manifold(u));
+    size_t quads = 0;
+    for (size_t f = 0; f < u.face_count(); f++) quads += u.face_size(f) == 4;
+    CHECK(quads > u.face_count() / 2);
+    std::set<std::pair<float, float>> inputs;
+    for (const Vec2 &t2 : a->uvs) inputs.insert({t2.x, t2.y});
+    for (const Vec2 &t2 : b->uvs) inputs.insert({t2.x, t2.y});
+    /* (Cut faces get new corners where the two meet; their UVs come from Manifold's interpolation.) */
+    size_t cut = 0;
+    for (size_t i = 0; i < u.uvs.size(); i++) cut += inputs.count({u.uvs[i].x, u.uvs[i].y}) == 0;
+    std::printf("    %zu of %zu corners' UVs taken from the inputs as they were\n", u.uvs.size() - cut, u.uvs.size());
+    CHECK(u.has_uvs() && cut < u.uvs.size() / 4);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8152,4 +8253,5 @@ void run_modeling_tests() {
   tests_round208();
   tests_round221();
   tests_round228();
+  tests_round231();
 }
