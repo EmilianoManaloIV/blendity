@@ -2,6 +2,26 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 232): Blendity against Blender 5.2 - the write-up (task 0212)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round ends that roadmap (tasks 0201-0212).
+
+**Added**
+- docs/tasks/0212-blender-parity-write-up.md: how both sides were measured, each gap's cause and fix (tasks 0204-0211),
+  the rows Blendity still trails and why, and where it leads.
+
+**Measured** (Pass 15 again, on a quiet machine):
+- headless: 27 of 59 rows behind Blender in round 223, now 17. Ten turned: FBX, glTF and USD export, duplicating
+  10,000 objects (22x ahead, from 476x behind), extrude, bevel, exit Edit Mode, triangulate, Array;
+- the window: 7 of 9 rows behind, now 1, Edit Mode on 500k faces at 5.6 against 4.9 ms. A 500k sphere 8.2 -> 4.3 ms
+  (Blender 4.8), playing 1,000 keyed objects 17.4 -> 4.1 (11.2), 10,000 cubes 20.1 -> 14.9 (25.5);
+- PERFORMANCE.md's Pass 15 window table is measured again.
+
+**Checked**
+- Docs and one Learn question: the Windows build, and the editor group (the Learn tab's citations among its 787 checks),
+  0 failed.
+
 ## 2026-10-24 (round 231): Boolean and Array on big meshes; the GPU shaders compiled by the build (task 0211)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
