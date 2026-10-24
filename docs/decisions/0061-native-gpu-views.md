@@ -49,6 +49,14 @@ Several scene features still sent a view to the CPU entirely (ADR 0036's list, s
   so nothing changes for the CPU path.
 - Views whose pictures the CPU still works on (depth of field) stay read back.
 
+## Amendment (task 0204, round 224): frames left running; picking's planes when asked
+- A view's frame with nothing to copy back is submitted and left running (`render_async`). Every later use of the
+  card's resources waits for it first; a failed wait marks the card lost, and the editor draws on the CPU.
+- The Scene view's depth and ids stay on the card when it draws the picture, the overlays and the cage. They come
+  back when the CPU reads them (picking, box select, the knife, a material drop) and only while they are still that
+  view's, at its size.
+- Verify mode and the CPU's own overlays keep reading them every frame.
+
 ## Amendment (task 0199, round 219): the default said, and checked on the card
 - Preferences says each window's decision; Auto's fall back to the CPU is said once (a machine without a card is not an
   error).

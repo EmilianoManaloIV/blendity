@@ -755,6 +755,7 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
+  bool scene_planes_deferred_for_test() const { return scene_planes_slot_ >= 0; }
   Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
   bool transform_active_for_test() const { return xf_.active; }  // a G / R / S is running
@@ -2942,6 +2943,9 @@ class Editor {
   void render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
                      const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false,
                      bool planes = true, bool full_size = false);  // planes: depth and ids at full size too (for picking)
+  int scene_planes_slot_ = -1;  // (task 0204: the card's slot holding the Scene view's depth and ids not yet copied back)
+  int scene_planes_w_ = 0, scene_planes_h_ = 0;  // (the size they were drawn at)
+  void ensure_scene_planes();   // (task 0204: those planes into scene_rt_ before the CPU reads them)
   bool planes_wanted_ = true;  // (render_scaled's `planes` while it draws: a filter stack's upscale follows it too)
   bool planes_always_ = false;  // tests: every view copies its planes, as before task 0092
   /* Task 0096 (ADR 0036): the views' deferred 3D on the GPU (gpu_views.cpp). One device for every view, each view its

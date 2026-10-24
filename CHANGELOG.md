@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 224): the views without the wait (task 0204)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 1.
+
+**Changed**
+- Each view's frame is left running on the card while the editor goes on. Before, the editor waited for it every
+  frame.
+- The Scene view's depth and ids stay on the card until a click, a box select, the knife or a material drop asks
+  for them.
+
+**Measured** (a 2560 x 1369 window, a frame, against Blender 5.2):
+- the 500k-face sphere 8.2 -> 3.9 ms (Blender 5.0);
+- a million triangles 6.3 -> 3.5 ms (4.2), Shaded 6.4 -> 3.3 (Material Preview 5.5);
+- 10,000 cubes 20.1 -> 13.9 ms (24.2);
+- Edit Mode on 50k faces 6.2 -> 3.6 ms (5.1), on 500k 16.6 -> 11.7 (5.5);
+- playing 1,000 keyed objects 17.4 -> 11.4 ms (11.3).
+
+Blendity is ahead on the viewport rows now, 1.2-1.7x. Edit Mode on big meshes is task 0205's.
+
+**Checked**
+- A frame drawn again is left running with its planes on the card; a click picks what is there now, on the card and
+  after a switch to the CPU (tests/test_gpu.cpp).
+- An Opus review found, all fixed:
+  - the planes' slot not forgotten when the next frame was drawn some other way, or when another view took it: a
+    click could read old planes, or write past a target that shrank;
+  - the CPU's cage tested against old depth when the card couldn't draw it;
+  - a failed wait ignored (now the card is marked lost and the editor draws on the CPU);
+  - the Profiler's times landing on the wrong frame;
+  - a test that could pass with a stale pick.
+- Unit checks (round 224): Windows, in render-cache verify mode, 11,963, 1 failed under load (994 tests; below), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-open timing test failed under the chain's load - a 153 ms frame against its 100 ms limit, again when run alone while the Linux legs built - and passed twice alone on a quiet machine (its slowest frame 20-22 ms). The sanitizer build's animation and autopose timing checks failed under its load and passed alone.)
+
 ## 2026-10-24 (round 223): why Blendity trails Blender where it does (task 0203)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with

@@ -201,6 +201,7 @@ bool Editor::origin_snap_target(const Recti &view, int mx, int my, Vec3 &world, 
 }
 
 void Editor::pick(const Recti &view, int mx, int my, int mode) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   if (origin_edit_ && !edit_mode_ && mode == SEL_REPLACE) {
     Vec3 p;
     std::string what;
@@ -328,6 +329,7 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
 }
 
 void Editor::box_select(const Recti &view, Recti box, int mode) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   if (mode == SEL_REPLACE) clear_selection();
   Recti b = box.intersect(view);
   std::vector<uint32_t> ids;
@@ -349,6 +351,7 @@ void Editor::box_select(const Recti &view, Recti box, int mode) {
 }
 
 void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   last_op_hidden_ = true;  // selecting something else puts the last operator's panel away
   GameObject *g = edit_object();
   if (!g) return;
@@ -440,6 +443,7 @@ void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
 }
 
 void Editor::edit_box_select(const Recti &view, Recti box, int mode) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   last_op_hidden_ = true;
   GameObject *g = edit_object();
   if (!g) return;
@@ -473,6 +477,7 @@ void Editor::edit_box_select(const Recti &view, Recti box, int mode) {
 }
 
 bool Editor::edit_pick_edge(const Recti &view, int mx, int my, uint32_t &a, uint32_t &b) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   GameObject *g = edit_object();
   if (!g) return false;
   const Mesh &m = **edit_mesh_ptr();

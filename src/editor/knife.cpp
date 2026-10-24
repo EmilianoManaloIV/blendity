@@ -57,6 +57,7 @@ void Editor::ngon_cache(const Mesh &m) {
 /* Where a click would put a line's end: a vertex (Endpoint), an edge's middle
  * (Midpoint) or anywhere along an edge (On Edge). Hidden points don't count. */
 Editor::KnifePoint Editor::knife_hit(const Recti &view, int mx, int my) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   KnifePoint best;
   GameObject *g = edit_object();
   if (!g) return best;

@@ -305,6 +305,12 @@ class Raster {
   virtual void set_instances(const std::vector<RasterInstance> &instances) = 0;
   /* Draws the frame into its slot and waits for the GPU. */
   virtual bool render(const RasterFrame &frame, std::string *error) = 0;
+  /* Task 0204: the frame submitted and left running on the card (nothing copied back): the next call that touches the
+   * card's resources waits for it first, so the CPU goes on meanwhile. A slot's planes come back later by read_back. */
+  virtual bool render_async(const RasterFrame &frame, std::string *error) { return render(frame, error); }
+  /* The card's own times of the frames left running that have finished since the last call (render_async's own times()
+   * have no passes: they come here once the card is done), for the Profiler. */
+  virtual RasterTimes take_async_times() { return {}; }
   virtual RasterTimes times() const = 0;
   /* (A): a slot's last frame into CPU memory; any pointer may be null (not read back then). */
   virtual bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;

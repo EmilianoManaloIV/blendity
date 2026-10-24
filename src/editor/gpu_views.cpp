@@ -777,6 +777,7 @@ int Editor::gpu_slot(const RenderTarget &rt) {
     if (gpu_slot_rt_[i] == &rt) best = i;
     else if (gpu_slot_rt_[best] != &rt && gpu_slot_used_[i] < gpu_slot_used_[best]) best = i;
   }
+  if (best == scene_planes_slot_ && gpu_slot_rt_[best] != &rt) scene_planes_slot_ = -1;  // (task 0204: another view takes the slot)
   gpu_slot_rt_[best] = &rt;
   gpu_slot_used_[best] = gpu_calls_ + 1;
   return best;
@@ -1084,12 +1085,30 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const bool filtered = filters && !filters->passes.empty();  // (task 0197: the CPU's passes work on the picture afterwards)
   const bool to_card = card_present_ && !dof && !filtered && card_view_at(rt, card_x, card_y);
   uint32_t *color = to_card ? nullptr : contiguous ? rt.color : gpu_color_.data();
-  const bool want_depth = !rt.depth.empty() && (planes_wanted_ || dof || filtered), want_ids = !rt.ids.empty() && (planes_wanted_ || filtered);
+  /* Task 0204: the Scene view's depth and ids stay on the card when the card draws its picture and overlays: a click, a
+   * box select, the knife or a material drop asks for them (ensure_scene_planes), not every frame. Not in verify mode
+   * (it compares the planes every frame), nor when the CPU draws the overlays (they test its depth). */
+  if (scene_full_call_) scene_planes_slot_ = -1;
+  const bool defer_planes = scene_full_call_ && &rt == &scene_rt_ && to_card && overlays && (!edit_mode_ || cage) && !dof && !filtered &&
+                            !cache_verify_ && !gpu_split_readback_for_test_;
+  const bool want_depth = !rt.depth.empty() && !defer_planes && (planes_wanted_ || dof || filtered),
+             want_ids = !rt.ids.empty() && !defer_planes && (planes_wanted_ || filtered);
   float *depth = want_depth ? rt.depth.data() : nullptr;
   uint32_t *ids = want_ids ? rt.ids.data() : nullptr;
   /* Task 0160 (ADR 0051): the frame and its copies out in one submission, one wait (the split path kept for the test
-   * that checks the picture is the same). */
-  if (ok) ok = gpu_split_readback_for_test_ ? g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err) : g->render_read(fr, color, depth, ids, &err);
+   * that checks the picture is the same). Task 0204: with nothing to copy back the frame is left running on the card
+   * while the editor goes on (the present, or the next use of the card, waits for it). */
+  const bool nothing_back = !color && !depth && !ids && !want_hdr;
+  if (ok) {
+    if (gpu_split_readback_for_test_) ok = g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err);
+    else if (nothing_back) ok = g->render_async(fr, &err);
+    else ok = g->render_read(fr, color, depth, ids, &err);
+  }
+  if (ok && defer_planes) scene_planes_slot_ = slot, scene_planes_w_ = rt.width, scene_planes_h_ = rt.height;
+  if (ok) {  // (task 0204: the card's times of the frames left running that finished meanwhile)
+    const gpu::RasterTimes at = g->take_async_times();
+    prof_.ms_gpu_shadow += at.shadow, prof_.ms_gpu_gbuffer += at.gbuffer, prof_.ms_gpu_lighting += at.lighting;
+  }
   if (ok) {
     const gpu::RasterTimes t = g->times();  // (task 0159: the card's own time in each pass, for the Profiler)
     prof_.ms_gpu_shadow += t.shadow, prof_.ms_gpu_gbuffer += t.gbuffer, prof_.ms_gpu_lighting += t.lighting;
@@ -1122,6 +1141,25 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   overlays_on_gpu_ = overlays_on_gpu_ || overlays;
   prof_.gpu_overlay_frames += overlays ? 1 : 0;
   return true;
+}
+
+/* Task 0204: the Scene view's depth and ids, left on the card by its last frame, copied into scene_rt_ before the CPU
+ * reads them (picking, box select, the knife, a material drop). Once a frame at most: they stay until the next frame. */
+void Editor::ensure_scene_planes() {
+  if (scene_planes_slot_ < 0) return;
+  const int slot = scene_planes_slot_;
+  scene_planes_slot_ = -1;
+  RenderTarget &rt = scene_rt_;
+  /* (Still the Scene view's slot, at the size it drew: else the target's own planes are newer than the card's.) */
+  if (gpu_slot_rt_[slot] != &rt || scene_planes_w_ != rt.width || scene_planes_h_ != rt.height) return;
+  std::string err;
+  if (gpu_view_ && rt.depth.size() == (size_t)rt.width * rt.height &&
+      gpu_view_->read_back(slot, nullptr, rt.depth.data(), rt.ids.size() == rt.depth.size() ? rt.ids.data() : nullptr, &err))
+    return;
+  /* (No card, or it failed: nothing is picked rather than a stale pick.) */
+  std::fill(rt.depth.begin(), rt.depth.end(), 1.0f);
+  std::fill(rt.ids.begin(), rt.ids.end(), 0u);
+  if (!err.empty()) Log::warn("The Scene view's depth couldn't come back from the GPU: %s", err.c_str());
 }
 
 /* Task 0197: the picture in linear light into the target, as Renderer3D's begin() and deferred pass fill it ("none",
@@ -1269,6 +1307,7 @@ bool Editor::card_frame_for_test(std::vector<uint32_t> &out) {
 /* The card set aside (an error): what was kept there is forgotten with it, so a card opened again - perhaps at the
  * same address - gets everything again. */
 void Editor::gpu_view_drop() {
+  scene_planes_slot_ = -1;  // (task 0204: the card's planes go with it)
   card_forget_windows();  // (task 0193)
   gpu_meshes_.clear();
   gpu_textures_.clear();

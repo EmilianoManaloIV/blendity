@@ -2723,6 +2723,71 @@ static void tests_round219() {
   });
 }
 
+/* ---------------------------------------------------------------- round 224: the views without the wait (task 0204) */
+static void tests_round224() {
+  test("gpu views: with the card presenting, the Scene view's frame is left running and its depth and ids stay on the card until a click asks; a click picks what is there now, never what was (on the card or after a switch to the CPU), and verify mode reads them every frame (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.set_render_cache_verify(false);  // (verify mode compares the planes every frame: it reads them back)
+    ed.viewport_device_for_test(2);
+    ed.card_present_for_test(true);
+    ed.command("camera 25 20 7 0 0.5 0");
+    ed.command("select Main Camera");
+    r34_steps(ed, 4);
+    if (!ed.scene_on_gpu_for_test() || ed.card_views_for_test() == 0) {
+      std::printf("    the card didn't present the Scene view here (%s): skipped\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    /* A frame drawn again (the camera moved): one submission, left running, its planes left on the card. */
+    ed.command("camera 25.5 20 7 0 0.5 0");
+    const uint64_t s0 = ed.gpu_submits_for_test();
+    r34_steps(ed, 1);
+    const uint64_t sent = ed.gpu_submits_for_test() - s0;
+    std::printf("    a frame drawn again: %llu submission(s), planes left on the card: %s\n", (unsigned long long)sent,
+                ed.scene_planes_deferred_for_test() ? "yes" : "no");
+    CHECK(sent >= 1 && ed.scene_planes_deferred_for_test());
+    /* A click on the Cube picks it: the ids come back when the click asks. */
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    int x = 0, y = 0;
+    CHECK(cube && ed.project_to_window(cube->world_position(), x, y));
+    if (!cube) return;
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.selected_object() == cube);
+    /* The Cube moved away: a click where it was picks nothing (the card's planes of the frame before would). */
+    cube->set_local_position(cube->local().position + Vec3(40.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("Move Cube");
+    r34_steps(ed, 2);
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    std::printf("    a click where the Cube was: %s\n", ed.selected_object() ? ed.selected_object()->name.c_str() : "nothing");
+    CHECK(ed.selected_object() != cube);
+    /* Back where it was; then on the CPU, moved away again: the click reads the CPU's planes, not the card's last. */
+    cube->set_local_position(cube->local().position - Vec3(40.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("Move Cube back");
+    r34_steps(ed, 3);
+    ed.viewport_device_for_test(1);
+    cube->set_local_position(cube->local().position + Vec3(40.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("Move Cube");
+    r34_steps(ed, 2);
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.selected_object() != cube);
+    /* Verify mode reads them back every frame. */
+    ed.viewport_device_for_test(2);
+    ed.set_render_cache_verify(true);
+    ed.command("camera 26 20 7 0 0.5 0");
+    r34_steps(ed, 3);
+    CHECK(!ed.scene_planes_deferred_for_test());
+    ed.card_present_for_test(false);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2743,4 +2808,5 @@ void run_gpu_tests() {
   tests_round216();
   tests_round217();
   tests_round219();
+  tests_round224();
 }

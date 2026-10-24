@@ -2031,6 +2031,7 @@ class VulkanRaster final : public Raster {
   }
 
   int add_mesh(const std::vector<RasterVertex> &v, const std::vector<uint32_t> &idx, std::string *err) override {
+    if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
     Mesh m;
     m.vertices = (uint32_t)v.size();
     m.indices = (uint32_t)idx.size();
@@ -2056,6 +2057,7 @@ class VulkanRaster final : public Raster {
   }
 
   bool update_mesh(int mesh, const std::vector<RasterVertex> &v, const std::vector<uint32_t> *idx, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
     Mesh &m = meshes_[(size_t)mesh];
     if (v.size() != m.vertices || (idx && idx->size() != m.indices)) return fail(err, "a mesh of another size");
@@ -2086,6 +2088,7 @@ class VulkanRaster final : public Raster {
   }
 
   bool read_mesh(int mesh, std::vector<RasterVertex> &v, std::vector<uint32_t> &idx, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
     const Mesh &m = meshes_[(size_t)mesh];
     const size_t vb = (size_t)m.vertices * sizeof(RasterVertex), ib = (size_t)m.indices * 4;
@@ -2124,6 +2127,7 @@ class VulkanRaster final : public Raster {
   bool can_draw_hdr() const override { return pl_hdr_ != VK_NULL_HANDLE; }
   /* Task 0197: the slot's last picture in linear light, rgba per pixel (x -1: none there), read back on its own. */
   bool read_hdr(int slot, float *rgba, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (slot < 0 || slot >= kSlots || !slots_[slot].fb_hdr) return fail(err, "no picture kept in linear light");
     const Slot &sl = slots_[slot];
     const size_t px = (size_t)sl.hdr.w * sl.hdr.h;
@@ -2139,12 +2143,14 @@ class VulkanRaster final : public Raster {
     return true;
   }
   void set_probe_volume(std::vector<float> packed) override {
+    settle();  // (task 0204: a frame left running on the card finishes first)
     probe_volume_ = std::move(packed);
     probe_dirty_ = true;
   }
   bool can_highlight_faces() const override { return geometry_; }
 
   int add_texture(const Texture &t, std::string *err) override {
+    if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
     if (t.levels.empty()) {
       fail(err, "an empty texture");
       return -1;
@@ -2187,6 +2193,7 @@ class VulkanRaster final : public Raster {
     return id;
   }
   void remove_texture(int texture) override {
+    settle();  // (task 0204: a frame left running on the card finishes first)
     if (texture < 0 || (size_t)texture >= texs_.size() || !texs_[(size_t)texture].live) return;
     TexSlot &s = texs_[(size_t)texture];
     s.live = false;
@@ -2194,13 +2201,16 @@ class VulkanRaster final : public Raster {
     tex_tables_dirty_ = true;
   }
   bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     return set_cage(cage_v_, cage_nv_, v.data(), sizeof(CageVertex), v.size(), ranges, err);
   }
   bool set_cage_edges(const std::vector<CageEdge> &e, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     return set_cage(cage_e_, cage_ne_, e.data(), sizeof(CageEdge), e.size(), ranges, err);
   }
 
   void remove_mesh(int mesh) override {
+    settle();  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return;
     free_mesh(meshes_[(size_t)mesh]);  // (no wait: every submission here is waited for before its call returns)
   }
@@ -2208,6 +2218,7 @@ class VulkanRaster final : public Raster {
   void set_instances(const std::vector<RasterInstance> &in) override { instances_ = in; }
 
   bool set_view_lut(uint64_t key, const float *rgb, int size, float log_min, float log_max, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (key == lut_key_ && lut_size_ == size) return true;
     std::vector<float> rgba((size_t)size * size * size * 4);
     for (size_t i = 0; i < rgba.size() / 4; i++) {
@@ -2230,13 +2241,55 @@ class VulkanRaster final : public Raster {
   }
 
   bool render(const RasterFrame &fr, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (!record_frame(fr, err) || !submit_wait(err)) return false;
     read_times();
     return true;
   }
 
+  /* Task 0204: the frame recorded and submitted, not waited for. Every entry point settles first (the command buffer,
+   * the frame's uniforms and the staging the frame reads stay untouched until the card is done with them). */
+  bool render_async(const RasterFrame &fr, std::string *err) override {
+    if (!settle(err)) return false;
+    if (!record_frame(fr, err)) return false;
+    submits_++;
+    ScopedTimer wall;
+    f_.vkEndCommandBuffer(cmd_);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd_;
+    f_.vkResetFences(dev_, 1, &fence_);
+    if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS) return fail(err, info_.name + ": the GPU refused the frame");
+    in_flight_ = true;
+    times_ = RasterTimes{};
+    times_.submit_wall = wall.ms();  // (the submission alone; the card's own times come by take_async_times once it is done)
+    return true;
+  }
+  RasterTimes take_async_times() override {
+    const RasterTimes t = async_done_;
+    async_done_ = RasterTimes{};
+    return t;
+  }
+  /* The frame left running, finished (its times kept for take_async_times). False when the card stopped responding: then
+   * for good (lost_), so every later use fails and the editor draws on the CPU, as a failed wait always did. */
+  bool settle(std::string *err = nullptr) {
+    if (lost_) return fail(err, info_.name + ": the GPU stopped responding");
+    if (!in_flight_) return true;
+    if (f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS) {
+      lost_ = true;
+      return fail(err, info_.name + ": the GPU stopped responding");
+    }
+    in_flight_ = false;
+    read_times();
+    async_done_.shadow += times_.shadow, async_done_.gbuffer += times_.gbuffer, async_done_.lighting += times_.lighting;
+    async_done_.total += times_.total;
+    times_ = RasterTimes{};
+    return true;
+  }
+
   /* Task 0160: the frame's passes and the copies out in one command buffer, one wait. */
   bool render_read(const RasterFrame &fr, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     const size_t px = (size_t)fr.width * fr.height;
     if (!readback_buffer(px, err)) return false;  // (before the frame is recorded: record_frame takes the queued mesh copies)
     if (!record_frame(fr, err)) return false;
@@ -2319,6 +2372,7 @@ class VulkanRaster final : public Raster {
   uint64_t submits() const override { return submits_; }
 
   bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (slot < 0 || slot >= kSlots) return fail(err, "no such view slot");
     const Slot &sl = slots_[slot];
     const size_t px = (size_t)sl.color.w * sl.color.h;
@@ -2359,6 +2413,7 @@ class VulkanRaster final : public Raster {
   }
 
   int attach_window(void *display, void *window, std::string *err) override {
+    if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
     if (!swapchain_ok_ || !pl_compose_) return fail(err, info_.name + " has no swapchains"), -1;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     if (!make_surface(display, window, surface, err)) return -1;
@@ -2385,6 +2440,7 @@ class VulkanRaster final : public Raster {
   }
 
   void detach_window(int id) override {
+    settle();  // (task 0204: a frame left running on the card finishes first)
     if (id < 0 || (size_t)id >= wins_.size() || !wins_[(size_t)id].live) return;
     f_.vkDeviceWaitIdle(dev_);
     Win &w = wins_[(size_t)id];
@@ -2398,6 +2454,7 @@ class VulkanRaster final : public Raster {
 
   PresentResult present_window(int id, const uint32_t *ui, int width, int height, const std::vector<PresentRect> &rects, bool all,
                                const std::vector<PresentView> &views, std::string *err) override {
+    if (lost_) return fail(err, info_.name + ": the GPU stopped responding"), Failed;  // (task 0204: the views' frame left running is ordered before this on the queue: no wait)
     if (id < 0 || (size_t)id >= wins_.size() || !wins_[(size_t)id].live) return fail(err, "no such window"), Failed;
     Win &w = wins_[(size_t)id];
     if (width <= 0 || height <= 0) return Skipped;
@@ -2440,6 +2497,7 @@ class VulkanRaster final : public Raster {
   }
 
   bool compose_read(const uint32_t *ui, int width, int height, const std::vector<PresentView> &views, uint32_t *out, std::string *err) override {
+    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (!pl_compose_) return fail(err, info_.name + " can't compose windows");
     Win &w = off_;
     if (w.extent.width != (uint32_t)width || w.extent.height != (uint32_t)height) {
@@ -2830,6 +2888,9 @@ class VulkanRaster final : public Raster {
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
+  bool in_flight_ = false;  // (task 0204: a frame submitted by render_async and not yet waited for)
+  bool lost_ = false;       // (its wait failed: the card stopped responding)
+  RasterTimes async_done_;  // (the finished async frames' passes, not yet taken)
   /* Task 0198: the presents' own command buffers and fences, two in flight (a present isn't waited for until its
    * slot comes round again). */
   VkCommandBuffer pcmd_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -2990,12 +3051,14 @@ class VulkanRaster final : public Raster {
   }
 
   void begin() {
+    settle();  // (task 0204: the command buffer may still be on the card; when it stopped responding, the submit after fails)
     f_.vkResetCommandBuffer(cmd_, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     f_.vkBeginCommandBuffer(cmd_, &bi);
   }
   bool submit_wait(std::string *err) {
+    if (lost_) return fail(err, info_.name + ": the GPU stopped responding");  // (task 0204: the command buffer may still be pending)
     submits_++;
     ScopedTimer wall;
     f_.vkEndCommandBuffer(cmd_);
@@ -4031,6 +4094,7 @@ class VulkanRaster final : public Raster {
   }
 
   void destroy() {
+    settle();
     if (!dev_) return;
     f_.vkDeviceWaitIdle(dev_);
     for (size_t i = 0; i < wins_.size(); i++) detach_window((int)i);

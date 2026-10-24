@@ -116,7 +116,10 @@ void Editor::draw_scene_view(const Recti &r) {
     else {
       std::vector<float> depth0;
       std::vector<uint32_t> ids0;
-      if (hit) depth0 = scene_rt_.depth, ids0 = scene_rt_.ids;  // what picking would have read
+      if (hit) {  // (verify mode: what picking would have read - task 0204: from the card, if it still has them)
+        ensure_scene_planes();
+        depth0 = scene_rt_.depth, ids0 = scene_rt_.ids;
+      }
       render_scene_view(view);
       prof_.view_renders++;
       if (hit && view_cache_verify(scene_cache_, view, "Scene view") && (depth0 != scene_rt_.depth || ids0 != scene_rt_.ids)) {
@@ -439,6 +442,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
 }
 
 void Editor::render_scene_view(const Recti &view) {
+  scene_planes_slot_ = -1;  // (task 0204: whoever draws this frame writes its planes; the card says so again if it keeps them)
   scene_rt_.attach(fb_, view);
   float aspect = view.w / (float)std::max(1, view.h);
   Mat4 v = cam_.view(), p = cam_.proj(aspect);

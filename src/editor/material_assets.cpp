@@ -206,6 +206,7 @@ void Editor::update_asset_drag() {
 
 /* A texture asset dropped on a Hierarchy row or an object in the Scene view: that object's first material uses it. */
 bool Editor::drop_texture_asset(const std::string &abs_path, int mx, int my) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   const std::string rel = make_asset_relative(abs_path);
   GameObject *g = nullptr;
   for (auto &r : drop_rows_)
@@ -225,6 +226,7 @@ bool Editor::drop_texture_asset(const std::string &abs_path, int mx, int my) {
 }
 
 bool Editor::drop_asset(const std::string &path, int mx, int my, MaterialPtr given) {
+  ensure_scene_planes();  // (task 0204: the Scene view's depth and ids, if still on the card)
   const std::string ext = fs::extension(path);
   if (!given && ext != ".mat") {
     /* An image onto a material's texture field. */
