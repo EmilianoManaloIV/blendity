@@ -150,6 +150,7 @@ struct FrameProfile {
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
   uint64_t gpu_overlay_frames = 0;                        // task 0192: Scene view frames whose overlays the card drew
   uint64_t gpu_face_dot_frames = 0;                       // task 0192: Edit Mode frames whose Face mode dots the card drew
+  uint64_t gpu_cage_vert_builds = 0;                      // task 0205: frames whose cage vertices (and Face mode's dots) were worked out again
   double ms_gpu = 0;
   /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
    * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
@@ -180,6 +181,7 @@ struct FrameProfile {
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
     gpu_overlay_frames += o.gpu_overlay_frames, gpu_face_dot_frames += o.gpu_face_dot_frames;
+    gpu_cage_vert_builds += o.gpu_cage_vert_builds;
     ms_gpu += o.ms_gpu;
     ms_gpu_shadow += o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
   }
@@ -3022,6 +3024,7 @@ class Editor {
   std::vector<gpu::CageEdge> gpu_cage_e_;
   const gpu::Raster *gpu_cage_owner_ = nullptr;
   uint64_t gpu_cage_edges_key_ = 0;  // what the edges' colours were worked out from
+  uint64_t gpu_cage_verts_key_ = 0;  // (task 0205) what the vertices were worked out from: the mesh's version, the object's matrix, the dots' colours
   bool gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err);
   uint32_t cage_edge_color(const Mesh &m, uint32_t a, uint32_t b) const;  // 0: not drawn
   uint32_t cage_dot_color(size_t v) const;

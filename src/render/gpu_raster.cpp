@@ -3258,9 +3258,9 @@ class VulkanRaster final : public Raster {
       f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_ov_point_);
       f_.vkCmdDraw(cmd_, 6, (uint32_t)fr.cage_dots.size(), 0, (uint32_t)fr.overlay_points.size());
     }
-    if (cage_nv_ && fr.cage_point_radius > 0.0f) {
+    if (cage_nv_ > fr.cage_point_first && fr.cage_point_radius > 0.0f) {
       f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_cage_point_);
-      f_.vkCmdDraw(cmd_, 6, cage_nv_, 0, 0);
+      f_.vkCmdDraw(cmd_, 6, cage_nv_ - fr.cage_point_first, 0, fr.cage_point_first);  // (gl_InstanceIndex counts from the first)
     }
   }
   /* A cage array on the card: whole (into a buffer made again when it grows), or only the ranges given. */

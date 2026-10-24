@@ -1355,23 +1355,44 @@ uint64_t Editor::cage_edges_key(const Mesh &m) const {
 bool Editor::gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err) {
   GameObject *obj = edit_object();
   if (!obj || !edit_mesh_ptr() || !*edit_mesh_ptr() || !g.can_draw_cage()) return false;
-  if (elem_ == EditElement::Face && !g.can_draw_overlays()) return false;  // (Face mode's dots go with the overlays: task 0192)
   const Mesh &m = **edit_mesh_ptr();
   const Mat4 &w = obj->world_matrix();
   vert_sel_.resize(m.vert_count(), 0);
   if (ngon_mode_) ngon_cache(m);
-  const bool dots = elem_ == EditElement::Vertex;
-  std::vector<gpu::CageVertex> v(m.vert_count());
-  JobSystem::global().parallel_for((int64_t)v.size(), 4096, [&](int64_t a, int64_t b) {
-    for (int64_t i = a; i < b; i++) {
-      const Vec3 p = w.point(m.positions[(size_t)i]);
-      v[(size_t)i] = {{p.x, p.y, p.z}, dots ? cage_dot_color((size_t)i) : 0u};
-    }
-  });
+  const bool dots = elem_ == EditElement::Vertex, face_dots = elem_ == EditElement::Face;
   if (gpu_cage_owner_ != &g) {  // (a card opened again holds nothing yet)
     gpu_cage_v_.clear();
     gpu_cage_e_.clear();
+    gpu_cage_verts_key_ = 0;
     gpu_cage_owner_ = &g;
+  }
+  /* Task 0205: the vertices again only when what they are worked out from changed (a frame that only redraws - an orbit,
+   * the views drawn again - sends nothing and builds nothing: on 500k faces that was 3 ms a frame). */
+  uint64_t vkey = kFnvBasis;
+  {
+    const uint64_t head[6] = {m.uid.v, m.version, m.deform_version, (uint64_t)elem_, (uint64_t)m.vert_count(), (uint64_t)ngon_mode_};
+    vkey = mix_bytes(vkey, head, sizeof(head));
+    vkey = mix_bytes(vkey, w.m, sizeof(w.m));
+    if (dots) vkey = mix_bytes(vkey, vert_sel_.data(), vert_sel_.size());
+    if (face_dots) vkey = mix_bytes(vkey, face_sel_.data(), face_sel_.size());
+  }
+  const bool verts_same = vkey == gpu_cage_verts_key_ && gpu_cage_v_.size() >= m.vert_count();
+  std::vector<gpu::CageVertex> v;
+  if (!verts_same) {
+    /* Task 0205: Face mode's dots go after the mesh's vertices, kept on the card with them (they were worked out and
+     * sent again every frame: on 500k faces, 10 ms of it). */
+    std::vector<Vec3> fpos;
+    std::vector<uint32_t> fcol;
+    if (face_dots) edit_face_dots(m, w, fpos, fcol);
+    prof_.gpu_cage_vert_builds++;
+    v.resize(m.vert_count() + fpos.size());
+    JobSystem::global().parallel_for((int64_t)m.vert_count(), 4096, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) {
+        const Vec3 p = w.point(m.positions[(size_t)i]);
+        v[(size_t)i] = {{p.x, p.y, p.z}, dots ? cage_dot_color((size_t)i) : 0u};
+      }
+    });
+    for (size_t i = 0; i < fpos.size(); i++) v[m.vert_count() + i] = {{fpos[i].x, fpos[i].y, fpos[i].z}, fcol[i]};
   }
   /* The edges' colours follow the selection, the topology (its seams), the mode, and in N-gon mode the shape (which
    * edges lie inside a flat region): worked out again only when one of them changed. */
@@ -1389,32 +1410,27 @@ bool Editor::gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err) {
     });
   }
   std::vector<std::pair<uint32_t, uint32_t>> vr, er;
-  const bool vpart = changed_runs(v, gpu_cage_v_, vr), epart = edges_same || changed_runs(e, gpu_cage_e_, er);
+  const bool vpart = verts_same || changed_runs(v, gpu_cage_v_, vr), epart = edges_same || changed_runs(e, gpu_cage_e_, er);
   uint64_t bytes = 0;
   for (const auto &r : vr) bytes += (uint64_t)r.second * sizeof(gpu::CageVertex);
   for (const auto &r : er) bytes += (uint64_t)r.second * sizeof(gpu::CageEdge);
   bytes += vpart ? 0 : v.size() * sizeof(gpu::CageVertex);
   bytes += epart ? 0 : e.size() * sizeof(gpu::CageEdge);
-  if (!g.set_cage_vertices(v, vpart ? &vr : nullptr, &err) || (!edges_same && !g.set_cage_edges(e, epart ? &er : nullptr, &err))) {
+  if ((!verts_same && !g.set_cage_vertices(v, vpart ? &vr : nullptr, &err)) || (!edges_same && !g.set_cage_edges(e, epart ? &er : nullptr, &err))) {
     gpu_cage_owner_ = nullptr;  // (what the card holds is unknown: everything again next time)
-    gpu_cage_edges_key_ = 0;
+    gpu_cage_edges_key_ = gpu_cage_verts_key_ = 0;
     return false;
   }
   prof_.gpu_cage_bytes += bytes;
-  gpu_cage_v_ = std::move(v);
+  if (!verts_same) gpu_cage_v_ = std::move(v);
+  gpu_cage_verts_key_ = vkey;
   if (!edges_same) gpu_cage_e_ = std::move(e);
   gpu_cage_edges_key_ = key;
-  if (elem_ == EditElement::Face) {  // task 0192: Face mode's dots over the cage
-    std::vector<Vec3> pos;
-    std::vector<uint32_t> col;
-    const float r = edit_face_dots(m, w, pos, col);
-    fr.cage_dots.resize(pos.size());
-    for (size_t i = 0; i < pos.size(); i++) fr.cage_dots[i] = {{pos[i].x, pos[i].y, pos[i].z}, col[i], r, 1u};
-    prof_.gpu_face_dot_frames++;
-  }
+  if (face_dots) prof_.gpu_face_dot_frames++;  // task 0192: Face mode's dots over the cage (task 0205: the cage's vertices after the mesh's)
   fr.cage = true;
   fr.cage_bias = kCageBias;
-  fr.cage_point_radius = dots ? cage_dot_radius() : 0.0f;
+  fr.cage_point_radius = dots ? cage_dot_radius() : face_dots ? ui_.px(ngon_mode_ ? 2.5f : 2.0f) : 0.0f;  // (edit_face_dots' radii, at this frame's scale)
+  fr.cage_point_first = face_dots ? (uint32_t)m.vert_count() : 0u;
   return true;
 }
 

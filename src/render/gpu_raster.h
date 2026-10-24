@@ -223,6 +223,7 @@ struct RasterFrame {
    * its vertices as dots of this radius in pixels (0: no dots). */
   bool cage = false;
   float cage_bias = 0.0f, cage_point_radius = 0.0f;
+  uint32_t cage_point_first = 0;  // (task 0205: the dots are the cage's vertices from here on - Face mode's after the mesh's)
   /* Task 0192: the overlays over the picture, before the cage, in the CPU's order: runs of lines, dots or outlines as
    * they were recorded (an outline run's outlines are drawn in one pass, which reads them all). */
   std::vector<OverlayLine> overlay_lines;

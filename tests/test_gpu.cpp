@@ -2788,6 +2788,71 @@ static void tests_round224() {
   });
 }
 
+/* ---------------------------------------------------------------- round 225: Edit Mode's cage kept on the card (task 0205) */
+static void tests_round225() {
+  test("gpu views: Edit Mode's cage stays on the card - a frame that only draws again sends nothing, in Vertex and Face mode; a face selected sends a few bytes; Face mode's dots look as the CPU draws them (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 96, 64);
+    big->add<MeshRenderer>();
+    big->set_local_position({0.0f, 1.0f, 0.0f});
+    ed.commit_change("add Big");
+    ed.command("overlay grid off");
+    ed.command("select Big");
+    ed.command("camera 0 15 4 0 1 0");
+    ed.viewport_device_for_test(2);
+    for (const char *mode : {"edit vertex", "edit face"}) {
+      ed.command(mode);
+      r34_steps(ed, 3);
+      const FrameProfile p0 = ed.frame_profile_totals();
+      ed.command("camera 1 15 4 0 1 0");  // (the views draw again; the cage is as it was)
+      r34_steps(ed, 2);
+      ed.command("camera 0 15 4 0 1 0");
+      r34_steps(ed, 2);
+      const FrameProfile p1 = ed.frame_profile_totals();
+      std::printf("    %s: %llu frames with the cage on the card, its vertices worked out again %llu times, %llu bytes sent while only drawing again\n",
+                  mode, (unsigned long long)(p1.gpu_cage_frames - p0.gpu_cage_frames), (unsigned long long)(p1.gpu_cage_vert_builds - p0.gpu_cage_vert_builds),
+                  (unsigned long long)(p1.gpu_cage_bytes - p0.gpu_cage_bytes));
+      CHECK(p1.gpu_cage_frames - p0.gpu_cage_frames >= 2);
+      CHECK(p1.gpu_cage_vert_builds == p0.gpu_cage_vert_builds);
+      CHECK(p1.gpu_cage_bytes == p0.gpu_cage_bytes);
+    }
+    /* A face selected: its dot's colour goes up, not the cage. */
+    const FrameProfile p2 = ed.frame_profile_totals();
+    ed.command("fsel 3000");
+    r34_steps(ed, 2);
+    const uint64_t sent = ed.frame_profile_totals().gpu_cage_bytes - p2.gpu_cage_bytes;
+    CHECK(ed.frame_profile_totals().gpu_cage_vert_builds - p2.gpu_cage_vert_builds == 1);  // (the dots' colours: worked out once)
+    const uint64_t whole = (uint64_t)(big->get<MeshFilter>()->mesh->vert_count() + big->get<MeshFilter>()->mesh->face_count()) * sizeof(gpu::CageVertex);
+    std::printf("    a face selected: %llu bytes sent (the cage's vertices and dots are %llu)\n", (unsigned long long)sent, (unsigned long long)whole);
+    CHECK(sent > 0 && sent * 10 < whole);
+    /* Face mode's dots on the card, as the CPU draws them. */
+    const std::vector<uint32_t> gpu = r34_crop(ed, ed.scene_view_rect());
+    ed.viewport_device_for_test(1);
+    big->set_local_position({0.0f, 1.0001f, 0.0f});  // (a change: the CPU draws again)
+    r34_steps(ed, 2);
+    big->set_local_position({0.0f, 1.0f, 0.0f});
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> cpu = r34_crop(ed, ed.scene_view_rect());
+    double sum = 0;
+    size_t within = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((cpu[i] >> k) & 255) - (int)((gpu[i] >> k) & 255)));
+      sum += worst;
+      within += worst <= 3;
+    }
+    const double mean = cpu.empty() ? 0 : sum / (double)cpu.size(), within3 = cpu.empty() ? 0 : (double)within / (double)cpu.size();
+    std::printf("    Face mode on the card against the CPU: mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, within3 * 100);
+    CHECK(cpu.size() == gpu.size() && mean < 1.0 && within3 >= 0.99);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2809,4 +2874,5 @@ void run_gpu_tests() {
   tests_round217();
   tests_round219();
   tests_round224();
+  tests_round225();
 }

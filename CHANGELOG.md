@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 225): Edit Mode's cage kept on the card (task 0205)
+
+**Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
+Blender 3D." This round fixes task 0203's rank 2.
+
+**Changed**
+- The Edit Mode cage's vertices are worked out again only when the mesh, the object's matrix, the mode or the
+  selection changes. Before, they were worked out again every frame and compared with the card's copy.
+- Face mode's dots are kept on the card with the cage. Before, they were worked out and sent every frame.
+
+**Measured** (a 2560 x 1369 window, a frame):
+- Edit Mode on the 500k-face sphere: 11.7 -> 6.0 ms (Blender 5.5);
+- in Face mode: 22.1 -> 8.2 ms;
+- on the 50k sphere: 3.6 -> 3.2 ms (Blender 5.2).
+
+**Checked**
+- A frame that only draws again rebuilds and sends nothing, and a face selected sends 96 bytes; Face mode on the card
+  matches the CPU's picture (tests/test_gpu.cpp).
+- An Opus review found, all fixed:
+  - Face mode's dot radius kept from the last rebuild (a change of UI scale wouldn't show);
+  - a test that the old code also passed (now the Profiler counts the cage's rebuilds, and the test checks there are
+    none while only drawing again);
+  - Face mode sent to the CPU without the overlays' pipelines, which it no longer needs.
+- Unit checks (round 225): Windows, in render-cache verify mode, 11,972, 1 failed under load (994 tests; below), 0 stale
+  pictures. Linux with libraries: 11,515, 0 failed. Sanitizer build: 11,391, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor_render`: 0 problems. (The gpu group's slow-card timing tests failed under the chain's load - the slow GPU open, and F12 on a slow card with frames of 58-201 ms, also when run alone while the Linux legs built - and passed twice alone on a quiet machine (frames of 1.3-14 ms)..)
+
 ## 2026-10-24 (round 224): the views without the wait (task 0204)
 
 **Asked:** "Measure why and improve performance in Blendity by comparing all editor features and performance with
