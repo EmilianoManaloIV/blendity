@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-24 (round 235): panels follow the finger (task 0215)
+
+**Asked:** the plan for a 2-in-1 - in Tablet Mode a finger scrolls lists, and targets are sized for it.
+
+**Changed** (Tablet Mode):
+- **Scrolling:** a finger dragging up or down scrolls any list or panel under it - Hierarchy, Inspector, Project,
+  Console, Learn, the tool windows - and a flick glides on. Nothing it pressed clicks.
+- **Sliders and numbers** dragged sideways still edit; a tap sets a slider.
+- **Rows and files:** a finger taps them to select; dragging them (reparenting, assets onto objects) is the pen's and
+  the mouse's.
+- **Targets:** the gizmos and Edit Mode's pick radius already grow with Tablet Mode's 1.5x UI scale.
+
+**Checked**
+- Scripted finger drags in the Hierarchy, in Tablet Mode and out of it, a flick, the scrollbar and a multi-selection
+  (tests/test_input.cpp). The tests run on the editor's clock, stepped 20 ms a frame.
+- An Opus review found five things, all fixed:
+  - a scroll that began on a selected Hierarchy row collapsed a multi-selection;
+  - a scroll that began on a slider or a number first changed its value; a finger now moves them only once it has gone
+    sideways, and once it has, the scroll can't take the press;
+  - a finger on the scrollbar dragged it backwards; it drags the thumb as the mouse does;
+  - Tablet Mode turned off mid-scroll could leave the scroll stuck, so mouse clicks on rows stopped selecting;
+  - a glide whose list went undrawn jumped on when it came back; it ends instead.
+
+  Each has a test.
+- Unit checks (round 235): Windows, in render-cache verify mode, 12,075, 0 failed (1016 tests), 0 stale
+  pictures. Linux with libraries: 11,617, 0 failed. Sanitizer build: 11,487, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (The gpu group's slow-open test and the sanitizer build's animation Play test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 234): fingers navigate the Scene view (task 0214)
 
 **Asked:** the plan for a 2-in-1 - in Tablet Mode one finger orbits, two pinch / pan / twist, the pen manipulates.

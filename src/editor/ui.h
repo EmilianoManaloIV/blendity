@@ -216,6 +216,13 @@ class Context {
   void end_scroll();
   void scroll_to(Id i, int offset) { scroll_[i] = offset; }
   int scroll_offset(Id i) { return scroll_[i]; }
+  /* Task 0215: in Tablet Mode (set by the editor each frame) a finger dragging up or down in a scrolled area scrolls it
+   * - once it has gone 10 px and mostly up or down, so a slider or a number dragged sideways still edits - and a flick
+   * glides on. The press is taken from the widget under it: nothing clicks. */
+  bool touch_scroll = false;
+  bool touch_scrolling() const { return touch_scroll_id_ != 0; }
+  bool touch_scrolled() const { return touch_scrolled_; }  // (this press scrolled: its release selects nothing)
+  bool touch_gliding() const { return touch_glide_id_ != 0; }
 
   /* --- popups & menus (drawn on top at end_frame) --- */
   void open_popup(Id i, const Recti &anchor, bool submenu_of_top = false);
@@ -273,6 +280,18 @@ class Context {
     int content_h;
     int offset;
   };
+  void touch_scroll_update(Id i, const Recti &r, int &off);
+  Id touch_candidate_ = 0, touch_scroll_id_ = 0, touch_glide_id_ = 0;
+  bool touch_scrolled_ = false;
+  /* A finger's slider or number drag: it waits until the finger has gone sideways (a scroll goes up or down), and once
+   * it changes a value the scroll can't take the press. */
+  bool finger_widget_drag_ = false;
+  int finger_press_y_ = 0;
+  bool finger_sideways(int press_x) const;
+  int slider_press_x_ = 0;
+  int touch_press_x_ = 0, touch_press_y_ = 0, touch_off0_ = 0, touch_last_off_ = 0;
+  float touch_vel_ = 0.0f, touch_glide_vel_ = 0.0f;  // (pixels a second, the offset's)
+  double touch_last_ = 0.0, touch_glide_last_ = 0.0;
   bool covered(int x, int y) const;
   void draw_popups();
   void draw_tooltip();

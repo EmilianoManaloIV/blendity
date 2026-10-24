@@ -992,10 +992,14 @@ class Editor {
   GameObject *rig_root_of(GameObject *g) const;
   std::string theme_name_ = "Dark";
   void set_theme(const std::string &name, bool save = true);
-  void touch_navigate(float k_pan);
-  float glide_yaw_for_test() const { return glide_yaw_; }  // task 0075
+  void touch_navigate(float k_pan);  // task 0075
+  float glide_yaw_for_test() const { return glide_yaw_; }
   void set_clock_for_test(double t) { test_clock_ = t; }
   double clock_for_test() const { return clock_now(); }
+  ui::Id hier_scroll_id_ = 0;  // (the Hierarchy's scrolled area, for tests)
+  Recti hier_body_;
+  Recti hierarchy_body_for_test() const { return hier_body_; }
+  int hierarchy_scroll_for_test() { return ui_.scroll_offset(hier_scroll_id_); }
   const std::string &theme_name_for_test() const { return theme_name_; }
   int retile_texture_users(const std::string &asset_path, float from, float to);  // task 0072
   std::vector<std::pair<MaterialPtr, bool>> texture_followers(const std::string &asset_path, float from);

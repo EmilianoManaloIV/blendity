@@ -104,6 +104,7 @@ void Editor::draw_hierarchy(const Recti &r) {
 
   int content_h = (int)rows.size() * rh + rh * 2;
   ui::Id sid = u.id("hier_scroll");
+  hier_scroll_id_ = sid, hier_body_ = body;
   if (scroll_to_active_) {
     for (size_t i = 0; i < rows.size(); i++)
       if (rows[i].g->id == active_) {
@@ -183,7 +184,7 @@ void Editor::draw_hierarchy(const Recti &r) {
         hier_press_x_ = in.mx;
         hier_press_y_ = in.my;
       }
-      if (in.released[0] && !hier_dragging_ && sel && !in.ctrl() && !in.shift() && hier_drag_ == g->id && selection_.size() > 1) select(g->id);
+      if (in.released[0] && !hier_dragging_ && !u.touch_scrolled() && sel && !in.ctrl() && !in.shift() && hier_drag_ == g->id && selection_.size() > 1) select(g->id);
       if (in.double_clicked[0]) frame_selected();
       if (in.pressed[1]) {
         if (!sel) select(g->id);
@@ -196,7 +197,11 @@ void Editor::draw_hierarchy(const Recti &r) {
       }
     }
   }
-  if (hier_drag_ && in.down[0] && std::max(std::abs(in.mx - hier_press_x_), std::abs(in.my - hier_press_y_)) > u.px(5)) hier_dragging_ = true;
+  /* Task 0215: in Tablet Mode a finger scrolls the list and taps rows; dragging rows (reparenting) is the pen's and the
+   * mouse's. A finger that scrolled selects nothing either. */
+  const bool finger = u.touch_scroll && in.touch;
+  if (u.touch_scrolling() || u.touch_scrolled()) hier_pending_select_ = 0;
+  if (!finger && hier_drag_ && in.down[0] && std::max(std::abs(in.mx - hier_press_x_), std::abs(in.my - hier_press_y_)) > u.px(5)) hier_dragging_ = true;
   if (hier_dragging_) {
     u.cursor = Cursor::Hand;
     if (drop_target) {

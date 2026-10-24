@@ -4,8 +4,6 @@
 
 #include "../src/core/touch_gestures.h"
 
-#include <chrono>
-#include <thread>
 
 using namespace bl;
 
@@ -343,7 +341,119 @@ static void tests_round234() {
   });
 }
 
+/* ---------------------------------------------------------------- round 235: panels follow the finger (task 0215) */
+static void tests_round235() {
+  using platform::EventType;
+  const platform::Pointer finger = platform::Pointer::Touch;
+  /* A frame 20 ms after the last on the editor's clock (a clock that stood still would leave frames undrawn by the frame
+   * cap: the press's frame among them). */
+  auto step = [&](Editor &ed, std::vector<platform::Event> events) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  /* A Hierarchy long enough to scroll, and a finger drag in it of `steps` moves of (sx, sy). */
+  auto setup = [&](Editor &ed, bool tablet) {
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);  // (time stepped below, not slept: the same however fast the build runs)
+    ed.command("create Cube 80");  // (each a row of its own at the top)
+    if (tablet) ed.command("window tablet on");
+    step(ed, {});
+    step(ed, {});
+    ed.clear_selection_for_test();
+    step(ed, {});
+  };
+  auto drag = [&](Editor &ed, int sx, int sy, int steps, bool pause) {
+    const Recti h = ed.dock_leaf_rect_for_test(WindowKind::Hierarchy);
+    int x = h.x + h.w / 2, y = h.y + h.h / 3;
+    step(ed, {pointer_ev(EventType::MouseDown, x, y, finger)});
+    for (int i = 0; i < steps; i++) {
+      x += sx, y += sy;
+      step(ed, {pointer_ev(EventType::MouseMove, x, y, finger)});
+    }
+    step(ed, {pointer_ev(EventType::MouseUp, x, y, finger)});
+  };
+
+  test("tablet: a finger dragging down the Hierarchy scrolls it by as far as it went, selecting and reparenting nothing; sideways it doesn't scroll; outside Tablet Mode it doesn't either", [&] {
+    Editor ed;
+    setup(ed, true);
+    const int off0 = ed.hierarchy_scroll_for_test();
+    drag(ed, 0, 20, 10, false);  // (down: the list starts scrolled to its end, the last cube made)
+    const int off1 = ed.hierarchy_scroll_for_test();
+    std::printf("    down 200 px: the Hierarchy scrolled %d -> %d, %zu selected\n", off0, off1, ed.selected_objects_for_test().size());
+    CHECK(off0 - off1 == 200 && ed.selected_objects_for_test().empty());
+    drag(ed, 20, 2, 10, false);
+    CHECK(ed.hierarchy_scroll_for_test() == off1);
+    Editor plain;
+    setup(plain, false);
+    const int p0 = plain.hierarchy_scroll_for_test();
+    drag(plain, 0, 20, 10, false);
+    CHECK(plain.hierarchy_scroll_for_test() == p0);
+  });
+
+  test("tablet: a finger's tap on a Hierarchy row still selects it; a flick scrolls on after the finger lifts, and the next touch stops it", [&] {
+    Editor ed;
+    setup(ed, true);
+    drag(ed, 0, 0, 0, false);  // (a tap)
+    step(ed, {});
+    CHECK(ed.selected_objects_for_test().size() == 1);
+    ed.clear_selection_for_test();
+    drag(ed, 0, 30, 5, true);
+    const int at_release = ed.hierarchy_scroll_for_test();
+    ed.set_clock_for_test(ed.clock_for_test() + 0.04);
+    step(ed, {});
+    const int later = ed.hierarchy_scroll_for_test();
+    std::printf("    a flick: %d at the lift, %d 40 ms later\n", at_release, later);
+    CHECK(later < at_release);
+    const Recti h = ed.dock_leaf_rect_for_test(WindowKind::Hierarchy);
+    step(ed, {pointer_ev(EventType::MouseDown, h.x + h.w / 2, h.y + h.h / 2, finger)});
+    const int stopped = ed.hierarchy_scroll_for_test();
+    ed.set_clock_for_test(ed.clock_for_test() + 0.04);
+    step(ed, {});
+    CHECK(ed.hierarchy_scroll_for_test() == stopped);
+    step(ed, {pointer_ev(EventType::MouseUp, h.x + h.w / 2, h.y + h.h / 2, finger)});
+  });
+
+  test("tablet: a finger scrolling from a selected row keeps the whole selection; one on the scrollbar drags the thumb the mouse's way; Tablet Mode turned off mid-scroll leaves nothing stuck", [&] {
+    Editor ed;
+    setup(ed, true);
+    ed.run_action_for_test("edit.select_all");
+    step(ed, {});
+    const size_t all = ed.selected_objects_for_test().size();
+    const int off0 = ed.hierarchy_scroll_for_test();
+    drag(ed, 0, 20, 10, false);
+    step(ed, {});
+    std::printf("    %zu selected, scrolled %d px; %zu still selected\n", all, off0 - ed.hierarchy_scroll_for_test(), ed.selected_objects_for_test().size());
+    CHECK(all > 3 && ed.selected_objects_for_test().size() == all && off0 - ed.hierarchy_scroll_for_test() > 150);  // (Select All also brings its active row into view)
+    /* The scrollbar: a finger dragging the thumb up moves the list up (the offset falls), as the mouse does. */
+    const Recti hr = ed.hierarchy_body_for_test();  // (the scrolled list itself: its bar is on its right)
+    const int bx = hr.right() - 4;
+    const int before = ed.hierarchy_scroll_for_test();
+    int y = hr.y + hr.h / 2;
+    step(ed, {pointer_ev(EventType::MouseDown, bx, y, finger)});
+    const int on_press = ed.hierarchy_scroll_for_test();
+    for (int i = 0; i < 5; i++) y -= 20, step(ed, {pointer_ev(EventType::MouseMove, bx, y, finger)});
+    step(ed, {pointer_ev(EventType::MouseUp, bx, y, finger)});
+    std::printf("    the thumb: %d, %d at the press, %d after dragging it up\n", before, on_press, ed.hierarchy_scroll_for_test());
+    CHECK(ed.hierarchy_scroll_for_test() < on_press);
+    /* Tablet Mode off with a finger down mid-scroll: after the lift a mouse click on a row selects it. */
+    const Recti h2 = ed.dock_leaf_rect_for_test(WindowKind::Hierarchy);
+    step(ed, {pointer_ev(EventType::MouseDown, h2.x + h2.w / 2, h2.y + h2.h / 3, finger)});
+    step(ed, {pointer_ev(EventType::MouseMove, h2.x + h2.w / 2, h2.y + h2.h / 3 + 30, finger)});
+    ed.command("window tablet off");
+    step(ed, {pointer_ev(EventType::MouseUp, h2.x + h2.w / 2, h2.y + h2.h / 3 + 30, finger)});
+    step(ed, {});
+    ed.clear_selection_for_test();
+    const Recti h3 = ed.dock_leaf_rect_for_test(WindowKind::Hierarchy);
+    step(ed, {pointer_ev(EventType::MouseMove, h3.x + h3.w / 2, h3.y + h3.h / 2)});
+    step(ed, {pointer_ev(EventType::MouseDown, h3.x + h3.w / 2, h3.y + h3.h / 2)});
+    step(ed, {pointer_ev(EventType::MouseUp, h3.x + h3.w / 2, h3.y + h3.h / 2)});
+    step(ed, {});
+    CHECK(ed.selected_objects_for_test().size() == 1 && !ed.ui_for_test().touch_scrolling());
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
+  tests_round235();
 }

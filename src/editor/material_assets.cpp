@@ -144,14 +144,18 @@ void Editor::update_asset_drag() {
     if (!in.down[0]) project_select_on_release_.clear();  // (a field took the drop)
     return;
   }
-  if (!d.dragging && (std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6))) d.dragging = true;  // (before the click test)
+  /* Task 0215: in Tablet Mode a finger scrolls the Project window and taps files; dragging them is the pen's and the
+   * mouse's. A finger that moved is a scroll, not a click. */
+  const bool finger = ui_.touch_scroll && in.touch;
+  const bool moved = std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6);
+  if (finger && moved) project_select_on_release_.clear();
+  if (!finger && !d.dragging && moved) d.dragging = true;  // (before the click test)
   if (!in.down[0] && !d.dragging && !project_select_on_release_.empty() && d.path == project_select_on_release_) {
     clear_selection();  // a click on a file row: it is selected now (the Inspector shows it)
     project_selected_ = project_select_on_release_;
     project_multi_.only(project_selected_);
   }
   if (!in.down[0]) project_select_on_release_.clear();
-  if (!d.dragging && (std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6))) d.dragging = true;
   if (d.dragging) {
     const bool image = !d.mat && image_extension_supported(fs::extension(d.path));
     const bool ptex = !d.mat && fs::extension(d.path) == ".ptex";  // a texture asset: objects (rows, the Scene view) or a folder

@@ -85,6 +85,8 @@ using namespace platform;
 
 void Context::begin_frame(Image *target, double now) {
   if (record_buttons) button_rects.clear();  // (tests: only what this frame drew)
+  if (!in.down[0] && !in.released[0]) touch_candidate_ = touch_scroll_id_ = 0, finger_widget_drag_ = false;  // (task 0215)
+  if (in.pressed[0]) touch_scrolled_ = finger_widget_drag_ = false, finger_press_y_ = in.my;
   canvas.begin(target);
   frame_++;
   order_last_ = 0;
@@ -668,7 +670,9 @@ bool Context::scrub(Id i, const Recti &r, float &v, float speed, float mn, float
   bool changed = false;
   if (active_ == i) {
     cursor = Cursor::ResizeH;
-    if (std::abs(in.mx - drag_press_x_) > px(3)) dragging_value_ = true;
+    const bool finger = touch_scroll && in.touch;
+    if (!finger && std::abs(in.mx - drag_press_x_) > px(3)) dragging_value_ = true;
+    if (finger && in.down[0] && finger_sideways(drag_press_x_)) dragging_value_ = finger_widget_drag_ = true;  // (task 0215)
     if (dragging_value_) {
       float mod = in.shift() ? 4.0f : (in.alt() ? 0.25f : 1.0f);
       float nv = clampf(drag_start_value_ + (in.mx - drag_press_x_) * speed * mod, mn, mx);
@@ -764,11 +768,20 @@ bool Context::number_committed(Id i, std::string *expr, int *component) const {
   return true;
 }
 
+/* A finger on a slider or a number in Tablet Mode (task 0215): has it gone sideways - 6 px, more across than up or down
+ * - so it edits the value rather than scrolling? Once it has, the scroll can't take the press. */
+bool Context::finger_sideways(int press_x) const {
+  const int dx = std::abs(in.mx - press_x), dy = std::abs(in.my - finger_press_y_);
+  return dx >= px(6) && dx > dy;
+}
+
 bool Context::slider(Id i, const Recti &r, float &v, float mn, float mx) {
   bool hot = hovered(r);
-  if (hot && in.pressed[0]) active_ = i;
+  if (hot && in.pressed[0]) active_ = i, slider_press_x_ = in.mx;
+  const bool finger = touch_scroll && in.touch;
+  if (active_ == i && finger && !finger_widget_drag_ && in.down[0] && finger_sideways(slider_press_x_)) finger_widget_drag_ = true;
   bool changed = false;
-  if (active_ == i) {
+  if (active_ == i && (!finger || finger_widget_drag_ || in.released[0])) {
     float t = saturate((in.mx - r.x) / (float)std::max(1, r.w));
     float nv = mn + (mx - mn) * t;
     if (nv != v) { v = nv; changed = true; }
@@ -1094,9 +1107,66 @@ bool Context::color_field(Id i, const Recti &r, Vec3 &c, float *alpha) {
 /* Scrolling                                                              */
 /* ===================================================================== */
 
+/* A finger scrolling this area (task 0215): see touch_scroll in ui.h. The innermost area under the press takes it (it
+ * is begun last); the offset follows the finger from where it pressed, and a flick still moving glides on. */
+void Context::touch_scroll_update(Id i, const Recti &r, int &off) {
+  const double now = time;  // (the frame's clock: the editor's, which tests can fix)
+  if (touch_glide_id_ == i) {
+    /* (A glide whose area went undrawn for a while ends rather than jumping on.) */
+    if (in.pressed[0] || in.wheel_y != 0.0f || !touch_scroll || now - touch_glide_last_ > 0.2) touch_glide_id_ = 0;
+    else {
+      const float dt = (float)std::min(now - touch_glide_last_, 0.1);
+      touch_glide_last_ = now;
+      off += (int)std::lround(touch_glide_vel_ * dt);
+      touch_glide_vel_ *= std::exp(-3.0f * dt);
+      if (std::fabs(touch_glide_vel_) < 30.0f) touch_glide_id_ = 0;
+      redraw = true;
+    }
+  }
+  if (!touch_scroll) return;
+  /* (Not on the scrollbar's strip: a finger there drags the thumb, as the mouse does.) */
+  const bool on_bar = in.mx >= r.right() - px(10);
+  if (in.touch && in.pressed[0] && !on_bar && r.contains(in.mx, in.my) && canvas.clip().contains(in.mx, in.my) && !covered(in.mx, in.my)) {
+    touch_candidate_ = i;
+    touch_press_x_ = in.mx, touch_press_y_ = in.my;
+    touch_off0_ = touch_last_off_ = off;
+    touch_vel_ = 0.0f;
+    touch_last_ = now;
+  }
+  if (touch_candidate_ == i && touch_scroll_id_ == 0 && in.down[0] && in.touch && !finger_widget_drag_) {
+    const int dx = std::abs(in.mx - touch_press_x_), dy = std::abs(in.my - touch_press_y_);
+    if (dy >= px(10) && dy > 2 * dx) {
+      touch_scroll_id_ = i;
+      touch_scrolled_ = true;
+      active_ = i ^ 0x70C4ull;  // (the widget pressed loses the press: it won't click)
+    }
+  }
+  if (touch_scroll_id_ != i) {
+    if (touch_candidate_ == i && !in.down[0]) touch_candidate_ = 0;
+    return;
+  }
+  if (in.down[0]) {
+    off = touch_off0_ - (in.my - touch_press_y_);
+    const float dt = (float)std::max(now - touch_last_, 1.0 / 240.0);
+    touch_vel_ = touch_vel_ * 0.5f + (off - touch_last_off_) / dt * 0.5f;
+    touch_last_off_ = off;
+    touch_last_ = now;
+    redraw = true;
+    return;
+  }
+  if (!in.cancelled && now - touch_last_ < 0.06 && std::fabs(touch_vel_) > 200.0f) {
+    touch_glide_id_ = i;
+    touch_glide_vel_ = std::max(-6000.0f, std::min(touch_vel_, 6000.0f));
+    touch_glide_last_ = now;
+  }
+  touch_scroll_id_ = touch_candidate_ = 0;
+  if (active_ == (i ^ 0x70C4ull)) active_ = 0;
+}
+
 int Context::begin_scroll(Id i, const Recti &r, int content_h) {
   int &off = scroll_[i];
   int maxoff = std::max(0, content_h - r.h);
+  touch_scroll_update(i, r, off);
   if (hovered(r) && in.wheel_y != 0 && !in.ctrl()) {
     off -= (int)(in.wheel_y * row_h() * 3);
     in.wheel_y = 0;  // consumed

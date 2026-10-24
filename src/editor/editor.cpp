@@ -510,6 +510,7 @@ void Editor::process_events(std::vector<Event> &events) {
 void Editor::apply_ui_scale() {
   float s = (ui_scale_pref_ > 0 ? ui_scale_pref_ : std::max(1.0f, dpi_)) * (tablet_ ? 1.5f : 1.0f);  // (Tablet: bigger targets, task 0188)
   ui_.scale = s;
+  ui_.touch_scroll = tablet_;  // (Tablet: a finger scrolls lists, task 0215)
   if (ui_.font.source().empty()) ui_.font.load_system_ui_font(13.0f * s);
   else ui_.font.set_pixel_height(13.0f * s);
 }
