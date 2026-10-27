@@ -11,6 +11,18 @@ SketchLayer &Sketch::layer_at(int i) {
   return layers[(size_t)std::max(0, std::min((int)layers.size() - 1, i))];
 }
 
+const SketchCanvas *Sketch::canvas_at(int id) const {
+  for (const SketchCanvas &c : canvases)
+    if (c.id == id) return &c;
+  return nullptr;
+}
+
+SketchCanvas *Sketch::canvas_at(int id) {
+  for (SketchCanvas &c : canvases)
+    if (c.id == id) return &c;
+  return nullptr;
+}
+
 namespace sketch {
 
 static const float kPi = 3.14159265358979f;

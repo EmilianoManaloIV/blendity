@@ -24,8 +24,18 @@ struct SketchPoint {
 
 enum class StrokeKind { Freehand, Line, Arc, Ellipse, Curve };
 
+/* A canvas (task 0224): the picture plane (id 0, kind 0: the stroke's frame is the view's), or a plane in the scene
+ * (kind 1: the frame is metres along u and v from the origin). */
+struct SketchCanvas {
+  int id = 0;
+  int kind = 0;
+  std::string name = "View";
+  Vec3 origin, u{1, 0, 0}, v{0, 0, 1};
+};
+
 struct SketchStroke {
   int layer = 0;
+  int canvas = 0;  // (SketchCanvas::id; 0 the picture plane)
   uint32_t color = 0xFF202020;
   float width = 2.0f;  // pixels at the UI's 1x
   StrokeKind kind = StrokeKind::Freehand;
@@ -51,14 +61,21 @@ struct Sketch {
   std::vector<SketchLayer> layers;
   std::vector<SketchStroke> strokes;
   int active_layer = 0;
+  std::vector<SketchCanvas> canvases;  // (the planes in the scene; the picture plane isn't listed)
+  int active_canvas = 0;
   int perspective = 0;  // 0 off, 1-3 point
+  /* The guide follows the camera and the camera the guide (task 0224): its points are the world axes' vanishing
+   * points - X, Z and (3-point) Y, each the end with the camera in front of it. */
+  bool follow_camera = true;
   Vec2 vp[3] = {{-0.4f, 0.5f}, {2.0f, 0.5f}, {0.8f, 3.0f}};  // (view heights; 2 and 3 are the second and third points)
   bool vp_placed = false;  // (the editor places them on the view when first shown, unless a file or a command did)
   bool empty() const {
     const bool plain = layers.empty() || (layers.size() == 1 && layers[0].visible && layers[0].opacity == 1.0f && layers[0].correct == 2 && layers[0].name == "Layer");
-    return strokes.empty() && plain && perspective == 0 && active_layer == 0;
+    return strokes.empty() && plain && perspective == 0 && active_layer == 0 && canvases.empty() && active_canvas == 0 && follow_camera;
   }
   SketchLayer &layer_at(int i);
+  const SketchCanvas *canvas_at(int id) const;
+  SketchCanvas *canvas_at(int id);
 };
 
 namespace sketch {

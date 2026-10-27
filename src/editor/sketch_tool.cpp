@@ -190,12 +190,14 @@ void Editor::sketch_snap_fit(const Recti &view, sketch::Fit &f, int join_start, 
     }
   }
   a = mid - d * (l * 0.5f), b = mid + d * (l * 0.5f);
+  sketch_snap_to_guides(view, a, b);  // (task 0224: onto a construction line it runs along)
   /* The ends onto other strokes' ends. */
   const float reach = (float)ui_.px(8);
   for (const SketchStroke &st : scene_->sketch.strokes) {
     if (st.pts.empty()) continue;
     for (const SketchPoint &e : {st.pts.front(), st.pts.back()}) {
-      const Vec2 q = sketch_to_px(view, {e.x, e.y});
+      Vec2 q;
+      if (!sketch_stroke_px(view, st, e, q)) continue;
       if (join_start && length(q - a) < reach) a = q;
       if (join_end && length(q - b) < reach) b = q;
     }
@@ -292,6 +294,31 @@ void Editor::sketch_stroke_end(const Recti &view) {
         });
       }
   }
+  /* On a scene canvas (task 0224) each point is where the view's ray through it meets the plane, in the plane's metres;
+   * a stroke that leaves the plane (past its horizon) stays on the picture plane. */
+  const SketchCanvas *canvas = s.active_canvas ? s.canvas_at(s.active_canvas) : nullptr;
+  if (canvas && canvas->kind == 1) {
+    for (SketchStroke &st : made) {
+      std::vector<SketchPoint> on;
+      for (const SketchPoint &p : st.pts) {
+        Vec2 uv;
+        if (!sketch_plane_hit(view, *canvas, sketch_to_px(view, {p.x, p.y}), uv)) break;
+        on.push_back({uv.x, uv.y, p.w});
+      }
+      if (on.size() != st.pts.size()) continue;
+      std::vector<SketchPoint> raw;
+      for (const SketchPoint &p : st.raw) {
+        Vec2 uv;
+        if (sketch_plane_hit(view, *canvas, sketch_to_px(view, {p.x, p.y}), uv)) raw.push_back({uv.x, uv.y, p.w});
+      }
+      st.raw = raw.size() == st.raw.size() ? raw : std::vector<SketchPoint>{};
+      st.pts = on;
+      st.canvas = canvas->id;
+      st.center = {}, st.rx = st.ry = 0.0f;  // (an ellipse's parameters are the view's, not the plane's)
+      if (st.kind == StrokeKind::Arc || st.kind == StrokeKind::Ellipse) st.kind = StrokeKind::Curve;
+    }
+    sketch_construction_lines(made);
+  }
   for (SketchStroke &st : made) s.strokes.push_back(std::move(st));
   mark_changed(made.size() > 1 ? "Sketch Strokes" : "Sketch Stroke");
   ui_.redraw = true;
@@ -304,8 +331,11 @@ bool Editor::sketch_erase_at(const Recti &view, Vec2 px) {
   bool any = false;
   for (size_t i = 0; i < s.strokes.size();) {
     std::vector<Vec2> pts;
-    for (const SketchPoint &p : s.strokes[i].pts) pts.push_back(sketch_to_px(view, {p.x, p.y}));
-    if (sketch::distance_to_polyline(px, pts) < reach) s.strokes.erase(s.strokes.begin() + (ptrdiff_t)i), any = true;
+    for (const SketchPoint &p : s.strokes[i].pts) {
+      Vec2 q;
+      if (sketch_stroke_px(view, s.strokes[i], p, q)) pts.push_back(q);
+    }
+    if (!pts.empty() && sketch::distance_to_polyline(px, pts) < reach) s.strokes.erase(s.strokes.begin() + (ptrdiff_t)i), any = true;
     else i++;
   }
   if (any) ui_.redraw = true;
@@ -325,6 +355,15 @@ bool Editor::sketch_update(const Recti &view) {
     return true;
   }
   sketch_guide_defaults(view);
+  /* Task 0224: the perspective guide's points are the world axes' vanishing points - read from the camera every frame
+   * (undo, another scene, a resize or a change of point count all move them), but not while a point is dragged, nor
+   * while points no camera could match are kept until the camera moves. */
+  {
+    const Sketch &s = scene_->sketch;
+    const bool moved = cam_.yaw != cam_yaw_before_ || cam_.pitch != cam_pitch_before_ || cam_.fov != cam_fov_before_;
+    if (moved) g.flat = false;
+    if (s.perspective > 0 && s.follow_camera && !cam_.ortho && g.drag_handle < 0 && !g.flat) sketch_guide_from_camera(view);
+  }
   if (in.touch && tablet_) return false;  // (a finger navigates: task 0214)
   if (drag_ != Drag::None && !g.stroking && !g.erasing && g.drag_handle < 0) return false;  // (Alt+drag, the View tool: navigation's)
   const Vec2 px{(float)in.mx, (float)in.my};
@@ -333,7 +372,11 @@ bool Editor::sketch_update(const Recti &view) {
     if (!in.down[0]) {
       const bool vp = g.drag_handle >= (int)sketch_handles().size() - scene_->sketch.perspective;
       g.drag_handle = -1;
-      if (vp) mark_changed("Move Vanishing Point");
+      if (vp) {
+        mark_changed("Move Vanishing Point");
+        if (scene_->sketch.follow_camera && !sketch_camera_from_guide(view))
+          Log::warn("Sketch: no camera looks that way (the points stay a flat guide; sketchguide follow off keeps them so)");
+      }
     }
     else sketch_move_handle(g.drag_handle, sketch_to_canvas(view, px));
     u.redraw = true;
@@ -401,17 +444,28 @@ void Editor::sketch_draw(const Recti &view) {
     const SketchLayer *layer = st.layer >= 0 && st.layer < (int)s.layers.size() ? &s.layers[(size_t)st.layer] : nullptr;
     if (layer && !layer->visible) continue;
     const float opacity = layer ? layer->opacity : 1.0f;
+    const uint32_t a = (uint32_t)std::lround(((st.color >> 24) & 255) * opacity);
+    const uint32_t color = (a << 24) | (st.color & 0xFFFFFF);
+    if (st.canvas && s.canvas_at(st.canvas)) {  // (a scene canvas: each segment clipped at the camera)
+      std::vector<Vec2> sa, sb;
+      sketch_stroke_segments(view, st, sa, sb);
+      float mean_w = 0.0f;
+      for (const SketchPoint &p : st.pts) mean_w += p.w;
+      mean_w /= (float)std::max<size_t>(1, st.pts.size());
+      for (size_t i = 0; i < sa.size(); i++) draw_stroke(u, {sa[i], sb[i]}, {mean_w, mean_w}, color, st.width * px1);
+      continue;
+    }
     std::vector<Vec2> pts;
     std::vector<float> w;
     for (const SketchPoint &p : st.pts) pts.push_back(sketch_to_px(view, {p.x, p.y})), w.push_back(p.w);
-    const uint32_t a = (uint32_t)std::lround(((st.color >> 24) & 255) * opacity);
-    draw_stroke(u, pts, w, (a << 24) | (st.color & 0xFFFFFF), st.width * px1);
+    draw_stroke(u, pts, w, color, st.width * px1);
   }
   const auto &g = sketch_;
   if (!g.active) {
     u.canvas.pop_clip();
     return;
   }
+  sketch_draw_canvas(view);
   if (g.stroking) draw_stroke(u, g.pen, g.pressure, g.color, g.width * px1);
   /* The guides. */
   const uint32_t guide_col = Color::hex(0x40C0FF, 170), handle_col = Color::hex(0xFFD040);
@@ -542,13 +596,20 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
       if (s.perspective) mark_changed("Perspective Guide");
     }
     else if (v == "snap") g.snap = to_lower(arg(2, "on")) != "off";
+    else if (v == "follow") {  // (task 0224: the guide and the camera as one)
+      s.follow_camera = to_lower(arg(2, "on")) != "off";
+      if (s.follow_camera && cam_.ortho) Log::info("sketchguide follow: the guide follows a perspective camera (the view is orthographic now)");
+      if (s.follow_camera && s.perspective > 0 && !cam_.ortho) sketch_guide_from_camera(scene_rect_);
+      mark_changed("Perspective Guide");
+    }
     else if (v == "vp" && t.size() >= 5) {
       const int i = std::max(0, std::min(2, std::atoi(arg(2, "0").c_str())));
       s.vp[i] = {(float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str())};
       s.vp_placed = true;
       mark_changed("Move Vanishing Point");
+      if (s.follow_camera && s.perspective > 0 && !sketch_camera_from_guide(scene_rect_)) Log::warn("sketchguide vp: no camera looks that way");
     }
-    else Log::info("usage: sketchguide ruler|ellipse|french [0-2]|off|symmetry x|y|xy|radial <n>|off|perspective 1|2|3|off|snap on|off|vp <i> <x> <y>");
+    else Log::info("usage: sketchguide ruler|ellipse|french [0-2]|off|symmetry x|y|xy|radial <n>|off|perspective 1|2|3|off|snap on|off|follow on|off|vp <i> <x> <y>");
     ui_.redraw = true;
     return true;
   }

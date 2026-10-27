@@ -307,14 +307,17 @@ std::string save_scene_text(const Scene &scene) {
   if (!sk.empty()) {
     for (const SketchLayer &l : sk.layers)
       os << "sketch_layer " << fmt(l.opacity) << " " << (l.visible ? 1 : 0) << " " << l.correct << " " << (l.name.empty() ? "Layer" : l.name) << "\n";  // (the name last: it may hold spaces)
-    os << "sketch_active " << sk.active_layer << "\n";
+    os << "sketch_active " << sk.active_layer << " " << sk.active_canvas << " " << (sk.follow_camera ? 1 : 0) << "\n";
     if (sk.perspective > 0) {
       os << "sketch_perspective " << sk.perspective;
       for (int i = 0; i < 3; i++) os << " " << fmt(sk.vp[i].x) << " " << fmt(sk.vp[i].y);
-      os << "\n";
+      os << " " << (sk.follow_camera ? 1 : 0) << "\n";
     }
+    for (const SketchCanvas &c : sk.canvases)
+      os << "sketch_canvas " << c.id << " " << c.kind << " " << fmt(c.origin.x) << " " << fmt(c.origin.y) << " " << fmt(c.origin.z) << " " << fmt(c.u.x) << " "
+         << fmt(c.u.y) << " " << fmt(c.u.z) << " " << fmt(c.v.x) << " " << fmt(c.v.y) << " " << fmt(c.v.z) << " " << (c.name.empty() ? "Canvas" : c.name) << "\n";
     for (const SketchStroke &st : sk.strokes) {
-      os << "sketch_stroke " << st.layer << " " << (int)st.kind << " " << st.color << " " << fmt(st.width) << " " << (st.closed ? 1 : 0) << " "
+      os << "sketch_stroke " << st.layer << " " << st.canvas << " " << (int)st.kind << " " << st.color << " " << fmt(st.width) << " " << (st.closed ? 1 : 0) << " "
          << fmt(st.center.x) << " " << fmt(st.center.y) << " " << fmt(st.rx) << " " << fmt(st.ry) << " " << fmt(st.angle) << " " << fmt(st.start)
          << " " << fmt(st.sweep) << " " << st.pts.size();
       for (const SketchPoint &p : st.pts) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
@@ -578,21 +581,37 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       if (l.name.empty()) l.name = "Layer";
       fresh.sketch.layers.push_back(l);
     }
-    else if (k == "sketch_active" && t.size() >= 2) fresh.sketch.active_layer = std::atoi(t[1].c_str());
+    else if (k == "sketch_active" && t.size() >= 2) {
+      fresh.sketch.active_layer = std::atoi(t[1].c_str());
+      if (t.size() >= 3) fresh.sketch.active_canvas = std::atoi(t[2].c_str());
+      if (t.size() >= 4) fresh.sketch.follow_camera = t[3] != "0";
+    }
     else if (k == "sketch_perspective" && t.size() >= 8) {
       fresh.sketch.perspective = std::max(0, std::min(3, std::atoi(t[1].c_str())));
       for (int i = 0; i < 3; i++) fresh.sketch.vp[i] = {std::strtof(t[(size_t)(2 + 2 * i)].c_str(), nullptr), std::strtof(t[(size_t)(3 + 2 * i)].c_str(), nullptr)};
       fresh.sketch.vp_placed = true;
+      if (t.size() >= 9) fresh.sketch.follow_camera = t[8] != "0";
     }
-    else if (k == "sketch_stroke" && t.size() >= 14) {
+    else if (k == "sketch_canvas" && t.size() >= 12) {
+      auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
+      SketchCanvas c;
+      c.id = std::atoi(t[1].c_str()), c.kind = std::atoi(t[2].c_str());
+      c.origin = {f(3), f(4), f(5)}, c.u = {f(6), f(7), f(8)}, c.v = {f(9), f(10), f(11)};
+      c.name.clear();
+      for (size_t i = 12; i < t.size(); i++) c.name += (i > 12 ? " " : "") + t[i];
+      if (c.name.empty()) c.name = "Canvas";
+      if (c.id > 0 && length(c.u) > 1e-6f && length(c.v) > 1e-6f) fresh.sketch.canvases.push_back(c);
+    }
+    else if (k == "sketch_stroke" && t.size() >= 15) {
       auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
       SketchStroke st;
       st.layer = std::atoi(t[1].c_str());
-      st.kind = (StrokeKind)std::max(0, std::min(4, std::atoi(t[2].c_str())));
-      st.color = (uint32_t)std::strtoul(t[3].c_str(), nullptr, 10);
-      st.width = f(4), st.closed = t[5] != "0";
-      st.center = {f(6), f(7)}, st.rx = f(8), st.ry = f(9), st.angle = f(10), st.start = f(11), st.sweep = f(12);
-      size_t at = 13;
+      st.canvas = std::atoi(t[2].c_str());
+      st.kind = (StrokeKind)std::max(0, std::min(4, std::atoi(t[3].c_str())));
+      st.color = (uint32_t)std::strtoul(t[4].c_str(), nullptr, 10);
+      st.width = f(5), st.closed = t[6] != "0";
+      st.center = {f(7), f(8)}, st.rx = f(9), st.ry = f(10), st.angle = f(11), st.start = f(12), st.sweep = f(13);
+      size_t at = 14;
       for (int part = 0; part < 2 && at < t.size(); part++) {
         const size_t n = (size_t)std::max(0, std::atoi(t[at].c_str()));
         at++;

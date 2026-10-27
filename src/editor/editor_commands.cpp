@@ -690,6 +690,7 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (sketch_command(t, line)) return;  // sketch | sketchguide | sketchstroke (task 0223)
+  if (sketch_canvas_command(t, line)) return;  // sketchcanvas (task 0224)
   if (c == "quickmenu") {  // quickmenu open [x y]|close|pick <slice>|list (task 0217)
     const std::string v = to_lower(arg(1, "list"));
     if (v == "open") quick_menu_open(std::atoi(arg(2, std::to_string(scene_rect_.x + scene_rect_.w / 2)).c_str()),

@@ -233,6 +233,7 @@ static void tests_round243() {
     /* Two-point perspective, the points at (-400, 300) and (1600, 300) px: a stroke heading right and slightly up
      * from (300, 500) lies on the line to the right point. */
     ed.command("sketchguide perspective 2");
+    ed.command("sketchguide follow off");  // (a flat guide: task 0224 ties it to the camera)
     ed.command(strprintf("sketchguide vp 0 %g %g", -400.0f / h, 300.0f / h));
     ed.command(strprintf("sketchguide vp 1 %g %g", 1600.0f / h, 300.0f / h));
     pen_stroke(ed, wobbled(line_pts({300, 380}, {600, 340}, 20), 4.0f, 7));
@@ -317,4 +318,209 @@ static void tests_round243() {
   });
 }
 
-void run_sketch_tests() { tests_round243(); }
+/* ------------------------------------------- round 244: the guide as the camera, canvases in the scene (task 0224) */
+static void tests_round244() {
+  test("the perspective guide is the camera: its points are the axes' vanishing points, orbiting moves them, and placing them places the camera (the round trip within a pixel); follow off keeps a flat guide", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("camera 35 -25 6");
+    ed.command("sketch on");
+    ed.command("sketchguide perspective 3");
+    ed.step_frame_headless();
+    const float h = (float)ed.scene_rect_for_test().h;  // (laid out at the first frame)
+    const Sketch &s = ed.sketch_for_test();
+    Vec2 vp[3] = {s.vp[0], s.vp[1], s.vp[2]};
+    std::printf("    the camera's points: (%.3f, %.3f) (%.3f, %.3f) (%.3f, %.3f) view heights\n", vp[0].x, vp[0].y, vp[1].x, vp[1].y, vp[2].x, vp[2].y);
+    /* X and Z vanish on one horizon, apart; Y (the camera tilted 25 degrees) well outside the view. */
+    CHECK(std::fabs(vp[0].x - vp[1].x) > 0.5f && std::fabs(vp[0].y - vp[1].y) < 1e-4f && std::fabs(vp[2].y - 0.5f) > 1.0f);
+    /* Orbiting moves them. */
+    ed.command("camera 10 -10 6");
+    ed.step_frame_headless();
+    CHECK(length(s.vp[0] - vp[0]) > 0.05f && length(s.vp[2] - vp[2]) > 0.05f);
+    /* The points placed back where they were place the camera. */
+    for (int i = 0; i < 3; i++) ed.command(strprintf("sketchguide vp %d %.6f %.6f", i, vp[i].x, vp[i].y));
+    ed.step_frame_headless();
+    const SceneCamera &cam = ed.scene_camera_for_test();
+    std::printf("    the camera from the points: yaw %.3f pitch %.3f fov %.3f (want 35 -25 60)\n", cam.yaw, cam.pitch, cam.fov);
+    CHECK(std::fabs(cam.yaw - 35.0f) < 0.05f && std::fabs(cam.pitch + 25.0f) < 0.05f && std::fabs(cam.fov - 60.0f) < 0.1f);
+    float worst = 0.0f;
+    for (int i = 0; i < 3; i++) worst = std::max(worst, length(s.vp[i] - vp[i]) * h);
+    std::printf("    the points after the round trip: %.3f px off at worst\n", worst);
+    CHECK(worst < 1.0f);
+    /* Three points no camera can match (the third dragged far off) leave the camera where it is, and the points
+     * where they were put until the camera moves. */
+    ed.command("sketchguide vp 2 -3 -3");
+    ed.step_frame_headless();
+    CHECK(std::fabs(cam.yaw - 35.0f) < 0.05f && std::fabs(s.vp[2].x + 3.0f) < 1e-5f);
+    ed.command("camera 36 -25 6");
+    ed.step_frame_headless();
+    CHECK(std::fabs(s.vp[2].x + 3.0f) > 0.1f);
+    /* A front view: X and Y lie in the picture plane and vanish at infinity - their points are put far out, not left
+     * stale (the review's case); and from there the Z point dragged left turns the camera. */
+    ed.command("camera 0 0 6");
+    ed.step_frame_headless();
+    std::printf("    the front view's points: (%.1f, %.1f) (%.4f, %.4f) (%.1f, %.1f); the middle %.4f\n", s.vp[0].x, s.vp[0].y, s.vp[1].x, s.vp[1].y, s.vp[2].x, s.vp[2].y, 0.5f * 733.0f / h);
+    CHECK(std::fabs(s.vp[0].x) > 40.0f && std::fabs(s.vp[2].y) > 40.0f && std::fabs(s.vp[1].x - 0.5f * 733.0f / h) < 1e-3f);
+    ed.command(strprintf("sketchguide vp 1 %.4f %.4f", 0.5f * 733.0f / h - 0.4f, 0.5f));
+    ed.step_frame_headless();
+    std::printf("    the camera from the Z point moved left: yaw %.2f pitch %.2f fov %.2f\n", cam.yaw, cam.pitch, cam.fov);
+    CHECK(std::fabs(cam.yaw) > 10.0f && std::fabs(cam.pitch) < 1.0f);
+    /* The Y point dragged across the view, through infinity (the review's case): the camera tilts the other way. */
+    ed.command("camera 30 -20 6");
+    ed.step_frame_headless();
+    const Vec2 y_up = s.vp[2];
+    ed.command("camera 30 20 6");
+    ed.step_frame_headless();
+    const Vec2 down[3] = {s.vp[0], s.vp[1], s.vp[2]};
+    ed.command("camera 30 -20 6");
+    ed.step_frame_headless();
+    std::printf("    the Y point: (%.2f, %.2f) at pitch -20, (%.2f, %.2f) at 20\n", y_up.x, y_up.y, down[2].x, down[2].y);
+    for (int i = 0; i < 3; i++) ed.command(strprintf("sketchguide vp %d %.5f %.5f", i, down[i].x, down[i].y));
+    ed.step_frame_headless();
+    std::printf("    the camera from it: yaw %.2f pitch %.2f fov %.2f (want 30 20 60)\n", cam.yaw, cam.pitch, cam.fov);
+    CHECK(std::fabs(cam.pitch - 20.0f) < 0.1f && std::fabs(cam.yaw - 30.0f) < 0.1f);
+    /* Undo of a stroke keeps the guide the camera's (the points come from the camera, not the snapshot). */
+    ed.command("camera 35 -25 6");
+    ed.step_frame_headless();
+    pen_stroke(ed, line_pts({100, 100}, {300, 100}, 10));
+    ed.command("camera 50 -25 6");
+    ed.step_frame_headless();
+    const Vec2 at50 = s.vp[0];
+    ed.command("undo");
+    ed.step_frame_headless();
+    const Sketch &s2 = ed.sketch_for_test();  // (undo swaps the scene: the sketch is another)
+    CHECK(length(s2.vp[0] - at50) < 1e-5f && s2.strokes.empty());
+    /* Fewer points: the first is still X's. */
+    ed.command("sketchguide perspective 2");
+    ed.step_frame_headless();
+    CHECK(length(s2.vp[0] - at50) < 1e-5f);
+    ed.command("sketchguide perspective 3");
+    ed.command("camera 35 -25 6");
+    ed.step_frame_headless();
+    /* Follow off: a flat guide, where the points are put and the camera's turn leaves them. */
+    ed.command("sketchguide follow off");
+    ed.command("sketchguide vp 0 -0.5 0.4");
+    ed.command("camera 60 -30 6");
+    ed.step_frame_headless();
+    CHECK(!s2.follow_camera && std::fabs(s2.vp[0].x + 0.5f) < 1e-5f && std::fabs(ed.scene_camera_for_test().yaw - 60.0f) < 1e-4f);
+    const std::string text = save_scene_text(ed.scene());
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err) && !back.sketch.follow_camera && back.sketch.perspective == 3);
+  });
+
+  test("canvases in the scene: a stroke on the ground canvas along the red axis is a world-X line and a construction line; a later stroke snaps onto it; a face and a plane canvas; canvases save and load", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("camera 35 -30 5");
+    ed.command("sketch on");
+    ed.command("sketchcanvas ground");
+    ed.step_frame_headless();
+    const Sketch &s = ed.sketch_for_test();
+    CHECK(s.canvases.size() == 1 && s.active_canvas == 1 && s.canvases[0].name == "Ground");
+    /* A line on the ground from (0.5, 0, 0.3) to (2.5, 0, 0.3) metres, wobbled 2 px. */
+    std::vector<Vec2> px;
+    for (int i = 0; i <= 30; i++) {
+      Vec2 p;
+      CHECK(ed.project_for_test({0.5f + 2.0f * (float)i / 30.0f, 0.0f, 0.3f}, p));
+      px.push_back(p);
+    }
+    std::printf("    the ground line on the view: (%.0f, %.0f) -> (%.0f, %.0f) px\n", px.front().x, px.front().y, px.back().x, px.back().y);
+    pen_stroke(ed, wobbled(px, 2.0f, 21));
+    CHECK(s.strokes.size() == 1);
+    if (s.strokes.size() == 1) {
+      const SketchStroke &st = s.strokes[0];
+      std::printf("    the stroke: canvas %d kind %d, (%.3f, %.3f) -> (%.3f, %.3f) m\n", st.canvas, (int)st.kind, st.pts.front().x, st.pts.front().y, st.pts.back().x, st.pts.back().y);
+      CHECK(st.canvas == 1 && st.kind == StrokeKind::Line && st.pts.size() == 2);
+      CHECK(std::fabs(st.pts.front().y - st.pts.back().y) < 1e-6f && std::fabs(st.pts.front().y - 0.3f) < 0.05f);
+      CHECK(std::fabs(st.pts.front().x - 0.5f) < 0.08f && std::fabs(st.pts.back().x - 2.5f) < 0.08f);
+    }
+    const std::vector<GuideLine> &guides = ed.scene().guides;
+    CHECK(guides.size() == 1);
+    if (guides.size() == 1) {
+      std::printf("    the construction line: through (%.3f, %.3f, %.3f) along (%.3f, %.3f, %.3f)\n", guides[0].p.x, guides[0].p.y, guides[0].p.z, guides[0].d.x, guides[0].d.y, guides[0].d.z);
+      CHECK(std::fabs(guides[0].d.x) > 0.9999f && std::fabs(guides[0].p.y) < 1e-5f && std::fabs(guides[0].p.z - 0.3f) < 0.05f);
+    }
+    /* A second stroke drawn 5 px above the first on the view, from 1 to 3 metres: it lands on the construction line
+     * (the same ground v), and no second guide is made. */
+    px.clear();
+    for (int i = 0; i <= 30; i++) {
+      Vec2 p;
+      ed.project_for_test({1.0f + 2.0f * (float)i / 30.0f, 0.0f, 0.3f}, p);
+      px.push_back(p + Vec2{0.0f, -5.0f});
+    }
+    pen_stroke(ed, wobbled(px, 1.5f, 22));
+    CHECK(s.strokes.size() == 2 && guides.size() == 1);
+    if (s.strokes.size() == 2) {
+      std::printf("    the second stroke's v: %.4f and %.4f (the first's %.4f)\n", s.strokes[1].pts.front().y, s.strokes[1].pts.back().y, s.strokes[0].pts.front().y);
+      CHECK(std::fabs(s.strokes[1].pts.front().y - s.strokes[0].pts.front().y) < 1e-3f);
+    }
+    /* An L on the ground - along X then along Z - keeps its corner when both lines are made exact (the review's
+     * case), and makes two construction lines. */
+    px.clear();
+    for (int i = 0; i <= 20; i++) {
+      Vec2 p;
+      ed.project_for_test({-2.0f + 1.5f * (float)i / 20.0f, 0.0f, -1.5f}, p);
+      px.push_back(p);
+    }
+    for (int i = 1; i <= 20; i++) {
+      Vec2 p;
+      ed.project_for_test({-0.5f, 0.0f, -1.5f + 1.5f * (float)i / 20.0f}, p);
+      px.push_back(p);
+    }
+    pen_stroke(ed, wobbled(px, 1.5f, 24));
+    CHECK(s.strokes.size() == 4 && guides.size() == 3);
+    if (s.strokes.size() == 4) {
+      const SketchStroke &p1 = s.strokes[2], &p2 = s.strokes[3];
+      const float gap = std::sqrt((p1.pts.back().x - p2.pts.front().x) * (p1.pts.back().x - p2.pts.front().x) + (p1.pts.back().y - p2.pts.front().y) * (p1.pts.back().y - p2.pts.front().y));
+      std::printf("    the L on the ground: %d + %d points, the corner's gap %.5f m; u %.3f -> %.3f, v %.3f -> %.3f\n", (int)p1.pts.size(), (int)p2.pts.size(), gap, p1.pts.front().x, p1.pts.back().x, p2.pts.front().y, p2.pts.back().y);
+      CHECK(p1.kind == StrokeKind::Line && p2.kind == StrokeKind::Line && gap < 1e-6f);
+      CHECK(std::fabs(p1.pts.front().y - p1.pts.back().y) < 1e-6f && std::fabs(p2.pts.front().x - p2.pts.back().x) < 1e-6f);
+    }
+    /* The picture plane again: a stroke there has no canvas. */
+    ed.command("sketchcanvas view");
+    pen_stroke(ed, wobbled(line_pts({100, 100}, {300, 120}, 20), 2.0f, 23));
+    CHECK(s.strokes.size() == 5 && s.strokes[4].canvas == 0);
+    /* The same ground canvas asked for again is the one there. */
+    ed.command("sketchcanvas ground");
+    CHECK(s.canvases.size() == 1 && s.active_canvas == 1);
+    /* A face canvas on the cube under the view's middle; a plane canvas through a point. */
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    ed.command("sketchcanvas face");
+    CHECK(s.canvases.size() == 2);
+    if (s.canvases.size() == 2) {
+      const SketchCanvas &c = s.canvases[1];
+      std::printf("    the face canvas: %s, origin (%.2f, %.2f, %.2f), u (%.2f, %.2f, %.2f), v (%.2f, %.2f, %.2f)\n", c.name.c_str(), c.origin.x, c.origin.y, c.origin.z, c.u.x, c.u.y, c.u.z, c.v.x, c.v.y, c.v.z);
+      CHECK(c.name.find("face") != std::string::npos && std::fabs(length(c.u) - 1.0f) < 1e-4f && std::fabs(length(c.v) - 1.0f) < 1e-4f && std::fabs(dot(c.u, c.v)) < 1e-4f);
+    }
+    ed.step_frame_headless();  // (the face canvas's undo step is taken at the frame)
+    ed.command("sketchcanvas plane x 1 2 3");
+    CHECK(s.canvases.size() == 3 && s.active_canvas == 3 && s.canvases[2].origin.y == 2.0f && std::fabs(s.canvases[2].u.y) < 1e-6f);
+    ed.command("sketchcanvas 1");
+    CHECK(s.active_canvas == 1);
+    ed.command("sketchcanvas 9");
+    CHECK(s.active_canvas == 1);
+    /* Undo takes the plane canvas back; save and load keep the rest. */
+    ed.command("undo");
+    CHECK(ed.sketch_for_test().canvases.size() == 2);
+    const std::string text = save_scene_text(ed.scene());
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err));
+    CHECK(back.sketch.canvases.size() == 2 && back.sketch.strokes.size() == 5 && back.sketch.strokes[0].canvas == 1 && back.sketch.strokes[4].canvas == 0);
+    /* A sketch with a canvas and nothing else still saves (the review's case). */
+    Editor ed2;
+    ed2.init_headless(1200, 800);
+    ed2.command("sketchcanvas ground");
+    Scene back2;
+    CHECK(load_scene_text(save_scene_text(ed2.scene()), back2, err) && back2.sketch.canvases.size() == 1);
+    if (back.sketch.canvases.size() == 2) CHECK(back.sketch.canvases[1].name == ed.sketch_for_test().canvases[1].name && length(back.sketch.canvases[1].u - ed.sketch_for_test().canvases[1].u) < 1e-5f);
+  });
+}
+
+void run_sketch_tests() {
+  tests_round243();
+  tests_round244();
+}

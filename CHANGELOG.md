@@ -2,6 +2,65 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 244): the perspective guide is the camera; canvases in the scene (task 0224)
+
+**Asked:** the second task of the perspective-drawing plan: "taking those drawings and sketching a possible 3D
+model... it takes refinement and construction lines."
+
+**Added**
+- **The guide and the camera are one:** a 1-, 2- or 3-point guide's points are the world axes' vanishing points,
+  read from the Scene view's camera, so orbiting moves them; dragging a point (or `sketchguide vp`) places the
+  camera - yaw, pitch and field of view solved from the points - and the points become that camera's. Points no
+  camera can match leave it where it is. `sketchguide follow off` keeps a flat guide.
+- **Canvases in the scene** (`sketchcanvas view|ground|face [x y]|plane x|y|z [px py pz]|list|<id>`): a stroke drawn
+  on the ground, on a face of a mesh or on an axis plane is fitted on the view, with the guides, then sent through
+  the view's rays onto the plane and kept in metres, so it sits in the scene from every camera. The active canvas
+  shows its axes and a grid.
+- **Construction lines:** a corrected line on a scene canvas along one of its axes becomes one of the scene's guide
+  lines (the Draw tools' X / Y / Z lines), or lands exactly on one already there; a line along a guide's picture is
+  pulled onto it. ADR 0064.
+
+**Checked**
+- A camera's three points placed back give the camera within 0.05 degrees and the points 0.000 px off; a wobbled line
+  on the ground canvas is a world-X line and a scene guide, a second one lands on it; face and plane canvases; undo,
+  save and load (tests/test_sketch.cpp).
+- An Opus review modelled the camera, the vanishing points and the solver in Python and found fourteen things, the
+  main ones fixed:
+  - the guide went stale without a camera move (undo brought back a snapshot's points, another scene opened kept its
+    file's, a change of point count or a resize left wrong points): the points are read from the camera every frame
+    now, except while one is dragged or while points no camera could match are kept (until the camera moves);
+  - front, side and top views broke it: an axis lying in the picture plane vanishes at infinity, its point was left
+    where it was and the solver failed at once. Such a point is put 100 view heights out along the axis's picture
+    (the fan is parallel there), and a point that far carries no constraint, so dragging the one finite point of a
+    front view turns the camera;
+  - a point dragged across the view through infinity (the camera tilted the other way) was rejected: the solve now
+    starts from the camera and its yaw and pitch mirrors and takes the nearest good camera; and the damping was
+    Marquardt's, which made an unknown the points don't move (the field of view, from one point) singular -
+    Levenberg's now;
+  - a face canvas's normal was wrong under non-uniform scale (53 degrees for a scale of 1, 3, 1): Newell's method on
+    the world corners now;
+  - canvases were lost on save when the sketch had no strokes and no perspective (`Sketch::empty` ignored them), and
+    the follow flag was written only with the perspective line;
+  - points behind the camera were skipped one by one, so scene strokes drew chords across the gap and a line with
+    one end behind disappeared: each segment is clipped at the camera now, the canvas's grid too;
+  - the construction-line correction tore the corners other pieces share (the class of bug round 243 fixed):
+    corners that equalled a moved end move with it;
+  - snapping to guides took hidden guides, guides outside the canvas's plane (a duplicate construction line from
+    one view), and skipped a guide whose anchor was behind the camera: shown guides in the plane, two points of
+    the line round the camera's pivot, a metre or more apart on the view.
+  Smaller ones fixed too: the acceptance test is per point (the worst within a tenth of the view's height), a
+  stroke's raw points on a scene canvas are in the plane's frame, the same ground or plane canvas asked for twice is
+  the one there, `sketchguide follow on` in an orthographic view says the guide follows a perspective camera, a
+  face index guard, the nearest existing guide taken rather than the last. Left as known limits: a 1-point guide's
+  axis is the one the camera looks most along, so it changes at 45 degrees; pieces after the first of a chain lose a
+  guide snap when they are moved to meet the piece before; the field of view drifts a few degrees when one point
+  alone is solved for.
+- Found while testing: a test read the Scene view's height before the first frame laid it out (0: every pixel
+  tolerance was met), and an undo swaps the scene, so a sketch reference taken before it is another scene's.
+- Unit checks (round 244): Windows, in render-cache verify mode, 12,258, 0 failed (1038 tests), 0 stale
+  pictures. Linux with libraries: 11,799, 0 failed. Sanitizer build: 11,669, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-26 (round 243): rulers and guides - sketching over the Scene view (task 0223)
 
 **Asked:** "something similar to SketchBook Pro, where I have rulers and guides that help me draw in perspective. But

@@ -921,6 +921,10 @@ class Editor {
   const AnimEditorState &anim_for_test() const { return anim_; }
   NavStyle nav_style_for_test() const { return nav_style_; }
   const SceneCamera &scene_camera_for_test() const { return cam_; }
+  bool project_for_test(Vec3 w, Vec2 &px) const {  // (the Scene view's pixels, from its top left)
+    float z;
+    return scene_r3d_.project(w, px, z);
+  }
   Recti scene_rect_for_test() const { return scene_rect_; }
   std::string shortcut_for_test(const std::string &id) const { return shortcut_text(id); }
   size_t edge_sel_count_for_test() const { return edge_sel_.size(); }
@@ -2747,6 +2751,7 @@ class Editor {
     int french = 0;
     int symmetry = 0, radial = 8;  // 0 none, 1 X, 2 Y, 3 XY, 4 radial
     int drag_handle = -1;
+    bool flat = false;  // (task 0224: a failed camera solve left the dragged points; they stay until the camera moves)
   } sketch_;
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;
@@ -2765,6 +2770,22 @@ class Editor {
   bool sketch_update(const Recti &view);
   void sketch_draw(const Recti &view);
   bool sketch_command(const std::vector<std::string> &t, const std::string &line);
+  /* Task 0224 (sketch_canvas.cpp): the perspective guide as the camera, canvases in the scene, construction lines. */
+  bool sketch_vanishing_point(const SceneCamera &cam, const Recti &view, Vec3 axis, Vec2 &out) const;
+  void sketch_guide_from_camera(const Recti &view);
+  bool sketch_solve_camera(const Recti &view, const SceneCamera &start, SceneCamera &best, float &worst) const;
+  bool sketch_camera_from_guide(const Recti &view);
+  bool sketch_stroke_px(const Recti &view, const SketchStroke &st, const SketchPoint &p, Vec2 &px) const;
+  bool sketch_segment_px(const Recti &view, Vec3 a, Vec3 b, Vec2 &pa, Vec2 &pb) const;
+  void sketch_stroke_segments(const Recti &view, const SketchStroke &st, std::vector<Vec2> &a, std::vector<Vec2> &b) const;
+  bool sketch_plane_hit(const Recti &view, const SketchCanvas &c, Vec2 px, Vec2 &uv) const;
+  void sketch_construction_lines(std::vector<SketchStroke> &made);
+  void sketch_draw_canvas(const Recti &view);
+  bool sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas &out);
+  bool sketch_canvas_command(const std::vector<std::string> &t, const std::string &line);
+  int sketch_add_canvas(SketchCanvas c);
+  bool sketch_snap_to_guides(const Recti &view, Vec2 &a, Vec2 &b) const;
+  float cam_yaw_before_ = 1e9f, cam_pitch_before_ = 1e9f, cam_fov_before_ = 1e9f;  // (the camera the guide last followed)
   /* ---- Drawing tool: polyline, rectangle, circle, arc, polygon (draw_tool.cpp) ---- */
   struct DrawTool {
     bool active = false;
