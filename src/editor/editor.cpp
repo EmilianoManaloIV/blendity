@@ -1082,6 +1082,12 @@ void Editor::draw_menubar(const Recti &r) {
       });
       ui_.tooltip("SketchBook's rulers and guides: a stroke follows the ruler, the ellipse or the French curve; symmetry mirrors\n"
                   "it; perspective snaps it to the lines through the nearest vanishing point (drag the points and the horizon).");
+      ui_.submenu("Build from Sketch", ui_.px(220), [this] {  // (task 0225)
+        static const char *const kBuild[][2] = {{"Box (three lines at a corner)", "box"}, {"Cylinder (two circles)", "cylinder"}, {"Cone (a circle and a line)", "cone"},
+                                                {"Sweep (two circles and a path)", "sweep"}, {"Face (a closed outline)", "face"}, {"Pull the Face (a line along its normal)", "pull"}};
+        for (const auto &b : kBuild)
+          if (ui_.menu_item(b[0])) sketch_build_command({"sketchbuild", b[1]});
+      });
     });
     u.tooltip("Draw a polyline, rectangle, circle, arc or polygon onto the mesh (or the ground) with snapping.\n"
               "With nothing selected it starts a new mesh. UModeler / SketchUp drawing tools.");

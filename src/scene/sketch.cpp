@@ -256,6 +256,25 @@ std::vector<Vec2> sample_arc(Vec2 center, float rx, float ry, float angle, float
   return out;
 }
 
+/* Whether a closed path turns at least `min_deg` in each of `parts` equal stretches of it (a curve), or has
+ * straight runs (a polygon's sides). */
+static bool turns_throughout(const std::vector<Vec2> &r, int parts, float min_deg) {
+  const int n = (int)r.size();
+  if (n < 3 * parts) return false;
+  for (int part = 0; part < parts; part++) {
+    const int from = part * n / parts, to = (part + 1) * n / parts;
+    float turn = 0.0f;
+    for (int i = std::max(1, from); i < to && i + 1 < n; i++) {
+      const Vec2 a = r[(size_t)i] - r[(size_t)(i - 1)], b = r[(size_t)(i + 1)] - r[(size_t)i];
+      const float la = length(a), lb = length(b);
+      if (la < 1e-6f || lb < 1e-6f) continue;
+      turn += std::acos(std::max(-1.0f, std::min(1.0f, dot(a, b) / (la * lb)))) * 180.0f / kPi;
+    }
+    if (turn < min_deg) return false;
+  }
+  return true;
+}
+
 std::vector<Fit> correct(const std::vector<Vec2> &pts, int level) {
   std::vector<Fit> out;
   if (pts.size() < 2) return out;
@@ -269,10 +288,23 @@ std::vector<Fit> correct(const std::vector<Vec2> &pts, int level) {
   /* The corners are looked for on a lightly smoothed path with 18 px windows: a shaky hand's wobble swings a short
    * window's direction by tens of degrees, and a real corner survives the smoothing. */
   const float turn = level >= 2 ? 55.0f : 75.0f;
-  std::vector<size_t> cut = corners(smoothed(r, 1.5f), 6, turn);
   float total = 0.0f;
   for (size_t i = 1; i < r.size(); i++) total += length(r[i] - r[i - 1]);
   const bool closed = length(r.front() - r.back()) < std::max(10.0f, total * 0.08f) && total > 40.0f;
+  /* A closed stroke that is an ellipse as a whole is one, before any corner is looked for: a small circle, or an
+   * ellipse's tight end, turns enough over 18 px to pass for a corner (task 0225: circles drawn as a cylinder's
+   * ends). The tolerance is a tight one (1.5 % of the length), since a small square's corners miss an ellipse by
+   * only a few pixels; and the path must turn all the way round - over 5 degrees in each of its eighths - since a
+   * hexagon, a long thin rectangle or a line drawn out and back fit an ellipse too, by their straight runs. */
+  {
+    const float tol = std::max(2.5f, total * 0.015f) * (level >= 2 ? 1.0f : 0.5f);
+    Fit whole;
+    if (closed && fit_ellipse(r, tol, whole) && turns_throughout(smoothed(r, 1.5f), 8, 5.0f)) {
+      out.push_back(whole);
+      return out;
+    }
+  }
+  std::vector<size_t> cut = corners(smoothed(r, 1.5f), 6, turn);
   std::vector<Vec2> ring;  // (a closed stroke with corners, begun at its first corner: its start is a corner too)
   if (closed && !cut.empty()) {
     ring.assign(r.begin() + (ptrdiff_t)cut[0], r.end());

@@ -2,6 +2,51 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 245): solids from the construction lines - 3-Sweep's way (task 0225)
+
+**Asked:** the third task of the perspective-drawing plan: "taking those drawings and sketching a possible 3D
+model... it takes refinement and construction lines."
+
+**Added**
+- **Draw > Build from Sketch** (`sketchbuild`): a **box** from three lines meeting at a corner on the scene's canvases
+  (two on the ground, an upright on a wall), with its lengths in F9; a **cylinder** or **cone** from two circles on
+  parallel planes (an ellipse on a canvas is a circle in its plane) or a circle and a line from its centre, with the
+  radii, height and sides in F9; a **sweep** from two circles and a stroke between their centres; a **face** from a
+  closed outline, and its **Push/Pull** from a line along its normal, through the Push/Pull operator. Every solid is
+  an ordinary mesh object; the strokes stay as the drawing. ADR 0065 (3-Sweep, Chen et al. 2013).
+- A small circle drawn with the pen is an ellipse, not a polygon: a closed stroke that fits an ellipse whole is one
+  before the corner search.
+
+**Checked**
+- With a known camera, wobbled strokes through the pen make a box, a cylinder, a cone, a face pulled 0.7 m and a
+  54-ring sweep with the sizes the construction lines span, F9 remakes the box, undo takes it back
+  (tests/test_sketch.cpp).
+- An Opus review modelled the builders in Python and found two serious things and several smaller, all fixed:
+  - a face's frame was left-handed (`cross(n, u)` for its third axis), so a face drawn on a wall came out 0.7 m off
+    and lying flat - the ground only worked because its frame happened to be the identity. The frame is
+    right-handed now, the face's normal turned toward the camera (a pull goes toward the artist), and a face on a
+    wall is a test;
+  - a circle's centre was the mean of its points, which the view had sampled evenly, so the near side had more and
+    the centre leant toward the camera - 2 cm at the test's camera, and a true circle refused at closer ones. The
+    circle is fitted by least squares on the plane (Kasa's fit), the seam point counted once;
+  - the whole-stroke ellipse rule took hexagons, long thin rectangles and a line drawn out and back for ellipses by
+    their straight runs: the path must now turn in each of its eighths;
+  - a face from a closed curve had its seam point twice (a sliver wall when pulled);
+  - `sketchbuild pull` took the most recent upright anywhere in the scene: it must start at the face now, and the
+    distance is in the mesh's units (a scaled object);
+  - strokes on hidden layers are not construction; the F9 title says Cylinder / Cone; the box's log reads in F9's
+    order.
+  Known limits written down: F9's Move rows do nothing for a built box or cylinder (nothing is selected after the
+  build); a corner turned about 45 degrees may put a horizontal line under Length Y (the geometry is right); a
+  sweep's end rings stand perpendicular to the path, not in the circles' planes; a path drawn with a corner is two
+  strokes and no sweep; the face chain walker does not backtrack at a T-junction.
+- Found while testing: a 1 m square drawn 48 px wide on the view lost a corner to the 18 px windows (the tests draw
+  closer), and the corner detector's small-scale variants (a contrast or a two-scale rule) lost 0223's wobbly
+  corners - the ellipse-first rule is what keeps small circles whole.
+- Unit checks (round 245): Windows, in render-cache verify mode, 12,280, 0 failed (1040 tests), 0 stale
+  pictures. Linux with libraries: 11,821, 0 failed. Sanitizer build: 11,691, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test and the sanitizer animation Play test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 244): the perspective guide is the camera; canvases in the scene (task 0224)
 
 **Asked:** the second task of the perspective-drawing plan: "taking those drawings and sketching a possible 3D

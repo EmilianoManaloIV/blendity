@@ -1684,6 +1684,7 @@ void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
   else if (op == "grid") { L.segments = grid_cols_; L.count = grid_rows_; }
   else if (op == "pipe") { L.amount = pipe_radius_; L.segments = pipe_sides_; }
   else if (op == "array") { L.count = array_count_; L.amount = array_spacing_; L.axis = array_axis_; }
+  else if (op == "sketch_box" || op == "sketch_cylinder") { L.size = last_op_size_; L.segments = 24; }  // (task 0225)
   else if (op == "taper") { L.amount = taper_distance_; L.amount2 = taper_scale_; }
   else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
   else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
@@ -2686,7 +2687,7 @@ bool Editor::edit_op_redoable(const std::string &op) const {
   return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" || op == "merge_distance" ||
          op == "loopcut" || op == "smooth" || op == "push_pull" || op == "poke" || op == "extrude_individual" ||
          op == "shrink_fatten" || op == "to_sphere" || op == "randomize" || op == "grid" || op == "pipe" || op == "array" || op == "taper" ||
-         op == "recess" || op == "shell" || op == "thicken" || op == "draft";
+         op == "recess" || op == "shell" || op == "thicken" || op == "draft" || op == "sketch_box" || op == "sketch_cylinder";
 }
 
 bool Editor::last_op_valid() {
@@ -2798,6 +2799,11 @@ void Editor::run_last_op(bool first) {
     face_sel_.assign(m.face_count(), 0);
     vert_sel_.assign(m.vert_count(), 0);
     if (L.elem == EditElement::Edge) edge_sel_.clear();
+  }
+  else if (op == "sketch_box" || op == "sketch_cylinder") {  // (task 0225: the whole mesh from its numbers)
+    sketch_build_mesh(op, m, L.size, L.segments);
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
   }
   else if (op == "array") {
     Quat frame;
@@ -2922,13 +2928,14 @@ void Editor::draw_last_op_panel(const Recti &view) {
       {"to_sphere", "To Sphere"},      {"randomize", "Randomize"},
       {"grid", "Grid"},                {"pipe", "Pipe"},
       {"array", "Array"},              {"taper", "Taper Extrude"},
+      {"sketch_box", "Box from Sketch"}, {"sketch_cylinder", "Cylinder / Cone from Sketch"},
       {"recess", "Recess / Plate"},   {"shell", "Shell"},
       {"thicken", "Thicken"},          {"draft", "Draft"}};
   auto it = titles.find(L.op);
   std::string title = it == titles.end() ? L.op : it->second;
   const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
   /* Rows: the operator's own fields, then Move, Along Normal, Orientation. */
-  int fields = L.op == "bevel" ? 4 : L.op == "push_pull" || L.op == "array" ? 3 :
+  int fields = L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" ? 3 :
                L.op == "grid" || L.op == "pipe" || L.op == "taper" || L.op == "recess" ? 2 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
   int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
@@ -3030,6 +3037,17 @@ void Editor::draw_last_op_panel(const Recti &view) {
     fl("Distance", L.amount, 0.01f, -10000.0f, 10000.0f);
     fl("End Scale", L.amount2, 0.01f, 0.0f, 100.0f);
   }
+  else if (L.op == "sketch_box") {
+    fl("Length X", L.size.x, 0.01f, -10000.0f, 10000.0f);
+    fl("Length Y", L.size.y, 0.01f, -10000.0f, 10000.0f);
+    fl("Length Z", L.size.z, 0.01f, -10000.0f, 10000.0f);
+  }
+  else if (L.op == "sketch_cylinder") {
+    fl("Base Radius", L.size.x, 0.005f, 0.0001f, 10000.0f);
+    fl("Top Radius", L.size.z, 0.005f, 0.0f, 10000.0f);
+    fl("Height", L.size.y, 0.01f, 0.001f, 10000.0f);
+    ifield("Sides", L.segments, 3, 128);
+  }
   else if (L.op == "recess") {
     fl("Depth", L.amount, 0.005f, -10000.0f, 10000.0f);
     u.tooltip("Positive: pushed in (a recess). Negative: pulled out (a raised plate).");
@@ -3097,6 +3115,7 @@ void Editor::remember_last_op_settings() {
   else if (op == "grid") grid_cols_ = L.segments, grid_rows_ = L.count;
   else if (op == "pipe") pipe_radius_ = L.amount, pipe_sides_ = L.segments;
   else if (op == "array") array_count_ = L.count, array_spacing_ = L.amount, array_axis_ = L.axis;
+  else if (op == "sketch_box" || op == "sketch_cylinder") last_op_size_ = L.size;
   else if (op == "taper") taper_distance_ = L.amount, taper_scale_ = L.amount2;
   else if (op == "recess") recess_depth_ = L.amount, recess_border_ = L.amount2;
   else if (op == "shell" || op == "thicken") shell_thickness_ = L.amount;

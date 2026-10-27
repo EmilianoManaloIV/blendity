@@ -520,7 +520,219 @@ static void tests_round244() {
   });
 }
 
+/* ------------------------------------------------- round 245: solids from the construction lines (task 0225) */
+namespace {
+/* A world segment drawn with the pen on the active scene canvas, through the view. */
+void world_line(Editor &ed, Vec3 a, Vec3 b, unsigned seed) {
+  std::vector<Vec2> px;
+  for (int i = 0; i <= 24; i++) {
+    Vec2 p;
+    ed.project_for_test(a + (b - a) * ((float)i / 24.0f), p);
+    px.push_back(p);
+  }
+  pen_stroke(ed, wobbled(px, 1.5f, seed));
+}
+/* A world circle (in the plane spanned by u and v round c) drawn as a closed pen stroke. */
+void world_circle(Editor &ed, Vec3 c, Vec3 u, Vec3 v, float r, unsigned seed) {
+  std::vector<Vec2> px;
+  for (int i = 0; i <= 64; i++) {
+    const float a = 2.0f * 3.14159265f * (float)i / 64.0f;
+    Vec2 p;
+    ed.project_for_test(c + u * (r * std::cos(a)) + v * (r * std::sin(a)), p);
+    px.push_back(p);
+  }
+  pen_stroke(ed, wobbled(px, 1.0f, seed));
+}
+const Mesh *active_mesh(Editor &ed) {
+  GameObject *g = ed.active_object_for_test();
+  const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  return mf && mf->mesh ? mf->mesh.get() : nullptr;
+}
+}  // namespace
+
+static void tests_round245() {
+  test("a box from three construction lines at a corner, with its lengths in F9; a cylinder from two circles; a cone from a circle and a line; undo takes the solid back", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("camera 35 -30 6");
+    ed.command("sketch on");
+    ed.step_frame_headless();
+    /* The box: X and Z lines on the ground from the origin, the upright on a wall through it. */
+    ed.command("sketchcanvas ground");
+    world_line(ed, {0, 0, 0}, {1.5f, 0, 0}, 31);
+    world_line(ed, {0, 0, 0}, {0, 0, 1.0f}, 32);
+    ed.command("sketchcanvas plane z 0 0 0");
+    world_line(ed, {0, 0, 0}, {0, 0.8f, 0}, 33);
+    CHECK(ed.sketch_for_test().strokes.size() == 3 && ed.scene().guides.size() == 3);
+    ed.command("sketchbuild box");
+    ed.step_frame_headless();
+    GameObject *box = ed.active_object_for_test();
+    const Mesh *m = active_mesh(ed);
+    CHECK(box && m && box->name == "Box" && m->vert_count() == 8 && m->face_count() == 6);
+    if (box && m) {
+      const AABB b = box->world_bounds();
+      std::printf("    the box: (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f) (want 0,0,0 to 1.5, 0.8, 1)\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+      CHECK(length(b.min) < 0.05f && length(b.max - Vec3{1.5f, 0.8f, 1.0f}) < 0.08f);
+      CHECK(ed.last_op_name_for_test() == "sketch_box");
+      /* F9: the lengths changed re-make it. */
+      ed.set_last_op_size_for_test({2.0f, 1.0f, 0.5f});
+      const AABB b2 = box->world_bounds();
+      std::printf("    after F9: to (%.3f, %.3f, %.3f)\n", b2.max.x, b2.max.y, b2.max.z);
+      CHECK(length(b2.max - Vec3{2.0f, 1.0f, 0.5f}) < 0.03f && active_mesh(ed)->face_count() == 6);
+    }
+    /* Undo: the box is gone, the strokes stay. */
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(!ed.scene().find_by_name("Box") && ed.sketch_for_test().strokes.size() == 3);
+    /* The cylinder: a circle on the ground and one a metre up. */
+    ed.command("sketchcanvas ground");
+    world_circle(ed, {2.5f, 0, 0}, {1, 0, 0}, {0, 0, 1}, 0.5f, 34);
+    ed.command("sketchcanvas plane y 0 1 0");
+    world_circle(ed, {2.5f, 1.0f, 0}, {1, 0, 0}, {0, 0, 1}, 0.4f, 35);
+    const Sketch &s = ed.sketch_for_test();
+    std::printf("    the circles: %d strokes", (int)s.strokes.size());
+    for (const SketchStroke &st : s.strokes) std::printf(" [kind %d, %d pts%s]", (int)st.kind, (int)st.pts.size(), st.closed ? ", closed" : "");
+    std::printf("\n");
+    CHECK(s.strokes.size() == 5 && s.strokes[3].closed && s.strokes[4].closed);
+    ed.command("sketchbuild cylinder");
+    ed.step_frame_headless();
+    GameObject *cyl = ed.active_object_for_test();
+    m = active_mesh(ed);
+    CHECK(cyl && m && cyl->name == "Cylinder" && m->vert_count() == 48 && m->face_count() == 26);
+    if (cyl && m) {
+      const AABB b = cyl->world_bounds();
+      std::printf("    the cylinder: x %.3f..%.3f, y %.3f..%.3f (want 2.0..3.0, 0..1); F9 %.3f / %.3f / %.3f\n", b.min.x, b.max.x, b.min.y, b.max.y, ed.last_op_size_for_test().x, ed.last_op_size_for_test().y, ed.last_op_size_for_test().z);
+      CHECK(std::fabs(b.min.x - 2.0f) < 0.03f && std::fabs(b.max.x - 3.0f) < 0.03f && std::fabs(b.min.y) < 0.03f && std::fabs(b.max.y - 1.0f) < 0.03f);
+      CHECK(ed.last_op_name_for_test() == "sketch_cylinder" && std::fabs(ed.last_op_size_for_test().z - 0.4f) < 0.02f);
+    }
+    /* The cone: a circle and a line from its centre up a wall. */
+    ed.command("sketchcanvas ground");
+    world_circle(ed, {-2.0f, 0, 0}, {1, 0, 0}, {0, 0, 1}, 0.5f, 36);
+    ed.command("sketchcanvas plane z -2 0 0");
+    world_line(ed, {-2.0f, 0, 0}, {-2.0f, 1.2f, 0}, 37);
+    ed.command("sketchbuild cone");
+    ed.step_frame_headless();
+    GameObject *cone = ed.active_object_for_test();
+    m = active_mesh(ed);
+    CHECK(cone && m && cone->name == "Cone" && m->vert_count() == 25 && m->face_count() == 25);
+    if (cone && m) {
+      const AABB b = cone->world_bounds();
+      std::printf("    the cone: y %.3f..%.3f (want 0..1.2), x %.3f..%.3f\n", b.min.y, b.max.y, b.min.x, b.max.x);
+      CHECK(std::fabs(b.max.y - 1.2f) < 0.03f && std::fabs(b.min.x + 2.5f) < 0.03f);
+    }
+  });
+
+  test("a face from a closed outline on a canvas, pulled by a line along its normal (the Push/Pull operator); a sweep from two circles and a path between their centres", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("camera 35 -55 3 1.5 0 2.5");  // (close and from well above: the square's corners stay sharp on the view)
+    ed.command("sketch on");
+    ed.step_frame_headless();
+    ed.command("sketchcanvas ground");
+    /* A square on the ground drawn in one stroke: four lines meeting at their corners. */
+    std::vector<Vec2> px;
+    const Vec3 corner[5] = {{1, 0, 2}, {2, 0, 2}, {2, 0, 3}, {1, 0, 3}, {1, 0, 2}};
+    for (int e = 0; e < 4; e++)
+      for (int i = (e ? 1 : 0); i <= 16; i++) {
+        Vec2 p;
+        ed.project_for_test(corner[e] + (corner[e + 1] - corner[e]) * ((float)i / 16.0f), p);
+        px.push_back(p);
+      }
+    pen_stroke(ed, wobbled(px, 1.5f, 41));
+    const Sketch &s = ed.sketch_for_test();
+    std::printf("    the square: %d strokes:", (int)s.strokes.size());
+    for (const SketchStroke &st : s.strokes) std::printf(" [kind %d, %d pts]", (int)st.kind, (int)st.pts.size());
+    std::printf("\n");
+    CHECK(s.strokes.size() == 4);
+    ed.command("sketchbuild face");
+    ed.step_frame_headless();
+    GameObject *face = ed.active_object_for_test();
+    const Mesh *m = active_mesh(ed);
+    CHECK(face && m && face->name == "Face" && m->vert_count() == 4 && m->face_count() == 1);
+    if (face && m) {
+      const AABB b = face->world_bounds();
+      std::printf("    the face: (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f) (want 1,0,2 to 2,0,3)\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+      CHECK(length(b.min - Vec3{1, 0, 2}) < 0.08f && length(b.max - Vec3{2, 0, 3}) < 0.08f);
+    }
+    /* The pull: a line up a wall through the face, 0.7 m. */
+    ed.command("sketchcanvas plane z 0 0 2");
+    world_line(ed, {1.5f, 0, 2}, {1.5f, 0.7f, 2}, 42);
+    ed.command("sketchbuild pull");
+    ed.step_frame_headless();
+    m = active_mesh(ed);
+    CHECK(m && m->face_count() == 6 && ed.last_op_name_for_test() == "push_pull");
+    if (m) {
+      const AABB b = face->world_bounds();
+      std::printf("    pulled: y %.3f..%.3f (want 0..0.7)\n", b.min.y, b.max.y);
+      CHECK(std::fabs(std::fabs(b.max.y - b.min.y) - 0.7f) < 0.05f);
+    }
+    /* A face on a wall (the review's case: its frame was left-handed and the face landed 0.7 m off): a square on
+     * the wall z = 1 from (1, 0) to (2, 1), the camera turned to see it. */
+    ed.command("camera 20 -25 4 1.5 0.5 1");
+    ed.step_frame_headless();
+    ed.command("sketchcanvas plane z 0 0 1");
+    px.clear();
+    const Vec3 wall[5] = {{1, 0, 1}, {2, 0, 1}, {2, 1, 1}, {1, 1, 1}, {1, 0, 1}};
+    for (int e = 0; e < 4; e++)
+      for (int i = (e ? 1 : 0); i <= 16; i++) {
+        Vec2 p;
+        ed.project_for_test(wall[e] + (wall[e + 1] - wall[e]) * ((float)i / 16.0f), p);
+        px.push_back(p);
+      }
+    pen_stroke(ed, wobbled(px, 1.5f, 46));
+    ed.command("sketchbuild face");
+    ed.step_frame_headless();
+    GameObject *wf = ed.active_object_for_test();
+    m = active_mesh(ed);
+    CHECK(wf && m && wf->name == "Face" && m->face_count() == 1);
+    if (wf && m) {
+      const AABB b = wf->world_bounds();
+      std::printf("    the face on the wall: (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f) (want 1,0,1 to 2,1,1)\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+      CHECK(length(b.min - Vec3{1, 0, 1}) < 0.08f && length(b.max - Vec3{2, 1, 1}) < 0.08f);
+    }
+    /* The sweep: a circle on the ground, a smaller one up and across, and a quarter-circle path between the
+     * centres on a wall through both; the camera moved to see each well (the strokes are in the scene). */
+    ed.command("camera 35 -60 4 0.75 0 -3");
+    ed.step_frame_headless();
+    ed.command("sketchcanvas ground");
+    world_circle(ed, {0, 0, -3}, {1, 0, 0}, {0, 0, 1}, 0.5f, 43);
+    ed.command("sketchcanvas plane y 0 1.5 0");
+    world_circle(ed, {1.5f, 1.5f, -3}, {1, 0, 0}, {0, 0, 1}, 0.3f, 44);
+    ed.command("camera 0 -25 4 0.75 0.75 -3");  // (facing the wall)
+    ed.step_frame_headless();
+    ed.command("sketchcanvas plane z 0 0 -3");
+    px.clear();
+    for (int i = 0; i <= 32; i++) {  // (a quarter circle from (0,0) up to (1.5, 1.5), centred at (1.5, 0))
+      const float a = 3.14159265f * (1.0f - 0.5f * (float)i / 32.0f);
+      Vec2 p;
+      ed.project_for_test({1.5f + 1.5f * std::cos(a), 1.5f * std::sin(a), -3.0f}, p);
+      px.push_back(p);
+    }
+    pen_stroke(ed, wobbled(px, 1.0f, 45));
+    const size_t before = ed.scene().guides.size();
+    std::printf("    before the sweep: %d strokes:", (int)s.strokes.size());
+    for (const SketchStroke &st : s.strokes) std::printf(" [kind %d, %d pts, canvas %d%s]", (int)st.kind, (int)st.pts.size(), st.canvas, st.closed ? ", closed" : "");
+    std::printf("\n");
+    ed.command("sketchbuild sweep");
+    ed.step_frame_headless();
+    GameObject *sw = ed.active_object_for_test();
+    m = active_mesh(ed);
+    CHECK(sw && m && sw->name == "Sweep");
+    if (sw && m) {
+      const int rings = (int)m->vert_count() / 24;
+      const AABB b = sw->world_bounds();
+      std::printf("    the sweep: %d rings, %d faces; (%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f)\n", rings, (int)m->face_count(), b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+      CHECK(rings >= 5 && (int)m->face_count() == 24 * (rings - 1) + 2);
+      /* The first ring lies near the ground (the path leaves it upward, as the hand drew the arc's start), the last
+       * stands on end near (1.5, 1.5); the rings reach the circles' radii in z. */
+      CHECK(b.min.y > -0.25f && std::fabs(b.max.y - 1.8f) < 0.15f && std::fabs(b.max.x - 1.5f) < 0.15f && std::fabs(b.max.z + 2.5f) < 0.1f && std::fabs(b.min.z + 3.5f) < 0.1f);
+    }
+    (void)before;
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
+  tests_round245();
 }

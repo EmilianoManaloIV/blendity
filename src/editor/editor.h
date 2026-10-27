@@ -782,6 +782,8 @@ class Editor {
   float last_op_profile_for_test() const { return last_op_.profile; }
   float last_op_amount_for_test() const { return last_op_.amount; }
   std::string last_op_name_for_test() const { return last_op_.op; }
+  Vec3 last_op_size_for_test() const { return last_op_.size; }
+  void set_last_op_size_for_test(Vec3 s) { last_op_.size = s; run_last_op(false); }  // (F9's fields, task 0225)
   bool last_op_valid_for_test() { return last_op_valid(); }
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
@@ -921,6 +923,15 @@ class Editor {
   const AnimEditorState &anim_for_test() const { return anim_; }
   NavStyle nav_style_for_test() const { return nav_style_; }
   const SceneCamera &scene_camera_for_test() const { return cam_; }
+  struct SketchSeg {  // (task 0225: a line stroke on a scene canvas as a world segment)
+    Vec3 a, b;
+    size_t stroke;
+  };
+  struct SketchCircle {  // (a closed stroke on a scene canvas read as a circle in its plane)
+    Vec3 c, n;
+    float r;
+    size_t stroke;
+  };
   bool project_for_test(Vec3 w, Vec2 &px) const {  // (the Scene view's pixels, from its top left)
     float z;
     return scene_r3d_.project(w, px, z);
@@ -1928,6 +1939,7 @@ class Editor {
     int count = 1;          // array: copies in all; grid: rows
     int axis = 0;           // array: 0 X, 1 Y, 2 Z (the selection's own axes)
     float amount2 = 0.0f;   // taper: end scale; recess: border
+    Vec3 size{1, 1, 1};     // sketch_box: the lengths; sketch_cylinder: base radius, height, top radius (task 0225)
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
@@ -2786,6 +2798,23 @@ class Editor {
   int sketch_add_canvas(SketchCanvas c);
   bool sketch_snap_to_guides(const Recti &view, Vec2 &a, Vec2 &b) const;
   float cam_yaw_before_ = 1e9f, cam_pitch_before_ = 1e9f, cam_fov_before_ = 1e9f;  // (the camera the guide last followed)
+  /* Task 0225 (sketch_build.cpp): solids from the construction lines, 3-Sweep's way. */
+  bool sketch_circle_of(const SketchStroke &st, SketchCircle &out) const;
+  bool sketch_stroke_shown(const SketchStroke &st) const;
+  std::vector<SketchSeg> sketch_segments() const;
+  std::vector<SketchCircle> sketch_circles() const;
+  GameObject *sketch_new_object(const std::string &name, Vec3 pos, Quat rot);
+  bool sketch_build_box();
+  bool sketch_build_cylinder();
+  bool sketch_build_cone();
+  bool sketch_build_sweep();
+  bool sketch_build_face();
+  bool sketch_build_pull();
+  void sketch_build_frustum(Vec3 base, Vec3 n, float r0, float r1, float height);
+  void sketch_build_mesh(const std::string &op, Mesh &m, Vec3 size, int segments);
+  void sketch_sweep_mesh(const std::vector<Vec3> &path, const SketchCircle &c0, const SketchCircle &c1);
+  bool sketch_build_command(const std::vector<std::string> &t);
+  Vec3 last_op_size_{1, 1, 1};  // (the box's lengths; the cylinder's base radius, height and top radius)
   /* ---- Drawing tool: polyline, rectangle, circle, arc, polygon (draw_tool.cpp) ---- */
   struct DrawTool {
     bool active = false;
