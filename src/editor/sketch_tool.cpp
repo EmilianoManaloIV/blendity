@@ -212,6 +212,7 @@ void Editor::sketch_stroke_end(const Recti &view) {
   if (g.pen.empty()) return;
   if (g.pen.size() == 1) g.pen.push_back(g.pen[0] + Vec2{0.5f, 0.0f}), g.pressure.push_back(g.pressure[0]);
   Sketch &s = scene_->sketch;
+  if (!sketch_layer_takes_strokes(s.active_layer, true)) return;  // (task 0234: a script's stroke on a locked layer)
   const SketchLayer &layer = s.layer_at(s.active_layer);
   const int level = g.freehand ? 0 : layer.correct;
   float mean_w = 0.0f;
@@ -320,6 +321,10 @@ bool Editor::sketch_erase_at(const Recti &view, Vec2 px) {
   const float reach = (float)ui_.px(8);
   bool any = false;
   for (size_t i = 0; i < s.strokes.size();) {
+    if (!sketch_layer_takes_strokes(s.strokes[i].layer, false)) {  // (task 0234: a locked layer's strokes stay)
+      i++;
+      continue;
+    }
     std::vector<Vec2> pts;
     for (const SketchPoint &p : s.strokes[i].pts) {
       Vec2 q;
@@ -330,6 +335,29 @@ bool Editor::sketch_erase_at(const Recti &view, Vec2 px) {
   }
   if (any) ui_.redraw = true;
   return any;
+}
+
+static void draw_stroke(ui::Context &u, const std::vector<Vec2> &pts, const std::vector<float> &w, uint32_t color, float width);
+
+/* One stroke as the view shows it: a scene canvas stroke segment by segment, clipped at the camera; a picture-plane
+ * one through its points. `color` carries the alpha to draw with. */
+void Editor::sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint32_t color) {
+  auto &u = ui_;
+  const Sketch &s = scene_->sketch;
+  const float px1 = (float)u.px(1.0f);
+  if (st.canvas && s.canvas_at(st.canvas)) {
+    std::vector<Vec2> sa, sb;
+    sketch_stroke_segments(view, st, sa, sb);
+    float mean_w = 0.0f;
+    for (const SketchPoint &p : st.pts) mean_w += p.w;
+    mean_w /= (float)std::max<size_t>(1, st.pts.size());
+    for (size_t i = 0; i < sa.size(); i++) draw_stroke(u, {sa[i], sb[i]}, {mean_w, mean_w}, color, st.width * px1);
+    return;
+  }
+  std::vector<Vec2> pts;
+  std::vector<float> w;
+  for (const SketchPoint &p : st.pts) pts.push_back(sketch_to_px(view, {p.x, p.y})), w.push_back(p.w);
+  draw_stroke(u, pts, w, color, st.width * px1);
 }
 
 /* The tool's frame: true when it took the pointer. */
@@ -408,6 +436,10 @@ bool Editor::sketch_update(const Recti &view) {
     return true;
   }
   if (!g.stroking && in.pressed[0] && sketch_view_.hovered && !in.alt()) {
+    if (!sketch_layer_takes_strokes(scene_->sketch.active_layer, true)) {  // (task 0234: a locked or hidden layer)
+      u.consume_click();
+      return true;
+    }
     sketch_stroke_begin(view, px, in.pressure, in.ctrl());
     g.view_kind = sketch_view_.kind;
     u.consume_click();
@@ -442,27 +474,7 @@ void Editor::sketch_draw(const Recti &view) {
   if (s.strokes.empty() && !sketch_.active) return;
   u.canvas.push_clip(view);
   const float px1 = (float)u.px(1.0f);
-  for (const SketchStroke &st : s.strokes) {
-    const SketchLayer *layer = st.layer >= 0 && st.layer < (int)s.layers.size() ? &s.layers[(size_t)st.layer] : nullptr;
-    if (layer && !layer->visible) continue;
-    const float opacity = (layer ? layer->opacity : 1.0f) * (layer && st.canvas == 0 ? sketch_layer_fade(*layer) : 1.0f);  // (task 0226)
-    if (opacity <= 0.0f) continue;
-    const uint32_t a = (uint32_t)std::lround(((st.color >> 24) & 255) * opacity);
-    const uint32_t color = (a << 24) | (st.color & 0xFFFFFF);
-    if (st.canvas && s.canvas_at(st.canvas)) {  // (a scene canvas: each segment clipped at the camera)
-      std::vector<Vec2> sa, sb;
-      sketch_stroke_segments(view, st, sa, sb);
-      float mean_w = 0.0f;
-      for (const SketchPoint &p : st.pts) mean_w += p.w;
-      mean_w /= (float)std::max<size_t>(1, st.pts.size());
-      for (size_t i = 0; i < sa.size(); i++) draw_stroke(u, {sa[i], sb[i]}, {mean_w, mean_w}, color, st.width * px1);
-      continue;
-    }
-    std::vector<Vec2> pts;
-    std::vector<float> w;
-    for (const SketchPoint &p : st.pts) pts.push_back(sketch_to_px(view, {p.x, p.y})), w.push_back(p.w);
-    draw_stroke(u, pts, w, color, st.width * px1);
-  }
+  sketch_draw_layers(view);  // (task 0234: bottom to top, each with its opacity and blend)
   const auto &g = sketch_;
   if (!g.active) {
     u.canvas.pop_clip();
@@ -568,17 +580,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
       s.layer_at(s.active_layer).correct = l == "none" ? 0 : l == "light" ? 1 : 2;
       mark_changed("Sketch Correction");
     }
-    else if (v == "layer") {
-      const std::string w = arg(2, "");
-      if (w == "add") {
-        SketchLayer l;
-        l.name = line.find("add ") != std::string::npos ? line.substr(line.find("add ") + 4) : "Layer " + std::to_string(s.layers.size() + 1);
-        s.layers.push_back(l);
-        s.active_layer = (int)s.layers.size() - 1;
-        mark_changed("Add Sketch Layer");
-      }
-      else s.active_layer = std::max(0, std::min((int)s.layers.size() - 1, std::atoi(w.c_str())));
-    }
+    else if (v == "layer") sketch_layer_command(t, line);  // (task 0234)
     else if (v == "opacity") {
       s.layer_at(s.active_layer).opacity = std::max(0.0f, std::min(1.0f, (float)std::atof(arg(2, "1").c_str())));
       mark_changed("Sketch Layer Opacity");
@@ -590,7 +592,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "count") Log::info("Sketch: %zu strokes on %zu layers", s.strokes.size(), s.layers.size());
     else if (v == "view") sketch_layer_view();  // (task 0226)
     else if (v == "overlay") g.overlay = to_lower(arg(2, "on")) != "off";
-    else Log::info("usage: sketch on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer add [name]|layer <n>|opacity <0-1>|hide|show|count");
+    else Log::info("usage: sketch on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer ...|opacity <0-1>|hide|show|count (sketch layer for the layer verbs)");
     ui_.redraw = true;
     return true;
   }

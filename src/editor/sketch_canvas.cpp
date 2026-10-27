@@ -483,6 +483,7 @@ bool Editor::sketch_world_stroke_command(const std::vector<std::string> &t) {
     return Vec2{dot(off, canvas->u) / std::max(1e-9f, dot(canvas->u, canvas->u)), dot(off, canvas->v) / std::max(1e-9f, dot(canvas->v, canvas->v))};
   };
   if (s.layers.empty()) s.layers.push_back(SketchLayer{});
+  if (!sketch_layer_takes_strokes(s.active_layer, true)) return true;  // (task 0234: a locked layer, a group)
   SketchStroke st;
   st.layer = s.active_layer;
   st.color = sketch_.color;

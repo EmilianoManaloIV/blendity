@@ -310,6 +310,8 @@ std::string save_scene_text(const Scene &scene) {
       if (l.has_view)
         os << "sketch_layer_view " << fmt(l.view_yaw) << " " << fmt(l.view_pitch) << " " << fmt(l.view_fov) << " " << fmt(l.view_pivot.x) << " " << fmt(l.view_pivot.y) << " "
            << fmt(l.view_pivot.z) << " " << fmt(l.view_dist) << "\n";
+      if (l.locked || l.blend != 0 || l.group >= 0 || l.is_group)  // (task 0234; an older build skips the line)
+        os << "sketch_layer_ext " << (l.locked ? 1 : 0) << " " << l.blend << " " << l.group << " " << (l.is_group ? 1 : 0) << "\n";
     }
     os << "sketch_active " << sk.active_layer << " " << sk.active_canvas << " " << (sk.follow_camera ? 1 : 0) << "\n";
     if (sk.perspective > 0) {
@@ -592,6 +594,10 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
       l.has_view = true;
       l.view_yaw = f(1), l.view_pitch = f(2), l.view_fov = f(3), l.view_pivot = {f(4), f(5), f(6)}, l.view_dist = f(7);
+    }
+    else if (k == "sketch_layer_ext" && t.size() >= 5 && !fresh.sketch.layers.empty()) {  // (task 0234: the layer before it)
+      SketchLayer &l = fresh.sketch.layers.back();
+      l.locked = t[1] != "0", l.blend = std::max(0, std::min(3, std::atoi(t[2].c_str()))), l.group = std::atoi(t[3].c_str()), l.is_group = t[4] != "0";
     }
     else if (k == "sketch_active" && t.size() >= 2) {
       fresh.sketch.active_layer = std::atoi(t[1].c_str());
@@ -921,6 +927,11 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
   }
   fresh.path = scene.path;
   if (fresh.active_camera && !fresh.find(fresh.active_camera)) fresh.active_camera = 0;  // a camera deleted after the id was written
+  for (size_t i = 0; i < fresh.sketch.layers.size(); i++) {  // (task 0234: a layer's group names another layer that is a group, or none)
+    SketchLayer &l = fresh.sketch.layers[i];
+    const bool valid = l.group >= 0 && (size_t)l.group < fresh.sketch.layers.size() && (size_t)l.group != i && fresh.sketch.layers[(size_t)l.group].is_group;
+    if (!valid) l.group = -1;
+  }
   scene = std::move(fresh);
   return true;
 }

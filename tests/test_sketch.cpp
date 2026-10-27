@@ -1332,6 +1332,276 @@ static void tests_round253() {
   });
 }
 
+/* Task 0234 (ADR 0072): the Layers panel - compositing by opacity and blend, the stack's operations, locks, the
+ * window and the Wheel's set, save and load. */
+static void tests_round254() {
+  using platform::EventType;
+  auto step = [](Editor &ed, std::vector<platform::Event> events = {}) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  auto px_at = [](const Editor &ed, int x, int y) {
+    const Image &fb = ed.main_fb_for_test();
+    return fb.pixels[(size_t)y * fb.width + x];
+  };
+  auto chan_diff = [](uint32_t a, uint32_t b) {
+    int d = 0;
+    for (int s = 0; s <= 16; s += 8) d = std::max(d, std::abs((int)((a >> s) & 255) - (int)((b >> s) & 255)));
+    return d;
+  };
+  auto red = [](uint32_t c) { return (int)((c >> 16) & 255); };
+  auto blue = [](uint32_t c) { return (int)(c & 255); };
+  auto click = [&](Editor &ed, const Recti &r) {
+    step(ed, {pen_ev(EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed, {pen_ev(EventType::MouseDown, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed, {pen_ev(EventType::MouseUp, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed);
+  };
+
+  test("layer compositing: two overlapping strokes on a half-opaque layer are one tone (not darker), Multiply darkens blue over red, a hidden layer shows what is under it, a solo leaves the others' pixels alone, and a group's opacity reads as its child's", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed);
+    const Recti s = ed.scene_rect_for_test();
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch width 30");
+    ed.command("sketch color 000000");
+    step(ed);
+    const int yl = s.h * 3 / 10, xs = s.w / 5, xe = s.w * 4 / 5, sx = s.x + s.w / 2, sy = s.y + yl, sy2 = s.y + yl * 2;
+    const uint32_t bg = px_at(ed, sx, sy), bg2 = px_at(ed, sx, sy2);
+    auto line = [&](int y) { ed.command(strprintf("sketchstroke %d %d %d %d", xs, y, xe, y)); };
+    line(yl);
+    step(ed);
+    const uint32_t one_full = px_at(ed, sx, sy);
+    ed.command("sketch opacity 0.5");
+    step(ed);
+    const uint32_t one_half = px_at(ed, sx, sy);
+    line(yl);
+    step(ed);
+    const uint32_t two_half = px_at(ed, sx, sy);
+    std::printf("    background %06X; one black stroke %06X, at opacity 0.5 %06X, two strokes at 0.5 %06X\n", bg & 0xFFFFFF, one_full & 0xFFFFFF, one_half & 0xFFFFFF, two_half & 0xFFFFFF);
+    CHECK(chan_diff(one_full, bg) > 60 && chan_diff(one_half, bg) > 20 && chan_diff(one_half, one_full) > 20);
+    CHECK(chan_diff(two_half, one_half) <= 3 && ed.sketch_for_test().strokes.size() == 2);  // (the layer's opacity, not each stroke's)
+    /* Multiply: blue over red is dark where they cross; Normal shows the blue. */
+    ed.command("sketch clear");
+    ed.command("sketch opacity 1");
+    ed.command("sketch color FF0000");
+    line(yl);
+    ed.command("sketch layer add Blue");
+    ed.command("sketch color 0000FF");
+    line(yl);
+    step(ed);
+    const uint32_t normal = px_at(ed, sx, sy);
+    ed.command("sketch layer blend multiply");
+    step(ed);
+    const uint32_t multiply = px_at(ed, sx, sy);
+    std::printf("    blue over red: Normal %06X, Multiply %06X\n", normal & 0xFFFFFF, multiply & 0xFFFFFF);
+    CHECK(blue(normal) > 200 && red(normal) < 40);
+    CHECK(red(multiply) < 30 && blue(multiply) < 30);
+    /* Hidden: the red shows again. Solo on the blue layer: a pixel only the red covers is the background. */
+    ed.command("sketch hide");
+    step(ed);
+    CHECK(red(px_at(ed, sx, sy)) > 200);
+    ed.command("sketch show");
+    ed.command("sketch layer blend normal");
+    ed.command("sketch layer 0");
+    ed.command("sketch color FF0000");  // (the tool keeps its colour: the blue from the layer above)
+    line(yl * 2);
+    step(ed);
+    CHECK(red(px_at(ed, sx, sy2)) > 200);
+    ed.command("sketch layer 1");
+    ed.command("sketch layer solo");
+    step(ed);
+    CHECK(ed.sketch_solo_for_test() == 1 && chan_diff(px_at(ed, sx, sy2), bg2) <= 3 && blue(px_at(ed, sx, sy)) > 200);
+    ed.command("sketch layer unsolo");
+    /* A group: the blue layer alone at 0.5 reads as the blue layer at 1 inside a group at 0.5. */
+    ed.command("sketch layer 0");
+    ed.command("sketch hide");
+    ed.command("sketch layer 1");
+    ed.command("sketch opacity 0.5");
+    step(ed);
+    const uint32_t blue_half = px_at(ed, sx, sy);
+    ed.command("sketch opacity 1");
+    ed.command("sketch layer group Inks");
+    ed.command("sketch opacity 0.5");
+    step(ed);
+    const uint32_t group_half = px_at(ed, sx, sy);
+    const Sketch &sk = ed.sketch_for_test();
+    std::printf("    blue at 0.5 %06X, blue in a group at 0.5 %06X\n", blue_half & 0xFFFFFF, group_half & 0xFFFFFF);
+    CHECK(sk.layers.size() == 3 && sk.layers[2].is_group && sk.layers[1].group == 2 && sk.active_layer == 2 && chan_diff(group_half, blue_half) <= 3);
+    /* A group is made in place: grouping the bottom layer puts the group right above it, under the blue. */
+    ed.command("sketch layer 0");
+    ed.command("sketch layer group Base");
+    CHECK(sk.layers.size() == 4 && sk.layers[1].is_group && sk.layers[0].group == 1 && sk.layers[2].name == "Blue" && sk.layers[2].group == 3 && sk.layers[3].is_group);
+    ed.command("sketch off");
+  });
+
+  test("the layer stack: move swaps the draw order and every stroke keeps its layer, merge down joins the strokes onto the lower layer (its opacity kept), duplicate copies the strokes, delete remaps, flatten leaves one layer", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed);
+    const Recti s = ed.scene_rect_for_test();
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch width 30");
+    const int yl = s.h * 3 / 10, xs = s.w / 5, xe = s.w * 4 / 5, sx = s.x + s.w / 2, sy = s.y + yl;
+    auto line = [&] { ed.command(strprintf("sketchstroke %d %d %d %d", xs, yl, xe, yl)); };
+    ed.command("sketch color FF0000");
+    line();
+    ed.command("sketch layer add Blue");
+    ed.command("sketch color 0000FF");
+    line();
+    step(ed);
+    CHECK(blue(px_at(ed, sx, sy)) > 200);
+    ed.command("sketch layer move 1 0");
+    step(ed);
+    const Sketch &sk = ed.sketch_for_test();
+    CHECK(sk.layers.size() == 2 && sk.layers[0].name == "Blue" && red(px_at(ed, sx, sy)) > 200);
+    CHECK(sk.strokes.size() == 2 && sk.strokes[0].layer == 1 && sk.strokes[1].layer == 0);  // (the red stroke went up with its layer)
+    ed.command("sketch layer 0");
+    ed.command("sketch opacity 0.4");
+    ed.command("sketch layer 1");
+    ed.command("sketch layer merge");
+    CHECK(sk.layers.size() == 1 && sk.strokes.size() == 2 && sk.strokes[0].layer == 0 && sk.strokes[1].layer == 0 && std::fabs(sk.layers[0].opacity - 0.4f) < 1e-5f);
+    ed.command("sketch layer duplicate");
+    CHECK(sk.layers.size() == 2 && sk.strokes.size() == 4 && sk.active_layer == 1 && sk.layers[1].name == "Blue copy");
+    size_t on_copy = 0;
+    for (const SketchStroke &st : sk.strokes) on_copy += st.layer == 1 ? 1 : 0;
+    CHECK(on_copy == 2);
+    ed.command("sketch layer delete");
+    CHECK(sk.layers.size() == 1 && sk.strokes.size() == 2 && sk.active_layer == 0);
+    ed.command("sketch layer add Top");
+    line();
+    ed.command("sketch layer add Hidden");
+    line();
+    ed.command("sketch hide");
+    ed.command("sketch layer add Fourth");
+    ed.command("sketch layer 2");
+    ed.command("sketch layer delete");  // (the layer above takes its place: the neighbour is picked, not the bottom)
+    CHECK(sk.layers.size() == 3 && sk.active_layer == 2 && sk.layers[2].name == "Fourth");
+    ed.command("sketch layer flatten");  // (the hidden layer's stroke goes, as Photoshop flattens)
+    CHECK(sk.layers.size() == 1 && sk.strokes.size() == 3 && sk.strokes[2].layer == 0 && sk.layers[0].opacity == 1.0f);
+    ed.command("sketch off");
+  });
+
+  test("a locked layer takes no pen stroke and keeps its strokes from the eraser; unlocked, both work again", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed);
+    const Recti s = ed.scene_rect_for_test();
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch width 10");
+    std::vector<Vec2> pts, lower;
+    for (int i = 0; i <= 10; i++) pts.push_back({(float)(s.w / 2 - 50 + 10 * i), (float)(s.h / 2)}), lower.push_back({(float)(s.w / 2 - 50 + 10 * i), (float)(s.h / 2 + 60)});
+    pen_stroke(ed, pts);
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    ed.command("sketch layer lock");
+    pen_stroke(ed, lower);
+    CHECK(ed.sketch_for_test().strokes.size() == 1 && ed.sketch_for_test().layers[0].locked);
+    pen_stroke(ed, pts, 1.0f, true);  // (the eraser end over the stroke)
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    ed.command("sketch layer unlock");
+    pen_stroke(ed, pts, 1.0f, true);
+    CHECK(ed.sketch_for_test().strokes.empty());
+    pen_stroke(ed, lower);
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    ed.command("sketch off");
+  });
+
+  test("the Layers window: in the Drawing and Reference & Planning layouts; a row per layer, a press on a name picks the layer, New Layer adds one, the eye hides, and a pen held on a row opens the Wheel's layers set", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed);
+    ed.command("layout Reference & Planning");
+    step(ed);
+    CHECK(ed.dock_leaf_rect_for_test(WindowKind::Layers).w > 0);
+    ed.command("layout Drawing");
+    step(ed);
+    CHECK(ed.dock_leaf_rect_for_test(WindowKind::Layers).w > 0);
+    ed.record_buttons_for_test(true);
+    ed.command("sketch on");
+    ed.command("sketch layer add Second");
+    step(ed);
+    step(ed);
+    const Recti w = ed.window_rect_for_test(WindowKind::Layers);
+    CHECK(w.w > 100 && ed.sketch_for_test().layers.size() == 2 && ed.sketch_for_test().active_layer == 1);
+    auto rect = [&](const std::string &n) {
+      const auto &br = ed.ui_for_test().button_rects;
+      return br.count(n) ? br.at(n) : Recti{};
+    };
+    const Recti row0 = rect("layer_row0"), row1 = rect("layer_row1");
+    std::printf("    the window %d x %d; row 0 at y %d, row 1 at y %d\n", w.w, w.h, row0.y, row1.y);
+    CHECK(row0.w > 0 && row1.w > 0 && row1.y < row0.y);  // (the top layer first)
+    click(ed, row0);
+    CHECK(ed.sketch_for_test().active_layer == 0);
+    const Recti nb = rect("New Layer");
+    CHECK(nb.w > 0);
+    click(ed, nb);
+    CHECK(ed.sketch_for_test().layers.size() == 3);
+    const Recti eye = rect("layer_eye1");
+    CHECK(eye.w > 0);
+    click(ed, eye);
+    CHECK(!ed.sketch_for_test().layers[1].visible);
+    /* The pen held on a row: the Wheel with the layers set, the row's layer picked. */
+    const Recti r1 = rect("layer_row1");
+    step(ed, {pen_ev(EventType::MouseMove, r1.x + r1.w / 2, r1.y + r1.h / 2)});
+    step(ed, {pen_ev(EventType::MouseDown, r1.x + r1.w / 2, r1.y + r1.h / 2)});
+    for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) step(ed);
+    std::printf("    the wheel %s, mode %s\n", ed.quick_menu_open_for_test() ? "open" : "closed", ed.wheel_mode_for_test().c_str());
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "layers" && ed.sketch_for_test().active_layer == 1);
+    step(ed, {pen_ev(EventType::MouseUp, r1.x + r1.w / 2, r1.y + r1.h / 2)});
+    ed.command("wheel close");
+    /* A drag: the top row (layer 2) dragged below the bottom row lands at the bottom (index 0); every layer keeps
+     * its name. */
+    step(ed);
+    const Recti top_row = rect("layer_row2"), bottom_row = rect("layer_row0");
+    CHECK(top_row.w > 0 && top_row.y < bottom_row.y);
+    const std::string top_name = ed.sketch_for_test().layers[2].name;
+    step(ed, {pen_ev(EventType::MouseMove, top_row.x + 10, top_row.y + top_row.h / 2)});
+    step(ed, {pen_ev(EventType::MouseDown, top_row.x + 10, top_row.y + top_row.h / 2)});
+    for (int k = 1; k <= 12; k++) step(ed, {pen_ev(EventType::MouseMove, top_row.x + 10, top_row.y + top_row.h / 2 + k * 8)});
+    step(ed, {pen_ev(EventType::MouseMove, top_row.x + 10, bottom_row.bottom() + 4)});
+    step(ed, {pen_ev(EventType::MouseUp, top_row.x + 10, bottom_row.bottom() + 4)});
+    step(ed);
+    std::printf("    after the drag: %s, %s, %s\n", ed.sketch_for_test().layers[0].name.c_str(), ed.sketch_for_test().layers[1].name.c_str(), ed.sketch_for_test().layers[2].name.c_str());
+    CHECK(ed.sketch_for_test().layers[0].name == top_name);
+    ed.record_buttons_for_test(false);
+    ed.command("sketch off");
+  });
+
+  test("save and load keep a layer's lock, blend and group; a file without the line loads with the defaults", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    step(ed);
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch layer lock");
+    ed.command("sketch layer blend screen");
+    ed.command("sketch layer add Inks");
+    ed.command("sketch layer group Group");
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("sketch_layer_ext 1 2 -1 0") != std::string::npos && text.find("sketch_layer_ext 0 0 2 0") != std::string::npos &&
+          text.find("sketch_layer_ext 0 0 -1 1") != std::string::npos);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err));
+    CHECK(back.sketch.layers.size() == 3 && back.sketch.layers[0].locked && back.sketch.layers[0].blend == 2 && back.sketch.layers[1].group == 2 && back.sketch.layers[2].is_group);
+    std::string stripped;
+    std::istringstream in(text);
+    for (std::string l; std::getline(in, l);)
+      if (l.rfind("sketch_layer_ext", 0) != 0) stripped += l + "\n";
+    Scene old;
+    CHECK(load_scene_text(stripped, old, err) && old.sketch.layers.size() == 3 && !old.sketch.layers[0].locked && old.sketch.layers[0].blend == 0 && old.sketch.layers[1].group == -1 && !old.sketch.layers[2].is_group);
+    ed.command("sketch off");
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
@@ -1340,4 +1610,5 @@ void run_sketch_tests() {
   tests_round247();
   tests_round248();
   tests_round253();
+  tests_round254();
 }

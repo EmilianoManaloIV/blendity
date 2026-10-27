@@ -84,7 +84,8 @@ enum class Icon {
   None, Hand, Move, Rotate, Scale, Transform, Play, Pause, Step, Cube, Camera, Light, Folder, File, Scene, Eye,
   Plus, Gear, Book, Paper, Chart, Info, Warning, Error, ArrowRight, ArrowDown, Check, Close, Grid, Vertex, Face,
   Magnet, Globe, Local, Pivot, Center, Empty, Mesh, Terminal, Flask, Lightbulb, Search, Menu, PushPull,
-  Wind, Spin, Wave  // task 0158: the effectors' icons in the Scene view (a Wind, a Rotator, an Oscillator)
+  Wind, Spin, Wave,  // task 0158: the effectors' icons in the Scene view (a Wind, a Rotator, an Oscillator)
+  Lock  // task 0234: a locked sketch layer
 };
 
 struct Input {

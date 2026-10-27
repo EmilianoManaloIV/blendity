@@ -59,6 +59,13 @@ struct SketchLayer {
   bool has_view = false;
   float view_yaw = 0.0f, view_pitch = 0.0f, view_fov = 60.0f, view_dist = 6.0f;
   Vec3 view_pivot;
+  /* The Layers panel (task 0234): a locked layer takes no stroke and no erase; the blend mode and the opacity
+   * composite the layer over what is under it, as Photoshop composites; a group is a layer holding others. */
+  bool locked = false;
+  int blend = 0;     // 0 Normal, 1 Multiply, 2 Screen, 3 Overlay
+  int group = -1;    // the index of the group layer it sits in, -1 none
+  bool is_group = false;
+  bool plain() const { return visible && opacity == 1.0f && correct == 2 && name == "Layer" && !locked && blend == 0 && group < 0 && !is_group; }
 };
 
 /* The scene's sketch: its layers and strokes, and the perspective guide - saved with the scene, since its vanishing
@@ -76,10 +83,20 @@ struct Sketch {
   Vec2 vp[3] = {{-0.4f, 0.5f}, {2.0f, 0.5f}, {0.8f, 3.0f}};  // (view heights; 2 and 3 are the second and third points)
   bool vp_placed = false;  // (the editor places them on the view when first shown, unless a file or a command did)
   bool empty() const {
-    const bool plain = layers.empty() || (layers.size() == 1 && layers[0].visible && layers[0].opacity == 1.0f && layers[0].correct == 2 && layers[0].name == "Layer");
+    const bool plain = layers.empty() || (layers.size() == 1 && layers[0].plain());
     return strokes.empty() && plain && perspective == 0 && active_layer == 0 && canvases.empty() && active_canvas == 0 && follow_camera;
   }
   SketchLayer &layer_at(int i);
+  /* The layer stack (task 0234): each remaps every stroke's layer, the groups and the active layer. `map[old]` is the
+   * new index, -1 gone (its strokes go with it). */
+  void remap_layers(const std::vector<int> &map);
+  void move_layer(int from, int to);
+  bool remove_layer(int i);
+  int duplicate_layer(int i);
+  bool merge_down(int i);
+  void flatten();  // (one layer; hidden layers' strokes go, as Photoshop flattens)
+  int add_group(const std::string &name, int child);  // (the group right above its child)
+  bool layer_shown(int i) const;  // (visible, and its group visible)
   const SketchCanvas *canvas_at(int id) const;
   SketchCanvas *canvas_at(int id);
 };

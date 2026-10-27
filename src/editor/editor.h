@@ -124,7 +124,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -621,6 +621,7 @@ class Editor {
     return sketch_stroke_px(scene_rect_, st, p, px);
   }
   bool sketch_place3d_for_test() const { return sketch_.place3d; }
+  int sketch_solo_for_test() const { return sketch_solo_; }  // (task 0234)
   float sketch_view_cam_yaw_for_test() const { return sketch_view_.cam.yaw; }
   Recti nav_button_rect_for_test(int which) const { return nav_buttons_shown() ? nav_button_rect(scene_rect_, which) : Recti{}; }
   Recti view_gizmo_rect_for_test() const { return view_gizmo_rect(scene_rect_); }
@@ -3019,6 +3020,31 @@ class Editor {
   void draw_draw_window(const Recti &r);
   void draw_draw_bar(const Recti &bar);
   bool draw_tab_command(const std::vector<std::string> &t);
+  /* The Layers panel (task 0234, editor/sketch_layers.cpp): the sketch's layers composited in order with their opacity
+   * and blend, the window that edits them, the console's verbs. */
+  Image sketch_comp_[2];  // (a layer's picture, transparent where it didn't draw; a group's, its children composited into it)
+  int sketch_solo_ = -1;  // (one layer shown alone; -1 none - the editor's, not the scene's; dropped by the stack's operations)
+  int layers_rename_ = -1;
+  std::string layers_rename_text_;
+  bool layers_opacity_dirty_ = false;
+  int layers_scroll_ = 0;
+  std::vector<int> layers_shown_;  // (the rows drawn this frame, top first: a drag's slots)
+  bool sketch_layer_shown(int i) const;
+  bool sketch_layer_takes_strokes(int i, bool say);
+  void sketch_draw_layers(const Recti &view);
+  void sketch_draw_layer(int i, const std::vector<size_t> &strokes, const Recti &view, bool in_group);
+  void sketch_draw_group(int i, const std::vector<std::vector<size_t>> &by_layer, const Recti &view);
+  void sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint32_t color);
+  void sketch_composite_clear(Image &c, const Recti &view);
+  void sketch_composite_over(const Image &c, const Recti &view, float opacity, int blend);
+  void sketch_layers_reset();  // (an undo, a redo, another scene: the editor's indices into the stack are stale)
+  void draw_layers_window(const Recti &r);
+  void draw_layer_row(int i, const Recti &row, bool child);
+  void draw_layer_name(int i, const Recti &name, const Recti &thumb, int top, int a);
+  void draw_layer_thumb(int i, const Recti &box);
+  void layers_drop(int from, int to);
+  void sketch_layer_command(const std::vector<std::string> &t, const std::string &line);
+  void sketch_layer_op(const std::string &op, int i);
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;
   void sketch_begin();

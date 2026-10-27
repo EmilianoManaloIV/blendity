@@ -1486,6 +1486,9 @@ void Context::rasterize_icon(Canvas &canvas, Icon icon, const Recti &r, uint32_t
     case Icon::Wave:  /* a wave: an Oscillator */
       L(1.5f, 8, 4, 4); L(4, 4, 6.5f, 8); L(6.5f, 8, 9, 12); L(9, 12, 11.5f, 8); L(11.5f, 8, 14.5f, 4);
       break;
+    case Icon::Lock:  /* a padlock: its body and a squared shackle (task 0234) */
+      R(3.5f, 8, 9, 6); L(5.5f, 8, 5.5f, 5); L(10.5f, 8, 10.5f, 5); L(5.5f, 5, 10.5f, 5);
+      break;
     case Icon::PushPull:  /* a slab with a face lifted off it (SketchUp's Push/Pull) */
       L(2, 11, 9, 14); L(9, 14, 14, 11); L(2, 11, 2, 13); L(14, 11, 14, 13); L(2, 13, 9, 15.5f); L(9, 15.5f, 14, 13);
       L(2, 7, 9, 10); L(9, 10, 14, 7); L(14, 7, 7, 4); L(7, 4, 2, 7);

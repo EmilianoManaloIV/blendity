@@ -2,6 +2,60 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 254): the Layers panel (task 0234)
+
+**Asked:** "Add layer opacity and systems so it's easier to navigate while in the console when using pen and drawing.
+Similar to how Photoshop and Substance Painter do layers. Make sure it's also compliant with the radial menu."
+
+**Added**
+- **Layers composited as Photoshop composites** (ADR 0072, `src/editor/sketch_layers.cpp`): the sketch's layers draw
+  bottom to top; a Normal layer at full opacity draws straight to the frame as before; any other - an opacity below 1,
+  a blend mode (Normal, Multiply, Screen, Overlay), a layer in a group - draws its strokes over a copy of what is under
+  it with a mask of where it drew, then is blended back by its mode and mixed in by its opacity, so two overlapping
+  strokes on a half-opaque layer are one tone. A group's children composite into the group's picture first. Solo
+  (`sketch layer solo|unsolo`, Alt-click an eye) shows one layer.
+- **The stack on the scene data:** `Sketch::move_layer`, `remove_layer`, `duplicate_layer`, `merge_down`, `flatten`
+  and `add_group` each remap every stroke's layer, the groups and the active layer; a locked or hidden layer refuses
+  the pen and keeps its strokes from the eraser (the log says why). Saved as a `sketch_layer_ext` line per layer that
+  needs one; an older build skips it.
+- **The Layers window** (`WindowKind::Layers`, Window > Layers; in the *Drawing* and *Reference & Planning* layouts
+  and from the Draw tab's bar): a row a layer, the top one first, a group's children indented under it - the eye
+  (Alt-click solos), the lock, a thumbnail of the picture-plane strokes, the name (a press picks the layer,
+  double-click renames, right-click the menu, a drag reorders), the opacity slider (one undo step when let go) and
+  the blend combo as the width allows - and a footer of New Layer, Group, Duplicate, Merge Down, Flatten, Delete; the
+  rows grow with Tablet Mode's UI.
+- **The Wheel's layers set:** a pen held on a row opens it on that layer - New, Duplicate, Merge Down, Delete, Hide /
+  Show, Lock / Unlock, a Blend ring (the modes, Solo, All, Group, Flatten), Undo; the sketch set's eighth slice became
+  a More ring (Build Box, Layers, New Layer, Merge Down, Place in 3D, Flat, Redo, Palette).
+- **Console:** `sketch layer add|group [name] | duplicate | merge | flatten | delete | move <from> <to> | rename <name>
+  | lock|unlock|lock toggle | toggle | solo|unsolo | blend normal|multiply|screen|overlay | <n>`, each an undo step.
+**Review (Opus, round 254):** nineteen findings, all taken before landing. The composite now draws a layer into a
+transparent picture and puts it over the frame by coverage times opacity with Porter-Duff over, the blend applied
+where the frame is opaque (the first build composited over a copy of the frame and wrote opaque pixels: black strokes
+wherever the card presents the view, and wrong edges for Multiply); a drag's slots are the rows as shown (top first)
+mapped back to layer indices, and the drop lands the layer right above the row under it (the first build read the
+slots as indices and subtracted one twice); the row menu copies what it reads before an item reshapes the stack and
+checks its index (a use-after-free after Duplicate; a stale index after an undo); a group is made in place, right
+above its layer; the list scrolls with the wheel; the solo, the rename and the menu's index are dropped by undo, redo,
+a new scene and every stack operation; Flatten drops hidden layers' strokes as Photoshop does; Delete picks the
+neighbour; `sketchline` / `sketchcircle` honour the lock; a hidden group's and a solo'd-out layer's strokes are
+neither construction nor erased; a loaded `group` must name a group layer; empty layers cost nothing and strokes are
+bucketed once per frame; the blend combo shows from 250 px; the New Layer tooltip and the spec's claims (the indices
+kept, the stress measurement that wasn't) corrected. Left as noted in Scope: the live stroke at full colour, finger
+scrolling of the list, a blend inside a group over its transparent picture.
+
+**Checked**
+- `tests_round254` in `tests/test_sketch.cpp` (5 tests, through the frame's pixels): two strokes on a half-opaque
+  layer are one tone, Multiply darkens blue over red, a hidden layer shows what is under it, a solo leaves the others'
+  pixels alone, a group at 0.5 reads as its child at 0.5; move swaps the draw order with every stroke keeping its
+  layer, merge down keeps the lower opacity, duplicate copies the strokes, delete remaps, flatten leaves one layer; a
+  locked layer refuses the pen and the eraser; the window shows in the two layouts with the top layer first, a press
+  picks a row, New Layer adds one, the eye hides, a pen held on a row opens the Wheel's layers set on that layer; save
+  and load round-trip lock, blend and group, a file without the line loads with the defaults.
+- Unit checks (round 254): Windows, in render-cache verify mode, 12,550, 0 failed (1070 tests), 0 stale
+  pictures. Linux with libraries: 12,091, 0 failed. Sanitizer build: 11,961, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 253): the Draw tab and the drawing-pad workflow (task 0233)
 
 **Asked:** "Add the option to sketch in the game view. The draw tab should have its own tab and be included within the

@@ -16,10 +16,10 @@ namespace {
 
 /* Window ids in dock strings: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 8 Profiler 9 Render
  * 10 UV Editor 11 Materials 12 Modeling Tools 13 Lighting 14 Textures 15 Rigging 16 Animation 17 Sequencer 18 Live Link
- * 19 Editing 20 My Tools 21 Draw. */
+ * 19 Editing 20 My Tools 21 Draw 22 Layers. */
 const Editor::Workspace kWorkspaces[] = {
     {"Default", "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,8,9:0)),L(3,12:0))", Editor::FocusAll, true},
-    {"Reference & Planning", "H(0.8,V(0.72,H(0.2,L(2:0),L(0,21,1:0)),L(4,5:0)),L(3:0))",
+    {"Reference & Planning", "H(0.8,V(0.72,H(0.2,L(2:0),L(0,21,1:0)),L(4,5:0)),V(0.55,L(3:0),L(22:0)))",
      Editor::FocusCreate | Editor::FocusObject | Editor::FocusSnap | Editor::FocusReference | Editor::FocusLight, true},
     {"Blocking Out", "H(0.76,V(0.74,H(0.2,L(2:0),L(0,21,1:0)),L(4,5:0)),L(12,3:0))",
      Editor::FocusCreate | Editor::FocusDraw | Editor::FocusObject | Editor::FocusSnap | Editor::FocusReference, true},
@@ -38,7 +38,7 @@ const Editor::Workspace kWorkspaces[] = {
      Editor::FocusCreate | Editor::FocusObject | Editor::FocusRig | Editor::FocusDeform, true},
     {"Skinning & Weight Painting", "H(0.7,V(0.78,H(0.22,L(2:0),L(0:0)),L(4,5:0)),L(15,3:0))", Editor::FocusObject | Editor::FocusRig, true},
     {"Animation", "H(0.74,V(0.6,H(0.5,L(0:0),L(1:0)),L(16,17,4,5:0)),L(3,15,2:0))", Editor::FocusObject | Editor::FocusRig | Editor::FocusLight, true},
-    {"Drawing", "H(0.8,V(0.76,L(21,0:0),L(4,5:0)),L(3,2:0))", Editor::FocusCreate | Editor::FocusDraw | Editor::FocusObject | Editor::FocusReference, true},  // (task 0233: the pad)
+    {"Drawing", "H(0.8,V(0.76,L(21,0:0),L(4,5:0)),V(0.5,L(22:0),L(3,2:0)))", Editor::FocusCreate | Editor::FocusDraw | Editor::FocusObject | Editor::FocusReference, true},  // (task 0233: the pad)
     /* The arrangements: every tool. */
     {"2 by 3", "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,8:0),L(3,12:0))))", Editor::FocusAll, false},
     {"Tall", "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,8,9:0))),L(3,12:0))", Editor::FocusAll, false},

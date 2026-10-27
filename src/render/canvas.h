@@ -96,6 +96,12 @@ class Canvas {
  public:
   void begin(Image *target);
   Image *target() const { return img_; }
+  /* Another image of the same size as the target, the clip kept (a layer's picture composited later: task 0234). */
+  Image *swap_target(Image *t) {
+    Image *was = img_;
+    img_ = t;
+    return was;
+  }
   int width() const { return img_->width; }
   int height() const { return img_->height; }
 

@@ -234,6 +234,9 @@ void Editor::draw_draw_bar(const Recti &bar) {
   u.checkbox({x, bar.y + u.px(5), h - u.px(4), h - u.px(4)}, sketch_.place3d);
   u.label({x + h, bar.y, u.px(90), bar.h}, "Place in 3D");
   u.tooltip("A stroke lands in the scene where it was drawn - on the face under the pen, else at the camera's pivot depth -\nand stays in perspective as the camera turns; off, it stays on the picture plane (sketch place 3d|flat).");
+  x += u.px(96);
+  if (u.button({x, bar.y + u.px(3), u.px(64), h}, "Layers", false, ui::Icon::Menu)) run_console_command("window Layers");  // (task 0234)
+  u.tooltip("The Layers panel: the sketch's layers with their opacity and blend, reordered by dragging.");
 }
 
 /* The Draw tab: the scene's picture from the source camera (its own targets and cache, no gizmos, icons or stats), the

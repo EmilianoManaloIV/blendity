@@ -109,10 +109,7 @@ bool Editor::sketch_circle_of(const SketchStroke &st, SketchCircle &out) const {
 }
 
 /* Whether a stroke's layer is shown: hidden layers are not construction. */
-bool Editor::sketch_stroke_shown(const SketchStroke &st) const {
-  const Sketch &s = scene_->sketch;
-  return st.layer < 0 || st.layer >= (int)s.layers.size() || s.layers[(size_t)st.layer].visible;
-}
+bool Editor::sketch_stroke_shown(const SketchStroke &st) const { return sketch_layer_shown(st.layer); }  // (task 0234: its group and the solo too)
 
 /* The sketch's line strokes on scene canvases as world segments, the most recent first. */
 std::vector<Editor::SketchSeg> Editor::sketch_segments() const {

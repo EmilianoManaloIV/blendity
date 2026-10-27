@@ -23,6 +23,118 @@ SketchCanvas *Sketch::canvas_at(int id) {
   return nullptr;
 }
 
+void Sketch::remap_layers(const std::vector<int> &map) {
+  auto at = [&](int i) { return i >= 0 && (size_t)i < map.size() ? map[(size_t)i] : i; };
+  for (size_t i = 0; i < strokes.size();) {
+    const int nl = at(strokes[i].layer);
+    if (nl < 0) strokes.erase(strokes.begin() + (ptrdiff_t)i);
+    else strokes[i].layer = nl, i++;
+  }
+  for (SketchLayer &l : layers) l.group = l.group < 0 ? -1 : at(l.group);
+  const int kept = at(active_layer);
+  active_layer = std::max(0, std::min((int)layers.size() - 1, kept < 0 ? active_layer : kept));  // (gone: its neighbour)
+}
+
+void Sketch::move_layer(int from, int to) {
+  const int n = (int)layers.size();
+  if (from < 0 || from >= n) return;
+  to = std::max(0, std::min(n - 1, to));
+  if (from == to) return;
+  std::vector<int> order;
+  for (int i = 0; i < n; i++)
+    if (i != from) order.push_back(i);
+  order.insert(order.begin() + to, from);
+  std::vector<SketchLayer> moved;
+  std::vector<int> map((size_t)n, -1);
+  for (int k = 0; k < n; k++) moved.push_back(layers[(size_t)order[(size_t)k]]), map[(size_t)order[(size_t)k]] = k;
+  layers.swap(moved);
+  remap_layers(map);
+}
+
+bool Sketch::remove_layer(int i) {
+  const int n = (int)layers.size();
+  if (i < 0 || i >= n) return false;
+  if (n == 1) {  // (one layer stays: emptied)
+    strokes.clear();
+    layers[0] = SketchLayer{};
+    active_layer = 0;
+    return true;
+  }
+  std::vector<int> map((size_t)n, -1);
+  for (int k = 0; k < n; k++) map[(size_t)k] = k < i ? k : k == i ? -1 : k - 1;
+  layers.erase(layers.begin() + i);
+  remap_layers(map);
+  return true;
+}
+
+int Sketch::duplicate_layer(int i) {
+  const int n = (int)layers.size();
+  if (i < 0 || i >= n || layers[(size_t)i].is_group) return -1;
+  std::vector<int> map((size_t)n, -1);
+  for (int k = 0; k < n; k++) map[(size_t)k] = k <= i ? k : k + 1;
+  SketchLayer copy = layers[(size_t)i];
+  copy.name += " copy";
+  layers.insert(layers.begin() + i + 1, copy);
+  const size_t strokes_before = strokes.size();
+  remap_layers(map);
+  for (size_t k = 0; k < strokes_before; k++)
+    if (strokes[k].layer == i) {
+      SketchStroke st = strokes[k];
+      st.layer = i + 1;
+      strokes.push_back(st);
+    }
+  active_layer = i + 1;
+  return i + 1;
+}
+
+bool Sketch::merge_down(int i) {
+  const int n = (int)layers.size();
+  if (i <= 0 || i >= n) return false;
+  const SketchLayer &top = layers[(size_t)i], &under = layers[(size_t)i - 1];
+  if (top.is_group || under.is_group || top.group != under.group) return false;  // (a group merges by flattening)
+  std::vector<int> map((size_t)n, -1);
+  for (int k = 0; k < n; k++) map[(size_t)k] = k < i ? k : k - 1;  // (the top's strokes land on the one under it)
+  layers.erase(layers.begin() + i);
+  remap_layers(map);
+  active_layer = i - 1;
+  return true;
+}
+
+bool Sketch::layer_shown(int i) const {
+  if (i < 0 || (size_t)i >= layers.size()) return true;
+  const SketchLayer &l = layers[(size_t)i];
+  if (!l.visible) return false;
+  return l.group < 0 || (size_t)l.group >= layers.size() || layers[(size_t)l.group].visible;
+}
+
+void Sketch::flatten() {
+  if (layers.empty()) return;
+  SketchLayer one;
+  one.name = layers[0].is_group ? "Layer" : layers[0].name;
+  one.correct = layers[0].correct;
+  std::vector<int> map(layers.size(), 0);
+  for (size_t i = 0; i < layers.size(); i++) map[i] = layer_shown((int)i) ? 0 : -1;  // (as Photoshop: hidden strokes go)
+  remap_layers(map);
+  layers.assign(1, one);
+  active_layer = 0;
+}
+
+int Sketch::add_group(const std::string &name, int child) {
+  const int n = (int)layers.size();
+  SketchLayer g;
+  g.name = name.empty() ? "Group " + std::to_string(n + 1) : name;
+  g.is_group = true;
+  const bool over = child >= 0 && child < n && !layers[(size_t)child].is_group;
+  const int at = over ? child + 1 : n;  // (in place, right above the layer it holds)
+  layers.insert(layers.begin() + at, g);
+  std::vector<int> map((size_t)n, -1);
+  for (int k = 0; k < n; k++) map[(size_t)k] = k < at ? k : k + 1;
+  remap_layers(map);
+  if (over) layers[(size_t)child].group = at;
+  active_layer = at;
+  return at;
+}
+
 namespace sketch {
 
 static const float kPi = 3.14159265358979f;
