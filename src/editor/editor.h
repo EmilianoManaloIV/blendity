@@ -784,6 +784,10 @@ class Editor {
   std::string last_op_name_for_test() const { return last_op_.op; }
   Vec3 last_op_size_for_test() const { return last_op_.size; }
   void set_last_op_size_for_test(Vec3 s) { last_op_.size = s; run_last_op(false); }  // (F9's fields, task 0225)
+  float sketch_layer_fade_for_test(int layer) const { return sketch_layer_fade(scene_->sketch.layer_at(layer)); }
+  int sketch_guide_kind_for_test() const { return sketch_.guide; }
+  Vec2 sketch_ruler_for_test(int i) const { return sketch_.ruler[i]; }
+  float sketch_ellipse_rx_for_test() const { return sketch_.ell_rx; }
   bool last_op_valid_for_test() { return last_op_valid(); }
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
@@ -2764,6 +2768,7 @@ class Editor {
     int symmetry = 0, radial = 8;  // 0 none, 1 X, 2 Y, 3 XY, 4 radial
     int drag_handle = -1;
     bool flat = false;  // (task 0224: a failed camera solve left the dragged points; they stay until the camera moves)
+    bool overlay = true;  // (task 0226: the selected meshes' edges drawn to draw against)
   } sketch_;
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;
@@ -2791,7 +2796,7 @@ class Editor {
   bool sketch_segment_px(const Recti &view, Vec3 a, Vec3 b, Vec2 &pa, Vec2 &pb) const;
   void sketch_stroke_segments(const Recti &view, const SketchStroke &st, std::vector<Vec2> &a, std::vector<Vec2> &b) const;
   bool sketch_plane_hit(const Recti &view, const SketchCanvas &c, Vec2 px, Vec2 &uv) const;
-  void sketch_construction_lines(std::vector<SketchStroke> &made);
+  void sketch_construction_lines(std::vector<SketchStroke> &made, float reach = 0.0f);
   void sketch_draw_canvas(const Recti &view);
   bool sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas &out);
   bool sketch_canvas_command(const std::vector<std::string> &t, const std::string &line);
@@ -2815,6 +2820,23 @@ class Editor {
   void sketch_sweep_mesh(const std::vector<Vec3> &path, const SketchCircle &c0, const SketchCircle &c1);
   bool sketch_build_command(const std::vector<std::string> &t);
   Vec3 last_op_size_{1, 1, 1};  // (the box's lengths; the cylinder's base radius, height and top radius)
+  /* Task 0226 (sketch_refine.cpp): the drawing over the model. */
+  void sketch_record_layer_view(SketchLayer &layer);
+  float sketch_layer_fade(const SketchLayer &layer) const;
+  bool sketch_layer_view();
+  float sketch_px_per_metre(const SketchCanvas &c, Vec2 uv) const;
+  void sketch_stroke_end_on_plane(const Recti &view, const SketchCanvas &canvas, int level, float mean_w, const SketchStroke &base);
+  void sketch_snap_to_plane_guides(const SketchCanvas &c, std::vector<SketchStroke> &made, float reach) const;
+  bool sketch_outline_from(size_t index, std::vector<SketchPoint> &chain) const;
+  long sketch_face_on_canvas(const Mesh &m, const Mat4 &w, const SketchCanvas &c, Vec3 at) const;
+  bool sketch_project();
+  bool sketch_trace(bool as_curve);
+  bool sketch_trace_curve(const std::vector<Vec3> &world, bool closed);
+  bool sketch_trace_cut(GameObject &g, size_t face, const std::vector<Vec3> &world, bool closed);
+  void sketch_draw_overlay(const Recti &view);
+  bool sketch_ruler_from_edge(const Recti &view, int mx, int my);
+  bool sketch_ellipse_from_face(const Recti &view, int mx, int my);
+  bool sketch_refine_command(const std::vector<std::string> &t);
   /* ---- Drawing tool: polyline, rectangle, circle, arc, polygon (draw_tool.cpp) ---- */
   struct DrawTool {
     bool active = false;

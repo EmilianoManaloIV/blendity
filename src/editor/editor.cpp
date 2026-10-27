@@ -1088,6 +1088,19 @@ void Editor::draw_menubar(const Recti &r) {
         for (const auto &b : kBuild)
           if (ui_.menu_item(b[0])) sketch_build_command({"sketchbuild", b[1]});
       });
+      ui_.submenu("Sketch over the Model", ui_.px(240), [this] {  // (task 0226)
+        if (ui_.menu_item("Project the Stroke onto the Face")) sketch_refine_command({"sketchproject"});
+        ui_.tooltip("The last stroke on the picture plane pushed onto the face under it, along the view: a line on the surface.");
+        if (ui_.menu_item("Trace into a Cut")) sketch_refine_command({"sketchtrace", "edge"});
+        ui_.tooltip("The last stroke on a face: a line cuts across the face (the Knife), a closed outline is imprinted as a face.");
+        if (ui_.menu_item("Trace into a Curve")) sketch_refine_command({"sketchtrace", "curve"});
+        ui_.menu_separator();
+        if (ui_.menu_item("Back to the Layer's View")) sketch_layer_view();
+        ui_.tooltip("The camera the layer's first stroke was drawn in: a picture-plane drawing fades as the view turns away from it.");
+        if (ui_.menu_item("Model Edges Overlay", nullptr, sketch_.overlay)) sketch_.overlay = !sketch_.overlay;
+        if (ui_.menu_item("Ruler along the Edge under the Middle")) sketch_command({"sketchguide", "ruler", "edge"}, "");
+        if (ui_.menu_item("Ellipse on the Face under the Middle")) sketch_command({"sketchguide", "ellipse", "face"}, "");
+      });
     });
     u.tooltip("Draw a polyline, rectangle, circle, arc or polygon onto the mesh (or the ground) with snapping.\n"
               "With nothing selected it starts a new mesh. UModeler / SketchUp drawing tools.");

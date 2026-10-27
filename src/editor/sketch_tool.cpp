@@ -224,6 +224,13 @@ void Editor::sketch_stroke_end(const Recti &view) {
     st.width = g.width;
     return st;
   };
+  /* On a scene canvas (tasks 0224, 0226) the stroke is corrected in the plane's own metres. */
+  const SketchCanvas *scene_canvas = s.active_canvas ? s.canvas_at(s.active_canvas) : nullptr;
+  if (scene_canvas && scene_canvas->kind == 1) {
+    sketch_stroke_end_on_plane(view, *scene_canvas, level, mean_w, base());
+    return;
+  }
+  sketch_record_layer_view(s.layer_at(s.active_layer));  // (task 0226: the picture plane's camera)
   if (level == 0) {
     SketchStroke st = base();
     st.kind = StrokeKind::Freehand;
@@ -293,31 +300,6 @@ void Editor::sketch_stroke_end(const Recti &view) {
           return Vec2{c.x + d.x * ca - d.y * sa, c.y + d.x * sa + d.y * ca};
         });
       }
-  }
-  /* On a scene canvas (task 0224) each point is where the view's ray through it meets the plane, in the plane's metres;
-   * a stroke that leaves the plane (past its horizon) stays on the picture plane. */
-  const SketchCanvas *canvas = s.active_canvas ? s.canvas_at(s.active_canvas) : nullptr;
-  if (canvas && canvas->kind == 1) {
-    for (SketchStroke &st : made) {
-      std::vector<SketchPoint> on;
-      for (const SketchPoint &p : st.pts) {
-        Vec2 uv;
-        if (!sketch_plane_hit(view, *canvas, sketch_to_px(view, {p.x, p.y}), uv)) break;
-        on.push_back({uv.x, uv.y, p.w});
-      }
-      if (on.size() != st.pts.size()) continue;
-      std::vector<SketchPoint> raw;
-      for (const SketchPoint &p : st.raw) {
-        Vec2 uv;
-        if (sketch_plane_hit(view, *canvas, sketch_to_px(view, {p.x, p.y}), uv)) raw.push_back({uv.x, uv.y, p.w});
-      }
-      st.raw = raw.size() == st.raw.size() ? raw : std::vector<SketchPoint>{};
-      st.pts = on;
-      st.canvas = canvas->id;
-      st.center = {}, st.rx = st.ry = 0.0f;  // (an ellipse's parameters are the view's, not the plane's)
-      if (st.kind == StrokeKind::Arc || st.kind == StrokeKind::Ellipse) st.kind = StrokeKind::Curve;
-    }
-    sketch_construction_lines(made);
   }
   for (SketchStroke &st : made) s.strokes.push_back(std::move(st));
   mark_changed(made.size() > 1 ? "Sketch Strokes" : "Sketch Stroke");
@@ -443,7 +425,8 @@ void Editor::sketch_draw(const Recti &view) {
   for (const SketchStroke &st : s.strokes) {
     const SketchLayer *layer = st.layer >= 0 && st.layer < (int)s.layers.size() ? &s.layers[(size_t)st.layer] : nullptr;
     if (layer && !layer->visible) continue;
-    const float opacity = layer ? layer->opacity : 1.0f;
+    const float opacity = (layer ? layer->opacity : 1.0f) * (layer && st.canvas == 0 ? sketch_layer_fade(*layer) : 1.0f);  // (task 0226)
+    if (opacity <= 0.0f) continue;
     const uint32_t a = (uint32_t)std::lround(((st.color >> 24) & 255) * opacity);
     const uint32_t color = (a << 24) | (st.color & 0xFFFFFF);
     if (st.canvas && s.canvas_at(st.canvas)) {  // (a scene canvas: each segment clipped at the camera)
@@ -466,6 +449,7 @@ void Editor::sketch_draw(const Recti &view) {
     return;
   }
   sketch_draw_canvas(view);
+  sketch_draw_overlay(view);
   if (g.stroking) draw_stroke(u, g.pen, g.pressure, g.color, g.width * px1);
   /* The guides. */
   const uint32_t guide_col = Color::hex(0x40C0FF, 170), handle_col = Color::hex(0xFFD040);
@@ -545,6 +529,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "off") sketch_end();
     else if (v == "clear") {
       s.strokes.clear();
+      for (SketchLayer &l : s.layers) l.has_view = false;  // (task 0226: the next stroke's camera is the layer's)
       mark_changed("Clear Sketch");
     }
     else if (v == "color") g.color = Color::hex((uint32_t)std::strtoul(arg(2, "202020").c_str(), nullptr, 16));
@@ -575,13 +560,23 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
       mark_changed(v == "show" ? "Show Sketch Layer" : "Hide Sketch Layer");
     }
     else if (v == "count") Log::info("Sketch: %zu strokes on %zu layers", s.strokes.size(), s.layers.size());
+    else if (v == "view") sketch_layer_view();  // (task 0226)
+    else if (v == "overlay") g.overlay = to_lower(arg(2, "on")) != "off";
     else Log::info("usage: sketch on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer add [name]|layer <n>|opacity <0-1>|hide|show|count");
     ui_.redraw = true;
     return true;
   }
   if (c == "sketchguide") {
     const std::string v = to_lower(arg(1, ""));
-    if (v == "ruler") g.guide = 1;
+    const Recti view = scene_rect_;
+    const int gx = t.size() >= 5 ? view.x + std::atoi(t[3].c_str()) : view.x + view.w / 2, gy = t.size() >= 5 ? view.y + std::atoi(t[4].c_str()) : view.y + view.h / 2;
+    if (v == "ruler" && to_lower(arg(2, "")) == "edge") {  // (task 0226: along the model's edge under the point)
+      if (!sketch_ruler_from_edge(view, gx, gy)) Log::warn("sketchguide ruler edge: no edge of a mesh there");
+    }
+    else if (v == "ellipse" && to_lower(arg(2, "")) == "face") {  // (on the circular face under the point)
+      if (!sketch_ellipse_from_face(view, gx, gy)) Log::warn("sketchguide ellipse face: no circular face there");
+    }
+    else if (v == "ruler") g.guide = 1;
     else if (v == "ellipse") g.guide = 2;
     else if (v == "french") g.guide = 3, g.french = std::max(0, std::min(2, std::atoi(arg(2, "0").c_str())));
     else if (v == "off") g.guide = 0;

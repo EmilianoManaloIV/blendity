@@ -731,8 +731,199 @@ static void tests_round245() {
   });
 }
 
+/* ------------------------------------------------------------ round 246: the drawing over the model (task 0226) */
+static void tests_round246() {
+  test("a picture-plane layer remembers the camera it was drawn in and fades as the view turns away; sketch view goes back; it saves; corrections on a scene canvas are true arcs and circles in metres", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("camera 35 -25 6");
+    ed.command("sketch on");
+    ed.step_frame_headless();
+    pen_stroke(ed, wobbled(line_pts({100, 100}, {300, 110}, 20), 2.0f, 51));
+    const Sketch &s = ed.sketch_for_test();
+    CHECK(s.layers.size() == 1 && s.layers[0].has_view && std::fabs(s.layers[0].view_yaw - 35.0f) < 1e-4f && std::fabs(s.layers[0].view_pitch + 25.0f) < 1e-4f);
+    CHECK(std::fabs(ed.sketch_layer_fade_for_test(0) - 1.0f) < 1e-5f);
+    ed.command("camera 50 -25 6");
+    ed.step_frame_headless();
+    const float at15 = ed.sketch_layer_fade_for_test(0);
+    ed.command("camera 75 -25 6");
+    ed.step_frame_headless();
+    const float at40 = ed.sketch_layer_fade_for_test(0);
+    std::printf("    the layer's fade: 15 degrees away %.2f, 40 degrees away %.2f\n", at15, at40);
+    CHECK(at15 > 0.3f && at15 < 0.8f && at40 == 0.0f);
+    /* Back to the layer's view: the camera animates there. */
+    ed.command("sketch view");
+    for (int i = 0; i < 300 && ed.scene_camera_for_test().animating; i++) ed.step_frame_headless();
+    CHECK(!ed.scene_camera_for_test().animating);
+    std::printf("    after sketch view: yaw %.2f pitch %.2f\n", ed.scene_camera_for_test().yaw, ed.scene_camera_for_test().pitch);
+    CHECK(std::fabs(ed.scene_camera_for_test().yaw - 35.0f) < 0.5f && std::fabs(ed.scene_camera_for_test().pitch + 25.0f) < 0.5f);
+    const std::string text = save_scene_text(ed.scene());
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err) && back.sketch.layers.size() == 1 && back.sketch.layers[0].has_view && std::fabs(back.sketch.layers[0].view_yaw - 35.0f) < 1e-4f);
+    /* Corrections in the plane: a half circle of radius 1 m on the ground round (1, 0, 1) is an Arc of radius 1 in
+     * metres, a full circle of radius 0.5 an Ellipse with both radii 0.5. */
+    ed.command("camera 35 -50 5 1 0 1");
+    ed.step_frame_headless();
+    ed.command("sketchcanvas ground");
+    std::vector<Vec2> px;
+    for (int i = 0; i <= 40; i++) {
+      const float a = 3.14159265f * (float)i / 40.0f;
+      Vec2 p;
+      ed.project_for_test({1.0f + std::cos(a), 0.0f, 1.0f + std::sin(a)}, p);
+      px.push_back(p);
+    }
+    pen_stroke(ed, wobbled(px, 1.5f, 52));
+    std::printf("    after the half circle: %d strokes:", (int)s.strokes.size());
+    for (const SketchStroke &st : s.strokes) std::printf(" [kind %d, %d pts, canvas %d]", (int)st.kind, (int)st.pts.size(), st.canvas);
+    std::printf("; drawn from (%.0f, %.0f) to (%.0f, %.0f), camera yaw %.1f%s\n", px.front().x, px.front().y, px.back().x, px.back().y, ed.scene_camera_for_test().yaw, ed.scene_camera_for_test().animating ? " (animating)" : "");
+    CHECK(s.strokes.size() == 2);
+    if (s.strokes.size() == 2) {
+      const SketchStroke &st = s.strokes[1];
+      std::printf("    the half circle on the ground: kind %d, %d points, centre (%.3f, %.3f) m, radius %.3f m\n", (int)st.kind, (int)st.pts.size(), st.center.x, st.center.y, st.rx);
+      CHECK(st.canvas == 1 && st.kind == StrokeKind::Arc && std::fabs(st.rx - 1.0f) < 0.03f && std::fabs(st.center.x - 1.0f) < 0.03f && std::fabs(st.center.y - 1.0f) < 0.03f);
+    }
+    px.clear();
+    for (int i = 0; i <= 64; i++) {
+      const float a = 2.0f * 3.14159265f * (float)i / 64.0f;
+      Vec2 p;
+      ed.project_for_test({1.0f + 0.5f * std::cos(a), 0.0f, 2.5f + 0.5f * std::sin(a)}, p);
+      px.push_back(p);
+    }
+    pen_stroke(ed, wobbled(px, 1.0f, 53));
+    CHECK(s.strokes.size() == 3);
+    if (s.strokes.size() == 3) {
+      const SketchStroke &st = s.strokes[2];
+      std::printf("    the circle on the ground: kind %d, %d points, radii %.3f x %.3f m at (%.3f, %.3f)\n", (int)st.kind, (int)st.pts.size(), st.rx, st.ry, st.center.x, st.center.y);
+      CHECK(st.kind == StrokeKind::Ellipse && st.closed && std::fabs(st.rx - 0.5f) < 0.02f && std::fabs(st.ry - 0.5f) < 0.02f && std::fabs(st.center.y - 2.5f) < 0.03f);
+    }
+  });
+
+  test("a stroke over the model projected onto the face under it, traced into a cut across the face and into a curve; the model's edges overlay; the ruler from an edge and the ellipse guide from a circular face", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("create Cube");
+    ed.command("camera 30 -35 4");
+    ed.command("sketch on");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    /* The cube's face under the view's middle: a stroke across it on the picture plane, then projected. */
+    pen_stroke(ed, wobbled(line_pts({r.w * 0.5f - 40.0f, r.h * 0.5f + 6.0f}, {r.w * 0.5f + 40.0f, r.h * 0.5f - 6.0f}, 20), 1.0f, 61));
+    const Sketch &s = ed.sketch_for_test();
+    CHECK(s.strokes.size() == 1 && s.strokes[0].canvas == 0);
+    ed.command("sketchproject");
+    ed.step_frame_headless();
+    CHECK(s.strokes.size() == 1 && s.strokes[0].canvas != 0 && s.canvases.size() == 1);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (s.canvases.size() == 1 && cube) {
+      const SketchCanvas &c = s.canvases[0];
+      std::printf("    projected onto %s (object %llu, face %d)\n", c.name.c_str(), (unsigned long long)c.object, c.face);
+      CHECK(c.object == cube->id && c.face >= 0 && c.name.find("Cube face") == 0);
+      /* The stroke's points lie on the face's plane, within the face's reach of its centre. */
+      const Vec3 w = c.origin + c.u * s.strokes[0].pts[0].x + c.v * s.strokes[0].pts[0].y;
+      std::printf("    the first point at (%.2f, %.2f, %.2f), the face's centre (%.2f, %.2f, %.2f)\n", w.x, w.y, w.z, c.origin.x, c.origin.y, c.origin.z);
+      CHECK(length(w - c.origin) < 1.0f);  // (the stroke runs past the face's edge: the plane goes on)
+    }
+    /* Traced into a cut: the face is split in two. */
+    const MeshFilter *mf = cube ? cube->get<MeshFilter>() : nullptr;
+    const size_t faces_before = mf && mf->mesh ? mf->mesh->face_count() : 0;
+    ed.command("sketchtrace edge");
+    ed.step_frame_headless();
+    mf = cube ? cube->get<MeshFilter>() : nullptr;
+    std::printf("    the cut: %zu faces -> %zu\n", faces_before, mf && mf->mesh ? mf->mesh->face_count() : 0);
+    CHECK(faces_before == 6 && mf && mf->mesh && mf->mesh->face_count() == 7);
+    ed.command("undo");
+    ed.step_frame_headless();
+    /* A square drawn on the face's canvas (four lines meeting end to end, the review's case) is imprinted as a face
+     * inside the cube's face: 6 faces to 7, the inner one selected. */
+    cube = ed.scene().find_by_name("Cube");
+    const Sketch &s2 = ed.sketch_for_test();  // (the undo swapped the scene)
+    CHECK(cube && s2.canvases.size() == 1);
+    if (cube && s2.canvases.size() == 1) {
+      const SketchCanvas c = s2.canvases[0];
+      const MeshFilter *bmf = cube->get<MeshFilter>();
+      std::printf("    before the square: %zu faces, %d strokes\n", bmf && bmf->mesh ? bmf->mesh->face_count() : 0, (int)s2.strokes.size());
+      ed.command("sketchcanvas 1");
+      std::vector<Vec2> sq;
+      const Vec2 corner[5] = {{-0.35f, -0.35f}, {0.35f, -0.35f}, {0.35f, 0.35f}, {-0.35f, 0.35f}, {-0.35f, -0.35f}};
+      for (int e = 0; e < 4; e++)
+        for (int i = (e ? 1 : 0); i <= 12; i++) {
+          const Vec2 uv = corner[e] + (corner[e + 1] - corner[e]) * ((float)i / 12.0f);
+          Vec2 p;
+          ed.project_for_test(c.origin + c.u * uv.x + c.v * uv.y, p);
+          sq.push_back(p);
+        }
+      pen_stroke(ed, wobbled(sq, 1.0f, 62));
+      std::printf("    the square on the face: %d strokes:", (int)s2.strokes.size() - 1);
+      for (size_t k = 1; k < s2.strokes.size(); k++) std::printf(" [kind %d, %d pts, canvas %d%s]", (int)s2.strokes[k].kind, (int)s2.strokes[k].pts.size(), s2.strokes[k].canvas, s2.strokes[k].closed ? ", closed" : "");
+      std::printf("\n");
+      ed.command("sketchtrace edge");
+      ed.step_frame_headless();
+      cube = ed.scene().find_by_name("Cube");
+      const MeshFilter *cmf = cube ? cube->get<MeshFilter>() : nullptr;
+      int selected = 0, corners = 0;
+      for (size_t f = 0; f < ed.face_sel_for_test().size(); f++)
+        if (ed.face_sel_for_test()[f]) selected++, corners = cmf && cmf->mesh && f < cmf->mesh->face_count() ? (int)cmf->mesh->face_size(f) : 0;
+      std::printf("    imprinted: %zu faces, %d selected with %d corners\n", cmf && cmf->mesh ? cmf->mesh->face_count() : 0, selected, corners);
+      CHECK(cmf && cmf->mesh && cmf->mesh->face_count() >= 7 && selected == 1 && corners == 4);
+      ed.command("undo");  // (the imprint)
+      ed.step_frame_headless();
+      ed.command("undo");  // (the square's strokes)
+      ed.step_frame_headless();
+      ed.command("sketchcanvas view");
+    }
+    /* Traced into a curve: a Poly curve through the projected stroke's points. */
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    ed.command("sketchtrace curve");
+    ed.step_frame_headless();
+    GameObject *traced = ed.scene().find_by_name("Traced Curve");
+    const Curve *cv = traced ? traced->get<Curve>() : nullptr;
+    CHECK(cv && cv->type == 2 && cv->points.size() == ed.sketch_for_test().strokes[0].pts.size());
+    /* The overlay draws when the tool is on and a mesh is selected (no crash, a frame); the ruler from the cube's
+     * edge under a point near the top edge; the ellipse guide from a cylinder's cap. */
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    cube = ed.scene().find_by_name("Cube");  // (the undo swapped the scene: the old pointer is another scene's)
+    CHECK(cube);
+    if (!cube) return;
+    /* The cube's edge nearest the view's middle, as the mesh has it. */
+    Vec2 e0, e1;
+    {
+      const Mesh &cm = *cube->get<MeshFilter>()->mesh;
+      const Mat4 &cw = cube->world_matrix();
+      float best = 1e30f;
+      for (const auto &e : cm.edge_cache()) {  // (a long one near the middle, not one seen end-on)
+        Vec2 a, b;
+        ed.project_for_test(cw.point(cm.positions[e.first]), a);
+        ed.project_for_test(cw.point(cm.positions[e.second]), b);
+        const float d = length((a + b) * 0.5f - Vec2{r.w * 0.5f, r.h * 0.5f}) - length(b - a);
+        if (d < best) best = d, e0 = a, e1 = b;
+      }
+    }
+    const Vec2 third = e0 + (e1 - e0) * (1.0f / 3.0f);
+    ed.command(strprintf("sketchguide ruler edge %d %d", (int)third.x + 2, (int)third.y + 2));
+    CHECK(ed.sketch_guide_kind_for_test() == 1);
+    {
+      const float h = (float)r.h;
+      const Vec2 a = ed.sketch_ruler_for_test(0) * h, b = ed.sketch_ruler_for_test(1) * h;
+      std::printf("    the ruler: (%.0f, %.0f) - (%.0f, %.0f) px; the edge (%.0f, %.0f) - (%.0f, %.0f)\n", a.x, a.y, b.x, b.y, e0.x, e0.y, e1.x, e1.y);
+      const bool same = (length(a - e0) < 2.0f && length(b - e1) < 2.0f) || (length(a - e1) < 2.0f && length(b - e0) < 2.0f);
+      CHECK(same);
+    }
+    ed.command("create Cylinder");
+    ed.command("camera 0 -89 4 0 0 0");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    ed.command("sketchguide ellipse face");
+    std::printf("    the ellipse guide from the cylinder's cap: kind %d, rx %.3f view heights\n", ed.sketch_guide_kind_for_test(), ed.sketch_ellipse_rx_for_test());
+    CHECK(ed.sketch_guide_kind_for_test() == 2 && ed.sketch_ellipse_rx_for_test() > 0.1f);
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
   tests_round245();
+  tests_round246();
 }

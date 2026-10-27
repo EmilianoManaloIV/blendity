@@ -275,6 +275,17 @@ static bool turns_throughout(const std::vector<Vec2> &r, int parts, float min_de
   return true;
 }
 
+Fit fit_piece(const std::vector<Vec2> &piece, float tol, bool closed, float spacing) {
+  Fit f;
+  if (fit_line(piece, tol, f)) return f;
+  if (closed && fit_ellipse(piece, tol, f)) return f;
+  if (fit_arc(piece, tol, closed, f)) return f;
+  if (closed && fit_ellipse(piece, tol * 1.5f, f)) return f;
+  f = fit_curve(piece, spacing);
+  f.closed = closed;  // (a closed blob stays closed)
+  return f;
+}
+
 std::vector<Fit> correct(const std::vector<Vec2> &pts, int level) {
   std::vector<Fit> out;
   if (pts.size() < 2) return out;
@@ -300,6 +311,13 @@ std::vector<Fit> correct(const std::vector<Vec2> &pts, int level) {
     const float tol = std::max(2.5f, total * 0.015f) * (level >= 2 ? 1.0f : 0.5f);
     Fit whole;
     if (closed && fit_ellipse(r, tol, whole) && turns_throughout(smoothed(r, 1.5f), 8, 5.0f)) {
+      out.push_back(whole);
+      return out;
+    }
+    /* Likewise an open stroke that is one arc as a whole (task 0226: a half circle's tight end in perspective passed
+     * for a corner), within the same tight tolerance: with the piece tolerance a segmental arch, three sides of a
+     * small square or a chevron passed for one arc. */
+    if (!closed && total > 40.0f && !fit_line(r, tol, whole) && fit_arc(r, tol, false, whole) && std::fabs(whole.sweep) > 0.5f) {
       out.push_back(whole);
       return out;
     }
@@ -330,13 +348,7 @@ std::vector<Fit> correct(const std::vector<Vec2> &pts, int level) {
     float len = 0.0f;
     for (size_t i = 1; i < piece.size(); i++) len += length(piece[i] - piece[i - 1]);
     const float tol = std::max(4.0f, std::min(14.0f, len * 0.04f)) * (level >= 2 ? 1.0f : 0.5f);
-    const bool piece_closed = closed && bounds.size() == 2;
-    Fit f;
-    if (fit_line(piece, tol, f)) out.push_back(f);
-    else if (piece_closed && fit_ellipse(piece, tol, f)) out.push_back(f);
-    else if (fit_arc(piece, tol, piece_closed, f)) out.push_back(f);
-    else if (piece_closed && fit_ellipse(piece, tol * 1.5f, f)) out.push_back(f);
-    else out.push_back(fit_curve(piece, spacing));
+    out.push_back(fit_piece(piece, tol, closed && bounds.size() == 2, spacing));
   }
   /* The pieces meet exactly at the corners: each corner is the mean of its two pieces' ends; a closed stroke's last
    * piece meets its first. */

@@ -31,6 +31,8 @@ struct SketchCanvas {
   int kind = 0;
   std::string name = "View";
   Vec3 origin, u{1, 0, 0}, v{0, 0, 1};
+  uint64_t object = 0;  // (a face canvas: the object and its face, for tracing a stroke into a cut; task 0226)
+  int face = -1;
 };
 
 struct SketchStroke {
@@ -53,6 +55,10 @@ struct SketchLayer {
   float opacity = 1.0f;
   bool visible = true;
   int correct = 2;  // 0 none, 1 light, 2 full
+  /* The camera the layer's picture-plane strokes were drawn in (task 0226): it fades as the view turns away. */
+  bool has_view = false;
+  float view_yaw = 0.0f, view_pitch = 0.0f, view_fov = 60.0f, view_dist = 6.0f;
+  Vec3 view_pivot;
 };
 
 /* The scene's sketch: its layers and strokes, and the perspective guide - saved with the scene, since its vanishing
@@ -101,6 +107,8 @@ bool fit_arc(const std::vector<Vec2> &pts, float tol, bool closed, Fit &out);
 bool fit_ellipse(const std::vector<Vec2> &pts, float tol, Fit &out);  // (a closed stroke)
 /* The stroke as a smooth curve: Gaussian smoothing of the resampled polyline, the ends kept. */
 Fit fit_curve(const std::vector<Vec2> &pts, float spacing);
+/* One piece of a stroke fitted: a line, (closed) an ellipse, an arc, or a smooth curve kept as drawn. */
+Fit fit_piece(const std::vector<Vec2> &piece, float tol, bool closed, float spacing);
 /* The whole correction: level 0 gives the stroke back as it was (lightly smoothed), 1 light, 2 full. The pieces come
  * in the stroke's order and meet at its corners. A scribble (too many corners, pieces too short to mean anything)
  * stays one freehand piece. Pixels in, pixels out. */

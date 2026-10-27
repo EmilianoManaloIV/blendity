@@ -275,7 +275,7 @@ static bool guide_in_plane(const GuideLine &g, const SketchCanvas &c) {
 /* Corrected lines on a scene canvas that run along one of its axes within 4 degrees are made to, and become the
  * scene's construction lines (the Draw tools' X / Y / Z lines), or land exactly on one already there, so later strokes
  * and drawing snap to them. A corner another piece shares with a moved end moves with it. */
-void Editor::sketch_construction_lines(std::vector<SketchStroke> &made) {
+void Editor::sketch_construction_lines(std::vector<SketchStroke> &made, float reach) {
   for (size_t si = 0; si < made.size(); si++) {
     SketchStroke &st = made[si];
     const SketchCanvas *c = st.canvas ? scene_->sketch.canvas_at(st.canvas) : nullptr;
@@ -290,16 +290,23 @@ void Editor::sketch_construction_lines(std::vector<SketchStroke> &made) {
     if (!along_u && !along_v) continue;
     const Vec3 dir = normalize(along_u ? c->u : c->v);
     const SketchPoint old0 = st.pts[0], old1 = st.pts[1];
-    /* Along the axis about its middle. */
-    const Vec2 mid = (a + b) * 0.5f, ad = along_u ? Vec2{1, 0} : Vec2{0, 1};
-    const float half = l * 0.5f * (dot(d, ad) < 0 ? -1.0f : 1.0f);
-    st.pts[0].x = mid.x - ad.x * half, st.pts[0].y = mid.y - ad.y * half;
-    st.pts[1].x = mid.x + ad.x * half, st.pts[1].y = mid.y + ad.y * half;
+    /* Along the axis: about its start when that is a corner shared with the piece before (the corner stays put
+     * and exact), else about its middle. */
+    const bool from_start = si > 0 && made[si - 1].pts.size() > 1 && made[si - 1].pts.back().x == old0.x && made[si - 1].pts.back().y == old0.y;
+    const Vec2 ad = along_u ? Vec2{1, 0} : Vec2{0, 1};
+    const float sign = dot(d, ad) < 0 ? -1.0f : 1.0f;
+    if (from_start) st.pts[1].x = a.x + ad.x * sign * l, st.pts[1].y = a.y + ad.y * sign * l;
+    else {
+      const Vec2 mid = (a + b) * 0.5f;
+      const float half = l * 0.5f * sign;
+      st.pts[0].x = mid.x - ad.x * half, st.pts[0].y = mid.y - ad.y * half;
+      st.pts[1].x = mid.x + ad.x * half, st.pts[1].y = mid.y + ad.y * half;
+    }
     /* The nearest construction line already there with that direction in this plane, within the view's snap read
      * back through the plane. */
     const Vec3 p = c->origin + c->u * st.pts[0].x + c->v * st.pts[0].y;
     const GuideLine *have = nullptr;
-    float have_off = 2e-3f * std::max(1.0f, length(p));
+    float have_off = std::max(reach, 2e-3f * std::max(1.0f, length(p)));
     for (const GuideLine &g : scene_->guides) {
       if (std::fabs(dot(normalize(g.d), dir)) < 0.9999f || !guide_in_plane(g, *c)) continue;
       const Vec3 off = p - g.p;
@@ -322,6 +329,33 @@ void Editor::sketch_construction_lines(std::vector<SketchStroke> &made) {
         if (q.x == old0.x && q.y == old0.y) q.x = st.pts[0].x, q.y = st.pts[0].y;
         else if (q.x == old1.x && q.y == old1.y) q.x = st.pts[1].x, q.y = st.pts[1].y;
       }
+    }
+  }
+}
+
+/* Line pieces on a scene canvas pulled onto a shown construction line in the canvas's plane they run along (within
+ * 4 degrees, their middle within `reach` metres): the guides along the canvas's axes are sketch_construction_lines',
+ * this takes the rest (a face canvas's diagonal, task 0226). */
+void Editor::sketch_snap_to_plane_guides(const SketchCanvas &c, std::vector<SketchStroke> &made, float reach) const {
+  if (!show_guides_) return;
+  for (SketchStroke &st : made) {
+    if (st.kind != StrokeKind::Line || st.pts.size() != 2 || st.canvas != c.id) continue;
+    const Vec2 a{st.pts[0].x, st.pts[0].y}, b{st.pts[1].x, st.pts[1].y};
+    const Vec2 d = b - a;
+    const float l = length(d);
+    if (l < 1e-6f) continue;
+    for (const GuideLine &g : scene_->guides) {
+      if (!guide_in_plane(g, c)) continue;
+      const Vec2 gd{dot(g.d, c.u) / std::max(1e-9f, dot(c.u, c.u)), dot(g.d, c.v) / std::max(1e-9f, dot(c.v, c.v))};
+      const float gl = length(gd);
+      if (gl < 1e-9f || std::fabs(dot(gd / gl, d / l)) < std::cos(4.0f * kPi / 180.0f)) continue;
+      const Vec3 off3 = g.p - c.origin;
+      const Vec2 gp{dot(off3, c.u) / std::max(1e-9f, dot(c.u, c.u)), dot(off3, c.v) / std::max(1e-9f, dot(c.v, c.v))};
+      const Vec2 u = gd / gl, mid = (a + b) * 0.5f, off = mid - gp;
+      if (length(off - u * dot(off, u)) > reach) continue;
+      const Vec2 na = gp + u * dot(a - gp, u), nb = gp + u * dot(b - gp, u);
+      st.pts[0].x = na.x, st.pts[0].y = na.y, st.pts[1].x = nb.x, st.pts[1].y = nb.y;
+      break;
     }
   }
 }
@@ -419,6 +453,7 @@ bool Editor::sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas 
   if (length(n) < 1e-12f) return false;
   n = normalize(n);
   out.name = g->name + " face " + std::to_string(face);
+  out.object = g->id, out.face = face;
   out.origin = centre / (float)std::max(1u, nf);
   out.u = normalize(longest - n * dot(longest, n));
   out.v = normalize(cross(n, out.u));

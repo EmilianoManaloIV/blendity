@@ -692,6 +692,7 @@ void Editor::run_console_command(const std::string &line) {
   if (sketch_command(t, line)) return;  // sketch | sketchguide | sketchstroke (task 0223)
   if (sketch_canvas_command(t, line)) return;  // sketchcanvas (task 0224)
   if (sketch_build_command(t)) return;  // sketchbuild (task 0225)
+  if (sketch_refine_command(t)) return;  // sketchproject | sketchtrace (task 0226)
   if (c == "quickmenu") {  // quickmenu open [x y]|close|pick <slice>|list (task 0217)
     const std::string v = to_lower(arg(1, "list"));
     if (v == "open") quick_menu_open(std::atoi(arg(2, std::to_string(scene_rect_.x + scene_rect_.w / 2)).c_str()),
@@ -1468,6 +1469,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("%s", gpu::status().c_str());
   }
   else if (c == "camera" && t.size() >= 4) {
+    cam_.animating = false;  // (a flight under way would carry the view off again)
     cam_.yaw = (float)std::atof(t[1].c_str());
     cam_.pitch = (float)std::atof(t[2].c_str());
     cam_.distance = (float)std::atof(t[3].c_str());

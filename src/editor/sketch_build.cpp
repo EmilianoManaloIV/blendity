@@ -373,6 +373,41 @@ void Editor::sketch_sweep_mesh(const std::vector<Vec3> &path, const SketchCircle
   Log::info("Sweep from the construction: %d rings, radius %.3g to %.3g", (int)rings.size(), c0.r, c1.r);
 }
 
+/* The closed outline a stroke on a scene canvas belongs to, in the plane's frame: the stroke itself when closed, or
+ * the chain of strokes on its canvas from it back to itself (the pieces of one stroke share their corners exactly,
+ * other strokes' ends within a millimetre), their points in order with the seam point once. */
+bool Editor::sketch_outline_from(size_t index, std::vector<SketchPoint> &chain) const {
+  const Sketch &s = scene_->sketch;
+  const SketchStroke &st = s.strokes[index];
+  chain.clear();
+  if (st.closed && st.pts.size() >= 3) {
+    chain = st.pts;
+    if (chain.size() > 3 && std::fabs(chain.front().x - chain.back().x) < 1e-6f && std::fabs(chain.front().y - chain.back().y) < 1e-6f) chain.pop_back();
+    return true;
+  }
+  if (st.pts.size() < 2) return false;
+  chain = st.pts;
+  std::vector<size_t> used = {index};
+  auto same = [](const SketchPoint &a, const SketchPoint &b) { return std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.y - b.y) < 1e-3f; };
+  auto append = [&](const SketchStroke &o, bool reversed) {
+    for (size_t k = 1; k < o.pts.size(); k++) chain.push_back(reversed ? o.pts[o.pts.size() - 1 - k] : o.pts[k]);
+  };
+  for (size_t steps = 0; steps < 64; steps++) {
+    if (chain.size() >= 4 && same(chain.back(), chain.front())) break;
+    bool found = false;
+    for (size_t j = s.strokes.size(); j-- > 0 && !found;) {
+      const SketchStroke &o = s.strokes[j];
+      if (std::find(used.begin(), used.end(), j) != used.end() || o.canvas != st.canvas || o.closed || o.pts.size() < 2) continue;
+      if (same(o.pts.front(), chain.back())) append(o, false), used.push_back(j), found = true;
+      else if (same(o.pts.back(), chain.back())) append(o, true), used.push_back(j), found = true;
+    }
+    if (!found) break;
+  }
+  if (chain.size() < 4 || !same(chain.back(), chain.front())) return false;
+  chain.pop_back();
+  return true;
+}
+
 /* The last closed outline on a scene canvas - a closed stroke, or line strokes chained end to end - as a face. */
 bool Editor::sketch_build_face() {
   const Sketch &s = scene_->sketch;
@@ -382,33 +417,8 @@ bool Editor::sketch_build_face() {
     const SketchStroke &st = s.strokes[i];
     const SketchCanvas *c = st.canvas ? s.canvas_at(st.canvas) : nullptr;
     if (!c || c->kind != 1) continue;
-    if (st.closed && st.pts.size() >= 3) {
-      for (const SketchPoint &p : st.pts) loop.push_back(on_plane(*c, p));
-      canvas = c;
-      break;
-    }
-    if (st.pts.size() < 2) continue;
-    /* A chain of strokes on this canvas from the stroke back to itself (the pieces of one stroke share their corners
-     * exactly; other strokes' ends within a millimetre), their points in order. */
-    std::vector<SketchPoint> chain = st.pts;
-    std::vector<size_t> used = {i};
-    auto same = [](const SketchPoint &a, const SketchPoint &b) { return std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.y - b.y) < 1e-3f; };
-    auto append = [&](const SketchStroke &o, bool reversed) {
-      for (size_t k = 1; k < o.pts.size(); k++) chain.push_back(reversed ? o.pts[o.pts.size() - 1 - k] : o.pts[k]);
-    };
-    for (size_t steps = 0; steps < 64; steps++) {
-      if (chain.size() >= 4 && same(chain.back(), chain.front())) break;
-      bool found = false;
-      for (size_t j = s.strokes.size(); j-- > 0 && !found;) {
-        const SketchStroke &o = s.strokes[j];
-        if (std::find(used.begin(), used.end(), j) != used.end() || o.canvas != st.canvas || o.closed || o.pts.size() < 2) continue;
-        if (same(o.pts.front(), chain.back())) append(o, false), used.push_back(j), found = true;
-        else if (same(o.pts.back(), chain.back())) append(o, true), used.push_back(j), found = true;
-      }
-      if (!found) break;
-    }
-    if (chain.size() < 4 || !same(chain.back(), chain.front())) continue;
-    chain.pop_back();
+    std::vector<SketchPoint> chain;
+    if (!sketch_outline_from(i, chain)) continue;
     for (const SketchPoint &p : chain) loop.push_back(on_plane(*c, p));
     canvas = c;
   }
@@ -416,7 +426,6 @@ bool Editor::sketch_build_face() {
     Log::warn("sketchbuild face: draw a closed outline on a scene canvas (a closed stroke, or lines meeting end to end)");
     return false;
   }
-  if (loop.size() > 3 && length(loop.front() - loop.back()) < 1e-6f) loop.pop_back();  // (a closed curve's seam point once)
   Vec3 centre(0.0f);
   for (const Vec3 &p : loop) centre += p;
   centre = centre / (float)loop.size();

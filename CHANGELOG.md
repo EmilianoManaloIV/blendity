@@ -2,6 +2,62 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 246): refinement - the drawing over the model (task 0226)
+
+**Asked:** the fourth task of the perspective-drawing plan: "just like drawing technique, it takes refinement and
+construction lines."
+
+**Added**
+- **Layers true from their view:** a picture-plane layer remembers the camera it was first drawn in and fades as the
+  view turns away; Draw > Sketch over the Model > Back to the Layer's View (`sketch view`) brings it back.
+- **Corrections in the plane:** a stroke on a scene canvas is corrected on the plane itself, in metres, so a half
+  circle drawn on the ground in perspective is a true arc, a circle a true circle, a corner where the plane has it.
+- **Project and trace:** the last picture-plane stroke pushed onto the face under it (`sketchproject`); the last
+  stroke on a face traced into a knife cut across the face or an imprinted outline (`sketchtrace edge`), or into a
+  Poly curve (`sketchtrace curve`).
+- **Drawing against the model:** the selected meshes' edges as an overlay while sketching; the ruler from the edge
+  under a point; the ellipse guide from a circular face. ADR 0066.
+
+**Checked**
+- A layer's fade with the angle; the camera back; a 1 m half circle on the ground read as an arc of 0.98 m, a circle
+  as 0.505 x 0.500; a stroke across the cube projected onto its face, cut into it (6 faces to 7), traced into a
+  curve; the ruler on the cube's edge within 2 px; the ellipse guide from a cylinder's cap (tests/test_sketch.cpp).
+- An Opus review modelled the maths in Python and found fourteen things, the main ones fixed:
+  - the save format had put a face canvas's object and face before its name, so canvases saved a round earlier
+    loaded wrong or not at all: they are on their own `sketch_canvas_face` line now;
+  - a layer's view was recorded once and never again, so a layer cleared or erased and drawn again from elsewhere
+    had its new strokes faded out as the pen lifted: the view is recorded again when the layer has no
+    picture-plane strokes, and drawing on a layer that has faded out here says so;
+  - the corrections on the plane scaled the whole stroke by one pixels-per-metre, so on a plane seen obliquely a
+    pixel's wobble at the far end became several and a receding line broke into pieces: the corners and the kinds
+    are decided on the view, where the hand drew them, and each piece is then fitted on the plane with its own
+    scale - a line is its two ends on the plane, an arc or an ellipse refitted with room, a curve the points as
+    they are;
+  - the whole-arc rule used the piece tolerance and swallowed segmental arches, three sides of a small square and
+    chevrons: the tight tolerance of the closed-ellipse rule now;
+  - a cut across a notched face could join crossings of different spans, through the notch: the crossings pair
+    off into spans and the span round the stroke's middle is cut;
+  - only an ellipse was imprinted: a closed outline is the stroke's own or the chain of pieces it closes (the
+    face builder's walker, shared), a closed blob keeps its closed flag, the seam point is dropped;
+  - a face canvas's face index went stale after a cut or a move: the face is found again in the canvas's plane
+    under the stroke;
+  - the plane path's end join tore shared corners: only a line's free ends join now; the axis correction turns a
+    line about the corner it shares with the piece before, not its middle;
+  - the ellipse guide from a face counted the first corner twice (its centre off by a twelfth of the radius) and
+    took any face: the corners once, within 5 % of their mean radius;
+  - `sketchproject` left the face canvas active and an undo step behind on failure, and projected faded strokes;
+  - lines no longer snapped to construction lines in the canvas's plane off its axes: they do;
+  - a failed cut left the edges split: the mesh is as it was, and every failure says why.
+  Known limits written down: the overlay draws the selected objects only; a stroke projected onto a curved
+  surface lands on the face's plane; a cut goes through one face.
+- Found while testing: a square drawn 30 px wide on a face seen obliquely loses a corner to the view's 18 px
+  windows (its chain still closes and imprints); the `camera` console command now ends a flight under way, which
+  carried the view off after `sketch view`; an undo swaps the scene, so a sketch reference taken before it is
+  another scene's (twice more).
+- Unit checks (round 246): Windows, in render-cache verify mode, 12,303, 0 failed (1042 tests), 0 stale
+  pictures. Linux with libraries: 11,844, 0 failed. Sanitizer build: 11,714, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test and the sanitizer animation Play test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 245): solids from the construction lines - 3-Sweep's way (task 0225)
 
 **Asked:** the third task of the perspective-drawing plan: "taking those drawings and sketching a possible 3D

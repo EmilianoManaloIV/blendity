@@ -305,8 +305,12 @@ std::string save_scene_text(const Scene &scene) {
   /* The sketch (task 0223): its layers, the perspective guide, and each stroke's corrected points then the pen's own. */
   const Sketch &sk = scene.sketch;
   if (!sk.empty()) {
-    for (const SketchLayer &l : sk.layers)
+    for (const SketchLayer &l : sk.layers) {
       os << "sketch_layer " << fmt(l.opacity) << " " << (l.visible ? 1 : 0) << " " << l.correct << " " << (l.name.empty() ? "Layer" : l.name) << "\n";  // (the name last: it may hold spaces)
+      if (l.has_view)
+        os << "sketch_layer_view " << fmt(l.view_yaw) << " " << fmt(l.view_pitch) << " " << fmt(l.view_fov) << " " << fmt(l.view_pivot.x) << " " << fmt(l.view_pivot.y) << " "
+           << fmt(l.view_pivot.z) << " " << fmt(l.view_dist) << "\n";
+    }
     os << "sketch_active " << sk.active_layer << " " << sk.active_canvas << " " << (sk.follow_camera ? 1 : 0) << "\n";
     if (sk.perspective > 0) {
       os << "sketch_perspective " << sk.perspective;
@@ -316,6 +320,8 @@ std::string save_scene_text(const Scene &scene) {
     for (const SketchCanvas &c : sk.canvases)
       os << "sketch_canvas " << c.id << " " << c.kind << " " << fmt(c.origin.x) << " " << fmt(c.origin.y) << " " << fmt(c.origin.z) << " " << fmt(c.u.x) << " "
          << fmt(c.u.y) << " " << fmt(c.u.z) << " " << fmt(c.v.x) << " " << fmt(c.v.y) << " " << fmt(c.v.z) << " " << (c.name.empty() ? "Canvas" : c.name) << "\n";
+    for (const SketchCanvas &c : sk.canvases)
+      if (c.object) os << "sketch_canvas_face " << c.id << " " << c.object << " " << c.face << "\n";  // (task 0226: a face canvas's face)
     for (const SketchStroke &st : sk.strokes) {
       os << "sketch_stroke " << st.layer << " " << st.canvas << " " << (int)st.kind << " " << st.color << " " << fmt(st.width) << " " << (st.closed ? 1 : 0) << " "
          << fmt(st.center.x) << " " << fmt(st.center.y) << " " << fmt(st.rx) << " " << fmt(st.ry) << " " << fmt(st.angle) << " " << fmt(st.start)
@@ -581,6 +587,12 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       if (l.name.empty()) l.name = "Layer";
       fresh.sketch.layers.push_back(l);
     }
+    else if (k == "sketch_layer_view" && t.size() >= 8 && !fresh.sketch.layers.empty()) {  // (the layer before it)
+      SketchLayer &l = fresh.sketch.layers.back();
+      auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
+      l.has_view = true;
+      l.view_yaw = f(1), l.view_pitch = f(2), l.view_fov = f(3), l.view_pivot = {f(4), f(5), f(6)}, l.view_dist = f(7);
+    }
     else if (k == "sketch_active" && t.size() >= 2) {
       fresh.sketch.active_layer = std::atoi(t[1].c_str());
       if (t.size() >= 3) fresh.sketch.active_canvas = std::atoi(t[2].c_str());
@@ -591,6 +603,9 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       for (int i = 0; i < 3; i++) fresh.sketch.vp[i] = {std::strtof(t[(size_t)(2 + 2 * i)].c_str(), nullptr), std::strtof(t[(size_t)(3 + 2 * i)].c_str(), nullptr)};
       fresh.sketch.vp_placed = true;
       if (t.size() >= 9) fresh.sketch.follow_camera = t[8] != "0";
+    }
+    else if (k == "sketch_canvas_face" && t.size() >= 4) {
+      if (SketchCanvas *c = fresh.sketch.canvas_at(std::atoi(t[1].c_str()))) c->object = std::strtoull(t[2].c_str(), nullptr, 10), c->face = std::atoi(t[3].c_str());
     }
     else if (k == "sketch_canvas" && t.size() >= 12) {
       auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
