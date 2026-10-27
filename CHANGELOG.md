@@ -2,6 +2,69 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 251): custom panels, a shortcut for anything, a UI file (task 0231)
+
+**Asked:** the second task of the customization plan: ZBrush's custom palettes ("put any button in a palette of your
+own, a hotkey on anything, Store Config to share a layout") for Blendity, Unity's way.
+
+**Added**
+- **My Tools** (`src/editor/custom_panels.cpp`, ADR 0069): a window kind holding named **panels** as tabs, each a grid
+  of commands - any palette entry (a keymap action, a window, a layout, a Create, a curated console line) or a console
+  line - with the command's tooltip; right-click any menu or palette row > *Add to My Tools > panel*; right-click a
+  button > Remove or Assign Shortcut; *+* makes a panel from the name typed; the tab's menu renames or deletes it.
+  Dockable anywhere like every window (dock id 20), part of a layout's dock string; saved as `panel=` in the
+  preferences. Console `panel new|add|remove|rename|delete|list|show|run`.
+- **A shortcut for anything:** a console line gets a keymap action of its own, `user.<n>` (`useraction=` in the
+  preferences), bound like any action and listed in the palette under *Yours*; right-click a menu or palette row >
+  *Assign Shortcut...*, then press the key - anywhere, not only in Preferences (a strip at the top says what is being
+  bound; the key is taken, so its old action doesn't run; a clash with another action is named in the console and
+  both run). Preferences > Keymap lists *Yours* with their chords and Remove. Console `shortcut <chord> <command>`,
+  `shortcut clear <command>`, `shortcut list`.
+- **A UI file:** `ui save <path>` writes `<name>.blendity-ui` - the layout and the windows, the workspace and its
+  focus, the feel, the keymap preset and overrides, the user actions, the panels, the Wheel's sets, the favorites,
+  the user layouts, the theme and the scale - and `ui load <path>` applies it whole (the lists it carries replace the
+  current ones; lines this build doesn't know are skipped); Preferences > UI file has the path, Save and Load, and two
+  built-ins: *Blender-like* (Blender's feel and keys, the 2 by 3 layout) and *ZBrush-like* (the Tall layout with My
+  Tools panels of the modeling operators and the scene's basics).
+
+**Changed**
+- The keymap page's key capture is the frame's (`keymap_capture_frame`), so a key can be assigned from a menu row;
+  a user layout's preference line is read by one function the preferences and the UI file share.
+**Reviewed** (the Opus review's findings, fixed before the PR)
+- Loading a UI file saved while a user layout was active crashed (the layouts' name pointers were fixed only after the
+  workspace was looked up); `ui save ` with a blank path aborted. The pointers are fixed before the lookup; the path
+  is the rest of the line, trimmed, and an empty one is refused.
+- Loading any UI file - the built-ins too - wiped the favorites, the Wheel's sets, the user actions and the panels
+  even when the file carried none. A list is replaced only when the file has a line of its kind.
+- A cleared or replaced user action left its chords in the keymap's overrides, where the next new action picked them
+  up (Ctrl+Alt+K ran the new line). A user action takes its chords with it when it goes; a new id never inherits.
+- Two uses after free: Assign Shortcut on a palette entry with no action passed the entry's name by reference into a
+  call that rebuilds the palette (a long name read after its free); the My Tools grid read a panel and a palette
+  entry after a button's command could have replaced them. The name is copied; the grid draws a copy of the entries
+  and runs the button after the grid.
+- The key capture ran after the windows drew, so Esc closed Preferences and left the capture armed, and the sketch
+  tool's Esc or the draw tool's Enter acted and were captured. The capture runs first in the frame, before the Wheel
+  and every window; Esc held or pressed cancels.
+- "The key goes to the new one" wasn't so (a built-in action with the chord ran first), and the message said both
+  would run. The chord is taken from the actions that had it (named in the console); a preset or Reset Changes keeps
+  the user actions' chords, which a preset can't bind.
+- Also: a loaded file's shortcuts and panel console lines are named in the console (a shared file runs commands); the
+  Yours rows show the line and replace the chord shown; a user action for a curated entry's line no longer doubles it
+  in the palette and commands match case aside; a tab's Rename / Delete address the panel by name (a deleted panel's
+  rename field went to another); New Panel takes the first free "Panel n"; `ui_scale` from a file is clamped; the
+  feel and preset apply before the overrides, the focus after the workspace; the empty block and unused variable the
+  moved capture left in keymap.cpp are gone.
+
+**Checked**
+- `tests_round251` in `tests/test_input.cpp` (3 tests): a panel's button runs its command and a console line is a
+  button, remove / rename / delete, the panels round-trip the preferences; a bound console line runs on its key, an
+  action's own chord goes on the action (no user action made), the binding survives the preferences, clear removes
+  it, a captured key binds without running its old action, Add to My Tools from the row's menu; a UI file saved, the
+  arrangement changed seven ways, loaded, gives the same text, an unknown line is skipped, the built-ins apply.
+- Unit checks (round 251): Windows, in render-cache verify mode, 12,430, 0 failed (1056 tests), 0 stale
+  pictures. Linux with libraries: 11,971, 0 failed. Sanitizer build: 11,841, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 250): the Wheel - one radial menu everywhere (task 0230)
 
 **Asked:** the first task of the customize / sculpt / paint / stylize plan (0230-0250): "a Blender addon 'Fluent' mode

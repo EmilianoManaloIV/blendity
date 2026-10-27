@@ -195,7 +195,8 @@ the views draw at 67 % and scale up, with a 1024 shadow map and 60 fps. Editing 
 orbiting at 60. Renders always use the scene's own settings. On a 2-in-1, Tablet Mode follows the fold: fingers
 navigate (one orbits, two zoom, pan and twist), the pen works, and **the Wheel** - one radial menu for Space, the pen's
 button or a finger held still, with a set per mode you fill from any menu's right-click - brings Undo, Delete and the
-rest without a keyboard ([the manual](docs/MANUAL.md), chapter 1).
+rest without a keyboard ([the manual](docs/MANUAL.md), chapter 1). **My Tools** holds panels of your own buttons, any command
+takes a key of your own (right-click it > Assign Shortcut...), and one `.blendity-ui` file carries the whole arrangement.
 
 ## Build it
 
@@ -223,7 +224,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (12396 unit checks in 1053 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (12430 unit checks in 1056 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

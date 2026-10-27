@@ -1142,6 +1142,192 @@ static void tests_round250() {
   });
 }
 
+/* ---------------------------------------------------------------- round 251: My Tools, a shortcut for anything, the UI file (task 0231) */
+static void tests_round251() {
+  using platform::EventType;
+  auto step = [&](Editor &ed, std::vector<platform::Event> events) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  auto key = [](int k, int mods = 0) {
+    platform::Event e;
+    e.type = EventType::KeyDown, e.key = k, e.mods = mods;
+    return e;
+  };
+  auto setup = [&](Editor &ed) {
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed, {});
+  };
+
+  test("my tools: a panel made from the console shows in the My Tools window, its button runs the command, a console line is a button too, remove takes it off, and the panels survive the preferences", [&] {
+    Editor ed;
+    setup(ed);
+    ed.command("panel new Favs");
+    ed.command("panel add Favs Create Cube");
+    ed.command("panel add Favs stats");  // (a console line)
+    ed.command("panel add Favs create cube");  // (refused: on it already, any case)
+    CHECK(ed.panels_prefs_text_for_test() == "panel=Favs|Create Cube;stats\n");
+    ed.command("window My Tools");
+    ed.record_buttons_for_test(true);
+    step(ed, {});
+    step(ed, {});
+    Recti r;
+    CHECK(ed.button_rect_for_test("Create Cube", r) && ed.button_rect_for_test("stats", r));
+    const size_t before = ed.scene().object_count();
+    CHECK(ed.button_rect_for_test("Create Cube", r));
+    r34_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    step(ed, {});
+    CHECK(ed.scene().object_count() == before + 1);
+    ed.command("panel remove Favs stats");
+    step(ed, {});
+    CHECK(!ed.button_rect_for_test("stats", r) && ed.panels_prefs_text_for_test() == "panel=Favs|Create Cube\n");
+    ed.command("panel rename Favs to Mine");
+    ed.command("panel new Second");
+    CHECK(ed.panels_prefs_text_for_test() == "panel=Mine|Create Cube\npanel=Second|\n");
+    const std::string dir = fs::join(scratch_project(), "panel_prefs");
+    fs::make_dirs(dir);
+    ed.prefs_for_test(dir + "/prefs.txt");
+    ed.save_prefs_for_test();
+    Editor ed2;
+    setup(ed2);
+    ed2.prefs_for_test(dir + "/prefs.txt");
+    ed2.load_prefs_for_test();
+    CHECK(ed2.panels_prefs_text_for_test() == ed.panels_prefs_text_for_test());
+    ed2.command("panel delete Second");
+    ed2.command("panel delete Mine");
+    CHECK(ed2.panels_prefs_text_for_test().empty());
+    ed.record_buttons_for_test(false);
+  });
+
+  test("shortcut: a console line bound to a chord runs on the key (a user action of its own), the binding survives the preferences, clear removes it; a key captured from a row's Assign Shortcut binds it and doesn't run its old action", [&] {
+    Editor ed;
+    setup(ed);
+    const size_t before = ed.scene().object_count();
+    ed.command("shortcut Ctrl+Alt+K create Cube");
+    CHECK(ed.user_actions_count_for_test() == 1);
+    step(ed, {key(platform::KEY_K, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {});
+    CHECK(ed.scene().object_count() == before + 1);
+    /* A palette entry with an action of its own gets the chord on that action, no user action. */
+    ed.command("shortcut Ctrl+Alt+U Undo");
+    CHECK(ed.user_actions_count_for_test() == 1 && ed.shortcut_for_test("edit.undo") == "Ctrl+Alt+U");
+    step(ed, {key(platform::KEY_U, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {});
+    CHECK(ed.scene().object_count() == before);
+    const std::string dir = fs::join(scratch_project(), "shortcut_prefs");
+    fs::make_dirs(dir);
+    ed.prefs_for_test(dir + "/prefs.txt");
+    ed.save_prefs_for_test();
+    Editor ed2;
+    setup(ed2);
+    ed2.prefs_for_test(dir + "/prefs.txt");
+    ed2.load_prefs_for_test();
+    CHECK(ed2.user_actions_count_for_test() == 1 && ed2.shortcut_for_test("user.1") == "Ctrl+Alt+K");
+    const size_t n2 = ed2.scene().object_count();
+    step(ed2, {key(platform::KEY_K, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed2, {});
+    CHECK(ed2.scene().object_count() == n2 + 1);
+    ed2.command("shortcut clear create Cube");
+    step(ed2, {key(platform::KEY_K, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed2, {});
+    CHECK(ed2.scene().object_count() == n2 + 1 && ed2.shortcut_for_test("user.1").empty());
+    /* The capture: Assign Shortcut on Create Sphere, then Ctrl+Alt+J - which runs nothing of its own. */
+    ed2.right_click_row_for_test("Create Sphere");
+    step(ed2, {});
+    ed2.command_ctx_pick_for_test(3);
+    CHECK(ed2.capturing_for_test());
+    step(ed2, {key(platform::KEY_J, platform::MOD_CTRL | platform::MOD_ALT)});
+    CHECK(!ed2.capturing_for_test() && ed2.scene().object_count() == n2 + 1);
+    step(ed2, {key(platform::KEY_J, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed2, {});
+    CHECK(ed2.scene().object_count() == n2 + 2);
+    /* A captured key that had an action (Ctrl+Z, Undo) neither runs it nor leaves it there: the chord moves. */
+    ed2.right_click_row_for_test("Separate Loose Parts");  // (a long name, a console entry: the capture copies it)
+    step(ed2, {});
+    ed2.command_ctx_pick_for_test(3);
+    const size_t n3 = ed2.scene().object_count();
+    step(ed2, {key(platform::KEY_Z, platform::MOD_CTRL)});
+    step(ed2, {});
+    CHECK(!ed2.capturing_for_test() && ed2.scene().object_count() == n3 && ed2.shortcut_for_test("edit.undo") != "Ctrl+Z");
+    ed2.command("keymap Unity");  // (the preset back: Undo is Ctrl+Z again; the user actions keep theirs)
+    CHECK(ed2.shortcut_for_test("edit.undo") == "Ctrl+Z" && !ed2.shortcut_for_test("user.2").empty());
+    /* Esc cancels a capture. */
+    ed2.right_click_row_for_test("Create Sphere");
+    step(ed2, {});
+    ed2.command_ctx_pick_for_test(3);
+    step(ed2, {key(platform::KEY_ESCAPE)});
+    CHECK(!ed2.capturing_for_test());
+    /* Add to My Tools from the same menu. */
+    ed2.right_click_row_for_test("Create Sphere");
+    step(ed2, {});
+    ed2.command_ctx_pick_for_test(2, "Shapes");
+    CHECK(ed2.panels_prefs_text_for_test() == "panel=Shapes|Create Sphere\n");
+  });
+
+  test("ui file: saved, the arrangement changed (theme, scale, keymap, feel, a panel, a wheel slice, a shortcut), loaded, every line it carries is back; the built-ins apply; a line this build doesn't know is skipped", [&] {
+    Editor ed;
+    setup(ed);
+    ed.command("panel add Mine Create Cube");
+    ed.command("wheel remove object More");
+    ed.command("wheel add object Bevel");
+    ed.command("shortcut Ctrl+Alt+K create Cube");
+    ed.command("favorite Smart UV Project");
+    const std::string saved = ed.ui_file_text_for_test();
+    const std::string dir = fs::join(scratch_project(), "ui_file");
+    fs::make_dirs(dir);
+    ed.command("ui save " + dir + "/mine");
+    std::string on_disk;
+    CHECK(fs::read_file(dir + "/mine.blendity-ui", on_disk) && on_disk == saved);
+    ed.command("theme Light");
+    ed.command("scale 1.5");
+    ed.command("keymap Maya");
+    ed.command("feel Blender");
+    ed.command("panel delete Mine");
+    ed.command("wheel reset");
+    ed.command("shortcut clear create Cube");
+    CHECK(ed.ui_file_text_for_test() != saved);
+    ed.command("ui load " + dir + "/mine");
+    step(ed, {});
+    CHECK(ed.ui_file_text_for_test() == saved);
+    /* A newer build's line is skipped; the rest applies; the lists the file doesn't carry stay. */
+    fs::write_file(dir + "/odd.blendity-ui", "future_thing=42\ntheme=Light\n");
+    ed.command("ui load " + dir + "/odd");
+    CHECK(ed.ui_file_text_for_test().find("theme=Light") != std::string::npos);
+    CHECK(ed.panels_prefs_text_for_test() == "panel=Mine|Create Cube\n" && ed.user_actions_count_for_test() == 1 && ed.favorites_for_test().size() == 1);
+    /* A file saved with a user layout active loads (the layouts' pointers are fixed before the workspace is looked up). */
+    ed.command("layout save Mine Too");
+    ed.command("ui save " + dir + "/withlayout");
+    ed.command("ui load " + dir + "/withlayout");
+    step(ed, {});
+    CHECK(ed.ui_file_text_for_test().find("user_layout=Mine Too;") != std::string::npos);
+    ed.command("ui save ");  // (a blank path: refused, no crash)
+    ed.command("ui load ");
+    ed.command("ui load blender");
+    step(ed, {});
+    CHECK(ed.shortcut_for_test("transform.grab") == "G" && ed.ui_file_text_for_test().find("workspace=2 by 3") != std::string::npos);
+    /* The preset changed with the feel: the user action keeps its chord; a cleared action's chord never reaches the
+     * next user action (its id may come round again: its old chord is gone with it). */
+    CHECK(ed.shortcut_for_test("user.1") == "Ctrl+Alt+K");
+    ed.command("shortcut clear create Cube");
+    ed.command("shortcut Ctrl+Alt+L stats");
+    CHECK(ed.user_actions_count_for_test() == 1 && ed.shortcut_for_test("user.1") == "Ctrl+Alt+L");
+    const size_t n_stats = ed.scene().object_count();
+    step(ed, {key(platform::KEY_K, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {});
+    CHECK(ed.scene().object_count() == n_stats);  // (Ctrl+Alt+K makes nothing now)
+    ed.command("shortcut clear stats");
+    ed.command("ui load zbrush");
+    step(ed, {});
+    CHECK(ed.panels_prefs_text_for_test().find("panel=Sculpt %26 Model|") != std::string::npos || ed.panels_prefs_text_for_test().find("Sculpt & Model") != std::string::npos);
+    CHECK(ed.dock_leaf_rect_for_test(WindowKind::MyTools).w > 0);
+    ed.command("ui load " + dir + "/mine");
+    ed.command("wheel reset");
+    ed.command("panel delete Mine");
+    ed.command("shortcut clear create Cube");
+  });
+}
+
 void run_input_tests() {
   tests_round233();
   tests_round234();
@@ -1153,4 +1339,5 @@ void run_input_tests() {
   tests_round240();
   tests_round241();
   tests_round250();
+  tests_round251();
 }

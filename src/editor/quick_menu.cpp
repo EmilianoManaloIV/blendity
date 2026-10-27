@@ -163,9 +163,30 @@ bool same_set(const std::vector<Editor::WheelSlice> &a, const std::vector<Editor
   return true;
 }
 
+Editor::WheelSlice parse_slice(const std::string &text) {
+  if (to_lower(text) == "add to selection") return {"Add to Selection", "", false, {}};
+  const size_t eq = text.find('=');
+  if (eq == std::string::npos) return {pref_unescape(text), pref_unescape(text), false, {}};
+  return {pref_unescape(text.substr(0, eq)), pref_unescape(text.substr(eq + 1)), false, {}};
+}
+
+std::string slice_text(const Editor::WheelSlice &s) {
+  if (s.entry.empty() && !s.is_ring) return "Add to Selection";
+  if (s.label == s.entry) return pref_escape(s.entry);
+  return pref_escape(s.label) + "=" + pref_escape(s.entry);
+}
+
+void cap_slices(std::vector<Editor::WheelSlice> &set) {
+  if ((int)set.size() > kMaxSlices) set.resize((size_t)kMaxSlices);
+  for (Editor::WheelSlice &s : set)
+    if ((int)s.ring.size() > kMaxSlices) s.ring.resize((size_t)kMaxSlices);
+}
+
+}  // namespace
+
 /* The preferences' separators inside a label or an entry are written as %XX (`sketchguide perspective 3` has none; a
- * console line with `=` or `;` keeps them). */
-std::string escape_pref(const std::string &s) {
+ * console line with `=` or `;` keeps them). Shared with the panels and the user actions (task 0231). */
+std::string pref_escape(const std::string &s) {
   std::string out;
   for (char c : s) {
     if (std::string("|;,=>:%").find(c) == std::string::npos) out += c;
@@ -174,7 +195,7 @@ std::string escape_pref(const std::string &s) {
   return out;
 }
 
-std::string unescape_pref(const std::string &s) {
+std::string pref_unescape(const std::string &s) {
   std::string out;
   for (size_t i = 0; i < s.size(); i++) {
     if (s[i] != '%' || i + 2 >= s.size() || !std::isxdigit((unsigned char)s[i + 1]) || !std::isxdigit((unsigned char)s[i + 2])) {
@@ -186,27 +207,6 @@ std::string unescape_pref(const std::string &s) {
   }
   return out;
 }
-
-Editor::WheelSlice parse_slice(const std::string &text) {
-  if (to_lower(text) == "add to selection") return {"Add to Selection", "", false, {}};
-  const size_t eq = text.find('=');
-  if (eq == std::string::npos) return {unescape_pref(text), unescape_pref(text), false, {}};
-  return {unescape_pref(text.substr(0, eq)), unescape_pref(text.substr(eq + 1)), false, {}};
-}
-
-std::string slice_text(const Editor::WheelSlice &s) {
-  if (s.entry.empty() && !s.is_ring) return "Add to Selection";
-  if (s.label == s.entry) return escape_pref(s.entry);
-  return escape_pref(s.label) + "=" + escape_pref(s.entry);
-}
-
-void cap_slices(std::vector<Editor::WheelSlice> &set) {
-  if ((int)set.size() > kMaxSlices) set.resize((size_t)kMaxSlices);
-  for (Editor::WheelSlice &s : set)
-    if ((int)s.ring.size() > kMaxSlices) s.ring.resize((size_t)kMaxSlices);
-}
-
-}  // namespace
 
 /* ---- sets ---- */
 
@@ -586,7 +586,7 @@ std::string Editor::wheel_set_text(const std::string &mode) {
       out += slice_text(s);
       continue;
     }
-    out += ">" + escape_pref(s.label) + ":";
+    out += ">" + pref_escape(s.label) + ":";
     for (size_t i = 0; i < s.ring.size(); i++) out += (i ? "," : "") + slice_text(s.ring[i]);
   }
   return out;
@@ -603,7 +603,7 @@ void Editor::load_wheel_pref(const std::string &v) {
       continue;
     }
     const size_t colon = item.find(':');
-    WheelSlice ring{unescape_pref(item.substr(1, colon == std::string::npos ? std::string::npos : colon - 1)), "", true, {}};
+    WheelSlice ring{pref_unescape(item.substr(1, colon == std::string::npos ? std::string::npos : colon - 1)), "", true, {}};
     if (colon != std::string::npos)
       for (const std::string &s : split_list(item.substr(colon + 1), ','))
         if (!s.empty()) ring.ring.push_back(parse_slice(s));

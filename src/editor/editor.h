@@ -100,6 +100,9 @@ constexpr int kEditorFeelCount = 4;
 extern const char *const kEditorFeels[kEditorFeelCount];
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys = false);
 std::string chord_text(const KeyChord &c);
+/* The preferences' separators (| ; , = > : %) inside a name, as %XX and back (the Wheel's sets, the panels, the user actions). */
+std::string pref_escape(const std::string &s);
+std::string pref_unescape(const std::string &s);
 KeyChord parse_chord(const std::string &text);
 /* Other actions bound to chord c in a context that overlaps action id's. */
 std::vector<std::string> keymap_conflicts(const Keymap &k, const std::string &id, const KeyChord &c);
@@ -121,7 +124,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -564,7 +567,11 @@ class Editor {
    * items run (0 the favorites, 1 the wheel). */
   void right_click_row_for_test(const std::string &label) { ui_.favorite_request = label; }
   std::string command_ctx_for_test() const { return ui_.any_popup_open() ? command_ctx_ : std::string(); }
-  void command_ctx_pick_for_test(int item) { command_ctx_run(item); }
+  void command_ctx_pick_for_test(int item, const std::string &panel = "") { command_ctx_run(item, panel); }
+  std::string ui_file_text_for_test() { return ui_file_text(); }
+  std::string panels_prefs_text_for_test() const { return panels_prefs_text(); }
+  size_t user_actions_count_for_test() const { return user_actions_.size(); }
+  bool capturing_for_test() const { return !capturing_binding_.empty(); }
   std::vector<std::string> wheel_labels_for_test() {
     std::vector<std::string> out;
     for (const auto &s : quick_menu_slices()) out.push_back(s.first);
@@ -2518,7 +2525,54 @@ class Editor {
    * offering the favorites and the wheel (command_palette.cpp). */
   std::string command_ctx_, command_ctx_mode_;
   void open_command_ctx(const std::string &name);
-  void command_ctx_run(int item);  // 0 the favorites (added or removed), 1 the wheel
+  void command_ctx_run(int item, const std::string &panel = "");  // 0 the favorites (added or removed), 1 the wheel, 2 My Tools (the panel), 3 a shortcut
+  /* ---- My Tools, user actions, the UI file (task 0231, ADR 0069: custom_panels.cpp) ---- */
+  struct CustomPanel {
+    std::string name;
+    std::vector<std::string> entries;  // palette names or console lines
+  };
+  struct UserAction {
+    std::string id, label, command;  // user.<n>; the command's name; the console line
+  };
+  std::vector<CustomPanel> panels_;
+  int panel_active_ = 0, panel_content_h_ = 0;
+  bool panel_naming_ = false, panel_renaming_ = false;
+  std::string panel_ctx_name_, panel_new_name_, panel_rename_text_, panel_btn_ctx_;
+  std::vector<UserAction> user_actions_;
+  std::string capturing_label_, ui_file_path_;
+  CustomPanel *panel_find(const std::string &name);
+  std::string panel_free_name();
+  std::vector<std::string> panel_names() const;
+  bool panel_new(const std::string &name);
+  bool panel_delete(const std::string &name);
+  bool panel_rename(const std::string &name, const std::string &to);
+  bool panel_add(const std::string &panel, const std::string &entry);
+  bool panel_remove(const std::string &panel, const std::string &entry);
+  void panel_run(const std::string &entry);
+  std::string panels_prefs_text() const;
+  void load_panel_pref(const std::string &v);
+  void draw_my_tools_window(const Recti &r);
+  void draw_panel_grid(const Recti &body, const CustomPanel &p);
+  void panel_command(const std::vector<std::string> &t, const std::string &line);
+  const UserAction *user_action(const std::string &id) const;
+  std::string user_action_free_id() const;
+  std::string action_for_command(const std::string &command);
+  void forget_user_action(const std::string &id);
+  void clear_keymap_overrides();  // (a preset or Reset Changes: the user actions keep their chords)
+  bool run_user_action(const std::string &id);
+  bool user_action_shortcuts(const KeyChord &pressed);
+  std::string user_actions_prefs_text() const;
+  void load_user_action_pref(const std::string &v);
+  void load_user_layout_pref(const std::string &v);
+  void capture_shortcut_for(std::string command);
+  void keymap_capture_frame();
+  void take_chord_from_others(const std::string &id, const KeyChord &c);
+  void shortcut_command(const std::vector<std::string> &t, const std::string &line);
+  void draw_user_shortcuts_settings();
+  std::string ui_file_text();
+  void ui_file_apply(const std::string &text);
+  void ui_file_command(const std::vector<std::string> &t, const std::string &line);
+  void draw_ui_file_settings();
   /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
   std::vector<PaletteEntry> palette_entries_;
   std::vector<std::string> add_component_recent_;

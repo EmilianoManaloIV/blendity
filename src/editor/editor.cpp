@@ -31,13 +31,13 @@ using ui::Icon;
 static const char *kVersion = releases::version();  // (VERSION, through the build scripts)
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer", "Live Link", "Editing"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer", "Live Link", "Editing", "My Tools"};
   static_assert(sizeof(names) / sizeof(names[0]) == (size_t)WindowKind::Count, "a title per window");
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step, Icon::Play, Icon::Globe, Icon::Eye};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step, Icon::Play, Icon::Globe, Icon::Eye, Icon::Grid};
   static_assert(sizeof(icons) / sizeof(icons[0]) == (size_t)WindowKind::Count, "an icon per window");
   return icons[(int)k];
 }
@@ -655,6 +655,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
   seqr_.drawn = false;
   sync_material_asset_names();
+  keymap_capture_frame();  // (task 0231: a key being assigned is taken before any window or the Wheel sees it)
   wheel_frame();  // (task 0230: a held pen or finger opens the Wheel; an open one takes the press before any window)
   draw_toolbar(toolbar);
   dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
@@ -1168,7 +1169,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
@@ -1640,6 +1641,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Sequencer: draw_sequencer_window(r); break;
     case WindowKind::LiveLink: draw_livelink_window(r); break;
     case WindowKind::Editing: draw_editing_window(r); break;
+    case WindowKind::MyTools: draw_my_tools_window(r); break;  // (task 0231)
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -3589,6 +3591,8 @@ void Editor::draw_dialogs() {
         draw_performance_settings(nullptr);
         draw_keymap_settings();
         draw_wheel_settings();  // (task 0230)
+        draw_user_shortcuts_settings();  // (task 0231)
+        draw_ui_file_settings();
         /* (After the keymap: its preset list opens below its field, and a row above would push the field down until the
          * list had to open upward - task 0152.) */
         Recti ri = u.popup_row(u.row_h() + u.px(4));  // (task 0152)
@@ -3661,6 +3665,8 @@ void Editor::load_prefs() {
     else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
     else if (k == "favorites") load_favorites_pref(v);
     else if (k == "wheel") load_wheel_pref(v);  // (task 0230)
+    else if (k == "panel") load_panel_pref(v);  // (task 0231)
+    else if (k == "useraction") load_user_action_pref(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
@@ -3695,18 +3701,7 @@ void Editor::load_prefs() {
     else if (k == "workspace") workspace_ = v;
     else if (k == "focus") focus_ = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
     else if (k == "alltools") show_all_tools_ = v == "1";
-    else if (k == "user_layout") {  // name;focus;dock (task 0055)
-      const size_t a = v.find(';'), b = a == std::string::npos ? a : v.find(';', a + 1);
-      if (b != std::string::npos) {
-        UserLayout l;
-        l.name = v.substr(0, a);
-        l.dock = v.substr(b + 1);
-        l.ws = {nullptr, nullptr, (uint32_t)std::strtoul(v.substr(a + 1, b - a - 1).c_str(), nullptr, 10), true};
-        user_layouts_.erase(std::remove_if(user_layouts_.begin(), user_layouts_.end(), [&](const UserLayout &o) { return o.name == l.name; }),
-                            user_layouts_.end());
-        user_layouts_.push_back(l);
-      }
-    }
+    else if (k == "user_layout") load_user_layout_pref(v);  // name;focus;dock (task 0055)
     else if (k == "view_scale") scale = (float)std::atof(v.c_str());
     else if (k == "cpu_threads") threads = std::atoi(v.c_str());
     else if (k == "tier_caps") std::sscanf(v.c_str(), "%d %d %d", &caps[0], &caps[1], &caps[2]);
@@ -3787,6 +3782,8 @@ void Editor::save_prefs() {
   s += "windows=" + windows_layout() + "\n";  // (task 0187)
   s += favorites_prefs_text();  // (task 0189)
   s += wheel_prefs_text();       // (task 0230)
+  s += user_actions_prefs_text();  // (task 0231)
+  s += panels_prefs_text();
   s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
 }

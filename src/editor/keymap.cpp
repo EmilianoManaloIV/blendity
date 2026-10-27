@@ -517,9 +517,17 @@ void Editor::set_binding(const std::string &id, const std::vector<KeyChord> &cho
   rebuild_keymap();
 }
 
+/* The overrides go, except the user actions' chords (`user.<n>`, task 0231): a preset has none for them. */
+void Editor::clear_keymap_overrides() {
+  for (auto it = keymap_overrides_.begin(); it != keymap_overrides_.end();) {
+    if (it->first.rfind("user.", 0) == 0) ++it;
+    else it = keymap_overrides_.erase(it);
+  }
+}
+
 void Editor::set_keymap_preset(const std::string &name) {
   keymap_preset_ = name;
-  keymap_overrides_.clear();  // a preset is a fresh start (Blender: Load Keymap Preset)
+  clear_keymap_overrides();  // a preset is a fresh start (Blender: Load Keymap Preset)
   rebuild_keymap();
   Log::info("Keymap: %s", name.c_str());
 }
@@ -561,6 +569,7 @@ void Editor::parse_keymap_overrides(const std::string &text) {
 
 bool Editor::run_action(const std::string &id) {
   auto &in = ui_.in;
+  if (id.rfind("user.", 0) == 0) return run_user_action(id);  // (a console line with a key of its own, task 0231)
   const WindowKind wins[] = {WindowKind::Scene,   WindowKind::Game,     WindowKind::Inspector, WindowKind::Hierarchy, WindowKind::Project,
                              WindowKind::Console, WindowKind::Profiler, WindowKind::Research,  WindowKind::UVEditor};  // (Research: Learn > References)
   const char *win_ids[] = {"window.scene", "window.game", "window.inspector", "window.hierarchy", "window.project",
@@ -769,6 +778,7 @@ void Editor::handle_shortcuts() {
       }
       if (done) break;
     }
+    if (!done) user_action_shortcuts(pressed);  // (the user's own, task 0231)
   }
   /* Esc in the Scene view puts away the Adjust Last Operation panel and ends Edit Origin. */
   if (scene_ok && in.key_pressed[platform::KEY_ESCAPE]) {
@@ -850,7 +860,7 @@ void Editor::draw_keymap_settings() {
             "Blender: MMB orbit, Shift+MMB pan, Ctrl+MMB zoom.  Maya: Alt+LMB tumble, Alt+MMB track, Alt+RMB dolly.");
   if (u.button({pr.x + u.px(300), pr.y + u.px(2), u.px(150), pr.h - u.px(4)}, strprintf("Reset Changes (%zu)", keymap_overrides_.size())) &&
       !keymap_overrides_.empty()) {
-    keymap_overrides_.clear();
+    clear_keymap_overrides();
     rebuild_keymap();
   }
   Recti sr = row(u.row_h() + u.px(4));
@@ -908,33 +918,7 @@ void Editor::draw_keymap_settings() {
     }
   }
   if (!shown) u.label(row(), "No action matches.", u.theme.text_dim);
-  /* Waiting for a key: the next one pressed (not a modifier on its own). */
-  if (!capturing_binding_.empty()) {
-    for (int key = 1; key < platform::KEY_COUNT; key++) {
-      if (!in.key_pressed[key] || key == platform::KEY_SHIFT || key == platform::KEY_CTRL || key == platform::KEY_ALT || key == platform::KEY_SUPER) continue;
-      std::vector<KeyChord> chords = keymap_[capturing_binding_];
-      if (key == platform::KEY_ESCAPE) {
-        capturing_binding_.clear();
-        break;
-      }
-      int mods = 0;
-      if (in.ctrl()) mods |= platform::MOD_CTRL;
-      if (in.shift()) mods |= platform::MOD_SHIFT;
-      if (in.alt()) mods |= platform::MOD_ALT;
-      if ((key == platform::KEY_BACKSPACE || key == platform::KEY_DELETE) && !mods) {
-        if (capturing_slot_ < (int)chords.size()) chords.erase(chords.begin() + capturing_slot_);
-      }
-      else {
-        const KeyChord c{key, mods};
-        if (capturing_slot_ < (int)chords.size()) chords[(size_t)capturing_slot_] = c;
-        else chords.push_back(c);
-      }
-      set_binding(capturing_binding_, chords);
-      capturing_binding_.clear();
-      in.key_pressed[key] = false;
-      break;
-    }
-  }
+  /* (A key being waited for is taken by keymap_capture_frame, each frame, wherever the editor is: task 0231.) */
 }
 
 }  // namespace bl

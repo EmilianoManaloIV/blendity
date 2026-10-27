@@ -698,6 +698,18 @@ void Editor::run_console_command(const std::string &line) {
     wheel_command(t, line);
     return;
   }
+  if (c == "panel") {  // panel new|delete|rename|add|remove|list|show|run (task 0231: My Tools)
+    panel_command(t, line);
+    return;
+  }
+  if (c == "shortcut") {  // shortcut <chord> <command> | clear <command> | list (task 0231)
+    shortcut_command(t, line);
+    return;
+  }
+  if (c == "ui") {  // ui save <path> | load <path>|blender|zbrush (task 0231: the UI file)
+    ui_file_command(t, line);
+    return;
+  }
   if (c == "tabletmode") {  // tabletmode auto|on|off: the main window's Tablet Mode follows the laptop, or is set (task 0218)
     const std::string v = to_lower(arg(1, ""));
     const int pref = v == "auto" ? 0 : v == "on" ? 1 : v == "off" ? 2 : -1;

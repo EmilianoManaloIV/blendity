@@ -90,6 +90,12 @@ const std::vector<PaletteEntry> &Editor::palette_entries() {
                         "Spot Light", "Area Light", "Camera", "Lattice", "Armature"})
     add({std::string("Create ") + k, "Create", "", std::string("create ") + k, ""});
   for (const Curated &c : kCurated) add({c.name, c.category, c.help, c.command, ""});
+  /* The user's own (task 0231), unless the line is a curated entry's already (then that entry carries the chord's name). */
+  for (const UserAction &a : user_actions_) {
+    bool known = false;
+    for (const PaletteEntry &e : palette_entries_) known = known || lower(e.command) == lower(a.command);
+    if (!known) add({a.label, "Yours", "Your shortcut: " + a.command, a.command, a.id});
+  }
   return palette_entries_;
 }
 
@@ -172,11 +178,13 @@ void Editor::open_command_ctx(const std::string &name) {
   ui_.open_popup(ui_.id("command_ctx"), {ui_.in.mx, ui_.in.my, 0, 0});
 }
 
-void Editor::command_ctx_run(int item) {
+void Editor::command_ctx_run(int item, const std::string &panel) {
   const PaletteEntry *e = palette_find(command_ctx_);
   if (!e) return;
   if (item == 0) toggle_favorite(e->name);
-  else wheel_add(command_ctx_mode_, e->name, "", "");
+  else if (item == 1) wheel_add(command_ctx_mode_, e->name, "", "");
+  else if (item == 2) panel_add(panel.empty() ? panel_free_name() : panel, e->name);  // (task 0231)
+  else if (item == 3) capture_shortcut_for(std::string(e->name));  // (a copy: the capture may rebuild the palette)
   ui_.close_popups();
 }
 
@@ -206,6 +214,13 @@ void Editor::draw_command_palette() {
     const bool fav = std::find(favorites().begin(), favorites().end(), e->name) != favorites().end();
     if (u.menu_item(fav ? "Remove from Quick Favorites" : "Add to Quick Favorites")) command_ctx_run(0);
     if (u.menu_item("Add to the Wheel (" + command_ctx_mode_ + ")")) command_ctx_run(1);
+    u.submenu("Add to My Tools", u.px(220), [this] {  // (task 0231)
+      auto &u = ui_;
+      for (const CustomPanel &p : std::vector<CustomPanel>(panels_))
+        if (u.menu_item(p.name)) command_ctx_run(2, p.name);
+      if (u.menu_item("New Panel")) command_ctx_run(2, panel_free_name());
+    });
+    if (u.menu_item("Assign Shortcut...")) command_ctx_run(3);
     u.favorite_request.clear();  // (a right-click on these rows is nothing)
   });
   u.popup(u.id("quick_favorites"), u.px(300), [this] {

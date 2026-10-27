@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| A command with no key of its own (a console line, a Create, a layout) stayed a trip through the menus; the user's own buttons had no place; a set-up took its machine with it. | My Tools panels, a shortcut for anything (right-click > Assign Shortcut..., pressed anywhere), and a UI file that carries the arrangement (task 0231). |
 | The pen quick menu held ten fixed commands, opened in the Scene view only, and a finger couldn't open it; a rare command took a trip through the menus or the palette. | The Wheel: one radial menu over any window for Space, the pen's button or a pen or finger held still, with a set of up to eight slices (and rings) per mode that any menu row's right-click fills (task 0230). |
 | Selecting two opposite edges selected all four edges of the quad. Mark Seam, Bevel and the edge highlight all saw four. | Edge mode keeps edges themselves, as Blender does (`edge_sel_`). The edge tools read exactly those edges (`meshops::EdgeSelectionScope`). |
 | Shade Smooth on some faces smoothed the whole object. | Shading is per face (`Mesh::face_smooth`). Smoothing stops at flat faces, at edges marked sharp (Mark Sharp / Clear Sharp), at the Smooth by Angle limit, and optionally at UV seams ("Seams Are Hard Edges"). |
