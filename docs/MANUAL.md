@@ -178,6 +178,28 @@ UModeler and Plasticity: **Follow** (sweep a face along a path), **Spin / Lathe*
 **Snapping.** Hold Ctrl for grid snapping; drawing snaps to the faces' own axes and to parallel and perpendicular
 edges; X / Y / Z lay construction lines while drawing.
 
+**Drawing in perspective, building from the construction.** For a drawing pad or a pen: **Draw > Sketch (pen)** draws
+over the Scene view with SketchBook's aids under **Draw > Guides** - a ruler, an ellipse (its minor axis shown), French
+curves, symmetry, and 1-, 2- and 3-point perspective with draggable vanishing points. The pen's pressure is the width,
+its eraser erases, Ctrl keeps a stroke freehand. When the pen lifts the stroke is corrected to what it meant: split at
+its corners, each piece a line, an arc, an ellipse or a curve, pulled vertical, horizontal or onto a vanishing line,
+its ends joined to other strokes' (an arch is two lines and an arc). The 3-point guide *is* the camera: orbit and its
+points move; drag a point and the camera turns to put it there. A **canvas** can be a plane in the scene - the ground,
+a face, a wall through a point (`sketchcanvas ground|face|plane`) - and a stroke on it is corrected in the plane's
+metres and sits in the scene from every view; a line along the plane's axis becomes a construction line. **Draw >
+Build from Sketch** makes solids from the strokes that fix them, 3-Sweep's way: a box from three lines at a corner,
+a cylinder or cone from two circles (or a circle and a line), a sweep from two circles and a path, a face from a
+closed outline and its Push/Pull from a line along its normal - boxes and cylinders with their numbers in F9. **Draw >
+Sketch over the Model** keeps the drawing true from its view (a layer fades as you orbit away; Back to the Layer's
+View), projects a stroke onto the face under it and traces it into a cut or a curve, and shows the model's edges to
+draw against. `sketchlift` lifts a whole scaffold drawn under the 3-point guide into a wire object to build from.
+
+**Example: a box from a drawing**
+1. Draw > Sketch (pen); `sketchcanvas ground`. Draw two lines from one point along the red and the blue axis (they
+   snap along the axes and become construction lines).
+2. `sketchcanvas plane z 0 0 0` (a wall through the origin) and draw the upright from the same corner.
+3. Draw > Build from Sketch > Box: the box stands on the three lines; F9 corrects its lengths.
+
 **Example: a doorway in a wall**
 1. GameObject > Shapes (Parametric) > Box; in the Inspector make it 4 x 3 x 0.2.
 2. Select the box, Draw > Rectangle (Mesh menu or Inspector), and draw a rectangle about 1 x 2.1 on its front face
@@ -191,7 +213,7 @@ edges; X / Y / Z lay construction lines while drawing.
 
 **Use cases:** level greyboxing; architectural massing; quick props.
 
-> Learn: *Points, Lines, N-gons and Booleans*, *Move, Rotate, Scale*.
+> Learn: *Points, Lines, N-gons and Booleans*, *Move, Rotate, Scale*, *Drawing in Perspective*.
 
 ---
 
@@ -642,6 +664,8 @@ the editor. A few that are handy by hand:
 | `anim new`, `anim frame 30`, `anim record on` | the Animation window |
 | `matdelete Bricks, Wood Floor` | delete materials by name |
 | `libs` | which of Blender's libraries this build uses |
+| `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
+| `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |
 
 ---
 

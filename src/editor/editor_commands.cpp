@@ -691,6 +691,7 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (sketch_command(t, line)) return;  // sketch | sketchguide | sketchstroke (task 0223)
   if (sketch_canvas_command(t, line)) return;  // sketchcanvas (task 0224)
+  if (sketch_world_stroke_command(t)) return;  // sketchline | sketchcircle (task 0228)
   if (sketch_build_command(t)) return;  // sketchbuild (task 0225)
   if (sketch_refine_command(t)) return;  // sketchproject | sketchtrace (task 0226)
   if (c == "quickmenu") {  // quickmenu open [x y]|close|pick <slice>|list (task 0217)

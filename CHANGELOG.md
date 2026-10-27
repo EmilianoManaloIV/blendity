@@ -2,6 +2,26 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 248): the manual, the Learn lesson, the check list for the drawing pad (task 0228)
+
+**Asked:** the sixth task of the perspective-drawing plan: where users look.
+
+**Added**
+- **The manual's** "Drawing in perspective, building from the construction" in chapter 3, with an example and the
+  console rows.
+- **The Learn lesson "Drawing in Perspective":** six sections, the five questions of rounds 243-247 moved into it,
+  and eleven Try-its - a box, a tapering cylinder and a cone built from commands among them.
+- **`sketchline` and `sketchcircle`:** a line or a circle on the active scene canvas from world points (the Try-its,
+  scripts, tests).
+- A ten-minute check list for the drawing pad (docs/tasks/0228).
+
+**Checked**
+- The lesson's Try-its run in order and build the box, the cylinder and the cone exactly; the manual's Learn notes
+  name lessons that exist (tests/test_sketch.cpp, tests/test_editor.cpp).
+- Unit checks (round 248): Windows, in render-cache verify mode, 12,339, 0 failed (1044 tests), 0 stale
+  pictures. Linux with libraries: 11,880, 0 failed. Sanitizer build: 11,750, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test and the sanitizer autopose test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 247): lift a scaffold - the spike, GO (task 0227)
 
 **Asked:** the fifth task of the perspective-drawing plan: a time-boxed spike lifting a scaffold of construction

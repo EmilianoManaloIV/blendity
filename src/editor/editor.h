@@ -2803,6 +2803,7 @@ class Editor {
   void sketch_draw_canvas(const Recti &view);
   bool sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas &out);
   bool sketch_canvas_command(const std::vector<std::string> &t, const std::string &line);
+  bool sketch_world_stroke_command(const std::vector<std::string> &t);  // (task 0228: sketchline, sketchcircle)
   int sketch_add_canvas(SketchCanvas c);
   bool sketch_snap_to_guides(const Recti &view, Vec2 &a, Vec2 &b) const;
   float cam_yaw_before_ = 1e9f, cam_pitch_before_ = 1e9f, cam_fov_before_ = 1e9f;  // (the camera the guide last followed)

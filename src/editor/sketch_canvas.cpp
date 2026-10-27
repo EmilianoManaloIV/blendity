@@ -460,6 +460,60 @@ bool Editor::sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas 
   return true;
 }
 
+/* sketchline x y z x y z | sketchcircle cx cy cz r: a line or a circle on the active scene canvas from world points
+ * (task 0228: the Learn tab's try-its and scripts; the points are read in the plane, so they should lie in it). */
+bool Editor::sketch_world_stroke_command(const std::vector<std::string> &t) {
+  if (t.empty()) return false;
+  const std::string c = to_lower(t[0]);
+  if (c != "sketchline" && c != "sketchcircle") return false;
+  Sketch &s = scene_->sketch;
+  const SketchCanvas *canvas = s.active_canvas ? s.canvas_at(s.active_canvas) : nullptr;
+  if (!canvas || canvas->kind != 1) {
+    Log::warn("%s: choose a scene canvas first (sketchcanvas ground, plane or face)", c.c_str());
+    return true;
+  }
+  auto f = [&](size_t i) { return (float)std::atof(t.size() > i ? t[i].c_str() : "0"); };
+  auto uv = [&](Vec3 w) {
+    const Vec3 off = w - canvas->origin;
+    return Vec2{dot(off, canvas->u) / std::max(1e-9f, dot(canvas->u, canvas->u)), dot(off, canvas->v) / std::max(1e-9f, dot(canvas->v, canvas->v))};
+  };
+  if (s.layers.empty()) s.layers.push_back(SketchLayer{});
+  SketchStroke st;
+  st.layer = s.active_layer;
+  st.color = sketch_.color;
+  st.width = sketch_.width;
+  st.canvas = canvas->id;
+  std::vector<SketchStroke> made;
+  if (c == "sketchline" && t.size() >= 7) {
+    const Vec2 a = uv({f(1), f(2), f(3)}), b = uv({f(4), f(5), f(6)});
+    st.kind = StrokeKind::Line;
+    st.pts = {{a.x, a.y, 1.0f}, {b.x, b.y, 1.0f}};
+    made.push_back(st);
+    sketch_construction_lines(made);
+  }
+  else if (c == "sketchcircle" && t.size() >= 5) {
+    const Vec2 centre = uv({f(1), f(2), f(3)});
+    const float r = f(4);
+    st.kind = StrokeKind::Ellipse;
+    st.closed = true;
+    st.center = centre, st.rx = st.ry = r;
+    const int n = 48;
+    for (int i = 0; i < n; i++) {
+      const float a = 2.0f * kPi * (float)i / (float)n;
+      st.pts.push_back({centre.x + r * std::cos(a), centre.y + r * std::sin(a), 1.0f});
+    }
+    made.push_back(st);
+  }
+  else {
+    Log::info("usage: sketchline x y z x y z | sketchcircle cx cy cz r (on the active scene canvas)");
+    return true;
+  }
+  for (SketchStroke &m : made) s.strokes.push_back(std::move(m));
+  mark_changed("Sketch Stroke");
+  ui_.redraw = true;
+  return true;
+}
+
 /* sketchcanvas view|ground|face [x y]|plane x|y|z [px py pz]|list|<id>: the canvas the next strokes go on. */
 bool Editor::sketch_canvas_command(const std::vector<std::string> &t, const std::string &line) {
   (void)line;

@@ -2,7 +2,10 @@
 // Sketching in perspective (tasks 0223-0229): the stroke corrections, the guides, and the Sketch tool in the editor.
 #include "test_common.h"
 
+#include "../src/editor/learn.h"
 #include "../src/scene/sketch.h"
+
+#include <sstream>
 
 
 
@@ -1053,10 +1056,69 @@ static void tests_round247() {
   });
 }
 
+/* ----------------------------------------------- round 248: the manual, the Learn lesson, the check list (task 0228) */
+static void tests_round248() {
+  test("the Drawing in Perspective lesson's try-its run: the box, the cylinder and the cone come out of their commands; sketchline and sketchcircle", [] {
+    std::vector<std::string> tryits;
+    for (int i = 0; i < lesson_count(); i++) {
+      if (std::string(lesson(i).title) != "Drawing in Perspective") continue;
+      std::istringstream is(lesson(i).body);
+      std::string line;
+      while (std::getline(is, line))
+        if (line.rfind("! cmd:", 0) == 0) tryits.push_back(line.substr(6, line.find(" | ") - 6));
+    }
+    std::printf("    %d try-its\n", (int)tryits.size());
+    CHECK(tryits.size() >= 10);
+    Editor ed;
+    ed.init_headless(1200, 800);
+    auto run = [&](const std::string &cmds) {
+      size_t a = 0;
+      while (a <= cmds.size()) {
+        const size_t e = cmds.find(';', a);
+        std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        a = e + 1;
+      }
+      ed.step_frame_headless();
+    };
+    for (const std::string &t : tryits) run(t);
+    ed.step_frame_headless();
+    /* (The sample scene has a Cylinder of its own: the built one is the last so named.) */
+    const GameObject *box = ed.scene().find_by_name("Box"), *cyl = nullptr, *cone = ed.scene().find_by_name("Cone");
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name == "Cylinder") cyl = &g;
+    });
+    CHECK(box && cyl && cone);
+    if (box) {
+      const AABB b = box->world_bounds();
+      std::printf("    the try-it box: (%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f)\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+      CHECK(length(b.min) < 1e-3f && length(b.max - Vec3{1.5f, 0.8f, 1.0f}) < 1e-3f);
+    }
+    if (cyl) {
+      const AABB b = cyl->world_bounds();
+      std::printf("    the try-it cylinder: (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f)\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+      CHECK(std::fabs(b.min.x - 2.0f) < 1e-3f && std::fabs(b.max.x - 3.0f) < 1e-3f && std::fabs(b.max.y - 1.0f) < 1e-3f);
+    }
+    if (cone) CHECK(std::fabs(cone->world_bounds().max.y - 1.2f) < 1e-3f);
+    /* sketchline needs a scene canvas; its line along an axis is a construction line. */
+    ed.command("sketchcanvas view");
+    const size_t guides = ed.scene().guides.size();
+    ed.command("sketchline 0 0 0 1 0 0");
+    CHECK(ed.scene().guides.size() == guides);
+    ed.command("sketchcanvas ground");
+    ed.command("sketchline 0 0 5 2 0 5");
+    CHECK(ed.scene().guides.size() == guides + 1);
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
   tests_round245();
   tests_round246();
   tests_round247();
+  tests_round248();
 }
