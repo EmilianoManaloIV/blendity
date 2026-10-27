@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 247): lift a scaffold - the spike, GO (task 0227)
+
+**Asked:** the fifth task of the perspective-drawing plan: a time-boxed spike lifting a scaffold of construction
+lines from the picture plane to 3D, with a gate of 10 % on a box-and-cylinder scaffold.
+
+**Added**
+- **`sketchlift`:** the picture plane's lines, labelled by the vanishing point they run toward, lifted to a
+  "Scaffold" wire object: lines meeting within 8 px share a point, a line along an axis fixes its ends' depths
+  against each other, the junction nearest the view's middle sits at the pivot distance (each connected part
+  pinned), the rest by least squares. Construction to build from, never a mesh. ADR 0067.
+
+**Checked**
+- The gate: a box and a cylinder, 19 lines, the ends wobbled a pixel, lift with the worst depth 0.3 % off; through
+  the editor the box's edges come out 1 : 0.80 : 1.18 at right angles within a degree (tests/test_sketch.cpp).
+- An Opus review ported the solver to Python and found one serious thing and several smaller, all fixed:
+  - the scaffold's parts were found over every line, free ones included, so a part tied to the gauge only by a line
+    along no axis had nothing holding its scale and shrank toward the camera (two boxes joined by one diagonal came
+    out 99 % off): the parts are found over the axis lines alone now, and each is gauged; a test draws it;
+  - `determined` counted any junction a labelled line touched, gauge or not; it counts junctions an axis line ties
+    to a gauged part;
+  - nothing noticed a junction solved to behind the camera (a wrong label): they are counted, and the editor lifts
+    nothing then and says so;
+  - a line a few pixels long got full weight and its wobble spread through its part: lines shorter than three
+    joins are free;
+  - a level line near the horizon runs toward X's and Z's vanishing points alike: a label is given only when one
+    point is clearly nearest (3 degrees);
+  - the rays came from the last frame's matrices while the vanishing points came from the camera as it is: the
+    rays are the camera's now;
+  - the editor's test read the mesh by the solver run's junction ids, which need not match: the editor keeps its
+    result for the test;
+  - the dense solve is capped at 400 lines for the spike.
+  Left as known limits: picture-plane strokes don't remember the camera they were drawn under, so orbiting before
+  the lift relabels them against the new view (the layer's view, task 0226, is the place to look); a free line's
+  depth is the gauge's.
+- Unit checks (round 247): Windows, in render-cache verify mode, 12,332, 0 failed (1043 tests), 0 stale
+  pictures. Linux with libraries: 11,873, 0 failed. Sanitizer build: 11,743, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 246): refinement - the drawing over the model (task 0226)
 
 **Asked:** the fourth task of the perspective-drawing plan: "just like drawing technique, it takes refinement and

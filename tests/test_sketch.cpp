@@ -5,6 +5,7 @@
 #include "../src/scene/sketch.h"
 
 
+
 using namespace bl;
 
 namespace {
@@ -921,9 +922,141 @@ static void tests_round246() {
   });
 }
 
+/* ------------------------------------------------------------ round 247: lifting a scaffold - the spike (task 0227) */
+#include "../src/research/sketch_lift.h"
+static void tests_round247() {
+  test("the lift: a box-and-cylinder scaffold drawn in 3-point perspective, its ends wobbled a pixel, lifts to within 10 % of the true depths (the gate), through the solver and through the editor", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("camera 35 -25 6 0.5 0.4 0.5");
+    ed.command("sketch on");
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    /* The scaffold: a box 1 x 0.8 x 1.2 at the origin (12 edges), a line along X from its corner to a cylinder's
+     * base centre at (2, 0, 0), the cylinder's axis up 1 m, its two silhouette lines along Y at x = 1.6 and 2.4,
+     * and the base's and top's lines along X between them. Every line along a world axis. */
+    struct L {
+      Vec3 a, b;
+      int axis;
+    };
+    std::vector<L> truth;
+    const float X = 1.0f, Y = 0.8f, Z = 1.2f;
+    for (int y = 0; y < 2; y++)
+      for (int z = 0; z < 2; z++) truth.push_back({{0, y * Y, z * Z}, {X, y * Y, z * Z}, 0});
+    for (int x = 0; x < 2; x++)
+      for (int z = 0; z < 2; z++) truth.push_back({{x * X, 0, z * Z}, {x * X, Y, z * Z}, 1});
+    for (int x = 0; x < 2; x++)
+      for (int y = 0; y < 2; y++) truth.push_back({{x * X, y * Y, 0}, {x * X, y * Y, Z}, 2});
+    truth.push_back({{X, 0, 0}, {1.6f, 0, 0}, 0});  // (the ground line ties the cylinder to the box)
+    truth.push_back({{1.6f, 0, 0}, {2, 0, 0}, 0});
+    truth.push_back({{2, 0, 0}, {2.4f, 0, 0}, 0});
+    truth.push_back({{2, 0, 0}, {2, 1, 0}, 1});
+    truth.push_back({{1.6f, 0, 0}, {1.6f, 1, 0}, 1});
+    truth.push_back({{2.4f, 0, 0}, {2.4f, 1, 0}, 1});
+    truth.push_back({{1.6f, 1, 0}, {2.4f, 1, 0}, 0});
+    /* On the view, the ends wobbled a pixel. */
+    std::vector<research::LiftLine> lines;
+    uint32_t seed = 77u;
+    auto wob = [&] {
+      seed = seed * 1664525u + 1013904223u;
+      return ((float)(seed >> 8) / 16777216.0f * 2.0f - 1.0f);
+    };
+    const Vec3 cam_pos = ed.scene_camera_for_test().position();
+    for (const L &l : truth) {
+      research::LiftLine ll;
+      CHECK(ed.project_for_test(l.a, ll.a) && ed.project_for_test(l.b, ll.b));
+      ll.a += Vec2{wob(), wob()}, ll.b += Vec2{wob(), wob()};
+      ll.axis = l.axis;
+      lines.push_back(ll);
+    }
+    /* The solver: the gauge is the junction nearest the view's middle at its true depth. */
+    research::LiftResult res;
+    auto ray = [&](Vec2 px) { return ed.screen_ray_for_test(px); };
+    const Vec2 middle{r.w * 0.5f, r.h * 0.5f};
+    int nearest = -1;
+    float best = 1e30f;
+    std::vector<Vec3> truth_points;
+    for (const L &l : truth) truth_points.push_back(l.a), truth_points.push_back(l.b);
+    for (size_t i = 0; i < truth_points.size(); i++) {
+      Vec2 p;
+      ed.project_for_test(truth_points[i], p);
+      if (length(p - middle) < best) best = length(p - middle), nearest = (int)i;
+    }
+    Vec2 anchor_px;
+    ed.project_for_test(truth_points[(size_t)nearest], anchor_px);
+    const float anchor_depth = length(truth_points[(size_t)nearest] - ray(anchor_px).origin);  // (the ray starts on the near plane)
+    CHECK(research::lift_scaffold(lines, ray, 6.0f, anchor_px, anchor_depth, res));
+    CHECK(res.junctions.size() == 8 + 6 && res.determined == (int)res.junctions.size() && res.behind == 0);
+    /* The review's case: two parts tied only by a free line (no axis) are each gauged, not left to collapse. */
+    {
+      std::vector<research::LiftLine> two = lines;
+      research::LiftLine brace;
+      ed.project_for_test({0, Y, 0}, brace.a);
+      ed.project_for_test({3.5f, 0.3f, 2.0f}, brace.b);
+      brace.axis = -1;
+      two.push_back(brace);
+      for (int k = 0; k < 3; k++) {  // (a second box's corner lines, 3.5 m over)
+        research::LiftLine l;
+        const Vec3 o{3.5f, 0.3f, 2.0f};
+        const Vec3 e = k == 0 ? Vec3{1, 0, 0} : k == 1 ? Vec3{0, 1, 0} : Vec3{0, 0, 1};
+        ed.project_for_test(o, l.a), ed.project_for_test(o + e * 0.7f, l.b);
+        l.axis = k;
+        two.push_back(l);
+      }
+      research::LiftResult r2;
+      CHECK(research::lift_scaffold(two, ray, 6.0f, anchor_px, anchor_depth, r2) && r2.behind == 0);
+      const float depth = length(r2.b[two.size() - 1] - ray(brace.b).origin);
+      std::printf("    a second part over a free brace: its corner at depth %.2f (the gauge %.2f; the near plane would be 0)\n", depth, anchor_depth);
+      CHECK(depth > 0.5f * anchor_depth);
+    }
+    float worst = 0.0f;
+    for (size_t i = 0; i < lines.size(); i++) {
+      const float da = length(res.a[i] - cam_pos), ta = length(truth[i].a - cam_pos), db = length(res.b[i] - cam_pos), tb = length(truth[i].b - cam_pos);
+      worst = std::max(worst, std::max(std::fabs(da - ta) / ta, std::fabs(db - tb) / tb));
+      if (i < 4 || std::fabs(da - ta) / ta > 0.1f || std::fabs(db - tb) / tb > 0.1f)
+        std::printf("    line %d: a (%.2f, %.2f, %.2f) want (%.2f, %.2f, %.2f), depth %.2f want %.2f; b depth %.2f want %.2f\n", (int)i, res.a[i].x, res.a[i].y, res.a[i].z, truth[i].a.x, truth[i].a.y, truth[i].a.z, da, ta, db, tb);
+    }
+    std::printf("    the camera at (%.2f, %.2f, %.2f); the anchor junction's ray origin (%.2f, %.2f, %.2f), the anchor depth %.2f\n", cam_pos.x, cam_pos.y, cam_pos.z, ray(anchor_px).origin.x, ray(anchor_px).origin.y, ray(anchor_px).origin.z, anchor_depth);
+    std::printf("    the solver: %d junctions, residual %.4f m, the worst depth %.1f %% off (the gate: 10 %%)\n", (int)res.junctions.size(), res.rms, worst * 100.0f);
+    CHECK(worst < 0.10f);
+    /* Through the editor: the lines as picture-plane strokes (sketchstroke, the perspective guide labelling them by
+     * the vanishing points), lifted to a Scaffold wire object. */
+    ed.command("sketchguide perspective 3");
+    ed.step_frame_headless();
+    for (const research::LiftLine &l : lines) ed.command(strprintf("sketchstroke %g %g %g %g", l.a.x, l.a.y, l.b.x, l.b.y));
+    CHECK(ed.sketch_for_test().strokes.size() == lines.size());
+    ed.command("sketchlift");
+    ed.step_frame_headless();
+    GameObject *sc = ed.active_object_for_test();
+    const MeshFilter *mf = sc ? sc->get<MeshFilter>() : nullptr;
+    CHECK(sc && mf && mf->mesh && sc->name == "Scaffold" && mf->mesh->vert_count() == 14 && mf->mesh->loose_edges.size() == lines.size());
+    if (sc && mf && mf->mesh) {
+      /* The gauge in the editor is the camera's pivot distance, so the scaffold's scale is its own: the box's edge
+       * ratios and right angles tell whether the shape lifted. */
+      /* The editor's own result: lines 0 (X at the origin), 4 (Y at the origin) and 8 (Z at the origin). */
+      const research::LiftResult &er = ed.last_lift_for_test();
+      CHECK(er.a.size() == lines.size() && er.behind == 0 && er.determined == (int)er.junctions.size());
+      Vec3 ex, ey, ez;
+      float lx = 0, ly = 0, lz = 0;
+      for (int li : {0, 4, 8}) {
+        const Vec3 a = er.a[(size_t)li], b = er.b[(size_t)li];
+        const Vec3 d = b - a;
+        if (li == 0) ex = normalize(d), lx = length(d);
+        if (li == 4) ey = normalize(d), ly = length(d);
+        if (li == 8) ez = normalize(d), lz = length(d);
+      }
+      std::printf("    the editor's scaffold: edges %.3f / %.3f / %.3f (ratios want 1 : 0.8 : 1.2), angles %.1f %.1f %.1f degrees\n", lx, ly, lz,
+                  std::acos(std::fabs(dot(ex, ey))) * 180.0f / 3.14159265f, std::acos(std::fabs(dot(ey, ez))) * 180.0f / 3.14159265f, std::acos(std::fabs(dot(ex, ez))) * 180.0f / 3.14159265f);
+      CHECK(std::fabs(ly / lx - 0.8f) < 0.08f && std::fabs(lz / lx - 1.2f) < 0.12f);
+      CHECK(std::fabs(dot(ex, ey)) < 0.1f && std::fabs(dot(ey, ez)) < 0.1f && std::fabs(dot(ex, ez)) < 0.1f);
+    }
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
   tests_round245();
   tests_round246();
+  tests_round247();
 }

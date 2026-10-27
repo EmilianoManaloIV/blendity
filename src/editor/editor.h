@@ -15,6 +15,7 @@
 //   Docking        Screen areas           screen (area split / join)
 #pragma once
 
+#include "../research/sketch_lift.h"
 #include <cstdlib>
 #include <algorithm>
 #include <unordered_map>
@@ -936,6 +937,8 @@ class Editor {
     float r;
     size_t stroke;
   };
+  Ray screen_ray_for_test(Vec2 px) const { return scene_r3d_.screen_ray(px.x, px.y); }  // (view pixels)
+  const research::LiftResult &last_lift_for_test() const { return last_lift_; }
   bool project_for_test(Vec3 w, Vec2 &px) const {  // (the Scene view's pixels, from its top left)
     float z;
     return scene_r3d_.project(w, px, z);
@@ -2837,6 +2840,8 @@ class Editor {
   bool sketch_ruler_from_edge(const Recti &view, int mx, int my);
   bool sketch_ellipse_from_face(const Recti &view, int mx, int my);
   bool sketch_refine_command(const std::vector<std::string> &t);
+  bool sketch_lift();  // (task 0227's spike)
+  research::LiftResult last_lift_;
   /* ---- Drawing tool: polyline, rectangle, circle, arc, polygon (draw_tool.cpp) ---- */
   struct DrawTool {
     bool active = false;

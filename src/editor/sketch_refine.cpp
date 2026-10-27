@@ -4,6 +4,7 @@
 // true circle); a stroke is projected onto the face under it, traced into a knife cut or a curve; the model's edges
 // are drawn as an overlay to draw against, and the ruler and the ellipse guide snap to its edges and circular faces.
 #include "editor.h"
+#include "../research/sketch_lift.h"
 
 #include <algorithm>
 #include <cmath>
@@ -510,13 +511,103 @@ bool Editor::sketch_ellipse_from_face(const Recti &view, int mx, int my) {
   return true;
 }
 
-/* sketchproject | sketchtrace edge|curve: the drawing into the model. */
+/* ------------------------------------------------------------------ the lift (task 0227's spike) */
+
+/* The picture plane's line strokes on shown layers lifted to a scaffold of 3D lines (research/sketch_lift.cpp): a
+ * line drawn toward one of the axes' vanishing points (within 10 degrees) runs along that axis, lines meeting within
+ * 8 px share a point, and the junction nearest the view's middle sits at the camera's pivot distance. The result is a
+ * "Scaffold" wire object - construction lines to build from (the Draw tools snap to its edges), never a mesh. */
+bool Editor::sketch_lift() {
+  const Sketch &s = scene_->sketch;
+  const Recti view = scene_rect_;
+  if (cam_.ortho) {
+    Log::warn("sketchlift: a perspective view is needed (the axes' vanishing points)");
+    return false;
+  }
+  Vec2 vps[3];
+  const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+  for (int k = 0; k < 3; k++) {
+    Vec2 v;
+    const Vec3 a = dot(axes[k], cam_.forward()) < 0 ? axes[k] * -1.0f : axes[k];
+    if (sketch_vanishing_point(cam_, view, a, v)) vps[k] = sketch_to_px(view, v);
+  }
+  std::vector<research::LiftLine> lines;
+  for (const SketchStroke &st : s.strokes) {
+    if (st.canvas != 0 || st.kind != StrokeKind::Line || st.pts.size() != 2 || !sketch_stroke_shown(st)) continue;
+    research::LiftLine l;
+    l.a = sketch_to_px(view, {st.pts[0].x, st.pts[0].y}), l.b = sketch_to_px(view, {st.pts[1].x, st.pts[1].y});
+    /* The axis whose vanishing point the line runs toward, when one is clearly nearest (near the horizon a level
+     * line runs toward X's and Z's alike: it is free then). */
+    l.axis = sketch::nearest_vanishing(l.a, l.b, vps, 3, 10.0f);
+    if (l.axis >= 0) {
+      Vec2 others[2];
+      int k = 0;
+      for (int i = 0; i < 3; i++)
+        if (i != l.axis) others[k++] = vps[i];
+      const Vec2 move = l.b - l.a;
+      auto deg_to = [&](Vec2 vp) {
+        const Vec2 toward = vp - l.a;
+        const float c = std::fabs(dot(move, toward)) / std::max(1e-6f, length(move) * length(toward));
+        return std::acos(std::max(-1.0f, std::min(1.0f, c))) * 180.0f / kPi;
+      };
+      const float best = deg_to(vps[l.axis]), second = std::min(deg_to(others[0]), deg_to(others[1]));
+      if (second - best < 3.0f) l.axis = -1;
+    }
+    lines.push_back(l);
+    if (lines.size() >= 400) break;  // (the spike's dense solve: a few hundred lines at most)
+  }
+  if (lines.empty()) {
+    Log::warn("sketchlift: draw the scaffold's lines on the picture plane first (the perspective guide labels them)");
+    return false;
+  }
+  /* The rays from the camera as it is now (the vanishing points are its), not the last frame's. */
+  const float aspect = (float)view.w / (float)std::max(1, view.h);
+  const Mat4 inv = (cam_.proj(aspect) * cam_.view()).inverse();
+  auto ray = [&](Vec2 px) {
+    const float nx = 2.0f * (px.x - view.x) / (float)std::max(1, view.w) - 1.0f, ny = 1.0f - 2.0f * (px.y - view.y) / (float)std::max(1, view.h);
+    const Vec4 a = inv * Vec4(nx, ny, 0.0f, 1.0f), b = inv * Vec4(nx, ny, 1.0f, 1.0f);
+    const Vec3 pa = a.xyz() / a.w, pb = b.xyz() / b.w;
+    return Ray{pa, normalize(pb - pa)};
+  };
+  research::LiftResult r;
+  if (!research::lift_scaffold(lines, ray, (float)ui_.px(8), {view.x + view.w * 0.5f, view.y + view.h * 0.5f}, cam_.distance, r)) {
+    Log::warn("sketchlift: the lines could not be lifted");
+    return false;
+  }
+  if (r.behind > 0) {
+    Log::warn("sketchlift: %d junctions came out behind the camera (a line labelled with the wrong axis?) - nothing lifted", r.behind);
+    return false;
+  }
+  last_lift_ = r;
+  if (edit_mode_) exit_edit_mode();
+  GameObject *g = scene_->create("Scaffold");
+  MeshPtr mesh = std::make_shared<Mesh>();
+  mesh->name = "Scaffold";
+  const Vec3 origin = r.junctions.empty() ? Vec3(0.0f) : r.junctions[0];
+  for (const Vec3 &j : r.junctions) mesh->add_vert(j - origin);
+  for (size_t i = 0; i < lines.size(); i++) mesh->add_loose_edge((uint32_t)r.junction_a[i], (uint32_t)r.junction_b[i]);
+  mesh->sync_attributes();
+  mesh->touch();
+  g->add<MeshFilter>()->mesh = mesh;
+  g->add<MeshRenderer>();
+  g->set_world_position(origin);
+  select(g->id);
+  mark_changed("Lift Scaffold");
+  int labelled = 0;
+  for (const research::LiftLine &l : lines) labelled += l.axis >= 0 ? 1 : 0;
+  Log::info("Scaffold lifted: %d lines (%d along an axis), %d junctions (%d fixed by the lines), residual %.4f m", (int)lines.size(), labelled,
+            (int)r.junctions.size(), r.determined, r.rms);
+  return true;
+}
+
+/* sketchproject | sketchtrace edge|curve | sketchlift: the drawing into the model. */
 bool Editor::sketch_refine_command(const std::vector<std::string> &t) {
   if (t.empty()) return false;
   const std::string c = to_lower(t[0]);
-  if (c != "sketchproject" && c != "sketchtrace") return false;
+  if (c != "sketchproject" && c != "sketchtrace" && c != "sketchlift") return false;
   if (playing_) return true;
-  if (c == "sketchproject") sketch_project();
+  if (c == "sketchlift") sketch_lift();
+  else if (c == "sketchproject") sketch_project();
   else {
     const std::string v = t.size() > 1 ? to_lower(t[1]) : "edge";
     if (v == "edge" || v == "cut") sketch_trace(false);
