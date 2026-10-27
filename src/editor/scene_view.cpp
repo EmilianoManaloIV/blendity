@@ -52,7 +52,8 @@ void Editor::draw_scene_view(const Recti &r) {
    * render, so transforms applied by a drag show up in the same frame. */
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
-  bool gizmo_busy = quick_menu_took || bone_handles_update(view);  // (before the gizmo: a pressed handle is the bone's, task 0066)
+  bool gizmo_busy = quick_menu_took || sketch_update(view);  // (task 0223: while sketching the pen draws, over gizmos and tools)
+  if (bone_handles_update(view)) gizmo_busy = true;  // (before the gizmo: a pressed handle is the bone's, task 0066)
   if (gizmo_update(view)) gizmo_busy = true;
   if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
   /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
@@ -156,6 +157,7 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
+  sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
   draw_autorig_markers(view);

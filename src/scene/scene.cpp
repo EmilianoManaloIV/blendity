@@ -2303,6 +2303,7 @@ void Scene::move_from(Scene &o) {
   render = o.render;
   lighting = o.lighting;
   guides = std::move(o.guides);
+  sketch = std::move(o.sketch);
   active_camera = o.active_camera;
   sequence = o.sequence;
   director.reset();  // (a Play session's player belongs to it)
@@ -2481,6 +2482,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->render = render;
   s->lighting = lighting;
   s->guides = guides;
+  s->sketch = sketch;
   s->active_camera = active_camera;
   s->sequence = sequence;
   s->objects_.reserve(objects_.size());

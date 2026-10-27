@@ -538,6 +538,11 @@ class Editor {
   bool guide_seen_for_test(const std::string &ws) const { return guides_seen_.count(ws) > 0; }
   std::string gizmo_typed_for_test() const { return gizmo_typed_; }
   int gizmo_hot_for_test() const { return gizmo_hot_; }
+  bool sketch_active_for_test() const { return sketch_.active; }
+  const Sketch &sketch_for_test() const { return scene_->sketch; }
+  void sketch_set_ruler_for_test(Vec2 a, Vec2 b) { sketch_.placed = true, sketch_.ruler[0] = a, sketch_.ruler[1] = b; }
+  void sketch_set_ellipse_for_test(Vec2 c, float rx, float ry, float angle) { sketch_.placed = true, sketch_.ell_c = c, sketch_.ell_rx = rx, sketch_.ell_ry = ry, sketch_.ell_angle = angle; }
+  void sketch_set_symmetry_center_for_test(Vec2 c) { sketch_.placed = true, sketch_.sym_c = c; }
   void set_tablet_posture_for_test(int folded) { test_posture_ = folded; }  // (1 folded, 0 open, -1 the system's)
   bool tablet_for_test() const { return tablet_; }
   std::string statusbar_hint_for_test() const { return statusbar_hint(); }
@@ -2726,6 +2731,40 @@ class Editor {
   int slice_axis_ = 1;   // X, Y, Z, View
   int slice_clear_ = 0;  // keep both, remove above, remove below
   float seam_angle_ = 30.0f;  // Seams from Sharp Edges / Select Sharp Edges (Blender: Sharpness 30)
+  /* ---- Sketch tool (task 0223, sketch_tool.cpp): pen strokes over the Scene view with guides ---- */
+  struct SketchTool {
+    bool active = false, stroking = false, erasing = false, erased = false, freehand = false, placed = false, snap = true;
+    std::vector<Vec2> pen;  // the stroke being drawn, in the view's pixels
+    std::vector<float> pressure;
+    Vec2 steady;            // the steady stroke's tether end
+    float tether = 0.0f;    // pixels; 0 off
+    int snap_vp = -1;       // the vanishing point this stroke follows
+    uint32_t color = 0xFF202020;
+    float width = 2.0f;
+    int guide = 0;          // 0 none, 1 ruler, 2 ellipse, 3 French curve
+    Vec2 ruler[2], ell_c, fr_c, sym_c;  // (the canvas's frame: view heights)
+    float ell_rx = 0.25f, ell_ry = 0.15f, ell_angle = 0.0f, fr_scale = 0.4f, fr_angle = 0.0f;
+    int french = 0;
+    int symmetry = 0, radial = 8;  // 0 none, 1 X, 2 Y, 3 XY, 4 radial
+    int drag_handle = -1;
+  } sketch_;
+  Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
+  Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;
+  void sketch_begin();
+  void sketch_end();
+  void sketch_guide_defaults(const Recti &view);
+  std::vector<Vec2> sketch_handles() const;
+  void sketch_move_handle(int index, Vec2 to);
+  std::vector<Vec2> sketch_french_px(const Recti &view) const;
+  Vec2 sketch_snap(const Recti &view, Vec2 p);
+  void sketch_stroke_begin(const Recti &view, Vec2 px, float pressure, bool freehand);
+  void sketch_stroke_add(const Recti &view, Vec2 px, float pressure);
+  void sketch_snap_fit(const Recti &view, sketch::Fit &f, int join_start = 1, int join_end = 1);
+  void sketch_stroke_end(const Recti &view);
+  bool sketch_erase_at(const Recti &view, Vec2 px);
+  bool sketch_update(const Recti &view);
+  void sketch_draw(const Recti &view);
+  bool sketch_command(const std::vector<std::string> &t, const std::string &line);
   /* ---- Drawing tool: polyline, rectangle, circle, arc, polygon (draw_tool.cpp) ---- */
   struct DrawTool {
     bool active = false;

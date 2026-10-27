@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-26 (round 243): rulers and guides - sketching over the Scene view (task 0223)
+
+**Asked:** "something similar to SketchBook Pro, where I have rulers and guides that help me draw in perspective. But
+taking those drawings and sketching a possible 3D model... it takes refinement and construction lines", and "adjust
+for corrections as some curves and lines will not be completely straight. For example a drawn arch." The first of
+tasks 0223-0229.
+
+**Added**
+- **The Sketch tool** (Draw > Sketch (pen)): pen strokes over the Scene view, the pressure as the width, the eraser
+  end erasing, Alt for freehand, layers with opacity, a steady stroke. Strokes are saved with the scene and undone
+  with it.
+- **Guides** (Draw > Guides): a ruler, an ellipse (its minor axis shown), three French curves, symmetry (X, Y, XY,
+  radial) and 1-, 2- and 3-point perspective with draggable vanishing points, each snapping the stroke.
+- **Corrections** as the pen lifts: a stroke is split at its corners and each piece becomes a line, an arc, an
+  ellipse or a smooth curve - an arch is two lines and an arc that meet - then pulled to the guides; a scribble
+  stays as drawn; the pen's own points are kept underneath. Per layer: none, light, full.
+- Console: `sketch`, `sketchguide`, `sketchstroke`. ADR 0063, requirement R-15.
+
+**Checked**
+- Synthetic strokes for every correction and guide; scripted pen strokes in the editor for the tool, the eraser,
+  undo, a finger in Tablet Mode, layers, save and load (tests/test_sketch.cpp, a new group).
+- An Opus review checked the maths in a numerical model and found five things, all fixed:
+  - Alt+drag both orbited (the Unity feel's Alt+left) and drew a freehand stroke: navigation's press is never a
+    stroke now, and Ctrl keeps a stroke freehand instead of Alt. The Sketch tool also takes the pen before the gizmo
+    and the tools, so while sketching the pen draws;
+  - a corrected corner was torn apart: each line was turned to vertical, horizontal or a vanishing line about its own
+    middle. Each piece is moved whole to start where the piece before ends, and only a stroke's free ends join other
+    strokes';
+  - an ellipse's radii were read off the points' spread, 8 % wrong for a 2:1 ellipse: they are fitted by least squares
+    on the ellipse's own equation (exact for a true ellipse);
+  - `sketchstroke` took any count of values divisible by three as points with pressures; the pressure is named now;
+  - a closed stroke with corners kept its start-to-end gap: it is begun at its first corner and its last piece meets
+    its first.
+
+  Smaller ones fixed too: the ellipse guide's nearest point from inside the ellipse (Newton from the angle could land
+  on the farthest point; a coarse sweep first), scene changes without an undo step (a vanishing point moved, a layer
+  added, hidden, faded or its correction changed), a sketch with only layer settings not saved, an empty layer name
+  dropping the layer on load, and the tests' wobble differing between platforms (their own generator now). The
+  review's L and square cases are tests: the pieces meet within a thousandth of a pixel.
+- Found while testing: a shaky hand's wobble swung a 12-pixel direction window by tens of degrees and hid a right
+  angle. The corners are now looked for on a lightly smoothed path with 18-pixel windows, and a scribble is known by
+  the sharp turns of the path as the pen drew it.
+- Unit checks (round 243): Windows, in render-cache verify mode, 12,190, 0 failed (1036 tests), 0 stale
+  pictures. Linux with libraries: 11,731, 0 failed. Sanitizer build: 11,601, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-24 (round 242): fingers and a pen on a 2-in-1 - the write-up and a check list (task 0222)
 
 **Asked:** "Integrate better support for pen mode. So that if I'm in a 2 in 1 laptop I can navigate more fluidly and
@@ -1041,7 +1087,7 @@ This round is the first step: the overlays.
   picture.
 - Unit checks (round 209): Windows, in render-cache verify mode, 11,841, 0 failed (974 tests), 0 stale
   pictures. Linux with libraries: 11,488, 0 failed. Sanitizer build: 11,364, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone; Edit Mode entry 17.9 ms in the chain's stress run.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone; Edit Mode entry 17.9 ms in the chain's stress run.)
 
 ## 2026-10-23 (round 208): an extrude without the whole-mesh work (task 0185, round 2 of 3, ADR 0053 amended)
 
@@ -1075,7 +1121,7 @@ This round is the first step: the overlays.
 - Unit checks (round 208): Windows, in render-cache verify mode, 11,837, 0 failed (973 tests), 0 stale
   pictures. Linux with libraries: 11,484, 0 failed. Sanitizer build: 11,360, 0 failed, no reports. `editor_fuzz` in
   verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `curved`, `editor_render`: 0 problems,
-  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed run again alone; curved's 8 problems and 79 overlapping results are the same as the build before this round.)
+  394 results with faces newly on top of each other in `pushpull`, no change. (the gpu group's slow-open test failed under the parallel load and passed alone; curved's 8 problems and 79 overlapping results are the same as the build before this round.)
 
 ## 2026-10-22 (round 207): undo no longer redraws the shadow map (task 0185, round 1 of 3)
 
@@ -1221,7 +1267,7 @@ This round is the first step: the overlays.
   secondary window; Win32 DPI and Cocoa's points in placement; X11 copy and paste between windows).
 - Unit checks (round 203): Windows, in render-cache verify mode, 11,657, 0 failed (962 tests), 0 stale
   pictures. Linux with libraries: 11,304, 0 failed. Sanitizer build: 11,180, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone; macOS compiles the Cocoa calls in CI only.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone; macOS compiles the Cocoa calls in CI only.)
 
 ## 2026-10-22 (round 202): the Editing tab's room to grow, specified (task 0184)
 
@@ -1349,7 +1395,7 @@ extensible.
 - Measured (stress `editing`, 3840 x 2160): the 11-step develop stack 683.2 ms in full, a slider on its last step 30.7 ms (1 step rerun), on its first 706.8 ms; the slowest adjustment alone Noise Reduction 467.8 ms. Task 0181's targets at 3840 x 2160: the full stack 683.2 ms (at most 150: missed), a slider on the last step 30.7 ms (at most 40: met). The full stack is the Tone Curve (347 ms alone) and Noise Reduction (468 ms) at full resolution: a following round takes it up (a preview at the screen's size, as Lightroom's, and look-up tables).
 - Unit checks (round 198): Windows, in render-cache verify mode, 11,569, 0 failed (955 tests), 0 stale
   pictures. Linux with libraries: 11,216, 0 failed. Sanitizer build: 11,092, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `filters`, `editing`: 0 problems. (the sanitizer leg's autopose timing check failed under the parallel load and passed run again alone.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `editor_render`, `filters`, `editing`: 0 problems. (the sanitizer leg's autopose timing check failed under the parallel load and passed alone.)
 
 ## 2026-10-22 (round 197): the UV Editor on one material's faces (task 0186)
 
@@ -1504,7 +1550,7 @@ and names the fallback: features written by PartField in Python, read the same w
 - Unit checks (round 192): Windows, in render-cache verify mode, 11,417, 0 failed (943 tests), 0 stale
   pictures. Linux with libraries: 11,064, 0 failed. Sanitizer build: 10,944, 0 failed, no reports. `editor_fuzz` in
   verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems,
-  394 results with faces newly on top of each other in `pushpull`, no change. (in the parallel runs, the gpu group's slow-open test, a Linux texture-deletion test and a sanitizer export read-back failed under load and passed run again alone.)
+  394 results with faces newly on top of each other in `pushpull`, no change. (in the parallel runs, the gpu group's slow-open test, a Linux texture-deletion test and a sanitizer export read-back failed under load and passed alone.)
 
 ## 2026-10-22 (round 191): Live Link - the scene sent live to Blender, Unity, Godot or Unreal (task 0172, ADR 0055)
 

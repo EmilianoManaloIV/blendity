@@ -187,6 +187,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"draw.circle", "Draw Circle", "Draw", CTX_SCENE},
       {"draw.arc", "Draw Arc", "Draw", CTX_SCENE},
       {"draw.polygon", "Draw Polygon", "Draw", CTX_SCENE},
+      {"draw.sketch", "Sketch (pen)", "Draw", CTX_SCENE},
       /* Windows and rendering */
       {"render.image", "Render Image", "Render", CTX_GLOBAL},
       {"render.screenshot", "Screenshot", "Render", CTX_GLOBAL},
@@ -693,6 +694,7 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "select.invert") edit_tool("select_invert");
   else if (id == "select.more") edit_tool("select_more");
   else if (id == "select.less") edit_tool("select_less");
+  else if (id == "draw.sketch") sketch_.active ? sketch_end() : sketch_begin();  // (task 0223)
   else if (starts_with(id, "draw.")) {
     const std::string shape = id.substr(5);
     for (int k = 0; k < kDrawShapeCount; k++)

@@ -302,6 +302,27 @@ std::string save_scene_text(const Scene &scene) {
   for (const GuideLine &gl : scene.guides)
     os << "guide " << fmt(gl.p.x) << " " << fmt(gl.p.y) << " " << fmt(gl.p.z) << " " << fmt(gl.d.x) << " " << fmt(gl.d.y) << " " << fmt(gl.d.z)
        << "\n";
+  /* The sketch (task 0223): its layers, the perspective guide, and each stroke's corrected points then the pen's own. */
+  const Sketch &sk = scene.sketch;
+  if (!sk.empty()) {
+    for (const SketchLayer &l : sk.layers)
+      os << "sketch_layer " << fmt(l.opacity) << " " << (l.visible ? 1 : 0) << " " << l.correct << " " << (l.name.empty() ? "Layer" : l.name) << "\n";  // (the name last: it may hold spaces)
+    os << "sketch_active " << sk.active_layer << "\n";
+    if (sk.perspective > 0) {
+      os << "sketch_perspective " << sk.perspective;
+      for (int i = 0; i < 3; i++) os << " " << fmt(sk.vp[i].x) << " " << fmt(sk.vp[i].y);
+      os << "\n";
+    }
+    for (const SketchStroke &st : sk.strokes) {
+      os << "sketch_stroke " << st.layer << " " << (int)st.kind << " " << st.color << " " << fmt(st.width) << " " << (st.closed ? 1 : 0) << " "
+         << fmt(st.center.x) << " " << fmt(st.center.y) << " " << fmt(st.rx) << " " << fmt(st.ry) << " " << fmt(st.angle) << " " << fmt(st.start)
+         << " " << fmt(st.sweep) << " " << st.pts.size();
+      for (const SketchPoint &p : st.pts) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
+      os << " " << st.raw.size();
+      for (const SketchPoint &p : st.raw) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
+      os << "\n";
+    }
+  }
   /* Meshes first (shared between objects, like Blender's ID datablocks). */
   std::unordered_map<const Mesh *, int> mesh_ids;
   std::vector<const Mesh *> order;
@@ -541,6 +562,47 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       std::string v(line.substr(line.find(' ') + 1));
       if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
       fresh.sequence = v;
+    }
+    else if (k == "sketch_layer" && t.size() >= 5) {
+      SketchLayer l;
+      l.opacity = std::strtof(t[1].c_str(), nullptr), l.visible = t[2] != "0", l.correct = std::max(0, std::min(2, std::atoi(t[3].c_str())));
+      /* The name: the rest of the line after the fourth field, spaces kept as written. */
+      size_t at = 0;
+      for (int field = 0; field < 4 && at < line.size(); field++) {
+        while (at < line.size() && line[at] == ' ') at++;
+        while (at < line.size() && line[at] != ' ') at++;
+      }
+      while (at < line.size() && line[at] == ' ') at++;
+      l.name = at < line.size() ? line.substr(at) : "";
+      while (!l.name.empty() && (l.name.back() == '\r' || l.name.back() == ' ')) l.name.pop_back();
+      if (l.name.empty()) l.name = "Layer";
+      fresh.sketch.layers.push_back(l);
+    }
+    else if (k == "sketch_active" && t.size() >= 2) fresh.sketch.active_layer = std::atoi(t[1].c_str());
+    else if (k == "sketch_perspective" && t.size() >= 8) {
+      fresh.sketch.perspective = std::max(0, std::min(3, std::atoi(t[1].c_str())));
+      for (int i = 0; i < 3; i++) fresh.sketch.vp[i] = {std::strtof(t[(size_t)(2 + 2 * i)].c_str(), nullptr), std::strtof(t[(size_t)(3 + 2 * i)].c_str(), nullptr)};
+      fresh.sketch.vp_placed = true;
+    }
+    else if (k == "sketch_stroke" && t.size() >= 14) {
+      auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
+      SketchStroke st;
+      st.layer = std::atoi(t[1].c_str());
+      st.kind = (StrokeKind)std::max(0, std::min(4, std::atoi(t[2].c_str())));
+      st.color = (uint32_t)std::strtoul(t[3].c_str(), nullptr, 10);
+      st.width = f(4), st.closed = t[5] != "0";
+      st.center = {f(6), f(7)}, st.rx = f(8), st.ry = f(9), st.angle = f(10), st.start = f(11), st.sweep = f(12);
+      size_t at = 13;
+      for (int part = 0; part < 2 && at < t.size(); part++) {
+        const size_t n = (size_t)std::max(0, std::atoi(t[at].c_str()));
+        at++;
+        std::vector<SketchPoint> &dst = part == 0 ? st.pts : st.raw;
+        for (size_t i = 0; i < n && at + 2 < t.size() + 0; i++, at += 3) {
+          if (at + 2 >= t.size()) break;
+          dst.push_back({f(at), f(at + 1), f(at + 2)});
+        }
+      }
+      if (!st.pts.empty()) fresh.sketch.strokes.push_back(std::move(st));
     }
     else if (k == "guide" && t.size() >= 7) {
       auto f = [&](int i) { return std::strtof(t[i].c_str(), nullptr); };

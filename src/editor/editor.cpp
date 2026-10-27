@@ -1061,6 +1061,27 @@ void Editor::draw_menubar(const Recti &r) {
     u.submenu("Draw", u.px(200), [this] {
       for (int k = 0; k < kDrawShapeCount; k++)
         if (ui_.menu_item(kDrawShapes[k], nullptr, draw_.active && draw_.shape == k)) draw_begin(k);
+      ui_.menu_separator();
+      if (ui_.menu_item("Sketch (pen)", nullptr, sketch_.active)) sketch_.active ? sketch_end() : sketch_begin();
+      ui_.tooltip("Draw with the pen over the Scene view: its pressure is the width, its eraser erases, Ctrl keeps a stroke\n"
+                  "freehand. Strokes are corrected to lines, arcs, ellipses and curves as the pen lifts (SketchBook's predictive stroke).");
+      ui_.submenu("Guides", ui_.px(220), [this] {
+        static const char *const kGuides[] = {"None", "Ruler", "Ellipse", "French Curve"};
+        for (int k = 0; k < 4; k++)
+          if (ui_.menu_item(kGuides[k], nullptr, sketch_.guide == k)) sketch_.guide = k;
+        ui_.menu_separator();
+        static const char *const kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
+        for (int k = 0; k < 5; k++)
+          if (ui_.menu_item(kSym[k], nullptr, sketch_.symmetry == k)) sketch_.symmetry = k;
+        ui_.menu_separator();
+        static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
+        for (int k = 0; k < 4; k++)
+          if (ui_.menu_item(kPersp[k], nullptr, scene_->sketch.perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
+        ui_.menu_separator();
+        if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
+      });
+      ui_.tooltip("SketchBook's rulers and guides: a stroke follows the ruler, the ellipse or the French curve; symmetry mirrors\n"
+                  "it; perspective snaps it to the lines through the nearest vanishing point (drag the points and the horizon).");
     });
     u.tooltip("Draw a polyline, rectangle, circle, arc or polygon onto the mesh (or the ground) with snapping.\n"
               "With nothing selected it starts a new mesh. UModeler / SketchUp drawing tools.");
