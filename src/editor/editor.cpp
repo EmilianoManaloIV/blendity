@@ -661,6 +661,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
+  draw_drop_hint();  // (task 0232)
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
   draw_statusbar(status);
@@ -741,24 +742,31 @@ void Editor::update_tab_drag() {
   }
   {
     DockNode *leaf = dock_leaf_at(in.mx, in.my);
-    int zone = 0;
     Recti pr;
-    if (leaf) {
-      Recti r = leaf->rect;
-      int tbh = ui_.row_h() + ui_.px(4);
-      float fx = (in.mx - r.x) / (float)r.w, fy = (in.my - r.y - tbh) / (float)std::max(1, r.h - tbh);
-      if (in.my < r.y + tbh) zone = 0;
-      else if (fx < 0.25f) zone = 1;
-      else if (fx > 0.75f) zone = 2;
-      else if (fy < 0.25f) zone = 3;
-      else if (fy > 0.75f) zone = 4;
-      pr = r;
-      if (zone == 1) pr.w /= 2;
-      if (zone == 2) { pr.x += pr.w / 2; pr.w /= 2; }
-      if (zone == 3) pr.h /= 2;
-      if (zone == 4) { pr.y += pr.h / 2; pr.h /= 2; }
-    }
+    const int zone = leaf ? dock_drop_zone(leaf, in.mx, in.my, &pr) : 0;
     WindowKind k = tab_drag_;
+    /* Over another editor window (task 0232): that window draws the highlight where the tab would land. */
+    const bool outside = in.mx < 0 || in.my < 0 || in.mx >= fb_.width || in.my >= fb_.height;
+    int dx = 0, dy = 0, lx = 0, ly = 0;
+    EditorWindow *over = nullptr;
+    bool over_main = false;
+    if (outside) {
+      desktop_point(in.mx, in.my, dx, dy);
+      over = window_at_desktop(dx, dy, lx, ly);
+      over_main = !over && main_at_desktop(dx, dy, lx, ly);
+    }
+    drop_hint_window_ = over ? over->id : over_main ? 0 : -1;
+    drop_hint_tab_ = k;
+    if (over || over_main) {
+      DockNode *root = over ? over->dock.get() : nullptr;
+      if (over_main) {  // (the main dock is swapped out: in the window drawing now's slot)
+        EditorWindow *here = editor_window(active_window_);
+        root = here ? here->dock.get() : nullptr;
+      }
+      const DockNode *tl = root ? dock_leaf_at(lx, ly, root) : nullptr;
+      drop_hint_rect_ = Recti{};
+      if (tl) dock_drop_zone(tl, lx, ly, &drop_hint_rect_);
+    }
     ui_.overlay([this, pr, leaf, k] {
       auto &cv = ui_.canvas;
       if (leaf) {
@@ -771,14 +779,16 @@ void Editor::update_tab_drag() {
       cv.text(ui_.font, tr.x + ui_.px(8), tr.y + ui_.px(3), t, ui_.theme.text_bright);
     });
     if (in.released[0] && !in.cancelled) {  // (a press taken back leaves the tab where it was: task 0213)
-      const bool outside = in.mx < 0 || in.my < 0 || in.mx >= fb_.width || in.my >= fb_.height;
       if (leaf) dock_move(k, leaf, zone);
-      else if (outside && active_window_ != 0) window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
+      else if (over) queue_window_move({WindowMove::ToWindow, k, lx, ly, 0, 0, 0, over->id});  // (task 0232)
+      else if (over_main) queue_window_move({WindowMove::ToWindow, k, lx, ly, 0, 0, 0, 0});
+      else if (outside && active_window_ != 0) queue_window_move({WindowMove::Main, k, 0, 0, 0, 0, 0});
       else if (outside) queue_new_window_at_mouse(k);
     }
     if (in.released[0]) {
       tab_dragging_ = false;
       tab_drag_ = WindowKind::Count;
+      drop_hint_window_ = -1;
     }
   }
 }
@@ -1501,7 +1511,7 @@ void Editor::dock_reset(const std::string &preset) {
     std::vector<WindowKind> held;
     collect_dock_tabs(w->dock.get(), held);
     for (WindowKind k : held)
-      if (dock_find(k) && (dock_->split || dock_->tabs.size() > 1)) dock_remove(k);
+      if (!can_duplicate(k) && dock_find(k) && (dock_->split || dock_->tabs.size() > 1)) dock_remove(k);  // (task 0232: a Scene view may be in both)
   }
   /* A layout saved before the Research window was retired (task 0034): its tab goes, and an area that held only it
    * closes. */
@@ -1595,7 +1605,8 @@ void Editor::dock_draw(DockNode *n) {
       ui_.menu_separator();
       ui_.menu_label("Add Tab");
       for (int w = 0; w < (int)WindowKind::Count; w++)
-        if ((WindowKind)w != WindowKind::Research && !dock_find_anywhere((WindowKind)w) &&  // (retired, task 0034)
+        if ((WindowKind)w != WindowKind::Research && !dock_find((WindowKind)w) &&  // (retired, task 0034; task 0232: a kind once per window)
+            (can_duplicate((WindowKind)w) || !dock_find_elsewhere((WindowKind)w, nullptr)) &&
             ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
           DockNode *leaf = dock_find(k);
           if (leaf) {
@@ -1741,6 +1752,12 @@ void Editor::dock_move(WindowKind k, DockNode *target, int zone) {
   dock_remove(k);
   target = anchor != WindowKind::Count ? dock_find(anchor) : dock_largest_leaf();
   if (!target) target = dock_largest_leaf();
+  dock_insert(k, target, zone);
+}
+
+/* `k` into `target`: a tab (zone 0), or a split with `k` on the left / right / top / bottom (1-4). */
+void Editor::dock_insert(WindowKind k, DockNode *target, int zone) {
+  if (!target) return;
   if (zone == 0) {
     target->tabs.push_back(k);
     target->active = (int)target->tabs.size() - 1;
@@ -1760,6 +1777,28 @@ void Editor::dock_move(WindowKind k, DockNode *target, int zone) {
     dock_fix_parents(target, target->parent);
   }
   focused_ = k;
+}
+
+/* The zone a point over a leaf means: its tab bar a tab (0), its left / right / top / bottom quarter a split (1-4),
+ * the middle a tab; `highlight` the area the tab would take. */
+int Editor::dock_drop_zone(const DockNode *leaf, int x, int y, Recti *highlight) const {
+  const Recti r = leaf->rect;
+  const int tbh = ui_.row_h() + ui_.px(4);
+  const float fx = (x - r.x) / (float)std::max(1, r.w), fy = (y - r.y - tbh) / (float)std::max(1, r.h - tbh);
+  int zone = 0;
+  if (y < r.y + tbh) zone = 0;
+  else if (fx < 0.25f) zone = 1;
+  else if (fx > 0.75f) zone = 2;
+  else if (fy < 0.25f) zone = 3;
+  else if (fy > 0.75f) zone = 4;
+  if (!highlight) return zone;
+  Recti pr = r;
+  if (zone == 1) pr.w /= 2;
+  if (zone == 2) pr.x += pr.w / 2, pr.w /= 2;
+  if (zone == 3) pr.h /= 2;
+  if (zone == 4) pr.y += pr.h / 2, pr.h /= 2;
+  *highlight = pr;
+  return zone;
 }
 
 /* ===================================================================== */
@@ -2000,6 +2039,9 @@ void Editor::redo() {
 
 void Editor::new_scene() {
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
+  inspector_lock_ = 0;  // (task 0232: a pin is an object id of this scene)
+  for (auto &w : windows_)
+    if (w->view) w->view->inspector_lock = 0;
   cancel_skin_job();
   autorig_cancel();
   anim_reset();

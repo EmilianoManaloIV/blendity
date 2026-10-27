@@ -710,6 +710,12 @@ void Editor::run_console_command(const std::string &line) {
     ui_file_command(t, line);
     return;
   }
+  if (c == "inspector" && (to_lower(arg(1, "")) == "lock" || to_lower(arg(1, "")) == "unlock")) {  // (task 0232: this Inspector keeps its object; `inspector essentials` below)
+    GameObject *g = to_lower(arg(1, "")) == "lock" ? inspector_object() : nullptr;
+    inspector_lock_ = g ? g->id : 0;
+    if (!g && to_lower(arg(1, "")) == "lock") Log::warn("inspector lock: nothing shown to pin");
+    return;
+  }
   if (c == "tabletmode") {  // tabletmode auto|on|off: the main window's Tablet Mode follows the laptop, or is set (task 0218)
     const std::string v = to_lower(arg(1, ""));
     const int pref = v == "auto" ? 0 : v == "on" ? 1 : v == "off" ? 2 : -1;

@@ -1114,7 +1114,7 @@ void Editor::draw_inspector(const Recti &r) {
   /* A menu choice not applied by the next frame (nothing selected, a folded section, an undo in
    * between) is dropped rather than kept for later. */
   if (inspector_action_.obj && u.frame_number() > inspector_action_.frame + 2) inspector_action_ = {};
-  GameObject *g = active_object();
+  GameObject *g = inspector_object();
   if (!g) {
     /* Project file selected? Show file info, like Unity's asset inspector. */
     if (!project_selected_.empty()) {
@@ -1156,7 +1156,7 @@ void Editor::draw_inspector(const Recti &r) {
     return;
   }
   ui::Id sid = u.id("insp_scroll");
-  static int last_content_h = 0;
+  int &last_content_h = inspector_content_h_;  // (per window: task 0232)
   int off = u.begin_scroll(sid, r, last_content_h);
   ui::Layout lay{{r.x + u.px(6), r.y, r.w - u.px(18), r.h}, r.y + u.px(6) - off};
   lay.row_h = u.row_h();
@@ -1172,9 +1172,16 @@ void Editor::draw_inspector(const Recti &r) {
     mark_changed("Toggle Active");
   }
   u.tooltip("Active: inactive objects are not drawn or updated.\nBlender: Disable in Viewports (monitor icon).");
+  /* The pin (task 0232; Unity's lock): this Inspector keeps showing one object while the selection moves on - a
+   * second Inspector on a drawing tablet shows the one being worked on. */
+  const int pin_w = u.px(60);
+  const Recti pb{hr.right() - pin_w, hr.y + u.px(2), pin_w, hr.h - u.px(4)};
+  if (u.button(pb, inspector_lock_ ? "Pinned" : "Pin", inspector_lock_ != 0)) inspector_lock_ = inspector_lock_ ? 0 : g->id;
+  u.tooltip(inspector_lock_ ? "Pinned: this Inspector keeps this object while the selection changes. Click to follow the selection again."
+                            : "Pin this Inspector to the object shown (a second Inspector can then follow the selection).");
   std::string name = g->name;
   bool committed = false;
-  if (u.text_field(u.id("name"), {hr.x + ic * 2 + u.px(12), hr.y + u.px(2), hr.w - ic * 2 - u.px(14), hr.h - u.px(4)}, name, &committed)) {
+  if (u.text_field(u.id("name"), {hr.x + ic * 2 + u.px(12), hr.y + u.px(2), hr.w - ic * 2 - u.px(14) - pin_w - u.px(6), hr.h - u.px(4)}, name, &committed)) {
     g->name = name;
     if (committed) mark_changed("Rename");
   }
@@ -1182,6 +1189,7 @@ void Editor::draw_inspector(const Recti &r) {
   std::vector<GameObject *> multi;
   for (uint64_t id : selection_)
     if (GameObject *o = scene_->find(id)) multi.push_back(o);
+  if (g != active_object()) multi = {g};  // (pinned: this Inspector edits its object, not the selection; task 0232)
   if (multi.size() > 1) {
     u.label(lay.row(), strprintf("%zu objects selected: edits apply to all of them", multi.size()), u.theme.text_dim);
     u.tooltip("Type +=1, -=1, *=2 or /=2 to change each object relative to its own value,\n"

@@ -29,7 +29,82 @@ void Editor::swap_window_state(EditorWindow &w) {
   std::swap(card_present_, w.card_present), std::swap(card_off_, w.card_off), std::swap(card_win_, w.card_win);  // (task 0193)
   std::swap(card_ui_stale_, w.card_ui_stale);  // (task 0198)
   std::swap(card_reason_, w.card_reason), std::swap(card_views_, w.card_views), std::swap(card_views_shown_, w.card_views_shown);
+  swap_view_state(w);  // (task 0232, ADR 0070)
   active_window_ = active_window_ == 0 ? w.id : 0;
+}
+
+/* The main window's view state as it is now (a new window starts from it). */
+std::unique_ptr<EditorViewState> Editor::capture_view_state() const {
+  auto v = std::make_unique<EditorViewState>();
+  v->cam = cam_;
+  v->shading = shading_, v->scene_lighting = scene_lighting_;
+  v->show_grid = show_grid_, v->show_gizmos = show_gizmos_, v->show_stats = show_stats_, v->show_bones = show_bones_;
+  v->show_rig_controls = show_rig_controls_, v->show_icons = show_icons_, v->show_points = show_points_, v->show_origins = show_origins_;
+  v->show_footprints = show_footprints_, v->show_outline = show_outline_;
+  v->cam.animating = false;
+  return v;
+}
+
+/* The window's view state into the editor's members and the editor's into the window (the same call both ways): the
+ * Scene view's camera, place and navigation, the shading and overlays, the Game view's place, the Inspector's pin,
+ * the targets, and the editor's own caches by window id. */
+void Editor::swap_view_state(EditorWindow &w) {
+  if (!w.view) w.view = capture_view_state();
+  EditorViewState &v = *w.view;
+  std::swap(cam_, v.cam);
+  std::swap(scene_rect_, v.scene_rect), std::swap(game_rect_, v.game_rect);
+  std::swap(cam_preview_rect_, v.cam_preview_rect), std::swap(last_op_rect_, v.last_op_rect);
+  std::swap(scene_hovered_, v.scene_hovered), std::swap(scene_drawn_, v.scene_drawn);
+  int drag = (int)drag_;
+  std::swap(drag, v.drag);
+  drag_ = (Drag)drag;
+  std::swap(drag_button_, v.drag_button), std::swap(drag_x_, v.drag_x), std::swap(drag_y_, v.drag_y);
+  std::swap(fly_last_, v.fly_last), std::swap(fly_accel_, v.fly_accel);
+  std::swap(shading_, v.shading), std::swap(scene_lighting_, v.scene_lighting);
+  std::swap(show_grid_, v.show_grid), std::swap(show_gizmos_, v.show_gizmos), std::swap(show_stats_, v.show_stats);
+  std::swap(show_bones_, v.show_bones), std::swap(show_rig_controls_, v.show_rig_controls), std::swap(show_icons_, v.show_icons);
+  std::swap(show_points_, v.show_points), std::swap(show_origins_, v.show_origins), std::swap(show_footprints_, v.show_footprints);
+  std::swap(show_outline_, v.show_outline);
+  std::swap(scene_rt_, v.scene_rt), std::swap(game_rt_, v.game_rt);
+  std::swap(scene_r3d_, v.scene_r3d), std::swap(game_r3d_, v.game_r3d);
+  std::swap(scene_ft_, v.scene_ft), std::swap(scene_vs_, v.scene_vs), std::swap(game_ft_, v.game_ft), std::swap(game_vs_, v.game_vs);
+  std::swap(scene_planes_slot_, v.scene_planes_slot), std::swap(scene_on_gpu_, v.scene_on_gpu);
+  std::swap(scene_planes_w_, v.scene_planes_w), std::swap(scene_planes_h_, v.scene_planes_h);
+  std::swap(pilot_cam_, v.pilot_cam), std::swap(pilot_saved_cam_, v.pilot_saved_cam);
+  int nav = (int)gizmo_nav_;
+  std::swap(nav, v.gizmo_nav);
+  gizmo_nav_ = (GizmoNav)nav;
+  std::swap(gizmo_nav_hot_, v.gizmo_nav_hot), std::swap(gizmo_nav_x_, v.gizmo_nav_x), std::swap(gizmo_nav_y_, v.gizmo_nav_y);
+  std::swap(gizmo_pivot_, v.gizmo_pivot), std::swap(gizmo_orient_, v.gizmo_orient);
+  std::swap(alt_click_, v.alt_click), std::swap(alt_click_ring_, v.alt_click_ring), std::swap(finger_orbit_, v.finger_orbit), std::swap(barrel_nav_, v.barrel_nav);
+  std::swap(cam_yaw_before_, v.cam_yaw_before), std::swap(cam_pitch_before_, v.cam_pitch_before), std::swap(cam_fov_before_, v.cam_fov_before);
+  std::swap(inspector_lock_, v.inspector_lock), std::swap(inspector_content_h_, v.inspector_content_h);
+  WindowCaches &c = window_caches_[w.id];
+  std::swap(scene_cache_, c.scene), std::swap(game_cache_, c.game);
+  std::swap(scene_overlays_, c.overlays), std::swap(scene_overlays_recorded_, c.overlays_recorded);
+  std::swap(inspector_action_, c.inspector_action);
+}
+
+/* An interaction under way in the Scene view drawing now (its tools own the pointer until it ends). */
+bool Editor::scene_interacting() const {
+  return drag_ != Drag::None || sketch_.stroking || gizmo_nav_ != GizmoNav::None || xf_.active || pp_.active || modal_.active || knife_.active ||
+         draw_.active || wp_stroking_ || finger_orbit_ || bone_drag_.modal;
+}
+
+void Editor::queue_window_move(WindowMove m) {
+  m.source = active_window_;
+  window_moves_.push_back(m);
+}
+
+/* A camera gliding or a drag under way in a secondary window: frames must keep coming for it. */
+bool Editor::windows_moving() const {
+  for (const auto &w : windows_) {
+    if (w->close || !w->view) continue;
+    const EditorViewState &v = *w->view;
+    const bool nav = v.drag != (int)Drag::None && v.drag != (int)Drag::Box && v.drag != (int)Drag::AltClick;
+    if (nav || v.cam.animating) return true;
+  }
+  return false;
 }
 
 EditorWindow *Editor::editor_window(int id) {
@@ -95,11 +170,16 @@ float Editor::os_units() const {
 /* ---- opening, moving, closing ---- */
 
 /* A new window holding `k` (taken from wherever it is) with its client area at (x, y), w x h. */
-EditorWindow *Editor::open_window(WindowKind k, int x, int y, int w, int h) {
+EditorWindow *Editor::open_window(WindowKind k, int x, int y, int w, int h, bool duplicate, int source) {
   if (active_window_ != 0) return nullptr;  // (between frames only: the windows' states are all in place)
-  take_tab(k);
   auto win = std::make_unique<EditorWindow>();
   win->id = next_window_id_++;
+  if (duplicate || (source > 0 && can_duplicate(k))) {  // (task 0232: a second instance - or a moved one - keeps where it looked)
+    const EditorWindow *from = source ? editor_window(source) : nullptr;
+    win->view = from && from->view ? std::make_unique<EditorViewState>(*from->view) : capture_view_state();
+    win->view->scene_planes_slot = -1, win->view->scene_on_gpu = false;
+  }
+  if (!duplicate) take_tab(k, source);
   win->x = x, win->y = y;
   win->dock = std::make_unique<DockNode>();
   win->dock->tabs = {k};
@@ -127,25 +207,33 @@ void Editor::init_window_ui(EditorWindow &w) {
   swap_window_state(w);
 }
 
-/* Takes `k` out of whichever dock has it (the main one, or a window's: a window left empty closes). */
-void Editor::take_tab(WindowKind k) {
-  if (dock_find(k)) {
+/* Takes `k` out of the dock of window `source` (0 the main one; -1: whichever has it - the main one first); a window
+ * left empty closes. With a kind in several windows (task 0232) the source says which instance moves. */
+void Editor::take_tab(WindowKind k, int source) {
+  if (source <= 0 && dock_find(k)) {
     dock_remove(k);
     return;
   }
-  EditorWindow *owner = nullptr;
-  if (!dock_find_elsewhere(k, &owner) || !owner) return;
+  if (source == 0) source = -1;  // (the main window without it, as a console command: wherever it is)
+  EditorWindow *owner = source > 0 ? editor_window(source) : nullptr;
+  if (source > 0 && (!owner || !owner->dock)) return;
+  if (source < 0 && (!dock_find_elsewhere(k, &owner) || !owner)) return;
   std::swap(dock_, owner->dock);
-  dock_remove(k);
+  const bool had = dock_find(k) != nullptr;
+  if (had) dock_remove(k);
   const bool empty = !dock_->split && dock_->tabs.empty();
   std::swap(dock_, owner->dock);
-  if (empty) owner->close = true;
+  if (had && empty) owner->close = true;
 }
 
 /* `k` back in the main window's dock (the main state is in place). */
-void Editor::move_to_main(WindowKind k) {
-  if (dock_find(k)) return;
-  take_tab(k);
+void Editor::move_to_main(WindowKind k, int source) {
+  if (dock_find(k) && !can_duplicate(k)) return;
+  if (dock_find(k)) {  // (the main window has one already: the moved one and its window's state go)
+    take_tab(k, source);
+    return;
+  }
+  take_tab(k, source);
   dock_open(k);
 }
 
@@ -158,6 +246,8 @@ void Editor::close_window(EditorWindow &w) {
   if (w.os) destroy_window(w.os);
   w.os = nullptr;
   w.dock.reset();
+  window_caches_.erase(w.id);  // (task 0232: its view caches go with it)
+  if (interaction_window_ == w.id) interaction_window_ = -1;
   for (WindowKind k : tabs) dock_open(k, false);
 }
 
@@ -200,15 +290,117 @@ void Editor::move_to_monitor(WindowKind k, int index) {
   open_window(k, x, y, w, h);
 }
 
-/* Window moves asked for while drawing (the tab menus, a tab dropped outside), done between frames. */
+/* Window moves asked for while drawing (the tab menus, a tab dropped outside or over another window), done between
+ * frames with the main state in place. */
 void Editor::apply_window_moves() {
   std::vector<WindowMove> moves;
   moves.swap(window_moves_);
   for (const WindowMove &m : moves) {
-    if (m.kind == WindowMove::NewWindow) open_window(m.tab, m.x, m.y, m.w, m.h);
-    else if (m.kind == WindowMove::Main) move_to_main(m.tab);
+    if (m.kind == WindowMove::NewWindow) open_window(m.tab, m.x, m.y, m.w, m.h, m.duplicate, m.source);
+    else if (m.kind == WindowMove::Main) move_to_main(m.tab, m.source);
+    else if (m.kind == WindowMove::ToWindow) move_to_window(m.tab, m.window_id, m.x, m.y, m.source);
     else move_to_monitor(m.tab, m.monitor);
   }
+  drop_hint_window_ = -1;
+}
+
+/* `k` into window `id`'s dock (0: the main one) at the zone under its local point (x, y): a tab, or a split. */
+void Editor::move_to_window(WindowKind k, int id, int x, int y, int source) {
+  EditorWindow *target = id ? editor_window(id) : nullptr;
+  if (id && (!target || target->close || !target->dock)) return;
+  if (source == id) return;
+  if (target) std::swap(dock_, target->dock);
+  const bool already = dock_find(k) != nullptr;
+  if (target) std::swap(dock_, target->dock);
+  if (already) {  // (the window holds it: shown there; the moved one and its state go)
+    take_tab(k, source);
+    if (target) std::swap(dock_, target->dock);
+    dock_open(k);
+    if (target) std::swap(dock_, target->dock);
+    return;
+  }
+  take_tab(k, source);
+  if (target) std::swap(dock_, target->dock);
+  DockNode *leaf = dock_leaf_at(x, y);
+  if (!leaf) leaf = dock_largest_leaf();
+  const bool laid_out = leaf && leaf->rect.w > 0 && leaf->rect.h > 0;  // (a window that never drew: a tab, not a split by a zero rect)
+  const int zone = laid_out ? dock_drop_zone(leaf, x, y, nullptr) : 0;
+  if (leaf) dock_insert(k, leaf, zone);
+  if (target) std::swap(dock_, target->dock);
+  if (!target) dock_fix_parents(dock_.get(), nullptr);
+}
+
+/* A second instance of `k` (a Scene view, a Game view, an Inspector) in a window of its own, the first staying put;
+ * from the window drawing now, whose view the new one copies. */
+void Editor::dock_duplicate(WindowKind k) {
+  if (!can_duplicate(k)) {
+    Log::warn("%s shows one thing: it isn't duplicated (the Scene view, the Game view and the Inspector are)", window_title(k));
+    return;
+  }
+  int wx = 0, wy = 0, ww = fb_.width, wh = fb_.height;
+  if (window_) get_window_rect(window_, wx, wy, ww, wh);
+  const Recti r = window_rects_.count(k) ? window_rects_[k] : Recti{0, 0, 800, 600};
+  const float u = os_units();
+  WindowMove m{WindowMove::NewWindow, k, wx + (int)((r.x + ui_.px(60)) * u), wy + (int)((r.y + ui_.px(60)) * u), (int)(std::max(r.w, 480) * u),
+               (int)(std::max(r.h, 320) * u), 0};
+  m.duplicate = true, m.source = active_window_;
+  queue_window_move(m);
+  if (active_window_ == 0) apply_window_moves();
+}
+
+/* The point (mx, my) of the window drawing now, on the desktop (headless: the main window at the origin, a window at
+ * its x, y). */
+void Editor::desktop_point(int mx, int my, int &dx, int &dy) {
+  int wx = 0, wy = 0, ww = 0, wh = 0;
+  if (window_) get_window_rect(window_, wx, wy, ww, wh);
+  else if (EditorWindow *here = editor_window(active_window_)) wx = here->x, wy = here->y;
+  const float u = os_units();
+  dx = wx + (int)(mx * u), dy = wy + (int)(my * u);
+}
+
+/* The secondary window under a desktop point, other than the one drawing now, and the point in its pixels. */
+EditorWindow *Editor::window_at_desktop(int dx, int dy, int &lx, int &ly) {
+  for (auto &w : windows_) {
+    if (w->close || w->id == active_window_ || !w->dock) continue;
+    int x = w->x, y = w->y, ww = w->fb.width, wh = w->fb.height;
+    if (w->os) get_window_rect(w->os, x, y, ww, wh);
+    if (dx < x || dy < y || dx >= x + ww || dy >= y + wh) continue;
+    const float u = w->os ? os_units() : 1.0f;
+    lx = (int)((dx - x) / u), ly = (int)((dy - y) / u);
+    return w.get();
+  }
+  return nullptr;
+}
+
+/* The main window under a desktop point while another window draws, and the point in its pixels (while a window
+ * draws, `here` holds the main window's OS window and framebuffer). */
+bool Editor::main_at_desktop(int dx, int dy, int &lx, int &ly) {
+  if (active_window_ == 0) return false;
+  EditorWindow *here = editor_window(active_window_);
+  if (!here) return false;
+  int x = 0, y = 0, ww = here->fb.width, wh = here->fb.height;
+  if (here->os) get_window_rect(here->os, x, y, ww, wh);
+  if (dx < x || dy < y || dx >= x + ww || dy >= y + wh) return false;
+  const float u = here->os ? os_units() : 1.0f;
+  lx = (int)((dx - x) / u), ly = (int)((dy - y) / u);
+  return true;
+}
+
+/* The object an Inspector shows: its pin, else the active object (a pin whose object is gone lets go). */
+GameObject *Editor::inspector_object() {
+  GameObject *g = inspector_lock_ ? scene_->find(inspector_lock_) : nullptr;
+  if (inspector_lock_ && !g) inspector_lock_ = 0;
+  return g ? g : active_object();
+}
+
+/* The drop highlight a tab dragged from another window asks this one to show. */
+void Editor::draw_drop_hint() {
+  if (drop_hint_window_ != active_window_ || !tab_dragging_) return;
+  const Recti pr = drop_hint_rect_;
+  ui_.overlay([this, pr] {
+    ui_.canvas.fill_rect(pr, Color::hex(0x3A79BB, 70));
+    ui_.canvas.rect_outline(pr, Color::hex(0x3A79BB), ui_.px(2));
+  });
 }
 
 /* A new window for `k` where the mouse is (a tab dropped outside every dock area), the size of its area now. */
@@ -217,7 +409,7 @@ void Editor::queue_new_window_at_mouse(WindowKind k) {
   if (window_) get_window_rect(window_, wx, wy, ww, wh);
   const Recti r = window_rects_.count(k) ? window_rects_[k] : Recti{0, 0, 800, 600};
   const float u = os_units();
-  window_moves_.push_back({WindowMove::NewWindow, k, wx + (int)((ui_.in.mx - ui_.px(40)) * u), wy + (int)((ui_.in.my - ui_.px(12)) * u),
+  queue_window_move({WindowMove::NewWindow, k, wx + (int)((ui_.in.mx - ui_.px(40)) * u), wy + (int)((ui_.in.my - ui_.px(12)) * u),
                            (int)(std::max(r.w, 480) * u), (int)(std::max(r.h, 320) * u), 0});
 }
 
@@ -234,10 +426,15 @@ void Editor::draw_tab_menu_windows(WindowKind k) {
   const Recti r = window_rects_.count(k) ? window_rects_[k] : Recti{0, 0, 800, 600};
   const float u = os_units();
   if (ui_.menu_item("Move to New Window"))
-    window_moves_.push_back({WindowMove::NewWindow, k, wx + (int)((r.x + ui_.px(40)) * u), wy + (int)((r.y + ui_.px(40)) * u), (int)(std::max(r.w, 480) * u),
+    queue_window_move({WindowMove::NewWindow, k, wx + (int)((r.x + ui_.px(40)) * u), wy + (int)((r.y + ui_.px(40)) * u), (int)(std::max(r.w, 480) * u),
                              (int)(std::max(r.h, 320) * u), 0});
-  ui_.tooltip("Its own window, to put on another display (or drag the tab out of the editor).");
-  if (active_window_ != 0 && ui_.menu_item("Move to Main Window")) window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
+  ui_.tooltip("Its own window, to put on another display (or drag the tab out of the editor - or onto another editor window).");
+  if (can_duplicate(k) && ui_.menu_item("Duplicate into New Window")) dock_duplicate(k);  // (task 0232)
+  if (can_duplicate(k)) ui_.tooltip("A second one, with a camera (or a pin) of its own; this one stays. For a drawing tablet beside the main screen.");
+  for (auto &other : windows_)  // (task 0232: into another window's dock)
+    if (other->id != active_window_ && !other->close && ui_.menu_item(strprintf("Move to Window %d", other->id)))
+      queue_window_move({WindowMove::ToWindow, k, other->fb.width / 2, other->fb.height / 2, 0, 0, 0, other->id});
+  if (active_window_ != 0 && ui_.menu_item("Move to Main Window")) queue_window_move({WindowMove::Main, k, 0, 0, 0, 0, 0});
   EditorWindow *here = editor_window(active_window_);
   if (here && (k == WindowKind::Render || k == WindowKind::Game) && ui_.menu_item("Render Only (the picture alone)"))
     window_modes_.push_back({here->id, WindowMode::RenderOnly, true});
@@ -245,7 +442,7 @@ void Editor::draw_tab_menu_windows(WindowKind k) {
   const std::vector<Monitor> ms = headless_ ? test_monitors_ : monitors();
   for (size_t i = 0; ms.size() > 1 && i < ms.size(); i++)
     if (ui_.menu_item(strprintf("Move to Display %zu (%s)", i + 1, ms[i].name.c_str())))
-      window_moves_.push_back({WindowMove::Monitor, k, 0, 0, 0, 0, (int)i});
+      queue_window_move({WindowMove::Monitor, k, 0, 0, 0, 0, (int)i});
 }
 
 /* ---- drawing ---- */
@@ -289,6 +486,8 @@ void Editor::draw_secondary_window(EditorWindow &w, double now) {
   }
   ui_.begin_frame(&fb_, now);
   begin_card_frame();  // (task 0193)
+  scene_drawn_ = false;  // (task 0232: this window's Scene view sets it where it draws)
+  if (cam_.update(now)) ui_.redraw = true;  // (this window's camera glides on its own)
   const Recti area{0, 0, fb_.width, fb_.height};
   ui_.canvas.fill_rect(area, ui_.theme.border);
   if (w.fullscreen && ui_.in.key_pressed[KEY_ESCAPE]) {
@@ -301,6 +500,7 @@ void Editor::draw_secondary_window(EditorWindow &w, double now) {
     dock_layout(dock_.get(), area);
     dock_draw(dock_.get());
   }
+  draw_drop_hint();  // (task 0232)
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
   if (pointer_window_ == active_window_) update_asset_drag();
@@ -465,9 +665,54 @@ std::string Editor::windows_layout() {
     if (w->close || !w->dock) continue;
     int x = w->x, y = w->y, ww = w->fb.width, wh = w->fb.height;
     if (w->os) get_window_rect(w->os, x, y, ww, wh);
-    s += strprintf("W(%d,%d,%d,%d,%d,", x, y, ww, wh, w->monitor) + dock_serialize(w->dock.get()) + ")";
+    s += strprintf("W(%d,%d,%d,%d,%d,", x, y, ww, wh, w->monitor) + dock_serialize(w->dock.get()) + window_view_text(*w) + ")";
   }
   return s;
+}
+
+/* ;V(yaw,pitch,distance,px,py,pz,fov,ortho,shading,pin) - the window's Scene view camera and shading and its
+ * Inspector's pin (task 0232); nothing before the window first drew. */
+/* The overlay flags as bits (the order of the fields). */
+static unsigned overlay_bits(const EditorViewState &v) {
+  const bool flags[] = {v.scene_lighting, v.show_grid, v.show_gizmos, v.show_stats, v.show_bones, v.show_rig_controls, v.show_icons, v.show_points,
+                        v.show_origins, v.show_footprints, v.show_outline};
+  unsigned bits = 0;
+  for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) bits |= flags[i] ? 1u << i : 0u;
+  return bits;
+}
+
+static void set_overlay_bits(EditorViewState &v, unsigned bits) {
+  bool *flags[] = {&v.scene_lighting, &v.show_grid, &v.show_gizmos, &v.show_stats, &v.show_bones, &v.show_rig_controls, &v.show_icons, &v.show_points,
+                   &v.show_origins, &v.show_footprints, &v.show_outline};
+  for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) *flags[i] = (bits >> i) & 1u;
+}
+
+/* ;V(yaw,pitch,distance,px,py,pz,fov,ortho,shading,pin,overlays) - the window's Scene view camera, shading and
+ * overlay flags and its Inspector's pin (task 0232); nothing before the window first drew. A value that isn't a
+ * number is written as 0 (a NaN's text would cut the line). */
+std::string Editor::window_view_text(const EditorWindow &w) {
+  if (!w.view) return "";
+  const EditorViewState &v = *w.view;
+  auto num = [](float x) { return std::isfinite(x) ? x : 0.0f; };
+  return strprintf(";V(%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%llu,%u)", num(v.cam.yaw), num(v.cam.pitch), num(v.cam.distance), num(v.cam.pivot.x),
+                   num(v.cam.pivot.y), num(v.cam.pivot.z), num(v.cam.fov), v.cam.ortho ? 1 : 0, (int)v.shading, (unsigned long long)v.inspector_lock,
+                   overlay_bits(v));
+}
+
+void Editor::load_window_view(EditorWindow &w, const std::string &text) {
+  float f[7] = {};
+  int ortho = 0, shading = (int)Shading::Shaded;
+  unsigned long long pin = 0;
+  unsigned bits = 0;
+  const int n = std::sscanf(text.c_str(), "V(%f,%f,%f,%f,%f,%f,%f,%d,%d,%llu,%u)", &f[0], &f[1], &f[2], &f[3], &f[4], &f[5], &f[6], &ortho, &shading, &pin, &bits);
+  if (n < 9) return;
+  w.view = capture_view_state();
+  EditorViewState &v = *w.view;
+  v.cam.yaw = f[0], v.cam.pitch = f[1], v.cam.distance = std::max(0.01f, f[2]), v.cam.pivot = {f[3], f[4], f[5]};
+  v.cam.fov = std::max(1.0f, std::min(170.0f, f[6])), v.cam.ortho = ortho != 0;
+  v.shading = (Shading)std::max(0, std::min(3, shading));
+  v.inspector_lock = (uint64_t)pin;
+  if (n >= 11) set_overlay_bits(v, bits);
 }
 
 void Editor::restore_windows(const std::string &s) {
@@ -487,18 +732,26 @@ void Editor::restore_windows(const std::string &s) {
     } catch (const std::exception &) {  // (a preferences line cut short)
       return;
     }
+    std::string view;  // (task 0232: ;V(...) after the dock)
+    if (pos < s.size() && s[pos] == ';') {
+      const size_t end = s.find(')', pos);
+      if (end == std::string::npos) return;
+      view = s.substr(pos + 1, end - pos);
+      pos = end + 1;
+    }
     pos++;  // (the window's ')')
     if (!place_on_display(v[0], v[1], v[2], v[3])) continue;
     std::vector<WindowKind> tabs;
     collect_tabs(dock.get(), tabs);
     if (tabs.empty()) continue;
-    EditorWindow *w = open_window(tabs[0], v[0], v[1], v[2], v[3]);
+    EditorWindow *w = open_window(tabs[0], v[0], v[1], v[2], v[3], can_duplicate(tabs[0]));  // (a Scene view may be in several windows)
     if (!w) continue;
     for (WindowKind k : tabs)
-      if (k != tabs[0]) take_tab(k);  // (out of the main dock: the window's tree has them)
+      if (k != tabs[0] && !can_duplicate(k)) take_tab(k);  // (out of the main dock: the window's tree has them; a Scene view may be in both)
     w->dock = std::move(dock);
     dock_fix_parents(w->dock.get(), nullptr);
     w->monitor = v[4];
+    if (!view.empty()) load_window_view(*w, view);
   }
 }
 
@@ -533,12 +786,20 @@ void Editor::dock_command(const std::vector<std::string> &t, const std::string &
     }
     return;
   }
+  if (verb == "duplicate" && t.size() >= 3) {  // dock duplicate <Window> (task 0232: a second instance in a window of its own)
+    const std::string title = line.substr(line.find(t[2], line.find(t[1]) + t[1].size()));
+    for (int k = 0; k < (int)WindowKind::Count; k++)
+      if (to_lower(title) == to_lower(window_title((WindowKind)k))) return dock_duplicate((WindowKind)k);
+    Log::warn("dock duplicate: no window '%s'", title.c_str());
+    return;
+  }
   if (verb != "move" || t.size() < 4) {
-    Log::warn("dock move <Window> newwindow | main | monitor <n>;  dock windows");
+    Log::warn("dock move <Window> newwindow | main | monitor <n> | window <n>;  dock duplicate <Window>;  dock windows");
     return;
   }
   const bool to_monitor = t.size() >= 5 && to_lower(t[t.size() - 2]) == "monitor";
-  const size_t last = to_monitor ? t.size() - 2 : t.size() - 1;
+  const bool to_window = t.size() >= 5 && to_lower(t[t.size() - 2]) == "window";  // (task 0232)
+  const size_t last = to_monitor || to_window ? t.size() - 2 : t.size() - 1;
   const size_t from = line.find(t[2], line.find(t[1]) + t[1].size()), to = line.rfind(t[last]);
   std::string title = from < to ? line.substr(from, to - from) : "";
   while (!title.empty() && title.back() == ' ') title.pop_back();
@@ -546,14 +807,21 @@ void Editor::dock_command(const std::vector<std::string> &t, const std::string &
   for (int k = 0; k < (int)WindowKind::Count; k++)
     if (to_lower(title) == to_lower(window_title((WindowKind)k))) kind = k;
   const std::string where = to_lower(t[last]);
-  if (kind < 0 || (WindowKind)kind == WindowKind::Research || (!to_monitor && where != "newwindow" && where != "main")) {
-    Log::warn("dock move: no window '%s', or no place '%s' (newwindow, main, monitor <n>)", title.c_str(), t[last].c_str());
+  if (kind < 0 || (WindowKind)kind == WindowKind::Research || (!to_monitor && !to_window && where != "newwindow" && where != "main")) {
+    Log::warn("dock move: no window '%s', or no place '%s' (newwindow, main, monitor <n>, window <n>)", title.c_str(), t[last].c_str());
     return;
   }
   const WindowKind k = (WindowKind)kind;
-  if (to_monitor) window_moves_.push_back({WindowMove::Monitor, k, 0, 0, 0, 0, std::atoi(t.back().c_str()) - 1});
-  else if (where == "main") window_moves_.push_back({WindowMove::Main, k, 0, 0, 0, 0, 0});
-  else window_moves_.push_back({WindowMove::NewWindow, k, 120, 120, 960, 640, 0});
+  if (to_window) {  // (its largest area: the console has no point to drop at; the main window's instance moves)
+    const int id = std::atoi(t.back().c_str());
+    EditorWindow *target = id ? editor_window(id) : nullptr;
+    if ((id && !target) || (id == 0 && t.back() != "0")) return Log::warn("dock move: no window '%s' (dock windows lists them; 0 is the main one)", t.back().c_str());
+    const int cx = target ? target->fb.width / 2 : fb_.width / 2, cy = target ? target->fb.height / 2 : fb_.height / 2;
+    queue_window_move({WindowMove::ToWindow, k, cx, cy, 0, 0, 0, id});
+  }
+  else if (to_monitor) queue_window_move({WindowMove::Monitor, k, 0, 0, 0, 0, std::atoi(t.back().c_str()) - 1});
+  else if (where == "main") queue_window_move({WindowMove::Main, k, 0, 0, 0, 0, 0});
+  else queue_window_move({WindowMove::NewWindow, k, 120, 120, 960, 640, 0});
   if (active_window_ == 0) apply_window_moves();
 }
 

@@ -3015,6 +3015,183 @@ static void tests_round227() {
   });
 }
 
+/* Task 0232 (ADR 0070): a kind once per window, the view state per window, drops onto other windows, duplicates, the
+ * Inspector's pin. */
+static void tests_round252() {
+  using platform::EventType;
+  test("windows: a tab dragged out of the main window and dropped over another editor window joins that window's dock (the main one no longer has it); dock move <Window> window <n> does the same from the console", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const int id = ed.open_window_for_test(WindowKind::Render, 600, 500);
+    EditorWindow *w = ed.window_for_test(id);
+    CHECK(w != nullptr);
+    if (!w) return;
+    w->x = 1300, w->y = 100;  // (beside the main window, not over it)
+    ed.step_window_headless(id, {});
+    ed.step_frame_headless();
+    const Recti leaf = ed.dock_leaf_rect_for_test(WindowKind::Inspector);
+    CHECK(leaf.w > 0);
+    const int tx = leaf.x + 12, ty = leaf.y + 6;
+    ed.step_frame_headless({mouse_ev(EventType::MouseMove, tx, ty)});
+    ed.step_frame_headless({mouse_ev(EventType::MouseDown, tx, ty)});
+    ed.step_frame_headless({mouse_ev(EventType::MouseMove, tx + 300, ty + 40)});
+    /* Over the other window's middle (1300 + 300, 100 + 300 on the desktop = the main window's 1600, 400). */
+    ed.step_frame_headless({mouse_ev(EventType::MouseMove, 1600, 400)});
+    ed.step_frame_headless({mouse_ev(EventType::MouseUp, 1600, 400)});
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    std::printf("    windows %zu; the Inspector in window %d: %d, in the main dock: %d\n", ed.window_count_for_test(), id,
+                ed.in_window_dock_for_test(id, WindowKind::Inspector), ed.in_main_dock_for_test(WindowKind::Inspector));
+    CHECK(ed.window_count_for_test() == 2 && ed.in_window_dock_for_test(id, WindowKind::Inspector) && !ed.in_main_dock_for_test(WindowKind::Inspector));
+    ed.command(strprintf("dock move Hierarchy window %d", id));
+    ed.step_frame_headless();
+    CHECK(ed.in_window_dock_for_test(id, WindowKind::Hierarchy) && !ed.in_main_dock_for_test(WindowKind::Hierarchy));
+    ed.command("dock move Hierarchy main");
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Hierarchy) && !ed.in_window_dock_for_test(id, WindowKind::Hierarchy));
+  });
+
+  test("windows: dock duplicate Scene opens a second Scene view in a window of its own with a camera of its own (an orbit there leaves the main one's alone), the main dock keeps its Scene view, a layout reset keeps both, and the cameras round-trip the windows preference", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const float yaw0 = ed.scene_camera_for_test().yaw;
+    ed.command("dock duplicate Scene");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2 && ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(1, WindowKind::Scene));
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    ed.step_window_headless(1, {});
+    const SceneCamera *cam = ed.window_camera_for_test(1);
+    CHECK(cam && std::fabs(cam->yaw - yaw0) < 1e-4f);
+    /* Alt+LMB drag in the second window orbits it (Unity's navigation). */
+    const int cx = w->fb.width / 2, cy = w->fb.height / 2;
+    platform::Event down = mouse_ev(EventType::MouseDown, cx, cy);
+    down.mods = platform::MOD_ALT;
+    ed.step_window_headless(1, {mouse_ev(EventType::MouseMove, cx, cy)});
+    ed.step_window_headless(1, {down});
+    for (int i = 1; i <= 10; i++) {
+      platform::Event mv = mouse_ev(EventType::MouseMove, cx + 12 * i, cy);
+      mv.mods = platform::MOD_ALT;
+      ed.step_window_headless(1, {mv});
+    }
+    platform::Event up = mouse_ev(EventType::MouseUp, cx + 120, cy);
+    up.mods = platform::MOD_ALT;
+    ed.step_window_headless(1, {up});
+    ed.step_frame_headless();
+    cam = ed.window_camera_for_test(1);
+    std::printf("    the main camera's yaw %.1f, the second window's %.1f\n", ed.scene_camera_for_test().yaw, cam ? cam->yaw : 0.0f);
+    CHECK(cam && std::fabs(cam->yaw - yaw0) > 5.0f && std::fabs(ed.scene_camera_for_test().yaw - yaw0) < 1e-4f);
+    ed.command("layout Default");
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(1, WindowKind::Scene));
+    /* The windows preference carries the second window's camera. */
+    const std::string saved = ed.windows_layout_for_test();
+    CHECK(saved.find(";V(") != std::string::npos);
+    Editor ed2;
+    ed2.init_headless(1200, 800);
+    ed2.step_frame_headless();
+    ed2.set_monitors_for_test({{0, 0, 3000, 2000, 1.0f, "Test", true}});
+    ed2.restore_windows_for_test(saved);
+    ed2.step_frame_headless();
+    const SceneCamera *cam2 = ed2.window_camera_for_test(1);
+    CHECK(ed2.window_count_for_test() == 2 && ed2.in_main_dock_for_test(WindowKind::Scene) && cam2 && std::fabs(cam2->yaw - cam->yaw) < 1e-3f);
+  });
+
+  test("windows: an Inspector pinned to an object keeps showing it while the selection moves on, and follows again when unpinned (the pin is the window's own)", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    CHECK(ed.selected_objects_for_test().size() == 1);
+    const uint64_t cube = ed.selected_objects_for_test().empty() ? 0 : ed.selected_objects_for_test()[0]->id;  // (the new one: the sample scene has a Cube too)
+    ed.command("inspector lock");
+    CHECK(ed.inspector_lock_for_test() == cube && cube != 0);
+    ed.command("create Sphere");
+    ed.step_frame_headless();
+    CHECK(ed.inspector_lock_for_test() == cube && !ed.selected_objects_for_test().empty() && ed.selected_objects_for_test()[0]->id != cube);
+    ed.command("inspector unlock");
+    CHECK(ed.inspector_lock_for_test() == 0);
+    /* A second Inspector in its own window has a pin of its own. */
+    ed.command("dock duplicate Inspector");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2 && ed.in_main_dock_for_test(WindowKind::Inspector) && ed.in_window_dock_for_test(1, WindowKind::Inspector));
+    ed.command("inspector lock");  // (the main window's: the console runs with the main state)
+    CHECK(ed.inspector_lock_for_test() != 0);
+    ed.step_window_headless(1, {});
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w && w->view && w->view->inspector_lock == 0);
+    ed.command("inspector unlock");
+  });
+
+  test("windows: a pen stroke begun in a duplicate Scene view goes on while the main window's Scene view draws (the interaction is the window's), and lands as one stroke; a duplicate Game view opens; closing the windows frees their caches and returns the tabs", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("dock duplicate Scene");
+    ed.step_frame_headless();
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    ed.step_window_headless(1, {});
+    ed.command("sketch on");
+    const size_t strokes0 = ed.sketch_for_test().strokes.size();
+    auto pen = [](EventType t, int x, int y) {
+      platform::Event e = mouse_ev(t, x, y);
+      e.pointer = platform::Pointer::Pen, e.pen = true, e.pressure = 0.8f;
+      return e;
+    };
+    const int sx = w->fb.width / 2, sy = w->fb.height / 2;
+    ed.step_window_headless(1, {pen(EventType::MouseMove, sx, sy)});
+    ed.step_window_headless(1, {pen(EventType::MouseDown, sx, sy)});
+    for (int i = 1; i <= 8; i++) {
+      ed.step_window_headless(1, {pen(EventType::MouseMove, sx + 10 * i, sy + 4 * i)});  // (each window frame runs the main frame too)
+      CHECK(ed.sketch_for_test().strokes.size() == strokes0);  // (the main window's Scene view doesn't end it)
+      CHECK(ed.interaction_window_for_test() == 1);
+    }
+    ed.step_window_headless(1, {pen(EventType::MouseUp, sx + 90, sy + 36)});
+    ed.step_frame_headless();
+    std::printf("    strokes %zu -> %zu\n", strokes0, ed.sketch_for_test().strokes.size());
+    CHECK(ed.sketch_for_test().strokes.size() == strokes0 + 1 && ed.interaction_window_for_test() == -1);
+    ed.command("sketch off");
+    ed.command("dock duplicate Game");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 3 && ed.in_main_dock_for_test(WindowKind::Game) && ed.in_window_dock_for_test(2, WindowKind::Game));
+    CHECK(ed.window_caches_for_test() >= 1);
+    ed.command("dock bringback");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 1 && ed.window_caches_for_test() == 0 && ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_main_dock_for_test(WindowKind::Game));
+  });
+
+  test("windows: a duplicate moved to another window takes its own instance (the main window keeps its Scene view), and a kind the target already holds is shown there", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("dock duplicate Scene");
+    ed.step_frame_headless();
+    const int other = ed.open_window_for_test(WindowKind::Render, 600, 500);
+    ed.step_frame_headless();
+    CHECK(other == 2 && ed.in_window_dock_for_test(1, WindowKind::Scene));
+    WindowMove m;
+    m.kind = WindowMove::ToWindow, m.tab = WindowKind::Scene, m.window_id = other, m.x = 300, m.y = 300, m.source = 1;
+    ed.queue_window_move_for_test(m);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(other, WindowKind::Scene) && ed.window_for_test(1) == nullptr);
+    /* The main window's Scene view moved onto a window that has one: shown there, the main one gone. */
+    ed.command(strprintf("dock move Scene window %d", other));
+    ed.step_frame_headless();
+    CHECK(!ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(other, WindowKind::Scene));
+    ed.command("dock bringback");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Scene));
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -3047,5 +3224,6 @@ void run_editor_tests() {
   tests_round209();
   tests_round222();
   tests_round227();
+  tests_round252();
   coverage_tests();
 }

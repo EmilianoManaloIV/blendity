@@ -772,13 +772,18 @@ void Editor::gpu_forget_meshes() {
 
 /* The view's slot of targets: the one it had, else the least recently used. */
 int Editor::gpu_slot(const RenderTarget &rt) {
+  auto mine = [&](int i) { return gpu_slot_rt_[i] == &rt && gpu_slot_win_[i] == active_window_; };  // (task 0232: per window)
   int best = 0;
   for (int i = 0; i < gpu::Raster::kSlots; i++) {
-    if (gpu_slot_rt_[i] == &rt) best = i;
-    else if (gpu_slot_rt_[best] != &rt && gpu_slot_used_[i] < gpu_slot_used_[best]) best = i;
+    if (mine(i)) best = i;
+    else if (!mine(best) && gpu_slot_used_[i] < gpu_slot_used_[best]) best = i;
   }
-  if (best == scene_planes_slot_ && gpu_slot_rt_[best] != &rt) scene_planes_slot_ = -1;  // (task 0204: another view takes the slot)
+  if (best == scene_planes_slot_ && !mine(best)) scene_planes_slot_ = -1;  // (task 0204: another view takes the slot)
+  if (!mine(best))  // (task 0232: another window's Scene view had planes waiting in it)
+    for (auto &w : windows_)
+      if (w->view && w->view->scene_planes_slot == best) w->view->scene_planes_slot = -1;
   gpu_slot_rt_[best] = &rt;
+  gpu_slot_win_[best] = active_window_;
   gpu_slot_used_[best] = gpu_calls_ + 1;
   return best;
 }
@@ -1151,7 +1156,7 @@ void Editor::ensure_scene_planes() {
   scene_planes_slot_ = -1;
   RenderTarget &rt = scene_rt_;
   /* (Still the Scene view's slot, at the size it drew: else the target's own planes are newer than the card's.) */
-  if (gpu_slot_rt_[slot] != &rt || scene_planes_w_ != rt.width || scene_planes_h_ != rt.height) return;
+  if (gpu_slot_rt_[slot] != &rt || gpu_slot_win_[slot] != active_window_ || scene_planes_w_ != rt.width || scene_planes_h_ != rt.height) return;
   std::string err;
   if (gpu_view_ && rt.depth.size() == (size_t)rt.width * rt.height &&
       gpu_view_->read_back(slot, nullptr, rt.depth.data(), rt.ids.size() == rt.depth.size() ? rt.ids.data() : nullptr, &err))

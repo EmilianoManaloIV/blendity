@@ -2,6 +2,65 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 252): windows for a drawing tablet - dock into any window, a second Scene view (task 0232)
+
+**Asked:** "I want to dock windows onto other windows. Such as on my drawing tablet I want my scene view and Inspector
+view. Include the option to have duplicate windows."
+
+**Added**
+- **A kind once per window, not once overall** (ADR 0070, amending 0059): the Scene view, the Game view and the
+  Inspector **duplicate** into a window of their own (the tab menu's *Duplicate into New Window*, `dock duplicate
+  <Window>`), the first staying put - a Scene view and an Inspector on the drawing tablet while the main window keeps
+  its own. The other kinds show one thing and stay in one window at a time.
+- **A view state per window** (`EditorViewState`): the Scene view's camera, place, navigation drag, shading and
+  overlay flags, pilot camera, the Game view's place, the Inspector's pin, and the render targets, renderers, filter
+  targets and view caches the views draw into, swapped into the editor's members with the window's UI
+  (`swap_window_state`), so every tool, shortcut and the Wheel act in the window under the pointer with no other
+  change; a new window starts from the main window's state (a duplicate from the window it came from); the card's
+  view slots are keyed by the window too; a camera gliding in another window keeps frames coming; saved in the
+  `windows=` preference as `;V(yaw,pitch,distance,pivot,fov,ortho,shading,pin)` per window and restored with it.
+- **Dock into any window:** a tab dragged out of one editor window and dropped over another joins that window's dock
+  at the zone under the pointer (its tab bar a tab, its quarters a split), the target drawing the highlight while the
+  drag is over it; the main window is a target like any other; `dock move <Window> window <n>` (the `dock windows`
+  numbers) joins a window's largest area; the tab menu's *Move to Window n*.
+- **The Inspector's Pin** (Unity's lock): this Inspector keeps one object while the selection moves on, and follows
+  again unpinned; `inspector lock|unlock`. A second Inspector has a pin of its own.
+
+**Changed**
+- A layout reset in the main window and Add Tab no longer remove or hide a Scene view, Game view or Inspector another
+  window holds; `dock_move`'s insertion is `dock_insert`, shared with the drop onto another window.
+**Reviewed** (the Opus review's findings, fixed before the PR)
+- Both Scene views ran the shared tool state every frame, so the window without the pen ended a stroke begun in the
+  other after one frame (and a Scene Gizmo press there snapped the main camera, G / R / S ran twice). An interaction
+  belongs to the window it began in (`interaction_window_`): the other windows' Scene views draw and leave the tools
+  alone until it ends; the Scene Gizmo's drag, the gizmo's pivot and orientation, the finger orbit, the Alt-click and
+  the side-button drag, the pilot's saved camera and the sketch guide's last camera are per window too.
+- The card's depth and id planes could be read for the wrong Scene view (the planes' size wasn't per window and the
+  slot check ignored the window): the size travels with the view, the check asks the window, and a slot taken from
+  another window clears that window's waiting planes.
+- `take_tab` removed the first instance it found, so moving a duplicate took the main window's Scene view; every move
+  now names the window it comes from and a moved Scene view carries its camera; restoring two windows with a Scene
+  view each no longer closes one.
+- A pinned Inspector edited the selection, not its object, and two Inspectors dropped each other's menu choices and
+  fought over the scroll: the pinned one edits its object alone; the menu choice and the scroll are the window's.
+- The Pin was drawn under the name field: it sits at the header row's right and the name field makes room.
+- The windows preference now carries the overlay flags with the camera (`;V(...)`, numbers written with nine digits
+  and a NaN as 0); a window that never drew gets a tab, not a split; the caches of a closed window are freed; a bad
+  window number in `dock move ... window` warns; the pins let go with a new scene.
+- Tests added: a pen stroke in a duplicate goes on while the main window draws and lands as one stroke; a Game view
+  duplicates; closing the windows frees the caches and returns the tabs; a duplicate moved to another window takes its
+  own instance.
+
+**Checked**
+- `tests_round252` in `tests/test_editor.cpp` (3 tests): a tab dropped over a second window joins it and leaves the main
+  dock, `dock move ... window n` and `main` move it back and forth; `dock duplicate Scene` makes a second Scene view
+  whose Alt+drag orbits it alone (the main camera unmoved), a layout reset keeps both, the windows preference
+  round-trips its camera; an Inspector pinned to a new cube keeps it as a sphere is made, unpins, and a second
+  Inspector has a pin of its own.
+- Unit checks (round 252): Windows, in render-cache verify mode, 12,474, 0 failed (1061 tests), 0 stale
+  pictures. Linux with libraries: 12,015, 0 failed. Sanitizer build: 11,885, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 251): custom panels, a shortcut for anything, a UI file (task 0231)
 
 **Asked:** the second task of the customization plan: ZBrush's custom palettes ("put any button in a palette of your

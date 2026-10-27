@@ -119,7 +119,11 @@ shows a guide strip with its next three steps. While dragging a gizmo arrow, typ
 go; right-click a tab for Move to New Window, Move to Display N or Move to Main Window. Each window is a dock of its
 own, at its own display's scale; the scene, selection and undo stay one, and the windows come back with the layout.
 A Render or Game tab in its own window can be Render Only (the picture alone, fitted, its controls at the top) and Full
-Screen on that display - a second monitor showing the render large. **Tablet Mode** (the tab menu) makes a window's
+Screen on that display - a second monitor showing the render large. A tab dragged onto **another editor window** docks
+there (a tab in its bar, a split at its edges), and the Scene view, the Game view and the Inspector can be **duplicated**
+(the tab menu's Duplicate into New Window; `dock duplicate Scene`): a second Scene view has a camera of its own, a second
+Inspector a **Pin** that keeps one object while the selection moves on - a drawing tablet beside the screen holds both
+while the main window keeps its own. **Tablet Mode** (the tab menu) makes a window's
 UI half as big again for a pen or a finger; a pen's pressure and tilt shape the Editing tab's brush, its eraser end
 erases, and a palm resting on the screen is ignored.
 

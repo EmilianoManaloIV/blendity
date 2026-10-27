@@ -44,26 +44,20 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
   const bool quick_menu_took = wheel_took_;  // (task 0230: the Wheel's frame step took the press or release)
-  if (!quick_menu_took) scene_navigation(view);
-  view_gizmo_drag(view);  // (a drag begun on the Scene Gizmo or its hand / magnifier: task 0216)
+  /* Task 0232: an interaction begun in another window's Scene view (a drag, a stroke, a gizmo, G / R / S, a brush) is
+   * that window's: this view draws, and leaves the tools alone until it ends. */
+  const bool other_owns = interaction_window_ >= 0 && interaction_window_ != active_window_;
+  if (!quick_menu_took && !other_owns) scene_navigation(view);
+  if (!other_owns) view_gizmo_drag(view);  // (a drag begun on the Scene Gizmo or its hand / magnifier: task 0216)
   update_pilot_camera();  // flying a camera: it follows the view
 
   /* Gizmo math and picking need this frame's camera matrices before we
    * render, so transforms applied by a drag show up in the same frame. */
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
-  bool gizmo_busy = quick_menu_took || sketch_update(view);  // (task 0223: while sketching the pen draws, over gizmos and tools)
-  if (bone_handles_update(view)) gizmo_busy = true;  // (before the gizmo: a pressed handle is the bone's, task 0066)
-  if (gizmo_update(view)) gizmo_busy = true;
-  if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
-  /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
-  if (pushpull_update(view)) gizmo_busy = true;
-  if (modal_update(view)) gizmo_busy = true;
-  if (transform_update(view)) gizmo_busy = true;
-  if (focus_pick_update(view)) gizmo_busy = true;
-  if (autorig_update(view)) gizmo_busy = true;
-  if (knife_update(view)) gizmo_busy = true;
-  if (draw_update(view)) gizmo_busy = true;
+  bool gizmo_busy = quick_menu_took || other_owns;
+  if (!other_owns) gizmo_busy = scene_tool_updates(view, gizmo_busy);
+  if (!other_owns) interaction_window_ = scene_interacting() ? active_window_ : -1;
 
   auto &in = u.in;
   /* (Task 0217's pen held still is the frame's now, with a finger's: wheel_frame, task 0230.) */
@@ -226,6 +220,25 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   }
   if (in.pressed[0] && tool_ == Tool::View) return {Drag::ViewTool, 0};
   return {Drag::None, 0};
+}
+
+/* The Scene view's tools, in their order of precedence (the sketch tool first: while sketching the pen draws, over
+ * gizmos and tools, task 0223; a pressed bone handle before the gizmo, task 0066; the Weight Paint brush, a running
+ * Push/Pull, the modal and transform operators, the focus pick, the auto-rig, the Knife, the Draw tools). True when one
+ * of them owns the mouse this frame. */
+bool Editor::scene_tool_updates(const Recti &view, bool busy) {
+  if (sketch_update(view)) busy = true;
+  if (bone_handles_update(view)) busy = true;
+  if (gizmo_update(view)) busy = true;
+  if (wp_update(view)) busy = true;
+  if (pushpull_update(view)) busy = true;
+  if (modal_update(view)) busy = true;
+  if (transform_update(view)) busy = true;
+  if (focus_pick_update(view)) busy = true;
+  if (autorig_update(view)) busy = true;
+  if (knife_update(view)) busy = true;
+  if (draw_update(view)) busy = true;
+  return busy;
 }
 
 void Editor::scene_navigation(const Recti &view) {

@@ -270,11 +270,42 @@ struct DockNode {
   DockNode *parent = nullptr;
 };
 
+/* A window's own view state (task 0232, ADR 0070): the Scene view's camera, place, navigation, shading and overlays,
+ * the Game view's place, the Inspector's pin, and the targets the views draw into - swapped into the editor's members
+ * with the window's UI (swap_window_state), so a second Scene view or Inspector in another window has its own. Made
+ * from the main window's when the window first draws (a duplicate copies the window it came from). */
+struct EditorViewState {
+  SceneCamera cam;
+  Recti scene_rect, game_rect, cam_preview_rect, last_op_rect;
+  bool scene_hovered = false, scene_drawn = false;
+  int drag = 0, drag_button = 0, drag_x = 0, drag_y = 0;  // (Editor::Drag, as an int)
+  double fly_last = 0;
+  float fly_accel = 1.0f;
+  Shading shading = Shading::Shaded;
+  bool scene_lighting = true, show_grid = true, show_gizmos = true, show_stats = true;
+  bool show_bones = true, show_rig_controls = true, show_icons = true, show_points = true, show_origins = true, show_footprints = true, show_outline = true;
+  RenderTarget scene_rt, game_rt;
+  Renderer3D scene_r3d, game_r3d;
+  FilterTarget scene_ft, scene_vs, game_ft, game_vs;
+  int scene_planes_slot = -1, scene_planes_w = 0, scene_planes_h = 0;
+  bool scene_on_gpu = false;
+  uint64_t pilot_cam = 0;
+  SceneCamera pilot_saved_cam;
+  int gizmo_nav = 0, gizmo_nav_hot = -1, gizmo_nav_x = 0, gizmo_nav_y = 0;  // (Editor::GizmoNav as an int)
+  Vec3 gizmo_pivot;
+  Quat gizmo_orient;
+  bool alt_click = false, alt_click_ring = false, finger_orbit = false, barrel_nav = false;
+  float cam_yaw_before = 1e9f, cam_pitch_before = 1e9f, cam_fov_before = 1e9f;  // (the sketch guide's last camera)
+  uint64_t inspector_lock = 0;  // the object an Inspector keeps showing (0: it follows the selection)
+  int inspector_content_h = 0;
+};
+
 /* A window beside the main one (task 0187, ADR 0059): its OS window, framebuffer, UI context and dock root, swapped
  * into the editor's while it draws (editor_windows.cpp). */
 struct EditorWindow {
   int id = 0;
   platform::Window *os = nullptr;  // (null headless)
+  std::unique_ptr<EditorViewState> view;  // (task 0232: null until the window first draws, or a duplicate's copy)
   Image fb;
   ui::Context ui;
   std::unique_ptr<DockNode> dock;
@@ -299,9 +330,12 @@ void collect_dock_tabs(const DockNode *n, std::vector<WindowKind> &out);
 
 /* A tab moved between windows, asked for while drawing and done between frames. */
 struct WindowMove {
-  enum Kind { NewWindow, Main, Monitor } kind = NewWindow;
+  enum Kind { NewWindow, Main, Monitor, ToWindow } kind = NewWindow;  // ToWindow: into window `window_id`'s dock at (x, y) (task 0232)
   WindowKind tab = WindowKind::Count;
   int x = 0, y = 0, w = 0, h = 0, monitor = 0;
+  int window_id = 0;      // ToWindow: the target (0 the main window)
+  bool duplicate = false;  // NewWindow: a second instance, the first staying where it is (task 0232)
+  int source = 0;          // NewWindow with duplicate: the window whose view state it copies (0 the main one)
 };
 
 const char *trash_name();  // "Recycle Bin" on Windows, else "Trash" (project_window.cpp)
@@ -604,6 +638,21 @@ class Editor {
     render_has_result_ = true;
   }
   bool in_main_dock_for_test(WindowKind k) { return dock_find(k) != nullptr; }
+  bool in_window_dock_for_test(int id, WindowKind k) {  // (task 0232)
+    EditorWindow *w = editor_window(id);
+    if (!w || !w->dock) return false;
+    std::vector<WindowKind> tabs;
+    collect_dock_tabs(w->dock.get(), tabs);
+    return std::find(tabs.begin(), tabs.end(), k) != tabs.end();
+  }
+  const SceneCamera *window_camera_for_test(int id) {
+    EditorWindow *w = editor_window(id);
+    return w && w->view ? &w->view->cam : nullptr;
+  }
+  uint64_t inspector_lock_for_test() const { return inspector_lock_; }
+  size_t window_caches_for_test() const { return window_caches_.size(); }
+  void queue_window_move_for_test(const WindowMove &m) { window_moves_.push_back(m); }
+  int interaction_window_for_test() const { return interaction_window_; }
   Recti dock_leaf_rect_for_test(WindowKind k) {
     DockNode *n = dock_find(k);
     return n ? n->rect : Recti{0, 0, 0, 0};
@@ -1155,6 +1204,28 @@ class Editor {
   void dock_draw_window(WindowKind k, const Recti &r);
   DockNode *dock_find(WindowKind k, DockNode *n = nullptr);
   DockNode *dock_leaf_at(int x, int y, DockNode *n = nullptr);
+  /* Task 0232 (ADR 0070): the drop zone of a point over a leaf (0 a tab, 1-4 a split left / right / top / bottom; the
+   * highlight it means), a tab put into a leaf at a zone (the second half of dock_move), the kinds a window may hold
+   * a second instance of, a tab dropped over another editor window, the drop highlight the target window draws. */
+  int dock_drop_zone(const DockNode *leaf, int x, int y, Recti *highlight) const;
+  void dock_insert(WindowKind k, DockNode *target, int zone);
+  static bool can_duplicate(WindowKind k) { return k == WindowKind::Scene || k == WindowKind::Game || k == WindowKind::Inspector; }
+  void dock_duplicate(WindowKind k);
+  EditorWindow *window_at_desktop(int dx, int dy, int &lx, int &ly);
+  bool main_at_desktop(int dx, int dy, int &lx, int &ly);
+  void desktop_point(int mx, int my, int &dx, int &dy);
+  void draw_drop_hint();
+  int drop_hint_window_ = -1;  // the window a tab drag hovers (its frame draws the highlight); -1 none
+  Recti drop_hint_rect_;
+  WindowKind drop_hint_tab_ = WindowKind::Count;
+  void move_to_window(WindowKind k, int id, int x, int y, int source);
+  void swap_view_state(EditorWindow &w);
+  std::unique_ptr<EditorViewState> capture_view_state() const;
+  bool windows_moving() const;
+  std::string window_view_text(const EditorWindow &w);
+  void load_window_view(EditorWindow &w, const std::string &text);
+  uint64_t inspector_lock_ = 0;  // the Inspector's pin (per window: EditorViewState)
+  GameObject *inspector_object();
   DockNode *dock_largest_leaf(DockNode *n = nullptr);
   void dock_remove(WindowKind k);
   void dock_open(WindowKind k, bool focus = true);
@@ -2002,7 +2073,7 @@ class Editor {
    * views nor makes the Scene view cheaper. */
   bool scene_moving() const {
     const bool nav = drag_ != Drag::None && drag_ != Drag::Box && drag_ != Drag::AltClick;
-    return nav || xf_.active || pp_.active || modal_.active;
+    return nav || xf_.active || pp_.active || modal_.active || windows_moving();
   }
   bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
   bool other_views_follow_ = false;
@@ -2637,10 +2708,10 @@ class Editor {
   EditorWindow *editor_window(int id);
   DockNode *dock_find_elsewhere(WindowKind k, EditorWindow **owner);
   DockNode *dock_find_anywhere(WindowKind k);
-  EditorWindow *open_window(WindowKind k, int x, int y, int w, int h);
+  EditorWindow *open_window(WindowKind k, int x, int y, int w, int h, bool duplicate = false, int source = 0);
   void init_window_ui(EditorWindow &w);
-  void take_tab(WindowKind k);
-  void move_to_main(WindowKind k);
+  void take_tab(WindowKind k, int source = -1);  // (source: the window to take it from, 0 the main one; -1 wherever it is)
+  void move_to_main(WindowKind k, int source = -1);
   void close_window(EditorWindow &w);
   void close_finished_windows();
   int monitor_at(int x, int y);
@@ -3303,6 +3374,7 @@ class Editor {
   std::unordered_map<const RenderMesh *, GpuMesh> gpu_meshes_;
   uint64_t gpu_calls_ = 0;
   const RenderTarget *gpu_slot_rt_[gpu::Raster::kSlots] = {};
+  int gpu_slot_win_[gpu::Raster::kSlots] = {};  // (task 0232: the targets are swapped by value, so the window keys the slot too)
   uint64_t gpu_slot_used_[gpu::Raster::kSlots] = {};
   void set_viewport_device(int d);
   bool gpu_view_wanted() const;
@@ -3357,6 +3429,22 @@ class Editor {
     uint64_t frame = 0;  // ui frame it was chosen in: used on the next draw or dropped
   };
   InspectorAction inspector_action_;
+  /* Task 0232: the secondary windows' view caches and overlay records, by window id, swapped in with the window
+   * (EditorViewState holds the public-typed state; these are the editor's own types). */
+  struct WindowCaches {
+    ViewCache scene, game;
+    Renderer3D::OverlayRecord overlays;
+    bool overlays_recorded = false;
+    InspectorAction inspector_action;
+  };
+  std::map<int, WindowCaches> window_caches_;
+  /* The window whose Scene view an interaction (a drag, a stroke, a gizmo, G / R / S, a brush) began in: the other
+   * windows' Scene views draw and leave the tools alone until it ends (-1: none). */
+  int interaction_window_ = -1;
+  bool scene_interacting() const;
+  bool scene_tool_updates(const Recti &view, bool busy);
+  void queue_window_move(WindowMove m);  // (from the window drawing now: its id is the move's source)
+  int inspector_content_h_ = 0;
   std::map<std::string, Recti> inspector_menu_rects_;  // each section's menu button, by key (tests click them)
   static constexpr int kCompRemove = 100, kCompMoveUp = 101, kCompReset = 102;
   bool scene_filters_ = false;
