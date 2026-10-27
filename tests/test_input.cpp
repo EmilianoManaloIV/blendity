@@ -577,12 +577,12 @@ static void tests_round237() {
     step(ed, {pen_ev(EventType::MouseDown, x, y)});
     for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) step(ed, {});  // (0.5 s at 20 ms a frame: 25)
     CHECK(ed.quick_menu_open_for_test());
-    /* Undo is the seventh of the ten slices, 216 degrees clockwise from straight up. */
-    const float a = 216.0f * 3.14159265f / 180.0f;
+    /* Undo is the sixth of the eight slices (task 0230's Wheel), 225 degrees clockwise from straight up. */
+    const float a = 225.0f * 3.14159265f / 180.0f;
     const int ux = x + (int)(std::sin(a) * 90.0f), uy = y - (int)(std::cos(a) * 90.0f);
     step(ed, {pen_ev(EventType::MouseMove, ux, uy)});
-    std::printf("    the menu opened; the slice under the pen: %d (Undo is 6)\n", ed.quick_menu_hot_for_test());
-    CHECK(ed.quick_menu_hot_for_test() == 6);
+    std::printf("    the menu opened; the slice under the pen: %d (Undo is 5)\n", ed.quick_menu_hot_for_test());
+    CHECK(ed.quick_menu_hot_for_test() == 5);
     step(ed, {pen_ev(EventType::MouseUp, ux, uy)});
     step(ed, {});
     CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == made - 1 && ed.selected_objects_for_test().empty());
@@ -638,8 +638,8 @@ static void tests_round237() {
     CHECK(ed.selected_objects_for_test().size() == 1);
     step(ed, {pen_ev(EventType::MouseDown, x, y, 1, true)});
     step(ed, {pen_ev(EventType::MouseUp, x, y, 1, true)});
-    /* Delete is the fifth slice, 144 degrees clockwise from up. */
-    const float a = 144.0f * 3.14159265f / 180.0f;
+    /* Delete is the fifth of eight slices, 180 degrees clockwise from up. */
+    const float a = 180.0f * 3.14159265f / 180.0f;
     const int dx = x + (int)(std::sin(a) * 90.0f), dy = y - (int)(std::cos(a) * 90.0f);
     step(ed, {pen_ev(EventType::MouseMove, dx, dy)});
     step(ed, {pen_ev(EventType::MouseDown, dx, dy)});
@@ -797,7 +797,348 @@ static void tests_round241() {
     const std::string tablet = ed.statusbar_hint_for_test();
     std::printf("    mouse: %s\n    tablet: %s\n", mouse.c_str(), tablet.c_str());
     CHECK(mouse.find("orbit") != std::string::npos && mouse.find("finger") == std::string::npos);
-    CHECK(tablet.find("One finger: orbit") != std::string::npos && tablet.find("quick menu") != std::string::npos);
+    CHECK(tablet.find("One finger: orbit") != std::string::npos && tablet.find("the Wheel") != std::string::npos);
+  });
+}
+
+/* ---------------------------------------------------------------- round 250: the Wheel (task 0230) */
+static void tests_round250() {
+  using platform::EventType;
+  auto step = [&](Editor &ed, std::vector<platform::Event> events) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  auto key = [](int k, int mods = 0) {
+    platform::Event e;
+    e.type = EventType::KeyDown, e.key = k, e.mods = mods;
+    return e;
+  };
+  auto text = [](char c) {
+    platform::Event e;
+    e.type = EventType::Text, e.codepoint = (uint32_t)c;
+    return e;
+  };
+  auto setup = [&](Editor &ed) {
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed, {});
+  };
+  /* A point in a window's middle (the Hierarchy's: below its rows). */
+  auto middle_of = [&](Editor &ed, WindowKind k) {
+    const Recti r = ed.dock_leaf_rect_for_test(k);
+    return std::make_pair(r.x + r.w / 2, r.y + r.h * 3 / 4);
+  };
+  /* The slice `i` of `n` at 90 px from the wheel's middle (as the hot test places them). */
+  auto slice_at = [&](int cx, int cy, int i, int n) {
+    const float a = 6.2831853f * i / n;
+    return std::make_pair(cx + (int)(std::sin(a) * 90.0f), cy - (int)(std::cos(a) * 90.0f));
+  };
+
+  test("wheel: Space opens the Wheel over the Scene view (the object set) and over the Hierarchy (its own set); a tap on Create Empty makes one; Esc closes it; menu.wheel is Space", [&] {
+    Editor ed;
+    setup(ed);
+    CHECK(ed.shortcut_for_test("menu.wheel") == "Space");
+    const Recti s = ed.scene_rect_for_test();
+    step(ed, {pointer_ev(EventType::MouseMove, s.x + s.w / 2, s.y + s.h / 2)});
+    step(ed, {key(platform::KEY_SPACE)});
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "object");
+    const std::vector<std::string> labels = ed.wheel_labels_for_test();
+    CHECK(labels.size() == 8 && labels[0] == "Move" && labels[5] == "Undo" && labels[7] == "More");
+    step(ed, {key(platform::KEY_ESCAPE)});
+    CHECK(!ed.quick_menu_open_for_test());
+    auto [hx, hy] = middle_of(ed, WindowKind::Hierarchy);
+    step(ed, {pointer_ev(EventType::MouseMove, hx, hy)});
+    step(ed, {key(platform::KEY_SPACE)});
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "hierarchy");
+    CHECK(ed.wheel_labels_for_test()[0] == "Create Empty");
+    const size_t before = ed.scene().object_count();
+    const Recti h = ed.dock_leaf_rect_for_test(WindowKind::Hierarchy);
+    std::printf("    the Hierarchy's wheel at a %d x %d window\n", h.w, h.h);
+    /* The wheel is kept inside the Hierarchy: its middle is where it can show whole. */
+    int cx = std::max(h.x + 150, std::min(hx, h.right() - 150)), cy = std::max(h.y + 110, std::min(hy, h.bottom() - 110));
+    auto [tx, ty] = slice_at(cx, cy, 0, 8);
+    step(ed, {pointer_ev(EventType::MouseMove, tx, ty)});
+    CHECK(ed.quick_menu_hot_for_test() == 0);
+    step(ed, {pointer_ev(EventType::MouseDown, tx, ty)});
+    step(ed, {pointer_ev(EventType::MouseUp, tx, ty)});
+    step(ed, {});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 1);
+  });
+
+  test("wheel: a ring slice opens its ring in place; the keys 1-8 pick; Esc goes back a ring, then closes; typed letters pick a slice by its start", [&] {
+    Editor ed;
+    setup(ed);
+    ed.command("wheel open");
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "object");
+    ed.command("wheel pick More");
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_labels_for_test()[0] == "Frame" && ed.wheel_labels_for_test()[2] == "Add to Selection");
+    step(ed, {key(platform::KEY_ESCAPE)});
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_labels_for_test()[0] == "Move");
+    step(ed, {key(platform::KEY_ESCAPE)});
+    CHECK(!ed.quick_menu_open_for_test());
+    /* The Hierarchy's set from the console: 1 is Create Empty. */
+    auto [hx, hy] = middle_of(ed, WindowKind::Hierarchy);
+    const size_t before = ed.scene().object_count();
+    ed.command(strprintf("wheel open %d %d", hx, hy));
+    CHECK(ed.wheel_mode_for_test() == "hierarchy");
+    step(ed, {key(platform::KEY_1)});
+    step(ed, {});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 1);
+    /* Typed: "d" is Duplicate or Delete - it waits; "de" is Delete alone (the new Empty is selected). */
+    ed.command(strprintf("wheel open %d %d", hx, hy));
+    step(ed, {text('d')});
+    CHECK(ed.quick_menu_open_for_test());
+    step(ed, {text('e')});
+    step(ed, {});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == before);
+  });
+
+  test("wheel: Shift keeps it open to chain; a tap in the middle repeats the slice picked last; a tap outside closes it", [&] {
+    Editor ed;
+    setup(ed);
+    auto [hx, hy] = middle_of(ed, WindowKind::Hierarchy);
+    const size_t before = ed.scene().object_count();
+    ed.command(strprintf("wheel open %d %d", hx, hy));
+    step(ed, {key(platform::KEY_1, platform::MOD_SHIFT)});
+    CHECK(ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 1);
+    step(ed, {key(platform::KEY_1, platform::MOD_SHIFT)});
+    CHECK(ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 2);
+    step(ed, {key(platform::KEY_ESCAPE)});
+    CHECK(!ed.quick_menu_open_for_test());
+    /* The middle repeats Create Empty, picked last in this set. */
+    ed.command(strprintf("wheel open %d %d", hx, hy));
+    const Recti h = ed.dock_leaf_rect_for_test(WindowKind::Hierarchy);
+    const int cx = std::max(h.x + 150, std::min(hx, h.right() - 150)), cy = std::max(h.y + 110, std::min(hy, h.bottom() - 110));
+    step(ed, {pointer_ev(EventType::MouseMove, cx, cy)});
+    step(ed, {pointer_ev(EventType::MouseDown, cx, cy)});
+    step(ed, {pointer_ev(EventType::MouseUp, cx, cy)});
+    step(ed, {});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 3);
+    ed.command(strprintf("wheel open %d %d", hx, hy));
+    step(ed, {pointer_ev(EventType::MouseMove, cx + 400, cy)});
+    step(ed, {pointer_ev(EventType::MouseDown, cx + 400, cy)});
+    step(ed, {pointer_ev(EventType::MouseUp, cx + 400, cy)});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 3);
+  });
+
+  test("wheel: a finger held still half a second opens it (in the Hierarchy and in the Scene view, with no selection made), and lifting over a slice runs it; a finger that moves opens nothing", [&] {
+    using platform::Pointer;
+    Editor ed;
+    setup(ed);
+    auto [hx, hy] = middle_of(ed, WindowKind::Hierarchy);
+    const size_t before = ed.scene().object_count();
+    step(ed, {pointer_ev(EventType::MouseMove, hx, hy, Pointer::Touch)});
+    step(ed, {pointer_ev(EventType::MouseDown, hx, hy, Pointer::Touch)});
+    for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) step(ed, {});
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "hierarchy");
+    const Recti h = ed.dock_leaf_rect_for_test(WindowKind::Hierarchy);
+    const int cx = std::max(h.x + 150, std::min(hx, h.right() - 150)), cy = std::max(h.y + 110, std::min(hy, h.bottom() - 110));
+    auto [tx, ty] = slice_at(cx, cy, 0, 8);
+    step(ed, {pointer_ev(EventType::MouseMove, tx, ty, Pointer::Touch)});
+    step(ed, {pointer_ev(EventType::MouseUp, tx, ty, Pointer::Touch)});
+    step(ed, {});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 1);
+    /* The Scene view over an object: the hold opens the wheel and the lift selects nothing. */
+    ed.command("window tablet on");
+    step(ed, {});
+    ed.clear_selection_for_test();
+    const Recti s = ed.scene_rect_for_test();
+    const int sx = s.x + s.w / 2, sy = s.y + s.h / 2;
+    step(ed, {pointer_ev(EventType::MouseMove, sx, sy, Pointer::Touch)});
+    step(ed, {pointer_ev(EventType::MouseDown, sx, sy, Pointer::Touch)});
+    for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) step(ed, {});
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "object");
+    step(ed, {pointer_ev(EventType::MouseUp, sx, sy, Pointer::Touch)});
+    step(ed, {});
+    CHECK(ed.quick_menu_open_for_test() && ed.selected_objects_for_test().empty());  // (lifted in the middle: it waits)
+    ed.command("wheel close");
+    /* A finger that moves orbits, and opens nothing. */
+    step(ed, {pointer_ev(EventType::MouseDown, sx, sy, Pointer::Touch)});
+    for (int i = 1; i <= 30; i++) step(ed, {pointer_ev(EventType::MouseMove, sx + 4 * i, sy, Pointer::Touch)});
+    CHECK(!ed.quick_menu_open_for_test());
+    step(ed, {pointer_ev(EventType::MouseUp, sx + 120, sy, Pointer::Touch)});
+  });
+
+  test("wheel: sets edited from the console (add with a label, into a ring, remove, move, ring, reset) are kept in the preferences and read back the same; a ring holds eight", [&] {
+    const std::string dir = fs::join(scratch_project(), "wheel_prefs");
+    fs::make_dirs(dir);
+    Editor ed;
+    setup(ed);
+    ed.prefs_for_test(dir + "/prefs.txt");
+    CHECK(ed.wheel_prefs_text_for_test().empty());  // (every set its default)
+    ed.command("wheel add hierarchy Smart UV Project label UV");  // (refused: the set holds eight already)
+    CHECK(ed.wheel_prefs_text_for_test().empty());
+    ed.command("wheel remove hierarchy Join");
+    ed.command("wheel remove hierarchy Frame");
+    ed.command("wheel add hierarchy Smart UV Project label UV");
+    ed.command("wheel add hierarchy No Such Command At All");  // (a console line: kept as typed)
+    const std::string hier = ed.wheel_prefs_text_for_test();
+    CHECK(hier.find("wheel=hierarchy|") != std::string::npos && hier.find("UV=Smart UV Project;No Such Command At All") != std::string::npos);
+    ed.command("wheel ring object Tools");
+    CHECK(ed.wheel_prefs_text_for_test().find(">Tools:Undo") == std::string::npos);  // (the object set has eight slices: no room)
+    ed.command("wheel remove object More");
+    ed.command("wheel ring object Tools");
+    ed.command("wheel add object Bevel ring Tools");
+    ed.command("wheel add object Loop Cut label Cut ring Tools");
+    ed.command("wheel move object Tools up");
+    const std::string text = ed.wheel_prefs_text_for_test();
+    std::printf("    prefs:\n%s", text.c_str());
+    CHECK(text.find(">Tools:Undo,Bevel,Cut=Loop Cut") != std::string::npos);
+    CHECK(text.find("Edit Mode=Edit Mode On / Off;>Tools") == std::string::npos && text.find(">Tools:Undo,Bevel,Cut=Loop Cut;Edit Mode=Edit Mode On / Off") != std::string::npos);
+    ed.save_prefs_for_test();
+    Editor ed2;
+    setup(ed2);
+    ed2.prefs_for_test(dir + "/prefs.txt");
+    ed2.load_prefs_for_test();
+    CHECK(ed2.wheel_prefs_text_for_test() == text);
+    ed2.command("wheel open");
+    ed2.command("wheel pick Cut");  // (goes down into Tools and runs Loop Cut's action: nothing to cut, no harm)
+    CHECK(!ed2.quick_menu_open_for_test());
+    ed2.command("wheel reset object");
+    CHECK(ed2.wheel_prefs_text_for_test().find("wheel=object|") == std::string::npos && ed2.wheel_prefs_text_for_test().find("wheel=hierarchy|") != std::string::npos);
+    ed2.command("wheel reset");
+    CHECK(ed2.wheel_prefs_text_for_test().empty());
+  });
+
+  test("wheel: a slice picked by a letter or a digit keeps the key to itself (no shortcut, no typed value after it); Space closes it; SketchUp's chord is Shift+Space", [&] {
+    Editor ed;
+    setup(ed);
+    /* Unity's R is the Scale tool: typing "r" picks Rotate, and the leaked R would then switch to Scale. */
+    const Recti s = ed.scene_rect_for_test();
+    step(ed, {pointer_ev(EventType::MouseMove, s.x + s.w / 2, s.y + s.h / 2)});
+    ed.command("wheel open");
+    step(ed, {key(platform::KEY_R), text('r')});
+    step(ed, {});
+    std::printf("    after typing r: tool %d (Rotate is 2, Scale 3), wheel open %d\n", ed.tool_for_test(), ed.quick_menu_open_for_test());
+    CHECK(!ed.quick_menu_open_for_test() && ed.tool_for_test() == 2 && !ed.modal_active_for_test());
+    /* The Hierarchy's 1 is Create Empty: the digit's text must not reach anything after it. */
+    auto [hx, hy] = middle_of(ed, WindowKind::Hierarchy);
+    const size_t before = ed.scene().object_count();
+    ed.command(strprintf("wheel open %d %d", hx, hy));
+    step(ed, {key(platform::KEY_1), text('1')});
+    CHECK(!ed.quick_menu_open_for_test() && ed.scene().object_count() == before + 1 && ed.ui_for_test().in.text.empty());
+    ed.command("wheel open");
+    step(ed, {key(platform::KEY_SPACE), text(' ')});
+    CHECK(!ed.quick_menu_open_for_test());
+    ed.command("keymap SketchUp");
+    CHECK(ed.shortcut_for_test("menu.wheel") == "Shift+Space");
+    ed.command("keymap Unity");
+  });
+
+  test("wheel: a pen held on a Hierarchy row opens the wheel and the row is neither dragged nor selected by the lift; the side button clicked over the Hierarchy opens it too", [&] {
+    using platform::Pointer;
+    Editor ed;
+    setup(ed);
+    ed.command("create Cube");
+    ed.command("create Sphere");
+    step(ed, {});
+    ed.clear_selection_for_test();
+    int rx = 0, ry = 0;
+    CHECK(ed.hierarchy_row_for_test("Cube", rx, ry));
+    auto pen_at = [&](EventType t, int x, int y, int button = 0, bool barrel = false) {
+      platform::Event e = pointer_ev(t, x, y, Pointer::Pen);
+      e.button = button, e.barrel = barrel;
+      return e;
+    };
+    step(ed, {pen_at(EventType::MouseMove, rx, ry)});
+    step(ed, {pen_at(EventType::MouseDown, rx, ry)});
+    for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) step(ed, {});
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "hierarchy");
+    /* Lifted on another row: no reparenting, no selection, the wheel waits (lifted in the middle). */
+    int sx = 0, sy = 0;
+    CHECK(ed.hierarchy_row_for_test("Sphere", sx, sy));
+    step(ed, {pen_at(EventType::MouseMove, rx, ry + 2)});
+    step(ed, {pen_at(EventType::MouseUp, rx, ry + 2)});
+    step(ed, {});
+    const GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->parent == 0 && ed.selected_objects_for_test().empty());
+    ed.command("wheel close");
+    /* The side button clicked over the Hierarchy. */
+    auto [hx, hy] = middle_of(ed, WindowKind::Hierarchy);
+    step(ed, {pen_at(EventType::MouseMove, hx, hy, 1, true)});
+    step(ed, {pen_at(EventType::MouseDown, hx, hy, 1, true)});
+    step(ed, {pen_at(EventType::MouseUp, hx, hy, 1, true)});
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_mode_for_test() == "hierarchy");
+    ed.command("wheel close");
+  });
+
+  test("wheel: a second editor window has a wheel of its own (a hold there opens it there, the main window neither drops the hold nor draws it); the Inspector shares the other set and editing it shows there", [&] {
+    using platform::Pointer;
+    Editor ed;
+    setup(ed);
+    const int id = ed.open_window_for_test(WindowKind::Hierarchy, 600, 500);
+    CHECK(id > 0);
+    ed.step_window_headless(id, {pointer_ev(EventType::MouseMove, 300, 400, Pointer::Touch)});
+    ed.step_window_headless(id, {pointer_ev(EventType::MouseDown, 300, 400, Pointer::Touch)});
+    for (int i = 0; i < 40 && !ed.quick_menu_open_for_test(); i++) {
+      ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+      ed.step_window_headless(id, {});
+      ed.step_frame_headless({});  // (the main window's frames must leave the other window's hold alone)
+    }
+    CHECK(ed.quick_menu_open_for_test() && ed.wheel_window_for_test() == id && ed.wheel_mode_for_test() == "hierarchy");
+    ed.step_window_headless(id, {pointer_ev(EventType::MouseUp, 300, 400, Pointer::Touch)});
+    ed.command("wheel close");
+    /* The Inspector has no set of its own: its wheel is the "other" set, and a slice added to "other" shows there. */
+    auto [ix, iy] = middle_of(ed, WindowKind::Inspector);
+    ed.command(strprintf("wheel open %d %d", ix, iy));
+    CHECK(ed.wheel_mode_for_test() == "other" && ed.wheel_labels_for_test()[0] == "Undo");
+    ed.command("wheel close");
+    ed.command("wheel remove other Render");
+    ed.command("wheel add other Create Cube label Cube");
+    ed.command(strprintf("wheel open %d %d", ix, iy));
+    const std::vector<std::string> labels = ed.wheel_labels_for_test();
+    CHECK(std::find(labels.begin(), labels.end(), "Cube") != labels.end());
+    ed.command("wheel close");
+    ed.command("wheel reset");
+  });
+
+  test("wheel: a right-click on a menu row offers Quick Favorites and the Wheel (the palette row too); a ring's slice is removed in its ring, not a same-named slice above it; separators in a name survive the preferences", [&] {
+    Editor ed;
+    setup(ed);
+    const Recti s = ed.scene_rect_for_test();
+    step(ed, {pointer_ev(EventType::MouseMove, s.x + s.w / 2, s.y + s.h / 2)});
+    ed.command("wheel remove object More");  // (room on the set: it holds eight)
+    ed.right_click_row_for_test("Bevel");
+    step(ed, {});
+    CHECK(ed.command_ctx_for_test() == "Bevel");
+    ed.command_ctx_pick_for_test(1);  // Add to the Wheel (object)
+    step(ed, {});
+    CHECK(ed.wheel_prefs_text_for_test().find("wheel=object|") != std::string::npos && ed.wheel_prefs_text_for_test().find("Bevel") != std::string::npos);
+    ed.right_click_row_for_test("Bevel");
+    step(ed, {});
+    ed.command_ctx_pick_for_test(0);  // Add to Quick Favorites
+    CHECK(ed.favorites_for_test() == std::vector<std::string>{"Bevel"});
+    ed.command("wheel reset");
+    /* Two Undo slices: the edit set's own and a new ring's. Removing the ring's leaves the top one. */
+    ed.command("wheel remove edit More");
+    ed.command("wheel ring edit Tools");
+    ed.command("wheel add edit Bevel ring Tools");
+    ed.command("wheel remove edit Undo ring Tools");
+    const std::string text = ed.wheel_prefs_text_for_test();
+    std::printf("    %s", text.c_str());
+    CHECK(text.find("Undo;Object Mode") != std::string::npos && text.find(">Tools:Bevel") != std::string::npos);
+    ed.command("wheel remove edit Bevel ring Tools");  // (a ring keeps its last slice)
+    CHECK(ed.wheel_prefs_text_for_test().find(">Tools:Bevel") != std::string::npos);
+    /* A label and a console line with the separators in them. */
+    ed.command("wheel remove hierarchy Join");
+    ed.command("wheel remove hierarchy Frame");
+    ed.command("wheel add hierarchy sketchguide perspective 3 label A=B:C");
+    ed.command("wheel add hierarchy stats label x:y,z>w");
+    const std::string dir = fs::join(scratch_project(), "wheel_prefs2");
+    fs::make_dirs(dir);
+    ed.prefs_for_test(dir + "/prefs.txt");
+    ed.save_prefs_for_test();
+    Editor ed2;
+    setup(ed2);
+    ed2.prefs_for_test(dir + "/prefs.txt");
+    ed2.load_prefs_for_test();
+    CHECK(ed2.wheel_prefs_text_for_test() == ed.wheel_prefs_text_for_test());
+    step(ed2, {});  // (the loaded layout is laid out at the next frame: the Hierarchy's place is known after it)
+    auto [hx, hy] = middle_of(ed2, WindowKind::Hierarchy);
+    ed2.command(strprintf("wheel open %d %d", hx, hy));
+    const std::vector<std::string> labels = ed2.wheel_labels_for_test();
+    CHECK(std::find(labels.begin(), labels.end(), "A=B:C") != labels.end() && std::find(labels.begin(), labels.end(), "x:y,z>w") != labels.end());
+    ed2.command("wheel close");
   });
 }
 
@@ -811,4 +1152,5 @@ void run_input_tests() {
   tests_round239();
   tests_round240();
   tests_round241();
+  tests_round250();
 }

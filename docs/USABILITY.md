@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| The pen quick menu held ten fixed commands, opened in the Scene view only, and a finger couldn't open it; a rare command took a trip through the menus or the palette. | The Wheel: one radial menu over any window for Space, the pen's button or a pen or finger held still, with a set of up to eight slices (and rings) per mode that any menu row's right-click fills (task 0230). |
 | Selecting two opposite edges selected all four edges of the quad. Mark Seam, Bevel and the edge highlight all saw four. | Edge mode keeps edges themselves, as Blender does (`edge_sel_`). The edge tools read exactly those edges (`meshops::EdgeSelectionScope`). |
 | Shade Smooth on some faces smoothed the whole object. | Shading is per face (`Mesh::face_smooth`). Smoothing stops at flat faces, at edges marked sharp (Mark Sharp / Clear Sharp), at the Smooth by Angle limit, and optionally at UV seams ("Seams Are Hard Edges"). |
 | In Edit Mode, clicking another mesh did nothing. | It now becomes the mesh being edited (as in Unity, where a click always selects); picking another object in the Hierarchy does the same. |
@@ -317,7 +318,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 1. **A Blender navigation preference**: MMB orbit, Shift+MMB pan and numpad views, for users who want Blender navigation too. It shares no keys with modeling, so it is independent of everything above.
 2. **A context menu on right-click without dragging** (Unity's Scene view menu, Blender's W menu): the current mode's operators under the cursor. Right-click is already split between fly (drag) and cancel (during operators), so a click without movement is free.
-3. **Pie menus or a search** (Blender's F3; the keymap's action list is a start): with about 50 operators now, a type-to-find box is the fastest way to reach a rare one.
+3. ~~Pie menus or a search~~ Done: the command palette (Ctrl+K, task 0189) and the Wheel (Space, task 0230).
 4. **Snapping during G** to vertices, edges and faces (Blender's snap targets): the move gizmo now has vertex (V) and surface (Ctrl+Shift) snapping; G itself still snaps only to the grid.
 5. **Proportional editing during G / R / S** (it already works with the gizmos), with the wheel changing its radius.
 6. **Spin** (an interactive Screw on the selection) and **Knife cuts through several faces** in one stroke: the Knife and the Screw modifier are in; these are their next steps.

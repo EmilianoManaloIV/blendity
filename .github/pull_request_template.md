@@ -21,4 +21,5 @@ docs/tasks/NNNN-slug.md (status: in review) - requirements R-xx; ADR NNNN or "no
 - [ ] docs/ARCHITECTURE.md, docs/USABILITY.md rows (if applicable)
 - [ ] ADR (if architectural)
 
-Merging is the human's decision; agents never merge.
+Merging is the human's decision; agents never merge. This project is written with an AI under human direction and
+review: see docs/AI_DISCLOSURE.md.

@@ -550,6 +550,27 @@ class Editor {
   std::string prefs_text_for_test() const { return prefs_text_0190(); }
   bool quick_menu_open_for_test() const { return qm_.open; }
   int quick_menu_hot_for_test() const { return qm_.hot; }
+  /* A slice of the Wheel (task 0230): a label, a palette entry's name or a console line ("" is Add to Selection), or a
+   * ring of slices of its own. */
+  struct WheelSlice {
+    std::string label, entry;
+    bool is_ring = false;  // (opens `ring` in place; a ring is never empty)
+    std::vector<WheelSlice> ring;
+  };
+  std::string wheel_mode_for_test() const { return qm_.mode; }
+  int wheel_window_for_test() const { return qm_.window; }
+  int tool_for_test() const { return (int)tool_; }
+  /* A menu row right-clicked by its label (what ui::Context::favorite_request carries); the small menu's entry; its
+   * items run (0 the favorites, 1 the wheel). */
+  void right_click_row_for_test(const std::string &label) { ui_.favorite_request = label; }
+  std::string command_ctx_for_test() const { return ui_.any_popup_open() ? command_ctx_ : std::string(); }
+  void command_ctx_pick_for_test(int item) { command_ctx_run(item); }
+  std::vector<std::string> wheel_labels_for_test() {
+    std::vector<std::string> out;
+    for (const auto &s : quick_menu_slices()) out.push_back(s.first);
+    return out;
+  }
+  std::string wheel_prefs_text_for_test() { return wheel_prefs_text(); }
   Recti nav_button_rect_for_test(int which) const { return nav_buttons_shown() ? nav_button_rect(scene_rect_, which) : Recti{}; }
   Recti view_gizmo_rect_for_test() const { return view_gizmo_rect(scene_rect_); }
   void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
@@ -2427,23 +2448,77 @@ class Editor {
   Recti nav_button_rect(const Recti &view, int which) const;  // 0 the hand, 1 the magnifier
   void view_gizmo_drag(const Recti &view);
   void view_gizmo_click(int axis);
-  /* Task 0217 (quick_menu.cpp): the pen quick menu - opened by the pen's side button clicked or the pen held still
-   * 0.5 s in the Scene view. `sticky_add_`: 1 armed by its Add to Selection, 2 while the next press adds. */
+  /* The Wheel (task 0230, ADR 0068; quick_menu.cpp - task 0217's pen quick menu grown): one radial menu over any
+   * window, opened by the keymap's menu.wheel, the pen's side button clicked, or the pen or a finger held still 0.5 s;
+   * its slices palette entries or console lines in a set per mode, a slice holding a ring of its own. `sticky_add_`:
+   * 1 armed by its Add to Selection, 2 while the next press adds. */
   struct QuickMenu {
-    bool open = false, held = false;
+    bool open = false, held = false, just_opened = false;  // (just_opened: the frame a hold opened it, its release is not the lift)
     int x = 0, y = 0, hot = -1;
-    int px = 0, py = 0;  // (where the pen opened it: moved inside the view, the ring's middle may not be under it)
+    int px = 0, py = 0;  // (where it opened: moved inside the window, the ring's middle may not be under it)
+    int window = 0;      // the editor window it opened in (0 the main one): the others neither drive nor draw it
+    std::string mode;    // the set shown (object, edit, sketch, weight paint, a window kind, other)
+    std::vector<int> path;  // the ring slices gone down (empty: the set's top ring)
+    std::string typed;      // letters typed to find a slice
   } qm_;
   int sticky_add_ = 0;
   double pen_press_at_ = 0.0;
-  bool pen_holding_ = false;  // (a pen held still in the Scene view, whichever window draws it: frames keep coming for the 0.5 s)
-  bool barrel_nav_ = false;  // (the navigation drag began with the pen's side button: a click without moving opens the menu)
-  std::vector<std::pair<std::string, std::string>> quick_menu_slices() const;
+  bool pen_holding_ = false;  // (a pen or a finger held still: frames keep coming for the 0.5 s)
+  bool barrel_nav_ = false;  // (the navigation drag began with the pen's side button: the Scene view orbits with it)
+  bool hold_candidate_ = false, wheel_took_ = false;  // (a press that may become a hold; the wheel took this frame's press or release)
+  int hold_x_ = 0, hold_y_ = 0, hold_window_ = 0;
+  bool barrel_click_ = false, wheel_running_ = false;  // (a side-button press that may become a click; a slice's command is running)
+  int barrel_button_ = 0, barrel_window_ = 0, barrel_x_ = 0, barrel_y_ = 0;
+  std::map<std::string, std::vector<WheelSlice>> wheel_sets_;  // the sets changed or loaded (the rest are the defaults)
+  std::map<std::string, std::string> wheel_last_;              // per set: the slice picked last (a tap in the middle repeats it)
+  int wheel_pref_mode_ = 0;                                    // Preferences > Wheel: the set shown
+  std::string wheel_add_text_, wheel_add_ring_;
+  static const std::vector<std::string> &wheel_modes();
+  std::vector<WheelSlice> &wheel_set(const std::string &mode);
+  bool wheel_has_own_set(const std::string &mode) const;
+  bool wheel_set_is_default(const std::string &mode) const;
+  WindowKind wheel_window_at(int x, int y);
+  std::string wheel_mode_at(int x, int y);
+  Recti wheel_bounds_at(int x, int y);
+  std::vector<WheelSlice> &wheel_ring();
+  std::vector<std::pair<std::string, std::string>> quick_menu_slices();
   void quick_menu_open(int x, int y, bool held);
-  int quick_menu_hot(int mx, int my) const;
+  int quick_menu_hot(int mx, int my);
+  void wheel_run(int index, bool keep);
   bool quick_menu_pick(const std::string &name);
+  void wheel_back();
+  void wheel_eat_keys();
+  bool wheel_keys();
+  int wheel_last_index();
   bool quick_menu_update();
+  bool wheel_held_update();
+  void wheel_frame();
+  bool wheel_hold_busy();
+  void wheel_hold_frame();
+  void wheel_take_press();
+  void wheel_barrel_frame();
   void quick_menu_draw();
+  std::string wheel_set_text(const std::string &mode);
+  void load_wheel_pref(const std::string &v);
+  std::string wheel_prefs_text();
+  std::vector<WheelSlice> *wheel_edit_ring(const std::string &mode, const std::string &ring_name);
+  bool wheel_add(const std::string &mode, const std::string &entry, const std::string &label, const std::string &ring);
+  bool wheel_remove(const std::string &mode, const std::string &label, const std::string &ring_name);
+  bool wheel_move(const std::string &mode, const std::string &label, int by, const std::string &ring_name);
+  bool wheel_make_ring(const std::string &mode, const std::string &name);
+  void wheel_reset(const std::string &mode);
+  std::string wheel_mode_arg(const std::vector<std::string> &t, const std::string &line, size_t from, std::string &mode);
+  void wheel_list(const std::string &mode);
+  void wheel_add_command(const std::vector<std::string> &t, const std::string &line);
+  void wheel_move_command(const std::vector<std::string> &t, const std::string &line);
+  void wheel_command(const std::vector<std::string> &t, const std::string &line);
+  void draw_wheel_row(const std::string &mode, const WheelSlice &s, const std::string &ring_name);
+  void draw_wheel_settings();
+  /* A menu or palette row right-clicked (task 0230): its palette entry and the wheel set it would join; the small menu
+   * offering the favorites and the wheel (command_palette.cpp). */
+  std::string command_ctx_, command_ctx_mode_;
+  void open_command_ctx(const std::string &name);
+  void command_ctx_run(int item);  // 0 the favorites (added or removed), 1 the wheel
   /* ---- the command palette, Quick Favorites, the status bar's hints (task 0189: command_palette.cpp) ---- */
   std::vector<PaletteEntry> palette_entries_;
   std::vector<std::string> add_component_recent_;

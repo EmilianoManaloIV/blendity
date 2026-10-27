@@ -655,6 +655,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
   seqr_.drawn = false;
   sync_material_asset_names();
+  wheel_frame();  // (task 0230: a held pen or finger opens the Wheel; an open one takes the press before any window)
   draw_toolbar(toolbar);
   dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
@@ -3587,6 +3588,7 @@ void Editor::draw_dialogs() {
         draw_assist_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
+        draw_wheel_settings();  // (task 0230)
         /* (After the keymap: its preset list opens below its field, and a row above would push the field down until the
          * list had to open upward - task 0152.) */
         Recti ri = u.popup_row(u.row_h() + u.px(4));  // (task 0152)
@@ -3658,6 +3660,7 @@ void Editor::load_prefs() {
     else if (k == "guides") guides_enabled_ = v != "0";
     else if (k == "palette_recent") palette_recent_ = split_list(v, ';');
     else if (k == "favorites") load_favorites_pref(v);
+    else if (k == "wheel") load_wheel_pref(v);  // (task 0230)
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
@@ -3783,6 +3786,7 @@ void Editor::save_prefs() {
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   s += "windows=" + windows_layout() + "\n";  // (task 0187)
   s += favorites_prefs_text();  // (task 0189)
+  s += wheel_prefs_text();       // (task 0230)
   s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
 }

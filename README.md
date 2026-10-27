@@ -193,8 +193,9 @@ display (drag it out of the editor). Ctrl+K finds any command by name.
 The minimum machine starts on the **Low** quality tier (Edit > Preferences..., Quality) and says so on the first run:
 the views draw at 67 % and scale up, with a 1024 shadow map and 60 fps. Editing frames there run at about 35-40 fps,
 orbiting at 60. Renders always use the scene's own settings. On a 2-in-1, Tablet Mode follows the fold: fingers
-navigate (one orbits, two zoom, pan and twist), the pen works, and its quick menu brings Undo, Delete and the rest
-without a keyboard ([the manual](docs/MANUAL.md), chapter 1).
+navigate (one orbits, two zoom, pan and twist), the pen works, and **the Wheel** - one radial menu for Space, the pen's
+button or a finger held still, with a set per mode you fill from any menu's right-click - brings Undo, Delete and the
+rest without a keyboard ([the manual](docs/MANUAL.md), chapter 1).
 
 ## Build it
 
@@ -222,7 +223,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (12339 unit checks in 1044 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (12396 unit checks in 1053 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).
@@ -244,6 +245,13 @@ Blender's full build needs about 40 external libraries and a large build system.
 needs in plain C++, documents which Blender source files each corresponds to, and links Blender's prebuilt libraries
 where they matter, each measured against Blendity's own fallback. Not recreated: sculpting, node editors, geometry
 nodes, grease pencil, the compositor and sequencer, Python, and `.blend` files.
+
+## AI disclosure
+
+Blendity is written with Anthropic's Claude through Claude Code, under a human's direction and review: every
+commit names the model, every pull request is reviewed and merged by a person, and the program itself runs no AI
+except the optional, local AI Inbetweening download. The whole story, including what is *not* in the program (no
+telemetry, no cloud), is in [docs/AI_DISCLOSURE.md](docs/AI_DISCLOSURE.md).
 
 ## License
 

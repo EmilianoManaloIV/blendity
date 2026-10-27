@@ -2,6 +2,75 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 250): the Wheel - one radial menu everywhere (task 0230)
+
+**Asked:** the first task of the customize / sculpt / paint / stylize plan (0230-0250): "a Blender addon 'Fluent' mode
+that allows the usage of a singular radial menu, unless you believe the touch interface among other methods is
+superior" - the user chose one wheel for the keyboard, the pen and a finger alike.
+
+**Added**
+- **The Wheel** (`src/editor/quick_menu.cpp`, ADR 0068): task 0217's pen quick menu grown into the editor's one radial
+  menu, opened by **Space** (Shift+Space in the SketchUp preset, whose Space is Select), the pen's side button, or
+  **the pen or a finger held still** half a second (fingers never opened it), over any window and kept inside it.
+- **Slices are palette entries** (any command the palette lists) or console lines, eight a ring; a slice can open **a
+  ring of its own** (Esc or a tap in the middle goes back).
+- **A set per mode** - Object, Edit Mode, Sketch, Weight Paint, and one per window kind (Hierarchy, Project, UV
+  Editor...; the rest share "other") - each with a default the user edits: **right-click a menu row > Add to the
+  Wheel**, Preferences > Wheel (Up / Down / Remove, Add by name or console line, New Ring, Reset), or the console's
+  `wheel add|remove|move|ring|reset`; saved in the preferences as `wheel=<mode>|...` (only the sets that differ from
+  their defaults).
+- **Picking:** flick-and-lift, a tap, **the keys 1-8** (each slice shows its number) or the first letters typed;
+  **Shift keeps it open** to chain; a tap in the middle repeats the slice picked last; the status bar names the keys.
+
+**Changed**
+- A right-click on a menu row or a palette row opens a small menu - Add to (or Remove from) Quick Favorites, Add to
+  the Wheel - instead of adding to the favorites at once; the console's `favorite` still adds at once.
+- The pen's hold moved from the Scene view to the frame (`wheel_frame`), so it works over every window and for a
+  finger; a finger that held still orbits nothing and selects nothing when it lifts.
+- `quickmenu` is an alias of `wheel`; the default Object and Edit Mode sets are eight slices with a "More" ring
+  (they were ten and twelve).
+- **An AI disclosure** (the user's request): `docs/AI_DISCLOSURE.md` says how Blendity is built (a human directs,
+  reviews and merges; Claude through Claude Code writes the code, tests and docs from approved specs; every commit
+  names the model) and what is not in the program (no telemetry, no cloud, no AI at run time except the optional
+  local AI Inbetweening); the README has a section linking to it and the PR template a line.
+- The plan gained the user's requests of the day as tasks 0232-0235 (windows for a drawing tablet, the Draw tab and
+  the drawing-pad workflow with every stroke placed in 3D, a Photoshop-style Layers panel, an HCI and modularity
+  pass) ahead of sculpting; `tools/test_coverage_map.py --check` still reports the four entries it did before this
+  round (edit.favorites, edit.palette, layoutguide, LiveLink), none of them this round's.
+**Reviewed** (the Opus review's findings, fixed before the PR)
+- The wheel and its hold belonged to no window: a secondary window's frame cleared the main window's hold and drew
+  the main window's wheel at the wrong coordinates. A wheel and a hold now belong to the window they began in
+  (`qm_.window`, `hold_window_`); the other windows neither drive nor draw them.
+- A letter or digit that picked a slice went on to the shortcuts and to the operator the pick started (typing "s"
+  picked Scale and the leaked S started a modal scale; "1" in the edit set extruded by exactly one unit). The wheel
+  eats its keys and the typed text every frame it is open.
+- A hold opened the wheel in the middle of drags that don't read a cancel (a Hierarchy row's drag or pending select,
+  a Weight Paint or Editing stroke, a UV or bone handle), which kept going under it. The held press is taken from the
+  windows when the wheel opens (a cancelled release this frame, those drags reset), and a hold on a busy target (a
+  slider being dragged) is dropped at once instead of redrawing for half a second.
+- The "other" set could never show: every window kind got its own copy of it. A window kind without a set of its own
+  now uses "other" (so editing "other" shows in the Inspector, Console, Learn...).
+- Editing by label hit the first same-named slice (a ring's "Undo" removed the top-level Undo). The Preferences rows
+  and the console address a ring's slices through their ring (`wheel remove edit Undo ring Tools`); a ring keeps its
+  last slice; a ring is a ring by a flag, not by being non-empty.
+- The palette row's right-click still added to the favorites at once; it opens the same small menu as a menu row.
+- Also: the side button clicked over any window opens the wheel (not only the Scene view); the separators in a label
+  or a console line are escaped in the preferences (`%3B`); a loaded set is capped at eight; Space closes an open
+  wheel; a chained pick that changes the mode shows the new mode's set; a slice whose command picks the wheel again
+  runs once; the Into-ring field clears when the mode changes.
+- The full suite's two pre-existing failures the reviewer saw (`test_modeling.cpp:6766`, `test_gpu.cpp:412`,
+  "mismatches == 0") are the known NO_LTCG-build and parallel-load cases, not this round's.
+
+**Checked**
+- `tests_round250` in `tests/test_input.cpp` (5 tests): Space opens the Wheel over the Scene view and the Hierarchy
+  with each one's set and a tap on Create Empty makes one; a ring opens in place, 1-8 and typed letters pick, Esc goes
+  back then closes; Shift chains and the middle repeats; a finger held still opens it in both windows without
+  selecting, a moving finger doesn't; sets edited from the console round-trip through the preferences and a ring
+  holds eight. Round 237's pen tests keep their meaning (the slice angles follow the eight-slice ring).
+- Unit checks (round 250): Windows, in render-cache verify mode, 12,396, 0 failed (1053 tests), 0 stale
+  pictures. Linux with libraries: 11,937, 0 failed. Sanitizer build: 11,807, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 249): drawing in perspective - the write-up (task 0229)
 
 **Asked:** the last task of the perspective-drawing plan (0223-0229).

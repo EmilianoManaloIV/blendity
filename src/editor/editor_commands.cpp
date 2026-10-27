@@ -694,14 +694,8 @@ void Editor::run_console_command(const std::string &line) {
   if (sketch_world_stroke_command(t)) return;  // sketchline | sketchcircle (task 0228)
   if (sketch_build_command(t)) return;  // sketchbuild (task 0225)
   if (sketch_refine_command(t)) return;  // sketchproject | sketchtrace (task 0226)
-  if (c == "quickmenu") {  // quickmenu open [x y]|close|pick <slice>|list (task 0217)
-    const std::string v = to_lower(arg(1, "list"));
-    if (v == "open") quick_menu_open(std::atoi(arg(2, std::to_string(scene_rect_.x + scene_rect_.w / 2)).c_str()),
-                                     std::atoi(arg(3, std::to_string(scene_rect_.y + scene_rect_.h / 2)).c_str()), false);
-    else if (v == "close") qm_.open = false;
-    else if (v == "pick" && !quick_menu_pick(line.substr(line.find("pick") + 5))) Log::warn("quickmenu: no slice named that");
-    else if (v == "list")
-      for (const auto &s : quick_menu_slices()) Log::info("%s", s.first.c_str());
+  if (c == "wheel" || c == "quickmenu") {  // the Wheel (task 0230; `quickmenu`: task 0217's name for it)
+    wheel_command(t, line);
     return;
   }
   if (c == "tabletmode") {  // tabletmode auto|on|off: the main window's Tablet Mode follows the laptop, or is set (task 0218)

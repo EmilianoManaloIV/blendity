@@ -113,6 +113,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"edit.undo", "Undo", "Edit", CTX_GLOBAL},
       {"edit.palette", "Command Palette", "Edit", CTX_GLOBAL},
       {"edit.favorites", "Quick Favorites", "Edit", CTX_GLOBAL},
+      {"menu.wheel", "The Wheel", "Edit", CTX_GLOBAL},  // task 0230: the radial menu
       {"edit.redo", "Redo", "Edit", CTX_GLOBAL},
       {"edit.duplicate", "Duplicate", "Edit", CTX_GLOBAL},
       {"edit.select_all", "Select All", "Edit", CTX_GLOBAL},
@@ -226,6 +227,7 @@ static void common_bindings(Keymap &k) {
   b("edit.redo", {"Ctrl+Y", "Ctrl+Shift+Z"});
   b("edit.palette", {"Ctrl+K", "F3"});  // (VS Code's palette key; Blender's F3 search)
   b("edit.favorites", {"Shift+Q"});     // (Blender's Q menu; Q is a tool key in these presets)
+  b("menu.wheel", {"Space"});           // (task 0230: the Wheel; SketchUp's Space is its Select tool, see below)
   b("render.image", {"F12"});
   b("render.screenshot", {"Shift+F12"});
   b("render.animation", {"Ctrl+F12"});
@@ -384,6 +386,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
   }
   else if (p == "sketchup") {
     b("tool.view", {"Space"});  // Select
+    b("menu.wheel", {"Shift+Space"});
     b("tool.move", {"M"});
     b("tool.rotate", {"Q"});
     b("tool.scale", {"S"});
@@ -575,6 +578,10 @@ bool Editor::run_action(const std::string &id) {
     return false;  // (flying: Shift+Q is "down, fast", not a menu)
   else if (id == "edit.palette") open_palette();
   else if (id == "edit.favorites") open_favorites();
+  else if (id == "menu.wheel" && (drag_ == Drag::Fly || in.down[1] || (playing_ && !paused_ && focused_ == WindowKind::Game)))
+    return false;  // (flying, or a game taking Space)
+  else if (id == "menu.wheel" && qm_.open) qm_.open = false;
+  else if (id == "menu.wheel") quick_menu_open(in.mx, in.my, false);  // (task 0230)
   else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
   else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();
   else if (id == "edit.undo") undo();
@@ -715,6 +722,7 @@ bool Editor::run_action(const std::string &id) {
 void Editor::handle_shortcuts() {
   auto &in = ui_.in;
   if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active || bone_drag_.modal || drag_ == Drag::Gizmo) return;  // a running operator (or a gizmo drag's typed number) takes the keys
+  if (qm_.open) return;  // (the Wheel's keys: 1-8, letters, Esc - task 0230)
   if (!capturing_binding_.empty()) return;  // Preferences is waiting for a key to bind
   int mods = 0;
   if (in.ctrl()) mods |= platform::MOD_CTRL;

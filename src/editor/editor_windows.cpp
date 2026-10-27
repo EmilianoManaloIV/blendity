@@ -295,6 +295,7 @@ void Editor::draw_secondary_window(EditorWindow &w, double now) {
     window_modes_.push_back({w.id, WindowMode::FullScreen, false});
     ui_.in.key_pressed[KEY_ESCAPE] = false;  // (taken: nothing else answers it)
   }
+  wheel_frame();  // (task 0230)
   if (!draw_render_only(w, area)) {
     dock_layout(dock_.get(), area);
     dock_draw(dock_.get());

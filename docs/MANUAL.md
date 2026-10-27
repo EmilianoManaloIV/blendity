@@ -68,7 +68,7 @@ works:
 | One finger drags a list or panel | scrolls it (sideways still moves sliders and numbers) | as the mouse |
 | The pen | selects, moves, draws, paints, as the mouse | the same |
 | The pen's side button held while dragging | orbits; Shift pans, Ctrl zooms | the same |
-| The pen's side button clicked, or the pen held still half a second where a press would select | the quick menu: flick or tap Undo, Delete, Extrude, Face... | the same |
+| The pen's side button clicked, or the pen or a finger held still half a second | the Wheel: flick or tap Undo, Delete, Extrude, Face... (Space opens it with a keyboard; right-click any menu row > Add to the Wheel puts a command on it) | the same |
 | Drag the Scene Gizmo / its hand / its magnifier | orbits / pans / zooms | the gizmo orbits (the hand and magnifier show with Preferences > Pen and touch > Navigation buttons: Always) |
 
 A finger's press waits a moment before it counts, so a pinch never starts a box select. On Windows a palm resting on

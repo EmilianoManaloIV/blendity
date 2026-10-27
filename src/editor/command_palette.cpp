@@ -147,17 +147,37 @@ bool Editor::toggle_favorite(const std::string &name) {
   return true;
 }
 
-/* A menu row right-clicked (ui::Context::favorite_request): its command, found by its label, into the favorites. */
+/* A menu row right-clicked (ui::Context::favorite_request): its command, found by its label, offered a place - the
+ * favorites, or the Wheel's set for where the mouse is (task 0230). */
 void Editor::take_favorite_request() {
   if (ui_.favorite_request.empty()) return;
   const std::string label = ui_.favorite_request;
   ui_.favorite_request.clear();
+  const PaletteEntry *found = nullptr;
   for (const std::string &n : {label, "Layout: " + label, "Create " + label, label + " Window"})
-    if (palette_find(n)) {
-      if (std::find(favorites().begin(), favorites().end(), palette_find(n)->name) == favorites().end()) toggle_favorite(palette_find(n)->name);
-      return;
-    }
-  Log::info("Quick Favorites: \"%s\" has no command of its own to keep (the palette, Ctrl+K, lists those that do)", label.c_str());
+    if (!found) found = palette_find(n);
+  if (!found) {
+    Log::info("Quick Favorites: \"%s\" has no command of its own to keep (the palette, Ctrl+K, lists those that do)", label.c_str());
+    return;
+  }
+  open_command_ctx(found->name);
+}
+
+/* The small menu for a command: Add to (or Remove from) Quick Favorites, Add to the Wheel - the set for where the
+ * mouse is. */
+void Editor::open_command_ctx(const std::string &name) {
+  command_ctx_ = name;
+  command_ctx_mode_ = wheel_mode_at(ui_.in.mx, ui_.in.my);
+  ui_.close_popups();
+  ui_.open_popup(ui_.id("command_ctx"), {ui_.in.mx, ui_.in.my, 0, 0});
+}
+
+void Editor::command_ctx_run(int item) {
+  const PaletteEntry *e = palette_find(command_ctx_);
+  if (!e) return;
+  if (item == 0) toggle_favorite(e->name);
+  else wheel_add(command_ctx_mode_, e->name, "", "");
+  ui_.close_popups();
 }
 
 /* ---- the popups ---- */
@@ -178,6 +198,16 @@ void Editor::open_favorites() {
 void Editor::draw_command_palette() {
   auto &u = ui_;
   u.popup(u.id("command_palette"), u.px(520), [this] { draw_palette_body(); });
+  u.popup(u.id("command_ctx"), u.px(280), [this] {  // (task 0230)
+    auto &u = ui_;
+    const PaletteEntry *e = palette_find(command_ctx_);
+    if (!e) return;
+    u.menu_label(e->name);
+    const bool fav = std::find(favorites().begin(), favorites().end(), e->name) != favorites().end();
+    if (u.menu_item(fav ? "Remove from Quick Favorites" : "Add to Quick Favorites")) command_ctx_run(0);
+    if (u.menu_item("Add to the Wheel (" + command_ctx_mode_ + ")")) command_ctx_run(1);
+    u.favorite_request.clear();  // (a right-click on these rows is nothing)
+  });
   u.popup(u.id("quick_favorites"), u.px(300), [this] {
     auto &u = ui_;
     u.menu_label("Quick Favorites (" + workspace_ + ")");
@@ -227,8 +257,8 @@ void Editor::draw_palette_body() {
     u.label({row.x + u.px(10), row.y, row.w * 2 / 3, row.h}, (fav ? "* " : "") + e.name, u.theme.text_bright);
     u.label({row.x, row.y, row.w - u.px(10), row.h}, e.category + (keys.empty() ? "" : "   " + keys), u.theme.text_dim, ui::Align::Right);
     u.mark_widget(row);
-    u.tooltip(e.help.empty() ? e.category + ": " + e.name + ". Right-click: Quick Favorites." : e.help + "\nRight-click: Quick Favorites.");
-    if (u.hovered(row) && u.in.pressed[1]) toggle_favorite(e.name);
+    u.tooltip(e.help.empty() ? e.category + ": " + e.name + ". Right-click: Quick Favorites or the Wheel." : e.help + "\nRight-click: Quick Favorites or the Wheel.");
+    if (u.hovered(row) && u.in.pressed[1]) open_command_ctx(e.name);  // (task 0230: the favorites or the wheel)
     if (!u.hovered(row) || !u.in.released[0]) continue;
     u.close_popups();
     palette_run(e);
@@ -263,10 +293,11 @@ void Editor::palette_command(const std::vector<std::string> &t, const std::strin
 
 /* What the mouse and the keys do where the mouse is (the Scene view's tool and mode, the feel's navigation). */
 std::string Editor::statusbar_hint() const {
+  if (qm_.open) return "The Wheel: tap or flick a slice  |  1-8, or its first letters  |  Shift: keep it open  |  Esc: back, close";  // (task 0230)
   /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */
   if (tablet_ && scene_hovered_)
-    return "One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button or hold: quick menu";
-  if (tablet_) return "Tablet Mode: a finger scrolls lists  |  Pen side button or hold in the Scene view: quick menu";
+    return "One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button, or a hold: the Wheel";
+  if (tablet_) return "Tablet Mode: a finger scrolls lists  |  Pen side button, or a pen or finger held still: the Wheel";
   if (!scene_hovered_) return "Ctrl+K: find any command  |  Shift+Q: Quick Favorites";
   std::string nav;
   switch (nav_style_) {

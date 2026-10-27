@@ -85,7 +85,8 @@ Any tab can leave the editor: drag it out past the window's edge and let go, or 
 ! cmd:dock move Render main | Bring it back
 For a second screen that shows the render large: in the Render tab's own window, right-click its tab > Render Only (the picture alone, fitted; its buttons appear at the top when the mouse is there), then Full Screen. On a pen display, Tablet Mode (the tab menu) makes that window's buttons and fields half as big again; the pen's pressure and tilt shape the Editing tab's brush, its eraser end erases, and a palm on the screen is ignored while the pen is near.
 ? You fold your 2-in-1 into a tablet. What does Blendity do, and how do you stop it? | On Auto (Preferences > Pen and touch > Tablet Mode), Tablet Mode turns on: bigger targets, fingers navigate. Unfolding turns it off. Choose Off to keep it off, or switch it from the tab menu - that holds until the next fold (task 0218).
-? With only a pen, how do you undo, or switch Edit Mode to faces? | Open the quick menu - click the pen's side button, or hold the pen still half a second in the Scene view - and flick through Undo (or Face) and lift, or tap it (task 0217).
+? With only a pen, how do you undo, or switch Edit Mode to faces? | Open the Wheel - click the pen's side button, or hold the pen (or a finger) still half a second - and flick through Undo (or Face) and lift, or tap it (task 0217, 0230).
+? You want Bevel, Loop Cut and Smart UV Project one tap away, anywhere in the editor, and the keyboard is folded away. | Put them on the Wheel: right-click the menu row (or the palette row) > Add to the Wheel, or Preferences > Wheel. The Wheel opens with Space, the pen's side button, or the pen or a finger held still; each mode and window has its own set of up to eight slices, and a slice can open a ring of eight more. 1-8 or the first letters pick; Shift keeps it open to chain (task 0230).
 ? With only a pen, how do you orbit, pan and zoom the Scene view? | Drag the Scene Gizmo to orbit; drag the hand under it to pan and the magnifier to zoom (they show in Tablet Mode, or always from Preferences). Or hold the pen's side button while dragging: it orbits, with Shift it pans, with Ctrl it zooms (task 0216).
 ? In Tablet Mode you drag a finger up the Inspector from a slider. Does the slider change? | No: up or down scrolls the panel. A finger moves a slider only once it has gone more across than up or down, and then the scroll leaves it alone. To drag a row to a new parent, use the pen or the mouse (task 0215).
 ? In Tablet Mode, what does one finger do in the Scene view, and what does the pen do? | One finger orbits (a tap selects, a double tap frames, a flick glides on); two pinch, pan and twist. The pen selects and moves things, as the mouse does. A finger on a gizmo handle still drags the handle (task 0214).
@@ -99,15 +100,15 @@ With the keyboard folded away, Tablet Mode splits the work: fingers move the vie
 | One finger on a list | Scrolls it; sideways it still moves sliders
 | The pen | Selects, moves, draws, as the mouse does
 | The pen's side button held | Orbits; Shift pans, Ctrl zooms
-| Side button clicked, or the pen held still where a press would select | The quick menu: flick or tap a command
+| Side button clicked, or the pen or a finger held still | The Wheel: flick or tap a command (Space opens it too)
 | The Scene Gizmo, its hand, its magnifier | Drag to orbit, pan, zoom
-? With the keyboard folded away, how do you delete the selection? | Open the quick menu - click the pen's side button, or hold the pen still half a second - and tap Delete (or flick through it and lift).
+? With the keyboard folded away, how do you delete the selection? | Open the Wheel - click the pen's side button, or hold the pen or a finger still half a second - and tap Delete (or flick through it and lift).
 ? Two fingers touch the Scene view a moment apart. Does the first one start a box select? | No: a finger's press waits a moment, and a second finger in that time makes it a pinch; a later second finger takes the press back.
 ! cmd:window tablet on | Tablet Mode on (the main window)
 ! cmd:window tablet off | Tablet Mode off (the main window)
 ! cmd:navbuttons always | Show the hand and the magnifier always
 ! cmd:navbuttons tablet | Show them only in Tablet Mode again
-! cmd:quickmenu open | Open the quick menu in the Scene view (with the Scene view showing)
+! cmd:wheel open | Open the Wheel in the Scene view (with the Scene view showing)
 @ blender/source/blender/editors/space_view3d/view3d_navigate.cc  (the navigation gizmo's orbit, pan and zoom)
 @ blender/intern/ghost/intern/GHOST_SystemWin32.cc  (pointer and pen input)
 # Layouts for each stage
