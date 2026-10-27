@@ -145,6 +145,7 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
+  sketch_bind_scene(view, scene_hovered_);  // (task 0233: the camera may have moved since the update)
   sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
@@ -227,6 +228,7 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
  * Push/Pull, the modal and transform operators, the focus pick, the auto-rig, the Knife, the Draw tools). True when one
  * of them owns the mouse this frame. */
 bool Editor::scene_tool_updates(const Recti &view, bool busy) {
+  sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
   if (sketch_update(view)) busy = true;
   if (bone_handles_update(view)) busy = true;
   if (gizmo_update(view)) busy = true;
@@ -2664,6 +2666,13 @@ void Editor::draw_game_view(const Recti &r) {
     }
     game_guides_frame_ = frame;
     draw_camera_guides(*cam, frame);
+  }
+  /* Task 0233: the sketch tool in the Game view - the pen draws in the game camera's perspective (Play stopped or
+   * paused: a running game takes the keys and the clicks). */
+  if (sketch_.active && !playing_) {
+    sketch_bind_game(img, *cam, *owner, v, p, u.hovered(img) && !u.any_popup_open());
+    sketch_update(img);
+    sketch_draw(img);
   }
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};

@@ -63,7 +63,7 @@ void add_sides(Mesh &m, const std::vector<uint32_t> &lo, const std::vector<uint3
  * the camera), the seam point once, if the points lie within 8 % of that circle. */
 bool Editor::sketch_circle_of(const SketchStroke &st, SketchCircle &out) const {
   const SketchCanvas *c = st.canvas ? scene_->sketch.canvas_at(st.canvas) : nullptr;
-  if (!c || c->kind != 1 || !st.closed || st.pts.size() < 8) return false;
+  if (!c || c->kind < 1 || !st.closed || st.pts.size() < 8) return false;
   std::vector<Vec2> pts;
   for (const SketchPoint &p : st.pts) pts.push_back({p.x, p.y});
   if (length(pts.front() - pts.back()) < 1e-6f) pts.pop_back();
@@ -121,7 +121,7 @@ std::vector<Editor::SketchSeg> Editor::sketch_segments() const {
   for (size_t i = s.strokes.size(); i-- > 0;) {
     const SketchStroke &st = s.strokes[i];
     const SketchCanvas *c = st.canvas ? s.canvas_at(st.canvas) : nullptr;
-    if (!c || c->kind != 1 || st.kind != StrokeKind::Line || st.pts.size() != 2 || !sketch_stroke_shown(st)) continue;
+    if (!c || c->kind < 1 || st.kind != StrokeKind::Line || st.pts.size() != 2 || !sketch_stroke_shown(st)) continue;
     out.push_back({on_plane(*c, st.pts[0]), on_plane(*c, st.pts[1]), i});
   }
   return out;
@@ -299,7 +299,7 @@ bool Editor::sketch_build_sweep() {
   for (size_t i = s.strokes.size(); i-- > 0;) {
     const SketchStroke &st = s.strokes[i];
     const SketchCanvas *c = st.canvas ? s.canvas_at(st.canvas) : nullptr;
-    if (!c || c->kind != 1 || st.closed || st.pts.size() < 2) continue;
+    if (!c || c->kind < 1 || st.closed || st.pts.size() < 2) continue;
     std::vector<Vec3> path;
     for (const SketchPoint &p : st.pts) path.push_back(on_plane(*c, p));
     const bool fwd = length(path.front() - c0.c) < 0.1f && length(path.back() - c1.c) < 0.1f;
@@ -416,7 +416,7 @@ bool Editor::sketch_build_face() {
   for (size_t i = s.strokes.size(); i-- > 0 && loop.empty();) {
     const SketchStroke &st = s.strokes[i];
     const SketchCanvas *c = st.canvas ? s.canvas_at(st.canvas) : nullptr;
-    if (!c || c->kind != 1) continue;
+    if (!c || c->kind < 1) continue;
     std::vector<SketchPoint> chain;
     if (!sketch_outline_from(i, chain)) continue;
     for (const SketchPoint &p : chain) loop.push_back(on_plane(*c, p));
@@ -431,7 +431,7 @@ bool Editor::sketch_build_face() {
   centre = centre / (float)loop.size();
   /* The face's normal toward the camera (a pull then goes toward the artist), its frame right-handed: u, n, cross(u, n). */
   Vec3 n = normalize(cross(canvas->u, canvas->v));
-  if (dot(n, cam_.position() - centre) < 0.0f) n = n * -1.0f;
+  if (dot(n, sketch_view_.cam.position() - centre) < 0.0f) n = n * -1.0f;
   const Vec3 u = normalize(canvas->u), v = cross(u, n);
   GameObject *g = sketch_new_object("Face", centre, quat_from_axes(u, n, v));
   MeshPtr &mp = *edit_mesh_ptr();
@@ -498,6 +498,7 @@ bool Editor::sketch_build_pull() {
 
 /* sketchbuild box|cylinder|cone|sweep|face|pull: a solid from the construction lines. */
 bool Editor::sketch_build_command(const std::vector<std::string> &t) {
+  if (!t.empty() && t[0] == "sketchbuild") sketch_bind_scene(scene_rect_, true);  // (task 0233)
   if (t.empty() || to_lower(t[0]) != "sketchbuild") return false;
   const std::string v = t.size() > 1 ? to_lower(t[1]) : "";
   if (playing_) return true;

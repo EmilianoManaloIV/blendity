@@ -77,7 +77,7 @@ void Editor::swap_view_state(EditorWindow &w) {
   std::swap(gizmo_nav_hot_, v.gizmo_nav_hot), std::swap(gizmo_nav_x_, v.gizmo_nav_x), std::swap(gizmo_nav_y_, v.gizmo_nav_y);
   std::swap(gizmo_pivot_, v.gizmo_pivot), std::swap(gizmo_orient_, v.gizmo_orient);
   std::swap(alt_click_, v.alt_click), std::swap(alt_click_ring_, v.alt_click_ring), std::swap(finger_orbit_, v.finger_orbit), std::swap(barrel_nav_, v.barrel_nav);
-  std::swap(cam_yaw_before_, v.cam_yaw_before), std::swap(cam_pitch_before_, v.cam_pitch_before), std::swap(cam_fov_before_, v.cam_fov_before);
+  std::swap(cam_yaw_before_[0], v.cam_yaw_before), std::swap(cam_pitch_before_[0], v.cam_pitch_before), std::swap(cam_fov_before_[0], v.cam_fov_before);
   std::swap(inspector_lock_, v.inspector_lock), std::swap(inspector_content_h_, v.inspector_content_h);
   WindowCaches &c = window_caches_[w.id];
   std::swap(scene_cache_, c.scene), std::swap(game_cache_, c.game);

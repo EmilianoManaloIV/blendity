@@ -29,6 +29,7 @@ void Editor::sketch_begin() {
 }
 
 void Editor::sketch_end() {
+  sketch_keynav_ = false;  // (task 0233: no key moves the view once the tool is off)
   sketch_.active = false;
   sketch_.stroking = sketch_.erasing = false;
   sketch_.drag_handle = -1;
@@ -230,6 +231,13 @@ void Editor::sketch_stroke_end(const Recti &view) {
     sketch_stroke_end_on_plane(view, *scene_canvas, level, mean_w, base());
     return;
   }
+  if (g.place3d) {  // (task 0233: in the scene where it was drawn, at the depth under the pen's first point)
+    const int depth_id = sketch_depth_canvas(view);
+    const size_t before = s.strokes.size();
+    if (const SketchCanvas *dc = depth_id ? s.canvas_at(depth_id) : nullptr) sketch_stroke_end_on_plane(view, *dc, level, mean_w, base());
+    if (s.strokes.size() > before) return;
+    sketch_prune_depth_canvases();  // (the stroke missed its plane - a camera looking past it: it stays on the picture plane)
+  }
   sketch_record_layer_view(s.layer_at(s.active_layer));  // (task 0226: the picture plane's camera)
   if (level == 0) {
     SketchStroke st = base();
@@ -337,14 +345,22 @@ bool Editor::sketch_update(const Recti &view) {
     return true;
   }
   sketch_guide_defaults(view);
+  /* Task 0233: a stroke, an erase or a handle drag begun in another view (the Game view, the Draw tab) is that view's;
+   * this one draws and waits. The keyboard moves the Scene camera while the pen is up. */
+  const bool busy = g.stroking || g.erasing || g.drag_handle >= 0;
+  if (busy && g.view_kind >= 0 && g.view_kind != sketch_view_.kind) return false;
+  if (!busy) g.view_kind = -1;
+  sketch_keyboard_nav();
   /* Task 0224: the perspective guide's points are the world axes' vanishing points - read from the camera every frame
    * (undo, another scene, a resize or a change of point count all move them), but not while a point is dragged, nor
    * while points no camera could match are kept until the camera moves. */
   {
     const Sketch &s = scene_->sketch;
-    const bool moved = cam_.yaw != cam_yaw_before_ || cam_.pitch != cam_pitch_before_ || cam_.fov != cam_fov_before_;
+    const bool moved = sketch_view_.cam.yaw != cam_yaw_before_[sketch_view_.kind] || sketch_view_.cam.pitch != cam_pitch_before_[sketch_view_.kind] || sketch_view_.cam.fov != cam_fov_before_[sketch_view_.kind];
     if (moved) g.flat = false;
-    if (s.perspective > 0 && s.follow_camera && !cam_.ortho && g.drag_handle < 0 && !g.flat) sketch_guide_from_camera(view);
+    if (sketch_view_.hovered) sketch_guide_view_ = sketch_view_.kind;  // (task 0233: the guide follows the view under the pointer)
+    const bool mine = sketch_guide_view_ == sketch_view_.kind;
+    if (mine && s.perspective > 0 && s.follow_camera && !sketch_view_.cam.ortho && g.drag_handle < 0 && !g.flat) sketch_guide_from_camera(view);
   }
   if (in.touch && tablet_) return false;  // (a finger navigates: task 0214)
   if (drag_ != Drag::None && !g.stroking && !g.erasing && g.drag_handle < 0) return false;  // (Alt+drag, the View tool: navigation's)
@@ -364,32 +380,36 @@ bool Editor::sketch_update(const Recti &view) {
     u.redraw = true;
     return true;
   }
-  if (!g.stroking && !g.erasing && in.pressed[0] && scene_hovered_) {
+  if (!g.stroking && !g.erasing && in.pressed[0] && sketch_view_.hovered) {
     const std::vector<Vec2> handles = sketch_handles();
     for (size_t i = 0; i < handles.size(); i++)
       if (length(sketch_to_px(view, handles[i]) - px) < (float)u.px(10)) {
         g.drag_handle = (int)i;
+        g.view_kind = sketch_view_.kind;
         u.consume_click();
         return true;
       }
   }
   /* The eraser end: the strokes it crosses go. */
-  if (!g.stroking && !g.erasing && in.pressed[0] && scene_hovered_ && in.eraser) {
+  if (!g.stroking && !g.erasing && in.pressed[0] && sketch_view_.hovered && in.eraser) {
     g.erasing = true;
     g.erased = false;
+    g.view_kind = sketch_view_.kind;
     u.consume_click();
   }
   if (g.erasing) {
     g.erased = sketch_erase_at(view, px) || g.erased;
     if (!in.down[0]) {
       g.erasing = false;
+      if (g.erased) sketch_prune_depth_canvases();  // (task 0233)
       if (g.erased) mark_changed("Erase Strokes");
     }
     u.cursor = Cursor::Hand;
     return true;
   }
-  if (!g.stroking && in.pressed[0] && scene_hovered_ && !in.alt()) {
+  if (!g.stroking && in.pressed[0] && sketch_view_.hovered && !in.alt()) {
     sketch_stroke_begin(view, px, in.pressure, in.ctrl());
+    g.view_kind = sketch_view_.kind;
     u.consume_click();
     u.redraw = true;
     return true;
@@ -519,6 +539,13 @@ void Editor::sketch_draw(const Recti &view) {
 
 /* sketch ... and sketchguide ...: the console (task 0223). */
 bool Editor::sketch_command(const std::vector<std::string> &t, const std::string &line) {
+  const std::string c0 = t.empty() ? std::string() : to_lower(t[0]);
+  if (c0 == "sketch" || c0 == "sketchguide" || c0 == "sketchstroke") sketch_bind_scene(scene_rect_, true);  // (task 0233: the console draws in the Scene view)
+  if (c0 == "sketch" && t.size() > 2 && to_lower(t[1]) == "place") {  // sketch place 3d|flat (task 0233)
+    sketch_.place3d = to_lower(t[2]) == "3d";
+    Log::info("Sketch: strokes %s", sketch_.place3d ? "land in the scene where they are drawn" : "stay on the picture plane");
+    return true;
+  }
   const std::string c = t.empty() ? "" : to_lower(t[0]);
   auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? t[i] : d; };
   Sketch &s = scene_->sketch;
@@ -529,6 +556,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "off") sketch_end();
     else if (v == "clear") {
       s.strokes.clear();
+      sketch_prune_depth_canvases();  // (task 0233)
       for (SketchLayer &l : s.layers) l.has_view = false;  // (task 0226: the next stroke's camera is the layer's)
       mark_changed("Clear Sketch");
     }
@@ -593,8 +621,8 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "snap") g.snap = to_lower(arg(2, "on")) != "off";
     else if (v == "follow") {  // (task 0224: the guide and the camera as one)
       s.follow_camera = to_lower(arg(2, "on")) != "off";
-      if (s.follow_camera && cam_.ortho) Log::info("sketchguide follow: the guide follows a perspective camera (the view is orthographic now)");
-      if (s.follow_camera && s.perspective > 0 && !cam_.ortho) sketch_guide_from_camera(scene_rect_);
+      if (s.follow_camera && sketch_view_.cam.ortho) Log::info("sketchguide follow: the guide follows a perspective camera (the view is orthographic now)");
+      if (s.follow_camera && s.perspective > 0 && !sketch_view_.cam.ortho) sketch_guide_from_camera(scene_rect_);
       mark_changed("Perspective Guide");
     }
     else if (v == "vp" && t.size() >= 5) {

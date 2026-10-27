@@ -487,7 +487,9 @@ void Editor::wheel_frame() {
 bool Editor::wheel_hold_busy() {
   const auto &in = ui_.in;
   if (ui_.any_active() || modal_.active || xf_.active || pp_.active) return true;
-  if (wheel_window_at(hold_x_, hold_y_) != WindowKind::Scene) return false;
+  const WindowKind under = wheel_window_at(hold_x_, hold_y_);
+  if (sketch_.active && (under == WindowKind::Draw || under == WindowKind::Game)) return true;  // (task 0233: the pen draws there too)
+  if (under != WindowKind::Scene) return false;
   if (sketch_.active) return true;
   const bool finger_still = in.touch && drag_button_ == 0 && (drag_ == Drag::Orbit || drag_ == Drag::Pan || finger_orbit_);
   return !(drag_ == Drag::None || drag_ == Drag::Box || finger_still);

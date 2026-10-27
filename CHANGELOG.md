@@ -2,6 +2,65 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 253): the Draw tab and the drawing-pad workflow (task 0233)
+
+**Asked:** "Add the option to sketch in the game view. The draw tab should have its own tab and be included within the
+reference and planning phase... I can still navigate and move around the scene with my keyboard, but I can use my
+drawing tablet as a way to actually modify the scene. The perspective guide should also adjust itself to a view so
+when you sketch and model it's accurate." And: "when I draw in perspective I want it to be a 3D representation in
+scene. So when I move the camera around I can still see in-perspective how that line looks."
+
+**Added**
+- **The sketch tool works in a view** (ADR 0071, `src/editor/sketch_view.cpp`): the Scene view, the Game view and the
+  Draw tab bind the view the pen draws in (rect, camera, matrices, hover) before the tool runs; every sketch function
+  projects, casts and picks through it, so the same strokes are drawn and corrected in each view's own perspective; a
+  stroke begun in one view goes on while the others draw. The game camera is read as a scene camera (its turn, its
+  focus distance as the pivot, its lens).
+- **The Draw tab** (`WindowKind::Draw`, dock id 21): the scene's picture from the Scene view's camera or the Game
+  camera (`draw source scene|game`), with its own targets and cache and no gizmos, icons or stats, and the sketch
+  tool's bar - the source, Draw / Drawing, the width, the guide, the perspective, the symmetry, the corrections,
+  Place in 3D; opening it starts the tool with Place in 3D on; in the *Reference & Planning* and *Blocking Out*
+  layouts, and a *Drawing* layout of its own.
+- **Sketching in the Game view:** with the tool on and Play stopped, the pen draws over the Game view in the game
+  camera's perspective (its vertical field of view at the picture's aspect); the guide's vanishing points come from the
+  view's own matrices, so they follow the camera of the view under the pointer, a physical lens included.
+- **Keyboard navigation while the pen draws:** with the tool on, the arrows (A / D) orbit and (W / S) dolly the Scene
+  camera, Shift+arrows (Q / E) pan, no mouse button down, no drag and the Wheel closed; a stroke under way holds the
+  keys; a key the view took is not the shortcuts' that frame, but Ctrl, Alt and Shift+letter chords are never taken;
+  frames keep coming while a key is held.
+- **Place in 3D** (`sketch place 3d|flat`): a picture-plane stroke lands in the scene when the pen lifts - on the
+  scene canvas it was drawn over, as before, else on a **depth canvas** facing the camera at the depth under the
+  pen's first point (the surface the view's ray hits; over nothing, the camera's pivot distance) - corrected in the
+  plane's metres, so orbiting shows the line foreshortened where it was drawn and Build from Sketch, the sweeps, the
+  cuts and the trace read it as they read a plane canvas's stroke. Depth canvases (kind 2) are saved with the scene,
+  never construction planes, not listed, and go when no stroke uses them. Off, the stroke stays on the picture plane
+  and fades with the view.
+**Review (Opus, round 253):** seven findings fixed before landing - strokes placed in 3D can now be built from (every
+`kind == 1` check on a canvas became `kind >= 1`; `sketchlift` keeps to picture-plane strokes); keyboard navigation
+leaves Ctrl, Alt and Shift+letter chords to the shortcuts and runs only with no drag, no right button and the Wheel
+closed, for the hovered view once a frame, its state cleared when the tool ends; the game camera's lens is its vertical
+field of view at the picture's aspect and the guide's vanishing points come from the view's own matrices; tests for the
+acceptance criteria (a stroke projecting back onto its pixel, the camera turned, over nothing at the pivot's depth,
+no stroke while Play runs, keys blocked during a stroke, Ctrl+D not eaten); the spec and ADR say `sketch_view_` and
+that the Draw tab isn't duplicated. The minors too: the Draw tab's *No perspective* turns the guide off, the tab
+restarts the tool when shown again (by frame number), a Game source leaves the Scene camera alone and says so, no
+sketching anywhere while Play runs or is paused, depth canvases no stroke uses are pruned (erase, clear, a missed
+plane - which falls back to flat), the console binds case-insensitively, named constants for the navigation rates.
+
+**Checked**
+- `tests_round253` in `tests/test_sketch.cpp` (4 tests): a pen stroke over the Game view is the game camera's (its
+  layer's view) and goes on while the Scene view draws, the guide's points differ over the two views; Right held half
+  a second turns the Scene camera with no button down and switches no tool, Shift+Up pans, W dollies, the keys are
+  the tools' again with the tool off, Ctrl+D duplicates and moves nothing, a key held during a stroke moves nothing;
+  a stroke over the cube lands on a depth canvas at the cube's depth (over nothing, the pivot's) and projects back
+  onto its pixel, still projecting after the camera turns, a flat stroke stays on the picture plane, `sketch clear`
+  leaves no depth canvas; the Game view takes no stroke while Play runs; the Draw tab shows in the two
+  layouts and the Drawing one, starts the tool with Place in 3D, takes a stroke in its own view, and shows the Game
+  camera on `draw source game`.
+- Unit checks (round 253): Windows, in render-cache verify mode, 12,511, 0 failed (1065 tests), 0 stale
+  pictures. Linux with libraries: 12,052, 0 failed. Sanitizer build: 11,922, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-27 (round 252): windows for a drawing tablet - dock into any window, a second Scene view (task 0232)
 
 **Asked:** "I want to dock windows onto other windows. Such as on my drawing tablet I want my scene view and Inspector

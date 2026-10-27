@@ -690,6 +690,7 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (sketch_command(t, line)) return;  // sketch | sketchguide | sketchstroke (task 0223)
+  if (c == "draw" && draw_tab_command(t)) return;  // draw source scene|game (task 0233: the Draw tab)
   if (sketch_canvas_command(t, line)) return;  // sketchcanvas (task 0224)
   if (sketch_world_stroke_command(t)) return;  // sketchline | sketchcircle (task 0228)
   if (sketch_build_command(t)) return;  // sketchbuild (task 0225)

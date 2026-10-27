@@ -57,11 +57,11 @@ void Editor::sketch_guide_from_camera(const Recti &view) {
   Sketch &s = scene_->sketch;
   for (int i = 0; i < s.perspective; i++) {
     Vec2 v;
-    if (sketch_vanishing_point(cam_, view, guide_axis(cam_, s.perspective, i), v)) s.vp[i] = v;
+    if (sketch_vanishing_point_bound(guide_axis(sketch_view_.cam, s.perspective, i), v)) s.vp[i] = v;  // (task 0233: the view's own matrices)
   }
   s.vp_placed = true;
   sketch_.flat = false;
-  cam_yaw_before_ = cam_.yaw, cam_pitch_before_ = cam_.pitch, cam_fov_before_ = cam_.fov;
+  cam_yaw_before_[sketch_view_.kind] = sketch_view_.cam.yaw, cam_pitch_before_[sketch_view_.kind] = sketch_view_.cam.pitch, cam_fov_before_[sketch_view_.kind] = sketch_view_.cam.fov;
 }
 
 /* Yaw, pitch and (2- and 3-point) the field of view by a damped Gauss-Newton from `start`, the Jacobian by finite
@@ -160,11 +160,11 @@ bool Editor::sketch_solve_camera(const Recti &view, const SceneCamera &start, Sc
  * the camera untouched, when the points are no camera's. */
 bool Editor::sketch_camera_from_guide(const Recti &view) {
   Sketch &s = scene_->sketch;
-  if (s.perspective <= 0 || cam_.ortho) return false;
-  SceneCamera best = cam_;
+  if (s.perspective <= 0 || sketch_view_.cam.ortho) return false;
+  SceneCamera best = sketch_view_.cam;
   float best_worst = 1e30f;
   for (int k = 0; k < 4; k++) {
-    SceneCamera start = cam_;
+    SceneCamera start = sketch_view_.cam;
     if (k & 1) start.yaw = -start.yaw;
     if (k & 2) start.pitch = -start.pitch;
     SceneCamera cam;
@@ -172,19 +172,24 @@ bool Editor::sketch_camera_from_guide(const Recti &view) {
     if (!sketch_solve_camera(view, start, cam, worst)) continue;
     /* Among good solves the one nearest the camera as it is. */
     const bool good = worst < 0.1f, best_good = best_worst < 0.1f;
-    const float turn = std::fabs(cam.yaw - cam_.yaw) + std::fabs(cam.pitch - cam_.pitch), best_turn = std::fabs(best.yaw - cam_.yaw) + std::fabs(best.pitch - cam_.pitch);
+    const float turn = std::fabs(cam.yaw - sketch_view_.cam.yaw) + std::fabs(cam.pitch - sketch_view_.cam.pitch), best_turn = std::fabs(best.yaw - sketch_view_.cam.yaw) + std::fabs(best.pitch - sketch_view_.cam.pitch);
     const bool better = good && best_good ? turn < best_turn : worst < best_worst;
     if (better) best = cam, best_worst = worst;
   }
   if (!(best_worst < 0.1f)) {
     sketch_.flat = true;  // (the dragged points stay as they are until the camera moves)
-    cam_yaw_before_ = cam_.yaw, cam_pitch_before_ = cam_.pitch, cam_fov_before_ = cam_.fov;
+    cam_yaw_before_[sketch_view_.kind] = sketch_view_.cam.yaw, cam_pitch_before_[sketch_view_.kind] = sketch_view_.cam.pitch, cam_fov_before_[sketch_view_.kind] = sketch_view_.cam.fov;
     return false;
   }
   while (best.yaw > 180.0f) best.yaw -= 360.0f;
   while (best.yaw < -180.0f) best.yaw += 360.0f;
+  if (!sketch_keynav_view()) {  // (task 0233: a game camera isn't turned by a drawing - a flat guide)
+    sketch_.flat = true;
+    return false;
+  }
   cam_.yaw = best.yaw, cam_.pitch = best.pitch, cam_.fov = best.fov;
   cam_.animating = false;
+  sketch_view_.cam = cam_;
   sketch_guide_from_camera(view);
   ui_.redraw = true;
   return true;
@@ -200,14 +205,14 @@ bool Editor::sketch_stroke_px(const Recti &view, const SketchStroke &st, const S
   const Vec3 w = c->origin + c->u * p.x + c->v * p.y;
   Vec2 s;
   float z;
-  if (!scene_r3d_.project(w, s, z)) return false;
+  if (!sketch_project(w, s, z)) return false;
   px = {view.x + s.x, view.y + s.y};
   return true;
 }
 
 /* A world segment on the view, clipped at the camera: false when it is wholly behind it. */
 bool Editor::sketch_segment_px(const Recti &view, Vec3 a, Vec3 b, Vec2 &pa, Vec2 &pb) const {
-  const Mat4 m = clip_matrix(cam_, view);
+  const Mat4 m = sketch_view_.vp;
   Vec4 ca = m * Vec4(a, 1.0f), cb = m * Vec4(b, 1.0f);
   const float eps = 1e-4f;
   if (ca.w < eps && cb.w < eps) return false;
@@ -237,7 +242,7 @@ void Editor::sketch_stroke_segments(const Recti &view, const SketchStroke &st, s
 
 /* Where the view's ray through `px` meets the canvas's plane, as (u, v) metres. */
 bool Editor::sketch_plane_hit(const Recti &view, const SketchCanvas &c, Vec2 px, Vec2 &uv) const {
-  const Ray ray = scene_r3d_.screen_ray(px.x - view.x, px.y - view.y);
+  const Ray ray = sketch_ray(px.x - view.x, px.y - view.y);
   const Vec3 n = normalize(cross(c.u, c.v));
   float t;
   if (!ray_plane(ray, c.origin, n, t) || t <= 0.0f) return false;
@@ -247,21 +252,21 @@ bool Editor::sketch_plane_hit(const Recti &view, const SketchCanvas &c, Vec2 px,
 }
 
 /* A canvas added, or the one already there with that plane and frame made active. */
-int Editor::sketch_add_canvas(SketchCanvas c) {
+int Editor::sketch_add_canvas(SketchCanvas c, bool activate) {
   Sketch &s = scene_->sketch;
   for (const SketchCanvas &o : s.canvases) {
     const bool same = length(o.origin - c.origin) < 1e-5f && length(o.u - c.u) < 1e-5f && length(o.v - c.v) < 1e-5f;
     if (!same) continue;
-    s.active_canvas = o.id;
+    if (activate) s.active_canvas = o.id;
     ui_.redraw = true;
     return o.id;
   }
   int id = 1;
   for (const SketchCanvas &o : s.canvases) id = std::max(id, o.id + 1);
   c.id = id;
-  c.kind = 1;
+  if (c.kind == 0) c.kind = 1;  // (task 0233: a depth canvas keeps its kind 2)
   s.canvases.push_back(c);
-  s.active_canvas = id;
+  if (activate) s.active_canvas = id;
   mark_changed("Sketch Canvas");
   return id;
 }
@@ -375,7 +380,7 @@ bool Editor::sketch_snap_to_guides(const Recti &view, Vec2 &a, Vec2 &b) const {
     if (c && c->kind == 1 && !guide_in_plane(g, *c)) continue;
     /* Two points of the line in front of the camera: round the one nearest the camera's pivot, a metre apart or
      * more when that is too short on the view. */
-    const Vec3 base = g.p + g.d * dot(cam_.pivot - g.p, g.d);
+    const Vec3 base = g.p + g.d * dot(sketch_view_.cam.pivot - g.p, g.d);
     Vec2 p0, p1, gd;
     float gl = 0.0f;
     bool ok = false;
@@ -419,14 +424,13 @@ void Editor::sketch_draw_canvas(const Recti &view) {
 /* The face of a mesh under a point of the view as a canvas: its plane, u along its longest edge. False when there is
  * no face there. */
 bool Editor::sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas &out) {
-  ensure_scene_planes();
-  const uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);
+  const uint64_t id = sketch_id_at(mx, my);  // (task 0233: the bound view's)
   GameObject *g = id ? scene_->find(id) : nullptr;
   MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf || !mf->mesh) return false;
   const Mesh &m = *mf->mesh;
   const Mat4 &w = g->world_matrix();
-  const Ray ray = scene_r3d_.screen_ray((float)(mx - view.x), (float)(my - view.y));
+  const Ray ray = sketch_ray((float)(mx - view.x), (float)(my - view.y));
   const Mat4 inv = w.inverse();
   const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
   const RenderMesh &rm = m.render_mesh(true);
@@ -463,6 +467,7 @@ bool Editor::sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas 
 /* sketchline x y z x y z | sketchcircle cx cy cz r: a line or a circle on the active scene canvas from world points
  * (task 0228: the Learn tab's try-its and scripts; the points are read in the plane, so they should lie in it). */
 bool Editor::sketch_world_stroke_command(const std::vector<std::string> &t) {
+  if (!t.empty() && (t[0] == "sketchline" || t[0] == "sketchcircle")) sketch_bind_scene(scene_rect_, true);  // (task 0233)
   if (t.empty()) return false;
   const std::string c = to_lower(t[0]);
   if (c != "sketchline" && c != "sketchcircle") return false;
@@ -516,6 +521,7 @@ bool Editor::sketch_world_stroke_command(const std::vector<std::string> &t) {
 
 /* sketchcanvas view|ground|face [x y]|plane x|y|z [px py pz]|list|<id>: the canvas the next strokes go on. */
 bool Editor::sketch_canvas_command(const std::vector<std::string> &t, const std::string &line) {
+  if (!t.empty() && t[0] == "sketchcanvas") sketch_bind_scene(scene_rect_, true);  // (task 0233)
   (void)line;
   if (t.empty() || to_lower(t[0]) != "sketchcanvas") return false;
   auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? t[i] : d; };
@@ -532,7 +538,7 @@ bool Editor::sketch_canvas_command(const std::vector<std::string> &t, const std:
   else if (v == "plane") {
     const std::string ax = to_lower(arg(2, "y"));
     SketchCanvas c;
-    c.origin = t.size() >= 6 ? Vec3{(float)std::atof(t[3].c_str()), (float)std::atof(t[4].c_str()), (float)std::atof(t[5].c_str())} : cam_.pivot;
+    c.origin = t.size() >= 6 ? Vec3{(float)std::atof(t[3].c_str()), (float)std::atof(t[4].c_str()), (float)std::atof(t[5].c_str())} : sketch_view_.cam.pivot;
     if (ax == "x") c.name = "Plane X", c.u = {0, 0, 1}, c.v = {0, 1, 0};  // (a wall facing X: along Z, up Y)
     else if (ax == "z") c.name = "Plane Z", c.u = {1, 0, 0}, c.v = {0, 1, 0};
     else c.name = "Plane Y", c.u = {1, 0, 0}, c.v = {0, 0, 1};
@@ -546,7 +552,10 @@ bool Editor::sketch_canvas_command(const std::vector<std::string> &t, const std:
   }
   else if (v == "list") {
     Log::info("Canvases: 0 View%s", s.active_canvas == 0 ? " (active)" : "");
-    for (const SketchCanvas &c : s.canvases) Log::info("  %d %s%s", c.id, c.name.c_str(), c.id == s.active_canvas ? " (active)" : "");
+    for (const SketchCanvas &c : s.canvases) {
+      if (c.kind == 2) continue;  // (a depth canvas: a stroke's place, not a construction plane - task 0233)
+      Log::info("  %d %s%s", c.id, c.name.c_str(), c.id == s.active_canvas ? " (active)" : "");
+    }
   }
   else if (!v.empty() && std::isdigit((unsigned char)v[0])) {
     const int id = std::atoi(v.c_str());

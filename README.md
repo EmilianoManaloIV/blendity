@@ -198,7 +198,8 @@ button or a finger held still, with a set per mode you fill from any menu's righ
 rest without a keyboard ([the manual](docs/MANUAL.md), chapter 1). **My Tools** holds panels of your own buttons, any command
 takes a key of your own (right-click it > Assign Shortcut...), and one `.blendity-ui` file carries the whole arrangement. On a
 drawing tablet beside the screen, a second Scene view and a pinned Inspector in a window of their own (*Duplicate into New
-Window*), and tabs dock into whichever window they are dropped on.
+Window*), and tabs dock into whichever window they are dropped on. The **Draw tab** is the pad: the scene from the Scene or the Game camera, the
+pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn.
 
 ## Build it
 
@@ -226,7 +227,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (12474 unit checks in 1061 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (12511 unit checks in 1065 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

@@ -1114,6 +1114,224 @@ static void tests_round248() {
   });
 }
 
+/* Task 0233 (ADR 0071): the sketch tool in a view - the Game view, the Draw tab, keyboard navigation, the guide per
+ * view, Place in 3D. */
+static void tests_round253() {
+  using platform::EventType;
+  auto step = [](Editor &ed, std::vector<platform::Event> events = {}) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  auto key = [](EventType t, int k, int mods = 0) {
+    platform::Event e;
+    e.type = t, e.key = k, e.mods = mods;
+    return e;
+  };
+
+  test("game view: a pen stroke over the Game view is the game camera's (its layer remembers that camera, not the Scene view's), a stroke begun there goes on while the Scene view draws, and the guide's points there are the game camera's", [&] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    ed.set_clock_for_test(100.0);
+    ed.command("layout 2 by 3");  // (the Scene view and the Game view both show)
+    step(ed);
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    const Recti g = ed.game_rect_for_test(), s = ed.scene_rect_for_test();
+    CHECK(g.w > 100 && s.w > 100);
+    const int x0 = g.x + g.w / 3, y0 = g.y + g.h / 2;
+    step(ed, {pen_ev(EventType::MouseMove, x0, y0)});
+    step(ed, {pen_ev(EventType::MouseDown, x0, y0)});
+    for (int i = 1; i <= 10; i++) {
+      step(ed, {pen_ev(EventType::MouseMove, x0 + 20 * i, y0 + 3 * i)});
+      CHECK(ed.sketch_for_test().strokes.empty());  // (the Scene view's sketch_update, run first each frame, leaves it)
+    }
+    step(ed, {pen_ev(EventType::MouseUp, x0 + 200, y0 + 30)});
+    step(ed);
+    const Sketch &sk = ed.sketch_for_test();
+    std::printf("    strokes %zu; the layer's view yaw %.1f (the Scene camera's %.1f)\n", sk.strokes.size(), sk.layers.empty() ? 0.0f : sk.layers[0].view_yaw,
+                ed.scene_camera_for_test().yaw);
+    CHECK(sk.strokes.size() == 1 && !sk.layers.empty() && sk.layers[0].has_view && std::fabs(sk.layers[0].view_yaw - ed.scene_camera_for_test().yaw) > 1.0f);
+    /* While Play runs (or is paused) the Game view takes no stroke: its edits would go on Stop. */
+    ed.command("play");
+    step(ed);
+    step(ed, {pen_ev(EventType::MouseMove, x0, y0 + 100)});
+    step(ed, {pen_ev(EventType::MouseDown, x0, y0 + 100)});
+    step(ed, {pen_ev(EventType::MouseMove, x0 + 100, y0 + 100)});
+    step(ed, {pen_ev(EventType::MouseUp, x0 + 100, y0 + 100)});
+    step(ed);
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    ed.command("stop");
+    step(ed);
+    ed.command("sketch on");
+    /* The 3-point guide over the Game view follows the game camera: its points move with the camera. */
+    ed.command("sketchguide perspective 3");
+    ed.command("sketchguide follow on");
+    const Vec2 vp_console = ed.sketch_for_test().vp[1];
+    step(ed, {pen_ev(EventType::MouseMove, g.x + g.w / 2, g.y + g.h / 2)});
+    step(ed);
+    auto bound = [&](const char *where) {
+      const SceneCamera vc = ed.sketch_view_cam_for_test();
+      std::printf("    %s: bound kind %d, guide view %d, flat %d; camera yaw %.1f pitch %.1f fov %.1f dist %.2f ortho %d; vp1 (%.2f, %.2f)\n", where,
+                  ed.sketch_view_kind_for_test(), ed.sketch_guide_view_for_test(), ed.sketch_flat_for_test(), vc.yaw, vc.pitch, vc.fov, vc.distance, vc.ortho,
+                  ed.sketch_for_test().vp[1].x, ed.sketch_for_test().vp[1].y);
+    };
+    std::printf("    after the console: vp1 (%.2f, %.2f)\n", vp_console.x, vp_console.y);
+    bound("over the Game view");
+    const Vec2 vp_game = ed.sketch_for_test().vp[1];  // (the Z axis: a level game camera has the X and Y axes parallel to its picture plane, no point)
+    step(ed, {pen_ev(EventType::MouseMove, s.x + s.w / 2, s.y + s.h / 2)});
+    step(ed);
+    bound("over the Scene view");
+    const Vec2 vp_scene = ed.sketch_for_test().vp[1];
+    std::printf("    vanishing point 1 (the Z axis) over the Game view (%.2f, %.2f), over the Scene view (%.2f, %.2f)\n", vp_game.x, vp_game.y, vp_scene.x, vp_scene.y);
+    CHECK(length(vp_game - vp_scene) > 0.01f);
+    ed.command("sketch off");
+  });
+
+  test("keyboard navigation: with the sketch tool on, Right held over the Scene view turns the camera with no button down and switches no tool; Shift+Up pans; W dollies in; the keys are the tools' again when the tool is off", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed);
+    const Recti s = ed.scene_rect_for_test();
+    step(ed, {pen_ev(EventType::MouseMove, s.x + s.w / 2, s.y + s.h / 2)});
+    const int tool0 = ed.tool_for_test();
+    const float yaw0 = ed.scene_camera_for_test().yaw, dist0 = ed.scene_camera_for_test().distance;
+    const Vec3 pivot0 = ed.scene_camera_for_test().pivot;
+    ed.command("sketch on");
+    step(ed, {key(EventType::KeyDown, platform::KEY_RIGHT)});
+    for (int i = 0; i < 25; i++) step(ed);
+    step(ed, {key(EventType::KeyUp, platform::KEY_RIGHT)});
+    const float yaw1 = ed.scene_camera_for_test().yaw;
+    std::printf("    yaw %.1f -> %.1f after half a second of Right\n", yaw0, yaw1);
+    CHECK(yaw1 > yaw0 + 20.0f && ed.tool_for_test() == tool0);
+    step(ed, {key(EventType::KeyDown, platform::KEY_UP, platform::MOD_SHIFT)});
+    for (int i = 0; i < 10; i++) step(ed);
+    step(ed, {key(EventType::KeyUp, platform::KEY_UP, platform::MOD_SHIFT)});
+    CHECK(length(ed.scene_camera_for_test().pivot - pivot0) > 0.05f);
+    step(ed, {key(EventType::KeyDown, platform::KEY_W)});
+    for (int i = 0; i < 10; i++) step(ed);
+    step(ed, {key(EventType::KeyUp, platform::KEY_W)});
+    CHECK(ed.scene_camera_for_test().distance < dist0 * 0.9f && ed.tool_for_test() == tool0);  // (W didn't switch to the Move tool)
+    /* Ctrl+D is the shortcuts' (Duplicate), not a dolly; a key held while a stroke is under way moves nothing. */
+    ed.command("create Cube");
+    step(ed);
+    const size_t objects = ed.scene().object_count();
+    const float dist1 = ed.scene_camera_for_test().distance;
+    step(ed, {key(EventType::KeyDown, platform::KEY_D, platform::MOD_CTRL)});
+    step(ed, {key(EventType::KeyUp, platform::KEY_D, platform::MOD_CTRL)});
+    CHECK(ed.scene().object_count() == objects + 1 && std::fabs(ed.scene_camera_for_test().distance - dist1) < 1e-5f);
+    const float yaw_s = ed.scene_camera_for_test().yaw;
+    step(ed, {pen_ev(EventType::MouseDown, s.x + s.w / 2, s.y + s.h / 2)});
+    step(ed, {key(EventType::KeyDown, platform::KEY_RIGHT)});
+    for (int i = 1; i <= 10; i++) step(ed, {pen_ev(EventType::MouseMove, s.x + s.w / 2 + 8 * i, s.y + s.h / 2)});
+    step(ed, {key(EventType::KeyUp, platform::KEY_RIGHT)});
+    step(ed, {pen_ev(EventType::MouseUp, s.x + s.w / 2 + 80, s.y + s.h / 2)});
+    CHECK(std::fabs(ed.scene_camera_for_test().yaw - yaw_s) < 1e-5f);
+    ed.command("sketch off");
+    const float yaw2 = ed.scene_camera_for_test().yaw;
+    step(ed, {key(EventType::KeyDown, platform::KEY_RIGHT)});
+    for (int i = 0; i < 10; i++) step(ed);
+    step(ed, {key(EventType::KeyUp, platform::KEY_RIGHT)});
+    CHECK(std::fabs(ed.scene_camera_for_test().yaw - yaw2) < 1e-4f);
+  });
+
+  test("place in 3D: a stroke over a cube lands on a depth canvas at the cube's depth and projects back onto its pixels after the camera turns; over nothing, at the pivot's depth; flat strokes stay on the picture plane", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed);
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch place 3d");
+    CHECK(ed.sketch_place3d_for_test());
+    const Recti s = ed.scene_rect_for_test();
+    /* The sample scene's Cube sits near the origin: the view's middle looks at it (the depth there is the cube's). */
+    const int cx = s.x + s.w / 2, cy = s.y + s.h / 2;
+    const float depth_px = ed.scene_depth_for_test(cx, cy);
+    std::vector<Vec2> pts;
+    for (int i = 0; i <= 10; i++) pts.push_back({(float)(s.w / 2 - 30 + 6 * i), (float)(s.h / 2 + 2 * i)});
+    pen_stroke(ed, pts);
+    const Sketch &sk = ed.sketch_for_test();
+    CHECK(sk.strokes.size() >= 1 && sk.strokes[0].canvas != 0);
+    const SketchCanvas *dc = sk.strokes.empty() ? nullptr : sk.canvas_at(sk.strokes[0].canvas);
+    CHECK(dc && dc->kind == 2);
+    if (!dc) return;
+    const SceneCamera &cam = ed.scene_camera_for_test();
+    const float d = dot(dc->origin - cam.position(), cam.forward());
+    std::printf("    the depth canvas %.3f m away (the pivot %.3f, the depth plane under the pen %s)\n", d, cam.distance, depth_px < 1.0f ? "a surface" : "nothing");
+    CHECK(d > 0.1f && (depth_px >= 1.0f ? std::fabs(d - cam.distance) < 1e-3f : d < cam.distance));
+    /* The stroke's first point projects back onto the pen's first pixel (within two pixels: the correction straightens). */
+    {
+      const SketchStroke &first = sk.strokes[0];
+      Vec2 px;
+      CHECK(ed.sketch_stroke_px_for_test(first, first.pts.front(), px) && std::fabs(px.x - (s.x + pts.front().x)) < 3.0f && std::fabs(px.y - (s.y + pts.front().y)) < 3.0f);
+    }
+    /* Over nothing (the view's top left corner looks at the sky): the pivot's depth; the depth canvas can be built from. */
+    const size_t strokes_before = ed.sketch_for_test().strokes.size();
+    pen_stroke(ed, {{20, 20}, {60, 22}, {100, 24}, {140, 26}});
+    const Sketch &sk2 = ed.sketch_for_test();
+    CHECK(sk2.strokes.size() == strokes_before + 1);
+    const SketchCanvas *dc2 = sk2.canvas_at(sk2.strokes.back().canvas);
+    const SceneCamera &cam2 = ed.scene_camera_for_test();
+    CHECK(dc2 && dc2->kind == 2 && std::fabs(dot(dc2->origin - cam2.position(), cam2.forward()) - cam2.distance) < 1e-3f);
+    /* The camera turned 40 degrees: the strokes keep their places (their canvases don't move) and still project. */
+    ed.command(strprintf("camera %g %g %g", cam2.yaw + 40.0f, cam2.pitch, cam2.distance));
+    step(ed);
+    Vec2 px_after;
+    CHECK(ed.sketch_stroke_px_for_test(ed.sketch_for_test().strokes[0], ed.sketch_for_test().strokes[0].pts.front(), px_after));
+    /* The stroke's first point projects (it is a 3D point on its canvas, not a picture-plane one). */
+    Vec2 px0;
+    const SketchStroke &st = ed.sketch_for_test().strokes[0];
+    CHECK(ed.sketch_stroke_px_for_test(st, st.pts.front(), px0));
+    /* Flat: a stroke stays on the picture plane (canvas 0). */
+    ed.command("sketch place flat");
+    pen_stroke(ed, {{100, 100}, {200, 110}, {300, 120}});
+    CHECK(!ed.sketch_place3d_for_test() && ed.sketch_for_test().strokes.back().canvas == 0);
+    ed.command("sketchcanvas list");  // (the depth canvas isn't listed: no crash, nothing to check but the log)
+    /* Erasing the strokes takes their depth canvases with them. */
+    ed.command("sketch clear");
+    size_t depth_left = 0;
+    for (const SketchCanvas &c : ed.sketch_for_test().canvases) depth_left += c.kind == 2 ? 1 : 0;
+    CHECK(depth_left == 0);
+    ed.command("sketch off");
+  });
+
+  test("the Draw tab: it shows in the Reference & Planning and Blocking Out layouts and in a Drawing layout, draws the scene from the Scene camera (or the Game camera with draw source game), starts the sketch tool with Place in 3D, and takes a pen stroke in its own view", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    step(ed);
+    ed.command("layout Reference & Planning");
+    step(ed);
+    CHECK(ed.dock_leaf_rect_for_test(WindowKind::Draw).w > 0);
+    ed.command("layout Blocking Out");
+    step(ed);
+    CHECK(ed.dock_leaf_rect_for_test(WindowKind::Draw).w > 0);
+    ed.command("layout Drawing");
+    step(ed);
+    ed.command("window Draw");
+    step(ed);
+    step(ed);
+    const Recti d = ed.window_rect_for_test(WindowKind::Draw);
+    CHECK(d.w > 200 && d.h > 200 && ed.sketch_active_for_test() && ed.sketch_place3d_for_test());
+    ed.command("sketch clear");
+    const int x0 = d.x + d.w / 3, y0 = d.y + d.h / 2;
+    step(ed, {pen_ev(EventType::MouseMove, x0, y0)});
+    step(ed, {pen_ev(EventType::MouseDown, x0, y0)});
+    for (int i = 1; i <= 8; i++) step(ed, {pen_ev(EventType::MouseMove, x0 + 15 * i, y0 + 2 * i)});
+    CHECK(ed.sketch_view_kind_for_test() == 2 && ed.sketch_for_test().strokes.empty());
+    step(ed, {pen_ev(EventType::MouseUp, x0 + 120, y0 + 16)});
+    step(ed);
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    ed.command("draw source game");
+    step(ed);
+    step(ed);
+    CHECK(std::fabs(ed.sketch_view_cam_yaw_for_test() - ed.scene_camera_for_test().yaw) > 1.0f);  // (the sample scene has a Main Camera; the pad shows its view)
+    ed.command("draw source scene");
+    ed.command("sketch off");
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
@@ -1121,4 +1339,5 @@ void run_sketch_tests() {
   tests_round246();
   tests_round247();
   tests_round248();
+  tests_round253();
 }

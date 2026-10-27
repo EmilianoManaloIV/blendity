@@ -25,17 +25,17 @@ void Editor::sketch_record_layer_view(SketchLayer &layer) {
     return;
   }
   layer.has_view = true;
-  layer.view_yaw = cam_.yaw, layer.view_pitch = cam_.pitch, layer.view_fov = cam_.fov, layer.view_dist = cam_.distance;
-  layer.view_pivot = cam_.pivot;
+  layer.view_yaw = sketch_view_.cam.yaw, layer.view_pitch = sketch_view_.cam.pitch, layer.view_fov = sketch_view_.cam.fov, layer.view_dist = sketch_view_.cam.distance;
+  layer.view_pivot = sketch_view_.cam.pivot;
 }
 
 /* How much of a layer shows from the camera as it is: all of it within 5 degrees of the view it was drawn in, none
  * past 30 (a construction drawing is true from its view); a layer with no view shows everywhere. */
 float Editor::sketch_layer_fade(const SketchLayer &layer) const {
   if (!layer.has_view) return 1.0f;
-  SceneCamera then = cam_;
+  SceneCamera then = sketch_view_.cam;
   then.yaw = layer.view_yaw, then.pitch = layer.view_pitch;
-  const float c = std::max(-1.0f, std::min(1.0f, dot(then.forward(), cam_.forward())));
+  const float c = std::max(-1.0f, std::min(1.0f, dot(then.forward(), sketch_view_.cam.forward())));
   const float deg = std::acos(c) * 180.0f / kPi;
   return std::max(0.0f, std::min(1.0f, 1.0f - (deg - 5.0f) / 25.0f));
 }
@@ -49,7 +49,7 @@ bool Editor::sketch_layer_view() {
     Log::info("Sketch: this layer has no view yet (its first stroke on the picture plane remembers the camera)");
     return false;
   }
-  cam_.ortho = false;
+  cam_.ortho = false;  // (the Scene view's camera goes back: the layer's view is a Scene camera's)
   cam_.fov = layer.view_fov;
   cam_.animate_to(layer.view_pivot, layer.view_yaw, layer.view_pitch, layer.view_dist, clock_now());
   ui_.redraw = true;
@@ -64,7 +64,7 @@ float Editor::sketch_px_per_metre(const SketchCanvas &c, Vec2 uv) const {
   const Vec3 p = c.origin + c.u * uv.x + c.v * uv.y;
   Vec2 a, bu, bv;
   float za, zu, zv;
-  if (!scene_r3d_.project(p, a, za) || !scene_r3d_.project(p + normalize(c.u) * 0.1f, bu, zu) || !scene_r3d_.project(p + normalize(c.v) * 0.1f, bv, zv)) return 100.0f;
+  if (!sketch_project(p, a, za) || !sketch_project(p + normalize(c.u) * 0.1f, bu, zu) || !sketch_project(p + normalize(c.v) * 0.1f, bv, zv)) return 100.0f;
   return std::max(1.0f, std::min(length(bu - a), length(bv - a)) / 0.1f);
 }
 
@@ -282,7 +282,7 @@ bool Editor::sketch_trace(bool as_curve) {
   for (size_t i = s.strokes.size(); i-- > 0;) {
     SketchStroke &st = s.strokes[i];
     const SketchCanvas *c = st.canvas ? s.canvas_at(st.canvas) : nullptr;
-    if (!c || c->kind != 1 || st.pts.size() < 2) continue;
+    if (!c || c->kind < 1 || st.pts.size() < 2) continue;  // (a plane or a depth canvas: task 0233)
     std::vector<SketchPoint> outline;
     const bool closed = sketch_outline_from(i, outline);
     std::vector<Vec3> world;
@@ -436,8 +436,7 @@ void Editor::sketch_draw_overlay(const Recti &view) {
 
 /* The nearest edge (within 10 px) of the mesh under a view point, or of the selected meshes: the ruler along it. */
 bool Editor::sketch_ruler_from_edge(const Recti &view, int mx, int my) {
-  ensure_scene_planes();
-  const uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);
+  const uint64_t id = sketch_id_at(mx, my);  // (task 0233: the bound view's)
   std::vector<uint64_t> candidates;
   if (id && scene_->find(id)) candidates.push_back(id);
   for (uint64_t sel : selection_)
@@ -455,7 +454,7 @@ bool Editor::sketch_ruler_from_edge(const Recti &view, int mx, int my) {
     for (const auto &e : m.edge_cache()) {
       Vec2 sa, sb;
       float za, zb;
-      if (!scene_r3d_.project(w.point(m.positions[e.first]), sa, za) || !scene_r3d_.project(w.point(m.positions[e.second]), sb, zb)) continue;
+      if (!sketch_project(w.point(m.positions[e.first]), sa, za) || !sketch_project(w.point(m.positions[e.second]), sb, zb)) continue;
       const Vec2 d = sb - sa;
       const float l2 = dot(d, d);
       const float t = l2 > 1e-6f ? std::max(0.0f, std::min(1.0f, dot(mouse - sa, d) / l2)) : 0.0f;
@@ -491,7 +490,7 @@ bool Editor::sketch_ellipse_from_face(const Recti &view, int mx, int my) {
   for (uint32_t i = 0; i < nf; i++) {
     Vec2 s;
     float z;
-    if (!scene_r3d_.project(w.point(m.positions[fv[i]]), s, z)) return false;
+    if (!sketch_project(w.point(m.positions[fv[i]]), s, z)) return false;
     pts.push_back(s + Vec2{(float)view.x, (float)view.y});
     mean += pts.back();
   }
@@ -520,7 +519,7 @@ bool Editor::sketch_ellipse_from_face(const Recti &view, int mx, int my) {
 bool Editor::sketch_lift() {
   const Sketch &s = scene_->sketch;
   const Recti view = scene_rect_;
-  if (cam_.ortho) {
+  if (sketch_view_.cam.ortho) {
     Log::warn("sketchlift: a perspective view is needed (the axes' vanishing points)");
     return false;
   }
@@ -528,8 +527,8 @@ bool Editor::sketch_lift() {
   const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
   for (int k = 0; k < 3; k++) {
     Vec2 v;
-    const Vec3 a = dot(axes[k], cam_.forward()) < 0 ? axes[k] * -1.0f : axes[k];
-    if (sketch_vanishing_point(cam_, view, a, v)) vps[k] = sketch_to_px(view, v);
+    const Vec3 a = dot(axes[k], sketch_view_.cam.forward()) < 0 ? axes[k] * -1.0f : axes[k];
+    if (sketch_vanishing_point_bound(a, v)) vps[k] = sketch_to_px(view, v);
   }
   std::vector<research::LiftLine> lines;
   for (const SketchStroke &st : s.strokes) {
@@ -562,7 +561,7 @@ bool Editor::sketch_lift() {
   }
   /* The rays from the camera as it is now (the vanishing points are its), not the last frame's. */
   const float aspect = (float)view.w / (float)std::max(1, view.h);
-  const Mat4 inv = (cam_.proj(aspect) * cam_.view()).inverse();
+  const Mat4 inv = (sketch_view_.cam.proj(aspect) * sketch_view_.cam.view()).inverse();
   auto ray = [&](Vec2 px) {
     const float nx = 2.0f * (px.x - view.x) / (float)std::max(1, view.w) - 1.0f, ny = 1.0f - 2.0f * (px.y - view.y) / (float)std::max(1, view.h);
     const Vec4 a = inv * Vec4(nx, ny, 0.0f, 1.0f), b = inv * Vec4(nx, ny, 1.0f, 1.0f);
@@ -570,7 +569,7 @@ bool Editor::sketch_lift() {
     return Ray{pa, normalize(pb - pa)};
   };
   research::LiftResult r;
-  if (!research::lift_scaffold(lines, ray, (float)ui_.px(8), {view.x + view.w * 0.5f, view.y + view.h * 0.5f}, cam_.distance, r)) {
+  if (!research::lift_scaffold(lines, ray, (float)ui_.px(8), {view.x + view.w * 0.5f, view.y + view.h * 0.5f}, sketch_view_.cam.distance, r)) {
     Log::warn("sketchlift: the lines could not be lifted");
     return false;
   }
@@ -602,6 +601,7 @@ bool Editor::sketch_lift() {
 
 /* sketchproject | sketchtrace edge|curve | sketchlift: the drawing into the model. */
 bool Editor::sketch_refine_command(const std::vector<std::string> &t) {
+  if (!t.empty() && (t[0] == "sketchproject" || t[0] == "sketchtrace" || t[0] == "sketchlift")) sketch_bind_scene(scene_rect_, true);  // (task 0233)
   if (t.empty()) return false;
   const std::string c = to_lower(t[0]);
   if (c != "sketchproject" && c != "sketchtrace" && c != "sketchlift") return false;

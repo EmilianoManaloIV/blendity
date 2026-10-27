@@ -124,7 +124,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -612,6 +612,16 @@ class Editor {
     return out;
   }
   std::string wheel_prefs_text_for_test() { return wheel_prefs_text(); }
+  int sketch_view_kind_for_test() const { return sketch_view_.kind; }
+  int sketch_guide_view_for_test() const { return sketch_guide_view_; }
+  SceneCamera sketch_view_cam_for_test() const { return sketch_view_.cam; }
+  bool sketch_flat_for_test() const { return sketch_.flat; }
+  bool sketch_stroke_px_for_test(const SketchStroke &st, const SketchPoint &p, Vec2 &px) {
+    sketch_bind_scene(scene_rect_, true);
+    return sketch_stroke_px(scene_rect_, st, p, px);
+  }
+  bool sketch_place3d_for_test() const { return sketch_.place3d; }
+  float sketch_view_cam_yaw_for_test() const { return sketch_view_.cam.yaw; }
   Recti nav_button_rect_for_test(int which) const { return nav_buttons_shown() ? nav_button_rect(scene_rect_, which) : Recti{}; }
   Recti view_gizmo_rect_for_test() const { return view_gizmo_rect(scene_rect_); }
   void overlays_off_gpu_for_test(bool on) { overlays_off_gpu_for_test_ = on; }  // (task 0192)
@@ -2972,7 +2982,43 @@ class Editor {
     int drag_handle = -1;
     bool flat = false;  // (task 0224: a failed camera solve left the dragged points; they stay until the camera moves)
     bool overlay = true;  // (task 0226: the selected meshes' edges drawn to draw against)
+    bool place3d = false;  // (task 0233: a picture-plane stroke lands on a depth canvas in the scene)
+    int view_kind = -1;    // (task 0233: the view a stroke, an erase or a handle drag began in: 0 Scene, 1 Game, 2 the Draw tab)
   } sketch_;
+  /* The view the sketch tool works in this frame (task 0233, ADR 0071: sketch_view.cpp): bound by the Scene view, the
+   * Game view or the Draw tab before the tool runs, so strokes are drawn and corrected in that view's perspective. */
+  struct SketchView {
+    int kind = 0;  // 0 the Scene view, 1 the Game view, 2 the Draw tab
+    Recti view;
+    SceneCamera cam;  // (the game camera as a SceneCamera: game_scene_camera)
+    Mat4 v, p, vp, inv;
+    Vec3 eye, fwd;
+    bool hovered = false;
+  } sketch_view_;
+  void sketch_bind(int kind, const Recti &view, const SceneCamera &cam, const Mat4 &v, const Mat4 &p, bool hovered);
+  void sketch_bind_scene(const Recti &view, bool hovered);
+  void sketch_bind_game(const Recti &img, const Camera &cam, const GameObject &owner, const Mat4 &v, const Mat4 &p, bool hovered);
+  SceneCamera game_scene_camera(const Camera &cam, const GameObject &owner, float aspect) const;
+  bool sketch_vanishing_point_bound(Vec3 axis, Vec2 &out) const;
+  bool sketch_keynav_view() const;
+  void sketch_prune_depth_canvases();
+  bool sketch_project(Vec3 w, Vec2 &s, float &z) const;
+  Ray sketch_ray(float x, float y) const;
+  uint64_t sketch_id_at(int mx, int my);
+  bool sketch_keyboard_nav();
+  bool sketch_keynav_ = false;
+  int sketch_guide_view_ = 0;  // the view kind whose camera the perspective guide follows (the one last under the pointer)
+  double sketch_keynav_last_ = 0.0;
+  int sketch_depth_canvas(const Recti &view);
+  /* The Draw tab (task 0233): its picture's source, targets and cache. */
+  int draw_source_ = 0;  // 0 the Scene view's camera, 1 the Game camera
+  uint64_t draw_last_frame_ = 0;  // (the UI frame the tab last drew: shown again after a gap, it starts the tool)
+  RenderTarget draw_rt_;
+  Renderer3D draw_r3d_;
+  FilterTarget draw_ft_, draw_vs_;
+  void draw_draw_window(const Recti &r);
+  void draw_draw_bar(const Recti &bar);
+  bool draw_tab_command(const std::vector<std::string> &t);
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;
   void sketch_begin();
@@ -3004,9 +3050,9 @@ class Editor {
   bool sketch_face_canvas(const Recti &view, int mx, int my, SketchCanvas &out);
   bool sketch_canvas_command(const std::vector<std::string> &t, const std::string &line);
   bool sketch_world_stroke_command(const std::vector<std::string> &t);  // (task 0228: sketchline, sketchcircle)
-  int sketch_add_canvas(SketchCanvas c);
+  int sketch_add_canvas(SketchCanvas c, bool activate = true);
   bool sketch_snap_to_guides(const Recti &view, Vec2 &a, Vec2 &b) const;
-  float cam_yaw_before_ = 1e9f, cam_pitch_before_ = 1e9f, cam_fov_before_ = 1e9f;  // (the camera the guide last followed)
+  float cam_yaw_before_[3] = {1e9f, 1e9f, 1e9f}, cam_pitch_before_[3] = {1e9f, 1e9f, 1e9f}, cam_fov_before_[3] = {1e9f, 1e9f, 1e9f};  // (the camera the guide last followed, per view kind: task 0233)
   /* Task 0225 (sketch_build.cpp): solids from the construction lines, 3-Sweep's way. */
   bool sketch_circle_of(const SketchStroke &st, SketchCircle &out) const;
   bool sketch_stroke_shown(const SketchStroke &st) const;
@@ -3263,7 +3309,7 @@ class Editor {
     int card_slot = -1;      // task 0193: the card holds the picture (img is the transparent hole over it): which slot,
     uint64_t card_gen = 0;   // and its drawing then
   };
-  ViewCache scene_cache_, game_cache_;
+  ViewCache scene_cache_, game_cache_, draw_cache_;  // (draw_cache_: the Draw tab's picture, task 0233)
   /* Task 0193 (ADR 0061): the window drawing now is presented by the card. Its views drawn there stay there: the
    * canvas is left transparent over them (card_views_ says where each goes) and present_window shows the frame - the
    * views' pictures, the canvas over them. card_off_: its present failed, the system presents it from now on. Per
