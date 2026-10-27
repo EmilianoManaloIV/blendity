@@ -56,6 +56,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   /* Blender-style Edit Mode toggle - Unity has no built-in mesh editing (ProBuilder adds it). */
   int ew = u.font.text_width("Edit Mode (Tab)") + h + u.px(12);
   Recti er{bar.right() - ew - u.px(6), y, ew, h};
+  draw_breadcrumb(x, y, h, er.x - u.px(160));  // (task 0235: layout > mode > tool, each a dropdown)
   bool can_edit = edit_mode_ || (active_object() && active_object()->get<MeshFilter>());
   bool hot = u.hovered(er);
   uint32_t bg = edit_mode_ ? u.theme.accent : (hot && can_edit ? u.theme.button_hover : u.theme.button);
@@ -65,7 +66,57 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", ink);
   if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
   u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
-  (void)x;
+}
+
+namespace {
+const char *const kToolNames[] = {"View", "Move", "Rotate", "Scale", "Transform"}, *const kToolCommands[] = {"view", "move", "rotate", "scale", "transform"};
+}
+
+/* The mode the Scene view is in, as the breadcrumb and the hints name it. */
+std::string Editor::mode_name() const {
+  if (sketch_.active) return "Sketch";
+  if (weight_paint_) return "Weight Paint";
+  if (edit_mode_) return "Edit";
+  return "Object";
+}
+
+std::string Editor::breadcrumb_text() const { return workspace_ + " > " + mode_name() + " > " + kToolNames[(int)tool_]; }
+
+/* Layout > Mode > Tool in the Scene view's bar, each part a button opening its choices; drawn only when it fits before
+ * `limit` (a narrow view keeps its controls). Returns the x after it. */
+int Editor::draw_breadcrumb(int x, int y, int h, int limit) {
+  auto &u = ui_;
+  const std::string parts[3] = {workspace_, mode_name(), kToolNames[(int)tool_]};
+  const int sep = u.font.text_width(">") + u.px(8);
+  int total = 0;
+  for (const std::string &p : parts) total += u.font.text_width(p) + u.px(14);
+  total += 2 * sep;
+  if (x + total > limit) return x;
+  const ui::Id ids[3] = {u.id("crumb_layout"), u.id("crumb_mode"), u.id("crumb_tool")};
+  for (int i = 0; i < 3; i++) {
+    const Recti br{x, y, u.font.text_width(parts[i]) + u.px(14), h};
+    if (u.button(br, parts[i])) u.open_popup(ids[i], {br.x, br.bottom(), br.w, 0});
+    u.tooltip(i == 0 ? "The layout: a stage of the work, its windows and tools (Window > Layouts)" : i == 1 ? "The mode: Object, Edit, Weight Paint or Sketch" : "The tool (Q W E R T)");
+    if (u.record_buttons) u.button_rects[i == 0 ? "crumb_layout" : i == 1 ? "crumb_mode" : "crumb_tool"] = br;
+    x = br.right();
+    if (i < 2) u.label({x, y, sep, h}, ">", u.theme.text_dim, ui::Align::Center), x += sep;
+  }
+  u.popup(ids[0], u.px(220), [this] {
+    for (const std::string &n : workspace_names())
+      if (ui_.menu_item(n, nullptr, n == workspace_)) apply_workspace(n);
+  });
+  u.popup(ids[1], u.px(160), [this] {
+    const std::string m = mode_name();
+    if (ui_.menu_item("Object", nullptr, m == "Object")) run_console_command("sketch off"), run_console_command("weightpaint off"), run_console_command("edit off");
+    if (ui_.menu_item("Edit", nullptr, m == "Edit")) run_console_command("edit");
+    if (ui_.menu_item("Weight Paint", nullptr, m == "Weight Paint")) run_console_command("weightpaint on");
+    if (ui_.menu_item("Sketch", nullptr, m == "Sketch")) run_console_command("sketch on");
+  });
+  u.popup(ids[2], u.px(160), [this] {
+    for (int i = 0; i < 5; i++)
+      if (ui_.menu_item(kToolNames[i], nullptr, (int)tool_ == i)) run_console_command(std::string("tool ") + kToolCommands[i]);
+  });
+  return x + u.px(10);
 }
 
 /* overlay list | overlay all [on|off] | overlay <bones|controls|icons|points|origins|footprints|outline|grid|gizmos|stats>

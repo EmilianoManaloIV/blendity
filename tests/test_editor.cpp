@@ -3192,6 +3192,185 @@ static void tests_round252() {
   });
 }
 
+/* Task 0235 (ADR 0073): the module registry; tabs that fit, fold and follow the stage; the breadcrumb; the Inspector's
+ * fold toggle; the layout guide after two sessions. */
+static void tests_round255() {
+  using platform::EventType;
+  auto step = [](Editor &ed, std::vector<platform::Event> events = {}) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  auto mouse = [](EventType t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    return e;
+  };
+  auto click = [&](Editor &ed, const Recti r) {  // (by value: button_rects is rebuilt every frame, so a reference into it dangles after the first step)
+    step(ed, {mouse(EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed, {mouse(EventType::MouseDown, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed, {mouse(EventType::MouseUp, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed);
+  };
+  /* A click that must take: pressed again (up to three times) until `done` says so - a frame may be drawn without the
+   * widget under the pointer having been laid out yet. */
+  auto click_until = [&](Editor &ed, const std::string &button, std::function<bool()> done) {
+    for (int attempt = 0; attempt < 3 && !done(); attempt++) {
+      const auto &br = ed.ui_for_test().button_rects;
+      if (!br.count(button)) {
+        step(ed);
+        continue;
+      }
+      const Recti r = br.at(button);
+      click(ed, r);
+      if (!done()) std::printf("    (the click on %s at (%d,%d %dx%d) didn't take on attempt %d)\n", button.c_str(), r.x, r.y, r.w, r.h, attempt + 1);
+    }
+    return done();
+  };
+  auto inside = [](const Recti &r, const Recti &leaf) { return r.w > 0 && r.x >= leaf.x && r.right() <= leaf.right(); };
+  const WindowKind six[6] = {WindowKind::Materials, WindowKind::Textures, WindowKind::Lighting, WindowKind::Rigging, WindowKind::Animation, WindowKind::Sequencer};
+
+  test("the registry: a module per window kind, each title unique; the titles and icons the editor shows are the registry's", [] {
+    int n = 0;
+    const Module *m = modules(n);
+    CHECK(n == (int)WindowKind::Count);
+    std::set<std::string> names;
+    for (int i = 0; i < n; i++) {
+      CHECK((int)m[i].kind == i && std::string(window_title(m[i].kind)) == m[i].name && window_icon(m[i].kind) == m[i].icon);
+      names.insert(m[i].name);
+    }
+    CHECK((int)names.size() == n);
+    CHECK(module_of(WindowKind::Materials).folds && std::string(module_of(WindowKind::Materials).group) == "Shading" && !module_of(WindowKind::Scene).folds && module_of(WindowKind::Scene).duplicates && !module_of(WindowKind::Layers).duplicates);
+  });
+
+  test("tabs that fit: a 600-px leaf with six tabs shows all six inside the strip (icons for the inactive ones), a 170-px leaf shows the active one and lists the rest in the overflow", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("tabs fold off");
+    ed.command("layout H(0.43,L(11,14,13,15,16,17:0),L(0:0))");
+    step(ed);
+    step(ed);
+    const Recti leaf = ed.dock_leaf_rect_for_test(WindowKind::Materials);
+    std::printf("    the leaf %d px wide\n", leaf.w);
+    CHECK(leaf.w > 500 && leaf.w < 700 && ed.tab_overflow_for_test().empty());
+    int right_most = 0;
+    for (WindowKind k : six) {
+      const Recti r = ed.tab_rect_for_test(k);
+      CHECK(inside(r, leaf) && r.x >= right_most);  // (in order, none over another)
+      right_most = r.right();
+    }
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w > ed.tab_rect_for_test(WindowKind::Textures).w);  // (the active one keeps its label)
+    ed.command("layout H(0.12,L(11,14,13,15,16,17:0),L(0:0))");
+    step(ed);
+    step(ed);
+    const Recti narrow = ed.dock_leaf_rect_for_test(WindowKind::Materials);
+    const std::vector<WindowKind> over = ed.tab_overflow_for_test();
+    std::printf("    the narrow leaf %d px wide; %zu tabs in the overflow\n", narrow.w, over.size());
+    CHECK(narrow.w < 200 && !over.empty() && inside(ed.tab_rect_for_test(WindowKind::Materials), narrow));
+    for (WindowKind k : six) {
+      const bool overflowed = std::find(over.begin(), over.end(), k) != over.end();
+      CHECK(overflowed ? ed.tab_rect_for_test(k).w == 0 : inside(ed.tab_rect_for_test(k), narrow));
+    }
+    ed.command("tabs fold on");
+  });
+
+  test("tab groups: Materials, Textures and Lighting in one leaf show as one Shading tab with a row of the three under it; a member pressed becomes the leaf's active tab; Fold Groups off shows three tabs", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("layout H(0.5,L(11,14,13:0),L(0:0))");
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_label_for_test(WindowKind::Materials) == "Shading" && ed.tab_label_for_test(WindowKind::Lighting) == "Shading");
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).x == ed.tab_rect_for_test(WindowKind::Textures).x && ed.window_rect_for_test(WindowKind::Materials).w > 0);
+    const auto &br = ed.ui_for_test().button_rects;
+    CHECK(br.count("Textures") && br.count("Lighting"));
+    CHECK(click_until(ed, "Textures", [&] { return ed.window_rect_for_test(WindowKind::Textures).w > 0; }));
+    CHECK(ed.tab_label_for_test(WindowKind::Textures) == "Shading");
+    ed.command("tabs fold off");
+    step(ed);
+    CHECK(ed.tab_label_for_test(WindowKind::Materials) == "Materials" && ed.tab_rect_for_test(WindowKind::Materials).x != ed.tab_rect_for_test(WindowKind::Textures).x);
+    ed.command("tabs fold on");
+    ed.record_buttons_for_test(false);
+  });
+
+  test("a stage's tabs: the Rigging layout hides a Materials tab (listed under the strip's +1) unless it was asked for or Show All Tabs is on; the Default layout hides nothing", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("layout H(0.72,V(0.74,H(0.22,L(2:0),L(0,1:0)),L(4,5:0)),L(11,15,3:0))");  // (the Rigging layout with a Materials tab kept in the Inspector's leaf)
+    ed.set_focus_for_test(Editor::FocusCreate | Editor::FocusObject | Editor::FocusRig | Editor::FocusDeform);
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w == 0 && ed.tab_rect_for_test(WindowKind::Rigging).w > 0 && ed.window_rect_for_test(WindowKind::Rigging).w > 0);  // (the leaf shows Rigging; a hidden tab keeps last frame's window rect)
+    CHECK(ed.tab_hidden_for_test() == std::vector<WindowKind>{WindowKind::Materials} && ed.ui_for_test().button_rects.count("+1"));  // (the strip says so)
+    ed.command("window Materials");  // (asked for: shown whatever the stage)
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w > 0 && ed.window_rect_for_test(WindowKind::Materials).w > 0);
+    ed.forget_opened_tabs_for_test();  // (the next session)
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w == 0 && ed.tab_rect_for_test(WindowKind::Rigging).w > 0 && ed.window_rect_for_test(WindowKind::Rigging).w > 0);  // (the leaf shows Rigging; a hidden tab keeps last frame's window rect)
+    ed.command("tabs all on");
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w > 0);
+    ed.command("tabs all off");
+    ed.command("layout Default");
+    step(ed);
+    step(ed);
+    for (WindowKind k : {WindowKind::Scene, WindowKind::Materials, WindowKind::Render, WindowKind::Inspector}) CHECK(ed.tab_rect_for_test(k).w > 0);
+  });
+
+  test("the breadcrumb reads layout > mode > tool and `where` prints it; the Inspector's Fold folds every component and Unfold opens them, the folds in the preferences; a layout picked in two sessions hides its guide and Reset Guides brings it back", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("layout Modeling & Topology");
+    ed.command("edit");
+    ed.command("tool move");
+    step(ed);
+    std::printf("    %s\n", ed.breadcrumb_for_test().c_str());
+    CHECK(ed.breadcrumb_for_test() == "Modeling & Topology > Edit > Move");
+    ed.command("where");
+    ed.command("edit off");
+    ed.command("layout Default");
+    ed.command("select Cube");
+    step(ed);
+    step(ed);
+    const auto &br = ed.ui_for_test().button_rects;
+    CHECK(br.count("Fold") && ed.folded_components_for_test() == 0);
+    CHECK(click_until(ed, "Fold", [&] { return ed.folded_components_for_test() > 0; }));  // (the header's button)
+    const int folded = ed.folded_components_for_test();
+    CHECK(click_until(ed, "Unfold", [&] { return ed.folded_components_for_test() == 0; }));
+    ed.command("inspector fold");  // (the same from the console)
+    step(ed);
+    std::printf("    %d components folded; %s\n", folded, ed.full_prefs_text_for_test().c_str());
+    CHECK(folded >= 2 && br.count("Unfold") && ed.full_prefs_text_for_test().find("fold=") != std::string::npos && ed.full_prefs_text_for_test().find("MeshFilter0") != std::string::npos);  // (the keys' order is the map's: it differs between platforms)
+    ed.command("inspector unfold");
+    step(ed);
+    CHECK(ed.folded_components_for_test() == 0);
+    /* The guide: one use a session however many times the layout is picked; hidden from the third session. */
+    ed.command("layoutguide reset");  // (an earlier test may have dismissed it in the shared preferences)
+    ed.command("layout Rigging");
+    ed.command("layout Default");
+    ed.command("layout Rigging");
+    std::printf("    Rigging uses %d, hidden %d\n", ed.guide_uses_for_test("Rigging"), (int)ed.layout_guide_hidden_for_test());
+    CHECK(ed.guide_uses_for_test("Rigging") == 1 && !ed.layout_guide_hidden_for_test() && ed.full_prefs_text_for_test().find("Rigging:1") != std::string::npos);
+    ed.set_guide_uses_for_test("Rigging", 3);
+    CHECK(ed.layout_guide_hidden_for_test());
+    ed.command("layoutguide reset");
+    CHECK(!ed.layout_guide_hidden_for_test() && ed.guide_uses_for_test("Rigging") == 0);
+    CHECK(Editor::component_fold_key("MeshRenderer1") && Editor::component_fold_key("ModifierStack") && !Editor::component_fold_key("proj_C:/x") && !Editor::component_fold_key("mat_0x1F") && !Editor::component_fold_key("grp_0x1Fname"));
+    ed.record_buttons_for_test(false);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -3225,5 +3404,6 @@ void run_editor_tests() {
   tests_round222();
   tests_round227();
   tests_round252();
+  tests_round255();
   coverage_tests();
 }

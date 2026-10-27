@@ -683,7 +683,7 @@ void Editor::run_console_command(const std::string &line) {
       Log::info("usage: layoutguide on|off|reset|dismiss");
       return;
     }
-    if (v == "reset") guides_seen_.clear();
+    if (v == "reset") guides_seen_.clear(), guide_uses_.clear();  // (task 0235: the ones that hid themselves too)
     else if (v == "dismiss") guides_seen_.insert(workspace_);
     else guides_enabled_ = v == "on";
     save_prefs();
@@ -709,6 +709,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "ui") {  // ui save <path> | load <path>|blender|zbrush (task 0231: the UI file)
     ui_file_command(t, line);
+    return;
+  }
+  if (c == "inspector" && (to_lower(arg(1, "")) == "fold" || to_lower(arg(1, "")) == "unfold")) {  // (task 0235: every component's header; `inspector essentials` below)
+    inspector_fold_all(inspector_object(), to_lower(arg(1, "")) == "unfold");
     return;
   }
   if (c == "inspector" && (to_lower(arg(1, "")) == "lock" || to_lower(arg(1, "")) == "unlock")) {  // (task 0232: this Inspector keeps its object; `inspector essentials` below)
@@ -781,6 +785,22 @@ void Editor::run_console_command(const std::string &line) {
       }
       else Log::warn("layout: no layout named '%s' (Window > Layouts lists them)", rest.c_str());
     }
+    return;
+  }
+  if (c == "where") {  // where: the breadcrumb - layout > mode > tool (task 0235)
+    Log::info("%s", breadcrumb_text().c_str());
+    return;
+  }
+  if (c == "tabs") {  // tabs all [on|off] | fold [on|off] (task 0235)
+    const bool on = t.size() < 3 || to_lower(t[2]) != "off";
+    const std::string what = arg(1, "");
+    if (what != "all" && what != "fold") {
+      Log::info("usage: tabs all [on|off] | fold [on|off]");
+      return;
+    }
+    (what == "all" ? show_all_tabs_ : fold_tabs_) = on;
+    save_prefs();
+    ui_.redraw = true;
     return;
   }
   if (c == "alltools") {  // alltools on|off (task 0055)

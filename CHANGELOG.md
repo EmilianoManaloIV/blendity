@@ -2,6 +2,65 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 255): the HCI and modularity pass - fewer, calmer tabs; where you are (task 0235)
+
+**Asked:** "Look through the project and find ways to make it more HCI friendly and easier to navigate. Tabs are
+starting to look larger and overwhelming." And: "Do some serious R&D when it comes to editor modularity, but UI
+simplicity so artists can focus on what's needed. Make it familiar to already mainstream tools; but keep it
+Unity-based."
+
+**Found** (the audit in `docs/tasks/0235-hci-pass.md`, against Nielsen's heuristics and Fitts's law on a 2-in-1): tabs
+that don't fit ran off the strip's edge with no sign the rest existed; 22 window kinds in one unsorted Add Tab list,
+three tabs for one job three times over; the layout, mode and tool shown in three places; four colour signals for two
+tab states; every Inspector component open on a small screen; the layout guide staying until dismissed; a hint that
+named the mode but not a running tool's next step.
+
+**Added**
+- **The module registry** (ADR 0073, `src/editor/modules.cpp`): one row per window kind - title, icon, group, the
+  stages it belongs to, whether it duplicates, whether its group folds - read by `window_title`, `window_icon` and
+  `can_duplicate` (three tables and their asserts went), and through them by the Window menu, Add Tab, the palette,
+  the Wheel's modes and the UI file. A new window kind is one row and one draw function.
+- **Tabs that fit** (`src/editor/tab_strip.cpp`): a strip whose labels don't fit shows the inactive tabs as icons;
+  when the icons don't fit either, the last ones go into an overflow menu (»), so no tab is lost to the edge.
+- **Tab groups:** in one area, Materials / Textures / Lighting show as one *Shading* tab with a row of the three
+  under it; Rigging / Animation / Sequencer and Modeling Tools / Live Link / Profiler fold the same way; the tab
+  menu's *Fold Groups* (`tabs fold on|off`) turns it off. The dock strings and layouts are unchanged.
+- **A stage shows its tabs:** in the main window a stage layout hides the tabs whose modules aren't in it, as it
+  hides tools; the strip's **+N** lists them (a pick shows one for good); a tab asked for, dropped or added shows
+  whatever the stage and is kept in the preferences; the tab menu's *Show All Tabs* (`tabs all [on|off]`) shows every
+  tab; a hidden active tab yields; a leaf never shows nothing; the Default layout, the arrangements and other editor
+  windows hide nothing.
+- **Where you are:** the Scene view's bar reads *Layout > Mode > Tool* when it has room, each part a dropdown;
+  `where` prints it; the status bar names a running tool's next step (Knife, G / R / S, Push/Pull, a modal
+  adjustment, Sketch).
+- **Quieter:** the Learn tab's orange is its icon, not an underline; the toolbar's groups are split by a thin rule;
+  the Inspector's *Fold* / *Unfold* folds every component to its header (the folds kept in the preferences); the
+  layout guide hides itself after a layout has been picked in two sessions (Got it still works; Reset Guides clears the
+  counts too).
+**Review (Opus, round 255):** two blockers and six majors, all taken before landing. The suite's one red test was the
+test's own bug (its click helper held a reference into `button_rects`, rebuilt every frame - the same bug had made
+the Inspector's header buttons look unclickable in round 254's tests); the coverage map now reads the registry;
+folding compares group names, not literal addresses (debug builds never folded); the layout a session opens on counts
+after the preferences are read, and Reset Guides clears the counts; the stage filter is the main window's only, a
+dropped or added tab counts as asked for and is kept in the preferences, and the strip's +N names the hidden tabs;
+the Window menu's shortcut table joined the registry; `fold=` keeps component keys only; the Knife and Push/Pull
+hints say what the tools do; the docs stopped claiming a tab is never clipped (a lone one wider than the strip is
+cut at the edge) and that Add Tab was folded. Left as noted: a group tab's close, menu and drag act on its active
+member; the member row has no fit logic beyond the clip; the strip's per-frame vectors.
+
+**Checked**
+- `tests_round255` in `tests/test_editor.cpp` (5 tests): the registry has a row per kind with unique titles and the
+  editor's titles and icons are its; a 600-px leaf with six tabs shows all six inside the strip in order and a
+  280-px leaf shows the active one with the rest in the overflow; Materials, Textures and Lighting show as one
+  Shading tab with a member row and a member pressed becomes active, Fold Groups off shows three; the Rigging layout
+  hides a Materials tab unless asked for or Show All Tabs is on, the Default layout hides nothing; the breadcrumb
+  reads "Modeling & Topology > Edit > Move", the header's Fold folds the Cube's components and Unfold opens them (the
+  console too) with component-only `fold=` keys in the preferences, a layout picked three times counts one session,
+  three sessions hide its guide and `layoutguide reset` brings it back.
+- Unit checks (round 255): Windows, in render-cache verify mode, 12,616, 0 failed (1075 tests), 0 stale
+  pictures. Linux with libraries: 12,157, 0 failed. Sanitizer build: 12,027, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open and off-main-thread path-tracer tests failed under the parallel load and passed alone, as did the animation and input groups under the sanitizers.)
+
 ## 2026-10-27 (round 254): the Layers panel (task 0234)
 
 **Asked:** "Add layer opacity and systems so it's easier to navigate while in the console when using pen and drawing.

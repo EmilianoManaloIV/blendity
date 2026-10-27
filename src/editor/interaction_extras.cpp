@@ -40,7 +40,7 @@ const Guide *guide_for(const std::string &layout) {
 Recti Editor::draw_layout_guide(const Recti &area) {
   auto &u = ui_;
   const Guide *g = guides_enabled_ ? guide_for(workspace_) : nullptr;
-  if (!g || guides_seen_.count(workspace_)) return area;
+  if (!g || layout_guide_hidden()) return area;
   const int h = u.row_h() + u.px(10);
   const Recti strip{area.x, area.y, area.w, h};
   u.canvas.fill_rect({area.x, area.y, area.w, h + u.px(2)}, u.theme.border);  // (the gap under the strip too: the frame isn't cleared)
@@ -65,6 +65,20 @@ Recti Editor::draw_layout_guide(const Recti &area) {
   }
   u.tooltip("Hide this layout's guide for good (Help > Reset Guides shows them again).");
   return {area.x, area.y + h + u.px(2), area.w, std::max(0, area.h - h - u.px(2))};
+}
+
+/* Dismissed, or the layout picked in two earlier sessions (the user knows it: task 0235). */
+bool Editor::layout_guide_hidden() const {
+  if (guides_seen_.count(workspace_)) return true;
+  auto it = guide_uses_.find(workspace_);
+  return it != guide_uses_.end() && it->second > 2;
+}
+
+/* A layout picked: counted once a session. */
+void Editor::note_layout_use(const std::string &name) {
+  if (guide_counted_.count(name)) return;
+  guide_counted_.insert(name);
+  guide_uses_[name]++;
 }
 
 std::vector<std::string> Editor::palette_guide_steps_for_test(const std::string &layout) {

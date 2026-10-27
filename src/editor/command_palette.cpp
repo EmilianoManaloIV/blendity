@@ -309,6 +309,19 @@ void Editor::palette_command(const std::vector<std::string> &t, const std::strin
 /* What the mouse and the keys do where the mouse is (the Scene view's tool and mode, the feel's navigation). */
 std::string Editor::statusbar_hint() const {
   if (qm_.open) return "The Wheel: tap or flick a slice  |  1-8, or its first letters  |  Shift: keep it open  |  Esc: back, close";  // (task 0230)
+  /* Task 0235: a tool with steps names the next one. */
+  if (knife_.active) return knife_.has_first ? "Knife: click the second point to cut  |  Esc / Enter: done" : "Knife: click the first point of the cut  |  Esc / Enter: done";
+  if (xf_.active) {
+    static const char *const kModal[] = {"Move", "Rotate", "Scale"};
+    return std::string(kModal[std::max(0, std::min(2, xf_.mode))]) + ": move the mouse  |  X Y Z: lock an axis  |  type a value  |  Enter: apply  |  Esc: cancel";
+  }
+  if (modal_.active) {
+    std::string op = modal_.op;
+    if (!op.empty()) op[0] = (char)std::toupper((unsigned char)op[0]);
+    return op + ": move the mouse away from the centre for more  |  Shift: finer  |  type a value  |  Enter: apply  |  Esc: cancel";
+  }
+  if (pp_.active) return "Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel";
+  if (sketch_.active && !tablet_) return "Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop";
   /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */
   if (tablet_ && scene_hovered_)
     return "One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button, or a hold: the Wheel";

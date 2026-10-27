@@ -1108,6 +1108,30 @@ struct InspectorReflector : Reflector {
   }
 };
 
+/* Task 0235: the components' fold state as one switch. A component's key is its type name and index (the section's). */
+bool Editor::inspector_any_open(GameObject *g) const {
+  if (!g) return false;
+  for (size_t ci = 0; ci < g->components.size(); ci++) {
+    const Component *c = g->components[ci].get();
+    if (c->is_modifier()) continue;
+    auto it = foldouts_.find(std::string(c->type_name()) + std::to_string(ci));
+    if (it == foldouts_.end() || it->second) return true;
+  }
+  auto mods = foldouts_.find("ModifierStack");
+  return mods == foldouts_.end() ? false : mods->second;
+}
+
+void Editor::inspector_fold_all(GameObject *g, bool open) {
+  if (!g) return;
+  for (size_t ci = 0; ci < g->components.size(); ci++) {
+    const Component *c = g->components[ci].get();
+    if (!c->is_modifier()) foldouts_[std::string(c->type_name()) + std::to_string(ci)] = open;
+  }
+  foldouts_["ModifierStack"] = open;
+  save_prefs();
+  ui_.redraw = true;
+}
+
 void Editor::draw_inspector(const Recti &r) {
   auto &u = ui_;
   inspector_menu_rects_.clear();
@@ -1174,14 +1198,18 @@ void Editor::draw_inspector(const Recti &r) {
   u.tooltip("Active: inactive objects are not drawn or updated.\nBlender: Disable in Viewports (monitor icon).");
   /* The pin (task 0232; Unity's lock): this Inspector keeps showing one object while the selection moves on - a
    * second Inspector on a drawing tablet shows the one being worked on. */
-  const int pin_w = u.px(60);
+  const int pin_w = u.px(60), fold_w = u.px(64);
   const Recti pb{hr.right() - pin_w, hr.y + u.px(2), pin_w, hr.h - u.px(4)};
   if (u.button(pb, inspector_lock_ ? "Pinned" : "Pin", inspector_lock_ != 0)) inspector_lock_ = inspector_lock_ ? 0 : g->id;
   u.tooltip(inspector_lock_ ? "Pinned: this Inspector keeps this object while the selection changes. Click to follow the selection again."
                             : "Pin this Inspector to the object shown (a second Inspector can then follow the selection).");
+  /* Task 0235: every component folded to its header line, or opened, with one button; the folds are kept. */
+  const bool any_open = inspector_any_open(g);
+  if (u.button({pb.x - fold_w - u.px(4), pb.y, fold_w, pb.h}, any_open ? "Fold" : "Unfold")) inspector_fold_all(g, !any_open);
+  u.tooltip("Fold every component to its header line (the Transform stays), or open them all; the folds are kept in the preferences (inspector fold|unfold).");
   std::string name = g->name;
   bool committed = false;
-  if (u.text_field(u.id("name"), {hr.x + ic * 2 + u.px(12), hr.y + u.px(2), hr.w - ic * 2 - u.px(14) - pin_w - u.px(6), hr.h - u.px(4)}, name, &committed)) {
+  if (u.text_field(u.id("name"), {hr.x + ic * 2 + u.px(12), hr.y + u.px(2), std::max(u.px(40), hr.w - ic * 2 - u.px(14) - pin_w - fold_w - u.px(10)), hr.h - u.px(4)}, name, &committed)) {
     g->name = name;
     if (committed) mark_changed("Rename");
   }

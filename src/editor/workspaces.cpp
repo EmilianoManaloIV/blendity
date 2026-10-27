@@ -83,6 +83,8 @@ bool Editor::apply_workspace(const std::string &name) {
   dock_reset(w->dock);
   focus_ = w->focus;
   workspace_ = w->name;
+  opened_tabs_.clear();  // (task 0235: the layout decides what shows)
+  note_layout_use(w->name);
   ui_.redraw = true;
   return true;
 }

@@ -30,17 +30,7 @@ using ui::Icon;
 
 static const char *kVersion = releases::version();  // (VERSION, through the build scripts)
 
-const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer", "Live Link", "Editing", "My Tools", "Draw", "Layers"};
-  static_assert(sizeof(names) / sizeof(names[0]) == (size_t)WindowKind::Count, "a title per window");
-  return names[(int)k];
-}
-
-ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step, Icon::Play, Icon::Globe, Icon::Eye, Icon::Grid, Icon::Paper, Icon::Menu};
-  static_assert(sizeof(icons) / sizeof(icons[0]) == (size_t)WindowKind::Count, "an icon per window");
-  return icons[(int)k];
-}
+/* window_title and window_icon: modules.cpp (task 0235: the registry). */
 
 /* ===================================================================== */
 /* Scene camera                                                           */
@@ -1178,12 +1168,9 @@ void Editor::draw_menubar(const Recti &r) {
   });
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
-    /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-    static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
-          u.menu_item(window_title((WindowKind)k), keys[k], dock_find_anywhere((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
+          u.menu_item(window_title((WindowKind)k), module_of((WindowKind)k).shortcut, dock_find_anywhere((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
     if (!windows_.empty() && u.menu_item(strprintf("Bring Back %zu Window%s", windows_.size(), windows_.size() == 1 ? "" : "s")))
       for (auto &w : windows_) w->close = true;  // (their tabs return to this window: task 0187)
@@ -1221,8 +1208,9 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
     if (u.menu_item("Open Manual")) open_manual();
-    if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty())) {
+    if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty() || !guide_uses_.empty())) {
       guides_seen_.clear();
+      guide_uses_.clear();  // (task 0235: the ones that hid themselves too)
       save_prefs();
     }
     u.tooltip("Show each layout's first-run guide again (what it is for, its next three steps).");
@@ -1255,7 +1243,7 @@ void Editor::draw_toolbar(const Recti &r) {
       {Tool::Scale, Icon::Scale, "Scale Tool (R)\nBlender: S."},
       {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."}};
   /* Grouped segmented control, like Unity's tool strip. */
-  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 5 + u.px(2), bh + u.px(2)}, u.theme.strip, u.theme.border, u.px(4));
+  u.canvas.vline(x + (bh + u.px(2)) * 5 + u.px(2), y, y + bh, u.theme.border);  // (task 0235: a thin rule splits the group, not a box)
   for (const T &t : tools) {
     if (u.icon_button({x, y, bh, bh}, t.i, tool_ == t.t, t.tip)) tool_ = t.t;
     x += bh + u.px(2);
@@ -1295,7 +1283,7 @@ void Editor::draw_toolbar(const Recti &r) {
 
   /* Play controls in the middle, like Unity. */
   int cx = r.x + r.w / 2 - (bh * 3 + u.px(4)) / 2;
-  u.frame({cx - u.px(2), y - u.px(1), bh * 3 + u.px(8), bh + u.px(2)}, u.theme.strip, u.theme.border, u.px(4));
+  u.canvas.vline(cx + bh * 3 + u.px(8), y, y + bh, u.theme.border);  // (task 0235)
   if (u.icon_button({cx, y, bh, bh}, Icon::Play, playing_, "Play (Ctrl+P)\nEnters Play mode. Changes made while playing are discarded on Stop, like Unity.")) {
     if (playing_) exit_play(); else enter_play();
   }
@@ -1567,62 +1555,14 @@ void Editor::dock_draw(DockNode *n) {
   Recti r = n->rect;
   int tbh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, tbh};
-  u.canvas.fill_rect(bar, u.theme.tabbar);
-  int x = r.x;
-  for (size_t i = 0; i < n->tabs.size(); i++) {
-    WindowKind k = n->tabs[i];
-    std::string t = window_title(k);
-    int a = u.font.line_height() - u.px(3);
-    int w = u.font.text_width(t) + a + u.px(22);
-    Recti tr{x, r.y, w, tbh};
-    bool active = (int)i == n->active;
-    bool hot = u.hovered(tr);
-    uint32_t bg = active ? u.theme.tab_active : (hot ? u.theme.tab_hover : u.theme.tabbar);
-    u.canvas.fill_rect(tr, bg);
-    if (active && focused_ == k) u.canvas.fill_rect({tr.x, tr.y, tr.w, u.px(2)}, u.theme.focus);
-    if (k == WindowKind::Learn) u.canvas.fill_rect({tr.x, tr.bottom() - u.px(2), tr.w, u.px(2)}, u.theme.accent);
-    u.draw_icon(window_icon(k), {tr.x + u.px(8), tr.y + (tbh - a) / 2, a, a}, active ? u.theme.text_bright : u.theme.text_dim);
-    u.canvas.text(u.font, tr.x + u.px(12) + a, tr.y + (tbh - u.font.line_height()) / 2, t, active ? u.theme.text_bright : u.theme.text);
-    if (hot && u.in.pressed[0]) {
-      n->active = (int)i;
-      focused_ = k;
-      tab_drag_ = k;
-      tab_drag_from_ = n;
-      tab_press_x_ = u.in.mx;
-      tab_press_y_ = u.in.my;
-      tab_dragging_ = false;
-      tab_drag_window_ = active_window_;
-    }
-    if (hot && u.in.pressed[2]) {
-      tab_close_queue_.push_back(k);  // closed after dock_draw: removing now would free nodes still on the stack
-      u.consume_click();
-      return;
-    }
-    if (hot && u.in.pressed[1]) u.open_popup(u.id("tabmenu") ^ (uint64_t)k, {u.in.mx, u.in.my, 0, 0});
-    u.popup(u.id("tabmenu") ^ (uint64_t)k, u.px(200), [this, k] {
-      if (ui_.menu_item("Close Tab")) tab_close_queue_.push_back(k);
-      draw_tab_menu_windows(k);
-      ui_.menu_separator();
-      ui_.menu_label("Add Tab");
-      for (int w = 0; w < (int)WindowKind::Count; w++)
-        if ((WindowKind)w != WindowKind::Research && !dock_find((WindowKind)w) &&  // (retired, task 0034; task 0232: a kind once per window)
-            (can_duplicate((WindowKind)w) || !dock_find_elsewhere((WindowKind)w, nullptr)) &&
-            ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
-          DockNode *leaf = dock_find(k);
-          if (leaf) {
-            leaf->tabs.push_back((WindowKind)w);
-            leaf->active = (int)leaf->tabs.size() - 1;
-          }
-        }
-    });
-    x += w;
-  }
+  if (!draw_tab_strip(n, bar)) return;  // (a tab closed by the middle button: the leaf is drawn next frame)
   if (n->tabs.empty()) {  // (the frame no longer clears the framebuffer: paint the empty leaf's content)
     u.canvas.fill_rect({r.x, r.y + tbh, r.w, r.h - tbh}, u.theme.border);
     return;
   }
   n->active = std::max(0, std::min(n->active, (int)n->tabs.size() - 1));
-  Recti content{r.x, r.y + tbh, r.w, r.h - tbh};
+  const int sh = draw_member_strip(n, {r.x, r.y + tbh, r.w, r.h - tbh});  // (task 0235: a folded group's members)
+  Recti content{r.x, r.y + tbh + sh, r.w, r.h - tbh - sh};
   if (u.hovered(content) && (u.in.pressed[0] || u.in.pressed[1] || u.in.pressed[2])) focused_ = n->tabs[n->active];
   window_rects_[n->tabs[n->active]] = content;
   /* The Scene and Game views paint every pixel of their content themselves. */
@@ -1722,6 +1662,7 @@ void Editor::dock_open(WindowKind k, bool focus) {
     open_references();
     return;
   }
+  opened_tabs_.insert(k);  // (task 0235: asked for, it shows whatever the layout's stage)
   DockNode *leaf = dock_find(k);
   EditorWindow *owner = nullptr;
   if (!leaf && (leaf = dock_find_elsewhere(k, &owner)) != nullptr) {  // (in another window, task 0187: shown there)
@@ -1761,6 +1702,7 @@ void Editor::dock_move(WindowKind k, DockNode *target, int zone) {
 /* `k` into `target`: a tab (zone 0), or a split with `k` on the left / right / top / bottom (1-4). */
 void Editor::dock_insert(WindowKind k, DockNode *target, int zone) {
   if (!target) return;
+  opened_tabs_.insert(k);  // (task 0235: dropped or moved here by the user - shown whatever the stage)
   if (zone == 0) {
     target->tabs.push_back(k);
     target->active = (int)target->tabs.size() - 1;
@@ -3706,6 +3648,13 @@ void Editor::load_prefs() {
     else if (k == "windows") windows_pref_ = v;
     else if (k == "recent_scenes") recent_scenes_ = split_list(v, ';');
     else if (k == "guides_seen") for (const std::string &g : split_list(v, ';')) guides_seen_.insert(g);
+    else if (k == "guide_uses") {  // (task 0235: name:sessions;...)
+      for (const std::string &e : split_list(v, ';')) {
+        const size_t colon = e.rfind(':');
+        if (colon != std::string::npos) guide_uses_[e.substr(0, colon)] = std::atoi(e.c_str() + colon + 1);
+      }
+    }
+    else if (k == "fold") for (const std::string &f : split_list(v, ';')) foldouts_[f] = false;  // (task 0235: the folded components)
     else if (k == "inspector_essentials") inspector_essentials_ = v != "0";
     else if (k == "nav_buttons") nav_buttons_always_ = v == "always";  // (task 0216)
     else if (k == "tablet_mode") tablet_pref_ = v == "on" ? 1 : v == "off" ? 2 : 0, tablet_pref_applied_ = false;  // (task 0218)
@@ -3747,8 +3696,11 @@ void Editor::load_prefs() {
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
     else if (k == "workspace") workspace_ = v;
+    else if (k == "opened") for (const std::string &o : split_list(v, ';')) opened_tabs_.insert((WindowKind)std::max(0, std::min((int)WindowKind::Count - 1, std::atoi(o.c_str()))));  // (task 0235)
     else if (k == "focus") focus_ = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
     else if (k == "alltools") show_all_tools_ = v == "1";
+    else if (k == "alltabs") show_all_tabs_ = v == "1";  // (task 0235)
+    else if (k == "foldtabs") fold_tabs_ = v != "0";
     else if (k == "user_layout") load_user_layout_pref(v);  // name;focus;dock (task 0055)
     else if (k == "view_scale") scale = (float)std::atof(v.c_str());
     else if (k == "cpu_threads") threads = std::atoi(v.c_str());
@@ -3778,6 +3730,7 @@ void Editor::load_prefs() {
   }
   /* The tier (task 0050): a named one sets its own values; Custom keeps the saved ones; none saved yet (preferences
    * from before the tiers) picks one for this machine. */
+  note_layout_use(workspace_);  // (task 0235: a session that opens on the layout counts - after `guide_uses` is read)
   const int saved_fps = max_fps_;
   if (tier < 0 || tier > TierCustom) set_quality_tier(recommended_tier());
   else if (tier != TierCustom) set_quality_tier(tier);
@@ -3790,6 +3743,32 @@ void Editor::load_prefs() {
   if (threads > 0) set_cpu_threads(threads);
   fix_user_layout_pointers();
   parse_keymap_overrides(keymap_text);  // also builds the keymap from the preset
+}
+
+/* A component section's fold key: its type name and index (or the modifier stack's) - not the Project tree's folders,
+ * a material's panel or a reflector group, whose keys hold paths and pointers. */
+bool Editor::component_fold_key(const std::string &key) {
+  if (key == "ModifierStack") return true;
+  if (key.empty() || !std::isdigit((unsigned char)key.back())) return false;
+  size_t i = 0;
+  while (i < key.size() && std::isalpha((unsigned char)key[i])) i++;
+  if (i == 0) return false;
+  while (i < key.size() && std::isdigit((unsigned char)key[i])) i++;
+  return i == key.size();
+}
+
+/* Task 0235: the tabs' switches, the tabs asked for, the layouts' session counts, the folded components. */
+std::string Editor::hci_prefs_text() const {
+  std::string s = strprintf("alltabs=%d\nfoldtabs=%d\n", show_all_tabs_ ? 1 : 0, fold_tabs_ ? 1 : 0), uses, folds;
+  for (const auto &kv : guide_uses_) uses += (uses.empty() ? "" : ";") + kv.first + ":" + std::to_string(kv.second);
+  for (const auto &kv : foldouts_)
+    if (!kv.second && component_fold_key(kv.first)) folds += (folds.empty() ? "" : ";") + kv.first;  // (the components', not the Project tree's or a material's)
+  if (!uses.empty()) s += "guide_uses=" + uses + "\n";
+  if (!folds.empty()) s += "fold=" + folds + "\n";
+  std::string opened;
+  for (WindowKind k : opened_tabs_) opened += (opened.empty() ? "" : ";") + std::to_string((int)k);
+  if (!opened.empty()) s += "opened=" + opened + "\n";
+  return s;
 }
 
 void Editor::save_prefs() {
@@ -3815,6 +3794,7 @@ void Editor::save_prefs() {
   s += "overlays_off=" + overlays_off + "\n";
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
+  s += hci_prefs_text();  // (task 0235)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();

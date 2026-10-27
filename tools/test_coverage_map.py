@@ -51,10 +51,10 @@ def windows():
     return [w.strip() for w in m.group(1).split(",") if w.strip() and w.strip() != "Count"]
 
 def window_titles():
-    t = read(os.path.join(SRC, "editor.cpp"))
-    m = re.search(r"const char \*window_title\(WindowKind k\) \{\s*static const char \*names\[\] = \{([^}]*)\}", t)
-    names = re.findall(r'"([^"]+)"', m.group(1))
-    return dict(zip(windows(), names))
+    """The module registry's rows (task 0235): kind -> title."""
+    t = read(os.path.join(SRC, "modules.cpp"))
+    rows = re.findall(r'\{WindowKind::(\w+), "([^"]+)"', t)
+    return {k: title for k, title in rows}
 
 def test_index():
     """test name -> its text, over every tests/test_*.cpp."""

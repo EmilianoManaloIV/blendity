@@ -36,6 +36,13 @@ Profiler and Learn windows under **Window**. Drag a tab onto another tab bar to 
 the windows for a stage of the work and shows only that stage's tools, so the editor never feels like every tool at
 once:
 
+A layout is a stage of the work: it shows that stage's tools *and tabs* (task 0235). A tab you open from the Window
+menu shows for the session whatever the stage; right-click a tab > *Show All Tabs* shows every tab. In one area,
+Materials, Textures and Lighting fold into one *Shading* tab with a row of the three under it (Rigging & Animation
+and Tools fold the same way; *Fold Groups* in the tab menu turns it off). A strip whose labels don't fit shows the
+inactive tabs as icons, then lists the last ones under »; the stage's hidden tabs are listed under +N. The Scene view's bar reads
+*Layout > Mode > Tool*, each part a dropdown.
+
 | Layout | Windows | Tools shown |
 |---|---|---|
 | Default | everything | everything |

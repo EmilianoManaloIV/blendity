@@ -126,6 +126,19 @@ Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, Count };
 const char *window_title(WindowKind k);
+/* The module registry (task 0235, editor/modules.cpp): a window kind's row. */
+struct Module {
+  WindowKind kind;
+  const char *name;
+  ui::Icon icon;
+  const char *group;  // (the tab group: Views, Scene, Assets, Output, Learn, Tools, Shading, Rigging & Animation, Yours)
+  uint32_t stages;    // (Editor::Focus bits: the layouts whose stage shows it)
+  bool duplicates;    // (a second window may hold one of its own: task 0232)
+  bool folds;         // (its group folds into one tab in a leaf)
+  const char *shortcut;  // (the Window menu's label, Unity's Ctrl+N; nullptr none)
+};
+const Module &module_of(WindowKind k);
+const Module *modules(int &count);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
  * and how often they ran. */
@@ -664,6 +677,32 @@ class Editor {
   size_t window_caches_for_test() const { return window_caches_.size(); }
   void queue_window_move_for_test(const WindowMove &m) { window_moves_.push_back(m); }
   int interaction_window_for_test() const { return interaction_window_; }
+  Recti tab_rect_for_test(WindowKind k) const {  // (task 0235: the tab as last drawn; empty when hidden or in the overflow)
+    auto it = tab_rects_.find(k);
+    return it == tab_rects_.end() ? Recti{} : it->second;
+  }
+  std::string tab_label_for_test(WindowKind k) const {
+    auto it = tab_label_of_.find(k);
+    return it == tab_label_of_.end() ? std::string() : it->second;
+  }
+  std::vector<WindowKind> tab_overflow_for_test() const { return tab_overflow_; }
+  std::vector<WindowKind> tab_hidden_for_test() const { return tab_hidden_; }
+  void forget_opened_tabs_for_test() { opened_tabs_.clear(); }
+  void set_focus_for_test(uint32_t focus) { focus_ = focus; }  // (task 0235: a raw dock string with a stage)
+  std::string breadcrumb_for_test() const { return breadcrumb_text(); }
+  int guide_uses_for_test(const std::string &name) const {
+    auto it = guide_uses_.find(name);
+    return it == guide_uses_.end() ? 0 : it->second;
+  }
+  bool layout_guide_hidden_for_test() const { return layout_guide_hidden(); }
+  void set_guide_uses_for_test(const std::string &name, int sessions) { guide_uses_[name] = sessions; }
+  std::string full_prefs_text_for_test() const { return hci_prefs_text(); }
+  static bool component_fold_key(const std::string &key);  // (task 0235: a component section's key, not the Project tree's or a material's)
+  int folded_components_for_test() const {
+    int n = 0;
+    for (const auto &kv : foldouts_) n += kv.second || kv.first.rfind("proj_", 0) == 0 ? 0 : 1;
+    return n;
+  }
   Recti dock_leaf_rect_for_test(WindowKind k) {
     DockNode *n = dock_find(k);
     return n ? n->rect : Recti{0, 0, 0, 0};
@@ -1214,13 +1253,40 @@ class Editor {
   void dock_draw(DockNode *n);
   void dock_draw_window(WindowKind k, const Recti &r);
   DockNode *dock_find(WindowKind k, DockNode *n = nullptr);
+  /* Task 0235: tabs that fit and fold; a stage's tabs. */
+  bool show_all_tabs_ = false, fold_tabs_ = true;
+  std::set<WindowKind> opened_tabs_;  // (asked for, dropped or added by the user: shown whatever the stage; kept in the preferences)
+  std::vector<WindowKind> tab_hidden_;  // (the main dock's tabs the stage hides, this frame)
+  std::map<WindowKind, Recti> tab_rects_;
+  std::map<WindowKind, std::string> tab_label_of_;
+  std::vector<WindowKind> tab_overflow_;
+  uint64_t tab_frame_ = 0;
+  bool tab_shown(WindowKind k) const;
+  std::vector<int> leaf_shown_tabs(const DockNode *n) const;
+  bool draw_tab_strip(DockNode *n, const Recti &bar);
+  int draw_member_strip(DockNode *n, const Recti &r);
+  void tab_press(DockNode *n, int index);
+  void draw_tab_popup(DockNode *n, WindowKind k);
+  void draw_tab_more(DockNode *n, const Recti &mr, bool overflow, const std::vector<WindowKind> &hidden);
+  /* Task 0235: where you are - the breadcrumb (layout > mode > tool), the Inspector's fold toggle, the guide after two
+   * sessions. */
+  int draw_breadcrumb(int x, int y, int h, int limit);
+  std::string breadcrumb_text() const;
+  std::string mode_name() const;
+  void inspector_fold_all(GameObject *g, bool open);
+  bool inspector_any_open(GameObject *g) const;
+  std::map<std::string, int> guide_uses_;  // (sessions a layout was picked in: the guide hides after two)
+  std::set<std::string> guide_counted_;    // (this session)
+  void note_layout_use(const std::string &name);
+  bool layout_guide_hidden() const;
+  std::string hci_prefs_text() const;
   DockNode *dock_leaf_at(int x, int y, DockNode *n = nullptr);
   /* Task 0232 (ADR 0070): the drop zone of a point over a leaf (0 a tab, 1-4 a split left / right / top / bottom; the
    * highlight it means), a tab put into a leaf at a zone (the second half of dock_move), the kinds a window may hold
    * a second instance of, a tab dropped over another editor window, the drop highlight the target window draws. */
   int dock_drop_zone(const DockNode *leaf, int x, int y, Recti *highlight) const;
   void dock_insert(WindowKind k, DockNode *target, int zone);
-  static bool can_duplicate(WindowKind k) { return k == WindowKind::Scene || k == WindowKind::Game || k == WindowKind::Inspector; }
+  static bool can_duplicate(WindowKind k) { return module_of(k).duplicates; }  // (task 0235: the registry's row)
   void dock_duplicate(WindowKind k);
   EditorWindow *window_at_desktop(int dx, int dy, int &lx, int &ly);
   bool main_at_desktop(int dx, int dy, int &lx, int &ly);
