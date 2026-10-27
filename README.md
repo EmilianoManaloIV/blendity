@@ -124,7 +124,10 @@ Each stage is a **layout** that arranges the windows and shows only that stage's
 everything):
 
 - **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
-- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull**, Booleans, snapping.
+- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull**, Booleans, snapping;
+  **drawing in perspective** with a pen - SketchBook-style rulers, ellipses, symmetry and a 3-point guide that *is* the
+  camera, strokes corrected to what the hand meant, canvases on the ground and on faces, and boxes, cylinders, faces and
+  whole scaffolds built from the construction lines, never guessed.
 - **Modeling & Topology** - Blender's Edit Mode (extrude, inset, bevel, loop cut, bridge, knife, n-gons, F9; a
   50k-face mesh enters it in about a frame, its overlapping-vertex check off the main thread), a
   modifier stack (Array, Bevel, Boolean, Mirror, Subdivision, Lattice, Curve, Mesh Deform...), curves and lattices

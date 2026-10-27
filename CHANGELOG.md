@@ -2,6 +2,19 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-27 (round 249): drawing in perspective - the write-up (task 0229)
+
+**Asked:** the last task of the perspective-drawing plan (0223-0229).
+
+**Added**
+- `docs/tasks/0229-perspective-drawing-write-up.md`: the idea (the guide is the camera), what each task added and
+  what the reviews caught, what was and wasn't tried on hardware, a drawing pad user step by step, what would come
+  next. The README's Blocking Out line says what the pen gets.
+
+**Checked**
+- Docs only: the Windows build and the editor group.
+- Docs only: the editor group (788 checks, with the manual's Learn links) and the sketch group (212) on the same build as round 248, 0 failed.
+
 ## 2026-10-27 (round 248): the manual, the Learn lesson, the check list for the drawing pad (task 0228)
 
 **Asked:** the sixth task of the perspective-drawing plan: where users look.
