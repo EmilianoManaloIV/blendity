@@ -27,7 +27,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 4)) shading_ = (Shading)m;
   u.tooltip("Draw mode (Blender: Z pie).\nSolid = fast vertex lighting (Workbench).\n"
             "Shaded = materials, textures, shadows (EEVEE / Unity Shaded).\n"
-            "Path tracing: F12, the Render window, or the Camera Preview's Rendered toggle.");
+            "Path tracing: " + key("render.image") + ", the Render window, or the Camera Preview's Rendered toggle.");
   x += u.px(176);
   if (u.icon_button({x, y, h, h}, Icon::Lightbulb, scene_lighting_, "Scene lighting on/off.\nOff = headlight from the camera, like Blender's Studio lighting.")) scene_lighting_ = !scene_lighting_;
   x += h + u.px(2);
@@ -54,7 +54,8 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
     scene_filters_ = !scene_filters_;
   x += h + u.px(10);
   /* Blender-style Edit Mode toggle - Unity has no built-in mesh editing (ProBuilder adds it). */
-  int ew = u.font.text_width("Edit Mode (Tab)") + h + u.px(12);
+  const std::string edit_label = with_key("Edit Mode", "mode.edit_toggle");  // (the key from the keymap: task 0254)
+  int ew = u.font.text_width(edit_label) + h + u.px(12);
   Recti er{bar.right() - ew - u.px(6), y, ew, h};
   draw_breadcrumb(x, y, h, er.x - u.px(160));  // (task 0235: layout > mode > tool, each a dropdown)
   bool can_edit = edit_mode_ || (active_object() && active_object()->get<MeshFilter>());
@@ -63,7 +64,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   u.frame(er, bg, u.theme.border, u.px(3));
   const uint32_t ink = !can_edit ? u.theme.text_dim : edit_mode_ ? 0xFFFFFFFF : u.theme.text_bright;  // (white on the accent only)
   u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
-  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", ink);
+  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, edit_label, ink);
   if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
   u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
 }

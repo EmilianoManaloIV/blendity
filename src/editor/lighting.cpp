@@ -112,7 +112,7 @@ bool Editor::live_gi_needed(std::string *why) {
     return false;
   }
   if (lighting_manual() && !lighting_update_requested_) {
-    say("Live GI: frozen (Lighting Updates: Manual; Update Lighting or Ctrl+Shift+L refreshes it)");
+    say(("Live GI: frozen (Lighting Updates: Manual; Update Lighting or " + key("lighting.update") + " refreshes it)").c_str());
     return false;
   }
   if (!ls.baked_gi || lighting_data_.empty()) {

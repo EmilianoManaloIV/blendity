@@ -206,6 +206,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"window.profiler", "Profiler", "Windows", CTX_GLOBAL},
       {"window.research", "References (Learn)", "Windows", CTX_GLOBAL},
       {"window.uv", "UV Editor", "Windows", CTX_GLOBAL},
+      {"window.history", "History", "Windows", CTX_GLOBAL},  // (task 0254; no chord in any preset)
   };
   return acts;
 }
@@ -583,8 +584,8 @@ bool Editor::run_action(const std::string &id) {
     }
   if (id == "file.save") save_scene_cmd(false);
   else if (id == "file.save_as") save_scene_cmd(true);
-  else if (id == "file.new") new_scene();
-  else if (id == "file.open") open_scene_dialog();
+  else if (id == "file.new") new_scene_asked();  // (task 0254: asks when the scene has unsaved changes)
+  else if (id == "file.open") open_scene_dialog_asked();
   else if ((id == "edit.palette" || id == "edit.favorites") && (drag_ == Drag::Fly || ui_.in.down[1]))
     return false;  // (flying: Shift+Q is "down, fast", not a menu)
   else if (id == "edit.palette") open_palette();
@@ -725,6 +726,7 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "render.animation") ranim_.active ? stop_render_animation() : (void)start_render_animation();
   else if (id == "window.render") dock_open(WindowKind::Render);
   else if (id == "window.learn") dock_open(WindowKind::Learn);
+  else if (id == "window.history") dock_open(WindowKind::History);
   else return false;
   return true;
 }

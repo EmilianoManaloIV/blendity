@@ -192,6 +192,7 @@ class Context {
    * reason as its tooltip, the click swallowed; `disabled_reasons` keeps the reason by label for the tests. */
   bool button_enabled(const Recti &r, const std::string &label, bool enabled, const char *why, bool selected = false, Icon icon = Icon::None);
   std::unordered_map<std::string, std::string> disabled_reasons;
+  std::unordered_map<std::string, std::string> menu_shortcuts;  // (tests: the shortcut drawn beside a menu row, by its label; task 0254)
   bool icon_button(const Recti &r, Icon icon, bool selected = false, const char *tip = nullptr);
   bool checkbox(const Recti &r, bool &v);
   bool toggle_row(const Recti &r, const std::string &label, bool &v);

@@ -226,7 +226,7 @@ void Editor::draw_command_palette() {
   u.popup(u.id("quick_favorites"), u.px(300), [this] {
     auto &u = ui_;
     u.menu_label("Quick Favorites (" + workspace_ + ")");
-    if (favorites().empty()) u.menu_label("Right-click a command in the palette (Ctrl+K) or a menu row");
+    if (favorites().empty()) u.menu_label("Right-click a command in the palette (" + key("edit.palette") + ") or a menu row");
     for (const std::string &n : std::vector<std::string>(favorites())) {
       const PaletteEntry *e = palette_find(n);
       if (!e) continue;
@@ -306,57 +306,7 @@ void Editor::palette_command(const std::vector<std::string> &t, const std::strin
 
 /* ---- the status bar's hints ---- */
 
-/* What the mouse and the keys do where the mouse is (the Scene view's tool and mode, the feel's navigation). */
-std::string Editor::statusbar_hint() const {
-  if (qm_.open) return "The Wheel: tap or flick a slice  |  1-8, or its first letters  |  Shift: keep it open  |  Esc: back, close";  // (task 0230)
-  /* Task 0235: a tool with steps names the next one. */
-  if (knife_.active) return knife_.has_first ? "Knife: click the second point to cut  |  Esc / Enter: done" : "Knife: click the first point of the cut  |  Esc / Enter: done";
-  if (xf_.active) {
-    static const char *const kModal[] = {"Move", "Rotate", "Scale"};
-    return std::string(kModal[std::max(0, std::min(2, xf_.mode))]) + ": move the mouse  |  X Y Z: lock an axis  |  type a value  |  Enter: apply  |  Esc: cancel";
-  }
-  if (modal_.active) {
-    std::string op = modal_.op;
-    if (!op.empty()) op[0] = (char)std::toupper((unsigned char)op[0]);
-    return op + ": move the mouse away from the centre for more  |  Shift: finer  |  type a value  |  Enter: apply  |  Esc: cancel";
-  }
-  if (pp_.active) return "Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel";
-  if (sketch_.active && !tablet_) return "Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop";
-  if (sculpt_remesh_) return "Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode) or `sculpt remesh cancel`: stop it at its next stage";  // (task 0241)
-  if (sculpt_)
-    return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate group  |  Esc: leave" +
-           (sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", sculpt_subdiv_levels()) : std::string()) +
-           (sculpt_dyntopo_ ? strprintf("  |  Dyntopo %.2f", sculpt_dyntopo_detail_) : std::string());  // (tasks 0236, 0238, 0239, 0242)
-  if (meshmaps_job_) return "Mesh Maps: baking on a worker...  |  Esc in the Scene view or `meshmaps cancel`: stop it at the next row";  // (task 0243; after the modes' hints)
-  if (paint_) return "Paint: drag over the model (the pen's eraser end erases)  |  Esc: leave  |  paint color|size|fill ...";  // (task 0245)
-  if (surface_job_) return "Surface: evaluating the stack on a worker (the views show the last result until it lands)";  // (task 0244)
-  if (const size_t hidden = hidden_face_count(active_object()))  // (task 0238: hidden faces stay hidden in every mode and in renders - said so)
-    return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All, or `sculpt show all`)", hidden, hidden == 1 ? "" : "s", active_object()->name.c_str());
-  /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */
-  if (tablet_ && scene_hovered_)
-    return "One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button, or a hold: the Wheel";
-  if (tablet_) return "Tablet Mode: a finger scrolls lists  |  Pen side button, or a pen or finger held still: the Wheel";
-  if (!scene_hovered_) return "Ctrl+K: find any command  |  Shift+Q: Quick Favorites";
-  std::string nav;
-  switch (nav_style_) {
-    case NavStyle::Unity: nav = "RMB: fly  |  MMB: pan  |  Alt+LMB: orbit  |  Wheel: zoom"; break;
-    case NavStyle::Unreal: nav = "RMB: fly  |  MMB: pan  |  Alt+LMB: orbit  |  Wheel: zoom"; break;
-    case NavStyle::Blender: nav = "MMB: orbit  |  Shift+MMB: pan  |  Wheel: zoom"; break;
-    case NavStyle::Maya: nav = "Alt+LMB: orbit  |  Alt+MMB: pan  |  Alt+RMB: zoom"; break;
-  }
-  if (edit_mode_) {
-    static const char *const kEls[] = {"vertices", "edges", "faces"};
-    static const char *const kTools[] = {"drag: pan", "the gizmo moves them", "the gizmo turns them", "the gizmo scales them", "the gizmo moves, turns, scales them"};
-    return std::string("Edit Mode (") + kEls[(int)elem_] + "): LMB: select  |  Shift or Ctrl+LMB: toggle  |  " + kTools[(int)tool_] + "  |  " + nav;
-  }
-  switch (tool_) {
-    case Tool::View: return "View tool: LMB drag: pan  |  " + nav;
-    case Tool::Move: return "Move: LMB: select  |  drag an arrow or plane: move along it  |  " + nav;
-    case Tool::Rotate: return "Rotate: LMB: select  |  drag a ring: turn about its axis  |  " + nav;
-    case Tool::Scale: return "Scale: LMB: select  |  drag a handle: scale along it, the centre: all axes  |  " + nav;
-    default: return "Transform: LMB: select  |  arrows move, rings turn, the centre box scales  |  " + nav;
-  }
-}
+/* statusbar_hint(): the hint table in hints.cpp (task 0254). */
 
 /* The hint in the status bar's middle, and the last action with Undo beside it (Nielsen: system status, undo). */
 void Editor::draw_statusbar_hint(const Recti &r) {
@@ -365,10 +315,15 @@ void Editor::draw_statusbar_hint(const Recti &r) {
   if (!undo_.empty() && r.w > u.px(140)) {
     const Recti undo_r{x, r.y + u.px(1), u.px(50), r.h - u.px(2)};
     if (u.button(undo_r, "Undo")) undo();
-    u.tooltip("Undo " + undo_.back().label + " (Ctrl+Z).");
+    u.tooltip("Undo " + undo_.back().label + " (" + key("edit.undo") + ").");
     const std::string last = "Last: " + undo_.back().label;
     const int lw = std::min(u.font.text_width(last), r.w / 4);
-    u.canvas.text_ellipsis(u.font, undo_r.right() + u.px(6), r.y + (r.h - u.font.line_height()) / 2, lw, last, u.theme.text_dim);
+    const Recti last_r{undo_r.right() + u.px(6), r.y, lw, r.h};
+    u.canvas.text_ellipsis(u.font, last_r.x, r.y + (r.h - u.font.line_height()) / 2, lw, last, u.theme.text_dim);
+    u.mark_widget(last_r);
+    if (u.record_buttons) u.button_rects["status:Last"] = last_r;
+    u.tooltip("The History window: every step, a click goes back to it.");
+    if (u.hovered(last_r) && u.in.pressed[0]) dock_open(WindowKind::History);  // (task 0254)
     x = undo_r.right() + u.px(18) + lw;
   }
   const int w = r.right() - x;

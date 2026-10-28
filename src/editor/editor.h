@@ -148,7 +148,7 @@ extern const char *const kSculptStrokes[5];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Count };
 const char *window_title(WindowKind k);
 /* The module registry (task 0235, editor/modules.cpp): a window kind's row. */
 struct Module {
@@ -159,7 +159,7 @@ struct Module {
   uint32_t stages;    // (Editor::Focus bits: the layouts whose stage shows it)
   bool duplicates;    // (a second window may hold one of its own: task 0232)
   bool folds;         // (its group folds into one tab in a leaf)
-  const char *shortcut;  // (the Window menu's label, Unity's Ctrl+N; nullptr none)
+  const char *shortcut;  // (a keymap action id - the Window menu shows the preset's chord for it; nullptr none)
 };
 const Module &module_of(WindowKind k);
 const Module *modules(int &count);
@@ -667,6 +667,17 @@ class Editor {
   void set_tablet_posture_for_test(int folded) { test_posture_ = folded; }  // (1 folded, 0 open, -1 the system's)
   bool tablet_for_test() const { return tablet_; }
   std::string statusbar_hint_for_test() const { return statusbar_hint(); }
+  std::vector<std::string> hint_row_names_for_test() const;  // (task 0254)
+  std::string statusbar_hint_row_for_test() const;
+  std::string shortcut_text_for_test(const std::string &id) const { return shortcut_text(id); }
+  std::string op_keys_for_test(const char *op) const {
+    const EditOpInfo *i = find_edit_op(op);
+    return i ? op_keys(*i) : std::string("(no such op)");
+  }
+  std::string menu_shortcut_for_test(const std::string &label) const {  // (what the menu drew beside the label: task 0254 F4)
+    auto it = ui_.menu_shortcuts.find(label);
+    return it == ui_.menu_shortcuts.end() ? std::string("(not drawn)") : it->second;
+  }
   int sculpt_subdiv_levels_for_test() const { return sculpt_subdiv_levels(); }  // (task 0239)
   bool sculpt_dynamesh_for_test(int resolution, int smooth) { return sculpt_dynamesh(resolution, smooth); }  // (task 0240)
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
@@ -693,6 +704,18 @@ class Editor {
     std::function<void()> cancel;
   };
   std::vector<JobView> jobs_for_test() { return jobs_running(); }
+  /* Task 0254: the History window's rows (the steps taken; the steps undone, the next one first), the unsaved-changes prompt. */
+  struct HistoryRows {
+    std::vector<std::string> past, future;
+  };
+  HistoryRows history_rows_for_test() const;
+  void new_scene_asked();
+  void open_scene_asked(const std::string &path);
+  void open_scene_dialog_asked();
+  bool unsaved_dialog_open_for_test() const { return dialog_ == Dialog::UnsavedChanges; }
+  bool scene_dirty_for_test() const { return scene_dirty_; }
+  bool playing_for_test() const { return playing_; }
+  void request_close_for_test() { request_close(); }
   std::string button_disabled_why_for_test(const std::string &label) const {
     auto it = ui_.disabled_reasons.find(label);
     return it == ui_.disabled_reasons.end() ? std::string() : it->second;
@@ -2914,6 +2937,20 @@ class Editor {
   void draw_palette_body();
   void palette_command(const std::vector<std::string> &t, const std::string &line);
   std::string statusbar_hint() const;
+  /* The hint table (task 0254, editor/hints.cpp): rows in priority order, the first whose condition holds is shown. */
+  struct HintRow {
+    const char *name;
+    bool (*when)(const Editor &);
+    std::string (*text)(const Editor &);
+  };
+  const std::vector<HintRow> &hint_rows() const;
+  const HintRow &hint_row_now() const;
+  std::string navigation_hint() const;
+  std::string hint_key(const char *action, const char *fallback) const;
+  std::string key(const char *action) const;  // (the preset's chord for a label, or nothing: task 0254 F4)
+  std::string with_key(const std::string &label, const char *action) const;  // ("Knife (K)", or "Knife" when the preset has no chord)
+  std::string op_keys(const EditOpInfo &o) const;
+  Recti uv_rect_;  // (the UV editor as last drawn: its hint row)
   void draw_statusbar_hint(const Recti &r);
   void draw_statusbar_log(const Recti &r);
   std::string favorites_prefs_text() const;
@@ -4390,6 +4427,16 @@ class Editor {
   };
   std::vector<JobSeen> jobs_seen_;
   std::string busy_label_;  // (a main-thread job about to block: shown for a frame first)
+  /* The History window and the unsaved-changes prompt (task 0254, editor/history_window.cpp). */
+  void draw_history_window(const Recti &r);
+  void history_jump(size_t steps);
+  void ask_unsaved(const std::string &what, std::function<void()> then);
+  void unsaved_save_then();
+  void unsaved_discard();
+  void unsaved_cancel();
+  void run_after_save();
+  std::function<void()> unsaved_then_, after_save_;
+  std::string unsaved_what_;
   struct ToastRects {
     Recti frame, text, fix;
     std::string fix_cmd, key;  // (key: the toast's text - the poll may have inserted a toast since the draw)
@@ -4419,7 +4466,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {

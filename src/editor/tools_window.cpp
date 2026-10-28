@@ -171,7 +171,7 @@ void Editor::draw_tools_window(const Recti &r) {
            if (edit_mode_) exit_edit_mode();
            else enter_edit_mode();
          }},
-        {"Join", "Combine the selected meshes into the active one (Ctrl+J).", two && !edit_mode_, [this] { join_selected(); }},
+        {"Join", "Combine the selected meshes into the active one (the Mesh menu shows the key).", two && !edit_mode_, [this] { join_selected(); }},
         {"Separate Parts", "Every loose piece becomes its own object.", mesh, [this] { separate("loose"); }},
         {"Union", "Boolean: merge the selected solids into the active one.", two && !edit_mode_, [this] { boolean_selected(1, true); }},
         {"Difference", "Boolean: cut the other selected objects out of the active one.", two && !edit_mode_, [this] { boolean_selected(0, true); }},
@@ -215,7 +215,7 @@ void Editor::draw_tools_window(const Recti &r) {
   if (section("Check: Overlapping Vertices & Edges", FocusCheck)) draw_overlap_panel(lay);
   if (section("UV", FocusUV)) {
     std::vector<GridButton> bs = {
-        {"Unwrap", "Unwrap along the seams (U).", mesh, [this] { uv_op("unwrap"); }},
+        {"Unwrap", "Unwrap along the seams.", mesh, [this] { uv_op("unwrap"); }},
         {"Smart UV", "Smart UV Project: no seams needed.", mesh, [this] { uv_op("smart"); }},
         {"Part Unwrap", "Unwrap by parts: few charts, each under the stretch bound.", mesh, [this] { uv_op("parts"); }},
         {"Cube Project", "Each face projected along its main axis.", mesh, [this] { uv_op("cube"); }},

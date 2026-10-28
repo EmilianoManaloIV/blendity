@@ -583,7 +583,7 @@ void Editor::draw_project(const Recti &r) {
         project_dir_ = full;
         project_listed_ = -100;
       }
-      else if (ext == ".scene") open_scene(full);
+      else if (ext == ".scene") open_scene_asked(full);  // (task 0254)
       else if (ext == ".ptex") {
         if (ProceduralTexturePtr t = texture_asset(make_asset_relative(full))) texture_selected_ = t;
         dock_open(WindowKind::Textures);
@@ -683,7 +683,7 @@ void Editor::draw_project(const Recti &r) {
     }
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false, fs::is_dir(sel) && in_assets ? sel : dir_now);
     u.menu_separator();
-    if (u.menu_item("Rename", "F2", false, in_assets)) {
+    if (u.menu_item("Rename", key("edit.rename").c_str(), false, in_assets)) {
       project_rename_ = sel;
       project_rename_buf_ = fs::is_dir(sel) ? fs::filename(sel) : fs::stem(sel);
     }

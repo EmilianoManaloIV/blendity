@@ -554,7 +554,7 @@ void Editor::draw_edit_targets(ui::Layout &lay) {
   if (texture && u.button({row.x, row.y, bw, row.h}, "Apply to Texture")) edit_apply_to_texture();
   if (texture) u.tooltip("Put the result on the texture as an Image layer on top (its procedural layers stay underneath).");
   if (u.button_enabled({row.right() - bw, row.y, bw, row.h}, "Use as Camera Look", edit_doc_.is_open(), "Nothing open: Open an image or Render first.")) edit_use_as_camera_look();
-  u.tooltip("Give the Main Camera these adjustments as camera filters, so the Game view and F12 carry the look.");
+  u.tooltip("Give the Main Camera these adjustments as camera filters, so the Game view and " + key("render.image") + " carry the look.");
 }
 
 void Editor::draw_editing_window(const Recti &r) {

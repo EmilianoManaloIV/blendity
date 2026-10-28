@@ -2,6 +2,60 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 274): hints from a table, labels from the keymap, unsaved-changes prompts, the History window (task 0254)
+
+**Asked:** ADR 0085's foundations F3-F6. The status bar's hint was an if-chain missing the gizmo drag, Draw, Edit
+Origin, the UV editor, Record, the bakes, Strokes and Scatter; 121 labels carried Unity's keys whatever the keymap
+preset, some wrong even then; New, Open and Open Recent replaced the scene without asking and Exit skipped its auto-save
+while Play ran; the undo history was one label in the status bar. Nielsen's H10, H4, H5 and H1 / H3.
+
+**Added**
+- **The hint table** (`src/editor/hints.cpp`): rows of {name, when, text} in priority order - the Wheel, the modals, Edit
+  Origin, the pilot, Draw, Sketch, the gizmo drag (type a number, V snaps, Ctrl+Shift drops), the jobs, Sculpt, Paint,
+  Strokes, Scatter, Weight Paint, Record, the bake and the render, the UV editor under the pointer, Tablet Mode, the
+  palette's elsewhere, Edit Mode, the Object Mode tools with the feel's navigation. The texts' shortcuts come from the
+  keymap. Round 271's hint table: 0 of 8 cells without a hint of their own (2 before).
+- **Labels from the keymap** (`Editor::key(action)`): every menu item, the toolbar's and Play's tooltips, the Window
+  menu (the module registry carries action ids), the Mesh menu's edit-operation table (action ids), the Inspector's
+  and Project window's menus, the Lighting, Render, Editing and Modeling Tools windows' texts show the preset's chord
+  or nothing; the labels the keymap cannot produce are dropped (Align With View, Unwrap "U", Extrude "E", the modifier
+  menu's Blender keys). `tools/hci_label_audit.py`: 0 literals (121 before), the fixed keys (Esc, Alt+F4, a modal's
+  own letters) left as they are and skipped by the audit on purpose.
+- **Unsaved changes** (`history_window.cpp`): "Save changes to <scene>?" - Save, Don't Save, Cancel - before New Scene,
+  Open Scene..., Open Recent, a .scene from the Project window or a drop, Ctrl+N and Ctrl+O, when the scene has changes
+  since its last save; Save runs the save, then the action once the save has really happened (a cancelled Save As drops
+  it). Exit leaves Play first, so its auto-save keeps the pre-Play edits (Play's own changes are discarded, as
+  Unity does); New and Open during Play leave Play first, then ask. The console's `newscene` and
+  `open` stay immediate (scripts).
+- **The History window** (`WindowKind::History`, in the Scene group): the steps taken as a list, the current one marked,
+  a click jumping to any of them (undo or redo as many steps as it takes), the undone steps dim below; the Editing
+  window's own stack as a second block with its Undo / Redo when an image is open; the status bar's "Last:" opens it.
+- **Review (Opus) taken:** a History click jumped while the rows were still being drawn, and the rows after it read undo
+  states that were gone - the click's target is taken after the rows; the Mesh menu's submenus showed the raw action
+  ids ("mesh.extrude") where the chord belongs - `op_keys` there too, with a test; a save that failed (or was refused
+  in Play) left the waiting New / Open armed for a later manual save - dropped with it; New / Open during Play replaced
+  the pre-Play scene without asking - they leave Play first, then ask, as Exit does; the UV editor's rectangle was never
+  cleared, so its hint showed over whatever took its place - reset each frame; the Record, bake and render rows hid the
+  Edit Mode, tablet and palette hints - they follow the modes'; the UV hint named the keymap's tool chords while the
+  editor hard-codes W E R - it says so; the Hierarchy menu's Delete and Frame Selected and the Render tooltip were
+  still literals the audit's skips hid - from the keymap; F9 in the operation tips - "Adjust Last Operation"; the
+  Start row is marked when everything is undone; labels whose action is unbound no longer end in "()"; the sculpt
+  hint's isolate back; the hint test rebinds the palette and expects the text to change; the History test clicks
+  "Last:"; the F5 claim corrected (Play's own changes are discarded, as Unity does: the auto-save keeps the pre-Play
+  edits). Open: a History jump of N steps restores N states on the main thread (not timed); the UV editor's W / E / R
+  are its own keys, not the keymap's.
+
+**Checked**
+- `tests_round274`: the status bar's "Last:" opening the History window by a click, its rows after four changes, a click on the first step going back three, a click on
+  an undone step redoing; the hint rows listed and the row showing per mode (Object, Edit, Sculpt, Paint, Strokes,
+  Scatter, the UV editor under the pointer, elsewhere), the palette rebound and its hint following, the Mesh menu's rows giving the preset's chord; the Edit menu's and
+  the Window menu's drawn shortcuts equal to the keymap's under Unity and Blender; New Scene with a changed scene asking,
+  Cancel keeping it, Don't Save replacing it, Save writing the file then replacing, Exit during Play leaving Play before
+  the auto-save (the file written). Round 271's hint test expects 0 holes.
+- Unit checks (round 274): Windows, in render-cache verify mode, 13141, 0 failed (1130 tests), 0 stale
+  pictures. Linux with libraries: 12681, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group passed alone: the known parallel-load noise.)
+
 ## 2026-10-28 (round 273): the job tray - every long job with its progress, its time and a Cancel (task 0253)
 
 **Asked:** ADR 0085's second foundation (F2). Quad Remesh, Mesh Maps, a baked-light layer, a surface's evaluation, a

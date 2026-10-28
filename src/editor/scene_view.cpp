@@ -2258,20 +2258,20 @@ const std::vector<EditOpPair> &edit_op_pairs() {
 const std::vector<EditOpInfo> &edit_op_table() {
   enum { V = 1, E = 2, F = 4, ALL = 7 };
   static const std::vector<EditOpInfo> ops = {
-      {"extrude_edges", "Extrude", "E", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
+      {"extrude_edges", "Extrude", "", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
        "a new edge (start a shape from one vertex). Blender: E in vertex / edge mode.", V | E},
-      {"merge_center", "Merge at Center", "Alt+M", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
-      {"connect", "Connect Vertex Path", "J", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
-      {"fill", "Make Face", "Alt+F", "Close the holes and wire loops in the selection with faces (every hole when nothing is selected):\n"
+      {"merge_center", "Merge at Center", "mesh.merge_center", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
+      {"connect", "Connect Vertex Path", "mesh.connect", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
+      {"fill", "Make Face", "mesh.fill", "Close the holes and wire loops in the selection with faces (every hole when nothing is selected):\n"
        "flat ones get one face, bent ones a fan, cracks with no area are welded shut. Selected vertices that are\n"
        "no loop (loose points, a chain) become one face through them. Blender: F and Fill Holes. SketchUp: closing a loop.", ALL},
       {"smooth", "Smooth Vertices", "", "Laplacian smoothing of the selected vertices. Blender: Smooth Vertices.", V},
-      {"dissolve_vertices", "Dissolve Vertices", "Ctrl+X", "Remove the selected vertices; the faces around each one merge (a vertex on a straight edge just goes).\nBlender: Dissolve Vertices.", V},
-      {"bevel", "Bevel", "Ctrl+B", "Round off the selected edges with a strip of faces. Blender: Ctrl+B.", E},
-      {"loopcut", "Loop Cut", "Ctrl+R", "Cut the quad ring across the selected edge (or hover an edge and press Ctrl+R). Blender: Ctrl+R.", E},
+      {"dissolve_vertices", "Dissolve Vertices", "mesh.dissolve", "Remove the selected vertices; the faces around each one merge (a vertex on a straight edge just goes).\nBlender: Dissolve Vertices.", V},
+      {"bevel", "Bevel", "mesh.bevel", "Round off the selected edges with a strip of faces. Blender: Ctrl+B.", E},
+      {"loopcut", "Loop Cut", "mesh.loop_cut", "Cut the quad ring across the selected edge (or hover an edge and press Ctrl+R). Blender: Ctrl+R.", E},
       {"select_loop", "Select Edge Loop", "Double-click", "Extend the selected edge to its whole loop. Blender: Alt+click.", E},
       {"subdivide_edges", "Subdivide", "", "Split the selected edges into equal parts. Blender: Subdivide.", E},
-      {"dissolve", "Dissolve", "Ctrl+X", "Remove the selected edges, merging the faces on both sides. Blender: Dissolve Edges.", E},
+      {"dissolve", "Dissolve", "mesh.dissolve", "Remove the selected edges, merging the faces on both sides. Blender: Dissolve Edges.", E},
       {"collapse", "Collapse", "", "Merge each selected edge (or connected group) into one vertex at its centre. Blender: Collapse.", E},
       {"mark_seam", "Mark Seam", "", "UV unwrapping cuts the mesh along these edges. Blender: Mark Seam.", E},
       {"clear_seam", "Clear Seam", "", "Remove UV seams from the selected edges.", E},
@@ -2285,11 +2285,11 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"select_by_material", "Same Material", "", "Select every face using the selected faces' material slots. Blender: Material > Select.", F},
       {"seams_from_sharp", "Seams from Sharp", "", "Mark a seam on every sharp edge: faces meeting at more than the Sharp Angle, or edges marked sharp.\n"
        "Blender: Select Sharp Edges, then Mark Seam.", E},
-      {"shell", "Shell", "", "Hollow the solid: the selected faces open up and the rest becomes a wall of the Thickness (F9 adjusts it).\n"
+      {"shell", "Shell", "", "Hollow the solid: the selected faces open up and the rest becomes a wall of the Thickness (Adjust Last Operation sets it).\n"
        "Plasticity / CAD: Shell.", F},
-      {"draft", "Draft", "", "Tilt the selected side faces by the Angle (F9) so they narrow toward the top (a mould's draft).\n"
+      {"draft", "Draft", "", "Tilt the selected side faces by the Angle (Adjust Last Operation) so they narrow toward the top (a mould's draft).\n"
        "Plasticity: Draft Face.", F},
-      {"thicken", "Thicken", "", "Give the whole surface a Thickness, set in F9 (a flat face becomes a slab). Plasticity: Thicken.", ALL},
+      {"thicken", "Thicken", "", "Give the whole surface a Thickness, set in Adjust Last Operation (a flat face becomes a slab). Plasticity: Thicken.", ALL},
       {"slice", "Slice", "", "Cut the mesh with a plane through the selection (or the origin) across the Slice Axis.\n"
        "UModeler: Slice. Blender: Bisect.", ALL},
       {"select_sharp", "Select Sharp Edges", "", "Select the edges whose faces meet at more than the Sharp Angle (and edges marked sharp).\n"
@@ -2298,30 +2298,30 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"clear_sharp", "Clear Sharp", "", "Let smooth shading run across the selected edges again.", E},
       {"edge_split", "Edge Split", "", "Disconnect the faces along the selected edges (hard edges, or to pull pieces apart). Blender: Edge Split.", E},
       {"select_ring", "Select Edge Ring", "", "Extend the selected edges across their quads (the rungs of a ladder). Blender: Ctrl+Alt+click.", E},
-      {"push_pull", "Push/Pull", "P", "Move the selected faces along their normal like SketchUp: sides stretch into coplanar\nneighbours, pushing to the far side makes a hole, pulling onto a face joins it.\nMove the mouse or type a distance, click to confirm, Esc to cancel.", F},
-      {"extrude", "Extrude", "Ctrl+E", "Extrude the selected faces along their normals. Blender: E.", F},
-      {"inset", "Inset", "Ctrl+I", "Make a smaller copy of the selected faces inside them: each face on its own (Individual),\n"
-       "or the whole selection as one face (Inset Individual off). F9 switches between them. Blender: I.", F},
-      {"push_through", "Push Through", "Alt+P", "Cut a hole through the object along the selected face's normal.\nTip: Inset first so the hole has a rim.", F},
+      {"push_pull", "Push/Pull", "mesh.push_pull", "Move the selected faces along their normal like SketchUp: sides stretch into coplanar\nneighbours, pushing to the far side makes a hole, pulling onto a face joins it.\nMove the mouse or type a distance, click to confirm, Esc to cancel.", F},
+      {"extrude", "Extrude", "mesh.extrude", "Extrude the selected faces along their normals. Blender: E.", F},
+      {"inset", "Inset", "mesh.inset", "Make a smaller copy of the selected faces inside them: each face on its own (Individual),\n"
+       "or the whole selection as one face (Inset Individual off). Adjust Last Operation switches between them. Blender: I.", F},
+      {"push_through", "Push Through", "mesh.push_through", "Cut a hole through the object along the selected face's normal.\nTip: Inset first so the hole has a rim.", F},
       {"fuse", "Fuse onto Face", "", "Join selected faces that lie on another face of the mesh (the touching area becomes an opening).", F},
       {"extrude_individual", "Extrude Individual", "", "Extrude each selected face on its own, with its own walls. Blender: Extrude Individual Faces.", F},
       {"poke", "Poke Faces", "", "Split each selected face into a fan of triangles around its centre. Blender: Face > Poke Faces.", F},
-      {"triangulate_faces", "Triangulate", "Ctrl+T", "Split the selected faces into triangles. Blender: Ctrl+T.", F},
-      {"tris_to_quads", "Tris to Quads", "Alt+J", "Join pairs of selected triangles into quads where they are nearly flat. Blender: Alt+J.", F},
-      {"dissolve_faces", "Dissolve Faces", "Ctrl+X", "Merge each connected group of selected faces into one face. Blender: Dissolve Faces.", F},
+      {"triangulate_faces", "Triangulate", "mesh.triangulate", "Split the selected faces into triangles. Blender: Ctrl+T.", F},
+      {"tris_to_quads", "Tris to Quads", "mesh.tris_to_quads", "Join pairs of selected triangles into quads where they are nearly flat. Blender: Alt+J.", F},
+      {"dissolve_faces", "Dissolve Faces", "mesh.dissolve", "Merge each connected group of selected faces into one face. Blender: Dissolve Faces.", F},
       {"flip_faces", "Flip Normals", "", "Turn the selected faces around (their normals point the other way). Blender: Mesh > Normals > Flip.", F},
-      {"duplicate", "Duplicate", "Shift+D", "Copy the selected faces in place; the copy is selected, ready to move. Blender: Shift+D. Unity: Ctrl+D.", F},
+      {"duplicate", "Duplicate", "mesh.duplicate", "Copy the selected faces in place; the copy is selected, ready to move. Blender: Shift+D. Unity: Ctrl+D.", F},
       {"split", "Split", "", "Detach the selected faces from the rest of the mesh (same place, own vertices). Blender: Y.", F},
       {"shade_smooth", "Shade Smooth", "", "Smooth shading on the selected faces only (Blender: Face > Shade Smooth).\nIt stops at flat faces and at edges marked sharp.", F},
       {"shade_flat", "Shade Flat", "", "Flat (faceted) shading on the selected faces only.", F},
-      {"bridge", "Bridge", "Ctrl+Shift+B", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
-      {"delete", "Delete", "Del", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
+      {"bridge", "Bridge", "mesh.bridge", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
+      {"delete", "Delete", "edit.delete", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
       {"merge_distance", "Merge by Distance", "", "Weld the selected vertices that are closer than the Merge Distance (all of them if nothing\n"
-       "is selected). F9: the distance, and Unselected to weld onto unselected vertices too. Blender: Merge > By Distance.", ALL},
+       "is selected). Adjust Last Operation: the distance, and Unselected to weld onto unselected vertices too. Blender: Merge > By Distance.", ALL},
       {"select_overlapping", "Select Z-Fighting", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
        "Modeling Tools > Check: Z-Fighting lists them and removes the ones that can go.", ALL},
       {"grid", "Grid", "", "Cut each selected quad into a grid of Grid Columns x Grid Rows (neighbours are split to match).\n"
-       "Click it for the helper: the wheel sets columns, Shift+wheel rows (F9 afterwards).", F},
+       "Click it for the helper: the wheel sets columns, Shift+wheel rows (Adjust Last Operation afterwards).", F},
       {"pipe", "Pipe", "", "A round tube of Pipe Radius along the selected edges (a chain), or along wire edges drawn with the\n"
        "Polyline tool; capped at both ends. Helper: the mouse sets the radius, the wheel the sides.", V | E},
       {"array", "Array", "", "Repeat the selected faces Array Count times, Array Spacing apart along the selection's X / Y / Z\n"
@@ -2335,21 +2335,21 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"merge_overlaps", "Merge Overlapping", "", "Weld vertices lying on top of each other (doubled edges on them become one).", ALL},
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
        "or in the whole mesh when nothing is selected. Blender: Mesh > Clean Up > Delete Loose.", ALL},
-      {"recalc_normals", "Recalculate Normals", "Shift+N", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
-      {"shrink_fatten", "Shrink/Fatten", "Alt+S", "Move the selected vertices along their normals (F9 sets the distance). Blender: Alt+S.", ALL},
-      {"to_sphere", "To Sphere", "Shift+Alt+S", "Pull the selected vertices onto a sphere around their centre (F9 sets how far). Blender: Shift+Alt+S.", ALL},
-      {"randomize", "Randomize", "", "Jitter the selected vertices (F9: amount and seed). Blender: Transform > Randomize.", ALL},
-      {"knife", "Knife / Line", "K", "Draw a line across a face to split it: click a corner or an edge, then another on the same face.\n"
+      {"recalc_normals", "Recalculate Normals", "mesh.recalc_normals", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
+      {"shrink_fatten", "Shrink/Fatten", "mesh.shrink_fatten", "Move the selected vertices along their normals (Adjust Last Operation sets the distance). Blender: Alt+S.", ALL},
+      {"to_sphere", "To Sphere", "mesh.to_sphere", "Pull the selected vertices onto a sphere around their centre (Adjust Last Operation sets how far). Blender: Shift+Alt+S.", ALL},
+      {"randomize", "Randomize", "", "Jitter the selected vertices (Adjust Last Operation: amount and seed). Blender: Transform > Randomize.", ALL},
+      {"knife", "Knife / Line", "mesh.knife", "Draw a line across a face to split it: click a corner or an edge, then another on the same face.\n"
        "Snaps to endpoints (green), midpoints (cyan) and edges (red). SketchUp: Line tool. Blender: K.", ALL},
       {"dissolve_limited", "Merge Coplanar", "", "Turn every flat region into one n-gon and drop corners on straight edges - within the selected\n"
        "faces only when some are selected (the rest of the mesh keeps its edges), the whole mesh otherwise.\n"
        "Blender: Delete > Limited Dissolve. SketchUp shows flat regions this way.", ALL},
       {"origin_to_selection", "Origin to Selection", "", "Move the object's origin to the centre of the selected elements (the mesh stays put).\n"
        "Blender: Shift+S > Cursor to Selected, then Set Origin > Origin to 3D Cursor.", ALL},
-      {"select_linked", "Select Linked", "Ctrl+L", "Select everything connected to the selection. Blender: Ctrl+L.", ALL},
-      {"select_more", "Select More", "Ctrl+=", "Grow the selection by one ring. Blender: Ctrl+Numpad +.", ALL},
-      {"select_less", "Select Less", "Ctrl+-", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
-      {"select_invert", "Invert Selection", "Ctrl+Shift+I", "Select what isn't, deselect what is. Blender: Ctrl+I.", ALL},
+      {"select_linked", "Select Linked", "select.linked", "Select everything connected to the selection. Blender: Ctrl+L.", ALL},
+      {"select_more", "Select More", "select.more", "Grow the selection by one ring. Blender: Ctrl+Numpad +.", ALL},
+      {"select_less", "Select Less", "select.less", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
+      {"select_invert", "Invert Selection", "select.invert", "Select what isn't, deselect what is. Blender: Ctrl+I.", ALL},
       {"select_non_manifold", "Select Non-Manifold", "", "Select holes and edges shared by more than two faces. Blender: Select > All by Trait > Non Manifold.", ALL},
       {"select_coplanar", "Select Coplanar", "", "Add every face lying in the same plane as a selected face (the same direction and the same\n"
        "height), joined to it or not. Blender: Select > Select Similar > Coplanar.", ALL},

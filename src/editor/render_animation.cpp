@@ -270,7 +270,7 @@ void Editor::draw_render_animation_button(ui::Layout &lay) {
     if (u.button(r, strprintf("Stop Render Animation (%d / %d)", k, n), true, ui::Icon::Pause)) stop_render_animation();
     return;
   }
-  if (u.button(r, "Render Animation (Ctrl+F12)", false, ui::Icon::Camera)) start_render_animation();
+  if (u.button(r, with_key("Render Animation", "render.animation"), false, ui::Icon::Camera)) start_render_animation();
   if (!u.hovered(r)) return;  // (the PATH is searched only for the tooltip)
   const std::string ffmpeg = ffmpeg_program();
   u.tooltip("Every frame of the scene's sequence (or the selected object's clip) through this render, as\n"

@@ -260,13 +260,13 @@ void Editor::draw_hierarchy(const Recti &r) {
   bool has_sel = !selection_.empty();
   u.popup(u.id("hier_ctx"), u.px(220), [this, has_sel, create_body] {
     auto &u = ui_;
-    if (u.menu_item("Rename", "F2", false, has_sel)) {
+    if (u.menu_item("Rename", key("edit.rename").c_str(), false, has_sel)) {
       rename_id_ = active_;
       if (GameObject *g = scene_->find(active_)) rename_buf_ = g->name;
     }
-    if (u.menu_item("Duplicate", "Ctrl+D", false, has_sel)) duplicate_selected();
-    if (u.menu_item("Delete", "Del", false, has_sel)) delete_selected();
-    if (u.menu_item("Frame Selected", "F", false, has_sel)) frame_selected();
+    if (u.menu_item("Duplicate", key("edit.duplicate").c_str(), false, has_sel)) duplicate_selected();
+    if (u.menu_item("Delete", key("edit.delete").c_str(), false, has_sel)) delete_selected();
+    if (u.menu_item("Frame Selected", key("view.frame").c_str(), false, has_sel)) frame_selected();
     if (GameObject *ag = scene_->find(active_); ag && ag->camera() && ag->id != scene_->active_camera)
       if (u.menu_item("Set as Active Camera", nullptr, false, true)) set_active_camera(ag);
     if (u.menu_item("Select Children", nullptr, false, has_sel)) {
@@ -286,7 +286,7 @@ void Editor::draw_hierarchy(const Recti &r) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
       mark_changed("Clear Parent");
     }
-    if (u.menu_item("Join", "Ctrl+J", false, selection_.size() > 1)) join_selected();
+    if (u.menu_item("Join", key("object.join").c_str(), false, selection_.size() > 1)) join_selected();
     u.submenu("Boolean", u.px(220), [this] {
       static const char *kOps[] = {"Difference", "Union", "Intersect"};
       for (int op : {1, 0, 2})
@@ -1548,7 +1548,7 @@ void Editor::draw_inspector(const Recti &r) {
           u.tooltip("Opens the Rigging window: skeletons, skins, vertex groups, Weight Paint and IK (Window > Rigging).");
         }
         Recti row = lay.row(u.row_h() + u.px(2));
-        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, edit_mode_ ? "Exit Edit Mode (Tab)" : "Enter Edit Mode (Tab)", edit_mode_, Icon::Vertex)) {
+        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, with_key(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "mode.edit_toggle"), edit_mode_, Icon::Vertex)) {
           if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
         }
         if (edit_mode_ && g->id == edit_obj_) {
@@ -1687,9 +1687,9 @@ void Editor::draw_inspector(const Recti &r) {
             inspector_action_ = {gid, c, (int)a, u.frame_number()};
             u.redraw = true;
           };
-          if (u.menu_item("Apply", "Ctrl+A")) choose(Apply);
+          if (u.menu_item("Apply")) choose(Apply);
           u.tooltip("Bake this modifier into the mesh and remove it (Blender: Apply).");
-          if (u.menu_item("Duplicate", "Shift+D")) choose(Duplicate);
+          if (u.menu_item("Duplicate")) choose(Duplicate);
           if (u.menu_item("Copy to Selected", nullptr, false, selection_.size() > 1)) choose(CopyToSelected);
           u.menu_separator();
           if (u.menu_item("Move Up", nullptr, false, kk > 0)) choose(Up);
@@ -1946,7 +1946,7 @@ void Editor::draw_profiler_gpu(const FrameProfile &fp, const std::function<void(
   const bool views_on_card = fp.gpu_views > 0 || scene_on_gpu_;  // (a frame whose views were all reused still shows the block)
   if (!views_on_card && !rendering_ && !cam_preview_rendered_) return;
   if (views_on_card) draw_profiler_gpu_views(fp, stat);
-  if (rendering_) draw_profiler_gpu_tracer("F12 render", final_pt_.stats(), render_time_ * 1000.0, "the render so far", stat);
+  if (rendering_) draw_profiler_gpu_tracer(strprintf("%s render", key("render.image").c_str()).c_str(), final_pt_.stats(), render_time_ * 1000.0, "the render so far", stat);
   if (cam_preview_rendered_) draw_profiler_gpu_tracer("Camera Preview", cam_preview_pt_.stats(), frame_ms_, "the frame", stat);
 }
 
@@ -2130,7 +2130,7 @@ void Editor::draw_lighting_window(const Recti &r) {
   {
     /* Task 0020: Update Lighting and the rough preview. */
     Recti r2 = lay.row(u.row_h() + u.px(4));
-    if (u.button({r2.x, r2.y, bw, r2.h}, lighting_update_requested_ ? "Updating..." : "Update Lighting  (Ctrl+Shift+L)", lighting_update_requested_,
+    if (u.button({r2.x, r2.y, bw, r2.h}, lighting_update_requested_ ? std::string("Updating...") : with_key("Update Lighting", "lighting.update"), lighting_update_requested_,
                  Icon::Lightbulb))
       lighting_update();
     u.tooltip("Runs Realtime GI once now: realtime lightmaps and live probes catch up, then stay as they are\n"
@@ -2153,7 +2153,7 @@ void Editor::draw_lighting_window(const Recti &r) {
                                          : "Lighting out of date: objects changed since the bake keep realtime ambient.",
             u.theme.warning);
   else if (!baking_ && frozen_out_of_date())
-    u.label(lay.row(), "Realtime GI out of date: Update Lighting (Ctrl+Shift+L) brings it up to date.", u.theme.warning);
+    u.label(lay.row(), "Realtime GI out of date: Update Lighting (" + key("lighting.update") + ") brings it up to date.", u.theme.warning);
   {
     std::string why;
     const bool live = live_gi_needed(&why);
@@ -2218,13 +2218,13 @@ void Editor::draw_render_window(const Recti &r) {
   Recti b = lay.row(u.row_h() + u.px(8));
   int bw = (b.w - u.px(12)) / 4;
   if (u.button({b.x, b.y, bw, b.h}, rendering_ && !render_preview_ ? "Restart" : "Render", false, Icon::Camera)) start_final_render();  // (F12 renders in Play too: no reason to refuse here)
-  u.tooltip("Render Image (F12) from the Main Camera. Blender: Render > Render Image.");
+  u.tooltip("Render Image (" + key("render.image") + ") from the Main Camera. Blender: Render > Render Image.");
   if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Preview", render_preview_ && render_has_result_, Icon::Eye)) start_final_render(true);
   u.tooltip(strprintf("A quick look before rendering: %d%% of the resolution, %d samples (Preview settings below).\n"
                       "Turn on Live Preview to update it whenever the scene changes.",
                       scene_->render.preview_percent, scene_->render.preview_samples));
   if (u.button_enabled({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", rendering_, "Nothing is rendering.", false, Icon::Pause) && rendering_) render_stop();
-  if (u.button_enabled({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", render_has_result_ && render_img_.width > 0, "Nothing rendered yet: Render first (F12).", false, Icon::File)) defer([this] { save_render(); });
+  if (u.button_enabled({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", render_has_result_ && render_img_.width > 0, ("Nothing rendered yet: Render first (" + key("render.image") + ").").c_str(), false, Icon::File)) defer([this] { save_render(); });
   u.tooltip("Saves to Renders/ in the chosen File Format.");
   {
     /* Camera sequence: a shot list rendered one camera after another. */
@@ -2381,7 +2381,7 @@ void Editor::draw_render_image(const Recti &right, int margin) {
     for (int x = right.x; x < right.right(); x += u.px(16))
       u.canvas.fill_rect({x, y, u.px(16), u.px(16)}, ((x - right.x) / u.px(16) + (y - right.y) / u.px(16)) & 1 ? Color::hex(0x2A2A2A) : Color::hex(0x303030));
   if (!render_has_result_ || render_img_.width == 0) {
-    u.label(right, "Press Render (F12) to render the Main Camera, or Preview for a quick look", u.theme.text_dim, ui::Align::Center);
+    u.label(right, "Press Render (" + key("render.image") + ") to render the Main Camera, or Preview for a quick look", u.theme.text_dim, ui::Align::Center);
     u.canvas.pop_clip();
     return;
   }
@@ -2472,7 +2472,7 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
           ngon_mode_ = !ngon_mode_;
         u.tooltip("SketchUp-style faces: a flat region of faces acts as one face (inner edges hidden,\n"
                   "one click selects it all, Push/Pull moves it all).");
-        if (u.button({nr.x + u.px(12) + 2 * nw, nr.y, nw, nr.h}, knife_.active ? "Knife (on)" : "Knife (K)", knife_.active))
+        if (u.button({nr.x + u.px(12) + 2 * nw, nr.y, nw, nr.h}, knife_.active ? std::string("Knife (on)") : with_key("Knife", "mesh.knife"), knife_.active))
           edit_tool("knife");
         u.tooltip("Split a face along a line between two points on its edges or corners.\nSketchUp: Line tool. Blender: Knife (K).");
       }
@@ -2558,7 +2558,7 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
        * left of the Scene view, or the drag helper - and are kept for next time. */
       if (elem_ == EditElement::Face) {
         er.field("Push/Pull Each Face", pp_individual_);
-        u.tooltip("On: Push/Pull (P) moves every selected face along its own normal (a box's sides all out at once).\n"
+        u.tooltip(std::string("On: Push/Pull (") + key("mesh.push_pull") + ") moves every selected face along its own normal (a box's sides all out at once).\n"
                   "Off: each connected group of selected faces moves along its own normal; separate groups move together.");
         er.field("Inset Individual", inset_individual_);
         u.tooltip("On: each selected face is inset on its own. Off: the selection is inset as one face\n"
@@ -2576,8 +2576,8 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
       }
       {
         Recti nr = lay.row();
-        u.label({nr.x + u.px(4), nr.y, nr.w - u.px(8), nr.h}, "Each tool's settings are in its helper (F9) when you use it.", u.theme.text_dim);
-        u.tooltip("Thickness, angle, distance, segments, count and the like show in Adjust Last Operation (F9, bottom left\n"
+        u.label({nr.x + u.px(4), nr.y, nr.w - u.px(8), nr.h}, "Each tool's settings are in its helper (" + key("edit.adjust_last") + ") when you use it.", u.theme.text_dim);
+        u.tooltip(std::string("Thickness, angle, distance, segments, count and the like show in Adjust Last Operation (") + key("edit.adjust_last") + ", bottom left\n"
                   "of the Scene view) after a tool runs, and in the drag helper while Bevel, Inset, Array, Grid, Pipe, Taper\n"
                   "or Recess is dragged. Changing them re-runs the tool, and they are kept for its next use.");
       }
@@ -2640,9 +2640,9 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
               if (!c.a) {  // Select All / None
                 const int hw = (bw3 - u.px(2)) / 2;
                 if (u.button({x, row.y, hw, row.h}, "All")) edit_select_all(true);
-                u.tooltip("Select everything (Ctrl+A).");
+                u.tooltip("Select everything (" + key("edit.select_all") + ").");
                 if (u.button({x + hw + u.px(2), row.y, bw3 - hw - u.px(2), row.h}, "None")) edit_select_all(false);
-                u.tooltip("Deselect everything (Ctrl+Shift+A).");
+                u.tooltip("Deselect everything (" + key("edit.select_none") + ").");
                 continue;
               }
               if (c.pair) {
@@ -2650,15 +2650,15 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
                 u.label({x, row.y, lw, row.h}, c.pair->label, u.theme.text_dim);
                 const int hw = (bw3 - lw - u.px(2)) / 2;
                 if (u.button({x + lw, row.y, hw, row.h}, c.pair->label_a)) edit_tool(c.a->op);
-                u.tooltip(c.a->keys[0] ? strprintf("%s (%s)", c.a->tip, c.a->keys) : std::string(c.a->tip));
+                u.tooltip(op_keys(*c.a).empty() ? std::string(c.a->tip) : strprintf("%s (%s)", c.a->tip, op_keys(*c.a).c_str()));
                 if (u.button({x + lw + hw + u.px(2), row.y, bw3 - lw - hw - u.px(2), row.h}, c.pair->label_b)) edit_tool(c.b->op);
-                u.tooltip(c.b->keys[0] ? strprintf("%s (%s)", c.b->tip, c.b->keys) : std::string(c.b->tip));
+                u.tooltip(op_keys(*c.b).empty() ? std::string(c.b->tip) : strprintf("%s (%s)", c.b->tip, op_keys(*c.b).c_str()));
                 continue;
               }
               std::string label = c.a->label;
               if (gi == 0 && starts_with(label, "Select ")) label = label.substr(7);  // in the Select group the word is implied
               if (u.button({x, row.y, bw3, row.h}, label)) edit_tool(c.a->op);
-              u.tooltip(c.a->keys[0] ? strprintf("%s (%s)", c.a->tip, c.a->keys) : std::string(c.a->tip));
+              u.tooltip(op_keys(*c.a).empty() ? std::string(c.a->tip) : strprintf("%s (%s)", c.a->tip, op_keys(*c.a).c_str()));
             }
           }
           if (gi == 1 && elem_ == EditElement::Face) {
@@ -2912,7 +2912,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     u.label({q1.x, q1.y, u.px(150), q1.h}, "Quality tier");
     if (u.combo(u.id("pref_tier"), {q1.x + u.px(150), q1.y + u.px(2), u.px(220), q1.h - u.px(4)}, ti, kTiers, 4)) set_quality_tier(ti);
     u.tooltip("Low: the Scene and Game views drawn at 67 % and scaled up, a 1024 shadow map, lighter Realtime GI, 60 fps.\n"
-              "Medium: views at 85 %, a 2048 shadow map. High: no limits. Renders (F12) always use the scene's own settings.\n"
+              "Medium: views at 85 %, a 2048 shadow map. High: no limits. Renders (" + key("render.image") + ") always use the scene's own settings.\n"
               "Recommended here: " + std::string(recommended_tier() == TierLow ? "Low" : "High") + ".");
     Recti q2 = row(u.row_h() + u.px(4));
     u.label({q2.x, q2.y, u.px(150), q2.h}, "Viewport resolution");
@@ -2970,7 +2970,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
   }
   u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster, and on Windows and Linux\n"
             "it shows the window too; the little it doesn't draw yet (realtime GI's per-pixel light, a retro filter's snapped vertices,\n"
-            "a live procedural seen very close) draws on the CPU, as before. With no GPU everything draws on the CPU. F12 renders stay on the CPU.");
+            "a live procedural seen very close) draws on the CPU, as before. With no GPU everything draws on the CPU. " + key("render.image") + " renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
   /* Task 0199: each window - its views' device and who shows it. */
   /* (While a secondary window draws, its state is the members' and its entry holds the main window's, swapped.) */

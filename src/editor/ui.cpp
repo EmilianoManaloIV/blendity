@@ -1335,6 +1335,7 @@ void Context::draw_popups() {
 bool Context::menu_item(const std::string &text, const char *shortcut, bool checked, bool enabled, Icon icon) {
   Recti r = popup_row();
   if (record_buttons) button_rects["menu:" + text] = r;  // (tests click a menu row by its text)
+  if (record_buttons) menu_shortcuts[text] = shortcut ? shortcut : "";
   bool hot = hovered(r);
   if (hot && enabled) {
     canvas.fill_rect(r, theme.selection);

@@ -141,6 +141,7 @@ void Editor::uv_op(const std::string &op) {
 void Editor::draw_uv_editor(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
+  uv_rect_ = r;  // (the hint table's row: task 0254)
   /* ---- toolbar ---- */
   int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
@@ -148,7 +149,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   int x = bar.x + u.px(6), y = bar.y + u.px(3), h = bh - u.px(6);
   struct B { const char *label, *op, *tip; };
   const B buttons[] = {
-      {"Unwrap", "unwrap", "Unwrap (U): Least Squares Conformal Maps per seam-bounded island, then pack.\nBlender: UV > Unwrap (Conformal)."},
+      {"Unwrap", "unwrap", "Unwrap: Least Squares Conformal Maps per seam-bounded island, then pack.\nBlender: UV > Unwrap (Conformal)."},
       {"Smart UV", "smart", "Smart UV Project: group faces by normal, project and pack. No seams needed."},
       {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (console:\nuv parts [bound] [multi]); ABF++ then LSCM; each part's charts packed together. No seams needed."},
       {"Cube", "cube", "Cube Projection: each face projected along its main axis."},
@@ -834,9 +835,9 @@ void Editor::draw_uv_tool_row(const Recti &bar) {
     const char *tip;
   };
   const B buttons[] = {
-      {"All", [this] { uv_select("all"); }, "Select everything (Ctrl+A)."},
-      {"None", [this] { uv_select("none"); }, "Deselect (Ctrl+Shift+A)."},
-      {"Invert", [this] { uv_select("invert"); }, "Invert the selection (Ctrl+I)."},
+      {"All", [this] { uv_select("all"); }, "Select everything (the Edit menu shows the key)."},
+      {"None", [this] { uv_select("none"); }, "Deselect (the Edit menu shows the key)."},
+      {"Invert", [this] { uv_select("invert"); }, "Invert the selection."},
       {"Islands", [this] { uv_select("islands"); }, "Grow the selection to whole islands (Blender: Select Linked)."},
       {"-90", [this] { uv_transform("rotate", -90); }, "Rotate the selection 90 degrees clockwise."},
       {"+90", [this] { uv_transform("rotate", 90); }, "Rotate the selection 90 degrees counter-clockwise."},

@@ -130,7 +130,7 @@ void Editor::draw_moonray_dialog(const std::function<void()> &close) {
     Recti row = u.popup_row();
     u.label({row.x + u.px(12), row.y, row.w - u.px(20), row.h}, l);
   };
-  say("MoonRay is DreamWorks' production renderer (open source, Apache-2.0). Blendity can render F12");
+  say(("MoonRay is DreamWorks' production renderer (open source, Apache-2.0). Blendity can render " + key("render.image")).c_str());
   say("images and animations in it, as a third render engine beside the rasterizer and the path tracer.");
   if (!mr_.installable()) {
     say("It can't run on this computer yet: " + mr_.problem + ".");
@@ -169,7 +169,7 @@ void Editor::draw_moonray_settings() {
     else state = "MoonRay isn't installed (optional: DreamWorks' production renderer)";
   }
   u.label({r.x + u.px(160), r.y, r.w - u.px(300), r.h}, state, mr_.ready() ? u.theme.text : u.theme.text_dim);
-  u.tooltip("MoonRay is a separate program Blendity downloads on request and runs for F12 renders (on Windows inside WSL).\n"
+  u.tooltip(std::string("MoonRay is a separate program Blendity downloads on request and runs for ") + key("render.image") + " renders (on Windows inside WSL).\n"
             "Console: moonray status | install | remove | folder <your own MoonRay> | check");
   if (!mr_located_) return;
   const Recti btn{r.right() - u.px(130), r.y + u.px(2), u.px(118), r.h - u.px(4)};

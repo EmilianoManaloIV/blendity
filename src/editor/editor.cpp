@@ -386,7 +386,8 @@ int Editor::run() {
 }
 
 void Editor::request_close() {
-  if (scene_dirty_ && !playing_) {
+  if (playing_) exit_play();  // (task 0254: first, so the auto-save runs on the scene Play restores - the edits made before Play - not on Play's discarded state)
+  if (scene_dirty_) {
     std::string path = scene_->path.empty() ? fs::join(assets_dir_, "Scenes/" + scene_->name + ".scene") : scene_->path;
     /* Unity asks; we auto-save to avoid data loss (and keep a backup). */
     if (fs::exists(path)) fs::copy_file(path, path + ".bak");
@@ -394,7 +395,6 @@ void Editor::request_close() {
     Log::info("Auto-saved %s on exit", path.c_str());
     if (scene_->path == path) save_lighting_data();
   }
-  if (playing_) exit_play();
   running_ = false;
 }
 
@@ -613,6 +613,7 @@ void Editor::frame_body(std::vector<Event> &events) {
     log_seen_ = 0;
   }
   Log::fetch(log_.size(), log_);
+  uv_rect_ = Recti{};  // (task 0254: the UV editor sets it again when it draws this frame; its hint row reads it)
   toasts_poll();   // (task 0252: new warnings and errors become toasts)
   jobs_poll();     // (task 0253: the jobs seen, their start and their end)
   hci_log_poll();  // (the study's log, when asked for)
@@ -820,6 +821,7 @@ void Editor::draw_menubar(const Recti &r) {
   for (const char *m : menus) {
     int w = u.font.text_width(m) + u.px(16);
     Recti mr{x, r.y, w, r.h};
+    if (u.record_buttons) u.button_rects["menubar:" + std::string(m)] = mr;  // (tests open a menu by its name)
     ui::Id id = u.id(m);
     bool open = u.popup_open(id);
     bool hot = u.hovered(mr);
@@ -839,18 +841,18 @@ void Editor::draw_menubar(const Recti &r) {
   auto has_sel = !selection_.empty();
   u.popup(u.id("File"), u.px(260), [this, has_sel] {
     auto &u = ui_;
-    if (u.menu_item("New Scene", "Ctrl+N")) new_scene();
-    if (u.menu_item("Open Scene...", "Ctrl+O")) open_scene_dialog();
+    if (u.menu_item("New Scene", key("file.new").c_str())) new_scene_asked();
+    if (u.menu_item("Open Scene...", key("file.open").c_str())) open_scene_dialog_asked();
     if (!recent_scenes_.empty())
       u.submenu("Open Recent", u.px(320), [this] {
         for (const std::string &p : std::vector<std::string>(recent_scenes_))
-          if (ui_.menu_item(fs::filename(p), nullptr, false, fs::exists(p))) defer([this, p] { open_scene(p); });  // (after the frame: windows hold pointers into this scene)
+          if (ui_.menu_item(fs::filename(p), nullptr, false, fs::exists(p))) defer([this, p] { open_scene_asked(p); });  // (after the frame: windows hold pointers into this scene)
         ui_.menu_separator();
         if (ui_.menu_item("Clear Recent")) recent_scenes_.clear();
       });
     u.menu_separator();
-    if (u.menu_item("Save", "Ctrl+S")) save_scene_cmd(false);
-    if (u.menu_item("Save As...", "Ctrl+Shift+S")) save_scene_cmd(true);
+    if (u.menu_item("Save", key("file.save").c_str())) save_scene_cmd(false);
+    if (u.menu_item("Save As...", key("file.save_as").c_str())) save_scene_cmd(true);
     if (u.menu_item("Compress Scene (Zstandard)", nullptr, scene_->compress, scene_compression_available())) scene_->compress = !scene_->compress;
     u.tooltip("Save this scene compressed, like Blender's File > Save > Compress (zstd).\nNeeds Blender's libraries; compressed scenes load automatically.");
     u.menu_separator();
@@ -862,11 +864,11 @@ void Editor::draw_menubar(const Recti &r) {
         if (ui_.menu_item(std::string(export_format_name(f)) + "...")) open_export_dialog(f);
     });
     u.menu_separator();
-    if (u.menu_item("Render Image", "F12", false, true, Icon::Camera)) start_final_render();
-    if (u.menu_item("Render Animation", "Ctrl+F12", ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation();
+    if (u.menu_item("Render Image", key("render.image").c_str(), false, true, Icon::Camera)) start_final_render();
+    if (u.menu_item("Render Animation", key("render.animation").c_str(), ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation();
     u.tooltip("Every frame of the scene's sequence (or the selected object's clip) as PNGs in Renders/, then an MP4 when FFmpeg is there.");
     if (u.menu_item("Save Render...", nullptr, false, render_has_result_)) defer([this] { save_render(); });
-    if (u.menu_item("Save Screenshot...", "Shift+F12")) screenshot_dialog();
+    if (u.menu_item("Save Screenshot...", key("render.screenshot").c_str())) screenshot_dialog();
     u.menu_separator();
     if (u.menu_item("Exit", "Alt+F4")) request_close();
   });
@@ -886,10 +888,10 @@ void Editor::draw_menubar(const Recti &r) {
     });
     u.tooltip("Work like Unity, Unreal, Blender or Maya: their keys and their Scene view mouse navigation.");
     u.menu_separator();
-    if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), "Ctrl+Z", false, !undo_.empty() || pending_change_)) undo();
-    if (u.menu_item(redo_.empty() ? std::string("Redo") : "Redo " + redo_.back().label, "Ctrl+Y", false, !redo_.empty())) redo();
+    if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), key("edit.undo").c_str(), false, !undo_.empty() || pending_change_)) undo();
+    if (u.menu_item(redo_.empty() ? std::string("Redo") : "Redo " + redo_.back().label, key("edit.redo").c_str(), false, !redo_.empty())) redo();
     u.menu_separator();
-    if (u.menu_item("Select All", "Ctrl+A")) {
+    if (u.menu_item("Select All", key("edit.select_all").c_str())) {
       if (edit_mode_) edit_select_all(true);
       else {
         selection_.clear();
@@ -897,14 +899,14 @@ void Editor::draw_menubar(const Recti &r) {
         if (!selection_.empty()) active_ = selection_.back();
       }
     }
-    if (u.menu_item("Deselect All", "Ctrl+Shift+A")) { if (edit_mode_) edit_select_all(false); else clear_selection(); }
-    if (u.menu_item("Duplicate", "Ctrl+D", false, has_sel)) duplicate_selected();
-    if (u.menu_item("Delete", "Del", false, has_sel)) delete_selected();
-    if (u.menu_item("Frame Selected", "F", false, has_sel)) frame_selected();
+    if (u.menu_item("Deselect All", key("edit.select_none").c_str())) { if (edit_mode_) edit_select_all(false); else clear_selection(); }
+    if (u.menu_item("Duplicate", key("edit.duplicate").c_str(), false, has_sel)) duplicate_selected();
+    if (u.menu_item("Delete", key("edit.delete").c_str(), false, has_sel)) delete_selected();
+    if (u.menu_item("Frame Selected", key("view.frame").c_str(), false, has_sel)) frame_selected();
     u.menu_separator();
-    if (u.menu_item(playing_ ? "Stop" : "Play", "Ctrl+P")) { if (playing_) exit_play(); else enter_play(); }
-    if (u.menu_item("Pause", "Ctrl+Shift+P", paused_, playing_)) paused_ = !paused_;
-    if (u.menu_item("Step", "Ctrl+Alt+P", false, playing_)) step_requested_ = true;
+    if (u.menu_item(playing_ ? "Stop" : "Play", key("play.toggle").c_str())) { if (playing_) exit_play(); else enter_play(); }
+    if (u.menu_item("Pause", key("play.pause").c_str(), paused_, playing_)) paused_ = !paused_;
+    if (u.menu_item("Step", key("play.step").c_str(), false, playing_)) step_requested_ = true;
     u.menu_separator();
     if (u.menu_item("Preferences...")) dialog_ = Dialog::Preferences;
   });
@@ -913,14 +915,14 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Import Model...")) import_dialog();
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
     u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
-    if (u.menu_item("Refresh", "Ctrl+R")) project_listed_ = -100;
+    if (u.menu_item("Refresh", key("assets.refresh").c_str())) project_listed_ = -100;
     u.menu_separator();
     if (u.menu_item("Open Assets Folder")) fs::open_external(assets_dir_);
   });
   u.popup(u.id("GameObject"), u.px(280), [this, has_sel] {
     auto &u = ui_;
-    if (u.menu_item("Create Empty", "Ctrl+Shift+N")) create_object("Empty");
-    if (u.menu_item("Create Empty Child", "Alt+Shift+N", false, has_sel)) create_object("Empty", true);
+    if (u.menu_item("Create Empty", key("object.create_empty").c_str())) create_object("Empty");
+    if (u.menu_item("Create Empty Child", key("object.create_empty_child").c_str(), false, has_sel)) create_object("Empty", true);
     /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
     if (shows(FocusCreate | FocusDraw | FocusEdit | FocusRig))
       u.submenu("3D Object", u.px(170), [this] {
@@ -1016,11 +1018,11 @@ void Editor::draw_menubar(const Recti &r) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
       mark_changed("Clear Parent");
     }
-    if (u.menu_item("Move To View", "Ctrl+Alt+F", false, has_sel)) {
+    if (u.menu_item("Move To View", key("object.move_to_view").c_str(), false, has_sel)) {
       for (GameObject *g : selected_objects(true)) g->set_world_position(cam_.pivot);
       mark_changed("Move To View");
     }
-    if (u.menu_item("Align With View", "Ctrl+Shift+F", false, has_sel)) {
+    if (u.menu_item("Align With View", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) {
         g->set_world_position(cam_.position());
         g->set_world_rotation(cam_.rotation());
@@ -1045,7 +1047,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Mesh"), u.px(300), [this, has_sel] {
     auto &u = ui_;
     u.menu_label("Blender-style modeling");
-    if (u.menu_item(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "Tab", edit_mode_, has_sel || edit_mode_)) {
+    if (u.menu_item(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", key("mode.edit_toggle").c_str(), edit_mode_, has_sel || edit_mode_)) {
       if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
     }
     u.menu_separator();
@@ -1062,20 +1064,20 @@ void Editor::draw_menubar(const Recti &r) {
         u.submenu(kEditGroups[gi], u.px(260), [this, gi] {
           auto &u = ui_;
           for (const EditOpInfo &op : edit_op_table())
-            if (edit_op_group(op.op) == gi && edit_op_available(op.op) && u.menu_item(op.label, op.keys[0] ? op.keys : nullptr)) edit_tool(op.op);
+            if (edit_op_group(op.op) == gi && edit_op_available(op.op) && u.menu_item(op.label, op_keys(op).empty() ? nullptr : op_keys(op).c_str())) edit_tool(op.op);  // (the preset's chord: task 0254)
         });
-      if (u.menu_item("Select All", "Ctrl+A")) edit_select_all(true);
+      if (u.menu_item("Select All", key("edit.select_all").c_str())) edit_select_all(true);
       if (elem_ == EditElement::Face && u.menu_item("Auto Fuse on Contact", nullptr, auto_fuse_)) auto_fuse_ = !auto_fuse_;
-      if (u.menu_item("Proportional Editing", "O", proportional_)) proportional_ = !proportional_;
+      if (u.menu_item("Proportional Editing", key("mesh.proportional").c_str(), proportional_)) proportional_ = !proportional_;
       if (u.menu_item("N-gon Mode (SketchUp)", nullptr, ngon_mode_)) ngon_mode_ = !ngon_mode_;
       u.tooltip("A flat region of faces acts as one face: its inner edges hide and a click selects all of it.\n"
-                "Merge Coplanar turns those regions into real n-gons; the Knife (K) splits them again.");
-      if (u.menu_item("Adjust Last Operation", "F9", last_op_open_)) last_op_open_ = !last_op_open_;
+                + std::string("Merge Coplanar turns those regions into real n-gons; the Knife (") + key("mesh.knife") + ") splits them again.");
+      if (u.menu_item("Adjust Last Operation", key("edit.adjust_last").c_str(), last_op_open_)) last_op_open_ = !last_op_open_;
       u.menu_separator();
     }
     if (!edit_mode_) {
       const bool two = selection_.size() > 1;
-      if (u.menu_item("Join", "Ctrl+J", false, two)) join_selected();
+      if (u.menu_item("Join", key("object.join").c_str(), false, two)) join_selected();
       u.tooltip("Combine the selected meshes into the active one (selected last), keeping their materials.\n"
                 "Blender: Object > Join (Ctrl+J). ProBuilder: Merge Objects.");
       u.submenu("Boolean", u.px(250), [this, two] {
@@ -1170,7 +1172,7 @@ void Editor::draw_menubar(const Recti &r) {
     u.menu_separator();
     u.submenu("UV", u.px(240), [this] {
       auto &u = ui_;
-      if (u.menu_item("Unwrap", "U")) uv_op("unwrap");
+      if (u.menu_item("Unwrap")) uv_op("unwrap");
       if (u.menu_item("Smart UV Project")) uv_op("smart");
       if (u.menu_item("Part Unwrap")) uv_op("parts");
       if (u.menu_item("Cube Projection")) uv_op("cube");
@@ -1188,7 +1190,7 @@ void Editor::draw_menubar(const Recti &r) {
       u.tooltip("Mark a seam on every edge sharper than the Seam Angle (30 degrees) and every edge marked sharp.\n"
                 "Blender: Select > Select Sharp Edges, then Edge > Mark Seam.");
       if (u.menu_item("Seams from Sharp Edges + Unwrap")) uv_op("seams_from_sharp_unwrap");
-      if (u.menu_item("Open UV Editor", "Ctrl+9")) dock_open(WindowKind::UVEditor);
+      if (u.menu_item("Open UV Editor", key("window.uv").c_str())) dock_open(WindowKind::UVEditor);
     });
     if (!research::features().empty()) {
       u.menu_separator();
@@ -1202,7 +1204,7 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
-          u.menu_item(window_title((WindowKind)k), module_of((WindowKind)k).shortcut, dock_find_anywhere((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
+          u.menu_item(window_title((WindowKind)k), key(module_of((WindowKind)k).shortcut).c_str(), dock_find_anywhere((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
     if (!windows_.empty() && u.menu_item(strprintf("Bring Back %zu Window%s", windows_.size(), windows_.size() == 1 ? "" : "s")))
       for (auto &w : windows_) w->close = true;  // (their tabs return to this window: task 0187)
@@ -1237,7 +1239,7 @@ void Editor::draw_menubar(const Recti &r) {
   });
   u.popup(u.id("Help"), u.px(260), [this] {
     auto &u = ui_;
-    if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
+    if (u.menu_item("Learn Blendity", key("window.learn").c_str(), false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
     if (u.menu_item("Open Manual")) open_manual();
     if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty() || !guide_uses_.empty())) {
@@ -1267,17 +1269,19 @@ void Editor::draw_toolbar(const Recti &r) {
   u.canvas.fill_rect(r, u.theme.toolbar);
   int bh = r.h - u.px(8), y = r.y + u.px(4);
   int x = r.x + u.px(8);
-  struct T { Tool t; Icon i; const char *tip; };
+  struct T { Tool t; Icon i; const char *action, *name, *rest; };  // (the key from the keymap: task 0254 F4)
   const T tools[] = {
-      {Tool::View, Icon::Hand, "View Tool (Q)\nDrag to pan. Blender: Shift+Middle Mouse."},
-      {Tool::Move, Icon::Move, "Move Tool (W)\nBlender: G or the Move tool (FoCG ch. 7.3 translation)."},
-      {Tool::Rotate, Icon::Rotate, "Rotate Tool (E)\nBlender: R. Hold Ctrl to snap 15 degrees."},
-      {Tool::Scale, Icon::Scale, "Scale Tool (R)\nBlender: S."},
-      {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."}};
+      {Tool::View, Icon::Hand, "tool.view", "View Tool", "Drag to pan. Blender: Shift+Middle Mouse."},
+      {Tool::Move, Icon::Move, "tool.move", "Move Tool", "Blender: G or the Move tool (FoCG ch. 7.3 translation)."},
+      {Tool::Rotate, Icon::Rotate, "tool.rotate", "Rotate Tool", "Blender: R. Hold Ctrl to snap 15 degrees."},
+      {Tool::Scale, Icon::Scale, "tool.scale", "Scale Tool", "Blender: S."},
+      {Tool::Transform, Icon::Transform, "tool.transform", "Transform Tool", "Move, rotate and scale in one gizmo. Blender: Transform tool."}};
   /* Grouped segmented control, like Unity's tool strip. */
   u.canvas.vline(x + (bh + u.px(2)) * 5 + u.px(2), y, y + bh, u.theme.border);  // (task 0235: a thin rule splits the group, not a box)
   for (const T &t : tools) {
-    if (u.icon_button({x, y, bh, bh}, t.i, tool_ == t.t, t.tip)) tool_ = t.t;
+    const std::string k = key(t.action);
+    const std::string tip = strprintf("%s%s%s%s\n%s", t.name, k.empty() ? "" : " (", k.c_str(), k.empty() ? "" : ")", t.rest);
+    if (u.icon_button({x, y, bh, bh}, t.i, tool_ == t.t, tip.c_str())) tool_ = t.t;
     x += bh + u.px(2);
   }
   x += u.px(14);
@@ -1306,9 +1310,9 @@ void Editor::draw_toolbar(const Recti &r) {
     u.tooltip("Face select mode (3).");
     x += ew + u.px(4);
     if (u.icon_button({x, y, bh, bh}, Icon::Globe, proportional_,
-                      "Proportional Editing (O). Unselected vertices within the radius follow\n"
-                      "the transform with a smooth falloff; scroll while dragging to resize.\n"
-                      "Blender: the same, Unity/ProBuilder: soft selection."))
+                      ("Proportional Editing (" + key("mesh.proportional") + "). Unselected vertices within the radius follow\n"
+                       "the transform with a smooth falloff; scroll while dragging to resize.\n"
+                       "Blender: the same, Unity/ProBuilder: soft selection.").c_str()))
       proportional_ = !proportional_;
     x += bh + u.px(8);
   }
@@ -1316,11 +1320,11 @@ void Editor::draw_toolbar(const Recti &r) {
   /* Play controls in the middle, like Unity. */
   int cx = r.x + r.w / 2 - (bh * 3 + u.px(4)) / 2;
   u.canvas.vline(cx + bh * 3 + u.px(8), y, y + bh, u.theme.border);  // (task 0235)
-  if (u.icon_button({cx, y, bh, bh}, Icon::Play, playing_, "Play (Ctrl+P)\nEnters Play mode. Changes made while playing are discarded on Stop, like Unity.")) {
+  if (u.icon_button({cx, y, bh, bh}, Icon::Play, playing_, strprintf("Play (%s)\nEnters Play mode. Changes made while playing are discarded on Stop, like Unity.", key("play.toggle").c_str()).c_str())) {
     if (playing_) exit_play(); else enter_play();
   }
-  if (u.icon_button({cx + bh + u.px(2), y, bh, bh}, Icon::Pause, paused_, "Pause (Ctrl+Shift+P)")) paused_ = !paused_;
-  if (u.icon_button({cx + 2 * (bh + u.px(2)), y, bh, bh}, Icon::Step, false, "Step one frame (Ctrl+Alt+P)")) {
+  if (u.icon_button({cx + bh + u.px(2), y, bh, bh}, Icon::Pause, paused_, strprintf("Pause (%s)", key("play.pause").c_str()).c_str())) paused_ = !paused_;
+  if (u.icon_button({cx + 2 * (bh + u.px(2)), y, bh, bh}, Icon::Step, false, strprintf("Step one frame (%s)", key("play.step").c_str()).c_str())) {
     if (!playing_) { enter_play(); paused_ = true; }
     step_requested_ = true;
   }
@@ -1373,7 +1377,7 @@ void Editor::draw_statusbar(const Recti &r) {
   const std::vector<JobView> jobs = jobs_running();  // (task 0253: the tray shows the bake; its text gives way)
   std::string lighting = baking_                 ? (jobs.empty() ? bake_status_ + "  |  " : std::string())
                          : lighting_out_of_date()  ? std::string("Lighting out of date  |  ")
-                         : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: Ctrl+Shift+L)  |  ")
+                         : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: ") + key("lighting.update") + ")  |  "
                                                    : std::string();
   const std::string head = lighting + (playing_ ? "PLAYING  |  " : "") + (edit_mode_ ? "EDIT MODE  |  " : "");
   const std::string tail = strprintf("  |  %zu objects  |  %zu tris  |  Blendity %s", scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
@@ -1439,7 +1443,7 @@ void Editor::handle_drop() {
       else Log::info("Added texture %s (select an object and drop again to apply it)", rel.c_str());
     }
     else if (ext == ".scene") {
-      open_scene(path);
+      open_scene_asked(path);  // (task 0254)
     }
     else if (ext == ".pdf" || ext == ".txt" || ext == ".md" || ext == ".tex" || ext == ".bib" || ext == ".docx" ||
              ext == ".html" || ext == ".htm" || ext == ".epub" || ext == ".ps" || ext == ".djvu") {
@@ -1631,6 +1635,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::MyTools: draw_my_tools_window(r); break;  // (task 0231)
     case WindowKind::Draw: draw_draw_window(r); break;  // (task 0233)
     case WindowKind::Layers: draw_layers_window(r); break;  // (task 0234)
+    case WindowKind::History: draw_history_window(r); break;  // (task 0254)
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -2101,6 +2106,7 @@ void Editor::save_scene_cmd(bool save_as) {
   save_dirty_clip_assets();
   save_dirty_sequence_assets();
   if (playing_) {
+    after_save_ = nullptr;  // (task 0254: nothing waits on a save that did not happen)
     Log::warn("Cannot save while in Play mode (Unity has the same rule). Press Stop first.");
     return;
   }
@@ -2111,8 +2117,9 @@ void Editor::save_scene_cmd(bool save_as) {
       fs::make_dirs(dir);
       std::string path;
       switch (pick_save_path("Save Scene As", fs::join(dir, scene_->name + ".scene"), {{"Blendity Scene", {".scene"}}}, path)) {
-        case PathPick::Cancelled: return;
+        case PathPick::Cancelled: after_save_ = nullptr; return;  // (task 0254: an action waiting on this save is dropped)
         case PathPick::Unavailable:
+          after_save_ = nullptr;
           dialog_ = Dialog::SaveAs;  // our own name prompt, saving into Assets/Scenes
           dialog_text_ = scene_->name;
           return;
@@ -2132,8 +2139,12 @@ void Editor::save_scene_cmd(bool save_as) {
     save_dirty_texture_assets();  // a texture edited since the last undo step goes to its .ptex too
     Log::info("Saved %s", scene_->path.c_str());
     save_lighting_data();  // a bake made before the scene had a file, or before Save As
+    run_after_save();  // (task 0254: New or Open that waited for this save)
   }
-  else Log::error("Could not write %s", scene_->path.c_str());
+  else {
+    after_save_ = nullptr;  // (task 0254: the action that waited is dropped with the failed save)
+    Log::error("Could not write %s", scene_->path.c_str());
+  }
 }
 
 void Editor::import_obj_file(const std::string &path) { import_model_file(path, false); }
@@ -2827,7 +2838,7 @@ void Editor::draw_first_run_tier(const std::function<void()> &close) {
   const uint64_t ram = sys::physical_memory_bytes();
   const std::string found = strprintf("This machine has %d threads and %.0f GB of memory, near Blendity's minimum.", sys::hardware_threads(), ram / 1073741824.0);
   for (const std::string &l : {found, std::string("Low keeps the editor smooth: the views draw at 67 % and scale up, a 1024 shadow map,"),
-                               std::string("60 fps. Renders (F12) always use the scene's own settings."),
+                               "60 fps. Renders (" + key("render.image") + ") always use the scene's own settings.",
                                std::string("Change it any time in Edit > Preferences > Quality.")}) {
     Recti r = u.popup_row();
     u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, l);
@@ -3613,6 +3624,29 @@ void Editor::draw_dialogs() {
         title("AI Inbetweening, an optional download");
         draw_ai_dialog(close);
         break;
+      case Dialog::UnsavedChanges: {  // (task 0254: Save / Don't Save / Cancel before the scene is replaced)
+        const std::string t = "Save changes to " + scene_->name + "?";
+        title(t.c_str());
+        Recti r = u.popup_row();
+        u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, unsaved_what_ + " would lose the changes since the last save.", u.theme.text_dim);
+        Recti b = u.popup_row(u.row_h() + u.px(10));
+        const int bw = u.px(100), bh = b.h - u.px(8), by = b.y + u.px(4);
+        const Recti save{b.x + u.px(12), by, bw, bh}, dont{b.x + u.px(12) + bw + u.px(6), by, bw, bh}, cancel{b.right() - bw - u.px(12), by, bw, bh};
+        if (u.record_buttons) u.button_rects["unsaved:Save"] = save, u.button_rects["unsaved:Don't Save"] = dont, u.button_rects["unsaved:Cancel"] = cancel;
+        if (u.button(save, "Save")) {
+          close();
+          unsaved_save_then();
+        }
+        else if (u.button(dont, "Don't Save")) {
+          close();
+          unsaved_discard();
+        }
+        else if (u.button(cancel, "Cancel")) {
+          close();
+          unsaved_cancel();
+        }
+        break;
+      }
       case Dialog::About: {
         title("About Blendity");
         const char *lines[] = {"Blendity - a Unity-style editor built on Blender's modeling ideas.",

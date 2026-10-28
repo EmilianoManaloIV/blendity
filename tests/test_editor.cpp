@@ -4583,6 +4583,7 @@ static void tests_round271() {
     }
     std::printf("    %d of %d cells have no hint of their own\n", holes, cells);
     CHECK(cells == 8);  // (object both ways; the six tool modes with the Cube selected)
+    CHECK(holes == 0);  // (round 274's hint table: every mode names itself)
   });
 }
 
@@ -4843,6 +4844,215 @@ static void tests_round273() {
   });
 }
 
+static void tests_round274() {
+  test("the History window (ADR 0085 F6): the status bar's Last opens it; four changes list as four steps with the last current; a click on the first jumps back three steps, a click on the last undone step redoes them", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(300.0);
+    ed.command("select Cube");
+    ed.command("layout Default");
+    ed.mark_changed_for_test("Step zero");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    {  /* The status bar's "Last:" opens the window. */
+      const auto &br = ed.ui_for_test().button_rects;
+      const bool last = br.count("status:Last") > 0;
+      if (last) {
+        const Recti r = br.at("status:Last");
+        const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      }
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const Recti hw = ed.window_rect_for_test(WindowKind::History);
+      std::printf("    'Last:' recorded %d; the History window %dx%d after the click\n", (int)last, hw.w, hw.h);
+      CHECK(last && hw.w > 0);
+    }
+    for (const char *label : {"Step one", "Step two", "Step three"}) {
+      ed.mark_changed_for_test(label);
+      ed.step_frame_headless();
+    }
+    Editor::HistoryRows rows = ed.history_rows_for_test();
+    std::printf("    after three changes: %zu past, %zu future; the Hierarchy's leaf shows History %d\n", rows.past.size(), rows.future.size(), (int)(ed.ui_for_test().button_rects.count("history:0") > 0));
+    CHECK(rows.past.size() == 4 && rows.future.empty() && rows.past[3] == "Step three");
+    auto click = [&](const std::string &key) {
+      const auto &br = ed.ui_for_test().button_rects;
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      return true;
+    };
+    CHECK(click("history:0"));
+    rows = ed.history_rows_for_test();
+    std::printf("    after a click on the first step: %zu past, %zu future (undo steps %zu)\n", rows.past.size(), rows.future.size(), ed.undo_steps_for_test());
+    CHECK(rows.past.size() == 1 && rows.future.size() == 3 && ed.undo_steps_for_test() == 1);
+    CHECK(click("history:redo:2"));
+    rows = ed.history_rows_for_test();
+    std::printf("    after a click on the last undone step: %zu past, %zu future\n", rows.past.size(), rows.future.size());
+    CHECK(rows.past.size() == 4 && rows.future.empty());
+  });
+  test("the hint table (ADR 0085 F3): the rows are listed by name; the row showing follows the state - Object Mode's tools, Edit Mode, Sculpt, Paint, Strokes, Scatter, the UV editor under the pointer, elsewhere the palette's; the shortcuts in the texts come from the keymap", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(320.0);
+    const std::vector<std::string> names = ed.hint_row_names_for_test();
+    std::printf("    %zu hint rows: ", names.size());
+    for (const std::string &n : names) std::printf("%s; ", n.c_str());
+    std::printf("\n");
+    CHECK(names.size() >= 26 && names.back() == "object tools");
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    auto row_hovered = [&] {
+      ed.set_scene_hovered_for_test(true);
+      return ed.statusbar_hint_row_for_test();
+    };
+    struct Case {
+      const char *on, *off, *row;
+    };
+    const Case cases[] = {{"", "", "object tools"}, {"edit", "edit off", "edit mode"}, {"sculpt on", "sculpt off", "sculpt"}, {"paint on", "paint off", "paint"},
+                          {"strokeobj on", "strokeobj off", "strokes"}, {"scatter on", "scatter off", "scatter"}};
+    ed.command("surface new HintSurf");
+    ed.command("scatter Sphere");
+    ed.step_frame_headless();
+    for (const Case &c : cases) {
+      if (*c.on) ed.command(c.on);
+      ed.step_frame_headless();
+      const std::string row = row_hovered();
+      std::printf("    %-12s -> row '%s'\n", *c.on ? c.on : "(object)", row.c_str());
+      CHECK(row == c.row);
+      if (*c.off) ed.command(c.off);
+      ed.step_frame_headless();
+    }
+    ed.set_scene_hovered_for_test(false);
+    const std::string elsewhere = ed.statusbar_hint_for_test();
+    std::printf("    elsewhere: row '%s': %s\n", ed.statusbar_hint_row_for_test().c_str(), elsewhere.c_str());
+    CHECK(ed.statusbar_hint_row_for_test() == "elsewhere" && elsewhere.find("find any command") != std::string::npos);
+    ed.set_binding("edit.palette", {KeyChord{platform::KEY_K, platform::MOD_CTRL | platform::MOD_SHIFT}});  // (the hint follows the keymap)
+    ed.step_frame_headless();
+    const std::string rebound = ed.statusbar_hint_for_test();
+    std::printf("    with the palette rebound: %s\n", rebound.c_str());
+    CHECK(rebound.find("Ctrl+Shift+K: find any command") != std::string::npos);
+    ed.command("keymap Unity");
+    ed.command("layout Texturing");
+    ed.command("window UV Editor");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti uv = ed.window_rect_for_test(WindowKind::UVEditor);
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, uv.x + uv.w / 2, uv.y + uv.h / 2)});
+    ed.set_scene_hovered_for_test(false);
+    std::printf("    the UV editor %dx%d under the pointer: row '%s'\n", uv.w, uv.h, ed.statusbar_hint_row_for_test().c_str());
+    CHECK(uv.w > 0 && ed.statusbar_hint_row_for_test() == "uv editor");
+  });
+  test("labels from the keymap (ADR 0085 F4): the Edit menu's shortcuts beside Select All, Duplicate, Delete and Frame Selected are the preset's chords under Unity and under Blender; the Window menu's too; the label audit's inventory is for the chain", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(330.0);
+    ed.step_frame_headless();
+    auto open_menu = [&](const char *name) {
+      const auto &br = ed.ui_for_test().button_rects;
+      const std::string key = std::string("menubar:") + name;
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    struct Row {
+      const char *label, *action;
+    };
+    const Row rows[] = {{"Select All", "edit.select_all"}, {"Duplicate", "edit.duplicate"}, {"Delete", "edit.delete"}, {"Frame Selected", "view.frame"}};
+    for (const char *preset : {"Unity", "Blender"}) {
+      ed.command(std::string("keymap ") + preset);
+      ed.step_frame_headless();
+      CHECK(open_menu("Edit"));
+      for (const Row &row : rows) {
+        const std::string drawn = ed.menu_shortcut_for_test(row.label), want = ed.shortcut_text_for_test(row.action);
+        std::printf("    %-8s %-15s drawn '%s', the keymap's '%s'\n", preset, row.label, drawn.c_str(), want.c_str());
+        CHECK(drawn == want);
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+      ed.step_frame_headless();
+      CHECK(open_menu("Window"));
+      const std::string hier = ed.menu_shortcut_for_test("Hierarchy"), want_h = ed.shortcut_text_for_test("window.hierarchy");
+      std::printf("    %-8s Window > Hierarchy drawn '%s', the keymap's '%s'\n", preset, hier.c_str(), want_h.c_str());
+      CHECK(hier == want_h);
+      ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+      ed.step_frame_headless();
+    }
+    ed.command("keymap Unity");
+    std::printf("    the Mesh menu's rows: extrude -> '%s' (the keymap's '%s'), select_loop -> '%s'\n", ed.op_keys_for_test("extrude").c_str(), ed.shortcut_text_for_test("mesh.extrude").c_str(), ed.op_keys_for_test("select_loop").c_str());
+    CHECK(ed.op_keys_for_test("extrude") == ed.shortcut_text_for_test("mesh.extrude") && !ed.op_keys_for_test("extrude").empty() && ed.op_keys_for_test("select_loop") == "Double-click");
+  });
+  test("unsaved changes (ADR 0085 F5): New Scene with a changed scene asks - Cancel keeps it, Don't Save replaces it, Save with a file writes it then replaces; Exit during Play leaves Play before the auto-save, so the file holds the pre-Play edits (Play's own changes are discarded, as Unity does)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(310.0);
+    auto click = [&](const std::string &key) {
+      const auto &br = ed.ui_for_test().button_rects;
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      return true;
+    };
+    ed.command("select Cube");
+    ed.mark_changed_for_test("An edit");
+    ed.step_frame_headless();
+    CHECK(ed.scene_dirty_for_test());
+    ed.new_scene_asked();
+    ed.step_frame_headless();
+    std::printf("    New Scene asked with a dirty scene: the prompt open %d, undo steps %zu\n", (int)ed.unsaved_dialog_open_for_test(), ed.undo_steps_for_test());
+    CHECK(ed.unsaved_dialog_open_for_test() && ed.undo_steps_for_test() == 1);
+    CHECK(click("unsaved:Cancel"));
+    CHECK(!ed.unsaved_dialog_open_for_test() && ed.undo_steps_for_test() == 1 && ed.scene_dirty_for_test());
+    ed.step_frame_headless();  // (a frame with no dialog open: the next ask is a fresh popup, as a user's would be)
+    ed.new_scene_asked();
+    ed.step_frame_headless();
+    CHECK(click("unsaved:Don't Save"));
+    std::printf("    after Don't Save: undo steps %zu, dirty %d, scene '%s'\n", ed.undo_steps_for_test(), (int)ed.scene_dirty_for_test(), ed.scene().name.c_str());
+    CHECK(ed.undo_steps_for_test() == 0 && !ed.scene_dirty_for_test());
+    /* Save, with a file: the scene is written, then replaced. */
+    const std::string path = fs::join(scratch_project(), "Scenes/t274.scene");
+    fs::make_dirs(fs::parent(path));
+    fs::remove_file(path);
+    ed.scene().path = path;
+    ed.scene().name = "t274";
+    ed.command("select Cube");
+    ed.mark_changed_for_test("Another edit");
+    ed.step_frame_headless();
+    ed.new_scene_asked();
+    ed.step_frame_headless();
+    CHECK(click("unsaved:Save"));
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    after Save: the file exists %d, undo steps %zu, scene '%s'\n", (int)fs::exists(path), ed.undo_steps_for_test(), ed.scene().name.c_str());
+    CHECK(fs::exists(path) && ed.undo_steps_for_test() == 0 && ed.scene().name == "Untitled");
+    /* Exit during Play: Play ends first, then the auto-save. */
+    ed.scene().path = path;
+    ed.scene().name = "t274";
+    ed.command("select Cube");
+    ed.mark_changed_for_test("Before Play");
+    ed.step_frame_headless();
+    ed.command("play");
+    ed.step_frame_headless();
+    CHECK(ed.playing_for_test());
+    const bool before = fs::exists(path);
+    fs::remove_file(path);
+    ed.request_close_for_test();
+    std::printf("    Exit during Play: playing after %d, the scene written %d (existed before %d)\n", (int)ed.playing_for_test(), (int)fs::exists(path), (int)before);
+    CHECK(!ed.playing_for_test() && fs::exists(path));
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -4888,5 +5098,6 @@ void run_editor_tests() {
   tests_round271();
   tests_round272();
   tests_round273();
+  tests_round274();
   coverage_tests();
 }

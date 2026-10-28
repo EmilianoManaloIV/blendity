@@ -70,6 +70,8 @@ class Doc {
   bool redo();
   bool can_undo() const { return !undo_.empty(); }
   bool can_redo() const { return !redo_.empty(); }
+  size_t undo_count() const { return undo_.size(); }  // (the History window: task 0254)
+  size_t redo_count() const { return redo_.size(); }
 
   /* The stack's result (cached; recomputed from the first changed step). */
   const Image &result();
