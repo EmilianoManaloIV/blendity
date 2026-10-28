@@ -40,14 +40,14 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
         {"Delete", "Delete", {}},
         {"Undo", "Undo", {}},
         {"Edit Mode", "Edit Mode On / Off", {}},
-        {"More", "",
+        {"More", "",  // (eight slices at most a ring: the selection and the animation in rings of their own, task 0260)
          {{"Frame", "Frame Selected", {}},
           {"Redo", "Redo", {}},
           {"Add to Selection", "", {}},
-          {"Select All", "Select All", {}},
-          {"Deselect", "Deselect All", {}},
           {"Rename", "Rename", {}},
           {"Drop to Floor", "Drop to Floor", {}},
+          {"Selection", "", {{"Select All", "Select All", {}}, {"Deselect", "Deselect All", {}}}},
+          {"Animation", "", {{"Set Key", "Set Key (every track, at the playhead)", {}}, {"Record", "Record (keys from edits)", {}}, {"Play Clip", "Play / Pause the Clip", {}}}},
           {"Palette", "Command Palette", {}}}}}},
       {"edit",
        {{"Extrude", "Extrude", {}},
@@ -249,6 +249,32 @@ void cap_slices(std::vector<Editor::WheelSlice> &set) {
 }
 
 }  // namespace
+
+/* The largest ring in a built-in set (task 0260's test: every ring fits the Wheel's slice count). */
+int Editor::wheel_set_max_ring_for_test(const char *set) {
+  int most = 0;
+  std::function<void(const std::vector<DefaultSlice> &)> walk = [&](const std::vector<DefaultSlice> &ring) {
+    most = std::max(most, (int)ring.size());
+    for (const DefaultSlice &d : ring) walk(d.ring);
+  };
+  for (const auto &kv : default_sets())
+    if (std::string(kv.first) == set) walk(kv.second);
+  return most;
+}
+
+/* A built-in set's slice labels, its rings unfolded (task 0260's test). */
+std::vector<std::string> Editor::wheel_set_labels_for_test(const char *set) {
+  std::vector<std::string> out;
+  std::function<void(const std::vector<DefaultSlice> &)> walk = [&](const std::vector<DefaultSlice> &ring) {
+    for (const DefaultSlice &d : ring) {
+      out.push_back(d.label);
+      walk(d.ring);
+    }
+  };
+  for (const auto &kv : default_sets())
+    if (std::string(kv.first) == set) walk(kv.second);
+  return out;
+}
 
 /* The preferences' separators inside a label or an entry are written as %XX (`sketchguide perspective 3` has none; a
  * console line with `=` or `;` keeps them). Shared with the panels and the user actions (task 0231). */

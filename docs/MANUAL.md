@@ -141,7 +141,9 @@ button), a Tone Curve point goes by Alt+click, the Materials toolbar has Assign 
 Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. Animation has keys of its own in every preset -
 set a key, play the clip, step to the previous or next key, Record (Shift+K and Ctrl+Shift+K under Unity, Shift+I and Up / Down
 under Blender; the menus and the palette show your preset's) - and while Record is on the Scene view wears a red frame and a RECORD badge.
-The Inspector shows
+In Weight Paint, Ctrl or the pen's eraser subtracts weight with the Add brush, as in every other brush; in the Rigging
+window's Skin section a Skeleton dropdown picks the skeleton to bind to, no Ctrl+click needed. In the Console, Up and Down recall the commands
+you typed, and a mistyped command is answered with the nearest known ones. The Inspector shows
 each component's first seven fields (Show more for the rest, All Fields for everything); each stage layout's first use
 shows a guide strip with its next three steps. While dragging a gizmo arrow, type a number to move exactly that far.
 

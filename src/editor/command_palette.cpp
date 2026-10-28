@@ -132,7 +132,11 @@ void Editor::palette_run(const PaletteEntry &e) {
   palette_recent_.insert(palette_recent_.begin(), e.name);
   if (palette_recent_.size() > 10) palette_recent_.resize(10);
   last_palette_command_ = e.action.empty() ? e.command : "action " + e.action;
-  if (!e.action.empty()) run_action(e.action);
+  if (!e.action.empty()) {
+    action_asked_for_ = true;  // (task 0260: an action named here is meant, whatever window has the keyboard)
+    run_action(e.action);
+    action_asked_for_ = false;
+  }
   else run_console_command(e.command);
 }
 

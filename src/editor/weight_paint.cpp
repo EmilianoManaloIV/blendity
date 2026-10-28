@@ -142,6 +142,7 @@ bool Editor::wp_begin_stroke() {
   for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);
   wp_prepare(m);
   wp_start_ = m.vertex_groups[(size_t)wp_group(m)].weights;  // a stroke's changes are measured from here (no accumulation)
+  wp_stroke_mode_ = wp_effective_mode(ui_.in.ctrl(), ui_.in.eraser);  // (task 0259: the mode for the whole stroke)
   wp_alpha_.assign(m.vert_count(), 0.0f);
   wp_stroke_mesh_ = &m;
   wp_stroking_ = true;
@@ -228,7 +229,8 @@ void Editor::wp_dab(float x, float y) {
       if (amount[v] <= wp_alpha_[v]) continue;  // within this stroke, the strongest dab so far decides
       wp_alpha_[v] = amount[v];
       const float a = wp_alpha_[v], s = wp_start_[v];
-      float nw = wp_brush_.mode == 0 ? s + a * target : wp_brush_.mode == 1 ? s - a * target : s + (target - s) * a;
+      const int mode = wp_stroke_mode_;  // (task 0259: Ctrl or the pen's eraser at the stroke's start makes an Add stroke subtract)
+      float nw = mode == 0 ? s + a * target : mode == 1 ? s - a * target : s + (target - s) * a;
       nw = std::max(0.0f, std::min(nw, 1.0f));
       changed = changed || nw != w[v];
       w[v] = nw;
@@ -319,6 +321,10 @@ const std::vector<Vec3> *Editor::wp_colors(const Mesh &m, const RenderMesh &rm) 
   wp_colors_serial_ = rm.serial, wp_colors_version_ = wp_version_, wp_colors_group_ = gi;
   return &wp_colors_;
 }
+
+/* The brush mode a dab uses: the Add brush subtracts while Ctrl is held or the pen's eraser end is down, as Paint's and
+ * Sculpt's do (task 0259); the other brushes are left as they are. */
+int Editor::wp_effective_mode(bool ctrl, bool eraser) const { return wp_brush_.mode == 0 && (ctrl || eraser) ? 1 : wp_brush_.mode; }
 
 /* weightpaint on|off|toggle; wpbrush <add|subtract|draw|blur> [radius] [strength] [weight]; wpfalloff <name>;
  * wpmirror on|off; wpfront on|off; wpstroke x y x y ... (window pixels: one stroke); wpnormalize; wpclean [threshold]. */

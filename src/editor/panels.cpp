@@ -1955,13 +1955,29 @@ void Editor::draw_console(const Recti &r) {
   bool done = false;
   ui::Id cid = u.id("console_cmd");
   u.text_field(cid, cmd, console_input_, &done, "Type a command (help) and press Enter");
+  if (u.editing(cid) && (u.in.key_pressed[KEY_UP] || u.in.key_pressed[KEY_DOWN])) {  // (task 0260: the history, as every shell's)
+    console_recall(u.in.key_pressed[KEY_UP] ? -1 : 1);
+    u.begin_edit(cid, console_input_, false);
+    u.in.key_pressed[KEY_UP] = u.in.key_pressed[KEY_DOWN] = false;
+  }
   if (done && !console_input_.empty()) {
     console_history_.push_back(console_input_);
+    console_hist_pos_ = -1;
     std::string c = console_input_;
     console_input_.clear();
     run_console_command(c);
     u.begin_edit(cid, "", false);  // keep focus for the next command
   }
+}
+
+/* Up (-1) steps back through the commands typed this session, Down (+1) forward; past the newest the field is empty. */
+void Editor::console_recall(int dir) {
+  const int n = (int)console_history_.size();
+  if (n == 0 || (console_hist_pos_ < 0 && dir > 0)) return;  // (Down at the bottom leaves what is typed, as a shell does)
+  const int from = console_hist_pos_ < 0 ? n : console_hist_pos_;
+  console_hist_pos_ = std::max(0, std::min(n, from + dir));
+  console_input_ = console_hist_pos_ < n ? console_history_[(size_t)console_hist_pos_] : std::string();
+  if (console_hist_pos_ >= n) console_hist_pos_ = -1;
 }
 
 /* ===================================================================== */
@@ -3286,7 +3302,7 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (!painting) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
-  br.help("Add raises, Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+  br.help("Add raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
   br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
   br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);

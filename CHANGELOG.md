@@ -2,6 +2,61 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 280): files and the shell - console recall and suggestions, .anim opens Animation, the Wheel's animation slices (task 0260)
+
+**Asked:** ADR 0085's files-and-shell round: the console kept a history nobody could recall and answered an unknown
+command with "type help"; double-clicking a .anim asset opened a text editor; the Wheel had no animation slice (round
+254 brought the unsaved-changes prompts, round 273 the import's busy state). Nielsen's H6, H9, H7.
+
+**Added**
+- **Console history recall**: Up and Down step through the commands typed this session; Down past the newest clears.
+- **Suggestions on an unknown command**: "Did you mean: meshmaps, ...?" - up to three of the palette's console commands
+  whose first word starts with, or contains, what was typed.
+- **.anim opens the Animation window** from the Project window's double-click, with a line saying how a clip is used.
+- **The Wheel's animation slices**: Set Key, Record and Play Clip in an Animation ring under the object ring's More (Select
+  All and Deselect in a Selection ring beside it: eight slices a ring).
+- **Review (Opus) taken:** the three slices pushed the object ring's More to eleven, past the Wheel's eight, so Record,
+  Play Clip and the Palette slice could not be reached - a Selection ring and an Animation ring hold them, a test
+  checks every built-in ring fits; Down with no recall active wiped the line being typed - it leaves it; the generated
+  command list missed the sketch families dispatched before the chain - added, and the comment says nothing checks the
+  list yet; an action named in the palette or the Wheel could stand down for the window that had the keyboard - named
+  actions run; a stale comment on the skeletons. Open: the Up / Down path through the field itself is not driven by a
+  test; Esc after a recall restores the recalled line rather than what was typed; two armatures of one name bind alike.
+
+**Checked**
+- `tests_round280`: two commands recalled with Up, returned with Down, cleared past the newest; `meshmap` answered with
+  `meshmaps`, `sketchlin` with `sketchline` and a nonsense word with nothing; the object ring lists the three animation
+  slices and every built-in ring fits the Wheel's eight.
+- Unit checks (round 280): Windows, in render-cache verify mode, 13192, 0 failed (1137 tests), 0 stale
+  pictures. Linux with libraries: 12732, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone (timing noise.)
+
+## 2026-10-28 (round 279): rigging and weight paint - Ctrl and the pen's eraser subtract, a Skeleton field for the skin (task 0259)
+
+**Asked:** ADR 0085's rigging round: Weight Paint's Add brush ignored the pen's eraser end and Ctrl, which every other
+brush honours, and binding a mesh to a skeleton needed a two-object selection made by Ctrl+click in the Hierarchy that
+the Rigging window could only describe. Nielsen's H4 (consistency), H6 (recognition over recall), the pen.
+
+**Added**
+- **Weight Paint subtracts with Ctrl and with the pen's eraser** while the Add brush is active (`wp_effective_mode`,
+  decided once per stroke); the other brushes are left as they are.
+- **A Skeleton field for the skin**: with a mesh selected alone, the Rigging window's Skin section offers a dropdown of
+  the scene's Armatures and enables Add Armature (Skin) for the one chosen; the pick belongs to that mesh; Ctrl+click
+  still works and wins when a bone is selected.
+- **Review (Opus) taken:** the Skeleton dropdown listed the "<mesh> Rig" groups (the Armature holders' parents), so a
+  bind named a non-armature, deformed nothing and re-nested the first character under the second mesh's new rig - it
+  lists the Armatures themselves, which also covers an Armature at the scene's root, and the test now asserts the bind
+  made vertex groups and moved nothing; the brush mode was decided per vertex per dab, so Ctrl pressed mid-stroke
+  jumped the weights - decided once when the stroke begins; a pick outlived the mesh it was made for - it resets with
+  the mesh; the brush help and the lesson say what Ctrl and the eraser do. Open: the Rigging window's grid buttons give
+  no reason when disabled (the grid helper predates `button_enabled`).
+
+**Checked**
+- `tests_round279`: the Add brush's mode with Ctrl, with the eraser and plain, Blur untouched; a skeleton made, the Cube
+  selected alone shows the Skeleton dropdown, the pick enables Add Armature (Skin), and a real click binds the Sphere to
+  the Armature (its Skin modifier names it, vertex groups made, nothing moved in the Hierarchy).
+- Round 280's unit-check line below covers both rounds (they landed together).
+
 ## 2026-10-28 (round 278): animation - keymap actions, bigger key targets, a Record cue, Play-time refusals (task 0258)
 
 **Asked:** ADR 0085's animation round: the keymap had no animation action (no preset could offer Unity's K or Blender's

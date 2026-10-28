@@ -786,6 +786,9 @@ class Editor {
   std::string panels_prefs_text_for_test() const { return panels_prefs_text(); }
   size_t user_actions_count_for_test() const { return user_actions_.size(); }
   bool capturing_for_test() const { return !capturing_binding_.empty(); }
+  std::vector<std::string> wheel_set_labels_for_test(const char *set);  // (task 0260: a built-in set's slices, its rings unfolded)
+  int wheel_set_max_ring_for_test(const char *set);
+  static constexpr int kWheelMaxSlicesForTest = 8;
   std::vector<std::string> wheel_labels_for_test() {
     std::vector<std::string> out;
     for (const auto &s : quick_menu_slices()) out.push_back(s.first);
@@ -928,6 +931,18 @@ class Editor {
   std::vector<uint8_t> &face_sel_for_test() { return face_sel_; }
   EditElement elem_for_test() const { return elem_; }
   bool weight_paint_for_test() const { return weight_paint_; }
+  void console_history_push_for_test(const std::string &c) { console_history_.push_back(c); }  // (task 0260)
+  void console_recall_for_test(int dir) { console_recall(dir); }
+  const std::string &console_input_for_test() const { return console_input_; }
+  std::vector<std::string> command_suggestions_for_test(const std::string &c) { return command_suggestions(c); }
+  int wp_effective_mode_for_test(bool ctrl, bool eraser) const { return wp_effective_mode(ctrl, eraser); }  // (task 0259)
+  void wp_brush_mode_for_test(int m) { wp_brush_.mode = m; }
+  void skin_pick_root_for_test(uint64_t id) { skin_pick_root_ = id; }
+  std::vector<std::string> skeleton_roots_for_test() {
+    std::vector<std::string> names;
+    for (GameObject *r : skeleton_roots()) names.push_back(r->name);
+    return names;
+  }
   bool sculpt_for_test() const { return sculpt_; }  // (task 0236)
   const std::vector<uint32_t> &sculpt_last_ids_for_test() const { return sculpt_last_ids_; }
   Vec3 sculpt_last_hit_for_test() const { return sculpt_last_hit_; }
@@ -1611,6 +1626,8 @@ class Editor {
   bool finish_skin_job();  // applies the result as one undo step
   void give_skin_modifier(GameObject *target, uint64_t source);
   void draw_skin_job_progress(ui::Layout &lay);
+  std::vector<GameObject *> skeleton_roots() const;  // (task 0259: every object carrying an Armature - what a Skin modifier names)
+  uint64_t skin_pick_root_ = 0, skin_pick_for_ = 0;  // (the Skin section's Skeleton dropdown, and the mesh it was made for)
   void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
   /* The Animation window (task 0059, animation_window.cpp). */
   AnimEditorState anim_;
@@ -1988,6 +2005,7 @@ class Editor {
   void anim_toggle_play();
   void anim_toggle_record();
   bool anim_shortcuts_stand_down() const;  // (a window with arrow keys of its own has the keyboard, or the view is flown)
+  bool action_asked_for_ = false;  // (task 0260: the palette or the Wheel named the action - no stand-down)
   const std::vector<std::string> &anim_clip_paths();
   void draw_anim_toolbar(const Recti &bar, GameObject *root);
   void anim_pick_clip(GameObject *root, const std::string &path);
@@ -2092,6 +2110,8 @@ class Editor {
   void wp_dab(float x, float y);
   void wp_stroke_to(float x, float y, bool first);
   Mesh *wp_mesh();
+  int wp_effective_mode(bool ctrl, bool eraser) const;  // (task 0259)
+  int wp_stroke_mode_ = 0;  // (decided once when the stroke begins: Ctrl or the eraser then makes an Add stroke a Subtract one)
   int wp_group(const Mesh &m) const;  // the group being painted (pinned while painting)
   void wp_prepare(const Mesh &m);
   void wp_abort_stroke();
@@ -4468,6 +4488,9 @@ class Editor {
   int console_sel_ = -1;
   std::string console_input_;
   std::vector<std::string> console_history_;
+  int console_hist_pos_ = -1;  // (task 0260: Up / Down recall; -1 past the newest)
+  void console_recall(int dir);
+  std::vector<std::string> command_suggestions(const std::string &typed);
   bool console_autoscroll_ = true;
 
   /* ---- learn ---- */

@@ -588,6 +588,10 @@ void Editor::draw_project(const Recti &r) {
         if (ProceduralTexturePtr t = texture_asset(make_asset_relative(full))) texture_selected_ = t;
         dock_open(WindowKind::Textures);
       }
+      else if (ext == ".anim") {  // (task 0260: a clip opens the Animation window, not a text editor)
+        dock_open(WindowKind::Animation);
+        Log::info("%s is an animation clip: give it to a character's Animation component (its Clip field) and the Animation window edits it", fs::filename(full).c_str());
+      }
       else if (model_extension_supported(ext) || motion_extension_supported(ext)) import_model_file(full, false);
       else if (ext != ".mat" && ext != ".ptex") fs::open_external(full);
     }

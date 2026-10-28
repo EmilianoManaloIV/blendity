@@ -537,6 +537,7 @@ bool Editor::action_pressed(const std::string &id) const {
 /* The animation chords stand down where a window reads the arrow keys itself (the Hierarchy, the Project window, the
  * UV editor), where typing goes (the Console), and while the view is flown (S flies in the Maya preset). */
 bool Editor::anim_shortcuts_stand_down() const {
+  if (action_asked_for_) return false;  // (named in the palette or the Wheel: meant, whatever has the keyboard)
   if (drag_ == Drag::Fly || ui_.in.down[1]) return true;
   return focused_ == WindowKind::Hierarchy || focused_ == WindowKind::Project || focused_ == WindowKind::Console || focused_ == WindowKind::UVEditor;
 }

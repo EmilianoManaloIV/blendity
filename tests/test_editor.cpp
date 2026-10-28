@@ -5336,6 +5336,102 @@ static void tests_round278() {
   });
 }
 
+static void tests_round279() {
+  test("rigging and weight paint within reach (ADR 0085, task 0259): the Add brush subtracts with Ctrl or the pen's eraser and the other brushes are left alone; a second mesh selected alone gets a Skeleton dropdown in the Skin section and, the skeleton picked, Add Armature (Skin) binds it to that skeleton", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(800.0);
+    ed.wp_brush_mode_for_test(0);
+    const int add_plain = ed.wp_effective_mode_for_test(false, false), add_ctrl = ed.wp_effective_mode_for_test(true, false), add_eraser = ed.wp_effective_mode_for_test(false, true);
+    ed.wp_brush_mode_for_test(3);
+    const int blur_ctrl = ed.wp_effective_mode_for_test(true, false);
+    ed.wp_brush_mode_for_test(0);
+    std::printf("    Add brush: plain %d, Ctrl %d, eraser %d (0 add, 1 subtract); Blur with Ctrl %d\n", add_plain, add_ctrl, add_eraser, blur_ctrl);
+    CHECK(add_plain == 0 && add_ctrl == 1 && add_eraser == 1 && blur_ctrl == 3);
+    /* A skeleton rigged on the Cube; then the Sphere, selected alone, binds to it through the dropdown. */
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<std::string> roots = ed.skeleton_roots_for_test();
+    std::printf("    skeleton roots after `create Armature`: %zu", roots.size());
+    for (const std::string &r : roots) std::printf(" '%s'", r.c_str());
+    std::printf("\n");
+    CHECK(!roots.empty());
+    if (roots.empty()) return;
+    ed.command("select Sphere");
+    ed.command("layout Rigging & Animation");
+    ed.command("window Rigging");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    const bool dropdown = br.count("skin:Skeleton") > 0;
+    const std::string why_none = ed.button_disabled_why_for_test("Add Armature (Skin)");
+    GameObject *root = ed.scene().find_by_name(roots[0]);
+    const GameObject *arm_parent_before = root ? root->parent : nullptr;
+    const GameObject *sphere_parent_before = ed.scene().find_by_name("Sphere") ? ed.scene().find_by_name("Sphere")->parent : nullptr;
+    ed.skin_pick_root_for_test(root ? root->id : 0);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool enabled = ed.button_disabled_why_for_test("Add Armature (Skin)").empty() && br.count("Add Armature (Skin)") > 0;
+    std::printf("    the Skin section: Skeleton dropdown %d; Add Armature before a pick disabled '%s'; after the pick enabled %d\n", (int)dropdown, why_none.c_str(), (int)enabled);
+    CHECK(dropdown && enabled);
+    if (br.count("Add Armature (Skin)")) {
+      const Recti r = br.at("Add Armature (Skin)");
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    }
+    const GameObject *sphere = ed.scene().find_by_name("Sphere"), *cube_after = ed.scene().find_by_name("Cube"), *arm = ed.scene().find_by_name(roots[0]);
+    const SkinModifier *sk = sphere ? sphere->get<SkinModifier>() : nullptr;
+    const bool armature = arm && arm->get<Armature>(), arm_parent_same = arm && arm->parent == arm_parent_before, sphere_parent_same = sphere && sphere->parent == sphere_parent_before;
+    const size_t groups = sphere && sphere->get<MeshFilter>() && sphere->get<MeshFilter>()->mesh ? sphere->get<MeshFilter>()->mesh->vertex_groups.size() : 0;
+    std::printf("    after Add Armature (Skin): the Sphere's Skin modifier %d, bound to '%s' (an Armature %d), %zu vertex group(s); the armature's parent unchanged %d, the Sphere's %d, the Cube still skinned %d\n",
+                (int)(sk != nullptr), sk ? sk->object.c_str() : "", (int)armature, groups, (int)arm_parent_same, (int)sphere_parent_same, (int)(cube_after && cube_after->get<SkinModifier>()));
+    CHECK(sk && sk->object == roots[0] && armature && groups > 0 && arm_parent_same && sphere_parent_same && cube_after && cube_after->get<SkinModifier>());
+  });
+}
+
+static void tests_round280() {
+  test("files and the shell (ADR 0085, task 0260): Up and Down recall the console's history, Down past the newest clears; an unknown command is answered with the nearest known ones; the Wheel's object ring carries Set Key, Record and Play Clip in an Animation ring, every built-in ring within the Wheel's eight slices", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();  // (the first frame: the log so far is history to the toasts)
+    ed.console_history_push_for_test("select Cube");
+    ed.console_history_push_for_test("meshmaps 256 8");
+    ed.console_recall_for_test(-1);
+    const std::string up1 = ed.console_input_for_test();
+    ed.console_recall_for_test(-1);
+    const std::string up2 = ed.console_input_for_test();
+    ed.console_recall_for_test(1);
+    const std::string down1 = ed.console_input_for_test();
+    ed.console_recall_for_test(1);
+    const std::string down2 = ed.console_input_for_test();
+    std::printf("    Up: '%s', Up: '%s', Down: '%s', Down: '%s'\n", up1.c_str(), up2.c_str(), down1.c_str(), down2.c_str());
+    CHECK(up1 == "meshmaps 256 8" && up2 == "select Cube" && down1 == "meshmaps 256 8" && down2.empty());
+    const std::vector<std::string> near = ed.command_suggestions_for_test("meshmap"), none = ed.command_suggestions_for_test("qzxv"), sk = ed.command_suggestions_for_test("sketchlin");
+    std::printf("    'meshmap' -> %zu suggestion(s)%s; 'qzxv' -> %zu; 'sketchlin' -> %s\n", near.size(), near.empty() ? "" : (": " + near[0]).c_str(), none.size(), sk.empty() ? "(none)" : sk[0].c_str());
+    CHECK(!near.empty() && near[0] == "meshmaps" && none.empty() && !sk.empty() && sk[0] == "sketchline");
+    ed.console_history_push_for_test("x");
+    ed.console_recall_for_test(1);  // (Down with no recall active: the field is left alone - here empty, so still empty)
+    CHECK(ed.console_input_for_test().empty());
+    ed.command("meshmap");
+    ed.step_frame_headless();
+    const auto &toasts = ed.toasts_for_test();
+    const bool said = std::any_of(toasts.begin(), toasts.end(), [](const Editor::Toast &t) { return t.text.find("Did you mean: meshmaps") != std::string::npos; });
+    std::printf("    the console's answer: %s\n", toasts.empty() ? "(nothing)" : toasts[0].text.c_str());
+    CHECK(said);
+    int widest = 0;
+    for (const char *set : {"object", "edit", "sculpt", "paint"}) widest = std::max(widest, ed.wheel_set_max_ring_for_test(set));
+    std::printf("    the widest built-in ring: %d slices (the Wheel shows %d)\n", widest, Editor::kWheelMaxSlicesForTest);
+    CHECK(widest > 0 && widest <= Editor::kWheelMaxSlicesForTest);
+    const std::vector<std::string> wheel = ed.wheel_set_labels_for_test("object");
+    const bool set_key = std::find(wheel.begin(), wheel.end(), "Set Key") != wheel.end(), record = std::find(wheel.begin(), wheel.end(), "Record") != wheel.end(), play = std::find(wheel.begin(), wheel.end(), "Play Clip") != wheel.end();
+    std::printf("    the object ring's slices: %zu; Set Key %d, Record %d, Play Clip %d\n", wheel.size(), (int)set_key, (int)record, (int)play);
+    CHECK(set_key && record && play);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -5386,5 +5482,7 @@ void run_editor_tests() {
   tests_round276();
   tests_round277();
   tests_round278();
+  tests_round279();
+  tests_round280();
   coverage_tests();
 }
