@@ -179,6 +179,32 @@ void Context::label(const Recti &r, const std::string &text, uint32_t color, Ali
 
 static uint64_t rect_key(const Recti &r) { return ((uint64_t)(uint16_t)r.x << 48) ^ ((uint64_t)(uint16_t)r.y << 32) ^ ((uint64_t)r.w << 16) ^ r.h; }
 
+bool Context::button_enabled(const Recti &r, const std::string &label, bool enabled, const char *why, bool selected, Icon icon) {
+  if (enabled) {
+    disabled_reasons.erase(label);
+    reason_key_ = 0;
+    return button(r, label, selected, icon);
+  }
+  disabled_reasons[label] = why ? why : "";
+  if (record_buttons) button_rects[label] = r;
+  frame(r, theme.strip, theme.border, px(3));
+  const int iw = icon != Icon::None ? font.line_height() - px(4) : 0;
+  const int tw = font.text_width(label);
+  int x = r.x + std::max(px(4), (r.w - tw - (iw ? iw + px(4) : 0)) / 2);
+  if (iw) {
+    draw_icon(icon, {x, r.y + px(3), iw, iw}, theme.text_dim);
+    x += iw + px(4);
+  }
+  canvas.text(font, x, r.y + (r.h - font.line_height()) / 2, label, theme.text_dim);
+  mark_widget(r);  // (the reason is this widget's tooltip; the caller's general tooltip waits until it is enabled)
+  reason_key_ = rect_key(r), reason_text_ = why ? why : "";
+  if (hovered(r)) {
+    if (!reason_text_.empty()) tooltip(reason_text_);
+    if (in.pressed[0]) consume_click();  // (the click goes nowhere: the reason is the answer)
+  }
+  return false;
+}
+
 bool Context::button(const Recti &r, const std::string &text, bool selected, Icon icon) {
   if (record_buttons) button_rects[text] = r;
   Id i = id(text) ^ (rect_key(r) * 0x9E3779B97F4A7C15ull);
@@ -273,6 +299,7 @@ bool Context::foldout(const Recti &r, const std::string &text, bool &open, Icon 
 
 void Context::tooltip(const std::string &text) {
   if (!last_hovered_ || active_ != 0 || text.empty()) return;
+  if (reason_key_ != 0 && rect_key(last_widget_) == reason_key_ && text != reason_text_) return;  // (a disabled button: its reason, not its help)
   Id key = rect_key(last_widget_) ^ (id(text) << 1);
   if (key != hover_id_) {
     hover_id_ = key;

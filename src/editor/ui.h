@@ -188,6 +188,10 @@ class Context {
   /* --- widgets --- */
   void label(const Recti &r, const std::string &text, uint32_t color = 0, Align align = Align::Left);
   bool button(const Recti &r, const std::string &label, bool selected = false, Icon icon = Icon::None);
+  /* A button that may be disabled with a reason (task 0252, ADR 0085 F1): drawn with the strip colour and dim text, the
+   * reason as its tooltip, the click swallowed; `disabled_reasons` keeps the reason by label for the tests. */
+  bool button_enabled(const Recti &r, const std::string &label, bool enabled, const char *why, bool selected = false, Icon icon = Icon::None);
+  std::unordered_map<std::string, std::string> disabled_reasons;
   bool icon_button(const Recti &r, Icon icon, bool selected = false, const char *tip = nullptr);
   bool checkbox(const Recti &r, bool &v);
   bool toggle_row(const Recti &r, const std::string &label, bool &v);
@@ -247,6 +251,7 @@ class Context {
   void menu_label(const std::string &text);
   Recti popup_row(int h = -1);  // reserve a row in the current popup
   Recti last_widget() const { return last_widget_; }  // where the last widget (or menu row) was drawn
+  std::string tooltip_text_for_test() const { return tooltip_text_; }  // (the tooltip the last frame showed)
   /* A widget drawn by hand (frames and labels): the next tooltip() belongs to it. */
   void mark_widget(const Recti &r) {
     last_widget_ = r;
@@ -344,6 +349,8 @@ class Context {
   Recti tooltip_anchor_;
   Recti last_widget_;
   bool last_hovered_ = false;
+  uint64_t reason_key_ = 0;  // (task 0252: the disabled button whose reason is its tooltip; the general tooltip after it waits)
+  std::string reason_text_;
   std::vector<std::function<void()>> overlays_;
   std::unordered_map<Id, int> int_results_;
   std::unordered_map<Id, Recti> combo_rects_;

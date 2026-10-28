@@ -2,6 +2,55 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 272): toasts with a fix, and buttons that say why they are disabled (task 0252)
+
+**Asked:** ADR 0085's first foundation (F1). About ninety refusals in the tool modes, and those of Generate Lighting,
+Render, the Editing window's buttons and Play-time edits, reached the user only as the status bar's cut-off last line or a
+Console row; buttons that could not work stayed clickable. Nielsen's H5 (prevent the error) and H9 (recognise and
+recover from it).
+
+**Added**
+- **Toasts** (`src/editor/toasts.cpp`): every new Warning or Error log line becomes a toast at the Scene view's
+  top-centre - the newest on top, three at most, each for three seconds (hovered, it waits; the pointer off it, 2.5 s
+  more), a click on the text opening the Console. The log line is unchanged, so scripts and tests reading the log see
+  nothing new; the same message again within the window is one toast with a count. Clicks and hovers on a toast are the
+  toast's before the view's navigation and tools, so a Fix click is neither a selection, a dab nor an orbit.
+- **A fix on the toast** (`Editor::refuse(text, fix_command, fix_label)`): a refusal that knows its remedy carries
+  "Fix: <label>" running a console command - Paint Mode without a surface offers `surface new`, a mesh without UVs `uv
+  unwrap`, a mesh whose modifiers change its geometry `applymods`, Paint and Generate Lighting in Play `stop`. Of the 82
+  `Log::warn` sites in the five tool files (by grep) 5 know their remedy this round; the rest are toasts without one.
+- **Buttons disabled with a reason** (`ui::Context::button_enabled(rect, label, enabled, why, selected, icon)`): dim on
+  the strip colour, the click swallowed, the reason as the tooltip (the general help waits until the button works):
+  Generate Lighting (Play; Baked GI off), Clear Baked Data (nothing baked), Save... (nothing rendered), Stop (not
+  rendering), the Editing window's Export... / Save / Undo / Redo / Use as Camera Look, the Sculpt / Paint / Strokes /
+  Scatter mode buttons (no mesh selected; Play).
+- **The study's instrument** (`--hci-log <file>` or `BLENDITY_HCI_LOG`): toasts (with their fix, and the fix clicked),
+  hint changes, undo steps (by a serial, past the undo cap) and layout changes appended with a timestamp - what round
+  282's study reads.
+- **Console:** `toast <text>`.
+- **Review (Opus) taken:** the disabled button never showed its reason (the hand-drawn branch did not mark the widget,
+  so the tooltip belonged to the previous one; and the caller's general tooltip reset the delay) - it marks the widget
+  and the general tooltip waits while the button is disabled, the test hovering Generate Lighting through the delay; a
+  click on a toast reached the tools and the navigation first (a Fix click in Sculpt Mode was a dab) - the toasts update
+  before both; the toast rectangles were indexed from the last draw while the poll could have inserted a toast since -
+  keyed by text; two refusals in one frame lost the first's fix, and a refusal before the first poll kept a stale fix
+  for a later line - a per-frame queue; the HCI log stopped seeing undo steps at the undo cap - a serial; the spec
+  claimed buttons and fixes the code lacked (Clear Baked Data, Use as Camera Look, Strokes, Scatter, the modifiers
+  fix, the hover test) - added, and Render's untrue "not while playing" dropped (F12 renders in Play); the start line
+  under `--hci-log`; `toast` trims its text. Open: Update Lighting and Render Camera Sequence as plain buttons; the Paper
+  theme's strip close to its button colour; the pause while hovered restarts at 2.5 s rather than resuming.
+
+**Checked**
+- `tests_round272`: the refusal with nothing selected is one toast without a fix, twice is one toast counted; there at
+  2.9 s, gone at 3.6 s; hovered four seconds it stays, and leaves once the pointer is off; the Fix button clicked through
+  real events runs `surface new` and Paint Mode then opens; Generate Lighting's reason as its tooltip during Play and in
+  `button_disabled_why_for_test`, Clear Baked Data's, Export...'s, Strokes' and Scatter's; the HCI log's toast, fix and
+  hint lines.
+- `tools/hci_label_audit.py` counts 122 literals now (one more: the Save... reason names F12; round 274 moves the labels to the keymap).
+- Unit checks (round 272): Windows, in render-cache verify mode, 13084, 0 failed (1124 tests), 0 stale
+  pictures. Linux with libraries: 12624, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The lighting group's Rendered-mode test failed in the chain on both legs - the warning's toast now over the view - and was changed to let the toast leave before the compare; rerun alone: 4762, 0 failed, and the editor group 1035, 0 failed. The gpu group passed alone: the known parallel-load noise.)
+
 ## 2026-10-28 (round 271): the HCI pass - the method set, the baselines, the measuring sticks (task 0251)
 
 **Asked:** which additions, chosen by HCI methods, would make the program easier for artists - from Unity, Unreal or

@@ -3400,6 +3400,7 @@ static void round39_tests() {
     r34_steps(ed, 3);
     const std::vector<uint32_t> shaded = r35_scene_view(ed);
     r36_cmd(ed, "shading rendered");
+    ed.set_clock_for_test(now_seconds() + 4.0);  // (the warning's toast (task 0252) has left the view before the compare)
     r34_steps(ed, 3);
     CHECK(r35_diff_count(r35_scene_view(ed), shaded) == 0);
     CHECK(!ed.wants_continuous_redraw_for_test());

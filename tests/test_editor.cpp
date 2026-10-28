@@ -4586,6 +4586,165 @@ static void tests_round271() {
   });
 }
 
+static void tests_round272() {
+  test("toasts (ADR 0085 F1): a refusal becomes a toast over the Scene view; one that knows its remedy carries a Fix button that runs the command; the same message twice is one toast with a count; a toast leaves after three seconds; Generate Lighting and the Editing window's Export are disabled with their reasons; the HCI log receives the events", [] {
+    const std::string hci = fs::join(scratch_project(), "hci-272.log");
+    fs::remove_file(hci);
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", hci.c_str());
+#else
+    setenv("BLENDITY_HCI_LOG", hci.c_str(), 1);
+#endif
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.record_buttons_for_test(true);
+    /* A refusal with no remedy: a toast with the text, no fix. */
+    ed.clear_selection_for_test();
+    ed.command("paint on");
+    ed.step_frame_headless();
+    const auto &toasts = ed.toasts_for_test();
+    std::printf("    after 'paint on' with nothing selected: %zu toast(s)%s\n", toasts.size(), toasts.empty() ? "" : (": \"" + toasts[0].text + "\"").c_str());
+    CHECK(toasts.size() == 1 && toasts[0].fix_cmd.empty() && toasts[0].text.find("select") != std::string::npos);
+    /* The same refusal again within the window: one toast, counted. */
+    ed.command("paint on");
+    ed.step_frame_headless();
+    if (!(toasts.size() == 1 && toasts[0].count == 2))
+      for (const auto &t : toasts) std::printf("    (toast: \"%s\" x%d)\n", t.text.c_str(), t.count);
+    CHECK(toasts.size() == 1 && toasts[0].count == 2);
+    /* It leaves after three seconds: there at 2.9 s, gone at 3.6 s. */
+    ed.set_clock_for_test(102.9);
+    ed.step_frame_headless();
+    CHECK(toasts.size() == 1);
+    ed.set_clock_for_test(103.6);
+    ed.step_frame_headless();
+    ed.set_clock_for_test(104.2);
+    ed.step_frame_headless();
+    std::printf("    3.6 s later: %zu toast(s)\n", toasts.size());
+    CHECK(toasts.empty());
+    /* A refusal that knows its remedy: the cube has no surface; the Fix button makes one and Paint Mode then opens. */
+    ed.command("select Cube");
+    ed.command("paint on");
+    ed.step_frame_headless();
+    CHECK(toasts.size() == 1 && toasts[0].fix_cmd == "surface new" && toasts[0].fix_label == "make a surface");
+    std::printf("    with the cube and no surface: %zu toast(s), fix '%s'\n", toasts.size(), toasts.empty() ? "" : toasts[0].fix_cmd.c_str());
+    auto click_label = [&](const std::string &label) {  // (a click on a recorded widget by its label, through real events)
+      for (int attempt = 0; attempt < 3; attempt++) {
+        ed.step_frame_headless();
+        const auto &br = ed.ui_for_test().button_rects;
+        if (!br.count(label)) continue;
+        const Recti r = br.at(label);
+        const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+        return true;
+      }
+      return false;
+    };
+    std::string why_none;
+    const bool clicked = click_label("Fix: make a surface");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const bool fixed = clicked && ed.surface_of_for_test(ed.active_object_for_test(), &why_none) != nullptr;
+    if (!fixed) {
+      std::string lg;
+      fs::read_file(hci, lg);
+      std::printf("    (fix click %d, toasts %zu, why '%s'; the HCI log so far:\n%s)\n", (int)clicked, toasts.size(), why_none.c_str(), lg.c_str());
+    }
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(fixed && toasts.empty());
+    ed.command("paint on");
+    ed.step_frame_headless();
+    std::printf("    after the fix: Paint Mode %d\n", (int)ed.paint_for_test());
+    CHECK(ed.paint_for_test());
+    ed.command("paint off");
+    /* Disabled with a reason: Generate Lighting during Play, the Editing window's Export with nothing open. */
+    ed.command("toast a toast by hand");
+    ed.step_frame_headless();
+    CHECK(!toasts.empty() && toasts[0].text == "a toast by hand");
+    /* Hovered, a toast waits: the pointer kept on it through four seconds, it is still there; moved off, it leaves. */
+    ed.set_clock_for_test(110.0);
+    ed.command("toast a toast that waits");
+    ed.step_frame_headless();
+    {
+      const auto &br = ed.ui_for_test().button_rects;
+      const bool recorded = br.count("toast:a toast that waits") > 0;
+      const Recti r = recorded ? br.at("toast:a toast that waits") : Recti{};
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.set_clock_for_test(112.0);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.set_clock_for_test(114.0);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      const auto waits = [](const Editor::Toast &t) { return t.text == "a toast that waits"; };
+      const bool kept = recorded && std::any_of(toasts.begin(), toasts.end(), waits);
+      std::printf("    hovered for 4 s: frame recorded %d, still shown %d\n", (int)recorded, (int)kept);
+      CHECK(kept);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, r.x + r.w + 40, r.y + r.h + 40)});
+      ed.set_clock_for_test(118.0);
+      ed.step_frame_headless();
+      const bool gone = std::none_of(toasts.begin(), toasts.end(), waits);
+      std::printf("    4 s after the pointer left: gone %d\n", (int)gone);
+      CHECK(gone);
+    }
+    ed.command("layout Lighting & Rendering");  // (the layout that shows the Lighting window; `window Lighting` alone folds it behind its tab group)
+    ed.command("window Lighting");
+    ed.command("play");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    {
+      const Recti lw = ed.window_rect_for_test(WindowKind::Lighting);
+      std::printf("    (Lighting window %dx%d, Generate Lighting drawn %d, status '%s')\n", lw.w, lw.h, (int)ed.ui_for_test().button_rects.count("Generate Lighting"), ed.statusbar_text_for_test().substr(0, 40).c_str());
+    }
+    const std::string why_play = ed.button_disabled_why_for_test("Generate Lighting");
+    {  /* The reason is the button's tooltip: the pointer on it through the tooltip's delay. */
+      const auto &br = ed.ui_for_test().button_rects;
+      const Recti gr = br.count("Generate Lighting") ? br.at("Generate Lighting") : Recti{};
+      const int cx = gr.x + gr.w / 2, cy = gr.y + gr.h / 2;
+      ed.set_clock_for_test(120.0);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.set_clock_for_test(120.8);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      const std::string tip = ed.ui_for_test().tooltip_text_for_test();
+      std::printf("    Generate Lighting hovered in Play, the tooltip: '%s'\n", tip.c_str());
+      CHECK(tip.find("playing") != std::string::npos);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, 2, 2)});
+    }
+    ed.command("stop");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why_stopped = ed.button_disabled_why_for_test("Generate Lighting");
+    std::printf("    Generate Lighting in Play: '%s'; after Stop: '%s'\n", why_play.c_str(), why_stopped.c_str());
+    CHECK(why_play.find("playing") != std::string::npos);
+    CHECK(why_stopped.empty() || why_stopped.find("Baked Global Illumination") != std::string::npos);
+    const std::string why_clear = ed.button_disabled_why_for_test("Clear Baked Data");
+    std::printf("    Clear Baked Data with nothing baked: '%s'\n", why_clear.c_str());
+    CHECK(why_clear.find("Nothing baked") != std::string::npos);
+    ed.command("window Editing");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why_export = ed.button_disabled_why_for_test("Export...");
+    std::printf("    Editing > Export with nothing open: '%s'\n", why_export.c_str());
+    CHECK(why_export.find("Nothing open") != std::string::npos);
+    /* The Strokes and Scatter mode buttons with nothing selected. */
+    ed.command("layout Default");
+    ed.command("window Modeling Tools");
+    ed.command("alltools on");
+    ed.clear_selection_for_test();
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why_strokes = ed.button_disabled_why_for_test("Strokes"), why_scatter = ed.button_disabled_why_for_test("Scatter");
+    std::printf("    nothing selected: Strokes '%s', Scatter '%s'\n", why_strokes.c_str(), why_scatter.c_str());
+    CHECK(why_strokes.find("Select") != std::string::npos && why_scatter.find("Select") != std::string::npos);
+    /* The HCI log. */
+    std::string log;
+    CHECK(fs::read_file(hci, log) && log.find("toast\tPaint:") != std::string::npos && log.find("fix\tsurface new") != std::string::npos && log.find("hint\t") != std::string::npos);
+    std::printf("    the HCI log: %zu lines\n", (size_t)std::count(log.begin(), log.end(), '\n'));
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", "");
+#else
+    unsetenv("BLENDITY_HCI_LOG");
+#endif
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -4629,5 +4788,6 @@ void run_editor_tests() {
   tests_round268();
   tests_round268b();
   tests_round271();
+  tests_round272();
   coverage_tests();
 }

@@ -5,6 +5,7 @@
 //   Blendity --scene file.scene    open a scene (or Blendity file.scene: a double-clicked file, with its project)
 //   Blendity --layout Learning     start with a layout preset
 //   Blendity --scale 1.5           force a UI scale
+//   Blendity --hci-log study.log   append toasts, fixes, hints, undo steps and layouts to a file (the HCI study)
 //   Blendity --headless-screenshot out.png [--size 1600x900] [--cmd "console command"]...  [--click X Y]...
 //       renders the editor without a window (CI, docs, visual tests)
 #include "../core/core.h"

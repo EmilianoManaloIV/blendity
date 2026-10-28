@@ -162,6 +162,7 @@ bool Editor::init(int argc, char **argv) {
     else if (a == "--layout" && i + 1 < argc) layout_arg = argv[++i];
     else if (a == "--scale" && i + 1 < argc) ui_scale_pref_ = (float)std::atof(argv[++i]);
     else if (a == "--lesson" && i + 1 < argc) lesson_ = std::atoi(argv[++i]);
+    else if (a == "--hci-log" && i + 1 < argc) hci_log_path_ = argv[++i];  // (the HCI study's instrument, task 0252)
   }
   window_ = create_window("Blendity", 1600, 900);
   if (!window_) {
@@ -612,6 +613,8 @@ void Editor::frame_body(std::vector<Event> &events) {
     log_seen_ = 0;
   }
   Log::fetch(log_.size(), log_);
+  toasts_poll();   // (task 0252: new warnings and errors become toasts)
+  hci_log_poll();  // (the study's log, when asked for)
 
   ui_.begin_frame(&fb_, now);
   begin_card_frame();  // (task 0193: whether the card presents this window this frame)
@@ -1934,6 +1937,7 @@ void Editor::commit_undo() {
   for (const auto &t : s.textures) s.bytes += t.first.size() + t.second.size();
   for (const auto &t : s.clips) s.bytes += t.first.size() + t.second.size();
   undo_.push_back(std::move(s));
+  undo_serial_++;
   trim_undo();
   redo_.clear();
   stable_ = scene_->clone();

@@ -921,6 +921,12 @@ void Editor::run_console_command(const std::string &line) {
     paint_command(t);
     return;
   }
+  if (c == "toast") {  // toast <text>: a toast by hand (tests, lessons) (task 0252)
+    std::string text = line.size() > 5 ? line.substr(5) : std::string();
+    text.erase(0, text.find_first_not_of(' '));
+    toast(LogLevel::Warning, text.empty() ? std::string("(a toast)") : text);
+    return;
+  }
   if (c == "scatter") {  // scatter <object> | density|radius|scale|rotate|align|tint|seed|mask|on|off|dab|erase|merge|count (task 0248)
     scatter_command(t);
     return;

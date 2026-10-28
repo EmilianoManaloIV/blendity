@@ -2115,11 +2115,11 @@ void Editor::draw_lighting_window(const Recti &r) {
   if (baking_) {
     if (u.button({b.x, b.y, bw, b.h}, "Cancel", true, Icon::Pause)) bake_cancel();
   }
-  else if (u.button({b.x, b.y, bw, b.h}, "Generate Lighting", false, Icon::Lightbulb))
+  else if (u.button_enabled({b.x, b.y, bw, b.h}, "Generate Lighting", !playing_ && scene_->lighting.baked_gi, playing_ ? "Not while playing: stop Play first." : "Baked Global Illumination is off (the Lightmapping Settings below).", false, Icon::Lightbulb))
     bake_start();
   u.tooltip("Bakes the Baked and Mixed lights, the sky and their bounces into lightmaps for objects marked\n"
             "Contribute GI (MeshRenderer). Saved next to the scene, in a folder with the scene's name.");
-  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Clear Baked Data", false, Icon::Close)) bake_clear();
+  if (u.button_enabled({b.x + bw + u.px(4), b.y, bw, b.h}, "Clear Baked Data", !lighting_data_.empty() || !probes_.empty(), "Nothing baked.", false, Icon::Close)) bake_clear();
   u.tooltip("Removes the lightmaps (to the trash) and goes back to realtime ambient light.");
   if (baking_) {
     Recti pr = lay.row(u.px(6));
@@ -2217,19 +2217,19 @@ void Editor::draw_render_window(const Recti &r) {
   lay.row_h = u.row_h();
   Recti b = lay.row(u.row_h() + u.px(8));
   int bw = (b.w - u.px(12)) / 4;
-  if (u.button({b.x, b.y, bw, b.h}, rendering_ && !render_preview_ ? "Restart" : "Render", false, Icon::Camera)) start_final_render();
+  if (u.button({b.x, b.y, bw, b.h}, rendering_ && !render_preview_ ? "Restart" : "Render", false, Icon::Camera)) start_final_render();  // (F12 renders in Play too: no reason to refuse here)
   u.tooltip("Render Image (F12) from the Main Camera. Blender: Render > Render Image.");
   if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Preview", render_preview_ && render_has_result_, Icon::Eye)) start_final_render(true);
   u.tooltip(strprintf("A quick look before rendering: %d%% of the resolution, %d samples (Preview settings below).\n"
                       "Turn on Live Preview to update it whenever the scene changes.",
                       scene_->render.preview_percent, scene_->render.preview_samples));
-  if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", false, Icon::Pause) && rendering_) {
+  if (u.button_enabled({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", rendering_, "Nothing is rendering.", false, Icon::Pause) && rendering_) {
     rendering_ = false;
     final_pt_.pause();  // (task 0161: the cards stop too)
     resolve_final_render(true);
     render_status_ += "  (stopped)";
   }
-  if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", false, Icon::File)) defer([this] { save_render(); });
+  if (u.button_enabled({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", render_has_result_ && render_img_.width > 0, "Nothing rendered yet: Render first (F12).", false, Icon::File)) defer([this] { save_render(); });
   u.tooltip("Saves to Renders/ in the chosen File Format.");
   {
     /* Camera sequence: a shot list rendered one camera after another. */
@@ -3280,8 +3280,10 @@ void Editor::draw_show_more(ui::Layout &lay, const std::string &type, int hidden
 /* The Scatter section (task 0248): the source, the density and the randomness, the mask. */
 void Editor::draw_scatter_tools(ui::Layout &lay) {
   auto &u = ui_;
+  const GameObject *g = active_object();
+  const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
-  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, scatter_ ? "Exit Scatter" : "Scatter", scatter_, ui::Icon::Vertex)) set_scatter(!scatter_);
+  if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, scatter_ ? "Exit Scatter" : "Scatter", scatter_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object to scatter onto.", scatter_, ui::Icon::Vertex)) set_scatter(!scatter_);
   u.tooltip("Paint instances of an object onto surfaces (rocks, tufts, props): name the source below, then dab; the pen's eraser end removes (scatter <object>, scatter on|off).");
   InspectorReflector br(*this, u, lay);
   br.text("Source", scatter_brush_.source);
@@ -3305,8 +3307,10 @@ void Editor::draw_scatter_tools(ui::Layout &lay) {
 /* The Strokes section (task 0248): the tool, its kind and sizes, the normals mode. */
 void Editor::draw_strokes_tools(ui::Layout &lay) {
   auto &u = ui_;
+  const GameObject *sel = active_object();
+  const bool mesh = sel && sel->mesh_filter() && sel->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
-  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, strokeobj_ ? "Exit Strokes" : "Strokes", strokeobj_, ui::Icon::Vertex)) set_strokeobj(!strokeobj_);
+  if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, strokeobj_ ? "Exit Strokes" : "Strokes", strokeobj_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object to paint strokes onto.", strokeobj_, ui::Icon::Vertex)) set_strokeobj(!strokeobj_);
   u.tooltip("Paint geometry: a click on a surface adds a card (a quad facing you), a drag with Ribbon a strip; one Stroke object holds them (strokeobj on|off).");
   if (!strokeobj_) return;
   InspectorReflector br(*this, u, lay);
@@ -3333,7 +3337,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   GameObject *g = active_object();
   const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
-  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, paint_ ? "Exit Paint" : "Paint", paint_, ui::Icon::Vertex)) set_paint(!paint_);
+  if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, paint_ ? "Exit Paint" : "Paint", paint_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object with a surface to paint it.", paint_, ui::Icon::Vertex)) set_paint(!paint_);
   u.tooltip(mesh || paint_ ? "Paint the selected object's surface (surface new first): drag over it; the pen's eraser end erases; Esc leaves (paint on|off)."
                            : "Select a mesh object with a surface to paint it.");
   if (!paint_) return;
@@ -3421,7 +3425,7 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   GameObject *g = active_object();
   const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
-  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, sculpt_ ? "Exit Sculpt" : "Sculpt", sculpt_, ui::Icon::Vertex)) set_sculpt(!sculpt_);
+  if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, sculpt_ ? "Exit Sculpt" : "Sculpt", sculpt_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object to sculpt it.", sculpt_, ui::Icon::Vertex)) set_sculpt(!sculpt_);
   u.tooltip(mesh || sculpt_ ? "Sculpt the selected mesh with a brush: drag over it; Shift smooths, Alt carves; Esc leaves (sculpt on|off)." : "Select a mesh object to sculpt it.");
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);

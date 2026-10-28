@@ -47,7 +47,10 @@ void Editor::draw_scene_view(const Recti &r) {
   /* Task 0232: an interaction begun in another window's Scene view (a drag, a stroke, a gizmo, G / R / S, a brush) is
    * that window's: this view draws, and leaves the tools alone until it ends. */
   const bool other_owns = interaction_window_ >= 0 && interaction_window_ != active_window_;
-  if (!quick_menu_took && !other_owns) scene_navigation(view);
+  /* Task 0252: a click or a hover on a toast is the toast's - before the navigation and the tools, so a Fix click is
+   * neither a selection nor a dab nor an orbit. */
+  const bool toast_took = !quick_menu_took && !other_owns && toasts_update(view);
+  if (!quick_menu_took && !other_owns && !toast_took) scene_navigation(view);
   if (!other_owns) view_gizmo_drag(view);  // (a drag begun on the Scene Gizmo or its hand / magnifier: task 0216)
   update_pilot_camera();  // flying a camera: it follows the view
 
@@ -55,7 +58,7 @@ void Editor::draw_scene_view(const Recti &r) {
    * render, so transforms applied by a drag show up in the same frame. */
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
-  bool gizmo_busy = quick_menu_took || other_owns;
+  bool gizmo_busy = quick_menu_took || other_owns || toast_took;
   if (!other_owns) gizmo_busy = scene_tool_updates(view, gizmo_busy);
   if (!other_owns) interaction_window_ = scene_interacting() ? active_window_ : -1;
 
@@ -153,6 +156,7 @@ void Editor::draw_scene_view(const Recti &r) {
   paint_draw(view);   // (task 0245)
   strokeobj_draw(view);  // (task 0248)
   scatter_draw(view);
+  draw_toasts(view);  // (task 0252: over the picture, under the handles)
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
   draw_pushpull(view);

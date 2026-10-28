@@ -434,6 +434,7 @@ void Editor::sculpt_end_stroke() {
   s.label = mask ? kMaskModes[std::max(1, std::min(3, (int)sculpt_mask_mode_))] : std::string("Sculpt ") + kSculptBrushes[std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind))];
   s.bytes = s.delta->ids.size() * (sizeof(uint32_t) + (mask ? 2 * sizeof(float) : 2 * sizeof(Vec3)));
   undo_.push_back(std::move(s));
+  undo_serial_++;
   trim_undo();
   redo_.clear();
   scene_dirty_ = true;

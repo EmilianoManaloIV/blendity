@@ -129,22 +129,22 @@ bool Editor::set_paint(bool on) {
     return false;
   }
   if (playing_) {
-    Log::warn("Paint: stop Play first");
+    refuse("Paint: stop Play first", "stop", "stop Play");
     return false;
   }
   std::string why;
   ProceduralTexturePtr pt = surface_of(g, &why);
   if (!pt) {
-    Log::warn("Paint: %s", why.c_str());
+    refuse("Paint: " + why, "surface new", "make a surface");
     return false;
   }
   if (mf->mesh->uvs.size() != mf->mesh->corner_verts.size()) {
-    Log::warn("Paint: %s has no UVs (surface new lays them out)", g->name.c_str());
+    refuse("Paint: " + g->name + " has no UVs (surface new lays them out)", "uv unwrap", "unwrap");
     return false;
   }
   const Mesh *ev = g->evaluated_mesh();
   if (ev && ev != mf->mesh.get() && (ev->vert_count() != mf->mesh->vert_count() || ev->face_count() != mf->mesh->face_count())) {
-    Log::warn("Paint: %s's modifiers add or remove geometry; apply them first (the brush projects onto the base mesh)", g->name.c_str());
+    refuse("Paint: " + g->name + "'s modifiers add or remove geometry; apply them first (the brush projects onto the base mesh)", "applymods", "apply the modifiers");
     return false;
   }
   if (edit_mode_) exit_edit_mode();
@@ -711,6 +711,7 @@ void Editor::paint_end_stroke() {
   s.bytes = bytes;
   paint_last_step_bytes_ = bytes;
   undo_.push_back(std::move(s));
+  undo_serial_++;
   trim_undo();
   redo_.clear();
   scene_dirty_ = true;

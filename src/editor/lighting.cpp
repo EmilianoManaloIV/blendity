@@ -258,7 +258,7 @@ int Editor::choose_bake_gpu() {
 void Editor::bake_start() {
   if (baking_) return;
   if (playing_) {
-    Log::warn("Generate Lighting: not while playing.");
+    refuse("Generate Lighting: not while playing.", "stop", "stop Play");
     return;
   }
   const LightingSettings &ls = scene_->lighting;

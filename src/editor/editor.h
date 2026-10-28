@@ -677,6 +677,18 @@ class Editor {
   int paint_last_fill_for_test() const { return paint_last_fill_; }
   size_t paint_last_step_bytes_for_test() const { return paint_last_step_bytes_; }
   bool paint_dab_uv_for_test(float u, float v) { return paint_dab_uv(u, v, 1.0f); }
+  /* A toast (task 0252, ADR 0085 F1; editor/toasts.cpp). */
+  struct Toast {
+    std::string text, fix_cmd, fix_label;
+    LogLevel level = LogLevel::Warning;
+    double born = 0.0;  // the clock when it appeared (pushed forward while hovered, so it waits)
+    int count = 1;
+  };
+  const std::vector<Toast> &toasts_for_test() const { return toasts_; }  // (task 0252)
+  std::string button_disabled_why_for_test(const std::string &label) const {
+    auto it = ui_.disabled_reasons.find(label);
+    return it == ui_.disabled_reasons.end() ? std::string() : it->second;
+  }
   bool strokeobj_for_test() const { return strokeobj_; }
   GameObject *strokeobj_object_for_test() { return strokeobj_object(false); }
   /* The Scatter brush's settings (task 0248; the tool lives in editor/scatter.cpp). */
@@ -4337,6 +4349,32 @@ class Editor {
   /* ---- console ---- */
   std::vector<LogEntry> log_;
   size_t log_seen_ = 0, log_gen_ = 0;
+  /* Toasts (task 0252, ADR 0085 F1; editor/toasts.cpp): every new warning or error of the log shown over the Scene view
+   * for three seconds, a refusal that knows its remedy with a Fix button running a console command. */
+  std::vector<Toast> toasts_;
+  size_t toast_seen_ = 0;
+  bool toast_started_ = false;
+  double toast_last_ = 0.0;
+  struct PendingFix {
+    std::string text, cmd, label;
+  };
+  std::vector<PendingFix> refuse_pending_;  // (this frame's refusals: each matching log line gets its fix; cleared after the poll)
+  void toast(LogLevel level, const std::string &text, const std::string &fix_cmd = "", const std::string &fix_label = "");
+  void refuse(const std::string &text, const std::string &fix_cmd, const std::string &fix_label);
+  void toasts_poll();
+  bool toasts_update(const Recti &view);  // (the clicks, before the view's own: a toast's text opens the Console, its Fix runs)
+  void draw_toasts(const Recti &view);
+  struct ToastRects {
+    Recti frame, text, fix;
+    std::string fix_cmd, key;  // (key: the toast's text - the poll may have inserted a toast since the draw)
+  };
+  std::vector<ToastRects> toast_rects_;  // (laid out by the last draw, read by the next update)
+  /* The HCI study's instrument (BLENDITY_HCI_LOG=<file>): toasts, fixes clicked, hint changes, undo labels, layouts. */
+  std::string hci_log_path_, hci_last_hint_, hci_last_layout_;
+  uint64_t hci_last_undo_ = 0, undo_serial_ = 0;  // (undo_serial_ counts every push: undo_ is trimmed at its cap)
+  bool hci_started_ = false;
+  void hci_log(const std::string &line);
+  void hci_log_poll();
   bool show_info_ = true, show_warn_ = true, show_error_ = true, collapse_ = false;
   int console_sel_ = -1;
   std::string console_input_;

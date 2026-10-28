@@ -503,9 +503,9 @@ void Editor::draw_edit_panel(const Recti &left) {
   if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Render", false, ui::Icon::Camera)) edit_open_render();
   u.tooltip("Open the Render window's last render: its light, shown through the render's view transform.");
   const bool open = edit_doc_.is_open();
-  if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Export...", false, ui::Icon::File) && open) defer([this] { edit_export_dialog(); });
+  if (u.button_enabled({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Export...", open, "Nothing open: Open an image or Render first.", false, ui::Icon::File) && open) defer([this] { edit_export_dialog(); });
   u.tooltip("Write the result as PNG / JPEG (through the view) or EXR / HDR (linear light).");
-  if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save", false, ui::Icon::Check) && open) edit_save("");
+  if (u.button_enabled({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save", open, "Nothing open: Open an image or Render first.", false, ui::Icon::Check) && open) edit_save("");
   u.tooltip("Save the adjustments as an .edit file beside the image (the image itself is never changed).");
   if (open) {
     Recti row = lay.row();
@@ -522,8 +522,8 @@ void Editor::draw_edit_panel(const Recti &left) {
     if (u.button({row.x + hw + u.px(4), row.y, hw, row.h}, "Before / After", edit_split_ >= 0.0f)) edit_split_ = edit_split_ >= 0.0f ? -1.0f : 0.5f;
     u.tooltip("Split the picture: the source left of the line, the result right (drag the line).");
     const bool can_undo = edit_doc_.can_undo();
-    if (u.button({row.x + 2 * (hw + u.px(4)), row.y, hw / 2 - u.px(2), row.h}, "Undo") && can_undo) edit_doc_.undo();
-    if (u.button({row.x + 2 * (hw + u.px(4)) + hw / 2, row.y, hw / 2, row.h}, "Redo")) edit_doc_.redo();
+    if (u.button_enabled({row.x + 2 * (hw + u.px(4)), row.y, hw / 2 - u.px(2), row.h}, "Undo", can_undo, "Nothing to undo in the Editing window.") && can_undo) edit_doc_.undo();
+    if (u.button_enabled({row.x + 2 * (hw + u.px(4)) + hw / 2, row.y, hw / 2, row.h}, "Redo", edit_doc_.can_redo(), "Nothing to redo in the Editing window.")) edit_doc_.redo();
     draw_edit_targets(lay);
     static std::vector<const char *> add_names;
     if (add_names.empty()) {
@@ -553,7 +553,7 @@ void Editor::draw_edit_targets(ui::Layout &lay) {
   const int bw = texture ? (row.w - u.px(4)) / 2 : row.w;
   if (texture && u.button({row.x, row.y, bw, row.h}, "Apply to Texture")) edit_apply_to_texture();
   if (texture) u.tooltip("Put the result on the texture as an Image layer on top (its procedural layers stay underneath).");
-  if (u.button({row.right() - bw, row.y, bw, row.h}, "Use as Camera Look")) edit_use_as_camera_look();
+  if (u.button_enabled({row.right() - bw, row.y, bw, row.h}, "Use as Camera Look", edit_doc_.is_open(), "Nothing open: Open an image or Render first.")) edit_use_as_camera_look();
   u.tooltip("Give the Main Camera these adjustments as camera filters, so the Game view and F12 carry the look.");
 }
 
