@@ -14,7 +14,7 @@ One entry per round of requests, newest first: what was asked, what changed, and
 
 **Checked**
 - A document: no code changed.
-- CHECKS270
+- No chain run: a document and this entry are the round's whole change.
 
 ## 2026-10-28 (round 269): the manual, the Learn lessons, the check lists (task 0249)
 
