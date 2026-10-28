@@ -2,6 +2,53 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 273): the job tray - every long job with its progress, its time and a Cancel (task 0253)
+
+**Asked:** ADR 0085's second foundation (F2). Quad Remesh, Mesh Maps, a baked-light layer, a surface's evaluation, a
+skin solve, the lightmap and probe bake, the final render, MoonRay and the animation's video each showed progress in a
+place of its own or not at all, none said how long it had run or had left, and cancelling was Esc here, a console verb
+there, a button elsewhere. Nielsen's H1 (visibility of system status) and H3 (user control and freedom).
+
+**Added**
+- **One tray** (`src/editor/job_tray.cpp`): `Editor::jobs_running()` lists the live jobs each frame from the state
+  that already exists - the remesh, mesh-maps, baked-light, surface and skin workers, the lightmap / probe bake, the
+  final render (samples over the target), MoonRay, the animation's frames and its video encode, and a *busy* label for
+  the import that blocks the main thread - each with its label, a progress (or a moving stripe), its start and its
+  cancel.
+- **In the status bar's right slot**: the newest job's label, percentage, time run and, past 2 % with a progress, the
+  estimate left (elapsed x remaining / done); a bar behind the text; "+N" for the others with all of them in the
+  tooltip; one **Cancel** reaching the job's own flag. The lighting bake's status text gives way while a job runs.
+- **Progress and cancel where they were missing**: the mesh-maps baker counts its rows (`bake_mesh_maps` takes a
+  progress pointer); the baked-light worker its texels, and it stops when cancelled (checked every 4,096 texels).
+  The Render window's Stop and the tray share `render_stop()`.
+- **Done**: a job seen last frame and gone this frame raises an Info toast - "Mesh Maps done in 3.2 s", or
+  "cancelled" - so the end is seen from wherever the user is; the HCI log gets `job start`, `job cancel`, `job done`
+  / `job cancelled` lines with the seconds. Info toasts draw with the accent colour and the Info icon.
+- **A busy state for the import**: the Import Preview's Import button puts "Importing <file>" in the tray and runs the
+  import two frames later, so the label is on screen while the import blocks.
+- **Console:** `jobs` lists the running jobs with their progress and time; `jobs cancel [label]`.
+- **Review (Opus) taken:** the tray's Cancel moved sideways with the status bar's frame-time text, so a press and its
+  release could land on different rectangles (the button's id is its rectangle) and the click was lost - the right
+  text is measured at its widest frame time and the tray keeps still, and the test re-aims each try; an animation or
+  a camera sequence listed as a Render a frame, with a "done" toast every frame and a Cancel that only ended the
+  current frame - each is one job with its own Stop; done toasts flooded (the Live Preview's renders, a surface's
+  every evaluation) and pushed warnings out of the three slots - a toast only past a second, never for the preview,
+  and an Info toast never evicts a warning or an error; Cancel was offered where it could not work (the video's
+  FFmpeg, a surface that restarts at once) - not offered; a cancel made by Esc or a console verb reported "done" - the
+  job's own flag counts; the bake's two phases were two jobs; a baked-light file written before a late cancel stayed -
+  removed; Mesh Maps' line for a cancel was a warning - information. Open: a skin solve held through an Edit Mode
+  session shows at 100 % with an idle Cancel; a MoonRay render still waiting for the program lists as a render.
+
+**Checked**
+- `tests_round273`: a Mesh Maps bake is in the tray from its first frame with the test clock as its start and a
+  Cancel; the frames until its progress first moves are printed; when it lands the tray is empty and an Info toast
+  says it is done with the time; a second, larger bake cancelled by a real click on the tray's Cancel lands nothing
+  (the undo steps unchanged) and the toast says cancelled; the HCI log has the start, cancel, done and cancelled
+  lines.
+- Unit checks (round 273): Windows, in render-cache verify mode, 13097, 0 failed (1126 tests), 0 stale
+  pictures. Linux with libraries: 12637, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group passed alone: the known parallel-load noise.)
+
 ## 2026-10-28 (round 272): toasts with a fix, and buttons that say why they are disabled (task 0252)
 
 **Asked:** ADR 0085's first foundation (F1). About ninety refusals in the tool modes, and those of Generate Lighting,

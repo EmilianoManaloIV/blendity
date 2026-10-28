@@ -399,8 +399,8 @@ void Editor::draw_import_preview_dialog(const std::function<void()> &close) {
   const Recti b = u.popup_row(u.row_h() + u.px(10));
   const Recti ok{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
   if (u.record_buttons) u.button_rects["ipv:Import"] = ok, u.button_rects["ipv:Cancel"] = cancel;
-  if (u.button(ok, "Import")) {
-    finish_import_preview(true);
+  if (u.button(ok, "Import")) {  // (task 0253: the import runs two frames on, "Importing ..." in the tray meanwhile)
+    busy("Importing " + fs::filename(ipv_.path), [this] { finish_import_preview(true); });
     close();
     return;
   }

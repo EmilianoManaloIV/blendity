@@ -1271,6 +1271,12 @@ bool Editor::paint_bake_light(const std::vector<std::string> &t, bool gradient) 
     const SurfaceMaps &mm = *maps;
     std::vector<uint32_t> px((size_t)mm.w * mm.h);
     for (size_t i = 0; i < px.size(); i++) {
+      if ((i & 4095) == 0) raw->progress.store((float)i / (float)px.size(), std::memory_order_relaxed);
+      if ((i & 4095) == 0 && raw->cancel.load(std::memory_order_relaxed)) {  // (the tray's Cancel: task 0253)
+        raw->why = "cancelled";
+        raw->done.store(true, std::memory_order_release);
+        return;
+      }
       Vec3 c;
       if (mm.cover[i] <= 0.0f) c = Vec3(1.0f);
       else if (gradient) c = bottom + (top - bottom) * clamp01(mm.position[i].y);
@@ -1295,6 +1301,11 @@ void Editor::bakelight_poll() {
   std::unique_ptr<BakeLightJob> job = std::move(bakelight_);
   if (job->thread.joinable()) job->thread.join();
   const bool gradient = job->gradient;
+  if (job->cancel.load(std::memory_order_relaxed)) {
+    fs::remove_file(job->abs);  // (a cancel after the write: the file goes too)
+    Log::info("paint %s: cancelled", gradient ? "bakegradient" : "bakelight");
+    return;
+  }
   if (!job->ok) {
     Log::warn("paint %s: %s", gradient ? "bakegradient" : "bakelight", job->why.c_str());
     return;

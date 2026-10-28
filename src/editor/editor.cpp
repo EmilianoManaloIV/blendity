@@ -614,6 +614,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   }
   Log::fetch(log_.size(), log_);
   toasts_poll();   // (task 0252: new warnings and errors become toasts)
+  jobs_poll();     // (task 0253: the jobs seen, their start and their end)
   hci_log_poll();  // (the study's log, when asked for)
 
   ui_.begin_frame(&fb_, now);
@@ -1369,19 +1370,22 @@ void Editor::draw_statusbar(const Recti &r) {
   auto &u = ui_;
   u.canvas.fill_rect(r, u.theme.tabbar);
   u.canvas.hline(r.x, r.right(), r.y, u.theme.border);
-  std::string lighting = baking_                 ? bake_status_ + "  |  "
+  const std::vector<JobView> jobs = jobs_running();  // (task 0253: the tray shows the bake; its text gives way)
+  std::string lighting = baking_                 ? (jobs.empty() ? bake_status_ + "  |  " : std::string())
                          : lighting_out_of_date()  ? std::string("Lighting out of date  |  ")
                          : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: Ctrl+Shift+L)  |  ")
                                                    : std::string();
-  std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
-                                playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
-                                scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
-  const int right_w = u.font.text_width(right) + u.px(20);
+  const std::string head = lighting + (playing_ ? "PLAYING  |  " : "") + (edit_mode_ ? "EDIT MODE  |  " : "");
+  const std::string tail = strprintf("  |  %zu objects  |  %zu tris  |  Blendity %s", scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
+  const std::string right = head + strprintf("%.1f ms", frame_ms_) + tail;
+  /* Measured with the widest frame time, so the job tray left of it keeps still while frames swing (task 0253). */
+  const int right_w = u.font.text_width(head + "999.9 ms" + tail) + u.px(20);
   u.label({r.x, r.y, r.w - u.px(10), r.h}, right, u.theme.text_dim, ui::Align::Right);
   const int x = r.x + u.px(8), log_w = r.w * 7 / 20;
   draw_statusbar_log({x, r.y, log_w, r.h});
+  const int tray_w = draw_job_tray(r.right() - right_w, r.y, r.h, jobs);
   const int mid_x = x + log_w + u.px(12);
-  draw_statusbar_hint({mid_x, r.y, std::max(0, r.right() - right_w - mid_x), r.h});
+  draw_statusbar_hint({mid_x, r.y, std::max(0, r.right() - right_w - tray_w - mid_x), r.h});
 }
 
 /* The last message: its icon and text; a click opens the Console. */
@@ -3483,7 +3487,7 @@ static void scan_files(const std::string &dir, const std::string &ext, std::vect
 static int g_dialog_shown = 0;  // which dialog has had its popup opened
 
 void Editor::draw_dialogs() {
-  if (ipv_.open && dialog_ != Dialog::ImportPreview) finish_import_preview(false);  // (the preview clicked away: as Cancel, task 0152)
+  if (ipv_.open && dialog_ != Dialog::ImportPreview && busy_label_.empty()) finish_import_preview(false);  // (the preview clicked away: as Cancel, task 0152)
   if (dialog_ == Dialog::None) {
     g_dialog_shown = 0;
     return;

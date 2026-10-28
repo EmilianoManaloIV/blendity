@@ -685,6 +685,14 @@ class Editor {
     int count = 1;
   };
   const std::vector<Toast> &toasts_for_test() const { return toasts_; }  // (task 0252)
+  struct JobView {  // (task 0253: one running job as the tray shows it)
+    std::string label;
+    float progress = -1.0f;  // (-1: none to show)
+    double started = 0.0;
+    bool cancellable = false, cancelled = false;  // (cancelled: the job's own flag is set - by the tray, Esc or a console verb)
+    std::function<void()> cancel;
+  };
+  std::vector<JobView> jobs_for_test() { return jobs_running(); }
   std::string button_disabled_why_for_test(const std::string &label) const {
     auto it = ui_.disabled_reasons.find(label);
     return it == ui_.disabled_reasons.end() ? std::string() : it->second;
@@ -3235,6 +3243,7 @@ class Editor {
   struct MeshMapsJob {
     std::thread thread;
     std::atomic<bool> done{false}, cancel{false};
+    std::atomic<float> progress{0.0f};  // (rows done over the size: task 0253)
     bool ok = false;
     std::string why, rel, base;  // (rel: the record, project-relative; base: where the worker writes)
     bool landed = false;         // (set when the record is written; otherwise the destructor removes the files)
@@ -3287,11 +3296,13 @@ class Editor {
   /* Bake Lighting into the Paint on a worker (task 0247): the pixels and the PNG; the layer lands when it is done. */
   struct BakeLightJob {
     std::thread thread;
-    std::atomic<bool> done{false};
+    std::atomic<bool> done{false}, cancel{false};
+    std::atomic<float> progress{0.0f};  // (texels done: task 0253)
     bool ok = false, gradient = false;
     std::string asset, rel, abs, name, why;
     Vec3 key;
     ~BakeLightJob() {
+      cancel.store(true, std::memory_order_relaxed);
       if (thread.joinable()) thread.join();
     }
   };
@@ -4364,6 +4375,21 @@ class Editor {
   void toasts_poll();
   bool toasts_update(const Recti &view);  // (the clicks, before the view's own: a toast's text opens the Console, its Fix runs)
   void draw_toasts(const Recti &view);
+  /* The job tray (task 0253, ADR 0085 F2): the running jobs listed from their own state, drawn in the status bar. */
+  std::vector<JobView> jobs_running();
+  void jobs_poll();
+  int draw_job_tray(int right_x, int y, int h, const std::vector<JobView> &jobs);
+  bool jobs_cancel(const std::string &label);
+  void jobs_command(const std::vector<std::string> &t);
+  void busy(const std::string &label, std::function<void()> fn);
+  void render_stop();
+  struct JobSeen {
+    std::string label;
+    double started = 0.0;
+    bool cancelled = false, alive = true;
+  };
+  std::vector<JobSeen> jobs_seen_;
+  std::string busy_label_;  // (a main-thread job about to block: shown for a frame first)
   struct ToastRects {
     Recti frame, text, fix;
     std::string fix_cmd, key;  // (key: the toast's text - the poll may have inserted a toast since the draw)

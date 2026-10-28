@@ -1308,6 +1308,7 @@ Preferences > UI file writes the layouts, shortcuts and panels to one file to sh
 @ source/blender/windowmanager (Blender's workspaces, screens and keymaps)
 ? Where is the keymap editor? | Any menu item: right-click > Assign Shortcut..., or shortcut <chord> <command> in the console. Preferences > UI file saves the result with your layouts.
 ? A warning flashed over the Scene view and went. Where did it go? | It was a toast: three seconds over the view, longer while your pointer is on it. The Console keeps every line (the toast's text opens it), and when the warning knows its remedy the toast carries a Fix button that runs the command. A button you cannot press is dim; hover it and the tooltip says why.
+? I started a bake and went on working. How do I know when it is done, or stop it? | The status bar's right slot shows every running job - its progress, the time it has run and an estimate left - with a Cancel; when it finishes a toast says so with the time. In the console, jobs lists them and jobs cancel stops one.
 )"},
     {"Sculpting", "Brushes, masks, polygroups, and four ways to add resolution", R"(
 Sculpting is modelling by touch: a brush moves the vertices under it, falling off to the edge of its disc. ZBrush's pillars are here - brushes, masks, polygroups, Dynamic Subdivision, DynaMesh, ZRemesher (QuadriFlow) and Sculptris Pro (Dyntopo).

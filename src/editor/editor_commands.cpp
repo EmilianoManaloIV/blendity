@@ -921,6 +921,10 @@ void Editor::run_console_command(const std::string &line) {
     paint_command(t);
     return;
   }
+  if (c == "jobs") {  // jobs | jobs cancel [label]: the job tray's list (task 0253)
+    jobs_command(t);
+    return;
+  }
   if (c == "toast") {  // toast <text>: a toast by hand (tests, lessons) (task 0252)
     std::string text = line.size() > 5 ? line.substr(5) : std::string();
     text.erase(0, text.find_first_not_of(' '));

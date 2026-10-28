@@ -129,7 +129,9 @@ the whole arrangement - layout, windows, feel, keymap and your shortcuts, panels
 as one `.blendity-ui` file and loads it back (`ui save|load`; two built-ins, Blender-like and ZBrush-like). The
 status bar says what the mouse and keys do where the mouse is, and offers Undo for the last action. A warning appears as
 a toast over the Scene view for three seconds, with a Fix button when a command puts it right (Paint on a mesh with no
-surface offers one); a button that cannot work now is dim, and its tooltip says why. The Inspector shows
+surface offers one); a button that cannot work now is dim, and its tooltip says why. A long job (a bake, a remesh, a render) shows in the status
+bar's right slot with its progress, the time it has run and an estimate left, and a Cancel; when it ends a toast says so.
+The Inspector shows
 each component's first seven fields (Show more for the rest, All Fields for everything); each stage layout's first use
 shows a guide strip with its next three steps. While dragging a gizmo arrow, type a number to move exactly that far.
 
@@ -791,6 +793,7 @@ the editor. A few that are handy by hand:
 | `meshmaps 1024 16`, `surface new`, `surface mask preset 1 edgewear`, `paint on`, `smat apply Worn Steel`, `export textures unity Exports/Crate` | the paint pipeline from the bake to the texture set |
 | `paint brush bristle`, `paint wet 0.5`, `paint bakelight`, `strokeobj grass 40 0.25 1`, `scatter Rock`, `set world.Fog 1` | the hand-painted look and a stylized scene |
 | `toast <text>` | a toast over the Scene view by hand (lessons, tests) |
+| `jobs`, `jobs cancel [label]` | the running jobs with their progress and time; stop one |
 
 ---
 

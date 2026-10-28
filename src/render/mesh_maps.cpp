@@ -194,7 +194,8 @@ std::string mesh_maps_key_text(const Mesh &m, const Mat4 &model) {
   return buf;
 }
 
-bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings &settings, MeshMapsResult &r, std::string *why, const std::atomic<bool> *cancel) {
+bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings &settings, MeshMapsResult &r, std::string *why, const std::atomic<bool> *cancel,
+                    std::atomic<float> *progress) {
   const auto t0 = std::chrono::steady_clock::now();
   auto fail = [&](const char *what) {
     if (why) *why = what;
@@ -278,6 +279,7 @@ bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings 
   r.covered.assign(N, 0);
   std::atomic<uint64_t> rays{0};
   std::atomic<bool> stop{false};
+  std::atomic<int64_t> rows_done{0};
   JobSystem::global().parallel_for(S, 2, [&](int64_t ya, int64_t yb) {
     uint64_t my_rays = 0;
     for (int64_t y = ya; y < yb && !stop.load(std::memory_order_relaxed); y++) {
@@ -324,6 +326,8 @@ bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings 
       }
     }
     rays.fetch_add(my_rays, std::memory_order_relaxed);
+    const int64_t done = rows_done.fetch_add(yb - ya, std::memory_order_relaxed) + (yb - ya);
+    if (progress) progress->store((float)done / (float)S, std::memory_order_relaxed);
   });
   if (stop.load()) return fail("cancelled");
   for (size_t i = 0; i < N; i++) r.texels += r.covered[i];

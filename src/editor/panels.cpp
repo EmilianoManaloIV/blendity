@@ -2223,12 +2223,7 @@ void Editor::draw_render_window(const Recti &r) {
   u.tooltip(strprintf("A quick look before rendering: %d%% of the resolution, %d samples (Preview settings below).\n"
                       "Turn on Live Preview to update it whenever the scene changes.",
                       scene_->render.preview_percent, scene_->render.preview_samples));
-  if (u.button_enabled({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", rendering_, "Nothing is rendering.", false, Icon::Pause) && rendering_) {
-    rendering_ = false;
-    final_pt_.pause();  // (task 0161: the cards stop too)
-    resolve_final_render(true);
-    render_status_ += "  (stopped)";
-  }
+  if (u.button_enabled({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", rendering_, "Nothing is rendering.", false, Icon::Pause) && rendering_) render_stop();
   if (u.button_enabled({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", render_has_result_ && render_img_.width > 0, "Nothing rendered yet: Render first (F12).", false, Icon::File)) defer([this] { save_render(); });
   u.tooltip("Saves to Renders/ in the chosen File Format.");
   {

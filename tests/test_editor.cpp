@@ -4745,6 +4745,104 @@ static void tests_round272() {
   });
 }
 
+static void tests_round273() {
+  test("the job tray (ADR 0085 F2): a Mesh Maps bake is in the status bar's tray from its first frame with its start time and a Cancel, its progress moves (the frames until it does printed), its end raises an Info toast with the time and the HCI log has the start and done lines; a second bake cancelled through the tray's Cancel button lands nothing; `jobs` lists the running jobs", [] {
+    const std::string hci = fs::join(scratch_project(), "hci-273.log");
+    fs::remove_file(hci);
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", hci.c_str());
+#else
+    setenv("BLENDITY_HCI_LOG", hci.c_str(), 1);
+#endif
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(200.0);
+    ed.record_buttons_for_test(true);
+    ed.command("select Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();  // (the cold frames)
+    const auto &toasts = ed.toasts_for_test();
+    auto has_toast = [&](const char *words) {
+      return std::any_of(toasts.begin(), toasts.end(), [&](const Editor::Toast &t) { return t.text.find(words) != std::string::npos; });
+    };
+    double clock = 200.0;
+    bool saw_partial = false;  // (a progress strictly between 0 and 1 seen in the tray)
+    auto wait = [&](int *first_progress) {  // (the frames while the worker runs; the test clock 0.1 s a frame)
+      for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) {
+        clock += 0.1;
+        ed.set_clock_for_test(clock);
+        ed.step_frame_headless();
+        const std::vector<Editor::JobView> jobs = ed.jobs_for_test();
+        if (first_progress && *first_progress < 0 && !jobs.empty() && jobs[0].progress > 0.0f) *first_progress = i;
+        saw_partial = saw_partial || (!jobs.empty() && jobs[0].progress > 0.0f && jobs[0].progress < 1.0f);
+        if (ed.meshmaps_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      return !ed.meshmaps_busy_for_test();
+    };
+    ed.command("meshmaps 1024 16");
+    ed.step_frame_headless();
+    {
+      const std::vector<Editor::JobView> jobs = ed.jobs_for_test();
+      std::printf("    after the first frame: %zu job(s)%s\n", jobs.size(),
+                  jobs.empty() ? "" : strprintf(" - '%s' started at %.1f, progress %.2f", jobs[0].label.c_str(), jobs[0].started, jobs[0].progress).c_str());
+      CHECK(jobs.size() == 1 && jobs[0].label == "Mesh Maps" && jobs[0].started == 200.0 && jobs[0].cancellable);
+      CHECK(ed.ui_for_test().button_rects.count("job:Cancel") > 0 && ed.ui_for_test().button_rects.count("job:tray") > 0);
+    }
+    int first_progress = -1;
+    CHECK(wait(&first_progress));
+    ed.step_frame_headless();
+    std::printf("    the progress first moved after %d frame(s), a partial value seen %d; %zu job(s) in the tray after the bake\n", first_progress, (int)saw_partial, ed.jobs_for_test().size());
+    CHECK(saw_partial);
+    for (const auto &t : toasts) std::printf("    (toast: \"%s\")\n", t.text.c_str());
+    CHECK(ed.jobs_for_test().empty());
+    CHECK(has_toast("Mesh Maps done in"));
+    const GameObject *G = ed.scene().find(gid);
+    CHECK(G && G->get<MeshRenderer>() && !G->get<MeshRenderer>()->mesh_maps.empty());
+    /* The second bake, larger, cancelled through the tray's button (a real click on its recorded rectangle). */
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("meshmaps 2048 16");
+    ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    int attempts = 0;
+    bool cancel_sent = false;
+    for (; attempts < 5 && !cancel_sent && ed.meshmaps_busy_for_test(); attempts++) {  // (the click re-aimed each try: the frame under load)
+      if (!br.count("job:Cancel")) {
+        ed.step_frame_headless();
+        continue;
+      }
+      const Recti r = br.at("job:Cancel");
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      std::string so_far;
+      cancel_sent = fs::read_file(hci, so_far) && so_far.find("job\tcancel Mesh Maps") != std::string::npos;
+    }
+    std::printf("    the tray's Cancel: %d attempt(s), registered %d, the bake still running %d\n", attempts, (int)cancel_sent, (int)ed.meshmaps_busy_for_test());
+    CHECK(cancel_sent);
+    CHECK(wait(nullptr));
+    ed.step_frame_headless();
+    std::printf("    after Cancel: %zu job(s), undo steps %zu (were %zu)\n", ed.jobs_for_test().size(), ed.undo_steps_for_test(), steps);
+    for (const auto &t : toasts) std::printf("    (toast: \"%s\")\n", t.text.c_str());
+    CHECK(ed.jobs_for_test().empty() && ed.undo_steps_for_test() == steps);
+    CHECK(has_toast("Mesh Maps cancelled in"));
+    ed.command("jobs");
+    ed.step_frame_headless();
+    std::string log;
+    CHECK(fs::read_file(hci, log) && log.find("job\tstart Mesh Maps") != std::string::npos && log.find("job\tdone Mesh Maps") != std::string::npos &&
+          log.find("job\tcancel Mesh Maps") != std::string::npos && log.find("job\tcancelled Mesh Maps") != std::string::npos);
+    std::printf("    the HCI log: %zu lines\n", (size_t)std::count(log.begin(), log.end(), '\n'));
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", "");
+#else
+    unsetenv("BLENDITY_HCI_LOG");
+#endif
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -4789,5 +4887,6 @@ void run_editor_tests() {
   tests_round268b();
   tests_round271();
   tests_round272();
+  tests_round273();
   coverage_tests();
 }
