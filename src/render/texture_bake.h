@@ -41,6 +41,9 @@ struct TextureBakeResult {
   int alpha_slot = -1;              // the first material slot whose surface left that alpha (the baked material takes its surface)
 };
 
+/* Whether the mesh's own UVs can be the layout at `size` (in 0..1, no overlap): the texture bake's rule, shared with the mesh maps (task 0243). */
+bool own_uvs_usable(const Mesh &m, int size);
+
 /* Bakes `mesh` placed by `model` with `materials` (slot i -> material; null = the default). Parallel over rows. */
 TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::vector<MaterialPtr> &materials,
                                 const TextureBakeSettings &settings = TextureBakeSettings());

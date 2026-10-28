@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| Edge wear, dirt in the crevices and dust on the top need to know where the edges, crevices and tops are; a painter had nothing of the geometry as images. | Mesh maps: Object > Bake Mesh Maps writes the normal, position, curvature, occlusion and thickness of the mesh into its UV layout, on a worker, and records them on the object (task 0243). |
 | A horn pulled out of a sphere was as coarse as the sphere: the brush could only move the vertices there were, and DynaMesh meant stopping to retessellate the whole object. | Dyntopo: the mesh tessellated under the brush as it moves, to the brush's own detail (task 0242). |
 | DynaMesh's quads were even but ran every which way; clean topology that follows the form meant another program. A remesh that takes seconds would have frozen the editor. | Quad Remesh (QuadriFlow) on a worker thread, the editor drawing meanwhile, the result one undo step when it lands (task 0241). |
 | A form pulled far out of its topology stretched its quads thin, and two pieces pushed together kept their inner walls; there was no way back to even polygons short of starting over. | DynaMesh: the mesh retopologized evenly at a resolution, overlaps merged, the mask kept, one undo step (task 0240). |

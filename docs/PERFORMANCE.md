@@ -1190,3 +1190,15 @@ rebuilt whole (the stroke's tombstones still in the arrays). The cost grows with
 |---|---|
 | ten dabs, Dyntopo off (a delta stroke) | 1.0 ms |
 | ten dabs, Dyntopo on (tessellate, then move; the tables rebuilt on each dab that changed faces) | 22.5 ms |
+
+## Mesh maps (task 0243)
+
+`tests_round263` (headless, three runs): the five maps of a 48 x 32 UV sphere (1,538 vertices) at 256 x 256 in its own
+UVs with 16 samples - 63,744 covered texels, two rays a sample (occlusion out, thickness in), the path tracer's BVH
+built on the mesh alone. A 1,024 bake is sixteen times the texels. The bake and the PNG writes run on a worker under
+`run_background`; the editor's frames went on meanwhile.
+
+| Bake | Rays | Time |
+|---|---|---|
+| the sphere at 256, 16 samples | 2,039,808 | 27-37 ms |
+| the editor's slowest frame while a 256 bake ran (after the cold frames) | | 4-14 ms |

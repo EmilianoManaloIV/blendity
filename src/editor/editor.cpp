@@ -73,6 +73,7 @@ bool SceneCamera::update(double now) {
 Editor::Editor() = default;
 Editor::~Editor() {
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
+  meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
@@ -656,6 +657,11 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (sculpt_gesture_ && !scene_drawn_) sculpt_gesture_ = false;  // (task 0238: a Ctrl gesture the same way, dropped)
   sculpt_remesh_poll();  // (task 0241: a finished Quad Remesh lands as a step)
   if (sculpt_remesh_) ui_.redraw = true;  // (frames while it works: the status line and the result's arrival)
+  meshmaps_poll();  // (task 0243: finished mesh maps land as files and a record)
+  if (meshmaps_job_) {
+    ui_.redraw = true;
+    if (ui_.in.key_pressed[platform::KEY_ESCAPE] && scene_hovered_ && !ui_.wants_keyboard() && !modal_.active) meshmaps_cancel(), ui_.in.key_pressed[platform::KEY_ESCAPE] = false;
+  }
   draw_drop_hint();  // (task 0232)
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
@@ -984,6 +990,18 @@ void Editor::draw_menubar(const Recti &r) {
       u.tooltip("Bake the active object's look (procedural textures, axis materials, Box mapping, every material slot) into\n"
                 "one set of images on new UVs, and give it a material that uses them: what it looks like, as plain images\n"
                 "any program shows. Undo restores it. Blender: Cycles Bake. (Console: baketex [size] [keepuvs])");
+      u.submenu("Bake Mesh Maps", u.px(200), [this, has_sel] {  // (task 0243)
+        for (int size : {512, 1024, 2048})
+          if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) {
+            MeshMapsSettings s = meshmaps_settings_;
+            s.size = size;
+            meshmaps_settings_ = s;
+            bake_mesh_maps_start(s);
+          }
+      });
+      u.tooltip("Bake the active object's geometry into its UV layout - world normal, position, curvature, ambient occlusion,\n"
+                "thickness - on a worker, the images under Assets/Textures/MeshMaps: what the layer stack's generators read\n"
+                "(Substance Painter's mesh maps). (Console: meshmaps [size] [samples] [keepuvs])");
     }
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);

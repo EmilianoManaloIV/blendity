@@ -335,6 +335,11 @@ without UVs. **Toon shading** and the **Outline** component give a cel-shaded lo
 **Bake Textures** turns everything an object's materials do into plain images on new UVs, so other programs show what
 Blendity renders.
 
+**Bake Mesh Maps** (Object > Bake Mesh Maps; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
+layout - world normal, position, curvature, ambient occlusion, thickness: Substance Painter's mesh maps - under
+Assets/Textures/MeshMaps, on a worker while you keep working (Esc or `meshmaps cancel` stops it). The Mesh Renderer
+records them; `meshmaps status` says whether the mesh has changed since. The layer stack's generators read them.
+
 **Many at once.** The Materials, Textures and Project windows select like the Hierarchy: Ctrl+click, Shift+click a
 range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Trash).
 
@@ -687,6 +692,7 @@ the editor. A few that are handy by hand:
 | `autorig humanoid`, `autorig build` | the marker auto-rig |
 | `anim new`, `anim frame 30`, `anim record on` | the Animation window |
 | `matdelete Bricks, Wood Floor` | delete materials by name |
+| `meshmaps 1024 16`, `meshmaps status` | bake the mesh maps on a worker; the record and whether it is stale |
 | `libs` | which of Blender's libraries this build uses |
 | `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
 | `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the editor tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/render/mesh_maps.h"
+#include <cstring>
+#include "../src/render/texture_bake.h"
+
+#include <chrono>
+#include <thread>
 
 
 
@@ -3371,6 +3377,125 @@ static void tests_round255() {
   });
 }
 
+static void tests_round263() {
+  test("mesh maps in the editor: the bake runs on a worker (the slowest frame printed), lands as five PNGs and a record on the Mesh Renderer in one undo step, undo clears the record; a mesh changed meanwhile drops the result; cancel; the record round-trips through the scene file and reads stale after a change", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();  // (the cold frames: the render mesh, the pictures)
+    int slowest_at = -1;
+    auto wait = [&](double &slowest) {
+      slowest = 0.0;
+      for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) {
+        const auto t0 = std::chrono::steady_clock::now();
+        ed.step_frame_headless();
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (ms > slowest) slowest = ms, slowest_at = i;
+        if (ed.meshmaps_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      return !ed.meshmaps_busy_for_test();
+    };
+    const size_t steps0 = ed.undo_steps_for_test();
+    const std::vector<Vec2> uvs0 = G()->mesh_filter()->mesh->uvs;
+    const bool own_usable = own_uvs_usable(*G()->mesh_filter()->mesh, 256);
+    ed.command("meshmaps 256 8");
+    CHECK(ed.meshmaps_busy_for_test());
+    double slowest = 0.0;
+    CHECK(wait(slowest));
+    ed.command("meshmaps status");  // (commits the pending step)
+    const MeshRenderer *mr = G()->get<MeshRenderer>();
+    const std::string rel = mr ? mr->mesh_maps : "";
+    auto files_of = [&](const std::string &base) {
+      bool all = !base.empty();
+      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"}) all = all && fs::exists(ed.resolve_asset_path_for_test(base + suffix));
+      return all;
+    };
+    auto png_count = [&] {
+      size_t n = 0;
+      for (const DirEntry &e : fs::list(ed.resolve_asset_path_for_test("Assets/Textures/MeshMaps")))
+        if (!e.is_dir && e.name.size() > 4 && e.name.compare(e.name.size() - 4, 4, ".png") == 0) n++;
+      return n;
+    };
+    const bool files = files_of(rel);
+    /* Usable own UVs are kept byte for byte (a textured object keeps its look); else the generated layout became the
+     * mesh's UVs: one per corner, inside 0..1. */
+    const std::vector<Vec2> &uvs1 = G()->mesh_filter()->mesh->uvs;
+    bool uvs_ok = uvs1.size() == G()->mesh_filter()->mesh->corner_verts.size();
+    for (const Vec2 &uv : uvs1) uvs_ok = uvs_ok && uv.x >= 0.0f && uv.x <= 1.0f && uv.y >= 0.0f && uv.y <= 1.0f;
+    const bool kept = uvs1.size() == uvs0.size() && std::memcmp(uvs1.data(), uvs0.data(), uvs0.size() * sizeof(Vec2)) == 0;
+    std::printf("    the sphere's own UVs usable %d, kept byte for byte %d\n", (int)own_usable, (int)kept);
+    CHECK(uvs_ok && kept == own_usable);
+    std::printf("    mesh maps: record '%s', the five files %d, %zu step(s), the slowest frame while they baked %.1f ms (frame %d; the last one lands the record), stale %d\n", rel.c_str(), (int)files,
+                ed.undo_steps_for_test() - steps0, slowest, slowest_at, (int)ed.mesh_maps_stale_for_test(G()));
+    CHECK(files && ed.undo_steps_for_test() == steps0 + 1 && !ed.mesh_maps_stale_for_test(G()));
+    /* The file round trip. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const GameObject *gb = back.find(gid);
+    const MeshRenderer *mrb = gb ? gb->get<MeshRenderer>() : nullptr;
+    CHECK(mrb && mrb->mesh_maps == rel && mrb->mesh_maps_key == mr->mesh_maps_key);
+    /* The loaded object's mesh keys the same: the record reads current after a reopen (a hash, not a session count). */
+    CHECK(gb && gb->mesh_filter() && gb->mesh_filter()->mesh && mesh_maps_key_text(*gb->mesh_filter()->mesh, gb->world_matrix()) == mrb->mesh_maps_key);
+    /* Shade Smooth / Flat and the object's transform are in the key: the normal map and the world reads change. */
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->smooth = !mp->smooth;
+      mp->touch();
+      ed.mark_changed_for_test("shading");
+    }
+    CHECK(ed.mesh_maps_stale_for_test(G()));
+    ed.command("undo");
+    CHECK(!ed.mesh_maps_stale_for_test(G()));
+    const Mat4 before_turn = G()->world_matrix();
+    G()->set_local_euler(Vec3(0.0f, 90.0f, 0.0f)), ed.mark_changed_for_test("a turn");
+    ed.step_frame_headless();
+    const bool turned = std::memcmp(before_turn.m, G()->world_matrix().m, sizeof before_turn.m) != 0;
+    const bool stale_turned = ed.mesh_maps_stale_for_test(G());
+    ed.command("undo");
+    std::printf("    the turn changed the world matrix %d; stale after it %d, after its undo %d\n", (int)turned, (int)stale_turned, (int)ed.mesh_maps_stale_for_test(G()));
+    CHECK(stale_turned && !ed.mesh_maps_stale_for_test(G()));
+    /* Stale after the mesh moves; undo clears the record. */
+    ed.command("sculpt on");
+    ed.command("sculpt off");
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->positions[0] += Vec3(0.0f, 0.01f, 0.0f);
+      mp->deform_version++;
+      ed.mark_changed_for_test("a nudge");
+    }
+    CHECK(ed.mesh_maps_stale_for_test(G()));
+    ed.command("undo");  // (the nudge)
+    ed.command("undo");  // (the maps' record)
+    CHECK(G()->get<MeshRenderer>()->mesh_maps.empty() && files_of(rel));  // (the files stay, as Bake Textures' do)
+    /* A change while it bakes drops the result and its files; the first bake's files survive; a cancel writes nothing. */
+    const size_t pngs = png_count();
+    ed.command("meshmaps 256 8");
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->positions[0] += Vec3(0.0f, 0.01f, 0.0f);
+      mp->deform_version++;
+      ed.mark_changed_for_test("a nudge meanwhile");
+    }
+    CHECK(wait(slowest));
+    std::printf("    after a bake dropped for a change meanwhile: %zu PNGs (%zu before), the first bake's files %d\n", png_count(), pngs, (int)files_of(rel));
+    CHECK(G()->get<MeshRenderer>()->mesh_maps.empty() && png_count() == pngs && files_of(rel));
+    ed.command("meshmaps 256 8");
+    ed.command("meshmaps cancel");
+    CHECK(wait(slowest));
+    CHECK(G()->get<MeshRenderer>()->mesh_maps.empty() && png_count() == pngs);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -3405,5 +3530,6 @@ void run_editor_tests() {
   tests_round227();
   tests_round252();
   tests_round255();
+  tests_round263();
   coverage_tests();
 }

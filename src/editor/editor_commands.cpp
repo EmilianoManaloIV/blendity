@@ -917,6 +917,10 @@ void Editor::run_console_command(const std::string &line) {
     toonstyle_command(name);
     return;
   }
+  if (c == "meshmaps") {  // meshmaps [size] [samples] [keepuvs|layout] | cancel | status (task 0243)
+    meshmaps_command(t);
+    return;
+  }
   if (c == "sculpt") {  // sculpt on|off|brush|size|strength|falloff|carve|front|pressure|dab|stroke (task 0236)
     sculpt_command(t);
     return;

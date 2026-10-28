@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the render tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/render/mesh_maps.h"
 
 static void colormanagement_tests() {
   test("display: exact sRGB table and SIMD encoders", [] {
@@ -10401,6 +10402,137 @@ static void tests_round212() {
   });
 }
 
+static void tests_round263() {
+  auto grey_of = [](uint32_t c) { return (float)(c & 0xFF) / 255.0f; };
+  test("mesh maps (ADR 0079): a sphere's ambient occlusion is open everywhere, its thickness deep, its curvature one convex value, its world normal the position's direction; an L of two cubes darkens in its inner corner; a thin plate reads thin", [&] {
+    const MeshPtr sphere = primitives::uv_sphere(0.5f, 48, 32);
+    MeshMapsSettings s;
+    s.size = 256, s.samples = 16;
+    MeshMapsResult r;
+    std::string why;
+    const bool ok = bake_mesh_maps(*sphere, Mat4::identity(), s, r, &why);
+    CHECK(ok);
+    if (!ok) {
+      std::printf("    %s\n", why.c_str());
+      return;
+    }
+    float ao_min = 1.0f, th_sum = 0.0f, cv_min = 1.0f, cv_max = 0.0f, worst_deg = 0.0f;
+    size_t covered = 0;
+    /* The point a texel covers, back from its owner triangle: the normal map against the position direction (the
+     * position map is the point in the bounds). */
+    for (size_t i = 0; i < r.covered.size(); i++) {
+      if (!r.covered[i]) continue;
+      covered++;
+      ao_min = std::min(ao_min, grey_of(r.ao[i]));
+      th_sum += grey_of(r.thickness[i]);
+      cv_min = std::min(cv_min, grey_of(r.curvature[i])), cv_max = std::max(cv_max, grey_of(r.curvature[i]));
+      const uint32_t n = r.normal[i], pcol = r.position[i];
+      const Vec3 nrm = normalize(Vec3((float)((n >> 16) & 0xFF) / 255.0f, (float)((n >> 8) & 0xFF) / 255.0f, (float)(n & 0xFF) / 255.0f) * 2.0f - Vec3(1.0f));
+      const Vec3 pos = Vec3((float)((pcol >> 16) & 0xFF) / 255.0f, (float)((pcol >> 8) & 0xFF) / 255.0f, (float)(pcol & 0xFF) / 255.0f) - Vec3(0.5f);  // (the sphere's bounds are centred)
+      if (length(pos) > 0.05f) worst_deg = std::max(worst_deg, std::acos(std::max(-1.0f, std::min(1.0f, dot(nrm, normalize(pos))))) * 180.0f / kPi);
+    }
+    /* Thickness is the mean inward distance over the reach (the bounds' longest side, the diameter here): a chord
+     * 2R cos(theta) under the cosine weighting averages 4R/3, two thirds of the diameter. */
+    const float th_mean = covered ? th_sum / (float)covered : 0.0f;
+    std::printf("    the sphere at 256: %zu texels; AO min %.3f; thickness mean %.3f (two thirds expected); curvature %.3f..%.3f; the normal within %.1f deg of the position's direction; %llu rays, %.0f ms\n",
+                covered, ao_min, th_mean, cv_min, cv_max, worst_deg, (unsigned long long)r.rays, r.ms_total);
+    CHECK(covered > 0 && ao_min > 0.95f && std::fabs(th_mean - 0.667f) < 0.05f && cv_min > 0.6f && cv_max < 0.65f && cv_max - cv_min < 0.05f && worst_deg < 3.0f);
+    /* An L: a unit cube and another on top of it, half a unit over. */
+    Mesh L = *primitives::cube(1.0f);
+    for (Vec3 &p : L.positions) p += Vec3(0.5f, 0.5f, 0.5f);
+    {
+      Mesh top = *primitives::cube(1.0f);
+      for (Vec3 &p : top.positions) p += Vec3(1.0f, 1.5f, 0.5f);
+      const uint32_t off = (uint32_t)L.vert_count();
+      L.positions.insert(L.positions.end(), top.positions.begin(), top.positions.end());
+      for (size_t f = 0; f < top.face_count(); f++) {
+        std::vector<uint32_t> fv(top.face_verts(f), top.face_verts(f) + top.face_size(f));
+        for (uint32_t &v : fv) v += off;
+        L.add_face(fv.data(), fv.size());
+      }
+      L.touch();
+    }
+    MeshMapsResult rl;
+    CHECK(bake_mesh_maps(L, Mat4::identity(), s, rl, &why));
+    float l_min = 1.0f, l_max = 0.0f;
+    for (size_t i = 0; i < rl.covered.size(); i++)
+      if (rl.covered[i]) l_min = std::min(l_min, grey_of(rl.ao[i])), l_max = std::max(l_max, grey_of(rl.ao[i]));
+    /* A plate: a cube 0.02 thick. */
+    Mesh plate = *primitives::cube(1.0f);
+    for (Vec3 &p : plate.positions) p.y *= 0.02f;
+    plate.touch();
+    MeshMapsResult rp;
+    CHECK(bake_mesh_maps(plate, Mat4::identity(), s, rp, &why));
+    /* Means: a plate's narrow sides are legitimately thick across, a cube's texels beside an edge legitimately thin. */
+    auto mean_thickness = [&](const MeshMapsResult &m, size_t *n) {
+      float sum = 0.0f;
+      *n = 0;
+      for (size_t i = 0; i < m.covered.size(); i++)
+        if (m.covered[i]) (*n)++, sum += grey_of(m.thickness[i]);
+      return *n ? sum / (float)*n : 0.0f;
+    };
+    size_t p_cov = 0, c_cov = 0;
+    const float p_mean = mean_thickness(rp, &p_cov);
+    MeshMapsResult rc;
+    CHECK(bake_mesh_maps(*primitives::cube(1.0f), Mat4::identity(), s, rc, &why));
+    const float c_mean = mean_thickness(rc, &c_cov);
+    /* The inner corner proper: the lower cube's top face (its world normal up, the position map's y at a half of
+     * the 0..2 bounds) within a twentieth of the upper cube's wall at x = 0.5 (the bounds run 0..1.5 in x: the
+     * position's x in 0.30..0.333). */
+    float corner_min = 1.0f, corner_sum = 0.0f;
+    size_t corner_n = 0;
+    for (size_t i = 0; i < rl.covered.size(); i++) {
+      if (!rl.covered[i]) continue;
+      const uint32_t n = rl.normal[i], pc = rl.position[i];
+      const float ny = (float)((n >> 8) & 0xFF) / 255.0f * 2.0f - 1.0f, px = (float)((pc >> 16) & 0xFF) / 255.0f, py = (float)((pc >> 8) & 0xFF) / 255.0f;
+      if (ny < 0.9f || std::fabs(py - 0.5f) > 0.02f || px < 0.30f || px > 0.333f) continue;
+      corner_n++, corner_sum += grey_of(rl.ao[i]), corner_min = std::min(corner_min, grey_of(rl.ao[i]));
+    }
+    const float corner_mean = corner_n ? corner_sum / (float)corner_n : 1.0f;
+    /* The same cube placed at a hundredth of its size: the reach and the offset follow the object into the world. */
+    MeshMapsResult rs;
+    const Mat4 small = Mat4::scale(Vec3(0.01f));
+    CHECK(bake_mesh_maps(*primitives::cube(1.0f), small, s, rs, &why));
+    size_t s_cov = 0;
+    const float s_mean = mean_thickness(rs, &s_cov);
+    float s_ao_min = 1.0f;
+    for (size_t i = 0; i < rs.covered.size(); i++)
+      if (rs.covered[i]) s_ao_min = std::min(s_ao_min, grey_of(rs.ao[i]));
+    std::printf("    the L: AO %.3f (the faces that meet) .. %.3f (the open faces), the inner corner's strip mean %.3f, min %.3f over %zu texels; the plate: mean thickness %.3f over %zu texels; the cube: %.3f over %zu, at a hundredth of the size %.3f (AO min %.3f)\n",
+                l_min, l_max, corner_mean, corner_min, corner_n, p_mean, p_cov, c_mean, c_cov, s_mean, s_ao_min);
+    CHECK(l_min < 0.7f && l_max > 0.95f && corner_n > 0 && corner_mean < 0.8f && corner_min < 0.7f && p_mean < 0.12f && c_mean > 0.4f && std::fabs(s_mean - c_mean) < 0.05f && s_ao_min > 0.95f);
+    /* The curvature does not change with the mesh's resolution: the sphere at twice the segments reads the same. */
+    MeshMapsResult rd;
+    CHECK(bake_mesh_maps(*primitives::uv_sphere(0.5f, 96, 64), Mat4::identity(), s, rd, &why));
+    float d_sum = 0.0f;
+    size_t d_n = 0;
+    for (size_t i = 0; i < rd.covered.size(); i++)
+      if (rd.covered[i]) d_n++, d_sum += grey_of(rd.curvature[i]);
+    const float d_mean = d_n ? d_sum / (float)d_n : 0.0f, c48 = covered ? (cv_min + cv_max) * 0.5f : 0.0f;
+    /* The same dense sphere with a little noise on its radius (a ten-thousandth, a sculpt's surface grain): the
+     * sagitta over the chord squared is a second difference and amplifies it; the smoothing pass holds the spread. */
+    Mesh noisy = *primitives::uv_sphere(0.5f, 96, 64);
+    uint32_t nseed = 7u;
+    for (Vec3 &q : noisy.positions) {
+      nseed = nseed * 1664525u + 1013904223u;
+      q = q * (1.0f + ((float)(nseed >> 8) / 16777216.0f - 0.5f) * 2e-4f);
+    }
+    noisy.touch();
+    MeshMapsResult rn;
+    CHECK(bake_mesh_maps(noisy, Mat4::identity(), s, rn, &why));
+    float n_sum = 0.0f, n_min = 1.0f, n_max = 0.0f;
+    size_t n_n = 0;
+    for (size_t i = 0; i < rn.covered.size(); i++)
+      if (rn.covered[i]) n_n++, n_sum += grey_of(rn.curvature[i]), n_min = std::min(n_min, grey_of(rn.curvature[i])), n_max = std::max(n_max, grey_of(rn.curvature[i]));
+    const float n_mean = n_n ? n_sum / (float)n_n : 0.0f;
+    std::printf("    curvature: the 48 x 32 sphere %.3f..%.3f, the 96 x 64 sphere's mean %.3f; with a ten-thousandth of radius noise: mean %.3f, %.3f..%.3f\n", cv_min, cv_max, d_mean, n_mean, n_min, n_max);
+    CHECK(d_n > 0 && std::fabs(d_mean - c48) < 0.03f && d_mean > 0.55f);
+    CHECK(n_n > 0 && std::fabs(n_mean - d_mean) < 0.03f && n_max - n_min < 0.3f);
+    Mesh empty;
+    CHECK(!bake_mesh_maps(empty, Mat4::identity(), s, rc, &why) && !why.empty());
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10440,4 +10572,5 @@ void run_render_tests() {
   tests_round184();
   tests_round211();
   tests_round212();
+  tests_round263();
 }

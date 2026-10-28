@@ -166,6 +166,7 @@ void MeshRenderer::reflect(Reflector &r) {
   r.field("Show in Renders", show_in_renders);
   r.help("Off: the Game view and rendered images leave the object out, as Blender does for Boolean cutters\n"
          "(Object > Visibility > Renders).");
+  if (r.serializing()) r.text("Mesh Maps", mesh_maps), r.text("Mesh Maps Key", mesh_maps_key);  // (task 0243: the record, not for hand editing)
   /* Shape keys (task 0135): files and hashes keep the weights as a list (whatever order the components come in, a
    * key's exact name); the Inspector and clips get a slider per key of the mesh (BlendShape/<name>). */
   if (r.serializing()) r.weight_list("Shape Weights", shape_weights);

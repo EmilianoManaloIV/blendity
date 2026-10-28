@@ -207,6 +207,10 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
   RenderRole render_role() const override { return RenderRole::MeshRenderer; }
   /* One material per slot; face material_index selects the slot. */
   std::vector<MaterialPtr> materials;
+  /* Mesh maps (task 0243, ADR 0079): the project-relative base of the baked images (<base>_ao.png and the rest) and
+   * the key of the mesh they were baked from (mesh_maps_key_text: its positions, topology and UVs hashed; `meshmaps
+   * status` says "stale" when the mesh's key differs). Files, undo and hashing see them; the Inspector does not. */
+  std::string mesh_maps, mesh_maps_key;
   bool cast_shadows = true;
   bool receive_shadows = true;
   bool show_wireframe = false;

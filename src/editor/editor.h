@@ -36,6 +36,7 @@
 #include "../scene/scene.h"
 #include "../scene/quad_remesh.h"
 #include "../scene/dyntopo.h"
+#include "../render/mesh_maps.h"
 #include "../scene/animation.h"
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
@@ -634,6 +635,9 @@ class Editor {
   int sculpt_subdiv_levels_for_test() const { return sculpt_subdiv_levels(); }  // (task 0239)
   bool sculpt_dynamesh_for_test(int resolution, int smooth) { return sculpt_dynamesh(resolution, smooth); }  // (task 0240)
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
+  bool meshmaps_busy_for_test() const { return meshmaps_job_ != nullptr; }        // (task 0243)
+  std::string resolve_asset_path_for_test(const std::string &rel) const { return resolve_asset_path(rel); }
+  bool mesh_maps_stale_for_test(const GameObject *g) const { return mesh_maps_stale(g); }
   bool sculpt_dyntopo_for_test() const { return sculpt_dyntopo_; }  // (task 0242)
   bool sculpt_mode_for_test() const { return sculpt_; }
   const SculptBrush &sculpt_brush_for_test() const { return sculpt_brush_; }
@@ -3138,6 +3142,32 @@ class Editor {
     meshops::QuadRemeshParams params;
   };
   std::unique_ptr<RemeshJob> sculpt_remesh_;
+  /* Task 0243: mesh maps baked on a worker (ADR 0079), the Remesh job's shape. */
+  struct MeshMapsJob {
+    std::thread thread;
+    std::atomic<bool> done{false}, cancel{false};
+    bool ok = false;
+    std::string why, rel, base;  // (rel: the record, project-relative; base: where the worker writes)
+    bool landed = false;         // (set when the record is written; otherwise the destructor removes the files)
+    uint64_t obj = 0, mesh_uid = 0, version = 0, deform_version = 0;
+    std::shared_ptr<Mesh> input;
+    Mat4 model;
+    MeshMapsSettings settings;
+    MeshMapsResult result;
+    ~MeshMapsJob() {
+      cancel.store(true, std::memory_order_relaxed);
+      if (thread.joinable()) thread.join();
+      if (landed || base.empty()) return;
+      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"}) fs::remove_file(base + suffix);
+    }
+  };
+  std::unique_ptr<MeshMapsJob> meshmaps_job_;
+  MeshMapsSettings meshmaps_settings_;
+  bool bake_mesh_maps_start(const MeshMapsSettings &s);
+  void meshmaps_poll();
+  void meshmaps_cancel();
+  bool mesh_maps_stale(const GameObject *g) const;
+  void meshmaps_command(const std::vector<std::string> &t);
   /* Task 0242: Sculptris Pro - the mesh tessellated under the brush (ADR 0078). A Dyntopo stroke is a snapshot step. */
   bool sculpt_dyntopo_ = false;
   float sculpt_dyntopo_detail_ = 0.25f;  // (of the brush's world radius)

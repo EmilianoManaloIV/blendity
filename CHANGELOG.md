@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 263): mesh maps (task 0243)
+
+**Asked:** Substance Painter's pillars - the layer stack with masks, mesh maps and generators, smart materials,
+painting on the model. The mesh maps first: everything else reads them.
+
+**Added**
+- **`bake_mesh_maps`** (`src/render/mesh_maps.cpp`, ADR 0079): the five maps Substance's generators read, baked from
+  the mesh into its UV layout (the texture bake's rule: the mesh's own UVs when they lie in 0-1 without overlap, so a
+  textured object keeps its look; else, or on `layout`, the generated layout, written onto the mesh when the bake
+  lands) - the **world normal** and the **position** in the mesh's bounds as colour, the **curvature** (each
+  neighbour's drop below the tangent plane over its chord squared, averaged over the ring, scaled by the bounds and
+  smoothed twice: the mean curvature at any resolution; 0.5 flat, convex toward 1),
+  **ambient occlusion** (cosine-weighted hemisphere rays about the face's outside through a path tracer built on the
+  mesh alone, over a reach of the object's size in the world; the open share) and **thickness** (the same rays inward:
+  the mean distance to the mesh over the reach, so a thin plate is dark and a solid sphere two thirds). Written as
+  five PNGs.
+- **In the editor:** Object > Bake Mesh Maps (512 / 1024 / 2048) beside Bake Textures, `meshmaps [size] [samples]
+  [keepuvs|layout]`, `meshmaps cancel`, `meshmaps status`; the bake and the PNGs on a worker with the mesh copied bare
+  (the status line says so; Esc over the Scene view or `meshmaps cancel` stops it); when it lands and the mesh is still
+  the one it baked from, one undo step keeps or writes the UVs, puts the files under
+  `Assets/Textures/MeshMaps/<name>_<map>.png` and records them on the Mesh Renderer with a content key of the mesh
+  (positions, topology, UVs, smoothing, the object's matrix; saved with the scene; `meshmaps status` says "stale" once
+  any of them changes, and current after a reopen); a mesh changed meanwhile, a cancel or a failure drops the result
+  and removes its files.
+- **Measured:** a 48 x 32 sphere at 256 in its own UVs with 16 samples: 2,039,808 rays in 27-37 ms over the runs; AO
+  1.000 everywhere, the normal within 1.7 degrees of the position's direction, curvature 0.624-0.631 (a 96 x 64 sphere
+  0.624, the same with a ten-thousandth of radius noise: 0.56-0.69), mean thickness 0.665 (two thirds expected); an L
+  of two cubes reads 0.54 on the strip beside its inner wall, 0 where its faces meet and 1 on the open faces; a 0.02
+  plate's mean thickness 0.052, a cube's 0.628 at any scale; the editor's slowest frame while a bake ran 4-14 ms.
+**Review (Opus, round 263, two passes):** five majors, seven minors and seven nits in the first pass, two majors and three minors in the second, all taken before landing. The generated UV layout had been thrown away (the maps fit no UVs the object had) and, once written onto the mesh, had replaced a textured object's own good UVs (the second pass): the object's own UVs are the default when they lie in 0-1 without overlap, and the generated layout is written onto the mesh only when they are unusable or `layout` is asked, as Bake Textures writes its. The rays' reach and offset were in object units while the rays travelled in the world (a centimetre import's thickness read black, a hundred-metre one's white: they come from the bounds placed by the object's matrix, tested on a cube at a hundredth of its size). The record's key was the mesh's session counter times a prime, an int the Inspector rounded through a float and that read "current" after a reopen whatever had changed: a 64-bit hash of the positions, topology, UVs, smoothing and the object's matrix as text, written to files and hashed but never shown, stale after a turn or a Shade Smooth and current after a reopen. The curvature divided by the edge length and so shrank with the mesh's resolution (a dense sculpt came out flat grey): each neighbour's drop over its chord squared, times a quarter of the bounds, is the mean curvature at any resolution, smoothed twice because a second difference amplifies surface grain (a ten-thousandth of radius noise spread it 0.43-0.82 with one pass, 0.56-0.69 with two). The worker's loops had not gone through `run_background`. Also: a cancel, a drop, a failure or the editor closing removes the files a bake wrote; Edit Mode and Weight Paint are left at the start and a landing under them or under Play is dropped; hidden faces are baked (they are part of the surface the maps describe); Esc cancels only over the Scene view; the Project window refreshes; a triangle with UV area and no 3D area is left to the padding; the L test reads the strip beside the wall, not the faces that meet, and the editor test checks the files on every path, the UVs kept byte for byte, and the key after a turn and a re-shading.
+
+**Checked**
+- `tests_round263` in `tests/test_render.cpp` (the sphere, the L, the plate, the cube, an empty mesh refused) and in
+  `tests/test_editor.cpp` (the worker and the slowest frame, the five files, one undo step, undo clearing the record,
+  the scene-file round trip, stale after a change, a change meanwhile dropping the result, cancel).
+- Unit checks (round 263): Windows, in render-cache verify mode, 12898, 0 failed (1107 tests), 0 stale
+  pictures. Linux with libraries: 12438, 0 failed. Sanitizer build: 12285, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test and the sanitizer run's animation group failed under the parallel load and passed alone.)
+
 ## 2026-10-28 (round 262): Sculptris Pro - Dyntopo (task 0242)
 
 **Asked:** ZBrush's Sculptris Pro - detail that appears under the brush as it moves.

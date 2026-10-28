@@ -38,6 +38,8 @@ struct BakeTri {
   float sign = 1.0f;
 };
 
+}  // namespace
+
 /* The mesh's own UVs are kept only when they are finite, inside 0..1, cover some area and don't overlap (two
  * charts on one texel would bake one surface over the other). Checked at up to 512 texels. */
 bool own_uvs_usable(const Mesh &m, int size) {
@@ -78,6 +80,8 @@ bool own_uvs_usable(const Mesh &m, int size) {
   }
   return covered > 0 && twice * 100 <= covered;  // a few texels on chart edges, not overlapping charts
 }
+
+namespace {
 
 }  // namespace
 
