@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the render tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include <map>
+#include <cstring>
+#include <chrono>
+#include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
 
 static void colormanagement_tests() {
@@ -10533,6 +10537,249 @@ static void tests_round263() {
   });
 }
 
+static void tests_round264() {
+  test("a surface's layer stack (ADR 0080): a Fill writes metallic alone and emission alone, the channels apart; Levels clamps a mask; an Anchor equals the mask it reads; the stack round-trips through the file with its masks, groups and names; the new outputs resolve", [&] {
+    ProceduralTexture t;
+    t.surface = true;
+    t.seamless = false;
+    t.width = t.height = 128;
+    t.add("Fill");  // L0: the base, mid grey
+    t.add("Fill");  // L1: metallic alone
+    CHECK(r49_set(t, "L1 Metallic", "1") && r49_set(t, "L1 Writes Albedo", "0") && r49_set(t, "L1 Writes Height", "0") && r49_set(t, "L1 Writes Roughness", "0") && r49_set(t, "L1 Writes Emission", "0"));
+    t.add("Fill");  // L2: emission alone
+    CHECK(r49_set(t, "L2 Emission", "1 0.5 0") && r49_set(t, "L2 Writes Albedo", "0") && r49_set(t, "L2 Writes Height", "0") && r49_set(t, "L2 Writes Roughness", "0") && r49_set(t, "L2 Writes Metallic", "0") &&
+          r49_set(t, "L2 Writes Emission", "1"));  // (a Fill writes no emission unless asked: an emission map makes the object a light)
+    TexPlanes p;
+    t.evaluate(p);
+    float metal_min = 1.0f, emit_err = 0.0f, albedo_err = 0.0f;
+    for (size_t i = 0; i < p.size(); i++) {
+      metal_min = std::min(metal_min, p.metal[i]);
+      emit_err = std::max(emit_err, length(p.emit[i] - Vec3(1.0f, 0.5f, 0.0f)));
+      albedo_err = std::max(albedo_err, length(p.albedo[i] - Vec3(0.5f)));
+    }
+    const Bitmap mb = t.output((int)TextureOutput::Metallic, p), eb = t.output((int)TextureOutput::Emission, p);
+    std::printf("    metallic min %.3f (image %d), emission off by %.4f at most (image %d %d %d), the albedo still grey (off by %.4f)\n", metal_min, mb.rgba8[0], emit_err, eb.rgba8[0], eb.rgba8[1], eb.rgba8[2],
+                albedo_err);
+    CHECK(metal_min > 0.999f && mb.rgba8[0] == 255 && emit_err < 1e-5f && eb.rgba8[0] == 255 && eb.rgba8[2] == 0 && albedo_err < 1e-5f);
+    /* A mask stack: Noise through Levels (black 0.4, white 0.6) clamps it - values in 0..1 with a tenth at each end. */
+    t.add("Fill");  // L3
+    TextureLayer &l3 = *t.layers[3];
+    l3.name = "edge";
+    l3.mask_layers.push_back(create_texture_layer("Noise"));
+    l3.mask_layers.push_back(create_texture_layer("Levels"));
+    for (auto &e : l3.mask_layers) make_mask_effect(*e);
+    CHECK(r49_set(t, "L3 M1 Black", "0.4") && r49_set(t, "L3 M1 White", "0.6"));
+    TexPlanes below;
+    t.evaluate_below(below, 3);
+    LayerContext c = t.context(below.w, below.h);
+    std::map<std::string, std::vector<float>> anchors;
+    std::vector<float> own3;
+    evaluate_own_mask(l3, below, c, anchors, own3);
+    size_t zeros = 0, ones = 0, outside = 0;
+    for (float v : own3) zeros += v <= 0.0f ? 1 : 0, ones += v >= 1.0f ? 1 : 0, outside += (v < 0.0f || v > 1.0f) ? 1 : 0;
+    std::printf("    the mask through Levels: %zu of %zu at 0, %zu at 1, %zu outside 0..1\n", zeros, own3.size(), ones, outside);
+    CHECK(outside == 0 && zeros > own3.size() / 10 && ones > own3.size() / 10 && zeros + ones < own3.size());
+    /* An Anchor in L4's mask reading "edge" gives L4 the same mask, bitwise. */
+    t.add("Fill");  // L4
+    TextureLayer &l4 = *t.layers[4];
+    l4.mask_layers.push_back(create_texture_layer("Anchor"));
+    make_mask_effect(*l4.mask_layers[0]);
+    CHECK(r49_set(t, "L4 M0 Layer", "edge"));
+    TexPlanes full;
+    full.reset(128, 128);
+    apply_layer_range(t.layers, 0, 4, full, c, anchors, nullptr);  // (the anchors recorded up to L3)
+    std::vector<float> own4;
+    evaluate_own_mask(l4, full, c, anchors, own4);
+    CHECK(anchors.count("edge") && own4.size() == own3.size() && std::memcmp(own4.data(), own3.data(), own3.size() * sizeof(float)) == 0);
+    /* A group of L1-L2 with a mask of its own (its children "C0 ..." and its effects "M0 ..." must not share names in
+     * the file), then the file. A mistyped preset leaves a mask alone. */
+    auto grp = create_texture_layer("Group");
+    grp->children()->push_back(std::move(t.layers[1]));
+    grp->children()->push_back(std::move(t.layers[2]));
+    grp->mask_layers.push_back(create_texture_layer("Fill"));
+    make_mask_effect(*grp->mask_layers[0]);
+    grp->mask_layers[0]->opacity = 0.25f;
+    CHECK(!apply_surface_mask_preset(*grp, "edgwear") && grp->mask_layers.size() == 1);
+    t.layers.erase(t.layers.begin() + 1, t.layers.begin() + 3);
+    t.layers.insert(t.layers.begin() + 1, std::move(grp));
+    t.touch();
+    ProceduralTexture back;
+    CHECK(load_texture_text(save_texture_text(t), back));
+    const TextureLayer *child0 = back.layers.size() > 1 && back.layers[1]->children() && !back.layers[1]->children()->empty() ? (*back.layers[1]->children())[0].get() : nullptr;
+    const bool apart = child0 && child0->opacity == 1.0f && (child0->targets & TargetMetallic) && back.layers[1]->mask_layers.size() == 1 && back.layers[1]->mask_layers[0]->opacity == 0.25f &&
+                       back.layers[1]->mask_layers[0]->targets == TargetHeight;  // (the child kept its own fields: the effect's did not land on it)
+    CHECK(apart);
+    const bool shape = back.surface && back.layers.size() == 4 && std::string(back.layers[1]->type_name()) == "Group" && back.layers[1]->children() && back.layers[1]->children()->size() == 2 &&
+                       back.layers[2]->name == "edge" && back.layers[2]->mask_layers.size() == 2 && std::string(back.layers[2]->mask_layers[1]->type_name()) == "Levels" &&
+                       back.layers[3]->mask_layers.size() == 1 && std::string(back.layers[3]->mask_layers[0]->type_name()) == "Anchor";
+    std::printf("    the file round trip: surface %d, %zu layers, group of %zu, 'edge' with %zu effects, an anchor %d\n", (int)back.surface, back.layers.size(),
+                back.layers.size() > 1 && back.layers[1]->children() ? back.layers[1]->children()->size() : (size_t)0, back.layers.size() > 2 ? back.layers[2]->mask_layers.size() : (size_t)0,
+                (int)(back.layers.size() > 3 && !back.layers[3]->mask_layers.empty()));
+    CHECK(shape);
+    TexPlanes pb, pg;
+    back.evaluate(pb);
+    t.evaluate(pg);
+    const bool same_planes = pb.metal.size() == pg.metal.size() && std::memcmp(pb.metal.data(), pg.metal.data(), pg.metal.size() * sizeof(float)) == 0 &&
+                             std::memcmp(pb.albedo.data(), pg.albedo.data(), pg.albedo.size() * sizeof(Vec3)) == 0 && std::memcmp(pb.emit.data(), pg.emit.data(), pg.emit.size() * sizeof(Vec3)) == 0;
+    std::printf("    the loaded stack evaluates bit for bit as the saved one %d\n", (int)same_planes);
+    CHECK(same_planes);
+    std::string asset;
+    int output = -1;
+    CHECK(split_texture_ref("Assets/Textures/S.ptex#metallic", asset, output) && output == (int)TextureOutput::Metallic && split_texture_ref("Assets/Textures/S.ptex#emission", asset, output) &&
+          output == (int)TextureOutput::Emission);
+  });
+  test("a surface's generators read the mesh maps: the Edge Wear preset on a subdivided cube's baked curvature marks the edges and leaves the face centres; a Blur never bleeds between two islands and the padding takes its own island", [&] {
+    Mesh cube = *primitives::cube(1.0f);
+    for (int k = 0; k < 3; k++) cube = meshops::subdivide_simple(cube);
+    MeshMapsSettings s;
+    s.size = 256, s.samples = 4;
+    MeshMapsResult r;
+    std::string why;
+    CHECK(bake_mesh_maps(cube, Mat4::identity(), s, r, &why));
+    auto maps = std::make_shared<SurfaceMaps>();
+    surface_maps_from_bake(r, 256, *maps);
+    ProceduralTexture t;
+    t.surface = true, t.seamless = false, t.width = t.height = 256, t.maps = maps;
+    t.add("Fill");
+    CHECK(apply_surface_mask_preset(*t.layers[0], "edgewear"));
+    TexPlanes p;
+    p.reset(256, 256);
+    LayerContext c = t.context(256, 256);
+    std::map<std::string, std::vector<float>> anchors;
+    std::vector<float> own;
+    evaluate_own_mask(*t.layers[0], p, c, anchors, own);
+    /* Edge texels by the position map (two coordinates at the bounds), face centres (one at the bounds, the others
+     * well inside). */
+    float edge_sum = 0.0f, centre_sum = 0.0f;
+    size_t edge_n = 0, centre_n = 0;
+    for (size_t i = 0; i < own.size(); i++) {
+      if (maps->cover[i] < 0.5f) continue;
+      const Vec3 q = maps->position[i];
+      int at_bound = 0, inside = 0;
+      for (float v : {q.x, q.y, q.z}) at_bound += (v < 0.03f || v > 0.97f) ? 1 : 0, inside += (v > 0.2f && v < 0.8f) ? 1 : 0;
+      if (at_bound >= 2) edge_sum += own[i], edge_n++;
+      else if (at_bound == 1 && inside == 2) centre_sum += own[i], centre_n++;
+    }
+    const float edge_mean = edge_n ? edge_sum / (float)edge_n : 0.0f, centre_mean = centre_n ? centre_sum / (float)centre_n : 1.0f;
+    std::printf("    the Edge Wear preset on the cube: %zu edge texels mean %.3f, %zu face-centre texels mean %.3f\n", edge_n, edge_mean, centre_n, centre_mean);
+    /* The preset multiplies a noise in at half opacity (a worn edge is not worn evenly), so the band's mean sits
+     * about three quarters of the curvature's own value; the ratio to the face centres is what the generator is for. */
+    CHECK(edge_n > 100 && centre_n > 100 && edge_mean > 0.4f && centre_mean < 0.05f && edge_mean > 20.0f * centre_mean);
+    /* Two islands a quarter of the atlas apart, one white one black, a Blur of radius 8 between them. */
+    auto two = std::make_shared<SurfaceMaps>();
+    two->w = two->h = 256;
+    two->cover.assign(256 * 256, 0.0f), two->ao.assign(256 * 256, 1.0f), two->curvature.assign(256 * 256, 0.5f), two->thickness.assign(256 * 256, 0.0f);
+    two->position.assign(256 * 256, Vec3(0.0f)), two->normal.assign(256 * 256, Vec3(0.0f, 0.0f, 1.0f));
+    TexPlanes q;
+    q.reset(256, 256);
+    for (int y = 0; y < 256; y++)
+      for (int x = 0; x < 256; x++) {
+        const size_t i = (size_t)y * 256 + x;
+        const bool a = x >= 16 && x < 96 && y >= 16 && y < 96, b = x >= 160 && x < 240 && y >= 16 && y < 96;
+        two->cover[i] = a || b ? 1.0f : 0.0f;
+        q.albedo[i] = a ? Vec3(1.0f) : b ? Vec3(0.0f) : Vec3(0.5f);
+      }
+    {
+      /* The nearest-covered table through the loader's path: a tiny result whose coverage is the two squares. */
+      MeshMapsResult rr;
+      rr.size = 256;
+      rr.covered.assign(256 * 256, 0);
+      rr.normal.assign(256 * 256, 0xFF8080FFu), rr.position.assign(256 * 256, 0xFF000000u), rr.curvature.assign(256 * 256, 0xFF808080u), rr.ao.assign(256 * 256, 0xFFFFFFFFu), rr.thickness.assign(256 * 256, 0xFF000000u);
+      for (size_t i = 0; i < rr.covered.size(); i++) rr.covered[i] = two->cover[i] > 0.5f ? 1 : 0;
+      surface_maps_from_bake(rr, 256, *two);
+    }
+    ProceduralTexture tb;
+    tb.surface = true, tb.seamless = false, tb.width = tb.height = 256, tb.maps = two;
+    tb.add("Blur");
+    CHECK(r49_set(tb, "L0 Radius", "8"));
+    LayerContext cb = tb.context(256, 256);
+    std::map<std::string, std::vector<float>> no_anchors;
+    apply_layer_range(tb.layers, 0, 1, q, cb, no_anchors, nullptr);
+    float a_min = 1.0f, b_max = 0.0f, pad_a_min = 1.0f, pad_b_max = 0.0f;
+    for (int y = 0; y < 256; y++)
+      for (int x = 0; x < 256; x++) {
+        const size_t i = (size_t)y * 256 + x;
+        const bool a = x >= 16 && x < 96 && y >= 16 && y < 96, b = x >= 160 && x < 240 && y >= 16 && y < 96;
+        if (a) a_min = std::min(a_min, q.albedo[i].x);
+        if (b) b_max = std::max(b_max, q.albedo[i].x);
+        if (!a && !b && x >= 96 && x < 104 && y >= 16 && y < 96) pad_a_min = std::min(pad_a_min, q.albedo[i].x);  // (the white island's padding, toward the gap)
+        if (!a && !b && x >= 152 && x < 160 && y >= 16 && y < 96) pad_b_max = std::max(pad_b_max, q.albedo[i].x);  // (the black island's)
+      }
+    std::printf("    Blur 8 over two islands: the white island's minimum %.4f, the black's maximum %.4f; their padding %.4f / %.4f\n", a_min, b_max, pad_a_min, pad_b_max);
+    CHECK(a_min > 0.99f && b_max < 0.01f && pad_a_min > 0.99f && pad_b_max < 0.01f);
+  });
+  test("rect evaluation equals the full evaluation bitwise inside the rect and touches nothing outside its halo; the full evaluation at 2048 and a 128 x 128 rect are timed", [&] {
+    /* Fill (named, a Noise-through-Levels mask of its own), Noise, Blur 4, Edge Wear, Levels (its mask an Anchor to the
+     * Fill's): the rect pass from the Noise up must read the anchor the composite below recorded. */
+    auto build = [](int size) {
+      ProceduralTexture t;
+      t.surface = true, t.seamless = false, t.width = t.height = size;
+      t.add("Fill");
+      t.layers[0]->name = "base";
+      t.layers[0]->mask_layers.push_back(create_texture_layer("Noise"));
+      t.layers[0]->mask_layers.push_back(create_texture_layer("Levels"));
+      for (auto &e : t.layers[0]->mask_layers) make_mask_effect(*e);
+      r49_set(t, "L0 M1 Black", "0.3");
+      t.add("Noise");
+      t.add("Blur");
+      r49_set(t, "L2 Radius", "4");
+      t.add("Edge Wear");
+      t.add("Levels");
+      r49_set(t, "L4 Black", "0.2");
+      t.layers[4]->mask_layers.push_back(create_texture_layer("Anchor"));
+      make_mask_effect(*t.layers[4]->mask_layers[0]);
+      r49_set(t, "L4 M0 Layer", "base");
+      t.add("Height AO");  // (its box filter must sum exactly too)
+      return t;
+    };
+    ProceduralTexture t = build(512);
+    TexPlanes full0;
+    t.evaluate(full0);
+    CHECK(r49_set(t, "L1 Scale", "7"));  // the edit: the Noise's scale (layer 1)
+    TexPlanes full;
+    t.evaluate(full);
+    TexPlanes rect;
+    std::map<std::string, std::vector<float>> anchors;
+    t.evaluate_below(rect, 1, &anchors);
+    const TexPlanes below = rect;
+    LayerContext c = t.context(512, 512);
+    CHECK(anchors.count("base") == 1);
+    const int halo = rect_halo(t, 1, c);
+    evaluate_rect(t, 1, 64, 64, 128, 128, rect, anchors);
+    auto same_at = [&](size_t i) {
+      return rect.height[i] == full.height[i] && rect.rough[i] == full.rough[i] && rect.metal[i] == full.metal[i] && rect.albedo[i].x == full.albedo[i].x && rect.albedo[i].y == full.albedo[i].y &&
+             rect.albedo[i].z == full.albedo[i].z && rect.emit[i].x == full.emit[i].x;
+    };
+    auto untouched = [&](size_t i) {
+      return rect.height[i] == below.height[i] && rect.rough[i] == below.rough[i] && rect.albedo[i].x == below.albedo[i].x && rect.mask[i] == below.mask[i] && rect.metal[i] == below.metal[i] &&
+             rect.emit[i].x == below.emit[i].x;
+    };
+    size_t inside_bad = 0, outside_bad = 0, inside = 0, outside = 0;
+    for (int y = 0; y < 512; y++)
+      for (int x = 0; x < 512; x++) {
+        const size_t i = (size_t)y * 512 + x;
+        if (x >= 64 && x < 128 && y >= 64 && y < 128) inside++, inside_bad += same_at(i) ? 0 : 1;
+        else if (x < 64 - halo || x >= 128 + halo || y < 64 - halo || y >= 128 + halo) outside++, outside_bad += untouched(i) ? 0 : 1;
+      }
+    std::printf("    the rect from the Noise up (halo %d): %zu of %zu texels inside differ from the full evaluation, %zu of %zu outside the halo were touched\n", halo, inside_bad, inside, outside_bad, outside);
+    CHECK(halo > 0 && inside_bad == 0 && outside_bad == 0);
+    /* The times (printed, never asserted). */
+    ProceduralTexture big = build(2048);
+    TexPlanes bp;
+    const auto t0 = std::chrono::steady_clock::now();
+    big.evaluate(bp);
+    const auto t1 = std::chrono::steady_clock::now();
+    TexPlanes br;
+    std::map<std::string, std::vector<float>> ba;
+    big.evaluate_below(br, 1, &ba);
+    const auto t2 = std::chrono::steady_clock::now();
+    evaluate_rect(big, 1, 1000, 1000, 1128, 1128, br, ba);
+    const auto t3 = std::chrono::steady_clock::now();
+    std::printf("    at 2048: the full stack %.0f ms, the composite below the Noise %.0f ms, a 128 x 128 rect from the Noise up %.1f ms\n", std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                std::chrono::duration<double, std::milli>(t2 - t1).count(), std::chrono::duration<double, std::milli>(t3 - t2).count());
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10573,4 +10820,5 @@ void run_render_tests() {
   tests_round211();
   tests_round212();
   tests_round263();
+  tests_round264();
 }

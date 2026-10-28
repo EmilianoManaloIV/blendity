@@ -340,6 +340,13 @@ layout - world normal, position, curvature, ambient occlusion, thickness: Substa
 Assets/Textures/MeshMaps, on a worker while you keep working (Esc or `meshmaps cancel` stops it). The Mesh Renderer
 records them; `meshmaps status` says whether the mesh has changed since. The layer stack's generators read them.
 
+**A surface** (`surface new` on the selected object) is a texture in the object's own UV space whose layers write colour,
+height, roughness, metallic and emission; each layer has a **mask that is a stack of effects** (the Textures window's Add
+Effect: a Mesh Map through levels, Noise, Levels, Blur, an Anchor to another layer's mask), and `surface mask preset <layer>
+edgewear|dirt|dust|metaledgewear|positiongradient|thickness` builds the usual ones from the baked mesh maps. A Group holds a
+sub-stack. Editing a layer redoes only the layers above it inside the edited rectangle; a changed surface evaluates on a
+worker while the views keep the last images.
+
 **Many at once.** The Materials, Textures and Project windows select like the Hierarchy: Ctrl+click, Shift+click a
 range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Trash).
 
@@ -693,6 +700,7 @@ the editor. A few that are handy by hand:
 | `anim new`, `anim frame 30`, `anim record on` | the Animation window |
 | `matdelete Bricks, Wood Floor` | delete materials by name |
 | `meshmaps 1024 16`, `meshmaps status` | bake the mesh maps on a worker; the record and whether it is stale |
+| `surface new`, `surface mask preset 1 edgewear`, `surface eval 0 0 128 128` | a surface for the object, a smart mask on layer 1, the rect engine timed |
 | `libs` | which of Blender's libraries this build uses |
 | `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
 | `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |

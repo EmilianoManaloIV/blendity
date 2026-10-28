@@ -5,6 +5,7 @@
 // Every count that decides a pattern's parity (a brick row's offset, a checker, the tatami and herringbone
 // blocks) is rounded so the pattern repeats exactly across the tile's edges.
 #include "procedural_texture.h"
+#include "surface.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -62,18 +63,46 @@ inline CellHit voronoi_cells(float sx, float sy, int N, float jitter, uint32_t s
   return h;
 }
 
-/* Wrapping box filters, separable with running sums: O(1) per texel whatever the radius. */
-template<class T> void box_mean(const std::vector<T> &src, std::vector<T> &dst, int w, int h, int r) {
+/* An index into a row or column: wrapping for a tile, clamped for a surface (task 0244: an atlas does not wrap). */
+inline int edge_index(int v, int n, bool wrap) { return wrap ? wrapi(v, n) : std::max(0, std::min(n - 1, v)); }
+
+/* Box filters, separable. A tile: running sums, O(1) per texel whatever the radius, wrapping. A surface (`exact`):
+ * each texel the direct sum of its window, O(r) - running sums carry the rounding of every texel before along the
+ * row, and a rect evaluation (task 0244) must be bitwise the full one; a direct window reads only what the halo
+ * covers - and clamped at the edges. */
+template<class T> void box_mean(const std::vector<T> &src, std::vector<T> &dst, int w, int h, int r, bool wrap = true, bool exact = false) {
   std::vector<T> tmp(src.size());
   const float inv = 1.0f / (2 * r + 1);
+  if (exact) {
+    JobSystem::global().parallel_for(h, 16, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++) {
+        const T *row = src.data() + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+          T sum = row[0] * 0.0f;
+          for (int k = -r; k <= r; k++) sum = sum + row[edge_index(x + k, w, wrap)];
+          tmp[(size_t)y * w + x] = sum * inv;
+        }
+      }
+    });
+    dst.resize(src.size());
+    JobSystem::global().parallel_for(h, 16, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < w; x++) {
+          T sum = tmp[0] * 0.0f;
+          for (int k = -r; k <= r; k++) sum = sum + tmp[(size_t)edge_index((int)y + k, h, wrap) * w + x];
+          dst[(size_t)y * w + x] = sum * inv;
+        }
+    });
+    return;
+  }
   JobSystem::global().parallel_for(h, 16, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) {
       const T *row = src.data() + (size_t)y * w;
       T sum = row[0] * 0.0f;
-      for (int k = -r; k <= r; k++) sum = sum + row[wrapi(k, w)];
+      for (int k = -r; k <= r; k++) sum = sum + row[edge_index(k, w, wrap)];
       for (int x = 0; x < w; x++) {
         tmp[(size_t)y * w + x] = sum * inv;
-        sum = sum + row[wrapi(x + r + 1, w)] - row[wrapi(x - r, w)];
+        sum = sum + row[edge_index(x + r + 1, w, wrap)] - row[edge_index(x - r, w, wrap)];
       }
     }
   });
@@ -81,16 +110,16 @@ template<class T> void box_mean(const std::vector<T> &src, std::vector<T> &dst, 
   JobSystem::global().parallel_for(w, 64, [&](int64_t x0, int64_t x1) {
     for (int64_t x = x0; x < x1; x++) {
       T sum = tmp[0] * 0.0f;
-      for (int k = -r; k <= r; k++) sum = sum + tmp[(size_t)wrapi(k, h) * w + x];
+      for (int k = -r; k <= r; k++) sum = sum + tmp[(size_t)edge_index(k, h, wrap) * w + x];
       for (int y = 0; y < h; y++) {
         dst[(size_t)y * w + x] = sum * inv;
-        sum = sum + tmp[(size_t)wrapi(y + r + 1, h) * w + x] - tmp[(size_t)wrapi(y - r, h) * w + x];
+        sum = sum + tmp[(size_t)edge_index(y + r + 1, h, wrap) * w + x] - tmp[(size_t)edge_index(y - r, h, wrap) * w + x];
       }
     }
   });
 }
-/* max - min of the height in a (2r+1)² square, wrapping: two passes of O(r) per texel. */
-void height_range(const TexPlanes &p, int r, std::vector<float> &out) {
+/* max - min of the height in a (2r+1)² square, wrapping (clamped for a surface): two passes of O(r) per texel. */
+void height_range(const TexPlanes &p, int r, std::vector<float> &out, bool wrap = true) {
   const int w = p.w, h = p.h;
   std::vector<float> mx(p.size()), mn(p.size());
   JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
@@ -98,7 +127,7 @@ void height_range(const TexPlanes &p, int r, std::vector<float> &out) {
       for (int x = 0; x < w; x++) {
         float a = 0.0f, b = 1.0f;
         for (int k = -r; k <= r; k++) {
-          const float v = p.height[(size_t)y * w + wrapi(x + k, w)];
+          const float v = p.height[(size_t)y * w + edge_index(x + k, w, wrap)];
           a = std::max(a, v);
           b = std::min(b, v);
         }
@@ -112,7 +141,7 @@ void height_range(const TexPlanes &p, int r, std::vector<float> &out) {
       for (int x = 0; x < w; x++) {
         float a = 0.0f, b = 1.0f;
         for (int k = -r; k <= r; k++) {
-          const size_t j = (size_t)wrapi((int)y + k, h) * w + x;
+          const size_t j = (size_t)edge_index((int)y + k, h, wrap) * w + x;
           a = std::max(a, mx[j]);
           b = std::min(b, mn[j]);
         }
@@ -612,15 +641,17 @@ struct ImageLayer : TextureLayerBase<ImageLayer> {
     if (c.seamless) k = std::max(1.0f, std::round(k));  // whole repeats: the image's own edges meet at the tile's
     const float op = clampf(fin(opacity, 1.0f), 0.0f, 1.0f);
     const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness;
-    JobSystem::global().parallel_for(p.h, 8, [&](int64_t y0, int64_t y1) {
-      for (int64_t y = y0; y < y1; y++)
-        for (int x = 0; x < p.w; x++) {
+    const int rx0 = p.x_begin(), rx1 = p.x_end(), ry0 = p.y_begin(), ry1 = p.y_end();  // (task 0244: the active rect and the layer's own mask)
+    const std::vector<float> *own = p.layer_mask;
+    JobSystem::global().parallel_for(ry1 - ry0, 8, [&](int64_t ya, int64_t yb) {
+      for (int64_t y = ry0 + ya; y < ry0 + yb; y++)
+        for (int x = rx0; x < rx1; x++) {
           const size_t i = (size_t)y * p.w + x;
           const Vec2 uv{(x + 0.5f) / p.w * k, 1.0f - (y + 0.5f) / p.h * k};  // (the planes' rows from the top; a texture's v from its bottom row)
           const Vec4 s = t->sample(uv, 0.0f, TexWrap::Repeat, TexFilter::Linear);
           const Vec3 a = vmax(Vec3(0.0f), vmin(Vec3(1.0f), fin3(Vec3(s.x, s.y, s.z), Vec3(0.5f))));
           const float lum = 0.2126f * a.x + 0.7152f * a.y + 0.0722f * a.z;
-          const float kk = op * (use_mask ? p.mask[i] : 1.0f);
+          const float kk = op * (use_mask ? p.mask[i] : 1.0f) * (own ? (*own)[i] : 1.0f);
           if (kk <= 0.0f) continue;
           if (wa)
             p.albedo[i] = lerp(p.albedo[i], Vec3(texture_blend(blend, p.albedo[i].x, a.x), texture_blend(blend, p.albedo[i].y, a.y), texture_blend(blend, p.albedo[i].z, a.z)), kk);
@@ -641,7 +672,7 @@ struct ImageLayer : TextureLayerBase<ImageLayer> {
   void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
     if (!aux || !aux->image) return;
     const float op = clampf(fin(opacity, 1.0f), 0.0f, 1.0f);
-    const float kk = op * (use_mask ? p.mask : 1.0f);
+    const float kk = op * (use_mask ? p.mask : 1.0f) * p.layer_mask;
     if (kk <= 0.0f) return;
     const Vec4 s = aux->image->sample({u * aux->image_tiling, 1.0f - v * aux->image_tiling}, 0.0f, TexWrap::Repeat, TexFilter::Linear);
     const Vec3 a = vmax(Vec3(0.0f), vmin(Vec3(1.0f), fin3(Vec3(s.x, s.y, s.z), Vec3(0.5f))));
@@ -671,11 +702,13 @@ struct MissingLayer : TextureLayer {
 template<class F> void filter_planes(const TextureLayer &l, TexPlanes &p, F &&fn) {
   const float op = clampf(fin(l.opacity, 1.0f), 0.0f, 1.0f);
   if (op <= 0.0f) return;
-  JobSystem::global().parallel_for(p.h, 8, [&](int64_t y0, int64_t y1) {
-    for (int64_t y = y0; y < y1; y++)
-      for (int x = 0; x < p.w; x++) {
+  const int rx0 = p.x_begin(), rx1 = p.x_end(), ry0 = p.y_begin(), ry1 = p.y_end();  // (task 0244: the active rect)
+  const std::vector<float> *own = p.layer_mask;
+  JobSystem::global().parallel_for(ry1 - ry0, 8, [&](int64_t ya, int64_t yb) {
+    for (int64_t y = ry0 + ya; y < ry0 + yb; y++)
+      for (int x = rx0; x < rx1; x++) {
         const size_t i = (size_t)y * p.w + x;
-        const float k = op * (l.use_mask ? p.mask[i] : 1.0f);
+        const float k = op * (l.use_mask ? p.mask[i] : 1.0f) * (own ? (*own)[i] : 1.0f);
         if (k <= 0.0f) continue;
         fn(x, (int)y, i, k);
       }
@@ -684,12 +717,13 @@ template<class F> void filter_planes(const TextureLayer &l, TexPlanes &p, F &&fn
 
 /* A filter's weight at a point, as filter_planes gives it per texel. */
 inline float point_weight(const TextureLayer &l, const TexPoint &p) {
-  return clampf(fin(l.opacity, 1.0f), 0.0f, 1.0f) * (l.use_mask ? p.mask : 1.0f);
+  return clampf(fin(l.opacity, 1.0f), 0.0f, 1.0f) * (l.use_mask ? p.mask : 1.0f) * p.layer_mask;
 }
 
 struct BlurLayer : TextureLayerBase<BlurLayer> {
   static constexpr const char *kName = "Blur";
   float radius = 2.0f;
+  int halo_texels(const LayerContext &c) const override { return (int)std::lround(clampf(fin(radius, 2.0f), 0.0f, 64.0f) * c.texel_scale); }
   void reflect(Reflector &r) override {
     r.field("Radius", radius, 0.1f, 0.0f, 64.0f);
     r.help("Texels; a box blur, wrapping at the tile's edges.");
@@ -699,15 +733,20 @@ struct BlurLayer : TextureLayerBase<BlurLayer> {
     const int rad = (int)std::lround(clampf(fin(radius, 2.0f), 0.0f, 64.0f) * c.texel_scale);
     if (rad <= 0) return;
     const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness;
-    std::vector<float> bh, br;
-    std::vector<Vec3> ba;
-    if (wh) box_mean(p.height, bh, p.w, p.h, rad);
-    if (wr) box_mean(p.rough, br, p.w, p.h, rad);
-    if (wa) box_mean(p.albedo, ba, p.w, p.h, rad);
+    const bool wm = targets & TargetMetallic, we = targets & TargetEmission;
+    std::vector<float> bh, br, bm;
+    std::vector<Vec3> ba, be;
+    if (wh) box_mean(p.height, bh, p.w, p.h, rad, !c.surface, c.surface);
+    if (wr) box_mean(p.rough, br, p.w, p.h, rad, !c.surface, c.surface);
+    if (wa) box_mean(p.albedo, ba, p.w, p.h, rad, !c.surface, c.surface);
+    if (wm) box_mean(p.metal, bm, p.w, p.h, rad, !c.surface, c.surface);
+    if (we) box_mean(p.emit, be, p.w, p.h, rad, !c.surface, c.surface);
     filter_planes(*this, p, [&](int, int, size_t i, float k) {
       if (wh) p.height[i] = lerpf(p.height[i], bh[i], k);
       if (wr) p.rough[i] = lerpf(p.rough[i], br[i], k);
       if (wa) p.albedo[i] = lerp(p.albedo[i], ba[i], k);
+      if (wm) p.metal[i] = lerpf(p.metal[i], bm[i], k);
+      if (we) p.emit[i] = lerp(p.emit[i], be[i], k);
     });
   }
   /* At a point: the blurred planes (a blur has no detail finer than its radius to lose). */
@@ -717,9 +756,9 @@ struct BlurLayer : TextureLayerBase<BlurLayer> {
     if (rad <= 0) return;
     aux.w = p.w;
     aux.h = p.h;
-    if (targets & TargetHeight) box_mean(p.height, aux.a, p.w, p.h, rad);
-    if (targets & TargetRoughness) box_mean(p.rough, aux.b, p.w, p.h, rad);
-    if (targets & TargetAlbedo) box_mean(p.albedo, aux.c, p.w, p.h, rad);
+    if (targets & TargetHeight) box_mean(p.height, aux.a, p.w, p.h, rad, !c.surface, c.surface);
+    if (targets & TargetRoughness) box_mean(p.rough, aux.b, p.w, p.h, rad, !c.surface, c.surface);
+    if (targets & TargetAlbedo) box_mean(p.albedo, aux.c, p.w, p.h, rad, !c.surface, c.surface);
   }
   void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
     if (!aux || aux->w == 0) return;
@@ -743,10 +782,11 @@ struct LevelsLayer : TextureLayerBase<LevelsLayer> {
   void apply(TexPlanes &p, const LayerContext &) const override {
     const float b = clampf(fin(black, 0.0f), 0.0f, 1.0f), w = clampf(fin(white, 1.0f), 0.0f, 1.0f), g = clampf(fin(gamma, 1.0f), 0.1f, 10.0f);
     auto lv = [&](float v) { return std::pow(clampf((v - b) / std::max(1e-4f, w - b), 0.0f, 1.0f), 1.0f / g); };
-    const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness;
+    const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness, wm = targets & TargetMetallic;
     filter_planes(*this, p, [&](int, int, size_t i, float k) {
       if (wh) p.height[i] = lerpf(p.height[i], lv(p.height[i]), k);
       if (wr) p.rough[i] = lerpf(p.rough[i], lv(p.rough[i]), k);
+      if (wm) p.metal[i] = lerpf(p.metal[i], lv(p.metal[i]), k);
       if (wa) p.albedo[i] = lerp(p.albedo[i], Vec3(lv(p.albedo[i].x), lv(p.albedo[i].y), lv(p.albedo[i].z)), k);
     });
   }
@@ -844,6 +884,7 @@ struct PlaneCopy {
 
 struct WarpLayer : TextureLayerBase<WarpLayer> {
   static constexpr const char *kName = "Warp";
+  bool reads_anywhere() const override { return true; }
   float strength = 0.05f, scale = 3.0f;
   void reflect(Reflector &r) override {
     r.field("Strength", strength, 0.005f, 0.0f, 0.5f);
@@ -878,6 +919,7 @@ struct WarpLayer : TextureLayerBase<WarpLayer> {
 
 struct TileLayer : TextureLayerBase<TileLayer> {
   static constexpr const char *kName = "Tile";
+  bool reads_anywhere() const override { return true; }
   int across = 2, down = 2;
   void reflect(Reflector &r) override {
     r.field("Across", across, 1, 64);
@@ -910,6 +952,7 @@ struct TileLayer : TextureLayerBase<TileLayer> {
 struct EdgeWearLayer : TextureLayerBase<EdgeWearLayer> {
   static constexpr const char *kName = "Edge Wear";
   float width = 2.0f, amount = 0.5f;
+  int halo_texels(const LayerContext &c) const override { return std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale)); }
   bool lighten = true;
   EdgeWearLayer() { targets = TargetAlbedo | TargetRoughness; }
   void reflect(Reflector &r) override {
@@ -922,7 +965,7 @@ struct EdgeWearLayer : TextureLayerBase<EdgeWearLayer> {
   bool is_generator() const override { return false; }
   void apply(TexPlanes &p, const LayerContext &c) const override {
     std::vector<float> e;
-    height_range(p, std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale)), e);
+    height_range(p, std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale)), e, !c.surface);
     /* Narrower than a texel here (a preview): faded by the share of the texel it would cover. */
     const float a = clampf(fin(amount, 0.5f), 0.0f, 1.0f) * std::min(1.0f, clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale);
     const bool wa = targets & TargetAlbedo, wr = targets & TargetRoughness;
@@ -937,7 +980,7 @@ struct EdgeWearLayer : TextureLayerBase<EdgeWearLayer> {
   void make_aux(const TexPlanes &p, const LayerContext &c, LayerAux &aux) const override {
     aux.w = p.w;
     aux.h = p.h;
-    height_range(p, std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale)), aux.a);
+    height_range(p, std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale)), aux.a, !c.surface);
     aux.image_tiling = std::min(1.0f, clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale);  // (the fade, as apply())
   }
   void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
@@ -953,6 +996,7 @@ struct EdgeWearLayer : TextureLayerBase<EdgeWearLayer> {
 struct HeightAoLayer : TextureLayerBase<HeightAoLayer> {
   static constexpr const char *kName = "Height AO";
   float radius = 4.0f, strength = 0.6f;
+  int halo_texels(const LayerContext &c) const override { return std::max(1, (int)std::lround(clampf(fin(radius, 4.0f), 1.0f, 32.0f) * c.texel_scale)); }
   HeightAoLayer() { targets = TargetAlbedo; }
   void reflect(Reflector &r) override {
     r.field("Radius", radius, 0.5f, 1.0f, 32.0f);
@@ -965,7 +1009,7 @@ struct HeightAoLayer : TextureLayerBase<HeightAoLayer> {
     const int rad = std::max(1, (int)std::lround(clampf(fin(radius, 4.0f), 1.0f, 32.0f) * c.texel_scale));
     const float st = clampf(fin(strength, 0.6f), 0.0f, 1.0f);
     std::vector<float> mean;
-    box_mean(p.height, mean, p.w, p.h, rad);
+    box_mean(p.height, mean, p.w, p.h, rad, !c.surface, c.surface);
     filter_planes(*this, p, [&](int, int, size_t i, float k) {
       const float occl = clampf((mean[i] - p.height[i]) * 4.0f, 0.0f, 1.0f) * st;
       p.albedo[i] = lerp(p.albedo[i], p.albedo[i] * (1.0f - occl), k);
@@ -977,7 +1021,7 @@ struct HeightAoLayer : TextureLayerBase<HeightAoLayer> {
     if (!(targets & TargetAlbedo)) return;
     aux.w = p.w;
     aux.h = p.h;
-    box_mean(p.height, aux.a, p.w, p.h, std::max(1, (int)std::lround(clampf(fin(radius, 4.0f), 1.0f, 32.0f) * c.texel_scale)));
+    box_mean(p.height, aux.a, p.w, p.h, std::max(1, (int)std::lround(clampf(fin(radius, 4.0f), 1.0f, 32.0f) * c.texel_scale)), !c.surface, c.surface);
   }
   void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
     if (!aux || aux->w == 0 || !(targets & TargetAlbedo)) return;
@@ -1026,14 +1070,16 @@ struct MaskByHeightLayer : TextureLayerBase<MaskByHeightLayer> {
   void apply(TexPlanes &p, const LayerContext &) const override {
     const float lo = clampf(fin(low, 0.0f), 0.0f, 1.0f), hi = clampf(fin(high, 0.5f), 0.0f, 1.0f), so = clampf(fin(softness, 0.05f), 0.0f, 0.5f);
     const float op = clampf(fin(opacity, 1.0f), 0.0f, 1.0f);
-    JobSystem::global().parallel_for(p.h, 16, [&](int64_t y0, int64_t y1) {
-      for (int64_t y = y0; y < y1; y++)
-        for (int x = 0; x < p.w; x++) {
+    const int rx0 = p.x_begin(), rx1 = p.x_end(), ry0 = p.y_begin(), ry1 = p.y_end();  // (task 0244)
+    const std::vector<float> *own = p.layer_mask;
+    JobSystem::global().parallel_for(ry1 - ry0, 16, [&](int64_t ya, int64_t yb) {
+      for (int64_t y = ry0 + ya; y < ry0 + yb; y++)
+        for (int x = rx0; x < rx1; x++) {
           const size_t i = (size_t)y * p.w + x;
           const float h = p.height[i];
           float m = smooth(lo - so, lo + so, h) * (1.0f - smooth(hi - so, hi + so, h));
           if (invert) m = 1.0f - m;
-          p.mask[i] = lerpf(p.mask[i], m, op);
+          p.mask[i] = lerpf(p.mask[i], m, op * (own ? (*own)[i] : 1.0f));
         }
     });
   }
@@ -1042,7 +1088,7 @@ struct MaskByHeightLayer : TextureLayerBase<MaskByHeightLayer> {
     const float op = clampf(fin(opacity, 1.0f), 0.0f, 1.0f);
     float m = smooth(lo - so, lo + so, p.height) * (1.0f - smooth(hi - so, hi + so, p.height));
     if (invert) m = 1.0f - m;
-    p.mask = lerpf(p.mask, m, op);
+    p.mask = lerpf(p.mask, m, op * p.layer_mask);
   }
 };
 
@@ -1473,6 +1519,9 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Rocks", "Generators", "Stones with a ground line between them, each lit on its upper left (a path, a wall).", make<RocksLayer>},
       {"Water", "Generators", "Water in one tone with thin bent highlight lines where the ripples catch the light.", make<WaterLayer>},
       {"Image", "Generators", "An image file, tiled.", make<ImageLayer>},
+      /* A surface's generators (task 0244, ADR 0080; surface.cpp). */
+      {"Fill", "Generators", "One value per channel over the whole surface (Substance's fill layer).", make_fill_layer},
+      {"Mesh Map", "Generators", "A baked mesh map (occlusion, curvature, thickness, position, normal) through levels: the mask generators' input.", make_mesh_map_layer},
       {"Blur", "Filters", "A box blur of the planes, wrapping at the edges.", make<BlurLayer>},
       {"Levels", "Filters", "Black and white points and a gamma.", make<LevelsLayer>},
       {"Hue / Saturation", "Filters", "Shifts the hue, scales the saturation and the value of the albedo.", make<HsvLayer>},
@@ -1483,6 +1532,9 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Height AO", "Filters", "Darkens low texels (mortar, grout) like ambient occlusion.", make<HeightAoLayer>},
       {"Color Ramp", "Filters", "Colours the albedo from the height.", make<ColorRampLayer>},
       {"Mask by Height", "Filters", "Sets the mask the layers above can fade by.", make<MaskByHeightLayer>},
+      /* A surface's filters (task 0244, ADR 0080; surface.cpp). */
+      {"Anchor", "Filters", "Another layer's mask, by its name (Substance's anchor point).", make_anchor_layer},
+      {"Group", "Filters", "A folder: its layers evaluated apart and blended back with one opacity and mask.", make_group_layer},
   };
   return infos;
 }

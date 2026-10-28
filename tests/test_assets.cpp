@@ -534,7 +534,31 @@ static void round50_tests() {
     CHECK(t && t->layers.size() == 1);
     if (!t) return;
     r34_steps(ed, 3);
-    const Recti ab = ed.texture_ui_rect_for_test("add_layer");
+    /* A row's rect scrolled into the window (the stack's rows run past the pane since a layer shows its Name, its
+     * channels and its mask's Add Effect row, task 0244): the wheel over the pane until it is inside. */
+    auto tex_rect = [&](const std::string &key) {
+      const Recti w = ed.window_rect_for_test(WindowKind::Textures);
+      for (int tries = 0; tries < 80; tries++) {
+        const Recti f = ed.texture_ui_rect_for_test(key);
+        if (f.w <= 0) {
+          r34_steps(ed, 1);
+          continue;
+        }
+        if (f.y >= w.y && f.y + f.h <= w.bottom()) return f;
+        platform::Event mv, wheel;
+        mv.type = platform::EventType::MouseMove;
+        wheel.type = platform::EventType::Wheel;
+        mv.x = wheel.x = f.x + f.w / 2;
+        mv.y = wheel.y = w.bottom() - ed.ui_for_test().px(30);
+        wheel.wheel_y = f.y > w.bottom() ? -3.0f : 3.0f;
+        ed.step_frame_headless({mv});
+        ed.step_frame_headless({wheel});
+        ed.step_frame_headless();
+      }
+      std::printf("    '%s' never came into view\n", key.c_str());
+      return Recti{0, 0, 0, 0};
+    };
+    const Recti ab = tex_rect("add_layer");
     CHECK(ab.w > 0);
     if (ab.w <= 0) return;
     r34_click(ed, ab.x + ab.w / 2, ab.y + ab.h / 2);
@@ -550,14 +574,14 @@ static void round50_tests() {
     }
     r50_pick_row(ed, pop, blur_row);
     CHECK(t->layers.size() == 2 && std::string(t->layers[1]->type_name()) == "Blur");
-    const Recti mr = ed.texture_ui_rect_for_test("layer1");
+    const Recti mr = tex_rect("layer1");
     CHECK(mr.w > 0);
     r34_click(ed, mr.x + mr.w / 2, mr.y + mr.h / 2);
     r34_steps(ed, 2);
     pop = r50_popup(ed);
     r50_pick_row(ed, pop, 0);  // Move Up
     CHECK(std::string(t->layers[0]->type_name()) == "Blur");
-    const Recti cb = ed.texture_ui_rect_for_test("layer_enabled0");
+    const Recti cb = tex_rect("layer_enabled0");
     r34_click(ed, cb.x + cb.w / 2, cb.y + cb.h / 2);
     r34_steps(ed, 2);
     CHECK(!t->layers[0]->enabled);

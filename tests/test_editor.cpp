@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the editor tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
 #include <cstring>
 #include "../src/render/texture_bake.h"
@@ -3496,6 +3497,105 @@ static void tests_round263() {
   });
 }
 
+static const Material &G_material(const GameObject *g) {
+  static Material none;
+  const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+  return mr && !mr->materials.empty() && mr->materials[0] ? *mr->materials[0] : none;
+}
+
+static void tests_round264() {
+  test("a surface in the editor: surface new makes a surface asset on the active object's material (albedo, normal, roughness, metallic, emission maps), add / mask preset / set / group edit it with undo, and a changed stack evaluates on a worker while the frames go on (the slowest printed)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };  // (an undo rebuilds the scene: the pointer must be looked up again)
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    const size_t steps_before_new = ed.undo_steps_for_test();
+    ed.command("surface new TestSurface");
+    const MeshRenderer *mr = g->get<MeshRenderer>();
+    CHECK(mr && !mr->materials.empty() && mr->materials[0]);
+    if (!mr || mr->materials.empty() || !mr->materials[0]) return;
+    const Material &m = *mr->materials[0];
+    std::string asset;
+    int out = -1;
+    /* Four maps and Metallic 1 (the map multiplies it); no emission map until a layer writes emission (an emission map
+     * makes the object a light in the path tracer). */
+    const bool maps = split_texture_ref(m.base_map.path, asset, out) && out == 0 && split_texture_ref(m.metallic_map.path, asset, out) && out == (int)TextureOutput::Metallic &&
+                      m.emission_map.path.empty() && !m.normal_map.path.empty() && !m.roughness_map.path.empty() && m.metallic == 1.0f;
+    ProceduralTexturePtr pt = texture_asset(asset);
+    std::printf("    surface new: %s, surface %d, %zu layer(s), the material's four maps and Metallic 1 %d, no emission map %d\n", asset.c_str(), pt ? (int)pt->surface : -1,
+                pt ? pt->layers.size() : (size_t)0, (int)maps, (int)m.emission_map.path.empty());
+    CHECK(pt && pt->surface && pt->layers.size() == 1 && maps);
+    if (!pt) return;
+    ed.step_frame_headless();
+    std::printf("    surface new made %zu step(s)\n", ed.undo_steps_for_test() - steps_before_new);
+    CHECK(ed.undo_steps_for_test() == steps_before_new + 1);  // (one step, its maps' load included)
+    ed.command("surface add Noise");
+    ed.command("surface mask preset 1 edgewear");
+    ed.command("surface set L1 Opacity 0.5");
+    CHECK(pt->layers.size() == 2 && pt->layers[1]->mask_layers.size() == 2 && std::fabs(pt->layers[1]->opacity - 0.5f) < 1e-6f);
+    ed.command("surface set L1 M0 Low 0.4");
+    bool low_set = false;
+    {
+      struct Read : Reflector {
+        float low = -1.0f;
+        void field(const char *n, float &v, float, float, float) override { if (std::string(n) == "L1 M0 Low") low = v; }
+        void field(const char *, int &, int, int) override {}
+        void field(const char *, bool &) override {}
+        void field(const char *, Vec3 &) override {}
+        void color(const char *, Vec3 &) override {}
+        void enumeration(const char *, int &, const char *const *, int) override {}
+        void text(const char *, std::string &) override {}
+        void mesh(const char *, MeshPtr &) override {}
+      } rd;
+      pt->reflect(rd);
+      low_set = std::fabs(rd.low - 0.4f) < 1e-6f;
+    }
+    CHECK(low_set);
+    ed.step_frame_headless();  // (the pending step of the last field edit commits)
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("surface group 0 1");
+    ed.step_frame_headless();  // (the step commits)
+    std::printf("    after surface group 0 1: %zu layer(s), the first %s with %zu children, %zu step(s)\n", pt->layers.size(), pt->layers.empty() ? "-" : pt->layers[0]->type_name(),
+                pt->layers.empty() || !pt->layers[0]->children() ? (size_t)0 : pt->layers[0]->children()->size(), ed.undo_steps_for_test() - steps);
+    CHECK(pt->layers.size() == 1 && std::string(pt->layers[0]->type_name()) == "Group" && pt->layers[0]->children() && pt->layers[0]->children()->size() == 2 && ed.undo_steps_for_test() == steps + 1);
+    ed.command("undo");
+    pt = texture_asset(asset);
+    std::printf("    after undo: %zu layer(s)\n", pt ? pt->layers.size() : (size_t)0);
+    CHECK(pt && pt->layers.size() == 2);
+    /* The worker: the stack changed, the frames step while it evaluates, the images land. */
+    ed.command("surface add Blur");
+    ed.command("surface set L2 Writes Emission 1");  // (the emission map follows the stack once the worker lands)
+    double slowest = 0.0;
+    int frames = 0;
+    bool ran = false;
+    for (int i = 0; i < 4000 && (i < 3 || ed.surface_busy_for_test()); i++) {
+      const auto t0 = std::chrono::steady_clock::now();
+      ed.step_frame_headless();
+      slowest = std::max(slowest, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+      frames++;
+      ran = ran || ed.surface_busy_for_test();
+      if (ed.surface_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::printf("    the surface's worker ran %d, %d frame(s) meanwhile, the slowest %.1f ms; busy still %d\n", (int)ran, frames, slowest, (int)ed.surface_busy_for_test());
+    CHECK(ran && !ed.surface_busy_for_test());
+    for (int i = 0; i < 4000 && (i < 3 || ed.surface_busy_for_test()); i++) {  // (the set after the add is a second job: let it land)
+      ed.step_frame_headless();
+      if (ed.surface_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const bool emission_now = split_texture_ref(G_material(G()).emission_map.path, asset, out) && out == (int)TextureOutput::Emission;
+    std::printf("    after a layer writes emission: the material's emission map %d\n", (int)emission_now);
+    CHECK(emission_now);
+    ed.command("surface eval 10 10 74 74");
+    ed.command("surface list");
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -3531,5 +3631,6 @@ void run_editor_tests() {
   tests_round252();
   tests_round255();
   tests_round263();
+  tests_round264();
   coverage_tests();
 }

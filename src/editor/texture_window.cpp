@@ -6,6 +6,7 @@
 
 #include "../core/core.h"
 #include "../texture/procedural_texture.h"
+#include "../texture/surface.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -320,15 +321,15 @@ void Editor::draw_textures_window(const Recti &r) {
   /* Preview: an output, 1x or 2 x 2. While a field is being dragged it evaluates at 256 at most, and at the
    * texture's size once the mouse is released. */
   {
-    static const char *outs[] = {"Albedo", "Normal", "Roughness", "Height"};
+    static const char *outs[] = {"Albedo", "Normal", "Roughness", "Height", "Metallic", "Emission"};  // (the last two: task 0244)
     const Recti oc{pane.x, pane.bottom() + u.px(4), pane.w - u.px(56), u.row_h()};
     texture_ui_rects_["output"] = oc;
-    u.combo(u.id("tex_out"), oc, texture_preview_output_, outs, 4);
+    u.combo(u.id("tex_out"), oc, texture_preview_output_, outs, 6);
     const Recti tb{oc.right() + u.px(4), oc.y, u.px(52), u.row_h()};
     if (u.button(tb, texture_preview_tiled_ ? "2 x 2" : "1 x", texture_preview_tiled_)) texture_preview_tiled_ = !texture_preview_tiled_;
     u.tooltip("Show the texture tiled 2 x 2: its edges meet in the middle.");
     ProceduralTexture &t = *texture_selected_;
-    const int which = std::max(0, std::min(3, texture_preview_output_));
+    const int which = std::max(0, std::min(5, texture_preview_output_));
     if (texture_dragging_) {
       const int ps = std::min(256, std::max(64, std::max(t.width, t.height)));
       const TexThumb &th = texture_thumb(t, which, ps);
@@ -364,6 +365,21 @@ void Editor::draw_textures_window(const Recti &r) {
   ui::Layout lay{{left.x + u.px(6), left.y, left.w - u.px(18), left.h}, left.y + u.px(6) - eoff};
   lay.row_h = u.row_h();
   u.label(lay.row(u.row_h() + u.px(4)), texture_selected_->name + "  (" + texture_selected_->asset_path + ")", u.theme.text_bright);
+  if (texture_selected_->surface) {  // (task 0244: a surface's maps and its evaluation's state)
+    Recti sr = lay.row(u.row_h() + u.px(4));
+    const Recti lb{sr.x + u.px(4), sr.y, u.px(130), sr.h};
+    texture_ui_rects_["surface_maps"] = lb;
+    if (u.button(lb, "Load Mesh Maps", false)) {
+      std::string why;
+      GameObject *g = active_object();
+      if (!g || !surface_load_maps(g, *texture_selected_, &why)) Log::warn("Surface: %s", why.empty() ? "select the object first" : why.c_str());
+    }
+    u.tooltip("Read the active object's baked mesh maps (Object > Bake Mesh Maps) into this surface: what its Mesh Map layers and\nmask presets read.");
+    u.label({lb.right() + u.px(8), sr.y, sr.w - lb.w - u.px(16), sr.h},
+            texture_selected_->maps ? strprintf("maps %d x %d%s", texture_selected_->maps->w, texture_selected_->maps->h, surface_job_ ? "  |  evaluating on a worker..." : "")
+                                    : std::string("no mesh maps (Mesh Map layers read flat grey)") + (surface_job_ ? "  |  evaluating on a worker..." : ""),
+            u.theme.text_dim);
+  }
   u.push_id((uint64_t)(uintptr_t)texture_selected_.get());
   const bool changed = draw_texture_fields(lay, texture_selected_);
   u.pop_id();

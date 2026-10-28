@@ -208,7 +208,9 @@ Subdivision: a Subdivision Surface the brush's cage drives, each dab recomputing
 at a chosen resolution from winding columns and surface nets, self-intersections merged, the mask kept; Quad Remesh
 through QuadriFlow on a worker (ZRemesher's class of result, without guides), when the build has Blender's Eigen; Dyntopo, the
 mesh tessellated under the brush as it moves (Sculptris Pro), one snapshot step a stroke. Mesh maps (normal, position,
-curvature, ambient occlusion, thickness) baked from the mesh into its UV layout on a worker, Substance Painter's set.
+curvature, ambient occlusion, thickness) baked from the mesh into its UV layout on a worker, Substance Painter's set. A
+layer stack on an object's surface - fills, a mask as a stack of effects on every layer, generators reading the mesh
+maps (edge wear, dirt, dust), anchors, groups, metallic and emission - redone inside the edited rectangle only.
 
 ## Build it
 
@@ -236,7 +238,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (12898 unit checks in 1107 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (12933 unit checks in 1111 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

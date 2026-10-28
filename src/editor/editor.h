@@ -37,6 +37,7 @@
 #include "../scene/quad_remesh.h"
 #include "../scene/dyntopo.h"
 #include "../render/mesh_maps.h"
+#include "../texture/procedural_texture.h"
 #include "../scene/animation.h"
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
@@ -636,6 +637,7 @@ class Editor {
   bool sculpt_dynamesh_for_test(int resolution, int smooth) { return sculpt_dynamesh(resolution, smooth); }  // (task 0240)
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
   bool meshmaps_busy_for_test() const { return meshmaps_job_ != nullptr; }        // (task 0243)
+  bool surface_busy_for_test() const { return surface_job_ != nullptr; }          // (task 0244)
   std::string resolve_asset_path_for_test(const std::string &rel) const { return resolve_asset_path(rel); }
   bool mesh_maps_stale_for_test(const GameObject *g) const { return mesh_maps_stale(g); }
   bool sculpt_dyntopo_for_test() const { return sculpt_dyntopo_; }  // (task 0242)
@@ -2009,7 +2011,9 @@ class Editor {
   bool draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t);  // panels.cpp; true when a field changed
   /* A texture's layer stack edited (the window's menus and `texlayer`): add <name>, remove / reset <i>, move <i> <j>;
    * one undo step each. */
-  bool texture_stack_op(const std::string &asset, const std::string &op, int i, int j = 0, const std::string &name = "");
+  /* `outer` >= 0 (task 0244): the operation works the sub-list of layer `outer` - its mask stack ("Mask", an added
+   * effect gets a mask effect's targets) or its group's children ("Children"). */
+  bool texture_stack_op(const std::string &asset, const std::string &op, int i, int j = 0, const std::string &name = "", int outer = -1, const std::string &which = "");
   void assign_texture_asset(GameObject *g, const std::string &asset_path);
   bool drop_texture_asset(const std::string &abs_path, int mx, int my);
   bool scene_drawn_ = false;  // the Scene view drew this frame (another tab can hide it)
@@ -3162,6 +3166,28 @@ class Editor {
     }
   };
   std::unique_ptr<MeshMapsJob> meshmaps_job_;
+  /* Task 0244: a surface evaluated off the main thread (ADR 0080). */
+  struct SurfaceJob {
+    std::thread thread;
+    std::atomic<bool> done{false}, cancel{false};
+    std::string path;
+    uint64_t hash = 0;
+    ProceduralTexture copy;
+    std::shared_ptr<TextureOutputsHandle> built;  // the images with their mips, built on the worker
+    ~SurfaceJob() {
+      cancel.store(true, std::memory_order_relaxed);
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<SurfaceJob> surface_job_;
+  std::set<std::string> surface_maps_failed_;  // records whose files were missing: not retried every frame
+  int surface_active_layer_ = 0;  // the layer the rect evaluation starts from (surface layer <i>)
+  ProceduralTexturePtr surface_of(GameObject *g, std::string *why) const;
+  bool surface_load_maps(GameObject *g, ProceduralTexture &pt, std::string *why, bool step = true);
+  void surface_sync_emission(const ProceduralTexture &pt);  // the materials using the surface gain or lose its emission map as its layers write emission
+  bool surface_new(const std::string &name);
+  void surface_command(const std::vector<std::string> &t, const std::string &line);
+  void surface_poll();
   MeshMapsSettings meshmaps_settings_;
   bool bake_mesh_maps_start(const MeshMapsSettings &s);
   void meshmaps_poll();

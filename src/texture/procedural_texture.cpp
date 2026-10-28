@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "procedural_texture.h"
+#include "surface.h"
+
+#include <functional>
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -28,6 +31,20 @@ void TexPlanes::reset(int width, int height_) {
   albedo.assign(size(), Vec3(0.5f));
   alpha.assign(size(), 1.0f);
   alpha_written = false;
+  metal.assign(size(), 0.0f);
+  emit.assign(size(), Vec3(0.0f));
+  rx0 = ry0 = rx1 = ry1 = 0;
+  layer_mask = nullptr;
+}
+
+TextureLayer::~TextureLayer() = default;
+TextureLayer::TextureLayer(const TextureLayer &o) { *this = o; }
+TextureLayer &TextureLayer::operator=(const TextureLayer &o) {
+  if (this == &o) return *this;
+  enabled = o.enabled, ui_expanded = o.ui_expanded, blend = o.blend, opacity = o.opacity, targets = o.targets, use_mask = o.use_mask, name = o.name;
+  mask_layers.clear();
+  for (const auto &l : o.mask_layers) mask_layers.push_back(l->clone());
+  return *this;
 }
 
 uint32_t texture_hash(uint32_t a, uint32_t b, uint32_t c) {
@@ -49,20 +66,25 @@ static const char *kBlendNames[] = {"Normal", "Multiply", "Add", "Screen", "Over
 
 /* The target bits as three checkboxes (files, undo and hashing see three bools). */
 static void reflect_targets(Reflector &r, int &targets) {
-  bool a = targets & TargetAlbedo, h = targets & TargetHeight, ro = targets & TargetRoughness;
+  bool a = targets & TargetAlbedo, h = targets & TargetHeight, ro = targets & TargetRoughness, me = targets & TargetMetallic, em = targets & TargetEmission;
   r.field("Writes Albedo", a);
   r.field("Writes Height", h);
   r.field("Writes Roughness", ro);
-  targets = (a ? TargetAlbedo : 0) | (h ? TargetHeight : 0) | (ro ? TargetRoughness : 0) | (targets & (TargetMask | TargetAlpha));
+  r.field("Writes Metallic", me);
+  r.field("Writes Emission", em);
+  targets = (a ? TargetAlbedo : 0) | (h ? TargetHeight : 0) | (ro ? TargetRoughness : 0) | (me ? TargetMetallic : 0) | (em ? TargetEmission : 0) | (targets & (TargetMask | TargetAlpha));
 }
 
 void TextureLayer::reflect_common(Reflector &r, bool with_enabled) {
   if (with_enabled) r.field("Enabled", enabled);
+  r.text("Name", name);
+  r.help("A name an Anchor effect in another layer's mask reads this layer's mask by (task 0244).");
   r.enumeration("Blend", blend, kBlendNames, 7);
   r.help("How this layer combines with what is below (Substance's layer blend modes; Height Max / Min for stacking heights).");
   r.field("Opacity", opacity, 0.01f, 0.0f, 1.0f);
   reflect_targets(r, targets);
   r.field("Use Mask", use_mask);
+  r.layer_list("Mask", mask_layers, "M");  // (task 0244: the layer's own mask as a stack of effects, "M0 ...")
 }
 
 LayerSample TextureLayer::sample(float, float, const LayerContext &) const { return LayerSample{}; }
@@ -119,11 +141,13 @@ void TextureLayer::apply_point(TexPoint &p, float u, float v, const LayerContext
   }
   /* A card's colour lands everywhere (the holes keep its background colour, so the cut's filtered edge has no grey
    * fringe); its height and roughness, and every plane of other generators, by the cover. */
-  float k = op * cover, ka = card ? op : k;
+  float k = op * cover * p.layer_mask, ka = (card ? op : k) * (card ? p.layer_mask : 1.0f);
   if (use_mask) k *= below, ka *= below;
   if (k <= 0.0f && ka <= 0.0f) return;
   if (k > 0.0f && (targets & TargetHeight)) p.height = clampf(lerpf(p.height, texture_blend(blend, p.height, fin1(s.height, 0.0f)), k), 0.0f, 1.0f);
   if (k > 0.0f && (targets & TargetRoughness)) p.rough = clampf(lerpf(p.rough, texture_blend(blend, p.rough, fin1(s.rough, 0.5f)), k), 0.0f, 1.0f);
+  if (k > 0.0f && (targets & TargetMetallic)) p.metal = clampf(lerpf(p.metal, texture_blend(blend, p.metal, fin1(s.metal, 0.0f)), k), 0.0f, 1.0f);
+  if (k > 0.0f && (targets & TargetEmission)) p.emit = vmax(Vec3(0.0f), lerp(p.emit, blend_color(blend, p.emit, Vec3(fin1(s.emit.x, 0.0f), fin1(s.emit.y, 0.0f), fin1(s.emit.z, 0.0f))), k));
   if (ka > 0.0f && (targets & TargetAlbedo)) {
     const Vec3 a{fin1(s.albedo.x, 0.5f), fin1(s.albedo.y, 0.5f), fin1(s.albedo.z, 0.5f)};
     p.albedo = vmax(Vec3(0.0f), vmin(Vec3(1.0f), lerp(p.albedo, blend_color(blend, p.albedo, a), ka)));
@@ -134,23 +158,28 @@ void TextureLayer::apply(TexPlanes &p, const LayerContext &c) const {
   const float op = clampf(fin1(opacity, 1.0f), 0.0f, 1.0f);
   if (op <= 0.0f) return;
   const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness, card = targets & TargetAlpha;
+  const bool wm = targets & TargetMetallic, we = targets & TargetEmission;
   const bool first_card = card && !p.alpha_written;  // (as apply_point: the first card sets the cover plane, the next adds)
-  JobSystem::global().parallel_for(p.h, 8, [&](int64_t y0, int64_t y1) {
-    for (int64_t y = y0; y < y1; y++) {
+  const int rx0 = p.x_begin(), rx1 = p.x_end(), ry0 = p.y_begin(), ry1 = p.y_end();  // (task 0244: the active rect)
+  const std::vector<float> *own = p.layer_mask;
+  JobSystem::global().parallel_for(ry1 - ry0, 8, [&](int64_t ya, int64_t yb) {
+    for (int64_t y = ry0 + ya; y < ry0 + yb; y++) {
       const float v = (y + 0.5f) / p.h;
-      for (int x = 0; x < p.w; x++) {
+      for (int x = rx0; x < rx1; x++) {
         const size_t i = (size_t)y * p.w + x;
         const LayerSample s = sample((x + 0.5f) / p.w, v, c);
-        const float cover = clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f), below = p.mask[i];
+        const float cover = clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f), below = p.mask[i], mine = own ? (*own)[i] : 1.0f;
         if (card) {
-          const float cov = use_mask ? cover * below : cover;  // (with Use Mask: only where the mask below allows)
+          const float cov = (use_mask ? cover * below : cover) * mine;  // (with Use Mask: only where the mask below allows)
           p.alpha[i] = first_card ? cov : std::max(p.alpha[i], cov);
         }
-        float k = op * cover, ka = card ? op : k;
+        float k = op * cover * mine, ka = (card ? op : k) * (card ? mine : 1.0f);
         if (use_mask) k *= below, ka *= below;
         if (k <= 0.0f && ka <= 0.0f) continue;
         if (k > 0.0f && wh) p.height[i] = clampf(lerpf(p.height[i], texture_blend(blend, p.height[i], fin1(s.height, 0.0f)), k), 0.0f, 1.0f);
         if (k > 0.0f && wr) p.rough[i] = clampf(lerpf(p.rough[i], texture_blend(blend, p.rough[i], fin1(s.rough, 0.5f)), k), 0.0f, 1.0f);
+        if (k > 0.0f && wm) p.metal[i] = clampf(lerpf(p.metal[i], texture_blend(blend, p.metal[i], fin1(s.metal, 0.0f)), k), 0.0f, 1.0f);
+        if (k > 0.0f && we) p.emit[i] = vmax(Vec3(0.0f), lerp(p.emit[i], blend_color(blend, p.emit[i], Vec3(fin1(s.emit.x, 0.0f), fin1(s.emit.y, 0.0f), fin1(s.emit.z, 0.0f))), k));
         if (ka > 0.0f && wa) {
           const Vec3 a{fin1(s.albedo.x, 0.5f), fin1(s.albedo.y, 0.5f), fin1(s.albedo.z, 0.5f)};
           p.albedo[i] = vmax(Vec3(0.0f), vmin(Vec3(1.0f), lerp(p.albedo[i], blend_color(blend, p.albedo[i], a), ka)));
@@ -190,7 +219,7 @@ struct LayerPrefixReflector : Reflector {
 };
 }  // namespace
 
-void Reflector::layer_list(const char *name, TextureLayerList &layers) {
+void Reflector::layer_list(const char *name, TextureLayerList &layers, const char *item_prefix) {
   std::string types;
   for (const auto &l : layers) types += std::string(l->type_name()) + ";";
   const std::string before = types;
@@ -209,7 +238,7 @@ void Reflector::layer_list(const char *name, TextureLayerList &layers) {
     layers = std::move(fresh);
   }
   for (size_t i = 0; i < layers.size(); i++) {
-    LayerPrefixReflector p(*this, "L" + std::to_string(i) + " ");
+    LayerPrefixReflector p(*this, std::string(item_prefix) + std::to_string(i) + " ");
     layers[i]->reflect_common(p);
     layers[i]->reflect(p);
   }
@@ -235,6 +264,9 @@ ProceduralTexture &ProceduralTexture::operator=(const ProceduralTexture &o) {
   live_shading = o.live_shading;
   use_normal = o.use_normal, use_roughness = o.use_roughness, use_height = o.use_height;  // (the output switches were left behind: a preset without a normal map got one back)
   alpha_from_cover = o.alpha_from_cover;
+  surface = o.surface;
+  maps = o.maps;
+  maps_from = o.maps_from;
   layers.clear();
   for (const auto &l : o.layers) layers.push_back(l->clone());
   return *this;
@@ -266,6 +298,11 @@ void ProceduralTexture::reflect(Reflector &r) {
   r.field("Live Shading", live_shading);
   r.help("Up close the views evaluate the layers per pixel, like a shader (sharp at any distance), instead of\n"
          "reading the image; further away, and in path-traced renders and exports, the image at this size.");
+  r.field("Surface", surface);
+  r.help("The texture is one object's surface in its UV space (task 0244): no wrap, no seamless blend; its Mesh Map layers\n"
+         "read the object's baked maps (`surface maps`) and the neighbourhood filters stay inside the UV islands.");
+  r.text("Mesh Maps", maps_from);
+  r.help("The mesh maps record this surface reads (Object > Bake Mesh Maps, then `surface maps`): reloaded when the file opens.");
   r.field("Alpha From Cover", alpha_from_cover);
   r.help("The albedo image's alpha is what the cards cover (task 0150): a Leaves, Grass or Clouds generator covers only\n"
          "its shapes, so a Cutout material shows holes between them (a foliage card, a cloud card). Stacked cards add\n"
@@ -284,6 +321,7 @@ void ProceduralTexture::reflect(Reflector &r) {
 uint64_t ProceduralTexture::hash() {
   uint64_t h = hash_reflect([this](Reflector &r) { reflect(r); });
   const uint64_t sz = (uint64_t)pow2_size(width) << 32 | (uint64_t)pow2_size(height);
+  if (maps) h ^= maps->hash * 0x9e3779b97f4a7c15ull;  // (task 0244: the maps the Mesh Map layers read)
   return (h ^ sz) * 1099511628211ull;
 }
 
@@ -328,6 +366,8 @@ LayerContext ProceduralTexture::context(int w, int h) const {
   c.w = w;
   c.h = h;
   c.physical_size = fin1(physical_size, 1.0f) > 0.0f ? fin1(physical_size, 1.0f) : 1.0f;
+  c.surface = surface;
+  c.maps = surface ? maps.get() : nullptr;
   c.seed = (uint32_t)seed;
   c.seamless = seamless;
   return c;
@@ -342,16 +382,21 @@ void ProceduralTexture::evaluate(TexPlanes &out, std::vector<LayerAux> *aux, int
     aux->clear();
     aux->resize(layers.size());
   }
-  for (size_t i = 0; i < layers.size(); i++) {
-    const TextureLayer &l = *layers[i];
-    if (!l.enabled) continue;
-    if (aux && l.needs_aux()) {
-      l.make_aux(out, c, (*aux)[i]);
-      shrink_aux((*aux)[i], 1024);
-    }
-    l.apply(out, c);
-  }
+  std::map<std::string, std::vector<float>> anchors;
+  apply_layer_range(layers, 0, layers.size(), out, c, anchors, aux);  // (task 0244: own masks, anchors, the surface's dilation)
+  if (aux)
+    for (auto &a : *aux) shrink_aux(a, 1024);
+  if (c.maps && !c.maps->empty()) dilate_uncovered(out, *c.maps);  // (the outputs' padding: each island's own border)
 }
+
+void ProceduralTexture::evaluate_below(TexPlanes &out, size_t n, std::map<std::string, std::vector<float>> *anchors) const {
+  out.reset(pow2_size(width), pow2_size(height));
+  LayerContext c = context(out.w, out.h);
+  std::map<std::string, std::vector<float>> own;
+  apply_layer_range(layers, 0, std::min(n, layers.size()), out, c, anchors ? *anchors : own, nullptr);
+}
+
+Vec3 texture_blend_color(int mode, Vec3 below, Vec3 v) { return blend_color(mode, below, v); }
 
 /* ===================================================================== */
 /* Live textures (task 0031)                                              */
@@ -364,6 +409,15 @@ LiveTexture::LiveTexture(const ProceduralTexture &t, std::vector<LayerAux> aux, 
   hash_ = tex_.hash() ^ ((uint64_t)w << 40 | (uint64_t)h << 20);
   aux_.resize(tex_.layers.size());
   for (const auto &l : tex_.layers) shapes_height_.push_back((l->targets & (TargetHeight | TargetMask)) != 0);
+  /* The copy's mask effects are made mask effects once here (task 0244), so a point evaluation applies them as they
+   * are instead of cloning each one per point. */
+  std::function<void(TextureLayerList &)> prepare = [&](TextureLayerList &ls) {
+    for (auto &l : ls) {
+      for (auto &e : l->mask_layers) make_mask_effect(*e), e->mask_layers.clear();
+      if (l->children()) prepare(*l->children());
+    }
+  };
+  prepare(tex_.layers);
 }
 
 TexPoint LiveTexture::eval(size_t n, float u, float v, bool height_only) const {
@@ -409,7 +463,9 @@ TexPoint LiveTexture::eval(size_t n, float u, float v, bool height_only) const {
       }
       continue;
     }
+    p.layer_mask = own_mask_at(l, p, u, v, ctx_);  // (task 0244: the layer's own mask at the point)
     l.apply_point(p, u, v, ctx_, aux_[i].empty() ? nullptr : &aux_[i]);
+    p.layer_mask = 1.0f;
   }
   return p;
 }
@@ -467,6 +523,12 @@ Bitmap ProceduralTexture::output(int which, const TexPlanes &p) const {
             break;
           }
           case TextureOutput::Roughness: o[0] = o[1] = o[2] = (uint8_t)clampf(p.rough[i] * 255.0f + 0.5f, 0.0f, 255.0f); break;
+          case TextureOutput::Metallic: o[0] = o[1] = o[2] = (uint8_t)clampf((i < p.metal.size() ? p.metal[i] : 0.0f) * 255.0f + 0.5f, 0.0f, 255.0f); break;
+          case TextureOutput::Emission:
+            o[0] = display::linear_to_srgb8(i < p.emit.size() ? p.emit[i].x : 0.0f);
+            o[1] = display::linear_to_srgb8(i < p.emit.size() ? p.emit[i].y : 0.0f);
+            o[2] = display::linear_to_srgb8(i < p.emit.size() ? p.emit[i].z : 0.0f);
+            break;
           default: o[0] = o[1] = o[2] = (uint8_t)clampf(p.height[i] * 255.0f + 0.5f, 0.0f, 255.0f); break;
         }
       }
@@ -480,10 +542,10 @@ Bitmap ProceduralTexture::output(int which) const {
   return output(which, p);
 }
 
-static const char *kOutputNames[] = {"albedo", "normal", "roughness", "height"};
-const char *texture_output_name(int which) { return which >= 0 && which < 4 ? kOutputNames[which] : "albedo"; }
+static const char *kOutputNames[] = {"albedo", "normal", "roughness", "height", "metallic", "emission"};
+const char *texture_output_name(int which) { return which >= 0 && which < (int)TextureOutput::Count ? kOutputNames[which] : "albedo"; }
 int texture_output_index(const std::string &name) {
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < (int)TextureOutput::Count; i++)
     if (name == kOutputNames[i]) return i;
   return -1;
 }
@@ -507,28 +569,36 @@ bool split_texture_ref(const std::string &path, std::string &asset, int &output)
 namespace {
 struct CachedOutput {
   uint64_t hash = 0;
-  TexturePtr tex[4];
-  bool have[4] = {false, false, false, false};
+  TexturePtr tex[(int)TextureOutput::Count];
+  bool have[(int)TextureOutput::Count] = {false, false, false, false, false, false};
   LiveTexturePtr live;
 };
 std::mutex g_cache_mutex;
 std::unordered_map<std::string, CachedOutput> g_cache;
 std::set<std::string> g_previews;  // asset paths in preview (under g_cache_mutex)
+std::set<std::string> g_async;     // asset paths a worker evaluates (task 0244): a stale entry is returned, not recomputed
 const int kPreviewSize = 256;
 
-const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
-  const std::string path = t.asset_path.empty() ? "<" + t.name + ">" : t.asset_path;
+uint64_t cache_hash(ProceduralTexture &t) {
   /* The images don't depend on Live Shading: hashed without it, so toggling it doesn't re-evaluate them. */
   const bool live = t.live_shading;
   t.live_shading = true;
   const uint64_t h = t.hash();
   t.live_shading = live;
+  return h;
+}
+
+const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
+  const std::string path = t.asset_path.empty() ? "<" + t.name + ">" : t.asset_path;
+  const bool live = t.live_shading;
+  const uint64_t h = cache_hash(t);
   bool preview;
   {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     preview = g_previews.count(path) > 0;
     auto it = g_cache.find(path + (preview ? "#preview" : ""));
     if (it != g_cache.end() && it->second.hash == h && it->second.have[0] && (!live || it->second.live)) return out = it->second;
+    if (it != g_cache.end() && it->second.have[0] && !preview && g_async.count(path)) return out = it->second;  // (task 0244: the last result until the worker's lands; a drag's preview is always fresh)
   }
   const std::string key = path + (preview ? "#preview" : "");
   /* Evaluated outside the lock (a stack can take a while, and its parallel_for may run other work on this
@@ -538,7 +608,7 @@ const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
   t.evaluate(planes, live ? &aux : nullptr, preview ? kPreviewSize : 0);  // (the kept planes only for live shading)
   CachedOutput fresh;
   fresh.hash = h;
-  for (int k = 0; k < 4; k++) {
+  for (int k = 0; k < (int)TextureOutput::Count; k++) {
     auto tex = std::make_shared<Texture>();
     tex->name = t.name + "#" + texture_output_name(k);
     tex->build(t.output(k, planes), k == (int)TextureOutput::Albedo);
@@ -554,13 +624,53 @@ const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
 
 TexturePtr procedural_texture_output(ProceduralTexture &t, int which) {
   CachedOutput c;
-  return cached_outputs(t, c).tex[std::max(0, std::min(3, which))];
+  return cached_outputs(t, c).tex[std::max(0, std::min((int)TextureOutput::Count - 1, which))];
 }
 
 LiveTexturePtr procedural_texture_live(ProceduralTexture &t) {
   CachedOutput c;
   return cached_outputs(t, c).live;
 }
+
+void procedural_texture_set_async(const std::string &asset_path, bool on) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  if (on) g_async.insert(asset_path);
+  else g_async.erase(asset_path);
+}
+
+uint64_t procedural_texture_cache_hash(ProceduralTexture &t) { return cache_hash(t); }
+
+bool procedural_texture_cached(const std::string &asset_path, uint64_t hash) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  auto it = g_cache.find(asset_path);
+  return it != g_cache.end() && it->second.hash == hash && it->second.have[0];
+}
+
+
+struct TextureOutputsHandle {
+  CachedOutput out;
+};
+
+std::shared_ptr<TextureOutputsHandle> procedural_texture_cache_build(const ProceduralTexture &t, uint64_t hash, TexPlanes &planes, std::vector<LayerAux> aux) {
+  auto h = std::make_shared<TextureOutputsHandle>();
+  h->out.hash = hash;
+  for (int k = 0; k < (int)TextureOutput::Count; k++) {
+    auto tex = std::make_shared<Texture>();
+    tex->name = t.name + "#" + texture_output_name(k);
+    tex->build(t.output(k, planes), k == (int)TextureOutput::Albedo);
+    h->out.tex[k] = tex;
+    h->out.have[k] = true;
+  }
+  if (t.live_shading) h->out.live = std::make_shared<const LiveTexture>(t, std::move(aux), planes.w, planes.h);
+  return h;
+}
+
+void procedural_texture_cache_store(const std::string &asset_path, const std::shared_ptr<TextureOutputsHandle> &built) {
+  if (!built) return;
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  g_cache[asset_path] = built->out;
+}
+
 
 void procedural_texture_set_preview(const std::string &asset_path, bool on) {
   std::lock_guard<std::mutex> lock(g_cache_mutex);

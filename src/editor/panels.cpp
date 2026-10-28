@@ -929,17 +929,32 @@ struct InspectorReflector : Reflector {
   /* A texture's layer stack (task 0028), like a camera's filter stack: each layer a foldout with its checkbox and a
    * menu (Move Up / Down, Reset, Remove), then Add Layer by category. Menus edit through texture_stack_op at the
    * end of the frame, by the asset's path. */
-  void layer_list(const char *, TextureLayerList &layers) override {
+  int layer_depth = 0, layer_outer = -1;  // (task 0244: a layer's mask stack or a group's children are drawn one level in)
+  void layer_list(const char *list_name, TextureLayerList &layers, const char *item_prefix) override {
     if (!edited_texture) return;
     const std::string path = edited_texture->asset_path;
+    const bool nested = layer_depth > 0;
+    const std::string which = nested ? std::string(list_name) : std::string();
+    const int outer = nested ? layer_outer : -1;
+    if (layer_depth > 1) {  // (a mask inside a group's child: the console's surface commands edit it)
+      Recti er = lay.row();
+      u.label({er.x + u.px(8), er.y, er.w - u.px(16), er.h}, strprintf("%s: %zu (the surface commands edit it)", list_name, layers.size()), u.theme.text_dim);
+      return;
+    }
+    const std::string key = nested ? strprintf("%s%d_", item_prefix, outer) : std::string();  // (the rects' names: "M3_layer0" a mask effect, "C3_layer0" a child; the top level keeps its own)
+    const std::string outer_prefix = record_prefix;
     const int n = (int)layers.size();
-    if (layers.empty()) {
+    if (layers.empty() && !nested) {
       Recti er = lay.row();
       u.label({er.x + u.px(8), er.y, er.w - u.px(16), er.h}, "No layers. Add Layer starts the stack (a generator first).", u.theme.text_dim);
     }
+    if (nested && n > 0) {
+      Recti hr = lay.row();
+      u.label({hr.x + u.px(8), hr.y, hr.w - u.px(16), hr.h}, which == "Mask" ? "Mask: the effects below shape this layer's own mask" : "In the group", u.theme.text_dim);
+    }
     for (int i = 0; i < n; i++) {
       TextureLayer &l = *layers[(size_t)i];
-      u.push_id((uint64_t)i + 9000);
+      u.push_id((uint64_t)i + (!nested ? 9000 : which == "Mask" ? 12000 : 15000));
       lay.space(u.px(2));
       Recti h = lay.row(u.row_h() + u.px(4));
       h.x += u.px(4);
@@ -950,53 +965,63 @@ struct InspectorReflector : Reflector {
       if (u.hovered(fr) && u.in.pressed[0]) l.ui_expanded = !l.ui_expanded;
       u.draw_icon(l.ui_expanded ? Icon::ArrowDown : Icon::ArrowRight, {h.x + u.px(2), h.y + (h.h - a) / 2, a, a}, u.theme.text);
       const Recti cb{fr.right(), h.y, a + u.px(4), h.h};
-      ed.texture_ui_rects_["layer_enabled" + std::to_string(i)] = cb;
+      ed.texture_ui_rects_[key + "layer_enabled" + std::to_string(i)] = cb;
       if (u.checkbox(cb, l.enabled)) {
-        record(FieldEdit::Bool, ("L" + std::to_string(i) + " Enabled").c_str()).b_new = l.enabled;
+        record(FieldEdit::Bool, (std::string(item_prefix) + std::to_string(i) + " Enabled").c_str()).b_new = l.enabled;
         changed = true;
       }
       const TextureLayerInfo *info = find_texture_layer_info(l.type_name());
       Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
-      u.label(tr, l.type_name(), l.enabled ? u.theme.text_bright : u.theme.text_dim);
+      const std::string title = l.name.empty() ? std::string(l.type_name()) : l.name + "  (" + l.type_name() + ")";
+      u.label(tr, title, l.enabled ? u.theme.text_bright : u.theme.text_dim);
       if (u.hovered(tr) && u.in.pressed[0]) l.ui_expanded = !l.ui_expanded;
-      if (!path.empty()) ed.stack_drag_item("layers:" + path, i, tr, h, &l.ui_expanded);  // (an unsaved texture can't move)
-      if (u.record_buttons) u.button_rects["layer_head" + std::to_string(i)] = tr;  // (tests)
+      if (!path.empty() && !nested) ed.stack_drag_item("layers:" + path, i, tr, h, &l.ui_expanded);  // (an unsaved texture can't move)
+      if (u.record_buttons) u.button_rects[key + "layer_head" + std::to_string(i)] = tr;  // (tests)
       if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
       const int bs = h.h - u.px(4);
       Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
       ui::Id mid = u.id("layer_menu");
-      ed.texture_ui_rects_["layer" + std::to_string(i)] = mr;
-      if (u.icon_button(mr, Icon::Menu, false, "Move, reset or remove this layer")) u.open_popup(mid, mr);
+      ed.texture_ui_rects_[key + "layer" + std::to_string(i)] = mr;
+      if (u.icon_button(mr, Icon::Menu, false, nested ? "Move, reset or remove this effect" : "Move, reset or remove this layer")) u.open_popup(mid, mr);
       Editor *edp = &ed;
-      u.popup(mid, u.px(200), [edp, path, i, n] {
+      u.popup(mid, u.px(200), [edp, path, i, n, outer, which] {
         auto &uu = edp->ui_;
-        if (uu.menu_item("Move Up", nullptr, false, i > 0)) edp->texture_stack_op(path, "move", i, i - 1);
-        if (uu.menu_item("Move Down", nullptr, false, i + 1 < n)) edp->texture_stack_op(path, "move", i, i + 1);
-        if (uu.menu_item("Reset")) edp->texture_stack_op(path, "reset", i);
+        if (uu.menu_item("Move Up", nullptr, false, i > 0)) edp->texture_stack_op(path, "move", i, i - 1, "", outer, which);
+        if (uu.menu_item("Move Down", nullptr, false, i + 1 < n)) edp->texture_stack_op(path, "move", i, i + 1, "", outer, which);
+        if (uu.menu_item("Reset")) edp->texture_stack_op(path, "reset", i, 0, "", outer, which);
         uu.menu_separator();
-        if (uu.menu_item("Remove Layer")) edp->texture_stack_op(path, "remove", i);
+        if (uu.menu_item(which == "Mask" ? "Remove Effect" : "Remove Layer")) edp->texture_stack_op(path, "remove", i, 0, "", outer, which);
       });
       if (l.ui_expanded) {
         lay.indent += u.px(10);
-        record_prefix = "L" + std::to_string(i) + " ";
+        record_prefix = outer_prefix + item_prefix + std::to_string(i) + " ";
+        layer_depth++;
+        layer_outer = i;
         l.reflect_common(*this, false);
         l.reflect(*this);
-        record_prefix.clear();
+        layer_depth--;
+        layer_outer = outer;
+        record_prefix = outer_prefix;
         lay.indent -= u.px(10);
       }
       u.pop_id();
     }
-    int from = 0, to = 0;
-    if (ed.stack_drag_end("layers:" + path, from, to)) ed.texture_stack_op(path, "move", from, to);
+    if (!nested) {
+      int from = 0, to = 0;
+      if (ed.stack_drag_end("layers:" + path, from, to)) ed.texture_stack_op(path, "move", from, to);
+    }
     lay.space(u.px(4));
     Recti ar = lay.row(u.row_h() + u.px(4));
     Recti ab{ar.x + u.px(4), ar.y, std::min(ar.w - u.px(8), u.px(200)), ar.h};
-    ui::Id add = u.id("add_layer");
-    ed.texture_ui_rects_["add_layer"] = ab;
-    if (u.button(ab, "Add Layer", false, Icon::Plus)) u.open_popup(add, ab);
-    u.tooltip("Add a generator (a pattern) or a filter (changes what is below) to the top of the stack.");
+    ui::Id add = u.id(!nested ? "add_layer" : which == "Mask" ? "add_effect" : "add_child");
+    ed.texture_ui_rects_[key + "add_layer"] = ab;
+    const char *add_label = !nested ? "Add Layer" : which == "Mask" ? "Add Effect" : "Add to Group";
+    if (u.button(ab, add_label, false, Icon::Plus)) u.open_popup(add, ab);
+    u.tooltip(!nested ? "Add a generator (a pattern) or a filter (changes what is below) to the top of the stack."
+                      : which == "Mask" ? "Add an effect to this layer's mask: a generator's values, a Mesh Map through levels, Levels, Blur, an Anchor to another layer's mask."
+                                        : "Add a layer inside the group.");
     Editor *edp = &ed;
-    u.popup(add, u.px(240), [edp, path] {
+    u.popup(add, u.px(240), [edp, path, outer, which] {
       auto &uu = edp->ui_;
       std::string category;
       for (const TextureLayerInfo &li : texture_layer_infos()) {
@@ -1004,7 +1029,7 @@ struct InspectorReflector : Reflector {
           category = li.category;
           uu.menu_label(category);
         }
-        if (uu.menu_item(li.name)) edp->texture_stack_op(path, "add", 0, 0, li.name);
+        if (uu.menu_item(li.name)) edp->texture_stack_op(path, "add", 0, 0, li.name, outer, which);
         uu.tooltip(li.help);
       }
     });

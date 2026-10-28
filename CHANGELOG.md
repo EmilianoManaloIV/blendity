@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 264): the layer stack on an object's surface (task 0244)
+
+**Asked:** Substance Painter's pillars - the layer stack with masks, mesh maps and generators, smart materials,
+painting on the model. After the mesh maps: the stack that reads them.
+
+**Added**
+- **A surface** (`ProceduralTexture::surface`, ADR 0080): a texture asset in one object's UV space - no wrap, no
+  seamless blend - with the object's baked mesh maps as planes the layers read (`SurfaceMaps`, `src/texture/surface.cpp`)
+  and the coverage keeping the neighbourhood filters (Blur, Edge Wear, Height AO) inside the UV islands: every
+  uncovered texel takes its nearest island's values before a filter reads, so nothing bleeds across a gap.
+- **Two more channels:** metallic and emission on every layer stack (`Writes Metallic`, `Writes Emission`), as the
+  `#metallic` and `#emission` outputs a material's maps take; a surface's material gets all five.
+- **A mask as its own stack** on every layer (`Mask` in the Textures window: Add Effect): a generator's values (Noise,
+  Voronoi, Checker, Gradient...), **Mesh Map** (ambient occlusion, curvature, thickness, a position or world-normal
+  axis through levels), Levels, Blur, **Anchor** (another layer's mask by that layer's Name); the smart-mask presets
+  `surface mask preset <layer> edgewear|dirt|dust|metaledgewear|positiongradient|thickness` build such stacks, editable
+  afterwards. **Fill** (one value per channel) and **Group** (a sub-stack blended back with one opacity and mask) layers.
+- **The rect engine:** the composite below an edited layer is kept and only the layers from it up are redone inside the
+  edited rectangle grown by the filters' halo; the result is bit for bit the full evaluation inside the rect (for
+  surfaces the box filter sums each window directly and clamps at the atlas edge; tiling textures keep their running
+  sums). Every loaded surface whose stack changed is evaluated on a worker, the images built there, the views showing
+  the last images until the next land. Console: `surface new|add|mask|group|set|layer|eval|maps|list`.
+- **Measured** (`tests_round264`): a 512 stack of a masked Fill, Noise, Blur 4, Edge Wear, an anchored Levels: 0 of
+  4,096 texels inside a 64 x 64 rect differ from the full evaluation, 0 of 255,088 outside its halo touched; at 2048
+  the full stack 300-400 ms over the runs, the composite below the Noise 110-180 ms, a 128 x 128 rect from the Noise
+  up 90-120 ms. The Edge Wear preset on a subdivided cube's baked curvature: the edge band's mask 0.50 against 0.02 on
+  the face centres. Blur 8 over two islands: the white one's minimum 1.0000, the black one's maximum 0.0000, the
+  padding each its own. The editor's slowest frame while a surface's worker ran: 15-45 ms over the runs.
+**Review (Opus, round 264):** ten majors, four minors and a nit, all taken before landing except where the spec now says otherwise. A surface's images had frozen - the output cache answered every request with the first images once a worker had run, drags included, and only the selected texture ever got a worker (every loaded surface whose hash moved gets one now, the drag preview is never served stale, and the images with their mips are built on the worker). The mesh maps were lost on undo and on reopening (they are files, not text: the record's path is a field now, the maps are kept across an undo and reloaded on open). A group's children and its mask had shared field names ("L1 L0 ...": a saved file gave the child the effect's opacity) - mask effects are "M0 ...", children "C0 ...". The material's metallic map multiplied a Metallic of 0, so it did nothing, and every surface became a mesh light through an emission map it did not write (Metallic 1, the emission map only when a layer writes emission, Extend wrap). The rect pass started from no anchors and skipped the dilation the full pass ends with (the anchors come with the composite below, the halo doubles over maps, the pass dilates at its end; a group's halo counts its children's masks; Image and Mask by Height honour the rect and the layer's own mask). A surface's Blur had wrapped across the atlas (clamped now) and the dilation does not stop islands closer than the blur radius from mixing in their gutter (the spec says so). A mistyped preset had cleared the mask (validated first). The box filter's direct window sums apply to surfaces only: tiling textures keep their running sums and their results. Also: the mask stack's scratch planes hold only what the effects read; the live path prepares mask effects once instead of cloning per point; the Mesh Map's softness is a rounded ramp; Blur and Levels work the metallic (and Blur the emission) channel; a group blends colour and emission by its mode. Not built, and said so in the spec: the slider path through the rect engine (an edit to a generator's field changes the whole surface; the engine serves round 0245's dabs), Substance's row letters and a Set as Surface button.
+
+**Checked**
+- `tests_round264` in `tests/test_render.cpp` (3 tests: the channels, the Levels mask, the Anchor, the file round trip
+  with groups and masks, the new outputs' references; the Edge Wear preset on a cube, Blur between two islands; rect
+  equals full, the times) and `tests/test_editor.cpp` (surface new and the material's five maps, add, a mask preset,
+  set, group with undo, the worker and the frames meanwhile).
+- Unit checks (round 264): Windows, in render-cache verify mode, 12933, 0 failed (1111 tests), 0 stale
+  pictures. Linux with libraries: 12473, 0 failed. Sanitizer build: 12320, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open and path-tracer-off-the-main-thread tests failed under the parallel load and passed alone.)
+
 ## 2026-10-28 (round 263): mesh maps (task 0243)
 
 **Asked:** Substance Painter's pillars - the layer stack with masks, mesh maps and generators, smart materials,

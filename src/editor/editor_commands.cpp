@@ -917,6 +917,10 @@ void Editor::run_console_command(const std::string &line) {
     toonstyle_command(name);
     return;
   }
+  if (c == "surface") {  // surface new|add|mask|group|set|layer|eval|maps|list (task 0244)
+    surface_command(t, line);
+    return;
+  }
   if (c == "meshmaps") {  // meshmaps [size] [samples] [keepuvs|layout] | cancel | status (task 0243)
     meshmaps_command(t);
     return;

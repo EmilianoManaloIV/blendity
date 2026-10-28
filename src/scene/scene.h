@@ -104,7 +104,9 @@ struct Reflector {
   virtual void filter_effects(const char *name, FilterEffectList &effects);
   /* A procedural texture's layers (ADR 0017): the same scheme with an "L0 " prefix. Defined in
    * texture/procedural_texture.cpp; the Textures window draws the stack instead. */
-  virtual void layer_list(const char *name, TextureLayerList &layers);
+  /* `item_prefix`: the letter the items' fields are named by ("L0 Opacity"; a layer's mask effects "M0 ...", a
+   * group's children "C0 ...", task 0244 - the three lists under one layer must not share names). */
+  virtual void layer_list(const char *name, TextureLayerList &layers, const char *item_prefix = "L");
   /* Serialization, undo and hashing must see every field, including ones the
    * Inspector hides for the current mode (e.g. path tracer samples while the
    * raster engine is active). */

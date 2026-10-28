@@ -1202,3 +1202,18 @@ built on the mesh alone. A 1,024 bake is sixteen times the texels. The bake and 
 |---|---|---|
 | the sphere at 256, 16 samples | 2,039,808 | 27-37 ms |
 | the editor's slowest frame while a 256 bake ran (after the cold frames) | | 4-14 ms |
+
+## The layer stack on a surface (task 0244)
+
+`tests_round264` (headless, one run): a surface of a masked Fill, Noise, Blur (radius 4), Edge Wear, an anchored
+Levels. The rect engine keeps the composite below the edited layer and redoes the layers from it up inside the edited
+rectangle grown by the filters' halo; for surfaces the box filter sums each window directly (O(r) a texel; running sums
+carry every earlier texel's rounding into the result, so the rect could not be bitwise the full evaluation) - tiling
+textures keep their running sums. Full evaluations run on a worker, which also builds the images and their mips.
+
+| Evaluation | Time |
+|---|---|
+| the whole stack at 2048 (direct window sums) | 300-400 ms over the runs |
+| the composite below the Noise (layer 1) at 2048 | 110-180 ms |
+| a 128 x 128 rect from the Noise up at 2048 (halo 10) | 90-120 ms |
+| the editor's slowest frame while a 1024 surface's worker ran | 15-45 ms |

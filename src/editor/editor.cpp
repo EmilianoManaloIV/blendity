@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "../scene/curve.h"
 #include "editor.h"
+#include "../texture/surface.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
 #include "../render/texture_bake.h"
@@ -74,6 +75,7 @@ Editor::Editor() = default;
 Editor::~Editor() {
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
+  surface_job_.reset();    // (task 0244: a surface evaluation the same)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
@@ -658,6 +660,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   sculpt_remesh_poll();  // (task 0241: a finished Quad Remesh lands as a step)
   if (sculpt_remesh_) ui_.redraw = true;  // (frames while it works: the status line and the result's arrival)
   meshmaps_poll();  // (task 0243: finished mesh maps land as files and a record)
+  surface_poll();   // (task 0244: a changed surface evaluated on a worker, its images swapped in)
   if (meshmaps_job_) {
     ui_.redraw = true;
     if (ui_.in.key_pressed[platform::KEY_ESCAPE] && scene_hovered_ && !ui_.wants_keyboard() && !modal_.active) meshmaps_cancel(), ui_.in.key_pressed[platform::KEY_ESCAPE] = false;
@@ -2162,10 +2165,13 @@ void Editor::restore_texture_texts(const std::vector<std::pair<std::string, std:
     if (!load_texture_text(kv.second, fresh)) continue;
     const uint64_t v = pt->version;
     const std::string path = pt->asset_path, name = pt->name;
+    const std::shared_ptr<const SurfaceMaps> maps = pt->maps;  // (task 0244: the mesh maps are files, not text - kept across the undo while the record is the same)
+    const std::string maps_from = pt->maps_from;
     *pt = fresh;
     pt->asset_path = path;
     pt->name = name;
     pt->version = v;
+    if (pt->maps_from == maps_from) pt->maps = maps;  // (a different record: surface_poll reloads from it, or none)
     pt->touch();  // a new version: saved back to its file, and the views redraw
   }
 }
@@ -2341,41 +2347,62 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
   if (!written.empty()) Log::info("Export: %zu procedural texture image(s) written beside the file", written.size());
 }
 
-bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name) {
+bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name, int outer, const std::string &which) {
   ProceduralTexturePtr pt = texture_asset(asset);
   if (!pt) return false;
-  const int n = (int)pt->layers.size();
+  /* The list worked: the stack, or a layer's mask stack / group children (task 0244). */
+  TextureLayerList *list = &pt->layers;
+  const bool mask = outer >= 0 && which == "Mask";
+  if (outer >= 0) {
+    if (outer >= (int)pt->layers.size()) return false;
+    list = mask ? &pt->layers[(size_t)outer]->mask_layers : pt->layers[(size_t)outer]->children();
+    if (!list) {
+      Log::warn("Texture %s: layer %d has no %s", pt->name.c_str(), outer, which.c_str());
+      return false;
+    }
+  }
+  const std::string what = mask ? "Effect" : "Layer";
+  const int n = (int)list->size();
   if (op == "add") {
     const TextureLayerInfo *info = find_texture_layer_info(name);
     if (!info) {
-      Log::warn("Add Layer: no layer called '%s'", name.c_str());
+      Log::warn("Add %s: no layer called '%s'", what.c_str(), name.c_str());
       return false;
     }
     note_texture_edit(*pt);
-    pt->add(info->name);
-    mark_changed("Add Layer " + info->name);
+    if (outer < 0) pt->add(info->name);
+    else {
+      auto l = create_texture_layer(info->name);
+      if (mask) make_mask_effect(*l);
+      list->push_back(std::move(l));
+      pt->touch();
+    }
+    mark_changed("Add " + what + " " + info->name);
     return true;
   }
   if (i < 0 || i >= n) {
-    Log::warn("Texture %s: layer %d is not in 0..%d", pt->name.c_str(), i, n - 1);
+    Log::warn("Texture %s: %s %d is not in 0..%d", pt->name.c_str(), what.c_str(), i, n - 1);
     return false;
   }
   note_texture_edit(*pt);
   if (op == "remove") {
-    pt->layers.erase(pt->layers.begin() + i);
-    mark_changed("Remove Layer");
+    list->erase(list->begin() + i);
+    mark_changed("Remove " + what);
   }
   else if (op == "move") {
     j = std::max(0, std::min(n - 1, j));
     if (j == i) return false;
-    auto l = std::move(pt->layers[(size_t)i]);
-    pt->layers.erase(pt->layers.begin() + i);
-    pt->layers.insert(pt->layers.begin() + j, std::move(l));
-    mark_changed("Move Layer");
+    auto l = std::move((*list)[(size_t)i]);
+    list->erase(list->begin() + i);
+    list->insert(list->begin() + j, std::move(l));
+    mark_changed("Move " + what);
   }
   else if (op == "reset") {
-    if (auto fresh = create_texture_layer(pt->layers[(size_t)i]->type_name())) pt->layers[(size_t)i] = std::move(fresh);
-    mark_changed("Reset Layer");
+    if (auto fresh = create_texture_layer((*list)[(size_t)i]->type_name())) {
+      if (mask) make_mask_effect(*fresh);
+      (*list)[(size_t)i] = std::move(fresh);
+    }
+    mark_changed("Reset " + what);
   }
   else return false;
   pt->touch();
@@ -2416,6 +2443,12 @@ void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) 
     /* Only the maps the texture gives (its Normal / Roughness Map switches): the others are left empty. */
     m.normal_map = pt->use_normal ? TextureRef{asset_path + "#normal", true} : TextureRef{};
     m.roughness_map = pt->use_roughness ? TextureRef{asset_path + "#roughness", true} : TextureRef{};
+    if (pt->surface) {  // (task 0244: a surface's metallic and emission channels too)
+      m.metallic_map = TextureRef{asset_path + "#metallic", true};
+      m.metallic = 1.0f;  // (the map multiplies the value: at 0 it would do nothing)
+      m.wrap = (int)TexWrap::Extend;  // (charts near the atlas edge don't pick up the opposite side, as the baked material)
+    }
+    if (pt->surface) surface_sync_emission(*pt);  // (the emission map only when a layer writes emission: an emission map makes the object a light)
     m.base_color = Vec3(1.0f);
     m.procedural = 0;
     m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
