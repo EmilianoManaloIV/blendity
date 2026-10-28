@@ -3,6 +3,7 @@
 #include "test_common.h"
 #include "../src/scene/uv_internal.h"
 #include "../src/scene/subdiv_chain.h"
+#include "../src/scene/dynamesh.h"
 #include "../src/scene/partfield.h"
 
 static void first_tests() {
@@ -8250,6 +8251,48 @@ static void tests_round259() {
   });
 }
 
+static void tests_round260() {
+  test("DynaMesh (ADR 0076): a cube at 16 and 32 comes out closed, all quads, its volume within 10 % (the corners round to the cell); a lone plane encloses nothing and is refused", [] {
+    auto closed = [](const Mesh &m, size_t &bad, size_t &nonq) {
+      std::unordered_map<uint64_t, int> edges;
+      nonq = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+        nonq += n == 4 ? 0 : 1;
+        for (uint32_t c = 0; c < n; c++) edges[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+      }
+      bad = 0;
+      for (const auto &e : edges) bad += e.second == 2 ? 0 : 1;
+      return bad == 0 && nonq == 0;
+    };
+    auto volume = [](const Mesh &m) {
+      double v = 0.0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+        for (uint32_t c = 1; c + 1 < n; c++) v += (double)dot(m.positions[fv[0]], cross(m.positions[fv[c]], m.positions[fv[c + 1]]));
+      }
+      return v / 6.0;
+    };
+    const MeshPtr cube = primitives::cube(1.0f);
+    for (int res : {16, 32}) {
+      Mesh out;
+      meshops::DynaMeshStats st;
+      CHECK(meshops::dynamesh(*cube, res, 1, out, &st));
+      size_t bad = 0, nonq = 0;
+      const bool ok = closed(out, bad, nonq);
+      const double v = volume(out);
+      std::printf("    cube at %d: %zu vertices, %zu quads, %zu bad edges, %zu non-quads, volume %.4f of 1 (%.1f ms)\n", res, out.vert_count(), out.face_count(), bad, nonq, v, st.ms_total);
+      CHECK(ok && std::fabs(v - 1.0) < 0.1);
+    }
+    const MeshPtr plane = primitives::grid(2.0f, 4, 4);
+    Mesh slab;
+    std::string why;
+    const bool refused = !meshops::dynamesh(*plane, 16, 0, slab, nullptr, &why);
+    std::printf("    a lone plane at 16: refused %d (%s)\n", (int)refused, why.c_str());
+    CHECK(refused && why.find("closed") != std::string::npos);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8288,4 +8331,5 @@ void run_modeling_tests() {
   tests_round228();
   tests_round231();
   tests_round259();
+  tests_round260();
 }

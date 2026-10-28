@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 260): DynaMesh (task 0240)
+
+**Asked:** ZBrush's DynaMesh - pull a form far out of its topology, then redistribute the polygons evenly and merge
+what overlaps.
+
+**Added**
+- **`meshops::dynamesh`** (`src/scene/dynamesh.cpp`, ADR 0076): a grid of `resolution` cells on the longest side;
+  for each axis every grid line's crossings with the triangles (binned per column) carry the triangle's orientation,
+  the running sum along the line is the winding number (nonzero: inside, so self-intersections merge), three votes a
+  grid vertex and the majority decides; naive surface nets over the signs with the lines' exact crossings - a vertex
+  per mixed cell, a quad per mixed grid edge - then tangential Laplacian relaxation. A closed shell of quads: the
+  24k-vertex sphere at 64 came out closed and manifold with its volume 0.1 % off and every vertex within a cell of
+  the surface; two spheres overlapping by half a radius became one shell, the inner walls gone, 3 % under the union's
+  volume. A line whose winding does not return to zero at its far end (an open edge, a flipped face) casts no vote;
+  a cell whose corners fall into two pieces is filled before the nets, so the output is a 2-manifold and parts closer
+  than a cell merge. The mask is interpolated at the crossings (a coarse cage keeps it everywhere); vertex groups by
+  position; groups, UVs, seams, sharp edges and shape keys are dropped. A lone sheet, tilted or not, encloses nothing
+  and is refused.
+- **In Sculpt Mode:** DynaMesh Resolution (8-256), DynaMesh Smooth (0-10) and the DynaMesh button in the Sculpt
+  section, `sculpt dynamesh [resolution] [smooth]`, the Wheel's Brushes ring with DynaMesh in Carve's slot (Carve stays
+  Alt, the panel's and the console's); one ordinary step, the mode stays on, the next stroke rebuilds its grid.
+- **A fix from round 258:** `sculpt group islands` had counted islands through shared UVs (a group a face on a mesh
+  without UVs); it counts through edges now.
+**Review (Opus, round 260):** two blockers and a dozen findings, all taken before landing. Naive surface nets had given one vertex to a cell whatever ran through it, so two parts touching along an edge, or closer than a cell, came out with edges in four faces and a vertex shared by two sheets: a cell whose inside or outside corners fall into two pieces, and a grid face with alternating corners, are now filled in before the nets (again until stable; the fill count is in the log line), and the two-cubes-on-an-edge case is a test. A line that crosses a sheet once kept a nonzero winding to the grid's edge and voted "inside" for everything behind it, so a plane tilted against two axes came out a wedge and a flipped face carved a wrong wedge: a line whose winding does not return to zero at its far end casts no vote now, and a vertex is inside by a strict majority of the lines that did (a tilted sheet is refused like a flat one; a tested case). The mask had been carried from the nearest old vertex within a cell and a half, so a coarse cage lost it: it is interpolated at the crossings, a vertex's the mean of its edges' (a masked 8-vertex cube keeps its mask on every output vertex). Also: the edge crossing nearest the inside end rather than the lowest; `sculpt dynamesh` leaves Edit Mode and Weight Paint first and checks its arguments; the Dynamic Subdivision field's pending value belongs to its object; the 0239 tail key compares the head's key, or its topology key only when the chain moved it; `sculpt group islands` ignores seams; the edge-on threshold is relative to the cell; the votes become the flag in place (one byte a vertex less at 256); the spec's numbers match the tests (the 6k sphere, 1.5 cells, the panel's ranges, two undo steps asserted, redo compared by positions, the mode asserted on).
+
+**Checked**
+- `tests_round260` in `tests/test_sculpt.cpp` (3 tests): the sphere at 64 closed, all quads, the volume within 5 %,
+  every vertex within a cell, the step undone and redone with the mode on and a stroke moving the new mesh; two
+  spheres one shell with no inner wall and the union's volume, the mask over the top carried (its share within 10
+  points, nothing masked below the line); the times at 64 and 128 on the sphere and the two spheres printed (the
+  sphere at 128: 77k quads in 148 ms) and an empty mesh refused. `tests_round260` in `tests/test_modeling.cpp`: a
+  cube at 16 and 32 closed, all quads, its volume within 1.2 %; a lone plane refused.
+- Unit checks (round 260): Windows, in render-cache verify mode, 12819, 0 failed (1097 tests), 0 stale
+  pictures. Linux with libraries: 12359, 0 failed. Sanitizer build: 12229, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone; the sanitizer leg ran alone afterwards..)
+
 ## 2026-10-28 (round 259): Dynamic Subdivision (task 0239)
 
 **Asked:** ZBrush's Dynamic Subdivision - a smooth, subdivided surface over a low-polygon cage the brush works - on

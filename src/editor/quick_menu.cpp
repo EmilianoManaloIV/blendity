@@ -112,7 +112,7 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
           {"Crease", "sculpt brush crease", {}},
           {"Scrape", "sculpt brush scrape", {}},
           {"Snake Hook", "sculpt brush snake", {}},
-          {"Carve", "sculpt carve toggle", {}}}},
+          {"DynaMesh", "sculpt dynamesh", {}}}},  // (task 0240; Carve stays Alt, the panel's and the console's)
         {"Size", "",
          {{"Bigger", "sculpt size +", {}},
           {"Smaller", "sculpt size -", {}},

@@ -630,6 +630,8 @@ class Editor {
   bool tablet_for_test() const { return tablet_; }
   std::string statusbar_hint_for_test() const { return statusbar_hint(); }
   int sculpt_subdiv_levels_for_test() const { return sculpt_subdiv_levels(); }  // (task 0239)
+  bool sculpt_dynamesh_for_test(int resolution, int smooth) { return sculpt_dynamesh(resolution, smooth); }  // (task 0240)
+  bool sculpt_mode_for_test() const { return sculpt_; }
   const SculptBrush &sculpt_brush_for_test() const { return sculpt_brush_; }
   std::string prefs_text_for_test() const { return prefs_text_0190(); }
   bool quick_menu_open_for_test() const { return qm_.open; }
@@ -3108,6 +3110,10 @@ class Editor {
   bool sculpt_cage_hit(float x, float y, Vec3 &world, float &dist);
   bool sculpt_cage_ = false;         // (this stroke: a Subdivision Surface is drawn over the mesh - the pick moves onto the cage)
   int sculpt_subdiv_pending_ = -1;   // (the panel's field while it is dragged: applied, one step, at the release)
+  uint64_t sculpt_subdiv_pending_obj_ = 0;  // (the object the pending value is for)
+  /* Task 0240: DynaMesh (ADR 0076) - the mesh retopologized evenly at a resolution, one ordinary step. */
+  int sculpt_dyna_res_ = 64, sculpt_dyna_smooth_ = 1;
+  bool sculpt_dynamesh(int resolution, int smooth);
   void sculpt_rect_mask(Vec2 a, Vec2 b);
   bool sculpt_isolate_at(const Recti &view, float x, float y);
   void sculpt_gesture_end(float x, float y);

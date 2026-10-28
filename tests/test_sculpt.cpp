@@ -4,6 +4,7 @@
 
 #include "../src/scene/mesh.h"
 #include "../src/scene/subdiv_chain.h"
+#include "../src/scene/dynamesh.h"
 #include "../src/render/canvas.h"
 
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <set>
+#include <unordered_map>
 #include <tuple>
 
 namespace {
@@ -1346,10 +1348,224 @@ static void tests_round259() {
   });
 }
 
+/* Task 0240: a closed mesh's checks - every edge in two faces, all quads, the signed volume. */
+static bool closed_quads(const Mesh &m, size_t &bad_edges, size_t &non_quads) {
+  std::unordered_map<uint64_t, int> edges;
+  non_quads = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+    non_quads += n == 4 ? 0 : 1;
+    for (uint32_t c = 0; c < n; c++) edges[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+  }
+  bad_edges = 0;
+  for (const auto &e : edges) bad_edges += e.second == 2 ? 0 : 1;
+  return bad_edges == 0 && non_quads == 0;
+}
+static double mesh_volume_d(const Mesh &m) {
+  double v = 0.0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+    for (uint32_t c = 1; c + 1 < n; c++) v += (double)dot(m.positions[fv[0]], cross(m.positions[fv[c]], m.positions[fv[c + 1]]));
+  }
+  return v / 6.0;
+}
+
+static void tests_round260() {
+  test("DynaMesh: the 24k-vertex sphere at resolution 64 comes out a closed shell of quads with its volume within 5 % and every vertex within a cell of the surface; the step undoes and redoes, the mode stays on, a stroke after it moves the new mesh", [&] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    const MeshPtr before = M();
+    const double vol0 = mesh_volume_d(*before);
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("sculpt dynamesh 64 1");
+    const MeshPtr after = M();
+    CHECK(after != before && after->vert_count() > 0);
+    size_t bad = 0, nonq = 0;
+    const bool closed = closed_quads(*after, bad, nonq);
+    const double vol1 = mesh_volume_d(*after);
+    const float cell = 1.0f / 64.0f;  // (the sphere's diameter is 1: its longest side)
+    float worst = 0.0f;
+    for (const Vec3 &p : after->positions) worst = std::max(worst, std::fabs(length(p) - 0.5f));  // (the sphere's local centre is the origin, its radius 0.5)
+    std::printf("    DynaMesh 64: %zu vertices / %zu faces -> %zu / %zu; %zu edges not in two faces, %zu non-quads; volume %.4f -> %.4f; the farthest vertex %.4f off the sphere (a cell %.4f)\n",
+                before->vert_count(), before->face_count(), after->vert_count(), after->face_count(), bad, nonq, vol0, vol1, worst, cell);
+    CHECK(closed && std::fabs(vol1 - vol0) < 0.05 * vol0 && worst < cell);
+    CHECK(ed.sculpt_mode_for_test());  // (the mode stays on)
+    /* A stroke on the new mesh. */
+    Vec2 px;
+    Vec3 w;
+    float d;
+    for (int i = 0; i < 100; i++) {
+      step(ed);
+      px = pixel_of(ed, G()->world_position());
+      if (ed.sculpt_hit_for_test(px.x, px.y, w, d)) break;
+    }
+    const std::vector<Vec3> pos1 = M()->positions;
+    ed.command("sculpt size 20");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const size_t moved = changed_count(pos1, M()->positions);
+    CHECK(moved > 0 && M() == after && ed.undo_steps_for_test() == steps0 + 2);  // (DynaMesh, then the stroke: two steps)
+    ed.command("undo");  // (the stroke)
+    ed.command("undo");  // (DynaMesh)
+    CHECK(M()->vert_count() == before->vert_count() && M()->positions == before->positions && ed.sculpt_mode_for_test());
+    ed.command("redo");
+    CHECK(M()->vert_count() == after->vert_count() && M()->positions == pos1);
+  });
+
+  test("DynaMesh: two spheres overlapping by half a radius become one closed shell with the inner walls gone and the union's volume; a mask over the top survives", [&] {
+    Editor ed;
+    GameObject *a = sphere_scene(ed, 1);
+    CHECK(a);
+    if (!a) return;
+    ed.command("sculpt off");
+    ed.command("create Sphere");
+    GameObject *b = ed.active_object_for_test();
+    const float dist = 0.75f;  // (radius 0.5: overlapping by half a radius)
+    b->set_world_position(a->world_position() + Vec3(dist, 0.0f, 0.0f));
+    ed.command("subdivide 1");
+    ed.select_object(b->id);
+    ed.select_object_add(a->id);
+    ed.command("join");
+    GameObject *j = ed.active_object_for_test();
+    CHECK(j);
+    if (!j) return;
+    const uint64_t gid = j->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    step(ed);
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) step(ed);
+    ed.command("sculpt on");
+    /* A mask over the top (local y above 0.25). */
+    MeshPtr m0 = M();
+    ed.command("sculpt mask clear");
+    m0 = M();
+    for (uint32_t v = 0; v < (uint32_t)m0->vert_count(); v++)
+      if (m0->positions[v].y > 0.25f) m0->sculpt_mask[v] = 1.0f;
+    size_t masked0 = 0;
+    for (float v : m0->sculpt_mask) masked0 += v > 0.5f ? 1 : 0;
+    const double share0 = (double)masked0 / (double)m0->vert_count();
+    const Vec3 ca(0.0f), cb(dist, 0.0f, 0.0f);  // (the join kept A's frame: A at the origin, B along x)
+    const double r = 0.5, lens = kPi * (4.0 * r + dist) * (2.0 * r - dist) * (2.0 * r - dist) / 12.0, union_vol = 2.0 * (4.0 / 3.0) * kPi * r * r * r - lens;
+    ed.command("sculpt dynamesh 64 1");
+    const MeshPtr after = M();
+    size_t bad = 0, nonq = 0;
+    const bool closed = closed_quads(*after, bad, nonq);
+    const double vol = mesh_volume_d(*after);
+    const float cell = (float)(2.0 * r + dist) / 64.0f;
+    size_t inner = 0;
+    for (size_t f = 0; f < after->face_count(); f++) {
+      Vec3 c(0.0f);
+      for (uint32_t k = 0; k < after->face_size(f); k++) c += after->positions[after->face_verts(f)[k]];
+      c = c / (float)after->face_size(f);
+      inner += std::min(length(c - ca), length(c - cb)) < (float)r - 1.5f * cell ? 1 : 0;
+    }
+    std::vector<int> island;
+    const int pieces = uvops::compute_islands(*after, nullptr, true, island);
+    size_t masked1 = 0, low_masked = 0;
+    for (uint32_t v = 0; v < (uint32_t)after->vert_count(); v++) {
+      if (!(after->sculpt_mask.size() == after->vert_count() && after->sculpt_mask[v] > 0.5f)) continue;
+      masked1++, low_masked += after->positions[v].y < 0.25f - 1.5f * cell ? 1 : 0;
+    }
+    const double share1 = (double)masked1 / (double)after->vert_count();
+    std::printf("    two spheres -> %zu vertices / %zu quads in %d piece(s); %zu bad edges, %zu non-quads; %zu face centres inside a sphere (inner walls); volume %.4f against the union's %.4f; masked %.1f %% -> %.1f %%, %zu masked below the line\n",
+                after->vert_count(), after->face_count(), pieces, bad, nonq, inner, vol, union_vol, 100.0 * share0, 100.0 * share1, low_masked);
+    CHECK(closed && pieces == 1 && inner == 0 && std::fabs(vol - union_vol) < 0.05 * union_vol);
+    CHECK(masked1 > 0 && std::fabs(share1 - share0) < 0.10 && low_masked == 0);
+  });
+
+  test("DynaMesh: the time at resolutions 64 and 128 on the sphere and the two spheres, printed; a mesh with no faces is refused", [&] {
+    const MeshPtr sphere = primitives::uv_sphere(0.5f, 96, 64);
+    Mesh two = *sphere;
+    {
+      Mesh other = *sphere;
+      for (Vec3 &p : other.positions) p.x += 0.75f;
+      const uint32_t off = (uint32_t)two.vert_count();
+      two.positions.insert(two.positions.end(), other.positions.begin(), other.positions.end());
+      for (size_t f = 0; f < other.face_count(); f++) {
+        std::vector<uint32_t> fv(other.face_verts(f), other.face_verts(f) + other.face_size(f));
+        for (uint32_t &v : fv) v += off;
+        two.add_face(fv.data(), fv.size());
+      }
+      two.touch();
+    }
+    for (const Mesh *in : {sphere.get(), &two})
+      for (int res : {64, 128}) {
+        Mesh out;
+        meshops::DynaMeshStats st;
+        std::string why;
+        const bool ok = meshops::dynamesh(*in, res, 1, out, &st, &why);
+        size_t bad = 0, nonq = 0;
+        const bool closed = ok && closed_quads(out, bad, nonq);
+        std::printf("    %s at %d: %zu -> %zu vertices, %zu quads, %zu crossings; columns %.1f ms, nets %.1f ms, relax %.1f ms, %.1f ms in all; closed %d\n", in == sphere.get() ? "the sphere" : "two spheres", res,
+                    st.verts_in, st.verts_out, st.faces_out, st.crossings, st.ms_columns, st.ms_nets, st.ms_smooth, st.ms_total, (int)closed);
+        CHECK(ok && closed && st.ms_total < 10000.0);
+      }
+    Mesh empty, out;
+    std::string why;
+    CHECK(!meshops::dynamesh(empty, 64, 1, out, nullptr, &why) && !why.empty());
+  });
+
+  test("DynaMesh: two cubes touching along an edge at an even resolution (the ambiguous sign pattern) come out one closed manifold shell; a plane tilted against two axes is refused like a flat one; a fully masked 8-vertex cube keeps its mask on every vertex", [&] {
+    /* Two unit cubes sharing the edge x = 1, y = 1. */
+    const MeshPtr a = primitives::cube(1.0f);
+    Mesh two = *a;
+    for (Vec3 &p : two.positions) p += Vec3(0.5f, 0.5f, 0.5f);  // (A = [0,1]^3)
+    {
+      Mesh other = *a;
+      for (Vec3 &p : other.positions) p += Vec3(1.5f, 1.5f, 0.5f);  // (B = [1,2] x [1,2] x [0,1])
+      const uint32_t off = (uint32_t)two.vert_count();
+      two.positions.insert(two.positions.end(), other.positions.begin(), other.positions.end());
+      for (size_t f = 0; f < other.face_count(); f++) {
+        std::vector<uint32_t> fv(other.face_verts(f), other.face_verts(f) + other.face_size(f));
+        for (uint32_t &v : fv) v += off;
+        two.add_face(fv.data(), fv.size());
+      }
+      two.touch();
+    }
+    for (int res : {16, 32}) {
+      Mesh out;
+      meshops::DynaMeshStats st;
+      std::string why;
+      const bool ok = meshops::dynamesh(two, res, 1, out, &st, &why);
+      size_t bad = 0, nonq = 0;
+      const bool closed = ok && closed_quads(out, bad, nonq);
+      std::vector<int> island;
+      const int pieces = ok ? uvops::compute_islands(out, nullptr, true, island) : 0;
+      std::printf("    two cubes on an edge at %d: %zu quads, %zu bad edges, %zu non-quads, %d piece(s), %zu cells merged; volume %.3f of 2\n", res, out.face_count(), bad, nonq, pieces, st.filled_cells,
+                  mesh_volume_d(out));
+      CHECK(ok && closed && pieces == 1 && std::fabs(mesh_volume_d(out) - 2.0) < 0.25);
+    }
+    /* A tilted sheet: z = 0.5 x + 0.5 y over [-1, 1]^2. */
+    MeshPtr sheet = primitives::grid(2.0f, 4, 4);
+    for (Vec3 &p : sheet->positions) p.y = 0.5f * p.x + 0.5f * p.z;  // (the grid lies in x-z; its y is the height)
+    sheet->touch();
+    Mesh out;
+    std::string why;
+    const bool refused = !meshops::dynamesh(*sheet, 16, 0, out, nullptr, &why);
+    std::printf("    a tilted sheet at 16: refused %d (%s)\n", (int)refused, why.c_str());
+    CHECK(refused);
+    /* A masked coarse cube. */
+    Mesh cube = *a;
+    cube.sculpt_mask.assign(cube.vert_count(), 1.0f);
+    Mesh dyn;
+    CHECK(meshops::dynamesh(cube, 32, 1, dyn, nullptr, &why));
+    size_t masked = 0;
+    for (float v : dyn.sculpt_mask) masked += v > 0.99f ? 1 : 0;
+    std::printf("    a masked 8-vertex cube at 32: %zu of %zu output vertices masked\n", masked, dyn.vert_count());
+    CHECK(dyn.sculpt_mask.size() == dyn.vert_count() && masked == dyn.vert_count());
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
   tests_round257();
   tests_round258();
   tests_round259();
+  tests_round260();
 }

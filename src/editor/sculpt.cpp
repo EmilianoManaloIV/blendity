@@ -10,6 +10,7 @@
 #include "../core/core.h"
 #include "../image/image.h"
 #include "../scene/uv.h"
+#include "../scene/dynamesh.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1025,7 +1026,9 @@ bool Editor::sculpt_group_op(const std::string &op) {
   }
   if (op == "islands") {
     std::vector<int> island;
-    uvops::compute_islands(*m, nullptr, false, island);
+    Mesh joined = *m;  // (connected through edges, seams ignored: `true` splits at seams, `false` counts UV islands - a group a face without UVs)
+    joined.seams.clear();
+    uvops::compute_islands(joined, nullptr, true, island);
     m->face_group.resize(nf);
     for (size_t f = 0; f < nf; f++) m->face_group[f] = f < island.size() ? std::max(0, island[f]) : 0;
   }
@@ -1135,6 +1138,40 @@ bool Editor::sculpt_cage_hit(float x, float y, Vec3 &world, float &dist) {
   if (best >= 1e30f) return false;
   world = W.point(lr.origin + lr.dir * best);
   dist = length(world - ray.origin);
+  return true;
+}
+
+/* ---- DynaMesh (task 0240, ADR 0076) ---- */
+
+/* The sculpted (or active) object's mesh retopologized evenly at `resolution` cells along its longest side, as one
+ * ordinary step (a topology change: a snapshot); the mode stays on and the next stroke rebuilds its grid. */
+bool Editor::sculpt_dynamesh(int resolution, int smooth) {
+  GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
+  MeshFilter *mf = mf_of(g);
+  if (!mf || !mf->mesh) {
+    Log::warn("DynaMesh: select a mesh object first");
+    return false;
+  }
+  if (edit_mode_) exit_edit_mode();  // (as set_sculpt: a selection of the old mesh must not outlive it)
+  if (weight_paint_) set_weight_paint(false);
+  sculpt_end_stroke();
+  sculpt_gesture_ = false;
+  commit_undo();
+  Mesh out;
+  meshops::DynaMeshStats st;
+  std::string why;
+  if (!meshops::dynamesh(*mf->mesh, resolution, smooth, out, &st, &why)) {
+    Log::warn("DynaMesh: %s", why.c_str());
+    return false;
+  }
+  auto m = std::make_shared<Mesh>(std::move(out));
+  mf->mesh = m;  // (the snapshot keeps the old mesh: an ordinary step)
+  sculpt_cache_mesh_ = nullptr;
+  sculpt_stroke_mesh_ = nullptr;
+  mark_changed(strprintf("DynaMesh %d", resolution));
+  Log::info("DynaMesh %d: %zu vertices / %zu faces -> %zu / %zu quads (a cell of %.4f, %zu cells merged; columns %.1f ms, nets %.1f ms, relax %.1f ms, %.1f ms in all)", resolution, st.verts_in,
+            st.faces_in, st.verts_out, st.faces_out, st.cell, st.filled_cells, st.ms_columns, st.ms_nets, st.ms_smooth, st.ms_total);
+  ui_.redraw = true;
   return true;
 }
 
@@ -1304,6 +1341,16 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     else Log::info("usage: sculpt symmetry x|y|z [on|off] | radial <n> | off");
   }
   else if (v == "lazy") sculpt_brush_.lazy = arg(2, "0") == "toggle" ? (sculpt_brush_.lazy > 0.0f ? 0.0f : 30.0f) : std::max(0.0f, std::min(300.0f, (float)std::atof(arg(2, "0").c_str())));
+  else if (v == "dynamesh") {  // sculpt dynamesh [resolution] [smooth]  (task 0240)
+    auto number = [](const std::string &a) { return !a.empty() && std::all_of(a.begin(), a.end(), [](char ch) { return ch >= '0' && ch <= '9'; }); };
+    if ((t.size() > 2 && !number(t[2])) || (t.size() > 3 && !number(t[3]))) {
+      Log::info("usage: sculpt dynamesh [resolution 8-256] [smooth 0-10]");
+      return;
+    }
+    if (t.size() > 2) sculpt_dyna_res_ = std::max(8, std::min(256, std::atoi(t[2].c_str())));
+    if (t.size() > 3) sculpt_dyna_smooth_ = std::max(0, std::min(10, std::atoi(t[3].c_str())));
+    sculpt_dynamesh(sculpt_dyna_res_, sculpt_dyna_smooth_);
+  }
   else if (v == "subdiv") {  // sculpt subdiv <n>|off|+|-  (task 0239)
     const std::string a = arg(2, "1");
     const bool number = !a.empty() && std::all_of(a.begin(), a.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
@@ -1373,7 +1420,7 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     sculpt_end_stroke();
   }
   else {
-    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | subdiv <n>|off|+|- | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
+    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | subdiv <n>|off|+|- | dynamesh [resolution] [smooth] | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
     return;
   }
   ui_.redraw = true;

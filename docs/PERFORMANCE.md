@@ -1156,3 +1156,14 @@ did per change before (and what any other head stack still does).
 | 1,490-vertex sphere, a 6-px dab, level 1 | 5,954 | 123 | 0.01 ms | 0.38 ms |
 | the same, level 2 | 23,810 | 645 | 0.04 ms | 1.76 ms |
 | the same, level 3 | 95,234 | 2,913 | 0.13 ms | 5.97 ms |
+
+## DynaMesh (task 0240)
+
+`meshops::dynamesh` in `tests_round260` (headless, one run; the columns, the surface nets and one relaxation pass):
+
+| Input | Resolution | Out | Time |
+|---|---|---|---|
+| a 6,050-vertex UV sphere | 64 | 19,320 quads | 29 ms |
+| the same | 128 | 77,272 quads | 148 ms |
+| two such spheres overlapping by half a radius (12,100 vertices) | 64 | 10,992 quads, one shell | 16 ms |
+| the same | 128 | 44,126 quads, one shell | 69 ms |
