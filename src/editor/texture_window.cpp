@@ -7,6 +7,7 @@
 #include "../core/core.h"
 #include "../texture/procedural_texture.h"
 #include "../texture/surface.h"
+#include "../texture/smart_material.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -317,6 +318,7 @@ void Editor::draw_textures_window(const Recti &r) {
   const int pw = std::min(body.w / 2, std::max(u.px(140), std::min(body.h - u.px(40), u.px(300))));
   Recti pane{body.right() - pw - u.px(6), body.y + u.px(6), pw, pw};
   texture_ui_rects_["preview"] = pane;
+  paint_canvas_update(pane, texture_preview_tiled_ ? 2 : 1);  // (task 0246: the canvas - a 2D stroke on the shown surface)
   Recti left{body.x, body.y, body.w - pw - u.px(12), body.h};
   /* Preview: an output, 1x or 2 x 2. While a field is being dragged it evaluates at 256 at most, and at the
    * texture's size once the mouse is released. */
@@ -334,6 +336,11 @@ void Editor::draw_textures_window(const Recti &r) {
       const int ps = std::min(256, std::max(64, std::max(t.width, t.height)));
       const TexThumb &th = texture_thumb(t, which, ps);
       draw_pixels(u, th.px, th.size, th.size, pane, texture_preview_tiled_ ? 2 : 1);
+      if (paint_ && paint_2d_ && texture_selected_ == paint_surface_ && u.hovered(pane)) {  // (task 0246: the brush on the canvas, its radius in texels shown at the pane's scale)
+        const float texels = (float)std::max(1, std::max(texture_selected_->width, texture_selected_->height));
+        const float r = paint_brush_.radius / texels * (float)pane.w / (float)(texture_preview_tiled_ ? 2 : 1);
+        u.canvas.circle((float)in.mx, (float)in.my, std::max(1.0f, r), paint_brush_.erase || in.eraser ? u.theme.warning : u.theme.accent);
+      }
       texture_preview_size_ = th.size;
     }
     else if (TexturePtr tex = procedural_texture_output(t, which)) {
@@ -365,6 +372,17 @@ void Editor::draw_textures_window(const Recti &r) {
   ui::Layout lay{{left.x + u.px(6), left.y, left.w - u.px(18), left.h}, left.y + u.px(6) - eoff};
   lay.row_h = u.row_h();
   u.label(lay.row(u.row_h() + u.px(4)), texture_selected_->name + "  (" + texture_selected_->asset_path + ")", u.theme.text_bright);
+  if (texture_selected_->surface) {  // (task 0246: the shelf - a built-in smart material applied on top)
+    Recti sh = lay.row(u.row_h() + u.px(4));
+    std::vector<const char *> names;
+    for (const std::string &n : smart_material_builtins()) names.push_back(n.c_str());
+    const Recti cb{sh.x + u.px(4), sh.y, u.px(150), sh.h};
+    u.combo(u.id("smat_pick"), cb, texture_smat_pick_, names.data(), (int)names.size());
+    const Recti ab{cb.right() + u.px(6), sh.y, u.px(90), sh.h};
+    texture_ui_rects_["smat_apply"] = ab;
+    if (u.button(ab, "Apply", false)) smat_apply(names[(size_t)std::max(0, std::min((int)names.size() - 1, texture_smat_pick_))], texture_selected_);
+    u.tooltip("A smart material - a group of layers with masks reading the mesh maps - added on top of this surface (smat apply <name>; smat save keeps one of your own).");
+  }
   if (texture_selected_->surface) {  // (task 0244: a surface's maps and its evaluation's state)
     Recti sr = lay.row(u.row_h() + u.px(4));
     const Recti lb{sr.x + u.px(4), sr.y, u.px(130), sr.h};

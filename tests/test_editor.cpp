@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the editor tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/render/canvas.h"
+#include "../src/texture/smart_material.h"
 #include "../src/texture/paint_layer.h"
 #include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
@@ -3719,6 +3721,158 @@ static void tests_round265() {
   });
 }
 
+static void tests_round266() {
+  test("smart materials in the editor: smat apply puts Painted Metal on the active object's surface as one step and smat save writes it; a 2D dab lands at its UV; a stencil black on the left masks a dab there; the Texturing layout opens", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    ed.command("surface new SmatSurf");
+    ed.step_frame_headless();  // (the step commits)
+    std::string why;
+    ProceduralTexturePtr pt = ed.surface_of_for_test(G(), &why);
+    CHECK(pt && pt->layers.size() == 1);
+    if (!pt) return;
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("smat apply Painted Metal");
+    ed.step_frame_headless();
+    std::printf("    smat apply: %zu layers, the top '%s' with %zu children, %zu step(s)\n", pt->layers.size(), pt->layers.back()->name.c_str(),
+                pt->layers.back()->children() ? pt->layers.back()->children()->size() : (size_t)0, ed.undo_steps_for_test() - steps);
+    CHECK(pt->layers.size() == 2 && pt->layers.back()->name == "Painted Metal" && pt->layers.back()->children() && pt->layers.back()->children()->size() == 2 && ed.undo_steps_for_test() == steps + 1);
+    ed.command("smat save 1 MyMetal");
+    CHECK(fs::exists(ed.resolve_asset_path_for_test("Assets/Materials/Smart/MyMetal.smat")));
+    ed.command("smat apply MyMetal");
+    CHECK(pt->layers.size() == 3 && pt->layers.back()->name == "MyMetal");
+    /* Another object's surface takes the saved file too: its hash moves, and its generators read its own maps. */
+    ed.command("select Sphere");
+    ed.step_frame_headless();
+    GameObject *sphere = ed.active_object_for_test();
+    CHECK(sphere && sphere != G());
+    ed.command("surface new SphereSurf");
+    ed.step_frame_headless();
+    ProceduralTexturePtr ps = ed.surface_of_for_test(sphere, &why);
+    CHECK(ps && ps != pt && ps->layers.size() == 1);
+    if (ps) {
+      const uint64_t h0 = ps->hash();
+      ed.command("smat apply MyMetal");
+      ed.step_frame_headless();
+      CHECK(ps->layers.size() == 2 && ps->hash() != h0 && pt->layers.size() == 3);
+      ed.command("undo");
+      ed.command("undo");  // (the sphere's surface too: the cube's undos below count from its own edits)
+    }
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.command("undo");
+    std::printf("    after one undo: %zu layers\n", pt->layers.size());
+    ed.command("undo");
+    pt = ed.surface_of_for_test(G(), &why);
+    std::printf("    after two undos: %zu layers (%s)\n", pt ? pt->layers.size() : (size_t)0, why.c_str());
+    CHECK(pt && pt->layers.size() == 1);
+    /* 2D painting: a dab at (0.25, 0.75) on the 1024 surface lands around image texel (256, 256). */
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    ed.command("paint size 16");
+    ed.command("paint hardness 1");
+    CHECK(ed.paint_dab_uv_for_test(0.25f, 0.75f));
+    PaintImagesPtr im = ed.paint_images_for_test();
+    CHECK(im && !im->empty());
+    if (!im || im->empty()) return;
+    size_t painted = 0, off = 0;
+    for (size_t i = 0; i < im->size(); i++) {
+      if (!im->cover[i]) continue;
+      painted++;
+      const int x = (int)(i % im->w), y = (int)(i / im->w);
+      if (std::abs(x - 256) > 19 || std::abs(y - 256) > 19) off++;  // (the disc of 16 plus the two-texel dilation)
+    }
+    std::printf("    a 2D dab at (0.25, 0.75): %zu texels around (256, 256), %zu elsewhere\n", painted, off);
+    CHECK(painted > 600 && off == 0);
+    ed.command("undo");
+    /* The canvas by real events: the Textures window open on the surface, 2D painting on, a press on the preview pane,
+     * a drag over several frames and the release - one stroke, one step, the coverage capped at the opacity. */
+    ed.command("layout Texturing");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Textures).w > 0 && ed.window_rect_for_test(WindowKind::Scene).w > 0 && ed.window_rect_for_test(WindowKind::Inspector).w > 0 && ed.window_rect_for_test(WindowKind::Tools).w > 0);
+    ed.select_texture_for_test(pt);
+    ed.command("paint 2d on");
+    ed.command("paint opacity 0.5");
+    ed.command("paint size 24");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(pane.w > 0);
+    if (pane.w > 0) {
+      const size_t steps0 = ed.undo_steps_for_test();
+      const int y = pane.y + pane.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, pane.x + pane.w / 4, y)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, pane.x + pane.w / 4, y)});
+      std::printf("    after the press on the canvas: %s\n", ed.paint_canvas_state_for_test().c_str());
+      for (int i = 1; i <= 6; i++) ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, pane.x + pane.w / 4 + i * pane.w / 12, y)});
+      const size_t steps_held = ed.undo_steps_for_test();
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, pane.x + pane.w * 3 / 4, y)});
+      ed.step_frame_headless();
+      im = ed.paint_images_for_test();
+      size_t covered = 0, over = 0, maxc = 0;
+      if (im)
+        for (uint8_t c : im->cover) covered += c ? 1 : 0, over += c > 130 ? 1 : 0, maxc = std::max(maxc, (size_t)c);
+      std::printf("    a canvas drag over 6 frames: %zu texels, the highest coverage %zu of 255 (opacity 0.5), %zu steps while held, %zu at the release\n", covered, maxc, steps_held - steps0, ed.undo_steps_for_test() - steps0);
+      CHECK(covered > 5000 && over == 0 && steps_held == steps0 && ed.undo_steps_for_test() == steps0 + 1);
+      if (ed.undo_steps_for_test() == steps0 + 1) ed.command("undo");
+    }
+    ed.command("paint 2d off");
+    ed.command("paint opacity 1");
+    ed.command("paint size 16");
+    /* A stencil black on its left half: a dab projected into the left half of the view paints nothing; the right half paints. */
+    Bitmap st;
+    st.width = st.height = 2;
+    st.rgba8 = {0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255};
+    std::string err;
+    const std::string stencil = fs::join(scratch_project(), "stencil.png");
+    {
+      const uint32_t px[4] = {0xFF000000u, 0xFFFFFFFFu, 0xFF000000u, 0xFFFFFFFFu};
+      CHECK(write_png(stencil, px, 2, 2, 2, false));
+    }
+    ed.command("paint stencil " + stencil);
+    Vec2 px;
+    CHECK(ed.project_for_test(G()->world_position(), px));
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_rect_for_test();
+    /* The square stencil is fit to the view's shorter side at its top left; the offset puts its black half over the cube,
+     * then its white half. */
+    const float sw = (float)std::min(view.w, view.h);
+    ed.command(strprintf("paint stencil offset %g 0", px.x - sw * 0.25f));  // (the cube in the black half)
+    ed.command("paint stencil scale 1");
+    ed.command(strprintf("paint dab %g %g", px.x - 2.0f, px.y));
+    size_t masked = 0;
+    for (uint8_t c : im->cover) masked += c ? 1 : 0;
+    ed.command(strprintf("paint stencil offset %g 0", px.x - sw * 0.75f));  // (the cube in the white half)
+    ed.command(strprintf("paint dab %g %g", px.x - 2.0f, px.y));
+    size_t through = 0;
+    for (uint8_t c : im->cover) through += c ? 1 : 0;
+    std::printf("    a stencil over the view: %zu texels painted through its black half, %zu through its white half\n", masked, through);
+    CHECK(masked == 0 && through > 0);
+    /* A NaN offset or a float image never reaches a bad index. */
+    ed.command("paint stencil offset nan 0");
+    ed.command(strprintf("paint dab %g %g", px.x, px.y));
+    ed.command("paint stencil off");
+    ed.command("paint off");
+    /* --assign: the material reads the exported files (the separate maps for roughness and metallic beside the packing). */
+    ed.command("export textures gltf Exports/Assigned --assign");
+    const MeshRenderer *mr = G()->get<MeshRenderer>();
+    const Material *am = mr && !mr->materials.empty() ? mr->materials[0].get() : nullptr;
+    std::printf("    --assign: base '%s' rough '%s' metal '%s' emit '%s' metallic %g roughness %g\n", am ? am->base_map.path.c_str() : "-", am ? am->roughness_map.path.c_str() : "-", am ? am->metallic_map.path.c_str() : "-", am ? am->emission_map.path.c_str() : "-", am ? am->metallic : -1.0f, am ? am->roughness : -1.0f);
+    const std::string ex = "Exports/Assigned/" + pt->name + "_";  // (the scratch project keeps earlier runs' assets: the surface's name may carry a number)
+    const bool assigned = am && am->base_map.path == ex + "Albedo.png" && am->roughness_map.path == ex + "Roughness.png" && am->metallic_map.path == ex + "Metallic.png" && (am->emission_map.path.empty() || am->emission_map.path == ex + "Emission.png") && am->metallic == 1.0f && am->roughness == 1.0f;
+    CHECK(assigned && fs::exists(ed.resolve_asset_path_for_test(ex + "ORM.png")) && fs::exists(ed.resolve_asset_path_for_test(ex + "Metallic.png")));
+    ed.command("undo");
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -3756,5 +3910,6 @@ void run_editor_tests() {
   tests_round263();
   tests_round264();
   tests_round265();
+  tests_round266();
   coverage_tests();
 }

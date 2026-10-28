@@ -59,6 +59,8 @@ bool Editor::surface_load_maps(GameObject *g, ProceduralTexture &pt, std::string
 }
 
 /* Whether a layer, or one in a group, writes the emission channel. */
+static bool stack_writes_emission(const TextureLayerList &ls);
+bool surface_stack_writes_emission(const ProceduralTexture &pt) { return stack_writes_emission(pt.layers); }
 static bool stack_writes_emission(const TextureLayerList &ls) {
   for (const auto &l : ls)
     if (l->enabled && ((l->targets & TargetEmission) || (l->children() && stack_writes_emission(*l->children())))) return true;

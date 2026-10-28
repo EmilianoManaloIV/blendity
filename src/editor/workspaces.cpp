@@ -31,6 +31,7 @@ const Editor::Workspace kWorkspaces[] = {
      Editor::FocusObject | Editor::FocusEdit | Editor::FocusUV | Editor::FocusMaterial, true},
     {"Texturing & Materials", "H(0.68,V(0.62,H(0.55,L(0:0),L(1:0)),H(0.5,L(11:0),L(14:0))),L(3,2:0))",
      Editor::FocusObject | Editor::FocusMaterial, true},
+    {"Texturing", "H(0.7,V(0.6,L(0:0),L(14:0)),L(12,3:0))", Editor::FocusObject | Editor::FocusMaterial | Editor::FocusEdit, true},  // (task 0246: the Scene view, the stack and shelf, the Paint tools)
     {"Lighting & Rendering", "H(0.74,V(0.62,H(0.55,L(0:0),L(1:0)),L(9,4,5:0)),V(0.55,L(13:0),L(3,2:0)))",
      Editor::FocusObject | Editor::FocusLight | Editor::FocusMaterial, true},
     {"Editing", "H(0.8,V(0.8,L(19,9:0),L(4,5:0)),L(3,2:0))", Editor::FocusObject | Editor::FocusMaterial, true},

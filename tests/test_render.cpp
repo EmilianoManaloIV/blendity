@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the render tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/texture/smart_material.h"
 #include "../src/texture/paint_layer.h"
 #include <map>
 #include <cstring>
@@ -10847,6 +10848,95 @@ static void tests_round265() {
   });
 }
 
+static void tests_round266() {
+  test("smart materials (ADR 0082): Worn Steel on a subdivided cube's baked maps reads metallic and lightens the edges; a group saved as text comes back the same; each export packing puts the channels where its engine reads them", [] {
+    Mesh cube = *primitives::cube(1.0f);
+    for (int k = 0; k < 3; k++) cube = meshops::subdivide_simple(cube);
+    MeshMapsSettings s;
+    s.size = 256, s.samples = 4;
+    MeshMapsResult r;
+    std::string why;
+    CHECK(bake_mesh_maps(cube, Mat4::identity(), s, r, &why));
+    auto maps = std::make_shared<SurfaceMaps>();
+    surface_maps_from_bake(r, 256, *maps);
+    ProceduralTexture t;
+    t.name = "SmartTest", t.surface = true, t.seamless = false, t.width = t.height = 256, t.maps = maps;
+    std::unique_ptr<TextureLayer> steel = smart_material_builtin("Worn Steel");
+    CHECK(steel && smart_material_refusal(*steel).empty());
+    if (!steel) return;
+    const std::string text = save_smart_material_text(*steel);
+    std::unique_ptr<TextureLayer> back = load_smart_material_text(text, &why);
+    CHECK(back && save_smart_material_text(*back) == text && back->children() && back->children()->size() == 3 && (*back->children())[1]->mask_layers.size() == 2);
+    t.layers.push_back(std::move(back));
+    TexPlanes p;
+    t.evaluate(p);
+    float metal_sum = 0.0f, edge_sum = 0.0f, centre_sum = 0.0f;
+    size_t n = 0, edge_n = 0, centre_n = 0;
+    for (size_t i = 0; i < p.size(); i++) {
+      if (maps->cover[i] < 0.5f) continue;
+      n++, metal_sum += p.metal[i];
+      const Vec3 q = maps->position[i];
+      int at_bound = 0, inside = 0;
+      for (float v : {q.x, q.y, q.z}) at_bound += (v < 0.03f || v > 0.97f) ? 1 : 0, inside += (v > 0.2f && v < 0.8f) ? 1 : 0;
+      const float lum = 0.2126f * p.albedo[i].x + 0.7152f * p.albedo[i].y + 0.0722f * p.albedo[i].z;
+      if (at_bound >= 2) edge_sum += lum, edge_n++;
+      else if (at_bound == 1 && inside == 2) centre_sum += lum, centre_n++;
+    }
+    const float metal_mean = n ? metal_sum / (float)n : 0.0f, edge = edge_n ? edge_sum / (float)edge_n : 0.0f, centre = centre_n ? centre_sum / (float)centre_n : 1.0f;
+    std::printf("    Worn Steel on the cube: metallic mean %.3f over %zu texels; the edge band's luminance %.3f against the face centres' %.3f\n", metal_mean, n, edge, centre);
+    CHECK(metal_mean > 0.5f && edge > centre * 1.1f);
+    /* The packings: a Fill with metallic 0.5 and roughness 0.25 (every channel a different value, so a swap shows) and
+     * the maps' occlusion (1 on the convex cube's open faces: the AO channel reads 255 here; a cup would read less). */
+    ProceduralTexture f;
+    f.name = "PackTest", f.surface = true, f.seamless = false, f.width = f.height = 64, f.maps = maps;
+    f.add("Fill");
+    CHECK(r49_set(f, "L0 Metallic", "0.5") && r49_set(f, "L0 Roughness", "0.25"));
+    const std::string dir = fs::join(scratch_project(), "Exports/PackTest");
+    struct Probe {
+      const char *packing, *map;
+      int r, g, b, a;
+    };
+    const Probe probes[] = {{"gltf", "ORM", 255, 64, 128, 255}, {"unity", "MetallicSmoothness", 128, 128, 128, 191}, {"hdrp", "MaskMap", 128, 255, 255, 191}, {"unreal", "ORM", 255, 64, 128, 255}};
+    for (const Probe &pr : probes) {
+      std::vector<std::string> files;
+      CHECK(export_texture_set(f, pr.packing, dir, files, &why));
+      const std::vector<std::string> maps_of = texture_packing_maps(pr.packing);
+      CHECK(files.size() == maps_of.size());
+      std::string file;
+      for (size_t k = 0; k < maps_of.size() && k < files.size(); k++)
+        if (maps_of[k] == pr.map) file = files[k];
+      Bitmap bm;
+      std::string err;
+      const bool ok = !file.empty() && load_image(file, bm, err) && bm.width == 64;
+      /* A texel the maps cover fully in the open (occlusion 1): the first covered texel with occlusion at 1. */
+      size_t texel = 0;
+      for (size_t i = 0; i < (size_t)64 * 64 && ok; i++) {
+        const size_t mi = (i / 64) * 4 * maps->w + (i % 64) * 4;  // (the 64-wide export against the 256 maps: nearest)
+        if (maps->cover[mi] > 0.5f && maps->ao[mi] > 0.99f) {
+          texel = i;
+          break;
+        }
+      }
+      const uint8_t *px = ok ? &bm.rgba8[texel * 4] : nullptr;
+      std::printf("    %s %s at texel %zu: %d %d %d %d (expected %d %d %d %d)\n", pr.packing, pr.map, texel, px ? px[0] : -1, px ? px[1] : -1, px ? px[2] : -1, px ? px[3] : -1, pr.r, pr.g, pr.b, pr.a);
+      CHECK(ok && std::abs(px[0] - pr.r) <= 1 && std::abs(px[1] - pr.g) <= 1 && std::abs(px[2] - pr.b) <= 1 && std::abs(px[3] - pr.a) <= 1);
+    }
+    /* Unreal reads DirectX normals: its Normal's green is glTF's inverted (a flat surface: 128 against 127). */
+    {
+      std::vector<std::string> gl, ue;
+      CHECK(export_texture_set(f, "gltf", dir, gl, &why) && export_texture_set(f, "unreal", fs::join(dir, "ue"), ue, &why));
+      Bitmap a, b;
+      std::string err;
+      const bool ok = gl.size() > 1 && ue.size() > 1 && load_image(gl[1], a, err) && load_image(ue[1], b, err) && a.width == 64 && b.width == 64;
+      const int ga = ok ? a.rgba8[(32 * 64 + 32) * 4 + 1] : -1, gb = ok ? b.rgba8[(32 * 64 + 32) * 4 + 1] : -1;
+      std::printf("    the Normal's green at the centre: gltf %d, unreal %d\n", ga, gb);
+      CHECK(ok && std::abs(ga - 128) <= 1 && gb == 255 - ga);
+    }
+    std::vector<std::string> none;
+    CHECK(!export_texture_set(f, "nothing", dir, none, &why) && !why.empty());
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10889,4 +10979,5 @@ void run_render_tests() {
   tests_round263();
   tests_round264();
   tests_round265();
+  tests_round266();
 }

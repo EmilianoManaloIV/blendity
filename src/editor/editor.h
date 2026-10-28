@@ -668,6 +668,10 @@ class Editor {
   PaintImagesPtr paint_images_for_test() { return paint_images_; }
   int paint_last_fill_for_test() const { return paint_last_fill_; }
   size_t paint_last_step_bytes_for_test() const { return paint_last_step_bytes_; }
+  bool paint_dab_uv_for_test(float u, float v) { return paint_dab_uv(u, v, 1.0f); }
+  std::string paint_canvas_state_for_test() const {
+    return strprintf("paint %d 2d %d stroking %d/%d shown-is-surface %d active %d why '%s'", (int)paint_, (int)paint_2d_, (int)paint_stroking_, (int)paint_2d_stroking_, (int)(texture_selected_ && texture_selected_ == paint_surface_), (int)ui_.any_active(), paint_canvas_why_.c_str());
+  }
   bool meshmaps_busy_for_test() const { return meshmaps_job_ != nullptr; }        // (task 0243)
   bool surface_busy_for_test() const { return surface_job_ != nullptr; }          // (task 0244)
   std::string resolve_asset_path_for_test(const std::string &rel) const { return resolve_asset_path(rel); }
@@ -3212,6 +3216,24 @@ class Editor {
   uint8_t paint_dab_serial_ = 0;
   std::map<std::string, PaintImagesPtr> paint_images_by_base_;  // a layer's images by their file base: kept across a texture's text restore
   size_t paint_last_step_bytes_ = 0;
+  /* Task 0246: 2D painting on the Textures window's canvas, and a stencil over the Scene view. */
+  bool paint_2d_ = false, paint_2d_stroking_ = false;  // (a canvas stroke: pressed on the pane, dabs by spacing while held, one step at release)
+  Vec2 paint_2d_last_;                                  // the last canvas dab's UV
+  std::string paint_canvas_why_;                        // (tests: why the last canvas frame began no stroke)
+  Bitmap paint_stencil_;
+  Vec2 paint_stencil_offset_;
+  float paint_stencil_scale_ = 1.0f;
+  int texture_smat_pick_ = 0;
+  bool paint_dab_uv(float u, float v, float pressure);
+  void paint_canvas_update(const Recti &pane, int tiles);
+  void paint_canvas_end();
+  float paint_stencil_at(Vec2 screen) const;
+  void paint_stencil_draw(const Recti &view);
+  bool paint_load_brush_image(const std::string &path, Bitmap &out, const char *what);
+  void smat_command(const std::vector<std::string> &t);
+  bool smat_apply(const std::string &name_or_path, ProceduralTexturePtr onto = nullptr);
+  void export_textures_command(const std::vector<std::string> &t);
+  friend bool surface_stack_writes_emission(const ProceduralTexture &pt);
   int paint_tiles_x_ = 0, paint_tiles_y_ = 0, paint_rows_y0_ = 0, paint_rows_y1_ = 0, paint_dab_rows_y0_ = 0, paint_dab_rows_y1_ = 0;
   bool paint_depth_grows_ = true;  // the view's depth grows with distance (set per dab from the planes)
   int paint_last_fill_ = -1;       // the last fill's triangles (-1: refused before painting; tests)

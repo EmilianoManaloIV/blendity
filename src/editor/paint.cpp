@@ -9,6 +9,11 @@
 #include "../render/display.h"
 #include "../texture/paint_layer.h"
 #include "../texture/surface.h"
+#include "../texture/smart_material.h"
+
+namespace bl {
+bool surface_stack_writes_emission(const ProceduralTexture &pt);  // (surface_ui.cpp)
+}
 
 #include <algorithm>
 #include <cmath>
@@ -365,7 +370,7 @@ void Editor::paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, 
         if (!scene_r3d_.project(wp, s, d)) continue;
         const float dist2 = (s.x - centre.x) * (s.x - centre.x) + (s.y - centre.y) * (s.y - centre.y);
         if (dist2 > r2) continue;
-        k *= paint_falloff(std::sqrt(dist2) / radius, paint_brush_.hardness) * paint_alpha_at({(s.x - centre.x) / radius, (s.y - centre.y) / radius});
+        k *= paint_falloff(std::sqrt(dist2) / radius, paint_brush_.hardness) * paint_alpha_at({(s.x - centre.x) / radius, (s.y - centre.y) / radius}) * paint_stencil_at(s);
         const int sx = (int)s.x, sy = (int)s.y;
         if (sx < 0 || sy < 0 || sx >= scene_rt_.width || sy >= scene_rt_.height) continue;  // (off the view: not seen, not painted)
         if (scene_rt_.id_at(sx, sy) != (uint32_t)paint_obj_) continue;                      // (another object in front, or the background)
@@ -436,7 +441,7 @@ void Editor::paint_dab(const Recti &view, float x, float y, float pressure) {
  * stamp bumped so the surface re-evaluates on its worker. */
 void Editor::paint_end_stroke() {
   if (!paint_stroking_) return;
-  paint_stroking_ = false;
+  paint_stroking_ = false, paint_2d_stroking_ = false;
   if (!paint_dabbed_ || !paint_images_ || !paint_delta_ || paint_delta_->tiles.empty()) {
     paint_delta_.reset();
     return;
@@ -588,6 +593,160 @@ bool Editor::paint_fill(const std::string &what, float x, float y) {
 }
 
 /* ===================================================================== */
+/* 2D painting and stencils (task 0246)                                   */
+/* ===================================================================== */
+
+/* A dab on the UV square: the texels within the brush's radius (in texels) of (u, v), no projection and no depth test -
+ * every triangle sharing a texel is painted alike, as a 2D view paints. */
+bool Editor::paint_dab_uv(float u, float v, float pressure) {
+  if (!paint_ || !paint_surface_) return false;
+  const bool own = !paint_stroking_;
+  if (own && !paint_begin_stroke_images()) return false;
+  PaintImages &im = *paint_images_;
+  if (!std::isfinite(u) || !std::isfinite(v)) return false;
+  u -= std::floor(u), v -= std::floor(v);  // (the UV square, wrapped)
+  pressure = std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f;
+  const float weight = paint_brush_.pressure == 1 ? pressure : 1.0f;
+  const float radius = std::min((float)std::max(im.w, im.h), std::max(1.0f, paint_brush_.radius * (paint_brush_.pressure == 2 ? std::max(0.1f, pressure) : 1.0f)));
+  if (own) paint_erase_ = paint_brush_.erase || ui_.in.eraser;
+  paint_dab_serial_++;
+  const float cx = u * im.w, cy = (1.0f - v) * im.h;
+  const int x0 = std::max(0, (int)std::floor(cx - radius)), x1 = std::min(im.w - 1, (int)std::ceil(cx + radius));
+  const int y0 = std::max(0, (int)std::floor(cy - radius)), y1 = std::min(im.h - 1, (int)std::ceil(cy + radius));
+  for (int y = y0; y <= y1; y++)
+    for (int x = x0; x <= x1; x++) {
+      const float dx = x + 0.5f - cx, dy = y + 0.5f - cy, d = std::sqrt(dx * dx + dy * dy);
+      if (d > radius) continue;
+      const float k = weight * paint_falloff(d / radius, paint_brush_.hardness) * paint_alpha_at({dx / radius, dy / radius});
+      if (k > 0.002f) paint_write_texel((size_t)y * im.w + x, k);
+    }
+  paint_dabbed_ = true;
+  if (own) paint_end_stroke();
+  ui_.redraw = true;
+  return true;
+}
+
+/* An alpha or stencil image: a float image (EXR, HDR) converted to 8 bits, so every reader indexes rgba8. */
+bool Editor::paint_load_brush_image(const std::string &path, Bitmap &out, const char *what) {
+  std::string err;
+  Bitmap bm;
+  if (!load_image(resolve_asset_path(path), bm, err)) {
+    Log::warn("%s: %s", what, err.c_str());
+    return false;
+  }
+  if (bm.is_float || bm.rgba8.size() != (size_t)bm.width * bm.height * 4) {
+    bm.rgba8.assign((size_t)bm.width * bm.height * 4, 255);
+    for (size_t i = 0; i < (size_t)bm.width * bm.height * 4 && i < bm.rgbaf.size(); i++)
+      bm.rgba8[i] = (uint8_t)std::lround(std::max(0.0f, std::min(1.0f, std::isfinite(bm.rgbaf[i]) ? bm.rgbaf[i] : 0.0f)) * 255.0f);
+    bm.rgbaf.clear(), bm.is_float = false;
+  }
+  out = std::move(bm);
+  return true;
+}
+
+/* The stencil's rect in the Scene view: the image's aspect kept, fit to the view's shorter side, scaled about the view's
+ * top left and moved by the offset. */
+static Recti paint_stencil_rect(const Bitmap &st, const Recti &view, Vec2 offset, float scale) {
+  const float fit = std::min((float)view.w / (float)st.width, (float)view.h / (float)st.height) * std::max(0.05f, scale);
+  return {view.x + (int)std::lround(offset.x), view.y + (int)std::lround(offset.y), std::max(1, (int)std::lround(st.width * fit)), std::max(1, (int)std::lround(st.height * fit))};
+}
+
+/* The stencil's luminance at a Scene view pixel (from the view's top left); 1 without one, 0 outside the image. */
+float Editor::paint_stencil_at(Vec2 screen) const {
+  const Bitmap &st = paint_stencil_;
+  if (st.width <= 0 || st.height <= 0 || scene_rect_.w <= 0 || scene_rect_.h <= 0) return 1.0f;
+  if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) return 0.0f;
+  const Recti r = paint_stencil_rect(st, Recti{0, 0, scene_rect_.w, scene_rect_.h}, paint_stencil_offset_, paint_stencil_scale_);
+  const float fx = (screen.x - r.x) / (float)r.w, fy = (screen.y - r.y) / (float)r.h;
+  if (!(fx >= 0.0f && fx < 1.0f && fy >= 0.0f && fy < 1.0f)) return 0.0f;  // (outside the stencil: nothing gets through)
+  const int x = std::min(st.width - 1, std::max(0, (int)(fx * st.width))), y = std::min(st.height - 1, std::max(0, (int)(fy * st.height)));
+  const uint8_t *px = &st.rgba8[((size_t)y * st.width + x) * 4];
+  return (px[0] + px[1] + px[2]) / (3.0f * 255.0f);
+}
+
+/* The stencil over the Scene view, translucent, so offset and scale are placed by eye (the pixels under its dark parts
+ * are what the brush leaves alone). */
+void Editor::paint_stencil_draw(const Recti &view) {
+  const Bitmap &st = paint_stencil_;
+  if (!paint_ || st.width <= 0 || st.height <= 0) return;
+  Image *img = ui_.canvas.target();
+  if (!img) return;
+  const Recti r = paint_stencil_rect(st, view, paint_stencil_offset_, paint_stencil_scale_);
+  const Recti c = r.intersect(view).intersect(ui_.canvas.clip());
+  for (int y = c.y; y < c.bottom(); y++) {
+    const int sy = std::min(st.height - 1, (int)((int64_t)(y - r.y) * st.height / r.h));
+    uint32_t *row = img->row(y);
+    for (int x = c.x; x < c.right(); x++) {
+      const int sx = std::min(st.width - 1, (int)((int64_t)(x - r.x) * st.width / r.w));
+      const uint8_t *px = &st.rgba8[((size_t)sy * st.width + sx) * 4];
+      const int lum = (px[0] + px[1] + px[2]) / 3;
+      const uint32_t d = row[x];
+      /* The dark parts tint the view towards the warning colour by 40 %; the light parts leave it. */
+      const int k = (255 - lum) * 102 / 255;
+      const uint32_t w = ui_.theme.warning;
+      auto mix = [&](int ch, int wv) { return (uint32_t)((ch * (255 - k) + wv * k) / 255); };
+      row[x] = 0xFF000000u | mix((d >> 16) & 255, (w >> 16) & 255) << 16 | mix((d >> 8) & 255, (w >> 8) & 255) << 8 | mix(d & 255, w & 255);
+    }
+  }
+  ui_.canvas.rect_outline(r, ui_.theme.warning);
+}
+
+/* The Textures window's canvas (the preview pane showing `tiles` x `tiles` copies of the texture): a press over it begins
+ * a 2D stroke on the shown surface, dabs follow the pointer by the brush's spacing (in texels, as the brush's radius),
+ * and the release ends the stroke as one step. The pane's pixel maps to the UV of the tile under it. */
+void Editor::paint_canvas_update(const Recti &pane, int tiles) {
+  auto &in = ui_.in;
+  if (!paint_ || !paint_2d_ || !texture_selected_ || texture_selected_ != paint_surface_) {
+    paint_canvas_end();
+    return;
+  }
+  const float px = (float)(in.mx - pane.x) / (float)std::max(1, pane.w) * std::max(1, tiles), py = (float)(in.my - pane.y) / (float)std::max(1, pane.h) * std::max(1, tiles);
+  const Vec2 uv(px - std::floor(px), 1.0f - (py - std::floor(py)));
+  const float pressure = std::isfinite(in.pressure) ? in.pressure : 1.0f;
+  if (!paint_2d_stroking_) {
+    if (!(ui_.hovered(pane) && in.pressed[0] && !ui_.any_active())) {
+      paint_canvas_why_ = strprintf("hovered %d pressed %d active %d at %d,%d pane %d,%d %dx%d", (int)ui_.hovered(pane), (int)in.pressed[0], (int)ui_.any_active(), in.mx, in.my, pane.x, pane.y, pane.w, pane.h);
+      return;
+    }
+    if (!paint_begin_stroke_images()) {
+      paint_canvas_why_ = "no images";
+      return;
+    }
+    paint_canvas_why_.clear();
+    ui_.consume_click();
+    paint_stroking_ = true, paint_dabbed_ = false, paint_2d_stroking_ = true;
+    paint_erase_ = paint_brush_.erase || in.eraser;
+    paint_dab_uv(uv.x, uv.y, pressure);
+    paint_2d_last_ = uv;
+    return;
+  }
+  if (!in.down[0]) {
+    paint_canvas_end();
+    return;
+  }
+  const PaintImages *im = paint_images_.get();
+  const float texels = im ? (float)std::max(im->w, im->h) : 1024.0f;
+  const float step = std::max(1.0f, paint_brush_.radius * std::max(0.05f, paint_brush_.spacing)) / texels;  // (in UV units)
+  Vec2 d = uv - paint_2d_last_;
+  if (std::fabs(d.x) > 0.5f) d.x -= std::copysign(1.0f, d.x);  // (the shortest way across the tile's wrap)
+  if (std::fabs(d.y) > 0.5f) d.y -= std::copysign(1.0f, d.y);
+  const float len = length(d);
+  if (len < step) return;
+  const int k = std::min(64, std::max(1, (int)(len / step)));
+  for (int i = 1; i <= k; i++) {
+    const Vec2 at = paint_2d_last_ + d * (i / (float)k);
+    paint_dab_uv(at.x, at.y, pressure);
+  }
+  paint_2d_last_ = uv;
+}
+
+void Editor::paint_canvas_end() {
+  if (!paint_2d_stroking_) return;
+  paint_2d_stroking_ = false;
+  paint_end_stroke();
+}
+
+/* ===================================================================== */
 /* The view, the frame, the console                                       */
 /* ===================================================================== */
 
@@ -617,6 +776,7 @@ bool Editor::paint_update(const Recti &view) {
 }
 
 void Editor::paint_draw(const Recti &view) {
+  paint_stencil_draw(view);
   if (!paint_ || !scene_hovered_) return;
   auto &u = ui_;
   const float r = paint_brush_.radius * u.scale;
@@ -685,10 +845,29 @@ void Editor::paint_command(const std::vector<std::string> &t) {
     if (arg(2, "off") == "off") paint_alpha_ = Bitmap();
     else {
       std::string err;
-      if (!load_image(resolve_asset_path(t[2]), paint_alpha_, err)) Log::warn("paint alpha: %s", err.c_str());
+      paint_load_brush_image(t[2], paint_alpha_, "paint alpha");
     }
   }
   else if (v == "layer") paint_layer_ = (int)num(2, -1.0f);
+  else if (v == "2d") {  // paint 2d on|off | dab u v [pressure]: the Textures window's canvas (task 0246)
+    const std::string w = arg(2, "on");
+    if (w == "dab") {
+      if (!paint_dab_uv(num(3, 0.5f), num(4, 0.5f), num(5, 1.0f))) Log::warn("paint 2d dab: Paint Mode is off (paint on)");
+    }
+    else paint_2d_ = w == "on" || (w == "toggle" && !paint_2d_), Log::info("Paint: the Textures window's canvas %s the brush (2D painting)", paint_2d_ ? "takes" : "no longer takes");
+  }
+  else if (v == "stencil") {  // paint stencil <image>|off | offset x y | scale s (task 0246)
+    const std::string w = arg(2, "off");
+    auto finite = [&](float f, float d) { return std::isfinite(f) ? f : d; };
+    if (w == "off") paint_stencil_ = Bitmap();
+    else if (w == "offset") paint_stencil_offset_ = Vec2(std::max(-1e5f, std::min(1e5f, finite(num(3, 0.0f), 0.0f))), std::max(-1e5f, std::min(1e5f, finite(num(4, 0.0f), 0.0f))));
+    else if (w == "scale") paint_stencil_scale_ = std::max(0.05f, std::min(20.0f, finite(num(3, 1.0f), 1.0f)));
+    else {
+      std::string path;
+      for (size_t k = 2; k < t.size(); k++) path += (k > 2 ? " " : "") + t[k];
+      if (paint_load_brush_image(path, paint_stencil_, "paint stencil")) paint_stencil_offset_ = Vec2(), paint_stencil_scale_ = 1.0f;
+    }
+  }
   else if (v == "dab") {
     if (!paint_) {
       Log::warn("paint dab: Paint Mode is off (paint on)");
@@ -709,7 +888,181 @@ void Editor::paint_command(const std::vector<std::string> &t) {
     const float x = t.size() > 4 ? num(3, 0.0f) : (float)(ui_.in.mx - scene_rect_.x), y = t.size() > 4 ? num(4, 0.0f) : (float)(ui_.in.my - scene_rect_.y);
     paint_fill(arg(2, "object"), x, y);
   }
-  else Log::warn("paint on|off | color r g b | roughness f | metallic f | height f | emission r g b | channels <list> | size | hardness | opacity | flow | spacing | alpha | symmetry | lazy | erase | pressure | dab x y [p] | fill group|island|material|object [x y] | layer <i>");
+  else Log::warn("paint on|off | color r g b | roughness f | metallic f | height f | emission r g b | channels <list> | size | hardness | opacity | flow | spacing | alpha | symmetry | lazy | erase | pressure | dab x y [p] | fill group|island|material|object [x y] | layer <i> | 2d on|off|dab u v | stencil <image>|off|offset x y|scale s");
+}
+
+/* ===================================================================== */
+/* Smart materials and texture sets (task 0246)                           */
+/* ===================================================================== */
+
+/* smat apply <built-in name | Assets/Materials/Smart/<name>.smat | name>: a copy of the group on top of the active
+ * object's surface; its Mesh Map effects read that surface's maps. */
+bool Editor::smat_apply(const std::string &name_or_path, ProceduralTexturePtr onto) {
+  std::string why;
+  ProceduralTexturePtr pt = onto ? onto : surface_of(active_object(), &why);
+  if (pt && !pt->surface) pt = nullptr, why = pt ? "" : "the texture shown is not a surface (surface new makes one on an object)";
+  if (!pt) {
+    Log::warn("smat apply: %s", why.c_str());
+    return false;
+  }
+  /* A saved file first - a built-in written out and edited wins over the code's copy - then the built-in. */
+  std::string path = name_or_path;
+  if (path.find('/') == std::string::npos && path.find('\\') == std::string::npos) path = "Assets/Materials/Smart/" + path + ".smat";
+  std::string text;
+  std::unique_ptr<TextureLayer> grp;
+  if (fs::read_file(resolve_asset_path(path), text)) {
+    grp = load_smart_material_text(text, &why);
+    if (!grp) {
+      Log::warn("smat apply: %s", why.c_str());
+      return false;
+    }
+    const std::string refusal = smart_material_refusal(*grp);
+    if (!refusal.empty()) {
+      Log::warn("smat apply: %s", refusal.c_str());
+      return false;
+    }
+    grp->name = fs::stem(path);
+  }
+  else grp = smart_material_builtin(name_or_path);
+  if (!grp) {
+    Log::warn("smat apply: no built-in and no file called '%s' (smat list)", name_or_path.c_str());
+    return false;
+  }
+  note_texture_edit(*pt);
+  pt->layers.push_back(std::move(grp));
+  pt->touch();
+  mark_changed("Apply Smart Material");
+  Log::info("Surface %s: %s applied on top (%zu layers)%s", pt->name.c_str(), pt->layers.back()->name.c_str(), pt->layers.size(), pt->maps ? "" : " - no mesh maps: its generators read flat grey (surface maps)");
+  return true;
+}
+
+/* smat save <layer> <name> | apply <name> | list | builtin <name> */
+void Editor::smat_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? t[i] : d; };
+  auto rest = [&](size_t from) {
+    std::string s;
+    for (size_t k = from; k < t.size(); k++) s += (k > from ? " " : "") + t[k];
+    return s;
+  };
+  const std::string sub = to_lower(arg(1, "list"));
+  if (sub == "list") {
+    Log::info("Smart materials, built in: %s", [&] {
+      std::string s;
+      for (const std::string &n : smart_material_builtins()) s += (s.empty() ? "" : ", ") + n;
+      return s;
+    }().c_str());
+    size_t n = 0;
+    for (const DirEntry &e : fs::list(resolve_asset_path("Assets/Materials/Smart")))
+      if (!e.is_dir && fs::extension(e.name) == ".smat") Log::info("  %s", e.name.c_str()), n++;
+    if (!n) Log::info("  (no saved ones: smat save <layer> <name>)");
+    return;
+  }
+  if (sub == "apply") {
+    smat_apply(rest(2));
+    return;
+  }
+  if (sub == "builtin" || sub == "save") {
+    std::unique_ptr<TextureLayer> grp;
+    std::string name;
+    if (sub == "builtin") {
+      name = rest(2);
+      grp = smart_material_builtin(name);
+      if (!grp) {
+        Log::warn("smat builtin: Worn Steel | Painted Metal | Rubber | Wood | Plastic | Concrete | Gold");
+        return;
+      }
+    }
+    else {
+      GameObject *g = active_object();
+      std::string why;
+      ProceduralTexturePtr pt = surface_of(g, &why);
+      const int i = std::atoi(arg(2, "-1").c_str());
+      if (!pt || i < 0 || i >= (int)pt->layers.size()) {
+        Log::warn("smat save <layer index> <name>: %s", pt ? "no such layer" : why.c_str());
+        return;
+      }
+      const std::string refusal = smart_material_refusal(*pt->layers[(size_t)i]);
+      if (!refusal.empty()) {
+        Log::warn("smat save: %s", refusal.c_str());
+        return;
+      }
+      name = rest(3);
+      grp = pt->layers[(size_t)i]->clone();
+      if (name.empty()) name = grp->name.empty() ? "Smart Material" : grp->name;
+    }
+    std::string file = name;
+    for (char &ch : file)
+      if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|' || ch == '#' || (unsigned char)ch < 32) ch = '_';
+    while (!file.empty() && (file.back() == ' ' || file.back() == '.')) file.pop_back();
+    static const char *reserved[] = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"};
+    for (const char *r : reserved)
+      if (to_lower(file) == to_lower(r)) file += "_";
+    if (file.empty()) {
+      Log::warn("smat: a name is needed");
+      return;
+    }
+    grp->name = file;
+    const std::string rel = "Assets/Materials/Smart/" + file + ".smat";
+    fs::make_dirs(resolve_asset_path("Assets/Materials/Smart"));
+    if (!fs::write_file(resolve_asset_path(rel), save_smart_material_text(*grp))) {
+      Log::warn("smat: could not write %s", rel.c_str());
+      return;
+    }
+    project_listed_ = -100;
+    Log::info("Smart material %s written (smat apply %s)", rel.c_str(), file.c_str());
+    return;
+  }
+  Log::warn("smat save <layer> <name> | apply <name> | list | builtin <name>");
+}
+
+/* export textures <packing> <dir> [--assign]: the active object's surface as a texture set. */
+void Editor::export_textures_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? t[i] : d; };
+  GameObject *g = active_object();
+  std::string why;
+  ProceduralTexturePtr pt = surface_of(g, &why);
+  if (!pt) {
+    Log::warn("export textures: %s", why.c_str());
+    return;
+  }
+  const std::string packing = to_lower(arg(2, "gltf"));
+  std::string dir = arg(3, "Exports/Textures");
+  const bool assign = std::find(t.begin(), t.end(), "--assign") != t.end();
+  if (dir == "--assign") dir = "Exports/Textures";
+  std::vector<std::string> files;
+  if (!export_texture_set(*pt, packing, resolve_asset_path(dir), files, &why)) {
+    Log::warn("export textures: %s", why.c_str());
+    return;
+  }
+  Log::info("export textures %s: %zu file(s) under %s (a snapshot: export again after more strokes)%s", packing.c_str(), files.size(), dir.c_str(), assign ? "; the material now reads the files (the Textures window's Assign puts the live surface back)" : "");
+  if (!assign) return;
+  MeshRenderer *mr = g->get<MeshRenderer>();
+  if (!mr || mr->materials.empty() || !mr->materials[0]) {
+    Log::warn("export textures --assign: %s has no material to point at the files", g->name.c_str());
+    return;
+  }
+  /* The engine's maps one a channel (`separate`) beside the packing's files: the material reads roughness and metallic
+   * from their own images, as it did from the surface's channels, and emission only when the stack writes it. */
+  std::vector<std::string> sep;
+  if (!export_texture_set(*pt, "separate", resolve_asset_path(dir), sep, &why)) {
+    Log::warn("export textures --assign: %s", why.c_str());
+    return;
+  }
+  const std::vector<std::string> maps = texture_packing_maps("separate");
+  auto file_of = [&](const char *map) {
+    for (size_t k = 0; k < maps.size() && k < sep.size(); k++)
+      if (maps[k] == map) return fs::join(dir, fs::filename(sep[k]));
+    return std::string();
+  };
+  Material &m = *mr->materials[0];
+  m.base_map = TextureRef{file_of("Albedo"), false};
+  m.normal_map = TextureRef{file_of("Normal"), true};
+  m.roughness_map = TextureRef{file_of("Roughness"), true};
+  m.metallic_map = TextureRef{file_of("Metallic"), true};
+  m.metallic = 1.0f, m.roughness = 1.0f;  // (the maps multiply the values)
+  m.emission_map = surface_stack_writes_emission(*pt) ? TextureRef{file_of("Emission"), false} : TextureRef{};
+  m.touch();
+  mark_changed("Assign Exported Textures");
 }
 
 /* The Paint layers' images written to their PNGs when they changed (called where the project and its assets are saved). */

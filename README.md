@@ -213,7 +213,8 @@ layer stack on an object's surface - fills, a mask as a stack of effects on ever
 maps (edge wear, dirt, dust), anchors, groups, metallic and emission - redone inside the edited rectangle only. Painting
 on the model by projection with a material brush (colour, roughness, metallic, height, emission in one dab), the far
 side and hidden surfaces left alone, fills by polygroup, island, material or object, a stroke one undo step of the
-tiles it touched.
+tiles it touched. Smart materials (a saved group with its masks, seven built in) dropped onto any surface, texture
+sets exported in the glTF, Unity, HDRP and Unreal packings, 2D painting on the UV canvas, stencils.
 
 ## Build it
 
@@ -241,7 +242,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (12956 unit checks in 1113 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (12996 unit checks in 1115 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

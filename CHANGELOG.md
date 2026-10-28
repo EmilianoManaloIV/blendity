@@ -2,6 +2,65 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 266): smart materials, texture sets, 2D painting (task 0246)
+
+**Asked:** Substance Painter's pillars - after the stack (0244) and the brush (0245): smart materials dropped onto any
+asset, the export game engines read, the 2D view.
+
+**Added**
+- **Smart materials** (`src/texture/smart_material.cpp`, ADR 0082): a Group layer with its children and masks saved
+  as text - the `.ptex` layer format, one layer - under `Assets/Materials/Smart/<name>.smat` and applied as a copy on
+  top of any surface's stack, where its Mesh Map effects read *that* surface's maps (the adaptivity is the stack's).
+  Seven built-ins made from Fill, Noise, Wood Floor, Plaster, Height AO and the mask presets: Worn Steel, Painted
+  Metal (the paint chipped at the edges: the edge-wear preset inverted), Rubber, Wood, Plastic, Concrete, Gold. A group
+  holding a Paint layer is refused as a smart material with a reason (its images belong to one surface).
+- **Texture sets:** `export textures <packing> <dir> [--assign]` evaluates the surface and writes its planes as PNGs in
+  the packing the target reads - `gltf` / `unreal` (BaseColor, Normal, ORM = occlusion R / roughness G / metallic B,
+  Emissive), `unity` (Albedo with the coverage as alpha, MetallicSmoothness = metallic RGB + smoothness A, Normal,
+  Emission, AO), `hdrp` (BaseColor, MaskMap = metallic R / occlusion G / smoothness A, Normal, Emission), `separate`
+  (one image a channel) - the occlusion from the surface's mesh maps (white without them); `--assign` points the
+  material's maps at the files.
+- **2D painting:** `paint 2d on` makes the Textures window's preview pane the canvas - a pane pixel is a UV, a dab
+  there writes the texel's neighbourhood through the same stroke, tile undo and dilation as a projected dab, no
+  projection and no depth test (every triangle sharing the texel is painted alike, as Substance's 2D view does);
+  `paint 2d dab u v [pressure]` from the console.
+- **Stencils:** `paint stencil <image>` holds an image over the Scene view (moved with `paint stencil offset x y`,
+  scaled with `paint stencil scale s`); a dab's weight is multiplied by the stencil's luminance at the projected pixel,
+  nothing gets through outside it; `paint stencil off`.
+- **The Texturing layout** (`layout Texturing`: the Scene view, the Textures window, the Modeling Tools with the Paint
+  section, the Inspector) and its guide; the Textures window's **shelf** (a surface's header: the built-ins in a combo
+  and Apply).
+- **Console:** `smat save <layer> <name> | apply <name> | list | builtin <name>`, `export textures <packing> <dir>
+  [--assign]`, `paint 2d on|off|dab u v`, `paint stencil <image>|off|offset x y|scale s`.
+- **Measured** (`tests_round266`): Worn Steel on a subdivided cube's baked maps - metallic mean 1.000 over 35,728
+  covered texels, the edge band's luminance 0.706 against the face centres' 0.565; a 16-texel 2D dab at (0.25, 0.75)
+  painted 1,000 texels about (256, 256) and none elsewhere; a stencil black on its left half let 0 texels through
+  there and 59,987 through its white half; a six-frame drag on the canvas at opacity 0.5 painted 28,704 texels, none
+  above 128 of 255, as one step.
+- **Review (Opus) taken:** a drag on the Textures window's canvas is one stroke - begun by the press on the pane, dabs
+  by the brush's spacing while held, one step at the release, the opacity capped as in the view (it had been a stroke
+  and a step a frame); the stencil is drawn over the Scene view, translucent, its aspect kept and fit to the view's
+  shorter side, so offset and scale are placed by eye; a float stencil or alpha image (EXR, HDR) is converted to 8 bits
+  and a NaN offset, scale or UV is refused (each had indexed past the image); Unreal's Normal is written DirectX (green
+  down), HDRP's mask map keeps its detail channel full; `--assign` points the material at the separate Roughness and
+  Metallic images beside the packing (it had cleared the maps with Metallic 1 left on) and at the Emission only when the
+  stack writes it; a saved `.smat` wins over the code's built-in of the same name, so a written-out built-in can be
+  edited; a loaded file is refused when it holds a Paint layer; the canvas and the shelf act on the texture shown (not
+  the active object's) and the canvas shows the brush at the pane's scale and maps 2 x 2 previews to their tile; file
+  names are sanitised for Windows (reserved names, streams); the tests probe metallic 0.5 so a swapped channel shows,
+  apply a saved material to a second object and see its hash move, drive the canvas with press / move / release events,
+  check `--assign`'s paths and the layout's four windows. Open: the export evaluates the surface on the main thread
+  (the `export` command's cost; measured in a later round's stress), the 2D brush's radius is in texels, no Paint
+  Strokes filter.
+
+**Checked**
+- `tests_round266` in `tests/test_render.cpp` (Worn Steel's metallic and edges on the cube's maps, a smart material's
+  text round trip, each packing's channels at a known texel) and `tests/test_editor.cpp` (smat apply as one step and
+  smat save / apply from the file, the 2D dab's texels, the stencil's halves, the Texturing layout).
+- Unit checks (round 266): Windows, in render-cache verify mode, 12996, 0 failed (1115 tests), 0 stale
+  pictures. Linux with libraries: 12536, 0 failed. Sanitizer build: 12383, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the sanitizer leg ran in the chain on this code before the test fix: 12,383 checks, one timing-dependent --assign check (fixed, passes on Windows and Linux); its rerun did not complete (WSL service failures); gpu views 8,176 checks; linux 12,536.)
+
 ## 2026-10-28 (round 265): painting on the model, with tile undo (task 0245)
 
 **Asked:** Substance Painter's pillars - the layer stack with masks, mesh maps and generators, smart materials,

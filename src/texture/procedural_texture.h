@@ -127,6 +127,7 @@ struct TextureLayer {
   virtual bool reads_anywhere() const { return false; }
   /* A group's sub-stack (null for every other layer). */
   virtual TextureLayerList *children() { return nullptr; }
+  const TextureLayerList *children_const() const { return const_cast<TextureLayer *>(this)->children(); }  // (children() mutates nothing: a Group's list)
   virtual const char *type_name() const = 0;
   virtual std::unique_ptr<TextureLayer> clone() const = 0;
   virtual void reflect(Reflector &r) = 0;

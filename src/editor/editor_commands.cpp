@@ -917,8 +917,16 @@ void Editor::run_console_command(const std::string &line) {
     toonstyle_command(name);
     return;
   }
-  if (c == "paint") {  // paint on|off|color|...|dab|fill (task 0245)
+  if (c == "paint") {  // paint on|off|color|...|dab|fill|2d|stencil (tasks 0245, 0246)
     paint_command(t);
+    return;
+  }
+  if (c == "smat") {  // smat save|apply|list|builtin (task 0246)
+    smat_command(t);
+    return;
+  }
+  if (c == "export" && to_lower(arg(1, "")) == "textures") {  // export textures <packing> <dir> [--assign] (task 0246)
+    export_textures_command(t);
     return;
   }
   if (c == "surface") {  // surface new|add|mask|group|set|layer|eval|maps|list (task 0244)

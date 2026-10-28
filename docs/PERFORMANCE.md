@@ -1229,3 +1229,14 @@ rows on the card; the stack re-evaluates on the surface's worker when the stroke
 |---|---|---|
 | a 40 px dab on a sphere filling a third of the view | 7,119 | the tiles touched, not the 4 MB image |
 | a fill of the whole object (720 triangles) | 995,680 | every tile |
+
+## Smart materials and texture sets (task 0246)
+
+Applying a smart material is a stack edit: the group's layers are redone above the edited position by the rect engine,
+on the surface's worker. An export evaluates the whole surface once and writes one PNG a map (uncompressed, on the main
+thread - the `export` command's cost, not a frame's). A 2D dab writes the disc's texels directly, no triangle walk.
+
+| `tests_round266` | Measured |
+|---|---|
+| Worn Steel on a 256 surface of a subdivided cube with its maps | metallic mean 1.000 over 35,728 texels; the edge band's luminance 0.706 against the face centres' 0.565 |
+| a 16-texel 2D dab | 1,000 texels about its UV, none elsewhere |

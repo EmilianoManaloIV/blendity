@@ -353,6 +353,13 @@ the far side and anything behind are left alone, the pen's eraser end erases, Mi
 fill group|island|material|object` fills a part. A stroke is one undo step holding only the tiles it touched. The painted
 images are saved beside the surface's texture when the project saves.
 
+**Smart materials** are groups of layers with their masks saved as assets: the Textures window's shelf applies a built-in
+(Worn Steel, Painted Metal, Rubber, Wood, Plastic, Concrete, Gold) on top of the surface, where its generators read this
+object's mesh maps; `smat save <layer> <name>` keeps a group of your own under Assets/Materials/Smart and `smat apply
+<name>` drops it onto another surface. `export textures gltf|unity|hdrp|unreal|separate <dir>` writes the surface as the
+images a game engine reads, packed as it expects. `paint 2d on` paints on the Textures window's canvas instead of the
+model; `paint stencil <image>` holds an image over the view that masks the brush.
+
 **Many at once.** The Materials, Textures and Project windows select like the Hierarchy: Ctrl+click, Shift+click a
 range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Trash).
 
@@ -708,6 +715,7 @@ the editor. A few that are handy by hand:
 | `meshmaps 1024 16`, `meshmaps status` | bake the mesh maps on a worker; the record and whether it is stale |
 | `surface new`, `surface mask preset 1 edgewear`, `surface eval 0 0 128 128` | a surface for the object, a smart mask on layer 1, the rect engine timed |
 | `paint on`, `paint color 0.8 0.1 0.1`, `paint fill island` | Paint Mode, the brush's colour, a fill of the UV island under the pointer |
+| `smat apply Worn Steel`, `export textures gltf Exports/Crate`, `paint 2d on` | a smart material on the surface, the texture set in the glTF packing, the canvas takes the brush |
 | `libs` | which of Blender's libraries this build uses |
 | `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
 | `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |
