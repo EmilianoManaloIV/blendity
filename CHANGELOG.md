@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 262): Sculptris Pro - Dyntopo (task 0242)
+
+**Asked:** ZBrush's Sculptris Pro - detail that appears under the brush as it moves.
+
+**Added**
+- **`meshops::Dyntopo`** (`src/scene/dyntopo.cpp`, ADR 0078): a tessellator over the mesh's arrays for one stroke - a
+  vertex-to-faces table it keeps, new triangles appended, removed faces tombstoned (their corners one vertex: no
+  area) and compacted away at the stroke's end. Under the brush: n-gons become triangles, edges longer than the
+  detail size are split at their midpoints (the new vertex's mask, groups and weights the mean of its ends', its UVs
+  interpolated), edges shorter than two fifths of it collapse to their midpoints where that folds no triangle, pinches
+  no edge into a third face, doubles no face and leaves more than four faces.
+- **In Sculpt Mode:** Dyntopo and Detail (a fraction of the brush's world radius, default a quarter - ZBrush's rule: a
+  small brush adds fine detail) in the Sculpt section, `sculpt dyntopo on|off|toggle|<detail>`, the Wheel's Size ring
+  with Dyntopo in Lazy Mouse's slot, the status line. A Dyntopo stroke makes the mesh the object's own at its start
+  and is one snapshot step at the pen's lift (ADR 0074's rule for topology; no delta); each dab tessellates its
+  instances' regions first - the mesh's version bumped at once so its tables and the render mesh follow the new ids -
+  then the brush moves the vertices. Grab and Snake Hook tessellate at their first dab and keep their sets. Dynamic
+  Subdivision must be off (the cage, not the surface, would be tessellated: the stroke says so).
+- **Measured:** a ten-dab Draw stroke across the 1,490-vertex sphere went to 1,840 vertices with 599 of 615 new edges
+  within [0.4, 1] x the detail, the mesh closed and manifold; the detail set to the brush radius took the 6k sphere to
+  2,943 vertices under the brush; a fully masked region gained 118 vertices, all masked, and moved none.
+**Review (Opus, round 262):** seven majors, seven minors and four nits, all taken before landing. A Dyntopo stroke had deleted the mesh's loose vertices (the compaction now drops only vertices that had faces and lost them) and every shape key (the keys are carried - a new vertex the mean of its ends', a collapse the mean, the deltas compacted); the mask had not protected against collapses (a held vertex is never collapsed); seams and sharp edges had kept stale keys through a split or a collapse (they are re-keyed to the halves or onto the survivor); a mesh coarser than the brush had nothing tessellated (the face under the cursor seeds the region, mirrored for the mirrored instances, and the tessellation works the faces the brush sphere reaches, as Dyntopo's PBVH leaves do, so a face larger than the brush is tessellated where the brush is and no further); the per-dab cost was unmeasured (a ten-dab stroke on the 6k sphere is printed with and without Dyntopo: 1 ms against 22 ms, the tables and render mesh rebuilt on each dab that changed faces - ADR 0078 names it the open item for dense meshes). Also: hidden faces are left out and the hidden table follows new vertices; n-gons use the mesh's own ear triangulation; a collapse between two boundary vertices or leaving a sliver is refused; Drag Dot refuses Dyntopo (its re-placed dab would leave a trail); a stroke that changed nothing gives the mesh back and leaves no step; edges with a NaN end are left alone; the ADRs say what the code does (every instance tessellated, then all moved against the same positions; tombstones are zero-area triangles; ADR 0074 amended for the stroke cut off). Tests added for a loose vertex and a shape key, a sharp edge's halves, the cube under a mid-face dab, hidden faces beside the brush, the no-change press, the masked region at a coarse detail. Quad Remesh (round 261) now refuses open meshes: QuadriFlow stalled without end on an open sheet in this round's run. The Linux legs then found the hidden top of the cube fanned into 267 hidden triangles through the edge it shared with the brushed face: an edge a hidden face shares is neither split nor collapsed now, and a vertex with a hidden face never collapsed; the test's no-change press repeats the first press at the same pixel (a console dab and a mouse press read the depth a hair apart) and dabs on the face the camera sees.
+
+**Checked**
+- `tests_round262` in `tests/test_sculpt.cpp` (3 tests): the Draw stroke adds vertices, the new edges lie within the
+  detail, the mesh stays manifold with no degenerate face, the stroke is one snapshot step that undoes to the original
+  and redoes, a stroke with Dyntopo off is a delta step again; a coarse detail collapses the 6k sphere under the brush
+  and keeps it manifold, a masked region gains masked vertices and moves none, Mirror X tessellates both sides alike.
+  `tests_round262` in `tests/test_modeling.cpp`: a cube's top refined to a detail (5 n-gons triangulated, 214 splits,
+  no top edge over the detail, manifold, compact after finish); the cube at a detail of 10 collapses three edges and
+  stops at five vertices.
+- Unit checks (round 262): Windows, in render-cache verify mode, 12869, 0 failed (1105 tests), 0 stale
+  pictures. Linux with libraries: 12409, 0 failed. Sanitizer build: 12256, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test and the sanitizer run's animation group failed under the parallel load and passed alone.)
+
 ## 2026-10-28 (round 261): the ZRemesher spike - Quad Remesh through QuadriFlow (task 0241)
 
 **Asked:** ZBrush's ZRemesher - quads that follow the form at a chosen count. The plan made it a spike: QuadriFlow from

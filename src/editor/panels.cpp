@@ -3292,6 +3292,10 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   if (subdiv != subdiv_was) sculpt_subdiv_pending_ = subdiv;  // (a drag passes several values: applied once, at the release)
   if (sculpt_subdiv_pending_ >= 0 && !u.in.down[0]) sculpt_set_subdiv(sculpt_subdiv_pending_), sculpt_subdiv_pending_ = -1;
   br.help("A Subdivision Surface on the sculpted object, levels 1-3 (0: none): the brush works the cage, the eye sees the surface, each dab re-evaluated locally (sculpt subdiv <n>|off).");
+  /* Task 0242: Sculptris Pro. */
+  br.field("Dyntopo", sculpt_dyntopo_);
+  br.field("Dyntopo Detail", sculpt_dyntopo_detail_, 0.01f, 0.05f, 1.0f);
+  br.help("Dyntopo tessellates the mesh under the brush as it moves: edges longer than Detail x the brush radius are split, shorter than two fifths of it collapsed; a Dyntopo stroke is one undo step holding the mesh (sculpt dyntopo on|off|<detail>).");
   /* Task 0240: DynaMesh. */
   br.field("DynaMesh Resolution", sculpt_dyna_res_, 8, 256);
   br.field("DynaMesh Smooth", sculpt_dyna_smooth_, 0, 10);

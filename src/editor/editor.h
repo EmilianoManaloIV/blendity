@@ -35,6 +35,7 @@
 #include "../scene/import.h"
 #include "../scene/scene.h"
 #include "../scene/quad_remesh.h"
+#include "../scene/dyntopo.h"
 #include "../scene/animation.h"
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
@@ -633,6 +634,7 @@ class Editor {
   int sculpt_subdiv_levels_for_test() const { return sculpt_subdiv_levels(); }  // (task 0239)
   bool sculpt_dynamesh_for_test(int resolution, int smooth) { return sculpt_dynamesh(resolution, smooth); }  // (task 0240)
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
+  bool sculpt_dyntopo_for_test() const { return sculpt_dyntopo_; }  // (task 0242)
   bool sculpt_mode_for_test() const { return sculpt_; }
   const SculptBrush &sculpt_brush_for_test() const { return sculpt_brush_; }
   std::string prefs_text_for_test() const { return prefs_text_0190(); }
@@ -3136,6 +3138,18 @@ class Editor {
     meshops::QuadRemeshParams params;
   };
   std::unique_ptr<RemeshJob> sculpt_remesh_;
+  /* Task 0242: Sculptris Pro - the mesh tessellated under the brush (ADR 0078). A Dyntopo stroke is a snapshot step. */
+  bool sculpt_dyntopo_ = false;
+  float sculpt_dyntopo_detail_ = 0.25f;  // (of the brush's world radius)
+  std::unique_ptr<meshops::Dyntopo> sculpt_dyn_;
+  size_t sculpt_dyn_split_ = 0, sculpt_dyn_collapsed_ = 0;
+  MeshPtr sculpt_dyn_before_;  // (the mesh as it was: a stroke that changed nothing gives it back and leaves no step)
+  uint32_t sculpt_dyn_seed_ = UINT32_MAX;  // (the face under the cursor at the dab)
+  bool sculpt_dyn_begin(GameObject *g);
+  void sculpt_dyn_refine(Mesh &m, const SculptSym &sym, Vec3 hit_local, float r_local);
+  void sculpt_dyn_end(Mesh &m);
+  uint32_t sculpt_face_under(float x, float y);
+  uint32_t sculpt_face_nearest(const Mesh &m, Vec3 p) const;  // (the live face whose centre is nearest: the mirrored seed)
   meshops::QuadRemeshParams sculpt_remesh_params_;
   bool sculpt_quad_remesh(const meshops::QuadRemeshParams &p);
   void sculpt_remesh_poll();

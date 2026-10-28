@@ -6,6 +6,7 @@
 #include "../src/scene/subdiv_chain.h"
 #include "../src/scene/dynamesh.h"
 #include "../src/scene/quad_remesh.h"
+#include "../src/scene/dyntopo.h"
 #include "../src/render/canvas.h"
 
 #include <chrono>
@@ -1732,6 +1733,276 @@ static void tests_round261() {
   });
 }
 
+static platform::Event mouse_event(platform::EventType t, int x, int y, int mods = 0) {
+  platform::Event e;
+  e.type = t, e.x = x, e.y = y, e.mods = mods;
+  return e;
+}
+
+/* Task 0242: every edge in two faces, no face without area (a tombstone left behind), the faces' sizes. */
+static bool manifold_faces(const Mesh &m, size_t &bad_edges, size_t &degenerate) {
+  std::unordered_map<uint64_t, int> edges;
+  degenerate = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+    bool same = true;
+    for (uint32_t c = 1; c < n; c++) same = same && fv[c] == fv[0];
+    degenerate += same ? 1 : 0;
+    for (uint32_t c = 0; c < n; c++) edges[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+  }
+  bad_edges = 0;
+  for (const auto &e : edges) bad_edges += e.second == 2 ? 0 : 1;
+  return bad_edges == 0 && degenerate == 0;
+}
+
+static void tests_round262() {
+  test("Dyntopo: a Draw stroke across the 1,490-vertex sphere adds vertices, the new edges under the brush lie within the detail size, the mesh stays manifold with no degenerate face; the stroke is one snapshot step that undoes and redoes; a stroke with Dyntopo off is a delta step again", [&] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 1);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    const MeshPtr before = M();
+    const Vec2 px = pixel_of(ed, G()->world_position());
+    const float R = length(pixel_of(ed, G()->world_position() + Vec3(0.0f, 0.5f, 0.0f)) - px);
+    ed.command("sculpt size 10");
+    ed.command("sculpt strength 0.5");
+    ed.command("sculpt dyntopo 0.25");
+    CHECK(ed.sculpt_dyntopo_for_test());
+    const size_t steps0 = ed.undo_steps_for_test(), snaps0 = ed.sculpt_undo_snapshots_for_test();
+    const MeshCounts c0 = mesh_counts();
+    ed.command(strprintf("sculpt stroke %g %g %g %g 10", px.x - R * 0.4f, px.y, px.x + R * 0.4f, px.y));
+    ed.command("sculpt size 11");  // (a command after: the pending step commits)
+    const MeshPtr after = M();
+    const MeshCounts c1 = mesh_counts() - c0;
+    size_t bad = 0, degenerate = 0;
+    const bool ok = manifold_faces(*after, bad, degenerate);
+    /* The new edges (both ends new) against the detail size: a quarter of the brush's world radius - taken from the last dab. */
+    const float r_local = ed.sculpt_last_radius_for_test(), detail = 0.25f * r_local;
+    size_t new_edges = 0, in_range = 0;
+    std::set<uint64_t> seen;
+    for (size_t f = 0; f < after->face_count(); f++) {
+      const uint32_t n = after->face_size(f), *fv = after->face_verts(f);
+      for (uint32_t c = 0; c < n; c++) {
+        const uint32_t a = fv[c], b = fv[(c + 1) % n];
+        if (a < before->vert_count() || b < before->vert_count() || !seen.insert(Mesh::edge_key(a, b)).second) continue;
+        const float len = length(after->positions[a] - after->positions[b]);
+        new_edges++, in_range += len >= 0.4f * detail * 0.9f && len <= detail * 1.1f ? 1 : 0;
+      }
+    }
+    std::printf("    Dyntopo stroke: %zu -> %zu vertices, %zu -> %zu faces; %zu bad edges, %zu degenerate faces; %zu of %zu new edges within [0.4, 1] x detail %.4f; %zu snapshot step(s), %llu render builds, %llu in place\n",
+                before->vert_count(), after->vert_count(), before->face_count(), after->face_count(), bad, degenerate, in_range, new_edges, detail, ed.sculpt_undo_snapshots_for_test() - snaps0,
+                (unsigned long long)c1.full_builds, (unsigned long long)c1.in_place);
+    CHECK(after != before && after->vert_count() > before->vert_count() && ok && new_edges > 0 && in_range >= new_edges * 9 / 10);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1 && ed.sculpt_undo_snapshots_for_test() == snaps0 + 1);
+    ed.command("undo");
+    CHECK(M()->vert_count() == before->vert_count() && M()->positions == before->positions);
+    ed.command("redo");
+    CHECK(M()->vert_count() == after->vert_count());
+    /* Dyntopo off: a delta step again. */
+    ed.command("sculpt dyntopo off");
+    const size_t snaps1 = ed.sculpt_undo_snapshots_for_test(), steps1 = ed.undo_steps_for_test();
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    CHECK(ed.undo_steps_for_test() == steps1 + 1 && ed.sculpt_undo_snapshots_for_test() == snaps1);
+  });
+
+  test("Dyntopo: on the 6k sphere a coarse detail removes vertices under the brush (collapses), the mesh staying manifold; a fully masked region gains vertices but moves none; Mirror X tessellates both sides", [&] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    const Vec2 px = pixel_of(ed, G()->world_position());
+    const float R = length(pixel_of(ed, G()->world_position() + Vec3(0.0f, 0.5f, 0.0f)) - px);
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 0.2");
+    ed.command("sculpt dyntopo 1.0");  // (the detail the brush radius: the sphere is far finer - edges collapse)
+    const size_t verts0 = M()->vert_count();
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - R * 0.3f, px.y, px.x + R * 0.3f, px.y));
+    ed.command("sculpt size 31");
+    size_t bad = 0, degenerate = 0;
+    const bool ok = manifold_faces(*M(), bad, degenerate);
+    std::printf("    coarse Dyntopo: %zu -> %zu vertices; %zu bad edges, %zu degenerate faces\n", verts0, M()->vert_count(), bad, degenerate);
+    CHECK(M()->vert_count() < verts0 && ok);
+    ed.command("undo");
+    CHECK(M()->vert_count() == verts0);
+    /* A mask: the region gains vertices (the mask carried to them) but nothing moves. */
+    ed.command("sculpt dyntopo 0.2");
+    ed.command("sculpt size 10");
+    ed.command("sculpt strength 1");
+    ed.command("sculpt mask fill");
+    const std::vector<Vec3> held = M()->positions;
+    const size_t verts1 = M()->vert_count();
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - R * 0.3f, px.y, px.x + R * 0.3f, px.y));
+    ed.command("sculpt size 11");
+    size_t moved = 0;
+    for (size_t v = 0; v < held.size() && v < M()->positions.size(); v++) moved += std::memcmp(&held[v], &M()->positions[v], sizeof(Vec3)) != 0 ? 1 : 0;
+    size_t masked_new = 0;
+    for (size_t v = held.size(); v < M()->vert_count(); v++) masked_new += M()->sculpt_mask.size() == M()->vert_count() && M()->sculpt_mask[v] > 0.99f ? 1 : 0;
+    std::printf("    a masked region: %zu -> %zu vertices, %zu old ones moved, %zu of %zu new ones masked\n", verts1, M()->vert_count(), moved, masked_new, M()->vert_count() - held.size());
+    CHECK(M()->vert_count() > verts1 && moved == 0 && masked_new == M()->vert_count() - held.size());
+    ed.command("undo");
+    ed.command("sculpt mask clear");
+    /* Mirror X: both sides grow. */
+    ed.command("sculpt symmetry x on");
+    const size_t verts2 = M()->vert_count();
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x + R * 0.2f, px.y - R * 0.3f, px.x + R * 0.5f, px.y + R * 0.3f));
+    ed.command("sculpt size 12");
+    size_t left = 0, right = 0;
+    for (size_t v = verts2; v < M()->vert_count(); v++) (M()->positions[v].x < 0.0f ? left : right)++;
+    std::printf("    Mirror X: %zu new vertices on x < 0, %zu on x > 0\n", left, right);
+    CHECK(left > 0 && right > 0 && std::fabs((double)left - (double)right) <= 0.2 * (double)std::max(left, right) + 2.0);
+    ed.command("undo");
+    ed.command("sculpt symmetry off");
+    /* A fully masked region at a coarse detail: nothing collapses, nothing moves. */
+    ed.command("sculpt dyntopo 1.0");
+    ed.command("sculpt size 30");
+    ed.command("sculpt mask fill");
+    const size_t verts3 = M()->vert_count();
+    const std::vector<Vec3> held3 = M()->positions;
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - R * 0.3f, px.y, px.x + R * 0.3f, px.y));
+    ed.command("sculpt size 31");
+    size_t moved3 = 0;
+    for (size_t v = 0; v < held3.size() && v < M()->positions.size(); v++) moved3 += std::memcmp(&held3[v], &M()->positions[v], sizeof(Vec3)) != 0 ? 1 : 0;
+    std::printf("    a masked region at a coarse detail: %zu -> %zu vertices, %zu moved\n", verts3, M()->vert_count(), moved3);
+    CHECK(M()->vert_count() >= verts3 && moved3 == 0);
+    ed.command("sculpt mask clear");
+    /* The time of a ten-dab stroke with and without Dyntopo (printed). */
+    ed.command("sculpt dyntopo off");
+    ed.command("sculpt size 10");
+    auto t0 = std::chrono::steady_clock::now();
+    ed.command(strprintf("sculpt stroke %g %g %g %g 10", px.x - R * 0.4f, px.y + R * 0.2f, px.x + R * 0.4f, px.y + R * 0.2f));
+    const double plain_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    ed.command("undo");
+    ed.command("sculpt dyntopo 0.25");
+    t0 = std::chrono::steady_clock::now();
+    ed.command(strprintf("sculpt stroke %g %g %g %g 10", px.x - R * 0.4f, px.y + R * 0.2f, px.x + R * 0.4f, px.y + R * 0.2f));
+    const double dyn_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    ten dabs on the 6k sphere: %.1f ms without Dyntopo, %.1f ms with (the version bumped and the tables rebuilt on each dab that changed faces)\n", plain_ms, dyn_ms);
+  });
+
+  test("Dyntopo: a loose vertex and a shape key survive a stroke; a sharp edge split by the brush stays sharp on both halves; the default cube, coarser than the brush, is tessellated under a dab in the middle of a face; hidden faces next to the brush are left alone; a stroke that changes nothing leaves no step", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->add_vert(Vec3(3.0f, 3.0f, 3.0f));  // (a loose vertex)
+      ShapeKey k;
+      k.name = "Puff";
+      k.delta.assign(mp->vert_count(), Vec3(0.0f, 0.1f, 0.0f));
+      mp->shape_keys.push_back(k);
+      for (size_t f = 0; f < mp->face_count(); f++) {  // (every cube edge sharp)
+        const uint32_t n = mp->face_size(f), *fv = mp->face_verts(f);
+        for (uint32_t c = 0; c < n; c++) mp->sharp_edges.push_back(Mesh::edge_key(fv[c], fv[(c + 1) % n]));
+      }
+      std::sort(mp->sharp_edges.begin(), mp->sharp_edges.end());
+      mp->sharp_edges.erase(std::unique(mp->sharp_edges.begin(), mp->sharp_edges.end()), mp->sharp_edges.end());
+      mp->touch();
+      ed.mark_changed_for_test("a loose vertex, a key, sharp edges");
+    }
+    step(ed);
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) step(ed);
+    ed.command("sculpt on");
+    Vec2 px;
+    Vec3 w;
+    float d;
+    for (int i = 0; i < 100; i++) {
+      step(ed);
+      px = pixel_of(ed, G()->world_position());
+      if (ed.sculpt_hit_for_test(px.x, px.y, w, d)) break;
+    }
+    const size_t verts0 = M()->vert_count(), sharp0 = M()->sharp_edges.size();
+    ed.command("sculpt dyntopo 0.5");
+    ed.command("sculpt size 12");
+    ed.command("sculpt strength 0");  // (the tessellation alone: the second press below must find nothing to do)
+    const size_t steps0 = ed.undo_steps_for_test();
+    /* One press and lift (a stroke of one dab) at an integer pixel: the no-change press below repeats it exactly - a
+     * console dab and a mouse press read the depth a hair apart, and an edge split to just under one detail is over
+     * the other. */
+    const Recti sr = ed.scene_rect_for_test();
+    const int ix = sr.x + (int)px.x, iy = sr.y + (int)px.y;
+    auto press = [&] {
+      step(ed, {mouse_event(platform::EventType::MouseMove, ix, iy)});
+      step(ed, {mouse_event(platform::EventType::MouseDown, ix, iy)});
+      step(ed, {mouse_event(platform::EventType::MouseUp, ix, iy)});
+      step(ed);
+    };
+    press();
+    ed.command("sculpt size 13");
+    const MeshPtr after = M();
+    const Vec3 loose = after->positions.back();
+    size_t sharp_halves = 0;
+    for (uint64_t k : after->sharp_edges) sharp_halves += (uint32_t)(k >> 32) >= 8 || (uint32_t)(k & 0xFFFFFFFFu) >= 8 ? 1 : 0;
+    std::printf("    the cube under a dab mid-face: %zu -> %zu vertices, %zu -> %zu faces; the loose vertex at (%.0f %.0f %.0f); the key %zu deltas; %zu -> %zu sharp edges, %zu on a new vertex; %zu step(s)\n",
+                verts0, after->vert_count(), (size_t)6, after->face_count(), loose.x, loose.y, loose.z, after->shape_keys.empty() ? (size_t)0 : after->shape_keys[0].delta.size(), sharp0,
+                after->sharp_edges.size(), sharp_halves, ed.undo_steps_for_test() - steps0);
+    CHECK(after->vert_count() > verts0 && after->face_count() > 6);
+    CHECK(loose == Vec3(3.0f, 3.0f, 3.0f) || std::find(after->positions.begin(), after->positions.end(), Vec3(3.0f, 3.0f, 3.0f)) != after->positions.end());
+    CHECK(after->shape_keys.size() == 1 && after->shape_keys[0].delta.size() == after->vert_count());
+    CHECK(after->sharp_edges.size() >= sharp0 && sharp_halves > 0);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1);
+    /* A stroke that changes nothing: the same spot, size and detail again with strength 0 - the region is at the detail
+     * already (no split, no collapse) and nothing moves: no step, the mesh as it was. */
+    ed.command("sculpt size 12");
+    const size_t steps1 = ed.undo_steps_for_test();
+    const MeshPtr held = M();
+    press();
+    std::printf("    a press and lift that changed nothing: %zu step(s), the mesh %s\n", ed.undo_steps_for_test() - steps1, M() == held ? "as it was" : "replaced");
+    CHECK(ed.undo_steps_for_test() == steps1 && M() == held);
+    ed.command("sculpt strength 0.3");
+    /* Hidden faces beside the brush are left alone: hide the top, dab at the side near the top edge. */
+    ed.command("undo");
+    ed.command("sculpt group islands");
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      for (size_t f = 0; f < mp->face_count(); f++) {
+        Vec3 c(0.0f);
+        for (uint32_t k = 0; k < mp->face_size(f); k++) c += mp->positions[mp->face_verts(f)[k]];
+        if (c.y > 0.49f * (float)mp->face_size(f)) mp->set_face_hidden(f, true);  // (the top face: its corners' sum, at a half each; a side face's upper half has less)
+      }
+      mp->touch();
+      ed.mark_changed_for_test("the top hidden");
+    }
+    for (int i = 0; i < 20; i++) step(ed);
+    size_t hidden_corners0 = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) hidden_corners0 += M()->face_hidden(f) ? M()->face_size(f) : 0;
+    /* The front face just under the top edge: the projection of a point on it, moved down a pixel at a time until the
+     * id plane has the object there (a pixel on the edge itself can miss; one platform's rounding had it miss and
+     * the check below passed on nothing). */
+    Vec2 side = pixel_of(ed, Vec3(w.x, G()->world_position().y + 0.45f, w.z));  // (the face the first dab hit - whichever the camera sees - just under the top)
+    {
+      Vec3 ws;
+      float ds;
+      int tries = 0;
+      for (; tries < 12 && !ed.sculpt_hit_for_test(side.x, side.y, ws, ds); tries++) side.y += 1.0f;
+      std::printf("    the pixel under the top edge found after %d step(s) down: hits %d\n", tries, (int)ed.sculpt_hit_for_test(side.x, side.y, ws, ds));
+      CHECK(ed.sculpt_hit_for_test(side.x, side.y, ws, ds));
+    }
+    ed.command(strprintf("sculpt dab %g %g", side.x, side.y));
+    ed.command("sculpt size 12");
+    size_t hidden_faces = 0, hidden_corners = 0;
+    for (size_t f = 0; f < M()->face_count(); f++)
+      if (M()->face_hidden(f)) hidden_faces++, hidden_corners += M()->face_size(f);
+    std::printf("    with the top hidden, a dab under the top edge: %zu hidden face(s) with %zu corners (was 1 with %zu)\n", hidden_faces, hidden_corners, hidden_corners0);
+    CHECK(hidden_faces == 1 && hidden_corners == hidden_corners0);
+    ed.command("sculpt show all");
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
@@ -1740,4 +2011,5 @@ void run_sculpt_tests() {
   tests_round259();
   tests_round260();
   tests_round261();
+  tests_round262();
 }

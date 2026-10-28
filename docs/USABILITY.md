@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| A horn pulled out of a sphere was as coarse as the sphere: the brush could only move the vertices there were, and DynaMesh meant stopping to retessellate the whole object. | Dyntopo: the mesh tessellated under the brush as it moves, to the brush's own detail (task 0242). |
 | DynaMesh's quads were even but ran every which way; clean topology that follows the form meant another program. A remesh that takes seconds would have frozen the editor. | Quad Remesh (QuadriFlow) on a worker thread, the editor drawing meanwhile, the result one undo step when it lands (task 0241). |
 | A form pulled far out of its topology stretched its quads thin, and two pieces pushed together kept their inner walls; there was no way back to even polygons short of starting over. | DynaMesh: the mesh retopologized evenly at a resolution, overlaps merged, the mask kept, one undo step (task 0240). |
 | A sculpted object with a Subdivision Surface did not move under the brush at all (the evaluated mesh never saw a positions-only change), and re-running the subdivision per dab would have been far from pen speed. | The evaluated mesh follows the cage; a lone Subdivision Surface is re-evaluated locally through its chain, and the brush's point lands on the cage (task 0239). |

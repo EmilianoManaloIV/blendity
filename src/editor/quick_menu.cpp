@@ -116,7 +116,7 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
         {"Size", "",
          {{"Bigger", "sculpt size +", {}},
           {"Smaller", "sculpt size -", {}},
-          {"Lazy Mouse", "sculpt lazy toggle", {}},
+          {"Dyntopo", "sculpt dyntopo toggle", {}},  // (task 0242; Lazy Mouse stays in the panel and the console)
           {"Subdivide +", "sculpt subdiv +", {}},  // (task 0239)
           {"Subdivide -", "sculpt subdiv -", {}},
           {"Dots", "sculpt stroke dots", {}},

@@ -293,7 +293,121 @@ bool Editor::sculpt_begin_stroke(const Recti &view, float x, float y) {
   sculpt_stroke_mesh_ = m;
   sculpt_stroking_ = true;
   sculpt_dabbed_ = false;
+  sculpt_dyn_.reset();
+  const int stroke_type = std::max(0, std::min(kStrokeKinds - 1, sculpt_brush_.stroke));
+  if (sculpt_dyntopo_ && !masking && stroke_type != kStrokeDragDot) sculpt_dyn_begin(g);  // (task 0242: the stroke tessellates; it is a snapshot step. Drag Dot re-places its one dab: it would leave a trail)
+  else if (sculpt_dyntopo_ && !masking) Log::info("Dyntopo: not with the Drag Dot stroke (its one dab moves; the tessellation would stay behind)");
+  sculpt_stroke_mesh_ = sculpt_mesh();  // (the mesh may have been made the object's own)
   return true;
+}
+
+/* A Dyntopo stroke (ADR 0078): the mesh made the object's own first (a snapshot keeps the mesh as it was), the
+ * tessellator built over it; the stroke writes positions and topology in place and commits at the pen's lift. Refused,
+ * with a log line, with a Subdivision Surface over the mesh (the cage would be tessellated, not the surface). */
+bool Editor::sculpt_dyn_begin(GameObject *g) {
+  if (sculpt_subdiv_levels() > 0) {
+    Log::warn("Dyntopo: turn Dynamic Subdivision off first (the brush would tessellate the cage, not the surface)");
+    return false;
+  }
+  MeshFilter *mf = mf_of(g);
+  if (!mf || !mf->mesh) return false;
+  sculpt_dyn_before_ = mf->mesh;
+  mesh_make_mutable(mf->mesh);  // (the snapshot keeps the mesh as it was: the stroke's undo)
+  mark_changed("Sculpt (Dyntopo)");
+  Mesh *own = mf->mesh.get();
+  sculpt_dyn_ = std::make_unique<meshops::Dyntopo>(*own);
+  sculpt_dyn_split_ = sculpt_dyn_collapsed_ = 0;
+  sculpt_cache_mesh_ = nullptr;
+  sculpt_build_grid(*own, sculpt_grid_.cell);  // (over the owned mesh)
+  return true;
+}
+
+/* The face under the Scene view pixel: the pixel's ray's first triangle of the base render mesh (hidden faces have none
+ * there), UINT32_MAX off the mesh. */
+uint32_t Editor::sculpt_face_under(float x, float y) {
+  GameObject *g = scene_->find(sculpt_obj_);
+  Mesh *m = sculpt_mesh();
+  if (!g || !m) return UINT32_MAX;
+  const Mat4 inv = g->world_matrix().inverse();
+  const Ray ray = scene_r3d_.screen_ray(x, y);
+  const Ray lr{inv.point(ray.origin), normalize(inv.dir(ray.dir))};
+  const RenderMesh &rm = m->render_mesh();
+  float best = 1e30f;
+  uint32_t face = UINT32_MAX;
+  for (size_t t = 0; t < rm.tri_count() && t < rm.tri_face.size(); t++) {
+    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    if (d > 0.0f && d < best) best = d, face = rm.tri_face[t];
+  }
+  return face;
+}
+
+/* The live face whose centre is nearest to p (a tombstoned face has one vertex: its centre is that vertex - skipped by
+ * its size). */
+uint32_t Editor::sculpt_face_nearest(const Mesh &m, Vec3 p) const {
+  uint32_t best = UINT32_MAX;
+  float best_d = 1e30f;
+  for (uint32_t f = 0; f < (uint32_t)m.face_count(); f++) {
+    const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+    if (n < 3 || fv[0] == fv[1]) continue;
+    Vec3 c(0.0f);
+    for (uint32_t k = 0; k < n; k++) c += m.positions[fv[k]];
+    const float d = length_sq(c / (float)n - p);
+    if (d < best_d) best_d = d, best = f;
+  }
+  return best;
+}
+
+/* One instance's region brought to the detail size before the brush moves it: the vertices within the radius, their
+ * faces triangulated, long edges split (the new vertices join the stroke's grid and its touched slots), short ones
+ * collapsed. */
+void Editor::sculpt_dyn_refine(Mesh &m, const SculptSym &sym, Vec3 hit_local, float r_local) {
+  if (!sculpt_dyn_) return;
+  std::vector<uint32_t> ids, made;
+  std::vector<float> dist;
+  sculpt_gather(m, sym.apply(hit_local), r_local, ids, dist);
+  /* The face under the cursor seeds the real instance (a mesh coarser than the brush); a mirrored instance is seeded by
+   * the face nearest the mirrored centre of that face, so both sides tessellate alike. */
+  uint32_t seed = sculpt_dyn_seed_;
+  if (!sym.identity() && seed != UINT32_MAX && seed < m.face_count()) {
+    Vec3 c(0.0f);
+    for (uint32_t k = 0; k < m.face_size(seed); k++) c += m.positions[m.face_verts(seed)[k]];
+    seed = sculpt_face_nearest(m, sym.apply(c / (float)std::max(1u, m.face_size(seed))));
+  }
+  if (ids.empty() && seed == UINT32_MAX) return;
+  const meshops::Dyntopo::Result r = sculpt_dyn_->refine(ids, sym.apply(hit_local), r_local, std::max(1e-6f, sculpt_dyntopo_detail_) * r_local, made, seed);
+  sculpt_dyn_split_ += r.split, sculpt_dyn_collapsed_ += r.collapsed;
+  if (sculpt_dyn_->faces_changed()) m.touch(), sculpt_dyn_->clear_changed();  // (the mesh's own tables - the vertex-face table the normals read - follow the new ids now, not at the dab's end)
+  for (uint32_t v : made) sculpt_grid_.cells[cell_key(m.positions[v], sculpt_grid_.cell)].push_back(v);
+  sculpt_grid_.verts = m.vert_count();
+  sculpt_touched_.resize(m.vert_count(), 0);
+  if (!sculpt_hidden_vert_.empty()) sculpt_hidden_vert_.resize(m.vert_count(), 0);
+  if (m.sculpt_mask.size() != m.vert_count() && !m.sculpt_mask.empty()) m.sculpt_mask.resize(m.vert_count(), 0.0f);
+}
+
+/* The pen lifted on a Dyntopo stroke: the tombstones compacted, the step committed (no delta: the snapshot is it). */
+void Editor::sculpt_dyn_end(Mesh &m) {
+  if (!sculpt_dyn_) return;
+  const bool topology = sculpt_dyn_->tombstones() > 0 || sculpt_dyn_split_ > 0 || sculpt_dyn_collapsed_ > 0;
+  sculpt_dyn_->finish();
+  sculpt_dyn_.reset();
+  GameObject *g = scene_->find(sculpt_obj_);
+  MeshFilter *mf = mf_of(g);
+  const bool nothing = !topology && !(sculpt_dabbed_ && sculpt_stroke_move_ > 0.0f);
+  if (nothing && mf && mf->mesh.get() == &m && sculpt_dyn_before_) {  // (a stroke that changed nothing: the mesh as it was comes back, no step)
+    mf->mesh = sculpt_dyn_before_;
+    pending_change_ = false;
+    sculpt_dyn_before_.reset();
+    sculpt_cache_mesh_ = nullptr;
+    return;
+  }
+  sculpt_dyn_before_.reset();
+  if (topology) Log::info("Dyntopo: %zu edges split, %zu collapsed; %zu vertices now", sculpt_dyn_split_, sculpt_dyn_collapsed_, m.vert_count());
+  m.touch();
+  commit_undo();
+  sculpt_cache_mesh_ = nullptr;
+  settle_meshes();
+  scene_dirty_ = true;
+  ui_.redraw = true;
 }
 
 MeshFilter *Editor::mf_of(GameObject *g) { return g ? g->mesh_filter() : nullptr; }
@@ -303,6 +417,11 @@ void Editor::sculpt_end_stroke() {
   if (!sculpt_stroking_) return;
   sculpt_stroking_ = false;
   Mesh *m = sculpt_mesh();
+  if (sculpt_dyn_ && m) {  // (task 0242: a Dyntopo stroke is its snapshot step)
+    sculpt_dyn_end(*m);
+    sculpt_delta_.reset();
+    return;
+  }
   if (!sculpt_dabbed_ || !m || m != sculpt_stroke_mesh_ || !sculpt_delta_) return;
   /* The step keeps the vertices that changed; a stroke that changed nothing makes none. */
   const bool mask = sculpt_delta_->mask;
@@ -347,6 +466,15 @@ size_t Editor::sculpt_keep_changed(const Mesh &m, SculptDelta &d) const {
 
 /* A stroke cut off (an undo, a new scene, the mode left): what it moved goes back and no step is made. */
 void Editor::sculpt_abort_stroke() {
+  if (sculpt_stroking_ && sculpt_dyn_) {  // (a Dyntopo stroke cut off keeps what it did, as a step: its mesh is already its own)
+    Mesh *m = sculpt_mesh();
+    if (m) sculpt_dyn_end(*m);
+    sculpt_dyn_.reset();
+    sculpt_stroking_ = false;
+    sculpt_stroke_mesh_ = nullptr;
+    sculpt_delta_.reset();
+    return;
+  }
   if (sculpt_stroking_) sculpt_restore_delta();
   sculpt_gesture_ = false;
   sculpt_stroking_ = false;
@@ -430,6 +558,11 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   const float r_local = sculpt_world_radius(px_radius, dist) / scale;
   if (r_local > sculpt_grid_.cell * 4.0f || r_local < sculpt_grid_.cell * 0.25f) sculpt_build_grid(m, r_local);  // (a brush grown or shrunk far: the cells follow)
   if (kind == kGrab) sculpt_grab_sets_.clear(), sculpt_grab_.px0 = px, sculpt_grab_.dist = dist;
+  const bool holds_set = kind == kGrab || kind == kSnake;  // (Grab and Snake Hook keep their sets: they tessellate at their first dab only)
+  if (sculpt_dyn_ && kind != kMask && (!holds_set || sculpt_dab_px_.size() == 1)) {  // (task 0242: every instance tessellated, then every instance gathered and moved against the same positions)
+    sculpt_dyn_seed_ = sculpt_face_under(x, y);
+    for (const SculptSym &sym : sculpt_symmetries()) sculpt_dyn_refine(m, sym, hit_local, r_local);
+  }
   /* Every instance gathered against the same positions, then its moves summed. */
   struct Instance {
     SculptSym sym;
@@ -470,7 +603,7 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
     m.positions[mv.first] += mv.second;
     sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(m.positions[mv.first] - sculpt_delta_->before[sculpt_touched_index(mv.first)]));
   }
-  if (!moves.empty()) m.deform_version++;
+  if (!moves.empty()) m.deform_version++;  // (after a Dyntopo tessellation the version was bumped already: the render mesh is rebuilt either way)
   sculpt_dabbed_ = true;
   ui_.redraw = true;
 }
@@ -1446,6 +1579,19 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     if (t.size() > 3) sculpt_dyna_smooth_ = std::max(0, std::min(10, std::atoi(t[3].c_str())));
     sculpt_dynamesh(sculpt_dyna_res_, sculpt_dyna_smooth_);
   }
+  else if (v == "dyntopo") {  // sculpt dyntopo on|off|toggle|<fraction of the brush radius>  (task 0242)
+    const std::string a = arg(2, "toggle");
+    if (a == "on" || a == "off" || a == "toggle") sculpt_dyntopo_ = a == "on" ? true : a == "off" ? false : !sculpt_dyntopo_;
+    else {
+      const float d = (float)std::atof(a.c_str());
+      if (!(d > 0.0f)) {
+        Log::info("usage: sculpt dyntopo on|off|toggle|<detail 0.05-1, of the brush radius>");
+        return;
+      }
+      sculpt_dyntopo_detail_ = std::max(0.05f, std::min(1.0f, d)), sculpt_dyntopo_ = true;
+    }
+    Log::info("Dyntopo %s (detail %.2f of the brush radius)", sculpt_dyntopo_ ? "on" : "off", sculpt_dyntopo_detail_);
+  }
   else if (v == "remesh") {  // sculpt remesh [faces] [sharp|nosharp] [boundary|noboundary] [adaptive|uniform] [seed <n>] | cancel  (task 0241)
     if (arg(2, "") == "cancel") {
       sculpt_remesh_cancel();
@@ -1540,7 +1686,7 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     sculpt_end_stroke();
   }
   else {
-    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | subdiv <n>|off|+|- | dynamesh [resolution] [smooth] | remesh [faces] [sharp|nosharp] [boundary|noboundary] [adaptive|uniform] [seed <n>]|cancel | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
+    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | subdiv <n>|off|+|- | dynamesh [resolution] [smooth] | dyntopo on|off|toggle|<detail> | remesh [faces] [sharp|nosharp] [boundary|noboundary] [adaptive|uniform] [seed <n>]|cancel | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
     return;
   }
   ui_.redraw = true;

@@ -325,7 +325,8 @@ std::string Editor::statusbar_hint() const {
   if (sculpt_remesh_) return "Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode) or `sculpt remesh cancel`: stop it at its next stage";  // (task 0241)
   if (sculpt_)
     return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate group  |  Esc: leave" +
-           (sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", sculpt_subdiv_levels()) : std::string());  // (tasks 0236, 0238, 0239)
+           (sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", sculpt_subdiv_levels()) : std::string()) +
+           (sculpt_dyntopo_ ? strprintf("  |  Dyntopo %.2f", sculpt_dyntopo_detail_) : std::string());  // (tasks 0236, 0238, 0239, 0242)
   if (const size_t hidden = hidden_face_count(active_object()))  // (task 0238: hidden faces stay hidden in every mode and in renders - said so)
     return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All, or `sculpt show all`)", hidden, hidden == 1 ? "" : "s", active_object()->name.c_str());
   /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */

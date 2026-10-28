@@ -60,6 +60,12 @@ second.
   its evaluated shape, so the vertices moved may not be the ones under the cursor (out of scope here; the mode logs
   nothing about it yet).
 
+## Amendment (task 0242, round 262): a Dyntopo stroke is a snapshot step
+A stroke with Dyntopo on (ADR 0078) changes topology: the mesh is made the object's own at the stroke's start and the
+step is a snapshot, committed at the pen's lift; a Dyntopo stroke cut off keeps what it did as that step (the "no step
+is made" above is for a delta stroke, whose vertices are written back); one that changed nothing gives the mesh back
+and leaves no step.
+
 ## Amendment (task 0238, round 258): the mask is a delta too; hidden faces leave the render mesh
 - **A mask stroke is a delta step** like a brush stroke: `SculptDelta` carries either positions or the mask's floats
   (`mask_before / mask_after`) for the touched vertices, written in place into the mesh the snapshots share, with

@@ -5,6 +5,7 @@
 #include "../src/scene/subdiv_chain.h"
 #include "../src/scene/dynamesh.h"
 #include "../src/scene/quad_remesh.h"
+#include "../src/scene/dyntopo.h"
 
 #include <atomic>
 #include "../src/scene/partfield.h"
@@ -8340,6 +8341,67 @@ static void tests_round261() {
   });
 }
 
+static void tests_round262() {
+  test("Dyntopo (ADR 0078): a cube's top face region refined to a detail - triangulated, the long edges split until none is over the size, manifold, compact after finish with no degenerate face; a collapse that would fold a triangle is refused", [] {
+    MeshPtr cube = primitives::cube(1.0f);
+    Mesh m = *cube;
+    meshops::Dyntopo dyn(m);
+    std::vector<uint32_t> region, made;
+    for (uint32_t v = 0; v < (uint32_t)m.vert_count(); v++)
+      if (m.positions[v].y > 0.0f) region.push_back(v);  // (the top four corners)
+    const meshops::Dyntopo::Result r = dyn.refine(region, Vec3(0.0f, 0.5f, 0.0f), 1.5f, 0.3f, made);  // (a sphere over the top face and its edges)
+    dyn.finish();
+    std::unordered_map<uint64_t, int> edges;
+    size_t degenerate = 0, over = 0, total_edges = 0;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      bool same = true;
+      for (uint32_t c = 1; c < n; c++) same = same && fv[c] == fv[0];
+      degenerate += same ? 1 : 0;
+      for (uint32_t c = 0; c < n; c++) {
+        if (!edges.emplace(Mesh::edge_key(fv[c], fv[(c + 1) % n]), 0).second) continue;
+        total_edges++;
+      }
+    }
+    /* The edges of faces touching the region: none longer than the detail (an edge both of whose ends are in the top face's fan). */
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      bool top = true;
+      for (uint32_t c = 0; c < n; c++) top = top && m.positions[fv[c]].y > 0.49f;
+      if (!top) continue;
+      for (uint32_t c = 0; c < n; c++) over += length(m.positions[fv[c]] - m.positions[fv[(c + 1) % n]]) > 0.3f * 1.001f ? 1 : 0;
+    }
+    size_t bad = 0;
+    std::unordered_map<uint64_t, int> count;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      for (uint32_t c = 0; c < n; c++) count[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+    }
+    for (const auto &e : count) bad += e.second == 2 ? 0 : 1;
+    std::printf("    a cube's top refined to 0.3: %zu triangulated, %zu split, %zu collapsed; %zu vertices, %zu faces, %zu edges; %zu bad edges, %zu degenerate, %zu top edges over the detail\n", r.triangulated,
+                r.split, r.collapsed, m.vert_count(), m.face_count(), total_edges, bad, degenerate, over);
+    CHECK(r.split > 0 && made.size() == r.split && bad == 0 && degenerate == 0 && over == 0 && m.vert_count() == 8 + made.size());
+    /* The whole cube at a huge detail: collapses run until the checks stop them (a double face, too few faces); what is
+     * left is still manifold and nothing is folded. */
+    Mesh c2 = *cube;
+    meshops::Dyntopo dyn2(c2);
+    std::vector<uint32_t> all, made2;
+    for (uint32_t v = 0; v < (uint32_t)c2.vert_count(); v++) all.push_back(v);
+    const meshops::Dyntopo::Result r2 = dyn2.refine(all, Vec3(0.0f), 3.0f, 10.0f, made2);  // (a detail of 10: every edge of 1 is "short")
+    dyn2.finish();
+    std::unordered_map<uint64_t, int> count2;
+    for (size_t f = 0; f < c2.face_count(); f++) {
+      const uint32_t n = c2.face_size(f), *fv = c2.face_verts(f);
+      for (uint32_t c = 0; c < n; c++) count2[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+    }
+    size_t bad2 = 0;
+    for (const auto &e : count2) bad2 += e.second == 2 ? 0 : 1;
+    std::printf("    the cube at detail 10: %zu collapsed (refused where a face would fold, double or an edge pinch), %zu vertices and %zu faces left, %zu bad edges\n", r2.collapsed, c2.vert_count(),
+                c2.face_count(), bad2);
+    CHECK(c2.vert_count() >= 4 && c2.face_count() >= 4 && bad2 == 0);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8380,4 +8442,5 @@ void run_modeling_tests() {
   tests_round259();
   tests_round260();
   tests_round261();
+  tests_round262();
 }

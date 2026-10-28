@@ -1179,3 +1179,14 @@ slowest editor frame while it worked is the second number.
 | two merged spheres (DynaMesh at 48 first) | 3,000 | 2,917 quads, one shell | about 6 s | 32 ms |
 | a cube | 200 | 197 quads | 130 ms | - |
 | a 48 x 32 UV sphere | 600 | 672 quads | 467 ms | - |
+
+## Dyntopo (task 0242)
+
+A ten-dab console stroke on the 6k-vertex sphere in `tests_round262` (headless, one run), the brush 10 px, the detail a
+quarter of its radius: a dab that changed faces bumps the mesh's version, so its vertex-face table and render mesh are
+rebuilt whole (the stroke's tombstones still in the arrays). The cost grows with the mesh: the open item ADR 0078 names.
+
+| Stroke | Time |
+|---|---|
+| ten dabs, Dyntopo off (a delta stroke) | 1.0 ms |
+| ten dabs, Dyntopo on (tessellate, then move; the tables rebuilt on each dab that changed faces) | 22.5 ms |
