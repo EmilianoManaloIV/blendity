@@ -29,7 +29,7 @@ command with "type help"; double-clicking a .anim asset opened a text editor; th
   slices and every built-in ring fits the Wheel's eight.
 - Unit checks (round 280): Windows, in render-cache verify mode, 13192, 0 failed (1137 tests), 0 stale
   pictures. Linux with libraries: 12732, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone (timing noise.)
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone: timing noise.)
 
 ## 2026-10-28 (round 279): rigging and weight paint - Ctrl and the pen's eraser subtract, a Skeleton field for the skin (task 0259)
 
