@@ -322,7 +322,7 @@ std::string Editor::statusbar_hint() const {
   }
   if (pp_.active) return "Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel";
   if (sketch_.active && !tablet_) return "Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop";
-  if (sculpt_) return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(2, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve  |  Esc: leave";  // (task 0236)
+  if (sculpt_) return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(9, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Esc: leave";  // (task 0236)
   /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */
   if (tablet_ && scene_hovered_)
     return "One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button, or a hold: the Wheel";

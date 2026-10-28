@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 257): the brush set, symmetry, the lazy mouse, alphas, stroke types (task 0237)
+
+**Asked:** ZBrush's pillars - brushes, symmetry, alphas, stroke types - on the Sculpt Mode of round 256.
+
+**Added**
+- **Seven more brushes** (`src/editor/sculpt.cpp`): Clay Buildup (toward a plane a quarter radius above the brush
+  area's plane: flat layers, not a rising peak; Alt or Carve below it), Inflate (each vertex along its own normal),
+  Flatten (to the area's plane), Scrape (only what stands above it comes down), Pinch (toward the centre in the
+  plane), Crease (a pinch that cuts in), Snake Hook (the vertices under each dab pulled along that dab's move). The
+  area's plane is the unweighted centre and mean normal of the vertices under the brush, as Blender samples it.
+  Shift still smooths with any brush.
+- **Symmetry:** Mirror X / Y / Z across the object's planes (every combination) and Radial N about its Y axis - a dab
+  applied at each instance, by position (a mesh that isn't symmetric gets symmetric dabs anyway); a Grab's set is
+  taken per instance and follows the mirrored pull.
+- **Lazy mouse:** the brush follows the pointer on a string (px) - the Sketch tool's steady stroke for the brush.
+- **Alphas:** an image's luminance shapes the dab (white moves, black doesn't, nothing outside the image), laid
+  across the brush's disc along the camera's right and up and turned to the stroke's direction (`alpha noturn`
+  keeps it as the image lies); the path as given or under the project's Assets.
+- **Stroke types:** Dots (a dab every quarter radius), Drag Dot (one dab that moves with the pointer), Drag Rect
+  (one stamp at the release, as wide as the drag and turned to it), Freehand (a dab at every move), Spray (eight
+  dabs a step scattered in the circle, each a random size and strength).
+- **The panel, the Wheel, the console:** Mirror X / Y / Z, Radial, Lazy Mouse, Stroke and the alpha in the Sculpt
+  section; a Brushes ring and a Symmetry ring in the Wheel's sculpt set; `sculpt brush <name> | symmetry x|y|z|radial
+  <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray`.
+**Review (Opus, round 257):** six majors and a dozen minors, all taken before landing. The symmetry instances had each worked on the positions the one before left, so a vertex on the mirror plane moved twice and a seam opened: every instance is now gathered and worked out against the positions before the dab and the moves are summed (Blender's proxies), Grab's sets the same way. Front Faces Only tested every instance against the real camera, so a Radial 6 dabbed only the near side: the eye and the view direction are mirrored with the instance. Snake Hook had pulled whatever lay under the pointer at each dab (nothing once the strand left the silhouette): the stroke keeps a place in the object's space that moves with the pointer at the press's depth and gathers around it without a raycast. The alpha's right and up were scaled by the object's scale (an alpha stretched on a scaled object): normalized. The Wheel's sculpt set had nine slices for a ring of eight: Bigger and Smaller moved into a Size ring with the lazy mouse and the stroke types, the mirrors became toggles. Also: one `sculpt_restore_delta` for the abort and the Drag Dot (it had written through a const_cast), the touched slot kept per vertex (an O(1) lookup instead of a scan), an HDR or EXR alpha read through its floats, Spray with Grab or Snake Hook dabbing once, dead code out (`sculpt_grab`, the unused press distance), the console's usage lines for an unknown stroke type or a bare `sculpt alpha`, the status hint naming Alt's carve for the brushes that have it, and tests for the seam, the far side under Radial 6 with Front Faces Only, and the Drag Dot.
+
+**Checked**
+- `tests_round257` in `tests/test_sculpt.cpp` (3 tests): six Clay Buildup dabs on a plane raise it less than six Draw
+  dabs (a layer, not a peak); Flatten brings a spike's tip down, Pinch draws the set toward its centre, Snake Hook
+  moves the centre vertex along the drag; Mirror X moves every mirrored vertex by the mirrored amount within 1e-4 and
+  Radial 6 moves four to six times one dab's vertices; a 30-px lazy mouse keeps the dabs within 12 px of the line
+  while the pointer zigzags 20 px off it; a 2 x 2 checker alpha moves fewer vertices than lie under the brush; Drag
+  Rect stamps one dab as wide as the drag, Spray's eight dabs lie in the circle, Freehand dabs once a move.
+- Unit checks (round 257): Windows, in render-cache verify mode, 12669, 0 failed (1082 tests), 0 stale
+  pictures. Linux with libraries: 12209, 0 failed. Sanitizer build: 12079, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone..)
+
 ## 2026-10-28 (round 256): Sculpt Mode - the foundation (task 0236)
 
 **Asked:** "we should start adding features that are from Substance Painter and ZBrush; do significant R&D on the

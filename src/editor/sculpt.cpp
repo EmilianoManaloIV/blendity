@@ -8,14 +8,16 @@
 // screen is the brush.
 #include "editor.h"
 #include "../core/core.h"
+#include "../image/image.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace bl {
 
-const char *const kSculptBrushes[3] = {"Draw", "Smooth", "Grab"};
+const char *const kSculptBrushes[10] = {"Draw", "Smooth", "Grab", "Clay Buildup", "Inflate", "Flatten", "Pinch", "Crease", "Scrape", "Snake Hook"};
 const char *const kSculptPressure[3] = {"Off", "Strength", "Size"};
+const char *const kSculptStrokes[5] = {"Dots", "Drag Dot", "Drag Rect", "Freehand", "Spray"};
 
 namespace {
 
@@ -24,6 +26,17 @@ constexpr float kSmoothStep = 0.5f;    // (a full-strength Smooth dab goes this 
 constexpr float kDabSpacing = 0.25f;   // (radii between dabs along a drag)
 constexpr int kMaxDabsPerMove = 64;
 constexpr float kSizeStep = 1.25f;     // (sculpt size + / -)
+constexpr float kPinchStep = 0.5f;     // (a full-strength Pinch dab takes a vertex this far toward the centre)
+constexpr float kClayHeight = 0.25f;   // (Clay Buildup's layer: this many radii above the area's plane)
+constexpr int kSprayDabs = 8;          // (Spray: dabs per step, scattered in the radius)
+constexpr int kBrushKinds = 10, kStrokeKinds = 5;
+enum { kDraw, kSmooth, kGrab, kClay, kInflate, kFlatten, kPinch, kCrease, kScrape, kSnake };
+enum { kStrokeDots, kStrokeDragDot, kStrokeDragRect, kStrokeFreehand, kStrokeSpray };
+
+float next_random(uint32_t &s) {  // (0..1; the stroke's own generator, the same on every platform)
+  s = s * 1664525u + 1013904223u;
+  return (float)(s >> 8) / 16777216.0f;
+}
 
 /* The proportional-editing curves (1 at the centre, 0 at the radius), Weight Paint's. */
 float brush_falloff(int kind, float t) {
@@ -244,6 +257,10 @@ bool Editor::sculpt_begin_stroke(const Recti &view, float x, float y) {
   sculpt_grab_ = SculptGrab{};
   sculpt_grab_.px0 = {x, y};
   sculpt_grab_.dist = dist;
+  sculpt_grab_sets_.clear();
+  sculpt_snake_set_ = false;
+  sculpt_dab_px_.clear();
+  sculpt_prev_px_ = {x, y};
   sculpt_stroke_mesh_ = m;
   sculpt_stroking_ = true;
   sculpt_dabbed_ = false;
@@ -272,7 +289,7 @@ void Editor::sculpt_end_stroke() {
   commit_undo();  // (a change made during the stroke - a key's - is its own step, before this one)
   UndoState s;
   s.delta = std::move(sculpt_delta_);
-  s.label = std::string("Sculpt ") + kSculptBrushes[std::max(0, std::min(2, sculpt_brush_.kind))];
+  s.label = std::string("Sculpt ") + kSculptBrushes[std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind))];
   s.bytes = s.delta->ids.size() * (sizeof(uint32_t) + 2 * sizeof(Vec3));
   undo_.push_back(std::move(s));
   trim_undo();
@@ -282,32 +299,39 @@ void Editor::sculpt_end_stroke() {
   ui_.redraw = true;
 }
 
-/* A stroke cut off (an undo, a new scene, the mode left): what it moved goes back - written in place, there is no
- * snapshot to throw it away with - and no step is made. */
+/* A stroke cut off (an undo, a new scene, the mode left): what it moved goes back and no step is made. */
 void Editor::sculpt_abort_stroke() {
-  Mesh *m = sculpt_stroking_ ? sculpt_mesh() : nullptr;
-  if (m && m == sculpt_stroke_mesh_ && sculpt_delta_) {
-    const SculptDelta &d = *sculpt_delta_;
-    for (size_t i = 0; i < d.ids.size(); i++)
-      if (d.ids[i] < m->vert_count()) m->positions[d.ids[i]] = d.before[i];
-    if (!d.ids.empty()) m->deform_version++;
-  }
+  if (sculpt_stroking_) sculpt_restore_delta();
   sculpt_stroking_ = false;
   sculpt_stroke_mesh_ = nullptr;
   sculpt_delta_.reset();
 }
 
-/* A touched vertex's position before its first dab goes into the stroke's delta. */
+/* A touched vertex's position before its first dab goes into the stroke's delta; its slot (+1) is kept per vertex so a
+ * later dab finds it at once. */
 void Editor::sculpt_record(const Mesh &m, const std::vector<uint32_t> &ids) {
   for (uint32_t v : ids) {
     if (sculpt_touched_[v]) continue;
-    sculpt_touched_[v] = 1;
     sculpt_delta_->ids.push_back(v);
     sculpt_delta_->before.push_back(m.positions[v]);
+    sculpt_touched_[v] = (uint32_t)sculpt_delta_->ids.size();  // (the slot + 1)
   }
 }
 
-/* One dab at (x, y) in the Scene view's pixels with the pen's pressure. */
+/* What the stroke moved goes back - written in place, there is no snapshot to throw it away with (an abort, the Drag
+ * Dot's re-placing). The mesh must still be the stroke's. */
+void Editor::sculpt_restore_delta() {
+  Mesh *m = sculpt_mesh();
+  if (!m || m != sculpt_stroke_mesh_ || !sculpt_delta_) return;
+  const SculptDelta &d = *sculpt_delta_;
+  for (size_t i = 0; i < d.ids.size(); i++)
+    if (d.ids[i] < m->vert_count()) m->positions[d.ids[i]] = d.before[i];
+  if (!d.ids.empty()) m->deform_version++;
+}
+
+/* One dab at (x, y) in the Scene view's pixels with the pen's pressure: the instances symmetry asks for are gathered
+ * and worked out against the positions before the dab, then their moves are added up (Blender's proxies), so a vertex
+ * two instances share - on a mirror plane, at the radial axis - moves by the sum and the seam stays a seam. */
 void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   Mesh *mp = sculpt_mesh();
   GameObject *g = mp ? scene_->find(sculpt_obj_) : nullptr;
@@ -317,7 +341,7 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   }
   Mesh &m = *mp;
   const bool shift = ui_.in.shift(), alt = ui_.in.alt();
-  const int kind = shift ? 1 : std::max(0, std::min(2, sculpt_brush_.kind));
+  const int kind = shift ? kSmooth : std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind));
   pressure = std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f;
   const float strength = std::max(0.0f, std::min(1.0f, sculpt_brush_.strength)) * (sculpt_brush_.pressure == 1 ? pressure : 1.0f);
   const float px_radius = std::max(1.0f, sculpt_brush_.radius * ui_.scale * (sculpt_brush_.pressure == 2 ? std::max(0.1f, pressure) : 1.0f));
@@ -328,62 +352,278 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
     sculpt_abort_stroke();
     return;
   }
-  std::vector<uint32_t> ids;
-  std::vector<float> dist_local, w;
-  float r_local = 0.0f;
-  Vec3 hit_local;
-  if (kind == 2 && !sculpt_grab_.ids.empty()) {  // (Grab: the set taken at the first dab)
-    sculpt_grab(m, inv, sculpt_grab_.ids, sculpt_grab_.weights, {x, y});
-    m.deform_version++;
-    sculpt_dabbed_ = true;
-    ui_.redraw = true;
+  const Vec2 px(x, y), drag_px = px - sculpt_prev_px_;  // (the stroke's direction here: the alpha turns to it, Snake Hook pulls along it)
+  sculpt_dab_px_.push_back(px);
+  sculpt_prev_px_ = px;
+  if (kind == kGrab && !sculpt_grab_sets_.empty()) {  // (Grab: the sets taken at the first dab follow the pointer)
+    sculpt_grab_follow(m, inv, px);
     return;
   }
-  Vec3 hit;
-  float dist;
-  if (!sculpt_hit(view, x, y, hit, dist)) return;  // (over nothing, or another object)
-  hit_local = inv.point(hit);
-  r_local = sculpt_world_radius(px_radius, dist) / scale;
-  if (r_local > sculpt_grid_.cell * 4.0f || r_local < sculpt_grid_.cell * 0.25f) sculpt_build_grid(m, r_local);  // (a brush grown or shrunk far: the cells follow)
-  sculpt_gather(m, hit_local, r_local, ids, dist_local);
-  sculpt_last_gathered_ = ids.size();  // (tests: before Front Faces Only)
-  if (sculpt_brush_.front_only) {  // (facing the camera)
-    const Vec3 eye_local = inv.point(cam_.position()), fwd_local = inv.dir(cam_.forward());
-    std::vector<uint32_t> kept;
-    std::vector<float> kept_d;
-    for (size_t i = 0; i < ids.size(); i++) {
-      const Vec3 n = sculpt_vertex_normal(m, ids[i]);
-      const Vec3 to_cam = cam_.ortho ? -fwd_local : eye_local - m.positions[ids[i]];
-      if (!(dot(n, to_cam) > 0.0f)) continue;
-      kept.push_back(ids[i]), kept_d.push_back(dist_local[i]);
-    }
-    ids.swap(kept), dist_local.swap(kept_d);
+  Vec3 hit_local;
+  float dist = 0.0f;
+  if (kind == kSnake && sculpt_snake_set_) {  // (Snake Hook: the stroke's place moves with the pointer at the stroke's depth, past the silhouette too)
+    sculpt_snake_pos_ += sculpt_pointer_move_local(inv, drag_px, sculpt_grab_.dist);
+    hit_local = sculpt_snake_pos_, dist = sculpt_grab_.dist;
   }
-  w.resize(ids.size());
-  for (size_t i = 0; i < ids.size(); i++) w[i] = strength * brush_falloff(sculpt_brush_.falloff, dist_local[i] / std::max(1e-9f, r_local));
-  sculpt_last_ids_ = ids, sculpt_last_hit_ = hit_local, sculpt_last_radius_ = r_local;
-  if (ids.empty()) return;
-  sculpt_record(m, ids);
-  if (kind == 0) sculpt_draw_brush(m, ids, w, r_local, sculpt_brush_.carve != alt);
-  else if (kind == 1) sculpt_smooth(m, ids, w);
   else {
-    sculpt_grab_.ids = ids, sculpt_grab_.weights = w;
-    sculpt_grab_.start.clear();
-    for (uint32_t v : ids) sculpt_grab_.start.push_back(m.positions[v]);
-    sculpt_grab_.px0 = {x, y};
-    sculpt_grab_.dist = dist;
+    Vec3 hit;
+    if (!sculpt_hit(view, x, y, hit, dist)) return;  // (over nothing, or another object)
+    hit_local = inv.point(hit);
+    if (kind == kSnake) sculpt_snake_pos_ = hit_local, sculpt_snake_set_ = true, sculpt_grab_.dist = dist;
   }
-  for (size_t i = 0; i < ids.size(); i++) sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(m.positions[ids[i]] - sculpt_delta_->before[sculpt_touched_index(ids[i])]));
+  const float r_local = sculpt_world_radius(px_radius, dist) / scale;
+  if (r_local > sculpt_grid_.cell * 4.0f || r_local < sculpt_grid_.cell * 0.25f) sculpt_build_grid(m, r_local);  // (a brush grown or shrunk far: the cells follow)
+  if (kind == kGrab) sculpt_grab_sets_.clear(), sculpt_grab_.px0 = px, sculpt_grab_.dist = dist;
+  /* Every instance gathered against the same positions, then its moves summed. */
+  struct Instance {
+    SculptSym sym;
+    std::vector<uint32_t> ids;
+    std::vector<float> w;
+  };
+  std::vector<Instance> instances;
+  for (const SculptSym &sym : sculpt_symmetries()) {
+    Instance in{sym, {}, {}};
+    const size_t gathered = sculpt_weights(m, inv, sym, sym.apply(hit_local), r_local, strength, drag_px, in.ids, in.w);
+    if (sym.identity()) sculpt_last_ids_ = in.ids, sculpt_last_hit_ = hit_local, sculpt_last_radius_ = r_local, sculpt_last_gathered_ = gathered;
+    if (!in.ids.empty()) instances.push_back(std::move(in));
+  }
+  if (instances.empty()) return;
+  std::unordered_map<uint32_t, Vec3> moves;
+  for (const Instance &in : instances) {
+    sculpt_record(m, in.ids);
+    if (kind == kGrab) {  // (the set is taken now and follows the pointer from here)
+      SculptGrabSet set;
+      set.sym = in.sym, set.ids = in.ids, set.weights = in.w;
+      for (uint32_t v : in.ids) set.start.push_back(m.positions[v]);
+      sculpt_grab_sets_.push_back(std::move(set));
+      continue;
+    }
+    std::vector<Vec3> was;
+    for (uint32_t v : in.ids) was.push_back(m.positions[v]);
+    sculpt_apply_brush(m, inv, in.sym, in.ids, in.w, r_local, kind, sculpt_brush_.carve != alt, drag_px);
+    for (size_t i = 0; i < in.ids.size(); i++) {
+      moves[in.ids[i]] += m.positions[in.ids[i]] - was[i];
+      m.positions[in.ids[i]] = was[i];  // (the next instance works against the same positions)
+    }
+  }
+  for (const auto &mv : moves) {
+    m.positions[mv.first] += mv.second;
+    sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(m.positions[mv.first] - sculpt_delta_->before[sculpt_touched_index(mv.first)]));
+  }
   m.deform_version++;
   sculpt_dabbed_ = true;
   ui_.redraw = true;
 }
 
-/* The delta's slot of a touched vertex (every id in `ids` was recorded before the move). */
-size_t Editor::sculpt_touched_index(uint32_t v) const {
-  const auto at = std::find(sculpt_delta_->ids.begin(), sculpt_delta_->ids.end(), v);
-  return (size_t)(at - sculpt_delta_->ids.begin());
+/* The pointer's move as a move in the object's space at a depth (the camera's right and up there). */
+Vec3 Editor::sculpt_pointer_move_local(const Mat4 &inv, Vec2 d, float dist) const {
+  const float per_px = sculpt_world_radius(1.0f, dist);  // (world units a pixel at that depth)
+  return inv.dir(cam_.right() * (d.x * per_px) - cam_.rotation().rotate({0, 1, 0}) * (d.y * per_px));
 }
+
+/* Grab's sets follow the pointer from where they started, each by its mirrored pull; a vertex in two sets moves by
+ * the sum. */
+void Editor::sculpt_grab_follow(Mesh &m, const Mat4 &inv, Vec2 px) {
+  const Vec3 move = sculpt_pointer_move_local(inv, px - sculpt_grab_.px0, sculpt_grab_.dist);
+  std::unordered_map<uint32_t, std::pair<Vec3, Vec3>> at;  // (vertex: its start, the sum of its pulls)
+  for (const SculptGrabSet &set : sculpt_grab_sets_) {
+    const Vec3 pull = set.sym.dir(move);
+    for (size_t i = 0; i < set.ids.size(); i++) {
+      auto &e = at[set.ids[i]];
+      e.first = set.start[i], e.second += pull * set.weights[i];
+    }
+  }
+  for (const auto &kv : at) {
+    m.positions[kv.first] = kv.second.first + kv.second.second;
+    sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(kv.second.second));
+  }
+  m.deform_version++;
+  sculpt_dabbed_ = true;
+  ui_.redraw = true;
+}
+
+/* ---- symmetry ---- */
+
+Vec3 Editor::SculptSym::apply(Vec3 p) const {
+  const Vec3 q(p.x * sign.x, p.y * sign.y, p.z * sign.z);
+  if (angle == 0.0f) return q;
+  const float c = std::cos(angle), s = std::sin(angle);
+  return {q.x * c + q.z * s, q.y, -q.x * s + q.z * c};
+}
+
+Vec3 Editor::SculptSym::dir(Vec3 d) const { return apply(d); }  // (a linear map: a direction follows the same way)
+
+bool Editor::SculptSym::identity() const { return sign.x > 0.0f && sign.y > 0.0f && sign.z > 0.0f && angle == 0.0f; }
+
+/* The dab's instances: itself, then its mirrors across the object's chosen planes (every combination, a bit mask over
+ * X, Y, Z), each turned about the Y axis `radial` times. Mirror X with Mirror Z is a half turn: with an even Radial the
+ * same place is dabbed twice (Blender does the same). */
+std::vector<Editor::SculptSym> Editor::sculpt_symmetries() const {
+  std::vector<SculptSym> out;
+  const int n = std::max(1, std::min(64, sculpt_brush_.radial));
+  const int allowed = (sculpt_brush_.sym_x ? 1 : 0) | (sculpt_brush_.sym_y ? 2 : 0) | (sculpt_brush_.sym_z ? 4 : 0);
+  for (int mask = 0; mask < 8; mask++) {
+    if (mask & ~allowed) continue;
+    for (int k = 0; k < n; k++) {
+      SculptSym s;
+      s.sign = {mask & 1 ? -1.0f : 1.0f, mask & 2 ? -1.0f : 1.0f, mask & 4 ? -1.0f : 1.0f};
+      s.angle = 2.0f * kPi * (float)k / (float)n;
+      out.push_back(s);
+    }
+  }
+  return out;
+}
+
+/* One instance's brush on its vertices (Grab is handled by the dab: it takes a set instead). */
+void Editor::sculpt_apply_brush(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, int kind, bool carve, Vec2 drag_px) {
+  switch (kind) {
+    case kDraw: sculpt_draw_brush(m, ids, w, r_local, carve); break;
+    case kSmooth: sculpt_smooth(m, ids, w); break;
+    case kClay: sculpt_clay(m, ids, w, r_local, carve); break;
+    case kInflate: sculpt_inflate(m, ids, w, r_local, carve); break;
+    case kFlatten: sculpt_flatten(m, ids, w, false); break;
+    case kScrape: sculpt_flatten(m, ids, w, true); break;
+    case kPinch: sculpt_pinch(m, ids, w, r_local, false); break;
+    case kCrease: sculpt_pinch(m, ids, w, r_local, true); break;
+    case kSnake: sculpt_snake(m, inv, sym, ids, w, drag_px); break;
+    default: break;
+  }
+}
+
+/* The vertices an instance touches and how much: the falloff by distance, the alpha's value where the vertex lies in
+ * the brush's disc (the camera's right and up in the object's space, mirrored with the instance, turned so the image's
+ * right runs along the stroke unless `alpha noturn`), Front Faces Only against the camera mirrored with the instance
+ * (Blender flips the view normal per symmetry pass). Returns how many were within the radius before that filter. */
+size_t Editor::sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, std::vector<uint32_t> &ids,
+                              std::vector<float> &w) const {
+  std::vector<float> dist_local;
+  sculpt_gather(m, hit_local, r_local, ids, dist_local);
+  const size_t gathered = ids.size();
+  const Vec3 eye_local = sym.apply(inv.point(cam_.position())), fwd_local = sym.dir(inv.dir(cam_.forward()));
+  Vec3 right = normalize(sym.dir(inv.dir(cam_.right()))), up = normalize(sym.dir(inv.dir(cam_.rotation().rotate({0, 1, 0}))));
+  if (!sculpt_alpha_.rgba8.empty() && sculpt_brush_.alpha_turn && length(drag_px) > 0.5f) {  // (the image's right along the stroke)
+    const Vec2 d = drag_px / length(drag_px);
+    const Vec3 r2 = right * d.x - up * d.y, u2 = right * d.y + up * d.x;
+    right = r2, up = u2;
+  }
+  std::vector<uint32_t> kept;
+  std::vector<float> kw;
+  for (size_t i = 0; i < ids.size(); i++) {
+    const Vec3 p = m.positions[ids[i]];
+    if (sculpt_brush_.front_only) {
+      const Vec3 n = sculpt_vertex_normal(m, ids[i]);
+      const Vec3 to_cam = cam_.ortho ? -fwd_local : eye_local - p;
+      if (!(dot(n, to_cam) > 0.0f)) continue;
+    }
+    float weight = strength * brush_falloff(sculpt_brush_.falloff, dist_local[i] / std::max(1e-9f, r_local));
+    if (!sculpt_alpha_.rgba8.empty()) weight *= sculpt_alpha_at({dot(p - hit_local, right) / r_local, dot(p - hit_local, up) / r_local});
+    kept.push_back(ids[i]), kw.push_back(weight);
+  }
+  ids.swap(kept), w.swap(kw);
+  return gathered;
+}
+
+/* The alpha's value at (u, v) in -1..1 across the brush's disc: the image's luminance, 0 outside it. */
+float Editor::sculpt_alpha_at(Vec2 uv) const {
+  const Bitmap &a = sculpt_alpha_;
+  if (a.width <= 0 || a.height <= 0) return 1.0f;
+  if (uv.x < -1.0f || uv.x > 1.0f || uv.y < -1.0f || uv.y > 1.0f) return 0.0f;
+  const int x = std::max(0, std::min(a.width - 1, (int)((uv.x * 0.5f + 0.5f) * a.width))), y = std::max(0, std::min(a.height - 1, (int)((0.5f - uv.y * 0.5f) * a.height)));
+  const uint8_t *px = &a.rgba8[((size_t)y * a.width + x) * 4];
+  return (px[0] + px[1] + px[2]) / (3.0f * 255.0f);
+}
+
+/* An alpha from an image file (its luminance: white moves, black doesn't); an empty path clears it. */
+bool Editor::sculpt_load_alpha(const std::string &path) {
+  sculpt_brush_.alpha.clear();
+  sculpt_alpha_ = Bitmap{};
+  if (path.empty()) return true;
+  std::string err;
+  Bitmap b;
+  const std::string full = fs::exists(path) ? path : fs::join(assets_dir_, path);
+  if (!load_image(full, b, err)) {
+    Log::warn("sculpt alpha: %s (%s)", err.empty() ? "no image there" : err.c_str(), full.c_str());
+    return false;
+  }
+  if (b.rgba8.empty() && !b.rgbaf.empty()) {  // (an HDR or EXR: its linear floats as bytes)
+    b.rgba8.resize(b.rgbaf.size());
+    for (size_t i = 0; i < b.rgbaf.size(); i++) b.rgba8[i] = (uint8_t)std::lround(std::max(0.0f, std::min(1.0f, b.rgbaf[i])) * 255.0f);
+  }
+  if (b.rgba8.empty()) {
+    Log::warn("sculpt alpha: the image has no pixels (%s)", full.c_str());
+    return false;
+  }
+  sculpt_alpha_ = std::move(b);
+  sculpt_brush_.alpha = path;
+  Log::info("Sculpt: the alpha is %s (%d x %d)", path.c_str(), sculpt_alpha_.width, sculpt_alpha_.height);
+  return true;
+}
+
+/* The brush area's centre and mean normal, every vertex under the brush alike (Blender's area plane: Clay Buildup,
+ * Flatten and Scrape work against it). */
+void Editor::sculpt_area(const Mesh &m, const std::vector<uint32_t> &ids, Vec3 &centre, Vec3 &normal) const {
+  Vec3 c(0.0f), n(0.0f);
+  float wsum = 0.0f;
+  for (uint32_t v : ids) c += m.positions[v], n += sculpt_vertex_normal(m, v), wsum += 1.0f;
+  centre = wsum > 0.0f ? c / wsum : c;
+  const float len = length(n);
+  normal = len > 1e-12f ? n / len : Vec3(0.0f, 1.0f, 0.0f);
+}
+
+/* Clay Buildup: toward a plane a quarter radius above the area's plane (below it when carving) - layers that stay
+ * flat rather than a bump that keeps rising. */
+void Editor::sculpt_clay(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool carve) {
+  Vec3 c, n;
+  sculpt_area(m, ids, c, n);
+  const float sign = carve ? -1.0f : 1.0f, height = kClayHeight * r_local * sign;
+  for (size_t i = 0; i < ids.size(); i++) {
+    const float h = dot(m.positions[ids[i]] - c, n);  // (above the plane)
+    const float want = height - h;                    // (the way to the layer's top)
+    if (want * sign <= 0.0f) continue;                // (already there or past it)
+    m.positions[ids[i]] += n * (want * std::min(1.0f, w[i]));
+  }
+}
+
+/* Inflate: each vertex along its own normal (Draw along the area's; a thin part swells both ways). */
+void Editor::sculpt_inflate(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool carve) {
+  std::vector<Vec3> normals(ids.size());
+  for (size_t i = 0; i < ids.size(); i++) normals[i] = sculpt_vertex_normal(m, ids[i]);
+  const float sign = carve ? -1.0f : 1.0f;
+  for (size_t i = 0; i < ids.size(); i++) m.positions[ids[i]] += normals[i] * (sign * w[i] * kDrawStep * r_local);
+}
+
+/* Flatten: toward the area's plane from both sides; Scrape (Trim Dynamic): only what stands above it comes down. */
+void Editor::sculpt_flatten(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, bool scrape) {
+  Vec3 c, n;
+  sculpt_area(m, ids, c, n);
+  for (size_t i = 0; i < ids.size(); i++) {
+    const float h = dot(m.positions[ids[i]] - c, n);
+    if (scrape && h <= 0.0f) continue;
+    m.positions[ids[i]] -= n * (h * std::min(1.0f, w[i]));
+  }
+}
+
+/* Pinch: toward the centre, in the area's plane; Crease (Dam Standard): a pinch that also pushes in, cutting a line. */
+void Editor::sculpt_pinch(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool crease) {
+  Vec3 c, n;
+  sculpt_area(m, ids, c, n);
+  for (size_t i = 0; i < ids.size(); i++) {
+    Vec3 to = c - m.positions[ids[i]];
+    to -= n * dot(to, n);  // (in the plane)
+    m.positions[ids[i]] += to * (w[i] * kPinchStep);
+    if (crease) m.positions[ids[i]] -= n * (w[i] * kDrawStep * 0.5f * r_local);
+  }
+}
+
+/* Snake Hook: the vertices under the stroke's place pulled along the pointer's move since the last dab (the place itself
+ * moves with the pointer at the stroke's depth, so a strand follows the drag out past the silhouette). */
+void Editor::sculpt_snake(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, Vec2 drag_px) {
+  const Vec3 move_local = sym.dir(sculpt_pointer_move_local(inv, drag_px, sculpt_grab_.dist));
+  for (size_t i = 0; i < ids.size(); i++) m.positions[ids[i]] += move_local * w[i];
+}
+
+/* The delta's slot of a touched vertex (every id a brush moved was recorded first). */
+size_t Editor::sculpt_touched_index(uint32_t v) const { return (size_t)sculpt_touched_[v] - 1; }
 
 /* Draw: along each vertex's normal (worked out before the move), a quarter radius at full strength; carving the other
  * way. */
@@ -408,32 +648,85 @@ void Editor::sculpt_smooth(Mesh &m, const std::vector<uint32_t> &ids, const std:
   for (size_t i = 0; i < ids.size(); i++) m.positions[ids[i]] += (target[i] - m.positions[ids[i]]) * (w[i] * kSmoothStep);
 }
 
-/* Grab: the set taken at the first dab moves with the pointer in the view plane, from where it started, each by its
- * weight. */
-void Editor::sculpt_grab(Mesh &m, const Mat4 &inv, const std::vector<uint32_t> &ids, const std::vector<float> &w, Vec2 px) {
-  const Vec2 d = px - sculpt_grab_.px0;
-  const float per_px = sculpt_world_radius(1.0f, sculpt_grab_.dist);  // (world units a pixel at the grab's depth)
-  const Vec3 move_world = cam_.right() * (d.x * per_px) - cam_.rotation().rotate({0, 1, 0}) * (d.y * per_px);
-  const Vec3 move_local = inv.dir(move_world);
-  for (size_t i = 0; i < ids.size() && i < sculpt_grab_.start.size(); i++) m.positions[ids[i]] = sculpt_grab_.start[i] + move_local * w[i];
-  for (size_t i = 0; i < ids.size(); i++) sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(move_local * w[i]));
-}
 
-/* From the last dab to (x, y), a dab every quarter radius. */
+/* From the last dab to (x, y) by the stroke type: Dots and Freehand dab along the way (every quarter radius, or at every
+ * move), Spray scatters dabs in the radius, Drag Dot moves one dab with the pointer, Drag Rect waits for the release.
+ * The lazy mouse drags the brush on a string: the pointer must get `lazy` px away before the brush follows. */
 void Editor::sculpt_stroke_to(const Recti &view, float x, float y, bool first) {
   const float pen = std::isfinite(ui_.in.pressure) ? ui_.in.pressure : 1.0f;
-  if (first) {
-    sculpt_dab(view, x, y, pen);
-    sculpt_last_px_ = {x, y};
+  Vec2 to(x, y);
+  if (first) sculpt_lazy_px_ = to, sculpt_press_px_ = to, sculpt_prev_px_ = to;
+  if (sculpt_brush_.lazy > 0.0f && !first) {
+    const Vec2 d = to - sculpt_lazy_px_;
+    const float l = length(d);
+    if (l > sculpt_brush_.lazy) sculpt_lazy_px_ += d * (1.0f - sculpt_brush_.lazy / l);
+    to = sculpt_lazy_px_;
+  }
+  const int type = std::max(0, std::min(kStrokeKinds - 1, sculpt_brush_.stroke));
+  if (type == kStrokeDragRect) {  // (one stamp at the release: nothing yet)
+    sculpt_last_px_ = to;
     return;
   }
-  const float step = std::max(1.0f, sculpt_brush_.radius * ui_.scale * kDabSpacing);
-  const Vec2 to(x, y), d = to - sculpt_last_px_;
+  if (type == kStrokeDragDot) {  // (one dab that follows the pointer: the last one taken back, put down again)
+    if (!first && sculpt_delta_ && length(to - sculpt_last_px_) >= 1.0f) {
+      sculpt_restore_delta();
+      sculpt_delta_->ids.clear(), sculpt_delta_->before.clear();
+      std::fill(sculpt_touched_.begin(), sculpt_touched_.end(), 0u);
+      sculpt_grab_sets_.clear();
+      sculpt_dab(view, to.x, to.y, pen);
+    }
+    else if (first) sculpt_dab(view, to.x, to.y, pen);
+    sculpt_last_px_ = to;
+    return;
+  }
+  if (first) {
+    if (type == kStrokeSpray) sculpt_spray(view, to.x, to.y, pen);
+    else sculpt_dab(view, to.x, to.y, pen);
+    sculpt_last_px_ = to;
+    return;
+  }
+  const float step = type == kStrokeFreehand ? 1.0f : std::max(1.0f, sculpt_brush_.radius * ui_.scale * kDabSpacing);
+  const Vec2 d = to - sculpt_last_px_;
   const float len = length(d);
   if (len < step) return;
-  const int k = std::min(kMaxDabsPerMove, (int)(len / step));
-  for (int i = 1; i <= k && sculpt_stroking_; i++) sculpt_dab(view, sculpt_last_px_.x + d.x * (i / (float)k), sculpt_last_px_.y + d.y * (i / (float)k), pen);
+  const int k = type == kStrokeFreehand ? 1 : std::min(kMaxDabsPerMove, std::max(1, (int)(len / step)));  // (Freehand: one dab a move)
+  for (int i = 1; i <= k && sculpt_stroking_; i++) {
+    const Vec2 at = sculpt_last_px_ + d * (i / (float)k);
+    if (type == kStrokeSpray) sculpt_spray(view, at.x, at.y, pen);
+    else sculpt_dab(view, at.x, at.y, pen);
+  }
   sculpt_last_px_ = to;
+}
+
+/* Spray: dabs scattered in the brush's circle, each a random fraction of the size and strength (Grab and Snake Hook
+ * would read the scatter as a drag: they dab once). */
+void Editor::sculpt_spray(const Recti &view, float x, float y, float pressure) {
+  if (sculpt_brush_.kind == kGrab || sculpt_brush_.kind == kSnake) {
+    sculpt_dab(view, x, y, pressure);
+    return;
+  }
+  const SculptBrush saved = sculpt_brush_;
+  const float R = saved.radius * ui_.scale;
+  for (int i = 0; i < kSprayDabs && sculpt_stroking_; i++) {
+    const float a = next_random(sculpt_rng_) * 2.0f * kPi, r = std::sqrt(next_random(sculpt_rng_)) * R;
+    sculpt_brush_.radius = saved.radius * (0.25f + 0.5f * next_random(sculpt_rng_));
+    sculpt_brush_.strength = saved.strength * (0.3f + 0.7f * next_random(sculpt_rng_));
+    sculpt_dab(view, x + std::cos(a) * r, y + std::sin(a) * r, pressure);
+  }
+  sculpt_brush_.radius = saved.radius, sculpt_brush_.strength = saved.strength;
+}
+
+/* Drag Rect's stamp at the release: one dab at the press point, as wide as the drag and turned to it. */
+void Editor::sculpt_stroke_end_shape(const Recti &view) {
+  if (std::max(0, std::min(kStrokeKinds - 1, sculpt_brush_.stroke)) != kStrokeDragRect || !sculpt_stroking_) return;
+  const Vec2 d = sculpt_last_px_ - sculpt_press_px_;
+  const float len = length(d);
+  if (len < 2.0f) return;
+  const SculptBrush saved = sculpt_brush_;
+  sculpt_brush_.radius = len / std::max(0.1f, ui_.scale);
+  sculpt_prev_px_ = sculpt_press_px_ - d;  // (so the drag's direction turns the alpha)
+  sculpt_dab(view, sculpt_press_px_.x, sculpt_press_px_.y, 1.0f);
+  sculpt_brush_ = saved;
 }
 
 /* The mode's frame: a press over the mesh begins a stroke, the drag dabs, the release ends it; Esc leaves. */
@@ -458,7 +751,10 @@ bool Editor::sculpt_update(const Recti &view) {
     return true;
   }
   if (in.down[0]) sculpt_stroke_to(view, x, y, false);
-  else sculpt_end_stroke();
+  else {
+    sculpt_stroke_end_shape(view);
+    sculpt_end_stroke();
+  }
   return true;
 }
 
@@ -514,8 +810,48 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     return;
   }
   if (v == "brush") {
-    const std::string b = arg(2, "draw");
-    sculpt_brush_.kind = b == "smooth" ? 1 : b == "grab" ? 2 : 0;
+    std::string b;
+    for (size_t i = 2; i < t.size(); i++) b += (i > 2 ? " " : "") + to_lower(t[i]);
+    int kind = -1;
+    for (int i = 0; i < kBrushKinds; i++)
+      if (b == to_lower(kSculptBrushes[i]) || (b.size() > 2 && to_lower(kSculptBrushes[i]).rfind(b, 0) == 0)) kind = kind < 0 ? i : kind;
+    if (b == "clay") kind = kClay;
+    if (b == "snake" || b == "hook") kind = kSnake;
+    if (kind < 0) {
+      Log::info("usage: sculpt brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake");
+      return;
+    }
+    sculpt_brush_.kind = kind;
+  }
+  else if (v == "symmetry") {  // sculpt symmetry x|y|z|off | radial <n>  (task 0237)
+    const std::string s = arg(2, "x");
+    if (s == "off") sculpt_brush_.sym_x = sculpt_brush_.sym_y = sculpt_brush_.sym_z = false, sculpt_brush_.radial = 1;
+    else if (s == "radial") sculpt_brush_.radial = std::max(1, std::min(64, std::atoi(arg(3, "6").c_str())));
+    else if (s == "x") sculpt_brush_.sym_x = arg(3, "on") == "toggle" ? !sculpt_brush_.sym_x : arg(3, "on") != "off";
+    else if (s == "y") sculpt_brush_.sym_y = arg(3, "on") == "toggle" ? !sculpt_brush_.sym_y : arg(3, "on") != "off";
+    else if (s == "z") sculpt_brush_.sym_z = arg(3, "on") == "toggle" ? !sculpt_brush_.sym_z : arg(3, "on") != "off";
+    else Log::info("usage: sculpt symmetry x|y|z [on|off] | radial <n> | off");
+  }
+  else if (v == "lazy") sculpt_brush_.lazy = std::max(0.0f, std::min(300.0f, (float)std::atof(arg(2, "0").c_str())));
+  else if (v == "alpha") {
+    std::string path;
+    for (size_t i = 2; i < t.size(); i++) path += (i > 2 ? " " : "") + t[i];
+    if (path.empty()) {
+      Log::info("usage: sculpt alpha <image>|off|turn|noturn (now: %s)", sculpt_brush_.alpha.empty() ? "none" : sculpt_brush_.alpha.c_str());
+      return;
+    }
+    if (to_lower(path) == "turn") sculpt_brush_.alpha_turn = true;
+    else if (to_lower(path) == "noturn") sculpt_brush_.alpha_turn = false;
+    else if (!sculpt_load_alpha(to_lower(path) == "off" ? "" : path)) return;
+  }
+  else if (v == "stroke" && t.size() == 3) {  // sculpt stroke dots|dot|rect|freehand|spray
+    const std::string s = arg(2, "dots");
+    const int type = s == "dots" ? kStrokeDots : s == "dot" ? kStrokeDragDot : s == "rect" ? kStrokeDragRect : s == "freehand" ? kStrokeFreehand : s == "spray" ? kStrokeSpray : -1;
+    if (type < 0) {
+      Log::info("usage: sculpt stroke dots|dot|rect|freehand|spray");
+      return;
+    }
+    sculpt_brush_.stroke = type;
   }
   else if (v == "size") {
     const std::string s = arg(2, "50");
@@ -557,7 +893,7 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     sculpt_end_stroke();
   }
   else {
-    Log::info("usage: sculpt on|off | brush draw|smooth|grab | size <px>|+|- | strength <0-1> | falloff smooth|sphere|root|sharp|linear|constant | carve on|off|toggle | front on|off | pressure off|strength|size | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
+    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
     return;
   }
   ui_.redraw = true;

@@ -123,14 +123,23 @@ extern const char *const kWeightBrushModes[4];  // Add, Subtract, Draw, Blur (ta
 extern const char *const kWeightFalloffs[6];
 /* Sculpt Mode's brush (task 0236). */
 struct SculptBrush {
-  int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab
+  int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab, Clay Buildup, Inflate, Flatten, Pinch, Crease, Scrape, Snake Hook
   float radius = 50.0f, strength = 0.5f;
   int falloff = 0;  // kWeightFalloffs
   bool carve = false, front_only = true;
   int pressure = 1;  // kSculptPressure: Off, Strength, Size
+  /* Task 0237: symmetry across the object's planes and around its Y axis, the lazy mouse's tether, the alpha, the
+   * stroke type. */
+  bool sym_x = false, sym_y = false, sym_z = false;
+  int radial = 1;        // (dabs around the Y axis; 1: none)
+  float lazy = 0.0f;     // (px: the pointer drags the brush on a string this long; 0 off)
+  std::string alpha;     // (an image's path: its luminance shapes the dab; empty: none)
+  bool alpha_turn = true;  // (the alpha turned to the stroke's direction; off: as the image lies)
+  int stroke = 0;        // kSculptStrokes: Dots, Drag Dot, Drag Rect, Freehand, Spray
 };
-extern const char *const kSculptBrushes[3];
+extern const char *const kSculptBrushes[10];
 extern const char *const kSculptPressure[3];
+extern const char *const kSculptStrokes[5];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
@@ -786,6 +795,9 @@ class Editor {
   float sculpt_last_radius_for_test() const { return sculpt_last_radius_; }
   bool sculpt_hit_for_test(float x, float y, Vec3 &world, float &dist) { return sculpt_hit(scene_rect_, x, y, world, dist); }
   size_t sculpt_last_gathered_for_test() const { return sculpt_last_gathered_; }
+  size_t sculpt_dabs_for_test() const { return sculpt_dab_px_.size(); }  // (task 0237)
+  int sculpt_brush_kind_for_test() const { return sculpt_brush_.kind; }
+  const std::vector<Vec2> &sculpt_dab_px_for_test() const { return sculpt_dab_px_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
@@ -2989,16 +3001,13 @@ class Editor {
     size_t verts = 0;
     std::unordered_map<uint64_t, std::vector<uint32_t>> cells;
   } sculpt_grid_;
-  std::vector<uint8_t> sculpt_touched_;  // (per vertex: recorded in the delta)
+  std::vector<uint32_t> sculpt_touched_;  // (per vertex: its slot in the delta + 1, 0 untouched)
   std::shared_ptr<SculptDelta> sculpt_delta_;
   std::vector<uint32_t> sculpt_last_ids_;  // (the last dab's vertices: tests)
   Vec3 sculpt_last_hit_;
   float sculpt_last_radius_ = 0.0f;
   size_t sculpt_last_gathered_ = 0;
-  struct SculptGrab {
-    std::vector<uint32_t> ids;
-    std::vector<float> weights;
-    std::vector<Vec3> start;
+  struct SculptGrab {  // (the stroke's press and depth: Grab's and Snake Hook's pulls are measured from there)
     Vec2 px0;
     float dist = 1.0f;
   } sculpt_grab_;
@@ -3017,7 +3026,43 @@ class Editor {
   void sculpt_stroke_to(const Recti &view, float x, float y, bool first);
   void sculpt_draw_brush(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool carve);
   void sculpt_smooth(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w);
-  void sculpt_grab(Mesh &m, const Mat4 &inv, const std::vector<uint32_t> &ids, const std::vector<float> &w, Vec2 px);
+  /* Task 0237: the brush set, symmetry, alphas, stroke types. */
+  struct SculptSym {  // (one instance of a dab: the mirror signs and the turn about Y)
+    Vec3 sign{1, 1, 1};
+    float angle = 0.0f;
+    Vec3 apply(Vec3 p) const;
+    Vec3 dir(Vec3 d) const;
+    bool identity() const;
+  };
+  std::vector<SculptSym> sculpt_symmetries() const;
+  void sculpt_apply_brush(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, int kind, bool carve, Vec2 drag_px);
+  size_t sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, std::vector<uint32_t> &ids, std::vector<float> &w) const;
+  Vec3 sculpt_pointer_move_local(const Mat4 &inv, Vec2 d, float dist) const;
+  void sculpt_grab_follow(Mesh &m, const Mat4 &inv, Vec2 px);
+  void sculpt_restore_delta();
+  float sculpt_alpha_at(Vec2 uv) const;
+  void sculpt_area(const Mesh &m, const std::vector<uint32_t> &ids, Vec3 &centre, Vec3 &normal) const;
+  Vec3 sculpt_snake_pos_;
+  bool sculpt_snake_set_ = false;
+  void sculpt_clay(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool carve);
+  void sculpt_inflate(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool carve);
+  void sculpt_flatten(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, bool scrape);
+  void sculpt_pinch(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool crease);
+  void sculpt_snake(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, Vec2 drag_px);
+  bool sculpt_load_alpha(const std::string &path);
+  void sculpt_spray(const Recti &view, float x, float y, float pressure);
+  void sculpt_stroke_end_shape(const Recti &view);
+  Bitmap sculpt_alpha_;
+  struct SculptGrabSet {
+    SculptSym sym;
+    std::vector<uint32_t> ids;
+    std::vector<float> weights;
+    std::vector<Vec3> start;
+  };
+  std::vector<SculptGrabSet> sculpt_grab_sets_;
+  Vec2 sculpt_lazy_px_, sculpt_prev_px_, sculpt_press_px_;
+  std::vector<Vec2> sculpt_dab_px_;  // (this stroke's dab positions: the tests' and the Drag Dot's)
+  uint32_t sculpt_rng_ = 0x9E3779B9u;
   size_t sculpt_touched_index(uint32_t v) const;
   static MeshFilter *mf_of(GameObject *g);
   void sculpt_record(const Mesh &m, const std::vector<uint32_t> &ids);

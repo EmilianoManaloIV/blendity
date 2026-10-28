@@ -3257,8 +3257,9 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   u.tooltip(mesh || sculpt_ ? "Sculpt the selected mesh with a brush: drag over it; Shift smooths, Alt carves; Esc leaves (sculpt on|off)." : "Select a mesh object to sculpt it.");
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);
-  br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 3);
-  br.help("Draw raises along the normal (Alt carves), Smooth evens the surface keeping its volume, Grab pulls what is under the first dab with the drag.");
+  br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 10);
+  br.help("Draw raises along the normal (Alt carves), Smooth evens the surface, Grab pulls what is under the first dab with the drag; Clay Buildup lays flat layers, Inflate swells along each vertex's normal, "
+          "Flatten and Scrape bring the area to its plane, Pinch and Crease draw it to the centre (Crease cuts in), Snake Hook pulls a strand along the drag.");
   br.field("Size", sculpt_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", sculpt_brush_.strength, 0.01f, 0.0f, 1.0f);
   br.enumeration("Falloff", sculpt_brush_.falloff, kWeightFalloffs, 6);
@@ -3266,6 +3267,19 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   br.field("Front Faces Only", sculpt_brush_.front_only);
   br.enumeration("Pressure", sculpt_brush_.pressure, kSculptPressure, 3);
   br.help("What a pen's pressure drives: the strength, the size, or nothing.");
+  br.field("Mirror X", sculpt_brush_.sym_x);
+  br.field("Mirror Y", sculpt_brush_.sym_y);
+  br.field("Mirror Z", sculpt_brush_.sym_z);
+  br.field("Radial", sculpt_brush_.radial, 1, 64);
+  br.help("Symmetry: the dab mirrored across the object's planes and repeated around its Y axis (sculpt symmetry ...).");
+  br.field("Lazy Mouse", sculpt_brush_.lazy, 1.0f, 0.0f, 300.0f);
+  br.help("The brush follows the pointer on a string this long (px): a steadier line. 0 is off.");
+  br.enumeration("Stroke", sculpt_brush_.stroke, kSculptStrokes, 5);
+  br.help("Dots: a dab every quarter radius. Drag Dot: one dab moved with the pointer. Drag Rect: one stamp as wide as the drag, turned to it. Freehand: a dab at every move. Spray: dabs scattered in the circle.");
+  Recti arow = lay.row(u.row_h() + u.px(2));
+  u.label({arow.x + u.px(4), arow.y, u.px(60), arow.h}, "Alpha");
+  u.label({arow.x + u.px(64), arow.y, arow.w - u.px(68), arow.h}, sculpt_brush_.alpha.empty() ? "none (sculpt alpha <image>)" : sculpt_brush_.alpha, u.theme.text_dim);
+  u.tooltip("An image whose brightness shapes the dab (white moves, black doesn't), turned to the stroke: `sculpt alpha <path>`, `sculpt alpha off`.");
 }
 
 }  // namespace bl

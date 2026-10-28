@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| Three brushes, one dab at a time, no symmetry: a face took twice the strokes and never matched its other half; a shaky hand showed in every line. | Ten brushes, Mirror X / Y / Z and Radial symmetry, a lazy mouse, alphas and stroke types (task 0237). |
 | Shaping a dense mesh meant Edit Mode's gizmo on selected vertices: no brush, every change a copy of the mesh for the undo. | Sculpt Mode: a brush that touches only what is under it, in place, with Draw / Smooth / Grab, pressure, and a stroke's undo as a delta (task 0236). |
 | Tabs that didn't fit a strip ran off its edge, clipped, with nothing to say the rest existed; three tabs did one job three times over (Shading, Rigging & Animation, Tools); a stage layout hid tools but not tabs. | Inactive tabs become icons when labels don't fit, then an overflow menu lists the rest; related kinds fold into one tab with a member row; a stage layout shows its own tabs, Show All Tabs the rest (task 0235). |
 | The layout, the mode and the tool were shown in three places, and a running tool's next step nowhere. | The Scene view's bar reads Layout > Mode > Tool, each a dropdown (`where` prints it); the status bar names the next step of Knife, G / R / S, Push/Pull, a modal adjustment and Sketch (task 0235). |
