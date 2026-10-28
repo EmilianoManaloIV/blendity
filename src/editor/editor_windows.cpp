@@ -88,7 +88,7 @@ void Editor::swap_view_state(EditorWindow &w) {
 /* An interaction under way in the Scene view drawing now (its tools own the pointer until it ends). */
 bool Editor::scene_interacting() const {
   return drag_ != Drag::None || sketch_.stroking || gizmo_nav_ != GizmoNav::None || xf_.active || pp_.active || modal_.active || knife_.active ||
-         draw_.active || wp_stroking_ || finger_orbit_ || bone_drag_.modal;
+         draw_.active || wp_stroking_ || finger_orbit_ || bone_drag_.modal || sculpt_stroking_ || sculpt_gesture_;
 }
 
 void Editor::queue_window_move(WindowMove m) {

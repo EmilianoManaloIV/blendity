@@ -652,6 +652,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
   if (sculpt_stroking_ && !scene_drawn_) sculpt_end_stroke();  // (task 0236: the Scene view stopped drawing mid-stroke - a tab switch: the stroke ends as it is)
+  if (sculpt_gesture_ && !scene_drawn_) sculpt_gesture_ = false;  // (task 0238: a Ctrl gesture the same way, dropped)
   draw_drop_hint();  // (task 0232)
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();

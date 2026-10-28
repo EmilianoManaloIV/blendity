@@ -87,6 +87,7 @@ struct MeshCacheFields {
     std::vector<Vec2> uvs;
     std::vector<int32_t> face_material;
     std::vector<uint8_t> face_smooth;
+    std::vector<int32_t> face_group;  // (task 0238: a hidden face has no triangles)
     std::vector<uint64_t> seams, sharp_edges, loose_edges;
     bool smooth = false, seams_sharp = false;
     float smooth_angle = 180.0f;
@@ -195,6 +196,14 @@ struct Mesh : MeshCaches {
    * extruding a lone vertex makes. Edit Mode selects and extrudes them like
    * any edge; edge_cache() includes them; extruding one gives a face. */
   std::vector<uint64_t> loose_edges;
+  /* Sculpt Mode's mask (task 0238; ZBrush's mask, Blender's "mask" attribute): a float per vertex, 0 free, 1 held;
+   * empty = no mask. Every brush's weight is multiplied by 1 - mask. Saved with the mesh ("mk" lines); a mask stroke
+   * is a delta undo step written in place, as a brush stroke is (ADR 0074). */
+  std::vector<float> sculpt_mask;
+  /* Polygroups (task 0238; ZBrush's): a group number per face, empty = every face group 0. A negative value is a
+   * hidden face keeping its group as -(group + 1): hidden faces leave the render mesh (and with it the picture, the
+   * id plane and the brush). Part of the topology the render caches follow. Saved with the mesh ("pg" lines). */
+  std::vector<int32_t> face_group;
   /* Vertex groups (task 0045, ADR 0024). Operators that renumber vertices keep them through remove_loose_verts;
    * Mirror, Array and Join copy them; anything else that changes the vertex count leaves them the wrong size, and
    * the editor (and the modifier stack) then carry them over from the mesh before by position
@@ -230,6 +239,16 @@ struct Mesh : MeshCaches {
   void set_sharp(uint32_t a, uint32_t b, bool on);
   bool smooth_of(size_t f) const { return f < face_smooth.size() ? face_smooth[f] != 0 : smooth; }
   bool any_smooth() const;  // any face shaded smooth
+  /* Task 0238: the mask and the polygroups. */
+  bool mask_fits() const { return !sculpt_mask.empty() && sculpt_mask.size() == positions.size(); }
+  int group_of(size_t f) const {
+    const int32_t g = f < face_group.size() ? face_group[f] : 0;
+    return g < 0 ? -(g + 1) : g;
+  }
+  static constexpr int32_t kMaxGroup = 1 << 30;  // (a group number from a file is clamped to this)
+  bool face_hidden(size_t f) const { return f < face_group.size() && face_group[f] < 0; }
+  bool any_hidden() const;
+  void set_face_hidden(size_t f, bool hidden);
   void set_face_smooth(size_t f, bool on);  // fills face_smooth from `smooth` the first time
 
   void clear();

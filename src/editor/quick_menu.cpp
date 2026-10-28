@@ -131,7 +131,15 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
           {"No Symmetry", "sculpt symmetry off", {}},
           {"Front Only", "sculpt front on", {}},
           {"Both Sides", "sculpt front off", {}}}},
-        {"Undo", "Undo", {}},
+        {"Masks", "",  // (task 0238)
+         {{"Clear Mask", "sculpt mask clear", {}},
+          {"Invert Mask", "sculpt mask invert", {}},
+          {"Blur Mask", "sculpt mask blur", {}},
+          {"Grow Mask", "sculpt mask grow", {}},
+          {"Group Islands", "sculpt group islands", {}},
+          {"Hide Masked", "sculpt hide masked", {}},
+          {"Show All", "sculpt show all", {}},
+          {"Show Groups", "sculpt groups toggle", {}}}},
         {"Object Mode", "sculpt off", {}}}},
       {"weight paint",
        {{"Add", "wpbrush add", {}},
@@ -545,7 +553,7 @@ void Editor::wheel_frame() {
  * one). */
 bool Editor::wheel_hold_busy() {
   const auto &in = ui_.in;
-  if (ui_.any_active() || modal_.active || xf_.active || pp_.active || sculpt_stroking_) return true;  // (task 0236: a stroke under way)
+  if (ui_.any_active() || modal_.active || xf_.active || pp_.active || sculpt_stroking_ || sculpt_gesture_) return true;  // (task 0236: a stroke under way; 0238: a Ctrl gesture)
   const WindowKind under = wheel_window_at(hold_x_, hold_y_);
   if (sketch_.active && (under == WindowKind::Draw || under == WindowKind::Game)) return true;  // (task 0233: the pen draws there too)
   if (under != WindowKind::Scene) return false;

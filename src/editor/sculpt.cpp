@@ -9,13 +9,14 @@
 #include "editor.h"
 #include "../core/core.h"
 #include "../image/image.h"
+#include "../scene/uv.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace bl {
 
-const char *const kSculptBrushes[10] = {"Draw", "Smooth", "Grab", "Clay Buildup", "Inflate", "Flatten", "Pinch", "Crease", "Scrape", "Snake Hook"};
+const char *const kSculptBrushes[11] = {"Draw", "Smooth", "Grab", "Clay Buildup", "Inflate", "Flatten", "Pinch", "Crease", "Scrape", "Snake Hook", "Mask"};
 const char *const kSculptPressure[3] = {"Off", "Strength", "Size"};
 const char *const kSculptStrokes[5] = {"Dots", "Drag Dot", "Drag Rect", "Freehand", "Spray"};
 
@@ -29,8 +30,11 @@ constexpr float kSizeStep = 1.25f;     // (sculpt size + / -)
 constexpr float kPinchStep = 0.5f;     // (a full-strength Pinch dab takes a vertex this far toward the centre)
 constexpr float kClayHeight = 0.25f;   // (Clay Buildup's layer: this many radii above the area's plane)
 constexpr int kSprayDabs = 8;          // (Spray: dabs per step, scattered in the radius)
-constexpr int kBrushKinds = 10, kStrokeKinds = 5;
-enum { kDraw, kSmooth, kGrab, kClay, kInflate, kFlatten, kPinch, kCrease, kScrape, kSnake };
+constexpr int kBrushKinds = 11, kStrokeKinds = 5;
+/* Task 0238: a vertex counts as masked above this; the mask's darkening in the view; a Ctrl click (not a drag) in px. */
+constexpr float kMaskedAbove = 0.5f, kMaskDarkening = 0.6f, kClickPx = 4.0f;
+const Vec3 kMaskDarkColor(0.12f);
+enum { kDraw, kSmooth, kGrab, kClay, kInflate, kFlatten, kPinch, kCrease, kScrape, kSnake, kMask };
 enum { kStrokeDots, kStrokeDragDot, kStrokeDragRect, kStrokeFreehand, kStrokeSpray };
 
 float next_random(uint32_t &s) {  // (0..1; the stroke's own generator, the same on every platform)
@@ -68,6 +72,21 @@ void vertex_ring(const Mesh &m, uint32_t v, std::vector<uint32_t> &out) {
         if (std::find(out.begin(), out.end(), nb) == out.end()) out.push_back(nb);
     }
   }
+}
+
+/* Every vertex of the face masked above a half (an empty face is not). */
+bool face_all_masked(const Mesh &m, size_t f) {
+  if (!m.mask_fits()) return false;
+  const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+  if (n == 0) return false;
+  for (uint32_t c = 0; c < n; c++)
+    if (!(m.sculpt_mask[fv[c]] > kMaskedAbove)) return false;
+  return true;
+}
+
+/* Any vertex masked at all (an all-zero mask is no mask: nothing to draw or to protect). */
+bool mask_any(const Mesh &m) {
+  return m.mask_fits() && std::any_of(m.sculpt_mask.begin(), m.sculpt_mask.end(), [](float v) { return v > 0.0f; });
 }
 
 }  // namespace
@@ -193,6 +212,7 @@ void Editor::sculpt_gather_cell(const Mesh &m, int64_t x, int64_t y, int64_t z, 
   if (it == sculpt_grid_.cells.end()) return;
   for (uint32_t v : it->second) {
     if (v >= m.vert_count()) continue;
+    if (v < sculpt_hidden_vert_.size() && sculpt_hidden_vert_[v]) continue;  // (every face of it hidden: task 0238)
     const float dd = length_sq(m.positions[v] - centre);
     if (dd > r2) continue;
     ids.push_back(v), d.push_back(std::sqrt(dd));
@@ -250,10 +270,16 @@ bool Editor::sculpt_begin_stroke(const Recti &view, float x, float y) {
   const float scale = std::max(1e-6f, length(g->world_matrix().dir({1.0f, 0.0f, 0.0f})));  // (the object's scale along X: a sculpted object is scaled evenly or near it)
   const float r_local = sculpt_world_radius(sculpt_brush_.radius * ui_.scale, dist) / scale;
   sculpt_build_grid(*m, r_local);  // (every stroke: the vertices are where the last stroke left them)
+  sculpt_build_hidden(*m);
   sculpt_stroke_move_ = 0.0f;
   sculpt_touched_.assign(m->vert_count(), 0);
   sculpt_delta_ = std::make_shared<SculptDelta>();
   sculpt_delta_->obj = sculpt_obj_;
+  /* Ctrl, or the Mask brush: a mask stroke (Alt takes the mask away, Shift with the Mask brush blurs it). */
+  const bool masking = ui_.in.ctrl() || sculpt_brush_.kind == kMask;
+  sculpt_mask_mode_ = !masking ? kMaskNone : ui_.in.alt() ? kMaskTake : ui_.in.shift() && !ui_.in.ctrl() ? kMaskBlur : kMaskAdd;
+  sculpt_delta_->mask = masking;
+  if (masking && !m->mask_fits()) m->sculpt_mask.assign(m->vert_count(), 0.0f), sculpt_mask_version_++;  // (in place, the snapshots' too: all zero is no mask)
   sculpt_grab_ = SculptGrab{};
   sculpt_grab_.px0 = {x, y};
   sculpt_grab_.dist = dist;
@@ -275,22 +301,15 @@ void Editor::sculpt_end_stroke() {
   sculpt_stroking_ = false;
   Mesh *m = sculpt_mesh();
   if (!sculpt_dabbed_ || !m || m != sculpt_stroke_mesh_ || !sculpt_delta_) return;
-  /* The step keeps the vertices that moved; a stroke that moved nothing makes none. */
-  SculptDelta &d = *sculpt_delta_;
-  size_t kept = 0;
-  for (size_t i = 0; i < d.ids.size(); i++) {
-    if (std::memcmp(&m->positions[d.ids[i]], &d.before[i], sizeof(Vec3)) == 0) continue;
-    d.ids[kept] = d.ids[i], d.before[kept] = d.before[i];
-    kept++;
-  }
-  d.ids.resize(kept), d.before.resize(kept);
-  if (kept == 0) return;
-  for (uint32_t v : d.ids) d.after.push_back(m->positions[v]);
+  /* The step keeps the vertices that changed; a stroke that changed nothing makes none. */
+  const bool mask = sculpt_delta_->mask;
+  if (sculpt_keep_changed(*m, *sculpt_delta_) == 0) return;
   commit_undo();  // (a change made during the stroke - a key's - is its own step, before this one)
   UndoState s;
   s.delta = std::move(sculpt_delta_);
-  s.label = std::string("Sculpt ") + kSculptBrushes[std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind))];
-  s.bytes = s.delta->ids.size() * (sizeof(uint32_t) + 2 * sizeof(Vec3));
+  static const char *const kMaskModes[] = {"", "Mask", "Unmask", "Blur Mask"};
+  s.label = mask ? kMaskModes[std::max(1, std::min(3, (int)sculpt_mask_mode_))] : std::string("Sculpt ") + kSculptBrushes[std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind))];
+  s.bytes = s.delta->ids.size() * (sizeof(uint32_t) + (mask ? 2 * sizeof(float) : 2 * sizeof(Vec3)));
   undo_.push_back(std::move(s));
   trim_undo();
   redo_.clear();
@@ -299,9 +318,34 @@ void Editor::sculpt_end_stroke() {
   ui_.redraw = true;
 }
 
+/* The delta pared to the vertices the stroke changed (positions, or the mask's floats), their `after` filled in;
+ * returns how many. */
+size_t Editor::sculpt_keep_changed(const Mesh &m, SculptDelta &d) const {
+  size_t kept = 0;
+  if (d.mask) {
+    for (size_t i = 0; i < d.ids.size(); i++) {
+      if (d.ids[i] >= m.sculpt_mask.size() || m.sculpt_mask[d.ids[i]] == d.mask_before[i]) continue;
+      d.ids[kept] = d.ids[i], d.mask_before[kept] = d.mask_before[i];
+      kept++;
+    }
+    d.ids.resize(kept), d.mask_before.resize(kept);
+    for (uint32_t v : d.ids) d.mask_after.push_back(m.sculpt_mask[v]);
+    return kept;
+  }
+  for (size_t i = 0; i < d.ids.size(); i++) {
+    if (std::memcmp(&m.positions[d.ids[i]], &d.before[i], sizeof(Vec3)) == 0) continue;
+    d.ids[kept] = d.ids[i], d.before[kept] = d.before[i];
+    kept++;
+  }
+  d.ids.resize(kept), d.before.resize(kept);
+  for (uint32_t v : d.ids) d.after.push_back(m.positions[v]);
+  return kept;
+}
+
 /* A stroke cut off (an undo, a new scene, the mode left): what it moved goes back and no step is made. */
 void Editor::sculpt_abort_stroke() {
   if (sculpt_stroking_) sculpt_restore_delta();
+  sculpt_gesture_ = false;
   sculpt_stroking_ = false;
   sculpt_stroke_mesh_ = nullptr;
   sculpt_delta_.reset();
@@ -310,11 +354,13 @@ void Editor::sculpt_abort_stroke() {
 /* A touched vertex's position before its first dab goes into the stroke's delta; its slot (+1) is kept per vertex so a
  * later dab finds it at once. */
 void Editor::sculpt_record(const Mesh &m, const std::vector<uint32_t> &ids) {
+  SculptDelta &d = *sculpt_delta_;
   for (uint32_t v : ids) {
     if (sculpt_touched_[v]) continue;
-    sculpt_delta_->ids.push_back(v);
-    sculpt_delta_->before.push_back(m.positions[v]);
-    sculpt_touched_[v] = (uint32_t)sculpt_delta_->ids.size();  // (the slot + 1)
+    d.ids.push_back(v);
+    if (d.mask) d.mask_before.push_back(v < m.sculpt_mask.size() ? m.sculpt_mask[v] : 0.0f);
+    else d.before.push_back(m.positions[v]);
+    sculpt_touched_[v] = (uint32_t)d.ids.size();  // (the slot + 1)
   }
 }
 
@@ -324,6 +370,12 @@ void Editor::sculpt_restore_delta() {
   Mesh *m = sculpt_mesh();
   if (!m || m != sculpt_stroke_mesh_ || !sculpt_delta_) return;
   const SculptDelta &d = *sculpt_delta_;
+  if (d.mask) {
+    for (size_t i = 0; i < d.ids.size(); i++)
+      if (d.ids[i] < m->sculpt_mask.size()) m->sculpt_mask[d.ids[i]] = d.mask_before[i];
+    sculpt_mask_version_++;
+    return;
+  }
   for (size_t i = 0; i < d.ids.size(); i++)
     if (d.ids[i] < m->vert_count()) m->positions[d.ids[i]] = d.before[i];
   if (!d.ids.empty()) m->deform_version++;
@@ -341,7 +393,7 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   }
   Mesh &m = *mp;
   const bool shift = ui_.in.shift(), alt = ui_.in.alt();
-  const int kind = shift ? kSmooth : std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind));
+  const int kind = sculpt_mask_mode_ ? kMask : shift ? kSmooth : std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind));
   pressure = std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f;
   const float strength = std::max(0.0f, std::min(1.0f, sculpt_brush_.strength)) * (sculpt_brush_.pressure == 1 ? pressure : 1.0f);
   const float px_radius = std::max(1.0f, sculpt_brush_.radius * ui_.scale * (sculpt_brush_.pressure == 2 ? std::max(0.1f, pressure) : 1.0f));
@@ -383,7 +435,7 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   std::vector<Instance> instances;
   for (const SculptSym &sym : sculpt_symmetries()) {
     Instance in{sym, {}, {}};
-    const size_t gathered = sculpt_weights(m, inv, sym, sym.apply(hit_local), r_local, strength, drag_px, in.ids, in.w);
+    const size_t gathered = sculpt_weights(m, inv, sym, sym.apply(hit_local), r_local, strength, drag_px, kind != kMask, in.ids, in.w);
     if (sym.identity()) sculpt_last_ids_ = in.ids, sculpt_last_hit_ = hit_local, sculpt_last_radius_ = r_local, sculpt_last_gathered_ = gathered;
     if (!in.ids.empty()) instances.push_back(std::move(in));
   }
@@ -391,6 +443,10 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   std::unordered_map<uint32_t, Vec3> moves;
   for (const Instance &in : instances) {
     sculpt_record(m, in.ids);
+    if (kind == kMask) {  // (the mask painted, not the surface)
+      sculpt_mask_apply(m, in.ids, in.w);
+      continue;
+    }
     if (kind == kGrab) {  // (the set is taken now and follows the pointer from here)
       SculptGrabSet set;
       set.sym = in.sym, set.ids = in.ids, set.weights = in.w;
@@ -410,9 +466,46 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
     m.positions[mv.first] += mv.second;
     sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(m.positions[mv.first] - sculpt_delta_->before[sculpt_touched_index(mv.first)]));
   }
-  m.deform_version++;
+  if (!moves.empty()) m.deform_version++;
   sculpt_dabbed_ = true;
   ui_.redraw = true;
+}
+
+/* The mask under an instance: added to (up to 1), taken from (down to 0), or blurred toward the neighbours' mean, by
+ * the instance's weights. */
+void Editor::sculpt_mask_apply(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w) {
+  std::vector<float> &mk = m.sculpt_mask;
+  if (mk.size() != m.vert_count()) return;
+  if (sculpt_mask_mode_ != kMaskBlur) {
+    const float sign = sculpt_mask_mode_ == kMaskTake ? -1.0f : 1.0f;
+    for (size_t i = 0; i < ids.size(); i++) mk[ids[i]] = std::max(0.0f, std::min(1.0f, mk[ids[i]] + sign * w[i]));
+    sculpt_mask_version_++;
+    return;
+  }
+  std::vector<uint32_t> ring;
+  std::vector<float> target(ids.size());
+  for (size_t i = 0; i < ids.size(); i++) {
+    vertex_ring(m, ids[i], ring);
+    float sum = 0.0f;
+    for (uint32_t nb : ring) sum += mk[nb];
+    target[i] = ring.empty() ? mk[ids[i]] : sum / (float)ring.size();
+  }
+  for (size_t i = 0; i < ids.size(); i++) mk[ids[i]] += (target[i] - mk[ids[i]]) * std::min(1.0f, w[i]);
+  sculpt_mask_version_++;
+}
+
+/* Per vertex, whether every face of it is hidden (such a vertex is never gathered); empty when nothing is hidden. */
+void Editor::sculpt_build_hidden(const Mesh &m) {
+  sculpt_hidden_vert_.clear();
+  if (!m.any_hidden()) return;
+  const Mesh::VertexFaces &vf = m.vertex_faces();
+  sculpt_hidden_vert_.assign(m.vert_count(), 0);
+  for (uint32_t v = 0; v + 1 < vf.offsets.size(); v++) {
+    if (vf.offsets[v + 1] == vf.offsets[v]) continue;  // (a loose vertex is never hidden)
+    bool all = true;
+    for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1] && all; k++) all = m.face_hidden(vf.faces[k]);
+    sculpt_hidden_vert_[v] = all ? 1 : 0;
+  }
 }
 
 /* The pointer's move as a move in the object's space at a depth (the camera's right and up there). */
@@ -494,8 +587,9 @@ void Editor::sculpt_apply_brush(Mesh &m, const Mat4 &inv, const SculptSym &sym, 
  * the brush's disc (the camera's right and up in the object's space, mirrored with the instance, turned so the image's
  * right runs along the stroke unless `alpha noturn`), Front Faces Only against the camera mirrored with the instance
  * (Blender flips the view normal per symmetry pass). Returns how many were within the radius before that filter. */
-size_t Editor::sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, std::vector<uint32_t> &ids,
-                              std::vector<float> &w) const {
+size_t Editor::sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, bool use_mask,
+                              std::vector<uint32_t> &ids, std::vector<float> &w) const {
+  const bool masked = use_mask && m.mask_fits();  // (task 0238: a held vertex is left out, a half-held one moves half)
   std::vector<float> dist_local;
   sculpt_gather(m, hit_local, r_local, ids, dist_local);
   const size_t gathered = ids.size();
@@ -517,6 +611,11 @@ size_t Editor::sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &s
     }
     float weight = strength * brush_falloff(sculpt_brush_.falloff, dist_local[i] / std::max(1e-9f, r_local));
     if (!sculpt_alpha_.rgba8.empty()) weight *= sculpt_alpha_at({dot(p - hit_local, right) / r_local, dot(p - hit_local, up) / r_local});
+    if (masked) {
+      const float free = 1.0f - std::max(0.0f, std::min(1.0f, m.sculpt_mask[ids[i]]));
+      if (free <= 0.0f) continue;
+      weight *= free;
+    }
     kept.push_back(ids[i]), kw.push_back(weight);
   }
   ids.swap(kept), w.swap(kw);
@@ -670,7 +769,7 @@ void Editor::sculpt_stroke_to(const Recti &view, float x, float y, bool first) {
   if (type == kStrokeDragDot) {  // (one dab that follows the pointer: the last one taken back, put down again)
     if (!first && sculpt_delta_ && length(to - sculpt_last_px_) >= 1.0f) {
       sculpt_restore_delta();
-      sculpt_delta_->ids.clear(), sculpt_delta_->before.clear();
+      sculpt_delta_->clear();  // (the mask's floats too: a mask stroke's Drag Dot)
       std::fill(sculpt_touched_.begin(), sculpt_touched_.end(), 0u);
       sculpt_grab_sets_.clear();
       sculpt_dab(view, to.x, to.y, pen);
@@ -738,16 +837,35 @@ bool Editor::sculpt_update(const Recti &view) {
     return false;
   }
   const float x = (float)(in.mx - view.x), y = (float)(in.my - view.y);
-  if (!sculpt_stroking_) {
+  if (!sculpt_stroking_ && !sculpt_gesture_) {
     if (scene_hovered_ && in.key_pressed[platform::KEY_ESCAPE] && !ui_.wants_keyboard()) {
       set_sculpt(false);
       in.key_pressed[platform::KEY_ESCAPE] = false;
       return true;
     }
     if (!(scene_hovered_ && in.pressed[0] && !ui_.any_active() && !qm_.open)) return false;
-    if (!sculpt_begin_stroke(view, x, y)) return false;  // (over nothing: the click is the view's)
-    ui_.consume_click();
-    sculpt_stroke_to(view, x, y, true);
+    if (in.ctrl() && in.shift()) {  // (Ctrl+Shift: the group under the pointer alone; off the model, everything shown - ZBrush's)
+      ui_.consume_click();
+      if (!sculpt_isolate_at(view, x, y)) sculpt_hide_op("none", "");
+      return true;
+    }
+    if (sculpt_begin_stroke(view, x, y)) {
+      ui_.consume_click();
+      sculpt_stroke_to(view, x, y, true);
+      return true;
+    }
+    if (!in.ctrl()) return false;  // (over nothing: the click is the view's)
+    ui_.consume_click();  // (Ctrl off the model: a click inverts the mask, a drag masks a rectangle)
+    sculpt_gesture_ = true, sculpt_gesture_from_ = {x, y};
+    return true;
+  }
+  if (sculpt_gesture_) {
+    if (in.key_pressed[platform::KEY_ESCAPE]) {  // (the gesture dropped: no invert, no rectangle)
+      sculpt_gesture_ = false;
+      in.key_pressed[platform::KEY_ESCAPE] = false;
+      return true;
+    }
+    if (!in.down[0]) sculpt_gesture_end(x, y);
     return true;
   }
   if (in.down[0]) sculpt_stroke_to(view, x, y, false);
@@ -765,13 +883,287 @@ void Editor::sculpt_draw(const Recti &view) {
   const float R = std::max(1.0f, sculpt_brush_.radius * u.scale);
   u.canvas.circle((float)u.in.mx, (float)u.in.my, R, Color::hex(0xFFFFFF, 200), 1.5f);
   u.canvas.circle((float)u.in.mx, (float)u.in.my, R * std::max(0.05f, std::min(1.0f, sculpt_brush_.strength)), Color::hex(0xFFFFFF, 90), 1.0f);
-  (void)view;
+  if (!sculpt_gesture_) return;
+  const Vec2 a = sculpt_gesture_from_ + Vec2((float)view.x, (float)view.y), b((float)u.in.mx, (float)u.in.my);  // (the rectangle being masked)
+  const Recti r{(int)std::min(a.x, b.x), (int)std::min(a.y, b.y), (int)std::fabs(b.x - a.x), (int)std::fabs(b.y - a.y)};
+  u.canvas.rect_outline(r, Color::hex(0xFFFFFF, 220), 1);
+}
+
+/* Ctrl released off the model: a click inverts the mask, a drag masks the rectangle. */
+void Editor::sculpt_gesture_end(float x, float y) {
+  sculpt_gesture_ = false;
+  const Vec2 to(x, y);
+  if (length(to - sculpt_gesture_from_) < kClickPx * std::max(0.5f, ui_.scale)) sculpt_mask_op("invert", {});
+  else sculpt_rect_mask(sculpt_gesture_from_, to);
+}
+
+/* ---- the mask, the groups, hiding (task 0238): ordinary steps on a mesh of the object's own ---- */
+
+/* The sculpted (or the active) object's mesh for an operation on the whole of it: a stroke under way ends, the mesh is
+ * made the object's own (a snapshot step: the mask and the groups are not written into the snapshots' mesh), the
+ * change is marked. Null, with a log line, when there is no mesh. */
+Mesh *Editor::sculpt_mesh_for_op(const char *label) {
+  GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
+  MeshFilter *mf = mf_of(g);
+  if (!mf || !mf->mesh) {
+    Log::warn("%s: select a mesh object first", label);
+    return nullptr;
+  }
+  sculpt_end_stroke();  // (a stroke under way - a shortcut mid-stroke - is kept as its own step)
+  sculpt_gesture_ = false;
+  commit_undo();
+  mesh_make_mutable(mf->mesh);
+  sculpt_cache_mesh_ = nullptr;
+  mark_changed(label);
+  sculpt_mask_version_++;
+  ui_.redraw = true;
+  return mf->mesh.get();
+}
+
+/* sculpt mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1>: the whole mask at once. */
+bool Editor::sculpt_mask_op(const std::string &op, const std::vector<std::string> &t) {
+  static const char *const kOps[] = {"clear", "fill", "invert", "blur", "sharpen", "grow", "shrink", "rect"};
+  int which = -1;
+  for (int i = 0; i < 8; i++)
+    if (op == kOps[i]) which = i;
+  if (which < 0) {
+    Log::info("usage: sculpt mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1>");
+    return false;
+  }
+  if (which == 7) {
+    if (t.size() < 7) {
+      Log::info("usage: sculpt mask rect <x0> <y0> <x1> <y1> (Scene view pixels)");
+      return false;
+    }
+    sculpt_rect_mask({(float)std::atof(t[3].c_str()), (float)std::atof(t[4].c_str())}, {(float)std::atof(t[5].c_str()), (float)std::atof(t[6].c_str())});
+    return true;
+  }
+  static const char *const kLabels[] = {"Clear Mask", "Fill Mask", "Invert Mask", "Blur Mask", "Sharpen Mask", "Grow Mask", "Shrink Mask"};
+  Mesh *m = sculpt_mesh_for_op(kLabels[which]);
+  if (!m) return false;
+  std::vector<float> &mk = m->sculpt_mask;
+  if (!m->mask_fits()) mk.assign(m->vert_count(), 0.0f);
+  sculpt_build_hidden(*m);  // (a hidden vertex keeps its mask through every operation)
+  auto hidden = [&](uint32_t v) { return v < sculpt_hidden_vert_.size() && sculpt_hidden_vert_[v]; };
+  if (which >= 3) {
+    sculpt_mask_ring_op(*m, which);
+    return true;
+  }
+  for (uint32_t v = 0; v < (uint32_t)m->vert_count(); v++) {
+    if (hidden(v)) continue;
+    mk[v] = which == 0 ? 0.0f : which == 1 ? 1.0f : 1.0f - mk[v];
+  }
+  return true;
+}
+
+/* Blur (3), sharpen (4), grow (5), shrink (6): each vertex against its ring, from the mask as it was. */
+void Editor::sculpt_mask_ring_op(Mesh &m, int which) {
+  std::vector<float> &mk = m.sculpt_mask;
+  const std::vector<float> was = mk;
+  std::vector<uint32_t> ring;
+  for (uint32_t v = 0; v < (uint32_t)m.vert_count(); v++) {
+    if (v < sculpt_hidden_vert_.size() && sculpt_hidden_vert_[v]) continue;
+    vertex_ring(m, v, ring);
+    if (ring.empty()) continue;
+    float sum = 0.0f, lo = was[v], hi = was[v];
+    for (uint32_t nb : ring) sum += was[nb], lo = std::min(lo, was[nb]), hi = std::max(hi, was[nb]);
+    const float mean = sum / (float)ring.size();
+    mk[v] = which == 3 ? mean : which == 4 ? std::max(0.0f, std::min(1.0f, was[v] + (was[v] - mean))) : which == 5 ? hi : lo;
+  }
+}
+
+/* The vertices whose projection falls in the Scene view rectangle a-b (and face the camera, with Front Faces Only)
+ * are masked fully - ZBrush's MaskRect. */
+void Editor::sculpt_rect_mask(Vec2 a, Vec2 b) {
+  Mesh *m = sculpt_mesh_for_op("Mask Rectangle");
+  GameObject *g = m ? (sculpt_ ? scene_->find(sculpt_obj_) : active_object()) : nullptr;
+  if (!m || !g) return;
+  if (!m->mask_fits()) m->sculpt_mask.assign(m->vert_count(), 0.0f);
+  sculpt_build_hidden(*m);
+  const float x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
+  const Mat4 &W = g->world_matrix();
+  const Vec3 eye_local = W.inverse().point(cam_.position()), fwd_local = W.inverse().dir(cam_.forward());
+  for (uint32_t v = 0; v < (uint32_t)m->vert_count(); v++) {
+    if (v < sculpt_hidden_vert_.size() && sculpt_hidden_vert_[v]) continue;
+    Vec2 px;
+    float z;
+    if (!scene_r3d_.project(W.point(m->positions[v]), px, z) || px.x < x0 || px.x > x1 || px.y < y0 || px.y > y1) continue;
+    if (sculpt_brush_.front_only) {
+      const Vec3 to_cam = cam_.ortho ? -fwd_local : eye_local - m->positions[v];
+      if (!(dot(sculpt_vertex_normal(*m, v), to_cam) > 0.0f)) continue;
+    }
+    m->sculpt_mask[v] = 1.0f;
+  }
+}
+
+/* sculpt group islands|material|mask|merge: the polygroups from the mesh's pieces, its materials, its mask, or all one. */
+bool Editor::sculpt_group_op(const std::string &op) {
+  if (op != "islands" && op != "material" && op != "mask" && op != "merge") {
+    Log::info("usage: sculpt group islands|material|mask|merge");
+    return false;
+  }
+  {
+    const GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
+    const MeshFilter *mf = mf_of(const_cast<GameObject *>(g));
+    if (op == "mask" && (!mf || !mf->mesh || !mask_any(*mf->mesh))) {  // (nothing masked: no group, no step)
+      Log::info("sculpt group mask: paint a mask first");
+      return false;
+    }
+  }
+  Mesh *m = sculpt_mesh_for_op(op == "islands" ? "Groups from Islands" : op == "material" ? "Groups from Materials" : op == "mask" ? "Group from Mask" : "Merge Groups");
+  if (!m) return false;
+  const size_t nf = m->face_count();
+  std::vector<uint8_t> hidden(nf, 0);
+  for (size_t f = 0; f < nf; f++) hidden[f] = m->face_hidden(f) ? 1 : 0;
+  if (op == "merge") m->face_group.assign(nf, 0);
+  if (op == "material") {
+    m->face_group.resize(nf);
+    for (size_t f = 0; f < nf; f++) m->face_group[f] = m->material_of(f);
+  }
+  if (op == "islands") {
+    std::vector<int> island;
+    uvops::compute_islands(*m, nullptr, false, island);
+    m->face_group.resize(nf);
+    for (size_t f = 0; f < nf; f++) m->face_group[f] = f < island.size() ? std::max(0, island[f]) : 0;
+  }
+  if (op == "mask") sculpt_groups_from_mask(*m);
+  for (size_t f = 0; f < nf; f++)
+    if (hidden[f]) m->set_face_hidden(f, true);  // (what was hidden stays hidden, in its new group)
+  m->touch();
+  return true;
+}
+
+/* The faces whose every vertex is masked above a half: a new group, the next number. */
+void Editor::sculpt_groups_from_mask(Mesh &m) {
+  const size_t nf = m.face_count();
+  m.face_group.resize(nf, 0);
+  int next = 0;
+  for (size_t f = 0; f < nf; f++) next = std::max(next, std::min(Mesh::kMaxGroup - 1, m.group_of(f)) + 1);
+  for (size_t f = 0; f < nf; f++)
+    if (face_all_masked(m, f)) m.face_group[f] = next;
+}
+
+/* sculpt hide group <n>|masked|unmasked|all|none|invert; sculpt show all: hidden faces leave the render mesh. */
+bool Editor::sculpt_hide_op(const std::string &what, const std::string &arg) {
+  const bool known = what == "group" || what == "masked" || what == "unmasked" || what == "all" || what == "none" || what == "invert";
+  if (!known || (what == "group" && arg.empty())) {
+    Log::info("usage: sculpt hide group <n>|masked|unmasked|all|none|invert | sculpt show all");
+    return false;
+  }
+  Mesh *m = sculpt_mesh_for_op(what == "none" ? "Show All" : "Hide Faces");
+  if (!m) return false;
+  const int group = std::atoi(arg.c_str());
+  for (size_t f = 0; f < m->face_count(); f++) {
+    const bool hide = sculpt_hide_wanted(*m, f, what, group);
+    if (what == "group" && !hide) continue;  // (hiding one group leaves the others as they are)
+    m->set_face_hidden(f, hide);
+  }
+  m->touch();
+  return true;
+}
+
+/* Whether `sculpt hide <what>` hides face f: its group, every face, none, the other way round, or by its mask (masked:
+ * every vertex above a half; unmasked: none is). */
+bool Editor::sculpt_hide_wanted(const Mesh &m, size_t f, const std::string &what, int group) const {
+  if (what == "group") return m.group_of(f) == group;
+  if (what == "all") return true;
+  if (what == "none") return false;
+  if (what == "invert") return !m.face_hidden(f);
+  if (what == "masked") return face_all_masked(m, f);
+  const uint32_t n = m.face_size(f), *fv = m.face_verts(f);  // (unmasked)
+  for (uint32_t c = 0; c < n; c++)
+    if (m.mask_fits() && m.sculpt_mask[fv[c]] > kMaskedAbove) return false;
+  return true;
+}
+
+/* How many faces of the object's mesh are hidden (the status bar says so outside Sculpt Mode too). */
+size_t Editor::hidden_face_count(const GameObject *g) const {
+  const MeshFilter *mf = mf_of(const_cast<GameObject *>(g));
+  if (!mf || !mf->mesh) return 0;
+  size_t n = 0;
+  for (int32_t v : mf->mesh->face_group) n += v < 0 ? 1 : 0;
+  return n;
+}
+
+/* Ctrl+Shift+click on the model: the group of the face under the pointer alone (every other group hidden). False
+ * off the model. */
+bool Editor::sculpt_isolate_at(const Recti &view, float x, float y) {
+  Mesh *m = sculpt_mesh();
+  GameObject *g = m ? scene_->find(sculpt_obj_) : nullptr;
+  Vec3 hit;
+  float dist;
+  if (!m || !g || !sculpt_hit(view, x, y, hit, dist)) return false;
+  (void)hit, (void)dist;
+  /* The face under the pointer: the ray through the render mesh (hidden faces have no triangles in it). */
+  const Mat4 inv = g->world_matrix().inverse();
+  const Ray ray = scene_r3d_.screen_ray(x, y);
+  const Ray lr{inv.point(ray.origin), normalize(inv.dir(ray.dir))};
+  const RenderMesh &rm = m->render_mesh();
+  float best = 1e30f;
+  size_t best_f = SIZE_MAX;
+  for (size_t t = 0; t < rm.tri_count() && t < rm.tri_face.size(); t++) {
+    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    if (d > 0.0f && d < best) best = d, best_f = rm.tri_face[t];
+  }
+  if (best_f == SIZE_MAX || best_f >= m->face_count()) return true;  // (the plane said the object, the mesh said nothing: no change)
+  const int group = m->group_of(best_f);
+  Mesh *mm = sculpt_mesh_for_op("Isolate Group");
+  if (!mm) return false;
+  for (size_t f = 0; f < mm->face_count(); f++) mm->set_face_hidden(f, mm->group_of(f) != group);
+  mm->touch();
+  return true;
+}
+
+/* The Scene view's colours for the sculpted mesh while the mask or the groups are shown: the material's colour pulled
+ * toward a dark grey by each vertex's mask, a hue per group (per render vertex: a boundary vertex takes the last face
+ * written). Cached per render mesh build, mask version, what is shown and the colour. */
+bool Editor::sculpt_colors_wanted(const Mesh &m) const {
+  return sculpt_ && ((sculpt_show_mask_ && mask_any(m)) || (sculpt_show_groups_ && !m.face_group.empty()));
+}
+
+static Vec3 group_hue(int g) {
+  const float h = std::fmod((float)g * 0.618034f + 0.11f, 1.0f) * 6.0f, s = 0.55f, v = 0.85f;
+  const int i = (int)h;
+  const float f = h - (float)i, p = v * (1.0f - s), q = v * (1.0f - s * f), t = v * (1.0f - s * (1.0f - f));
+  switch (i % 6) {
+    case 0: return {v, t, p};
+    case 1: return {q, v, p};
+    case 2: return {p, v, t};
+    case 3: return {p, q, v};
+    case 4: return {t, p, v};
+    default: return {v, p, q};
+  }
+}
+
+const std::vector<Vec3> *Editor::sculpt_colors(const Mesh &m, const RenderMesh &rm, Vec3 albedo) {
+  const int flags = (sculpt_show_mask_ && mask_any(m) ? 1 : 0) | (sculpt_show_groups_ && !m.face_group.empty() ? 2 : 0);
+  if (!flags) return nullptr;
+  const bool same_albedo = std::memcmp(&sculpt_colors_albedo_, &albedo, sizeof(Vec3)) == 0;
+  if (sculpt_colors_serial_ == rm.build_serial && sculpt_colors_version_ == sculpt_mask_version_ && sculpt_colors_flags_ == flags && same_albedo &&  // (the build, not the in-place serial: the colours don't read positions)
+      sculpt_colors_.size() == rm.positions.size())
+    return &sculpt_colors_;
+  sculpt_colors_.assign(rm.positions.size(), albedo);
+  for (size_t k = 0; k < rm.indices.size() && k < rm.tri_corner.size(); k++) {
+    const uint32_t c = rm.tri_corner[k], rv = rm.indices[k];
+    if (c >= m.corner_verts.size() || rv >= sculpt_colors_.size()) continue;
+    Vec3 col = albedo;
+    if ((flags & 2) && k / 3 < rm.tri_face.size()) col = group_hue(m.group_of(rm.tri_face[k / 3]));
+    if (flags & 1) {
+      const uint32_t v = m.corner_verts[c];
+      const float mk = kMaskDarkening * std::max(0.0f, std::min(1.0f, v < m.sculpt_mask.size() ? m.sculpt_mask[v] : 0.0f));
+      col = col * (1.0f - mk) + kMaskDarkColor * mk;
+    }
+    sculpt_colors_[rv] = col;
+  }
+  sculpt_colors_serial_ = rm.build_serial, sculpt_colors_version_ = sculpt_mask_version_, sculpt_colors_flags_ = flags, sculpt_colors_albedo_ = albedo;
+  return &sculpt_colors_;
 }
 
 /* ---- undo ---- */
 
-/* A delta step applied in place: the positions before (undo) or after (redo) into the object's mesh, which the stable
- * snapshot shares (ADR 0074). A mesh that no longer fits the step (replaced, renumbered) drops it with a log line. */
+/* A delta step applied in place: the positions - or a mask stroke's floats (task 0238) - before (undo) or after (redo)
+ * into the object's mesh, which the stable snapshot shares (ADR 0074). A mesh that no longer fits the step (replaced,
+ * renumbered) drops it with a log line. */
 void Editor::apply_sculpt_delta(UndoState s, std::vector<UndoState> &into, const char *verb, bool undo) {
   GameObject *g = scene_->find(s.delta->obj);
   MeshFilter *mf = g ? g->mesh_filter() : nullptr;
@@ -785,11 +1177,19 @@ void Editor::apply_sculpt_delta(UndoState s, std::vector<UndoState> &into, const
       Log::warn("%s %s: the mesh changed since (a step that no longer fits)", verb, s.label.c_str());
       return;
     }
-  const std::vector<Vec3> &src = undo ? s.delta->before : s.delta->after;
-  for (size_t i = 0; i < s.delta->ids.size(); i++) m.positions[s.delta->ids[i]] = src[i];
-  m.deform_version++;
-  sculpt_cache_mesh_ = nullptr;  // (the grid is stale)
-  settle_meshes();
+  if (s.delta->mask) {  // (task 0238: the mask's floats, in place as the positions are)
+    if (!m.mask_fits()) m.sculpt_mask.assign(m.vert_count(), 0.0f);
+    const std::vector<float> &mk = undo ? s.delta->mask_before : s.delta->mask_after;
+    for (size_t i = 0; i < s.delta->ids.size(); i++) m.sculpt_mask[s.delta->ids[i]] = mk[i];
+    sculpt_mask_version_++;
+  }
+  else {
+    const std::vector<Vec3> &src = undo ? s.delta->before : s.delta->after;
+    for (size_t i = 0; i < s.delta->ids.size(); i++) m.positions[s.delta->ids[i]] = src[i];
+    m.deform_version++;
+    sculpt_cache_mesh_ = nullptr;  // (the grid is stale)
+    settle_meshes();
+  }
   scene_dirty_ = true;
   Log::info("%s %s", verb, s.label.c_str());
   into.push_back(std::move(s));
@@ -818,10 +1218,19 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     if (b == "clay") kind = kClay;
     if (b == "snake" || b == "hook") kind = kSnake;
     if (kind < 0) {
-      Log::info("usage: sculpt brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake");
+      Log::info("usage: sculpt brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake|mask");
       return;
     }
     sculpt_brush_.kind = kind;
+  }
+  else if (v == "mask") sculpt_mask_op(arg(2, ""), t);  // (task 0238)
+  else if (v == "group") sculpt_group_op(arg(2, ""));
+  else if (v == "groups") sculpt_show_groups_ = arg(2, "on") == "toggle" ? !sculpt_show_groups_ : arg(2, "on") != "off";
+  else if (v == "maskview") sculpt_show_mask_ = arg(2, "on") == "toggle" ? !sculpt_show_mask_ : arg(2, "on") != "off";
+  else if (v == "hide") sculpt_hide_op(arg(2, ""), arg(3, "0"));
+  else if (v == "show") sculpt_hide_op("none", "");
+  else if (v == "isolate" && t.size() > 3) {  // (Ctrl+Shift+click's test hook, in the Scene view's pixels)
+    if (!sculpt_isolate_at(scene_rect_, (float)std::atof(t[2].c_str()), (float)std::atof(t[3].c_str()))) sculpt_hide_op("none", "");
   }
   else if (v == "symmetry") {  // sculpt symmetry x|y|z|off | radial <n>  (task 0237)
     const std::string s = arg(2, "x");
@@ -893,7 +1302,7 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     sculpt_end_stroke();
   }
   else {
-    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
+    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
     return;
   }
   ui_.redraw = true;

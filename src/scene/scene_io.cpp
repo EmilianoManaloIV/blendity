@@ -401,6 +401,11 @@ std::string save_scene_text(const Scene &scene) {
     /* Per-face smooth shading ("fs"), sharp edges ("e"), seams as hard edges. */
     if (!m.face_smooth.empty())
       for (uint8_t s : m.face_smooth) os << "fs " << (s ? 1 : 0) << '\n';
+    /* Task 0238: polygroups ("pg", a negative one hidden) and the sculpt mask ("mk", only when some vertex is masked). */
+    if (std::any_of(m.face_group.begin(), m.face_group.end(), [](int32_t g) { return g != 0; }))
+      for (int32_t pg : m.face_group) os << "pg " << pg << '\n';
+    if (m.mask_fits() && std::any_of(m.sculpt_mask.begin(), m.sculpt_mask.end(), [](float v) { return v != 0.0f; }))
+      for (float v : m.sculpt_mask) os << "mk " << F{v} << '\n';
     for (uint64_t k : m.sharp_edges) os << "e " << (uint32_t)(k >> 32) << ' ' << (uint32_t)(k & 0xFFFFFFFF) << '\n';
     if (m.seams_sharp) os << "seamsharp 1\n";
     for (uint64_t k : m.loose_edges) os << "w " << (uint32_t)(k >> 32) << ' ' << (uint32_t)(k & 0xFFFFFFFF) << '\n';  // wire edges
@@ -773,6 +778,20 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
           parse_uint(p + 3, le, s);
           m->face_smooth.push_back(s == 1 ? 1 : 0);
         }
+        else if (line.size() > 2 && p[0] == 'p' && p[1] == 'g' && p[2] == ' ') {  // (task 0238; a sign, then digits, clamped)
+          const char *q = p + 3;
+          const bool neg = q < le && *q == '-';
+          if (q < le && (*q == '-' || *q == '+')) q++;
+          uint64_t u = 0;
+          parse_uint(q, le, u);
+          const int64_t g = std::min<int64_t>(u == UINT64_MAX ? 0 : (int64_t)std::min<uint64_t>(u, (uint64_t)Mesh::kMaxGroup), Mesh::kMaxGroup);
+          m->face_group.push_back((int32_t)(neg ? -g : g));
+        }
+        else if (line.size() > 2 && p[0] == 'm' && p[1] == 'k' && p[2] == ' ') {
+          float v = 0.0f;
+          parse_float(p + 3, le, v);
+          m->sculpt_mask.push_back(std::isfinite(v) ? std::max(0.0f, std::min(1.0f, v)) : 0.0f);
+        }
         else if (line.size() > 1 && p[0] == 'e' && p[1] == ' ') {
           uint64_t a, b;
           p = parse_uint(p + 2, le, a);
@@ -862,6 +881,8 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       if (!m->face_smooth.empty()) m->face_smooth.resize(m->face_count(), m->smooth ? 1 : 0);
       if (!m->uvs.empty() && m->uvs.size() != m->corner_verts.size()) m->uvs.clear();
       if (!m->face_material.empty()) m->face_material.resize(m->face_count(), 0);
+      if (!m->face_group.empty()) m->face_group.resize(m->face_count(), 0);  // (task 0238)
+      if (!m->sculpt_mask.empty()) m->sculpt_mask.resize(m->vert_count(), 0.0f);
       m->touch();
       meshes[id] = m;
     }

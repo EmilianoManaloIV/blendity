@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <tuple>
 
 namespace {
 
@@ -655,8 +657,570 @@ static void tests_round257() {
   });
 }
 
+static void tests_round258() {
+  using platform::EventType;
+  auto mouse = [](EventType t, int x, int y, int mods = 0) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y, e.mods = mods;
+    return e;
+  };
+  /* The Scene view pixel at the sphere's centre once the brush can hit it there. */
+  auto centre_px = [](Editor &ed, GameObject *g) {
+    Vec2 px;
+    Vec3 w;
+    float d;
+    for (int i = 0; i < 100; i++) {
+      step(ed);
+      px = pixel_of(ed, g->world_position());
+      if (ed.sculpt_hit_for_test(px.x, px.y, w, d)) break;
+    }
+    return px;
+  };
+  /* Two spheres a metre and a half apart joined into one object, Sculpt on it. */
+  auto two_spheres = [&](Editor &ed) -> GameObject * {
+    GameObject *a = sphere_scene(ed, 1);
+    if (!a) return nullptr;
+    ed.command("sculpt off");
+    ed.command("create Sphere");
+    GameObject *b = ed.active_object_for_test();
+    if (!b) return nullptr;
+    b->set_world_position(a->world_position() + Vec3(1.5f, 0.0f, 0.0f));
+    ed.command("subdivide 1");
+    ed.select_object(b->id);
+    ed.select_object_add(a->id);  // (A active: it keeps the result)
+    ed.command("join");
+    GameObject *j = ed.active_object_for_test();
+    if (!j) return nullptr;
+    step(ed);
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) step(ed);
+    ed.command("sculpt on");
+    centre_px(ed, j);
+    return j;
+  };
+
+  test("sculpt mask: a filled mask holds the surface against a Draw dab, a half mask halves it; a mask stroke is one delta step (no snapshot) that undoes and redoes exactly; Ctrl paints it, Ctrl+Alt takes it away", [&] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    auto M = [&] { return g->mesh_filter()->mesh; };  // (an operation gives the object a mesh of its own: read it fresh)
+    const Vec2 px = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 40");
+    ed.command("sculpt strength 1");
+    ed.command("sculpt falloff constant");
+    /* The whole mask: nothing moves. */
+    const std::vector<Vec3> round = M()->positions;
+    ed.command("sculpt mask fill");
+    ed.command("sculpt brush draw");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const size_t held = changed_count(round, M()->positions);
+    CHECK(M()->mask_fits() && held == 0);
+    ed.command("sculpt mask clear");
+    /* The unmasked dab's move at the centre, then the same dab behind a half mask. */
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const std::vector<uint32_t> ids = ed.sculpt_last_ids_for_test();
+    uint32_t centre = ids.empty() ? 0 : ids[0];
+    float best = 1e9f;
+    for (uint32_t v : ids)
+      if (length(round[v] - ed.sculpt_last_hit_for_test()) < best) best = length(round[v] - ed.sculpt_last_hit_for_test()), centre = v;
+    const float full_move = length(M()->positions[centre] - round[centre]);
+    ed.command("undo");
+    step(ed);
+    const size_t steps0 = ed.undo_steps_for_test(), snaps0 = ed.sculpt_undo_snapshots_for_test();
+    ed.command("sculpt brush mask");
+    ed.command("sculpt strength 0.5");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const std::vector<float> half = M()->sculpt_mask;
+    size_t masked = 0;
+    for (float v : half) masked += v > 0.0f ? 1 : 0;
+    CHECK(masked > 0 && std::fabs(half[centre] - 0.5f) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1 && ed.sculpt_undo_snapshots_for_test() == snaps0);  // (a delta step, no snapshot)
+    ed.command("sculpt brush draw");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const float half_move = length(M()->positions[centre] - round[centre]);
+    std::printf("    the centre vertex moved %.5f unmasked, %.5f behind a half mask (%zu vertices masked)\n", full_move, half_move, masked);
+    CHECK(full_move > 0.0f && std::fabs(half_move / full_move - 0.5f) < 0.05f);
+    ed.command("undo");  // (the Draw dab)
+    ed.command("undo");  // (the mask stroke)
+    bool back = M()->mask_fits();
+    for (float v : M()->sculpt_mask) back = back && v == 0.0f;
+    CHECK(back && ed.undo_steps_for_test() == steps0);
+    ed.command("redo");
+    CHECK(M()->sculpt_mask == half);
+    ed.command("undo");
+    step(ed);
+    /* Ctrl with the Draw brush paints the mask; Ctrl+Alt takes it away. */
+    const Recti sr = ed.scene_rect_for_test();
+    const int wx = sr.x + (int)px.x, wy = sr.y + (int)px.y;
+    step(ed, {mouse(EventType::MouseMove, wx, wy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseDown, wx, wy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseUp, wx, wy, platform::MOD_CTRL)});
+    step(ed);
+    size_t ctrl_masked = 0;
+    for (float v : M()->sculpt_mask) ctrl_masked += v > 0.0f ? 1 : 0;
+    CHECK(ctrl_masked > 0 && changed_count(round, M()->positions) == 0);
+    step(ed, {mouse(EventType::MouseMove, wx, wy, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {mouse(EventType::MouseDown, wx, wy, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {mouse(EventType::MouseUp, wx, wy, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed);
+    size_t left = 0;
+    for (float v : M()->sculpt_mask) left += v > 0.0f ? 1 : 0;
+    std::printf("    Ctrl masked %zu vertices, Ctrl+Alt left %zu masked\n", ctrl_masked, left);
+    CHECK(left == 0);
+  });
+
+  test("sculpt mask operations: fill and invert, grow by one ring, blur lowers the steepest step, a rectangle masks exactly the vertices projected into it; each an ordinary step", [&] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    auto M = [&] { return g->mesh_filter()->mesh; };  // (an operation gives the object a mesh of its own: read it fresh)
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const size_t snaps0 = ed.sculpt_undo_snapshots_for_test();
+    ed.command("sculpt mask fill");
+    bool all = M()->mask_fits();
+    for (float v : M()->sculpt_mask) all = all && v == 1.0f;
+    ed.command("sculpt mask invert");
+    bool none = M()->mask_fits();
+    for (float v : M()->sculpt_mask) none = none && v == 0.0f;
+    CHECK(all && none);
+    /* A hard-edged patch: grow adds its ring; blur softens its edge. */
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 1");
+    ed.command("sculpt falloff constant");
+    ed.command("sculpt brush mask");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));  // (the stroke commits the pending step: fill and invert are two snapshots now)
+    CHECK(ed.sculpt_undo_snapshots_for_test() == snaps0 + 2);
+    const std::vector<float> patch = M()->sculpt_mask;
+    const Mesh::VertexFaces &vf = M()->vertex_faces();
+    auto ring_of = [&](uint32_t v, std::vector<uint32_t> &out) {  // (the edge neighbours, as the brush's ring: not a quad's far corner)
+      out.clear();
+      for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++) {
+        const size_t f = vf.faces[k];
+        const uint32_t n = M()->face_size(f), *fv = M()->face_verts(f);
+        for (uint32_t c = 0; c < n; c++)
+          if (fv[c] == v) out.push_back(fv[(c + 1) % n]), out.push_back(fv[(c + n - 1) % n]);
+      }
+    };
+    auto steepest = [&](const std::vector<float> &mk) {
+      float worst = 0.0f;
+      std::vector<uint32_t> ring;
+      for (uint32_t v = 0; v < (uint32_t)M()->vert_count(); v++) {
+        ring_of(v, ring);
+        for (uint32_t nb : ring) worst = std::max(worst, std::fabs(mk[v] - mk[nb]));
+      }
+      return worst;
+    };
+    ed.command("sculpt mask grow");
+    std::vector<uint32_t> ring;
+    size_t ring_ok = 0, ring_total = 0;
+    for (uint32_t v = 0; v < (uint32_t)M()->vert_count(); v++) {
+      if (patch[v] < 1.0f) continue;
+      ring_of(v, ring);
+      for (uint32_t nb : ring) ring_total++, ring_ok += M()->sculpt_mask[nb] >= 1.0f ? 1 : 0;
+    }
+    CHECK(ring_total > 0 && ring_ok == ring_total);
+    const float before_blur = steepest(M()->sculpt_mask);
+    ed.command("sculpt mask blur");
+    const float after_blur = steepest(M()->sculpt_mask);
+    std::printf("    grow: %zu of %zu ring vertices masked; blur: the steepest step %.3f -> %.3f\n", ring_ok, ring_total, before_blur, after_blur);
+    CHECK(before_blur >= 0.99f && after_blur < before_blur * 0.8f);
+    /* The rectangle, against the test's own projection (Front Faces Only off: every vertex in it). */
+    ed.command("sculpt mask clear");
+    ed.command("sculpt front off");
+    const float x0 = px.x - 25.0f, y0 = px.y - 40.0f, x1 = px.x + 25.0f, y1 = px.y + 10.0f;
+    ed.command(strprintf("sculpt mask rect %g %g %g %g", x0, y0, x1, y1));
+    size_t in = 0, wrong = 0;
+    for (uint32_t v = 0; v < (uint32_t)M()->vert_count(); v++) {
+      Vec2 p;
+      const bool proj = ed.project_for_test(g->world_matrix().point(M()->positions[v]), p);
+      const bool inside = proj && p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+      in += inside ? 1 : 0;
+      wrong += (M()->sculpt_mask[v] == 1.0f) != inside ? 1 : 0;
+    }
+    std::printf("    rect: %zu vertices project into it, %zu disagree with the mask\n", in, wrong);
+    CHECK(in > 0 && wrong == 0);
+  });
+
+  test("sculpt hiding and groups: islands numbered, a hidden group leaves the render mesh and the id plane, is neither dabbed nor gathered, comes back with show all; the mask and the groups round-trip through the scene file", [&] {
+    Editor ed;
+    GameObject *g = two_spheres(ed);
+    CHECK(g);
+    if (!g) return;
+    auto M = [&] { return g->mesh_filter()->mesh; };  // (an operation gives the object a mesh of its own: read it fresh)
+    ed.command("sculpt group islands");
+    std::set<int> groups;
+    for (size_t f = 0; f < M()->face_count(); f++) groups.insert(M()->group_of(f));
+    CHECK(groups.size() == 2);
+    const size_t all_tris = M()->render_mesh().indices.size() / 3;
+    size_t tris0 = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) tris0 += M()->group_of(f) == 0 ? M()->face_size(f) - 2 : 0;
+    /* Which island is which: the centre of the group-1 faces. */
+    Vec3 c1(0.0f);
+    size_t n1 = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) {
+      if (M()->group_of(f) != 1) continue;
+      for (uint32_t c = 0; c < M()->face_size(f); c++) c1 += M()->positions[M()->face_verts(f)[c]], n1++;
+    }
+    c1 = c1 / (float)std::max<size_t>(1, n1);
+    const Vec3 c1_world = g->world_matrix().point(c1);
+    ed.command("sculpt hide group 1");
+    const size_t shown_tris = M()->render_mesh().indices.size() / 3;
+    std::printf("    %zu triangles, %zu with group 1 hidden (group 0 has %zu)\n", all_tris, shown_tris, tris0);
+    CHECK(shown_tris == tris0 && shown_tris < all_tris);
+    for (int i = 0; i < 20; i++) step(ed);  // (the view draws the render mesh again)
+    const Vec2 p1 = pixel_of(ed, c1_world);
+    const uint32_t id_hidden = ed.scene_id_for_test((int)p1.x, (int)p1.y);
+    const std::vector<Vec3> before = M()->positions;
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("sculpt size 40");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt dab %g %g", p1.x, p1.y));
+    std::printf("    the hidden island's centre pixel reads id %u (the object is %u); a dab there moved %zu vertices and made %zu step(s)\n", id_hidden, (uint32_t)g->id,
+                changed_count(before, M()->positions), ed.undo_steps_for_test() - steps0);
+    CHECK(id_hidden != (uint32_t)g->id && changed_count(before, M()->positions) == 0 && ed.undo_steps_for_test() == steps0);  // (what is behind shows through: another object, or nothing)
+    /* A brush on the shown island wide enough to reach the hidden one gathers none of it. */
+    const Vec2 p0 = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 600");
+    ed.command(strprintf("sculpt dab %g %g", p0.x, p0.y));
+    size_t hidden_moved = 0, shown_moved = 0;
+    std::vector<uint8_t> vert_group1(M()->vert_count(), 0);
+    for (size_t f = 0; f < M()->face_count(); f++)
+      if (M()->group_of(f) == 1)
+        for (uint32_t c = 0; c < M()->face_size(f); c++) vert_group1[M()->face_verts(f)[c]] = 1;
+    for (uint32_t v = 0; v < (uint32_t)M()->vert_count(); v++) {
+      if (length(M()->positions[v] - before[v]) == 0.0f) continue;
+      (vert_group1[v] ? hidden_moved : shown_moved)++;
+    }
+    std::printf("    a 600 px dab on the shown island moved %zu of its vertices and %zu of the hidden island's\n", shown_moved, hidden_moved);
+    CHECK(shown_moved > 0 && hidden_moved == 0);
+    ed.command("undo");
+    ed.command("sculpt show all");
+    CHECK(M()->render_mesh().indices.size() / 3 == all_tris && !M()->any_hidden());
+    /* The file: the mask and the groups come back. */
+    ed.command("sculpt size 40");
+    ed.command("sculpt brush mask");
+    ed.command(strprintf("sculpt dab %g %g", p0.x, p0.y));
+    Scene back;
+    std::string err;
+    const std::string text = save_scene_text(ed.scene());
+    size_t pg_lines = 0, mk_lines = 0;
+    for (size_t at = text.find("\npg "); at != std::string::npos; at = text.find("\npg ", at + 1)) pg_lines++;
+    for (size_t at = text.find("\nmk "); at != std::string::npos; at = text.find("\nmk ", at + 1)) mk_lines++;
+    std::printf("    the file holds %zu pg lines and %zu mk lines\n", pg_lines, mk_lines);
+    CHECK(load_scene_text(text, back, err));
+    GameObject *gb = back.find(g->id);  // (by id: the sample scene has a Sphere of its own)
+    const Mesh *mb = gb && gb->mesh_filter() ? gb->mesh_filter()->mesh.get() : nullptr;
+    CHECK(mb && mb->vert_count() == M()->vert_count());
+    if (!mb || mb->vert_count() != M()->vert_count()) return;
+    bool same_mask = mb->sculpt_mask.size() == M()->sculpt_mask.size();
+    for (size_t i = 0; same_mask && i < mb->sculpt_mask.size(); i++) same_mask = std::fabs(mb->sculpt_mask[i] - M()->sculpt_mask[i]) < 1e-6f;
+    std::printf("    the file: %zu mask values and %zu groups back\n", mb->sculpt_mask.size(), mb->face_group.size());
+    CHECK(same_mask && mb->face_group == M()->face_group);
+  });
+
+  test("sculpt isolate and colours: Ctrl+Shift+click on an island hides the other group; the groups view gives the islands different colours; the mask darkens", [&] {
+    Editor ed;
+    GameObject *g = two_spheres(ed);
+    CHECK(g);
+    if (!g) return;
+    auto M = [&] { return g->mesh_filter()->mesh; };  // (an operation gives the object a mesh of its own: read it fresh)
+    ed.command("sculpt group islands");
+    const Vec2 p0 = pixel_of(ed, g->world_position());
+    const int g0 = [&] {  // (the group under the object's centre pixel: the first sphere's)
+      Vec3 w;
+      float d;
+      if (!ed.sculpt_hit_for_test(p0.x, p0.y, w, d)) return -1;
+      const Vec3 hl = g->world_matrix().inverse().point(w);
+      size_t best_f = 0;
+      float best = 1e30f;
+      for (size_t f = 0; f < M()->face_count(); f++) {
+        Vec3 c(0.0f);
+        for (uint32_t k = 0; k < M()->face_size(f); k++) c += M()->positions[M()->face_verts(f)[k]];
+        const float dd = length_sq(c / (float)M()->face_size(f) - hl);
+        if (dd < best) best = dd, best_f = f;
+      }
+      return M()->group_of(best_f);
+    }();
+    const Recti sr = ed.scene_rect_for_test();
+    step(ed, {mouse(EventType::MouseMove, sr.x + (int)p0.x, sr.y + (int)p0.y, platform::MOD_CTRL | platform::MOD_SHIFT)});
+    step(ed, {mouse(EventType::MouseDown, sr.x + (int)p0.x, sr.y + (int)p0.y, platform::MOD_CTRL | platform::MOD_SHIFT)});
+    step(ed, {mouse(EventType::MouseUp, sr.x + (int)p0.x, sr.y + (int)p0.y, platform::MOD_CTRL | platform::MOD_SHIFT)});
+    step(ed);
+    size_t hidden_other = 0, hidden_own = 0, other = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) {
+      if (M()->group_of(f) == g0) hidden_own += M()->face_hidden(f) ? 1 : 0;
+      else other++, hidden_other += M()->face_hidden(f) ? 1 : 0;
+    }
+    std::printf("    isolate: group %d clicked; %zu of %zu other faces hidden, %zu of its own\n", g0, hidden_other, other, hidden_own);
+    CHECK(g0 >= 0 && other > 0 && hidden_other == other && hidden_own == 0);
+    ed.command("sculpt show all");
+    /* The colours. */
+    ed.command("sculpt groups on");
+    const std::vector<Vec3> *cols = ed.sculpt_colors_for_test(*M());
+    std::set<std::tuple<int, int, int>> distinct;
+    if (cols)
+      for (const Vec3 &c : *cols) distinct.insert({(int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255)});
+    CHECK(cols && distinct.size() >= 2);
+    ed.command("sculpt groups off");
+    ed.command("sculpt mask fill");
+    const std::vector<Vec3> *dark = ed.sculpt_colors_for_test(*M());
+    bool darker = dark && !dark->empty();
+    if (dark)
+      for (const Vec3 &c : *dark) darker = darker && c.x < 0.8f && c.y < 0.8f && c.z < 0.8f;
+    std::printf("    %zu distinct group colours; the filled mask darkens every vertex: %d\n", distinct.size(), (int)darker);
+    CHECK(darker);
+  });
+
+  test("sculpt mask gestures and the rest of the operations: Ctrl+click off the model inverts, Ctrl+drag masks a rectangle (front faces only when on), Esc drops a gesture, Shift with the Mask brush blurs, a Drag Dot mask stroke leaves the mask outside its last dot alone and undoes exactly; fill, sharpen, shrink; group from mask, by material, merged; hide masked, unmasked, all, invert", [&] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };  // (an undo of a snapshot step rebuilds the scene: the object is looked up again)
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = length(pixel_of(ed, g->world_position() + Vec3(0.0f, 0.5f, 0.0f)) - px);  // (the sphere's radius on screen)
+    const Recti sr = ed.scene_rect_for_test();
+    const int wx = sr.x + (int)px.x, wy = sr.y + (int)px.y;
+    std::printf("    the sphere is %.0f px across on screen\n", 2.0f * R);
+    ed.command("sculpt front off");
+    /* Off the model: the view's corner, far from the sphere. */
+    const int ox = sr.x + 30, oy = sr.y + 30;
+    Vec3 w;
+    float d;
+    CHECK(!ed.sculpt_hit_for_test(30.0f, 30.0f, w, d));
+    ed.command("sculpt mask clear");
+    const size_t steps0 = ed.undo_steps_for_test();
+    step(ed, {mouse(EventType::MouseMove, ox, oy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseDown, ox, oy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseUp, ox, oy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseMove, wx, wy)});  // (the modifiers let go)
+    step(ed);
+    bool all_one = M()->mask_fits();
+    for (float v : M()->sculpt_mask) all_one = all_one && v == 1.0f;
+    CHECK(all_one);  // (Ctrl+click off the model: the empty mask inverted to full)
+    ed.command("sculpt mask clear");
+    /* Ctrl+drag off the model: the rectangle, dropped by Esc first. */
+    step(ed, {mouse(EventType::MouseMove, ox, oy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseDown, ox, oy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseMove, wx, wy, platform::MOD_CTRL)});
+    {
+      platform::Event esc;
+      esc.type = EventType::KeyDown, esc.key = platform::KEY_ESCAPE;
+      step(ed, {esc});
+    }
+    step(ed, {mouse(EventType::MouseUp, wx, wy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseMove, wx, wy)});  // (the modifiers let go)
+    step(ed);
+    size_t masked = 0;
+    for (float v : M()->sculpt_mask) masked += v > 0.0f ? 1 : 0;
+    CHECK(masked == 0);  // (Esc: nothing masked)
+    step(ed, {mouse(EventType::MouseMove, ox, oy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseDown, ox, oy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseMove, wx, wy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseUp, wx, wy, platform::MOD_CTRL)});
+    step(ed, {mouse(EventType::MouseMove, wx, wy)});  // (the modifiers let go)
+    step(ed);
+    size_t in_rect = 0;
+    masked = 0;
+    for (uint32_t v = 0; v < (uint32_t)M()->vert_count(); v++) {
+      Vec2 p;
+      const bool proj = ed.project_for_test(G()->world_matrix().point(M()->positions[v]), p);
+      in_rect += proj && p.x >= 30.0f && p.x <= (float)(int)px.x && p.y >= 30.0f && p.y <= (float)(int)px.y ? 1 : 0;  // (the drag ended on the whole pixel wx, wy)
+      masked += M()->sculpt_mask[v] == 1.0f ? 1 : 0;
+    }
+    std::printf("    Ctrl+drag: %zu vertices project into the rectangle, %zu masked\n", in_rect, masked);
+    CHECK(in_rect > 0 && masked == in_rect);
+    /* Front Faces Only: the rectangle takes fewer (the back of the sphere left out). */
+    ed.command("sculpt mask clear");
+    ed.command("sculpt front on");
+    ed.command(strprintf("sculpt mask rect %g %g %g %g", px.x - R * 0.4f, px.y - R * 0.4f, px.x + R * 0.4f, px.y + R * 0.4f));
+    size_t front_masked = 0;
+    for (float v : M()->sculpt_mask) front_masked += v == 1.0f ? 1 : 0;
+    ed.command("sculpt mask clear");
+    ed.command("sculpt front off");
+    ed.command(strprintf("sculpt mask rect %g %g %g %g", px.x - R * 0.4f, px.y - R * 0.4f, px.x + R * 0.4f, px.y + R * 0.4f));
+    size_t both_masked = 0;
+    for (float v : M()->sculpt_mask) both_masked += v == 1.0f ? 1 : 0;
+    std::printf("    the rectangle masks %zu front-facing vertices, %zu with the back too\n", front_masked, both_masked);
+    CHECK(front_masked > 0 && front_masked < both_masked);
+    /* Shift with the Mask brush blurs the rectangle's edge. */
+    const Mesh::VertexFaces &vf = M()->vertex_faces();
+    auto steepest = [&]() {
+      float worst = 0.0f;
+      const MeshPtr m = M();
+      for (uint32_t v = 0; v < (uint32_t)m->vert_count(); v++)
+        for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++) {
+          const size_t f = vf.faces[k];
+          for (uint32_t c = 0; c < m->face_size(f); c++) worst = std::max(worst, std::fabs(m->sculpt_mask[v] - m->sculpt_mask[m->face_verts(f)[c]]));
+        }
+      return worst;
+    };
+    ed.command("sculpt mask clear");  // (a hard-edged disc, then Shift blurs its edge with a wider brush)
+    ed.command("sculpt brush mask");
+    ed.command("sculpt falloff constant");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt size %g", std::max(6.0f, R * 0.3f)));
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const float before_blur = steepest();
+    ed.command(strprintf("sculpt size %g", std::max(10.0f, R * 0.6f)));
+    step(ed, {mouse(EventType::MouseMove, wx, wy, platform::MOD_SHIFT)});
+    step(ed, {mouse(EventType::MouseDown, wx, wy, platform::MOD_SHIFT)});
+    step(ed, {mouse(EventType::MouseUp, wx, wy, platform::MOD_SHIFT)});
+    step(ed, {mouse(EventType::MouseMove, wx, wy)});  // (the modifiers let go)
+    step(ed);
+    const float after_blur = steepest();
+    std::printf("    Shift with the Mask brush: the steepest step %.3f -> %.3f\n", before_blur, after_blur);
+    CHECK(before_blur >= 0.99f && after_blur < before_blur);
+    /* Drag Dot with the mask: a half mask under A, then Ctrl+Alt dragged from A to B takes the mask only under the last dot. */
+    ed.command("sculpt mask clear");
+    ed.command("sculpt falloff constant");
+    ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.25f)));
+    ed.command("sculpt strength 1");
+    const int dx = std::max(4, (int)(R * 0.45f));  // (A and B on the sphere, either side of the centre)
+    ed.command(strprintf("sculpt dab %g %g", px.x - (float)dx, px.y));  // (A: masked 1)
+    ed.command(strprintf("sculpt dab %g %g", px.x + (float)dx, px.y));  // (B: masked 1)
+    const std::vector<float> two_dots = M()->sculpt_mask;
+    const size_t steps_dot = ed.undo_steps_for_test();
+    ed.command("sculpt stroke dot");
+    ed.command("sculpt brush draw");  // (Ctrl makes it a mask stroke anyway)
+    const int ax = wx - dx, bx = wx + dx;
+    step(ed, {mouse(EventType::MouseMove, ax, wy, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {mouse(EventType::MouseDown, ax, wy, platform::MOD_CTRL | platform::MOD_ALT)});
+    for (int i = 1; i <= 8; i++) step(ed, {mouse(EventType::MouseMove, ax + (2 * dx * i) / 8, wy, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {mouse(EventType::MouseUp, bx, wy, platform::MOD_CTRL | platform::MOD_ALT)});
+    step(ed, {mouse(EventType::MouseMove, wx, wy)});  // (the modifiers let go)
+    step(ed);
+    const Vec3 last_hit = ed.sculpt_last_hit_for_test();
+    const float r = ed.sculpt_last_radius_for_test();
+    size_t wrong_outside = 0, cleared_inside = 0;
+    for (uint32_t v = 0; v < (uint32_t)M()->vert_count(); v++) {
+      const bool inside = length(M()->positions[v] - last_hit) <= r * 1.001f;
+      if (!inside && M()->sculpt_mask[v] != two_dots[v]) wrong_outside++;
+      if (inside && two_dots[v] > 0.0f && M()->sculpt_mask[v] == 0.0f) cleared_inside++;
+    }
+    std::printf("    Drag Dot (Ctrl+Alt) from A to B: %zu vertices outside the last dot changed, %zu under it cleared; %zu step(s)\n", wrong_outside, cleared_inside,
+                ed.undo_steps_for_test() - steps_dot);
+    CHECK(wrong_outside == 0 && cleared_inside > 0 && ed.undo_steps_for_test() == steps_dot + 1);
+    ed.command("undo");
+    CHECK(M()->sculpt_mask == two_dots);
+    ed.command("sculpt stroke dots");
+    /* Fill, sharpen, shrink. */
+    ed.command("sculpt mask fill");
+    bool filled = true;
+    for (float v : M()->sculpt_mask) filled = filled && v == 1.0f;
+    ed.command("sculpt mask clear");
+    ed.command("sculpt brush mask");
+    ed.command("sculpt strength 0.5");
+    ed.command(strprintf("sculpt size %g", std::max(6.0f, R * 0.3f)));
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));  // (a half-masked disc)
+    ed.command("sculpt mask sharpen");
+    size_t sharpened_up = 0;
+    for (float v : M()->sculpt_mask) sharpened_up += v > 0.5f ? 1 : 0;  // (inside the disc the mean is the same: unchanged; at the rim it is lower: the rim rises)
+    const std::vector<float> sharp = M()->sculpt_mask;
+    ed.command("sculpt mask shrink");
+    size_t shrunk = 0, grown = 0;
+    for (size_t i = 0; i < sharp.size(); i++) shrunk += M()->sculpt_mask[i] < sharp[i] ? 1 : 0, grown += M()->sculpt_mask[i] > sharp[i] ? 1 : 0;
+    std::printf("    fill: %d; sharpen raised %zu rim vertices; shrink lowered %zu and raised %zu\n", (int)filled, sharpened_up, shrunk, grown);
+    CHECK(filled && sharpened_up > 0 && shrunk > 0 && grown == 0);
+    /* Groups from the mask, by material, merged; hiding by the mask. */
+    ed.command("sculpt mask clear");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    size_t all_masked_faces = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) {
+      bool all = true;
+      for (uint32_t c = 0; c < M()->face_size(f); c++) all = all && M()->sculpt_mask[M()->face_verts(f)[c]] > 0.5f;
+      all_masked_faces += all ? 1 : 0;
+    }
+    ed.command("sculpt group mask");
+    size_t new_group = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) new_group += M()->group_of(f) == 1 ? 1 : 0;
+    CHECK(all_masked_faces > 0 && new_group == all_masked_faces);
+    ed.command("sculpt hide masked");
+    size_t hidden = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) hidden += M()->face_hidden(f) ? 1 : 0;
+    CHECK(hidden == all_masked_faces);
+    ed.command("sculpt hide invert");
+    size_t hidden_inv = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) hidden_inv += M()->face_hidden(f) ? 1 : 0;
+    CHECK(hidden_inv == M()->face_count() - all_masked_faces);
+    ed.command("sculpt hide all");
+    CHECK(M()->render_mesh().indices.empty());
+    ed.command("sculpt show all");
+    ed.command("sculpt hide unmasked");
+    size_t hidden_un = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) hidden_un += M()->face_hidden(f) ? 1 : 0;
+    std::printf("    %zu faces all masked: group from mask %zu, hide masked %zu, hide invert %zu, hide unmasked %zu of %zu\n", all_masked_faces, new_group, hidden, hidden_inv, hidden_un,
+                M()->face_count());
+    CHECK(hidden_un > 0 && hidden_un <= M()->face_count() - all_masked_faces);
+    ed.command("sculpt show all");
+    ed.command("sculpt group material");
+    bool by_mat = true;
+    for (size_t f = 0; f < M()->face_count(); f++) by_mat = by_mat && M()->group_of(f) == M()->material_of(f);
+    ed.command("sculpt group merge");
+    bool merged = true;
+    for (size_t f = 0; f < M()->face_count(); f++) merged = merged && M()->group_of(f) == 0;
+    CHECK(by_mat && merged);
+  });
+
+  test("sculpt groups through topology: a Subdivision modifier's children keep their parent's group and hidden state; an Array's copies too; a face-rebuilding operator drops the groups rather than misplace them; the status bar names hidden faces outside the mode", [&] {
+    Editor ed;
+    GameObject *g = two_spheres(ed);
+    CHECK(g);
+    if (!g) return;
+    auto M = [&] { return g->mesh_filter()->mesh; };
+    ed.command("sculpt group islands");
+    ed.command("sculpt hide group 1");
+    size_t hidden_corners = 0, hidden_faces = 0;
+    for (size_t f = 0; f < M()->face_count(); f++) {
+      if (!M()->face_hidden(f)) continue;
+      hidden_faces++, hidden_corners += M()->face_size(f);
+    }
+    /* The modifier: a child quad per corner of a hidden face is hidden. */
+    SubdivisionSurface *sub = g->add<SubdivisionSurface>();
+    sub->levels = 1;
+    ed.mark_changed_for_test("Subdivision");
+    const Mesh *ev = g->evaluated_mesh();
+    size_t ev_hidden = 0;
+    for (size_t f = 0; ev && f < ev->face_count(); f++) ev_hidden += ev->face_hidden(f) ? 1 : 0;
+    std::printf("    %zu hidden base faces (%zu corners): %zu hidden faces in the level-1 subdivision of %zu\n", hidden_faces, hidden_corners, ev_hidden, ev ? ev->face_count() : 0);
+    CHECK(ev && ev_hidden == hidden_corners && ev->render_mesh().indices.size() / 3 == (ev->face_count() - ev_hidden) * 2);
+    g->remove_component(sub);
+    ed.mark_changed_for_test("Subdivision off");
+    /* An Array modifier's copies carry the groups. */
+    ArrayModifier *arr = g->add<ArrayModifier>();
+    arr->count = 2;
+    ed.mark_changed_for_test("Array");
+    ev = g->evaluated_mesh();
+    size_t arr_hidden = 0;
+    for (size_t f = 0; ev && f < ev->face_count(); f++) arr_hidden += ev->face_hidden(f) ? 1 : 0;
+    CHECK(ev && ev->face_count() == M()->face_count() * 2 && arr_hidden == hidden_faces * 2);
+    g->remove_component(arr);
+    ed.mark_changed_for_test("Array off");
+    /* A face-rebuilding operator on a copy: the groups go with the old numbering. */
+    Mesh rebuilt = *M();
+    meshops::triangulate(rebuilt);
+    rebuilt.sync_attributes();
+    CHECK(rebuilt.face_count() != M()->face_count() && rebuilt.face_group.empty() && !rebuilt.any_hidden());
+    /* The status bar outside the mode. */
+    ed.command("sculpt off");
+    step(ed);
+    const std::string status = ed.statusbar_hint_for_test();
+    std::printf("    status: %s\n", status.c_str());
+    CHECK(status.find("hidden") != std::string::npos);
+    ed.command("sculpt on");
+    ed.command("sculpt show all");
+    CHECK(!M()->any_hidden());
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
   tests_round257();
+  tests_round258();
 }

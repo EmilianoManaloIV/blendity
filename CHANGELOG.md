@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 258): masks, polygroups, hiding (task 0238)
+
+**Asked:** ZBrush's masks - and with them polygroups and hiding - on the Sculpt Mode of rounds 256-257.
+
+**Added**
+- **The mask** (`Mesh::sculpt_mask`, a float per vertex; `src/editor/sculpt.cpp`): every brush's weight is
+  multiplied by 1 - mask, so a held vertex never moves and a half-held one moves half (Grab and Snake Hook read it
+  too). Ctrl with the left button paints it with any brush (ZBrush's Ctrl), Ctrl+Alt takes it away, the Mask brush
+  does the same without Ctrl (Shift with it blurs). A mask stroke is a delta undo step like a brush stroke (ADR 0074
+  amended): no snapshot, exact on undo and redo. Masked vertices draw darker in the Scene view (CPU and GPU) while the
+  mode is on (Show Mask).
+- **Mask operations:** Clear, Fill, Invert (Ctrl+click off the model), Blur, Sharpen, Grow, Shrink, and a rectangle
+  (Ctrl+drag off the model, an outline while dragging; `sculpt mask rect`): every vertex projected into it, front
+  faces only when that is on. Each one ordinary step.
+- **Polygroups** (`Mesh::face_group`): from the mesh's islands, its materials or its mask, or merged; Show Groups
+  colours them in the view (a hue per group, per render vertex). Saved with the mesh (`pg`), as the mask is (`mk`).
+- **Hiding:** a hidden face (a negative group) has no triangles in the render mesh, so it leaves the picture, the id
+  plane (the brush cannot hit it), the GPU view and the path tracer with no other code knowing; a vertex all of whose
+  faces are hidden is never gathered. `sculpt hide group <n>|masked|unmasked|all|none|invert`, `sculpt show all`;
+  Ctrl+Shift+click a face to see its group alone, Ctrl+Shift+click off the model to see everything (ZBrush's).
+- **The panel, the Wheel, the console:** Show Mask, Show Groups, a row of mask buttons and a row of group / hide
+  buttons in the Sculpt section; a Masks ring in the Wheel's sculpt set; `sculpt mask|group|groups|maskview|hide|
+  show|isolate`; the status bar names Ctrl and Ctrl+Shift.
+**Review (Opus, round 258):** three blockers and nine minors, all taken before landing. The groups and hidden flags had stayed at their old indices through a face-rebuilding operator or a modifier (a deleted face shifted every hidden flag one face down; a Subdivision hid random patches): a Subdivision's children and an Array's copies now carry their parent's group, and `FaceBuilder`, `sync_attributes` and `Mesh::clear` drop a wrong-sized `face_group` or mask rather than misplace it. A Drag Dot mask stroke had cleared the positions' delta but not the mask's, so the floats no longer belonged to their vertices (`SculptDelta::clear`). The Wheel could open during a Ctrl gesture and another window's frame could end one (the gesture joins `wheel_hold_busy` and `scene_interacting`, Esc drops it); isolate took the nearest vertex's nearest face rather than the face under the ray (now the render mesh's triangle, as the pick does; a miss changes nothing instead of showing all); the mask colours were rebuilt every in-place frame (keyed on the build serial now) and stayed on after Clear Mask (an all-zero mask is no mask); the whole-mask operations and the rectangle had masked hidden vertices; a `pg` line's value went through `strtol` unclamped and allocated a string per line; a shortcut mid-stroke threw the stroke away (it ends as its own step); the spec claimed Edit Mode saw every face (hidden faces stay hidden in every mode and in renders until Show All - the status bar now says so). Two tests added: the gestures, Shift blur, Drag Dot mask, the remaining operations; the groups through a Subdivision, an Array, a triangulate.
+
+**Checked**
+- `tests_round258` in `tests/test_sculpt.cpp` (4 tests): a filled mask holds the surface against a Draw dab and a
+  half mask halves the centre vertex's move within 5 %; a mask stroke is one delta step (no snapshot) that undoes to
+  the exact floats and redoes; Ctrl paints, Ctrl+Alt clears; fill and invert, grow by one ring, blur halves the
+  steepest step, a rectangle masks exactly the vertices projected into it; on two joined spheres `group islands`
+  numbers two groups, hiding one leaves the other's triangles only, its centre pixel no longer reads the object, a
+  dab there moves nothing and makes no step, a 600 px dab on the shown island gathers none of the hidden one, show
+  all brings every triangle back, and the mask and groups round-trip through the scene file; Ctrl+Shift+click
+  isolates the clicked group, the groups view gives two colours, a filled mask darkens every vertex.
+- Unit checks (round 258): Windows, in render-cache verify mode, 12719, 0 failed (1088 tests), 0 stale
+  pictures. Linux with libraries: 12259, 0 failed. Sanitizer build: 12129, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The first Linux run failed the gestures test on a pixel's truncation (the drag ends on a whole pixel; the test compared against the float centre): fixed, the Linux legs run again, the sanitizer leg alone afterwards. The gpu group's slow-open test failed under the parallel load and passed alone..)
+
 ## 2026-10-28 (round 257): the brush set, symmetry, the lazy mouse, alphas, stroke types (task 0237)
 
 **Asked:** ZBrush's pillars - brushes, symmetry, alphas, stroke types - on the Sculpt Mode of round 256.

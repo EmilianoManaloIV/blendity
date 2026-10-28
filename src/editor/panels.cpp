@@ -3257,9 +3257,10 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   u.tooltip(mesh || sculpt_ ? "Sculpt the selected mesh with a brush: drag over it; Shift smooths, Alt carves; Esc leaves (sculpt on|off)." : "Select a mesh object to sculpt it.");
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);
-  br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 10);
+  br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 11);
   br.help("Draw raises along the normal (Alt carves), Smooth evens the surface, Grab pulls what is under the first dab with the drag; Clay Buildup lays flat layers, Inflate swells along each vertex's normal, "
-          "Flatten and Scrape bring the area to its plane, Pinch and Crease draw it to the centre (Crease cuts in), Snake Hook pulls a strand along the drag.");
+          "Flatten and Scrape bring the area to its plane, Pinch and Crease draw it to the centre (Crease cuts in), Snake Hook pulls a strand along the drag; "
+          "Mask paints a mask no brush gets through (Ctrl with any brush does the same; Ctrl+Alt takes it away).");
   br.field("Size", sculpt_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", sculpt_brush_.strength, 0.01f, 0.0f, 1.0f);
   br.enumeration("Falloff", sculpt_brush_.falloff, kWeightFalloffs, 6);
@@ -3280,6 +3281,27 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   u.label({arow.x + u.px(4), arow.y, u.px(60), arow.h}, "Alpha");
   u.label({arow.x + u.px(64), arow.y, arow.w - u.px(68), arow.h}, sculpt_brush_.alpha.empty() ? "none (sculpt alpha <image>)" : sculpt_brush_.alpha, u.theme.text_dim);
   u.tooltip("An image whose brightness shapes the dab (white moves, black doesn't), turned to the stroke: `sculpt alpha <path>`, `sculpt alpha off`.");
+  /* Task 0238: the mask, the groups, hiding. */
+  br.field("Show Mask", sculpt_show_mask_);
+  br.field("Show Groups", sculpt_show_groups_);
+  br.help("Ctrl paints the mask (Ctrl+Alt takes it away; off the model Ctrl+click inverts it, Ctrl+drag masks a rectangle); Ctrl+Shift+click a face to see its group alone, off the model to see all.");
+  const char *const mask_ops[] = {"Clear", "Invert", "Blur", "Grow", "Shrink"}, *const mask_cmds[] = {"clear", "invert", "blur", "grow", "shrink"};
+  Recti mrow = lay.row(u.row_h() + u.px(2));
+  const int mw = (mrow.w - u.px(8)) / 5;
+  for (int i = 0; i < 5; i++)
+    if (u.button({mrow.x + u.px(4) + i * mw, mrow.y, mw - u.px(2), mrow.h}, mask_ops[i])) sculpt_mask_op(mask_cmds[i], {});
+  u.tooltip("The whole mask at once: cleared, inverted, blurred one step, grown or shrunk by one ring (sculpt mask ...).");
+  const char *const group_ops[] = {"Islands", "From Mask", "Hide Masked", "Show All"};
+  Recti grow = lay.row(u.row_h() + u.px(2));
+  const int gw = (grow.w - u.px(8)) / 4;
+  for (int i = 0; i < 4; i++) {
+    if (!u.button({grow.x + u.px(4) + i * gw, grow.y, gw - u.px(2), grow.h}, group_ops[i])) continue;
+    if (i == 0) sculpt_group_op("islands");
+    else if (i == 1) sculpt_group_op("mask");
+    else if (i == 2) sculpt_hide_op("masked", "");
+    else sculpt_hide_op("none", "");
+  }
+  u.tooltip("Polygroups from the mesh's pieces or from the mask (sculpt group ...); hide the masked faces, show everything (sculpt hide ..., sculpt show all).");
 }
 
 }  // namespace bl

@@ -33,6 +33,8 @@ void Mesh::clear() {
   face_smooth.clear();
   sharp_edges.clear();
   loose_edges.clear();
+  sculpt_mask.clear();  // (task 0238)
+  face_group.clear();
   touch();
 }
 
@@ -86,6 +88,10 @@ void Mesh::sync_attributes() {
   if (!uvs.empty()) uvs.resize(corner_verts.size());
   if (!face_material.empty()) face_material.resize(face_count(), 0);
   if (!face_smooth.empty()) face_smooth.resize(face_count(), smooth ? 1 : 0);
+  /* Task 0238: the groups and the mask are per face and per vertex by index; a topology change that left them the
+   * wrong size has renumbered what they belong to, so they go rather than land on the wrong faces or vertices. */
+  if (face_group.size() != face_count()) face_group.clear();
+  if (sculpt_mask.size() != positions.size()) sculpt_mask.clear();
 }
 
 int Mesh::find_group(const std::string &group) const {
@@ -135,6 +141,21 @@ bool Mesh::any_smooth() const {
   for (uint8_t s : face_smooth)
     if (s) return true;
   return false;
+}
+
+/* Task 0238: any face hidden (a negative group). */
+bool Mesh::any_hidden() const {
+  for (int32_t g : face_group)
+    if (g < 0) return true;
+  return false;
+}
+
+/* A face hidden or shown, its group kept (the array is made when the first face hides). */
+void Mesh::set_face_hidden(size_t f, bool hidden) {
+  if (f >= face_count()) return;
+  if (face_group.size() != face_count()) face_group.resize(face_count(), 0);
+  const int g = std::max(0, std::min(kMaxGroup, group_of(f)));
+  face_group[f] = hidden ? -(g + 1) : g;
 }
 
 void Mesh::set_face_smooth(size_t f, bool on) {
@@ -299,11 +320,12 @@ uint64_t Mesh::topology_serial() const {
   const Topology &t = topo_;
   const bool same = topo_serial_ && t.verts == positions.size() && same_bytes(t.face_offsets, face_offsets) &&
                     same_bytes(t.corner_verts, corner_verts) && same_bytes(t.uvs, uvs) && same_bytes(t.face_material, face_material) &&
-                    same_bytes(t.face_smooth, face_smooth) && same_bytes(t.seams, seams) && same_bytes(t.sharp_edges, sharp_edges) &&
+                    same_bytes(t.face_smooth, face_smooth) && same_bytes(t.face_group, face_group) && same_bytes(t.seams, seams) &&
+                    same_bytes(t.sharp_edges, sharp_edges) &&
                     same_bytes(t.loose_edges, loose_edges) && t.smooth == smooth && t.seams_sharp == seams_sharp &&
                     std::memcmp(&t.smooth_angle, &smooth_angle, sizeof(float)) == 0;
   if (same) return topo_serial_;
-  topo_ = Topology{positions.size(), face_offsets, corner_verts, uvs, face_material, face_smooth, seams, sharp_edges, loose_edges,
+  topo_ = Topology{positions.size(), face_offsets, corner_verts, uvs, face_material, face_smooth, face_group, seams, sharp_edges, loose_edges,
                    smooth, seams_sharp, smooth_angle};
   /* From one counter for every mesh: a copy keeps its source's serial, but two copies that change apart never meet
    * on one (the overlap check's answers are keyed on it, task 0108). */
@@ -355,7 +377,7 @@ size_t Mesh::edge_count() const {
 
 size_t Mesh::memory_bytes() const {
   size_t b = positions.capacity() * sizeof(Vec3) + face_offsets.capacity() * 4 + corner_verts.capacity() * 4;
-  b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8;
+  b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8 + sculpt_mask.capacity() * 4 + face_group.capacity() * 4;
   for (const RenderMesh &c : cache_)
     b += c.positions.capacity() * sizeof(Vec3) * 2 + c.uvs.capacity() * sizeof(Vec2) + c.tangents.capacity() * sizeof(Vec4) +
          c.indices.capacity() * 4 + c.tri_face.capacity() * 6 + c.tri_corner.capacity() * 4;
@@ -942,7 +964,7 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const
     tri_big_ = false;
     for (size_t f = 0; f < nf; f++) {
       const uint32_t n = face_size(f);
-      tri_start_[f + 1] = tri_start_[f] + (n >= 3 ? n - 2 : 0);
+      tri_start_[f + 1] = tri_start_[f] + (n >= 3 && !face_hidden(f) ? n - 2 : 0);  // (a hidden face has none: task 0238)
       tri_big_ = tri_big_ || n > 3;
     }
     tri_topo_ = topo;
@@ -953,7 +975,7 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const
   JobSystem::global().parallel_for((int64_t)nf, 1024, [&](int64_t f0, int64_t f1) {
     std::vector<uint32_t> local;
     for (int64_t f = f0; f < f1; f++) {
-      if (face_size((size_t)f) <= 3) continue;
+      if (face_size((size_t)f) <= 3 || face_hidden((size_t)f)) continue;
       if (moved && (size_t)f < moved->size() && !(*moved)[(size_t)f]) continue;  // (its triangles stand: only its own corners decide them)
       triangulate_face(*this, (size_t)f, local);
       const uint32_t base = face_offsets[(size_t)f];
@@ -1055,6 +1077,7 @@ void Mesh::render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnorm
   std::vector<uint32_t> local;
   rm.indices.reserve(corner_verts.size() * 2);
   for (size_t f = 0; f < nf; f++) {
+    if (face_hidden(f)) continue;  // (task 0238)
     uint32_t base = face_offsets[f];
     triangulate_face(*this, f, local);
     uint16_t mat = (uint16_t)std::max(0, std::min(65535, material_of(f)));
@@ -1204,6 +1227,7 @@ const std::vector<uint32_t> &Mesh::tessellation() const {
       std::vector<uint32_t> &out = tris[(size_t)k];
       out.reserve(4 * (m.face_offsets[f1] - m.face_offsets[f0]));  // (a face of n corners: n - 2 triangles)
       for (size_t f = f0; f < f1; f++) {
+        if (m.face_hidden(f)) continue;  // (task 0238: no triangles)
         triangulate_face(m, f, local);
         const uint32_t fb = m.face_offsets[f];
         for (size_t i = 0; i + 2 < local.size(); i += 3) out.insert(out.end(), {fb + local[i], fb + local[i + 1], fb + local[i + 2], (uint32_t)f});
@@ -1842,6 +1866,7 @@ static Mesh subdivide_impl(const Mesh &in, bool smooth) {
   if (uv) out.uvs.resize(nc * 4);
   if (!in.face_material.empty()) out.face_material.resize(nc);
   if (!in.face_smooth.empty()) out.face_smooth.resize(nc);
+  if (in.face_group.size() == nf) out.face_group.resize(nc);  // (task 0238: a child face keeps its parent's group, hidden stays hidden)
   const uint32_t ebase = (uint32_t)nv, fbase = (uint32_t)(nv + ne);
   js.parallel_for((int64_t)nf, 2048, [&](int64_t b, int64_t e) {
     for (int64_t f = b; f < e; f++) {
@@ -1868,6 +1893,7 @@ static Mesh subdivide_impl(const Mesh &in, bool smooth) {
         }
         if (!out.face_material.empty()) out.face_material[c] = in.material_of((size_t)f);
         if (!out.face_smooth.empty()) out.face_smooth[c] = in.smooth_of((size_t)f) ? 1 : 0;
+        if (!out.face_group.empty()) out.face_group[c] = in.face_group[(size_t)f];
       }
     }
   });
@@ -2723,7 +2749,7 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
    * while appending is safe. */
   const uint32_t nv = (uint32_t)m.vert_count();
   const size_t nc = m.corner_verts.size(), nf = m.face_count();
-  const bool has_uv = m.has_uvs(), has_mat = !m.face_material.empty(), has_smooth = !m.face_smooth.empty();
+  const bool has_uv = m.has_uvs(), has_mat = !m.face_material.empty(), has_smooth = !m.face_smooth.empty(), has_group = m.face_group.size() == nf;
   if (has_mat) m.face_material.resize(nf, 0);
   if (has_smooth) m.face_smooth.resize(nf, m.smooth ? 1 : 0);
   const std::vector<uint64_t> seams = m.seams;
@@ -2736,6 +2762,7 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
   if (has_uv) m.uvs.reserve(nc * (size_t)count);
   if (has_mat) m.face_material.reserve(nf * (size_t)count);
   if (has_smooth) m.face_smooth.reserve(nf * (size_t)count);
+  if (has_group) m.face_group.reserve(nf * (size_t)count);  // (task 0238: a copy keeps its groups and hidden faces)
   m.seams.reserve(seams.size() * (size_t)count);
   for (int c = 1; c < count; c++) {
     const uint32_t off = nv * (uint32_t)c, corner_off = (uint32_t)(nc * (size_t)c);
@@ -2749,6 +2776,7 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
     for (size_t i = 0; has_uv && i < nc; i++) m.uvs.push_back(m.uvs[i]);
     for (size_t f = 0; has_mat && f < nf; f++) m.face_material.push_back(m.face_material[f]);
     if (has_smooth) m.face_smooth.insert(m.face_smooth.end(), nf, m.smooth ? 1 : 0);
+    for (size_t f = 0; has_group && f < nf; f++) m.face_group.push_back(m.face_group[f]);
     for (uint64_t k : seams) {
       const uint32_t a = (uint32_t)(k >> 32) + off, b = (uint32_t)(k & 0xFFFFFFFF) + off;
       if (seams_inside) m.seams.push_back(Mesh::edge_key(a, b));

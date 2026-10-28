@@ -38,6 +38,7 @@ struct FaceBuilder {
     if (has_uv) m.uvs = std::move(uv);
     if (has_mat) m.face_material = std::move(mat);
     if (has_smooth) m.face_smooth = std::move(sm);
+    if (m.face_group.size() != m.face_count()) m.face_group.clear();  // (task 0238: the faces were rebuilt - the groups and hidden flags would land on the wrong ones)
   }
 };
 

@@ -59,3 +59,16 @@ second.
 - The brush works the base mesh: an object drawn through a deforming modifier, shape keys or an armature is picked by
   its evaluated shape, so the vertices moved may not be the ones under the cursor (out of scope here; the mode logs
   nothing about it yet).
+
+## Amendment (task 0238, round 258): the mask is a delta too; hidden faces leave the render mesh
+- **A mask stroke is a delta step** like a brush stroke: `SculptDelta` carries either positions or the mask's floats
+  (`mask_before / mask_after`) for the touched vertices, written in place into the mesh the snapshots share, with
+  the same consequences as positions (a snapshot restored above a mask stroke still holds it; the delta steps below
+  take the mask back in order). A mesh with no mask gets one of zeros in place at the first mask stroke: an all-zero
+  mask is no mask to every reader, so the snapshots are unchanged in meaning. Whole-mask operations (clear, invert,
+  blur, grow, shrink, the rectangle), the polygroup operations and hiding are ordinary snapshot steps on a mesh made
+  the object's own first.
+- **Hidden faces have no triangles.** `Mesh::face_group` is part of the topology the render caches follow: a hidden
+  face (a negative group) is skipped by the triangulation, so the picture, the id plane (and with it the brush), the
+  GPU view and the path tracer all leave it out with no other code knowing; a hide or unhide is a topology change
+  (a rebuild), never an in-place frame. The gather skips a vertex all of whose faces are hidden.

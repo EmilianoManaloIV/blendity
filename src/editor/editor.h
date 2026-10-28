@@ -123,7 +123,7 @@ extern const char *const kWeightBrushModes[4];  // Add, Subtract, Draw, Blur (ta
 extern const char *const kWeightFalloffs[6];
 /* Sculpt Mode's brush (task 0236). */
 struct SculptBrush {
-  int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab, Clay Buildup, Inflate, Flatten, Pinch, Crease, Scrape, Snake Hook
+  int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab, Clay Buildup, Inflate, Flatten, Pinch, Crease, Scrape, Snake Hook, Mask
   float radius = 50.0f, strength = 0.5f;
   int falloff = 0;  // kWeightFalloffs
   bool carve = false, front_only = true;
@@ -137,7 +137,7 @@ struct SculptBrush {
   bool alpha_turn = true;  // (the alpha turned to the stroke's direction; off: as the image lies)
   int stroke = 0;        // kSculptStrokes: Dots, Drag Dot, Drag Rect, Freehand, Spray
 };
-extern const char *const kSculptBrushes[10];
+extern const char *const kSculptBrushes[11];
 extern const char *const kSculptPressure[3];
 extern const char *const kSculptStrokes[5];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
@@ -564,7 +564,11 @@ struct SculptDelta {
   uint64_t obj = 0;
   std::vector<uint32_t> ids;
   std::vector<Vec3> before, after;
+  bool mask = false;  // (task 0238: a mask stroke - the floats below instead of the positions)
+  std::vector<float> mask_before, mask_after;
+  void clear() { ids.clear(), before.clear(), after.clear(), mask_before.clear(), mask_after.clear(); }  // (the kind kept)
 };
+enum SculptMaskMode { kMaskNone = 0, kMaskAdd, kMaskTake, kMaskBlur };  // (task 0238: what a mask stroke does)
 
 struct UndoState {
   std::unique_ptr<Scene> scene;
@@ -796,6 +800,13 @@ class Editor {
   bool sculpt_hit_for_test(float x, float y, Vec3 &world, float &dist) { return sculpt_hit(scene_rect_, x, y, world, dist); }
   size_t sculpt_last_gathered_for_test() const { return sculpt_last_gathered_; }
   size_t sculpt_dabs_for_test() const { return sculpt_dab_px_.size(); }  // (task 0237)
+  const std::vector<Vec3> *sculpt_colors_for_test(const Mesh &m) { return sculpt_colors(m, m.render_mesh(), Vec3(0.8f)); }  // (task 0238)
+  
+  size_t sculpt_undo_snapshots_for_test() const {  // (the steps that hold a scene, not a delta)
+    size_t n = 0;
+    for (const UndoState &s : undo_) n += s.scene ? 1 : 0;
+    return n;
+  }
   int sculpt_brush_kind_for_test() const { return sculpt_brush_.kind; }
   const std::vector<Vec2> &sculpt_dab_px_for_test() const { return sculpt_dab_px_; }
   Shading shading_for_test() const { return shading_; }
@@ -3036,7 +3047,8 @@ class Editor {
   };
   std::vector<SculptSym> sculpt_symmetries() const;
   void sculpt_apply_brush(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, int kind, bool carve, Vec2 drag_px);
-  size_t sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, std::vector<uint32_t> &ids, std::vector<float> &w) const;
+  size_t sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, bool use_mask, std::vector<uint32_t> &ids,
+                        std::vector<float> &w) const;
   Vec3 sculpt_pointer_move_local(const Mat4 &inv, Vec2 d, float dist) const;
   void sculpt_grab_follow(Mesh &m, const Mat4 &inv, Vec2 px);
   void sculpt_restore_delta();
@@ -3064,6 +3076,33 @@ class Editor {
   std::vector<Vec2> sculpt_dab_px_;  // (this stroke's dab positions: the tests' and the Drag Dot's)
   uint32_t sculpt_rng_ = 0x9E3779B9u;
   size_t sculpt_touched_index(uint32_t v) const;
+  /* Task 0238: masks, polygroups, hiding. */
+  bool sculpt_show_mask_ = true, sculpt_show_groups_ = false;
+  SculptMaskMode sculpt_mask_mode_ = kMaskNone;  // (this stroke: a brush stroke, or the mask added to, taken from, blurred)
+  bool sculpt_gesture_ = false;   // (Ctrl pressed off the model: a click inverts the mask, a drag masks a rectangle)
+  Vec2 sculpt_gesture_from_;
+  std::vector<uint8_t> sculpt_hidden_vert_;  // (per vertex at the stroke's start: every face hidden)
+  uint64_t sculpt_mask_version_ = 1;         // (bumped by every mask or group change: the colours follow)
+  std::vector<Vec3> sculpt_colors_;
+  uint64_t sculpt_colors_serial_ = 0, sculpt_colors_version_ = 0;
+  int sculpt_colors_flags_ = -1;
+  Vec3 sculpt_colors_albedo_;
+  const std::vector<Vec3> *sculpt_colors(const Mesh &m, const RenderMesh &rm, Vec3 albedo);
+  bool sculpt_colors_wanted(const Mesh &m) const;
+  void sculpt_build_hidden(const Mesh &m);
+  void sculpt_mask_apply(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w);
+  size_t sculpt_keep_changed(const Mesh &m, SculptDelta &d) const;
+  Mesh *sculpt_mesh_for_op(const char *label);
+  bool sculpt_mask_op(const std::string &op, const std::vector<std::string> &t);
+  void sculpt_mask_ring_op(Mesh &m, int which);
+  bool sculpt_group_op(const std::string &op);
+  void sculpt_groups_from_mask(Mesh &m);
+  bool sculpt_hide_op(const std::string &what, const std::string &arg);
+  bool sculpt_hide_wanted(const Mesh &m, size_t f, const std::string &what, int group) const;
+  size_t hidden_face_count(const GameObject *g) const;
+  void sculpt_rect_mask(Vec2 a, Vec2 b);
+  bool sculpt_isolate_at(const Recti &view, float x, float y);
+  void sculpt_gesture_end(float x, float y);
   static MeshFilter *mf_of(GameObject *g);
   void sculpt_record(const Mesh &m, const std::vector<uint32_t> &ids);
   bool sculpt_update(const Recti &view);
