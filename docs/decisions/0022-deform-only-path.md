@@ -1,6 +1,6 @@
 # 0022: Deforming modifiers move positions in place (`deform_version`, `deform_serial`)
 
-- **Status:** accepted (task 0041; the roadmap was approved by the user on 2026-10-11)
+- **Status:** accepted (task 0041; the roadmap was approved by the user on 2026-10-11); amended by ADR 0075 (the evaluated mesh's key reads `deform_version`; a lone Subdivision Surface head follows positions in place)
 - **Date:** 2026-10-11
 - **Requirements:** Q-01, R-02
 - **Refines:** ADR 0003 (copy-on-write meshes), ADR 0009 (the view render cache)

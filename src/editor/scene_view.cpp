@@ -552,7 +552,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
       it.unlit = false;
       it.materials = nullptr;  // (with materials, Solid shades per pixel from them: the weight colours are the point here)
     }
-    if (!game && sculpt_ && g.id == sculpt_obj_ && sculpt_colors_wanted(*mf->mesh)) {  // Sculpt Mode: the mask darkens, the groups colour (task 0238)
+    if (!game && sculpt_ && g.id == sculpt_obj_ && g.evaluated_mesh(editing ? 2 : 0) == mf->mesh.get() && sculpt_colors_wanted(*mf->mesh)) {  // Sculpt Mode: the mask darkens, the groups colour (task 0238; on the cage only when the cage is what is drawn - task 0239)
       it.mesh = &mf->mesh->render_mesh();
       it.vertex_colors = sculpt_colors(*mf->mesh, *it.mesh, it.albedo);
       it.unlit = false;

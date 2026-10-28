@@ -3,6 +3,7 @@
 #include "test_common.h"
 
 #include "../src/scene/mesh.h"
+#include "../src/scene/subdiv_chain.h"
 #include "../src/render/canvas.h"
 
 #include <chrono>
@@ -1218,9 +1219,137 @@ static void tests_round258() {
   });
 }
 
+static void tests_round259() {
+  /* A sphere with a Subdivision Surface, Sculpt on, the frames until the brush hits the subdivided surface at the centre. */
+  auto subdiv_sphere = [](Editor &ed, int levels, uint64_t &gid, Vec2 &px) -> GameObject * {
+    GameObject *g = sphere_scene(ed, 1);
+    if (!g) return nullptr;
+    gid = g->id;
+    ed.command(strprintf("sculpt subdiv %d", levels));
+    Vec3 w;
+    float d;
+    for (int i = 0; i < 100; i++) {
+      step(ed);
+      g = ed.scene().find(gid);
+      px = pixel_of(ed, g->world_position());
+      if (ed.sculpt_hit_for_test(px.x, px.y, w, d)) break;
+    }
+    return ed.scene().find(gid);
+  };
+  auto bit_diff = [](const std::vector<Vec3> &a, const std::vector<Vec3> &b, float &worst) {
+    size_t n = a.size() == b.size() ? 0 : SIZE_MAX;
+    worst = 0.0f;
+    for (size_t i = 0; n != SIZE_MAX && i < a.size(); i++) {
+      if (std::memcmp(&a[i], &b[i], sizeof(Vec3)) == 0) continue;
+      n++, worst = std::max(worst, length(a[i] - b[i]));
+    }
+    return n;
+  };
+
+  test("dynamic subdivision: a dab on a sphere with a level-2 Subdivision Surface changes the subdivided surface the next frame, in place (no full render build) and equal to the full subdivision bit for bit; undo takes the surface back", [&] {
+    Editor ed;
+    uint64_t gid = 0;
+    Vec2 px;
+    GameObject *g = subdiv_sphere(ed, 2, gid, px);
+    CHECK(g && ed.sculpt_subdiv_levels_for_test() == 2);
+    if (!g) return;
+    auto G = [&] { return ed.scene().find(gid); };
+    const Mesh *ev = G()->evaluated_mesh();
+    CHECK(ev && ev != G()->mesh_filter()->mesh.get() && ev->vert_count() > G()->mesh_filter()->mesh->vert_count());
+    if (!ev) return;
+    const std::vector<Vec3> before = ev->positions;
+    ed.command("sculpt size 6");  // (a 44-px sphere on screen: a small dab, so the footprint is a patch, not the half)
+    ed.command("sculpt strength 1");
+    const MeshCounts c0 = mesh_counts();
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    step(ed);
+    const MeshCounts c1 = mesh_counts() - c0;
+    ev = G()->evaluated_mesh();
+    const size_t moved = changed_count(before, ev->positions);
+    const Mesh full = meshops::subdivide(*G()->mesh_filter()->mesh, 2, true);
+    float worst = 0.0f;
+    const size_t diff = bit_diff(ev->positions, full.positions, worst);
+    const meshops::SubdivChain *chain = G()->eval_chain_for_test();
+    std::printf("    the dab moved %zu of %zu subdivided vertices (the chain recomputed %zu); %zu differ from the full subdivision (worst %.2e); the frame built %llu render meshes from scratch, %llu in place\n",
+                moved, ev->vert_count(), chain ? chain->last_touched() : 0, diff, worst, (unsigned long long)c1.full_builds, (unsigned long long)c1.in_place);
+    CHECK(moved > 0 && diff == 0 && chain && c1.full_builds == 0);
+    ed.command("undo");
+    step(ed);
+    ev = G()->evaluated_mesh();
+    CHECK(changed_count(before, ev->positions) == 0);
+  });
+
+  test("dynamic subdivision: levels 1-3, Catmull-Clark and simple, three dabs each - the chain equals the full subdivision bit for bit and the update touches under a tenth of the vertices (its time printed beside the full subdivision's)", [&] {
+    Editor ed;
+    uint64_t gid = 0;
+    Vec2 px;
+    GameObject *g = subdiv_sphere(ed, 1, gid, px);
+    CHECK(g);
+    if (!g) return;
+    auto G = [&] { return ed.scene().find(gid); };
+    ed.command("sculpt size 6");
+    ed.command("sculpt strength 1");
+    for (int levels = 1; levels <= 3; levels++)
+      for (int smooth = 1; smooth >= 0; smooth--) {
+        ed.command(strprintf("sculpt subdiv %d", levels));
+        SubdivisionSurface *sub = G()->get<SubdivisionSurface>();
+        if (sub && sub->smooth != (smooth == 1)) sub->smooth = smooth == 1, ed.mark_changed_for_test("Catmull-Clark or simple");
+        for (int i = 0; i < 20; i++) step(ed);
+        const size_t steps0 = ed.undo_steps_for_test();
+        for (int i = 0; i < 2; i++) ed.command(strprintf("sculpt dab %g %g", px.x + 3.0f * i, px.y - 2.0f * i));
+        const meshops::SubdivChain *chain_before = G()->eval_chain_for_test();
+        const auto t0 = std::chrono::steady_clock::now();
+        ed.command(strprintf("sculpt dab %g %g", px.x - 3.0f, px.y + 2.0f));
+        const auto t1 = std::chrono::steady_clock::now();
+        const Mesh *ev = G()->evaluated_mesh();
+        const auto t2 = std::chrono::steady_clock::now();
+        const Mesh full = meshops::subdivide(*G()->mesh_filter()->mesh, levels, smooth == 1);
+        const auto t3 = std::chrono::steady_clock::now();
+        float worst = 0.0f;
+        const size_t diff = ev ? bit_diff(ev->positions, full.positions, worst) : SIZE_MAX;
+        const meshops::SubdivChain *chain = G()->eval_chain_for_test();
+        const double update_ms = std::chrono::duration<double, std::milli>(t2 - t1).count(), full_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+        std::printf("    level %d %s: %zu of %zu vertices recomputed by the dab, %zu differ from the full subdivision (worst %.2e); the update %.2f ms, the full subdivision %.2f ms, the chain %zu KB\n",
+                    levels, smooth ? "Catmull-Clark" : "simple", chain ? chain->last_touched() : 0, ev ? ev->vert_count() : 0, diff, worst, update_ms, full_ms, chain ? chain->memory_bytes() / 1024 : 0);
+        CHECK(ev && chain && chain == chain_before && diff == 0 && chain->last_touched() > 0 && chain->last_touched() < ev->vert_count() / 10);  // (the same chain followed the dab: no rebuild; the times are printed, never asserted)
+        (void)t0;
+        while (ed.undo_steps_for_test() > steps0) ed.command("undo");
+        step(ed);
+      }
+  });
+
+  test("dynamic subdivision: sculpt subdiv adds, sets and removes the modifier as undo steps; the lazy mouse toggles", [&] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 0);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    ed.command("sculpt subdiv 2");
+    CHECK(ed.sculpt_subdiv_levels_for_test() == 2 && G()->get<SubdivisionSurface>() && G()->get<SubdivisionSurface>()->levels == 2);
+    ed.command("sculpt subdiv +");
+    CHECK(ed.sculpt_subdiv_levels_for_test() == 3);
+    ed.command("sculpt subdiv +");  // (3 is the most)
+    CHECK(ed.sculpt_subdiv_levels_for_test() == 3);
+    ed.command("sculpt subdiv off");
+    CHECK(ed.sculpt_subdiv_levels_for_test() == 0 && !G()->get<SubdivisionSurface>());
+    ed.command("undo");
+    CHECK(ed.sculpt_subdiv_levels_for_test() == 3);
+    ed.command("undo");
+    CHECK(ed.sculpt_subdiv_levels_for_test() == 2);
+    ed.command("undo");
+    CHECK(ed.sculpt_subdiv_levels_for_test() == 0);
+    ed.command("sculpt lazy toggle");
+    const bool on = ed.sculpt_brush_for_test().lazy > 0.0f;
+    ed.command("sculpt lazy toggle");
+    CHECK(on && ed.sculpt_brush_for_test().lazy == 0.0f);
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
   tests_round257();
   tests_round258();
+  tests_round259();
 }

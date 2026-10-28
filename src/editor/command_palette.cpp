@@ -322,7 +322,9 @@ std::string Editor::statusbar_hint() const {
   }
   if (pp_.active) return "Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel";
   if (sketch_.active && !tablet_) return "Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop";
-  if (sculpt_) return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate group  |  Esc: leave";  // (tasks 0236, 0238)
+  if (sculpt_)
+    return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate group  |  Esc: leave" +
+           (sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", sculpt_subdiv_levels()) : std::string());  // (tasks 0236, 0238, 0239)
   if (const size_t hidden = hidden_face_count(active_object()))  // (task 0238: hidden faces stay hidden in every mode and in renders - said so)
     return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All, or `sculpt show all`)", hidden, hidden == 1 ? "" : "s", active_object()->name.c_str());
   /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */

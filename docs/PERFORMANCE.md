@@ -1144,3 +1144,15 @@ Done since the last list: SIMD in the rasterizer (pass 3, in triangle setup rath
 4. Parallel mip-map generation for 4K+ textures.
 5. Replacing the per-component `std::map` in the scene loader with a flat vector.
 6. A uniform-grid broad phase for the fallback `physics_step` (O(bodies²) without Jolt).
+
+## Dynamic Subdivision (task 0239)
+
+A dab on a cage with a Subdivision Surface, measured in `tests_round259` (the headless test, the same run for both
+columns): the chain recomputes the points the moved cage vertices reach; the whole subdivision is what the modifier
+did per change before (and what any other head stack still does).
+
+| Cage, brush | Out | Recomputed by the chain | The chain's update | The whole subdivision |
+|---|---|---|---|---|
+| 1,490-vertex sphere, a 6-px dab, level 1 | 5,954 | 123 | 0.01 ms | 0.38 ms |
+| the same, level 2 | 23,810 | 645 | 0.04 ms | 1.76 ms |
+| the same, level 3 | 95,234 | 2,913 | 0.13 ms | 5.97 ms |

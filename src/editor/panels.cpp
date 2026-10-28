@@ -3284,6 +3284,12 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   /* Task 0238: the mask, the groups, hiding. */
   br.field("Show Mask", sculpt_show_mask_);
   br.field("Show Groups", sculpt_show_groups_);
+  int subdiv = sculpt_subdiv_pending_ >= 0 ? sculpt_subdiv_pending_ : sculpt_subdiv_levels();  // (task 0239)
+  const int subdiv_was = subdiv;
+  br.field("Dynamic Subdivision", subdiv, 0, 3);
+  if (subdiv != subdiv_was) sculpt_subdiv_pending_ = subdiv;  // (a drag passes several values: applied once, at the release)
+  if (sculpt_subdiv_pending_ >= 0 && !u.in.down[0]) sculpt_set_subdiv(sculpt_subdiv_pending_), sculpt_subdiv_pending_ = -1;
+  br.help("A Subdivision Surface on the sculpted object, levels 1-3 (0: none): the brush works the cage, the eye sees the surface, each dab re-evaluated locally (sculpt subdiv <n>|off).");
   br.help("Ctrl paints the mask (Ctrl+Alt takes it away; off the model Ctrl+click inverts it, Ctrl+drag masks a rectangle); Ctrl+Shift+click a face to see its group alone, off the model to see all.");
   const char *const mask_ops[] = {"Clear", "Invert", "Blur", "Grow", "Shrink"}, *const mask_cmds[] = {"clear", "invert", "blur", "grow", "shrink"};
   Recti mrow = lay.row(u.row_h() + u.px(2));

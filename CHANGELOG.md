@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 259): Dynamic Subdivision (task 0239)
+
+**Asked:** ZBrush's Dynamic Subdivision - a smooth, subdivided surface over a low-polygon cage the brush works - on
+the Sculpt Mode of rounds 256-258.
+
+**Added**
+- **The evaluated mesh follows a dab** (`GameObject::evaluated_mesh`, ADR 0075): its key now reads the base mesh's
+  `deform_version`, so a positions-only change re-evaluates any modifier stack. Before, a subdivided object stood
+  still under the brush.
+- **The subdivision chain** (`meshops::SubdivChain`, `src/scene/subdiv_chain.cpp`): a Subdivision Surface alone at
+  the head of the stack keeps its per-level tables and, when only cage positions changed, recomputes the Catmull-
+  Clark (or simple) points the moved vertices reach - the face points of the faces around them, those faces' edge
+  points and vertex points - level by level, with `subdivide_impl`'s own arithmetic in its own order, so the result
+  is the full subdivision's bit for bit (every vertex checked at levels 1-3, both schemes, on a sphere, an open grid
+  and a cube). The last level is written into the evaluated mesh in place, so the render mesh follows in place and
+  the GPU view uploads the moved range. A 6-px dab at level 2 on a 1,490-vertex cage recomputed 645 of 23,810
+  vertices in 0.04 ms where the whole subdivision takes 1.76 ms.
+- **The brush works the cage, the pick lands on it** (`sculpt_cage_hit`): the planes' point lies on the subdivided
+  surface, inside the cage for Catmull-Clark, where a small brush reached no cage vertex; with a modifier drawn over
+  the mesh the point is moved onto the cage along the pixel's ray (its first hit on the base mesh's triangles, as
+  Blender sculpts against the base mesh's PBVH).
+- **Dynamic Subdivision** in the Sculpt section (the modifier's levels, 0 = none), `sculpt subdiv <n>|off|+|-`, the
+  Wheel's Size ring with Subdivide + / - (Lazy Mouse a toggle, `sculpt lazy toggle`; Freehand left the ring), the
+  status line naming the level; vertex groups and polygroups carried through the chain as the modifier carries
+  them. The mask's darkening (round 258) is drawn only when the cage itself is what the view draws.
+
+**Checked**
+- `tests_round259` in `tests/test_sculpt.cpp` (3 tests): a dab on a level-2 sphere changes the subdivided surface
+  the next frame, in place (no render mesh built from scratch) and bit for bit the full subdivision's, and undo takes
+  it back; levels 1-3 x Catmull-Clark / simple after three dabs each equal the full subdivision bit for bit, touch
+  under a tenth of the vertices (123 / 645 / 2,913 of 5,954 / 23,810 / 95,234) and at level 2 take less time than
+  the full subdivision; `sculpt subdiv` adds, sets and removes the modifier as undo steps. `tests_round259` in
+  `tests/test_modeling.cpp`: the chain against the full subdivision on an open 6 x 6 grid and a cube, bit for bit,
+  and nothing recomputed when nothing moved.
+- Unit checks (round 259): Windows, in render-cache verify mode, 12793, 0 failed (1092 tests), 0 stale
+  pictures. Linux with libraries: 12333, 0 failed. Sanitizer build: 12203, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group's slow-open test failed under the parallel load and passed alone; the sanitizer leg ran alone afterwards..)
+
 ## 2026-10-28 (round 258): masks, polygroups, hiding (task 0238)
 
 **Asked:** ZBrush's masks - and with them polygroups and hiding - on the Sculpt Mode of rounds 256-257.

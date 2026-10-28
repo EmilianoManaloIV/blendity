@@ -263,6 +263,8 @@ bool Editor::sculpt_begin_stroke(const Recti &view, float x, float y) {
   Vec3 hit;
   float dist;
   if (!sculpt_hit(view, x, y, hit, dist)) return false;
+  sculpt_cage_ = sculpt_subdiv_levels() > 0;  // (decided once a stroke: no evaluation per dab)
+  if (sculpt_cage_) sculpt_cage_hit(x, y, hit, dist);
   commit_undo();  // (a pending change is a step before the stroke's)
   if (!sculpt_own_mesh(g, mf_of(g))) return false;  // (a duplicate made since shares the mesh: the object gets its own)
   m = sculpt_mesh();
@@ -420,6 +422,7 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   else {
     Vec3 hit;
     if (!sculpt_hit(view, x, y, hit, dist)) return;  // (over nothing, or another object)
+    if (sculpt_cage_) sculpt_cage_hit(x, y, hit, dist);  // (a Subdivision Surface drawn over the mesh: the point moved onto the cage - task 0239)
     hit_local = inv.point(hit);
     if (kind == kSnake) sculpt_snake_pos_ = hit_local, sculpt_snake_set_ = true, sculpt_grab_.dist = dist;
   }
@@ -1076,6 +1079,65 @@ bool Editor::sculpt_hide_wanted(const Mesh &m, size_t f, const std::string &what
   return true;
 }
 
+/* ---- Dynamic Subdivision (task 0239, ADR 0075) ---- */
+
+/* The sculpted (or active) object's Subdivision Surface levels, 0 without one or with it off. */
+int Editor::sculpt_subdiv_levels() const {
+  const GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
+  const SubdivisionSurface *sub = g ? g->get<SubdivisionSurface>() : nullptr;
+  return sub && sub->enabled ? std::max(0, sub->levels) : 0;
+}
+
+/* A Subdivision Surface on the object at `levels` (1-3), added, set or - at 0 - removed: one ordinary step. The brush
+ * keeps working the cage; the surface follows each dab through the chain. */
+void Editor::sculpt_set_subdiv(int levels) {
+  GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
+  if (!mf_of(g)) {
+    Log::warn("sculpt subdiv: select a mesh object first");
+    return;
+  }
+  levels = std::max(0, std::min(3, levels));
+  if (sculpt_subdiv_levels() == levels) return;
+  sculpt_end_stroke();
+  commit_undo();
+  SubdivisionSurface *sub = g->get<SubdivisionSurface>();
+  if (levels == 0) {
+    if (sub) g->remove_component(sub);
+    mark_changed("Dynamic Subdivision Off");
+    return;
+  }
+  if (!sub) sub = g->add<SubdivisionSurface>(), sub->smooth = true;  // (a new one Catmull-Clark; a Simple one stays Simple)
+  sub->levels = levels, sub->enabled = true;
+  mark_changed("Dynamic Subdivision");
+  Log::info("Dynamic Subdivision: level %d (the brush works the cage)", levels);
+}
+
+/* With a Subdivision Surface drawn over the mesh, the planes' point lies on the subdivided surface - inside the cage for
+ * Catmull-Clark - and a small brush around it would reach no cage vertex. The brush works the cage, so the point is
+ * moved onto it: the pixel's ray's first hit on the base mesh's triangles (Blender sculpts against the base mesh's
+ * PBVH the same way). Only for a subdivision (another modifier's surface - a posed armature's, a displacement's - is
+ * not a cage around the base), decided once a stroke (`sculpt_cage_`): nothing is evaluated per dab. False, and
+ * nothing changed, when the ray misses the cage. */
+bool Editor::sculpt_cage_hit(float x, float y, Vec3 &world, float &dist) {
+  GameObject *g = scene_->find(sculpt_obj_);
+  Mesh *m = sculpt_mesh();
+  if (!g || !m) return false;
+  const Mat4 &W = g->world_matrix();
+  const Mat4 inv = W.inverse();
+  const Ray ray = scene_r3d_.screen_ray(x, y);
+  const Ray lr{inv.point(ray.origin), normalize(inv.dir(ray.dir))};
+  const RenderMesh &rm = m->render_mesh();
+  float best = 1e30f;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    if (d > 0.0f && d < best) best = d;
+  }
+  if (best >= 1e30f) return false;
+  world = W.point(lr.origin + lr.dir * best);
+  dist = length(world - ray.origin);
+  return true;
+}
+
 /* How many faces of the object's mesh are hidden (the status bar says so outside Sculpt Mode too). */
 size_t Editor::hidden_face_count(const GameObject *g) const {
   const MeshFilter *mf = mf_of(const_cast<GameObject *>(g));
@@ -1241,7 +1303,16 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     else if (s == "z") sculpt_brush_.sym_z = arg(3, "on") == "toggle" ? !sculpt_brush_.sym_z : arg(3, "on") != "off";
     else Log::info("usage: sculpt symmetry x|y|z [on|off] | radial <n> | off");
   }
-  else if (v == "lazy") sculpt_brush_.lazy = std::max(0.0f, std::min(300.0f, (float)std::atof(arg(2, "0").c_str())));
+  else if (v == "lazy") sculpt_brush_.lazy = arg(2, "0") == "toggle" ? (sculpt_brush_.lazy > 0.0f ? 0.0f : 30.0f) : std::max(0.0f, std::min(300.0f, (float)std::atof(arg(2, "0").c_str())));
+  else if (v == "subdiv") {  // sculpt subdiv <n>|off|+|-  (task 0239)
+    const std::string a = arg(2, "1");
+    const bool number = !a.empty() && std::all_of(a.begin(), a.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
+    if (a != "off" && a != "+" && a != "-" && !number) {
+      Log::info("usage: sculpt subdiv <0-3>|off|+|-");
+      return;
+    }
+    sculpt_set_subdiv(a == "off" ? 0 : a == "+" ? sculpt_subdiv_levels() + 1 : a == "-" ? sculpt_subdiv_levels() - 1 : std::atoi(a.c_str()));
+  }
   else if (v == "alpha") {
     std::string path;
     for (size_t i = 2; i < t.size(); i++) path += (i > 2 ? " " : "") + t[i];
@@ -1302,7 +1373,7 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     sculpt_end_stroke();
   }
   else {
-    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
+    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | subdiv <n>|off|+|- | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
     return;
   }
   ui_.redraw = true;

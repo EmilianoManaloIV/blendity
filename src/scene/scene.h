@@ -26,6 +26,9 @@
 namespace bl {
 
 class GameObject;
+namespace meshops {
+class SubdivChain;  // (ADR 0075: Dynamic Subdivision)
+}
 class Scene;
 struct PhysicsWorld;  // physics.h
 
@@ -1304,6 +1307,7 @@ class GameObject {
   uint64_t evaluated_key(int kind = 0) const;
   /* All three keys in one pass over the components (the same values as three evaluated_key calls). */
   void evaluated_keys(uint64_t out[3]) const;
+  const meshops::SubdivChain *eval_chain_for_test(int kind = 0) const { return eval_chain_[std::max(0, std::min(kind, 2))].get(); }  // (task 0239)
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
@@ -1330,6 +1334,11 @@ class GameObject {
   mutable std::shared_ptr<Mesh> eval_head_[3];
   mutable uint64_t eval_head_key_[3] = {0, 0, 0};
   mutable uint64_t eval_from_[3] = {0, 0, 0};
+  /* Dynamic Subdivision (ADR 0075, task 0239): the chain behind eval_head_ when the head is one Subdivision Surface,
+   * and that head's key without the base's deform_version (the chain follows positions; anything else rebuilds). */
+  mutable std::shared_ptr<meshops::SubdivChain> eval_chain_[3];
+  mutable uint64_t eval_head_topo_[3] = {0, 0, 0};
+  mutable uint64_t eval_from_topo_[3] = {0, 0, 0};  // (the head topology key eval_mesh_ was deformed from: a chain-followed head deforms its tail again in place)
   friend class Scene;
 };
 

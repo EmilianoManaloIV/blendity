@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| A sculpted object with a Subdivision Surface did not move under the brush at all (the evaluated mesh never saw a positions-only change), and re-running the subdivision per dab would have been far from pen speed. | The evaluated mesh follows the cage; a lone Subdivision Surface is re-evaluated locally through its chain, and the brush's point lands on the cage (task 0239). |
 | Nothing protected a finished part from the next stroke, and a face in the way could not be put aside: a detail on a lip took the chin with it. | Masks painted with Ctrl (a held vertex never moves), polygroups, and hidden faces that leave the picture, the id plane and the brush (task 0238). |
 | Three brushes, one dab at a time, no symmetry: a face took twice the strokes and never matched its other half; a shaky hand showed in every line. | Ten brushes, Mirror X / Y / Z and Radial symmetry, a lazy mouse, alphas and stroke types (task 0237). |
 | Shaping a dense mesh meant Edit Mode's gizmo on selected vertices: no brush, every change a copy of the mesh for the undo. | Sculpt Mode: a brush that touches only what is under it, in place, with Draw / Smooth / Grab, pressure, and a stroke's undo as a delta (task 0236). |

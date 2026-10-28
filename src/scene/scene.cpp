@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "subdiv_chain.h"
 #include "../core/json.h"
 #include "animation.h"
 #include "sequence.h"
@@ -2175,6 +2176,9 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
+  uint64_t topo_key = key;  // (ADR 0075: the key without the base's deform_version - what the subdivision chain follows)
+  auto tmix = [&](uint64_t v) { topo_key = (topo_key ^ v) * kFnvPrime; };
+  mix(mf->mesh->deform_version);  // (ADR 0075: a positions-only change - a sculpt dab - re-evaluates the stack; the views' keys already read it)
   /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
    * Edit Mode's cage (kind 2) shows the basis it edits, as Blender does. */
   const MeshRenderer *shaping = kind == 2 ? nullptr : get<MeshRenderer>();
@@ -2188,28 +2192,82 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   size_t split = 0;
   for (size_t i = 0; i < components.size(); i++)
     if (on(*components[i]) && (!components[i]->is_deform_only() || kind == 2)) split = i + 1;
-  uint64_t head_key = key;
+  uint64_t head_key = key, head_topo_key = topo_key;
   bool any_head = false, any_tail = false;
+  const SubdivisionSurface *chain_sub = nullptr;  // (ADR 0075: the head is one Subdivision Surface, levels 1-3)
+  int head_count = 0;
   for (size_t i = 0; i < components.size(); i++) {
     Component &c = *components[i];
     if (!on(c)) continue;
     any = true;
     (i < split ? any_head : any_tail) = true;
-    mix(hash_component(c));
-    mix(c.modifier_dependency_hash());
-    if (i + 1 == split) head_key = key;
+    const uint64_t hc = hash_component(c), hd = c.modifier_dependency_hash();
+    mix(hc);
+    mix(hd);
+    if (i < split) tmix(hc), tmix(hd), head_count++, chain_sub = dynamic_cast<const SubdivisionSurface *>(&c);
+    if (i + 1 == split) head_key = key, head_topo_key = topo_key;
   }
+  if (head_count != 1 || !chain_sub || chain_sub->levels < 1 || chain_sub->levels > 3) chain_sub = nullptr;
   /* The weights are part of the head when a modifier runs before the tail; otherwise the keys are added on the
    * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
-  if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime;
+  if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime, head_topo_key = (head_topo_key ^ shape_hash) * kFnvPrime;
   if (shaped) mix(shape_hash);
   if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
-  if (!any && !shaped) return mf->mesh.get();
+  if (!any && !shaped) {  // (nothing drawn over the mesh: the caches go with it - a chain's tables are not kept for nothing)
+    eval_mesh_[kind] = nullptr, eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
+    return mf->mesh.get();
+  }
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
       if (on(*components[i])) run_modifier(*components[i], m);
   };
+  /* The head: built whole when its key changed - or, for one Subdivision Surface whose base only moved (ADR 0075),
+   * followed in place by its chain, the moved vertices' footprint recomputed level by level. */
+  bool head_followed = false;  // (the chain moved the head's positions only: its tail may deform again in place)
+  auto chain_follows = [&]() {
+    if (!chain_sub || !eval_chain_[kind] || !eval_head_[kind] || eval_head_topo_[kind] != head_topo_key) return false;
+    std::vector<Vec3> base = mf->mesh->positions;
+    apply_shape_keys(*mf->mesh, shaping, base);
+    const bool shared_out = eval_mesh_[kind] == eval_head_[kind];
+    if (eval_head_[kind].use_count() > (shared_out ? 2 : 1)) {  // (a snapshot holds the head: it is written through a copy)
+      auto c = std::make_shared<Mesh>(*eval_head_[kind]);
+      if (shared_out) eval_mesh_[kind] = c;
+      eval_head_[kind] = c;
+    }
+    const size_t written = eval_chain_[kind]->update(base, *eval_head_[kind]);
+    if (written == meshops::SubdivChain::kRefused) return false;  // (not the mesh the chain was built for: rebuilt)
+    if (written) eval_head_[kind]->deform_version++;
+    eval_head_key_[kind] = head_key;
+    head_followed = true;
+    return true;
+  };
+  auto refresh_head = [&]() {
+    if (eval_head_[kind] && eval_head_key_[kind] == head_key) return;
+    if (chain_follows()) return;
+    auto h = std::make_shared<Mesh>(*mf->mesh);
+    apply_shape_keys(*mf->mesh, shaping, h->positions);
+    h->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
+    eval_chain_[kind] = nullptr;
+    if (chain_sub) {
+      const Mesh in = *h;
+      eval_chain_[kind] = meshops::SubdivChain::build(in, chain_sub->levels, chain_sub->smooth, *h);
+      if (eval_chain_[kind] && chain_sub->smooth) h->smooth = true;                                   // (as the modifier sets it)
+      if (eval_chain_[kind] && !in.vertex_groups.empty()) meshops::transfer_vertex_groups(in, *h);  // (as run_modifier carries them, by position)
+    }
+    if (!eval_chain_[kind]) run(*h, 0, split);
+    h->touch();
+    eval_head_[kind] = h;
+    eval_head_key_[kind] = head_key;
+    eval_head_topo_[kind] = head_topo_key;
+  };
+  if (!any_tail && chain_sub) {  // (the stack is the subdivision alone: the head is the result)
+    refresh_head();
+    eval_mesh_[kind] = eval_head_[kind];
+    eval_key_[kind] = key;
+    eval_from_[kind] = 0;
+    return eval_mesh_[kind].get();
+  }
   if (!any_tail) {
     auto m = std::make_shared<Mesh>(*mf->mesh);
     apply_shape_keys(*mf->mesh, shaping, m->positions);
@@ -2220,27 +2278,24 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     eval_key_[kind] = key;
     eval_from_[kind] = 0;
     eval_head_[kind] = nullptr;  // nothing to deform from: don't keep a second copy
+    eval_chain_[kind] = nullptr;
     return eval_mesh_[kind].get();
   }
   const Mesh *head = mf->mesh.get();
   if (any_head) {
-    if (!eval_head_[kind] || eval_head_key_[kind] != head_key) {
-      auto h = std::make_shared<Mesh>(*mf->mesh);
-      apply_shape_keys(*mf->mesh, shaping, h->positions);
-      h->shape_keys.clear();
-      run(*h, 0, split);
-      h->touch();
-      eval_head_[kind] = h;
-      eval_head_key_[kind] = head_key;
-    }
+    refresh_head();
     head = eval_head_[kind].get();
   }
   else
-    eval_head_[kind] = nullptr;
+    eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
   std::shared_ptr<Mesh> m = eval_mesh_[kind];
   const bool same_topology = m && m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
                              m->face_offsets.size() == head->face_offsets.size();
-  if (m && eval_from_[kind] == head_key && same_topology) {
+  /* The tail deforms again in place when the head is the one it was deformed from (its key), or when the chain moved
+   * that head's positions only (its topology key); a head rebuilt whole takes the full path - its connectivity may
+   * have changed under the same counts. */
+  const bool same_head = eval_from_[kind] == head_key || (head_followed && eval_from_topo_[kind] == head_topo_key);
+  if (m && same_head && same_topology) {
     /* Deform again from the head's positions. A copy shared with a snapshot (Scene::clone) or another
      * scene is never written: it is copied first, render mesh included, which still saves the rebuild. */
     if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
@@ -2266,6 +2321,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   eval_mesh_[kind] = m;
   eval_key_[kind] = key;
   eval_from_[kind] = head_key;
+  eval_from_topo_[kind] = head_topo_key;
   return eval_mesh_[kind].get();
 }
 

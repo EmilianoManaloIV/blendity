@@ -2,6 +2,7 @@
 // blendity_tests: the modeling tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/scene/uv_internal.h"
+#include "../src/scene/subdiv_chain.h"
 #include "../src/scene/partfield.h"
 
 static void first_tests() {
@@ -8217,6 +8218,38 @@ static void tests_round231() {
   });
 }
 
+static void tests_round259() {
+  test("subdivision chain (ADR 0075): on an open grid and a cube, after a few vertices move, the chain's local update equals the full subdivision bit for bit at levels 1-3, Catmull-Clark and simple, and recomputes only the moved vertices' footprint", [] {
+    for (int which = 0; which < 3; which++) {  // (an open grid of quads, a cube, a UV sphere with its triangle fans and a loose vertex)
+      MeshPtr base = which == 0 ? primitives::grid(2.0f, 6, 6) : which == 1 ? primitives::cube(1.0f) : primitives::uv_sphere(0.5f, 12, 8);
+      if (which == 2) base->positions.push_back(Vec3(2.0f, 0.0f, 0.0f)), base->touch();
+      for (int levels = 1; levels <= 3; levels++)
+        for (int smooth = 1; smooth >= 0; smooth--) {
+          Mesh out;
+          std::shared_ptr<meshops::SubdivChain> chain = meshops::SubdivChain::build(*base, levels, smooth == 1, out);
+          CHECK(chain);
+          if (!chain) continue;
+          Mesh moved = *base;
+          moved.positions[0] += Vec3(0.1f, 0.2f, -0.05f);
+          moved.positions[moved.vert_count() / 2] += Vec3(0.0f, 0.3f, 0.0f);
+          const size_t n = chain->update(moved.positions, out);
+          const Mesh full = meshops::subdivide(moved, levels, smooth == 1);
+          size_t diff = 0;
+          float worst = 0.0f;
+          for (size_t v = 0; v < out.positions.size() && v < full.positions.size(); v++) {
+            if (std::memcmp(&out.positions[v], &full.positions[v], sizeof(Vec3)) == 0) continue;
+            diff++, worst = std::max(worst, length(out.positions[v] - full.positions[v]));
+          }
+          std::printf("    %s level %d %s: %zu of %zu vertices recomputed, %zu differ from the full subdivision (worst %.2e); the chain %zu KB\n", which == 0 ? "grid" : which == 1 ? "cube" : "uv sphere + a loose vertex", levels,
+                      smooth ? "Catmull-Clark" : "simple", n, out.vert_count(), diff, worst, chain->memory_bytes() / 1024);
+          CHECK(out.vert_count() == full.vert_count() && diff == 0 && n > 0 && (which == 1 || n < out.vert_count()));  // (two of a cube's eight vertices reach the whole cube)
+          /* Nothing moved: nothing recomputed. */
+          CHECK(chain->update(moved.positions, out) == 0);
+        }
+    }
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8254,4 +8287,5 @@ void run_modeling_tests() {
   tests_round221();
   tests_round228();
   tests_round231();
+  tests_round259();
 }

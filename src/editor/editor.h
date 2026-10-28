@@ -629,6 +629,8 @@ class Editor {
   void set_tablet_posture_for_test(int folded) { test_posture_ = folded; }  // (1 folded, 0 open, -1 the system's)
   bool tablet_for_test() const { return tablet_; }
   std::string statusbar_hint_for_test() const { return statusbar_hint(); }
+  int sculpt_subdiv_levels_for_test() const { return sculpt_subdiv_levels(); }  // (task 0239)
+  const SculptBrush &sculpt_brush_for_test() const { return sculpt_brush_; }
   std::string prefs_text_for_test() const { return prefs_text_0190(); }
   bool quick_menu_open_for_test() const { return qm_.open; }
   int quick_menu_hot_for_test() const { return qm_.hot; }
@@ -3100,6 +3102,12 @@ class Editor {
   bool sculpt_hide_op(const std::string &what, const std::string &arg);
   bool sculpt_hide_wanted(const Mesh &m, size_t f, const std::string &what, int group) const;
   size_t hidden_face_count(const GameObject *g) const;
+  /* Task 0239: Dynamic Subdivision - a Subdivision Surface on the sculpted object (ADR 0075). */
+  int sculpt_subdiv_levels() const;
+  void sculpt_set_subdiv(int levels);
+  bool sculpt_cage_hit(float x, float y, Vec3 &world, float &dist);
+  bool sculpt_cage_ = false;         // (this stroke: a Subdivision Surface is drawn over the mesh - the pick moves onto the cage)
+  int sculpt_subdiv_pending_ = -1;   // (the panel's field while it is dragged: applied, one step, at the release)
   void sculpt_rect_mask(Vec2 a, Vec2 b);
   bool sculpt_isolate_at(const Recti &view, float x, float y);
   void sculpt_gesture_end(float x, float y);

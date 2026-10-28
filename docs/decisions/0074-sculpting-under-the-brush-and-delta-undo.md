@@ -1,6 +1,6 @@
 # ADR 0074: sculpting touches only what is under the brush; a stroke's undo is a delta
 
-- **Status:** accepted (task 0236, round 256); amends ADR 0003 and ADR 0053 (a snapshot's mesh is never written)
+- **Status:** accepted (task 0236, round 256); amends ADR 0003 and ADR 0053 (a snapshot's mesh is never written); its "a subdivided object is out of scope" replaced by ADR 0075
 - **Relates to:** ADR 0022 (positions-only changes move the render mesh in place), ADR 0034 (tangents settled after
   an interaction), task 0046 (Weight Paint: a brush over one mesh), task 0099 (in-place normals around what moved),
   task 0204 (the GPU view's planes read back on demand)
