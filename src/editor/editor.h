@@ -38,6 +38,7 @@
 #include "../scene/dyntopo.h"
 #include "../render/mesh_maps.h"
 #include "../texture/procedural_texture.h"
+#include "../texture/paint_layer.h"
 #include "../scene/animation.h"
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
@@ -574,9 +575,34 @@ struct SculptDelta {
 };
 enum SculptMaskMode { kMaskNone = 0, kMaskAdd, kMaskTake, kMaskBlur };  // (task 0238: what a mask stroke does)
 
+/* Task 0245 (ADR 0081): a paint stroke's step - the 64 x 64 tiles it touched, before and after, applied in place. */
+struct PaintDelta {
+  struct Pixels {
+    std::vector<uint32_t> color, emit;
+    std::vector<uint8_t> rough, metal, height, cover, channels;
+  };
+  struct Tile {
+    int x0 = 0, y0 = 0, w = 0, h = 0;
+    Pixels before, after;
+  };
+  std::string asset;  // the surface's .ptex
+  int layer = -1;     // the Paint layer's index
+  int stamp_before = 0, stamp_after = 0;
+  std::vector<Tile> tiles;
+};
+struct PaintBrush {
+  Vec3 color{0.8f, 0.1f, 0.1f}, emission{0.0f, 0.0f, 0.0f};
+  float roughness = 0.5f, metallic = 0.0f, height = 0.5f;
+  int channels = 0xF;  // the PaintChannel bits a dab writes (colour, roughness, metallic, height; emission on request)
+  float radius = 20.0f, hardness = 0.5f, opacity = 1.0f, flow = 1.0f, spacing = 0.25f, lazy = 0.0f;
+  int pressure = 1;  // 0 nothing, 1 opacity, 2 size
+  bool erase = false, sym_x = false, sym_y = false, sym_z = false;
+};
+
 struct UndoState {
   std::unique_ptr<Scene> scene;
   std::shared_ptr<SculptDelta> delta;  // (set: a delta step; `scene` is empty)
+  std::shared_ptr<PaintDelta> paint;   // (set: a paint step - tiles in place; task 0245)
   std::vector<uint64_t> selection;
   uint64_t active = 0;
   EditSelection edit_sel;  // Edit Mode's selection at this state (task 0167)
@@ -636,6 +662,12 @@ class Editor {
   int sculpt_subdiv_levels_for_test() const { return sculpt_subdiv_levels(); }  // (task 0239)
   bool sculpt_dynamesh_for_test(int resolution, int smooth) { return sculpt_dynamesh(resolution, smooth); }  // (task 0240)
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
+  bool paint_for_test() const { return paint_; }                                   // (task 0245)
+  ProceduralTexturePtr surface_of_for_test(GameObject *g, std::string *why) const { return surface_of(g, why); }
+  PaintBrush &paint_brush_for_test() { return paint_brush_; }
+  PaintImagesPtr paint_images_for_test() { return paint_images_; }
+  int paint_last_fill_for_test() const { return paint_last_fill_; }
+  size_t paint_last_step_bytes_for_test() const { return paint_last_step_bytes_; }
   bool meshmaps_busy_for_test() const { return meshmaps_job_ != nullptr; }        // (task 0243)
   bool surface_busy_for_test() const { return surface_job_ != nullptr; }          // (task 0244)
   std::string resolve_asset_path_for_test(const std::string &rel) const { return resolve_asset_path(rel); }
@@ -3166,6 +3198,52 @@ class Editor {
     }
   };
   std::unique_ptr<MeshMapsJob> meshmaps_job_;
+  /* Task 0245 (ADR 0081): Paint Mode - the brush, the stroke's tiles, the layer written. */
+  PaintBrush paint_brush_;
+  bool paint_ = false, paint_stroking_ = false, paint_dabbed_ = false, paint_erase_ = false;
+  uint64_t paint_obj_ = 0;
+  Scene *paint_scene_ = nullptr;
+  ProceduralTexturePtr paint_surface_;
+  int paint_layer_ = -1;
+  PaintImagesPtr paint_images_;
+  std::shared_ptr<PaintDelta> paint_delta_;
+  std::vector<uint32_t> paint_tile_slot_;
+  std::vector<uint8_t> paint_stroke_alpha_, paint_stroke_dab_, paint_written_;  // per texel, for the stroke: the weight built so far, the dab that last wrote it, written at all
+  uint8_t paint_dab_serial_ = 0;
+  std::map<std::string, PaintImagesPtr> paint_images_by_base_;  // a layer's images by their file base: kept across a texture's text restore
+  size_t paint_last_step_bytes_ = 0;
+  int paint_tiles_x_ = 0, paint_tiles_y_ = 0, paint_rows_y0_ = 0, paint_rows_y1_ = 0, paint_dab_rows_y0_ = 0, paint_dab_rows_y1_ = 0;
+  bool paint_depth_grows_ = true;  // the view's depth grows with distance (set per dab from the planes)
+  int paint_last_fill_ = -1;       // the last fill's triangles (-1: refused before painting; tests)
+  Vec2 paint_last_px_, paint_lazy_px_;
+  TexturePtr paint_view_tex_;
+  Bitmap paint_alpha_;
+  bool set_paint(bool on);
+  PaintLayer *paint_layer(bool make);
+  bool paint_hit(const Recti &view, float x, float y, Vec3 &world, float &dist);
+  uint32_t paint_face_under(float x, float y);
+  bool paint_begin_stroke(const Recti &view, float x, float y);
+  bool paint_begin_stroke_images();
+  PaintImages &paint_layer_images(PaintLayer &l, int size);
+  void paint_reattach_images(ProceduralTexture &pt);
+  float paint_alpha_at(Vec2 uv) const;
+  void paint_stroke_to(const Recti &view, float x, float y, bool first);
+  void paint_dab(const Recti &view, float x, float y, float pressure);
+  uint32_t paint_touch_tile(int tx, int ty);
+  void paint_write_texel(size_t i, float k);
+  void paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, const Mat4 &W, Vec2 centre, float radius, float k_max, bool all);
+  std::vector<Vec3> paint_mirrors(Vec3 hit_local) const;
+  void paint_end_stroke();
+  void paint_abort_stroke();
+  static void paint_tile_write(PaintImages &im, const PaintDelta::Tile &t, bool before);
+  void apply_paint_delta(UndoState s, std::vector<UndoState> &into, const char *verb, bool undo);
+  bool paint_fill(const std::string &what, float x, float y);
+  bool paint_update(const Recti &view);
+  void paint_draw(const Recti &view);
+  void paint_command(const std::vector<std::string> &t);
+  size_t paint_flush_images();
+  void draw_paint_tools(ui::Layout &lay);
+  void gpu_texture_rows_changed(const TexturePtr &t, int y0, int y1);
   /* Task 0244: a surface evaluated off the main thread (ADR 0080). */
   struct SurfaceJob {
     std::thread thread;

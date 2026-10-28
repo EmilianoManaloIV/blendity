@@ -126,6 +126,7 @@ bool Editor::set_sculpt(bool on) {
   }
   if (edit_mode_) exit_edit_mode();
   if (weight_paint_) set_weight_paint(false);
+  if (paint_) set_paint(false);  // (task 0245: one mode at a time)
   if (sketch_.active) sketch_end();
   commit_undo();  // (a pending change is a step of its own, before the mesh is made the mode's)
   if (!sculpt_own_mesh(g, mf)) return false;

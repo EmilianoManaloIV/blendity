@@ -3167,6 +3167,45 @@ class VulkanRaster final : public Raster {
     for (Slot &sl : slots_) bind_buffers(sl.set);
     return true;
   }
+  /* Task 0245: rows [y0, y1) of level 0 replaced from `t`, through the staging buffer (a paint stroke's rows). */
+  bool update_texture_rows(int texture, const Texture &t, int y0, int y1, std::string *err) override {
+    if (!settle(err)) return false;
+    if (texture < 0 || texture >= (int)texs_.size() || !texs_[(size_t)texture].live || t.levels.empty()) return fail(err, "no such texture");
+    TexSlot &s = texs_[(size_t)texture];
+    const Texture::Level &l = t.levels[0];
+    if (s.levels.empty() || s.levels[0].first != l.w || s.levels[0].second != l.h || s.is_float != t.is_float) return fail(err, "the texture's level 0 changed size");
+    y0 = std::max(0, y0), y1 = std::min(l.h, y1);
+    if (y1 <= y0) return true;
+    const size_t elem = s.is_float ? 16 : 4, bytes = (size_t)(y1 - y0) * l.w * elem, from = (size_t)y0 * l.w;
+    if (!staging_.buf || staging_.size < bytes) {
+      free_buffer(staging_);
+      if (!make_buffer(staging_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props())) return fail(err, info_.name + ": out of memory for an upload");
+    }
+    std::memcpy(staging_.mapped, s.is_float ? (const void *)(l.pxf.data() + from) : (const void *)(l.px8.data() + from), bytes);
+    Buf &arena = s.is_float ? texf_ : tex8_;
+    begin();
+    const VkBufferCopy c{0, (s.at + from) * elem, bytes};
+    f_.vkCmdCopyBuffer(cmd_, staging_.buf, arena.buf, 1, &c);
+    uploaded();
+    return submit_wait(err);
+  }
+  bool read_texture(int texture, std::vector<uint32_t> &px8, std::string *err) override {
+    if (!settle(err)) return false;
+    if (texture < 0 || texture >= (int)texs_.size() || !texs_[(size_t)texture].live) return fail(err, "no such texture");
+    const TexSlot &s = texs_[(size_t)texture];
+    if (s.is_float || s.levels.empty()) return fail(err, "a float texture");
+    const size_t n = (size_t)s.levels[0].first * s.levels[0].second, bytes = n * 4;
+    free_buffer(staging_);  // (the upload staging is a copy source only: a buffer that can be written to, for this read)
+    if (!make_buffer(staging_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props())) return fail(err, info_.name + ": out of memory for a read");
+    begin();
+    const VkBufferCopy c{s.at * 4, 0, bytes};
+    f_.vkCmdCopyBuffer(cmd_, tex8_.buf, staging_.buf, 1, &c);
+    uploaded();
+    if (!submit_wait(err)) return false;
+    px8.resize(n);
+    std::memcpy(px8.data(), staging_.mapped, bytes);
+    return true;
+  }
   /* A texture's levels one after another at an offset of its arena, written straight into the staging buffer (no
    * copy of the chain between). A staging buffer grown past 64 MB for it is let go after. */
   bool upload_levels(Buf &dst, size_t offset, const Texture &t, size_t elem, size_t bytes, std::string *err) {

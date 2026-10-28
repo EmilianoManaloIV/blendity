@@ -6,6 +6,7 @@
 // blocks) is rounded so the pattern repeats exactly across the tile's edges.
 #include "procedural_texture.h"
 #include "surface.h"
+#include "paint_layer.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -1534,6 +1535,7 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Mask by Height", "Filters", "Sets the mask the layers above can fade by.", make<MaskByHeightLayer>},
       /* A surface's filters (task 0244, ADR 0080; surface.cpp). */
       {"Anchor", "Filters", "Another layer's mask, by its name (Substance's anchor point).", make_anchor_layer},
+      {"Paint", "Filters", "Images the brush writes in Paint Mode (colour, roughness, metallic, height, emission), by their painted coverage.", [] { return std::unique_ptr<TextureLayer>(std::make_unique<PaintLayer>()); }},
       {"Group", "Filters", "A folder: its layers evaluated apart and blended back with one opacity and mask.", make_group_layer},
   };
   return infos;

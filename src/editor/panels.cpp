@@ -3272,6 +3272,48 @@ void Editor::draw_show_more(ui::Layout &lay, const std::string &type, int hidden
   else inspector_more_.insert(type);
 }
 
+/* Paint Mode's toggle and brush (task 0245), in the Modeling Tools window's Paint section. */
+void Editor::draw_paint_tools(ui::Layout &lay) {
+  auto &u = ui_;
+  GameObject *g = active_object();
+  const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, paint_ ? "Exit Paint" : "Paint", paint_, ui::Icon::Vertex)) set_paint(!paint_);
+  u.tooltip(mesh || paint_ ? "Paint the selected object's surface (surface new first): drag over it; the pen's eraser end erases; Esc leaves (paint on|off)."
+                           : "Select a mesh object with a surface to paint it.");
+  if (!paint_) return;
+  InspectorReflector br(*this, u, lay);
+  br.color("Color", paint_brush_.color);
+  br.field("Roughness", paint_brush_.roughness, 0.01f, 0.0f, 1.0f);
+  br.field("Metallic", paint_brush_.metallic, 0.01f, 0.0f, 1.0f);
+  br.field("Height", paint_brush_.height, 0.01f, 0.0f, 1.0f);
+  br.color("Emission", paint_brush_.emission);
+  bool wc = paint_brush_.channels & paint_channel_bit(PaintColor), wr = paint_brush_.channels & paint_channel_bit(PaintRough), wm = paint_brush_.channels & paint_channel_bit(PaintMetal),
+       wh = paint_brush_.channels & paint_channel_bit(PaintHeight), we = paint_brush_.channels & paint_channel_bit(PaintEmit);
+  br.field("Paints Color", wc);
+  br.field("Paints Roughness", wr);
+  br.field("Paints Metallic", wm);
+  br.field("Paints Height", wh);
+  br.field("Paints Emission", we);
+  paint_brush_.channels = (wc ? paint_channel_bit(PaintColor) : 0) | (wr ? paint_channel_bit(PaintRough) : 0) | (wm ? paint_channel_bit(PaintMetal) : 0) | (wh ? paint_channel_bit(PaintHeight) : 0) |
+                          (we ? paint_channel_bit(PaintEmit) : 0);
+  br.help("A material brush: every channel switched on is written by one dab (Substance's material mode).");
+  br.field("Size", paint_brush_.radius, 1.0f, 1.0f, 500.0f);
+  br.field("Hardness", paint_brush_.hardness, 0.01f, 0.0f, 1.0f);
+  br.field("Opacity", paint_brush_.opacity, 0.01f, 0.0f, 1.0f);
+  br.field("Flow", paint_brush_.flow, 0.01f, 0.0f, 1.0f);
+  br.field("Spacing", paint_brush_.spacing, 0.01f, 0.05f, 2.0f);
+  br.help("Dabs this many radii apart along the stroke.");
+  br.field("Lazy Mouse", paint_brush_.lazy, 1.0f, 0.0f, 200.0f);
+  static const char *kPaintPressure[] = {"Nothing", "Opacity", "Size"};
+  br.enumeration("Pressure", paint_brush_.pressure, kPaintPressure, 3);
+  br.field("Erase", paint_brush_.erase);
+  br.field("Mirror X", paint_brush_.sym_x);
+  br.field("Mirror Y", paint_brush_.sym_y);
+  br.field("Mirror Z", paint_brush_.sym_z);
+  br.help("Symmetry: the dab mirrored across the object's planes, each a disc of its own on screen.");
+}
+
 /* Sculpt Mode's toggle and brush (task 0236), in the Modeling Tools window's Sculpt section. */
 void Editor::draw_sculpt_tools(ui::Layout &lay) {
   auto &u = ui_;

@@ -208,6 +208,7 @@ void Editor::draw_tools_window(const Recti &r) {
     u.label(row, mesh ? "Press Tab (or Edit Mode above) to edit the mesh." : "Select a mesh to edit it.", u.theme.text_dim);
   }
   if (section("Sculpt", FocusEdit)) draw_sculpt_tools(lay);  // (task 0236)
+  if (section("Paint", FocusEdit)) draw_paint_tools(lay);    // (task 0245)
   if (section("Check: Z-Fighting", FocusCheck)) draw_zfight_panel(lay);
   if (section("Check: Overlapping Vertices & Edges", FocusCheck)) draw_overlap_panel(lay);
   if (section("UV", FocusUV)) {

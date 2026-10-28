@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the render tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/texture/paint_layer.h"
 #include <map>
 #include <cstring>
 #include <chrono>
@@ -10780,6 +10781,72 @@ static void tests_round264() {
   });
 }
 
+static void tests_round265() {
+  test("a Paint layer (ADR 0081): its painted texels blend into the planes by their coverage and the channels it writes, the unpainted ones leave the stack alone; the images round-trip through their PNGs; the dilation grows the paint two texels", [] {
+    ProceduralTexture t;
+    t.surface = true, t.seamless = false, t.width = t.height = 64;
+    t.add("Fill");
+    t.add("Paint");
+    auto *pl = static_cast<PaintLayer *>(t.layers[1].get());
+    PaintImages &im = pl->ensure_images(64);
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 32; x++) {  // the left half painted red, metallic, rough 0.2, at full coverage
+        const size_t i = (size_t)y * 64 + x;
+        im.color[i] = 0xFFFF0000u, im.metal[i] = 255, im.rough[i] = 51, im.height[i] = 200, im.cover[i] = 255, im.channels[i] = (uint8_t)((1 << PaintChannels) - 1);
+      }
+    TexPlanes p;
+    t.evaluate(p);
+    float left_err = 0.0f, right_err = 0.0f;
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) {
+        const size_t i = (size_t)y * 64 + x;
+        if (x < 32) left_err = std::max(left_err, std::max(length(p.albedo[i] - Vec3(1.0f, 0.0f, 0.0f)), std::max(std::fabs(p.metal[i] - 1.0f), std::fabs(p.rough[i] - 0.2f))));
+        else right_err = std::max(right_err, std::max(length(p.albedo[i] - Vec3(0.5f)), std::max(p.metal[i], std::fabs(p.rough[i] - 0.5f))));
+      }
+    std::printf("    the painted half off by %.4f at most, the unpainted half off by %.4f\n", left_err, right_err);
+    CHECK(left_err < 0.01f && right_err < 1e-5f);
+    /* The files. */
+    const std::string base = fs::join(scratch_project(), "paint_test");
+    std::string err;
+    CHECK(paint_images_save(im, base, &err));
+    PaintImages back;
+    CHECK(paint_images_load(base, back, &err) && back.w == 64 && back.h == 64);
+    size_t rgb_bad = 0;
+    for (size_t i = 0; i < im.size(); i++) rgb_bad += im.cover[i] && (back.color[i] & 0x00FFFFFFu) != (im.color[i] & 0x00FFFFFFu) ? 1 : 0;  // (an unpainted texel's colour is not kept: its coverage is)
+    std::printf("    the PNG round trip: %zu painted texels with another colour\n", rgb_bad);
+    CHECK(rgb_bad == 0 && back.cover == im.cover && back.metal == im.metal && back.rough == im.rough && back.height == im.height && back.channels == im.channels);
+    /* A channel a stroke did not write leaves the stack alone: the same block with the colour bit alone keeps the Fill's
+     * metallic and roughness. */
+    for (size_t i = 0; i < im.size(); i++)
+      if (im.cover[i]) im.channels[i] = (uint8_t)paint_channel_bit(PaintColor);
+    TexPlanes pc;
+    t.evaluate(pc);
+    float keep_err = 0.0f;
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 32; x++) keep_err = std::max(keep_err, std::max(pc.metal[(size_t)y * 64 + x], std::fabs(pc.rough[(size_t)y * 64 + x] - 0.5f)));
+    std::printf("    with the colour bit alone the Fill's metallic and roughness show through (off by %.4f)\n", keep_err);
+    CHECK(keep_err < 1e-5f && length(pc.albedo[0] - Vec3(1.0f, 0.0f, 0.0f)) < 0.01f);
+    /* The dilation: a 10 x 10 block grown by two texels on every side, and no farther. */
+    PaintImages d;
+    d.reset(64, 64);
+    std::vector<uint8_t> written(d.size(), 0);
+    for (int y = 20; y < 30; y++)
+      for (int x = 20; x < 30; x++) d.cover[(size_t)y * 64 + x] = 255, d.color[(size_t)y * 64 + x] = 0xFF00FF00u, written[(size_t)y * 64 + x] = 1;
+    size_t fills = 0;
+    paint_dilate(d, written, nullptr, 2, [&](size_t) { fills++; });
+    size_t covered = 0, wrong = 0;
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) {
+        const bool in = x >= 18 && x < 32 && y >= 18 && y < 32 && !((x < 20 || x >= 30) && (y < 20 || y >= 30) && (std::min(std::abs(x - 20), std::abs(x - 29)) + std::min(std::abs(y - 20), std::abs(y - 29)) > 2));
+        const bool is = d.cover[(size_t)y * 64 + x] > 0;
+        covered += is ? 1 : 0;
+        wrong += (is != in) ? 1 : 0;
+      }
+    std::printf("    the dilation: %zu covered texels (%zu filled), %zu not where expected (a diamond of two texels around the block)\n", covered, fills, wrong);
+    CHECK(wrong == 0 && covered > 100 && fills == covered - 100);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10821,4 +10888,5 @@ void run_render_tests() {
   tests_round212();
   tests_round263();
   tests_round264();
+  tests_round265();
 }

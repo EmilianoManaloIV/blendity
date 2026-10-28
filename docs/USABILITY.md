@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| The stack could generate wear and dirt but nothing could be painted where the artist wanted it; textures were made elsewhere and imported. | Paint Mode: a material brush paints colour, roughness, metallic, height and emission on the model by projection, the far side left alone, a stroke one light undo step (task 0245). |
 | Painting wear by hand means painting every edge; the procedural textures could fade a layer by one shared mask only, and every slider re-evaluated the whole texture. | A surface's layer stack: each layer has a mask that is a stack of effects (edge wear from the baked curvature, dirt from the occlusion, an anchor to another layer's mask), and an edit redoes only the layers above it inside the edited rectangle (task 0244). |
 | Edge wear, dirt in the crevices and dust on the top need to know where the edges, crevices and tops are; a painter had nothing of the geometry as images. | Mesh maps: Object > Bake Mesh Maps writes the normal, position, curvature, occlusion and thickness of the mesh into its UV layout, on a worker, and records them on the object (task 0243). |
 | A horn pulled out of a sphere was as coarse as the sphere: the brush could only move the vertices there were, and DynaMesh meant stopping to retessellate the whole object. | Dyntopo: the mesh tessellated under the brush as it moves, to the brush's own detail (task 0242). |

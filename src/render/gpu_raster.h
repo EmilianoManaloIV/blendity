@@ -303,6 +303,18 @@ class Raster {
    * is RasterInstance::tex's. -1 when it doesn't fit (the error says why). */
   virtual int add_texture(const Texture &t, std::string *error) = 0;
   virtual void remove_texture(int texture) = 0;
+  /* Task 0245: rows [y0, y1) of the texture's level 0 replaced from `t` (a paint stroke's rows, not the mip chain). */
+  virtual bool update_texture_rows(int texture, const Texture &t, int y0, int y1, std::string *error) {
+    (void)texture, (void)t, (void)y0, (void)y1;
+    if (error) *error = "not on this device";
+    return false;
+  }
+  /* The card's copy of level 0, read back (tests: a rows update leaves it as a whole upload would). */
+  virtual bool read_texture(int texture, std::vector<uint32_t> &px8, std::string *error) {
+    (void)texture, (void)px8;
+    if (error) *error = "not on this device";
+    return false;
+  }
   /* What the card holds for a mesh, read back (tests: partial updates leave it as a whole upload would). */
   virtual bool read_mesh(int mesh, std::vector<RasterVertex> &v, std::vector<uint32_t> &indices, std::string *error) = 0;
   /* An OpenColorIO view's LUT as colormanagement::view_lut gives it (size^3 colours, red fastest, a log2 shaper);

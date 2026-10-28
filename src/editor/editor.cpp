@@ -76,6 +76,7 @@ Editor::~Editor() {
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
+  paint_abort_stroke();    // (task 0245)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
@@ -1936,6 +1937,7 @@ void Editor::commit_undo() {
   redo_.clear();
   stable_ = scene_->clone();
   pending_change_ = false;
+  paint_flush_images();  // (task 0245: the Paint layers' PNGs before their textures' texts)
   if (save_dirty_material_assets() + save_dirty_texture_assets() + save_dirty_clip_assets() + save_dirty_sequence_assets()) project_listed_ = -100;  // edited assets go back to their files
 }
 
@@ -1959,12 +1961,14 @@ void Editor::undo() {
   anim_set_preview(false);  // (the pose shown goes back first: it isn't the scene's)
   seq_set_preview(false);
   wp_abort_stroke();  // a stroke under way would write into the restored scene's (shared) mesh
+  paint_abort_stroke();  // (task 0245: a paint stroke the same - its tiles' before would be taken after this step's)
   sculpt_abort_stroke();
   commit_undo();
   if (undo_.empty()) return;
   UndoState s = std::move(undo_.back());
   undo_.pop_back();
   if (s.delta) return apply_sculpt_delta(std::move(s), redo_, "Undo", true);  // (task 0236: in place, no scene swap)
+  if (s.paint) return apply_paint_delta(std::move(s), redo_, "Undo", true);   // (task 0245: the tiles in place)
   restore_state(std::move(s), redo_, "Undo");
 }
 
@@ -1986,6 +1990,7 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   active_ = s.active;
   relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
   save_dirty_material_assets();
+  paint_flush_images();  // (task 0245: the Paint layers' PNGs with their textures)
   save_dirty_texture_assets();
   save_dirty_clip_assets();
   save_dirty_sequence_assets();
@@ -1994,6 +1999,7 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   stable_ = scene_->clone();
   restore_edit_selection(s.edit_sel);
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
+  if (paint_) paint_scene_ = scene_.get();  // (task 0245: keep painting)
   if (sculpt_) sculpt_scene_ = scene_.get(), sculpt_cache_mesh_ = nullptr;  // (task 0236: keep sculpting; the grid is rebuilt)
   prune_selection();
   scene_dirty_ = true;
@@ -2012,6 +2018,7 @@ void Editor::redo() {
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
   if (s.delta) return apply_sculpt_delta(std::move(s), undo_, "Redo", false);
+  if (s.paint) return apply_paint_delta(std::move(s), undo_, "Redo", false);
   restore_state(std::move(s), undo_, "Redo");
 }
 
@@ -2112,6 +2119,7 @@ void Editor::save_scene_cmd(bool save_as) {
     scene_dirty_ = false;
     project_listed_ = -100;
     save_dirty_material_assets();
+    paint_flush_images();
     save_dirty_texture_assets();  // a texture edited since the last undo step goes to its .ptex too
     Log::info("Saved %s", scene_->path.c_str());
     save_lighting_data();  // a bake made before the scene had a file, or before Save As
@@ -2172,6 +2180,7 @@ void Editor::restore_texture_texts(const std::vector<std::pair<std::string, std:
     pt->name = name;
     pt->version = v;
     if (pt->maps_from == maps_from) pt->maps = maps;  // (a different record: surface_poll reloads from it, or none)
+    paint_reattach_images(*pt);  // (task 0245: the paint images are pixels the tile steps own, not text - the layers rebuilt from text take them back)
     pt->touch();  // a new version: saved back to its file, and the views redraw
   }
 }

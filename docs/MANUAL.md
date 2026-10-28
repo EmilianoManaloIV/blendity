@@ -347,6 +347,12 @@ edgewear|dirt|dust|metaledgewear|positiongradient|thickness` builds the usual on
 sub-stack. Editing a layer redoes only the layers above it inside the edited rectangle; a changed surface evaluates on a
 worker while the views keep the last images.
 
+**Paint Mode** (Modeling Tools > Paint; `paint on`) paints the surface's Paint layer on the model: what is under the brush's
+disc and facing you takes the brush's colour, roughness, metallic, height and emission at once (the Paints boxes choose),
+the far side and anything behind are left alone, the pen's eraser end erases, Mirror X / Y / Z paint the mirror. `paint
+fill group|island|material|object` fills a part. A stroke is one undo step holding only the tiles it touched. The painted
+images are saved beside the surface's texture when the project saves.
+
 **Many at once.** The Materials, Textures and Project windows select like the Hierarchy: Ctrl+click, Shift+click a
 range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Trash).
 
@@ -701,6 +707,7 @@ the editor. A few that are handy by hand:
 | `matdelete Bricks, Wood Floor` | delete materials by name |
 | `meshmaps 1024 16`, `meshmaps status` | bake the mesh maps on a worker; the record and whether it is stale |
 | `surface new`, `surface mask preset 1 edgewear`, `surface eval 0 0 128 128` | a surface for the object, a smart mask on layer 1, the rect engine timed |
+| `paint on`, `paint color 0.8 0.1 0.1`, `paint fill island` | Paint Mode, the brush's colour, a fill of the UV island under the pointer |
 | `libs` | which of Blender's libraries this build uses |
 | `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
 | `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |

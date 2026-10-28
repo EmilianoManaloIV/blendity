@@ -724,6 +724,20 @@ int Editor::gpu_texture(const TexturePtr &t, std::string &err) {
   return id;
 }
 
+/* Task 0245: a texture painted in place - its rows [y0, y1) go up when the card holds it (nothing otherwise: it is
+ * uploaded whole when first drawn). */
+void Editor::gpu_texture_rows_changed(const TexturePtr &t, int y0, int y1) {
+  if (!t || !gpu_view_) return;
+  auto found = gpu_textures_.find(t.get());
+  if (found == gpu_textures_.end() || found->second.id < 0) return;
+  std::string err;
+  if (!gpu_view_->update_texture_rows(found->second.id, *t, y0, y1, &err)) {
+    gpu_view_->remove_texture(found->second.id);  // (its slot freed; the whole texture goes up again at the next frame)
+    gpu_textures_.erase(found);
+    if (!err.empty()) Log::warn("GPU view: %s", err.c_str());
+  }
+}
+
 /* Task 0099: the card's copy is the render mesh this one moved from in place: only what the move changed goes up. */
 bool Editor::gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err) {
   if (e.id < 0 || rm.moved_from == 0 || e.serial != rm.moved_from || e.vertices != rm.positions.size() || e.indices != rm.indices.size()) return false;

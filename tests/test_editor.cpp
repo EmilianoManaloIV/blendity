@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the editor tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/texture/paint_layer.h"
 #include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
 #include <cstring>
@@ -3596,6 +3597,128 @@ static void tests_round264() {
   });
 }
 
+static void tests_round265() {
+  test("Paint Mode (ADR 0081): a dab paints the texels under the brush's disc on the near side only, with the brush's colour at the centre; the material brush writes roughness, metallic and height too; the eraser clears; Mirror X paints the mirror; a fill of the object covers it; the stroke's undo restores the tiles bit for bit, holding only the touched tiles", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    ed.command("delete");
+    ed.command("create Sphere");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    G()->set_local_scale(Vec3(6.0f));  // (a sphere of three units nine units off fills a good part of the view: a dab is a part of it)
+    ed.mark_changed_for_test("a big sphere");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.command("surface new PaintSurf");
+    ed.command("meshmaps 256 4");
+    for (int i = 0; i < 4000 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    ed.command("surface maps");
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    Vec2 px;
+    CHECK(ed.project_for_test(G()->world_position(), px));
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();  // (the id plane holds the sphere)
+    ed.command("paint color 0.9 0.2 0.1");
+    ed.command("paint roughness 0.2");
+    ed.command("paint metallic 1");
+    ed.command("paint height 0.8");
+    ed.command("paint hardness 1");  // (the whole disc at full weight: the colour test reads any painted texel)
+    ed.command("paint size 40");
+    ed.command(strprintf("paint dab %g %g", px.x, px.y));
+    PaintImagesPtr im = ed.paint_images_for_test();
+    CHECK(im && !im->empty());
+    if (!im || im->empty()) return;
+    std::printf("    the stroke's undo step holds %zu bytes against the images' %zu\n", ed.paint_last_step_bytes_for_test(), im->size() * 13);
+    CHECK(ed.paint_last_step_bytes_for_test() < im->size() * 13 / 4);
+    const std::vector<uint32_t> after_dab = im->color;
+    const std::vector<uint8_t> cover_dab = im->cover;
+    size_t painted = 0, colour_ok = 0, values_ok = 0;
+    for (size_t i = 0; i < im->size(); i++) {
+      if (!im->cover[i]) continue;
+      painted++;
+      const uint32_t c = im->color[i];
+      colour_ok += std::abs((int)((c >> 16) & 0xFF) - 243) <= 1 && std::abs((int)((c >> 8) & 0xFF) - 124) <= 1 && std::abs((int)(c & 0xFF) - 89) <= 1 ? 1 : 0;  // (0.9 0.2 0.1 in sRGB)
+      values_ok += std::abs((int)im->rough[i] - 51) <= 1 && im->metal[i] == 255 && std::abs((int)im->height[i] - 204) <= 1 ? 1 : 0;
+    }
+    /* The far side: the surface's maps hold the world normal. The painted texels' mean normal faces the camera (a
+     * 40-px disc on a sphere that fills a third of the view is a cap of some 15 degrees); a texel whose normal opposes
+     * it is on the far side, and none of those may be painted. */
+    std::string why;
+    ProceduralTexturePtr pt = ed.surface_of_for_test(G(), &why);
+    const std::shared_ptr<const SurfaceMaps> maps_keep = pt ? pt->maps : nullptr;  // (held: the test reads them after undos)
+    const SurfaceMaps *maps = maps_keep.get();
+    size_t far_painted = 0, far_total = 0, near_total = 0;
+    if (maps && maps->w == im->w) {
+      Vec3 mean(0.0f);
+      for (size_t i = 0; i < im->size(); i++)
+        if (im->cover[i] && maps->cover[i] > 0.5f) mean += maps->normal[i];
+      const Vec3 to_cam = length(mean) > 1e-6f ? normalize(mean) : Vec3(0.0f, 0.0f, 1.0f);
+      for (size_t i = 0; i < im->size(); i++) {
+        if (maps->cover[i] < 0.5f) continue;
+        const bool far = dot(maps->normal[i], to_cam) < -0.3f;
+        if (far) far_total++, far_painted += im->cover[i] ? 1 : 0;
+        else near_total++;
+      }
+    }
+    std::printf("    a dab of 40 px on the sphere: %zu texels painted (%zu the brush's colour within 1/255, %zu its roughness / metallic / height), %zu of %zu far-side texels painted (%zu near-side texels)\n",
+                painted, colour_ok, values_ok, far_painted, far_total, near_total);
+    CHECK(painted > 100 && colour_ok == painted && values_ok == painted && painted < near_total + far_total);
+    CHECK(maps && far_total > 0 && far_painted == 0);
+    /* The eraser clears what the dab painted. */
+    ed.command("paint erase on");
+    ed.command(strprintf("paint dab %g %g", px.x, px.y));
+    size_t left = 0;
+    for (uint8_t c : im->cover) left += c ? 1 : 0;
+    ed.command("paint erase off");
+    std::printf("    the eraser over the same dab: %zu texels still covered\n", left);
+    CHECK(left < painted / 10);
+    /* Undo both strokes: bit for bit the images before them, the buffers kept, the steps' tiles small. */
+    const uint32_t *buf_before = im->color.data();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("undo");
+    CHECK(im->color == after_dab && im->cover == cover_dab);
+    ed.command("undo");
+    size_t any = 0;
+    for (uint8_t c : im->cover) any += c ? 1 : 0;
+    std::printf("    after two undos: %zu covered texels, the buffer %s, %zu step(s) fewer; the surface keeps its maps %d\n", any, im->color.data() == buf_before ? "kept" : "reallocated",
+                steps - ed.undo_steps_for_test(), (int)(pt->maps == maps_keep));
+    CHECK(any == 0 && im->color.data() == buf_before && ed.undo_steps_for_test() == steps - 2 && pt->maps == maps_keep);
+    ed.command("redo");
+    CHECK(im->color == after_dab);
+    ed.command("undo");
+    /* Mirror X: the dab and its mirror; then a fill of the whole object. */
+    Vec2 side_px;  // (a point on the sphere a third of a radius right of its centre, as seen: on the surface whatever its size on screen)
+    CHECK(ed.project_for_test(G()->world_position() + Vec3(1.0f, 0.0f, 0.0f), side_px));
+    ed.command("paint symmetry x");
+    ed.command(strprintf("paint dab %g %g", side_px.x, side_px.y));
+    size_t mirrored = 0;
+    for (uint8_t c : im->cover) mirrored += c ? 1 : 0;
+    ed.command("paint symmetry none");
+    ed.command("undo");
+    ed.command(strprintf("paint dab %g %g", side_px.x, side_px.y));
+    size_t single = 0;
+    for (uint8_t c : im->cover) single += c ? 1 : 0;
+    std::printf("    a dab beside the centre: %zu texels; with Mirror X %zu\n", single, mirrored);
+    CHECK(single > 0 && mirrored > single * 3 / 2);
+    ed.command("undo");
+    ed.command("paint fill object");
+    size_t filled = 0, maps_covered = 0;
+    for (size_t i = 0; i < im->size(); i++) filled += im->cover[i] ? 1 : 0, maps_covered += maps && maps->cover[i] > 0.5f ? 1 : 0;
+    std::printf("    paint fill object: %zu texels of %zu the maps cover (%d triangles; the editor's images are the test's %d)\n", filled, maps_covered, ed.paint_last_fill_for_test(),
+                (int)(ed.paint_images_for_test() == im));
+    CHECK(filled > maps_covered * 9 / 10);
+    ed.command("paint off");
+    CHECK(!ed.paint_for_test());
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -3632,5 +3755,6 @@ void run_editor_tests() {
   tests_round255();
   tests_round263();
   tests_round264();
+  tests_round265();
   coverage_tests();
 }

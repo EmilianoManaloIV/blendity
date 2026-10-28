@@ -74,6 +74,7 @@ bool Editor::set_weight_paint(bool on) {
   }
   if (edit_mode_) exit_edit_mode();
   if (sculpt_) set_sculpt(false);  // (task 0236: one mode at a time)
+  if (paint_) set_paint(false);    // (task 0245)
   if (mf->mesh->vertex_groups.empty()) vgroup_op("add", "", "", 1.0f);  // something to paint
   weight_paint_ = true;
   wp_obj_ = g->id;

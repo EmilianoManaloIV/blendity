@@ -1217,3 +1217,15 @@ textures keep their running sums. Full evaluations run on a worker, which also b
 | the composite below the Noise (layer 1) at 2048 | 110-180 ms |
 | a 128 x 128 rect from the Noise up at 2048 (halo 10) | 90-120 ms |
 | the editor's slowest frame while a 1024 surface's worker ran | 15-45 ms |
+
+## Painting on the model (task 0245)
+
+A dab walks every render-mesh triangle (720 on the test's sphere), skips those whose screen bounds miss the disc, and
+rasterizes the rest in UV space with a projection and a depth-plane read per texel; a stroke's undo step holds the
+64 x 64 tiles it touched (12 bytes a texel, before and after). The view follows the dab through the albedo texture's
+rows on the card; the stack re-evaluates on the surface's worker when the stroke ends.
+
+| Stroke on a 1k surface (`tests_round265`) | Texels | Undo step |
+|---|---|---|
+| a 40 px dab on a sphere filling a third of the view | 7,119 | the tiles touched, not the 4 MB image |
+| a fill of the whole object (720 triangles) | 995,680 | every tile |

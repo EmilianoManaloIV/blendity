@@ -150,6 +150,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
   sculpt_draw(view);  // (task 0236)
+  paint_draw(view);   // (task 0245)
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
   draw_pushpull(view);
@@ -236,6 +237,7 @@ bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   if (gizmo_update(view)) busy = true;
   if (wp_update(view)) busy = true;
   if (sculpt_update(view)) busy = true;  // (task 0236)
+  if (paint_update(view)) busy = true;   // (task 0245)
   if (pushpull_update(view)) busy = true;
   if (modal_update(view)) busy = true;
   if (transform_update(view)) busy = true;
@@ -770,7 +772,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || weight_paint_ || sculpt_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || sculpt_ || paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1227,7 +1229,7 @@ bool Editor::gizmo_update(const Recti &view) {
 
 void Editor::draw_gizmo(const Recti &view) {
   auto &u = ui_;
-  if (tool_ == Tool::View || weight_paint_ || sculpt_) return;  // Weight Paint, Sculpt: the brush, not the gizmo
+  if (tool_ == Tool::View || weight_paint_ || sculpt_ || paint_) return;  // Weight Paint, Sculpt, Paint: the brush, not the gizmo
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
   if (!has_target) return;
   /* Snapping markers: the vertex / surface point a move is snapping to, and with V
@@ -1366,6 +1368,7 @@ MeshPtr *Editor::edit_mesh_ptr() {
 void Editor::enter_edit_mode() {
   if (weight_paint_) set_weight_paint(false);  // one mode at a time
   if (sculpt_) set_sculpt(false);
+  if (paint_) set_paint(false);  // (task 0245)
   if (playing_) return;
   if (pilot_cam_) toggle_pilot_camera();  // piloting hides the editor's overlays: editing needs them back
   GameObject *g = active_object();

@@ -2,6 +2,51 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 265): painting on the model, with tile undo (task 0245)
+
+**Asked:** Substance Painter's pillars - the layer stack with masks, mesh maps and generators, smart materials,
+painting on the model. After the stack: the brush.
+
+**Added**
+- **Paint Mode** (`src/editor/paint.cpp`, ADR 0081): Modeling Tools > Paint (or `paint on`, the keymap's Paint Mode On
+  / Off) on an object with a surface. A dab paints by **projection**: the object and depth under the cursor from the
+  Scene view's planes (as a sculpt dab reads them), every render-mesh triangle whose screen bounds meet the brush's disc
+  walked in its UV triangle, each texel's world point placed by barycentrics, projected, kept when it lies in the disc
+  and its depth is within the triangle's own depth slope of the plane there - the far side and anything behind are not
+  painted (Blender's Project Paint) - with the hardness falloff, the pen's pressure (opacity or size) and an alpha
+  image. A **material brush**: colour, roughness, metallic, height and emission with a switch per channel, written
+  by one dab; the pen's eraser end (or Erase) clears; Mirror X / Y / Z paint the mirrored discs; Lazy Mouse, spacing.
+- **A Paint layer** (`src/texture/paint_layer.cpp`): a layer of the surface's stack whose channels are images (RGBA8
+  colour and emission, 8-bit roughness, metallic, height, and a coverage) blended into the planes by their painted
+  coverage with the layer's blend, opacity, targets and mask, saved as PNGs beside the `.ptex` when the project saves
+  (`<base>_color.png` and the rest; the layer's Stamp counts the strokes so the surface re-evaluates on its worker).
+  After a stroke the painted texels are dilated two texels into their unpainted neighbours (no gap at a seam).
+- **Tile undo** (ADR 0081): a stroke is one undo step holding the 64 x 64 tiles it touched, before and after, applied
+  in place by undo and redo - the second in-place delta kind beside the sculpt delta (a 4k image a stroke would end
+  the undo budget in thirty strokes).
+- **Fills:** `paint fill group|island|material|object` paint the brush's channels over the polygroup under the cursor,
+  the UV island, the material slot or the whole object.
+- **The views follow the dab:** the material's albedo texture takes the painted texels in place and the GPU view
+  updates those rows (`Raster::update_texture_rows`, not the mip chain; `read_texture` reads a texture back); the
+  stack lands from the worker when the stroke ends.
+- **Console:** `paint on|off`, `paint color r g b`, `roughness`, `metallic`, `height`, `emission r g b`, `channels
+  color,rough,metal,height,emit|all`, `size`, `hardness`, `opacity`, `flow`, `spacing`, `alpha <image>|off`,
+  `symmetry x|y|z|none`, `lazy`, `erase on|off`, `pressure off|opacity|size`, `dab x y [pressure]`,
+  `fill group|island|material|object`, `layer <i>`.
+- **Measured** (`tests_round265`): a 40 px dab on a sphere filling a third of the view painted 7,119 texels of a 1k
+  surface, every one the brush's colour, roughness, metallic and height within 1/255, none of the 372,096 far-side
+  texels; the eraser over it left 696 (the first stroke's dilation ring); Mirror X 24,911 against 7,364; a fill of the
+  object 995,680 of the 1,048,576 covered texels; two undos restored the images bit for bit in the same buffers.
+**Review (Opus, round 265):** two blockers, eight majors and a dozen minors; the blockers, five majors and most minors taken before landing, the rest named in the spec as open. Paint had not shown after reopening the project or after any texture undo (the layer's images were loaded only by the brush: the layer loads its PNGs on first evaluation now, and the editor keeps every layer's images by their file base, so a texture rebuilt from text takes them back instead of reloading a PNG that may hold strokes the history does not); Ctrl+S had not written the paint (the flush was behind commit_undo's guard: it runs wherever the project or its textures are saved); turning a channel off had not stopped it being painted (one coverage served every channel: a per-texel mask of the channels written, saved with the images; an unwritten channel leaves the stack alone); the dilation had walked the stroke's rows across the whole image, growing every earlier stroke in them and storing a row of tiles per dab (it grows only what this stroke wrote, within the surface's coverage, and the tiles it reaches join the step); undo during a stroke had corrupted the history (a stroke is aborted by undo and redo, as a sculpt stroke is); opacity and flow had piled up over overlapping dabs (the stroke's weight builds by Flow to its Opacity and is composited against the texel as it was before the stroke; a dab writes a texel once). Also: the brush's alpha image is read, a snapshot undo keeps Paint Mode, Edit Mode and Weight Paint leave it, a failed GPU row update frees the card's slot, the barycentric slack is a quarter texel whatever the triangle's size, objects whose modifiers change the geometry are refused, a tile that no longer fits is skipped, a dropped step is kept in the history. Open, in the spec: the PNGs are stored uncompressed on the main thread at save (272 MB at 4k), every dab walks every triangle (a 1M-triangle mesh wants a spatial gather), the live preview is the raw brush colour until the stack lands, the GPU rows update is untested, and no timing is printed yet.
+
+**Checked**
+- `tests_round265` in `tests/test_render.cpp` (a Paint layer's blend by coverage and channels, its PNG round trip, the
+  dilation's two-texel diamond) and `tests/test_editor.cpp` (the dab, the far side, the material brush, the eraser,
+  the tile undo and redo with the buffers kept, Mirror X, the fill of the object).
+- Unit checks (round 265): Windows, in render-cache verify mode, 12956, 0 failed (1113 tests), 0 stale
+  pictures. Linux with libraries: 12496, 0 failed. Sanitizer build: 12343, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the sanitizer leg run alone (san_only.sh); gpu views 8,176 checks; linux 12,496.)
+
 ## 2026-10-28 (round 264): the layer stack on an object's surface (task 0244)
 
 **Asked:** Substance Painter's pillars - the layer stack with masks, mesh maps and generators, smart materials,
