@@ -1167,3 +1167,15 @@ did per change before (and what any other head stack still does).
 | the same | 128 | 77,272 quads | 148 ms |
 | two such spheres overlapping by half a radius (12,100 vertices) | 64 | 10,992 quads, one shell | 16 ms |
 | the same | 128 | 44,126 quads, one shell | 69 ms |
+
+## Quad Remesh (task 0241)
+
+`meshops::quad_remesh` (QuadriFlow) in `tests_round261`, headless, one run; in the editor it runs on a worker, and the
+slowest editor frame while it worked is the second number.
+
+| Input | Target | Out | Time | Slowest editor frame meanwhile |
+|---|---|---|---|---|
+| the 6k-vertex sphere (5,952 faces) | 2,000 | 2,113 quads | about 2.5 s | 29 ms |
+| two merged spheres (DynaMesh at 48 first) | 3,000 | 2,917 quads, one shell | about 6 s | 32 ms |
+| a cube | 200 | 197 quads | 130 ms | - |
+| a 48 x 32 UV sphere | 600 | 672 quads | 467 ms | - |

@@ -5,12 +5,15 @@
 #include "../src/scene/mesh.h"
 #include "../src/scene/subdiv_chain.h"
 #include "../src/scene/dynamesh.h"
+#include "../src/scene/quad_remesh.h"
 #include "../src/render/canvas.h"
 
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <unordered_map>
 #include <tuple>
@@ -1561,6 +1564,174 @@ static void tests_round260() {
   });
 }
 
+static void tests_round261() {
+  /* Frames until the worker's result lands (or is dropped); the slowest frame printed. */
+  auto wait_remesh = [](Editor &ed, double &slowest_ms) {
+    slowest_ms = 0.0;
+    for (int i = 0; i < 20000 && ed.sculpt_remesh_busy_for_test(); i++) {
+      const auto t0 = std::chrono::steady_clock::now();
+      step(ed);
+      slowest_ms = std::max(slowest_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+      if (ed.sculpt_remesh_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return !ed.sculpt_remesh_busy_for_test();
+  };
+
+  test("quad remesh: the sphere to 2,000 faces on a worker - all quads, closed, the count within a quarter of the target, every vertex within 2 % of the radius, one undo step with the mode on; the editor's frames went on meanwhile (the slowest printed)", [&] {
+    if (!meshops::quad_remesh_available()) {
+      std::printf("    (this build has no QuadriFlow: the command says so and nothing changes)\n");
+      Editor ed;
+      GameObject *g = sphere_scene(ed, 1);
+      CHECK(g);
+      if (!g) return;
+      const MeshPtr before = g->mesh_filter()->mesh;
+      ed.command("sculpt remesh 2000");
+      CHECK(!ed.sculpt_remesh_busy_for_test() && g->mesh_filter()->mesh == before);
+      return;
+    }
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    const MeshPtr before = M();
+    const size_t steps0 = ed.undo_steps_for_test();
+    const auto t_start = std::chrono::steady_clock::now();
+    ed.command("sculpt remesh 2000");
+    const double start_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count();
+    CHECK(ed.sculpt_remesh_busy_for_test());
+    double slowest = 0.0;
+    const bool landed = wait_remesh(ed, slowest);
+    const MeshPtr after = M();
+    size_t bad = 0, nonq = 0;
+    const bool closed = after != before && closed_quads(*after, bad, nonq);
+    float worst = 0.0f;
+    for (const Vec3 &p : after->positions) worst = std::max(worst, std::fabs(length(p) - 0.5f));
+    std::printf("    quad remesh 2000: %zu vertices / %zu faces -> %zu / %zu (%zu bad edges, %zu non-quads); the farthest vertex %.4f off the sphere; the start took %.1f ms, the slowest frame while it worked %.1f ms\n",
+                before->vert_count(), before->face_count(), after->vert_count(), after->face_count(), bad, nonq, worst, start_ms, slowest);
+    CHECK(landed && closed && after->face_count() >= 1500 && after->face_count() <= 2500 && worst < 0.015f && ed.sculpt_mode_for_test());
+    /* One step: undo brings the sphere back. */
+    ed.command("sculpt size 10");
+    ed.command("undo");
+    CHECK(M()->vert_count() == before->vert_count() && M()->positions == before->positions && ed.undo_steps_for_test() == steps0);
+  });
+
+  test("quad remesh: two merged spheres (DynaMesh first) to 3,000 faces come out one closed shell of quads; a mask over the top survives; a stroke made while the worker runs makes the result drop", [&] {
+    if (!meshops::quad_remesh_available()) return;
+    Editor ed;
+    GameObject *a = sphere_scene(ed, 1);
+    CHECK(a);
+    if (!a) return;
+    ed.command("sculpt off");
+    ed.command("create Sphere");
+    GameObject *b = ed.active_object_for_test();
+    b->set_world_position(a->world_position() + Vec3(0.75f, 0.0f, 0.0f));
+    ed.command("subdivide 1");
+    ed.select_object(b->id);
+    ed.select_object_add(a->id);
+    ed.command("join");
+    GameObject *j = ed.active_object_for_test();
+    CHECK(j);
+    if (!j) return;
+    const uint64_t gid = j->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    auto M = [&] { return G()->mesh_filter()->mesh; };
+    step(ed);
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) step(ed);
+    ed.command("sculpt on");
+    ed.command("sculpt dynamesh 48 1");
+    ed.command("sculpt mask clear");
+    {
+      const MeshPtr m = M();
+      for (uint32_t v = 0; v < (uint32_t)m->vert_count(); v++)
+        if (m->positions[v].y > 0.25f) m->sculpt_mask[v] = 1.0f;
+    }
+    size_t masked0 = 0;
+    for (float v : M()->sculpt_mask) masked0 += v > 0.5f ? 1 : 0;
+    const double share0 = (double)masked0 / (double)M()->vert_count();
+    ed.command("sculpt remesh 3000");
+    double slowest = 0.0;
+    CHECK(wait_remesh(ed, slowest));
+    const MeshPtr after = M();
+    size_t bad = 0, nonq = 0;
+    const bool closed = closed_quads(*after, bad, nonq);
+    std::vector<int> island;
+    const int pieces = uvops::compute_islands(*after, nullptr, true, island);
+    size_t masked1 = 0, low = 0;
+    for (uint32_t v = 0; v < (uint32_t)after->vert_count(); v++) {
+      if (!(after->sculpt_mask.size() == after->vert_count() && after->sculpt_mask[v] > 0.5f)) continue;
+      masked1++, low += after->positions[v].y < 0.2f ? 1 : 0;
+    }
+    const double share1 = (double)masked1 / (double)after->vert_count();
+    std::printf("    two spheres -> %zu quads in %d piece(s), %zu bad edges, %zu non-quads; masked %.1f %% -> %.1f %%, %zu masked well below the line; the slowest frame %.1f ms\n", after->face_count(), pieces, bad,
+                nonq, 100.0 * share0, 100.0 * share1, low, slowest);
+    CHECK(closed && pieces == 1 && after->face_count() >= 2000 && after->face_count() <= 4000);
+    CHECK(masked1 > 0 && std::fabs(share1 - share0) < 0.12 && low == 0);
+    /* A stroke while the worker runs: the result is dropped. */
+    const MeshPtr held = M();
+    Vec2 px;
+    Vec3 w;
+    float d;
+    for (int i = 0; i < 100; i++) {
+      step(ed);
+      px = pixel_of(ed, G()->world_position());
+      if (ed.sculpt_hit_for_test(px.x, px.y, w, d)) break;
+    }
+    ed.command("sculpt remesh 1500");
+    CHECK(ed.sculpt_remesh_busy_for_test());
+    ed.command("sculpt size 10");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));  // (the mesh moved under the worker)
+    CHECK(wait_remesh(ed, slowest));
+    CHECK(M() == held);  // (dropped: the mesh is still the one the stroke worked on)
+    /* A cancel through the console: the result is dropped whenever it ends. */
+    ed.command("sculpt remesh 1500");
+    CHECK(ed.sculpt_remesh_busy_for_test());
+    ed.command("sculpt remesh cancel");
+    CHECK(wait_remesh(ed, slowest));
+    CHECK(M() == held);
+    /* A mask painted while it works: the result is dropped too. */
+    ed.command("sculpt remesh 1500");
+    ed.command("sculpt mask invert");
+    CHECK(wait_remesh(ed, slowest));
+    CHECK(M() != held && M()->vert_count() == held->vert_count());  // (the invert's own step copied the mesh; the remesh did not land)
+  });
+
+  test("quad remesh: bad input is refused with a reason - a T-junction, a flipped face, an open plane, a vertex that is not a number, a face without area", [&] {
+    if (!meshops::quad_remesh_available()) return;
+    auto refused = [](const Mesh &m, const char *what) {
+      Mesh out;
+      std::string why;
+      const bool ok = meshops::quad_remesh(m, {}, out, nullptr, &why);
+      std::printf("    %s: refused %d (%s)\n", what, (int)!ok, why.c_str());
+      return !ok && !why.empty();
+    };
+    Mesh t;  // (three faces on one edge)
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1), Vec3(0, -1, 0)}) t.add_vert(p);
+    t.add_face({0, 1, 2}), t.add_face({0, 3, 1}), t.add_face({0, 1, 4});
+    t.touch();
+    CHECK(refused(t, "a T-junction"));
+    Mesh flipped = *primitives::cube(1.0f);
+    {
+      const uint32_t *fv = flipped.face_verts(0);
+      std::swap(flipped.corner_verts[flipped.face_offsets[0]], flipped.corner_verts[flipped.face_offsets[0] + 2]);
+      (void)fv;
+      flipped.touch();
+    }
+    CHECK(refused(flipped, "a flipped face"));
+    CHECK(refused(*primitives::grid(2.0f, 4, 4), "an open plane (QuadriFlow stalled on one: refused for its open edges)"));
+    Mesh nan = *primitives::cube(1.0f);
+    nan.positions[0].x = std::numeric_limits<float>::quiet_NaN();
+    nan.touch();
+    CHECK(refused(nan, "a vertex that is not a number"));
+    Mesh flat = *primitives::cube(1.0f);
+    flat.positions[1] = flat.positions[0];  // (a face collapses to a line)
+    flat.touch();
+    CHECK(refused(flat, "a face without area"));
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
@@ -1568,4 +1739,5 @@ void run_sculpt_tests() {
   tests_round258();
   tests_round259();
   tests_round260();
+  tests_round261();
 }

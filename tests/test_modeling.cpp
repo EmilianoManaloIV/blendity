@@ -4,6 +4,9 @@
 #include "../src/scene/uv_internal.h"
 #include "../src/scene/subdiv_chain.h"
 #include "../src/scene/dynamesh.h"
+#include "../src/scene/quad_remesh.h"
+
+#include <atomic>
 #include "../src/scene/partfield.h"
 
 static void first_tests() {
@@ -8293,6 +8296,50 @@ static void tests_round260() {
   });
 }
 
+static void tests_round261() {
+  test("quad remesh (ADR 0077): a cube to 200 faces and a UV sphere to 600 come out closed, all quads, within a quarter of the target (skipped without QuadriFlow); an empty mesh and a cancel are refused with a reason", [] {
+    Mesh out;
+    std::string why;
+    Mesh empty;
+    CHECK(!meshops::quad_remesh(empty, {}, out, nullptr, &why) && !why.empty());
+    if (!meshops::quad_remesh_available()) {
+      std::printf("    (no QuadriFlow in this build: %s)\n", why.c_str());
+      return;
+    }
+    auto closed = [](const Mesh &m, size_t &bad, size_t &nonq) {
+      std::unordered_map<uint64_t, int> edges;
+      nonq = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+        nonq += n == 4 ? 0 : 1;
+        for (uint32_t c = 0; c < n; c++) edges[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+      }
+      bad = 0;
+      for (const auto &e : edges) bad += e.second == 2 ? 0 : 1;
+      return bad == 0 && nonq == 0;
+    };
+    struct Case {
+      const char *name;
+      MeshPtr mesh;
+      int target;
+    } cases[] = {{"cube", primitives::cube(1.0f), 200}, {"uv sphere", primitives::uv_sphere(0.5f, 48, 32), 600}};
+    for (const Case &c : cases) {
+      meshops::QuadRemeshParams p;
+      p.target_faces = c.target;
+      meshops::QuadRemeshStats st;
+      why.clear();
+      const bool ok = meshops::quad_remesh(*c.mesh, p, out, &st, &why);
+      size_t bad = 0, nonq = 0;
+      const bool manifold = ok && closed(out, bad, nonq);
+      std::printf("    %s to %d: ok %d (%s), %zu vertices, %zu faces, %zu bad edges, %zu non-quads, %.0f ms\n", c.name, c.target, (int)ok, why.c_str(), out.vert_count(), out.face_count(), bad, nonq, st.ms_total);
+      CHECK(ok && manifold && out.face_count() >= (size_t)(c.target * 3 / 4) && out.face_count() <= (size_t)(c.target * 5 / 4));
+    }
+    std::atomic<bool> cancel{true};
+    meshops::QuadRemeshParams p;
+    CHECK(!meshops::quad_remesh(*cases[0].mesh, p, out, nullptr, &why, &cancel) && why == "cancelled");
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8332,4 +8379,5 @@ void run_modeling_tests() {
   tests_round231();
   tests_round259();
   tests_round260();
+  tests_round261();
 }

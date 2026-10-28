@@ -3298,6 +3298,18 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   Recti drow = lay.row(u.row_h() + u.px(2));
   if (u.button({drow.x + u.px(4), drow.y, drow.w - u.px(8), drow.h}, "DynaMesh")) sculpt_dynamesh(sculpt_dyna_res_, sculpt_dyna_smooth_);
   u.tooltip("Redistribute the polygons evenly at the resolution (cells along the longest side) and merge what overlaps - ZBrush's DynaMesh; the mask is kept, groups and UVs are not (sculpt dynamesh [resolution] [smooth]).");
+  /* Task 0241: Quad Remesh. */
+  br.field("Target Faces", sculpt_remesh_params_.target_faces, 10, 2000000);
+  br.field("Preserve Sharp", sculpt_remesh_params_.preserve_sharp);
+  br.field("Preserve Boundary", sculpt_remesh_params_.preserve_boundary);
+  br.field("Adaptive Scale", sculpt_remesh_params_.adaptive_scale);
+  Recti rrow = lay.row(u.row_h() + u.px(2));
+  const bool remeshing = sculpt_remesh_ != nullptr;
+  if (u.button({rrow.x + u.px(4), rrow.y, rrow.w - u.px(8), rrow.h}, remeshing ? "Quad Remesh: working... (click to cancel)" : meshops::quad_remesh_available() ? "Quad Remesh" : "Quad Remesh (needs Eigen in the build)")) {
+    if (remeshing) sculpt_remesh_cancel();
+    else sculpt_quad_remesh(sculpt_remesh_params_);
+  }
+  u.tooltip("Quads that follow the form at about the target count, through QuadriFlow on a worker (ZRemesher's class of result, without guides): the mask is kept, groups and UVs are not (sculpt remesh [faces] ...).");
   br.help("Ctrl paints the mask (Ctrl+Alt takes it away; off the model Ctrl+click inverts it, Ctrl+drag masks a rectangle); Ctrl+Shift+click a face to see its group alone, off the model to see all.");
   const char *const mask_ops[] = {"Clear", "Invert", "Blur", "Grow", "Shrink"}, *const mask_cmds[] = {"clear", "invert", "blur", "grow", "shrink"};
   Recti mrow = lay.row(u.row_h() + u.px(2));

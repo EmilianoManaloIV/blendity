@@ -34,6 +34,7 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/quad_remesh.h"
 #include "../scene/animation.h"
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
@@ -631,6 +632,7 @@ class Editor {
   std::string statusbar_hint_for_test() const { return statusbar_hint(); }
   int sculpt_subdiv_levels_for_test() const { return sculpt_subdiv_levels(); }  // (task 0239)
   bool sculpt_dynamesh_for_test(int resolution, int smooth) { return sculpt_dynamesh(resolution, smooth); }  // (task 0240)
+  bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
   bool sculpt_mode_for_test() const { return sculpt_; }
   const SculptBrush &sculpt_brush_for_test() const { return sculpt_brush_; }
   std::string prefs_text_for_test() const { return prefs_text_0190(); }
@@ -3114,6 +3116,30 @@ class Editor {
   /* Task 0240: DynaMesh (ADR 0076) - the mesh retopologized evenly at a resolution, one ordinary step. */
   int sculpt_dyna_res_ = 64, sculpt_dyna_smooth_ = 1;
   bool sculpt_dynamesh(int resolution, int smooth);
+  /* Task 0241: Quad Remesh (ADR 0077) on a worker - the mesh copied, QuadriFlow run, the result one ordinary step when it
+   * arrives and the mesh is still the one it started from. */
+  struct RemeshJob {
+    std::thread thread;
+    std::atomic<bool> done{false}, cancel{false};
+    bool ok = false;
+    std::string why;
+    uint64_t obj = 0;
+    uint64_t mesh_uid = 0;  // (the mesh the job started from: its uid, unique per copy - not an address that could be reused)
+    uint64_t version = 0, deform_version = 0, mask_version = 0;
+    ~RemeshJob() {  // (the editor going away mid-job, or before the poll: the worker told to stop and waited for)
+      cancel.store(true, std::memory_order_relaxed);
+      if (thread.joinable()) thread.join();
+    }
+    std::shared_ptr<Mesh> input;
+    Mesh out;
+    meshops::QuadRemeshStats stats;
+    meshops::QuadRemeshParams params;
+  };
+  std::unique_ptr<RemeshJob> sculpt_remesh_;
+  meshops::QuadRemeshParams sculpt_remesh_params_;
+  bool sculpt_quad_remesh(const meshops::QuadRemeshParams &p);
+  void sculpt_remesh_poll();
+  void sculpt_remesh_cancel();
   void sculpt_rect_mask(Vec2 a, Vec2 b);
   bool sculpt_isolate_at(const Recti &view, float x, float y);
   void sculpt_gesture_end(float x, float y);

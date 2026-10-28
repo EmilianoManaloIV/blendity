@@ -56,6 +56,11 @@ call :lib tbb              BL_WITH_TBB         "tbb\include"                    
 call :lib embree           BL_WITH_EMBREE      "embree\include"                                "embree\lib\embree4.lib"
 call :lib openimagedenoise BL_WITH_OIDN        "openimagedenoise\include"                      "openimagedenoise\lib\OpenImageDenoise.lib"
 call :lib eigen            BL_WITH_EIGEN       "eigen\include\eigen3"                          ""
+rem QuadriFlow (task 0241, ADR 0077): Blender's bundled copy in extern\quadriflow, with Eigen.
+if exist "%L%\eigen\include\eigen3" set USE_QUADRIFLOW=1
+rem (WIN32: LEMON's Windows paths key on Blender's define; __TBB_NO_IMPLICIT_LINKAGE: with WIN32 on, a TBB header reached through the libraries' includes auto-linked tbb12.lib by its bare name)
+if "%USE_QUADRIFLOW%"=="1" set LIBDEFS=%LIBDEFS% /DBL_WITH_QUADRIFLOW /D_USE_MATH_DEFINES /DWIN32 /D__TBB_NO_IMPLICIT_LINKAGE
+if "%USE_QUADRIFLOW%"=="1" set LIBINC=%LIBINC% /Iextern\quadriflow\src /Iextern\quadriflow\3rd\pcg32 /Iextern\quadriflow\3rd\lemon-1.3.1 /Iextern\quadriflow\lemon_gen
 call :lib opensubdiv       BL_WITH_OPENSUBDIV  "opensubdiv\include"                            "opensubdiv\lib\osdCPU.lib"
 call :lib openexr          BL_WITH_OPENEXR     "openexr\include openexr\include\OpenEXR imath\include imath\include\Imath" "openexr\lib\OpenEXR.lib openexr\lib\OpenEXRCore.lib openexr\lib\Iex.lib openexr\lib\IlmThread.lib imath\lib\Imath.lib"
 call :lib opencolorio      BL_WITH_OCIO        "opencolorio\include"                           "opencolorio\lib\OpenColorIO.lib"
@@ -134,6 +139,9 @@ set SRCRSP=%OBJ%\sources.rsp
   echo extern\ufbx\ufbx.c
   echo extern\sky\source\sky_hosek.cpp
   if "%USE_OPTIX%"=="1" echo extern\cuew\src\cuew.c
+  if "%USE_QUADRIFLOW%"=="1" for %%f in (adjacent-matrix dedge hierarchy loader localsat merge-vertex optimizer parametrizer parametrizer-flip parametrizer-int parametrizer-mesh parametrizer-scale parametrizer-sing subdivide) do echo extern\quadriflow\src\%%f.cpp
+  if "%USE_QUADRIFLOW%"=="1" for %%f in (arg_parser base color lp_base lp_skeleton random) do echo extern\quadriflow\3rd\lemon-1.3.1\lemon\%%f.cc
+  if "%USE_QUADRIFLOW%"=="1" echo extern\quadriflow\3rd\lemon-1.3.1\lemon\bits\windows.cc
 )
 set LIBSRC=@%SRCRSP%
 set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib ws2_32.lib %LIBLINK%

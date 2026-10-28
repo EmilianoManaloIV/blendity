@@ -841,6 +841,11 @@ bool Editor::sculpt_update(const Recti &view) {
     return false;
   }
   const float x = (float)(in.mx - view.x), y = (float)(in.my - view.y);
+  if (sculpt_remesh_ && in.key_pressed[platform::KEY_ESCAPE] && !ui_.wants_keyboard()) {  // (task 0241: Esc stops the remesh first)
+    sculpt_remesh_cancel();
+    in.key_pressed[platform::KEY_ESCAPE] = false;
+    return true;
+  }
   if (!sculpt_stroking_ && !sculpt_gesture_) {
     if (scene_hovered_ && in.key_pressed[platform::KEY_ESCAPE] && !ui_.wants_keyboard()) {
       set_sculpt(false);
@@ -1175,6 +1180,96 @@ bool Editor::sculpt_dynamesh(int resolution, int smooth) {
   return true;
 }
 
+/* ---- Quad Remesh (task 0241, ADR 0077) ---- */
+
+/* QuadriFlow on the sculpted (or active) object's mesh, on a worker: the mesh copied, the editor's frames go on, the
+ * result lands through sculpt_remesh_poll as one ordinary step. One job at a time. */
+bool Editor::sculpt_quad_remesh(const meshops::QuadRemeshParams &p) {
+  if (!meshops::quad_remesh_available()) {
+    Log::warn("Quad Remesh: this build has no QuadriFlow (it needs Blender's Eigen among the libraries)");
+    return false;
+  }
+  if (sculpt_remesh_) {
+    Log::warn("Quad Remesh: one is running (sculpt remesh cancel stops it)");
+    return false;
+  }
+  if (playing_) {
+    Log::warn("Quad Remesh: stop Play first");
+    return false;
+  }
+  GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
+  MeshFilter *mf = mf_of(g);
+  if (!mf || !mf->mesh) {
+    Log::warn("Quad Remesh: select a mesh object first");
+    return false;
+  }
+  if (edit_mode_) exit_edit_mode();
+  if (weight_paint_) set_weight_paint(false);
+  sculpt_end_stroke();
+  sculpt_gesture_ = false;
+  commit_undo();
+  auto job = std::make_unique<RemeshJob>();
+  job->obj = g->id;
+  job->mesh_uid = mf->mesh->uid.v;
+  job->version = mf->mesh->version, job->deform_version = mf->mesh->deform_version, job->mask_version = sculpt_mask_version_;
+  job->input = mesh_copy_bare(*mf->mesh);  // (what the worker reads, without the render caches: a smaller stall at the start)
+  job->params = p;
+  RemeshJob *raw = job.get();
+  job->thread = std::thread([raw] {  // (quad_remesh catches what QuadriFlow throws; nothing here logs - the main thread does)
+    raw->ok = meshops::quad_remesh(*raw->input, raw->params, raw->out, &raw->stats, &raw->why, &raw->cancel);
+    raw->done.store(true, std::memory_order_release);
+  });
+  sculpt_remesh_ = std::move(job);
+  Log::info("Quad Remesh: working toward %d faces on a worker (Esc or `sculpt remesh cancel` stops it)", p.target_faces);
+  ui_.redraw = true;
+  return true;
+}
+
+/* Each frame: a finished job lands as a step when its mesh is still the one it started from, or is dropped with a
+ * log line. */
+void Editor::sculpt_remesh_poll() {
+  if (!sculpt_remesh_ || !sculpt_remesh_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<RemeshJob> job = std::move(sculpt_remesh_);
+  if (job->thread.joinable()) job->thread.join();
+  if (job->cancel.load(std::memory_order_relaxed)) {  // (cancelled late, after QuadriFlow's last check: the result is not wanted)
+    Log::info("Quad Remesh: cancelled - the result is dropped");
+    return;
+  }
+  if (!job->ok) {
+    Log::warn("Quad Remesh: %s", job->why.c_str());
+    return;
+  }
+  GameObject *g = scene_->find(job->obj);
+  MeshFilter *mf = mf_of(g);
+  const bool same = mf && mf->mesh && mf->mesh->uid.v == job->mesh_uid && mf->mesh->version == job->version && mf->mesh->deform_version == job->deform_version &&
+                    sculpt_mask_version_ == job->mask_version;
+  if (!same) {
+    Log::warn("Quad Remesh: the mesh changed while it worked (a stroke, a mask, an undo, another scene) - the result is dropped");
+    return;
+  }
+  if ((edit_mode_ && edit_obj_ == job->obj) || weight_paint_ || playing_) {  // (a mode entered meanwhile holds the old mesh's selections and weights)
+    Log::warn("Quad Remesh: Edit Mode, Weight Paint or Play began while it worked - the result is dropped");
+    return;
+  }
+  sculpt_end_stroke();
+  commit_undo();
+  auto m = std::make_shared<Mesh>(std::move(job->out));
+  mf->mesh = m;
+  sculpt_cache_mesh_ = nullptr;
+  sculpt_stroke_mesh_ = nullptr;
+  mark_changed(strprintf("Quad Remesh %d", job->params.target_faces));
+  Log::info("Quad Remesh %d: %zu vertices / %zu faces -> %zu / %zu quads in %.0f ms", job->params.target_faces, job->stats.verts_in, job->stats.faces_in, job->stats.verts_out, job->stats.faces_out,
+            job->stats.ms_total);
+  ui_.redraw = true;
+}
+
+/* The running job told to stop (QuadriFlow reads the flag between its stages); its result is dropped when it ends. */
+void Editor::sculpt_remesh_cancel() {
+  if (!sculpt_remesh_) return;
+  sculpt_remesh_->cancel.store(true, std::memory_order_relaxed);
+  Log::info("Quad Remesh: cancelling (it stops at the next stage)");
+}
+
 /* How many faces of the object's mesh are hidden (the status bar says so outside Sculpt Mode too). */
 size_t Editor::hidden_face_count(const GameObject *g) const {
   const MeshFilter *mf = mf_of(const_cast<GameObject *>(g));
@@ -1351,6 +1446,31 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     if (t.size() > 3) sculpt_dyna_smooth_ = std::max(0, std::min(10, std::atoi(t[3].c_str())));
     sculpt_dynamesh(sculpt_dyna_res_, sculpt_dyna_smooth_);
   }
+  else if (v == "remesh") {  // sculpt remesh [faces] [sharp|nosharp] [boundary|noboundary] [adaptive|uniform] [seed <n>] | cancel  (task 0241)
+    if (arg(2, "") == "cancel") {
+      sculpt_remesh_cancel();
+      return;
+    }
+    meshops::QuadRemeshParams q = sculpt_remesh_params_;
+    for (size_t i = 2; i < t.size(); i++) {
+      const std::string a = to_lower(t[i]);
+      const bool number = !a.empty() && std::all_of(a.begin(), a.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
+      if (number) q.target_faces = std::max(10, std::min(2000000, std::atoi(a.c_str())));
+      else if (a == "sharp") q.preserve_sharp = true;
+      else if (a == "nosharp") q.preserve_sharp = false;
+      else if (a == "boundary") q.preserve_boundary = true;
+      else if (a == "noboundary") q.preserve_boundary = false;
+      else if (a == "adaptive") q.adaptive_scale = true;
+      else if (a == "uniform") q.adaptive_scale = false;
+      else if (a == "seed" && i + 1 < t.size()) q.seed = std::atoi(t[++i].c_str());
+      else {
+        Log::info("usage: sculpt remesh [faces] [sharp|nosharp] [boundary|noboundary] [adaptive|uniform] [seed <n>] | cancel");
+        return;
+      }
+    }
+    sculpt_remesh_params_ = q;
+    sculpt_quad_remesh(q);
+  }
   else if (v == "subdiv") {  // sculpt subdiv <n>|off|+|-  (task 0239)
     const std::string a = arg(2, "1");
     const bool number = !a.empty() && std::all_of(a.begin(), a.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
@@ -1420,7 +1540,7 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     sculpt_end_stroke();
   }
   else {
-    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | subdiv <n>|off|+|- | dynamesh [resolution] [smooth] | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
+    Log::info("usage: sculpt on|off | brush draw|smooth|grab|clay|inflate|flatten|pinch|crease|scrape|snake | size <px>|+|- | strength <0-1> | falloff <name> | carve on|off|toggle | front on|off | pressure off|strength|size | symmetry x|y|z|radial <n>|off | lazy <px> | alpha <image>|off|turn|noturn | stroke dots|dot|rect|freehand|spray | subdiv <n>|off|+|- | dynamesh [resolution] [smooth] | remesh [faces] [sharp|nosharp] [boundary|noboundary] [adaptive|uniform] [seed <n>]|cancel | mask clear|fill|invert|blur|sharpen|grow|shrink|rect <x0> <y0> <x1> <y1> | group islands|material|mask|merge | groups on|off | maskview on|off | hide group <n>|masked|unmasked|all|none|invert | show all | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]");
     return;
   }
   ui_.redraw = true;

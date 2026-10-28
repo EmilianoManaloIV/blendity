@@ -72,6 +72,7 @@ bool SceneCamera::update(double now) {
 
 Editor::Editor() = default;
 Editor::~Editor() {
+  sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
   ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
@@ -653,6 +654,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   dock_draw(dock_.get());
   if (sculpt_stroking_ && !scene_drawn_) sculpt_end_stroke();  // (task 0236: the Scene view stopped drawing mid-stroke - a tab switch: the stroke ends as it is)
   if (sculpt_gesture_ && !scene_drawn_) sculpt_gesture_ = false;  // (task 0238: a Ctrl gesture the same way, dropped)
+  sculpt_remesh_poll();  // (task 0241: a finished Quad Remesh lands as a step)
+  if (sculpt_remesh_) ui_.redraw = true;  // (frames while it works: the status line and the result's arrival)
   draw_drop_hint();  // (task 0232)
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
@@ -3360,6 +3363,7 @@ int Editor::startup_check() {
 }
 
 void Editor::enter_play() {
+  sculpt_remesh_cancel();  // (task 0241: Play clones the scene; a result landing in the clone would be thrown away by Stop)
   set_weight_paint(false);
   set_sculpt(false);  // (task 0236: the stable clone shares meshes)
   cancel_skin_job();  // (Stop would throw its result away)

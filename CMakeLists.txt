@@ -141,6 +141,38 @@ file(GLOB BLENDITY_SOURCES CONFIGURE_DEPENDS
   src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp)
 # Blender's own bundled dependencies (extern/README.md)
 list(APPEND BLENDITY_SOURCES extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp)
+# QuadriFlow (task 0241, ADR 0077): Blender's bundled copy, compiled when Eigen is among the libraries.
+set(BL_QUADRIFLOW_INCS "")
+if("BL_WITH_EIGEN" IN_LIST BL_LIB_DEFS)
+  list(APPEND BLENDITY_SOURCES
+    extern/quadriflow/src/adjacent-matrix.cpp
+    extern/quadriflow/src/dedge.cpp
+    extern/quadriflow/src/hierarchy.cpp
+    extern/quadriflow/src/loader.cpp
+    extern/quadriflow/src/localsat.cpp
+    extern/quadriflow/src/merge-vertex.cpp
+    extern/quadriflow/src/optimizer.cpp
+    extern/quadriflow/src/parametrizer.cpp
+    extern/quadriflow/src/parametrizer-flip.cpp
+    extern/quadriflow/src/parametrizer-int.cpp
+    extern/quadriflow/src/parametrizer-mesh.cpp
+    extern/quadriflow/src/parametrizer-scale.cpp
+    extern/quadriflow/src/parametrizer-sing.cpp
+    extern/quadriflow/src/subdivide.cpp
+    extern/quadriflow/3rd/lemon-1.3.1/lemon/arg_parser.cc
+    extern/quadriflow/3rd/lemon-1.3.1/lemon/base.cc
+    extern/quadriflow/3rd/lemon-1.3.1/lemon/color.cc
+    extern/quadriflow/3rd/lemon-1.3.1/lemon/lp_base.cc
+    extern/quadriflow/3rd/lemon-1.3.1/lemon/lp_skeleton.cc
+    extern/quadriflow/3rd/lemon-1.3.1/lemon/random.cc
+    extern/quadriflow/3rd/lemon-1.3.1/lemon/bits/windows.cc
+  )
+  list(APPEND BL_LIB_DEFS BL_WITH_QUADRIFLOW _USE_MATH_DEFINES)
+  if(WIN32)
+    list(APPEND BL_LIB_DEFS WIN32 __TBB_NO_IMPLICIT_LINKAGE)  # (LEMON keys on Blender's WIN32 define; TBB's headers must not auto-link)
+  endif()
+  set(BL_QUADRIFLOW_INCS extern/quadriflow/src extern/quadriflow/3rd/pcg32 extern/quadriflow/3rd/lemon-1.3.1 extern/quadriflow/lemon_gen)
+endif()
 
 if(WIN32)
   list(APPEND BLENDITY_SOURCES src/platform/platform_win32.cpp)
@@ -166,7 +198,7 @@ if(BLENDITY_USE_LIBS AND UNIX AND NOT APPLE)
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(blendity_engine PUBLIC Threads::Threads)
-target_include_directories(blendity_engine PUBLIC extern/sky/include)
+target_include_directories(blendity_engine PUBLIC extern/sky/include ${BL_QUADRIFLOW_INCS})
 if(BLENDITY_USE_LIBS)
   target_compile_definitions(blendity_engine PUBLIC ${BL_LIB_DEFS})
   target_include_directories(blendity_engine SYSTEM PUBLIC ${BL_LIB_INCS})

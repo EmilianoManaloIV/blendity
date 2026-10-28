@@ -322,6 +322,7 @@ std::string Editor::statusbar_hint() const {
   }
   if (pp_.active) return "Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel";
   if (sketch_.active && !tablet_) return "Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop";
+  if (sculpt_remesh_) return "Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode) or `sculpt remesh cancel`: stop it at its next stage";  // (task 0241)
   if (sculpt_)
     return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate group  |  Esc: leave" +
            (sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", sculpt_subdiv_levels()) : std::string());  // (tasks 0236, 0238, 0239)

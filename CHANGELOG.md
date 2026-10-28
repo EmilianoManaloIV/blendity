@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 261): the ZRemesher spike - Quad Remesh through QuadriFlow (task 0241)
+
+**Asked:** ZBrush's ZRemesher - quads that follow the form at a chosen count. The plan made it a spike: QuadriFlow from
+Blender's tree behind a flag, the measurements and the gap to ZRemesher written down.
+
+**Added**
+- **QuadriFlow in the tree** (`extern/quadriflow`, Blender's patched copy with LEMON, pcg32 and pss; ADR 0077):
+  compiled into the engine when Blender's Eigen is among the libraries (`BL_WITH_QUADRIFLOW`, all three builds), its
+  licences listed. `meshops::quad_remesh` (`src/scene/quad_remesh.cpp`) drives the `Parametrizer` as Blender's
+  wrapper does - the input welded and fan-triangulated, the field normalized and initialized for the target, the
+  boundary constraints when asked, the orientation and position fields, the index map, the quads out - with a cancel
+  flag read between the stages; the mask and vertex groups by position.
+- **Quad Remesh in Sculpt Mode:** Target Faces, Preserve Sharp, Preserve Boundary, Adaptive Scale and the button in
+  the Sculpt section, `sculpt remesh [faces] [sharp|nosharp] [boundary|noboundary] [adaptive|uniform] [seed <n>]`,
+  `sculpt remesh cancel`. The operator runs on a worker with the mesh copied: the editor keeps drawing (the status
+  line says so, Esc cancels), the result lands as one ordinary step when the mesh is still the one it started from
+  and is dropped with a log line otherwise (a stroke, an undo, another scene). Without Eigen the command says so.
+- **The findings** (`docs/tasks/0241-zremesher-spike.md`): the 6k sphere to 2,000 came out 2,113 closed quads within
+  1.8 % of the radius in about 2.5 s with the editor's slowest frame 29 ms; two merged spheres to 3,000 one shell of
+  2,917 quads with the mask kept; a cube to 200 in 130 ms. Against ZRemesher the field and the count are there; guide
+  curves (QuadriFlow's orientation constraints from Sketch strokes), symmetry and painted density are what a later
+  round would add.
+**Review (Opus, round 261):** two blockers and five majors, all taken before landing. `build.sh` had used build.bat's variable names and an unset flag under `set -u`, so every Linux and macOS build would have stopped: it sets the flag, reads the right folder, appends to its own flags and lists the fourteen sources CMake lists (no `post-solver.cpp`, which wants Ceres). The worker's thread was never joined when the editor closed mid-job - a `std::terminate`: the job's destructor cancels and joins, and the editor's destructor drops the job first. A cancel after QuadriFlow's last check had landed anyway (the poll drops a cancelled job; a check after the index map); bad input could throw or exit inside the library (the input is checked as Blender checks it - finite, no face without area or edge without length, no edge in three faces, no two faces winding alike, no wire edges - and exceptions on the worker are caught; the library's own `exit` calls stay a recorded risk); the result had landed under Edit Mode, Weight Paint or Play (dropped now; Play cancels the job); a mask painted meanwhile had been lost (the mask version is compared too); the mesh was known by its address (by its uid now); the start copied the render caches (a bare copy). Also: the Esc hint names where Esc works, the licence is BSD-3-Clause by its text (the labels and the file's name say so), `pss` is not compiled, and tests for a cancel through the console, a mask painted meanwhile, and five bad inputs.
+
+**Checked**
+- `tests_round261` in `tests/test_sculpt.cpp` (2 tests, guarded by the flag): the sphere to 2,000 on the worker - all
+  quads, closed, within a quarter of the target, every vertex within 2 % of the radius, one undo step with the mode on,
+  the slowest frame printed; two merged spheres to 3,000 one shell with the mask kept, and a stroke made while the
+  worker runs makes its result drop. `tests_round261` in `tests/test_modeling.cpp`: a cube to 200 and a UV sphere to
+  600 closed and all quads within a quarter of the target; an empty mesh and a cancel refused with a reason.
+- Unit checks (round 261): Windows, in render-cache verify mode, 12845, 0 failed (1101 tests), 0 stale
+  pictures. Linux with libraries: 12385, 0 failed. Sanitizer build: 12232, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone.)
+
 ## 2026-10-28 (round 260): DynaMesh (task 0240)
 
 **Asked:** ZBrush's DynaMesh - pull a form far out of its topology, then redistribute the polygons evenly and merge
