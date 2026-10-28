@@ -148,7 +148,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   u.canvas.fill_rect(bar, u.theme.bar);
   int x = bar.x + u.px(6), y = bar.y + u.px(3), h = bh - u.px(6);
   struct B { const char *label, *op, *tip; };
-  const B buttons[] = {
+  static const B buttons[] = {  // (static: the More menu's popup reads it after this frame's draw - task 0255)
       {"Unwrap", "unwrap", "Unwrap: Least Squares Conformal Maps per seam-bounded island, then pack.\nBlender: UV > Unwrap (Conformal)."},
       {"Smart UV", "smart", "Smart UV Project: group faces by normal, project and pack. No seams needed."},
       {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (console:\nuv parts [bound] [multi]); ABF++ then LSCM; each part's charts packed together. No seams needed."},
@@ -163,12 +163,26 @@ void Editor::draw_uv_editor(const Recti &r) {
       {"Clear Seam", "clear_seam", "Clear seams between selected vertices."},
       {"Seams from Sharp", "seams_from_sharp_unwrap", "Mark a seam on every sharp edge (faces meeting at more than the Seam Angle, or marked sharp),\n"
        "then unwrap. Blender: Select Sharp Edges, Mark Seam, Unwrap."}};
+  std::vector<const B *> more;  // (task 0255: a narrow window folds the rest into a menu instead of dropping them)
   for (const B &b : buttons) {
     int w = u.font.text_width(b.label) + u.px(14);
-    if (x + w > bar.right() - u.px(410)) break;
+    if (x + w > bar.right() - u.px(470)) {
+      more.push_back(&b);
+      continue;
+    }
     if (u.button({x, y, w, h}, b.label)) uv_op(b.op);
     u.tooltip(b.tip);
     x += w + u.px(3);
+  }
+  if (!more.empty()) {
+    const int mw = u.font.text_width("More") + u.px(14);
+    const ui::Id more_id = u.id("uv_more");
+    if (u.button({x, y, mw, h}, "More")) u.open_popup(more_id, {x, y, mw, h});
+    u.tooltip(strprintf("%zu more tool%s the bar has no room for.", more.size(), more.size() == 1 ? "" : "s"));
+    u.popup(more_id, u.px(220), [this, more] {
+      for (const B *b : more)
+        if (ui_.menu_item(b->label)) uv_op(b->op);
+    });
   }
   draw_uv_material_filter({bar.right() - u.px(400), y, u.px(144), h});
   static const char *bgs[] = {"Material Texture", "UV Grid", "Color Grid", "None"};
@@ -604,13 +618,11 @@ void Editor::draw_uv_editor(const Recti &r) {
     if (in.key_pressed[platform::KEY_UP]) uv_transform("move", 0, step);
     if (in.key_pressed[platform::KEY_DOWN]) uv_transform("move", 0, -step);
     if (in.ctrl() && in.key_pressed[platform::KEY_I]) uv_select("invert");
-    /* The gizmo's tools, as in the Scene view: W move, E rotate, R scale, Y all three. */
-    if (!in.ctrl() && !in.alt()) {
-      if (in.key_pressed[platform::KEY_W]) tool_ = Tool::Move;
-      if (in.key_pressed[platform::KEY_E]) tool_ = Tool::Rotate;
-      if (in.key_pressed[platform::KEY_R]) tool_ = Tool::Scale;
-      if (in.key_pressed[platform::KEY_Y]) tool_ = Tool::Transform;
-    }
+    /* The gizmo's tools, as in the Scene view: the keymap's tool actions (task 0255; Unity's W E R Y). */
+    if (action_pressed("tool.move")) tool_ = Tool::Move;
+    if (action_pressed("tool.rotate")) tool_ = Tool::Rotate;
+    if (action_pressed("tool.scale")) tool_ = Tool::Scale;
+    if (action_pressed("tool.transform")) tool_ = Tool::Transform;
     if (in.key_pressed[platform::KEY_1] && !in.ctrl()) uv_select_mode_ = 0;
     if (in.key_pressed[platform::KEY_2] && !in.ctrl()) uv_select_mode_ = 1;
     if (in.key_pressed[platform::KEY_3] && !in.ctrl()) uv_select_mode_ = 2;

@@ -56,9 +56,9 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
          return std::string(kModal[std::max(0, std::min(2, e.xf_.mode))]) + ": move the mouse  |  X Y Z: lock an axis  |  type a value  |  Enter: apply  |  Esc: cancel";
        }},
       {"operator modal", [](const Editor &e) { return e.modal_.active; },
-       [](const Editor &e) { return capitalised(e.modal_.op) + ": move the mouse away from the centre for more  |  Shift: finer  |  type a value  |  Enter: apply  |  Esc: cancel"; }},
+       [](const Editor &e) { return capitalised(e.modal_.op) + ": move the mouse away from the centre for more  |  Shift: finer  |  ] / [: segments or count  |  type a value  |  Enter: apply  |  Esc: cancel"; }},
       {"push/pull", [](const Editor &e) { return e.pp_.active; },
-       [](const Editor &) { return std::string("Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel"); }},
+       [](const Editor &) { return std::string("Push/Pull: move the mouse to push or pull the face  |  type a distance  |  Ctrl: keep the original face  |  click or Enter: done  |  Esc or right-click: cancel"); }},
       {"edit origin", [](const Editor &e) { return e.origin_edit_; },
        [](const Editor &) { return std::string("Edit Origin: drag the gizmo to move the object's pivot (the mesh stays)  |  Done, or Esc: finish"); }},
       {"pilot", [](const Editor &e) { return e.pilot_cam_ != 0; },
@@ -77,7 +77,12 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
        [](const Editor &) { return std::string("Dragging: type a number for an exact amount  |  V: snap to a vertex  |  Ctrl+Shift: drop onto a surface  |  Esc: cancel"); }},
       {"uv editor", [](const Editor &e) { return e.uv_rect_.w > 0 && e.uv_rect_.contains(e.ui_.in.mx, e.ui_.in.my); },
        [](const Editor &e) {
-         return std::string("UV Editor: LMB: select  |  W E R: move, turn, scale the islands (the editor's own keys)  |  MMB drag, or Space+drag: pan  |  Wheel: zoom  |  Unwrap: the toolbar");
+         std::string keys;  // (the preset's chords for the three tools; a preset without them: the toolbar)
+         for (const char *id : {"tool.move", "tool.rotate", "tool.scale"}) {
+           const std::string k = e.key(id);
+           if (!k.empty()) keys += (keys.empty() ? "" : " ") + k;
+         }
+         return "UV Editor: LMB: select  |  " + (keys.empty() ? std::string("the toolbar") : keys) + ": move, turn, scale the islands  |  MMB drag: pan  |  Wheel: zoom  |  Unwrap: the toolbar";
        }},
       {"remesh job", [](const Editor &e) { return e.sculpt_remesh_ != nullptr; },
        [](const Editor &) { return std::string("Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode), the tray's Cancel or `sculpt remesh cancel`: stop it at its next stage"); }},

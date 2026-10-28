@@ -223,7 +223,10 @@ History panel and an accessibility theme to follow. Round 272 landed the first: 
 Scene view with a Fix button where the remedy is a command, and a button that cannot work is disabled with its reason;
 round 273 the second: one job tray in the status bar with every long job's progress, time run, estimate left and Cancel;
 round 274 the next four: the status hint from a table that covers every mode, every shortcut label from the keymap preset,
-"Save changes?" before a scene is replaced, and a History window of the undo steps.
+"Save changes?" before a scene is replaced, and a History window of the undo steps. Round 275 took the modeling, placing and
+UV findings: Ctrl's three meanings said in the hints, a snap-increment dropdown, keys for every wheel-only parameter, a UV
+editor that folds its toolbar and takes its tool keys from the keymap, Hierarchy drop zones in thirds with a Move into... menu, clearer operation names, a
+Boolean dialog that names the object kept.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -254,7 +257,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13141 unit checks in 1130 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13149 unit checks in 1132 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

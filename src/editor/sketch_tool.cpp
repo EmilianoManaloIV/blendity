@@ -440,7 +440,7 @@ bool Editor::sketch_update(const Recti &view) {
       u.consume_click();
       return true;
     }
-    sketch_stroke_begin(view, px, in.pressure, in.ctrl());
+    sketch_stroke_begin(view, px, in.pressure, in.ctrl());  // (Ctrl keeps a stroke freehand: Alt is the orbit modifier, task 0223)
     g.view_kind = sketch_view_.kind;
     u.consume_click();
     u.redraw = true;

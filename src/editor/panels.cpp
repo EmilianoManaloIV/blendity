@@ -32,6 +32,8 @@ static Icon object_icon(const GameObject &g) {
 /* Hierarchy                                                              */
 /* ===================================================================== */
 
+int hier_drop_mode(int ry, int rh) { return ry < rh / 3 ? 1 : (ry > rh - rh / 3 ? 2 : 0); }
+
 void Editor::draw_hierarchy(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
@@ -194,7 +196,7 @@ void Editor::draw_hierarchy(const Recti &r) {
       if (hier_dragging_ && hier_drag_ != g->id) {
         int ry = in.my - row.y;
         drop_target = g;
-        drop_mode = ry < rh / 4 ? 1 : (ry > rh * 3 / 4 ? 2 : 0);
+        drop_mode = hier_drop_mode(ry, rh);  // (task 0255: the into-zone is the middle third, a quarter before)
       }
     }
   }
@@ -267,6 +269,34 @@ void Editor::draw_hierarchy(const Recti &r) {
     if (u.menu_item("Duplicate", key("edit.duplicate").c_str(), false, has_sel)) duplicate_selected();
     if (u.menu_item("Delete", key("edit.delete").c_str(), false, has_sel)) delete_selected();
     if (u.menu_item("Frame Selected", key("view.frame").c_str(), false, has_sel)) frame_selected();
+    if (has_sel)
+      u.submenu("Move into...", u.px(240), [this] {  // (task 0255: reparent without a drag - a finger's way; the first 40 objects)
+        auto &u = ui_;
+        if (u.menu_item("(the scene's root)")) {
+          int moved = 0;
+          for (GameObject *g : selected_objects(true))
+            if (g->parent) scene_->set_parent(g, nullptr), moved++;
+          if (moved) mark_changed("Move to the root");
+        }
+        int shown = 0;
+        const std::vector<GameObject *> moving = selected_objects(true);
+        auto under_a_moving = [&](GameObject &t) {  // (a selected object, or inside one: not a place to move into)
+          for (GameObject *g : moving)
+            if (g == &t || scene_->is_ancestor(g, &t)) return true;
+          return false;
+        };
+        scene_->for_each([&](GameObject &t) {
+          if (shown >= 40 || under_a_moving(t)) return;
+          shown++;
+          if (!u.menu_item(t.name)) return;
+          int moved = 0;
+          for (GameObject *g : moving)
+            if (g->parent != &t) scene_->set_parent(g, &t), moved++;
+          if (!moved) return;
+          expanded_.insert(t.id);
+          mark_changed("Move into " + t.name);
+        });
+      });
     if (GameObject *ag = scene_->find(active_); ag && ag->camera() && ag->id != scene_->active_camera)
       if (u.menu_item("Set as Active Camera", nullptr, false, true)) set_active_camera(ag);
     if (u.menu_item("Select Children", nullptr, false, has_sel)) {

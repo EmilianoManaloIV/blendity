@@ -133,7 +133,8 @@ surface offers one); a button that cannot work now is dim, and its tooltip says 
 bar's right slot with its progress, the time it has run and an estimate left, and a Cancel; when it ends a toast says so.
 Every shortcut you see in a menu or a tooltip is the one your keymap preset binds (Preferences > Keymap), and New or Open
 asks "Save changes?" when the scene has changes since its last save. Window > History lists every undo step; a click goes
-back to it. The Inspector shows
+back to it. Ctrl snaps a drag (the increment is the dropdown beside the magnet), keeps Push/Pull's original face or a Sketch
+stroke freehand - the hint says which - and `]` / `[` set a modal's segments or count when you have no wheel. The Inspector shows
 each component's first seven fields (Show more for the rest, All Fields for everything); each stage layout's first use
 shows a guide strip with its next three steps. While dragging a gizmo arrow, type a number to move exactly that far.
 
@@ -797,6 +798,7 @@ the editor. A few that are handy by hand:
 | `toast <text>` | a toast over the Scene view by hand (lessons, tests) |
 | `jobs`, `jobs cancel [label]` | the running jobs with their progress and time; stop one |
 | `window History` | the undo steps as a list, a click jumps to one |
+| `boolean difference kept Cube` | cut the Cube by the other selected meshes, whichever was selected last |
 
 ---
 

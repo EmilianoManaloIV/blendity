@@ -1774,7 +1774,7 @@ void Editor::select_sharp_op(const Mesh &m) {
   return;
 }
 
-/* Select Z-Fighting: the faces the check finds on top of each other. */
+/* Select Overlapping Faces: the faces the z-fighting check finds on top of each other. */
 void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
   /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
   const size_t n = zfight_scan(false);
@@ -1786,7 +1786,7 @@ void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
     if (z.obj_b == g.id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
   }
   sync_vert_face_selection(true);
-  Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
+  Log::info(n ? "Select Overlapping Faces: %zu pair(s) of faces on top of each other selected" : "Select Overlapping Faces: none found", n);
   return;
 }
 
@@ -2258,7 +2258,7 @@ const std::vector<EditOpPair> &edit_op_pairs() {
 const std::vector<EditOpInfo> &edit_op_table() {
   enum { V = 1, E = 2, F = 4, ALL = 7 };
   static const std::vector<EditOpInfo> ops = {
-      {"extrude_edges", "Extrude", "", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
+      {"extrude_edges", "Extrude Edges", "", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
        "a new edge (start a shape from one vertex). Blender: E in vertex / edge mode.", V | E},
       {"merge_center", "Merge at Center", "mesh.merge_center", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
       {"connect", "Connect Vertex Path", "mesh.connect", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
@@ -2318,7 +2318,7 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"delete", "Delete", "edit.delete", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
       {"merge_distance", "Merge by Distance", "", "Weld the selected vertices that are closer than the Merge Distance (all of them if nothing\n"
        "is selected). Adjust Last Operation: the distance, and Unselected to weld onto unselected vertices too. Blender: Merge > By Distance.", ALL},
-      {"select_overlapping", "Select Z-Fighting", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
+      {"select_overlapping", "Select Overlapping Faces", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
        "Modeling Tools > Check: Z-Fighting lists them and removes the ones that can go.", ALL},
       {"grid", "Grid", "", "Cut each selected quad into a grid of Grid Columns x Grid Rows (neighbours are split to match).\n"
        "Click it for the helper: the wheel sets columns, Shift+wheel rows (Adjust Last Operation afterwards).", F},
@@ -2330,7 +2330,7 @@ const std::vector<EditOpInfo> &edit_op_table() {
        "Helper: the mouse sets the distance, the wheel the end's scale.", F},
       {"recess", "Recess / Plate", "", "Inset the selection as one panel by Recess Border, then push its middle in by Recess Depth\n"
        "(negative: a raised plate). Helper: the mouse sets the depth, the wheel the border.", F},
-      {"select_overlaps", "Select Overlapping", "", "Select vertices lying on top of each other and edges running along each other\n"
+      {"select_overlaps", "Select Doubled Vertices", "", "Select vertices lying on top of each other and edges running along each other\n"
        "(shown live as yellow rings and magenta lines; Modeling Tools > Check: Overlapping Vertices & Edges).", ALL},
       {"merge_overlaps", "Merge Overlapping", "", "Weld vertices lying on top of each other (doubled edges on them become one).", ALL},
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
@@ -3309,6 +3309,11 @@ bool Editor::modal_update(const Recti &view) {
     in.wheel_y = 0;
     changed = true;
   }
+  if (!u.wants_keyboard()) {  // (task 0255: ] and [ set what the wheel sets - segments, count, sides - for a pen or a finger; + and - are typed values)
+    const bool up = in.key_pressed[platform::KEY_RBRACKET], down = in.key_pressed[platform::KEY_LBRACKET];
+    if (up || down) in.wheel_y = up ? 1.0f : -1.0f;
+    if (up || down) in.key_pressed[platform::KEY_RBRACKET] = in.key_pressed[platform::KEY_LBRACKET] = false;
+  }
   if (in.wheel_y != 0 && modal_.op != "bevel" && modal_.op != "inset") {
     const int dir = in.wheel_y > 0 ? 1 : -1;
     LastOp &L = last_op_;
@@ -3452,7 +3457,7 @@ void Editor::pushpull_begin() {
   pp_.start = closest_on_line_to_ray(pp_.origin, pp_.axis,
                                      scene_r3d_.screen_ray((float)(in.mx - scene_rect_.x), (float)(in.my - scene_rect_.y)));
   pp_.lim = meshops::push_pull_limits(m, pp_.fsel);
-  pp_.keep = in.ctrl();
+  pp_.keep = in.ctrl();  // (Ctrl keeps the original face: Alt is the orbit modifier - task 0223, kept by task 0255)
   pp_.active = true;
   ui_.redraw = true;
 }

@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 275): modeling, placing and UV - the walkthrough's fixes (task 0255)
+
+**Asked:** ADR 0085's first area round, what the modeling walkthrough and the audits found: Ctrl with three meanings
+nowhere said, tool parameters only the wheel could reach, the UV editor panning with the middle button alone and dropping
+toolbar buttons when narrow, Hierarchy drop zones a quarter of a row, one name for two operations, a Boolean that needed
+"selected last". Nielsen's H4 (consistency), H7 (flexibility), Fitts (targets), the pen.
+
+**Added**
+- **Ctrl, said**: Push/Pull's "keep the original face" and Sketch's "freehand" stay on Ctrl (Alt is the orbit modifier
+  in three feels) and the hints and tooltips now say what Ctrl does in each tool; the snap increment is a dropdown
+  beside the magnet (0.1 to 5 m, or Custom), saved with the preferences, read by the gizmo's Ctrl drag and the modals.
+- **Keys for the wheel-only parameters**: in a modal `]` / `[` do what the wheel does - Bevel's segments, Array's count,
+  Grid's rows and columns, Pipe's sides, Taper's and Recess's second amount - for a pen or a finger.
+- **The UV editor** folds the toolbar buttons it has no room for into a "More" menu, and takes W / E / R / Y from the
+  keymap's tool actions (`action_pressed`); its hint names the preset's chords.
+- **Hierarchy drop** zones are thirds of a row (`hier_drop_mode`), and "Move into..." in the row's menu reparents to the
+  root or to any object without a drag.
+- **Names**: "Extrude Edges"; "Select Overlapping Faces" (was Z-Fighting); "Select Doubled Vertices" (was Overlapping).
+- **Boolean by name**: "Boolean..." opens a dialog naming the object kept and cut (the active mesh first) and the
+  operation, Apply now or Live modifier; `boolean <op> [modifier] [kept <name>]`. The result no longer depends on the
+  selection order.
+- **Review (Opus) taken:** moving Push/Pull's keep and Sketch's freehand to Alt broke both (Alt is the orbit modifier
+  in three feels - the task 0223 fix - so no stroke could be freehand and Alt-click finishing a Push/Pull selected a
+  loop) - Ctrl stays, and the hints say what it does; `+` / `-` in a modal doubled as typed values (a typed "-0.05"
+  also lowered the count) - only `]` / `[`; the UV toolbar's More menu kept pointers into a stack table read after the
+  frame - the table is static; Space+drag in the UV editor could not work (Space is the Wheel's chord in every preset
+  but one) - dropped, said so; the Boolean dialog could show one object and cut another when the active object was no
+  mesh - the kept object is always one of the meshes shown, the active one first; `boolean ... kept <name>` took one
+  word and fell back silently - the rest of the line, a warning when unknown; the snap combo overwrote a custom step
+  and the turn step - a Custom entry, the turn step left alone; "Move into..." listed the selection's own descendants
+  and recorded empty steps - skipped. Open: the Boolean dialog's buttons and "Move into..." are not driven by a test;
+  `]` / `[` on a US keyboard are the bracket keys only.
+
+**Checked**
+- `tests_round275`: the drop zones over a 30 px row; the three labels; a Bevel modal started by its chord with `]` and
+  `[` changing the segments; the Cube kept and cut by the Sphere giving the same mesh whichever was selected last, by
+  the hook and by the console's `kept Cube`; the UV editor's hint naming the preset's tool chords.
+- Unit checks (round 275): Windows, in render-cache verify mode, 13149, 0 failed (1132 tests), 0 stale
+  pictures. Linux with libraries: 12689, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group passed alone: the known parallel-load noise.)
+
 ## 2026-10-28 (round 274): hints from a table, labels from the keymap, unsaved-changes prompts, the History window (task 0254)
 
 **Asked:** ADR 0085's foundations F3-F6. The status bar's hint was an if-chain missing the gizmo drag, Draw, Edit

@@ -5062,10 +5062,10 @@ static void round58_tests() {
     const Recti menu = r50_popup(ed);
     CHECK(menu.w > 0 && ed.selected_object() && ed.selected_object()->name == "Cube");
     if (menu.w <= 0) return;
-    /* Rows: Rename, Duplicate, Delete, Frame Selected, Select Children, Clear Parent, Join, Boolean, Separate By Loose
+    /* Rows: Rename, Duplicate, Delete, Frame Selected, Move into... (task 0255), Select Children, Clear Parent, Join, Boolean, Separate By Loose
      * Parts, Export Selection..., Bake Textures. Hovering it opens its sizes. */
     const int row = ed.ui_for_test().row_h();
-    const int by = menu.y + ed.ui_for_test().px(4) + row * 10 + row / 2;
+    const int by = menu.y + ed.ui_for_test().px(4) + row * 11 + row / 2;
     ed.step_frame_headless({r34_mouse(R34ET::MouseMove, menu.x + menu.w / 2, by)});
     r34_steps(ed, 2);
     const Recti sizes = r50_popup(ed);

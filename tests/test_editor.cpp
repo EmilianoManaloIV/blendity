@@ -5053,6 +5053,78 @@ static void tests_round274() {
   });
 }
 
+static void tests_round275() {
+  test("modeling, placing and UV (ADR 0085, task 0255): the Hierarchy's drop zones are thirds; the edit operations' new names; ] and [ set a bevel modal's segments as the wheel does", [] {
+    std::printf("    drop zones of a 30 px row: %d %d %d %d %d (0 into, 1 before, 2 after)\n", hier_drop_mode(0, 30), hier_drop_mode(9, 30), hier_drop_mode(15, 30), hier_drop_mode(21, 30), hier_drop_mode(29, 30));
+    CHECK(hier_drop_mode(0, 30) == 1 && hier_drop_mode(9, 30) == 1 && hier_drop_mode(10, 30) == 0 && hier_drop_mode(15, 30) == 0 && hier_drop_mode(20, 30) == 0 && hier_drop_mode(21, 30) == 2 && hier_drop_mode(29, 30) == 2);
+    const EditOpInfo *ee = find_edit_op("extrude_edges"), *of = find_edit_op("select_overlapping"), *dv = find_edit_op("select_overlaps");
+    CHECK(ee && std::string(ee->label) == "Extrude Edges" && of && std::string(of->label) == "Select Overlapping Faces" && dv && std::string(dv->label) == "Select Doubled Vertices");
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(400.0);
+    ed.command("select Cube");
+    ed.command("edit");
+    ed.command("edit edge all");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_view_rect();
+    const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless({key_ev(platform::KEY_B, platform::MOD_CTRL)});  // (Unity's Bevel chord starts the modal over the view)
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 40, cy)});
+    const bool modal = ed.modal_active_for_test();
+    const int segs0 = ed.last_op_segments_for_test();
+    ed.step_frame_headless({key_ev(platform::KEY_RBRACKET)});
+    ed.step_frame_headless({key_ev(platform::KEY_RBRACKET)});
+    const int segs2 = ed.last_op_segments_for_test();
+    ed.step_frame_headless({key_ev(platform::KEY_LBRACKET)});
+    const int segs1 = ed.last_op_segments_for_test();
+    std::printf("    the bevel modal started %d; segments %d -> %d after ] twice -> %d after [\n", (int)modal, segs0, segs2, segs1);
+    CHECK(modal && segs2 == segs0 + 2 && segs1 == segs0 + 1);
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(!ed.modal_active_for_test());
+  });
+  test("Boolean by name (task 0255): the object kept is chosen, not the one selected last - Cube kept and cut by the Sphere gives the same mesh whichever was selected last; the UV editor's hint names the keymap's tool chords", [] {
+    size_t faces[2] = {0, 0};
+    for (int order = 0; order < 2; order++) {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      const GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+      CHECK(cube && sphere);
+      if (!cube || !sphere) return;
+      const uint64_t cube_id = cube->id;
+      ed.scene().find(sphere->id)->set_world_position(ed.scene().find(cube_id)->world_position() + Vec3(0.5f, 0.5f, 0.5f));
+      ed.select_for_test(order == 0 ? cube_id : sphere->id, false);
+      ed.select_for_test(order == 0 ? sphere->id : cube_id, true);
+      ed.step_frame_headless();
+      if (order == 0) ed.boolean_for_test(0, true, cube_id);
+      else ed.command("boolean difference kept Cube");  // (the console's form)
+      ed.step_frame_headless();
+      const GameObject *kept = ed.scene().find(cube_id);
+      faces[order] = kept && kept->get<MeshFilter>() && kept->get<MeshFilter>()->mesh ? kept->get<MeshFilter>()->mesh->face_count() : 0;
+      std::printf("    %s selected last: the Cube kept with %zu faces, the Sphere %s\n", order == 0 ? "Sphere" : "Cube", faces[order], ed.scene().find_by_name("Sphere") ? "still there" : "removed");
+    }
+    CHECK(faces[0] > 6 && faces[0] == faces[1]);
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("layout Texturing");
+    ed.command("window UV Editor");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti uv = ed.window_rect_for_test(WindowKind::UVEditor);
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, uv.x + uv.w / 2, uv.y + uv.h / 2)});
+    ed.command("keymap Blender");
+    ed.step_frame_headless();
+    ed.set_scene_hovered_for_test(false);
+    const std::string blender_hint = ed.statusbar_hint_for_test();
+    ed.command("keymap Unity");
+    ed.step_frame_headless();
+    ed.set_scene_hovered_for_test(false);
+    const std::string unity_hint = ed.statusbar_hint_for_test();
+    std::printf("    the UV editor's hint under Unity: %s\n    under Blender: %s\n", unity_hint.c_str(), blender_hint.c_str());
+    CHECK(uv.w > 0 && unity_hint.find("W E R: move, turn, scale") != std::string::npos && blender_hint != unity_hint);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -5099,5 +5171,6 @@ void run_editor_tests() {
   tests_round272();
   tests_round273();
   tests_round274();
+  tests_round275();
   coverage_tests();
 }

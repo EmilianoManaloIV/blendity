@@ -509,6 +509,17 @@ void Editor::rebuild_keymap() {
   for (auto &kv : keymap_overrides_) keymap_[kv.first] = kv.second;
 }
 
+/* Whether this frame's key press is one of the action's chords under the preset (the UV editor's tools: task 0255). */
+bool Editor::action_pressed(const std::string &id) const {
+  const auto it = keymap_.find(id);
+  if (it == keymap_.end()) return false;
+  const auto &in = ui_.in;
+  const int mods = (in.ctrl() ? platform::MOD_CTRL : 0) | (in.shift() ? platform::MOD_SHIFT : 0) | (in.alt() ? platform::MOD_ALT : 0);
+  for (const KeyChord &c : it->second)
+    if (c.key > 0 && c.key < platform::KEY_COUNT && in.key_pressed[c.key] && c.mods == mods) return true;
+  return false;
+}
+
 std::string Editor::shortcut_text(const std::string &id) const {
   auto it = keymap_.find(id);
   if (it == keymap_.end() || it->second.empty()) return "";

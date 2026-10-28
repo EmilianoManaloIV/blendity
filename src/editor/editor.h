@@ -150,6 +150,8 @@ Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Count };
 const char *window_title(WindowKind k);
+/* The Hierarchy's drop zones (task 0255): 1 before, 2 after, 0 into - the outer thirds and the middle of a row. */
+int hier_drop_mode(int ry, int rh);
 /* The module registry (task 0235, editor/modules.cpp): a window kind's row. */
 struct Module {
   WindowKind kind;
@@ -772,6 +774,7 @@ class Editor {
   std::string wheel_mode_for_test() const { return qm_.mode; }
   int wheel_window_for_test() const { return qm_.window; }
   int tool_for_test() const { return (int)tool_; }
+  int focused_window_for_test() const { return (int)focused_; }  // (task 0255)
   /* A menu row right-clicked by its label (what ui::Context::favorite_request carries); the small menu's entry; its
    * items run (0 the favorites, 1 the wheel). */
   void right_click_row_for_test(const std::string &label) { ui_.favorite_request = label; }
@@ -1220,6 +1223,7 @@ class Editor {
   void dock_reset_for_test(const std::string &preset) { dock_reset(preset); }
   void load_prefs_for_test() { load_prefs(); }
   void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }
+  void boolean_for_test(int op, bool apply, uint64_t kept) { boolean_selected(op, apply, kept); }  // (task 0255)
   void project_open_folder_for_test(const std::string &dir, const std::string &search = "") { project_dir_ = dir; project_search_ = search; project_listed_ = -100; }
   std::vector<std::string> button_labels_for_test() const {
     std::vector<std::string> out;
@@ -2417,6 +2421,7 @@ class Editor {
   bool run_action(const std::string &id);
   std::string shortcut_text(const std::string &id) const;
   void set_binding(const std::string &id, const std::vector<KeyChord> &chords);
+  bool action_pressed(const std::string &id) const;  // (this frame's key press is one of the action's chords: task 0255)
   void set_keymap_preset(const std::string &name);
   const Keymap &keymap() const { return keymap_; }
   const std::string &keymap_preset_name() const { return keymap_preset_; }
@@ -2600,7 +2605,9 @@ class Editor {
   void update_camera_focus();  // cameras keeping a picked point in focus
   void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
   void join_selected();
-  void boolean_selected(int op, bool apply);
+  void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
+  uint64_t boolean_kept_ = 0;  // (the Boolean dialog's choice: task 0255)
+  int boolean_op_ = 0;
   void separate(const std::string &mode);
   GameObject *spawn_part(GameObject *g, Mesh mesh);
   void set_origin(int mode, Vec3 world_point = Vec3(0.0f));  // kOriginModes; world_point for "Origin to Point"
@@ -4466,7 +4473,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {

@@ -1297,7 +1297,17 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "boolean") {
     /* boolean <difference|union|intersect> [modifier]: the active object is cut by the other selected ones */
     const std::string o = to_lower(arg(1, "difference"));
-    boolean_selected(o == "union" ? 1 : o == "intersect" ? 2 : 0, to_lower(arg(2, "")) != "modifier");
+    uint64_t kept = 0;  // (task 0255: `kept <name>` names the object cut and kept; the rest of the line is the name)
+    for (size_t i = 2; i + 1 < t.size(); i++) {
+      if (to_lower(t[i]) != "kept") continue;
+      std::string name;
+      for (size_t k = i + 1; k < t.size(); k++) name += (name.empty() ? "" : " ") + t[k];
+      const GameObject *k = scene_->find_by_name(name);
+      if (!k) return Log::warn("boolean: no object named '%s'", name.c_str());
+      kept = k->id;
+      break;
+    }
+    boolean_selected(o == "union" ? 1 : o == "intersect" ? 2 : 0, to_lower(arg(2, "")) != "modifier", kept);
   }
   else if (c == "separate") separate(to_lower(arg(1, "loose")) == "selection" ? "selection" : "loose");
   else if (c == "esel") {

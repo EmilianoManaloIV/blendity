@@ -1080,6 +1080,11 @@ void Editor::draw_menubar(const Recti &r) {
       if (u.menu_item("Join", key("object.join").c_str(), false, two)) join_selected();
       u.tooltip("Combine the selected meshes into the active one (selected last), keeping their materials.\n"
                 "Blender: Object > Join (Ctrl+J). ProBuilder: Merge Objects.");
+      if (u.menu_item("Boolean...", nullptr, false, two)) {  // (task 0255: the object kept named, whatever the order of selection)
+        boolean_kept_ = active_;
+        dialog_ = Dialog::Boolean;
+      }
+      u.tooltip("Choose which selected object is kept and cut by the others, and the operation - no need to select it last.");
       u.submenu("Boolean", u.px(250), [this, two] {
         auto &u = ui_;
         static const char *kOps[] = {"Difference", "Union", "Intersect"};
@@ -1297,6 +1302,20 @@ void Editor::draw_toolbar(const Recti &r) {
   u.tooltip("Handle orientation. Blender: Transform Orientation (Global / Local).");
   x += gw + u.px(4);
   if (u.icon_button({x, y, bh, bh}, Icon::Magnet, snap_, "Increment snapping (or hold Ctrl while dragging).\nBlender: Shift+Tab snapping toggle.")) snap_ = !snap_;
+  {  /* Task 0255: the snap increment beside the magnet (Unity's Increment Snap), read by the gizmo and the modals; saved with the preferences. */
+    static const char *const steps[] = {"0.1 m", "0.25 m", "0.5 m", "1 m", "5 m", "Custom"};
+    static const float values[] = {0.1f, 0.25f, 0.5f, 1.0f, 5.0f};
+    int cur = 5;  // (Custom: a value set in Preferences that is none of the steps)
+    for (int i = 0; i < 5; i++)
+      if (std::fabs(snap_move_ - values[i]) < 1e-4f) cur = i;
+    const int sw = u.px(76);
+    if (u.combo(u.id("snap_step"), {x + bh + u.px(4), y, sw, bh}, cur, steps, 6) && cur < 5) {
+      snap_move_ = values[cur];
+      save_prefs();
+    }
+    u.tooltip(strprintf("The move step for a Ctrl drag (and the magnet). A turn snaps to %g degrees (Preferences).", snap_rot_));
+    x += sw + u.px(4);
+  }
   x += bh + u.px(14);
   if (edit_mode_) {
     int ew = u.font.text_width("Vertex") + bh + u.px(10);
@@ -3624,6 +3643,47 @@ void Editor::draw_dialogs() {
         title("AI Inbetweening, an optional download");
         draw_ai_dialog(close);
         break;
+      case Dialog::Boolean: {  // (task 0255: the object kept and the cutters named, whatever the order of selection)
+        title("Boolean");
+        std::vector<GameObject *> meshes;
+        for (GameObject *g : selected_objects(false))
+          if (g->get<MeshFilter>() && g->get<MeshFilter>()->mesh) meshes.push_back(g);
+        std::stable_partition(meshes.begin(), meshes.end(), [this](const GameObject *g) { return g->id == active_; });  // (the active mesh first)
+        std::vector<const char *> names;
+        int cur = -1;
+        for (size_t i = 0; i < meshes.size(); i++) {
+          names.push_back(meshes[i]->name.c_str());
+          if (meshes[i]->id == boolean_kept_) cur = (int)i;
+        }
+        if (cur < 0 && !meshes.empty()) boolean_kept_ = meshes[0]->id, cur = 0;  // (the active object was no mesh: the first mesh is kept)
+        if (cur < 0) cur = 0;
+        Recti r = u.popup_row();
+        u.label({r.x + u.px(12), r.y, u.px(120), r.h}, "Keep and cut");
+        if (!names.empty() && u.combo(u.id("bool_keep"), {r.x + u.px(136), r.y, r.w - u.px(150), r.h}, cur, names.data(), (int)names.size())) boolean_kept_ = meshes[(size_t)cur]->id;
+        r = u.popup_row();
+        u.label({r.x + u.px(12), r.y, u.px(120), r.h}, "Operation");
+        static const char *const kBoolOps[] = {"Difference", "Union", "Intersect"};
+        u.combo(u.id("bool_op"), {r.x + u.px(136), r.y, r.w - u.px(150), r.h}, boolean_op_, kBoolOps, 3);
+        r = u.popup_row();
+        std::string cutters;
+        for (GameObject *g : meshes)
+          if (g->id != boolean_kept_) cutters += (cutters.empty() ? "" : ", ") + g->name;
+        u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, meshes.size() < 2 ? std::string("Select two or more mesh objects.") : "The cutters: " + cutters, u.theme.text_dim);
+        Recti b = u.popup_row(u.row_h() + u.px(10));
+        const int bw = u.px(110), bh = b.h - u.px(8), by = b.y + u.px(4);
+        const Recti apply{b.x + u.px(12), by, bw, bh}, live{b.x + u.px(12) + bw + u.px(6), by, bw, bh}, cancel{b.right() - u.px(92), by, u.px(80), bh};
+        if (u.record_buttons) u.button_rects["bool:Apply"] = apply, u.button_rects["bool:Modifier"] = live, u.button_rects["bool:Cancel"] = cancel;
+        if (u.button_enabled(apply, "Apply now", meshes.size() >= 2, "Select two or more mesh objects.")) {
+          close();
+          boolean_selected(boolean_op_, true, boolean_kept_);
+        }
+        else if (u.button_enabled(live, "Live modifier", meshes.size() >= 2, "Select two or more mesh objects.")) {
+          close();
+          boolean_selected(boolean_op_, false, boolean_kept_);
+        }
+        else if (u.button(cancel, "Cancel")) close();
+        break;
+      }
       case Dialog::UnsavedChanges: {  // (task 0254: Save / Don't Save / Cancel before the scene is replaced)
         const std::string t = "Save changes to " + scene_->name + "?";
         title(t.c_str());
