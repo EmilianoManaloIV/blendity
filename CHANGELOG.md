@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 270): the write-up - customize, sculpt, paint, stylize (task 0250)
+
+**Asked:** the pass's write-up.
+
+**Added**
+- `docs/tasks/0250-write-up-sculpt-paint-stylize.md`: what rounds 250-269 set out to do and what landed (a table by
+  round, task and ADR), what held up (one brush architecture across five rounds, in-place undo deltas, the rect engine,
+  workers wherever a frame would stall, honest numbers), what the reviews caught and the pass kept, what is still open
+  (sculpt, paint, stylize and process items), and where to read more.
+
+**Checked**
+- A document: no code changed.
+- CHECKS270
+
 ## 2026-10-28 (round 269): the manual, the Learn lessons, the check lists (task 0249)
 
 **Asked:** after the customize, sculpt, paint and stylize rounds, the manual, the Learn lessons and the check lists.
@@ -21,8 +35,10 @@ One entry per round of requests, newest first: what was asked, what changed, and
 - No new code: the manual test (13 chapters, the Learn notes) and the Learn tab's Try-it test (every new section's
   commands run headless) cover the additions.
 - Unit checks (round 269): Windows, in render-cache verify mode, 13060, 0 failed (1122 tests), 0 stale
-  pictures. Linux with libraries: 12600, 0 failed. Sanitizer build: 12600, 0 failed, no reports. `editor_fuzz` in
-  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group passed alone (the known parallel-load noise); linux 12,600.)
+  pictures. Linux with libraries: 12600, 0 failed. The sanitizer leg did not run this round (WSL would not
+  start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group
+  passed alone: the known parallel-load noise.)
 
 ## 2026-10-28 (round 268): stylized environments (task 0248)
 
