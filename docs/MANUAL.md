@@ -360,6 +360,13 @@ object's mesh maps; `smat save <layer> <name>` keeps a group of your own under A
 images a game engine reads, packed as it expects. `paint 2d on` paints on the Textures window's canvas instead of the
 model; `paint stencil <image>` holds an image over the view that masks the brush.
 
+**The hand-painted look.** The Paint section's Tip (Round, Flat turned to the drag, Bristle) and Mode (Paint, Smudge, Blend),
+Wet (the brush carries the colour it went over), Jitter and `paint grain <image>` make the brush behave like paint; the palette
+row keeps swatches and the picked one's shades. `paint bakelight` bakes the mesh maps' occlusion and a key light into a Multiply
+layer to paint over (`paint bakegradient` the top-down value gradient), `paint gradient` lays one as paint. Set the material's
+Shading Model to Hand-painted so every renderer shows the texture as painted (a rim and a painted highlight in the CPU raster;
+glTF writes it unlit). Posterize, Edge Shade and Cavity are filters in the Textures window's Add Layer menu.
+
 **Many at once.** The Materials, Textures and Project windows select like the Hierarchy: Ctrl+click, Shift+click a
 range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Trash).
 
@@ -716,6 +723,7 @@ the editor. A few that are handy by hand:
 | `surface new`, `surface mask preset 1 edgewear`, `surface eval 0 0 128 128` | a surface for the object, a smart mask on layer 1, the rect engine timed |
 | `paint on`, `paint color 0.8 0.1 0.1`, `paint fill island` | Paint Mode, the brush's colour, a fill of the UV island under the pointer |
 | `smat apply Worn Steel`, `export textures gltf Exports/Crate`, `paint 2d on` | a smart material on the surface, the texture set in the glTF packing, the canvas takes the brush |
+| `paint brush bristle`, `paint wet 0.5`, `paint bakelight key 1 1 0.5` | a bristle tip, wet mixing, the light baked into a layer to paint over |
 | `libs` | which of Blender's libraries this build uses |
 | `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
 | `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |

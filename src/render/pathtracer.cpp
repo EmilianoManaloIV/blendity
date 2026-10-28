@@ -2059,7 +2059,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     g.tex1[1] = m.mapping;
     g.tex1[2] = m.procedural;
     g.tex1[3] = m.surface;
-    g.flags[0] = m.unlit ? 1 : 0;
+    g.flags[0] = m.unlit || m.shading_model == 2 ? 1 : 0;  // (task 0247: Hand-painted traces unlit on the card too)
     g.flags[1] = m.wrap;
     g.flags[2] = settings_.retro.active() && settings_.retro.tex.filter >= 0 ? settings_.retro.tex.filter : m.filter;  // a camera filter's
     g.flags[3] = (m.shading_model == 1 ? 1 : 0) | (m.outline_hull ? 2 : 0);  // toon, an outline's hull (ADR 0020)

@@ -2,6 +2,69 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 267): the hand-painted look (task 0247)
+
+**Asked:** after Substance's pillars, the stylized side - the hand-painted look of Blizzard's and Riot's textures and
+of Ghibli-styled games: the light painted into the colour, a brush that behaves like paint.
+
+**Added**
+- **The painterly brush** (`src/editor/paint.cpp`, ADR 0083): **tips** - Round (the falloff), Flat (an ellipse of the
+  brush's Tip Ratio turned to the drag), Bristle (a bundle of small stamps placed by the stroke's seed, so a stroke
+  leaves streaks); **wet mixing** (Wet: the brush carries the mean colour it went over at the last dab and mixes the
+  next dab's by that much - strokes blend as paint); **jitter** in hue, saturation and value per dab from the stroke's
+  seed (0 exact); **grain** (`paint grain <image> [scale]`: an image's luminance multiplies the dab's weight, tiled in
+  texel space); **Smudge** (the paint pulled one spacing step along the drag, onto fresh texels too) and **Blend**
+  (the 3 x 3 mean) as modes, colour only, through the same tile step. Everything downstream is 0245's: a stroke is one
+  undo step, the dilation and the GPU rows as before.
+- **The Gradient fill** (`paint gradient r g b r g b [island|group|material|object] [x|y|z]`): a fill from one colour
+  to another along a world axis of the mesh maps' position - the value gradient hand-painters lay first.
+- **The palette** (the Paint section: swatches, the picked one's five shades, +; `paint palette add|pick|shade|remove|
+  save|load|list`), saved as text under `Assets/Palettes/<name>.pal`.
+- **Lighting painted in:** `paint bakelight [key x y z]` adds a **Baked Light** Image layer (Multiply) holding per
+  texel of the mesh maps the occlusion times a key direction's wrap-lit term (the scene's first directional light's,
+  or the one given) - the painter's key-and-ambient pass, written under `Assets/Textures/Baked/`, one undo step;
+  `paint bakegradient [top] [bottom]` the top-down value gradient the same way. Not a lightmap: no shadow rays or
+  bounces this round.
+- **The Hand-painted shading model** (Material > Shading Model: Hand-painted; ADR 0083): the texture's colour as it is
+  in every renderer (unlit in the CPU raster, the GPU view, the path tracer and its kernel), plus a rim at grazing
+  angles and a painted specular where the roughness channel is low in the CPU raster (Rim, Rim Width, Rim Color,
+  Painted Specular); lights neither shade nor darken it. glTF writes it `KHR_materials_unlit` (and an `unlit`
+  material too, which had no extension before).
+- **Stylization filters** (`src/texture/surface.cpp`): **Posterize** (N values, the hue kept), **Edge Shade** (the
+  mesh maps' convex edges lightened or darkened through a width - the edge-highlight pass), **Cavity** (the occlusion
+  to a strength multiplying the colour).
+- **Console:** `paint brush round|flat|bristle|paint|smudge|blend`, `paint tip ratio|bristles`, `paint wet`, `paint
+  jitter h s v`, `paint grain`, `paint stroke x0 y0 x1 y1 [dabs]`, `paint gradient`, `paint palette`, `paint
+  bakelight`, `paint bakegradient`.
+- **Measured** (`tests_round267`): a wet 0.5 blue stroke over red left 2,933 texels with red and blue both above 0.2
+  and 339 pure blue; jitter 0 painted 3,647 of 3,647 texels the exact colour; a checker grain at 16 texels a cell
+  painted 2,504 texels against 3,647; Smudge moved a red patch's centre 2.1 texels along the drag; the baked light
+  from +X read 0.985 on a sphere's +X side against 0.652 on -X; Edge Shade lifted the cube's edge band to 0.708 against
+  the faces' 0.510; Posterize 5 left exactly 5 values.
+- **Review (Opus) taken:** the scene sun's key is now toward the light (a light points along its +Z; it had lit the
+  underside; disabled and inactive lights are skipped; tested with the sample scene's sun aimed down); Smudge pulls
+  along the drag in texel space, read from the dabs' centroids, with its step in texels (it had used the screen drag,
+  wrong on a rotated or mirrored island; the screen drag turns the Flat tip only); Smudge and Blend read the touched
+  tiles as they were before the dab (a snapshot once a dab: the result had depended on the scan order); each bake
+  writes a file of its own and tells the texture cache (an earlier layer keeps its image; undo gives it back); the bake
+  runs on a worker and the layer lands when the file is written (a 4k map's PNG had been encoded on the main thread);
+  fills and the gradient ignore the brush's Smudge / Blend mode; a stroke's first dab stamps Round and Smudge waits for
+  a drag (a vertical Flat stroke had started with a crossbar); the Bristle stamps are made once a stroke and evaluated
+  after the occlusion tests; the dab serial's wrap at 255 is handled; Edge Shade and Cavity write the height in a mask
+  stack; the filters run their rows in parallel; the solid modes and the Materials window's ball honour Hand-painted;
+  the palette's pick follows a remove; the loosened round-266 check is explained in the test; the ADR's claims about
+  redo and the baked light's source are corrected. Open: the Hand-painted rim on the card and in the path tracer, MoonRay
+  exports it lit, the pen's tilt, Paint Strokes.
+
+**Checked**
+- `tests_round267` in `tests/test_editor.cpp` (the stamps' peaks and the Flat tip's turn, the wet stroke, jitter 0 and
+  0.2, the grain, Smudge; the baked light and gradient layers, the Gradient fill, the palette), `tests/test_render.cpp`
+  (Posterize, Edge Shade, Cavity on the cube's maps, the Hand-painted sample unlit) and `tests/test_livelink.cpp`
+  (`KHR_materials_unlit`).
+- Unit checks (round 267): Windows, in render-cache verify mode, 13033, 0 failed (1119 tests), 0 stale
+  pictures. Linux with libraries: 12573, 0 failed. Sanitizer build: 12420, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the sanitizer animation group passed alone (the known parallel-load noise); gpu views and fuzz clean; linux 12,573.)
+
 ## 2026-10-28 (round 266): smart materials, texture sets, 2D painting (task 0246)
 
 **Asked:** Substance Painter's pillars - after the stack (0244) and the brush (0245): smart materials dropped onto any

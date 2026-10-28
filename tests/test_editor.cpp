@@ -3867,9 +3867,368 @@ static void tests_round266() {
     const Material *am = mr && !mr->materials.empty() ? mr->materials[0].get() : nullptr;
     std::printf("    --assign: base '%s' rough '%s' metal '%s' emit '%s' metallic %g roughness %g\n", am ? am->base_map.path.c_str() : "-", am ? am->roughness_map.path.c_str() : "-", am ? am->metallic_map.path.c_str() : "-", am ? am->emission_map.path.c_str() : "-", am ? am->metallic : -1.0f, am ? am->roughness : -1.0f);
     const std::string ex = "Exports/Assigned/" + pt->name + "_";  // (the scratch project keeps earlier runs' assets: the surface's name may carry a number)
+    /* The emission map follows the live rule (the stack writes emission - the Paint layer does); whether the live material already
+     * carried one depends on the worker having landed, which the sanitizer build's timing made false: either is right here. */
     const bool assigned = am && am->base_map.path == ex + "Albedo.png" && am->roughness_map.path == ex + "Roughness.png" && am->metallic_map.path == ex + "Metallic.png" && (am->emission_map.path.empty() || am->emission_map.path == ex + "Emission.png") && am->metallic == 1.0f && am->roughness == 1.0f;
     CHECK(assigned && fs::exists(ed.resolve_asset_path_for_test(ex + "ORM.png")) && fs::exists(ed.resolve_asset_path_for_test(ex + "Metallic.png")));
     ed.command("undo");
+  });
+}
+
+static void tests_round267() {
+  test("the painterly brush (ADR 0083): a Bristle stamp has several peaks inside the disc and a Round one, a Flat tip turned 90 degrees swaps its extents; a wet blue stroke over red ends between them; jitter 0 paints the exact colour and jitter 0.2 in value stays within it; a checker grain halves the painted texels; Smudge pulls a patch's edge along the drag", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    g->set_local_scale(Vec3(6.0f));  // (the cube fills a good part of the view: a 30 px dab is a patch, not the whole face)
+    ed.command("surface new BrushSurf");
+    ed.step_frame_headless();
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    PaintBrush &b = ed.paint_brush_for_test();
+    /* The stamps, sampled on a 41 x 41 grid over the disc. */
+    auto peaks = [&](int tip) {
+      b.tip = tip, b.hardness = 0.0f;  // (no plateau: a peak is one cell)
+      const int n = 41;
+      std::vector<float> w((size_t)n * n);
+      for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) w[(size_t)y * n + x] = ed.paint_stamp_for_test({(x - 20) / 20.0f, (y - 20) / 20.0f}, {1.0f, 0.0f}, 7u);
+      int count = 0;
+      for (int y = 1; y < n - 1; y++)
+        for (int x = 1; x < n - 1; x++) {
+          const float c = w[(size_t)y * n + x];
+          if (c <= 0.05f) continue;
+          bool top = true;
+          for (int dy = -1; dy <= 1 && top; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+              if ((dx || dy) && w[(size_t)(y + dy) * n + x + dx] > c) top = false;
+          /* A plateau (the hard centre) counts once: only its first texel in scan order. */
+          bool first = true;
+          for (int dy = -1; dy <= 0 && first; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+              if ((dy < 0 || dx < 0) && w[(size_t)(y + dy) * n + x + dx] == c) first = false;
+          if (top && first) count++;
+        }
+      return count;
+    };
+    const int round_peaks = peaks(0), bristle_peaks = peaks(2);
+    b.tip = 1, b.tip_ratio = 0.3f, b.hardness = 0.5f;  // (0.5 along the drag is inside the hard centre; 0.5 across is 1.67 radii out of the 0.3-wide ellipse)
+    const float along = ed.paint_stamp_for_test({0.5f, 0.0f}, {1.0f, 0.0f}, 7u), across = ed.paint_stamp_for_test({0.0f, 0.5f}, {1.0f, 0.0f}, 7u);
+    const float along_t = ed.paint_stamp_for_test({0.5f, 0.0f}, {0.0f, 1.0f}, 7u), across_t = ed.paint_stamp_for_test({0.0f, 0.5f}, {0.0f, 1.0f}, 7u);
+    std::printf("    stamps: Round %d peak(s), Bristle %d; Flat along / across the drag %.2f / %.2f, turned 90 degrees %.2f / %.2f\n", round_peaks, bristle_peaks, along, across, along_t, across_t);
+    CHECK(round_peaks == 1 && bristle_peaks >= 6 && along > 0.5f && across == 0.0f && along_t == 0.0f && across_t > 0.5f);
+    b.tip = 0;
+    /* The dabs below go on the cube's front face, at the view's centre. */
+    Vec2 px;
+    CHECK(ed.project_for_test(g->world_position(), px));
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    auto stroke = [&](float x0, float x1, int dabs) { ed.command(strprintf("paint stroke %g %g %g %g %d", x0, px.y, x1, px.y, dabs)); };  // (one stroke: the brush carries its pickup along it)
+    auto count_where = [&](std::function<bool(uint32_t)> f) {
+      PaintImagesPtr im = ed.paint_images_for_test();
+      size_t n = 0;
+      if (im)
+        for (size_t i = 0; i < im->size(); i++)
+          if (im->cover[i] && f(im->color[i])) n++;
+      return n;
+    };
+    auto count = [&] { return count_where([](uint32_t) { return true; }); };
+    ed.command("paint size 30");
+    ed.command("paint hardness 1");
+    ed.command("paint opacity 1");
+    /* Wet: red first, then blue over it with wet 0.5 - texels with both red and blue above 0.2. */
+    ed.command("paint color 1 0 0");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    ed.command("paint color 0 0 1");
+    ed.command("paint wet 0.5");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const size_t mixed = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) > 51 && (c & 0xFF) > 51; }), pure_blue = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) == 0 && (c & 0xFF) == 255; });
+    std::printf("    a wet blue stroke over red: %zu mixed texels (red and blue both above 0.2), %zu pure blue\n", mixed, pure_blue);
+    CHECK(mixed > 500 && pure_blue < mixed);
+    ed.command("paint wet 0");
+    ed.command("undo");
+    ed.command("undo");
+    /* Jitter: 0 paints the brush's exact colour; 0.2 in value keeps every texel's value within 0.2 (sRGB bytes compared in linear). */
+    ed.command("paint color 0.5 0.25 0.1");
+    ed.command("paint jitter 0 0 0");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const uint32_t exact = 0xFF000000u | (uint32_t)display::linear_to_srgb8(0.5f) << 16 | (uint32_t)display::linear_to_srgb8(0.25f) << 8 | display::linear_to_srgb8(0.1f);
+    const size_t all0 = count(), same0 = count_where([&](uint32_t c) { return c == exact; });
+    ed.command("undo");
+    ed.command("paint jitter 0 0 0.2");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    size_t distinct = 0, out_of_range = 0;
+    {
+      std::set<uint32_t> seen;
+      PaintImagesPtr im = ed.paint_images_for_test();
+      for (size_t i = 0; im && i < im->size(); i++) {
+        if (!im->cover[i]) continue;
+        seen.insert(im->color[i]);
+        const float v = std::max({((im->color[i] >> 16) & 0xFF) / 255.0f, ((im->color[i] >> 8) & 0xFF) / 255.0f, (im->color[i] & 0xFF) / 255.0f});
+        const float v0 = display::linear_to_srgb8(0.5f) / 255.0f;
+        if (std::fabs(v - v0) > 0.2f + 0.02f) out_of_range++;  // (0.2 in linear value is less in sRGB bytes: a loose bound with a tolerance)
+      }
+      distinct = seen.size();
+    }
+    std::printf("    jitter 0: %zu of %zu texels the exact colour; jitter 0.2 in value: %zu distinct colours, %zu out of range\n", same0, all0, distinct, out_of_range);
+    CHECK(all0 > 0 && same0 == all0 && distinct > 3 && out_of_range == 0);
+    ed.command("paint jitter 0 0 0");
+    ed.command("undo");
+    /* Grain: a 2 x 2 checker at scale 1 lets every other texel through - about half the texels. */
+    const std::string grain = fs::join(scratch_project(), "grain.png");
+    {
+      const uint32_t px4[4] = {0xFFFFFFFFu, 0xFF000000u, 0xFF000000u, 0xFFFFFFFFu};
+      CHECK(write_png(grain, px4, 2, 2, 2, false));
+    }
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const size_t plain = count();
+    ed.command("undo");
+    ed.command("paint grain " + grain + " 16");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const size_t grained = count();
+    ed.command("paint grain off");
+    ed.command("undo");
+    std::printf("    grain: %zu texels with a 2 x 2 checker at 16 texels a cell against %zu without (the dilation fills two texels of each hole's rim)\n", grained, plain);
+    CHECK(grained > 0 && grained < plain * 0.85f);
+    /* Smudge: a red patch, then a smudge stroke dragging rightwards on screen pulls red along the drag - in texel space, which
+     * way the face's UVs run (measured first: two dabs at the drag's ends, their texel columns compared). */
+    ed.command("paint color 1 0 0");
+    ed.command("paint size 20");
+    auto red_column = [&] {
+      PaintImagesPtr imp = ed.paint_images_for_test();
+      double sx = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; imp && i < imp->size(); i++)
+        if (imp->cover[i] && ((imp->color[i] >> 16) & 0xFF) > 128) sx += (double)(i % imp->w), n++;
+      return n ? (float)(sx / n) : 0.0f;
+    };
+    ed.command(strprintf("paint dab %g %g", px.x - 36.0f, px.y));
+    const float col_start = red_column();
+    ed.command("undo");
+    ed.command(strprintf("paint dab %g %g", px.x + 30.0f, px.y));
+    const float col_end = red_column();
+    ed.command("undo");
+    const float drag_sign = col_end > col_start ? 1.0f : -1.0f;
+    ed.command(strprintf("paint dab %g %g", px.x - 30.0f, px.y));
+    const size_t red_before = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) > 128; });
+    PaintImagesPtr im = ed.paint_images_for_test();
+    float cx_before = 0.0f;
+    {
+      double sx = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; im && i < im->size(); i++)
+        if (im->cover[i] && ((im->color[i] >> 16) & 0xFF) > 128) sx += (double)(i % im->w), n++;
+      cx_before = n ? (float)(sx / n) : 0.0f;
+    }
+    ed.command("paint brush smudge");
+    stroke(px.x - 36.0f, px.x + 30.0f, 22);
+    ed.command("paint brush round");
+    const size_t red_after = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) > 128; });
+    float cx_after = 0.0f;
+    {
+      double sx = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; im && i < im->size(); i++)
+        if (im->cover[i] && ((im->color[i] >> 16) & 0xFF) > 128) sx += (double)(i % im->w), n++;
+      cx_after = n ? (float)(sx / n) : 0.0f;
+    }
+    std::printf("    smudge: %zu red texels before, %zu after; the red's centre moved from texel column %.1f to %.1f (the screen drag runs toward %s in this face's texels: the paint goes with it)\n", red_before, red_after, cx_before, cx_after, drag_sign > 0.0f ? "+x" : "-x");
+    CHECK(red_before > 0 && red_after > red_before && (cx_after - cx_before) * drag_sign > 1.0f);
+    ed.command("paint off");
+  });
+}
+
+static void tests_round267b() {
+  test("lighting painted in (ADR 0083): paint bakelight with a key from +X adds one Multiply Image layer as one step whose PNG is brighter on the sphere's +X side than its -X side; paint bakegradient is brighter at the top; the Gradient fill over the object is brighter at the top than the bottom; a palette saved and loaded has the same swatches and picks the brush's colour", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Sphere");
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    G()->set_local_scale(Vec3(4.0f));
+    ed.command("surface new LightSurf");
+    ed.step_frame_headless();
+    ed.command("meshmaps 128 2");
+    for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    ed.command("meshmaps status");
+    ed.command("surface maps");
+    ed.step_frame_headless();
+    std::string why;
+    ProceduralTexturePtr pt = ed.surface_of_for_test(G(), &why);
+    CHECK(pt && pt->maps && !pt->maps->empty());
+    if (!pt || !pt->maps || pt->maps->empty()) return;
+    const size_t layers0 = pt->layers.size(), steps0 = ed.undo_steps_for_test();
+    ed.command("paint bakelight key 1 0 0");
+    for (int i = 0; i < 20000 && ed.bakelight_busy_for_test(); i++) ed.step_frame_headless();  // (the worker: the layer lands on a frame)
+    ed.step_frame_headless();
+    const bool added = pt->layers.size() == layers0 + 1 && std::string(pt->layers.back()->type_name()) == "Image" && pt->layers.back()->blend == (int)LayerBlend::Multiply;
+    std::string rel;
+    if (added) {  // (the layer's file: a name of its own per bake, so an earlier layer keeps its image)
+      struct ReadPath : Reflector {
+        std::string path;
+        bool all_fields() const override { return true; }
+        void field(const char *, float &, float, float, float) override {}
+        void field(const char *, int &, int, int) override {}
+        void field(const char *, bool &) override {}
+        void field(const char *, Vec3 &) override {}
+        void color(const char *, Vec3 &) override {}
+        void enumeration(const char *, int &, const char *const *, int) override {}
+        void text(const char *, std::string &) override {}
+        void mesh(const char *, MeshPtr &) override {}
+        void texture(const char *n, TextureRef &v) override {
+          if (std::string(n) == "Image") path = v.path;
+        }
+      } rp;
+      pt->layers.back()->reflect(rp);
+      rel = rp.path;
+    }
+    Bitmap bm;
+    std::string err;
+    const bool loaded = !rel.empty() && load_image(ed.resolve_asset_path_for_test(rel), bm, err) && bm.width == pt->maps->w;
+    float plus = 0.0f, minus = 0.0f;
+    size_t pn = 0, mn = 0;
+    for (size_t i = 0; loaded && i < pt->maps->normal.size(); i++) {
+      if (pt->maps->cover[i] < 0.5f) continue;
+      const float nx = pt->maps->normal[i].x, lum = bm.rgba8[i * 4] / 255.0f;
+      if (nx > 0.8f) plus += lum, pn++;
+      else if (nx < -0.8f) minus += lum, mn++;
+    }
+    std::printf("    bakelight from +X: %zu layer(s) (+%zu), %zu step(s); the PNG's +X side %.3f against -X %.3f\n", pt->layers.size(), pt->layers.size() - layers0, ed.undo_steps_for_test() - steps0, pn ? plus / pn : 0.0f, mn ? minus / mn : 0.0f);
+    CHECK(added && ed.undo_steps_for_test() == steps0 + 1 && loaded && pn && mn && plus / pn > minus / mn + 0.2f);
+    ed.command("undo");
+    pt = ed.surface_of_for_test(G(), &why);
+    CHECK(pt && pt->layers.size() == layers0);
+    if (!pt) return;
+    /* The scene's sun as the key: a directional light aimed down (-Y) makes the top brighter than the underside. */
+    ed.command("select Directional Light");
+    ed.step_frame_headless();
+    GameObject *sun = ed.active_object_for_test();
+    if (sun && sun->get<Light>()) {
+      sun->set_local_euler(Vec3(90.0f, 0.0f, 0.0f));  // (+Z turned to -Y: the light points down)
+      ed.command("select Sphere");
+      ed.step_frame_headless();
+      ed.command("paint bakelight");
+      for (int i = 0; i < 20000 && ed.bakelight_busy_for_test(); i++) ed.step_frame_headless();
+      ed.step_frame_headless();
+      std::string rel2;
+      if (pt->layers.size() == layers0 + 1) {
+        struct ReadPath2 : Reflector {
+          std::string path;
+          bool all_fields() const override { return true; }
+          void field(const char *, float &, float, float, float) override {}
+          void field(const char *, int &, int, int) override {}
+          void field(const char *, bool &) override {}
+          void field(const char *, Vec3 &) override {}
+          void color(const char *, Vec3 &) override {}
+          void enumeration(const char *, int &, const char *const *, int) override {}
+          void text(const char *, std::string &) override {}
+          void mesh(const char *, MeshPtr &) override {}
+          void texture(const char *n, TextureRef &v) override {
+            if (std::string(n) == "Image") path = v.path;
+          }
+        } rp2;
+        pt->layers.back()->reflect(rp2);
+        rel2 = rp2.path;
+      }
+      Bitmap sm;
+      const bool sl = !rel2.empty() && rel2 != rel && load_image(ed.resolve_asset_path_for_test(rel2), sm, err) && sm.width == pt->maps->w;
+      float up = 0.0f, down = 0.0f;
+      size_t un = 0, dn = 0;
+      for (size_t i = 0; sl && i < pt->maps->normal.size(); i++) {
+        if (pt->maps->cover[i] < 0.5f) continue;
+        const float ny = pt->maps->normal[i].y, lum = sm.rgba8[i * 4] / 255.0f;
+        if (ny > 0.8f) up += lum, un++;
+        else if (ny < -0.8f) down += lum, dn++;
+      }
+      std::printf("    bakelight from the scene's sun aimed down: the top %.3f against the underside %.3f (its own file: %d)\n", un ? up / un : 0.0f, dn ? down / dn : 0.0f, (int)(rel2 != rel));
+      CHECK(sl && un && dn && up / un > down / dn + 0.2f);
+      ed.command("undo");
+    }
+    else ed.command("select Sphere");
+    ed.command("paint bakegradient 1 1 1 0 0 0");
+    for (int i = 0; i < 20000 && ed.bakelight_busy_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    std::string grel;
+    if (pt->layers.size() == layers0 + 1) {
+      struct ReadPath3 : Reflector {
+        std::string path;
+        bool all_fields() const override { return true; }
+        void field(const char *, float &, float, float, float) override {}
+        void field(const char *, int &, int, int) override {}
+        void field(const char *, bool &) override {}
+        void field(const char *, Vec3 &) override {}
+        void color(const char *, Vec3 &) override {}
+        void enumeration(const char *, int &, const char *const *, int) override {}
+        void text(const char *, std::string &) override {}
+        void mesh(const char *, MeshPtr &) override {}
+        void texture(const char *n, TextureRef &v) override {
+          if (std::string(n) == "Image") path = v.path;
+        }
+      } rp3;
+      pt->layers.back()->reflect(rp3);
+      grel = rp3.path;
+    }
+    Bitmap gm;
+    const bool gl = !grel.empty() && load_image(ed.resolve_asset_path_for_test(grel), gm, err) && gm.width == pt->maps->w;
+    float top = 0.0f, bottom = 0.0f;
+    size_t tn = 0, bn = 0;
+    for (size_t i = 0; gl && i < pt->maps->position.size(); i++) {
+      if (pt->maps->cover[i] < 0.5f) continue;
+      const float y = pt->maps->position[i].y, lum = gm.rgba8[i * 4] / 255.0f;
+      if (y > 0.9f) top += lum, tn++;
+      else if (y < 0.1f) bottom += lum, bn++;
+    }
+    std::printf("    bakegradient: the top %.3f against the bottom %.3f\n", tn ? top / tn : 0.0f, bn ? bottom / bn : 0.0f);
+    CHECK(gl && tn && bn && top / tn > bottom / bn + 0.5f);
+    ed.command("undo");
+    /* The Gradient fill: dark at the bottom to light at the top over the object, read back by the maps' position. */
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    ed.command("paint gradient 0.1 0.1 0.1 0.9 0.9 0.9 object y");
+    PaintImagesPtr im = ed.paint_images_for_test();
+    CHECK(im && !im->empty());
+    float gtop = 0.0f, gbottom = 0.0f;
+    size_t gtn = 0, gbn = 0;
+    for (size_t i = 0; im && i < im->size(); i++) {
+      if (!im->cover[i]) continue;
+      const int x = (int)(i % im->w), y = (int)(i / im->w);
+      const Vec3 q = pt->maps->sample3(pt->maps->position, (x + 0.5f) / im->w, 1.0f - (y + 0.5f) / im->h);
+      const float lum = ((im->color[i] >> 16) & 0xFF) / 255.0f;
+      if (q.y > 0.9f) gtop += lum, gtn++;
+      else if (q.y < 0.1f) gbottom += lum, gbn++;
+    }
+    std::printf("    the Gradient fill: %zu texels; the top %.3f against the bottom %.3f\n", im ? im->size() : (size_t)0, gtn ? gtop / gtn : 0.0f, gbn ? gbottom / gbn : 0.0f);
+    CHECK(gtn && gbn && gtop / gtn > gbottom / gbn + 0.5f);
+    ed.command("undo");
+    /* The palette. */
+    ed.command("paint palette add 1 0 0");
+    ed.command("paint palette add 0 1 0");
+    ed.command("paint palette add 0.2 0.3 0.4");
+    ed.command("paint palette save TestPal");
+    CHECK(fs::exists(ed.resolve_asset_path_for_test("Assets/Palettes/TestPal.pal")));
+    ed.command("paint palette remove 0");
+    ed.command("paint palette remove 0");
+    CHECK(ed.paint_palette_for_test().size() == 1);
+    ed.command("paint palette load TestPal");
+    const auto &pal = ed.paint_palette_for_test();
+    CHECK(pal.size() == 3 && length(pal[2] - Vec3(0.2f, 0.3f, 0.4f)) < 1e-5f);
+    ed.command("paint palette pick 1");
+    CHECK(length(ed.paint_brush_for_test().color - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);
+    ed.command("paint palette shade 0");
+    std::printf("    palette: %zu swatches after load; shade 0 of green is (%.2f, %.2f, %.2f)\n", pal.size(), ed.paint_brush_for_test().color.x, ed.paint_brush_for_test().color.y, ed.paint_brush_for_test().color.z);
+    CHECK(std::fabs(ed.paint_brush_for_test().color.y - 0.5f) < 1e-4f && ed.paint_brush_for_test().color.x < 1e-6f);
+    ed.command("paint off");
   });
 }
 
@@ -3911,5 +4270,7 @@ void run_editor_tests() {
   tests_round264();
   tests_round265();
   tests_round266();
+  tests_round267();
+  tests_round267b();
   coverage_tests();
 }

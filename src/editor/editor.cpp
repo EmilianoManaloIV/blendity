@@ -661,6 +661,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   sculpt_remesh_poll();  // (task 0241: a finished Quad Remesh lands as a step)
   if (sculpt_remesh_) ui_.redraw = true;  // (frames while it works: the status line and the result's arrival)
   meshmaps_poll();  // (task 0243: finished mesh maps land as files and a record)
+  bakelight_poll();  // (task 0247: a baked-light layer lands when its worker is done)
   surface_poll();   // (task 0244: a changed surface evaluated on a worker, its images swapped in)
   if (meshmaps_job_) {
     ui_.redraw = true;

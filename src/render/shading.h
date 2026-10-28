@@ -74,6 +74,7 @@ struct SurfaceSample {
   Vec3 normal;  // after normal mapping
   bool unlit = false;
   const Material *toon = nullptr;  // a Toon material (ADR 0020): lights shade it through shade_toon
+  const Material *handpainted = nullptr;  // a Hand-painted material (ADR 0083): unlit plus its rim and painted specular (the CPU raster)
   /* The toon maps at this point (task 0148): the shadow side's own albedo, the painted shadow bias (0.5 neutral), the
    * highlight's and the rim's masks, the ramp (sampled per light by how lit), and the tangent for a hair highlight. */
   Vec3 toon_shade;

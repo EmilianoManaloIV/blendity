@@ -3298,6 +3298,52 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   paint_brush_.channels = (wc ? paint_channel_bit(PaintColor) : 0) | (wr ? paint_channel_bit(PaintRough) : 0) | (wm ? paint_channel_bit(PaintMetal) : 0) | (wh ? paint_channel_bit(PaintHeight) : 0) |
                           (we ? paint_channel_bit(PaintEmit) : 0);
   br.help("A material brush: every channel switched on is written by one dab (Substance's material mode).");
+  /* The painterly brush (task 0247). */
+  static const char *tips[] = {"Round", "Flat", "Bristle"};
+  br.enumeration("Tip", paint_brush_.tip, tips, 3);
+  if (paint_brush_.tip == 1) br.field("Tip Ratio", paint_brush_.tip_ratio, 0.01f, 0.05f, 1.0f);
+  if (paint_brush_.tip == 2) br.field("Bristles", paint_brush_.bristles, 1, 64);
+  static const char *modes[] = {"Paint", "Smudge", "Blend"};
+  br.enumeration("Mode", paint_brush_.mode, modes, 3);
+  br.field("Wet", paint_brush_.wet, 0.01f, 0.0f, 1.0f);
+  br.field("Jitter Hue", paint_brush_.jitter_h, 0.01f, 0.0f, 1.0f);
+  br.field("Jitter Saturation", paint_brush_.jitter_s, 0.01f, 0.0f, 1.0f);
+  br.field("Jitter Value", paint_brush_.jitter_v, 0.01f, 0.0f, 1.0f);
+  br.help("Flat turns with the drag (Tip Ratio its width); Bristle is a bundle of small stamps. Wet: how much of the colour under\n"
+          "the last dab the brush carries on (strokes blend as paint). Jitter: a random shift per dab. Smudge pulls the paint\n"
+          "along the drag, Blend softens it (paint brush, wet, jitter, grain <image>).");
+  /* The palette: a row of swatches (click: the brush's colour), its shades, Add from the brush's colour. */
+  {
+    Recti prow = lay.row(u.row_h() + u.px(4));
+    const int sw = u.row_h();
+    int x = prow.x + u.px(4);
+    for (size_t i = 0; i < paint_palette_.size() && x + sw <= prow.right() - u.px(40); i++, x += sw + u.px(2)) {
+      const Recti r{x, prow.y + u.px(2), sw, sw};
+      const Vec3 &c = paint_palette_[i];
+      u.canvas.fill_rect(r, Color::rgba(std::pow(std::max(0.0f, std::min(1.0f, c.x)), 1.0f / 2.2f), std::pow(std::max(0.0f, std::min(1.0f, c.y)), 1.0f / 2.2f), std::pow(std::max(0.0f, std::min(1.0f, c.z)), 1.0f / 2.2f)));
+      u.canvas.rect_outline(r, (int)i == paint_palette_pick_ ? u.theme.accent : u.theme.border);
+      if (u.hovered(r) && u.in.pressed[0]) paint_brush_.color = c, paint_palette_pick_ = (int)i, u.consume_click();
+    }
+    const Recti add{prow.right() - u.px(36), prow.y, u.px(32), prow.h};
+    if (u.button(add, "+", false)) paint_palette_.push_back(paint_brush_.color), paint_palette_pick_ = (int)paint_palette_.size() - 1;
+    u.tooltip("The palette: click a swatch for its colour, + adds the brush's (paint palette add|pick|shade|save|load).");
+  }
+  if (paint_palette_pick_ >= 0 && paint_palette_pick_ < (int)paint_palette_.size()) {
+    Recti srow = lay.row(u.row_h() + u.px(4));
+    const int sw = u.row_h();
+    int x = srow.x + u.px(4);
+    const Vec3 hsv0 = paint_rgb_to_hsv_for_ui(paint_palette_[(size_t)paint_palette_pick_]);
+    for (int i = 0; i < 5; i++, x += sw + u.px(2)) {
+      Vec3 hsv = hsv0;
+      hsv.z = std::max(0.0f, std::min(1.0f, hsv.z * (0.5f + 0.25f * i)));
+      const Vec3 c = paint_hsv_to_rgb_for_ui(hsv);
+      const Recti r{x, srow.y + u.px(2), sw, sw};
+      u.canvas.fill_rect(r, Color::rgba(std::pow(c.x, 1.0f / 2.2f), std::pow(c.y, 1.0f / 2.2f), std::pow(c.z, 1.0f / 2.2f)));
+      u.canvas.rect_outline(r, u.theme.border);
+      if (u.hovered(r) && u.in.pressed[0]) paint_brush_.color = c, u.consume_click();
+    }
+    u.tooltip("The picked swatch's shades, darker to lighter (paint palette shade 0-4).");
+  }
   br.field("Size", paint_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Hardness", paint_brush_.hardness, 0.01f, 0.0f, 1.0f);
   br.field("Opacity", paint_brush_.opacity, 0.01f, 0.0f, 1.0f);

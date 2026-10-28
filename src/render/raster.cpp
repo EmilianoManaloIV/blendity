@@ -1899,6 +1899,13 @@ void Renderer3D::shade_deferred() {
 }
 
 Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const {
+  if (s.unlit && s.handpainted) {  // (task 0247: the colour as painted, a rim at grazing angles, a highlight where the roughness is low)
+    const Material &m = *s.handpainted;
+    const float nv = std::max(0.0f, dot(s.normal, V));
+    const float rim = std::pow(1.0f - nv, 1.0f / std::max(0.05f, m.hp_rim_width)) * std::max(0.0f, m.hp_rim);
+    const float spec = std::max(0.0f, m.hp_spec) * (1.0f - s.roughness) * (1.0f - s.roughness) * std::pow(nv, 16.0f);
+    return s.albedo + s.emission + m.hp_rim_color * rim + Vec3(spec);
+  }
   if (s.unlit) return s.albedo + s.emission;
   Vec3 n = s.normal;
   Vec3 lo(0.0f);

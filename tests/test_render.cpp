@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the render tests (task 0177: one file a subsystem; the groups keep their rounds' order).
+#include <set>
 #include "test_common.h"
 #include "../src/texture/smart_material.h"
 #include "../src/texture/paint_layer.h"
@@ -10937,6 +10938,82 @@ static void tests_round266() {
   });
 }
 
+static void tests_round267() {
+  test("the hand-painted look (ADR 0083): Posterize leaves exactly N values of a gradient, Edge Shade lifts the cube's edge band above its faces and Cavity darkens where the maps' occlusion is low; a Hand-painted material evaluates unlit with its rim fields in hand, a lit PBR one does not", [] {
+    /* Posterize over a Gradient: N distinct values. */
+    ProceduralTexture t;
+    t.name = "PosterTest", t.width = t.height = 64;
+    t.add("Gradient");
+    TextureLayer *po = t.add("Posterize");
+    CHECK(po);
+    if (!po) return;
+    CHECK(r49_set(t, "L1 Levels", "5"));
+    TexPlanes p;
+    t.evaluate(p);
+    std::set<int> values;
+    for (size_t i = 0; i < p.size(); i++) values.insert((int)std::lround(std::max({p.albedo[i].x, p.albedo[i].y, p.albedo[i].z}) * 1000.0f));
+    std::printf("    Posterize 5 over a gradient: %zu distinct values\n", values.size());
+    CHECK(values.size() == 5);
+    /* Edge Shade and Cavity on the subdivided cube's maps. */
+    Mesh cube = *primitives::cube(1.0f);
+    for (int k = 0; k < 3; k++) cube = meshops::subdivide_simple(cube);
+    MeshMapsSettings s;
+    s.size = 128, s.samples = 4;
+    MeshMapsResult r;
+    std::string why;
+    CHECK(bake_mesh_maps(cube, Mat4::identity(), s, r, &why));
+    auto maps = std::make_shared<SurfaceMaps>();
+    surface_maps_from_bake(r, 128, *maps);
+    ProceduralTexture e;
+    e.name = "EdgeTest", e.surface = true, e.seamless = false, e.width = e.height = 128, e.maps = maps;
+    e.add("Fill");
+    CHECK(r49_set(e, "L0 Color", "0.5 0.5 0.5"));
+    e.add("Edge Shade");
+    TexPlanes pe;
+    e.evaluate(pe);
+    float edge_sum = 0.0f, face_sum = 0.0f;
+    size_t edge_n = 0, face_n = 0;
+    for (size_t i = 0; i < pe.size(); i++) {
+      if (maps->cover[i] < 0.5f) continue;
+      const float c = maps->curvature[i], lum = pe.albedo[i].x;
+      if (c > 0.6f) edge_sum += lum, edge_n++;
+      else if (std::fabs(c - 0.5f) < 0.02f) face_sum += lum, face_n++;
+    }
+    const float edge = edge_n ? edge_sum / (float)edge_n : 0.0f, face = face_n ? face_sum / (float)face_n : 0.0f;
+    std::printf("    Edge Shade (Light) on the cube: the edge band %.3f against the flat faces %.3f (%zu / %zu texels)\n", edge, face, edge_n, face_n);
+    CHECK(edge_n > 0 && face_n > 0 && edge > face + 0.1f && std::fabs(face - 0.5f) < 0.01f);
+    /* Cavity: with an occlusion plane written low on half the texels, those darken; the rest keep the fill. */
+    auto dark = std::make_shared<SurfaceMaps>(*maps);
+    for (size_t i = 0; i < dark->ao.size(); i++) dark->ao[i] = (i % 128) < 64 ? 0.25f : 1.0f;
+    ProceduralTexture cv;
+    cv.name = "CavityTest", cv.surface = true, cv.seamless = false, cv.width = cv.height = 128, cv.maps = dark;
+    cv.add("Fill");
+    CHECK(r49_set(cv, "L0 Color", "0.8 0.8 0.8"));
+    cv.add("Cavity");
+    TexPlanes pc;
+    cv.evaluate(pc);
+    float low = 0.0f, high = 0.0f;
+    size_t ln = 0, hn = 0;
+    for (size_t i = 0; i < pc.size(); i++) {
+      if (dark->cover[i] < 0.5f) continue;
+      if ((i % 128) < 64) low += pc.albedo[i].x, ln++;
+      else high += pc.albedo[i].x, hn++;
+    }
+    std::printf("    Cavity: %.3f where the occlusion is 0.25, %.3f where it is 1\n", ln ? low / ln : 0.0f, hn ? high / hn : 0.0f);
+    CHECK(ln && hn && std::fabs(low / ln - 0.2f) < 0.01f && std::fabs(high / hn - 0.8f) < 0.01f);
+    /* The Hand-painted model: unlit, with the material in hand for the raster's rim; PBR is lit. */
+    Material hp;
+    hp.shading_model = 2;
+    hp.base_color = {0.3f, 0.6f, 0.2f};
+    SurfacePoint sp;
+    sp.normal = {0.0f, 0.0f, 1.0f};
+    const SurfaceSample a = evaluate_material(hp, sp);
+    Material pbr;
+    const SurfaceSample b = evaluate_material(pbr, sp);
+    CHECK(a.unlit && a.handpainted == &hp && length(a.albedo - hp.base_color) < 1e-6f && !b.unlit && !b.handpainted);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -10980,4 +11057,5 @@ void run_render_tests() {
   tests_round264();
   tests_round265();
   tests_round266();
+  tests_round267();
 }

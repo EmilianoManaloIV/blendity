@@ -1535,6 +1535,10 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Mask by Height", "Filters", "Sets the mask the layers above can fade by.", make<MaskByHeightLayer>},
       /* A surface's filters (task 0244, ADR 0080; surface.cpp). */
       {"Anchor", "Filters", "Another layer's mask, by its name (Substance's anchor point).", make_anchor_layer},
+      /* The hand-painted look's filters (task 0247, ADR 0083; surface.cpp). */
+      {"Posterize", "Filters", "The colour's value in N flat steps, its hue kept.", make_posterize_layer},
+      {"Edge Shade", "Filters", "The convex edges (mesh maps' curvature) lightened or darkened: the hand-painter's edge pass.", make_edge_shade_layer},
+      {"Cavity", "Filters", "The colour multiplied by the mesh maps' occlusion through a strength: the cavity pass.", make_cavity_layer},
       {"Paint", "Filters", "Images the brush writes in Paint Mode (colour, roughness, metallic, height, emission), by their painted coverage.", [] { return std::unique_ptr<TextureLayer>(std::make_unique<PaintLayer>()); }},
       {"Group", "Filters", "A folder: its layers evaluated apart and blended back with one opacity and mask.", make_group_layer},
   };

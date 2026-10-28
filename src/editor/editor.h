@@ -597,6 +597,14 @@ struct PaintBrush {
   float radius = 20.0f, hardness = 0.5f, opacity = 1.0f, flow = 1.0f, spacing = 0.25f, lazy = 0.0f;
   int pressure = 1;  // 0 nothing, 1 opacity, 2 size
   bool erase = false, sym_x = false, sym_y = false, sym_z = false;
+  /* The painterly brush (task 0247, ADR 0083). */
+  int tip = 0;             // 0 Round, 1 Flat (an ellipse turned to the drag), 2 Bristle (small stamps from the stroke's seed)
+  float tip_ratio = 0.3f;  // the Flat tip's width across the drag over its length
+  int bristles = 12;
+  int mode = 0;            // 0 Paint, 1 Smudge (the paint pulled along the drag), 2 Blend (the 3 x 3 mean)
+  float wet = 0.0f;        // how much of the colour picked up under the last dab the brush carries
+  float jitter_h = 0.0f, jitter_s = 0.0f, jitter_v = 0.0f;
+  float grain_scale = 1.0f;
 };
 
 struct UndoState {
@@ -669,6 +677,13 @@ class Editor {
   int paint_last_fill_for_test() const { return paint_last_fill_; }
   size_t paint_last_step_bytes_for_test() const { return paint_last_step_bytes_; }
   bool paint_dab_uv_for_test(float u, float v) { return paint_dab_uv(u, v, 1.0f); }
+  const std::vector<Vec3> &paint_palette_for_test() const { return paint_palette_; }
+  float paint_stamp_for_test(Vec2 local, Vec2 dir, uint32_t seed) {
+    paint_dab_dir_ = dir, paint_stroke_seed_ = seed, paint_dir_known_ = true;
+    paint_bristles_.clear();
+    return paint_stamp(local);
+  }
+  bool bakelight_busy_for_test() const { return bakelight_ != nullptr; }
   std::string paint_canvas_state_for_test() const {
     return strprintf("paint %d 2d %d stroking %d/%d shown-is-surface %d active %d why '%s'", (int)paint_, (int)paint_2d_, (int)paint_stroking_, (int)paint_2d_stroking_, (int)(texture_selected_ && texture_selected_ == paint_surface_), (int)ui_.any_active(), paint_canvas_why_.c_str());
   }
@@ -3220,6 +3235,55 @@ class Editor {
   bool paint_2d_ = false, paint_2d_stroking_ = false;  // (a canvas stroke: pressed on the pane, dabs by spacing while held, one step at release)
   Vec2 paint_2d_last_;                                  // the last canvas dab's UV
   std::string paint_canvas_why_;                        // (tests: why the last canvas frame began no stroke)
+  /* The painterly brush's state (task 0247): the stroke's seed (from the step count and the layer's stamp: a stroke undone and painted again rolls the same), the
+   * drag's direction, the colour this dab writes (jittered, mixed), the colour picked up so far, the grain image. */
+  uint32_t paint_stroke_seed_ = 1;
+  Vec2 paint_dab_dir_{1.0f, 0.0f}, paint_dab_centroid_, paint_dab_centroid_prev_;  // (the screen drag: the Flat tip's turn)
+  Vec2 paint_smudge_dir_{1.0f, 0.0f};  // the drag in texel space (from the dabs' centroids): Smudge's pull
+  bool paint_dir_known_ = false;       // (false until the stroke has moved: the first dab stamps Round and Smudge waits)
+  bool paint_filling_ = false;         // (a fill or gradient: the brush's mode does not apply)
+  std::vector<Vec2> paint_bristles_;   // the Bristle tip's stamp centres (x, y) and weights, from the stroke's seed
+  std::vector<float> paint_bristle_w_;
+  /* Smudge and Blend read what a dab's texels were before the dab: the tiles the dab touches are copied once (colour and
+   * coverage) when first written in that dab. */
+  std::vector<uint32_t> paint_snap_color_;
+  std::vector<uint8_t> paint_snap_cover_, paint_snap_tile_dab_;
+  uint32_t paint_snap_at(size_t i, bool &covered);
+  void paint_snap_tile(int tx, int ty);
+  /* Bake Lighting into the Paint on a worker (task 0247): the pixels and the PNG; the layer lands when it is done. */
+  struct BakeLightJob {
+    std::thread thread;
+    std::atomic<bool> done{false};
+    bool ok = false, gradient = false;
+    std::string asset, rel, abs, name, why;
+    Vec3 key;
+    ~BakeLightJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<BakeLightJob> bakelight_;
+  void bakelight_poll();
+  Vec3 paint_dab_color_;
+  Vec3 paint_pick_sum_;
+  float paint_pick_n_ = 0.0f, paint_centroid_n_ = 0.0f;
+  Vec3 paint_mix_color_;
+  bool paint_mix_loaded_ = false;
+  Bitmap paint_grain_;
+  /* The Gradient fill (task 0247): the fill's colour runs from `from` to `to` along a world axis of the mesh maps' position. */
+  bool paint_gradient_ = false;
+  Vec3 paint_gradient_from_, paint_gradient_to_;
+  int paint_gradient_axis_ = 1;
+  std::vector<Vec3> paint_palette_;
+  int paint_palette_pick_ = -1;
+  bool paint_bake_light(const std::vector<std::string> &t, bool gradient);
+  static Vec3 paint_rgb_to_hsv_for_ui(Vec3 c);
+  static Vec3 paint_hsv_to_rgb_for_ui(Vec3 hsv);
+  void paint_palette_command(const std::vector<std::string> &t);
+  float paint_stamp(Vec2 local) const;
+  float paint_grain_at(int x, int y) const;
+  void paint_dab_begin(float pressure);
+  void paint_dab_finish();
+  Vec3 paint_dab_colour() const;
   Bitmap paint_stencil_;
   Vec2 paint_stencil_offset_;
   float paint_stencil_scale_ = 1.0f;

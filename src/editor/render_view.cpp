@@ -79,7 +79,7 @@ DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRe
   const Material &mat0 = *mr.material(0);
   it.albedo = mat0.base_color;
   it.specular = mat0.specular * 0.5f;
-  it.unlit = mat0.unlit;
+  it.unlit = mat0.unlit || mat0.shading_model == 2;  // (task 0247)
   it.double_sided = editing;
   for (auto &mp : mr.materials)
     if (mp && mp->double_sided) it.double_sided = true;

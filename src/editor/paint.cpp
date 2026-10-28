@@ -17,7 +17,10 @@ bool surface_stack_writes_emission(const ProceduralTexture &pt);  // (surface_ui
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <thread>
 #include <map>
 
 namespace bl {
@@ -28,6 +31,7 @@ constexpr int kPaintTile = 64;
 
 inline float paint_falloff(float t, float hardness) {  // (t: 0 at the centre, 1 at the edge; hardness: how far the full weight reaches)
   const float h = std::max(0.0f, std::min(0.99f, hardness));
+  if (t >= 1.0f) return 0.0f;  // (outside the disc: the Flat tip's narrow side asks past it)
   if (t <= h) return 1.0f;
   const float s = (t - h) / (1.0f - h);
   return 1.0f - s * s * (3.0f - 2.0f * s);
@@ -43,6 +47,45 @@ inline uint32_t lerp_argb(uint32_t a, uint32_t b, float k) {
   uint32_t out = 0xFF000000u;
   for (int s = 0; s < 24; s += 8) out |= (uint32_t)std::lround(((a >> s) & 0xFF) + (((b >> s) & 0xFF) - (float)((a >> s) & 0xFF)) * k) << s;
   return out;
+}
+
+inline float clamp01(float v) { return std::isfinite(v) ? std::max(0.0f, std::min(1.0f, v)) : 0.0f; }
+inline uint32_t paint_hash(uint32_t x) {  // (a small integer hash: the stroke's seed, the dab, the bristle)
+  x ^= x >> 16, x *= 0x7feb352dU, x ^= x >> 15, x *= 0x846ca68bU, x ^= x >> 16;
+  return x;
+}
+inline float paint_rand(uint32_t seed, uint32_t k) { return (paint_hash(seed * 0x9E3779B9u + k) & 0xFFFFFF) / 16777216.0f; }  // [0, 1)
+inline Vec3 paint_rgb_to_hsv(Vec3 c) {
+  const float mx = std::max({c.x, c.y, c.z}), mn = std::min({c.x, c.y, c.z}), d = mx - mn;
+  float h = 0.0f;
+  if (d > 1e-6f) {
+    if (mx == c.x) h = (c.y - c.z) / d;
+    else if (mx == c.y) h = 2.0f + (c.z - c.x) / d;
+    else h = 4.0f + (c.x - c.y) / d;
+    h /= 6.0f;
+    if (h < 0.0f) h += 1.0f;
+  }
+  return {h, mx > 1e-6f ? d / mx : 0.0f, mx};
+}
+inline Vec3 paint_hsv_to_rgb(Vec3 hsv) {
+  const float h = (hsv.x - std::floor(hsv.x)) * 6.0f, s = std::max(0.0f, std::min(1.0f, hsv.y)), v = std::max(0.0f, std::min(1.0f, hsv.z));
+  const int i = (int)h;
+  const float f = h - i, p = v * (1.0f - s), q = v * (1.0f - s * f), t = v * (1.0f - s * (1.0f - f));
+  switch (i % 6) {
+    case 0: return {v, t, p};
+    case 1: return {q, v, p};
+    case 2: return {p, v, t};
+    case 3: return {p, q, v};
+    case 4: return {t, p, v};
+    default: return {v, p, q};
+  }
+}
+inline Vec3 unpack_srgb(uint32_t argb) {  // (a Paint image's colour back to linear)
+  auto ch = [](uint32_t v) {
+    const float s = v / 255.0f;
+    return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+  };
+  return {ch((argb >> 16) & 0xFF), ch((argb >> 8) & 0xFF), ch(argb & 0xFF)};
 }
 
 /* The island flood for a fill: the triangles joined to `face`'s through corners at the same UV. */
@@ -222,7 +265,137 @@ bool Editor::paint_begin_stroke_images() {
   paint_dab_rows_y0_ = im.h, paint_dab_rows_y1_ = 0;
   paint_view_tex_ = procedural_texture_output(*paint_surface_, 0);  // (the material's albedo: written as the stroke goes)
   paint_stroking_ = true, paint_dabbed_ = false;
+  paint_stroke_seed_ = paint_hash((uint32_t)undo_.size() * 7919u + (uint32_t)l->stamp * 104729u + 17u);  // (task 0247: the jitter's and bristles' seed, from the step count and the layer's stamp: a stroke undone and painted again rolls the same)
+  paint_mix_loaded_ = false, paint_centroid_n_ = 0.0f, paint_dab_dir_ = {1.0f, 0.0f}, paint_smudge_dir_ = {1.0f, 0.0f}, paint_dir_known_ = false;
+  {  // the Bristle tip's stamps, once a stroke
+    const int n = std::max(1, std::min(64, paint_brush_.bristles));
+    paint_bristles_.resize((size_t)n), paint_bristle_w_.resize((size_t)n);
+    for (int i = 0; i < n; i++) {
+      const float a = paint_rand(paint_stroke_seed_, (uint32_t)i * 3u) * 6.2831853f, rr = std::sqrt(paint_rand(paint_stroke_seed_, (uint32_t)i * 3u + 1u)) * (1.0f - 0.28f);
+      paint_bristles_[(size_t)i] = Vec2(std::cos(a) * rr, std::sin(a) * rr);
+      paint_bristle_w_[(size_t)i] = 0.4f + 0.6f * paint_rand(paint_stroke_seed_, (uint32_t)i * 3u + 2u);
+    }
+  }
+  paint_snap_tile_dab_.assign(paint_tile_slot_.size(), 0);
+  paint_snap_color_.assign(im.size(), 0), paint_snap_cover_.assign(im.size(), 0);
   return true;
+}
+
+/* ===================================================================== */
+/* The painterly brush (task 0247, ADR 0083)                              */
+/* ===================================================================== */
+
+/* The tip's weight at a point of the brush's disc (`local` in units of the radius, from the centre): Round the
+ * hardness falloff; Flat an ellipse turned to the drag, `tip_ratio` wide across it; Bristle the sum of `bristles`
+ * small round stamps placed by the stroke's seed, each with its own weight, so a stroke leaves streaks. */
+float Editor::paint_stamp(Vec2 local) const {
+  const PaintBrush &br = paint_brush_;
+  if (br.tip == 1 && paint_dir_known_) {
+    const float l = length(paint_dab_dir_);
+    const Vec2 d = l > 1e-6f ? paint_dab_dir_ / l : Vec2(1.0f, 0.0f);
+    const float along = local.x * d.x + local.y * d.y, across = -local.x * d.y + local.y * d.x;
+    const float ratio = std::max(0.05f, std::min(1.0f, br.tip_ratio));
+    return paint_falloff(std::sqrt(along * along + (across / ratio) * (across / ratio)), br.hardness);
+  }
+  if (br.tip == 2) {
+    const int n = std::max(1, std::min(64, br.bristles));
+    const float r = 0.28f;  // a bristle's radius in units of the brush's
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+      Vec2 c;
+      float w;
+      if ((size_t)n == paint_bristles_.size()) c = paint_bristles_[(size_t)i], w = paint_bristle_w_[(size_t)i];
+      else {  // (no stroke begun: the tests' direct call)
+        const float a = paint_rand(paint_stroke_seed_, (uint32_t)i * 3u) * 6.2831853f, rr = std::sqrt(paint_rand(paint_stroke_seed_, (uint32_t)i * 3u + 1u)) * (1.0f - r);
+        c = Vec2(std::cos(a) * rr, std::sin(a) * rr), w = 0.4f + 0.6f * paint_rand(paint_stroke_seed_, (uint32_t)i * 3u + 2u);
+      }
+      const float t = length(local - c) / r;
+      if (t < 1.0f) sum += w * paint_falloff(t, std::max(br.hardness, 0.3f));
+    }
+    return std::min(1.0f, sum);
+  }
+  return paint_falloff(length(local), br.hardness);
+}
+
+/* The grain's luminance at a texel (the image tiled in texel space, `grain_scale` texels an image pixel); 1 without. */
+float Editor::paint_grain_at(int x, int y) const {
+  const Bitmap &g = paint_grain_;
+  if (g.width <= 0 || g.height <= 0) return 1.0f;
+  const float sc = std::max(0.05f, paint_brush_.grain_scale);
+  const int gx = ((int)std::floor(x / sc) % g.width + g.width) % g.width, gy = ((int)std::floor(y / sc) % g.height + g.height) % g.height;
+  const uint8_t *px = &g.rgba8[((size_t)gy * g.width + gx) * 4];
+  return (px[0] + px[1] + px[2]) / (3.0f * 255.0f);
+}
+
+/* The colour this dab writes: the brush's, moved in HSV by the jitter (from the stroke's seed and the dab's number), then
+ * mixed with what the brush carries by the wet amount. */
+Vec3 Editor::paint_dab_colour() const {
+  const PaintBrush &br = paint_brush_;
+  Vec3 c = br.color;
+  if (br.jitter_h > 0.0f || br.jitter_s > 0.0f || br.jitter_v > 0.0f) {
+    Vec3 hsv = paint_rgb_to_hsv(c);
+    const uint32_t k = (uint32_t)paint_dab_serial_ * 3u + 1000u;
+    hsv.x += (paint_rand(paint_stroke_seed_, k) * 2.0f - 1.0f) * std::max(0.0f, std::min(1.0f, br.jitter_h)) * 0.5f;
+    hsv.y = std::max(0.0f, std::min(1.0f, hsv.y + (paint_rand(paint_stroke_seed_, k + 1) * 2.0f - 1.0f) * std::max(0.0f, std::min(1.0f, br.jitter_s))));
+    hsv.z = std::max(0.0f, std::min(1.0f, hsv.z + (paint_rand(paint_stroke_seed_, k + 2) * 2.0f - 1.0f) * std::max(0.0f, std::min(1.0f, br.jitter_v))));
+    c = paint_hsv_to_rgb(hsv);
+  }
+  const float wet = std::max(0.0f, std::min(1.0f, br.wet));
+  if (wet > 0.0f && paint_mix_loaded_) c = c + (paint_mix_color_ - c) * wet;
+  return c;
+}
+
+/* Before a dab's texels: the dab's colour decided, the pickup reset. */
+void Editor::paint_dab_begin(float) {
+  paint_dab_color_ = paint_dab_colour();
+  paint_pick_sum_ = Vec3(), paint_pick_n_ = 0.0f;
+  paint_dab_centroid_ = Vec2(), paint_centroid_n_ = 0.0f;
+}
+
+/* After a dab's texels: the brush picks up the mean colour it painted over (by the wet amount) and the drag's direction in
+ * texel space is read from the dab's centroid against the last one (the Flat tip's turn, Smudge's pull). */
+void Editor::paint_dab_finish() {
+  const float wet = std::max(0.0f, std::min(1.0f, paint_brush_.wet));
+  if (wet > 0.0f && paint_pick_n_ > 0.0f) {
+    const Vec3 mean = paint_pick_sum_ / paint_pick_n_;
+    paint_mix_color_ = paint_mix_loaded_ ? paint_mix_color_ + (mean - paint_mix_color_) * wet : mean;
+    paint_mix_loaded_ = true;
+  }
+  if (paint_centroid_n_ > 0.0f) {
+    const Vec2 c = paint_dab_centroid_ / paint_centroid_n_;
+    if (paint_dab_serial_ > 1) {
+      const Vec2 d = c - paint_dab_centroid_prev_;
+      if (length(d) > 0.5f) paint_smudge_dir_ = d;  // (texel space, its length the dab's step in texels: Smudge's pull)
+    }
+    paint_dab_centroid_prev_ = c;
+  }
+}
+
+/* What a texel was before this dab: the snapshot when its tile was copied in this dab, the live image otherwise (a tile
+ * untouched in this dab is as it was). */
+uint32_t Editor::paint_snap_at(size_t i, bool &covered) {
+  const PaintImages &im = *paint_images_;
+  const int x = (int)(i % im.w), y = (int)(i / im.w);
+  const size_t slot = (size_t)(y / kPaintTile) * paint_tiles_x_ + (x / kPaintTile);
+  if (slot < paint_snap_tile_dab_.size() && paint_snap_tile_dab_[slot] == paint_dab_serial_) {
+    covered = paint_snap_cover_[i] != 0;
+    return paint_snap_color_[i];
+  }
+  covered = im.cover[i] != 0;
+  return im.color[i];
+}
+
+void Editor::paint_snap_tile(int tx, int ty) {
+  const size_t slot = (size_t)ty * paint_tiles_x_ + tx;
+  if (slot >= paint_snap_tile_dab_.size() || paint_snap_tile_dab_[slot] == paint_dab_serial_) return;
+  paint_snap_tile_dab_[slot] = paint_dab_serial_;
+  const PaintImages &im = *paint_images_;
+  const int x0 = tx * kPaintTile, y0 = ty * kPaintTile, x1 = std::min(im.w, x0 + kPaintTile), y1 = std::min(im.h, y0 + kPaintTile);
+  for (int y = y0; y < y1; y++) {
+    const size_t a = (size_t)y * im.w + x0, n = (size_t)(x1 - x0);
+    std::memcpy(&paint_snap_color_[a], &im.color[a], n * sizeof(uint32_t));
+    std::memcpy(&paint_snap_cover_[a], &im.cover[a], n);
+  }
 }
 
 bool Editor::paint_begin_stroke(const Recti &view, float x, float y) {
@@ -311,7 +484,55 @@ void Editor::paint_write_texel(size_t i, float k) {
   const uint8_t was_ch = tile.before.channels[b];
   auto chan = [&](PaintChannel c) { return (br.channels & paint_channel_bit(c)) != 0; };
   auto had = [&](PaintChannel c) { return !fresh && (was_ch & paint_channel_bit(c)); };
-  if (chan(PaintColor)) im.color[i] = had(PaintColor) ? lerp_argb(tile.before.color[b], pack_srgb(br.color), a) : pack_srgb(br.color);
+  paint_dab_centroid_ += Vec2((float)x, (float)y) * k, paint_centroid_n_ += k;
+  if (br.mode != 0 && !paint_filling_) {  // Smudge / Blend (task 0247): colour only, read from the layer's own paint as it was before this dab
+    if (!chan(PaintColor)) return;
+    paint_snap_tile(x / kPaintTile, y / kPaintTile);
+    uint32_t src = 0;
+    bool have = false;
+    if (br.mode == 1) {
+      if (!paint_dir_known_) return;  // (the first dab: no drag to pull along yet)
+      const float l = length(paint_smudge_dir_);
+      const Vec2 d = l > 1e-6f ? paint_smudge_dir_ / l : Vec2(1.0f, 0.0f);
+      const float step = std::max(1.0f, l);  // (the last dab's step in texels)
+      const int sx = x - (int)std::lround(d.x * step), sy = y - (int)std::lround(d.y * step);
+      if (sx >= 0 && sy >= 0 && sx < im.w && sy < im.h) {
+        paint_snap_tile(sx / kPaintTile, sy / kPaintTile);
+        bool cov = false;
+        const uint32_t c = paint_snap_at((size_t)sy * im.w + sx, cov);
+        if (cov) src = c, have = true;
+      }
+    }
+    else {
+      float r = 0.0f, g = 0.0f, bl = 0.0f, n = 0.0f;
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+          const int sx = x + dx, sy = y + dy;
+          if (sx < 0 || sy < 0 || sx >= im.w || sy >= im.h) continue;
+          paint_snap_tile(sx / kPaintTile, sy / kPaintTile);
+          bool cov = false;
+          const uint32_t c = paint_snap_at((size_t)sy * im.w + sx, cov);
+          if (!cov) continue;
+          r += (c >> 16) & 0xFF, g += (c >> 8) & 0xFF, bl += c & 0xFF, n += 1.0f;
+        }
+      if (n > 0.0f) src = 0xFF000000u | (uint32_t)std::lround(r / n) << 16 | (uint32_t)std::lround(g / n) << 8 | (uint32_t)std::lround(bl / n), have = true;
+    }
+    if (!have) return;  // (nothing to pull or spread: the texel stays)
+    im.color[i] = had(PaintColor) ? lerp_argb(tile.before.color[b], src, a) : src;  // (a fresh texel takes the paint pulled onto it: the patch grows along the drag)
+    im.cover[i] = std::max(tile.before.cover[b], (uint8_t)std::lround(a * 255.0f));
+    im.channels[i] = (uint8_t)(was_ch | paint_channel_bit(PaintColor));
+    if (paint_view_tex_ && !paint_view_tex_->levels.empty() && paint_view_tex_->levels[0].w == im.w && paint_view_tex_->levels[0].h == im.h)
+      const_cast<Texture &>(*paint_view_tex_).levels[0].px8[i] = to_rgba8(im.color[i]);
+    return;
+  }
+  if (br.wet > 0.0f && had(PaintColor)) paint_pick_sum_ += unpack_srgb(tile.before.color[b]) * k, paint_pick_n_ += k;  // (what the brush picks up: the paint it goes over)
+  uint32_t dab_color = pack_srgb(paint_dab_color_);
+  if (paint_gradient_ && paint_surface_ && paint_surface_->maps && !paint_surface_->maps->empty()) {  // (task 0247: the Gradient fill, by the mesh maps' position)
+    const Vec3 q = paint_surface_->maps->sample3(paint_surface_->maps->position, (x + 0.5f) / im.w, 1.0f - (y + 0.5f) / im.h);
+    const float t = clamp01(paint_gradient_axis_ == 0 ? q.x : paint_gradient_axis_ == 1 ? q.y : q.z);
+    dab_color = pack_srgb(paint_gradient_from_ + (paint_gradient_to_ - paint_gradient_from_) * t);
+  }
+  if (chan(PaintColor)) im.color[i] = had(PaintColor) ? lerp_argb(tile.before.color[b], dab_color, a) : dab_color;
   if (chan(PaintRough)) im.rough[i] = had(PaintRough) ? lerp8(tile.before.rough[b], br.roughness, a) : (uint8_t)std::lround(br.roughness * 255.0f);
   if (chan(PaintMetal)) im.metal[i] = had(PaintMetal) ? lerp8(tile.before.metal[b], br.metallic, a) : (uint8_t)std::lround(br.metallic * 255.0f);
   if (chan(PaintHeight)) im.height[i] = had(PaintHeight) ? lerp8(tile.before.height[b], br.height, a) : (uint8_t)std::lround(br.height * 255.0f);
@@ -370,12 +591,13 @@ void Editor::paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, 
         if (!scene_r3d_.project(wp, s, d)) continue;
         const float dist2 = (s.x - centre.x) * (s.x - centre.x) + (s.y - centre.y) * (s.y - centre.y);
         if (dist2 > r2) continue;
-        k *= paint_falloff(std::sqrt(dist2) / radius, paint_brush_.hardness) * paint_alpha_at({(s.x - centre.x) / radius, (s.y - centre.y) / radius}) * paint_stencil_at(s);
         const int sx = (int)s.x, sy = (int)s.y;
         if (sx < 0 || sy < 0 || sx >= scene_rt_.width || sy >= scene_rt_.height) continue;  // (off the view: not seen, not painted)
         if (scene_rt_.id_at(sx, sy) != (uint32_t)paint_obj_) continue;                      // (another object in front, or the background)
         const float plane = scene_rt_.depth_at(sx, sy);                                       // (behind the surface the view shows - the far side - whichever way the depth runs)
         if (paint_depth_grows_ ? d > plane + tol : d < plane - tol) continue;
+        const Vec2 local((s.x - centre.x) / radius, (s.y - centre.y) / radius);
+        k *= paint_stamp(local) * paint_alpha_at(local) * paint_stencil_at(s) * paint_grain_at(x, y);  // (after the tests: the Bristle stamp is the dear one)
       }
       if (k <= 0.002f) continue;
       paint_write_texel((size_t)y * im.w + x, k);
@@ -415,6 +637,12 @@ void Editor::paint_dab(const Recti &view, float x, float y, float pressure) {
   paint_erase_ = paint_brush_.erase || ui_.in.eraser;
   paint_dab_serial_++;
   paint_dab_rows_y0_ = paint_images_->h, paint_dab_rows_y1_ = 0;
+  {  // (task 0247: the drag's direction on screen turns the Flat tip; the texel-space direction for Smudge follows from the centroids)
+    const Vec2 d = Vec2(x, y) - paint_last_px_;
+    if (length(d) > 0.5f) paint_dab_dir_ = d, paint_dir_known_ = true;
+  }
+  if (paint_dab_serial_ == 255) std::fill(paint_stroke_dab_.begin(), paint_stroke_dab_.end(), 0), paint_dab_serial_ = 0;  // (a long stroke: the per-dab marks start over)
+  paint_dab_begin(pressure);
   const Mat4 &W = g->world_matrix();
   const Mesh &mesh = *mf->mesh;
   const RenderMesh &rm = mesh.render_mesh();
@@ -431,6 +659,7 @@ void Editor::paint_dab(const Recti &view, float x, float y, float pressure) {
     if (!scene_r3d_.project(W.point(local), centre, cd)) continue;
     for (size_t tri = 0; tri < rm.tri_count(); tri++) paint_triangle(rm, mesh, tri, W, centre, radius, weight, false);
   }
+  paint_dab_finish();
   paint_dabbed_ = true;
   if (paint_dab_rows_y1_ > paint_dab_rows_y0_) gpu_texture_rows_changed(paint_view_tex_, paint_dab_rows_y0_, paint_dab_rows_y1_);  // (this dab's rows only)
   ui_.redraw = true;
@@ -582,9 +811,12 @@ bool Editor::paint_fill(const std::string &what, float x, float y) {
   const Mat4 &W = g->world_matrix();
   paint_erase_ = paint_brush_.erase;
   paint_dab_serial_++;
+  paint_dab_begin(1.0f);
+  paint_filling_ = true;
   size_t n = 0;
   for (size_t t = 0; t < rm.tri_count(); t++)
     if (take[t]) paint_triangle(rm, mesh, t, W, Vec2(), 0.0f, 1.0f, true), n++;
+  paint_filling_ = false;
   paint_dabbed_ = n > 0;
   paint_last_fill_ = (int)n;
   paint_end_stroke();
@@ -611,15 +843,23 @@ bool Editor::paint_dab_uv(float u, float v, float pressure) {
   if (own) paint_erase_ = paint_brush_.erase || ui_.in.eraser;
   paint_dab_serial_++;
   const float cx = u * im.w, cy = (1.0f - v) * im.h;
+  if (paint_centroid_n_ > 0.0f) {  // (the drag on the canvas: from the last dab's centre, in texels)
+    const Vec2 d = Vec2(cx, cy) - paint_dab_centroid_prev_;
+    if (length(d) > 0.5f) paint_dab_dir_ = d, paint_smudge_dir_ = d, paint_dir_known_ = true;
+  }
+  if (paint_dab_serial_ == 255) std::fill(paint_stroke_dab_.begin(), paint_stroke_dab_.end(), 0), paint_dab_serial_ = 0;
+  paint_dab_begin(pressure);
   const int x0 = std::max(0, (int)std::floor(cx - radius)), x1 = std::min(im.w - 1, (int)std::ceil(cx + radius));
   const int y0 = std::max(0, (int)std::floor(cy - radius)), y1 = std::min(im.h - 1, (int)std::ceil(cy + radius));
   for (int y = y0; y <= y1; y++)
     for (int x = x0; x <= x1; x++) {
       const float dx = x + 0.5f - cx, dy = y + 0.5f - cy, d = std::sqrt(dx * dx + dy * dy);
       if (d > radius) continue;
-      const float k = weight * paint_falloff(d / radius, paint_brush_.hardness) * paint_alpha_at({dx / radius, dy / radius});
+      const Vec2 local(dx / radius, dy / radius);
+      const float k = weight * paint_stamp(local) * paint_alpha_at(local) * paint_grain_at(x, y);
       if (k > 0.002f) paint_write_texel((size_t)y * im.w + x, k);
     }
+  paint_dab_finish();
   paint_dabbed_ = true;
   if (own) paint_end_stroke();
   ui_.redraw = true;
@@ -849,6 +1089,77 @@ void Editor::paint_command(const std::vector<std::string> &t) {
     }
   }
   else if (v == "layer") paint_layer_ = (int)num(2, -1.0f);
+  else if (v == "gradient") {  // paint gradient r g b r g b [island|group|material|object] [x|y|z] [px py] (task 0247)
+    if (!paint_surface_ || !paint_surface_->maps || paint_surface_->maps->empty()) {
+      Log::warn("paint gradient: the surface needs its mesh maps (meshmaps, then surface maps): the gradient runs along the position they hold");
+      return;
+    }
+    paint_gradient_from_ = Vec3(num(2, 0.2f), num(3, 0.2f), num(4, 0.2f)), paint_gradient_to_ = Vec3(num(5, 0.9f), num(6, 0.9f), num(7, 0.9f));
+    std::string what = "object";
+    paint_gradient_axis_ = 1;
+    float px = scene_rect_.w * 0.5f, py = scene_rect_.h * 0.5f;
+    size_t k = 8;
+    for (; k < t.size(); k++) {
+      const std::string w = to_lower(t[k]);
+      if (w == "island" || w == "group" || w == "material" || w == "object") what = w;
+      else if (w == "x" || w == "y" || w == "z") paint_gradient_axis_ = w == "x" ? 0 : w == "y" ? 1 : 2;
+      else break;
+    }
+    if (k + 1 < t.size()) px = num(k, px), py = num(k + 1, py);
+    paint_gradient_ = true;
+    paint_fill(what, px, py);
+    paint_gradient_ = false;
+  }
+  else if (v == "palette") paint_palette_command(t);
+  else if (v == "bakelight") {  // paint bakelight [key x y z] (task 0247)
+    paint_bake_light(t, false);
+  }
+  else if (v == "bakegradient") {  // paint bakegradient [top r g b] [bottom r g b]
+    paint_bake_light(t, true);
+  }
+  else if (v == "stroke") {  // paint stroke x0 y0 x1 y1 [dabs]: one stroke of dabs along the line (view pixels), as a drag makes (task 0247)
+    if (!paint_) {
+      Log::warn("paint stroke: Paint Mode is off (paint on)");
+      return;
+    }
+    const float x0 = num(2, 0.0f), y0 = num(3, 0.0f), x1 = num(4, x0), y1 = num(5, y0);
+    const int n = std::max(1, std::min(256, (int)num(6, 16.0f)));
+    if (!paint_begin_stroke(scene_rect_, x0, y0)) {
+      Log::warn("paint stroke: nothing of the object under (%g, %g)", x0, y0);
+      return;
+    }
+    paint_stroke_to(scene_rect_, x0, y0, true);
+    for (int i = 1; i <= n && paint_stroking_; i++) {
+      const Vec2 at(x0 + (x1 - x0) * i / (float)n, y0 + (y1 - y0) * i / (float)n);
+      paint_dab(scene_rect_, at.x, at.y, 1.0f);  // (every point a dab: the spacing is the caller's)
+      paint_last_px_ = at;
+    }
+    paint_end_stroke();
+  }
+  else if (v == "brush") {  // paint brush round|flat|bristle|smudge|blend (task 0247)
+    const std::string w = to_lower(arg(2, "round"));
+    if (w == "round") b.tip = 0, b.mode = 0;
+    else if (w == "flat") b.tip = 1, b.mode = 0;
+    else if (w == "bristle") b.tip = 2, b.mode = 0;
+    else if (w == "smudge") b.mode = 1;
+    else if (w == "blend") b.mode = 2;
+    else if (w == "paint") b.mode = 0;
+    else Log::warn("paint brush round|flat|bristle (the tip) | paint|smudge|blend (what a dab does)");
+  }
+  else if (v == "tip") {  // paint tip ratio <r> | bristles <n>
+    if (arg(2, "") == "ratio") b.tip_ratio = std::max(0.05f, std::min(1.0f, num(3, 0.3f)));
+    else if (arg(2, "") == "bristles") b.bristles = std::max(1, std::min(64, (int)num(3, 12.0f)));
+    else Log::warn("paint tip ratio <0.05-1> | bristles <1-64>");
+  }
+  else if (v == "wet") b.wet = std::max(0.0f, std::min(1.0f, num(2, 0.0f)));
+  else if (v == "jitter") b.jitter_h = std::max(0.0f, std::min(1.0f, num(2, 0.0f))), b.jitter_s = std::max(0.0f, std::min(1.0f, num(3, 0.0f))), b.jitter_v = std::max(0.0f, std::min(1.0f, num(4, 0.0f)));
+  else if (v == "grain") {  // paint grain <image>|off [scale]
+    if (arg(2, "off") == "off") paint_grain_ = Bitmap();
+    else {
+      paint_load_brush_image(t[2], paint_grain_, "paint grain");
+      if (t.size() > 3) b.grain_scale = std::max(0.05f, num(3, 1.0f));
+    }
+  }
   else if (v == "2d") {  // paint 2d on|off | dab u v [pressure]: the Textures window's canvas (task 0246)
     const std::string w = arg(2, "on");
     if (w == "dab") {
@@ -888,7 +1199,213 @@ void Editor::paint_command(const std::vector<std::string> &t) {
     const float x = t.size() > 4 ? num(3, 0.0f) : (float)(ui_.in.mx - scene_rect_.x), y = t.size() > 4 ? num(4, 0.0f) : (float)(ui_.in.my - scene_rect_.y);
     paint_fill(arg(2, "object"), x, y);
   }
-  else Log::warn("paint on|off | color r g b | roughness f | metallic f | height f | emission r g b | channels <list> | size | hardness | opacity | flow | spacing | alpha | symmetry | lazy | erase | pressure | dab x y [p] | fill group|island|material|object [x y] | layer <i> | 2d on|off|dab u v | stencil <image>|off|offset x y|scale s");
+  else Log::warn("paint on|off | color r g b | roughness f | metallic f | height f | emission r g b | channels <list> | size | hardness | opacity | flow | spacing | alpha | symmetry | lazy | erase | pressure | dab x y [p] | fill group|island|material|object [x y] | layer <i> | 2d on|off|dab u v | stencil <image>|off|offset x y|scale s | brush round|flat|bristle|smudge|blend | tip ratio|bristles | wet w | jitter h s v | grain <image>|off [scale] | stroke x0 y0 x1 y1 [n] | gradient r g b r g b [part] [axis] | palette ... | bakelight [key x y z] | bakegradient [top] [bottom]");
+}
+
+/* ===================================================================== */
+/* Lighting painted in, the palette (task 0247, ADR 0083)                 */
+/* ===================================================================== */
+
+/* paint bakelight [key x y z] | bakegradient [top r g b] [bottom r g b]: the active object's surface gains an Image layer
+ * (Multiply, the painter's convention) holding, per texel of its mesh maps, the light arriving there - the maps'
+ * occlusion as the sky's share and a key direction's wrap-lit term (the scene's first directional light's, or the one
+ * given) - or the top-down value gradient between two colours by the maps' position. Written under
+ * Assets/Textures/Baked/<surface>_light.png (or _gradient.png); one undo step. Computed on the main thread: a texel of
+ * the maps is a dot product (the mesh maps' rays were the bake's cost). */
+bool Editor::paint_bake_light(const std::vector<std::string> &t, bool gradient) {
+  auto num = [&](size_t i, float d) { return t.size() > i ? (float)std::atof(t[i].c_str()) : d; };
+  GameObject *g = active_object();
+  std::string why;
+  ProceduralTexturePtr pt = surface_of(g, &why);
+  if (!pt) {
+    Log::warn("paint %s: %s", gradient ? "bakegradient" : "bakelight", why.c_str());
+    return false;
+  }
+  if (!pt->maps || pt->maps->empty()) {
+    Log::warn("paint %s: the surface needs its mesh maps (meshmaps, then surface maps)", gradient ? "bakegradient" : "bakelight");
+    return false;
+  }
+  const SurfaceMaps &m = *pt->maps;
+  Vec3 key(0.5f, 0.8f, 0.3f), top(0.95f, 0.95f, 0.95f), bottom(0.35f, 0.35f, 0.4f);
+  if (gradient) {
+    if (t.size() >= 5) top = Vec3(num(2, top.x), num(3, top.y), num(4, top.z));
+    if (t.size() >= 8) bottom = Vec3(num(5, bottom.x), num(6, bottom.y), num(7, bottom.z));
+  }
+  else {
+    bool given = false;
+    for (size_t k = 2; k < t.size(); k++) {
+      if (to_lower(t[k]) != "key") continue;
+      if (k + 3 >= t.size()) {
+        Log::warn("paint bakelight key x y z: three numbers");
+        return false;
+      }
+      key = Vec3(num(k + 1, key.x), num(k + 2, key.y), num(k + 3, key.z)), given = true;
+    }
+    if (!given)
+      for (const auto &gp : scene_->objects()) {
+        const Light *l = gp->get<Light>();
+        if (!l || l->type != 0 || !l->enabled || !gp->active_in_hierarchy()) continue;
+        key = gp->world_rotation().rotate(Vec3(0.0f, 0.0f, 1.0f)) * -1.0f;  // (a light points along its +Z: the key is toward the light)
+        break;
+      }
+  }
+  if (length(key) < 1e-6f) key = Vec3(0.5f, 0.8f, 0.3f);
+  key = normalize(key);
+  if (bakelight_) {
+    Log::warn("paint %s: a bake is still running", gradient ? "bakegradient" : "bakelight");
+    return false;
+  }
+  /* A file of its own per bake (an earlier layer keeps its image; undo gives it back), written by a worker with the maps shared
+   * (they are const; a changed surface gets new ones). */
+  const std::string dir = "Assets/Textures/Baked";
+  const uint32_t tag = paint_hash((uint32_t)pt->layers.size() * 31u + (uint32_t)(key.x * 1000.0f) * 7u + (uint32_t)(key.y * 1000.0f) * 13u + (uint32_t)(key.z * 1000.0f) * 17u + (uint32_t)(top.x * 100.0f) + (uint32_t)std::time(nullptr));
+  std::string rel = dir + "/" + pt->name + (gradient ? "_gradient_" : "_light_") + strprintf("%08x", tag) + ".png";
+  fs::make_dirs(resolve_asset_path(dir));
+  auto job = std::make_unique<BakeLightJob>();
+  job->gradient = gradient, job->asset = pt->asset_path, job->rel = rel, job->abs = resolve_asset_path(rel), job->name = pt->name, job->key = key;
+  const std::shared_ptr<const SurfaceMaps> maps = pt->maps;
+  BakeLightJob *raw = job.get();
+  job->thread = std::thread([raw, maps, key, top, bottom, gradient] {
+    const SurfaceMaps &mm = *maps;
+    std::vector<uint32_t> px((size_t)mm.w * mm.h);
+    for (size_t i = 0; i < px.size(); i++) {
+      Vec3 c;
+      if (mm.cover[i] <= 0.0f) c = Vec3(1.0f);
+      else if (gradient) c = bottom + (top - bottom) * clamp01(mm.position[i].y);
+      else {
+        const float wrap = clamp01(dot(normalize(mm.normal[i]), key) * 0.5f + 0.5f);
+        c = Vec3(clamp01(mm.ao[i]) * (0.35f + 0.65f * wrap));
+      }
+      px[i] = pack_srgb(c);
+    }
+    raw->ok = write_png(raw->abs, px.data(), mm.w, mm.h, mm.w, false);
+    if (!raw->ok) raw->why = "could not write " + raw->rel;
+    raw->done.store(true, std::memory_order_release);
+  });
+  bakelight_ = std::move(job);
+  Log::info("paint %s: baking on a worker (the layer lands when the file is written)", gradient ? "bakegradient" : "bakelight");
+  return true;
+}
+
+/* The baked-light worker's result: the Image layer added to the surface it was asked for (one undo step), or a warning. */
+void Editor::bakelight_poll() {
+  if (!bakelight_ || !bakelight_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<BakeLightJob> job = std::move(bakelight_);
+  if (job->thread.joinable()) job->thread.join();
+  const bool gradient = job->gradient;
+  if (!job->ok) {
+    Log::warn("paint %s: %s", gradient ? "bakegradient" : "bakelight", job->why.c_str());
+    return;
+  }
+  ProceduralTexturePtr pt = texture_asset(job->asset);
+  if (!pt) {
+    fs::remove_file(job->abs);
+    Log::warn("paint %s: the surface is gone; the bake was dropped", gradient ? "bakegradient" : "bakelight");
+    return;
+  }
+  const std::string rel = job->rel;
+  const Vec3 key = job->key;
+  note_texture_edit(*pt);
+  TextureLayer *l = pt->add("Image");
+  if (!l) return;
+  l->name = gradient ? "Baked Gradient" : "Baked Light";
+  l->blend = (int)LayerBlend::Multiply;
+  l->targets = TargetAlbedo;
+  struct SetImage : Reflector {
+    std::string path;
+    bool all_fields() const override { return true; }
+    void field(const char *, float &, float, float, float) override {}
+    void field(const char *, int &, int, int) override {}
+    void field(const char *, bool &) override {}
+    void field(const char *, Vec3 &) override {}
+    void color(const char *, Vec3 &) override {}
+    void enumeration(const char *, int &, const char *const *, int) override {}
+    void text(const char *, std::string &) override {}
+    void mesh(const char *, MeshPtr &) override {}
+    void texture(const char *n, TextureRef &v) override {
+      if (std::string(n) == "Image") v = TextureRef{path, false};
+    }
+  } set;
+  set.path = rel;
+  l->reflect(set);
+  texture_cache_forget(resolve_asset_path(rel));
+  pt->touch();
+  project_listed_ = -100;
+  mark_changed(gradient ? "Bake Gradient into the Paint" : "Bake Lighting into the Paint");
+  Log::info("Surface %s: %s layer added (Multiply) from %s%s", pt->name.c_str(), l->name.c_str(), rel.c_str(), gradient ? "" : strprintf(" - key (%.2f, %.2f, %.2f)", key.x, key.y, key.z).c_str());
+}
+
+Vec3 Editor::paint_rgb_to_hsv_for_ui(Vec3 c) { return paint_rgb_to_hsv(c); }
+Vec3 Editor::paint_hsv_to_rgb_for_ui(Vec3 hsv) { return paint_hsv_to_rgb(hsv); }
+
+/* paint palette add [r g b] | pick <i> | shade <i> | remove <i> | save <name> | load <name> | list */
+void Editor::paint_palette_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? to_lower(t[i]) : d; };
+  auto num = [&](size_t i, float d) { return t.size() > i ? (float)std::atof(t[i].c_str()) : d; };
+  const std::string sub = arg(2, "list");
+  if (sub == "add") {
+    paint_palette_.push_back(t.size() >= 6 ? Vec3(num(3, 0.5f), num(4, 0.5f), num(5, 0.5f)) : paint_brush_.color);
+    paint_palette_pick_ = (int)paint_palette_.size() - 1;
+    return;
+  }
+  const int i = (int)num(3, -1.0f);
+  if (sub == "pick" || sub == "remove") {
+    if (i < 0 || i >= (int)paint_palette_.size()) {
+      Log::warn("paint palette %s: %zu swatch(es)", sub.c_str(), paint_palette_.size());
+      return;
+    }
+    if (sub == "pick") paint_brush_.color = paint_palette_[(size_t)i], paint_palette_pick_ = i;
+    else {
+      paint_palette_.erase(paint_palette_.begin() + i);
+      if (paint_palette_pick_ == i) paint_palette_pick_ = -1;
+      else if (paint_palette_pick_ > i) paint_palette_pick_--;
+    }
+    return;
+  }
+  if (sub == "shade") {  // the five shades of the picked swatch, from darker to lighter
+    if (paint_palette_pick_ < 0 || paint_palette_pick_ >= (int)paint_palette_.size() || i < 0 || i > 4) {
+      Log::warn("paint palette shade <0-4>: pick a swatch first");
+      return;
+    }
+    Vec3 hsv = paint_rgb_to_hsv(paint_palette_[(size_t)paint_palette_pick_]);
+    hsv.z = clamp01(hsv.z * (0.5f + 0.25f * i));
+    paint_brush_.color = paint_hsv_to_rgb(hsv);
+    return;
+  }
+  if (sub == "save" || sub == "load") {
+    std::string name = t.size() > 3 ? t[3] : "Palette";
+    for (char &ch : name)
+      if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|') ch = '_';
+    const std::string rel = "Assets/Palettes/" + name + ".pal";
+    if (sub == "save") {
+      std::string text = "# Blendity palette: one swatch a line, linear r g b\n";
+      for (const Vec3 &c : paint_palette_) text += strprintf("%g %g %g\n", c.x, c.y, c.z);
+      fs::make_dirs(resolve_asset_path("Assets/Palettes"));
+      if (!fs::write_file(resolve_asset_path(rel), text)) Log::warn("paint palette save: could not write %s", rel.c_str());
+      else project_listed_ = -100, Log::info("Palette %s written (%zu swatches)", rel.c_str(), paint_palette_.size());
+      return;
+    }
+    std::string text;
+    if (!fs::read_file(resolve_asset_path(rel), text)) {
+      Log::warn("paint palette load: no %s", rel.c_str());
+      return;
+    }
+    paint_palette_.clear();
+    size_t pos = 0;
+    while (pos < text.size()) {
+      size_t e = text.find('\n', pos);
+      if (e == std::string::npos) e = text.size();
+      const std::string line = text.substr(pos, e - pos);
+      pos = e + 1;
+      if (line.empty() || line[0] == '#') continue;
+      Vec3 c;
+      if (std::sscanf(line.c_str(), "%f %f %f", &c.x, &c.y, &c.z) == 3 && std::isfinite(c.x) && std::isfinite(c.y) && std::isfinite(c.z)) paint_palette_.push_back(Vec3(clamp01(c.x), clamp01(c.y), clamp01(c.z)));
+    }
+    paint_palette_pick_ = paint_palette_.empty() ? -1 : 0;
+    return;
+  }
+  Log::info("Palette: %zu swatch(es)%s", paint_palette_.size(), paint_palette_.empty() ? " (paint palette add [r g b])" : "");
+  for (size_t k = 0; k < paint_palette_.size(); k++) Log::info("  %zu: %.3f %.3f %.3f%s", k, paint_palette_[k].x, paint_palette_[k].y, paint_palette_[k].z, (int)k == paint_palette_pick_ ? " (picked)" : "");
 }
 
 /* ===================================================================== */

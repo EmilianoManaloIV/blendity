@@ -144,8 +144,20 @@ void Material::reflect(Reflector &r) {
     }
   }
   r.group_end();
-  static const char *models[] = {"PBR (Principled)", "Toon (Cel)"};
-  r.enumeration("Shading Model", shading_model, models, 2);
+  static const char *models[] = {"PBR (Principled)", "Toon (Cel)", "Hand-painted"};
+  r.enumeration("Shading Model", shading_model, models, 3);
+  if (r.all_fields() || shading_model == 2) {  // (task 0247, ADR 0083)
+    if (r.group("Hand-painted", true)) {
+      r.field("Rim", hp_rim, 0.01f, 0.0f, 2.0f);
+      r.field("Rim Width", hp_rim_width, 0.01f, 0.05f, 1.0f);
+      r.color("Rim Color", hp_rim_color);
+      r.field("Painted Specular", hp_spec, 0.01f, 0.0f, 2.0f);
+      r.help("The texture carries the light (the baked-light layer, the painted highlights): the surface shows its colour as\n"
+             "it is in every renderer, lights neither shade nor darken it, plus a rim at grazing angles and a highlight where\n"
+             "the roughness channel is low. Blizzard's and Riot's hand-painted look; glTF writes it KHR_materials_unlit.");
+    }
+    r.group_end();
+  }
   r.help("Toon: the anime / cel look (Goo Engine; Blender: Shader to RGB + Color Ramp) - light in flat tones with a\n"
          "hard edge, a shadow colour, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
          "for the black lines.");

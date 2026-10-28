@@ -65,6 +65,10 @@ bool apply_surface_mask_preset(TextureLayer &l, const std::string &preset);
 std::unique_ptr<TextureLayer> make_fill_layer();
 std::unique_ptr<TextureLayer> make_mesh_map_layer();
 std::unique_ptr<TextureLayer> make_anchor_layer();
+/* The hand-painted look's filters (task 0247): Posterize, Edge Shade, Cavity. */
+std::unique_ptr<TextureLayer> make_posterize_layer();
+std::unique_ptr<TextureLayer> make_edge_shade_layer();
+std::unique_ptr<TextureLayer> make_cavity_layer();
 std::unique_ptr<TextureLayer> make_group_layer();
 /* A mask effect's targets as a mask stack wants them (the height plane is the mask there). */
 void make_mask_effect(TextureLayer &l);

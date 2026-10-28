@@ -361,7 +361,7 @@ template<class T> void put(std::string &b, T v) { b.append(reinterpret_cast<cons
 /* A material's glTF object: `base` / `metal_rough` / `normal` are texture indices (-1: none). Says whether it used
  * KHR_materials_emissive_strength and BLENDITY_toon (task 0172: a Toon material's fields, every one by its name). */
 struct GltfMaterialUse {
-  bool emissive_strength = false, toon = false;
+  bool emissive_strength = false, toon = false, unlit = false;
 };
 std::string material_json(const Material &m, const std::string &name, int base, int metal_rough, int normal, GltfMaterialUse &use) {
   std::string j = "{\"name\":\"" + json_escape(name) + "\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[" + num(m.base_color.x) + "," +
@@ -385,6 +385,10 @@ std::string material_json(const Material &m, const std::string &name, int base, 
       ext += "\"KHR_materials_emissive_strength\":{\"emissiveStrength\":" + num(emax) + "}";
       use.emissive_strength = true;
     }
+  }
+  if (m.unlit || m.shading_model == 2) {  // (task 0247: a Hand-painted or unlit material, as MToon exporters write them)
+    ext += (ext.empty() ? "" : ",") + std::string("\"KHR_materials_unlit\":{}");
+    use.unlit = true;
   }
   if (m.shading_model == 1) {
     Material copy = m;  // (reflect takes a non-const material)
@@ -1228,9 +1232,10 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
   std::string scene_nodes = "[";
   for (size_t i = 0; i < nodes.size(); i++) scene_nodes += (i ? "," : "") + std::to_string(i);
   std::string json = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"Blendity\"}";
-  if (use.emissive_strength || use.toon) {
+  if (use.emissive_strength || use.toon || use.unlit) {
     std::string used = use.emissive_strength ? "\"KHR_materials_emissive_strength\"" : "";
     if (use.toon) used += std::string(used.empty() ? "" : ",") + "\"BLENDITY_toon\"";
+    if (use.unlit) used += std::string(used.empty() ? "" : ",") + "\"KHR_materials_unlit\"";
     json += ",\"extensionsUsed\":[" + used + "]";
   }
   json += ",\"scene\":0,\"scenes\":[{\"name\":\"Scene\",\"nodes\":" + scene_nodes + "]}]";

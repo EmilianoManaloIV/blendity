@@ -72,6 +72,7 @@ bool material_uniform(const Material &m, const Material::Resolved &tx) {
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
   SurfaceSample s = evaluate_any(m, tx, sp);
   if (m.shading_model == 1) s.toon = &m;  // an axis material's parts shade by the parent's model
+  if (m.shading_model == 2) s.handpainted = &m, s.unlit = true;  // (task 0247)
   return s;
 }
 
@@ -249,7 +250,7 @@ static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &t
     out.emission = out.emission * inv;
   }
   out.normal = length(nsum) > 1e-6f ? normalize(nsum) : sp.normal;
-  out.unlit = m.unlit;
+  out.unlit = m.unlit || m.shading_model == 2;  // (task 0247: Hand-painted shows the texture as it is)
   return out;
 }
 
@@ -300,7 +301,7 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
   s.roughness = m.roughness;
   s.specular = m.specular;
   s.alpha = m.alpha;
-  s.unlit = m.unlit;
+  s.unlit = m.unlit || m.shading_model == 2;  // (task 0247)
   s.normal = sp.normal;
 
   /* Texture coordinates (Blender: Texture Coordinate + Mapping nodes). */

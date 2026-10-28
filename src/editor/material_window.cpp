@@ -88,7 +88,7 @@ const Preview &material_preview(const Material &m, int size) {
       const float spec = std::pow(std::max(0.0f, dot(n, H)), shin) * (shin + 8) / (8 * kPi) * ndl;
       /* A sky-ish ambient for the shadowed side, and a fake reflection for metals. */
       const Vec3 sky = Vec3(0.35f, 0.40f, 0.48f) * (0.5f + 0.5f * n.y);
-      Vec3 c = m.unlit ? albedo : albedo * (1 - m.metallic) * (ndl * 0.9f + 0.12f) + f0 * spec + f0 * sky * (0.3f + 0.7f * m.metallic);
+      Vec3 c = m.unlit || m.shading_model == 2 ? albedo : albedo * (1 - m.metallic) * (ndl * 0.9f + 0.12f) + f0 * spec + f0 * sky * (0.3f + 0.7f * m.metallic);
       c += m.emission * m.emission_strength;
       if (m.alpha < 1.0f) c = c * m.alpha + bg * (1 - m.alpha);
       /* Soft edge. */

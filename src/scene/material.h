@@ -102,6 +102,10 @@ struct Material {
   TextureRef toon_specular_map;       // where the highlight spot may appear (black: never)
   Vec3 toon_specular_color{1, 1, 1};  // the spot's colour
   bool toon_hair_highlight = false;   // the spot as a band across the hair's tangent (Kajiya-Kay's sheen)
+  /* The Hand-painted model (shading_model 2, ADR 0083, task 0247): the texture's colour as it is, unlit, plus a rim and a
+   * painted specular from the roughness channel; lights neither shade nor darken it (the light is in the paint). */
+  float hp_rim = 0.15f, hp_rim_width = 0.3f, hp_spec = 0.3f;
+  Vec3 hp_rim_color{1.0f, 1.0f, 1.0f};
   int toon_rim_side = 0;              // the rim: 0 all round the silhouette, 1 the lit side only, 2 the shadow side only
   TextureRef toon_rim_map;            // where the rim may show (black: never)
   bool toon_key_light_only = false;   // only the brightest sun bands the tones; other lights add smooth fill

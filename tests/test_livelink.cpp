@@ -513,7 +513,30 @@ static void livelink_fixture_tests() {
   });
 }
 
+static void tests_round267() {
+  test("export: a Hand-painted material and an unlit one are written KHR_materials_unlit, listed in extensionsUsed; a PBR material is not", [] {
+    auto mesh = primitives::cube(1.0f);
+    MaterialPtr hp = make_material("Painted", {0.9f, 0.3f, 0.3f});
+    hp->shading_model = 2;
+    MaterialPtr pbr = make_material("Plain", {0.5f, 0.5f, 0.5f});
+    MaterialPtr un = make_material("Unlit", {0.5f, 0.5f, 0.5f});
+    un->unlit = true;
+    ExportOptions o = export_defaults((int)ExportFormat::GLB);
+    const std::string glb = export_gltf({ExportItem{"Painted", mesh.get(), Mat4::identity(), {hp}}, ExportItem{"Plain", mesh.get(), Mat4::identity(), {pbr}}, ExportItem{"Unlit", mesh.get(), Mat4::identity(), {un}}}, o, true, "", nullptr);  // (one slot a cube: three materials)
+    const Json j = glb_json(glb);
+    CHECK(j.type == Json::Obj && j["materials"].size() == 3);
+    const bool first_unlit = j["materials"][0]["extensions"]["KHR_materials_unlit"].type == Json::Obj;
+    const bool second_unlit = j["materials"][1]["extensions"]["KHR_materials_unlit"].type == Json::Obj;
+    const bool third_unlit = j["materials"][2]["extensions"]["KHR_materials_unlit"].type == Json::Obj;
+    bool used = false;
+    for (size_t i = 0; i < j["extensionsUsed"].size(); i++) used = used || j["extensionsUsed"][i].str == "KHR_materials_unlit";
+    std::printf("    glTF: Hand-painted unlit %d, PBR unlit %d, an unlit material %d, extensionsUsed lists it %d\n", (int)first_unlit, (int)second_unlit, (int)third_unlit, (int)used);
+    CHECK(first_unlit && !second_unlit && third_unlit && used);
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
+  tests_round267();
 }

@@ -1240,3 +1240,15 @@ thread - the `export` command's cost, not a frame's). A 2D dab writes the disc's
 |---|---|
 | Worn Steel on a 256 surface of a subdivided cube with its maps | metallic mean 1.000 over 35,728 texels; the edge band's luminance 0.706 against the face centres' 0.565 |
 | a 16-texel 2D dab | 1,000 texels about its UV, none elsewhere |
+
+## The hand-painted look (task 0247)
+
+A Bristle dab costs `bristles` (12) small stamp evaluations a texel on top of 0245's projection; Flat and Round one. Wet
+mixing adds a colour unpack per texel the brush goes over; Smudge one neighbour read, Blend nine. `paint bakelight` is a
+dot product a texel of the mesh maps on the main thread (a 1k map: a few milliseconds; the rays were the bake's cost).
+The filters run per texel inside the rect engine's rectangle, single-threaded like Levels.
+
+| `tests_round267` | Measured |
+|---|---|
+| a wet 0.5 blue stroke over red (a 6x cube, size 30, 8 dabs) | 2,933 mixed texels, 339 pure blue |
+| the baked light from +X on a 4x sphere's 128 maps | 0.985 on +X against 0.652 on -X |

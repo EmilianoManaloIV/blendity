@@ -482,6 +482,141 @@ struct GroupLayer : TextureLayerBase<GroupLayer> {
 
 std::unique_ptr<TextureLayer> make_fill_layer() { return std::make_unique<FillLayer>(); }
 std::unique_ptr<TextureLayer> make_mesh_map_layer() { return std::make_unique<MeshMapLayer>(); }
+
+/* ===================================================================== */
+/* Stylization filters (task 0247, ADR 0083)                              */
+/* ===================================================================== */
+
+namespace {
+
+/* A filter's weight at a texel / point: its opacity, the stack's mask when used, its own mask. */
+inline float stylize_weight(const TextureLayer &l, const TexPlanes &p, size_t i) {
+  return clamp01(l.opacity) * (l.use_mask ? p.mask[i] : 1.0f) * (p.layer_mask ? (*p.layer_mask)[i] : 1.0f);
+}
+inline float stylize_weight(const TextureLayer &l, const TexPoint &p) { return clamp01(l.opacity) * (l.use_mask ? p.mask : 1.0f) * p.layer_mask; }
+
+template<class F> void stylize_planes(const TextureLayer &l, TexPlanes &p, F &&fn) {  // (fn(i, u, v, k) over the active rect, rows in parallel)
+  const int rx0 = p.x_begin(), rx1 = p.x_end(), ry0 = p.y_begin(), ry1 = p.y_end();
+  JobSystem::global().parallel_for(ry1 - ry0, 8, [&](int64_t ya, int64_t yb) {
+    for (int64_t y = ry0 + ya; y < ry0 + yb; y++)
+      for (int x = rx0; x < rx1; x++) {
+        const size_t i = (size_t)y * p.w + x;
+        const float k = stylize_weight(l, p, i);
+        if (k > 0.0f) fn(i, (x + 0.5f) / p.w, 1.0f - (y + 0.5f) / p.h, k);
+      }
+  });
+}
+
+inline Vec3 posterize_color(Vec3 c, int levels) {  // (the value quantized, the hue and saturation kept)
+  const float mx = std::max({c.x, c.y, c.z});
+  if (mx <= 1e-6f) return c;
+  const float q = std::round(mx * (levels - 1)) / (float)(levels - 1);
+  return c * (q / mx);
+}
+
+}  // namespace
+
+/* Posterize: the albedo's value in N steps (the hue kept), and the height when targeted. */
+struct PosterizeLayer : TextureLayerBase<PosterizeLayer> {
+  static constexpr const char *kName = "Posterize";
+  int levels = 4;
+  PosterizeLayer() { targets = TargetAlbedo; }
+  void reflect(Reflector &r) override {
+    r.field("Levels", levels, 2, 32);
+    r.help("How many values the colour keeps (its hue and saturation stay): the flat tones of a hand-painted texture.");
+  }
+  bool is_generator() const override { return false; }
+  void apply(TexPlanes &p, const LayerContext &) const override {
+    const int n = std::max(2, std::min(32, levels));
+    stylize_planes(*this, p, [&](size_t i, float, float, float k) {
+      if (targets & TargetAlbedo) p.albedo[i] = lerp(p.albedo[i], posterize_color(p.albedo[i], n), k);
+      if (targets & TargetHeight) p.height[i] = lerpf(p.height[i], std::round(p.height[i] * (n - 1)) / (float)(n - 1), k);
+    });
+  }
+  void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override {
+    const float k = stylize_weight(*this, p);
+    if (k <= 0.0f) return;
+    const int n = std::max(2, std::min(32, levels));
+    if (targets & TargetAlbedo) p.albedo = lerp(p.albedo, posterize_color(p.albedo, n), k);
+    if (targets & TargetHeight) p.height = lerpf(p.height, std::round(p.height * (n - 1)) / (float)(n - 1), k);
+  }
+};
+
+/* Edge Shade: the convex edges (the curvature above 0.5, through a width) darkened or lightened by an amount - the
+ * hand-painter's edge-darken or edge-highlight pass. Needs the mesh maps. */
+struct EdgeShadeLayer : TextureLayerBase<EdgeShadeLayer> {
+  static constexpr const char *kName = "Edge Shade";
+  int mode = 1;  // 0 Darken, 1 Light
+  float width = 0.2f, amount = 0.6f;
+  EdgeShadeLayer() { targets = TargetAlbedo; }
+  void reflect(Reflector &r) override {
+    static const char *modes[] = {"Darken", "Light"};
+    r.enumeration("Mode", mode, modes, 2);
+    r.field("Width", width, 0.01f, 0.02f, 0.5f);
+    r.field("Amount", amount, 0.01f, 0.0f, 1.0f);
+    r.help("The convex edges from the mesh maps' curvature (0.5 flat): Light paints the highlight a hand-painter puts on\n"
+           "every edge, Darken the line a comic inker would. Width: how far from flat counts as an edge.");
+  }
+  bool is_generator() const override { return false; }
+  float edge(const LayerContext &c, float u, float v) const {
+    if (!c.maps || c.maps->empty()) return 0.0f;
+    return clamp01((c.maps->sample(c.maps->curvature, u, v) - 0.5f) / std::max(0.02f, width));
+  }
+  Vec3 shade(Vec3 a, float t) const { return mode == 0 ? a * (1.0f - clamp01(amount) * t) : lerp(a, Vec3(1.0f), clamp01(amount) * t); }
+  float shade1(float h, float t) const { return mode == 0 ? h * (1.0f - clamp01(amount) * t) : lerpf(h, 1.0f, clamp01(amount) * t); }  // (the height: a mask stack's plane)
+  void apply(TexPlanes &p, const LayerContext &c) const override {
+    if (!(targets & (TargetAlbedo | TargetHeight))) return;
+    stylize_planes(*this, p, [&](size_t i, float u, float v, float k) {
+      const float t = edge(c, u, v);
+      if (t <= 0.0f) return;
+      if (targets & TargetAlbedo) p.albedo[i] = lerp(p.albedo[i], shade(p.albedo[i], t), k);
+      if (targets & TargetHeight) p.height[i] = lerpf(p.height[i], shade1(p.height[i], t), k);
+    });
+  }
+  void apply_point(TexPoint &p, float u, float v, const LayerContext &c, const LayerAux *) const override {
+    const float k = stylize_weight(*this, p);
+    const float t = k > 0.0f && (targets & (TargetAlbedo | TargetHeight)) ? edge(c, u, v) : 0.0f;
+    if (t <= 0.0f) return;
+    if (targets & TargetAlbedo) p.albedo = lerp(p.albedo, shade(p.albedo, t), k);
+    if (targets & TargetHeight) p.height = lerpf(p.height, shade1(p.height, t), k);
+  }
+};
+
+/* Cavity: the colour multiplied by the mesh maps' occlusion through a strength - the crevices darkened as a painter's
+ * cavity pass does. Needs the mesh maps. */
+struct CavityLayer : TextureLayerBase<CavityLayer> {
+  static constexpr const char *kName = "Cavity";
+  float strength = 1.0f;
+  CavityLayer() { targets = TargetAlbedo; }
+  void reflect(Reflector &r) override {
+    r.field("Strength", strength, 0.05f, 0.0f, 4.0f);
+    r.help("The occlusion raised to this power multiplies the colour: 1 as baked, above it deeper crevices, below it a hint.");
+  }
+  bool is_generator() const override { return false; }
+  float factor(const LayerContext &c, float u, float v) const {
+    if (!c.maps || c.maps->empty()) return 1.0f;
+    return std::pow(clamp01(c.maps->sample(c.maps->ao, u, v)), std::max(0.0f, strength));
+  }
+  void apply(TexPlanes &p, const LayerContext &c) const override {
+    if (!(targets & (TargetAlbedo | TargetHeight))) return;
+    stylize_planes(*this, p, [&](size_t i, float u, float v, float k) {
+      const float f = factor(c, u, v);
+      if (targets & TargetAlbedo) p.albedo[i] = lerp(p.albedo[i], p.albedo[i] * f, k);
+      if (targets & TargetHeight) p.height[i] = lerpf(p.height[i], p.height[i] * f, k);  // (a mask stack's plane)
+    });
+  }
+  void apply_point(TexPoint &p, float u, float v, const LayerContext &c, const LayerAux *) const override {
+    const float k = stylize_weight(*this, p);
+    if (k <= 0.0f || !(targets & (TargetAlbedo | TargetHeight))) return;
+    const float f = factor(c, u, v);
+    if (targets & TargetAlbedo) p.albedo = lerp(p.albedo, p.albedo * f, k);
+    if (targets & TargetHeight) p.height = lerpf(p.height, p.height * f, k);
+  }
+};
+
+std::unique_ptr<TextureLayer> make_posterize_layer() { return std::make_unique<PosterizeLayer>(); }
+std::unique_ptr<TextureLayer> make_edge_shade_layer() { return std::make_unique<EdgeShadeLayer>(); }
+std::unique_ptr<TextureLayer> make_cavity_layer() { return std::make_unique<CavityLayer>(); }
 std::unique_ptr<TextureLayer> make_anchor_layer() { return std::make_unique<AnchorLayer>(); }
 std::unique_ptr<TextureLayer> make_group_layer() { return std::make_unique<GroupLayer>(); }
 

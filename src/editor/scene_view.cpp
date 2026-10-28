@@ -542,7 +542,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     const Material &mat0 = *mr->material(0);
     it.albedo = mat0.base_color;
     it.specular = mat0.specular * 0.5f;
-    it.unlit = mat0.unlit;
+    it.unlit = mat0.unlit || mat0.shading_model == 2;  // (task 0247: Hand-painted shows its texture as painted in the solid modes too)
     it.double_sided = mat0.double_sided || editing;
     it.materials = &mr->materials;
     it.receive_shadows = mr->receive_shadows;
