@@ -2,6 +2,28 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 269): the manual, the Learn lessons, the check lists (task 0249)
+
+**Asked:** after the customize, sculpt, paint and stylize rounds, the manual, the Learn lessons and the check lists.
+
+**Added**
+- **The manual:** chapter 1 *Your editor, your way* (the Wheel, panels anywhere, a shortcut for anything, UI files, the
+  module registry, the stages as one pipeline); chapter 3 *Stylized environments*; chapter 4 *Sculpting* with the
+  pipeline order *sculpt > remesh > unwrap > bake mesh maps > paint*; chapter 6 *Painting the surface* (the Substance
+  pipeline in five steps) and *The hand-painted look*; the console table's sculpt, paint and stylize rows.
+- **The features tracker** (`research/FEATURES.md`): nine rows for the rounds' methods - Jacobson 2013 (DynaMesh's
+  winding numbers), Gibson 1998 (its surface nets), Huang 2018 (QuadriFlow), Baxter 2004 (IMPaSTo, marked simplified),
+  and the tools' own methods marked "no paper" - each with its source file and test round.
+- **Five Learn lessons** with Try-it buttons: *Customizing the Editor*, *Sculpting*, *Painting the Surface*, *The
+  Hand-painted Look*, *Stylized Environments* - each citing the reference books and Blender's source, with a question.
+
+**Checked**
+- No new code: the manual test (13 chapters, the Learn notes) and the Learn tab's Try-it test (every new section's
+  commands run headless) cover the additions.
+- Unit checks (round 269): Windows, in render-cache verify mode, 13060, 0 failed (1122 tests), 0 stale
+  pictures. Linux with libraries: 12600, 0 failed. Sanitizer build: 12600, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group passed alone (the known parallel-load noise); linux 12,600.)
+
 ## 2026-10-28 (round 268): stylized environments (task 0248)
 
 **Asked:** the stylized side after the hand-painted look - environments in the Ghibli / oil-paint 3D style: brush

@@ -152,6 +152,14 @@ erases, and a palm resting on the screen is ignored.
 
 ---
 
+**Your editor, your way.** Everything above is movable: the **Wheel** (hold the pen's button or Tab in a view: one radial
+menu with the tools, brushes and sizes of whatever mode you are in), **panels** that dock into any window or float on a
+second screen, a **shortcut for anything** (Assign Shortcut... on any menu item, `shortcut <chord> <command>`), a **UI file**
+(Preferences > UI file) that saves the whole arrangement to share or restore, and the **module registry** (Window > Modules)
+that hides what you do not use. The layouts are stages of one pipeline - Reference, Blocking, Modeling, Sculpting, UV,
+Texturing, Stylized, Lighting, Rigging, Animation - and each shows the tools of its stage first (Show All Tools shows the
+rest). The Learn tab's *Customizing the Editor* lesson walks through it.
+
 ## 2. Reference and planning
 
 **Reference images.** GameObject > Reference Image... puts a picture into the scene as an unlit plane facing the
@@ -241,6 +249,14 @@ draw against. `sketchlift` lifts a whole scaffold drawn under the 3-point guide 
 
 ---
 
+**Stylized environments.** For a Ghibli-styled or oil-paint scene: **Modeling Tools > Strokes** paints geometry - a
+click on a surface adds a card (a quad facing you), a drag with Ribbon a strip - into one Stroke object whose cards shade by
+their own facing, by the surface's normal, or away from a **Canopy** centre so a bush of flat cards reads as one round
+volume; `strokeobj canopyfill` fills a shell round the centre, `strokeobj grass` drops blades onto the ground. **Modeling
+Tools > Scatter** places instances of a named object by density (`scatter Rock`, then dab; the eraser end removes; a
+painted mask keeps them off a path; `scatter merge` joins them for export). The World's **Sun Disc**, **Horizon Band** and
+**Fog** finish the look in every renderer alike. The `Stylized` layout gathers these.
+
 ## 4. Modeling and topology
 
 **Edit Mode** (Tab): 1 / 2 / 3 pick vertex, edge and face selection. The tools follow the selection mode, as in
@@ -288,7 +304,19 @@ others).
 2. Make a torus for a link; add an Array modifier with Fit Type: Fit Curve and the path as its Curve (drag the path
    from the Hierarchy onto the field), and a Curve modifier on the same path.
 
-**Use cases:** hard-surface props, architecture details, game-ready low poly with Subdivision Surface previews.
+**Sculpting.** **Modeling Tools > Sculpt** (`sculpt on`) is ZBrush's workflow on the mesh under the pen: **brushes**
+(Clay, Draw, Inflate, Smooth, Grab, Snake Hook, Crease, Flatten, Pinch) with Mirror symmetry, a lazy mouse, alpha images
+and stroke types; **masks** (Ctrl paints, Ctrl+I inverts, Shift+Ctrl clears) that keep a brush off a region;
+**polygroups** (one per island, by the mask, or grown from a face) and **hiding** (H / Alt+H) to work on a part alone.
+Four ways to add resolution: **Dynamic Subdivision** (a Catmull-Clark preview the brush edits through: the base mesh stays
+light), **DynaMesh** (the Sculpt section's Resolution and button: the shell retopologized evenly from its winding number,
+two shapes merged into one skin), **Quad Remesh** (QuadriFlow: a clean quad mesh at a target face count, sharp edges and
+boundaries kept, on a worker), and **Dyntopo** (Sculptris Pro: the mesh tessellated under the brush as it moves, finer where
+the detail is). The pipeline order that keeps a model clean: *sculpt > remesh > unwrap > bake mesh maps > paint* - a remesh
+after painting would throw the paint's UVs away.
+
+**Use cases:** hard-surface props, architecture details, game-ready low poly with Subdivision Surface previews; organic
+sculpts for characters and creatures, retopologized for games.
 
 > Learn: *Meshes: Vertices, Edges, Faces*, *Edit Mode: Modeling Like Blender*, *Modifiers vs Components*,
 > *Advanced Modeling Tools*, *Bevel, Bridge and Push Through*.
@@ -386,7 +414,29 @@ range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Tr
 1. Make a material, set Axis Mode: World; Axis Top: a grass material asset, Axis Side: rock, Axis Bottom: dirt.
 2. Set Axis High to a snow material with High Start 30 (metres), and Axis Noise so the borders wander.
 
-**Use cases:** game assets with real PBR maps; architectural materials; stylised (toon, anime, manga) renders.
+**Painting the surface** - the Substance Painter pipeline, in order. 1. **Object > Bake Mesh Maps** (`meshmaps`): the
+normal, position, curvature, occlusion and thickness of the mesh baked into its UVs on a worker. 2. **A surface** (`surface
+new`): a texture flagged as this object's, its layers reading those maps - **Fill** layers with a **mask stack** (a Mesh Map
+through levels, Noise, Blur, Levels, an Anchor to another layer's mask) and the **smart masks** (edge wear, dirt, dust,
+metal edge wear, position gradient, thickness), **Group** layers, metallic and emission channels; editing a layer redoes
+only the layers above it inside the edited rectangle. 3. **Paint Mode** (Modeling Tools > Paint): a material brush paints
+colour, roughness, metallic, height and emission by projection, the far side left alone, fills by polygroup / island /
+material / object, a stroke one light undo step of the tiles it touched; `paint 2d on` paints on the Textures window's
+canvas; `paint stencil` masks the brush with an image. 4. **Smart materials** (the Textures window's shelf: Worn Steel,
+Painted Metal, Rubber, Wood, Plastic, Concrete, Gold; `smat save` keeps your own group) dropped onto any surface, their
+generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|hdrp|unreal|separate <dir>`): the
+texture set packed as the engine reads it.
+
+**The hand-painted look.** When the light should live in the texture (Blizzard's and Riot's style): `paint bakelight` bakes
+the maps' occlusion and a key light into a Multiply layer to paint over (`paint bakegradient` the top-down value gradient,
+`paint gradient` lays one as paint); the Paint section's **Tip** (Flat turns with the drag, Bristle streaks), **Wet** mixing,
+**Jitter** and `paint grain` make the brush behave like paint; Smudge pulls, Blend softens; the **palette** row keeps
+swatches and shades; **Posterize**, **Edge Shade** and **Cavity** filters flatten and accent the stack; the material's
+**Shading Model: Hand-painted** shows the texture as painted in every renderer (a rim and a painted highlight in the CPU
+raster) and glTF writes it unlit.
+
+**Use cases:** game assets with real PBR maps; architectural materials; stylised (toon, anime, manga) renders; hand-painted
+textures for stylized games.
 
 > Learn: *Materials and Textures*, *Assets, Scenes and Files*.
 
@@ -735,6 +785,9 @@ the editor. A few that are handy by hand:
 | `libs` | which of Blender's libraries this build uses |
 | `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
 | `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |
+| `sculpt on`, `sculpt brush clay`, `sculpt dynamesh 128`, `sculpt remesh 2000`, `sculpt dyntopo on` | Sculpt Mode, a brush, the remeshers, Sculptris Pro |
+| `meshmaps 1024 16`, `surface new`, `surface mask preset 1 edgewear`, `paint on`, `smat apply Worn Steel`, `export textures unity Exports/Crate` | the paint pipeline from the bake to the texture set |
+| `paint brush bristle`, `paint wet 0.5`, `paint bakelight`, `strokeobj grass 40 0.25 1`, `scatter Rock`, `set world.Fog 1` | the hand-painted look and a stylized scene |
 
 ---
 

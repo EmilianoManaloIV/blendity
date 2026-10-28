@@ -1290,6 +1290,105 @@ A picture-plane layer remembers the camera it was first drawn in and fades as yo
 A whole scaffold drawn on the picture plane under the 3-point guide - a box, a cylinder beside it, their lines - lifts in one command (sketchlift): lines meeting at their ends share a point, a line drawn toward a vanishing point runs along that axis, and the depths are solved from that with the junction nearest the middle at the pivot distance. The result is a Scaffold wire object to build from, never a mesh. Lines toward no vanishing point, and parts tied to nothing, land where the gauge puts them.
 ? You drew a whole box-and-cylinder scaffold on the picture plane under the 3-point guide. How does it get into the scene? | sketchlift: lines meeting at their ends share a point, a line drawn toward a vanishing point runs along that axis, and the depths are solved from that with the junction nearest the middle at the pivot distance - a Scaffold wire object to build from with the Draw tools (task 0227).
 )"},
+    {"Customizing the Editor", "The Wheel, panels anywhere, a shortcut for anything, UI files", R"(
+Unity gives you layouts; Blender gives you workspaces and a keymap editor. Blendity has both and three more handles: the Wheel, docking into any window (or a second screen), and a UI file that saves the whole arrangement.
+# The Wheel
+Hold the pen's button (or press Tab over a view) and one radial menu opens with the tools, brushes and sizes of the mode you are in - the same ring in Edit Mode, Sculpt Mode and Paint Mode, so your hand learns one gesture.
+! cmd:wheel | Open the Wheel
+# Panels anywhere
+Drag any tab onto another window to dock it, or past the editor's edge to float it where you let go (a second screen beside a drawing pad). A layout saves where everything is; the Layout dropdown's Save keeps yours.
+! layout:Texturing | Try the Texturing layout
+! layout:Stylized | Try the Stylized layout
+# A shortcut for anything
+Right-click a menu item: Assign Shortcut... takes the next key you press. From the console: shortcut <chord> <command>.
+! cmd:shortcut list | List the shortcuts
+# UI files and modules
+Preferences > UI file writes the layouts, shortcuts and panels to one file to share or restore; Window > Modules hides the windows you do not use, and each stage's layout shows its own tools first.
+> [GEA1] ch. 10 Tools for Debugging and Development - the tools pipeline; the editor is the first tool
+@ source/blender/windowmanager (Blender's workspaces, screens and keymaps)
+? Where is the keymap editor? | Any menu item: right-click > Assign Shortcut..., or shortcut <chord> <command> in the console. Preferences > UI file saves the result with your layouts.
+)"},
+    {"Sculpting", "Brushes, masks, polygroups, and four ways to add resolution", R"(
+Sculpting is modelling by touch: a brush moves the vertices under it, falling off to the edge of its disc. ZBrush's pillars are here - brushes, masks, polygroups, Dynamic Subdivision, DynaMesh, ZRemesher (QuadriFlow) and Sculptris Pro (Dyntopo).
+# Try it
+! cmd:select Sphere | Select the Sphere
+! cmd:sculpt on | Sculpt Mode on
+! cmd:sculpt brush clay | The Clay brush - drag over the sphere
+! cmd:sculpt symmetry x | Mirror X: both sides at once
+# Masks and polygroups
+Ctrl paints a mask that a brush cannot move; Ctrl+I inverts it; polygroups split the mesh into parts you can hide (H) and work on alone.
+! cmd:sculpt mask clear | Clear the mask
+# Resolution
+- Dynamic Subdivision: a Catmull-Clark preview you sculpt through; the base mesh stays light.
+- DynaMesh: the shell retopologized evenly from its winding number - two blobs merged into one skin.
+- Quad Remesh: QuadriFlow's clean quads at a target count, sharp edges kept, on a worker.
+- Dyntopo: the mesh tessellated under the brush as it moves - detail where you put it.
+! cmd:sculpt dynamesh 64 | DynaMesh at 64
+The pipeline order: sculpt > remesh > unwrap > bake mesh maps > paint. A remesh after painting throws the paint's UVs away.
+> [FoCG] ch. 12 Data Structures for Graphics - the half-edge and the triangle mesh the brushes walk
+> [GEA2] ch. 10 The Rendering Engine - why a game wants the retopologized quads, not the sculpt
+@ source/blender/editors/sculpt_paint (Blender's sculpt mode, Dyntopo and the remeshers)
+? Why remesh before painting? | The paint lives in the UVs' texels; a remesh makes a new mesh with new UVs, so the paint would have nothing to sit on. Sculpt, remesh, unwrap, bake, then paint.
+)"},
+    {"Painting the Surface", "Mesh maps, the layer stack, the brush, smart materials, export", R"(
+Substance Painter's pipeline: bake the mesh maps, build a stack whose masks read them, paint on top, drop smart materials on, export the texture set as the engine wants it.
+# Try it
+! cmd:select Sphere | Select the Sphere
+! cmd:meshmaps 256 8 | Bake the mesh maps (a worker: the status line tells)
+! cmd:surface new Demo | A surface on the object
+! cmd:surface add Fill | A Fill layer
+! cmd:surface mask preset 1 edgewear | An edge-wear mask reading the curvature
+! cmd:smat apply Worn Steel | A smart material on top
+! cmd:paint on | Paint Mode: drag over the sphere
+# What the pieces are
+- Mesh maps: normal, position, curvature, occlusion, thickness, baked into the UVs - the generators' input.
+- The stack: Fill and Group layers, each with a mask stack (Mesh Map through levels, Noise, Blur, Levels, Anchor); editing a layer redoes only what is above it, inside the edited rectangle.
+- The brush: colour, roughness, metallic, height and emission by projection; a stroke one light undo step of the tiles it touched.
+- Smart materials: a saved group whose generators read whatever maps the surface has.
+! cmd:export textures gltf Exports/Demo | Export the texture set (glTF packing)
+> [FoCG] ch. 11 Texture Mapping - UV space, texel footprints and why a seam needs dilation
+> [GEA2] ch. 10.6 Materials, textures and shaders in the rendering pipeline
+@ source/blender/editors/sculpt_paint/paint_image_proj.cc (Blender's Project Paint)
+? The paint shows on the wrong side of a thin plate. | It should not: every texel is projected through the camera and depth-tested against what the view shows, so the far side is left alone. If it does, the plate is thinner than the depth tolerance - zoom in and paint again.
+)"},
+    {"The Hand-painted Look", "Light painted into the texture, a brush that behaves like paint", R"(
+Blizzard's and Riot's textures carry their light in the colour: a value pass first, the light baked or painted, then brushwork on top, and a shader that does not relight it.
+# Try it
+! cmd:select Sphere | Select the Sphere
+! cmd:surface new Painted | A surface
+! cmd:meshmaps 256 8 | Bake its mesh maps
+! cmd:paint bakelight | The light baked into a Multiply layer (the scene's sun as the key)
+! cmd:paint on | Paint Mode
+! cmd:paint brush bristle | A bristle tip
+! cmd:paint wet 0.5 | Wet mixing: strokes blend as paint
+# The pieces
+- Bake Lighting: the maps' occlusion and a key direction into an Image layer you paint over; Bake Gradient the top-down value pass.
+- Tips: Round, Flat (turns with your drag), Bristle (streaks); Jitter and grain for life; Smudge and Blend.
+- Filters: Posterize for flat tones, Edge Shade for the edge highlight, Cavity for the crevices.
+- The Hand-painted shading model: the texture as painted in every renderer, a rim and a painted highlight in the CPU raster; glTF writes it unlit.
+> [FoCG] ch. 5 Linear Algebra and ch. 18 Color - value, hue and why the light can be premultiplied into the texture
+> [GEA2] ch. 10.1 Foundations of Depth-Buffered Triangle Rasterization - the unlit path
+@ source/blender/editors/sculpt_paint (Blender's texture paint brushes)
+? Why does the engine wash out my painted light? | A lit material adds its own light on top. Set the material's Shading Model to Hand-painted: it shows the texture as it is, and the glTF carries KHR_materials_unlit so the engine does the same.
+)"},
+    {"Stylized Environments", "Strokes as geometry, foliage and scatter, a painted sky and fog", R"(
+A Ghibli-styled scene is cards with painted alphas whose normals are faked so a bush reads as one volume, props scattered by hand, a painted sky and fog carrying the palette.
+# Try it
+! cmd:layout Stylized | The Stylized layout
+! cmd:strokeobj on | The Strokes tool: click a surface for a card, drag with Ribbon for a strip
+! cmd:strokeobj canopyfill 1 200 0 2 0 | A canopy of 200 cards round (0, 2, 0)
+! cmd:strokeobj grass 40 0.25 1 | Grass on the ground under the pointer
+! cmd:scatter Sphere | Scatter spheres: dab on the ground
+! cmd:set world.Fog 1 | Fog on
+# The pieces
+- A Stroke object is one mesh rebuilt from its cards and ribbons, with custom normals: Own, Surface, or Canopy (away from a centre).
+- Scatter places children sharing the source's mesh by density; a Paint layer's coverage keeps them off a path; merge joins them for export.
+- The World's Sun Disc, Horizon Band and Fog are the same in the Scene view, the GPU view and renders.
+> [FoCG] ch. 15 Curves - the ribbon's strip along a path; ch. 11 Texture Mapping - the alpha-cut card
+> [GEA2] ch. 10.4 Visual Effects and Overlays - particle and card systems, fog as a post effect
+@ source/blender/editors/gpencil (Blender's Grease Pencil strokes)
+? Why fake the normals on foliage cards? | Each card is flat, so lit on its own it reads as a flat sprite; pointing every card's normal away from the bush's centre makes the light fall over the bush as over one sphere - the trick every hand-painted game uses.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }
