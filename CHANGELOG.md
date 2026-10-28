@@ -2,6 +2,66 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 277): compositing and materials - a pen's reach, a visible Assign, an Export Textures dialog (task 0257)
+
+**Asked:** ADR 0085's compositing and materials round: the Render window's image panned with the middle button only (a
+pen has none), the Tone Curve's points went only by right-click, "Assign to Selection" was a right-click item with no
+button, and the texture set's export was a console command with no window to find it in. Nielsen's H6 and H7, the pen.
+
+**Added**
+- **The Render window's image pans with a left drag** as well as the middle button (the wheel zooms, a double-click fits).
+- **Tone Curve points go by Alt+click** as well as right-click; the tooltip says both.
+- **Assign to Selection is a button** in the Materials window's toolbar, beside Edit UVs, disabled with its reason when
+  no material or no object is selected; the right-click item stays.
+- **Export Textures...** in the Textures window's toolbar opens a dialog - the packing (glTF, Unity, HDRP, Unreal,
+  separate maps), the folder under the project, "Assign the exported images to the material" - that runs the console's
+  `export textures`; the console form stays for scripts.
+- **Review (Opus) taken:** the left-drag pan followed any held button over the image, a slider or a tab dragged across
+  it included - it starts only with a press on the image; the image's own text still said "middle-drag pan"; an
+  Alt+click that missed a point added one - it adds nothing now; the export dialog said "under Assets" where the folder
+  is under the project - the text and a hint row say so, the packing's maps are listed under the choice (HDRP's too),
+  an empty folder disables Export; the Textures toolbar guards its width before adding the button; a test that a press
+  from the settings column crossing the image pans nothing. Open: the Export button's click and an assign by the
+  toolbar button are not driven by a test; the Materials toolbar's "Showing N of M" label can draw over the Assign
+  button while a search filters.
+
+**Checked**
+- `tests_round277`: a preview rendered, a left drag over the Render window's image moves its pan; the Materials
+  toolbar's Assign to Selection disabled with its reason when nothing is selected; the Textures toolbar's Export
+  Textures... opening the dialog by a real click, its Export and Cancel buttons recorded.
+- Unit checks (round 277): Windows, in render-cache verify mode, 13157, 0 failed (1134 tests), 0 stale
+  pictures. Linux with libraries: 12697, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group passed alone: the known parallel-load noise.)
+
+## 2026-10-28 (round 276): lighting and rendering - one Environment, one Device section, the rendering components at hand (task 0256)
+
+**Asked:** ADR 0085's lighting and rendering round: the Environment was edited in two windows under two headers, four
+device pickers in three places defined "Auto" nowhere, and the Rendering components were missing from Add Component
+unless the layout's stage was lighting or materials. Nielsen's H4 (consistency), H6 (recognition), H10 (help).
+
+**Added**
+- **One Environment**: the Render window's section is a row - "edited in the Lighting window" with an **Open Lighting**
+  button - instead of a second copy of the fields.
+- **One Device section**: the Render window's Render Devices opens with "Auto means the GPU when there is one, else the
+  CPU" said once, then the Viewport Device (Preferences' setting) and the GI Device (the Lighting settings' field)
+  beside the render device and the per-card switches.
+- **The Rendering components always at hand**: Add Component (the Inspector's and the Component menu's) lists Light,
+  Camera, Camera Filters, Probe Volume and Outline in every layout.
+- **Review (Opus) taken:** the test could not fail (it ran in a layout that already showed the Lighting window, probed a
+  field inside a folded group and a device setting through its own hook) - it starts in the Default layout, probes
+  "Sky Color", asserts the Lighting window was absent before the click, and checks the two device rows are drawn; the
+  GI Device tooltip said the lightmap bake ran on it (the bake follows the render Device) - corrected; the "Auto"
+  definition and the Environment row were ellipsized at the pane's width - two short rows, a shorter label; the device
+  combos ran past the pane at 1.5x - one helper sized to the row; the CPU row's "(Auto)" gave Auto a second meaning in
+  the section that defines it - dropped; a stale comment. Open: Open Lighting docks into the largest leaf; the render
+  Device and the Denoise Device stay in the Render Settings fields above.
+
+**Checked**
+- `tests_round276`: in the Default layout the Render window's Open Lighting button, no Environment field of its own and the
+  Lighting window only after a real click; the Viewport Device and GI Device rows drawn; Add Component in the Default
+  layout listing Camera Filters and Light.
+- The checks of round 277 below cover this round too (both landed in one chain).
+
 ## 2026-10-28 (round 275): modeling, placing and UV - the walkthrough's fixes (task 0255)
 
 **Asked:** ADR 0085's first area round, what the modeling walkthrough and the audits found: Ctrl with three meanings

@@ -1869,8 +1869,7 @@ void Editor::draw_inspector(const Recti &r) {
     for (auto &ci : component_registry()) {
       if (!f.empty() && to_lower(ci.name).find(f) == std::string::npos) continue;
       /* Another stage's components (task 0055) show only when searched for by name. */
-      if (f.empty() && ((ci.category == "Rigging" && !shows(FocusRig)) || (ci.category == "Rendering" && !shows(FocusLight | FocusMaterial | FocusReference))))
-        continue;
+      if (f.empty() && ci.category == "Rigging" && !shows(FocusRig)) continue;  // (task 0256: the Rendering components in every layout)
       if (ci.category != last_cat) {
         u.menu_label(ci.category);
         last_cat = ci.category;
@@ -2346,6 +2345,31 @@ void Editor::draw_render_window(const Recti &r) {
   {
     const auto &devs = gpu::devices();
     RenderSettings &rs = scene_->render;
+    /* Task 0256: every device choice read in one place, Auto defined once (the fields mirrored keep their own homes too). */
+    u.label(lay.row(), "Auto: the GPU when there is one, else the CPU -", u.theme.text_dim);
+    u.label(lay.row(), "for the views, the GI and the denoiser alike.", u.theme.text_dim);
+    static const char *const kDeviceNames[] = {"Auto", "CPU", "GPU"};
+    auto device_combo = [&](const char *id, const char *label, int value, const char *tip) {  // (a row that fits the pane; -1 unchanged)
+      Recti row = lay.row(u.row_h() + u.px(4));
+      const int lw = std::min(u.px(150), row.w / 2);
+      u.label({row.x + u.px(4), row.y, lw, row.h}, label);
+      if (u.record_buttons) u.button_rects[std::string("render:") + label] = row;
+      int v = value;
+      const bool changed = u.combo(u.id(id), {row.x + lw + u.px(4), row.y + u.px(2), std::max(u.px(60), row.w - lw - u.px(12)), row.h - u.px(4)}, v, kDeviceNames, 3);
+      u.tooltip(tip);
+      return changed ? v : -1;
+    };
+    const int vd = device_combo("render_viewdev", "Viewport Device", viewport_device_, "Where the Scene and Game views draw (the same setting as Preferences > Viewport Device).");
+    if (vd >= 0) {
+      set_viewport_device(vd);
+      save_prefs();
+    }
+    const int gd = device_combo("render_gidev", "GI Device", scene_->lighting.gi_device,
+                                "Where Realtime GI, realtime lightmaps and live probes run (the Lighting window's field). Generate Lighting uses the render Device above.");
+    if (gd >= 0) {
+      scene_->lighting.gi_device = gd;
+      mark_changed("GI Device");
+    }
     const bool gpu_mode = rs.device >= 1;
     auto device_row = [&](const std::string &title, const std::string &detail, bool on, bool enabled) {
       Recti row = lay.row(u.row_h() * 2);
@@ -2360,7 +2384,7 @@ void Editor::draw_render_window(const Recti &r) {
       rs.gpu_with_cpu = !rs.gpu_with_cpu;
       mark_changed("Render Devices");
     }
-    u.tooltip(rs.device == 2 ? "GPU + CPU (Auto): the CPU always renders alongside the GPUs, each as fast as it can."
+    u.tooltip(rs.device == 2 ? "GPU + CPU: the CPU always renders alongside the GPUs, each as fast as it can."
               : gpu_mode     ? "Tick to render on the CPU alongside the GPUs (combined rendering)."
                              : "Set Device to GPU Compute to use the GPUs.");
     for (const gpu::DeviceInfo &d : devs) {
@@ -2378,15 +2402,13 @@ void Editor::draw_render_window(const Recti &r) {
     if (!final_pt_.gpu_error().empty()) u.label(lay.row(), final_pt_.gpu_error(), u.theme.warning);
   }
   lay.space(u.px(6));
-  header("World / Environment Lighting");
-  {
-    InspectorReflector ir(*this, u, lay);
-    u.push_id("world");
-    scene_->environment.reflect(ir);
-    u.pop_id();
-    if (ir.changed) {
-      mark_changed("World Settings");
-    }
+  header("Environment");
+  {  /* Task 0256: one place for the Environment - the Lighting window; this row points there instead of a second copy. */
+    Recti row = lay.row(u.row_h() + u.px(4));
+    const int bw = u.px(110);
+    u.label({row.x + u.px(4), row.y, row.w - bw - u.px(12), row.h}, "Sky, fog, ambient: the Lighting window.", u.theme.text_dim);
+    if (u.button({row.right() - bw - u.px(4), row.y + u.px(2), bw, row.h - u.px(4)}, "Open Lighting", false, Icon::Lightbulb)) dock_open(WindowKind::Lighting);
+    u.tooltip("The Environment section of the Lighting window: one set of fields, read by the views and the renders alike.");
   }
   lay.space(u.px(6));
   GameObject *owner = nullptr;
@@ -2401,7 +2423,7 @@ void Editor::draw_render_window(const Recti &r) {
 }
 
 /* The Render window's picture (task 0188: also alone, in a render-only window): a checker behind, wheel zoom,
- * middle-drag pan, double-click fit. */
+ * drag pan (left or middle), double-click fit. */
 void Editor::draw_render_image(const Recti &right, int margin) {
   auto &u = ui_;
   if (margin < 0) margin = u.px(20);
@@ -2421,7 +2443,9 @@ void Editor::draw_render_image(const Recti &right, int margin) {
     if (render_zoom_ <= 0) render_zoom_ = fit;
     render_zoom_ = clampf(render_zoom_ * std::pow(1.2f, u.in.wheel_y), 0.05f, 16.0f);
   }
-  if (u.hovered(right) && u.in.down[2]) render_pan_ += Vec2((float)u.in.dx(), (float)u.in.dy());
+  if (u.hovered(right) && u.in.pressed[0] && !u.any_active()) render_pan_drag_ = true;  // (task 0257: a left drag that begins on the image pans - a pen has no middle button)
+  if (!u.in.down[0]) render_pan_drag_ = false;
+  if ((u.hovered(right) && u.in.down[2]) || render_pan_drag_) render_pan_ += Vec2((float)u.in.dx(), (float)u.in.dy());
   if (u.hovered(right) && u.in.double_clicked[0]) { render_zoom_ = 0; render_pan_ = Vec2(0, 0); }
   float sc = render_zoom_ > 0 && margin > 0 ? render_zoom_ : fit;  // (render-only, no margin: always fitted)
   int dw = (int)(iw * sc), dh = (int)(ih * sc);
@@ -2450,7 +2474,7 @@ void Editor::draw_render_image(const Recti &right, int margin) {
     u.label(badge, "PREVIEW", 0xFF000000u, ui::Align::Center);
   }
   u.label({right.x + u.px(8), right.bottom() - u.row_h() - u.px(4), right.w, u.row_h()},
-          strprintf("%d x %d  |  %.0f%%  |  wheel zoom, middle-drag pan, double-click fit", iw, ih, sc * 100.0f), u.theme.text_dim);
+          strprintf("%d x %d  |  %.0f%%  |  wheel zoom, drag pan, double-click fit", iw, ih, sc * 100.0f), u.theme.text_dim);
   u.canvas.pop_clip();
 }
 

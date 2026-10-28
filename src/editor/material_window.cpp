@@ -177,6 +177,13 @@ void Editor::draw_materials_window(const Recti &r) {
     if (u.button({bar.right() - u.px(96), bar.y + u.px(3), u.px(90), bh - u.px(6)}, "Edit UVs")) uv_edit_material(material_selected_);
     u.tooltip("The UV Editor on the selected object's faces of this material (the others dimmed).");
   }
+  if (bar.w > u.px(640)) {  // (task 0257: Assign to Selection as a button, not only the right-click item)
+    const bool can = material_selected_ && !selection_.empty();
+    if (u.button_enabled({bar.right() - u.px(96) - u.px(156), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "Assign to Selection", can,
+                         material_selected_ ? "Select an object to assign it to." : "Select a material first."))
+      for (GameObject *g : selected_objects(false)) assign_material(g, 0, material_selected_);
+    u.tooltip("Put the selected material on the selected objects' first slot (also: right-click the tile).");
+  }
   const Recti sf{bar.x + u.px(162), bar.y + u.px(4), std::min(u.px(200), bar.w - u.px(170)), bh - u.px(8)};
   u.text_field(u.id("mat_search"), sf, material_search_, nullptr, "Search materials");
   if (!f.empty() && list.size() < all)  // say that the search hides some

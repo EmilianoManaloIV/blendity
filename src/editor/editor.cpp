@@ -1036,8 +1036,8 @@ void Editor::draw_menubar(const Recti &r) {
     for (auto &ci : component_registry())
       if (std::find(cats.begin(), cats.end(), ci.category) == cats.end()) cats.push_back(ci.category);
     for (auto &cat : cats) {
-      /* Rigging and Rendering components belong to their stages' layouts (task 0055). */
-      if ((cat == "Rigging" && !shows(FocusRig)) || (cat == "Rendering" && !shows(FocusLight | FocusMaterial | FocusReference))) continue;
+      /* The Rigging components belong to their stage's layouts (task 0055); the Rendering ones show everywhere (task 0256). */
+      if (cat == "Rigging" && !shows(FocusRig)) continue;
       u.submenu(cat, u.px(220), [this, cat, has_sel] {
         for (auto &ci : component_registry())
           if (ci.category == cat && ui_.menu_item(ci.name, nullptr, false, has_sel)) add_component_to_selection(ci.name);
@@ -3537,6 +3537,7 @@ void Editor::draw_dialogs() {
     g_dialog_shown = (int)dialog_;
     u.open_popup(id, anchor);
     if (dialog_ == Dialog::SaveAs) u.begin_edit(u.id("saveas_name"), dialog_text_, true);
+    if (dialog_ == Dialog::ExportTextures) u.begin_edit(u.id("exptex_dir"), dialog_text_, true);
     dialog_files_.clear();
     if (dialog_ == Dialog::OpenScene) scan_files(assets_dir_, ".scene", dialog_files_);
     if (dialog_ == Dialog::ImportObj) {
@@ -3643,6 +3644,40 @@ void Editor::draw_dialogs() {
         title("AI Inbetweening, an optional download");
         draw_ai_dialog(close);
         break;
+      case Dialog::ExportTextures: {  // (task 0257: the texture set's export with a window to find it in)
+        title("Export Textures");
+        static const char *const kPackings[] = {"glTF", "Unity", "HDRP", "Unreal", "Separate maps"};
+        static const char *const kPackingMaps[] = {"BaseColor, Normal, ORM, Emissive", "Albedo, MetallicSmoothness, Normal, Emission, AO",
+                                                   "BaseColor, MaskMap, Normal, Emission", "BaseColor, Normal, ORM, Emissive", "every map on its own"};
+        static const char *const kPackingIds[] = {"gltf", "unity", "hdrp", "unreal", "separate"};
+        Recti r = u.popup_row();
+        u.label({r.x + u.px(12), r.y, u.px(90), r.h}, "Packing");
+        u.combo(u.id("exptex_packing"), {r.x + u.px(106), r.y, r.w - u.px(120), r.h}, export_packing_, kPackings, 5);
+        export_packing_ = std::max(0, std::min(4, export_packing_));
+        r = u.popup_row();
+        u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, kPackingMaps[export_packing_], u.theme.text_dim);
+        r = u.popup_row(u.row_h() + u.px(8));
+        u.label({r.x + u.px(12), r.y, u.px(90), r.h}, "Folder");
+        bool done = false;
+        u.text_field(u.id("exptex_dir"), {r.x + u.px(106), r.y + u.px(3), r.w - u.px(120), r.h - u.px(6)}, dialog_text_, &done);
+        r = u.popup_row();
+        u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, "Under the project folder (Exports/Textures by default).", u.theme.text_dim);
+        r = u.popup_row();
+        u.checkbox({r.x + u.px(12), r.y + u.px(2), u.row_h() - u.px(4), u.row_h() - u.px(4)}, export_assign_);
+        u.label({r.x + u.px(12) + u.row_h(), r.y, r.w - u.px(40), r.h}, "Assign the exported images to the material", u.theme.text_dim);
+        Recti b = u.popup_row(u.row_h() + u.px(10));
+        const Recti ex{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+        if (u.record_buttons) u.button_rects["exptex:Export"] = ex, u.button_rects["exptex:Cancel"] = cancel;
+        const bool go = u.button_enabled(ex, "Export", !dialog_text_.empty(), "Name a folder.") || (done && !dialog_text_.empty());
+        if (u.button(cancel, "Cancel")) close();
+        if (go && !dialog_text_.empty()) {
+          std::vector<std::string> t = {"export", "textures", kPackingIds[export_packing_], dialog_text_};
+          if (export_assign_) t.push_back("--assign");
+          close();
+          export_textures_command(t);
+        }
+        break;
+      }
       case Dialog::Boolean: {  // (task 0255: the object kept and the cutters named, whatever the order of selection)
         title("Boolean");
         std::vector<GameObject *> meshes;

@@ -195,6 +195,17 @@ void Editor::draw_textures_window(const Recti &r) {
     }
   });
   int x = nb.right() + u.px(6);
+  if (bar.w > u.px(720)) {  /* Task 0257: Export Textures... - the texture set's export as a dialog, not a console command only. */
+    const int ew = u.font.text_width("Export Textures...") + u.px(14);
+    std::string why;
+    const bool can = surface_of(active_object(), &why) != nullptr;
+    if (u.button_enabled({x, nb.y, ew, nb.h}, "Export Textures...", can, can ? "" : ("Export needs a surface: " + why).c_str())) {
+      dialog_ = Dialog::ExportTextures;
+      dialog_text_ = "Exports/Textures";
+    }
+    u.tooltip("The active object's surface as a texture set: a packing (glTF, Unity, HDRP, Unreal, separate maps) into a folder under the project.");
+    x += ew + u.px(6);
+  }
   if (texture_selected_) {
     static const char *sizes[] = {"256", "512", "1024", "2048"};
     int si = texture_selected_->width >= 2048 ? 3 : texture_selected_->width >= 1024 ? 2 : texture_selected_->width >= 512 ? 1 : 0;

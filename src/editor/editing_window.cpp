@@ -365,7 +365,7 @@ void Editor::draw_edit_curve(ui::Layout &lay, int step) {
   box.w = box.h;
   draw_curve_box(box, edit_doc_.stack()[(size_t)step].curve[ch], ch);
   u.mark_widget(box);
-  u.tooltip("Click to add a point, drag to move one, right-click to remove it (on the display axis: 0 black, 1 white).");
+  u.tooltip("Click to add a point, drag to move one, right-click or Alt+click to remove it (on the display axis: 0 black, 1 white).");
   edit_curve_input(box, step, ch);
 }
 
@@ -409,12 +409,13 @@ void Editor::edit_curve_input(const Recti &box, int step, int ch) {
   std::vector<Vec2> pts = edit_doc_.stack()[(size_t)step].curve[ch];
   if (pts.size() < 2) pts = {Vec2(0, 0), Vec2(1, 1)};
   int near = curve_point_near(box, pts);
-  if (u.in.pressed[1] && near > 0 && near + 1 < (int)pts.size()) {
+  if ((u.in.pressed[1] || (u.in.pressed[0] && u.in.alt())) && near > 0 && near + 1 < (int)pts.size()) {  // (task 0257: Alt+click removes too)
     pts.erase(pts.begin() + near);
     edit_doc_.set_curve(step, ch, pts);
     u.redraw = true;
     return;
   }
+  if (u.in.alt()) return;  // (an Alt+click that removed nothing adds nothing either)
   if (!u.in.pressed[0]) return;
   edit_doc_.begin_change();
   if (near < 0) {

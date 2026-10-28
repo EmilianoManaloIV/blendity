@@ -5125,6 +5125,129 @@ static void tests_round275() {
   });
 }
 
+static void tests_round276() {
+  test("lighting and rendering in one place (ADR 0085, task 0256): the Render window points at the Lighting window for the Environment (a click opens it); its Render Devices section carries the Viewport and GI device rows; Add Component lists the Rendering components in a modeling layout", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(500.0);
+    ed.command("layout Default");  // (a layout without the Lighting window: the click must bring it)
+    ed.command("window Render");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    const bool open_lighting = br.count("Open Lighting") > 0, sky_field = br.count("field:Sky Color") > 0, lighting_before = ed.window_rect_for_test(WindowKind::Lighting).w > 0;
+    std::printf("    Render window: Open Lighting button %d, an Environment field of its own %d, the Lighting window shown before the click %d\n", (int)open_lighting, (int)sky_field, (int)lighting_before);
+    CHECK(open_lighting && !sky_field && !lighting_before);
+    auto click = [&](const std::string &key) {
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    {  /* The Render window is short in this layout: scroll its settings column until the button is in view. */
+      const Recti rw = ed.window_rect_for_test(WindowKind::Render);
+      int scrolls = 0;
+      for (; scrolls < 60 && br.count("Open Lighting") && br.at("Open Lighting").bottom() > rw.bottom() - 4; scrolls++) {
+        platform::Event w;
+        w.type = platform::EventType::Wheel;
+        w.x = rw.x + 40, w.y = rw.y + rw.h / 2;
+        w.wheel_y = -3;
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, w.x, w.y)});
+        ed.step_frame_headless({w});
+      }
+      std::printf("    the Render window %dx%d: %d scroll step(s) to bring Open Lighting into view\n", rw.w, rw.h, scrolls);
+    }
+    CHECK(click("Open Lighting"));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti lw = ed.window_rect_for_test(WindowKind::Lighting), rw2 = ed.window_rect_for_test(WindowKind::Render);
+    std::printf("    after the click: the Lighting window %dx%d, the Render window %dx%d, focused %d (Lighting %d)\n", lw.w, lw.h, rw2.w, rw2.h, ed.focused_window_for_test(), (int)WindowKind::Lighting);
+    if (lw.w == 0) {
+      ed.command("window Lighting");
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const Recti lw2 = ed.window_rect_for_test(WindowKind::Lighting);
+      std::printf("    (the console's `window Lighting` in this layout: %dx%d)\n", lw2.w, lw2.h);
+    }
+    CHECK(lw.w > 0);
+    ed.command("window Render");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool vrow = br.count("render:Viewport Device") > 0, grow = br.count("render:GI Device") > 0;
+    std::printf("    Render Devices: the Viewport Device row %d, the GI Device row %d\n", (int)vrow, (int)grow);
+    CHECK(vrow && grow);
+    /* Add Component in a modeling layout lists the Rendering components. */
+    ed.command("layout Default");
+    ed.command("select Cube");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool opened = click("Add Component");
+    const bool filters = br.count("menu:Camera Filters") > 0, light = br.count("menu:Light") > 0;
+    std::printf("    Add Component in the Default layout: opened %d, Camera Filters %d, Light %d\n", (int)opened, (int)filters, (int)light);
+    CHECK(opened && filters && light);
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+  });
+}
+
+static void tests_round277() {
+  test("compositing and materials within a pen's reach (ADR 0085, task 0257): a left drag pans the Render window's image; the Materials toolbar's Assign to Selection is disabled with its reason when nothing is selected; the Textures toolbar's Export Textures... opens the dialog", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(600.0);
+    ed.command("layout Lighting & Rendering");
+    ed.command("window Render");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("preview");  // (a quick render: the image area pans only with a picture in it)
+    for (int i = 0; i < 400 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Recti rw = ed.window_rect_for_test(WindowKind::Render);
+    const Vec2 pan0 = ed.render_pan_for_test();
+    const int cx = rw.x + rw.w * 2 / 3, cy = rw.y + rw.h * 2 / 3;  // (the image area: right of the settings column, below the bar)
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 30, cy + 10)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 60, cy + 20)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx + 60, cy + 20)});
+    const Vec2 pan1 = ed.render_pan_for_test();
+    /* A press that began outside the image (the settings column) and crossed into it pans nothing. */
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, rw.x + 20, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, rw.x + 20, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 50, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx + 50, cy)});
+    const Vec2 pan2 = ed.render_pan_for_test();
+    std::printf("    the Render window %dx%d with a preview rendered %d: a left drag of 60 px moved the pan (%.0f, %.0f) -> (%.0f, %.0f)\n", rw.w, rw.h, (int)(ed.render_image_for_test().width > 0), pan0.x, pan0.y, pan1.x, pan1.y);
+    std::printf("    a press from the settings column crossing the image: pan (%.0f, %.0f) -> (%.0f, %.0f)\n", pan1.x, pan1.y, pan2.x, pan2.y);
+    CHECK(rw.w > 0 && pan1.x > pan0.x && pan2.x == pan1.x && pan2.y == pan1.y);
+    ed.command("layout Texturing");
+    ed.command("window Materials");
+    ed.clear_selection_for_test();
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why = ed.button_disabled_why_for_test("Assign to Selection");
+    const Recti mw = ed.window_rect_for_test(WindowKind::Materials);
+    std::printf("    the Materials window %dx%d: Assign to Selection drawn %d, disabled: '%s'\n", mw.w, mw.h, (int)(ed.ui_for_test().button_rects.count("Assign to Selection") > 0), why.c_str());
+    CHECK(mw.w > 0 && ed.ui_for_test().button_rects.count("Assign to Selection") > 0 && why.find("Select") != std::string::npos);
+    ed.command("select Cube");
+    ed.command("surface new ExportSurf");
+    ed.command("window Textures");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    const bool button = br.count("Export Textures...") > 0;
+    if (button) {
+      const Recti r = br.at("Export Textures...");
+      const int bx = r.x + r.w / 2, by = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, bx, by)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, bx, by)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, bx, by)});
+      ed.step_frame_headless();
+    }
+    std::printf("    Textures toolbar: Export Textures... drawn %d, the dialog open %d, its Export button recorded %d\n", (int)button, (int)ed.export_textures_dialog_for_test(), (int)(br.count("exptex:Export") > 0));
+    CHECK(button && ed.export_textures_dialog_for_test() && br.count("exptex:Export") > 0 && br.count("exptex:Cancel") > 0);
+    ed.close_dialog_for_test();
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -5172,5 +5295,7 @@ void run_editor_tests() {
   tests_round273();
   tests_round274();
   tests_round275();
+  tests_round276();
+  tests_round277();
   coverage_tests();
 }

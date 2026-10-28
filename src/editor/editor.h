@@ -715,6 +715,8 @@ class Editor {
   void open_scene_asked(const std::string &path);
   void open_scene_dialog_asked();
   bool unsaved_dialog_open_for_test() const { return dialog_ == Dialog::UnsavedChanges; }
+  bool export_textures_dialog_for_test() const { return dialog_ == Dialog::ExportTextures; }  // (task 0257)
+  Vec2 render_pan_for_test() const { return render_pan_; }
   bool scene_dirty_for_test() const { return scene_dirty_; }
   bool playing_for_test() const { return playing_; }
   void request_close_for_test() { request_close(); }
@@ -2607,6 +2609,8 @@ class Editor {
   void join_selected();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
   uint64_t boolean_kept_ = 0;  // (the Boolean dialog's choice: task 0255)
+  int export_packing_ = 0;  // (the Export Textures dialog: task 0257)
+  bool export_assign_ = false;
   int boolean_op_ = 0;
   void separate(const std::string &mode);
   GameObject *spawn_part(GameObject *g, Mesh mesh);
@@ -4181,6 +4185,7 @@ class Editor {
   std::string render_status_;
   float render_zoom_ = 0;  // 0 = fit
   Vec2 render_pan_;
+  bool render_pan_drag_ = false;  // (a left drag that began on the image: task 0257)
   std::vector<float> render_linear_;  // for .hdr output
   std::vector<std::string> image_assets_;
   double image_assets_time_ = -100;
@@ -4473,7 +4478,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {
