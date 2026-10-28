@@ -2,6 +2,51 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 271): the HCI pass - the method set, the baselines, the measuring sticks (task 0251)
+
+**Asked:** which additions, chosen by HCI methods, would make the program easier for artists - from Unity, Unreal or
+the Adobe suite, on a keyboard, a pen or a tablet - over every feature of the app. Three audits found seven problems
+repeating in every area (refusals and progress only in the console, hard-coded shortcut labels, silent data loss on New
+/ Open / Exit, pen and tablet gaps, one thing in several places, invisible modes, hidden features); ADR 0085 sets the
+twelve-round pass that fixes them, foundations first. This round lays the baselines and the tools that measure.
+
+**Added**
+- **ADR 0085**: the methods named per change (Nielsen, Fitts, Hick, KLM, the cognitive walkthrough, transfer of learning,
+  WCAG), the foundations F1-F7 before the area rounds, the measuring sticks, the artefacts under `docs/hci/`.
+- **`docs/hci/`**: the README, four cognitive walkthroughs at the baseline (a prop modelled to rendered: 8 of 12 steps
+  with a failing question; sculpt to export: 5 of 12; rig to export: 8 of 12; a stylized scene: 3 of 10), the KLM table
+  of twenty frequent actions (19 timed: 77.0 s before the pass), the study protocol, this round's reports.
+- **The Fitts dump** (`tests_round271`): every window's and tool mode's recorded widget rectangles as JSON at UI scales
+  1.0 and 1.5 (Tablet Mode); **`tools/hci_fitts_audit.py`** reports the targets under 7 mm and the index of difficulty
+  to each control from the Scene view's centre. Baseline: 1,009 of 1,099 targets under 7 mm at 1.0, 925 of 1,024 at 1.5 (a fresh project; 420 of 440 and 394 of 415 distinct) - the
+  row height itself fails the pen rule, so the first fix is a taller row in Tablet Mode.
+- **The status-hint table** (`tests_round271`): seven modes x two selection states; baseline 2 of 8 cells with no hint of
+  their own (Strokes, Scatter).
+- **`tools/hci_label_audit.py`**: the string literals in `src/editor` carrying a shortcut the keymap does not produce;
+  baseline 121 (other tools' keys and mouse gestures not counted). `--check` for the chain once round 274 moves the labels to `shortcut_text`.
+- **`tools/test_coverage_map.py`** gains widget rows (`u.button` labels, Inspector fields, Tools sections) with the
+  tests that drive each by label: 153 widgets, 145 not driven; counted toward `--check` only with `--widgets`.
+- **Review (Opus) taken:** the hint test reads the hint with the pointer over the view (a frame had reset the hover,
+  so Object and Edit Mode looked like holes) and judges a hole by the mode's name, not by the fallback's text; the
+  Fitts dump runs with the Modeling Tools window open and every section shown (the brush controls were never
+  recorded), skips the Project's and the Materials' tiles (what the scratch project held), writes into the test's own
+  folder, escapes its JSON, and the audit counts distinct targets beside per-context ones with 7 mm at 96 DPI (26.5 /
+  39.7 px, not 24 / 36); the Inspector reflector records its float, bool and colour fields by label as the int field
+  did (the Tools sections were invisible to the dump and the coverage map); the label audit leaves out other tools'
+  keys named on purpose and mouse gestures (168 became 121); the coverage map drops the section headers (not in
+  `button_rects`) and format-string labels and reads the button's second argument; the walkthrough scores were
+  recounted under a stated rule (an N in any column), the KLM rows recomputed under stated rules (BB a click, 2K a
+  chord, one M a cognitive unit) with the replay test moved to *Not done*; the README's filter and the reports'
+  table rows fixed. Open: the Inspector's enumeration and text fields are not yet recorded by label; grid buttons
+  and section headers are not scanned; the KLM replay.
+
+**Checked**
+- `tests_round271` in `tests/test_editor.cpp` (the dump's contexts and targets, the hint table's cells); the two scripts
+  on the dump and the sources; `tools/test_coverage_map.py` still exits as before without `--widgets`.
+- Unit checks (round 271): Windows, in render-cache verify mode, 13067, 0 failed (1124 tests), 0 stale
+  pictures. Linux with libraries: 12607, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group passed alone: the known parallel-load noise.)
+
 ## 2026-10-28 (round 270): the write-up - customize, sculpt, paint, stylize (task 0250)
 
 **Asked:** the pass's write-up.

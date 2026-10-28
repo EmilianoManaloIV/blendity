@@ -443,6 +443,7 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     float old = v;
+    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
     bool ch = u.drag_label(fid(n) ^ 0xAB, label_rect(row), n, v, speed);
     v = clampf(v, mn, mx);
     ch |= u.float_field(fid(n), field_rect(row), v, speed, mn, mx);
@@ -517,6 +518,7 @@ struct InspectorReflector : Reflector {
   void field(const char *n, bool &v) override {
     if (skip()) return;
     Recti row = lay.row();
+    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
     u.label(label_rect(row), n);
     if (u.checkbox(field_rect(row), v)) {
       record(FieldEdit::Bool, n).b_new = v;
@@ -545,6 +547,7 @@ struct InspectorReflector : Reflector {
   void color(const char *n, Vec3 &v) override {
     if (skip()) return;
     Recti row = lay.row();
+    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
     u.label(label_rect(row), n);
     if (u.color_field(fid(n), field_rect(row), v)) {
       record(FieldEdit::Color, n).v_new = v;

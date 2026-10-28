@@ -217,6 +217,9 @@ tiles it touched. Smart materials (a saved group with its masks, seven built in)
 sets exported in the glTF, Unity, HDRP and Unreal packings, 2D painting on the UV canvas, stencils. The hand-painted look:
 flat and bristle tips, wet mixing, jitter, grain, Smudge and Blend, a gradient fill and a palette, the lighting baked into a
 layer to paint over, a Hand-painted shading model that shows the texture as painted, Posterize / Edge Shade / Cavity filters.
+An HCI pass over the whole editor is under way (ADR 0085, `docs/hci/`): cognitive walkthroughs, a KLM table, a Fitts target
+audit and a shortcut-label audit in the test suite, with toasts, a job tray, keymap-driven labels, unsaved-changes prompts, a
+History panel and an accessibility theme to follow.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -247,7 +250,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13060 unit checks in 1122 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13067 unit checks in 1124 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

@@ -4448,6 +4448,144 @@ static void tests_round268b() {
   });
 }
 
+/* The HCI measuring sticks (ADR 0085, task 0251): the widget rectangles every window and tool mode records, dumped for
+ * tools/hci_fitts_audit.py; the status bar's hint over every mode and state. Both print their numbers; the thresholds
+ * become assertions as the rounds fix what they find. */
+static std::string hci_dump_dir() {  // (BLENDITY_HCI_DUMP_DIR, else the test's own folder: nothing left in the shared project)
+  const char *e = std::getenv("BLENDITY_HCI_DUMP_DIR");
+  const std::string d = e && *e ? std::string(e) : fs::join(test_dir(), "hci");
+  fs::make_dirs(d);
+  return d;
+}
+
+static std::string json_escape(const std::string &s) {
+  std::string o;
+  for (unsigned char c : s) {
+    if (c == '"' || c == '\\') o += '\\', o += (char)c;
+    else if (c < 32) o += strprintf("\\u%04x", (int)c);
+    else o += (char)c;
+  }
+  return o;
+}
+
+static void tests_round271() {
+  test("hci: the Fitts dump - every window's and tool mode's recorded widget rectangles written as JSON at UI scales 1.0 and 1.5 for tools/hci_fitts_audit.py (the counts printed; the audit's threshold becomes an assertion in the area rounds)", [] {
+    for (float scale : {1.0f, 1.5f}) {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      ed.set_clock_for_test(100.0);
+      if (scale != 1.0f) ed.command("window tablet on");  // (Tablet Mode: the UI at 1.5x, as a 2-in-1 shows it)
+      for (int i = 0; i < 5; i++) ed.step_frame_headless();
+      ed.record_buttons_for_test(true);
+      std::string json = "{\"scale\":" + strprintf("%.1f", scale) + ",";
+      {
+        const Recti v = ed.scene_rect_for_test();
+        json += strprintf("\"scene\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d},", v.x, v.y, v.w, v.h);
+      }
+      json += "\"contexts\":{";
+      size_t contexts = 0, targets = 0;
+      auto snapshot = [&](const std::string &context) {
+        if (std::getenv("BLENDITY_HCI_TRACE")) std::printf("    snapshot %s\n", context.c_str()), std::fflush(stdout);
+        for (int i = 0; i < 3; i++) ed.step_frame_headless();
+        const auto &rects = ed.ui_for_test().button_rects;
+        if (rects.empty()) return;
+        if (contexts++) json += ",";
+        json += "\"" + json_escape(context) + "\":{";
+        bool first = true;
+        for (const auto &kv : rects) {
+          if (kv.first.rfind("file:", 0) == 0 || kv.first.rfind("mat:", 0) == 0) continue;  // (the project's and the materials' tiles: what the scratch project holds, not the editor's controls)
+          json += (first ? "" : ",") + ("\"" + json_escape(kv.first) + "\":") + strprintf("{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", kv.second.x, kv.second.y, kv.second.w, kv.second.h);
+          first = false;
+          targets++;
+        }
+        json += "}";
+        ed.record_buttons_for_test(false);
+        ed.record_buttons_for_test(true);
+      };
+      /* Every window, opened through the Window menu's command. */
+      for (int k = 0; k < (int)WindowKind::Count; k++) {
+        const std::string title = window_title((WindowKind)k);
+        if (title.empty()) continue;
+        if (std::getenv("BLENDITY_HCI_TRACE")) std::printf("    opening %s\n", title.c_str()), std::fflush(stdout);
+        ed.command("window " + title);
+        snapshot("window:" + title);
+      }
+      /* The tool modes on the sample scene's objects, with the Modeling Tools window open (the sections hold the brush controls). */
+      if (std::getenv("BLENDITY_HCI_TRACE")) std::printf("    modes\n"), std::fflush(stdout);
+      ed.command("layout Default");
+      ed.command("window Modeling Tools");
+      ed.command("alltools on");  // (every section, whatever the layout's stage: the brush controls are what the audit is for)
+      ed.command("select Cube");
+      snapshot("mode:object");
+      ed.command("edit");
+      snapshot("mode:edit");
+      ed.command("edit off");
+      ed.command("sculpt on");
+      snapshot("mode:sculpt");
+      const bool sculpt_controls = json.find("\"field:Size\"") != std::string::npos && json.find("\"field:Strength\"") != std::string::npos;  // (Modeling Tools' Sculpt section is in the dump)
+      if (!sculpt_controls) std::printf("    (no field:Size / field:Strength in the sculpt snapshot; the Tools window %dx%d, sculpt %d)\n", ed.window_rect_for_test(WindowKind::Tools).w, ed.window_rect_for_test(WindowKind::Tools).h, (int)ed.sculpt_for_test());
+      ed.command("sculpt off");
+      ed.command("surface new FittsSurf");
+      ed.command("paint on");
+      snapshot("mode:paint");
+      ed.command("paint off");
+      CHECK(sculpt_controls);
+      ed.command("strokeobj on");
+      snapshot("mode:strokes");
+      ed.command("strokeobj off");
+      ed.command("scatter Sphere");
+      ed.command("scatter on");
+      snapshot("mode:scatter");
+      ed.command("scatter off");
+      json += "}}";
+      const std::string path = fs::join(hci_dump_dir(), strprintf("fitts-%.1f.json", scale));
+      CHECK(fs::write_file(path, json));
+      std::printf("    scale %.1f: %zu contexts, %zu targets -> %s\n", scale, contexts, targets, path.c_str());
+      CHECK(contexts >= 20 && targets > 100);
+    }
+  });
+
+  test("hci: the status bar's hint over every tool mode and selection state (a table printed for docs/hci/hints-<round>.md; the holes are the baseline round 274 fills)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    struct Mode {
+      const char *name, *on, *off, *word;  // (word: what a hint of the mode's own names)
+    };
+    const Mode modes[] = {{"object", "", "", "Move"}, {"edit", "edit", "edit off", "Edit"}, {"sculpt", "sculpt on", "sculpt off", "Sculpt"}, {"paint", "paint on", "paint off", "Paint"}, {"strokes", "strokeobj on", "strokeobj off", "Stroke"}, {"scatter", "scatter on", "scatter off", "Scatter"}, {"sketch", "sketch on", "sketch off", "Sketch"}};
+    ed.command("select Cube");
+    ed.command("surface new HintSurf");
+    ed.command("scatter Sphere");
+    int holes = 0, cells = 0;
+    std::printf("    | mode | nothing selected | the Cube selected |\n    |---|---|---|\n");
+    for (const Mode &m : modes) {
+      std::string cell[2];
+      for (int sel = 0; sel < 2; sel++) {
+        if (sel) ed.command("select Cube"); else ed.clear_selection_for_test();
+        if (!sel && *m.on) {  // (a tool mode needs a selection to turn on: not a hint's hole, a refusal's)
+          cell[sel] = "n/a (needs a selection)";
+          continue;
+        }
+        if (*m.on) ed.command(m.on);
+        for (int i = 0; i < 2; i++) ed.step_frame_headless();
+        ed.set_scene_hovered_for_test(true);  // (a frame resets the hover: read the hint at once, as the pointer over the view would)
+        std::string h = ed.statusbar_hint_for_test();
+        if (*m.off) ed.command(m.off);
+        const bool generic = h.find(m.word) == std::string::npos;  // (a hole: the hint does not name the mode)
+        cells++, holes += generic ? 1 : 0;
+        if (h.size() > 60) h = h.substr(0, 57) + "...";
+        for (char &c : h)
+          if (c == '|') c = '/';
+        cell[sel] = generic ? "**(none)** " + h : h;
+      }
+      std::printf("    | %s | %s | %s |\n", m.name, cell[0].c_str(), cell[1].c_str());
+    }
+    std::printf("    %d of %d cells have no hint of their own\n", holes, cells);
+    CHECK(cells == 8);  // (object both ways; the six tool modes with the Cube selected)
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -4490,5 +4628,6 @@ void run_editor_tests() {
   tests_round267b();
   tests_round268();
   tests_round268b();
+  tests_round271();
   coverage_tests();
 }
