@@ -142,6 +142,8 @@ layout(std140, set = 0, binding = 0) uniform Frame {
   vec4 cage;           // the Edit Mode cage: its lines' depth bias, its dots' radius
   vec4 probe;          // task 0197: the probes' normal bias, view bias, leak reduction, live
   vec4 gi;             // task 0197: realtime GI's specular occlusion
+  vec4 sky_disc; vec4 sky_disc_color; vec4 sky_band;  // task 0248: the stylized sky (dir + cos, colour + softness, colour + width)
+  vec4 fog; vec4 fog_color; vec4 fog_far;             // task 0248: start, end, on; the near and far colours
 };
 layout(std430, set = 0, binding = 21) readonly buffer Lights { Light lights[]; };  // task 0195: any number (view.z of them)
 layout(std430, set = 0, binding = 22) readonly buffer VertexColors { vec4 vcol[]; };  // task 0195: Weight Paint's (Inst.toon5.y)
@@ -1211,7 +1213,21 @@ vec3 irradiance(vec3 n) {
 vec3 radiance(vec3 d, float lod) {
   if (int(env.x + 0.5) == 1) return env_color.rgb * env.y;
   if (env_has_map()) return tex_sample(int(env_map.x), dir_to_equirect(d, env_map.y), lod, 0, 2).xyz * env.y;
-  return (d.y >= 0.0 ? mix(equator.rgb, sky.rgb, sqrt(clamp(d.y, 0.0, 1.0))) : mix(equator.rgb, ground.rgb, sqrt(clamp(-d.y * 4.0, 0.0, 1.0)))) * env.y;
+  vec3 g = d.y >= 0.0 ? mix(equator.rgb, sky.rgb, sqrt(clamp(d.y, 0.0, 1.0))) : mix(equator.rgb, ground.rgb, sqrt(clamp(-d.y * 4.0, 0.0, 1.0)));
+  if (sky_band.w > 0.0) g = mix(g, sky_band.rgb, clamp(1.0 - abs(d.y) / sky_band.w, 0.0, 1.0));  // (task 0248: the horizon band)
+  if (sky_disc.w < 1.0) {  // (the sun disc)
+    float cd = dot(d, sky_disc.xyz);
+    float edge = (1.0 - sky_disc.w) * clamp(sky_disc_color.w, 0.0, 1.0);
+    g = mix(g, sky_disc_color.rgb, clamp((cd - sky_disc.w) / max(1e-6, edge), 0.0, 1.0));
+  }
+  return g * env.y;
+}
+/* Task 0248: distance fog at a lit pixel (Environment::fog_apply). */
+vec3 fog_apply(vec3 c, vec3 P) {
+  if (fog.z < 0.5) return c;
+  float fe = max(fog.x + 1e-3, fog.y);
+  float f = clamp((length(P - eye.xyz) - fog.x) / (fe - fog.x), 0.0, 1.0);
+  return mix(c, mix(fog_color.rgb, fog_far.rgb, f), f);
 }
 vec3 radiance(vec3 d) { return radiance(d, 0.0); }
 vec3 env_specular(vec3 r, float rough) {
@@ -1439,7 +1455,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     if (kind == 1 || kind == 2 || kind == 4) amb = A.rgb;
     else if (I.toon3.y > 0.5) amb = (irradiance(vec3(0.0, 1.0, 0.0)) + irradiance(vec3(0.0, -1.0, 0.0))) * 0.5 * (kind == 3 ? gsky : 1.0) + (kind == 3 ? A.rgb : vec3(0.0));
     else amb = kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
-    return display(lo + amb * albedo + toon_rim(I, n, V, keyL) * clamp(T.t2.x, 0.0, 1.0) + emission);
+    return display(fog_apply(lo + amb * albedo + toon_rim(I, n, V, keyL) * clamp(T.t2.x, 0.0, 1.0) + emission, P));
   }
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
@@ -1469,7 +1485,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   vec3 spec = env_specular(R, rough) * env_brdf_approx(f0, rough, nv);
   vec3 amb = kind == 1 || kind == 2 || kind == 4 ? A.rgb : kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
   if (kind == 3) spec *= 1.0 + (gsky - 1.0) * gi.x;  // (realtime GI's sky share occludes the reflection, not over a lightmap)
-  return display(lo + amb * albedo * (1.0 - metallic) + spec + emission);
+  return display(fog_apply(lo + amb * albedo * (1.0 - metallic) + spec + emission, P));
 }
 )";
 
@@ -1925,6 +1941,7 @@ struct FrameUbo {
   float eye[4], sky[4], equator[4], ground[4], view[4], shadow[4], background[4];
   float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4], env_map[4], sh[9][4], cage[4];
   float probe[4], gi[4];  // (task 0197)
+  float sky_disc[4], sky_disc_color[4], sky_band[4], fog[4], fog_color[4], fog_far[4];  // (task 0248)
 };
 struct InstGpu {
   float model[16], albedo_rough[4], metal_spec[4], emission[4];
@@ -3619,6 +3636,7 @@ class VulkanRaster final : public Raster {
     u.bg[0] = (float)fr.background;
     u.probe[0] = fr.probe_normal_bias, u.probe[1] = fr.probe_view_bias, u.probe[2] = fr.probe_leak ? 1.0f : 0.0f, u.probe[3] = fr.probe_live ? 1.0f : 0.0f;
     u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = u.gi[2] = u.gi[3] = 0.0f;  // (task 0197)
+    for (int k = 0; k < 4; k++) u.sky_disc[k] = fr.sky_disc[k], u.sky_disc_color[k] = fr.sky_disc_color[k], u.sky_band[k] = fr.sky_band[k], u.fog[k] = fr.fog[k], u.fog_color[k] = fr.fog_color[k], u.fog_far[k] = fr.fog_far[k];  // (task 0248)
     u.cage[0] = fr.cage_bias;
     u.cage[1] = fr.cage_point_radius;
     u.lut[0] = (float)lut_size_;

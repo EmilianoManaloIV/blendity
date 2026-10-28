@@ -217,6 +217,8 @@ tiles it touched. Smart materials (a saved group with its masks, seven built in)
 sets exported in the glTF, Unity, HDRP and Unreal packings, 2D painting on the UV canvas, stencils. The hand-painted look:
 flat and bristle tips, wet mixing, jitter, grain, Smudge and Blend, a gradient fill and a palette, the lighting baked into a
 layer to paint over, a Hand-painted shading model that shows the texture as painted, Posterize / Edge Shade / Cavity filters.
+Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
+scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer.
 
 ## Build it
 

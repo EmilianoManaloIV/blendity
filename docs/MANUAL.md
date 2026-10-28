@@ -367,6 +367,13 @@ layer to paint over (`paint bakegradient` the top-down value gradient), `paint g
 Shading Model to Hand-painted so every renderer shows the texture as painted (a rim and a painted highlight in the CPU raster;
 glTF writes it unlit). Posterize, Edge Shade and Cavity are filters in the Textures window's Add Layer menu.
 
+**Stylized environments.** Modeling Tools > Strokes paints geometry: a click on a surface adds a card (a quad facing you), a drag
+with Ribbon a strip; set Normals to Canopy so a bush of cards shades as one round volume; `strokeobj canopyfill` fills a shell
+round the centre, `strokeobj grass` drops blades onto the ground; give the material an alpha image for leaves. Modeling Tools >
+Scatter places instances of a named object by density (`scatter Rock`, then dab; the eraser end removes; `scatter mask 1` keeps
+them off a painted path; `scatter merge` joins them for export). The Lighting window's World has a Sun Disc, a Horizon Band and
+Fog (near and far colours) that every renderer shows alike.
+
 **Many at once.** The Materials, Textures and Project windows select like the Hierarchy: Ctrl+click, Shift+click a
 range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Trash).
 
@@ -724,6 +731,7 @@ the editor. A few that are handy by hand:
 | `paint on`, `paint color 0.8 0.1 0.1`, `paint fill island` | Paint Mode, the brush's colour, a fill of the UV island under the pointer |
 | `smat apply Worn Steel`, `export textures gltf Exports/Crate`, `paint 2d on` | a smart material on the surface, the texture set in the glTF packing, the canvas takes the brush |
 | `paint brush bristle`, `paint wet 0.5`, `paint bakelight key 1 1 0.5` | a bristle tip, wet mixing, the light baked into a layer to paint over |
+| `strokeobj on`, `strokeobj grass 40 0.25 1`, `scatter Rock`, `set world.Fog 1` | cards and ribbons as geometry, grass on the ground, rocks scattered by density, distance fog |
 | `libs` | which of Blender's libraries this build uses |
 | `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
 | `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |

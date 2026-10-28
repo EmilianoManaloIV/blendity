@@ -11014,6 +11014,29 @@ static void tests_round267() {
   });
 }
 
+static void tests_round268() {
+  test("the stylized sky and fog (ADR 0084): the gradient world's horizon band colours the horizon and the sun disc its centre, with the sky above untouched; the fog leaves a surface at Fog Start its own colour and gives one at Fog End the far colour", [] {
+    Environment e;
+    e.mode = Environment::Gradient;
+    e.sky = {0.2f, 0.4f, 0.8f}, e.equator = {0.5f, 0.5f, 0.5f}, e.ground = {0.1f, 0.1f, 0.1f};
+    const Vec3 up = e.radiance({0.0f, 1.0f, 0.0f}), horizon0 = e.radiance({1.0f, 0.0f, 0.0f});
+    e.band_width = 0.2f, e.band_color = {0.9f, 0.6f, 0.4f};
+    e.sun_dir = normalize(Vec3(0.3f, 0.5f, 0.2f));
+    e.disc_cos = std::cos(5.0f * 0.5f * kDeg2Rad), e.disc_soft = 0.0f, e.disc_color = {1.0f, 0.95f, 0.8f};
+    const Vec3 horizon = e.radiance({1.0f, 0.0f, 0.0f}), sun = e.radiance(e.sun_dir), up2 = e.radiance({0.0f, 1.0f, 0.0f});
+    const Vec3 beside = e.radiance(normalize(e.sun_dir + Vec3(0.0f, 0.2f, 0.0f)));  // (well outside the 2.5 degree disc)
+    std::printf("    the horizon (%.2f, %.2f, %.2f) was (%.2f, %.2f, %.2f); the sun's centre (%.2f, %.2f, %.2f); the zenith unchanged %d\n", horizon.x, horizon.y, horizon.z, horizon0.x, horizon0.y, horizon0.z, sun.x, sun.y, sun.z, (int)(length(up - up2) < 1e-6f));
+    CHECK(length(horizon - e.band_color) < 1e-5f && length(sun - e.disc_color) < 1e-5f && length(up - up2) < 1e-6f && length(beside - e.disc_color) > 0.1f);
+    e.fog = true, e.fog_start = 10.0f, e.fog_end = 50.0f, e.fog_color = {0.6f, 0.65f, 0.75f}, e.fog_far = {0.9f, 0.9f, 1.0f};
+    const Vec3 own(0.2f, 0.1f, 0.05f);
+    const Vec3 at_start = e.fog_apply(own, 10.0f), at_end = e.fog_apply(own, 50.0f), beyond = e.fog_apply(own, 500.0f), half = e.fog_apply(own, 30.0f);
+    std::printf("    fog: at the start (%.2f, %.2f, %.2f), at the end (%.2f, %.2f, %.2f), halfway (%.2f, %.2f, %.2f)\n", at_start.x, at_start.y, at_start.z, at_end.x, at_end.y, at_end.z, half.x, half.y, half.z);
+    CHECK(length(at_start - own) < 1e-6f && length(at_end - e.fog_far) < 1e-6f && length(beyond - e.fog_far) < 1e-6f && half.x > own.x && half.x < e.fog_far.x);
+    e.fog = false;
+    CHECK(length(e.fog_apply(own, 500.0f) - own) < 1e-6f);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -11058,4 +11081,5 @@ void run_render_tests() {
   tests_round265();
   tests_round266();
   tests_round267();
+  tests_round268();
 }

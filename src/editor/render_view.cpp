@@ -193,6 +193,12 @@ void Editor::update_environment() {
   env_.strength = es.strength;
   env_.rotation = es.rotation;
   env_.mode = (Environment::Mode)std::max(0, std::min(3, es.mode));
+  /* The stylized sky and the fog (task 0248): cheap fields, copied every time (no key: they change nothing baked). */
+  env_.sun_dir = length(sun) > 1e-6f ? normalize(sun) : Vec3(0.3f, 0.8f, 0.5f);
+  env_.disc_cos = es.sun_disc > 0.0f ? std::cos(std::min(89.0f, es.sun_disc) * 0.5f * kDeg2Rad) : 2.0f;
+  env_.disc_soft = es.sun_disc_softness, env_.disc_color = es.sun_disc_color;
+  env_.band_width = std::max(0.0f, es.horizon_band), env_.band_color = es.horizon_band_color;
+  env_.fog = es.fog, env_.fog_start = es.fog_start, env_.fog_end = es.fog_end, env_.fog_color = es.fog_color, env_.fog_far = es.fog_color_far;
   if (key == env_key_) return;
   env_key_ = key;
   env_.map = nullptr;

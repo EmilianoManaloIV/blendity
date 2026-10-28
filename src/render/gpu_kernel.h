@@ -73,6 +73,7 @@ layout(std430, binding = 0) readonly buffer Params {
   vec4 retro;       // affine UVs, screen door, internal width, height (0: off)
   vec4 key_light;   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
   vec4 misc;        // task 0149: x the toon map reads (8; a uniform so the loop isn't unrolled into eight fetches)
+  vec4 env_disc; vec4 env_disc_color; vec4 env_band; vec4 fog; vec4 fog_color; vec4 fog_far;  // (task 0248: the stylized sky and the fog)
 } P;
 layout(std430, binding = 1) buffer Accum { vec4 accum[]; };
 layout(std430, binding = 2) buffer Aux { vec4 aux[]; };  // albedo [0, n), normal + depth [n, 2n)
@@ -449,6 +450,13 @@ vec3 env_radiance(vec3 d) {
   }
   float t = d.y;
   vec3 g = t >= 0.0 ? mix(P.env_equator.xyz, P.env_sky.xyz, sqrt(saturate1(t))) : mix(P.env_equator.xyz, P.env_ground.xyz, sqrt(saturate1(-t * 4.0)));
+  if (P.env_band.w > 0.0) g = mix(g, P.env_band.xyz, saturate1(1.0 - abs(t) / P.env_band.w));  // (task 0248: the horizon band)
+  if (P.env_disc.w < 1.0) {  // (the sun disc)
+    float cd = dot(d, P.env_disc.xyz);
+    float edge = (1.0 - P.env_disc.w) * clamp(P.env_disc_color.w, 0.0, 1.0);
+    float k = saturate1((cd - P.env_disc.w) / max(1e-6, edge));
+    g = mix(g, P.env_disc_color.xyz, k);
+  }
   return g * strength;
 }
 )GLSL",
@@ -718,6 +726,12 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     vec3 n = s.normal;
     if (dot(n, V) < 0.0) n = normalize(n + sp.geo_normal * (-dot(n, V) + 0.01));
     if (bounce == 0) { albedo_out = s.albedo + s.emission; normal_out = n; depth_out = h.t; id_out = float(h.obj + 1u); }
+    if (bounce == 0 && camera_path && P.fog.z > 0.5) {  // (task 0248: distance fog at the first hit)
+      float fe = max(P.fog.x + 1e-3, P.fog.y);
+      float f = clamp((since_scatter + h.t - P.fog.x) / (fe - P.fog.x), 0.0, 1.0);
+      L += beta * mix(P.fog_color.xyz, P.fog_far.xyz, f) * f;
+      beta *= (1.0 - f);
+    }
     vec3 c0 = vec3(0.0);
     float w_emit = 1.0;
     if (last_pdf > 0.0 && P.counts.y > 0 && luminance(s.emission) > 0.0) {

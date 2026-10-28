@@ -1377,6 +1377,17 @@ struct EnvironmentSettings {
   float rotation = 0.0f;
   float turbidity = 3.0f;
   float ground_albedo = 0.3f;
+  /* The stylized sky (task 0248, ADR 0084) on the Gradient world: a painted sun disc (its size in degrees, 0 off; toward the
+   * first directional light) and a horizon band (its half-width as a share of the sky, 0 off). */
+  float sun_disc = 0.0f, sun_disc_softness = 0.3f;
+  Vec3 sun_disc_color{1.0f, 0.95f, 0.8f};
+  float horizon_band = 0.0f;
+  Vec3 horizon_band_color{0.95f, 0.75f, 0.6f};
+  /* Distance fog in every renderer: the surface colour mixed toward the ramp (near colour to far colour) by the view
+   * distance from `fog_start` to `fog_end`. */
+  bool fog = false;
+  float fog_start = 10.0f, fog_end = 60.0f;
+  Vec3 fog_color{0.6f, 0.65f, 0.75f}, fog_color_far{0.75f, 0.8f, 0.9f};
   void reflect(Reflector &r);
 };
 

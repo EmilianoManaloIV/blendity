@@ -5,6 +5,7 @@
 #include "animation.h"
 #include "sequence.h"
 #include "curve.h"
+#include "stroke_object.h"
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -127,6 +128,7 @@ void register_builtin_components() {
   reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
+  reg<Strokes>("Mesh", "Brush strokes as geometry (task 0248): cards and ribbons painted onto surfaces, the object's mesh rebuilt from them with custom normals (Own, Surface or Canopy).", "Grease Pencil strokes / a cards mesh with custom normals");
   reg<ProbeVolume>("Rendering",
                    "Light probes placed automatically (dense near geometry): objects without a lightmap take their indirect "
                    "light from them. Baked by Generate Lighting, kept live by Realtime GI.",
@@ -289,7 +291,28 @@ void EnvironmentSettings::reflect(Reflector &r) {
     r.color("Sky Color", sky);
     r.color("Equator Color", equator);
     r.color("Ground Color", ground);
+    if (r.group("Stylized Sky", false)) {  // (task 0248)
+      r.field("Sun Disc", sun_disc, 0.1f, 0.0f, 30.0f);
+      r.help("A painted sun on the gradient sky: the disc's size in degrees (0: none), toward the first Directional Light.");
+      r.field("Sun Disc Softness", sun_disc_softness, 0.01f, 0.0f, 1.0f);
+      r.color("Sun Disc Color", sun_disc_color);
+      r.field("Horizon Band", horizon_band, 0.01f, 0.0f, 0.5f);
+      r.help("A band of colour along the horizon (its half-width as a share of the sky; 0: none): the warm line of a painted sky.");
+      r.color("Horizon Band Color", horizon_band_color);
+    }
+    r.group_end();
   }
+  if (r.group("Fog", false)) {  // (task 0248: in every renderer, by the view distance)
+    r.field("Fog", fog);
+    r.field("Fog Start", fog_start, 0.1f, 0.0f, 10000.0f);
+    r.field("Fog End", fog_end, 0.1f, 0.0f, 10000.0f);
+    r.color("Fog Color", fog_color);
+    r.color("Fog Color Far", fog_color_far);
+    r.help("Distance fog: a surface's colour is mixed toward the ramp - Fog Color at Fog Start to Fog Color Far at Fog End and\n"
+           "beyond - by its distance from the eye, in the Scene view, the GPU view and renders alike (a stylization: no scattering;\n"
+           "the Retro camera filter's fog is a display effect of its own).");
+  }
+  r.group_end();
   if (all || mode == 1) {
     r.field("Turbidity", turbidity, 0.02f, 1.0f, 10.0f);
     r.help("Haze in the atmosphere (Hosek-Wilkie model). The sun direction comes from the first Directional Light.");

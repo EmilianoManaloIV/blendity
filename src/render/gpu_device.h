@@ -48,6 +48,7 @@ struct GParams {
   int32_t env_i[4];     // mode, map texture
   float env_f[4];       // strength, rotation
   float env_sky[4], env_equator[4], env_ground[4], env_color[4];
+  /* (The stylized sky and fog, task 0248: appended at the block's end in the kernel; see env_disc below.) */
   float lens[4];        // aperture radius, focus distance, blades, blade rotation
   float cam_right[4], cam_up[4], cam_fwd[4];
   float background[4];  // a camera's Solid Color for camera rays (w: on)
@@ -55,6 +56,7 @@ struct GParams {
   float retro[4];       // affine UVs, screen door, internal width, height (0: off)
   float key_light[4];   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
   float misc[4];        // task 0149: x the toon map reads (8); task 0157: y a bake gather weights its first emissive hit
+  float env_disc[4], env_disc_color[4], env_band[4], fog[4], fog_color[4], fog_far[4];  // (task 0248: the disc's direction + cos, its colour + softness, the band's colour + width, the fog's start / end / on, its colours)
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };

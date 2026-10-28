@@ -151,6 +151,8 @@ void Editor::draw_scene_view(const Recti &r) {
   wp_draw(view);
   sculpt_draw(view);  // (task 0236)
   paint_draw(view);   // (task 0245)
+  strokeobj_draw(view);  // (task 0248)
+  scatter_draw(view);
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
   draw_pushpull(view);
@@ -238,6 +240,8 @@ bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   if (wp_update(view)) busy = true;
   if (sculpt_update(view)) busy = true;  // (task 0236)
   if (paint_update(view)) busy = true;   // (task 0245)
+  if (strokeobj_update(view)) busy = true;  // (task 0248)
+  if (scatter_update(view)) busy = true;
   if (pushpull_update(view)) busy = true;
   if (modal_update(view)) busy = true;
   if (transform_update(view)) busy = true;

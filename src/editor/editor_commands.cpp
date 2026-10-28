@@ -921,6 +921,14 @@ void Editor::run_console_command(const std::string &line) {
     paint_command(t);
     return;
   }
+  if (c == "scatter") {  // scatter <object> | density|radius|scale|rotate|align|tint|seed|mask|on|off|dab|erase|merge|count (task 0248)
+    scatter_command(t);
+    return;
+  }
+  if (c == "strokeobj") {  // strokeobj on|off|new|card|ribbon|size|width|normals|canopy|alpha|dab|stroke (task 0248)
+    strokeobj_command(t);
+    return;
+  }
   if (c == "smat") {  // smat save|apply|list|builtin (task 0246)
     smat_command(t);
     return;

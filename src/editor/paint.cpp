@@ -113,6 +113,7 @@ void island_triangles(const RenderMesh &rm, const Mesh &mesh, uint32_t face, std
 /* ===================================================================== */
 
 bool Editor::set_paint(bool on) {
+  if (on) set_strokeobj(false);  // (task 0248: one brush at a time)
   if (on && paint_ && active_ == paint_obj_ && scene_.get() == paint_scene_) return true;
   if (paint_) {
     paint_abort_stroke();

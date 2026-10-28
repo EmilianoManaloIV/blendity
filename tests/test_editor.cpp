@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the editor tests (task 0177: one file a subsystem; the groups keep their rounds' order).
+#include "../src/scene/raycast.h"
+#include "../src/scene/stroke_object.h"
 #include "test_common.h"
 #include "../src/render/canvas.h"
 #include "../src/texture/smart_material.h"
@@ -4232,6 +4234,220 @@ static void tests_round267b() {
   });
 }
 
+static void tests_round268() {
+  test("stroke objects (ADR 0084): a dab on the cube makes a Stroke object with one card facing the camera, Surface normals take the face's axis normal, Canopy normals point from the centre; a ribbon of N points is a strip of 2N vertices and N - 1 quads; each stroke is one undo step; the list survives its text form", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube);
+    if (!cube) return;
+    cube->set_local_scale(Vec3(4.0f));
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    Vec2 px;
+    CHECK(ed.project_for_test(cube->world_position(), px));
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("strokeobj size 0.3");
+    ed.command(strprintf("strokeobj dab %g %g", px.x, px.y));
+    ed.step_frame_headless();
+    GameObject *so = ed.strokeobj_object_for_test();
+    const Strokes *st = so ? so->get<Strokes>() : nullptr;
+    const MeshFilter *mf = so ? so->mesh_filter() : nullptr;
+    CHECK(ed.strokeobj_for_test() && st && mf && mf->mesh && st->cards.size() == 1 && mf->mesh->vert_count() == 4 && mf->mesh->face_count() == 2 && mf->mesh->custom_normals.size() == 4);  // (a card is two faces back to back: the back-side flip never turns the custom normal)
+    if (!st || !mf || !mf->mesh || st->cards.empty()) return;
+    const Ray ray = ed.screen_ray_for_test(px);
+    const Vec3 toward = normalize(ray.dir) * -1.0f;
+    const float facing_dot = dot(normalize(mf->mesh->custom_normals[0]), toward);
+    std::printf("    a card at the cube's centre: %zu card(s), %zu vertices, its normal against the view direction %.4f (one degree is %.4f), %zu step(s)\n", st->cards.size(), mf->mesh->vert_count(), facing_dot, std::cos(1.0f * 3.14159265f / 180.0f), ed.undo_steps_for_test() - steps0);
+    CHECK(facing_dot > std::cos(1.0f * 3.14159265f / 180.0f) && ed.undo_steps_for_test() == steps0 + 1);
+    /* Surface normals: the cube's face under the dab is axis-aligned. */
+    ed.command("strokeobj normals surface");
+    ed.step_frame_headless();
+    const Vec3 sn = normalize(mf->mesh->custom_normals[0]);
+    const float axis_max = std::max({std::fabs(sn.x), std::fabs(sn.y), std::fabs(sn.z)});
+    std::printf("    Surface normals: (%.3f, %.3f, %.3f)\n", sn.x, sn.y, sn.z);
+    CHECK(axis_max > 0.999f);
+    /* Canopy normals: from the centre given. */
+    ed.command("strokeobj canopy 0 -10 0");
+    ed.step_frame_headless();
+    const Vec3 cn = normalize(mf->mesh->custom_normals[0]), expect = normalize(mf->mesh->positions[0] - Vec3(0.0f, -10.0f, 0.0f));  // (per vertex: from the centre to the corner)
+    std::printf("    Canopy normals: (%.3f, %.3f, %.3f) against the expected (%.3f, %.3f, %.3f)\n", cn.x, cn.y, cn.z, expect.x, expect.y, expect.z);
+    CHECK(dot(cn, expect) > 0.9999f);
+    ed.command("strokeobj normals own");
+    /* A ribbon along the face. */
+    ed.command("strokeobj ribbon");
+    ed.command("strokeobj width 0.1");
+    ed.command(strprintf("strokeobj stroke %g %g %g %g 9", px.x - 60.0f, px.y, px.x + 60.0f, px.y));
+    ed.step_frame_headless();
+    const size_t n = st->ribbons.empty() ? 0 : st->ribbons[0].points.size();
+    std::printf("    a ribbon: %zu ribbon(s) of %zu points; the mesh %zu vertices, %zu faces\n", st->ribbons.size(), n, mf->mesh->vert_count(), mf->mesh->face_count());
+    CHECK(st->ribbons.size() == 1 && n >= 3 && mf->mesh->vert_count() == 4 + 2 * n && mf->mesh->face_count() == 2 + 2 * (n - 1));
+    /* The text form round-trips. */
+    Strokes copy;
+    const std::string text = strokes_to_text(*st);
+    CHECK(strokes_from_text(text, copy) && strokes_to_text(copy) == text && copy.cards.size() == 1 && copy.ribbons.size() == 1 && copy.ribbons[0].points.size() == n);
+    /* Foliage: a canopy of 100 cards on a 1 m shell round (0, 3, 0), each facing out from the centre; grass of density
+     * 40 on the plane's visible spot - about 40 pi blades, upright, their normals up. */
+    const uint64_t orig_id = so->id;
+    ed.command("strokeobj canopyfill 1 100 0 3 0");  // (a canopy has its own centre: a Stroke object of its own)
+    ed.step_frame_headless();
+    GameObject *soc = ed.strokeobj_object_for_test();
+    const Strokes *stc = soc ? soc->get<Strokes>() : nullptr;
+    bool outward = stc && soc != so && stc->cards.size() == 100;
+    float shell_err = 0.0f;
+    for (size_t i = 0; stc && i < stc->cards.size() && outward; i++) {
+      const Vec3 w = soc->world_matrix().point(stc->cards[i].center) - Vec3(0.0f, 3.0f, 0.0f);
+      shell_err = std::max(shell_err, std::fabs(length(w) - 1.0f));
+      outward = outward && dot(normalize(w), normalize(stc->cards[i].facing)) > 0.999f;
+    }
+    std::printf("    canopyfill: a new Stroke object %d with %zu cards, on the shell within %.4f, facing out %d; its mesh %zu vertices\n", (int)(soc && soc != so), stc ? stc->cards.size() : (size_t)0, shell_err, (int)outward, soc && soc->mesh_filter() && soc->mesh_filter()->mesh ? soc->mesh_filter()->mesh->vert_count() : (size_t)0);
+    CHECK(outward && shell_err < 1e-3f && stc->normals == 2 && soc->mesh_filter() && soc->mesh_filter()->mesh && soc->mesh_filter()->mesh->vert_count() == 400);
+    ed.command("undo");
+    ed.select_object(orig_id);
+    ed.step_frame_headless();
+    {
+      const GameObject *plane = ed.scene().find_by_name("Plane");
+      Vec2 gp;
+      bool gfound = false;
+      for (const Vec3 &cand : {Vec3(-3.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, -3.0f), Vec3(-3.0f, 0.0f, -3.0f), Vec3(3.0f, 0.0f, -3.0f)}) {
+        Vec2 p;
+        if (!plane || !ed.project_for_test(cand, p)) continue;
+        const Ray ray = ed.screen_ray_for_test(p);
+        SceneHit hit;
+        if (!scene_raycast(ed.scene(), ray.origin, ray.dir, 1e5f, hit) || hit.object != plane) continue;
+        gp = p, gfound = true;
+        break;
+      }
+      CHECK(gfound);
+      if (gfound) {
+        GameObject *so3 = ed.strokeobj_object_for_test();
+        const Strokes *st3 = so3 ? so3->get<Strokes>() : nullptr;
+        const size_t before = st3 ? st3->cards.size() : 0;
+        ed.command(strprintf("strokeobj grass 40 0.25 1 %g %g", gp.x, gp.y));
+        ed.step_frame_headless();
+        so3 = ed.strokeobj_object_for_test();
+        st3 = so3 ? so3->get<Strokes>() : nullptr;
+        const size_t blades = st3 ? st3->cards.size() - (so3 == ed.scene().find(orig_id) ? before : 0) : 0;
+        bool upright = st3 != nullptr;
+        for (size_t i = before; st3 && i < st3->cards.size(); i++) upright = upright && std::fabs(st3->cards[i].facing.y) < 1e-3f && std::fabs(st3->cards[i].size - 0.25f) < 1e-5f;
+        const size_t want = (size_t)std::lround(40.0f * 3.14159265f);
+        std::printf("    grass: %zu blades (about %zu wanted), upright %d, normals mode %d\n", blades, want, (int)upright, st3 ? st3->normals : -1);
+        CHECK(blades >= want * 8 / 10 && blades <= want * 12 / 10 + 1 && upright && st3->normals == 2);
+        ed.command("undo");
+        ed.select_object(orig_id);
+        ed.step_frame_headless();
+      }
+    }
+    so = ed.strokeobj_object_for_test();
+    st = so ? so->get<Strokes>() : nullptr;
+    mf = so ? so->mesh_filter() : nullptr;
+    CHECK(so && st && mf && mf->mesh);
+    if (!so || !st || !mf || !mf->mesh) return;
+    const uint64_t so_id = so->id;
+    ed.command("undo");  // (the scene is rebuilt: the object is looked up again)
+    GameObject *so2 = ed.scene().find(so_id);
+    const Strokes *st2 = so2 ? so2->get<Strokes>() : nullptr;
+    CHECK(st2 && st2->ribbons.empty() && st2->cards.size() == 1 && so2->mesh_filter() && so2->mesh_filter()->mesh && so2->mesh_filter()->mesh->vert_count() == 4);
+    ed.command("strokeobj off");
+    CHECK(!ed.strokeobj_for_test());
+  });
+}
+
+static void tests_round268b() {
+  test("the Scatter brush (ADR 0084): a dab of density 4 in a 1 m disc on a ground plane places about 4 pi instances of the Sphere as children of one Scatter object, none where a Paint layer's mask covers the plane; the eraser removes them; merge joins them into one mesh with the instances' faces summed", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    GameObject *ground = ed.scene().find_by_name("Plane");  // (the sample scene's ground, at y = 0)
+    CHECK(ground && ground->mesh_filter() && ground->mesh_filter()->mesh);
+    if (!ground || !ground->mesh_filter() || !ground->mesh_filter()->mesh) return;
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();
+    /* A ground spot the view sees and nothing hides: candidates projected and traced back along the pixel's ray. */
+    Vec3 spot;
+    Vec2 px;
+    bool found = false;
+    const std::vector<Vec3> cands = {Vec3(-3.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, -3.0f), Vec3(-3.0f, 0.0f, -3.0f), Vec3(-1.5f, 0.0f, -3.0f), Vec3(-3.0f, 0.0f, 1.5f), Vec3(3.0f, 0.0f, -3.0f), Vec3(0.0f, 0.0f, 3.0f)};  // (well inside the plane, a metre or more from the cube and the sphere)
+    for (const Vec3 &cand : cands) {
+      Vec2 p;
+      if (!ed.project_for_test(cand, p)) continue;
+      const Recti view = ed.scene_rect_for_test();
+      if (p.x < 10.0f || p.y < 10.0f || p.x > view.w - 10.0f || p.y > view.h - 10.0f) continue;
+      const Ray ray = ed.screen_ray_for_test(p);
+      SceneHit hit;
+      if (!scene_raycast(ed.scene(), ray.origin, ray.dir, 1e5f, hit) || hit.object != ground) continue;
+      spot = hit.point, px = p, found = true;
+      break;
+    }
+    std::printf("    the ground spot (%.2f, %.2f, %.2f) at pixel (%.0f, %.0f)\n", spot.x, spot.y, spot.z, px.x, px.y);
+    CHECK(std::fabs(spot.y) < 0.01f);
+    CHECK(found);
+    if (!found) return;
+    const GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(sphere && sphere->mesh_filter() && sphere->mesh_filter()->mesh);
+    if (!sphere || !sphere->mesh_filter() || !sphere->mesh_filter()->mesh) return;
+    const size_t sphere_faces = sphere->mesh_filter()->mesh->face_count();
+    ed.command("scatter Sphere");
+    ed.command("scatter density 4");
+    ed.command("scatter radius 1");
+    ed.command("scatter scale 0.1 0.1");  // (small: the drops do not land on each other)
+    ed.command("scatter seed 3");
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command(strprintf("scatter dab %g %g", px.x, px.y));
+    ed.step_frame_headless();
+    GameObject *parent = ed.scatter_parent_for_test();
+    const size_t n = parent ? parent->children.size() : 0;
+    const float want = 4.0f * 3.14159265f;
+    std::printf("    a dab of density 4 in a 1 m disc: %zu instances (about %.1f wanted), %zu step(s)\n", n, want, ed.undo_steps_for_test() - steps0);
+    CHECK(parent && n >= (size_t)(want * 0.8f) && n <= (size_t)(want * 1.2f) + 1 && ed.undo_steps_for_test() == steps0 + 1);
+    if (!parent) return;
+    bool on_plane = true;
+    for (const GameObject *c : parent->children) on_plane = on_plane && std::fabs(c->world_position().y) < 0.01f && length(Vec2(c->world_position().x, c->world_position().z) - Vec2(spot.x, spot.z)) <= 1.05f;
+    if (!parent->children.empty()) {
+      const Vec3 p0 = parent->children[0]->world_position();
+      std::printf("    the first instance at (%.3f, %.3f, %.3f)\n", p0.x, p0.y, p0.z);
+    }
+    CHECK(on_plane);
+    /* Merge: one mesh with the instances' faces. */
+    ed.command("scatter merge");
+    const GameObject *merged = ed.scene().find_by_name("Scatter Merged");
+    std::printf("    merged: %zu faces against %zu x %zu\n", merged && merged->mesh_filter() && merged->mesh_filter()->mesh ? merged->mesh_filter()->mesh->face_count() : (size_t)0, n, sphere_faces);
+    CHECK(merged && merged->mesh_filter() && merged->mesh_filter()->mesh && merged->mesh_filter()->mesh->face_count() == n * sphere_faces);
+    ed.command("undo");
+    /* The eraser: everything within the disc goes. */
+    ed.command(strprintf("scatter erase %g %g", px.x, px.y));
+    parent = ed.scatter_parent_for_test();
+    std::printf("    after the eraser: %zu instance(s)\n", parent ? parent->children.size() : (size_t)0);
+    CHECK(parent && parent->children.empty());
+    /* The mask: the ground's surface with a Paint layer filled over the object keeps every instance off. */
+    ed.command("select Plane");
+    ed.step_frame_headless();
+    ed.command("surface new GroundSurf");
+    ed.step_frame_headless();
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (ed.paint_for_test()) {
+      ed.command("paint fill object");
+      ed.command("paint off");
+      ed.command("scatter mask 1");  // (the Paint layer sits above the surface's Fill)
+      {
+        std::string why;
+        GameObject *gr = ed.scene().find_by_name("Plane");
+        const bool m = gr && ed.scatter_masked_for_test(*gr, spot, why);
+        std::printf("    the mask at the spot: %d (%s)\n", (int)m, why.c_str());
+      }
+      ed.command(strprintf("scatter dab %g %g", px.x, px.y));
+      parent = ed.scatter_parent_for_test();
+      std::printf("    with the painted mask: %zu instance(s)\n", parent ? parent->children.size() : (size_t)0);
+      CHECK(parent && parent->children.empty());
+      ed.command("scatter mask off");
+    }
+    ed.command("scatter off");
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -4272,5 +4488,7 @@ void run_editor_tests() {
   tests_round266();
   tests_round267();
   tests_round267b();
+  tests_round268();
+  tests_round268b();
   coverage_tests();
 }

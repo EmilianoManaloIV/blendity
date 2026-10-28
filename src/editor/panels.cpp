@@ -4,6 +4,7 @@
 // Profiler (Blender: Statistics overlay / --debug timings).
 #include "editor.h"
 #include "../texture/procedural_texture.h"
+#include "../scene/stroke_object.h"
 
 #include "../core/core.h"
 #include <cstring>
@@ -3273,6 +3274,57 @@ void Editor::draw_show_more(ui::Layout &lay, const std::string &type, int hidden
 }
 
 /* Paint Mode's toggle and brush (task 0245), in the Modeling Tools window's Paint section. */
+/* The Scatter section (task 0248): the source, the density and the randomness, the mask. */
+void Editor::draw_scatter_tools(ui::Layout &lay) {
+  auto &u = ui_;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, scatter_ ? "Exit Scatter" : "Scatter", scatter_, ui::Icon::Vertex)) set_scatter(!scatter_);
+  u.tooltip("Paint instances of an object onto surfaces (rocks, tufts, props): name the source below, then dab; the pen's eraser end removes (scatter <object>, scatter on|off).");
+  InspectorReflector br(*this, u, lay);
+  br.text("Source", scatter_brush_.source);
+  br.field("Density", scatter_brush_.density, 0.1f, 0.0f, 10000.0f);
+  br.field("Radius", scatter_brush_.radius, 0.05f, 0.01f, 1000.0f);
+  br.field("Scale Min", scatter_brush_.scale_min, 0.01f, 0.001f, 100.0f);
+  br.field("Scale Max", scatter_brush_.scale_max, 0.01f, 0.001f, 100.0f);
+  br.field("Rotate", scatter_brush_.rotate, 1.0f, 0.0f, 180.0f);
+  static const char *aligns[] = {"Surface Normal", "World Up"};
+  br.enumeration("Align", scatter_brush_.align, aligns, 2);
+  br.field("Tint", scatter_brush_.tint);
+  if (scatter_brush_.tint) br.color("Tint Color", scatter_brush_.tint_color);
+  br.field("Mask Layer", scatter_brush_.mask_layer, -1, 64);
+  br.help("Density: instances a square metre of the dab's disc, jittered from the seed (a dab is repeatable). Mask Layer: a Paint layer\n"
+          "of the surface's stack whose painted texels keep instances off (a path). The instances are children of one Scatter object:\n"
+          "select, move or delete them as usual; scatter merge joins them into one mesh for export.");
+  row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Merge Instances", false)) scatter_merge();
+}
+
+/* The Strokes section (task 0248): the tool, its kind and sizes, the normals mode. */
+void Editor::draw_strokes_tools(ui::Layout &lay) {
+  auto &u = ui_;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, strokeobj_ ? "Exit Strokes" : "Strokes", strokeobj_, ui::Icon::Vertex)) set_strokeobj(!strokeobj_);
+  u.tooltip("Paint geometry: a click on a surface adds a card (a quad facing you), a drag with Ribbon a strip; one Stroke object holds them (strokeobj on|off).");
+  if (!strokeobj_) return;
+  InspectorReflector br(*this, u, lay);
+  static const char *kinds[] = {"Card", "Ribbon"};
+  br.enumeration("Kind", strokeobj_kind_, kinds, 2);
+  br.field("Size", strokeobj_size_, 0.01f, 0.001f, 100.0f);
+  br.field("Width", strokeobj_width_, 0.005f, 0.001f, 100.0f);
+  GameObject *g = strokeobj_object(false);
+  Strokes *s = g ? g->get<Strokes>() : nullptr;
+  if (s) {
+    static const char *modes[] = {"Own", "Surface", "Canopy"};
+    const int was = s->normals;
+    br.enumeration("Normals", s->normals, modes, 3);
+    if (s->normals != was) strokeobj_rebuild(*g, "Stroke Normals");
+    row = lay.row(u.row_h() + u.px(2));
+    if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Canopy Centre from Strokes", false)) strokeobj_command({"strokeobj", "canopy"});
+    u.tooltip("Normals: Own shades each card flat; Surface takes the surface's normal under the dab; Canopy points every card away from the centre so a bush of cards shades as one round volume (strokeobj normals, strokeobj canopy).");
+  }
+  br.help("Give the material an alpha image (a leaf, a petal, a brush stroke) with strokeobj alpha <image>: the cards are cut out by it.");
+}
+
 void Editor::draw_paint_tools(ui::Layout &lay) {
   auto &u = ui_;
   GameObject *g = active_object();

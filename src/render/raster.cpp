@@ -1883,6 +1883,7 @@ void Renderer3D::shade_deferred() {
         }
         if (T.highlighted) s.albedo = lerp(s.albedo, it.highlight_color, 0.45f);
         Vec3 color = light_surface(s, sp, V, it, env);
+        if (env.fog) color = env.fog_apply(color, length(sp.position - env_.camera_pos));  // (task 0248)
         row_hdr.push_back(color);
         row_x.push_back(x);
       }
@@ -1992,7 +1993,9 @@ void Renderer3D::shade_run8(const Shade8Tri &t, const SurfaceSample &surface, in
     sp.geo_normal = Vec3(o.gx[i], o.gy[i], o.gz[i]);
     SurfaceSample s = surface;
     s.normal = sp.normal;
-    row_hdr.push_back(light_finish(s, sp, Vec3(o.vx[i], o.vy[i], o.vz[i]), Vec3(o.lx[i], o.ly[i], o.lz[i]), env));
+    Vec3 c = light_finish(s, sp, Vec3(o.vx[i], o.vy[i], o.vz[i]), Vec3(o.lx[i], o.ly[i], o.lz[i]), env);
+    if (env.fog) c = env.fog_apply(c, length(sp.position - eye));  // (task 0248: the 8-wide path fogs like the one-pixel path)
+    row_hdr.push_back(c);
     row_x.push_back(x + i);
   }
 }
@@ -2196,6 +2199,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           auto lit = [&](const SurfaceSample &ss) {
             if (gouraud) return pack(shade(env_, ss.albedo, it.specular, ss.normal, sp.position));
             Vec3 c = light_surface(ss, sp, V, it, env);
+            if (env.fog) c = env.fog_apply(c, length(sp.position - env_.camera_pos));  // (task 0248)
             uint32_t out;
             display::encode_span(&c.x, &out, 1, env_.view_transform, env_.exposure);
             return out;

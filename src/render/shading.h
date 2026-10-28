@@ -149,7 +149,28 @@ struct Environment {
   float rotation = 0.0f;  // degrees around +Y
   Vec3 sh[9];             // irradiance spherical harmonics (computed from map)
   bool sh_valid = false;
-
+  /* The stylized sky and fog (task 0248, ADR 0084). */
+  Vec3 sun_dir{0.3f, 0.8f, 0.5f};   // toward the sun (the disc's centre)
+  float disc_cos = 2.0f;            // cos of the disc's half-angle (2: no disc)
+  float disc_soft = 0.3f;
+  Vec3 disc_color{1.0f, 0.95f, 0.8f};
+  float band_width = 0.0f;          // the horizon band's half-width in d.y (0: none)
+  Vec3 band_color{0.95f, 0.75f, 0.6f};
+  bool fog = false;
+  float fog_start = 10.0f, fog_end = 60.0f;
+  Vec3 fog_color{0.6f, 0.65f, 0.75f}, fog_far{0.75f, 0.8f, 0.9f};
+  float fog_amount(float dist) const {  // 0 at fog_start, 1 at fog_end and beyond
+    if (!fog) return 0.0f;
+    const float e = std::max(fog_start + 1e-3f, fog_end);
+    const float t = (dist - fog_start) / (e - fog_start);
+    return t <= 0.0f ? 0.0f : t >= 1.0f ? 1.0f : t;
+  }
+  Vec3 fog_apply(Vec3 c, float dist) const {
+    const float f = fog_amount(dist);
+    if (f <= 0.0f) return c;
+    const Vec3 fc = fog_color + (fog_far - fog_color) * f;
+    return c + (fc - c) * f;
+  }
   Vec3 radiance(Vec3 dir, float lod = 0.0f) const;       // background / reflections
   Vec3 irradiance(Vec3 n) const;                          // cosine-convolved (diffuse)
   Vec3 specular(Vec3 r, float roughness) const;           // pre-filtered by roughness

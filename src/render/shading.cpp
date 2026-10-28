@@ -579,8 +579,16 @@ Vec3 equirect_to_dir(Vec2 uv, float rot) {
 
 static Vec3 gradient(const Environment &e, Vec3 d) {
   float t = d.y;
-  if (t >= 0) return lerp(e.equator, e.sky, std::sqrt(saturate(t)));
-  return lerp(e.equator, e.ground, std::sqrt(saturate(-t * 4.0f)));
+  Vec3 c = t >= 0 ? lerp(e.equator, e.sky, std::sqrt(saturate(t))) : lerp(e.equator, e.ground, std::sqrt(saturate(-t * 4.0f)));
+  /* The stylized sky (task 0248): a horizon band fading over its half-width, a sun disc with a soft edge. */
+  if (e.band_width > 0.0f) c = lerp(c, e.band_color, saturate(1.0f - std::fabs(t) / e.band_width));
+  if (e.disc_cos < 1.0f) {
+    const float cd = dot(d, e.sun_dir);
+    const float edge = (1.0f - e.disc_cos) * std::max(0.0f, std::min(1.0f, e.disc_soft));
+    const float k = saturate((cd - e.disc_cos) / std::max(1e-6f, edge));
+    if (k > 0.0f) c = lerp(c, e.disc_color, k);
+  }
+  return c;
 }
 
 Vec3 Environment::radiance(Vec3 dir, float lod) const {

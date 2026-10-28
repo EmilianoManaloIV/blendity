@@ -483,6 +483,14 @@ void raster_world(gpu::RasterFrame &fr, const LightingEnv &env, const Camera *ca
   set3(fr.equator, e ? e->equator : env.equator);
   set3(fr.ground, e ? e->ground : env.ground);
   if (e) set3(fr.env_color, e->color);
+  if (e) {  // (task 0248: the stylized sky and the fog)
+    set3(fr.sky_disc, e->sun_dir), fr.sky_disc[3] = e->disc_cos;
+    set3(fr.sky_disc_color, e->disc_color), fr.sky_disc_color[3] = e->disc_soft;
+    set3(fr.sky_band, e->band_color), fr.sky_band[3] = e->band_width;
+    fr.fog[0] = e->fog_start, fr.fog[1] = e->fog_end, fr.fog[2] = e->fog ? 1.0f : 0.0f;
+    set3(fr.fog_color, e->fog_color), set3(fr.fog_far, e->fog_far);
+  }
+  else fr.sky_disc[3] = 2.0f, fr.sky_band[3] = 0.0f, fr.fog[2] = 0.0f;
   fr.view_transform = (int)env.view_transform;
   fr.exposure = env.exposure;
   if (cam && cam->clear_flags == 1) {

@@ -2,6 +2,60 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 268): stylized environments (task 0248)
+
+**Asked:** the stylized side after the hand-painted look - environments in the Ghibli / oil-paint 3D style: brush
+strokes as geometry, hand-placed foliage, scattered props, a painted sky.
+
+**Added**
+- **Stroke objects** (`src/scene/stroke_object.cpp`, `src/editor/strokes_tool.cpp`, ADR 0084): a `Strokes` component
+  keeps cards (a quad facing the camera at its dab, the surface's normal under it kept) and ribbons (a drag's points
+  swept into a strip); the object's mesh is rebuilt from the list on every edit with custom normals by Own, Surface or
+  Canopy (away from a centre: a bush of flat cards shades as one round volume). The list is saved as text; each stroke
+  is one undo step; renderers and exporters see a plain mesh. Modeling Tools > Strokes; `strokeobj on|off | new |
+  card | ribbon | size | width | normals | canopy | alpha | dab | stroke | count`.
+- **Foliage from strokes:** `strokeobj canopyfill [radius] [count] [x y z]` (a shell of cards round the canopy centre,
+  facing out), `strokeobj grass [density] [height] [radius] [x y]` (upright cards dropped onto the surface by density,
+  kept off a Paint layer's mask, their normals up).
+- **The Scatter brush** (`src/editor/scatter.cpp`, Modeling Tools > Scatter): `scatter <object>`, then dabs place
+  instances (the source's mesh and materials shared; a tinted copy when asked) as children of one Scatter object by
+  density a square metre of the dab's disc on a seeded spiral, dropped onto the same surface, aligned to the normal or
+  world up, scaled and turned at random; `scatter mask <layer>` keeps them off a Paint layer's painted texels; the
+  eraser end removes within the disc; `scatter merge` joins them into one mesh for export.
+- **A stylized sky and fog** (the Lighting window's World): the Gradient world's Sun Disc (toward the first directional
+  light) and Horizon Band; Fog (start, end, a near and a far colour) by the view distance in the CPU raster, the GPU
+  view, the path tracer and its GPU kernel alike. `set world.Fog 1`, `set world.SunDisc 8`, `set world.HorizonBand
+  0.15`.
+- **The Stylized layout** (`layout Stylized`) and its guide.
+- **Measured** (`tests_round268`): a card at the cube's centre faces the view within 1.0000 (one degree is 0.9998); a
+  ribbon of 10 points is 20 vertices and 9 quads; `canopyfill 1 100` puts 100 cards on the shell within 1e-4 facing
+  out; `grass 40 0.25 1` makes 126 blades (40 pi wanted); a scatter dab of density 4 in a 1 m disc places 13 instances
+  (4 pi wanted), the merge 13 x 384 faces, the mask 0.
+- **Review (Opus) taken:** fog reaches the CPU raster's 8-wide shading path too (plain materials had stayed clear
+  inside each run of eight pixels); the path tracer's and the kernel's fog distance runs from the camera through
+  see-through passes (a hill seen through a leaf card's holes had less fog than the frame); every card and ribbon
+  segment is two single-sided faces back to back sharing the custom normal, so a renderer's back-side flip never turns
+  the Canopy normal (half the grass had shaded as facing the ground); the scatter spread is the golden angle jittered
+  (it had been one spiral arm); the Scatter parent is validated by name and shape (a freed id could adopt another object
+  and the eraser destroy its children); the tint is one copy a dab with no asset path (relinking had dropped it, and
+  every instance had carried a copy); the counts are capped at 5,000 instances and 20,000 blades a dab with a reason
+  (density x radius could overflow an int); the mask's triangle search rejects by bounds first; a dab is repeatable by
+  the seed and the hit point (the session counter had made it not so); a canopy or grass goes into a Stroke object of
+  its own when the current one holds strokes of another kind (they had moved the object's canopy centre); instances
+  are named "<source> Instance"; the spec's console forms are the field names without spaces (`set world.FogEnd 40`;
+  `set world.Fog End 40` had turned fog off); `gpu_device.h` is back to LF. The OptiX device's committed PTX was regenerated
+  (`tools/optix_ptx_embed.bat`) so it carries the sky disc, band and fog too. Open: the Inspector's Normals edit does not rebuild until the next stroke; the mask reads the base mesh (a modifier's
+  geometry is not matched); the parent's own transform is assumed identity; glass adds fog over a fogged background.
+
+**Checked**
+- `tests_round268` in `tests/test_editor.cpp` (the Stroke object's card, Surface and Canopy normals, a ribbon, the text
+  round trip, canopy fill, grass, undo; the scatter dab's count and placement, merge, the eraser, the mask) and
+  `tests/test_render.cpp` (the sky's band and disc, the fog ramp).
+- Unit checks (round 268): Windows, in render-cache verify mode, 13060, 0 failed (1120 tests; the gpu group passed alone
+  after the OptiX PTX was regenerated), 0 stale pictures; Linux 12600, 0 failed (1122 tests, rerun after a gcc-only access
+  error in the first chain); the sanitizer leg did not run this round (WSL would not start it; the previous round's run
+  covered the shared code). Fuzz, in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems.
+
 ## 2026-10-28 (round 267): the hand-painted look (task 0247)
 
 **Asked:** after Substance's pillars, the stylized side - the hand-painted look of Blizzard's and Riot's textures and

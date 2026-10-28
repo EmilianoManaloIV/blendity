@@ -212,6 +212,10 @@ struct RasterFrame {
   float sky[3] = {0.45f, 0.52f, 0.62f}, equator[3] = {0.32f, 0.34f, 0.36f}, ground[3] = {0.16f, 0.15f, 0.14f};
   float env_color[3] = {0.05f, 0.05f, 0.05f};
   float env_strength = 1.0f;
+  /* Task 0248: the stylized sky (the disc's direction, cos and softness, its colour; the band's colour and half-width)
+   * and the fog (start, end, on; the near and far colours). */
+  float sky_disc[4] = {0.3f, 0.8f, 0.5f, 2.0f}, sky_disc_color[4] = {1.0f, 0.95f, 0.8f, 0.3f}, sky_band[4] = {0.95f, 0.75f, 0.6f, 0.0f};
+  float fog[4] = {10.0f, 60.0f, 0.0f, 0.0f}, fog_color[4] = {0.6f, 0.65f, 0.75f, 0.0f}, fog_far[4] = {0.75f, 0.8f, 0.9f, 0.0f};
   /* The background: 0 one colour (`clear`, as displayed), 1 the editor's own sky (bg_*: Renderer3D::clear_sky's
    * gradient, not tone mapped), 2 the world (as lit, through the view transform). */
   int background = 0;

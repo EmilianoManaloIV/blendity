@@ -22,6 +22,7 @@ const Guide kGuides[] = {
     {"UV Unwrapping", "Lay the surface flat for textures: seams, unwrap, pack.", {"Smart UV Project", "Part Unwrap", "Pack Islands"}},
     {"Texturing & Materials", "Give surfaces their look: materials, procedural textures.", {"Materials Window", "Textures Window", "New Material Asset"}},
     {"Texturing", "Paint and layer a surface: smart materials, masks from the mesh maps, the brush.", {"Textures Window", "Modeling Tools Window", "Paint Mode On / Off"}},
+    {"Stylized", "Build a painted world: strokes as geometry, scattered props, a stylized sky and fog.", {"Modeling Tools Window", "Lighting Window", "Scene Window"}},
     {"Lighting & Rendering", "Light the scene and render it.", {"Create Area Light", "Generate Lighting", "Render Preview"}},
     {"Editing", "Develop a render or an image: exposure, colour, crop, masks.", {"Develop the Last Render", "Editing Window", "Use as Camera Look"}},
     {"Rigging", "Give a character bones: a rig, IK, hair chains.", {"Humanoid Rig", "Auto IK on Selected Skeleton", "Rig Hair from Mesh"}},

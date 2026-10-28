@@ -209,6 +209,8 @@ void Editor::draw_tools_window(const Recti &r) {
   }
   if (section("Sculpt", FocusEdit)) draw_sculpt_tools(lay);  // (task 0236)
   if (section("Paint", FocusEdit)) draw_paint_tools(lay);    // (task 0245)
+  if (section("Strokes", FocusEdit)) draw_strokes_tools(lay);  // (task 0248)
+  if (section("Scatter", FocusEdit)) draw_scatter_tools(lay);
   if (section("Check: Z-Fighting", FocusCheck)) draw_zfight_panel(lay);
   if (section("Check: Overlapping Vertices & Edges", FocusCheck)) draw_overlap_panel(lay);
   if (section("UV", FocusUV)) {

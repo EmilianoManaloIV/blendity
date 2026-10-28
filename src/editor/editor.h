@@ -677,6 +677,28 @@ class Editor {
   int paint_last_fill_for_test() const { return paint_last_fill_; }
   size_t paint_last_step_bytes_for_test() const { return paint_last_step_bytes_; }
   bool paint_dab_uv_for_test(float u, float v) { return paint_dab_uv(u, v, 1.0f); }
+  bool strokeobj_for_test() const { return strokeobj_; }
+  GameObject *strokeobj_object_for_test() { return strokeobj_object(false); }
+  /* The Scatter brush's settings (task 0248; the tool lives in editor/scatter.cpp). */
+  struct ScatterBrush {
+    std::string source;      // the object copied (its mesh and materials shared)
+    float density = 4.0f;    // instances a square metre of the dab's disc
+    float radius = 1.0f;     // the dab's radius in metres on the surface
+    float scale_min = 0.8f, scale_max = 1.2f;
+    float rotate = 180.0f;   // the random yaw's range in degrees
+    int align = 0;           // 0 the surface normal, 1 world up
+    bool tint = false;
+    Vec3 tint_color{1.0f, 1.0f, 1.0f};
+    uint32_t seed = 1;
+    int mask_layer = -1;     // a Paint layer of the surface's stack whose coverage keeps instances off (-1: none)
+  };
+  GameObject *scatter_parent_for_test() { return scatter_parent(false); }
+  ScatterBrush &scatter_brush_for_test() { return scatter_brush_; }
+  bool scatter_masked_for_test(GameObject &g, Vec3 p, std::string &why) {
+    const bool m = scatter_masked(g, p);
+    why = scatter_mask_why_;
+    return m;
+  }
   const std::vector<Vec3> &paint_palette_for_test() const { return paint_palette_; }
   float paint_stamp_for_test(Vec2 local, Vec2 dir, uint32_t seed) {
     paint_dab_dir_ = dir, paint_stroke_seed_ = seed, paint_dir_known_ = true;
@@ -3288,6 +3310,45 @@ class Editor {
   Vec2 paint_stencil_offset_;
   float paint_stencil_scale_ = 1.0f;
   int texture_smat_pick_ = 0;
+  /* The Strokes tool (task 0248, ADR 0084; editor/strokes_tool.cpp): dabs on surfaces become cards or ribbons of one Stroke
+   * object, its mesh rebuilt from the list. */
+  bool strokeobj_ = false, strokeobj_stroking_ = false;
+  uint64_t strokeobj_id_ = 0;  // the Stroke object edited (0: made on the first dab)
+  int strokeobj_kind_ = 0;     // 0 card, 1 ribbon
+  float strokeobj_size_ = 0.2f, strokeobj_width_ = 0.05f;
+  std::vector<Vec3> strokeobj_points_;  // the ribbon being drawn (world)
+  Vec3 strokeobj_facing_, strokeobj_surface_n_;
+  Vec2 strokeobj_last_px_;
+  std::string strokeobj_alpha_;
+  void set_strokeobj(bool on);
+  GameObject *strokeobj_object(bool make);
+  bool strokeobj_hit(const Recti &view, float x, float y, Vec3 &point, Vec3 &normal, Vec3 &facing);
+  bool strokeobj_dab(const Recti &view, float x, float y);
+  void strokeobj_ribbon_point(const Recti &view, float x, float y);
+  void strokeobj_ribbon_end();
+  void strokeobj_rebuild(GameObject &g, const char *label);
+  int strokeobj_canopy_fill(Vec3 centre, float radius, int count);
+  int strokeobj_grass(const Recti &view, float x, float y, float density, float height, float radius);
+  bool strokeobj_update(const Recti &view);
+  void strokeobj_draw(const Recti &view);
+  void strokeobj_command(const std::vector<std::string> &t);
+  void draw_strokes_tools(ui::Layout &lay);
+  /* The Scatter brush (task 0248, ADR 0084; editor/scatter.cpp): dabs place instances of a source object on surfaces. */
+  ScatterBrush scatter_brush_;
+  bool scatter_ = false, scatter_stroking_ = false;
+  uint64_t scatter_parent_ = 0;
+  Vec2 scatter_last_px_;
+  uint32_t scatter_dabs_ = 0;
+  void set_scatter(bool on);
+  GameObject *scatter_parent(bool make);
+  bool scatter_dab(const Recti &view, float x, float y, bool erase);
+  bool scatter_masked(GameObject &surface_obj, Vec3 world_point);
+  std::string scatter_mask_why_;  // (tests)
+  int scatter_merge();
+  bool scatter_update(const Recti &view);
+  void scatter_draw(const Recti &view);
+  void scatter_command(const std::vector<std::string> &t);
+  void draw_scatter_tools(ui::Layout &lay);
   bool paint_dab_uv(float u, float v, float pressure);
   void paint_canvas_update(const Recti &pane, int tiles);
   void paint_canvas_end();

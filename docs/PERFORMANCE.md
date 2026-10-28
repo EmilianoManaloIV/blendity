@@ -1252,3 +1252,15 @@ The filters run per texel inside the rect engine's rectangle, single-threaded li
 |---|---|
 | a wet 0.5 blue stroke over red (a 6x cube, size 30, 8 dabs) | 2,933 mixed texels, 339 pure blue |
 | the baked light from +X on a 4x sphere's 128 maps | 0.985 on +X against 0.652 on -X |
+
+## Stylized environments (task 0248)
+
+A Stroke object's mesh is rebuilt from its list on every stroke (positions appended: thousands of cards in one pass; a
+forest would want chunks). A scatter dab casts one ray a candidate point plus a triangle walk of the hit mesh a point
+when a mask is set. Fog is a mix per lit pixel in every renderer; the sky's disc and band two dot products a background
+pixel.
+
+| `tests_round268` | Measured |
+|---|---|
+| `canopyfill 1 100` | 100 cards, 424 vertices, one rebuild |
+| a scatter dab of density 4 in a 1 m disc | 13 instances, one step |

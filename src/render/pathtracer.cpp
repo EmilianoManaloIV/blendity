@@ -866,6 +866,13 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       *depth_out = h.t;
       if (id_out) *id_out = h.object + 1;
     }
+    if (bounce == 0 && camera_path && env_.fog) {  // (task 0248: the fog's share of the pixel is the ramp's colour; the surface's path carries the rest)
+      const float f = env_.fog_amount(since_scatter + h.t);  // (from the camera, through the see-through passes)
+      if (f > 0.0f) {
+        L += beta * (env_.fog_color + (env_.fog_far - env_.fog_color) * f) * f;
+        beta = beta * (1.0f - f);
+      }
+    }
     auto add = [&](Vec3 c) {
       if (bounce > 0 && clamp > 0) {
         float m = std::max({c.x, c.y, c.z});
@@ -2219,6 +2226,12 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   v4(p.env_equator, env_.equator);
   v4(p.env_ground, env_.ground);
   v4(p.env_color, env_.color);
+  v4(p.env_disc, env_.sun_dir), p.env_disc[3] = env_.disc_cos;  // (task 0248)
+  v4(p.env_disc_color, env_.disc_color), p.env_disc_color[3] = env_.disc_soft;
+  v4(p.env_band, env_.band_color), p.env_band[3] = env_.band_width;
+  p.fog[0] = env_.fog_start, p.fog[1] = env_.fog_end, p.fog[2] = env_.fog ? 1.0f : 0.0f, p.fog[3] = 0.0f;
+  v4(p.fog_color, env_.fog_color);
+  v4(p.fog_far, env_.fog_far);
   v4(p.background, settings_.background);
   p.background[3] = settings_.solid_background ? (settings_.transparent_film ? 2.0f : 1.0f) : 0.0f;  // 2: transparent film
   /* The Retro stages for camera rays (task 0032). */
