@@ -151,6 +151,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"object.drop_to_floor", "Drop to Floor", "Object", CTX_SCENE},
       /* Modes */
       {"mode.edit_toggle", "Edit Mode On / Off", "Modes", CTX_SCENE},
+      {"mode.sculpt_toggle", "Sculpt Mode On / Off", "Modes", CTX_SCENE},  // (task 0236; unbound: the palette, the Wheel, the Tools window)
       {"mode.vertex", "Vertex Select Mode", "Modes", CTX_SCENE_EDIT},
       {"mode.edge", "Edge Select Mode", "Modes", CTX_SCENE_EDIT},
       {"mode.face", "Face Select Mode", "Modes", CTX_SCENE_EDIT},
@@ -673,6 +674,7 @@ bool Editor::run_action(const std::string &id) {
     if (edit_mode_) exit_edit_mode();
     else enter_edit_mode();
   }
+  else if (id == "mode.sculpt_toggle") set_sculpt(!sculpt_);  // (task 0236)
   else if (id == "mode.vertex") set_edit_element(EditElement::Vertex);
   else if (id == "mode.edge") set_edit_element(EditElement::Edge);
   else if (id == "mode.face") set_edit_element(EditElement::Face);

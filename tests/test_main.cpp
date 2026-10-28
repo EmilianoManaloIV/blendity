@@ -81,6 +81,7 @@ void run_editor_tests();
 void run_livelink_tests();
 void run_input_tests();
 void run_sketch_tests();
+void run_sculpt_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -94,6 +95,7 @@ static const TestGroup kTestGroups[] = {
     {"livelink", run_livelink_tests},
     {"input", run_input_tests},
     {"sketch", run_sketch_tests},
+    {"sculpt", run_sculpt_tests},
 };
 
 int main(int argc, char **argv) {

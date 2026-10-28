@@ -917,6 +917,10 @@ void Editor::run_console_command(const std::string &line) {
     toonstyle_command(name);
     return;
   }
+  if (c == "sculpt") {  // sculpt on|off|brush|size|strength|falloff|carve|front|pressure|dab|stroke (task 0236)
+    sculpt_command(t);
+    return;
+  }
   if (c == "weightpaint" || c == "wpbrush" || c == "wpfalloff" || c == "wpmirror" || c == "wpfront" || c == "wpstroke" || c == "wpnormalize" ||
       c == "wpclean") {
     weight_paint_command(t);

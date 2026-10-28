@@ -99,7 +99,7 @@ void Editor::draw_scene_view(const Recti &r) {
     pt_sel_.clear();
   /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). A finger's double tap
    * in Tablet Mode does it as it lifts (task 0214). */
-  if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_ && !finger_orbit_) frame_selected();
+  if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && !sculpt_ && active_ && !finger_orbit_) frame_selected();  // (task 0236: two dabs close together aren't a frame)
 
   {
     /* The 3D layer is reused while nothing it shows has changed (an idle frame, the mouse over a panel,
@@ -149,6 +149,7 @@ void Editor::draw_scene_view(const Recti &r) {
   sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
+  sculpt_draw(view);  // (task 0236)
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
   draw_pushpull(view);
@@ -202,6 +203,7 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   /* Task 0216: a pen with its side button held (Windows sends it as the right button) navigates in every feel - orbit,
    * Shift pans, Ctrl zooms - as the middle button does in Blender's pen setup. */
   const int barrel_button = in.pressed[1] ? 1 : in.pressed[0] ? 0 : -1;
+  if (sculpt_ && in.pressed[0] && !in.barrel) return {Drag::None, 0};  // (task 0236: the left button is the brush's, Shift and Alt its smooth and carve)
   if (in.pen && in.barrel && barrel_button >= 0 && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal)
     return {in.shift() ? Drag::Pan : in.ctrl() ? Drag::Zoom : Drag::Orbit, barrel_button};
   if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal) {  // a right-click cancels a running Push/Pull, Inset, Bevel or bone Extrude instead
@@ -233,6 +235,7 @@ bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   if (bone_handles_update(view)) busy = true;
   if (gizmo_update(view)) busy = true;
   if (wp_update(view)) busy = true;
+  if (sculpt_update(view)) busy = true;  // (task 0236)
   if (pushpull_update(view)) busy = true;
   if (modal_update(view)) busy = true;
   if (transform_update(view)) busy = true;
@@ -761,7 +764,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || weight_paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || sculpt_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1218,7 +1221,7 @@ bool Editor::gizmo_update(const Recti &view) {
 
 void Editor::draw_gizmo(const Recti &view) {
   auto &u = ui_;
-  if (tool_ == Tool::View || weight_paint_) return;  // Weight Paint: the brush, not the gizmo
+  if (tool_ == Tool::View || weight_paint_ || sculpt_) return;  // Weight Paint, Sculpt: the brush, not the gizmo
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
   if (!has_target) return;
   /* Snapping markers: the vertex / surface point a move is snapping to, and with V
@@ -1356,6 +1359,7 @@ MeshPtr *Editor::edit_mesh_ptr() {
 
 void Editor::enter_edit_mode() {
   if (weight_paint_) set_weight_paint(false);  // one mode at a time
+  if (sculpt_) set_sculpt(false);
   if (playing_) return;
   if (pilot_cam_) toggle_pilot_camera();  // piloting hides the editor's overlays: editing needs them back
   GameObject *g = active_object();

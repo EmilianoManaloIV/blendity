@@ -121,6 +121,16 @@ struct WeightBrush {
 };
 extern const char *const kWeightBrushModes[4];  // Add, Subtract, Draw, Blur (task 0046)
 extern const char *const kWeightFalloffs[6];
+/* Sculpt Mode's brush (task 0236). */
+struct SculptBrush {
+  int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab
+  float radius = 50.0f, strength = 0.5f;
+  int falloff = 0;  // kWeightFalloffs
+  bool carve = false, front_only = true;
+  int pressure = 1;  // kSculptPressure: Off, Strength, Size
+};
+extern const char *const kSculptBrushes[3];
+extern const char *const kSculptPressure[3];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
@@ -539,8 +549,17 @@ struct EditSelection {
   std::vector<uint8_t> verts, faces;
   std::vector<uint64_t> edges;
 };
+/* A sculpt stroke's undo step (task 0236, ADR 0074): the touched vertices' positions before and after, applied in
+ * place to the object's mesh instead of swapping the scene. */
+struct SculptDelta {
+  uint64_t obj = 0;
+  std::vector<uint32_t> ids;
+  std::vector<Vec3> before, after;
+};
+
 struct UndoState {
   std::unique_ptr<Scene> scene;
+  std::shared_ptr<SculptDelta> delta;  // (set: a delta step; `scene` is empty)
   std::vector<uint64_t> selection;
   uint64_t active = 0;
   EditSelection edit_sel;  // Edit Mode's selection at this state (task 0167)
@@ -761,6 +780,12 @@ class Editor {
   std::vector<uint8_t> &face_sel_for_test() { return face_sel_; }
   EditElement elem_for_test() const { return elem_; }
   bool weight_paint_for_test() const { return weight_paint_; }
+  bool sculpt_for_test() const { return sculpt_; }  // (task 0236)
+  const std::vector<uint32_t> &sculpt_last_ids_for_test() const { return sculpt_last_ids_; }
+  Vec3 sculpt_last_hit_for_test() const { return sculpt_last_hit_; }
+  float sculpt_last_radius_for_test() const { return sculpt_last_radius_; }
+  bool sculpt_hit_for_test(float x, float y, Vec3 &world, float &dist) { return sculpt_hit(scene_rect_, x, y, world, dist); }
+  size_t sculpt_last_gathered_for_test() const { return sculpt_last_gathered_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
@@ -817,6 +842,7 @@ class Editor {
   static void note_render_cache_mismatch();
   /* Tests: the Scene view's depth at a window pixel (1 = nothing), as the tools read it. */
   float scene_depth_for_test(int wx, int wy) const { return scene_rt_.depth_at(wx - scene_rect_.x, wy - scene_rect_.y); }
+  uint32_t scene_id_for_test(int vx, int vy) const { return scene_rt_.id_at(vx, vy); }  // (view pixels; task 0236)
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
   /* Tests: where the Game view's camera frame (the guides' frame) was last drawn. */
   Recti game_guides_frame_for_test() const { return game_guides_frame_; }
@@ -2141,7 +2167,7 @@ class Editor {
   void settle_meshes();
   /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
    * Push/Pull, a modal adjustment. Whole-scene checks wait for it to end (task 0087). */
-  bool interacting() const { return ui_.in.down[0] || ui_.in.down[1] || ui_.in.down[2] || xf_.active || pp_.active || modal_.active; }
+  bool interacting() const { return ui_.in.down[0] || ui_.in.down[1] || ui_.in.down[2] || xf_.active || pp_.active || modal_.active || sculpt_stroking_; }
   /* Task 0103 (Blender's sculpt: flush_update_step / flush_update_done): during a drag the Game view and the Camera
    * Preview keep their last picture and draw once on release, unless Preferences > Other Views Follow Drags is on.
    * Play is never held back. */
@@ -2150,7 +2176,7 @@ class Editor {
    * views nor makes the Scene view cheaper. */
   bool scene_moving() const {
     const bool nav = drag_ != Drag::None && drag_ != Drag::Box && drag_ != Drag::AltClick;
-    return nav || xf_.active || pp_.active || modal_.active || windows_moving();
+    return nav || xf_.active || pp_.active || modal_.active || sculpt_stroking_ || windows_moving();  // (task 0236: a sculpt stroke)
   }
   bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
   bool other_views_follow_ = false;
@@ -2952,6 +2978,58 @@ class Editor {
   float prop_radius_ = 1.0f;
   int prop_falloff_ = 0;
   std::vector<float> gizmo_vert_w_;
+  /* Sculpt Mode (task 0236, ADR 0074; editor/sculpt.cpp). */
+  SculptBrush sculpt_brush_;
+  bool sculpt_ = false, sculpt_stroking_ = false, sculpt_dabbed_ = false;
+  uint64_t sculpt_obj_ = 0;
+  const Scene *sculpt_scene_ = nullptr;
+  const Mesh *sculpt_stroke_mesh_ = nullptr, *sculpt_cache_mesh_ = nullptr;
+  struct SculptGrid {
+    float cell = 1.0f;
+    size_t verts = 0;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> cells;
+  } sculpt_grid_;
+  std::vector<uint8_t> sculpt_touched_;  // (per vertex: recorded in the delta)
+  std::shared_ptr<SculptDelta> sculpt_delta_;
+  std::vector<uint32_t> sculpt_last_ids_;  // (the last dab's vertices: tests)
+  Vec3 sculpt_last_hit_;
+  float sculpt_last_radius_ = 0.0f;
+  size_t sculpt_last_gathered_ = 0;
+  struct SculptGrab {
+    std::vector<uint32_t> ids;
+    std::vector<float> weights;
+    std::vector<Vec3> start;
+    Vec2 px0;
+    float dist = 1.0f;
+  } sculpt_grab_;
+  Vec2 sculpt_last_px_;
+  bool set_sculpt(bool on);
+  Mesh *sculpt_mesh();
+  bool sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist);
+  float sculpt_world_radius(float px, float dist) const;
+  void sculpt_build_grid(const Mesh &m, float cell);
+  void sculpt_gather(const Mesh &m, Vec3 centre, float radius, std::vector<uint32_t> &ids, std::vector<float> &d) const;
+  Vec3 sculpt_vertex_normal(const Mesh &m, uint32_t v) const;
+  bool sculpt_begin_stroke(const Recti &view, float x, float y);
+  void sculpt_end_stroke();
+  void sculpt_abort_stroke();
+  void sculpt_dab(const Recti &view, float x, float y, float pressure);
+  void sculpt_stroke_to(const Recti &view, float x, float y, bool first);
+  void sculpt_draw_brush(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool carve);
+  void sculpt_smooth(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w);
+  void sculpt_grab(Mesh &m, const Mat4 &inv, const std::vector<uint32_t> &ids, const std::vector<float> &w, Vec2 px);
+  size_t sculpt_touched_index(uint32_t v) const;
+  static MeshFilter *mf_of(GameObject *g);
+  void sculpt_record(const Mesh &m, const std::vector<uint32_t> &ids);
+  bool sculpt_update(const Recti &view);
+  void sculpt_draw(const Recti &view);
+  void draw_sculpt_tools(ui::Layout &lay);
+  void sculpt_command(const std::vector<std::string> &t);
+  void apply_sculpt_delta(UndoState s, std::vector<UndoState> &into, const char *verb, bool undo);
+  void trim_undo();
+  bool sculpt_own_mesh(GameObject *g, MeshFilter *mf);
+  void sculpt_gather_cell(const Mesh &m, int64_t x, int64_t y, int64_t z, Vec3 centre, float r2, std::vector<uint32_t> &ids, std::vector<float> &d) const;
+  float sculpt_stroke_move_ = 0.0f;  // (the farthest a vertex moved this stroke: the gather reaches that much past the radius, the grid being the stroke's start)
   /* Weight Paint (task 0046). */
   WeightBrush wp_brush_;
   bool weight_paint_ = false, wp_stroking_ = false, wp_dabbed_ = false, wp_mirror_done_ = false;

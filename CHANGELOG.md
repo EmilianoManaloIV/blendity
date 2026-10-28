@@ -2,6 +2,61 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 256): Sculpt Mode - the foundation (task 0236)
+
+**Asked:** "we should start adding features that are from Substance Painter and ZBrush; do significant R&D on the
+matter" - the ZBrush pillars begin with a Sculpt Mode whose brushes work at pen speed on a dense mesh.
+
+**Added**
+- **Sculpt Mode** (ADR 0074, `src/editor/sculpt.cpp`): Modeling Tools > Sculpt (the toggle, the brush, Size,
+  Strength, Falloff, Carve, Front Faces Only, Pressure), `sculpt on|off`, the keymap action *Sculpt Mode On / Off*
+  (the palette, the Wheel), the Wheel's *sculpt* set, the breadcrumb's Mode dropdown. Entering makes the mesh its own
+  once and leaves Edit Mode and Weight Paint (and they leave it); Play refuses it; Esc leaves.
+- **Only what is under the brush moves:** a stroke builds a uniform grid over the vertices (the cell the brush's
+  world radius); a dab reads the object and the depth under the cursor from the Scene view's planes (no raycast),
+  the depth turned into a distance by bisection on the renderer's projection, the screen radius into a world radius
+  at that depth - the circle on screen is what you set - and walks the cells inside it; the vertices there take the
+  brush by the falloff, their normals worked out from their faces at the dab; Front Faces Only skips those facing
+  away. The grid is built at every stroke's start.
+- **Three brushes:** Draw (along the normal; Alt or Carve goes inward), Smooth (Shift; a Laplacian step toward the
+  neighbours' mean, Blender's smooth), Grab (the vertices under the first dab follow the drag in the view plane). Dabs
+  every quarter radius along the drag; the pen's pressure drives the strength or the size.
+- **In place, positions only:** a dab writes the positions and bumps `deform_version`; the render mesh follows in
+  place and the GPU view updates the moved range; no render mesh is built from scratch through a stroke; the other
+  views hold their picture as for a drag; tangents settle when the pen lifts.
+- **Delta undo:** a stroke is one undo step holding the moved vertices' positions before and after - no scene
+  snapshot (28 bytes a vertex); undo and redo apply it in place; a stroke cut off writes its positions back; delta
+  steps go through the stack's cap and budget. The amendment to ADR 0003 / 0053: a mesh only snapshots share is left
+  shared and written by a delta step, positions only, in step order; another object sharing it gets the stroke an
+  own-mesh step first.
+- **Console:** `sculpt on|off | brush draw|smooth|grab | size <px>|+|- | strength <0-1> | falloff <name> | carve
+  on|off|toggle | front on|off | pressure off|strength|size | dab <x> <y> [pressure] | stroke <x0> <y0> <x1> <y1> [n]`.
+**Review (Opus, round 256):** three blockers and six majors, all taken before landing; the check chain then found seven stale pictures (the Scene view's cache key read `version` but not `deform_version`: fixed in `evaluated_keys`) and a Grab test reading a stale depth plane. Entering the mode had copied
+the mesh, so the stable snapshot kept the old one and an unrelated undo took every stroke back - a mesh only snapshots
+share is now left shared, as the ADR meant, and only another object's share gets an own-mesh step; the brush reads the
+GPU view's planes after a readback (`ensure_scene_planes`); the grid is built at every stroke's start, the gather
+reaches past the radius by the stroke's farthest move, ids past the mesh are skipped and a mesh changed under a stroke
+ends it; a cut-off stroke writes its positions back; delta steps go through the undo cap and budget; a pending change
+is committed before a stroke and before its step; a pen held still mid-stroke opens no Wheel; an undo keeps the mode;
+Sketch and Sculpt exclude each other; a stroke that moved nothing makes no step. The claims changed to what the code
+does: a Laplacian smooth (no Taubin step; the volume within 2 %), a depth found by bisection, a 23,810-vertex sphere
+with its dabs timed, the Wheel's sculpt set only in the mode, a row in the manual's table. Added: tests of the gather's
+completeness and of a pointer drag with Shift, Alt, an undo mid-drag and Esc. Left as noted in Scope: a deforming
+modifier under the brush, a non-uniform scale, the mode staying on its object.
+
+**Checked**
+- `tests/test_sculpt.cpp` (a new group, 4 tests): a Draw dab on a sphere moves exactly the vertices within the
+  brush's radius (the set equal to a brute-force count), each outward and less toward the edge, the rest bitwise
+  unchanged, Carve inward, pressure 0.5 about half as far; Smooth lowers a spike's Laplacian energy and keeps the
+  volume within 2 %; Grab moves the centre vertex with the drag within 6 px and nothing outside the set; a stroke is
+  one undo step restored bitwise and redone, a dab over nothing adds none; on a 23,810-vertex sphere no render mesh
+  is built from scratch through a stroke (in place instead; 13 dabs in about 25 ms, printed); a pointer drag over the
+  Scene view is one stroke, Shift smooths, Alt carves, an undo mid-drag leaves no trace, Esc leaves; the modes
+  exclude each other and Play refuses it.
+- Unit checks (round 256): Windows, in render-cache verify mode, 12649, 0 failed (1079 tests), 0 stale
+  pictures. Linux with libraries: 12189, 0 failed. Sanitizer build: 12059, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The first chain found two things: the render group's hash-memo test (evaluated_key now mixes deform_version as evaluated_keys does) and the livelink group hung in the parallel suite once (killed; it passed alone, and in the rerun). In the rerun the gpu group's slow-open test failed under the parallel load and passed alone; the sanitizer leg ran alone afterwards..)
+
 ## 2026-10-28 (round 255): the HCI and modularity pass - fewer, calmer tabs; where you are (task 0235)
 
 **Asked:** "Look through the project and find ways to make it more HCI friendly and easier to navigate. Tabs are

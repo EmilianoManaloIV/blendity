@@ -651,6 +651,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
+  if (sculpt_stroking_ && !scene_drawn_) sculpt_end_stroke();  // (task 0236: the Scene view stopped drawing mid-stroke - a tab switch: the stroke ends as it is)
   draw_drop_hint();  // (task 0232)
   for (WindowKind k : tab_close_queue_) dock_remove(k);
   tab_close_queue_.clear();
@@ -1864,6 +1865,17 @@ void Editor::restore_edit_selection(const EditSelection &e) {
   if (elem_ == EditElement::Edge && edge_sel_.empty() && std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end()) edges_from_verts();
 }
 
+/* The stack's cap (200 steps) and budget (undo_budget): the oldest go first, the newest stays. Every push goes through
+ * here - a snapshot's and a sculpt stroke's delta (task 0236). */
+void Editor::trim_undo() {
+  while (undo_.size() > 200) undo_.erase(undo_.begin());
+  size_t total = undo_bytes();
+  const size_t budget = undo_budget();
+  size_t drop = 0;
+  while (undo_.size() - drop > 1 && total > budget) total -= undo_[drop++].bytes;
+  if (drop) undo_.erase(undo_.begin(), undo_.begin() + (std::ptrdiff_t)drop);
+}
+
 void Editor::commit_undo() {
   if (!pending_change_) return;
   settle_meshes();
@@ -1895,14 +1907,7 @@ void Editor::commit_undo() {
   for (const auto &t : s.textures) s.bytes += t.first.size() + t.second.size();
   for (const auto &t : s.clips) s.bytes += t.first.size() + t.second.size();
   undo_.push_back(std::move(s));
-  if (undo_.size() > 200) undo_.erase(undo_.begin());
-  {
-    size_t total = undo_bytes();
-    const size_t budget = undo_budget();
-    size_t drop = 0;
-    while (undo_.size() - drop > 1 && total > budget) total -= undo_[drop++].bytes;  // the oldest first, the newest kept
-    if (drop) undo_.erase(undo_.begin(), undo_.begin() + (std::ptrdiff_t)drop);
-  }
+  trim_undo();
   redo_.clear();
   stable_ = scene_->clone();
   pending_change_ = false;
@@ -1929,10 +1934,12 @@ void Editor::undo() {
   anim_set_preview(false);  // (the pose shown goes back first: it isn't the scene's)
   seq_set_preview(false);
   wp_abort_stroke();  // a stroke under way would write into the restored scene's (shared) mesh
+  sculpt_abort_stroke();
   commit_undo();
   if (undo_.empty()) return;
   UndoState s = std::move(undo_.back());
   undo_.pop_back();
+  if (s.delta) return apply_sculpt_delta(std::move(s), redo_, "Undo", true);  // (task 0236: in place, no scene swap)
   restore_state(std::move(s), redo_, "Undo");
 }
 
@@ -1962,6 +1969,7 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   stable_ = scene_->clone();
   restore_edit_selection(s.edit_sel);
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
+  if (sculpt_) sculpt_scene_ = scene_.get(), sculpt_cache_mesh_ = nullptr;  // (task 0236: keep sculpting; the grid is rebuilt)
   prune_selection();
   scene_dirty_ = true;
   Log::info("%s %s", verb, s.label.c_str());
@@ -1975,8 +1983,10 @@ void Editor::redo() {
   anim_set_preview(false);
   seq_set_preview(false);
   wp_abort_stroke();
+  sculpt_abort_stroke();
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
+  if (s.delta) return apply_sculpt_delta(std::move(s), undo_, "Redo", false);
   restore_state(std::move(s), undo_, "Redo");
 }
 
@@ -1986,6 +1996,7 @@ void Editor::redo() {
 
 void Editor::new_scene() {
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
+  set_sculpt(false);
   sketch_layers_reset();  // (task 0234: a solo or a rename is an index into this scene's stack)
   inspector_lock_ = 0;  // (task 0232: a pin is an object id of this scene)
   for (auto &w : windows_)
@@ -2014,6 +2025,7 @@ void Editor::new_scene() {
 
 bool Editor::open_scene(const std::string &path) {
   set_weight_paint(false);
+  set_sculpt(false);
   cancel_skin_job();
   autorig_cancel();
   anim_reset();
@@ -3348,6 +3360,7 @@ int Editor::startup_check() {
 
 void Editor::enter_play() {
   set_weight_paint(false);
+  set_sculpt(false);  // (task 0236: the stable clone shares meshes)
   cancel_skin_job();  // (Stop would throw its result away)
   autorig_cancel();
   anim_set_preview(false);  // (Play plays from the scene's own pose)

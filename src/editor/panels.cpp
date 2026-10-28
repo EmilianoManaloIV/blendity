@@ -3247,4 +3247,25 @@ void Editor::draw_show_more(ui::Layout &lay, const std::string &type, int hidden
   else inspector_more_.insert(type);
 }
 
+/* Sculpt Mode's toggle and brush (task 0236), in the Modeling Tools window's Sculpt section. */
+void Editor::draw_sculpt_tools(ui::Layout &lay) {
+  auto &u = ui_;
+  GameObject *g = active_object();
+  const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, sculpt_ ? "Exit Sculpt" : "Sculpt", sculpt_, ui::Icon::Vertex)) set_sculpt(!sculpt_);
+  u.tooltip(mesh || sculpt_ ? "Sculpt the selected mesh with a brush: drag over it; Shift smooths, Alt carves; Esc leaves (sculpt on|off)." : "Select a mesh object to sculpt it.");
+  if (!sculpt_) return;
+  InspectorReflector br(*this, u, lay);
+  br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 3);
+  br.help("Draw raises along the normal (Alt carves), Smooth evens the surface keeping its volume, Grab pulls what is under the first dab with the drag.");
+  br.field("Size", sculpt_brush_.radius, 1.0f, 1.0f, 500.0f);
+  br.field("Strength", sculpt_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.enumeration("Falloff", sculpt_brush_.falloff, kWeightFalloffs, 6);
+  br.field("Carve", sculpt_brush_.carve);
+  br.field("Front Faces Only", sculpt_brush_.front_only);
+  br.enumeration("Pressure", sculpt_brush_.pressure, kSculptPressure, 3);
+  br.help("What a pen's pressure drives: the strength, the size, or nothing.");
+}
+
 }  // namespace bl

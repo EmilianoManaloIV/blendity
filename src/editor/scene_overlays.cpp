@@ -74,6 +74,7 @@ const char *const kToolNames[] = {"View", "Move", "Rotate", "Scale", "Transform"
 
 /* The mode the Scene view is in, as the breadcrumb and the hints name it. */
 std::string Editor::mode_name() const {
+  if (sculpt_) return "Sculpt";  // (task 0236)
   if (sketch_.active) return "Sketch";
   if (weight_paint_) return "Weight Paint";
   if (edit_mode_) return "Edit";
@@ -107,7 +108,8 @@ int Editor::draw_breadcrumb(int x, int y, int h, int limit) {
   });
   u.popup(ids[1], u.px(160), [this] {
     const std::string m = mode_name();
-    if (ui_.menu_item("Object", nullptr, m == "Object")) run_console_command("sketch off"), run_console_command("weightpaint off"), run_console_command("edit off");
+    if (ui_.menu_item("Object", nullptr, m == "Object")) run_console_command("sketch off"), run_console_command("weightpaint off"), run_console_command("sculpt off"), run_console_command("edit off");
+    if (ui_.menu_item("Sculpt", nullptr, m == "Sculpt")) run_console_command("sculpt on");
     if (ui_.menu_item("Edit", nullptr, m == "Edit")) run_console_command("edit");
     if (ui_.menu_item("Weight Paint", nullptr, m == "Weight Paint")) run_console_command("weightpaint on");
     if (ui_.menu_item("Sketch", nullptr, m == "Sketch")) run_console_command("sketch on");

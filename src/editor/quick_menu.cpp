@@ -100,6 +100,15 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
           {"Group", "sketch layer group", {}},
           {"Flatten", "sketch layer flatten", {}}}},
         {"Undo", "Undo", {}}}},
+      {"sculpt",  // (task 0236)
+       {{"Draw", "sculpt brush draw", {}},
+        {"Smooth", "sculpt brush smooth", {}},
+        {"Grab", "sculpt brush grab", {}},
+        {"Carve", "sculpt carve toggle", {}},
+        {"Bigger", "sculpt size +", {}},
+        {"Smaller", "sculpt size -", {}},
+        {"Undo", "Undo", {}},
+        {"Object Mode", "sculpt off", {}}}},
       {"weight paint",
        {{"Add", "wpbrush add", {}},
         {"Subtract", "wpbrush subtract", {}},
@@ -238,7 +247,7 @@ std::string pref_unescape(const std::string &s) {
 const std::vector<std::string> &Editor::wheel_modes() {
   static std::vector<std::string> modes;
   if (modes.empty()) {
-    for (const char *m : {"object", "edit", "sketch", "weight paint"}) modes.push_back(m);
+    for (const char *m : {"object", "edit", "sketch", "sculpt", "weight paint"}) modes.push_back(m);
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Scene) modes.push_back(to_lower(window_title((WindowKind)k)));
     modes.push_back("other");
@@ -282,6 +291,7 @@ std::string Editor::wheel_mode_at(int x, int y) {
   }
   if (edit_mode_) return "edit";
   if (sketch_.active) return "sketch";
+  if (sculpt_) return "sculpt";  // (task 0236)
   if (weight_paint_) return "weight paint";
   return "object";
 }
@@ -511,7 +521,7 @@ void Editor::wheel_frame() {
  * one). */
 bool Editor::wheel_hold_busy() {
   const auto &in = ui_.in;
-  if (ui_.any_active() || modal_.active || xf_.active || pp_.active) return true;
+  if (ui_.any_active() || modal_.active || xf_.active || pp_.active || sculpt_stroking_) return true;  // (task 0236: a stroke under way)
   const WindowKind under = wheel_window_at(hold_x_, hold_y_);
   if (sketch_.active && (under == WindowKind::Draw || under == WindowKind::Game)) return true;  // (task 0233: the pen draws there too)
   if (under != WindowKind::Scene) return false;

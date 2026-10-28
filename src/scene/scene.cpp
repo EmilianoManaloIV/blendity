@@ -2082,6 +2082,7 @@ uint64_t GameObject::evaluated_key(int kind) const {
   auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
+  mix(mf->mesh->deform_version);  // (as evaluated_keys: a positions-only change is a change the views must see)
   mix((uint64_t)kind);
   for (auto &c : components)
     if (c->is_modifier() && (kind == 1 ? c->show_in_render : c->enabled && (kind == 0 || c->show_in_editmode))) {
@@ -2102,6 +2103,7 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
     out[kind] = kFnvBasis;
     mix(out[kind], (uint64_t)(uintptr_t)mf->mesh.get());
     mix(out[kind], mf->mesh->version);
+    mix(out[kind], mf->mesh->deform_version);  // (ADR 0022: a positions-only change - a sculpt dab, task 0236 - is a change the views must see)
     mix(out[kind], (uint64_t)kind);
   }
   /* The shape keys' weights (task 0135): renders and the viewport show them, Edit Mode's cage the basis. */
