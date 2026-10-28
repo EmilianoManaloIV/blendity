@@ -304,6 +304,41 @@ void Editor::anim_edit_keys(const char *label, const std::function<void(Animatio
   anim_apply();
 }
 
+/* Task 0258: the keymap's Set Key - a key at the playhead on every track (Unity's K adds one on each animated property). */
+void Editor::anim_key_all() {
+  if (playing_) return refuse("Set Key: not while Play runs", "stop", "stop Play");  // (Play's edits are discarded: a key would go with them)
+  AnimationClipPtr clip = anim_clip();
+  if (!clip) return refuse("Set Key: select an animated object (or Create a clip in the Animation window)", "window Animation", "open Animation");
+  if (clip->tracks.empty()) return refuse("Set Key: the clip has no tracks yet - turn Record on and move the object", "anim record on", "Record");
+  const float frame = std::round(anim_.frame);
+  GameObject *root = anim_root();
+  anim_edit_keys("Set Key", [&](AnimationClip &c) {
+    for (AnimTrack &t : c.tracks) {
+      float v = t.sample(frame);
+      if (GameObject *g = root ? anim_target(*root, t.path) : nullptr) read_anim_value(*g, t.property, t.axis, v);
+      t.set_key(frame, v);
+    }
+  });
+}
+
+void Editor::anim_toggle_play() {
+  if (!anim_clip()) return refuse("Play the clip: select an animated object first", "window Animation", "open Animation");
+  anim_.playing = !anim_.playing;
+  if (anim_.playing) anim_set_preview(true), anim_.play_from = anim_.frame, anim_.play_clock = now_seconds();
+}
+
+void Editor::anim_toggle_record() {
+  if (anim_.record) {
+    anim_.record = false;
+    return;
+  }
+  if (playing_) return refuse("Record: not while Play runs", "stop", "stop Play");
+  anim_set_preview(true);  // (Preview must be on to record; it refuses with no animated object)
+  if (!anim_.preview) return refuse("Record: select an animated object first (Create a clip in the Animation window)", "window Animation", "open Animation");
+  anim_.record = true;
+  anim_snapshot_shown();
+}
+
 /* A key at the playhead on `t` with the number's value now (the curve's value when its object is missing). */
 void Editor::anim_add_key(size_t track, float frame) {
   GameObject *root = anim_root();
@@ -461,17 +496,11 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   };
   if (button(u.px(64), "Preview", anim_.preview, "Shows the clip at the playhead on the scene; turning it off puts the scene back.")) anim_set_preview(!anim_.preview);
   const Recti rec{x, y, u.px(28), bh};
-  if (button(u.px(28), "", anim_.record, "Record (Unity's red button): changes to the animated objects become keys at the playhead.")) {
-    anim_.record = !anim_.record;
-    if (anim_.record) anim_set_preview(true), anim_snapshot_shown();
-  }
+  if (button(u.px(28), "", anim_.record, "Record (Unity's red button): changes to the animated objects become keys at the playhead.")) anim_toggle_record();
   u.canvas.fill_circle((float)(rec.x + rec.w / 2), (float)(rec.y + rec.h / 2), (float)u.px(5), anim_.record ? Color::hex(0xFF3B3B) : Color::hex(0x884444));
   if (button(u.px(26), "|<", false, "First frame")) anim_set_frame(0.0f);
   if (button(u.px(26), "<", false, "Previous key")) anim_step_key(-1);
-  if (button(u.px(30), anim_.playing ? "||" : ">", anim_.playing, "Play the clip in the Scene view (Preview)")) {
-    anim_.playing = !anim_.playing;
-    if (anim_.playing) anim_set_preview(true), anim_.play_from = anim_.frame, anim_.play_clock = now_seconds();
-  }
+  if (button(u.px(30), anim_.playing ? "||" : ">", anim_.playing, "Play the clip in the Scene view (Preview)")) anim_toggle_play();
   if (button(u.px(26), ">", false, "Next key")) anim_step_key(1);
   AnimationClipPtr clip = anim_clip();
   if (button(u.px(26), ">|", false, "Last frame") && clip) anim_set_frame(clip->end_frame());
@@ -637,7 +666,7 @@ bool Editor::anim_key_under(const AnimationClip &clip, const Recti &sheet, int r
   const int r = (my - sheet.y) / std::max(1, row_h) + anim_.scroll;
   if (my < sheet.y || r < 0 || (size_t)r >= rows.size()) return false;
   for (float f : anim_row_frames(clip, rows[(size_t)r])) {
-    if (std::abs(anim_x_of(sheet, f, end) - mx) > ui_.px(5)) continue;
+    if (std::abs(anim_x_of(sheet, f, end) - mx) > ui_.px(9)) continue;  // (task 0258: an 18 px target - 4.8 mm at 96 DPI, under 7 mm still; 10 px before)
     keys = anim_row_keys(clip, rows[(size_t)r], f);
     return !keys.empty();
   }
@@ -653,7 +682,7 @@ bool Editor::anim_all_selected(const std::vector<std::pair<int, float>> &keys) c
 std::vector<std::pair<int, float>> Editor::anim_box_keys(const AnimationClip &clip, const Recti &sheet, int row_h, float end, const Recti &box) const {
   std::vector<std::pair<int, float>> out;
   const std::vector<AnimRow> rows = anim_rows(clip);
-  const int half = ui_.px(5);
+  const int half = ui_.px(9);  // (task 0258)
   for (size_t r = (size_t)std::max(0, anim_.scroll); r < rows.size(); r++) {
     const int y0 = sheet.y + ((int)r - anim_.scroll) * row_h;
     if (y0 > sheet.bottom()) break;
@@ -689,7 +718,7 @@ void Editor::anim_sheet_input(const AnimationClip &clip, const Recti &ruler, con
   std::vector<std::pair<int, float>> keys;
   const bool on_key = anim_key_under(clip, sheet, row_h, end, mx, my, keys);
   if (in.double_clicked[0] && !on_key) return anim_add_row_key(clip, sheet, row_h, end, mx, my);
-  if (in.pressed[1] && on_key) {
+  if ((in.pressed[1] || (in.pressed[0] && in.alt())) && on_key) {  // (task 0258: Alt+click opens the tangent menu too)
     if (!anim_all_selected(keys)) anim_.selected = keys;
     u.open_popup(u.id("anim_key_ctx"), {mx, my, 0, 0});
     return;

@@ -156,6 +156,7 @@ void Editor::draw_scene_view(const Recti &r) {
   paint_draw(view);   // (task 0245)
   strokeobj_draw(view);  // (task 0248)
   scatter_draw(view);
+  if (anim_.record) ui_.canvas.rect_outline(view, Color::hex(0xB03030), ui_.px(3));  // (task 0258: the Record frame round the view)
   draw_toasts(view);  // (task 0252: over the picture, under the handles)
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)

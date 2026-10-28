@@ -131,6 +131,12 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"play.toggle", "Play / Stop", "Play", CTX_GLOBAL},
       {"play.pause", "Pause", "Play", CTX_GLOBAL},
       {"play.step", "Step", "Play", CTX_GLOBAL},
+      /* Animation (task 0258): the clip, not Play mode. */
+      {"anim.key", "Set Key (every track, at the playhead)", "Animation", CTX_GLOBAL},
+      {"anim.play", "Play / Pause the Clip", "Animation", CTX_GLOBAL},
+      {"anim.prev_key", "Previous Key", "Animation", CTX_GLOBAL},
+      {"anim.next_key", "Next Key", "Animation", CTX_GLOBAL},
+      {"anim.record", "Record (keys from edits)", "Animation", CTX_GLOBAL},
       /* Lighting */
       {"lighting.update", "Update Lighting", "Lighting", CTX_GLOBAL},
       /* Tools and transforms */
@@ -240,6 +246,10 @@ static void common_bindings(Keymap &k) {
   b("play.toggle", {"Ctrl+P"});
   b("play.pause", {"Ctrl+Shift+P"});
   b("play.step", {"Ctrl+Alt+P"});
+  b("anim.key", {"Shift+K"});  // (task 0258: Unity's Animation window keys with K; K is the Knife here, so Shift+K)
+  b("anim.record", {"Ctrl+Shift+K"});
+  b("anim.prev_key", {","});
+  b("anim.next_key", {"."});
   b("lighting.update", {"Ctrl+Shift+L"});
   b("object.create_empty", {"Ctrl+Shift+N"});
   b("object.create_empty_child", {"Alt+Shift+N"});
@@ -281,6 +291,9 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
   const std::string p = to_lower(name);
   if (p == "blender") {
     b("transform.grab", {"G"});
+    b("anim.key", {"Shift+I"});  // (task 0258: Blender's I is Inset in Edit Mode here, so Shift+I; Up / Down jump between keys)
+    b("anim.next_key", {"Up"});
+    b("anim.prev_key", {"Down"});
     b("transform.rotate", {"R"});
     b("transform.scale", {"S"});
     b("tool.move", {"Shift+Space"});
@@ -325,6 +338,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
   }
   else if (p == "maya") {
     b("tool.view", {"Q"});
+    b("anim.key", {"S"});  // (task 0258: Maya's Set Key)
     b("tool.move", {"W"});
     b("tool.rotate", {"E"});
     b("tool.scale", {"R"});
@@ -518,6 +532,13 @@ bool Editor::action_pressed(const std::string &id) const {
   for (const KeyChord &c : it->second)
     if (c.key > 0 && c.key < platform::KEY_COUNT && in.key_pressed[c.key] && c.mods == mods) return true;
   return false;
+}
+
+/* The animation chords stand down where a window reads the arrow keys itself (the Hierarchy, the Project window, the
+ * UV editor), where typing goes (the Console), and while the view is flown (S flies in the Maya preset). */
+bool Editor::anim_shortcuts_stand_down() const {
+  if (drag_ == Drag::Fly || ui_.in.down[1]) return true;
+  return focused_ == WindowKind::Hierarchy || focused_ == WindowKind::Project || focused_ == WindowKind::Console || focused_ == WindowKind::UVEditor;
 }
 
 std::string Editor::shortcut_text(const std::string &id) const {
@@ -738,6 +759,12 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "window.render") dock_open(WindowKind::Render);
   else if (id == "window.learn") dock_open(WindowKind::Learn);
   else if (id == "window.history") dock_open(WindowKind::History);
+  else if (id.rfind("anim.", 0) == 0 && anim_shortcuts_stand_down()) return false;  // (task 0258: the Hierarchy's and the UV editor's own arrows, a flown view)
+  else if (id == "anim.key") anim_key_all();
+  else if (id == "anim.play") anim_toggle_play();
+  else if (id == "anim.prev_key") anim_step_key(-1);
+  else if (id == "anim.next_key") anim_step_key(1);
+  else if (id == "anim.record") anim_toggle_record();
   else return false;
   return true;
 }

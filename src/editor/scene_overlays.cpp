@@ -53,6 +53,16 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
                     "Console: filters on / off."))
     scene_filters_ = !scene_filters_;
   x += h + u.px(10);
+  if (anim_.record && bar.right() - x > u.px(420)) {  // (task 0258: Record said in the view's bar, not only the Animation window's dot - a word, not a colour alone; when the bar has room)
+    const int rw = u.font.text_width("RECORD") + u.px(14);
+    const Recti rr{x, bar.y + u.px(3), rw, h};
+    u.canvas.fill_round_rect(rr, u.px(3), Color::hex(0xB03030));
+    u.label(rr, "RECORD", Color::hex(0xFFFFFF), ui::Align::Center);
+    u.mark_widget(rr);
+    u.tooltip("Record is on: every edit of the animated objects becomes a key at the playhead (the Animation window's red button turns it off).");
+    if (u.record_buttons) u.button_rects["overlay:RECORD"] = rr;
+    x += rw + u.px(10);
+  }
   /* Blender-style Edit Mode toggle - Unity has no built-in mesh editing (ProBuilder adds it). */
   const std::string edit_label = with_key("Edit Mode", "mode.edit_toggle");  // (the key from the keymap: task 0254)
   int ew = u.font.text_width(edit_label) + h + u.px(12);

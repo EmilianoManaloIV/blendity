@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 278): animation - keymap actions, bigger key targets, a Record cue, Play-time refusals (task 0258)
+
+**Asked:** ADR 0085's animation round: the keymap had no animation action (no preset could offer Unity's K or Blender's
+I, the palette listed nothing of animation), the dopesheet's keys were 5 px hits with a right-click-only tangent menu,
+Record showed as a dot in one window, and Set Key in Play did nothing in silence. Nielsen's H1,
+H4, Fitts.
+
+**Added**
+- **Keymap actions** (category Animation): `anim.key` (a key at the playhead on every track, from the objects' values
+  now), `anim.play`, `anim.prev_key` / `anim.next_key`, `anim.record`; bound Shift+K / Ctrl+Shift+K / , / . under
+  Unity and Unreal (K and I are the Knife and Inset here), Shift+I / Up / Down under Blender, S under Maya; the
+  palette lists them.
+- **Bigger key targets**: a dopesheet key is hit within 9 px either side - an 18 px target, 4.8 mm at 96 DPI (10 px
+  before; still under 7 mm).
+- **The tangent menu by Alt+click** as well as right-click.
+- **A Record cue in the Scene view**: a red frame round the view and a RECORD badge in its bar while Record is on - a
+  word and a frame, not a colour alone.
+- **Play refused aloud**: Set Key and Record in Play raise a toast with Fix: stop Play (they did nothing in silence);
+  Record turns on only with an animated object selected, else it says so. The chords stand down where a window reads
+  the arrow keys itself (Hierarchy, Project, UV editor), in the Console and while the view is flown.
+- **Review (Opus) taken:** the "edit during Play with Record on" refusal could never fire (an edit in Play never
+  reaches the recorder, and entering Play turns Record off) - replaced by Set Key and Record refusing aloud in Play with
+  Fix: stop; Blender's Up / Down ran the key jumps inside the Hierarchy and the UV editor, which read the arrows
+  themselves - the animation chords stand down there, in the Console, in the Project window and while the view is flown
+  (Maya's S); the keymap's Record could show RECORD with nothing recording (Preview refused) - Record turns on only when
+  Preview could, else it says what to select; the "7 mm" claim was wrong (an 18 px target is 4.8 mm) - said honestly;
+  the badge checks its room and the comment it split; the Play button shares the toggle; the tests use two tracks, land
+  on frame 12, press the chord itself over the view and see the Play refusal. Open: the curves view's 5 px hits; the
+  Alt+click menu and Record's refusals are not driven by a test.
+
+**Checked**
+- `tests_round278`: the bindings per preset; no animation chord collides with another action's in any preset; Set Key
+  adds a key on every track at the playhead; Next Key moves the playhead; Record toggles with the RECORD badge drawn
+  only while it is on; Shift+K pressed over the view adds the keys; Set Key in Play refuses with Fix: stop.
+- Unit checks (round 278): Windows, in render-cache verify mode, 13182, 0 failed (1135 tests), 0 stale
+  pictures. Linux with libraries: 12722, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (The gpu group passed alone: the known parallel-load noise.)
+
 ## 2026-10-28 (round 277): compositing and materials - a pen's reach, a visible Assign, an Export Textures dialog (task 0257)
 
 **Asked:** ADR 0085's compositing and materials round: the Render window's image panned with the middle button only (a

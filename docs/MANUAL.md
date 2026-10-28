@@ -138,7 +138,10 @@ stroke freehand - the hint says which - and `]` / `[` set a modal's segments or 
 Lighting window (the Render window points there); the Render window's Render Devices section is where every device choice
 is read, Auto meaning the GPU when there is one. The Render window's image pans with a left drag (a pen has no middle
 button), a Tone Curve point goes by Alt+click, the Materials toolbar has Assign to Selection, and the Textures toolbar's
-Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. The Inspector shows
+Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. Animation has keys of its own in every preset -
+set a key, play the clip, step to the previous or next key, Record (Shift+K and Ctrl+Shift+K under Unity, Shift+I and Up / Down
+under Blender; the menus and the palette show your preset's) - and while Record is on the Scene view wears a red frame and a RECORD badge.
+The Inspector shows
 each component's first seven fields (Show more for the rest, All Fields for everything); each stage layout's first use
 shows a guide strip with its next three steps. While dragging a gizmo arrow, type a number to move exactly that far.
 

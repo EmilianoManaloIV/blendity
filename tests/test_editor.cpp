@@ -5248,6 +5248,94 @@ static void tests_round277() {
   });
 }
 
+static void tests_round278() {
+  test("animation within reach (ADR 0085, task 0258): the five animation actions exist and the presets bind them as stated, colliding with no other action's chord; Set Key adds a key on every track at the playhead, Record toggles, Next Key moves the playhead; the Scene view's bar carries the RECORD badge while Record is on", [] {
+    struct Bind {
+      const char *preset, *action, *chord;
+    };
+    const Bind binds[] = {{"Unity", "anim.key", "Shift+K"}, {"Unity", "anim.record", "Ctrl+Shift+K"}, {"Unity", "anim.prev_key", ","}, {"Unity", "anim.next_key", "."},
+                          {"Unreal", "anim.key", "Shift+K"}, {"Blender", "anim.key", "Shift+I"}, {"Blender", "anim.next_key", "Up"}, {"Blender", "anim.prev_key", "Down"}, {"Maya", "anim.key", "S"}};
+    for (const Bind &b : binds) {
+      const Keymap k = keymap_preset(b.preset);
+      const auto it = k.find(b.action);
+      const std::string got = it == k.end() || it->second.empty() ? std::string("(none)") : chord_text(it->second[0]);
+      std::printf("    %-8s %-14s %s\n", b.preset, b.action, got.c_str());
+      CHECK(got == b.chord);
+    }
+    /* No animation chord collides with another action's in its preset. */
+    int collisions = 0;
+    for (const char *preset : {"Unity", "Unreal", "Blender", "Maya", "SketchUp"}) {
+      const Keymap k = keymap_preset(preset);
+      for (const auto &kv : k) {
+        if (kv.first.rfind("anim.", 0) != 0) continue;
+        for (const KeyChord &c : kv.second)
+          for (const auto &other : k) {
+            if (other.first == kv.first || std::find(other.second.begin(), other.second.end(), c) == other.second.end()) continue;
+            collisions++;
+            std::printf("    collision in %s: %s and %s share %s\n", preset, kv.first.c_str(), other.first.c_str(), chord_text(c).c_str());
+          }
+      }
+    }
+    CHECK(collisions == 0);
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(700.0);
+    ed.command("select Cube");
+    ed.command("layout Default");
+    ed.command("window Animation");  // (Record sees the edits from the Animation window's frame)
+    ed.command("anim new Hop");
+    ed.command("anim key . Position 1 0 0");  // (two tracks - Y and X - with keys at 0 and 30)
+    ed.command("anim key . Position 1 30 1");
+    ed.command("anim key . Position 0 0 0");
+    ed.command("anim key . Position 0 30 2");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("anim frame 12");
+    ed.step_frame_headless();
+    const AnimationClipPtr clip = ed.scene().find_by_name("Cube") ? ed.anim_clip_for_test() : nullptr;
+    const size_t tracks = clip ? clip->tracks.size() : 0;
+    size_t keys0 = 0, keys1 = 0;
+    if (clip) for (const AnimTrack &t : clip->tracks) keys0 += t.keys.size();
+    CHECK(ed.run_action("anim.key"));
+    ed.step_frame_headless();
+    if (clip) for (const AnimTrack &t : clip->tracks) keys1 += t.keys.size();
+    std::printf("    the clip: %zu track(s), %zu key(s) -> %zu after Set Key at frame 12\n", tracks, keys0, keys1);
+    CHECK(tracks == 2 && keys1 == keys0 + tracks);
+    ed.command("anim frame 0");
+    CHECK(ed.run_action("anim.next_key"));
+    std::printf("    Next Key from frame 0: the playhead at %.0f (the Set Key at 12)\n", ed.anim_for_test().frame);
+    CHECK(ed.anim_for_test().frame == 12.0f);
+    /* The chord itself, over the Scene view: Shift+K under Unity adds a key at the playhead. */
+    ed.command("anim frame 20");
+    const Recti view = ed.scene_view_rect();
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, view.x + view.w / 2, view.y + view.h / 2)});
+    ed.step_frame_headless({key_ev(platform::KEY_K, platform::MOD_SHIFT)});
+    size_t keys2 = 0;
+    if (clip) for (const AnimTrack &t : clip->tracks) keys2 += t.keys.size();
+    std::printf("    Shift+K over the view at frame 20: %zu -> %zu keys\n", keys1, keys2);
+    CHECK(keys2 == keys1 + tracks);
+    /* In Play, Set Key refuses aloud with the fix. */
+    ed.command("play");
+    ed.step_frame_headless();
+    CHECK(ed.run_action("anim.key"));
+    ed.step_frame_headless();
+    const auto &toasts = ed.toasts_for_test();
+    const bool refused = std::any_of(toasts.begin(), toasts.end(), [](const Editor::Toast &t) { return t.text.find("not while Play") != std::string::npos && t.fix_cmd == "stop"; });
+    std::printf("    Set Key in Play: refused with Fix: stop %d\n", (int)refused);
+    CHECK(refused);
+    ed.command("stop");
+    ed.step_frame_headless();
+    CHECK(ed.run_action("anim.record"));
+    ed.step_frame_headless();
+    const bool badge_on = ed.ui_for_test().button_rects.count("overlay:RECORD") > 0, rec_on = ed.anim_for_test().record;
+    CHECK(ed.run_action("anim.record"));
+    ed.step_frame_headless();
+    const bool badge_off = ed.ui_for_test().button_rects.count("overlay:RECORD") > 0;
+    std::printf("    Record toggled on: record %d, the RECORD badge %d; toggled off: badge %d\n", (int)rec_on, (int)badge_on, (int)badge_off);
+    CHECK(rec_on && badge_on && !badge_off && !ed.anim_for_test().record);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -5297,5 +5385,6 @@ void run_editor_tests() {
   tests_round275();
   tests_round276();
   tests_round277();
+  tests_round278();
   coverage_tests();
 }

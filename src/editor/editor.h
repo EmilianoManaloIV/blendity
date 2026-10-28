@@ -1984,6 +1984,10 @@ class Editor {
   void anim_add_property(GameObject *g, const std::string &property, int axes);
   std::vector<float> anim_key_frames();
   void anim_step_key(int dir);
+  void anim_key_all();  // (task 0258: a key at the playhead on every track)
+  void anim_toggle_play();
+  void anim_toggle_record();
+  bool anim_shortcuts_stand_down() const;  // (a window with arrow keys of its own has the keyboard, or the view is flown)
   const std::vector<std::string> &anim_clip_paths();
   void draw_anim_toolbar(const Recti &bar, GameObject *root);
   void anim_pick_clip(GameObject *root, const std::string &path);
