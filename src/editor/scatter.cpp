@@ -269,7 +269,7 @@ void Editor::scatter_draw(const Recti &view) {
   auto &u = ui_;
   const Vec2 c((float)u.in.mx, (float)u.in.my);
   if (c.x < view.x || c.y < view.y || c.x > view.right() || c.y > view.bottom()) return;
-  u.canvas.circle(c.x, c.y, std::max(4.0f, scatter_brush_.radius * 40.0f * u.scale), u.in.eraser ? u.theme.warning : u.theme.accent);
+  draw_brush_ring(c.x, c.y, std::max(4.0f, scatter_brush_.radius * 40.0f * u.scale), u.in.eraser || u.in.alt(), u.theme.accent);  // (task 0269)
 }
 
 /* scatter <object> | density n | radius r | scale a b | rotate deg | align normal|up | tint [r g b]|off | seed n | mask <layer>|off |

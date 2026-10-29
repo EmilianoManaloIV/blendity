@@ -27,6 +27,10 @@ and book chapters behind each idea. Each chapter here names its lesson.
 
 ## 1. Getting around
 
+The **?** beside the status bar's hint opens the Learn lesson for what you are doing. In Tablet Mode the status bar and
+the toasts grow so their buttons (Cancel, Fix) are pen-sized. A **CPU** badge in the Scene view's bar says the views
+draw on the CPU although Auto wanted the graphics card; its tooltip says why.
+
 **The windows.** Scene (the 3D view you edit in), Game (what the active camera sees), Hierarchy (the objects as a
 tree), Inspector (the selected object's components), Project (the files in `Assets`), Console (messages and a
 command line), plus the UV Editor, Render, Materials, Textures, Modeling Tools, Lighting, Rigging, Animation,
@@ -205,6 +209,12 @@ click.
 
 ## 3. Blocking out
 
+GameObject > 3D Object is in every layout. Right after adding a primitive, the **Adjust Last** panel at the bottom
+left of the Scene view (F9) changes its size, segments or rings; the change stays one undo step. A click-made Draw
+shape gets the panel too: a circle's or an arc's segments, a polygon's sides, a rectangle's fillet. While Bevel, Array,
+Grid, Pipe, Taper or Recess runs, the bar at the bottom of the view steps its count with - and + (a pen's way to the
+wheel).
+
 **Primitives and parametric shapes.** GameObject > 3D Object: cube, sphere, icosphere, cylinder, cone, torus, plane,
 quad and the Utah teapot. GameObject > Shapes (Parametric): box, plane, cylinder, cone, sphere, icosphere, torus,
 capsule, pipe, arch, stairs, wedge and prism, which keep their settings in the Inspector and rebuild as you change
@@ -340,6 +350,9 @@ sculpts for characters and creatures, retopologized for games.
 ---
 
 ## 5. UV unwrapping
+
+After Unwrap, Smart UV or Pack, the Adjust Last panel changes the margin (and Smart UV's angle). The UV editor's **Pan**
+toggle makes a left drag pan, for a pen; two fingers pan too.
 
 Layout > UV Unwrapping puts the **UV Editor** (Ctrl+9) beside the Scene view.
 
@@ -604,6 +617,9 @@ turbulence, gusts) blows every chain by its own Wind. Bake writes the swing into
 
 ## 9. Animation
 
+Ctrl+wheel (or the wheel over the ruler) and a pinch zoom the time about the pointer; Shift+wheel, two fingers or the
+middle button pan it; Home or **Fit** shows the whole clip.
+
 Window > **Animation** is Unity's Animation window, a dopesheet (the Animation layout puts it along the bottom).
 
 1. Select the object (a character's root, a door) and press **Create**: it gets an **Animation** component and a clip,
@@ -669,6 +685,10 @@ clip, blend seconds) jump to a clip in Play, blending from the pose of the momen
 ---
 
 ## 10. Files: import and export
+
+**glTF (.glb / .gltf) carries a rig**: a mesh with a Skin modifier exports at rest with its armature as joints, four
+weights a vertex and its rig's clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and
+Blender import a character that still moves. The other formats write the mesh as posed.
 
 **Import** (File > Import Model, or drop files on the window): OBJ + MTL, FBX, glTF, STL, PLY and USD text; their
 materials and textures come along, and rigged files come with their skeletons and skins. The model is shown first in

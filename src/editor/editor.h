@@ -152,6 +152,8 @@ enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Lea
 const char *window_title(WindowKind k);
 /* The Hierarchy's drop zones (task 0255): 1 before, 2 after, 0 into - the outer thirds and the middle of a row. */
 int hier_drop_mode(int ry, int rh);
+/* A sculpt polygroup's colour (task 0269, editor/sculpt.cpp): Okabe-Ito's eight, then lighter and darker tiers. */
+Vec3 sculpt_group_color(int g);
 /* The module registry (task 0235, editor/modules.cpp): a window kind's row. */
 struct Module {
   WindowKind kind;
@@ -417,6 +419,10 @@ struct AnimEditorState {
   int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
+  float view_start = 0.0f, view_span = 0.0f;  // (task 0267: the frames the sheet shows; span 0: the whole clip)
+  int view_pan_x = 0;  // (a middle-button pan's last x)
+  const void *view_for = nullptr;  // (the clip the view was set for)
+  bool view_panning = false;
   /* The Curves view (task 0061). */
   bool curves = false;
   float v_min = -1.0f, v_max = 1.0f;  // the value axis
@@ -742,6 +748,19 @@ class Editor {
   GameObject *scatter_parent_for_test() { return scatter_parent(false); }
   ScatterBrush &scatter_brush_for_test() { return scatter_brush_; }
   bool scatter_for_test() const { return scatter_; }                          // (task 0261)
+  bool brush_ring_erasing_for_test() const { return brush_ring_erasing_; }    // (task 0269)
+  void force_cpu_views_for_test(const std::string &why) { gpu_view_.reset(), gpu_view_tried_ = true, gpu_view_error_ = why, scene_cache_.key = game_cache_.key = 0; }  // (as a device change: the cached pictures were the card's)
+  std::string cpu_badge_state_for_test() const { return strprintf("wanted %d, view %d, tried %d, opening %d, device %d", (int)gpu_view_wanted(), (int)(gpu_view_ != nullptr), (int)gpu_view_tried_, (int)gpu_view_opening_.valid(), viewport_device_); }
+  Vec2 uv_pan_for_test() const { return uv_pan_; }                            // (task 0265)
+  GameObject *edit_object_for_test() { return edit_object(); }                // (task 0266)
+  float anim_frame_at_for_test(int x) const { return anim_frame_at(anim_.sheet, x, anim_.sheet_end); }  // (task 0267)
+  bool uv_hand_for_test() const { return uv_hand_; }
+  Recti uv_rect_for_test() const { return uv_rect_; }
+  std::vector<std::string> scatter_source_choices_for_test() const { return scatter_source_choices(); }  // (task 0264)
+  std::vector<std::string> scatter_mask_choices_for_test() { return scatter_mask_choices(); }
+  const std::string &strokeobj_alpha_for_test() const { return strokeobj_alpha_; }
+  const std::string &assets_dir_for_test() const { return assets_dir_; }
+  size_t strokeobj_cards_for_test();  // (task 0264; in strokes_tool.cpp, where Strokes is complete)
   SculptBrush &sculpt_brush_mut_for_test() { return sculpt_brush_; }          // (task 0261)
   bool scatter_masked_for_test(GameObject &g, Vec3 p, std::string &why) {
     const bool m = scatter_masked(g, p);
@@ -2014,6 +2033,9 @@ class Editor {
   void draw_anim_add_property(GameObject *root);
   float anim_frame_at(const Recti &sheet, int x, float end) const;
   int anim_x_of(const Recti &sheet, float frame, float end) const;
+  void anim_view_input(const Recti &ruler, const Recti &sheet, float end);  // (task 0267: Ctrl+wheel, a pinch, Shift+wheel, the middle button)
+  void anim_view_zoom(const Recti &sheet, float end, float factor, int about_x);
+  void anim_view_fit() { anim_.view_start = 0.0f, anim_.view_span = 0.0f; }
   bool anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, std::vector<std::pair<int, float>> &keys);
   bool anim_selected(int track, float frame) const;
   void anim_sheet_input(const AnimationClip &clip, const Recti &ruler, const Recti &sheet, int row_h, float end);
@@ -2500,6 +2522,7 @@ class Editor {
   void import_obj_file(const std::string &path);
   /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
   std::string export_model(const ExportOptions &o, const std::string &path = "");
+  std::shared_ptr<ExportSkin> export_skin_of(GameObject &armature, const Mesh &m, const GameObject &owner, const SkinModifier &skin);  // (task 0268)
   std::string export_model(const std::string &format, bool selection_only);  // "obj" "fbx" "glb" "gltf" "stl" "ply" "usda"
   void open_export_dialog(int format);  // the options, then the Save As dialog
   void import_dialog();      // File > Import Model: the OS Open dialog (or the Assets list)
@@ -2994,6 +3017,8 @@ class Editor {
   std::string op_keys(const EditOpInfo &o) const;
   Recti uv_rect_;  // (the UV editor as last drawn: its hint row)
   void draw_statusbar_hint(const Recti &r);
+  int hint_lesson() const;   // (task 0270: the Learn lesson for the hint row under way)
+  void open_hint_lesson();
   void draw_statusbar_log(const Recti &r);
   std::string favorites_prefs_text() const;
   void load_favorites_pref(const std::string &v);
@@ -3422,6 +3447,13 @@ class Editor {
   Vec3 strokeobj_facing_, strokeobj_surface_n_;
   Vec2 strokeobj_last_px_;
   std::string strokeobj_alpha_;
+  float strokeobj_fill_radius_ = 1.0f;  // (task 0264: Fill Canopy's shell)
+  int strokeobj_fill_count_ = 200;
+  bool tool_combo_row(ui::Layout &lay, const char *label, const char *key, int &cur, const std::vector<std::string> &items);  // (task 0264)
+  void draw_brush_ring(float x, float y, float r, bool erasing, uint32_t color);  // (task 0269: erasing dashed, with an E)
+  bool brush_ring_erasing_ = false;
+  std::vector<std::string> scatter_source_choices() const;  // (task 0264: the scene's meshes but the one painted on)
+  std::vector<std::string> scatter_mask_choices();          // (task 0264: None, then the surface's layers by name)
   void set_strokeobj(bool on);
   GameObject *strokeobj_object(bool make);
   bool strokeobj_hit(const Recti &view, float x, float y, Vec3 &point, Vec3 &normal, Vec3 &facing);
@@ -3794,6 +3826,42 @@ class Editor {
     bool guide = false;
     bool bent = false;     // the plane turned mid-polyline (X / Y / Z): a 3D path, kept as wire edges
   } draw_;
+ public:
+  /* Task 0266: Adjust Last outside Edit Mode's operators (editor/adjust_last.cpp) - an added primitive, a UV operator, a
+   * Draw shape - run again from before with the panel's numbers, amending the same undo step. */
+  struct ObjLastOp {
+    std::string kind, what;  // "primitive" Cube | "uv" unwrap / smart / pack | "draw" Circle ...
+    uint64_t obj = 0, serial = 0;
+    float a = 0.0f, b = 0.0f;  // size or radius / margin / fillet; height or minor radius / angle limit
+    int n = 0, m = 0;          // segments, subdivisions or sides; rings or ring segments
+    bool flag = true;          // Pack's rotation
+    MeshPtr before;            // the mesh before (UV, Draw)
+    Mat4 before_xf;
+    std::vector<uint8_t> mask;
+    bool has_mask = false;
+    std::vector<Vec3> draw_pts;
+    std::vector<KnifePoint> draw_snaps;
+    Vec3 draw_plane_p, draw_plane_n, draw_axis_u;
+    bool draw_has_plane = false;
+    int draw_face = -1, draw_shape = 0;
+    const Mesh *result = nullptr;  // the mesh the operation left on the object, and its version: anything else there ends the panel
+    uint64_t result_version = 0;
+  };
+  bool obj_last_valid() const;
+  const ObjLastOp &obj_last_for_test() const { return obj_last_; }
+ private:
+  ObjLastOp obj_last_;
+  bool obj_last_open_ = true;
+  Recti obj_last_rect_{};
+  uint64_t obj_last_serial_now() const;
+  void record_primitive_last(GameObject *g, const std::string &kind);
+  void record_uv_last(uint64_t obj, const std::string &op, MeshPtr before, const std::vector<uint8_t> *mask);
+  void record_draw_last(uint64_t obj, MeshPtr before, const Mat4 &before_xf);
+  void amend_last_step();
+  void obj_last_note_result();
+  void obj_last_end() { obj_last_ = ObjLastOp{}; }
+  void obj_last_rerun();
+  void draw_obj_last_panel(const Recti &view);
   /* Plasticity's construction lines while drawing: X / Y / Z lay a guide along that axis (local
    * or global, as Snap Axes says) through the last point or the point under the mouse; Ctrl+click
    * on an edge lays one along the edge. A polyline point on a guide may leave the drawing plane. */
@@ -4228,6 +4296,12 @@ class Editor {
   std::vector<uint8_t> uv_sel_;  // per corner
   float uv_zoom_ = 1.0f;
   Vec2 uv_pan_;
+  bool uv_hand_ = false;  // (task 0265: the UV editor's Pan toggle - a left drag pans, for a pen with no middle button)
+  int uv_pan_button_ = 2;  // (the button whose release ends the pan)
+  /* Task 0265: the modal operator's step bar - the value the wheel and ] [ step, with - and + a pen can tap. */
+  struct ModalStepBar { Recti bar, minus, plus; const char *name = nullptr; std::string value; };
+  ModalStepBar modal_step_bar(const Recti &view) const;
+  bool modal_over_bar_ = false;
   int uv_bg_ = 0;  // 0 material texture, 1 UV grid, 2 color grid, 3 none
   bool uv_stretch_ = false;
   /* Task 0186: the material slots the UV Editor edits (empty: all); the other faces dimmed or (hide) not drawn. */

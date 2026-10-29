@@ -2,6 +2,150 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 290): the pen's targets at 7 mm in Tablet Mode, asserted; the hint's help (task 0270)
+
+**Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits
+left open.
+
+**Added**
+- **The pen's targets** - navigation buttons, a modal's step buttons, the job tray's Cancel, a toast's Fix - are 7 mm
+  or more in Tablet Mode (the status bar and the toasts 34 px tall there), asserted by a test.
+- **The hint's ?** opens the Learn lesson for what is under way.
+- **Review (Opus) taken:** the Adjust Last panel outlived Undo, Redo, New and Open (a re-run after Undo would have
+  folded into the previous step; after Open it could replace an unrelated object's mesh) - it ends with them and with
+  Play, and lasts only while the object still has the mesh the operation left, unedited; a Draw panel only in its Edit
+  Mode; the Edit menu's Adjust Last works as F9. A glTF export left the scene changed (a clip's non-transform numbers
+  at its last frame, the bones' Inspector angles re-derived) - every transform is put back whole and every number the
+  clip names; a vertex no bone moves was written with zero weights (collapsed to the origin in most engines) - it
+  follows the mesh's own object with weight 1; the skin's Max Influences and vertex group are honoured, bones with a
+  singular rest left out, each group's joint looked up once, the clip sampled to its last key. The dopesheet drew keys,
+  the playhead and the body strip outside the sheet when zoomed - clipped; a double-click left of frame 0 keyed a
+  negative frame - frame 0; the view is fitted to a new clip and kept within reach. A Scatter mask the surface lacks is
+  shown as such, not as None; the sequencer Play test runs on the editor's clock. A long dropdown (the Alpha list in a
+  big project) flipped over its own field, where the opening click's release picked a row - it fits the larger side and
+  scrolls. Open: the re-run happens on every change of a dragged field (as Edit Mode's panel does); each skinned mesh
+  carries its own copy of the skeleton and clip; FBX still writes the mesh as posed.
+
+**Checked**
+- `tests_round290`: the six targets printed and asserted at 39.7 px or more at 1.5x; the ? while sculpting opens
+  Sculpting.
+- Unit checks (round 290): Windows, in render-cache verify mode, 13278, 0 failed (1145 tests), 0 stale
+  pictures. Linux with libraries: 12818, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone: timing noise; the views-on-the-card leg found one stale picture from round 289's test hook, fixed (it clears the view caches as a device change does) and that leg's editor group run again: 1229 checks, 0 stale.)
+
+## 2026-10-28 (round 289): accessibility - Okabe-Ito polygroups, the eraser by shape, the CPU badge, selected keys by shape (task 0269)
+
+**Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits
+left open.
+
+**Added**
+- **Polygroups** in Okabe and Ito's eight colours, then lighter and darker; **the brush ring** dashed with an E while
+  erasing or subtracting (Paint's ring now follows its Erase setting); **a CPU badge** in the Scene view's bar while
+  the views wanted the card and draw on the CPU; **selected keys** outlined; High Contrast's selected key cyan.
+
+**Checked**
+- `tests_round289`: the palette's first colour and tiers; the ring erasing only with Erase on; the badge absent when
+  the CPU is chosen, present with Auto and no card.
+- Round 290's unit-check line covers this round (rounds 284 to 290 landed together).
+
+## 2026-10-28 (round 288): glTF export of skeletons, skin weights and the rig's clip (task 0268)
+
+**Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits
+left open.
+
+**Added**
+- **A rigged character exports to glTF** at rest with its skeleton, four weights a vertex, inverse bind matrices and
+  its rig's clip sampled per frame (export option Armatures and Animation, on by default).
+
+**Checked**
+- `tests_round288`: a cube with an Armature and a clip turning its bone 45 degrees, exported and read back by
+  Blendity's own importer: one skin, the bone, its vertex group, a clip turning it 45.00 degrees.
+- Round 290's unit-check line covers this round (rounds 284 to 290 landed together).
+
+## 2026-10-28 (round 287): the 3D Object menu in every layout; time zoom and pan in the Animation window (task 0267)
+
+**Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits
+left open.
+
+**Added**
+- **GameObject > 3D Object** in every layout.
+- **The Animation window's time**: Ctrl+wheel or a pinch zooms about the pointer, Shift+wheel, two fingers or the
+  middle button pans, Home or Fit shows the whole clip.
+
+**Checked**
+- `tests_round287`: the submenu in four other layouts; the zoom keeps the frame under the pointer; the pan and the
+  pinch move and widen the view; Fit restores it.
+- Round 290's unit-check line covers this round (rounds 284 to 290 landed together).
+
+## 2026-10-28 (round 286): Adjust Last outside Edit Mode - primitives, UV operators, Draw shapes (task 0266)
+
+**Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits
+left open.
+
+**Added**
+- **The Adjust Last panel** after an added primitive (size, radius, height, segments, rings, subdivisions), a UV
+  operator (Unwrap's and Pack's margin, Smart UV's angle) and a click-made Draw shape (segments, sides, fillet): a
+  change runs it again from before and amends the same undo step; F9 shows it in the Scene view.
+
+**Checked**
+- `tests_round286`: a Cylinder's segments, an Unwrap's margin and a circle's segments typed into the panel, the undo
+  steps unchanged, one undo removing the Cylinder.
+- Round 290's unit-check line covers this round (rounds 284 to 290 landed together).
+
+## 2026-10-28 (round 285): pen reach - the modal step bar, the UV editor's Pan (task 0265)
+
+**Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits
+left open.
+
+**Added**
+- **The modal step bar**: Bevel's segments, Array's count, Grid's rows, Pipe's sides, Taper's and Recess's second
+  amount by - and + buttons a pen can tap; the amount holds while the pointer is on the bar.
+- **The UV editor's Pan toggle**: a left drag pans with it on; two fingers pan.
+
+**Checked**
+- `tests_round285`: + + - by taps steps Bevel's segments, the modal still running and its width unchanged; a left drag
+  of (50, 30) with Pan on moves the UV view by (50, 30).
+- Round 290's unit-check line covers this round (rounds 284 to 290 landed together).
+
+## 2026-10-28 (round 284): the stylized tools in the panels - Scatter's source and mask by name, Strokes' alpha and Fill Canopy (task 0264)
+
+**Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits
+left open.
+
+**Added**
+- **Scatter's Source and Mask Layer** are dropdowns: the scene's meshes, the surface's layers by place and name.
+- **Strokes' Alpha** is a dropdown of the project's images; **Fill Canopy** is a button with its radius and count.
+
+**Checked**
+- `tests_round284`: each picked through real clicks in the Stylized layout; Fill Canopy adds 200 cards.
+- Round 290's unit-check line covers this round (rounds 284 to 290 landed together).
+
+## 2026-10-28 (round 283): the CI-only and non-LTCG test failures (task 0263)
+
+**Asked:** review the test issues and check the non-passing cases on GitHub. Every PR from #218 failed CI on all four
+jobs while the local chain (Blender's libraries, LTCG, 32 threads) passed; #189's sanitizer job failed; a modeling test
+failed in any build without LTCG.
+
+**Fixed** (reproduced with the build CI makes, `BLENDITY_NO_LIBS=1`, and without LTCG)
+- **The job tray's progress jumped from 0 to done** on a two-core runner: the Mesh Maps baker reported per block of
+  rows; it reports per row.
+- **A modeling test wrote a missing normal map into the shared Default-Material**, so every later test in the project
+  warned "cannot read none.png" (the toast test's leftover warning): the test gives the cube its own copy.
+- **The full and the in-place corner normals differed in the last bit** without LTCG (`/fp:fast` inlined `normalize`
+  two ways): one out-of-line `corner_normalize` in every path.
+- **Auto Generate's settle second ran on the wall clock**, which a sanitizer build's frames overran: it runs on the
+  editor's clock and the tests set it.
+- **Tests:** the Boolean-by-name test accepts the dependency-free build's refusal (no Manifold); the toast test
+  tolerates an Info toast after the Fix; the autopose time is printed, not asserted (ADR 0056); a sequencer Play test
+  waits 0.55 s of wall clock, not 31 frames.
+- **Review (Opus) taken:** the sequencer Play test still leaned on the wall clock (Play's step is capped at 50 ms, so
+  a slow frame gave less Play than wall time) - it runs on the editor's clock at a 60th a frame. Open: `corner_normalize`
+  is a call per corner in the normal loops (no stress row measured it this round).
+
+**Checked**
+- The whole suite in a `BLENDITY_NO_LIBS=1` build without LTCG (what CI builds, and the build the drag test failed in).
+- Round 290's unit-check line covers this round (rounds 283 to 290 landed together).
+
 ## 2026-10-28 (round 282): the HCI pass measured - KLM, Fitts, hints, labels and walkthroughs after; the study not run (task 0262)
 
 **Asked:** ADR 0085's last round: the measuring sticks of round 271 again on the finished pass, the study, the write-up.

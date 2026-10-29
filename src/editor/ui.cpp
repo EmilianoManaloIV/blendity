@@ -97,7 +97,7 @@ Theme theme_named(const std::string &name) {
     t.accent = h(0xFFB000), t.text_on_accent = h(0x000000), t.progress = h(0x0046B0), t.warning = h(0xFFD600), t.error = h(0xFF6B5E), t.ok = h(0x4CE07A);
     t.axis_x = h(0xFF6B5E), t.axis_y = h(0x4CE07A), t.axis_z = h(0x6FA8FF), t.axis_hot = h(0xFFD600);
     t.row_alt = h(0x161616), t.strip = h(0x101010), t.row_hover = h(0x303030), t.key = h(0xFFFFFF), t.key_group = h(0xFFFFFF);
-    t.key_selected = h(0xFFD600), t.canvas_bg = h(0x000000);
+    t.key_selected = h(0x00E5FF), t.canvas_bg = h(0x000000);  // (task 0269: cyan, apart from the warning's yellow; selected keys are outlined as well)
     t.tooltip = h(0x000000), t.tooltip_border = h(0xFFFFFF), t.scroll_track = h(0x161616), t.scroll_thumb = h(0xC8C8C8);
     t.bar = h(0x080808), t.pane = h(0x141414), t.stripe = h(0x1A1A1A), t.well = h(0x000000), t.playhead = h(0xFFFFFF);
     t.note_text = h(0xFFE9A8), t.link = h(0x8FD3FF), t.link_icon = h(0x8FD3FF);
@@ -885,6 +885,7 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
       /* Inside a popup (a dialog such as Preferences): stack the list on it instead of closing it. */
       const bool nested = current_layer_ > 0;
       open_popup(i, r, nested);
+      popups_.back().list = true;  // (task 0264)
       if (nested) {
         popups_.back().submenu = false;  // still drops down below the field
         popups_.back().dropdown = true;
@@ -1332,22 +1333,37 @@ void Context::draw_popups() {
     int h = std::max(p.content_h, row_h());
     Recti r = p.submenu ? Recti{p.anchor.right(), p.anchor.y - px(4), p.width, h} : Recti{p.anchor.x, p.anchor.bottom(), p.width, h};
     if (r.right() > canvas.width()) r.x = p.submenu ? p.anchor.x - p.width : canvas.width() - r.w;
-    if (r.bottom() > canvas.height()) r.y = p.submenu ? canvas.height() - r.h : std::max(0, p.anchor.y - r.h);
+    if (p.list && r.bottom() > canvas.height()) {
+      /* Task 0264: a list longer than the room below goes to the larger side and fits it - never over its own field,
+       * where the release of the click that opened it would pick a row - and the wheel scrolls the rest. */
+      const int below = canvas.height() - p.anchor.bottom(), above = std::max(0, p.anchor.y);
+      r.h = std::min(h, std::max(row_h(), std::max(below, above)));
+      r.y = below >= above || h <= below ? p.anchor.bottom() : p.anchor.y - r.h;
+    }
+    else if (r.bottom() > canvas.height()) r.y = p.submenu ? canvas.height() - r.h : std::max(0, p.anchor.y - r.h);
     r.x = std::max(0, r.x);
     r.y = std::max(0, r.y);
+    const int scroll_max = std::max(0, h - r.h);
+    if (scroll_max > 0 && r.contains(in.mx, in.my) && in.wheel_y != 0.0f) {
+      popups_[k].scroll -= (int)(in.wheel_y * (float)(row_h() * 3));
+      in.wheel_y = 0.0f;
+      redraw = true;
+    }
+    popups_[k].scroll = std::max(0, std::min(scroll_max, popups_[k].scroll));
+    p.scroll = popups_[k].scroll;
     canvas.push_clip({0, 0, canvas.width(), canvas.height()});
     canvas.fill_rect({r.x + px(3), r.y + px(3), r.w, r.h}, Color::hex(0x000000, 80));
     canvas.fill_rect(r, theme.popup);
     canvas.rect_outline(r, theme.border);
     current_layer_ = (int)k + 1;
     popup_area_ = {r.x + 1, r.y + px(4), r.w - 2, r.h - px(8)};
-    popup_cursor_y_ = r.y + px(4);
+    popup_cursor_y_ = r.y + px(4) - p.scroll;
     canvas.push_clip(r.shrink(1));
     if (p.body) p.body();
     canvas.pop_clip();
     canvas.pop_clip();
     if (k >= popups_.size() || popups_[k].id != p.id) break;  // closed by a click inside
-    int content = popup_cursor_y_ - r.y + px(4);
+    int content = popup_cursor_y_ - r.y + px(4) + p.scroll;  // (the whole list's height, scrolled or not)
     if (content != popups_[k].content_h) {
       popups_[k].content_h = content;
       redraw = true;
@@ -1396,6 +1412,7 @@ bool Context::menu_item(const std::string &text, const char *shortcut, bool chec
 
 bool Context::submenu(const std::string &text, int width, std::function<void()> body) {
   Recti r = popup_row();
+  if (record_buttons) button_rects["submenu:" + text] = r;  // (tests find a submenu by its text: task 0267)
   Id sid = id(text) ^ (current_layer_ * 0x1000193ull);
   bool open = popup_open(sid);
   bool hot = hovered(r);

@@ -4,6 +4,7 @@
 // there, per layout - Blender's Q menu) and the status bar's hints for what the mouse and keys do where it is
 // (Blender 2.8's status bar). The commands are the keymap's actions and the console's lines: nothing new to wire.
 #include "editor.h"
+#include "learn.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -330,8 +331,43 @@ void Editor::draw_statusbar_hint(const Recti &r) {
     if (u.hovered(last_r) && u.in.pressed[0]) dock_open(WindowKind::History);  // (task 0254)
     x = undo_r.right() + u.px(18) + lw;
   }
+  /* Task 0270: ? beside the hint opens the Learn lesson for what is under way (the hint row's topic). */
+  if (r.right() - x > u.px(80)) {
+    const int qs = r.h - u.px(2);
+    const Recti qr{x, r.y + u.px(1), qs, qs};
+    if (u.record_buttons) u.button_rects["status:?"] = qr;
+    if (u.button(qr, "?")) open_hint_lesson();
+    u.tooltip("The Learn lesson for this: " + std::string(lesson(hint_lesson()).title) + " (" + key("window.learn") + " opens Learn).");
+    x = qr.right() + u.px(6);
+  }
   const int w = r.right() - x;
   if (w > u.px(40)) u.canvas.text_ellipsis(u.font, x, r.y + (r.h - u.font.line_height()) / 2, w, statusbar_hint(), u.theme.text_dim);
+}
+
+/* Task 0270: the lesson a hint row belongs to, by a word of its title; the shortcut sheet when nothing fits. */
+int Editor::hint_lesson() const {
+  static const std::pair<const char *, const char *> kTopics[] = {
+      {"sculpt", "Sculpting"}, {"remesh job", "Sculpting"}, {"hidden faces", "Sculpting"}, {"paint", "Painting the Surface"},
+      {"mesh maps job", "Painting the Surface"}, {"surface job", "Painting the Surface"}, {"strokes", "Stylized Environments"},
+      {"scatter", "Stylized Environments"}, {"weight paint", "Modifiers vs Components"}, {"edit mode", "Edit Mode"},
+      {"knife", "Advanced Modeling Tools"}, {"push/pull", "Points, Lines, N-gons"}, {"operator modal", "Bevel, Bridge"},
+      {"transform modal", "Move, Rotate, Scale"}, {"gizmo drag", "Move, Rotate, Scale"}, {"uv editor", "UV Mapping"},
+      {"draw", "Points, Lines, N-gons"}, {"sketch", "Drawing in Perspective"}, {"wheel", "Customizing the Editor"},
+      {"record", "Modifiers vs Components"}, {"baking", "Baked and Realtime Lighting"}, {"rendering", "Render Engines"},
+      {"pilot", "Cameras and Projection"}, {"edit origin", "Move, Rotate, Scale"}, {"object tools", "Navigating the Scene View"}};
+  const std::string row = hint_row_now().name;
+  const char *want = "Navigating the Scene View";
+  for (const auto &t : kTopics)
+    if (row == t.first) want = t.second;
+  for (int i = 0; i < lesson_count(); i++)
+    if (std::string(lesson(i).title).find(want) != std::string::npos) return i;
+  return 2;  // (the shortcut sheet)
+}
+
+void Editor::open_hint_lesson() {
+  lesson_ = hint_lesson();
+  dock_open(WindowKind::Learn);
+  hci_log("hint help: " + std::string(lesson(lesson_).title));
 }
 
 std::string Editor::favorites_prefs_text() const {

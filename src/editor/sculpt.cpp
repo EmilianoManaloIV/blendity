@@ -1450,18 +1450,17 @@ bool Editor::sculpt_colors_wanted(const Mesh &m) const {
   return sculpt_ && ((sculpt_show_mask_ && mask_any(m)) || (sculpt_show_groups_ && !m.face_group.empty()));
 }
 
-static Vec3 group_hue(int g) {
-  const float h = std::fmod((float)g * 0.618034f + 0.11f, 1.0f) * 6.0f, s = 0.55f, v = 0.85f;
-  const int i = (int)h;
-  const float f = h - (float)i, p = v * (1.0f - s), q = v * (1.0f - s * f), t = v * (1.0f - s * (1.0f - f));
-  switch (i % 6) {
-    case 0: return {v, t, p};
-    case 1: return {q, v, p};
-    case 2: return {p, v, t};
-    case 3: return {p, q, v};
-    case 4: return {t, p, v};
-    default: return {v, p, q};
-  }
+/* A polygroup's colour (task 0269): Okabe and Ito's palette, told apart under the common colour-vision deficiencies,
+ * then the same eight lighter and darker - past eight groups the lightness changes too, which every viewer sees. */
+Vec3 sculpt_group_color(int g) {
+  static const Vec3 kOkabeIto[8] = {{0.902f, 0.624f, 0.000f}, {0.337f, 0.706f, 0.914f}, {0.000f, 0.620f, 0.451f}, {0.941f, 0.894f, 0.259f},
+                                    {0.000f, 0.447f, 0.698f}, {0.835f, 0.369f, 0.000f}, {0.800f, 0.475f, 0.655f}, {0.600f, 0.600f, 0.600f}};
+  const unsigned k = (unsigned)std::max(0, g);
+  const Vec3 c = kOkabeIto[k % 8];
+  const unsigned tier = (k / 8) % 3;
+  if (tier == 1) return c * 0.55f + Vec3(0.45f);  // lighter
+  if (tier == 2) return c * 0.55f;                 // darker
+  return c;
 }
 
 const std::vector<Vec3> *Editor::sculpt_colors(const Mesh &m, const RenderMesh &rm, Vec3 albedo) {
@@ -1476,7 +1475,7 @@ const std::vector<Vec3> *Editor::sculpt_colors(const Mesh &m, const RenderMesh &
     const uint32_t c = rm.tri_corner[k], rv = rm.indices[k];
     if (c >= m.corner_verts.size() || rv >= sculpt_colors_.size()) continue;
     Vec3 col = albedo;
-    if ((flags & 2) && k / 3 < rm.tri_face.size()) col = group_hue(m.group_of(rm.tri_face[k / 3]));
+    if ((flags & 2) && k / 3 < rm.tri_face.size()) col = sculpt_group_color(m.group_of(rm.tri_face[k / 3]));
     if (flags & 1) {
       const uint32_t v = m.corner_verts[c];
       const float mk = kMaskDarkening * std::max(0.0f, std::min(1.0f, v < m.sculpt_mask.size() ? m.sculpt_mask[v] : 0.0f));

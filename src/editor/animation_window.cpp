@@ -524,6 +524,11 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   x += u.px(154);
   if (button(u.px(96), "Add Property", false, "Animate a number of the selected object (or the root): Position, Rotation, Scale or a component's.") && clip)
     u.open_popup(u.id("anim_add_prop"), {x - u.px(99), bar.bottom(), 0, 0});
+  {
+    const Recti fb{x, y, u.px(36), bh};
+    if (u.record_buttons) u.button_rects["anim:Fit"] = fb;
+    if (button(u.px(36), "Fit", false, "The whole clip in view (Home). Ctrl+wheel or a pinch zooms the time, Shift+wheel, two fingers or the middle button pans it.")) anim_view_fit();
+  }
   if (button(u.px(76), "Dopesheet", !anim_.curves, "The keys as diamonds along the time line (Unity's Dopesheet).")) anim_.curves = false;
   if (button(u.px(64), "Curves", anim_.curves,
              "Each property's value over time: drag keys in time and value, and their tangent handles to shape the curve.\n"
@@ -609,8 +614,61 @@ void Editor::draw_anim_add_property(GameObject *root) {
   });
 }
 
-float Editor::anim_frame_at(const Recti &sheet, int x, float end) const { return (float)(x - sheet.x) / (float)std::max(1, sheet.w) * end; }
-int Editor::anim_x_of(const Recti &sheet, float frame, float end) const { return sheet.x + (int)std::lround(frame / end * (float)sheet.w); }
+/* Frames and x through the view window (task 0267): span 0 shows the whole clip, as before. */
+float Editor::anim_frame_at(const Recti &sheet, int x, float end) const {
+  const float span = anim_.view_span > 0.0f ? anim_.view_span : end, start = anim_.view_span > 0.0f ? anim_.view_start : 0.0f;
+  return start + (float)(x - sheet.x) / (float)std::max(1, sheet.w) * span;
+}
+int Editor::anim_x_of(const Recti &sheet, float frame, float end) const {
+  const float span = anim_.view_span > 0.0f ? anim_.view_span : end, start = anim_.view_span > 0.0f ? anim_.view_start : 0.0f;
+  const double x = (double)sheet.x + (double)(frame - start) / (double)span * (double)sheet.w;
+  return (int)std::lround(std::max(-1.0e6, std::min(1.0e6, x)));  // (a key far outside a deep zoom stays an int)
+}
+
+/* Zoom the time by `factor` (below 1: closer) keeping the frame under `about_x` where it is; 2 frames to 4 clips wide. */
+void Editor::anim_view_zoom(const Recti &sheet, float end, float factor, int about_x) {
+  const float at = anim_frame_at(sheet, about_x, end);
+  const float span0 = anim_.view_span > 0.0f ? anim_.view_span : end;
+  const float span = std::max(2.0f, std::min(end * 4.0f, span0 * factor));
+  const float t = (float)(about_x - sheet.x) / (float)std::max(1, sheet.w);
+  anim_.view_span = span;
+  anim_.view_start = at - t * span;
+  ui_.redraw = true;
+}
+
+/* Task 0267: the time line's own navigation, before the rows take the wheel - Ctrl+wheel (or the wheel over the ruler)
+ * and a two-finger pinch zoom about the pointer; Shift+wheel, a sideways wheel, two fingers and the middle button pan;
+ * Home fits the clip. The plain wheel over the rows still scrolls them. */
+void Editor::anim_view_input(const Recti &ruler, const Recti &sheet, float end) {
+  auto &u = ui_;
+  auto &in = u.in;
+  const bool over = u.hovered(sheet) || u.hovered(ruler);
+  if (anim_.view_panning) {
+    if (!in.down[2]) anim_.view_panning = false;
+    const float span = anim_.view_span > 0.0f ? anim_.view_span : end;
+    if (anim_.view_span <= 0.0f) anim_.view_span = end;
+    anim_.view_start -= (float)(in.mx - anim_.view_pan_x) / (float)std::max(1, sheet.w) * span;
+    anim_.view_pan_x = in.mx;
+    u.redraw = true;
+  }
+  if (!over) return;
+  if (in.pressed[2]) anim_.view_panning = true, anim_.view_pan_x = in.mx;
+  if (in.wheel_y != 0.0f && (in.ctrl() || u.hovered(ruler))) {
+    anim_view_zoom(sheet, end, in.wheel_y > 0.0f ? 0.8f : 1.25f, in.mx);
+    in.wheel_y = 0.0f;
+  }
+  if (in.touch_zoom != 1.0f && std::isfinite(in.touch_zoom) && in.touch_zoom > 0.0f) anim_view_zoom(sheet, end, 1.0f / in.touch_zoom, in.mx);
+  float pan_px = in.touch_pan_x;
+  if (in.wheel_y != 0.0f && in.shift()) pan_px += in.wheel_y * (float)u.px(40), in.wheel_y = 0.0f;
+  if (in.wheel_x != 0.0f) pan_px += in.wheel_x * (float)u.px(40), in.wheel_x = 0.0f;
+  if (pan_px != 0.0f && std::isfinite(pan_px)) {
+    const float span = anim_.view_span > 0.0f ? anim_.view_span : end;
+    if (anim_.view_span <= 0.0f) anim_.view_span = end;
+    anim_.view_start -= pan_px / (float)std::max(1, sheet.w) * span;
+    u.redraw = true;
+  }
+  if (in.key_pressed[platform::KEY_HOME] && !u.wants_keyboard()) anim_view_fit(), in.key_pressed[platform::KEY_HOME] = false;
+}
 
 /* The key under (mx, my) in the sheet: its track and frame. */
 /* The dopesheet's rows (task 0069): a vector property's axes under one row ("Lid : Position", Unity's), unfolded into
@@ -751,7 +809,7 @@ void Editor::anim_add_row_key(const AnimationClip &clip, const Recti &sheet, int
   const std::vector<AnimRow> rows = anim_rows(clip);
   const int r = (my - sheet.y) / std::max(1, row_h) + anim_.scroll;
   if (r < 0 || (size_t)r >= rows.size()) return;
-  const float f = std::round(anim_frame_at(sheet, mx, end));
+  const float f = std::max(0.0f, std::round(anim_frame_at(sheet, mx, end)));  // (task 0267: left of frame 0 when panned: frame 0)
   for (int t : rows[(size_t)r].tracks) anim_add_key((size_t)t, f);
 }
 
@@ -771,12 +829,16 @@ void Editor::anim_end_drag(const AnimationClip &clip, const Recti &sheet, int ro
 /* The ruler: frame numbers every so many frames. */
 void Editor::draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end) {
   auto &u = ui_;
-  const int step = std::max(1, (int)std::ceil(end / std::max(1.0f, (float)ruler.w / (float)u.px(50)) / 5.0f) * 5);
-  for (int f = 0; f <= (int)end; f += step) {
+  const float span = anim_.view_span > 0.0f ? anim_.view_span : end, start = anim_.view_span > 0.0f ? anim_.view_start : 0.0f;  // (task 0267)
+  const int step = std::max(1, (int)std::ceil(span / std::max(1.0f, (float)ruler.w / (float)u.px(50)) / 5.0f) * 5);
+  u.canvas.push_clip(ruler);
+  const int first = std::max(0, (int)std::floor(start / (float)step) * step);
+  for (int f = first; f <= (int)(start + span) && f <= (int)end * 4; f += step) {
     const int fx = anim_x_of(sheet, (float)f, end);
     u.canvas.vline(fx, ruler.y + ruler.h / 2, ruler.bottom(), Color::hex(0x666666));
     u.label({fx + u.px(2), ruler.y, u.px(40), ruler.h}, std::to_string(f), u.theme.text_dim);
   }
+  u.canvas.pop_clip();
 }
 
 /* The rows: names on the left (missing objects in yellow; a group's ▸ unfolds its axes); in the Dopesheet their keys
@@ -802,6 +864,7 @@ void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const R
     if (lr.y > body.bottom()) break;
     draw_anim_row_name(clip, root, row, lr, body, sheet, (int)r);
     if (anim_.curves) continue;
+    u.canvas.push_clip(sheet);  // (task 0267: zoomed or panned, keys outside the view stay in the sheet)
     for (float f : anim_row_frames(clip, row)) {
       const std::vector<std::pair<int, float>> ks = anim_row_keys(clip, row, f);
       const bool sel = anim_all_selected(ks);
@@ -813,7 +876,13 @@ void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const R
       const uint32_t c = sel || lit ? u.theme.key_selected : row.group ? u.theme.key_group : u.theme.key;
       u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx, cy - s), Vec2(cx + s, cy), c);
       u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx + s, cy), Vec2(cx, cy + s), c);
+      if (sel || lit) {  // (task 0269: a selected key by its outline too, not the colour alone)
+        const float o = s + (float)u.px(2);
+        u.canvas.line(cx - o, cy, cx, cy - o, u.theme.text_bright, 1.5f), u.canvas.line(cx, cy - o, cx + o, cy, u.theme.text_bright, 1.5f);
+        u.canvas.line(cx + o, cy, cx, cy + o, u.theme.text_bright, 1.5f), u.canvas.line(cx, cy + o, cx - o, cy, u.theme.text_bright, 1.5f);
+      }
     }
+    u.canvas.pop_clip();
   }
 }
 
@@ -884,6 +953,9 @@ void Editor::draw_animation_window(const Recti &r) {
   const Recti list{body.x, body.y + row_h, list_w, body.h - row_h}, ruler{body.x + list_w, body.y, body.w - list_w - u.px(8), row_h};
   const Recti sheet{ruler.x, ruler.bottom(), ruler.w, body.h - row_h};
   const float end = std::max(30.0f, clip->end_frame()) * 1.1f;
+  if (anim_.view_for != clip.get()) anim_view_fit(), anim_.view_for = clip.get();  // (another clip: the whole of it)
+  anim_view_input(ruler, sheet, end);  // (task 0267: before the rows take the wheel)
+  if (anim_.view_span > 0.0f) anim_.view_start = std::max(-anim_.view_span, std::min(end * 4.0f, anim_.view_start));  // (always some of the clip in reach)
   u.canvas.fill_rect({body.x, body.y, body.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, sheet, end);
   draw_body_strip(ruler, end);  // (contacts and the flight's frames under the ruler: tasks 0116, 0117)
@@ -892,7 +964,7 @@ void Editor::draw_animation_window(const Recti &r) {
   if (anim_.curves) draw_anim_curves(*clip, sheet, end);
   /* The playhead (red while recording). */
   const int px = anim_x_of(sheet, anim_.frame, end);
-  u.canvas.vline(px, ruler.y, body.bottom(), anim_.record ? Color::hex(0xFF3B3B) : u.theme.playhead);
+  if (px >= sheet.x && px <= sheet.right()) u.canvas.vline(px, ruler.y, body.bottom(), anim_.record ? Color::hex(0xFF3B3B) : u.theme.playhead);  // (task 0267: in view)
   if (anim_.drag == 3) u.canvas.rect_outline({std::min(in.mx, anim_.drag_x), std::min(in.my, anim_.drag_y), std::abs(in.mx - anim_.drag_x), std::abs(in.my - anim_.drag_y)}, u.theme.focus);
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
   if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);

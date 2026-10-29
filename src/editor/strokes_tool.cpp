@@ -327,4 +327,11 @@ void Editor::strokeobj_command(const std::vector<std::string> &t) {
   else Log::warn("strokeobj on|off | new | card | ribbon | size s | width w | normals own|surface|canopy | canopy [x y z] | canopyfill [r] [n] [x y z] | grass [density] [height] [radius] [x y] | alpha <image>|off | dab x y | stroke x0 y0 x1 y1 [n] | count");
 }
 
+/* Task 0264: the cards of the scene's Stroke object, for the tests. */
+size_t Editor::strokeobj_cards_for_test() {
+  GameObject *g = strokeobj_object(false);
+  const Strokes *s = g ? g->get<Strokes>() : nullptr;
+  return s ? s->cards.size() : 0;
+}
+
 }  // namespace bl

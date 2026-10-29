@@ -236,7 +236,11 @@ Record and Play Clip. Round 281: the welcome asks where you come from (Unity, Un
 sets the keys and the feel; an Adobe keymap preset (B brush, E eraser, V move, [ ] size); [ ] step every brush; a High
 Contrast theme measured against WCAG's 4.5:1; `keymap table`. Round 282: the HCI pass measured - the KLM estimate for 19
 frequent actions 80.9 s -> 54.65 s, 0 wrong shortcut labels, every tool mode hinted, 24 failing walkthrough steps -> 7;
-the think-aloud study is written but not yet run (`docs/hci/`).
+the think-aloud study is written but not yet run (`docs/hci/`). Round 283: the tests that failed only on CI (the dependency-free build, two
+cores, sanitizers) or without LTCG pass there too. Rounds 284-290: Scatter's and Strokes' settings as dropdowns and buttons, a
+pen-tappable step bar for the modal tools, Pan in the UV editor, Adjust Last for primitives, UV operators and Draw shapes, 3D Object
+in every layout, time zoom in the Animation window, glTF export of a rig with its weights and clip, Okabe-Ito polygroups, the
+eraser by shape, a CPU badge, 7 mm pen targets in Tablet Mode (asserted), and a ? beside the hint that opens the lesson.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -267,7 +271,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13230 unit checks in 1138 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13278 unit checks in 1145 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

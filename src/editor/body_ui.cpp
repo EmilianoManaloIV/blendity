@@ -85,7 +85,8 @@ void Editor::draw_body_strip(const Recti &ruler, float end) {
   for (const AnimationClip::Contact &k : clip->contacts) {
     if (std::find(bones.begin(), bones.end(), k.bone) == bones.end()) bones.push_back(k.bone);
     const int row = (int)(std::find(bones.begin(), bones.end(), k.bone) - bones.begin());
-    const int x0 = anim_x_of(ruler, k.from, end), x1 = anim_x_of(ruler, k.to + 1.0f, end), y = ruler.bottom() - bar * (row + 1);
+    const int x0 = std::max(ruler.x, anim_x_of(ruler, k.from, end)), x1 = std::min(ruler.right(), anim_x_of(ruler, k.to + 1.0f, end)), y = ruler.bottom() - bar * (row + 1);  // (task 0267: within the ruler)
+    if (x1 <= x0) continue;
     if (y < ruler.y) break;
     u.canvas.fill_rect({x0, y, std::max(1, x1 - x0), bar - 1}, k.manual ? Color::hex(0xE08A2E) : Color::hex(0x9C6A3A));
   }
@@ -94,7 +95,8 @@ void Editor::draw_body_strip(const Recti &ruler, float end) {
   for (size_t f = 0; f < body_.flight.marks.size(); f++) {
     const uint8_t m = body_.flight.marks[f];
     if (!m) continue;
-    const int x0 = anim_x_of(ruler, (float)f, end), x1 = anim_x_of(ruler, (float)f + 1.0f, end);
+    const int x0 = std::max(ruler.x, anim_x_of(ruler, (float)f, end)), x1 = std::min(ruler.right(), anim_x_of(ruler, (float)f + 1.0f, end));  // (task 0267)
+    if (x1 <= x0) continue;
     u.canvas.fill_rect({x0, ruler.y, std::max(1, x1 - x0), bar}, Color::hex(kMark[m]));
   }
 }

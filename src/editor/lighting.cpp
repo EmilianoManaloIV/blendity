@@ -617,7 +617,7 @@ void Editor::auto_generate_step() {
     settle_since_ = 0;
     return;
   }
-  const double now = now_seconds();
+  const double now = clock_now();  // (the test clock when a test sets one: a slow build's frames no longer pass the second)
   if (settle_since_ == 0 || ood_key_ != settle_key_) {  // still changing: wait for it to settle
     settle_key_ = ood_key_;
     settle_since_ = now;

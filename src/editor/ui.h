@@ -285,6 +285,8 @@ class Context {
     bool dropdown = false;  // a combo's list opened inside a dialog: below its field, closes on its own
     int width = 200;
     int content_h = 0;
+    int scroll = 0;  // (task 0264: a list taller than the room it has scrolls by the wheel)
+    bool list = false;  // (a combo's list: fitted and scrolled; a dialog or a menu keeps its own placement)
     bool declared = false;
     std::function<void()> body;
   };

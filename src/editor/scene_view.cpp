@@ -42,6 +42,7 @@ void Editor::draw_scene_view(const Recti &r) {
     return;
   }
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
+                   !(obj_last_valid() && obj_last_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
   const bool quick_menu_took = wheel_took_;  // (task 0230: the Wheel's frame step took the press or release)
   /* Task 0232: an interaction begun in another window's Scene view (a drag, a stroke, a gizmo, G / R / S, a brush) is
@@ -196,8 +197,11 @@ void Editor::draw_scene_view(const Recti &r) {
   }
   if (show_gizmos_ && !playing_) draw_camera_preview(view);
   else cam_preview_rect_ = Recti{};
-  if (edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
+  const bool obj_last = obj_last_valid();  // (task 0266: the newest step's panel; Edit Mode's gives way to it)
+  if (!obj_last && edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
   else last_op_rect_ = Recti{};
+  if (obj_last && !last_op_hidden_) draw_obj_last_panel(view);
+  else obj_last_rect_ = Recti{};
   if (playing_) u.canvas.rect_outline(view, Color::hex(0x3A79BB, 120), u.px(2));
 }
 
@@ -3257,6 +3261,28 @@ void Editor::modal_finish(bool keep) {
   Log::info("%s cancelled", modal_.op.c_str());
 }
 
+/* Task 0265: the step bar of a modal operator whose value the wheel steps (Bevel's segments, Array's count, Grid's rows,
+ * Pipe's sides, Taper's and Recess's second amount): centred at the bottom of the view, its - and + buttons 36 px
+ * (UI scale 1) - a pen's target - so the value is reachable without a wheel or a keyboard. Empty for the others. */
+Editor::ModalStepBar Editor::modal_step_bar(const Recti &view) const {
+  ModalStepBar b;
+  const LastOp &L = last_op_;
+  const std::string &op = modal_.op;
+  if (op == "bevel") b.name = "Segments", b.value = std::to_string(L.segments);
+  else if (op == "array") b.name = "Count", b.value = std::to_string(L.count);
+  else if (op == "grid") b.name = "Rows", b.value = std::to_string(L.segments);
+  else if (op == "pipe") b.name = "Sides", b.value = std::to_string(L.segments);
+  else if (op == "taper") b.name = "Taper", b.value = strprintf("%.2f", L.amount2);
+  else if (op == "recess") b.name = "Depth", b.value = strprintf("%.3g", L.amount2);
+  else return b;
+  const auto &u = ui_;
+  const int s = u.px(36), w = u.px(150) + 2 * s;
+  b.bar = {view.x + (view.w - w) / 2, view.bottom() - s - u.px(40), w, s};
+  b.minus = {b.bar.x, b.bar.y, s, s};
+  b.plus = {b.bar.right() - s, b.bar.y, s, s};
+  return b;
+}
+
 bool Editor::modal_update(const Recti &view) {
   if (!modal_.active) return false;
   auto &u = ui_;
@@ -3277,7 +3303,19 @@ bool Editor::modal_update(const Recti &view) {
   float amount;
   double typed = 0;
   const float d = length(Vec2((float)in.mx, (float)in.my) - modal_.center);
+  /* Task 0265: the step bar. While the pointer is on it the amount holds (a pen travelling to it would change the
+   * width); leaving it, the drag goes on from there. A tap on - or + is the wheel's step, not a confirm. */
+  const ModalStepBar sb = modal_step_bar(view);
+  const bool over_bar = sb.name && sb.bar.contains(in.mx, in.my);
+  if (over_bar && in.pressed[0]) {
+    in.wheel_y = sb.plus.contains(in.mx, in.my) ? 1.0f : sb.minus.contains(in.mx, in.my) ? -1.0f : 0.0f;
+    in.pressed[0] = false;
+    u.consume_click();
+  }
+  if (modal_over_bar_ && !over_bar) modal_.start_amount = modal_.amount, modal_.start_len = d, modal_.precise = false;
+  modal_over_bar_ = over_bar;
   if (!modal_.typed.empty() && ui::eval_number(modal_.typed, typed)) amount = (float)typed;
+  else if (over_bar) amount = modal_.amount;
   else {
     /* Shift: a tenth of the speed from where it was pressed (Blender). */
     if (in.shift() && !modal_.precise) {
@@ -3358,6 +3396,14 @@ void Editor::draw_modal(const Recti &view) {
   if (!modal_.active) return;
   auto &u = ui_;
   u.canvas.push_clip(view);
+  if (const ModalStepBar sb = modal_step_bar(view); sb.name) {  // (task 0265)
+    u.frame(sb.bar, u.theme.popup, u.theme.border, u.px(4));
+    for (const Recti &r : {sb.minus, sb.plus}) u.frame(r, r.contains(u.in.mx, u.in.my) ? u.theme.button_hover : u.theme.button, u.theme.border, u.px(4));
+    u.label(sb.minus, "-", u.theme.text_bright, ui::Align::Center);
+    u.label(sb.plus, "+", u.theme.text_bright, ui::Align::Center);
+    u.label({sb.minus.right(), sb.bar.y, sb.plus.x - sb.minus.right(), sb.bar.h}, std::string(sb.name) + "  " + sb.value, u.theme.text_bright, ui::Align::Center);
+    if (u.record_buttons) u.button_rects["modal:-"] = sb.minus, u.button_rects["modal:+"] = sb.plus;
+  }
   /* A dashed line from the centre to the cursor, as Blender draws it. */
   const Vec2 m((float)u.in.mx, (float)u.in.my);
   const Vec2 d = m - modal_.center;

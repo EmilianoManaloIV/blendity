@@ -120,7 +120,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"edit.select_none", "Deselect All", "Edit", CTX_GLOBAL},
       {"edit.delete", "Delete", "Edit", CTX_SCENE},
       {"edit.rename", "Rename", "Edit", CTX_SCENE},
-      {"edit.adjust_last", "Adjust Last Operation", "Edit", CTX_EDIT},
+      {"edit.adjust_last", "Adjust Last Operation", "Edit", CTX_SCENE},  // (task 0266: an added primitive, a UV operator, a Draw shape too)
       {"assets.refresh", "Refresh Assets", "Edit", CTX_GLOBAL},
       /* Objects */
       {"object.join", "Join Objects", "Object", CTX_GLOBAL},
@@ -761,8 +761,9 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "edit.adjust_last") {
     if (last_op_hidden_) {
       last_op_hidden_ = false;
-      last_op_open_ = true;
+      last_op_open_ = obj_last_open_ = true;
     }
+    else if (obj_last_valid()) obj_last_open_ = !obj_last_open_;  // (task 0266)
     else last_op_open_ = !last_op_open_;
   }
   else if (id == "assets.refresh") {

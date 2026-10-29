@@ -300,7 +300,7 @@ void Editor::wp_draw(const Recti &view) {
   if (!weight_paint_ || !scene_hovered_) return;
   auto &u = ui_;
   const float R = std::max(1.0f, wp_brush_.radius * u.scale);
-  u.canvas.circle((float)u.in.mx, (float)u.in.my, R, Color::hex(0xFFFFFF, 200), 1.5f);
+  draw_brush_ring((float)u.in.mx, (float)u.in.my, R, wp_effective_mode(u.in.ctrl(), u.in.eraser) == 1, Color::hex(0xFFFFFF, 200));  // (task 0269: subtracting, dashed with an E)
   u.canvas.circle((float)u.in.mx, (float)u.in.my, R * std::max(0.05f, std::min(1.0f, wp_brush_.strength)), Color::hex(0xFFFFFF, 90), 1.0f);
   (void)view;
 }

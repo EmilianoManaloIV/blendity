@@ -350,7 +350,7 @@ void Editor::draw_textures_window(const Recti &r) {
       if (paint_ && paint_2d_ && texture_selected_ == paint_surface_ && u.hovered(pane)) {  // (task 0246: the brush on the canvas, its radius in texels shown at the pane's scale)
         const float texels = (float)std::max(1, std::max(texture_selected_->width, texture_selected_->height));
         const float r = paint_brush_.radius / texels * (float)pane.w / (float)(texture_preview_tiled_ ? 2 : 1);
-        u.canvas.circle((float)in.mx, (float)in.my, std::max(1.0f, r), paint_brush_.erase || in.eraser ? u.theme.warning : u.theme.accent);
+        draw_brush_ring((float)in.mx, (float)in.my, std::max(1.0f, r), paint_brush_.erase || in.eraser, u.theme.accent);  // (task 0269)
       }
       texture_preview_size_ = th.size;
     }

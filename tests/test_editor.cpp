@@ -4656,7 +4656,14 @@ static void tests_round272() {
       std::printf("    (fix click %d, toasts %zu, why '%s'; the HCI log so far:\n%s)\n", (int)clicked, toasts.size(), why_none.c_str(), lg.c_str());
     }
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
-    CHECK(fixed && toasts.empty());
+    /* The refusal is gone; an Info toast may have come after it - the surface's evaluation ends with "done in ..."
+     * when it takes over a second (task 0253), as on CI's runners. */
+    size_t warnings_left = 0;
+    for (const auto &t : toasts) {
+      std::printf("    a toast after the fix: [%s] \"%s\"\n", t.level == LogLevel::Info ? "info" : "warning", t.text.c_str());
+      warnings_left += t.level != LogLevel::Info;
+    }
+    CHECK(fixed && warnings_left == 0);
     ed.command("paint on");
     ed.step_frame_headless();
     std::printf("    after the fix: Paint Mode %d\n", (int)ed.paint_for_test());
@@ -5106,7 +5113,8 @@ static void tests_round275() {
       faces[order] = kept && kept->get<MeshFilter>() && kept->get<MeshFilter>()->mesh ? kept->get<MeshFilter>()->mesh->face_count() : 0;
       std::printf("    %s selected last: the Cube kept with %zu faces, the Sphere %s\n", order == 0 ? "Sphere" : "Cube", faces[order], ed.scene().find_by_name("Sphere") ? "still there" : "removed");
     }
-    CHECK(faces[0] > 6 && faces[0] == faces[1]);
+    if (meshops::boolean_available()) CHECK(faces[0] > 6 && faces[0] == faces[1]);
+    else CHECK(faces[0] == 6 && faces[1] == 6);  // (the dependency-free build has no Manifold: the Boolean refuses and changes nothing)
     Editor ed;
     ed.init_headless(1200, 800);
     ed.command("layout Texturing");
@@ -5394,6 +5402,522 @@ static void tests_round279() {
   });
 }
 
+static void tests_round290() {
+  test("the pen's targets (task 0270): in Tablet Mode (UI 1.5x) the Scene view's navigation buttons, a modal's step buttons, the job tray's Cancel and a toast's Fix are 7 mm or more on a 96 dpi screen, asserted; the status hint's ? opens the Learn lesson for the tool under way (Sculpting while sculpting)", [] {
+    Editor ed;
+    ed.init_headless(1700, 1000);
+    ed.record_buttons_for_test(true);
+    ed.command("window tablet on");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const float scale = ed.ui_for_test().scale, mm7 = 7.0f / 25.4f * 96.0f * scale;
+    struct Target { std::string name; Recti r; };
+    std::vector<Target> targets;
+    targets.push_back({"navigation (orbit / pan)", ed.nav_button_rect_for_test(0)});
+    targets.push_back({"navigation (zoom)", ed.nav_button_rect_for_test(1)});
+    /* A toast with a Fix: Paint on a cube without a surface. */
+    ed.command("select Cube");
+    ed.command("paint on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti r;
+    if (ed.button_rect_for_test("Fix: make a surface", r)) targets.push_back({"a toast's Fix", r});
+    /* The job tray's Cancel: a mesh-maps bake. */
+    ed.command("surface new PenSurf");
+    ed.command("meshmaps 1024 32");  // (big enough to be running for a frame)
+    ed.step_frame_headless();
+    if (ed.button_rect_for_test("job:Cancel", r)) targets.push_back({"the job tray's Cancel", r});
+    ed.command("meshmaps cancel");
+    for (int i = 0; i < 400 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    /* A modal's step buttons: Bevel. */
+    ed.command("edit");
+    ed.command("edit edge all");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_view_rect();
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, view.x + view.w / 2, view.y + view.h / 2)});
+    ed.step_frame_headless({key_ev(platform::KEY_B, platform::MOD_CTRL)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, view.x + view.w / 2 + 40, view.y + view.h / 2)});
+    if (ed.button_rect_for_test("modal:+", r)) targets.push_back({"a modal's +", r});
+    if (ed.button_rect_for_test("modal:-", r)) targets.push_back({"a modal's -", r});
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    int small = 0;
+    for (const Target &t : targets) {
+      const int side = std::min(t.r.w, t.r.h);
+      std::printf("    %-24s %3d x %3d px (7 mm is %.1f px)%s\n", t.name.c_str(), t.r.w, t.r.h, mm7, side < mm7 ? "  UNDER" : "");
+      small += side + 0.5f < mm7;
+    }
+    CHECK(targets.size() == 6);
+    CHECK(small == 0);
+    /* Two ways in that no test drove (the coverage map's empty rows): Quick Favorites and the Live Link window. */
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    const size_t popups0 = ed.popup_count_for_test();
+    const bool fav = ed.run_action_for_test("edit.favorites");
+    ed.step_frame_headless();
+    const size_t popups1 = ed.popup_count_for_test();
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.command("window Live Link");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti ll = ed.dock_leaf_rect_for_test(WindowKind::LiveLink);
+    std::printf("    Quick Favorites ran %d (popups %zu -> %zu); the Live Link window %dx%d\n", (int)fav, popups0, popups1, ll.w, ll.h);
+    CHECK(fav && popups1 > popups0 && ll.w > 0 && ll.h > 0);
+    /* The hint's ?: Sculpting while sculpting. */
+    ed.command("edit off");
+    ed.command("sculpt on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti q;
+    const bool shown = ed.button_rect_for_test("status:?", q);
+    if (shown)
+      for (platform::EventType t : {platform::EventType::MouseMove, platform::EventType::MouseDown, platform::EventType::MouseUp}) ed.step_frame_headless({mouse_ev(t, q.x + q.w / 2, q.y + q.h / 2)});
+    const std::string title = lesson(ed.lesson_for_test()).title;
+    std::printf("    the hint's ? shown %d; after the click the Learn lesson '%s'\n", (int)shown, title.c_str());
+    CHECK(shown && title == "Sculpting");
+  });
+}
+
+static void tests_round289() {
+  test("accessibility (task 0269): polygroups take Okabe-Ito's eight colours then lighter and darker tiers; the paint brush's ring says erasing by its shape; a Scene view whose views wanted the card and draw on the CPU says CPU in its bar", [] {
+    const Vec3 orange = sculpt_group_color(0), sky = sculpt_group_color(1), light = sculpt_group_color(8), dark = sculpt_group_color(16);
+    std::printf("    group 0 (%.3f %.3f %.3f), 1 (%.3f %.3f %.3f), 8 (%.3f %.3f %.3f), 16 (%.3f %.3f %.3f)\n", orange.x, orange.y, orange.z, sky.x, sky.y, sky.z, light.x, light.y, light.z, dark.x,
+                dark.y, dark.z);
+    CHECK(std::fabs(orange.x - 0.902f) < 1e-3f && std::fabs(orange.y - 0.624f) < 1e-3f && orange.z == 0.0f);  // (#E69F00)
+    auto lum = [](Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; };
+    CHECK(lum(light) > lum(orange) && lum(dark) < lum(orange));
+    int same = 0;
+    for (int a = 0; a < 8; a++)
+      for (int b = a + 1; b < 8; b++) same += length(sculpt_group_color(a) - sculpt_group_color(b)) < 0.1f;
+    CHECK(same == 0);
+    Editor ed;
+    ed.init_headless(1700, 900);  // (the bar's badges show when it has room)
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("surface new RingSurf");
+    ed.command("paint on");
+    const Recti view = ed.scene_view_rect();
+    const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless();
+    const bool plain = ed.brush_ring_erasing_for_test();
+    ed.paint_brush_for_test().erase = true;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 3, cy)});
+    const bool erasing = ed.brush_ring_erasing_for_test();
+    std::printf("    paint on %d: the ring erasing %d; the eraser on: %d\n", (int)ed.paint_for_test(), (int)plain, (int)erasing);
+    CHECK(ed.paint_for_test() && !plain && erasing);
+    ed.paint_brush_for_test().erase = false;
+    ed.command("paint off");
+    /* The tests draw on the CPU by choice (BLENDITY_VIEWPORT_DEVICE=cpu): no badge. Auto with no card: the badge. */
+    Recti badge;
+    ed.step_frame_headless();
+    const bool by_choice = ed.button_rect_for_test("overlay:CPU", badge);
+    const char *was = std::getenv("BLENDITY_VIEWPORT_DEVICE");
+    const std::string keep = was ? was : "";
+    set_env("BLENDITY_VIEWPORT_DEVICE", "auto");
+    ed.force_cpu_views_for_test("no Vulkan GPU (a test)");  // (before any frame asks for the card: none is opened)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool fallen_back = ed.button_rect_for_test("overlay:CPU", badge);
+    const std::string state = ed.cpu_badge_state_for_test();
+    set_env("BLENDITY_VIEWPORT_DEVICE", keep.empty() ? "cpu" : keep.c_str());
+    std::printf("    the CPU badge: the CPU chosen %d, Auto with no card %d (%s)\n", (int)by_choice, (int)fallen_back, state.c_str());
+    CHECK(!by_choice && fallen_back);
+  });
+}
+
+static void tests_round288() {
+  test("glTF export of a rig (task 0268): a cube with an Armature (Skin bound) and a clip turning its bone exports with a skin - joints, inverse bind matrices, JOINTS_0 / WEIGHTS_0 - and an animation; Blendity's own importer reads it back with the bone, the weights and the clip's turn", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("create Armature");  // (the Cube inside "Cube Rig" with an Armature and a Skin bound by automatic weights)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig && ed.scene().find_by_name("Cube")->get<SkinModifier>());
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R288");
+    ed.command("anim key Bone Rotation 2 0 0");  // (the object by name, below the rig)
+    ed.command("anim key Bone Rotation 2 30 45");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    {
+      const AnimationClipPtr c = ed.anim_clip_for_test();
+      const Animation *an = rig->get<Animation>();
+      std::printf("    the rig's Animation %d (clip '%s'), the clip %d with %zu track(s)%s\n", (int)(an != nullptr), an ? an->clip.c_str() : "", (int)(c != nullptr), c ? c->tracks.size() : (size_t)0,
+                  c && !c->tracks.empty() ? (" - '" + c->tracks[0].path + "' " + c->tracks[0].property).c_str() : "");
+    }
+    ed.command("anim frame 30");
+    ed.command("anim preview off");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    bone->set_local_euler({0, 0, 270});  // (an Inspector angle past 180: the export must leave it as it is)
+    const Vec3 hint0 = bone->local().euler_hint;
+    ed.command("select Cube");
+    ExportOptions o = export_defaults((int)ExportFormat::GLB);
+    const std::string path = fs::join(test_dir(), "r288_rig.glb");
+    std::remove(path.c_str());
+    ed.export_model_for_test(o, path);
+    const Vec3 hint1 = bone->local().euler_hint;
+    std::printf("    the bone's Inspector angle before the export %.1f, after %.1f\n", hint0.z, hint1.z);
+    CHECK(std::fabs(hint1.z - hint0.z) < 1e-3f);
+    std::string glb;
+    CHECK(fs::read_file(path, glb) && glb.size() > 20);
+    const std::string json = glb.size() > 20 ? glb.substr(20, std::min<size_t>(glb.size() - 20, *reinterpret_cast<const uint32_t *>(glb.data() + 12))) : std::string();
+    const bool has_skin = json.find("\"skins\"") != std::string::npos && json.find("\"inverseBindMatrices\"") != std::string::npos;
+    const bool has_attrs = json.find("\"JOINTS_0\"") != std::string::npos && json.find("\"WEIGHTS_0\"") != std::string::npos;
+    const bool has_anim = json.find("\"animations\"") != std::string::npos && json.find("\"path\":\"rotation\"") != std::string::npos;
+    std::printf("    the file: %zu bytes; skins %d, JOINTS_0 / WEIGHTS_0 %d, animations %d\n", glb.size(), (int)has_skin, (int)has_attrs, (int)has_anim);
+    CHECK(has_skin && has_attrs && has_anim);
+    ImportResult res;
+    CHECK(import_model(path, res));
+    size_t bones = 0, groups = 0;
+    for (const ImportedNode &n : res.nodes) {
+      bones += n.is_bone && n.name == "Bone";
+      if (n.mesh)
+        for (const VertexGroup &vg : n.mesh->vertex_groups) groups += vg.name == "Bone";
+    }
+    float turn = -999.0f;
+    for (const AnimationClip &c : res.clips)
+      for (const AnimTrack &t : c.tracks)
+        if (t.path.size() >= 4 && t.path.compare(t.path.size() - 4, 4, "Bone") == 0 && t.property == "Rotation" && t.axis == 2) turn = t.sample(30.0f * c.frame_rate / 60.0f);
+    std::printf("    imported: %zu skin(s), the Bone %zu, its vertex group on the mesh %zu, %zu clip(s); the bone's Z turn at the clip's end %.2f degrees\n", res.skins.size(), bones, groups,
+                res.clips.size(), turn);
+    CHECK(res.skins.size() == 1 && bones == 1 && groups == 1 && res.clips.size() == 1);
+    CHECK(std::fabs(turn - 45.0f) < 1.0f);
+    std::remove(path.c_str());
+  });
+}
+
+static void tests_round287() {
+  test("reach (task 0267): the 3D Object menu is in every layout's GameObject menu; the Animation window's time zooms with Ctrl+wheel and a pinch about the pointer, pans with Shift+wheel, and Fit puts the whole clip back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    for (const char *layout : {"Lighting & Rendering", "Animation", "Texturing", "Editing"}) {
+      ed.command(std::string("layout ") + layout);
+      ed.step_frame_headless();
+      Recti mb;
+      bool has = false;
+      if (ed.button_rect_for_test("menubar:GameObject", mb)) {
+        for (platform::EventType t : {platform::EventType::MouseMove, platform::EventType::MouseDown, platform::EventType::MouseUp}) {
+          platform::Event e;
+          e.type = t, e.x = mb.x + mb.w / 2, e.y = mb.y + mb.h / 2;
+          ed.step_frame_headless({e});
+        }
+        Recti sub;
+        has = ed.button_rect_for_test("submenu:3D Object", sub);
+        ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+      }
+      std::printf("    %s: the GameObject menu has 3D Object %d\n", layout, (int)has);
+      CHECK(has);
+    }
+    ed.command("layout Animation");
+    ed.command("select Cube");
+    ed.command("anim new R287");
+    ed.command("anim key . Position 1 0 0");
+    ed.command("anim key . Position 1 100 1");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti sheet;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet));
+    using ET = platform::EventType;
+    const int mx = sheet.x + sheet.w / 2, my = sheet.y + sheet.h / 2;
+    const float f_mid0 = ed.anim_frame_at_for_test(mx), f_right0 = ed.anim_frame_at_for_test(sheet.right() - 1);
+    platform::Event mv;
+    mv.type = ET::MouseMove, mv.x = mx, mv.y = my;
+    ed.step_frame_headless({mv});
+    platform::Event w;
+    w.type = ET::Wheel, w.x = mx, w.y = my, w.wheel_y = 1.0f, w.mods = platform::MOD_CTRL;
+    for (int i = 0; i < 3; i++) ed.step_frame_headless({w});
+    const float f_mid1 = ed.anim_frame_at_for_test(mx), span1 = ed.anim_frame_at_for_test(sheet.right() - 1) - ed.anim_frame_at_for_test(sheet.x);
+    std::printf("    Ctrl+wheel x3: the frame under the pointer %.1f -> %.1f, the frames in view %.1f -> %.1f\n", f_mid0, f_mid1, f_right0, span1);
+    CHECK(std::fabs(f_mid1 - f_mid0) < 0.6f && span1 < (f_right0 - 0.0f) * 0.6f);
+    w.mods = platform::MOD_SHIFT;
+    const float start0 = ed.anim_frame_at_for_test(sheet.x);
+    w.wheel_y = -1.0f;
+    ed.step_frame_headless({w});
+    const float start1 = ed.anim_frame_at_for_test(sheet.x);
+    std::printf("    Shift+wheel: the first frame in view %.1f -> %.1f\n", start0, start1);
+    CHECK(start1 > start0);
+    platform::Event g;
+    g.type = ET::Gesture, g.x = mx, g.y = my, g.zoom = 0.5f;  // (two fingers apart to half: zoom out)
+    const float span_before_pinch = ed.anim_frame_at_for_test(sheet.right() - 1) - ed.anim_frame_at_for_test(sheet.x);
+    ed.step_frame_headless({g});
+    const float span_after_pinch = ed.anim_frame_at_for_test(sheet.right() - 1) - ed.anim_frame_at_for_test(sheet.x);
+    std::printf("    a pinch to half: the frames in view %.1f -> %.1f\n", span_before_pinch, span_after_pinch);
+    CHECK(span_after_pinch > span_before_pinch * 1.5f);
+    Recti fit;
+    CHECK(ed.button_rect_for_test("anim:Fit", fit));
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = fit.x + fit.w / 2, e.y = fit.y + fit.h / 2;
+      ed.step_frame_headless({e});
+    }
+    const float after_fit = ed.anim_frame_at_for_test(sheet.right() - 1);
+    std::printf("    Fit: the last frame in view %.1f (it was %.1f before zooming)\n", after_fit, f_right0);
+    CHECK(std::fabs(after_fit - f_right0) < 0.01f);
+  });
+}
+
+static void tests_round286() {
+  test("Adjust Last outside Edit Mode (task 0266): an added Cylinder's segments, a UV unwrap's margin and a drawn circle's segments changed in the panel by typing - each re-run from before into the same undo step (one Ctrl+Z goes back to before it), the panel gone once another step is made", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto type_into = [&](const std::string &key, const std::string &text) {  // (a double-click enters the field, then typing and Enter)
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = x, e.y = y;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+      for (char c : text) {
+        platform::Event e;
+        e.type = ET::Text, e.codepoint = (uint32_t)c;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      return true;
+    };
+    /* A Cylinder: 24 segments, then 8 typed into the panel. */
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("create Cylinder");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const uint64_t cyl_id = ed.active_object_for_test() ? ed.active_object_for_test()->id : 0;  // (the sample scene has a Cylinder of its own: by id, not name)
+    auto cyl_faces = [&] {
+      const GameObject *g = ed.scene().find(cyl_id);
+      return g && g->get<MeshFilter>() && g->get<MeshFilter>()->mesh ? g->get<MeshFilter>()->mesh->face_count() : (size_t)0;
+    };
+    const size_t faces24 = cyl_faces(), steps1 = ed.undo_steps_for_test();
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().what == "Cylinder");
+    const bool typed = type_into("adjust:Segments", "8");
+    const size_t faces8 = cyl_faces();
+    std::printf("    Cylinder: %zu faces at 24 segments, typed 8 (%d): %zu faces; undo steps %zu -> %zu -> %zu; the panel's %s n %d, valid %d\n", faces24, (int)typed, faces8, steps0,
+                steps1, ed.undo_steps_for_test(), ed.obj_last_for_test().what.c_str(), ed.obj_last_for_test().n, (int)ed.obj_last_valid());
+    CHECK(typed && faces24 == 24 + 2 && faces8 == 8 + 2 && ed.undo_steps_for_test() == steps1);  // (the same step, amended)
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.scene().find(cyl_id));  // (one Ctrl+Z: back to before it was added)
+    /* A UV unwrap of the Cube: the margin typed; the step amended. */
+    ed.command("select Cube");
+    ed.command("uv unwrap");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const size_t uv_steps = ed.undo_steps_for_test();
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().what == "unwrap");
+    const GameObject *cube = ed.scene().find_by_name("Cube");
+    const Vec2 uv0 = cube->get<MeshFilter>()->mesh->uvs[0];
+    const bool typed_margin = type_into("adjust:Margin", "0.2");
+    const Vec2 uv1 = ed.scene().find_by_name("Cube")->get<MeshFilter>()->mesh->uvs[0];
+    std::printf("    Unwrap: margin typed 0.2 (%d): the first UV (%.3f %.3f) -> (%.3f %.3f), margin %.2f, steps %zu -> %zu\n", (int)typed_margin, uv0.x, uv0.y, uv1.x, uv1.y,
+                ed.obj_last_for_test().a, uv_steps, ed.undo_steps_for_test());
+    CHECK(typed_margin && std::fabs(ed.obj_last_for_test().a - 0.2f) < 1e-4f && (uv0.x != uv1.x || uv0.y != uv1.y) && ed.undo_steps_for_test() == uv_steps);
+    /* Undo ends it (the step is no longer the newest); redo brings the step back, not the panel. */
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool after_undo = ed.obj_last_valid();
+    ed.command("redo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    the panel after Undo %d, after Redo %d\n", (int)after_undo, (int)ed.obj_last_valid());
+    CHECK(!after_undo && !ed.obj_last_valid());
+    /* Another step ends the panel. */
+    ed.command("create Cube");
+    ed.command("delete");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.obj_last_valid());
+    /* A drawn circle: 24 segments, then 6. */
+    ed.clear_selection_for_test();  // (nothing selected: Draw makes its own Drawing object)
+    ed.command("draw circle");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_view_rect();
+    const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+    for (auto [x, y] : {std::pair<int, int>{cx, cy}, {cx + 60, cy}}) {
+      ed.step_frame_headless({mouse_ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({mouse_ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({mouse_ev(ET::MouseUp, x, y)});
+    }
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const GameObject *dr = ed.edit_object_for_test();
+    const size_t v24 = dr && dr->get<MeshFilter>()->mesh ? dr->get<MeshFilter>()->mesh->vert_count() : 0;
+    const bool drawn = ed.obj_last_valid() && ed.obj_last_for_test().kind == "draw";
+    const bool typed_sides = drawn && type_into("adjust:Segments", "6");
+    const GameObject *dr2 = ed.edit_object_for_test();
+    const size_t v6 = dr2 && dr2->get<MeshFilter>()->mesh ? dr2->get<MeshFilter>()->mesh->vert_count() : 0;
+    std::printf("    Draw Circle: recorded %d, %zu vertices at %d segments, typed 6 (%d): %zu vertices\n", (int)drawn, v24, drawn ? ed.obj_last_for_test().n : -1, (int)typed_sides, v6);
+    CHECK(drawn && typed_sides && v24 >= 24 && v6 == 6);
+  });
+}
+
+static void tests_round285() {
+  test("pen reach (task 0265): the modal step bar's + and - step Bevel's segments by a tap, without confirming, and the amount holds while the pointer is on the bar; the UV editor's Pan toggle makes a left drag pan", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(400.0);
+    ed.command("select Cube");
+    ed.command("edit");
+    ed.command("edit edge all");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto tap = [&](const std::string &key) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+      return true;
+    };
+    const Recti view = ed.scene_view_rect();
+    const int vx = view.x + view.w / 2, vy = view.y + view.h / 2;
+    ed.step_frame_headless({mouse_ev(ET::MouseMove, vx, vy)});
+    ed.step_frame_headless({key_ev(platform::KEY_B, platform::MOD_CTRL)});  // (Unity's Bevel chord starts the modal over the view)
+    ed.step_frame_headless({mouse_ev(ET::MouseMove, vx + 40, vy)});
+    CHECK(ed.modal_active_for_test());
+    const int seg0 = ed.last_op_segments_for_test();
+    const float amount0 = ed.last_op_amount_for_test();
+    const bool t1 = tap("modal:+"), t2 = tap("modal:+");
+    const int seg2 = ed.last_op_segments_for_test();
+    const bool t3 = tap("modal:-");
+    const int seg1 = ed.last_op_segments_for_test();
+    std::printf("    bevel: segments %d -> + + %d -> - %d (taps %d %d %d), still running %d, amount %.4f -> %.4f\n", seg0, seg2, seg1, (int)t1, (int)t2, (int)t3,
+                (int)ed.modal_active_for_test(), amount0, ed.last_op_amount_for_test());
+    CHECK(t1 && t2 && t3 && seg2 == seg0 + 2 && seg1 == seg0 + 1 && ed.modal_active_for_test());
+    CHECK(std::fabs(ed.last_op_amount_for_test() - amount0) < 1e-6f);  // (travelling to the bar and tapping changed no width)
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(!ed.modal_active_for_test());
+    /* The UV editor: Pan on, a left drag moves the view. */
+    ed.command("layout UV Unwrapping");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const bool pan_on = tap("uv:Pan");
+    const Vec2 p0 = ed.uv_pan_for_test();
+    const Recti uv = ed.uv_rect_for_test();
+    const int cx = uv.x + uv.w / 2, cy = uv.y + uv.h / 2 + 40;
+    platform::Event e;
+    e.type = ET::MouseMove, e.x = cx, e.y = cy;
+    ed.step_frame_headless({e});
+    e.type = ET::MouseDown;
+    ed.step_frame_headless({e});
+    for (int k = 1; k <= 5; k++) {
+      e.type = ET::MouseMove, e.x = cx + 10 * k, e.y = cy + 6 * k;
+      ed.step_frame_headless({e});
+    }
+    e.type = ET::MouseUp;
+    ed.step_frame_headless({e});
+    const Vec2 p1 = ed.uv_pan_for_test();
+    std::printf("    UV editor: Pan tapped %d (on %d), a left drag of (50, 30) moved the view by (%.0f, %.0f)\n", (int)pan_on, (int)ed.uv_hand_for_test(), p1.x - p0.x, p1.y - p0.y);
+    CHECK(pan_on && ed.uv_hand_for_test() && std::fabs(p1.x - p0.x - 50.0f) < 1.0f && std::fabs(p1.y - p0.y - 30.0f) < 1.0f);
+  });
+}
+
+static void tests_round284() {
+  test("the stylized tools in the panels (task 0264): Scatter's source and mask picked from dropdowns by name; Strokes' alpha picked from the project's images and Fill Canopy pressed - each through real clicks", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    const std::string img = fs::join(ed.assets_dir_for_test(), "0leaf284.png");  // (written before the image list is read - it is cached 3 s; first in the sorted list, however many images other tests left)
+    std::vector<uint32_t> leaf(64);
+    for (int y = 0; y < 8; y++)
+      for (int x = 0; x < 8; x++) leaf[(size_t)y * 8 + x] = (x + y) % 2 ? 0xFF20A020u : 0x00000000u;
+    CHECK(write_png(img, leaf.data(), 8, 8, 8, true));
+    ed.command("layout Stylized");
+    ed.step_frame_headless();
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && ed.scene().find_by_name("Sphere"));
+    if (!cube) return;
+    ed.select_for_test(cube->id, false);
+    using ET = platform::EventType;
+    auto click = [&](const std::string &key) {  // (a recorded rectangle; a tool row scrolled until it is inside the Tools pane)
+      for (int attempt = 0; attempt < 60; attempt++) {
+        ed.step_frame_headless();
+        const auto &br = ed.ui_for_test().button_rects;
+        if (!br.count(key)) continue;
+        const Recti r = br.at(key);
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Tools);
+        const bool list_row = key.rfind("menu:", 0) == 0;
+        if (list_row && (r.y < 0 || r.bottom() > 900)) {  // (a long list scrolls: the wheel over it)
+          platform::Event w;
+          w.type = ET::Wheel, w.x = r.x + 8, w.y = std::max(10, std::min(890, r.y + r.h / 2)), w.wheel_y = r.y < 0 ? 1.0f : -1.0f;
+          ed.step_frame_headless({w});
+          continue;
+        }
+        const int top = pane.y + 28;  // (below the pane's tab)
+        if (attempt == 59) std::printf("    ('%s' at y %d-%d, the Tools pane y %d-%d)\n", key.c_str(), r.y, r.bottom(), pane.y, pane.bottom());
+        if (!list_row && (r.y < top || r.bottom() > pane.bottom())) {
+          platform::Event w;
+          w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < top ? 1.0f : -1.0f;
+          platform::Event over;  // (the pointer over the pane first: the wheel scrolls what is under it)
+          over.type = ET::MouseMove, over.x = w.x, over.y = w.y;
+          ed.step_frame_headless({over});
+          ed.step_frame_headless({w});
+          continue;
+        }
+        for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+          platform::Event e;
+          e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+          ed.step_frame_headless({e});
+        }
+        ed.step_frame_headless();  // (a dropdown's pick reaches its field on the next frame)
+        return true;
+      }
+      std::string rows;
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind("menu:", 0) == 0) rows += " '" + kv.first + "'";
+      std::printf("    (no '%s'; the list rows recorded:%s)\n", key.c_str(), rows.empty() ? " none" : rows.c_str());
+      return false;
+    };
+    /* Scatter: the source by name. */
+    ed.command("scatter on");
+    const std::vector<std::string> sources = ed.scatter_source_choices_for_test();
+    std::printf("    scatter's sources: %zu (Sphere among them %d, the Cube painted on left out %d)\n", sources.size(),
+                (int)(std::find(sources.begin(), sources.end(), "Sphere") != sources.end()), (int)(std::find(sources.begin(), sources.end(), "Cube") == sources.end()));
+    CHECK(std::find(sources.begin(), sources.end(), "Sphere") != sources.end() && std::find(sources.begin(), sources.end(), "Cube") == sources.end());
+    const bool opened = click("scatter:source");
+    const bool picked = opened && click("menu:Sphere");
+    std::printf("    the Source dropdown opened %d, Sphere clicked %d: source '%s'\n", (int)opened, (int)picked, ed.scatter_brush_for_test().source.c_str());
+    CHECK(ed.scatter_brush_for_test().source == "Sphere");
+    /* The mask by layer name, once the Cube has a surface. */
+    ed.command("surface new MaskSurf");
+    ed.step_frame_headless();
+    const std::vector<std::string> masks = ed.scatter_mask_choices_for_test();
+    std::printf("    mask choices: %zu ('%s' first, '%s' next)\n", masks.size(), masks.empty() ? "" : masks[0].c_str(), masks.size() > 1 ? masks[1].c_str() : "");
+    CHECK(masks.size() >= 2 && masks[0] == "None" && masks[1].rfind("0: ", 0) == 0);
+    if (masks.size() >= 2 && click("scatter:mask") && click("menu:" + masks[1])) std::printf("    mask layer after the click: %d\n", ed.scatter_brush_for_test().mask_layer);
+    CHECK(ed.scatter_brush_for_test().mask_layer == 0);
+    ed.command("scatter off");
+    /* Strokes: an image in the project, picked as the cards' alpha; Fill Canopy. */
+    ed.command("strokeobj on");
+    ed.command("strokeobj new");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const bool alpha_open = click("strokes:alpha");
+    std::string leaf_rel;
+    for (const auto &kv : ed.ui_for_test().button_rects)
+      if (kv.first.find("leaf284.png") != std::string::npos && kv.first.rfind("menu:", 0) == 0) leaf_rel = kv.first;
+    if (leaf_rel.empty()) {
+      size_t rows = 0;
+      std::string some;
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind("menu:", 0) == 0 && rows++ < 3) some += " '" + kv.first + "'";
+      std::printf("    (the Alpha list: %zu rows recorded%s; the leaf on disk %d)\n", rows, some.c_str(), (int)fs::exists(img));
+    }
+    const bool alpha_picked = alpha_open && !leaf_rel.empty() && click(leaf_rel);
+    std::printf("    the Alpha dropdown opened %d, the leaf listed '%s' and clicked %d: alpha '%s'\n", (int)alpha_open, leaf_rel.c_str(), (int)alpha_picked, ed.strokeobj_alpha_for_test().c_str());
+    CHECK(ed.strokeobj_alpha_for_test().find("leaf284.png") != std::string::npos);
+    const size_t before = ed.strokeobj_cards_for_test();
+    const bool filled = click("strokes:Fill Canopy");
+    const size_t after = ed.strokeobj_cards_for_test();
+    std::printf("    Fill Canopy clicked %d: %zu -> %zu cards\n", (int)filled, before, after);
+    CHECK(filled && after >= before + 100);
+    std::remove(img.c_str());
+  });
+}
+
 static void tests_round281() {
   test("onboarding and transfer (ADR 0085, task 0261): the Adobe preset's keys; [ ] step the active brush by a quarter and nothing with no brush on; every theme's WCAG contrast printed and the High Contrast theme's at 4.5 or more; the welcome's origin sets the keys and the feel", [] {
     /* The Adobe preset. */
@@ -5629,5 +6153,12 @@ void run_editor_tests() {
   tests_round279();
   tests_round280();
   tests_round281();
+  tests_round284();
+  tests_round285();
+  tests_round286();
+  tests_round287();
+  tests_round288();
+  tests_round289();
+  tests_round290();
   coverage_tests();
 }

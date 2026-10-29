@@ -1017,6 +1017,21 @@ bool Editor::paint_update(const Recti &view) {
   return true;
 }
 
+/* Task 0269: a brush's ring. Erasing, it is dashed with an E beside it - the state by shape and letter, not the colour
+ * alone (WCAG 1.4.1): the warning colour still says it to those who see it. */
+void Editor::draw_brush_ring(float x, float y, float r, bool erasing, uint32_t color) {
+  auto &u = ui_;
+  brush_ring_erasing_ = erasing;
+  if (!erasing) return u.canvas.circle(x, y, r, color, 1.5f);
+  const int n = std::max(8, std::min(96, (int)(r * 0.35f))) * 2;
+  for (int i = 0; i < n; i += 2) {
+    const float a0 = 6.2831853f * (float)i / (float)n, a1 = 6.2831853f * (float)(i + 1) / (float)n;
+    u.canvas.line(x + r * std::cos(a0), y + r * std::sin(a0), x + r * std::cos(a1), y + r * std::sin(a1), u.theme.warning, 2.0f);
+  }
+  const int s = u.px(16);
+  u.label({(int)(x + r * 0.72f) + u.px(2), (int)(y - r * 0.72f) - s, s, s}, "E", u.theme.warning);
+}
+
 void Editor::paint_draw(const Recti &view) {
   paint_stencil_draw(view);
   if (!paint_ || !scene_hovered_) return;
@@ -1024,7 +1039,7 @@ void Editor::paint_draw(const Recti &view) {
   const float r = paint_brush_.radius * u.scale;
   const Vec2 c((float)u.in.mx, (float)u.in.my);
   if (c.x < view.x || c.y < view.y || c.x > view.right() || c.y > view.bottom()) return;
-  u.canvas.circle(c.x, c.y, r, paint_erase_ || u.in.eraser ? u.theme.warning : u.theme.accent);
+  draw_brush_ring(c.x, c.y, r, paint_brush_.erase || paint_erase_ || u.in.eraser, u.theme.accent);  // (the brush's own Erase too: paint_erase_ is set when a stroke begins)
   u.canvas.circle(c.x, c.y, std::max(1.0f, r * std::max(0.0f, std::min(0.99f, paint_brush_.hardness))), u.theme.text_dim);
 }
 

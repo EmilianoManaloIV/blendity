@@ -631,7 +631,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   auto &c = ui_.canvas;
   int mh = ui_.row_h() + ui_.px(2);
   int th = ui_.px(36);
-  int sh = ui_.row_h();
+  int sh = tablet_ ? std::max(ui_.row_h(), ui_.px(34)) : ui_.row_h();  // (task 0270: its buttons 7 mm tall for a pen in Tablet Mode)
   Recti menubar{0, 0, fb_.width, mh};
   Recti toolbar{0, mh, fb_.width, th};
   Recti status{0, fb_.height - sh, fb_.width, sh};
@@ -924,8 +924,8 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Create Empty", key("object.create_empty").c_str())) create_object("Empty");
     if (u.menu_item("Create Empty Child", key("object.create_empty_child").c_str(), false, has_sel)) create_object("Empty", true);
     /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
-    if (shows(FocusCreate | FocusDraw | FocusEdit | FocusRig))
-      u.submenu("3D Object", u.px(170), [this] {
+    /* Task 0267: in every layout - the walkthrough's first step (add a cube) failed in the other layouts. */
+    u.submenu("3D Object", u.px(170), [this] {
         for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
@@ -1072,7 +1072,7 @@ void Editor::draw_menubar(const Recti &r) {
       if (u.menu_item("N-gon Mode (SketchUp)", nullptr, ngon_mode_)) ngon_mode_ = !ngon_mode_;
       u.tooltip("A flat region of faces acts as one face: its inner edges hide and a click selects all of it.\n"
                 + std::string("Merge Coplanar turns those regions into real n-gons; the Knife (") + key("mesh.knife") + ") splits them again.");
-      if (u.menu_item("Adjust Last Operation", key("edit.adjust_last").c_str(), last_op_open_)) last_op_open_ = !last_op_open_;
+      if (u.menu_item("Adjust Last Operation", key("edit.adjust_last").c_str(), last_op_open_)) run_action("edit.adjust_last");  // (task 0266: as F9, the object panel too)
       u.menu_separator();
     }
     if (!edit_mode_) {
@@ -1990,6 +1990,7 @@ size_t Editor::undo_bytes() const {
 
 void Editor::undo() {
   if (playing_) return;
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();  // (its item may not be where it was)
   sketch_layers_reset();  // (task 0234)
   cancel_skin_job();  // (its result was solved for the state being undone)
@@ -2043,6 +2044,7 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
 
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();
   sketch_layers_reset();  // (task 0234)
   cancel_skin_job();
@@ -2062,6 +2064,7 @@ void Editor::redo() {
 /* ===================================================================== */
 
 void Editor::new_scene() {
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   set_sculpt(false);
   sketch_layers_reset();  // (task 0234: a solo or a rename is an index into this scene's stack)
@@ -2091,6 +2094,7 @@ void Editor::new_scene() {
 }
 
 bool Editor::open_scene(const std::string &path) {
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);
   set_sculpt(false);
   cancel_skin_job();
@@ -2551,17 +2555,128 @@ std::vector<std::pair<MaterialPtr, bool>> Editor::texture_followers(const std::s
 /* File > Export (Blender: File > Export; Unity: the FBX Exporter). The
  * selection - or the whole scene - with world transforms baked in, materials
  * and UVs, in any of the formats Blender exports meshes to. */
+/* Task 0268: a skinned mesh's rig for glTF - the armature's objects as joints (each bone at its rest, anything else
+ * where it stands), the mesh's vertex groups as each vertex's four strongest joints, and the clip of the Animation
+ * component above the armature sampled at every frame (the scene's pose put back after). */
+std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin) {
+  auto sk = std::make_shared<ExportSkin>();
+  sk->base = armature_base(arm);
+  sk->base_name = arm.parent ? arm.parent->name + " Skeleton" : std::string("Skeleton");
+  std::vector<GameObject *> objs;
+  std::vector<std::pair<GameObject *, int>> stack{{&arm, -1}};
+  while (!stack.empty() && objs.size() < 4096) {
+    auto [g, parent] = stack.back();
+    stack.pop_back();
+    ExportSkin::Joint j;
+    j.name = g->name, j.parent = parent;
+    const Bone *b = g->get<Bone>();
+    const Transform &l = g->local();
+    j.t = b ? b->rest_position : l.position, j.r = b ? b->rest_rotation : l.rotation, j.s = b ? b->rest_scale : l.scale;
+    const int me = (int)sk->joints.size();
+    sk->joints.push_back(j);
+    objs.push_back(g);
+    for (size_t c = g->children.size(); c-- > 0;) stack.push_back({g->children[c], me});
+  }
+  /* The weights as the Skin modifier deforms: deforming bones with an invertible rest, at most its Max Influences (and
+   * four, glTF's), its vertex group limiting which vertices follow. A vertex that follows no bone stays at rest in
+   * Blendity: in the file it follows the mesh's own object (a joint when the mesh sits under the rig) or the first
+   * joint, with weight 1 - glTF's weights must add up to 1 (all zeros collapse to the origin in most engines). */
+  std::unordered_map<std::string, int> by_name;
+  int still = 0;
+  for (size_t k = 0; k < objs.size(); k++) {
+    if (objs[k] == &owner) still = (int)k;
+    const Bone *b = objs[k]->get<Bone>();
+    if (!b || !b->deform) continue;
+    const Mat4 rm = b->rest_matrix();
+    const float det = dot(cross(rm.column(0), rm.column(1)), rm.column(2));
+    if (std::fabs(det) > 1e-12f && finite_bits(det)) by_name.emplace(objs[k]->name, (int)k);
+  }
+  std::vector<int> group_joint(m.vertex_groups.size(), -1);  // (each group's joint looked up once)
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    const auto it = by_name.find(m.vertex_groups[gi].name);
+    if (it != by_name.end()) group_joint[gi] = it->second;
+  }
+  bool invert = false;
+  const std::string *limit = skin.limit_group(invert);
+  const int limit_gi = limit && !limit->empty() ? m.find_group(*limit) : -1;
+  const size_t most = (size_t)std::max(1, std::min(4, skin.max_influences));
+  sk->vjoints.assign(m.vert_count(), {(uint16_t)still, 0, 0, 0});
+  sk->vweights.assign(m.vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+  std::vector<std::pair<float, int>> w;
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    if (limit_gi >= 0) {
+      const std::vector<float> &lw = m.vertex_groups[(size_t)limit_gi].weights;
+      const bool in_group = v < lw.size() && lw[v] > 0.0f;
+      if (in_group == invert) continue;  // (left out by the modifier's group: at rest)
+    }
+    w.clear();
+    for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+      const std::vector<float> &gw = m.vertex_groups[gi].weights;
+      if (group_joint[gi] >= 0 && v < gw.size() && gw[v] > 0.0f && finite_bits(gw[v])) w.push_back({gw[v], group_joint[gi]});
+    }
+    if (w.empty()) continue;
+    std::sort(w.begin(), w.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    float sum = 0.0f;
+    for (size_t k = 0; k < w.size() && k < most; k++) sum += w[k].first;
+    sk->vjoints[v] = {0, 0, 0, 0}, sk->vweights[v] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (size_t k = 0; k < w.size() && k < most; k++) sk->vjoints[v][k] = (uint16_t)w[k].second, sk->vweights[v][k] = w[k].first / sum;
+  }
+  /* The clip: the Animation component on the armature or above it. */
+  GameObject *root = &arm;
+  while (root && !(root->get<Animation>() && !root->get<Animation>()->clip.empty())) root = root->parent;
+  const AnimationClipPtr clip = root ? clip_asset(root->get<Animation>()->clip) : nullptr;
+  if (!clip || clip->tracks.empty()) return sk;
+  /* What sampling will write, kept to put back: every transform under the root (the whole Transform, its Inspector
+   * angles too) and every other number the clip's tracks name (a light's intensity, a component's field). */
+  std::vector<std::pair<GameObject *, Transform>> saved;
+  std::vector<GameObject *> under{root};
+  while (!under.empty()) {
+    GameObject *g = under.back();
+    under.pop_back();
+    saved.push_back({g, g->local()});
+    for (GameObject *c : g->children) under.push_back(c);
+  }
+  std::vector<std::tuple<GameObject *, std::string, int, float>> numbers;
+  for (const AnimTrack &tr : clip->tracks) {
+    if (tr.property == "Position" || tr.property == "Rotation" || tr.property == "Scale") continue;
+    GameObject *g = anim_target(*root, tr.path);
+    float v = 0.0f;
+    if (g && read_anim_value(*g, tr.property, tr.axis, v)) numbers.emplace_back(g, tr.property, tr.axis, v);
+  }
+  ExportSkin::Anim an;
+  an.name = clip->name, an.fps = clip->frame_rate > 0.0f ? clip->frame_rate : 30.0f;
+  an.frames = std::max(1, std::min(100000, (int)std::ceil(std::max(clip->length, clip->end_frame())) + 1));  // (keys past the length too)
+  an.t.assign(objs.size(), {}), an.r.assign(objs.size(), {}), an.s.assign(objs.size(), {});
+  for (int f = 0; f < an.frames; f++) {
+    apply_clip(*clip, *root, (float)f);
+    for (size_t k = 0; k < objs.size(); k++) {
+      const Transform &l = objs[k]->local();
+      an.t[k].push_back(l.position), an.r[k].push_back(l.rotation), an.s[k].push_back(l.scale);
+    }
+  }
+  for (auto &[g, t] : saved) g->set_local(t);
+  for (auto &[g, prop, axis, v] : numbers) write_anim_value(*g, prop, axis, v);
+  sk->anims.push_back(std::move(an));
+  return sk;
+}
+
 std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
   std::vector<ExportItem> items;
   auto add = [&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mf = g.get<MeshFilter>();
-    const Mesh *m = o.apply_modifiers ? g.evaluated_mesh() : (mf && mf->mesh ? mf->mesh.get() : nullptr);
+    /* Task 0268: a skinned mesh in glTF goes at rest with its rig (the skin is the file's to apply). */
+    const bool gltf = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF;
+    const SkinModifier *skm = o.skins && gltf ? g.get<SkinModifier>() : nullptr;
+    GameObject *arm = skm && !skm->object.empty() ? scene_->find_by_name(skm->object) : nullptr;
+    if (arm && !arm->get<Armature>()) arm = nullptr;
+    const Mesh *m = arm && mf && mf->mesh ? mf->mesh.get() : o.apply_modifiers ? g.evaluated_mesh() : (mf && mf->mesh ? mf->mesh.get() : nullptr);
     if (!m || !m->face_count()) return;
     ExportItem it;
     it.name = g.name;
     it.mesh = m;
     it.world = g.world_matrix();
+    if (arm) it.skin = export_skin_of(*arm, *m, g, *skm);
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
     items.push_back(it);
     /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
@@ -3102,6 +3217,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   if (parent) expanded_.insert(parent->id);
   select(g->id);
   mark_changed("Create " + kind);
+  record_primitive_last(g, kind);  // (task 0266: its size and segments in the Adjust Last panel)
   return g;
 }
 
@@ -3514,6 +3630,7 @@ int Editor::startup_check() {
 }
 
 void Editor::enter_play() {
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   sculpt_remesh_cancel();  // (task 0241: Play clones the scene; a result landing in the clone would be thrown away by Stop)
   set_weight_paint(false);
   set_sculpt(false);  // (task 0236: the stable clone shares meshes)

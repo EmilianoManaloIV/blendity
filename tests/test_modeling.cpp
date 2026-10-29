@@ -6718,7 +6718,8 @@ static void tests_round112() {
     for (size_t k = 0; k < a.indices.size(); k++) {
       const uint32_t i = a.indices[k], j = b.indices[k];
       if (std::memcmp(&a.positions[i], &b.positions[j], sizeof(Vec3)) != 0) return fail(strprintf("position at triangle corner %zu", k));
-      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0) return fail(strprintf("normal at triangle corner %zu", k));
+      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0)
+        return fail(strprintf("normal at triangle corner %zu: (%a %a %a) in place, (%a %a %a) rebuilt", k, a.normals[i].x, a.normals[i].y, a.normals[i].z, b.normals[j].x, b.normals[j].y, b.normals[j].z));
       if (uv && std::memcmp(&a.uvs[i], &b.uvs[j], sizeof(Vec2)) != 0) return fail(strprintf("UV at triangle corner %zu", k));
     }
     return true;
@@ -6874,7 +6875,15 @@ static void tests_round112() {
     GameObject *cube = ed.scene().find_by_name("Cube");
     CHECK(cube != nullptr);
     if (!cube) return;
-    cube->get<MeshRenderer>()->material(0)->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    /* The cube's own copy of its material (no asset path): the shared Default-Material was saved with this missing map
+     * and every later test in the project warned "cannot read none.png" (the toast test's leftover warning). */
+    auto own = std::make_shared<Material>(*cube->get<MeshRenderer>()->material(0));
+    own->asset_path.clear();
+    own->name = "R34 Normal Mapped";
+    own->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    auto &slots = cube->get<MeshRenderer>()->materials;
+    if (slots.empty()) slots.push_back(own);
+    else slots[0] = own;
     ed.command("select Cube");
     ed.command("edit vertex");
     ed.command("vsel 0 1 2 3 4 5 6 7");

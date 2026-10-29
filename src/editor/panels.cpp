@@ -3342,6 +3342,44 @@ void Editor::draw_show_more(ui::Layout &lay, const std::string &type, int hidden
 }
 
 /* Paint Mode's toggle and brush (task 0245), in the Modeling Tools window's Paint section. */
+/* A labelled dropdown row in a tool section (task 0264); its rectangle recorded for the tests under `key`. */
+bool Editor::tool_combo_row(ui::Layout &lay, const char *label, const char *key, int &cur, const std::vector<std::string> &items) {
+  auto &u = ui_;
+  const Recti r = lay.row(u.row_h() + u.px(2));
+  u.label({r.x + u.px(4), r.y, u.px(92), r.h}, label);
+  std::vector<const char *> names;
+  for (const std::string &s : items) names.push_back(s.c_str());
+  const Recti c{r.x + u.px(98), r.y + u.px(1), r.w - u.px(102), r.h - u.px(2)};
+  if (u.record_buttons) u.button_rects[key] = c;
+  return u.combo(u.id(key), c, cur, names.data(), (int)names.size());
+}
+
+/* Task 0264: what Scatter can copy - every mesh object in the scene but the one being painted on and the scattered
+ * instances themselves (children of a Scatter object). */
+std::vector<std::string> Editor::scatter_source_choices() const {
+  std::vector<std::string> out;
+  const GameObject *target = active_object();
+  scene_->for_each([&](GameObject &g) {
+    if (&g == target || !g.mesh_filter() || !g.mesh_filter()->mesh) return;
+    if (g.parent && g.parent->name.rfind("Scatter", 0) == 0) return;
+    if (std::find(out.begin(), out.end(), g.name) == out.end()) out.push_back(g.name);
+  });
+  return out;
+}
+
+/* Task 0264: the mask's choices - None, then each layer of the painted object's surface by its place and name. */
+std::vector<std::string> Editor::scatter_mask_choices() {
+  std::vector<std::string> out{"None"};
+  std::string why;
+  const ProceduralTexturePtr pt = active_object() ? surface_of(active_object(), &why) : nullptr;
+  if (!pt) return out;
+  for (size_t i = 0; i < pt->layers.size(); i++) {
+    const TextureLayer &l = *pt->layers[i];
+    out.push_back(strprintf("%zu: %s", i, l.name.empty() ? l.type_name() : l.name.c_str()));  // (an unnamed layer by its type, as the Textures window shows it)
+  }
+  return out;
+}
+
 /* The Scatter section (task 0248): the source, the density and the randomness, the mask. */
 void Editor::draw_scatter_tools(ui::Layout &lay) {
   auto &u = ui_;
@@ -3350,8 +3388,22 @@ void Editor::draw_scatter_tools(ui::Layout &lay) {
   Recti row = lay.row(u.row_h() + u.px(2));
   if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, scatter_ ? "Exit Scatter" : "Scatter", scatter_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object to scatter onto.", scatter_, ui::Icon::Vertex)) set_scatter(!scatter_);
   u.tooltip("Paint instances of an object onto surfaces (rocks, tufts, props): name the source below, then dab; the pen's eraser end removes (scatter <object>, scatter on|off).");
+  /* Task 0264: the source and the mask by name, not typed: an Unreal user picks an asset from a list. */
+  const std::vector<std::string> sources = scatter_source_choices();
+  int si = -1;
+  for (size_t i = 0; i < sources.size(); i++)
+    if (sources[i] == scatter_brush_.source) si = (int)i;
+  if (sources.empty()) {
+    row = lay.row(u.row_h() + u.px(2));
+    u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Source: add another mesh to copy (a rock, a tuft)", u.theme.text_dim);
+  }
+  else if (tool_combo_row(lay, "Source", "scatter:source", si, sources) && si >= 0) scatter_brush_.source = sources[(size_t)si];
+  const std::vector<std::string> masks = scatter_mask_choices();
+  std::vector<std::string> masks_shown = masks;
+  int mi = scatter_brush_.mask_layer + 1;
+  if (mi >= (int)masks.size()) masks_shown.push_back(strprintf("%d: (not in this surface)", scatter_brush_.mask_layer)), mi = (int)masks_shown.size() - 1;  // (still set: said so)
+  if (masks_shown.size() > 1 && tool_combo_row(lay, "Mask Layer", "scatter:mask", mi, masks_shown) && mi < (int)masks.size()) scatter_brush_.mask_layer = mi - 1;
   InspectorReflector br(*this, u, lay);
-  br.text("Source", scatter_brush_.source);
   br.field("Density", scatter_brush_.density, 0.1f, 0.0f, 10000.0f);
   br.field("Radius", scatter_brush_.radius, 0.05f, 0.01f, 1000.0f);
   br.field("Scale Min", scatter_brush_.scale_min, 0.01f, 0.001f, 100.0f);
@@ -3361,9 +3413,8 @@ void Editor::draw_scatter_tools(ui::Layout &lay) {
   br.enumeration("Align", scatter_brush_.align, aligns, 2);
   br.field("Tint", scatter_brush_.tint);
   if (scatter_brush_.tint) br.color("Tint Color", scatter_brush_.tint_color);
-  br.field("Mask Layer", scatter_brush_.mask_layer, -1, 64);
   br.help("Density: instances a square metre of the dab's disc, jittered from the seed (a dab is repeatable). Mask Layer: a Paint layer\n"
-          "of the surface's stack whose painted texels keep instances off (a path). The instances are children of one Scatter object:\n"
+          "of the surface's stack, chosen by name above, whose painted texels keep instances off (a path; the list shows once the object has a surface). The instances are children of one Scatter object:\n"
           "select, move or delete them as usual; scatter merge joins them into one mesh for export.");
   row = lay.row(u.row_h() + u.px(2));
   if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Merge Instances", false)) scatter_merge();
@@ -3392,9 +3443,26 @@ void Editor::draw_strokes_tools(ui::Layout &lay) {
     if (s->normals != was) strokeobj_rebuild(*g, "Stroke Normals");
     row = lay.row(u.row_h() + u.px(2));
     if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Canopy Centre from Strokes", false)) strokeobj_command({"strokeobj", "canopy"});
+    /* Task 0264: the canopy's shell of cards from the panel (strokeobj canopyfill). */
+    br.field("Fill Radius", strokeobj_fill_radius_, 0.05f, 0.01f, 100.0f);
+    br.field("Fill Count", strokeobj_fill_count_, 1, 5000);
+    row = lay.row(u.row_h() + u.px(2));
+    const Recti fill{row.x + u.px(4), row.y, row.w - u.px(8), row.h};
+    if (u.record_buttons) u.button_rects["strokes:Fill Canopy"] = fill;
+    if (u.button(fill, "Fill Canopy", false))
+      strokeobj_command({"strokeobj", "canopyfill", strprintf("%g", strokeobj_fill_radius_), std::to_string(strokeobj_fill_count_)});
+    u.tooltip("A shell of cards facing out round the canopy centre: a bush or a tree's crown in one click (strokeobj canopyfill).");
     u.tooltip("Normals: Own shades each card flat; Surface takes the surface's normal under the dab; Canopy points every card away from the centre so a bush of cards shades as one round volume (strokeobj normals, strokeobj canopy).");
   }
-  br.help("Give the material an alpha image (a leaf, a petal, a brush stroke) with strokeobj alpha <image>: the cards are cut out by it.");
+  /* Task 0264: the cards' alpha from the project's images (a leaf, a petal, a brush stroke). */
+  std::vector<std::string> alphas{"None"};
+  int ai = 0;
+  for (const std::string &p : image_assets()) {
+    if (p == strokeobj_alpha_) ai = (int)alphas.size();
+    alphas.push_back(p);
+  }
+  if (tool_combo_row(lay, "Alpha", "strokes:alpha", ai, alphas)) strokeobj_command({"strokeobj", "alpha", ai <= 0 ? std::string("off") : alphas[(size_t)ai]});
+  br.help("Alpha: an image whose transparency cuts the cards out (a leaf, a petal, a brush stroke); the project's images are listed (strokeobj alpha <image>).");
 }
 
 void Editor::draw_paint_tools(ui::Layout &lay) {

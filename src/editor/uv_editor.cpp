@@ -64,6 +64,9 @@ void Editor::uv_op(const std::string &op) {
     Log::warn("UV tools need an object with a MeshFilter (select one, or Tab into Edit Mode)");
     return;
   }
+  /* Task 0266: Adjust Last runs an operator with numbers again from this - a detached copy, not a share of the live mesh
+   * (a share would make the operator copy it, and whatever holds the mesh would see the old one). */
+  const MeshPtr uv_before = op == "unwrap" || op == "smart" || op == "pack" ? mesh_copy_bare(**mp) : nullptr;
   Mesh &m = *mesh_make_mutable(*mp);
   /* Operate on the selected faces in Edit Mode (Blender behaviour), else on everything; only the UV Editor's
    * material slots (task 0186). */
@@ -134,6 +137,7 @@ void Editor::uv_op(const std::string &op) {
   }
   m.touch();
   mark_changed("UV: " + op);
+  if (g && uv_before) record_uv_last(g->id, op, uv_before, pm);  // (task 0266: Unwrap's and Pack's margin, Smart UV's angle)
   if (islands >= 0) Log::info("UV %s: %d island(s) in %.1f ms", op.c_str(), islands, t.ms());
   else Log::info("UV %s done in %.1f ms", op.c_str(), t.ms());
 }
@@ -425,8 +429,10 @@ void Editor::draw_uv_editor(const Recti &r) {
     for (size_t k = 0; k < m.corner_count(); k++)
       if (m.corner_verts[k] == v && std::fabs(m.uvs[k].x - t.x) + std::fabs(m.uvs[k].y - t.y) < 1e-5f) uv_sel_[k] = value;
   };
+  if (hot && (in.touch_pan_x != 0.0f || in.touch_pan_y != 0.0f) && std::isfinite(in.touch_pan_x) && std::isfinite(in.touch_pan_y))
+    uv_pan_ += Vec2(in.touch_pan_x, in.touch_pan_y);  // (task 0265: two fingers pan, as in the Scene view)
   if (uv_drag_ == UvDrag::None && hot) {
-    if (in.pressed[2]) uv_drag_ = UvDrag::Pan;
+    if (in.pressed[2] || (in.pressed[0] && uv_hand_)) uv_drag_ = UvDrag::Pan, uv_pan_button_ = in.pressed[2] ? 2 : 0;
     else if (in.pressed[0] && gizmo_hit(Vec2((float)in.mx, (float)in.my)).mode != UvDrag::None) {
       /* A gizmo handle: that transform, along its axis, about the gizmo's centre. */
       const GizmoHit gh = gizmo_hit(Vec2((float)in.mx, (float)in.my));
@@ -484,7 +490,7 @@ void Editor::draw_uv_editor(const Recti &r) {
     case UvDrag::Pan:
       uv_pan_ += Vec2((float)in.dx(), (float)in.dy());
       u.cursor = platform::Cursor::Hand;
-      if (!in.down[2]) uv_drag_ = UvDrag::None;
+      if (!in.down[uv_pan_button_]) uv_drag_ = UvDrag::None;  // (the button that began it: the middle, or the left with Pan on - task 0265)
       break;
     case UvDrag::Box: {
       Recti box{std::min(uv_press_x_, in.mx), std::min(uv_press_y_, in.my), std::abs(in.mx - uv_press_x_), std::abs(in.my - uv_press_y_)};
@@ -834,6 +840,14 @@ void Editor::draw_uv_tool_row(const Recti &bar) {
     if (u.button({x, y, w, h}, kModes[k], uv_select_mode_ == k)) uv_select_mode_ = k;
     u.tooltip(k == 0 ? "Pick UV vertices (1)." : k == 1 ? "Pick whole faces: click inside one, box by centre (2)." : "Pick whole islands: click any face of one; drag to move it (3).");
     x += w + u.px(2);
+  }
+  {
+    const int pw = u.font.text_width("Pan") + u.px(14);  // (task 0265: a pen has no middle button)
+    const Recti pr{x + u.px(4), y, pw, h};
+    if (u.record_buttons) u.button_rects["uv:Pan"] = pr;
+    if (u.button(pr, "Pan", uv_hand_)) uv_hand_ = !uv_hand_;
+    u.tooltip("Pan: while on, a left drag (a pen, a finger) moves the view; the middle button and two fingers always do.");
+    x += pw + u.px(6);
   }
   {
     const int w = u.font.text_width("Sync") + u.px(14);
