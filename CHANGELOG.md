@@ -2,6 +2,66 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 293): texturing and bakes without the console (task 0273)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems.
+
+**Added**
+- **New Surface** in the GameObject menu, the Textures window's New, the palette and the Texturing guide.
+- **A layer's menu**: Mask Preset, Clear Mask, Group with the Layer Below, Save as Smart Material...; the shelf lists
+  the project's saved smart materials.
+- **A Bake dialog** (size, samples, Keep UVs) for Bake Mesh Maps... and Bake Textures....
+- **Review (Opus) taken:** the path row and the folder dialog were never used - Export Textures' folder has the
+  field and its ... (and a click away from the field no longer exports); Save as Smart Material wrote over a saved
+  file of the same name - a dialog offers a free name and says when Replace would write over one, and the item is
+  for Group layers only; the Bucket filled on a click that missed the model and stayed on after Paint; the palette's
+  name refilled while typed; Bake Textures kept UVs by default; the Layer list offered layers the brush ignores; the
+  shelf and the Palettes list read the disk every frame; Load Mesh Maps' Fix started a bake without asking; the
+  folder dialog is Windows' IFileOpenDialog.
+
+**Checked**
+- `tests_round293`: New Surface, the layer menu's four items and the Bake dialog by clicks; the review's fixes (Export
+  Textures' folder typed and ..., a Fix clicked with the Scene view hidden, a Bucket miss).
+- Unit checks (round 293): Windows, in render-cache verify mode, 13309, 0 failed (1149 tests), 0 stale
+  pictures. Linux with libraries: 12849, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone: timing noise.)
+
+## 2026-10-29 (round 292): Sculpt and Paint without the console (task 0272)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems.
+
+**Added**
+- **Sculpt**: an Alpha picker, Fill / Sharpen / Grow / Shrink Mask, groups From Materials and Merge All, Hide Unmasked,
+  Invert Hidden, Show All, Hide Group.
+- **Paint**: Bucket Fill (group, island, material, object; a gradient), Bake Light and Bake Gradient, Brush Alpha,
+  Grain and Stencil pickers, Paint on Textures Canvas, the Layer list, Palettes load and Save Palette, a right-click
+  removing a swatch; the gradient and the light bake refused with Load or Bake Mesh Maps as the Fix.
+
+**Checked**
+- `tests_round292`: masks, groups and hiding by clicks; a project image as the alpha; a Bucket click on the cube; the
+  palette saved and a swatch removed.
+- Round 293's unit-check line covers this round (rounds 291 to 293 landed together).
+
+## 2026-10-29 (round 291): pickers, a Report dialog, refusals with a Fix, messages that name the interface (task 0271)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems.
+
+**Added**
+- **Pickers**: an image row (None, Browse..., the project's images) and a path field with a ... button for the
+  system's file or folder dialog (a new folder dialog on Windows, Linux and macOS).
+- **A Report dialog** shows what UV Report and Scene Statistics printed, with Copy.
+- **Refusals with a Fix**: stop Play, cancel the running job, open the window or turn on the setting asked for.
+- **Messages name the interface** instead of a console command; toasts and their Fix show when another tab hides
+  the Scene view; `tools/hci_console_audit.py` counts what still sends the artist to the Console.
+
+**Checked**
+- `tests_round291`: a report and its Copy; Fix: Stop Play, Turn Realtime GI on and Cancel the bake by clicks; Browse...
+  with no file dialog says how else.
+- Round 293's unit-check line covers this round (rounds 291 to 293 landed together).
+
 ## 2026-10-28 (round 290): the pen's targets at 7 mm in Tablet Mode, asserted; the hint's help (task 0270)
 
 **Asked:** the user (2026-10-28): start and finish all the follow-up work round 282's walkthroughs and audits

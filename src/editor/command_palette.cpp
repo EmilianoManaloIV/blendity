@@ -29,7 +29,7 @@ const Curated kCurated[] = {
     {"Smart UV Project", "UV", "Group faces by normal, project and pack: no seams needed.", "uv smart"},
     {"Part Unwrap", "UV", "PartUV's charts by parts under a stretch bound.", "uv parts"},
     {"Pack Islands", "UV", "Pack the UV islands into the 0-1 square.", "uv pack"},
-    {"UV Report", "UV", "Charts, seam length and stretch of the selected mesh's UVs (in the Console).", "uv report"},
+    {"UV Report", "UV", "Charts, seam length and stretch of the selected mesh's UVs, in a report.", "report uv report"},
     {"Render Preview", "Render", "A quick render at the preview settings.", "preview"},
     {"Save Render", "Render", "Save the last render to Renders/.", "saverender"},
     {"Generate Lighting", "Lighting", "Bake the scene's lightmaps.", "bake start"},
@@ -41,10 +41,13 @@ const Curated kCurated[] = {
     {"Separate Loose Parts", "Mesh", "One object per loose part of the selected mesh.", "separate loose"},
     {"Apply Modifiers", "Mesh", "Bake the selected object's modifiers into its mesh.", "applymods"},
     {"New Material Asset", "Materials", "A material asset from the selection's first material.", "newmat"},
+    {"New Surface", "Texturing", "A layered surface on the selected object's material (Paint and smart materials work on it).", "surface new"},
+    {"Bake Mesh Maps...", "Texturing", "The object's normal, curvature, occlusion and thickness in its UVs: what the masks read.", "bakedialog maps"},
+    {"Bake Textures...", "Texturing", "The object's look baked into plain images.", "bakedialog textures"},
     {"Preferences", "Edit", "Preferences.", "preferences"},
     {"Manual", "Help", "The user manual.", "manual"},
     {"References", "Help", "The papers behind Blendity's features (Learn).", "references"},
-    {"Scene Statistics", "Help", "Objects, vertices and faces (in the Console).", "stats"},
+    {"Scene Statistics", "Help", "Objects, vertices and faces, in a report.", "report stats"},
     {"Bring Windows Back", "Windows", "Every window's tabs back into the main window.", "dock bringback"},
 };
 

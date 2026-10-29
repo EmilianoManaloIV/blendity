@@ -660,7 +660,10 @@ void Editor::frame_body(std::vector<Event> &events) {
   draw_toolbar(toolbar);
   dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
+  if (toasts_on_dock_) toasts_update(dock_area);  // (task 0271: drawn over the dock last frame - its clicks are taken here, before the windows)
   dock_draw(dock_.get());
+  toasts_on_dock_ = !scene_drawn_;
+  if (toasts_on_dock_) draw_toasts(dock_area);  // (in Play or a layout without the Scene view, a refusal and its Fix still show)
   if (sculpt_stroking_ && !scene_drawn_) sculpt_end_stroke();  // (task 0236: the Scene view stopped drawing mid-stroke - a tab switch: the stroke ends as it is)
   if (sculpt_gesture_ && !scene_drawn_) sculpt_gesture_ = false;  // (task 0238: a Ctrl gesture the same way, dropped)
   sculpt_remesh_poll();  // (task 0241: a finished Quad Remesh lands as a step)
@@ -967,7 +970,7 @@ void Editor::draw_menubar(const Recti &r) {
     }
     if (shows(FocusRig)) {
       if (u.menu_item("Armature")) create_object("Armature");
-      u.tooltip("A skeleton: a root with one bone (add more with the console's `bone add`). Select a mesh first and it gets\n"
+      u.tooltip("A skeleton: a root with one bone (add more with the Rigging window's Add Bone). Select a mesh first and it gets\n"
                 "a Skin modifier with automatic weights. Blender: Add > Armature.");
     }
     if (shows(FocusRig))
@@ -994,25 +997,16 @@ void Editor::draw_menubar(const Recti &r) {
                   "Blender: Options > Affect Only > Origins.");
     });
     if (shows(FocusMaterial)) {
-      u.submenu("Bake Textures", u.px(200), [this, has_sel] {
-        for (int size : {512, 1024, 2048, 4096})
-          if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) bake_object_textures(size);
-      });
+      if (u.menu_item("New Surface", nullptr, false, has_sel)) surface_new("");  // (task 0273)
+      u.tooltip("A layered surface on the selected object's material: Paint, the smart materials and the masks work on it.");
+      if (u.menu_item("Bake Textures...", nullptr, false, has_sel)) bake_mode_ = 1, dialog_ = Dialog::Bake;  // (task 0273: the size and Keep UVs in a dialog)
       u.tooltip("Bake the active object's look (procedural textures, axis materials, Box mapping, every material slot) into\n"
                 "one set of images on new UVs, and give it a material that uses them: what it looks like, as plain images\n"
-                "any program shows. Undo restores it. Blender: Cycles Bake. (Console: baketex [size] [keepuvs])");
-      u.submenu("Bake Mesh Maps", u.px(200), [this, has_sel] {  // (task 0243)
-        for (int size : {512, 1024, 2048})
-          if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) {
-            MeshMapsSettings s = meshmaps_settings_;
-            s.size = size;
-            meshmaps_settings_ = s;
-            bake_mesh_maps_start(s);
-          }
-      });
+                "any program shows. Undo restores it. Blender: Cycles Bake.");
+      if (u.menu_item("Bake Mesh Maps...", nullptr, false, has_sel)) bake_mode_ = 0, dialog_ = Dialog::Bake;  // (tasks 0243, 0273)
       u.tooltip("Bake the active object's geometry into its UV layout - world normal, position, curvature, ambient occlusion,\n"
                 "thickness - on a worker, the images under Assets/Textures/MeshMaps: what the layer stack's generators read\n"
-                "(Substance Painter's mesh maps). (Console: meshmaps [size] [samples] [keepuvs])");
+                "(Substance Painter's mesh maps).");
     }
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
@@ -2132,7 +2126,7 @@ void Editor::save_scene_cmd(bool save_as) {
   save_dirty_sequence_assets();
   if (playing_) {
     after_save_ = nullptr;  // (task 0254: nothing waits on a save that did not happen)
-    Log::warn("Cannot save while in Play mode (Unity has the same rule). Press Stop first.");
+    refuse("Cannot save while in Play mode (Unity has the same rule). Press Stop first.", "stop", "Stop Play");
     return;
   }
   commit_undo();  // an edit this frame: its vertex groups mended before they are written
@@ -2290,8 +2284,8 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
    * or stretch the base's images, so they are refused. */
   const Mesh *ev = g->evaluated_mesh();
   if (ev && ev != mf->mesh.get() && (ev->corner_verts.size() != mf->mesh->corner_verts.size() || ev->face_count() != mf->mesh->face_count())) {
-    Log::warn("Bake Textures: %s's modifiers add or remove geometry; apply them first (Mesh > Apply Modifiers), or use "
-              "File > Export with Bake Textures, which bakes what it exports", g->name.c_str());
+    refuse(strprintf("Bake Textures: %s's modifiers add or remove geometry; apply them first (Mesh > Apply Modifiers), or use "
+                     "File > Export with Bake Textures, which bakes what it exports", g->name.c_str()), "applymods", "Apply Modifiers");
     return false;
   }
   const Mesh &source = ev ? *ev : *mf->mesh;
@@ -3040,6 +3034,71 @@ void Editor::draw_first_run_tier(const std::function<void()> &close) {
   close();
 }
 
+/* Task 0273: the bakes' settings - the size, the samples (mesh maps), the UVs kept or laid out anew. */
+void Editor::draw_bake_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  static const char *kSizes[] = {"512", "1024", "2048", "4096"};
+  int si = bake_size_ <= 512 ? 0 : bake_size_ <= 1024 ? 1 : bake_size_ <= 2048 ? 2 : 3;
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  u.label({r.x + u.px(12), r.y, u.px(110), r.h}, "Size");
+  const Recti sc{r.x + u.px(126), r.y + u.px(2), u.px(110), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["bake:size"] = sc;
+  if (u.combo(u.id("bake_size"), sc, si, kSizes, 4)) bake_size_ = std::atoi(kSizes[si]);
+  if (bake_mode_ == 0) {
+    r = u.popup_row(u.row_h() + u.px(4));
+    u.label({r.x + u.px(12), r.y, u.px(110), r.h}, "Samples");
+    const Recti sf{r.x + u.px(126), r.y + u.px(2), u.px(110), r.h - u.px(4)};
+    if (u.record_buttons) u.button_rects["bake:samples"] = sf;
+    u.int_field(u.id("bake_samples"), sf, bake_samples_, 4, 64);
+    u.tooltip("Rays a texel for the occlusion and the thickness: more is smoother and slower.");
+  }
+  r = u.popup_row(u.row_h() + u.px(4));
+  const Recti kc{r.x + u.px(12), r.y + u.px(2), u.row_h() - u.px(4), u.row_h() - u.px(4)};
+  if (u.record_buttons) u.button_rects["bake:keep"] = kc;
+  bool &keep = bake_mode_ == 1 ? bake_keep_uvs_textures_ : bake_keep_uvs_;  // (each bake its own: Bake Textures makes new UVs unless asked)
+  u.checkbox(kc, keep);
+  u.label({kc.right() + u.px(6), r.y, r.w - u.px(40), r.h}, "Keep the mesh's UVs (when they lie in 0-1 and don't overlap)", u.theme.text_dim);
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti go{b.right() - u.px(184), b.y + u.px(4), u.px(84), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["bake:Bake"] = go, u.button_rects["bake:Cancel"] = cancel;
+  if (u.button(cancel, "Cancel")) return close();
+  if (!u.button(go, "Bake")) return;
+  close();
+  if (bake_mode_ == 1) return (void)bake_object_textures(bake_size_, bake_keep_uvs_textures_);
+  MeshMapsSettings s = meshmaps_settings_;
+  s.size = bake_size_, s.samples = std::max(4, std::min(64, bake_samples_)), s.keep_uvs = bake_keep_uvs_;
+  meshmaps_settings_ = s;
+  bake_mesh_maps_start(s);
+}
+
+/* Save as Smart Material (task 0273): the name, said when it would replace a saved one; Save writes the layer. */
+void Editor::draw_smat_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  Recti r = u.popup_row(u.row_h() + u.px(8));
+  u.label({r.x + u.px(12), r.y, u.px(90), r.h}, "Name");
+  bool done = false;
+  const Recti fr{r.x + u.px(106), r.y + u.px(3), r.w - u.px(120), r.h - u.px(6)};
+  if (u.record_buttons) u.button_rects["smat:name"] = fr;
+  u.text_field(u.id("smat_name"), fr, dialog_text_, &done);
+  const std::string file = smat_file_name(dialog_text_);
+  const bool exists = !file.empty() && fs::exists(resolve_asset_path("Assets/Materials/Smart/" + file + ".smat"));
+  r = u.popup_row();
+  u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h},
+          exists ? "A smart material of this name is saved: Replace writes over it." : "Saved under Assets/Materials/Smart; the shelf lists it.",
+          exists ? u.theme.accent : u.theme.text_dim);
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti go{b.right() - u.px(184), b.y + u.px(4), u.px(84), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["smat:Save"] = go, u.button_rects["smat:Cancel"] = cancel;
+  if (u.button(cancel, "Cancel")) return close();
+  const bool save = u.button_enabled(go, exists ? "Replace" : "Save", !file.empty(), "Name it.") || (done && !file.empty() && !exists);
+  if (!save) return;
+  ProceduralTexturePtr pt = texture_asset(smat_asset_);
+  const std::string name = dialog_text_;
+  close();
+  if (!pt || smat_layer_ < 0 || smat_layer_ >= (int)pt->layers.size()) return refuse("Save as Smart Material: the layer is gone", "", "");
+  smat_write(pt->layers[(size_t)smat_layer_]->clone(), name);
+}
+
 /* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
 void Editor::set_theme(const std::string &name_in, bool save) {
   const int k = ui::theme_index(name_in);
@@ -3695,7 +3754,7 @@ void Editor::draw_dialogs() {
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
   const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
                     dialog_ == Dialog::MoonRay || dialog_ == Dialog::Ai;
-  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : wide || dialog_ == Dialog::Report ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -3707,6 +3766,7 @@ void Editor::draw_dialogs() {
     u.open_popup(id, anchor);
     if (dialog_ == Dialog::SaveAs) u.begin_edit(u.id("saveas_name"), dialog_text_, true);
     if (dialog_ == Dialog::ExportTextures) u.begin_edit(u.id("exptex_dir"), dialog_text_, true);
+    if (dialog_ == Dialog::SaveSmat) u.begin_edit(u.id("smat_name"), dialog_text_, true);
     dialog_files_.clear();
     if (dialog_ == Dialog::OpenScene) scan_files(assets_dir_, ".scene", dialog_files_);
     if (dialog_ == Dialog::ImportObj) {
@@ -3801,6 +3861,14 @@ void Editor::draw_dialogs() {
           close();
         });
         break;
+      case Dialog::Bake:  // (task 0273)
+        title(bake_mode_ == 0 ? "Bake Mesh Maps" : "Bake Textures");
+        draw_bake_dialog(close);
+        break;
+      case Dialog::Report:  // (task 0271)
+        title(report_title_.c_str());
+        draw_report_dialog(close);
+        break;
       case Dialog::FirstRunTier:
         title(welcome_low_ ? "Welcome: Blendity starts on Low here" : "Welcome to Blendity");
         draw_first_run_tier(close);
@@ -3827,10 +3895,12 @@ void Editor::draw_dialogs() {
         u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, kPackingMaps[export_packing_], u.theme.text_dim);
         r = u.popup_row(u.row_h() + u.px(8));
         u.label({r.x + u.px(12), r.y, u.px(90), r.h}, "Folder");
-        bool done = false;
-        u.text_field(u.id("exptex_dir"), {r.x + u.px(106), r.y + u.px(3), r.w - u.px(120), r.h - u.px(6)}, dialog_text_, &done);
+        const bool done = path_picker_field({r.x + u.px(106), r.y + u.px(3), r.w - u.px(120), r.h - u.px(6)}, u.id("exptex_dir"), "exptex", dialog_text_,
+                                            PickKind::Folder, {}, [this](const std::string &p) {
+                                              if (dialog_ == Dialog::ExportTextures) dialog_text_ = p;  // (task 0271's folder dialog)
+                                            });
         r = u.popup_row();
-        u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, "Under the project folder (Exports/Textures by default).", u.theme.text_dim);
+        u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, "Under the project folder (Exports/Textures by default), or ... for one anywhere.", u.theme.text_dim);
         r = u.popup_row();
         u.checkbox({r.x + u.px(12), r.y + u.px(2), u.row_h() - u.px(4), u.row_h() - u.px(4)}, export_assign_);
         u.label({r.x + u.px(12) + u.row_h(), r.y, r.w - u.px(40), r.h}, "Assign the exported images to the material", u.theme.text_dim);
@@ -3845,6 +3915,11 @@ void Editor::draw_dialogs() {
           close();
           export_textures_command(t);
         }
+        break;
+      }
+      case Dialog::SaveSmat: {  // (task 0273: the name asked, a file replaced only when said)
+        title("Save as Smart Material");
+        draw_smat_dialog(close);
         break;
       }
       case Dialog::Boolean: {  // (task 0255: the object kept and the cutters named, whatever the order of selection)

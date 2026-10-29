@@ -143,7 +143,7 @@ void Editor::spring_remove(GameObject &bone) {
   for (GameObject *g : off)
     if (SpringView::Row *r = spring_row(*g)) r->added = false, r->ignored = true, r->tick = false;
   mark_changed("Remove Spring Bones");
-  Log::info("Spring Bones taken off %zu chain(s) (remembered as not spring chains: spring unignore <bone> brings one back)", off.size());
+  Log::info("Spring Bones taken off %zu chain(s) (remembered as not spring chains: Show Ignored > Unignore brings one back)", off.size());
 }
 
 /* Bake: the clip simulated frame by frame, each chain's rotations keyed; the chains' live simulation turned off (their
@@ -152,7 +152,7 @@ void Editor::spring_bake() {
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (!root || !clip) return Log::warn("Spring Bones: select an animated character with a clip");
-  if (playing_) return Log::warn("Spring Bones: stop Play first");
+  if (playing_) return refuse("Spring Bones: stop Play first", "stop", "Stop Play");
   AnimationClip baked;
   const size_t keys = spring::bake(*scene_, *root, *clip, baked);
   if (!keys) return Log::warn("Spring Bones: none under %s (Rigging > Spring Bones > Find Spring Chains)", root->name.c_str());

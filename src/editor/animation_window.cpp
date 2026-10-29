@@ -149,7 +149,7 @@ void Editor::anim_set_preview(bool on) {
   if (on == anim_.preview) return;
   GameObject *root = anim_root();
   if (on && (playing_ || !root)) {
-    if (playing_) Log::warn("Animation: Preview and Record are for editing; Stop Play first");
+    if (playing_) refuse("Animation: Preview and Record are for editing; Stop Play first", "stop", "Stop Play");
     return;
   }
   if (on) {

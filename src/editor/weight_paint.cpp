@@ -69,7 +69,7 @@ bool Editor::set_weight_paint(bool on) {
     return false;
   }
   if (playing_) {
-    Log::warn("Weight Paint: stop Play first");
+    refuse("Weight Paint: stop Play first", "stop", "Stop Play");
     return false;
   }
   if (edit_mode_) exit_edit_mode();

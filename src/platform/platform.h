@@ -136,6 +136,8 @@ bool save_file_dialog(Window *w, const std::string &title, const std::string &in
                       std::string &out_path, int *filter_index = nullptr);
 bool open_file_dialog(Window *w, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
                       std::string &out_path);
+/* A folder (task 0271): the system's chooser; false on cancel or when there is none. */
+bool folder_dialog(Window *w, const std::string &title, const std::string &initial_dir, std::string &out_path);
 /* UTF-8 helper shared by backends. */
 void append_utf8(std::string &s, uint32_t cp);
 

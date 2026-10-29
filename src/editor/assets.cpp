@@ -393,7 +393,15 @@ void Editor::draw_import_preview_dialog(const std::function<void()> &close) {
   };
   line(pv.result.summary, u.theme.text);
   for (size_t i = 0; i < pv.result.notes.size() && i < 5; i++) line(pv.result.notes[i], u.theme.text_dim);
-  if (pv.result.notes.size() > 5) line(strprintf("... and %zu more notes (the Console lists them after the import)", pv.result.notes.size() - 5), u.theme.text_dim);
+  if (pv.result.notes.size() > 5) {  // (task 0271: all of them here, on request - not only in the Console after the import)
+    if (ipv_all_notes_)
+      for (size_t i = 5; i < pv.result.notes.size() && i < 40; i++) line(pv.result.notes[i], u.theme.text_dim);
+    const Recti r = u.popup_row();
+    if (!ipv_all_notes_) u.label({r.x + u.px(10), r.y, r.w - u.px(130), r.h}, strprintf("... and %zu more notes", pv.result.notes.size() - 5), u.theme.text_dim);
+    const Recti nb{r.right() - u.px(116), r.y + u.px(1), u.px(106), r.h - u.px(2)};
+    if (u.record_buttons) u.button_rects["import:All Notes"] = nb;
+    if (u.button(nb, ipv_all_notes_ ? "Fewer Notes" : "All Notes")) ipv_all_notes_ = !ipv_all_notes_;
+  }
   draw_ipv_shading_row();
   draw_ipv_outline_row();
   const Recti b = u.popup_row(u.row_h() + u.px(10));
@@ -481,7 +489,7 @@ void Editor::draw_ipv_outline_row() {
 /* A motion file (task 0137: MMD's .vmd) onto a character: Assets/Animations/<character>/<motion>.anim, played by the
  * character's Animation component (Unity's way), shown in the Animation window. */
 void Editor::import_motion_file(const std::string &path) {
-  if (playing_) return Log::warn("Import Motion: stop Play first");
+  if (playing_) return refuse("Import Motion: stop Play first", "stop", "Stop Play");
   GameObject *root = motion_target();
   if (!root) return Log::warn("Import %s: select the character it moves (an object with bones)", fs::filename(path).c_str());
   AnimationClip clip;

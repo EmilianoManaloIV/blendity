@@ -24,7 +24,7 @@ void Editor::set_strokeobj(bool on) {
   strokeobj_ = on;
   strokeobj_stroking_ = false;
   ui_.redraw = true;
-  Log::info("Strokes: %s", on ? "on - a click paints a card, a drag a ribbon (strokeobj card|ribbon; Esc leaves)" : "off");
+  Log::info("Strokes: %s", on ? "on - a click paints a card, a drag a ribbon (Kind: Modeling Tools > Strokes; Esc leaves)" : "off");
 }
 
 /* The Stroke object edited: the one chosen (or the active object when it has a Strokes component), else a new one at the

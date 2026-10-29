@@ -60,7 +60,7 @@ static std::string render_folder_name(const std::string &scene_name) {
 /* Starts rendering frames `first` to `last` (-1: the source's whole length) at `fps` (0: the source's). */
 bool Editor::start_render_animation(int first, int last, float fps) {
   if (playing_) {
-    Log::warn("Render Animation: Stop Play first (it poses the scene frame by frame)");
+    refuse("Render Animation: Stop Play first (it poses the scene frame by frame)", "stop", "Stop Play");
     return false;
   }
   int source = 0, src_last = 0;

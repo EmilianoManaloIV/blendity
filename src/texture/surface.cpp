@@ -317,7 +317,7 @@ struct MeshMapLayer : TextureLayerBase<MeshMapLayer> {
   void reflect(Reflector &r) override {
     static const char *names[] = {"Ambient Occlusion", "Curvature", "Thickness", "Position X", "Position Y", "Position Z", "Normal X", "Normal Y (up)", "Normal Z"};
     r.enumeration("Map", map, names, 9);
-    r.help("The baked mesh map read (Object > Bake Mesh Maps, then `surface maps`): occlusion and thickness 0..1, curvature\n"
+    r.help("The baked mesh map read (Object > Bake Mesh Maps, then Textures > Load Mesh Maps): occlusion and thickness 0..1, curvature\n"
            "0.5 flat and above convex, the position in the bounds, the world normal's component as 0..1.");
     r.field("Low", low, 0.01f, 0.0f, 1.0f);
     r.field("High", high, 0.01f, 0.0f, 1.0f);

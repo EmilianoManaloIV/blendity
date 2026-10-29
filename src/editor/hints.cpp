@@ -85,7 +85,7 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
          return "UV Editor: LMB: select  |  " + (keys.empty() ? std::string("the toolbar") : keys) + ": move, turn, scale the islands  |  MMB drag: pan  |  Wheel: zoom  |  Unwrap: the toolbar";
        }},
       {"remesh job", [](const Editor &e) { return e.sculpt_remesh_ != nullptr; },
-       [](const Editor &) { return std::string("Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode), the tray's Cancel or `sculpt remesh cancel`: stop it at its next stage"); }},
+       [](const Editor &) { return std::string("Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode) or the tray's Cancel: stop it at its next stage"); }},
       {"sculpt", [](const Editor &e) { return e.sculpt_; },
        [](const Editor &e) {
          return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, e.sculpt_brush_.kind))] +
@@ -94,16 +94,16 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
                 (e.sculpt_dyntopo_ ? strprintf("  |  Dyntopo %.2f", e.sculpt_dyntopo_detail_) : std::string());
        }},
       {"mesh maps job", [](const Editor &e) { return e.meshmaps_job_ != nullptr; },
-       [](const Editor &) { return std::string("Mesh Maps: baking on a worker...  |  Esc in the Scene view, the tray's Cancel or `meshmaps cancel`: stop it at the next row"); }},
+       [](const Editor &) { return std::string("Mesh Maps: baking on a worker...  |  Esc in the Scene view or the tray's Cancel: stop it at the next row"); }},
       {"paint", [](const Editor &e) { return e.paint_; },
-       [](const Editor &e) { return "Paint: drag over the model (the pen's eraser end erases)  |  " + e.brush_keys() + ": size  |  Esc: leave  |  paint color|size|fill ..."; }},
+       [](const Editor &e) { return "Paint: drag over the model (the pen's eraser end erases)  |  " + e.brush_keys() + ": size  |  Esc: leave  |  settings: Modeling Tools > Paint"; }},
       {"strokes", [](const Editor &e) { return e.strokeobj_; },
        [](const Editor &e) {
          return std::string("Strokes (") + (e.strokeobj_kind_ == 1 ? "ribbon" : "card") +
-                "): tap the surface for a card, drag for a ribbon  |  Shift: erase  |  " + e.brush_keys() + ": size  |  Esc: leave  |  strokeobj kind|size|normals ...";
+                "): tap the surface for a card, drag for a ribbon  |  Shift: erase  |  " + e.brush_keys() + ": size  |  Esc: leave  |  settings: Modeling Tools > Strokes";
        }},
       {"scatter", [](const Editor &e) { return e.scatter_; },
-       [](const Editor &e) { return "Scatter: drag over the surface to drop instances of the source object  |  Alt, or the pen's eraser: remove  |  " + e.brush_keys() + ": radius  |  Esc: leave  |  scatter <object>"; }},
+       [](const Editor &e) { return "Scatter: drag over the surface to drop instances of the source object  |  Alt, or the pen's eraser: remove  |  " + e.brush_keys() + ": radius  |  Esc: leave  |  Source: Modeling Tools > Scatter"; }},
       {"weight paint", [](const Editor &e) { return e.weight_paint_; },
        [](const Editor &e) { return "Weight Paint: drag to add weight to the active bone's group  |  Ctrl: subtract  |  the pen's eraser erases  |  " + e.brush_keys() + ": radius  |  Esc: leave"; }},
       {"surface job", [](const Editor &e) { return e.surface_job_ != nullptr; },
@@ -111,7 +111,7 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
       {"hidden faces", [](const Editor &e) { return e.hidden_face_count(e.active_object()) != 0; },
        [](const Editor &e) {
          const size_t hidden = e.hidden_face_count(e.active_object());
-         return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All, or `sculpt show all`)", hidden, hidden == 1 ? "" : "s", e.active_object()->name.c_str());
+         return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All)", hidden, hidden == 1 ? "" : "s", e.active_object()->name.c_str());
        }},
       {"tablet scene", [](const Editor &e) { return e.tablet_ && e.scene_hovered_; },
        [](const Editor &) { return std::string("One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button, or a hold: the Wheel"); }},

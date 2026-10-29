@@ -14,7 +14,10 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#include <shlobj.h>
+#include <objbase.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <windowsx.h>
 #include <mmsystem.h>
 
@@ -840,6 +843,78 @@ bool save_file_dialog(Window *w, const std::string &title, const std::string &in
 bool open_file_dialog(Window *w, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
                       std::string &out_path) {
   return run_file_dialog(w, false, title, initial_dir, filters, out_path, nullptr);
+}
+
+/* The shell's folder chooser (task 0271), COM initialised for it on this thread; the initial folder through its callback. */
+static int CALLBACK folder_dialog_start(HWND h, UINT msg, LPARAM, LPARAM data) {
+  if (msg == BFFM_INITIALIZED && data) SendMessageW(h, BFFM_SETSELECTIONW, TRUE, data);
+  return 0;
+}
+
+/* The Vista folder picker: true when chosen; `made` false when the dialog couldn't be created (the caller falls back). */
+static bool pick_folder_vista(HWND owner, const std::wstring &title, const std::wstring &start, std::string &out_path, bool &made) {
+  IFileOpenDialog *dlg = nullptr;
+  made = SUCCEEDED(CoCreateInstance(__uuidof(FileOpenDialog), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)));
+  if (!made) return false;
+  DWORD opts = 0;
+  dlg->GetOptions(&opts);
+  dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+  dlg->SetTitle(title.c_str());
+  IShellItem *folder = nullptr;
+  if (!start.empty() && SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
+    dlg->SetFolder(folder);
+    folder->Release();
+  }
+  bool ok = false;
+  IShellItem *item = nullptr;
+  if (SUCCEEDED(dlg->Show(owner)) && SUCCEEDED(dlg->GetResult(&item))) {
+    PWSTR path = nullptr;
+    ok = SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path;
+    if (ok) out_path = narrow(path);
+    if (path) CoTaskMemFree(path);
+    item->Release();
+  }
+  dlg->Release();
+  return ok;
+}
+
+bool folder_dialog(Window *w, const std::string &title, const std::string &initial_dir, std::string &out_path) {
+  const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  const std::wstring wtitle = widen(title), start = widen(initial_dir);
+  const bool was_refresh = w ? w->in_refresh : false;
+  if (w) {
+    w->in_refresh = true;
+    if (w->buttons_down) w->buttons_down = 0, ReleaseCapture();
+  }
+  bool made = false;
+  const bool chosen = pick_folder_vista(w ? w->hwnd : nullptr, wtitle, start, out_path, made);
+  if (w) w->in_refresh = was_refresh;
+  if (made) {
+    if (SUCCEEDED(co)) CoUninitialize();
+    return chosen;
+  }
+  BROWSEINFOW bi{};
+  bi.hwndOwner = w ? w->hwnd : nullptr;
+  bi.lpszTitle = wtitle.c_str();
+  bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+  bi.lpfn = folder_dialog_start;
+  bi.lParam = start.empty() ? 0 : (LPARAM)start.c_str();
+  const bool was = w ? w->in_refresh : false;
+  if (w) {
+    w->in_refresh = true;
+    if (w->buttons_down) w->buttons_down = 0, ReleaseCapture();
+  }
+  PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+  if (w) w->in_refresh = was;
+  bool ok = false;
+  if (pidl) {
+    wchar_t buf[MAX_PATH * 4] = {0};
+    ok = SHGetPathFromIDListW(pidl, buf) != FALSE;
+    if (ok) out_path = narrow(buf);
+    CoTaskMemFree(pidl);
+  }
+  if (SUCCEEDED(co)) CoUninitialize();
+  return ok;
 }
 
 }  // namespace bl::platform

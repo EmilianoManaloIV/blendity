@@ -4,6 +4,7 @@
 // Profiler (Blender: Statistics overlay / --debug timings).
 #include "editor.h"
 #include "../texture/procedural_texture.h"
+#include "../texture/surface.h"
 #include "../scene/stroke_object.h"
 
 #include "../core/core.h"
@@ -1018,13 +1019,26 @@ struct InspectorReflector : Reflector {
       ed.texture_ui_rects_[key + "layer" + std::to_string(i)] = mr;
       if (u.icon_button(mr, Icon::Menu, false, nested ? "Move, reset or remove this effect" : "Move, reset or remove this layer")) u.open_popup(mid, mr);
       Editor *edp = &ed;
-      u.popup(mid, u.px(200), [edp, path, i, n, outer, which] {
+      const bool is_group = std::string(l.type_name()) == "Group";
+      const ProceduralTexturePtr owner = path.empty() ? nullptr : texture_asset(path);
+      const bool on_surface = owner && owner->surface;
+      u.popup(mid, u.px(200), [edp, path, i, n, outer, which, is_group, on_surface] {
         auto &uu = edp->ui_;
         if (uu.menu_item("Move Up", nullptr, false, i > 0)) edp->texture_stack_op(path, "move", i, i - 1, "", outer, which);
         if (uu.menu_item("Move Down", nullptr, false, i + 1 < n)) edp->texture_stack_op(path, "move", i, i + 1, "", outer, which);
         if (uu.menu_item("Reset")) edp->texture_stack_op(path, "reset", i, 0, "", outer, which);
         uu.menu_separator();
         if (uu.menu_item(which == "Mask" ? "Remove Effect" : "Remove Layer")) edp->texture_stack_op(path, "remove", i, 0, "", outer, which);
+        if (outer >= 0) return;  // (task 0273: what follows is for a top-level layer)
+        uu.menu_separator();
+        if (on_surface)  // (the presets read the surface's mesh maps: flat grey anywhere else)
+          uu.submenu("Mask Preset", uu.px(200), [edp, path, i] {
+            for (const std::string &p : surface_mask_presets())
+              if (edp->ui_.menu_item(p)) edp->texture_layer_op(path, "preset", i, p);
+          });
+        if (uu.menu_item("Clear Mask")) edp->texture_layer_op(path, "clearmask", i, "");
+        if (uu.menu_item("Group with the Layer Below", nullptr, false, i + 1 < n)) edp->texture_layer_op(path, "group", i, "");
+        if (uu.menu_item("Save as Smart Material...", nullptr, false, is_group)) edp->texture_layer_op(path, "smat", i, "");
       });
       if (l.ui_expanded) {
         lay.indent += u.px(10);
@@ -2129,8 +2143,8 @@ void Editor::draw_profiler(const Recti &r) {
   u.combo(u.id("stress_kind"), {sr.x + u.px(170), sr.y, u.px(110), sr.h}, stress_kind_, kinds, 4);
   if (u.button({sr.x + u.px(290), sr.y, u.px(90), sr.h}, "Spawn")) spawn_stress_grid(stress_count_, kinds[stress_kind_]);
   u.tooltip("Creates a grid of objects that share one mesh, then watch the graph.\nFull headless suite: blendity_stress (see README).");
-  if (u.button({sr.x + u.px(388), sr.y, u.px(110), sr.h}, "Benchmark")) run_console_command("bench 20");
-  u.tooltip("Renders the Scene view 20x with each optimization disabled in turn; results go to the Console.");
+  if (u.button({sr.x + u.px(388), sr.y, u.px(110), sr.h}, "Benchmark")) run_console_command("report bench 20");
+  u.tooltip("Renders the Scene view 20x with each optimization disabled in turn; the results open in a report.");
   lay.space(u.px(20));
   content_h = lay.y + off - r.y;
   u.end_scroll();
@@ -3380,6 +3394,20 @@ std::vector<std::string> Editor::scatter_mask_choices() {
   return out;
 }
 
+/* Task 0272: a row of equal buttons; `hit` the one pressed. Each recorded as <prefix>:<label> for the tests. */
+bool Editor::row_buttons(ui::Layout &lay, const char *prefix, const std::vector<const char *> &labels, int &hit) {
+  auto &u = ui_;
+  const Recti row = lay.row(u.row_h() + u.px(2));
+  const int n = std::max(1, (int)labels.size()), w = (row.w - u.px(8)) / n;
+  hit = -1;
+  for (int i = 0; i < n; i++) {
+    const Recti b{row.x + u.px(4) + i * w, row.y, w - u.px(2), row.h};
+    if (u.record_buttons) u.button_rects[std::string(prefix) + ":" + labels[(size_t)i]] = b;
+    if (u.button(b, labels[(size_t)i])) hit = i;
+  }
+  return hit >= 0;
+}
+
 /* The Scatter section (task 0248): the source, the density and the randomness, the mask. */
 void Editor::draw_scatter_tools(ui::Layout &lay) {
   auto &u = ui_;
@@ -3455,14 +3483,8 @@ void Editor::draw_strokes_tools(ui::Layout &lay) {
     u.tooltip("Normals: Own shades each card flat; Surface takes the surface's normal under the dab; Canopy points every card away from the centre so a bush of cards shades as one round volume (strokeobj normals, strokeobj canopy).");
   }
   /* Task 0264: the cards' alpha from the project's images (a leaf, a petal, a brush stroke). */
-  std::vector<std::string> alphas{"None"};
-  int ai = 0;
-  for (const std::string &p : image_assets()) {
-    if (p == strokeobj_alpha_) ai = (int)alphas.size();
-    alphas.push_back(p);
-  }
-  if (tool_combo_row(lay, "Alpha", "strokes:alpha", ai, alphas)) strokeobj_command({"strokeobj", "alpha", ai <= 0 ? std::string("off") : alphas[(size_t)ai]});
-  br.help("Alpha: an image whose transparency cuts the cards out (a leaf, a petal, a brush stroke); the project's images are listed (strokeobj alpha <image>).");
+  image_picker_row(lay, "Alpha", "strokes:alpha", strokeobj_alpha_, [this](const std::string &p) { strokeobj_command({"strokeobj", "alpha", p.empty() ? std::string("off") : p}); });  // (task 0271: Browse... for one elsewhere)
+  br.help("Alpha: an image whose transparency cuts the cards out (a leaf, a petal, a brush stroke): the project's images, or Browse... for one elsewhere.");
 }
 
 void Editor::draw_paint_tools(ui::Layout &lay) {
@@ -3471,7 +3493,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
   if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, paint_ ? "Exit Paint" : "Paint", paint_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object with a surface to paint it.", paint_, ui::Icon::Vertex)) set_paint(!paint_);
-  u.tooltip(mesh || paint_ ? "Paint the selected object's surface (surface new first): drag over it; the pen's eraser end erases; Esc leaves (paint on|off)."
+  u.tooltip(mesh || paint_ ? "Paint the selected object's surface (it needs one: the Textures window's New Surface): drag over it; the pen's eraser end erases; Esc leaves."
                            : "Select a mesh object with a surface to paint it.");
   if (!paint_) return;
   InspectorReflector br(*this, u, lay);
@@ -3503,7 +3525,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Jitter Value", paint_brush_.jitter_v, 0.01f, 0.0f, 1.0f);
   br.help("Flat turns with the drag (Tip Ratio its width); Bristle is a bundle of small stamps. Wet: how much of the colour under\n"
           "the last dab the brush carries on (strokes blend as paint). Jitter: a random shift per dab. Smudge pulls the paint\n"
-          "along the drag, Blend softens it (paint brush, wet, jitter, grain <image>).");
+          "along the drag, Blend softens it; Grain is below.");
   /* The palette: a row of swatches (click: the brush's colour), its shades, Add from the brush's colour. */
   {
     Recti prow = lay.row(u.row_h() + u.px(4));
@@ -3514,11 +3536,18 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
       const Vec3 &c = paint_palette_[i];
       u.canvas.fill_rect(r, Color::rgba(std::pow(std::max(0.0f, std::min(1.0f, c.x)), 1.0f / 2.2f), std::pow(std::max(0.0f, std::min(1.0f, c.y)), 1.0f / 2.2f), std::pow(std::max(0.0f, std::min(1.0f, c.z)), 1.0f / 2.2f)));
       u.canvas.rect_outline(r, (int)i == paint_palette_pick_ ? u.theme.accent : u.theme.border);
+      if (u.record_buttons) u.button_rects[strprintf("paint:swatch %zu", i)] = r;
+      if (u.hovered(r) && u.in.pressed[1]) {  // (task 0272: right-click removes it)
+        paint_palette_.erase(paint_palette_.begin() + (std::ptrdiff_t)i);
+        paint_palette_pick_ = -1;
+        u.consume_click();
+        break;
+      }
       if (u.hovered(r) && u.in.pressed[0]) paint_brush_.color = c, paint_palette_pick_ = (int)i, u.consume_click();
     }
     const Recti add{prow.right() - u.px(36), prow.y, u.px(32), prow.h};
     if (u.button(add, "+", false)) paint_palette_.push_back(paint_brush_.color), paint_palette_pick_ = (int)paint_palette_.size() - 1;
-    u.tooltip("The palette: click a swatch for its colour, + adds the brush's (paint palette add|pick|shade|save|load).");
+    u.tooltip("The palette: click a swatch for its colour, right-click removes it, + adds the brush's colour.");
   }
   if (paint_palette_pick_ >= 0 && paint_palette_pick_ < (int)paint_palette_.size()) {
     Recti srow = lay.row(u.row_h() + u.px(4));
@@ -3550,6 +3579,78 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Mirror Y", paint_brush_.sym_y);
   br.field("Mirror Z", paint_brush_.sym_z);
   br.help("Symmetry: the dab mirrored across the object's planes, each a disc of its own on screen.");
+  draw_paint_extras(lay);  // (task 0272)
+}
+
+/* Task 0272: what Paint did only by console - the bucket and the gradient, light painted in, the brush's images, the
+ * Textures canvas, the layer painted, the palette's files. */
+void Editor::draw_paint_extras(ui::Layout &lay) {
+  auto &u = ui_;
+  InspectorReflector br(*this, u, lay);
+  static const char *kBuckets[] = {"Off", "Group", "Island", "Material", "Object"};
+  int bucket = paint_bucket_;
+  if (tool_combo_row(lay, "Bucket Fill", "paint:bucket", bucket, {kBuckets, kBuckets + 5})) paint_bucket_ = bucket;
+  if (paint_bucket_ > 0) {
+    br.field("Gradient", paint_bucket_gradient_);
+    if (paint_bucket_gradient_) {
+      br.color("From", paint_gradient_from_);
+      br.color("To", paint_gradient_to_);
+      static const char *kAxes[] = {"X", "Y", "Z"};
+      br.enumeration("Along", paint_gradient_axis_, kAxes, 3);
+    }
+  }
+  br.help("Bucket Fill: a click on the model fills that part - its polygroup, its island, its material or the whole object - with\n"
+          "the brush's colour, or a gradient along an axis (it needs the mesh maps: Object > Bake Mesh Maps).");
+  int hit = -1;
+  if (row_buttons(lay, "paint", {"Bake Light", "Bake Gradient"}, hit)) paint_bake_light({"paint", hit == 0 ? "bakelight" : "bakegradient"}, hit == 1);
+  u.tooltip("Light painted in: the scene's light (or a top-to-bottom gradient) baked into a Multiply layer you can paint over.");
+  image_picker_row(lay, "Brush Alpha", "paint:alpha", paint_alpha_path_, [this](const std::string &p) { paint_command({"paint", "alpha", p.empty() ? std::string("off") : p}); });
+  image_picker_row(lay, "Grain", "paint:grain", paint_grain_path_, [this](const std::string &p) { paint_command({"paint", "grain", p.empty() ? std::string("off") : p}); });
+  if (!paint_grain_path_.empty()) br.field("Grain Scale", paint_brush_.grain_scale, 0.05f, 0.05f, 20.0f);
+  image_picker_row(lay, "Stencil", "paint:stencil", paint_stencil_path_, [this](const std::string &p) { paint_command({"paint", "stencil", p.empty() ? std::string("off") : p}); });
+  if (!paint_stencil_path_.empty()) {
+    br.field("Stencil Offset X", paint_stencil_offset_.x, 1.0f, -1e5f, 1e5f);
+    br.field("Stencil Offset Y", paint_stencil_offset_.y, 1.0f, -1e5f, 1e5f);
+    br.field("Stencil Scale", paint_stencil_scale_, 0.05f, 0.05f, 20.0f);
+  }
+  br.help("Brush Alpha shapes each dab, Grain is a paper texture the paint catches on, Stencil an image laid over the view that\n"
+          "masks where paint lands.");
+  br.field("Paint on Textures Canvas", paint_2d_);
+  br.help("On: the Textures window's picture takes the brush too (paint the texture flat).");
+  std::string why;
+  const ProceduralTexturePtr pt = active_object() ? surface_of(active_object(), &why) : nullptr;
+  if (pt) {  // (the Paint layers only: the brush paints into nothing else)
+    std::vector<std::string> layers{"Automatic"};
+    std::vector<int> index{-1};
+    int li = 0;
+    for (size_t i = 0; i < pt->layers.size(); i++) {
+      if (std::string(pt->layers[i]->type_name()) != "Paint") continue;
+      if ((int)i == paint_layer_) li = (int)layers.size();
+      layers.push_back(strprintf("%zu: %s", i, pt->layers[i]->name.empty() ? pt->layers[i]->type_name() : pt->layers[i]->name.c_str()));
+      index.push_back((int)i);
+    }
+    if (tool_combo_row(lay, "Layer", "paint:layer", li, layers)) paint_layer_ = index[(size_t)li];
+  }
+  /* The palette's files: Assets/Palettes/<name>.pal, listed again when the project's listing is. */
+  if (palettes_listed_ != project_listed_ || project_listed_ < 0) {
+    palettes_listed_ = project_listed_;
+    palettes_.assign(1, "Load Palette...");
+    for (const auto &e : fs::list(resolve_asset_path("Assets/Palettes")))
+      if (!e.is_dir && fs::extension(e.name) == ".pal") palettes_.push_back(fs::stem(e.name));
+  }
+  const std::vector<std::string> palettes = palettes_;
+  int pal = 0;
+  if (palettes.size() > 1 && tool_combo_row(lay, "Palettes", "paint:palettes", pal, palettes) && pal > 0) paint_palette_command({"paint", "palette", "load", palettes[(size_t)pal]});
+  const Recti sr = lay.row(u.row_h() + u.px(2));
+  std::string &name = picker_text_["paint:palette_name"];  // (empty while typed; "Palette" when saved so)
+  u.text_field(u.id("paint_palette_name"), {sr.x + u.px(4), sr.y + u.px(1), sr.w - u.px(100), sr.h - u.px(2)}, name);
+  const Recti save{sr.right() - u.px(90), sr.y, u.px(86), sr.h};
+  if (u.record_buttons) u.button_rects["paint:Save Palette"] = save;
+  if (u.button(save, "Save Palette")) {
+    paint_palette_command({"paint", "palette", "save", name.empty() ? std::string("Palette") : name});
+    palettes_listed_ = -1;
+  }
+  u.tooltip("The palette written to Assets/Palettes/<name>.pal; Palettes loads one. Right-click a swatch to remove it.");
 }
 
 /* Sculpt Mode's toggle and brush (task 0236), in the Modeling Tools window's Sculpt section. */
@@ -3582,10 +3683,9 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   br.help("The brush follows the pointer on a string this long (px): a steadier line. 0 is off.");
   br.enumeration("Stroke", sculpt_brush_.stroke, kSculptStrokes, 5);
   br.help("Dots: a dab every quarter radius. Drag Dot: one dab moved with the pointer. Drag Rect: one stamp as wide as the drag, turned to it. Freehand: a dab at every move. Spray: dabs scattered in the circle.");
-  Recti arow = lay.row(u.row_h() + u.px(2));
-  u.label({arow.x + u.px(4), arow.y, u.px(60), arow.h}, "Alpha");
-  u.label({arow.x + u.px(64), arow.y, arow.w - u.px(68), arow.h}, sculpt_brush_.alpha.empty() ? "none (sculpt alpha <image>)" : sculpt_brush_.alpha, u.theme.text_dim);
-  u.tooltip("An image whose brightness shapes the dab (white moves, black doesn't), turned to the stroke: `sculpt alpha <path>`, `sculpt alpha off`.");
+  image_picker_row(lay, "Alpha", "sculpt:alpha", sculpt_brush_.alpha, [this](const std::string &p) { sculpt_load_alpha(p); });  // (task 0272)
+  br.field("Alpha Turns", sculpt_brush_.alpha_turn);
+  br.help("Alpha: an image whose brightness shapes the dab (white moves, black doesn't); Alpha Turns turns it to the stroke.");
   /* Task 0238: the mask, the groups, hiding. */
   br.field("Show Mask", sculpt_show_mask_);
   br.field("Show Groups", sculpt_show_groups_);
@@ -3620,23 +3720,20 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   }
   u.tooltip("Quads that follow the form at about the target count, through QuadriFlow on a worker (ZRemesher's class of result, without guides): the mask is kept, groups and UVs are not (sculpt remesh [faces] ...).");
   br.help("Ctrl paints the mask (Ctrl+Alt takes it away; off the model Ctrl+click inverts it, Ctrl+drag masks a rectangle); Ctrl+Shift+click a face to see its group alone, off the model to see all.");
-  const char *const mask_ops[] = {"Clear", "Invert", "Blur", "Grow", "Shrink"}, *const mask_cmds[] = {"clear", "invert", "blur", "grow", "shrink"};
-  Recti mrow = lay.row(u.row_h() + u.px(2));
-  const int mw = (mrow.w - u.px(8)) / 5;
-  for (int i = 0; i < 5; i++)
-    if (u.button({mrow.x + u.px(4) + i * mw, mrow.y, mw - u.px(2), mrow.h}, mask_ops[i])) sculpt_mask_op(mask_cmds[i], {});
-  u.tooltip("The whole mask at once: cleared, inverted, blurred one step, grown or shrunk by one ring (sculpt mask ...).");
-  const char *const group_ops[] = {"Islands", "From Mask", "Hide Masked", "Show All"};
-  Recti grow = lay.row(u.row_h() + u.px(2));
-  const int gw = (grow.w - u.px(8)) / 4;
-  for (int i = 0; i < 4; i++) {
-    if (!u.button({grow.x + u.px(4) + i * gw, grow.y, gw - u.px(2), grow.h}, group_ops[i])) continue;
-    if (i == 0) sculpt_group_op("islands");
-    else if (i == 1) sculpt_group_op("mask");
-    else if (i == 2) sculpt_hide_op("masked", "");
-    else sculpt_hide_op("none", "");
-  }
-  u.tooltip("Polygroups from the mesh's pieces or from the mask (sculpt group ...); hide the masked faces, show everything (sculpt hide ..., sculpt show all).");
+  /* Task 0272: every mask, group and hide operation, not only the five the console didn't need. */
+  int hit = -1;
+  static const char *const kMaskCmds[] = {"clear", "fill", "invert", "blur", "sharpen", "grow", "shrink"};
+  if (row_buttons(lay, "sculpt", {"Clear Mask", "Fill Mask", "Invert Mask", "Blur Mask"}, hit)) sculpt_mask_op(kMaskCmds[hit], {});
+  if (row_buttons(lay, "sculpt", {"Sharpen Mask", "Grow Mask", "Shrink Mask"}, hit)) sculpt_mask_op(kMaskCmds[hit + 4], {});
+  u.tooltip("The whole mask at once: cleared, filled, inverted, blurred or sharpened a step, grown or shrunk by a ring.");
+  static const char *const kGroupCmds[] = {"islands", "mask", "material", "merge"};
+  if (row_buttons(lay, "sculpt", {"Groups: Islands", "From Mask", "From Materials", "Merge All"}, hit)) sculpt_group_op(kGroupCmds[hit]);
+  u.tooltip("Polygroups from the mesh's pieces, the mask or the materials; Merge All makes them one group.");
+  static const char *const kHideCmds[] = {"masked", "unmasked", "invert", "none"};
+  if (row_buttons(lay, "sculpt", {"Hide Masked", "Hide Unmasked", "Invert Hidden", "Show All"}, hit)) sculpt_hide_op(kHideCmds[hit], "");
+  br.field("Group", sculpt_hide_group_, 0, 1 << 20);
+  if (row_buttons(lay, "sculpt", {"Hide Group", "Hide All"}, hit)) sculpt_hide_op(hit == 0 ? "group" : "all", std::to_string(sculpt_hide_group_));
+  u.tooltip("Hide the group numbered above (Ctrl+Shift+click a face shows its group alone), or every face.");
 }
 
 }  // namespace bl

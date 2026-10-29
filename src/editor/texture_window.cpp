@@ -189,6 +189,9 @@ void Editor::draw_textures_window(const Recti &r) {
       if (ui_.menu_item(p.c_str())) new_texture_asset(p), made = true;
     ui_.menu_separator();
     if (ui_.menu_item("Empty")) new_texture_asset(""), made = true;
+    ui_.menu_separator();
+    if (ui_.menu_item("Surface on the Selected Object", nullptr, false, active_object() != nullptr)) surface_new(""), made = true;  // (task 0273)
+    ui_.tooltip("A layered surface on the selected object's material: Paint, the smart materials and the masks work on it.");
     if (made) {  // the new one in view (a search left from earlier would hide it)
       texture_search_.clear();
       ui_.redraw = true;
@@ -386,13 +389,21 @@ void Editor::draw_textures_window(const Recti &r) {
   if (texture_selected_->surface) {  // (task 0246: the shelf - a built-in smart material applied on top)
     Recti sh = lay.row(u.row_h() + u.px(4));
     std::vector<const char *> names;
+    if (!smat_saved_listed_ || project_listed_ < 0) {  // (task 0273: the project's own after the built-in ones, listed once and on a save)
+      smat_saved_listed_ = true;
+      smat_saved_.clear();
+      for (const DirEntry &e : fs::list(resolve_asset_path("Assets/Materials/Smart")))
+        if (!e.is_dir && fs::extension(e.name) == ".smat") smat_saved_.push_back(fs::stem(e.name));
+    }
     for (const std::string &n : smart_material_builtins()) names.push_back(n.c_str());
+    for (const std::string &n : smat_saved_) names.push_back(n.c_str());
     const Recti cb{sh.x + u.px(4), sh.y, u.px(150), sh.h};
     u.combo(u.id("smat_pick"), cb, texture_smat_pick_, names.data(), (int)names.size());
     const Recti ab{cb.right() + u.px(6), sh.y, u.px(90), sh.h};
     texture_ui_rects_["smat_apply"] = ab;
     if (u.button(ab, "Apply", false)) smat_apply(names[(size_t)std::max(0, std::min((int)names.size() - 1, texture_smat_pick_))], texture_selected_);
-    u.tooltip("A smart material - a group of layers with masks reading the mesh maps - added on top of this surface (smat apply <name>; smat save keeps one of your own).");
+    u.tooltip("A smart material - a group of layers with masks reading the mesh maps - added on top of this surface. Save your own from a\n"
+              "layer's menu (Save as Smart Material): it joins this list.");
   }
   if (texture_selected_->surface) {  // (task 0244: a surface's maps and its evaluation's state)
     Recti sr = lay.row(u.row_h() + u.px(4));
@@ -401,7 +412,8 @@ void Editor::draw_textures_window(const Recti &r) {
     if (u.button(lb, "Load Mesh Maps", false)) {
       std::string why;
       GameObject *g = active_object();
-      if (!g || !surface_load_maps(g, *texture_selected_, &why)) Log::warn("Surface: %s", why.empty() ? "select the object first" : why.c_str());
+      if (!g || !surface_load_maps(g, *texture_selected_, &why))  // (task 0271: no maps yet - the Fix bakes them)
+        refuse("Surface: " + (why.empty() ? std::string("select the object first") : why), why.find("mesh maps") != std::string::npos ? "bakedialog maps" : "", "Bake Mesh Maps...");
     }
     u.tooltip("Read the active object's baked mesh maps (Object > Bake Mesh Maps) into this surface: what its Mesh Map layers and\nmask presets read.");
     u.label({lb.right() + u.px(8), sr.y, sr.w - lb.w - u.px(16), sr.h},

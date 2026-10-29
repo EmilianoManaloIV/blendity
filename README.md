@@ -241,6 +241,9 @@ cores, sanitizers) or without LTCG pass there too. Rounds 284-290: Scatter's and
 pen-tappable step bar for the modal tools, Pan in the UV editor, Adjust Last for primitives, UV operators and Draw shapes, 3D Object
 in every layout, time zoom in the Animation window, glTF export of a rig with its weights and clip, Okabe-Ito polygroups, the
 eraser by shape, a CPU badge, 7 mm pen targets in Tablet Mode (asserted), and a ? beside the hint that opens the lesson.
+Rounds 291-293: what only the Console could do in Sculpt, Paint and texturing has buttons, pickers and dialogs (New Surface, a
+layer's Mask Preset and Save as Smart Material, a Bake dialog, Bucket Fill, palettes); refusals carry a Fix; results show in a
+Report dialog.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -271,7 +274,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13278 unit checks in 1145 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13309 unit checks in 1149 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

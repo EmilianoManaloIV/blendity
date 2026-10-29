@@ -747,7 +747,20 @@ class Editor {
   };
   GameObject *scatter_parent_for_test() { return scatter_parent(false); }
   ScatterBrush &scatter_brush_for_test() { return scatter_brush_; }
+  size_t paint_palette_size_for_test() const { return paint_palette_.size(); }  // (task 0272)
+  int paint_bucket_for_test() const { return paint_bucket_; }
+  void paint_command_for_test(const std::vector<std::string> &t) {  // ("bucketmode n": the Bucket Fill's dropdown, set as its row does)
+    if (t.size() > 2 && t[1] == "bucketmode") paint_bucket_ = std::atoi(t[2].c_str());
+  }
+  bool bake_dialog_open_for_test() const { return dialog_ == Dialog::Bake; }  // (task 0273)
+  bool smat_dialog_open_for_test() const { return dialog_ == Dialog::SaveSmat; }
+  const std::string &dialog_text_for_test() const { return dialog_text_; }
+  bool bake_keep_uvs_for_test(int mode) const { return mode == 1 ? bake_keep_uvs_textures_ : bake_keep_uvs_; }
+  int meshmaps_settings_size_for_test() const { return meshmaps_settings_.size; }
   bool scatter_for_test() const { return scatter_; }                          // (task 0261)
+  const std::vector<std::string> &report_lines_for_test() const { return report_lines_; }
+  bool report_open_for_test() const { return dialog_ == Dialog::Report; }
+  const std::string &report_copied_for_test() const { return report_copied_; }  // (task 0271)
   bool brush_ring_erasing_for_test() const { return brush_ring_erasing_; }    // (task 0269)
   void force_cpu_views_for_test(const std::string &why) { gpu_view_.reset(), gpu_view_tried_ = true, gpu_view_error_ = why, scene_cache_.key = game_cache_.key = 0; }  // (as a device change: the cached pictures were the card's)
   std::string cpu_badge_state_for_test() const { return strprintf("wanted %d, view %d, tried %d, opening %d, device %d", (int)gpu_view_wanted(), (int)(gpu_view_ != nullptr), (int)gpu_view_tried_, (int)gpu_view_opening_.valid(), viewport_device_); }
@@ -2537,6 +2550,24 @@ class Editor {
   PathPick pick_save_path(const std::string &title, const std::string &suggested, const std::vector<platform::FileFilter> &filters,
                           std::string &out, int *filter = nullptr);
   PathPick pick_open_path(const std::string &title, const std::string &dir, const std::vector<platform::FileFilter> &filters, std::string &out);
+  PathPick pick_folder(const std::string &title, const std::string &dir, std::string &out);  // (task 0271)
+  /* Task 0271 (editor/ui_pickers.cpp): rows that choose instead of asking for a typed command or path. */
+  enum class PickKind { Open, Save, Folder };
+  bool image_picker_row(ui::Layout &lay, const char *label, const char *key, const std::string &current, const std::function<void(const std::string &)> &apply);
+  bool path_picker_row(ui::Layout &lay, const char *label, const char *key, const std::string &current, PickKind kind,
+                       const std::vector<platform::FileFilter> &filters, const std::function<void(const std::string &)> &apply);
+  bool path_picker_field(const Recti &r, ui::Id fid, const std::string &key, std::string &text, PickKind kind,
+                         const std::vector<platform::FileFilter> &filters, const std::function<void(const std::string &)> &picked);
+  void picker_unavailable(const std::string &what);
+  std::unordered_map<std::string, std::string> picker_text_;
+  /* The Report dialog: what an operation printed, shown instead of left in the Console. */
+  void show_report(const std::string &title, const std::vector<std::string> &lines);
+  void report_command(const std::string &line);
+  void draw_report_dialog(const std::function<void()> &close);
+  std::string report_title_, report_copied_;
+  std::vector<std::string> report_lines_;
+  bool toasts_on_dock_ = false;  // (task 0271: the Scene view did not draw: the toasts are over the dock area)
+  bool ipv_all_notes_ = false;  // (the import preview lists every note)
   /* Work that must run outside the UI frame (native dialogs, screenshots of a
    * frame without the menu that asked for them): after `frames` presents. */
   void defer(std::function<void()> fn, int frames = 1);
@@ -3371,6 +3402,18 @@ class Editor {
   Scene *paint_scene_ = nullptr;
   ProceduralTexturePtr paint_surface_;
   int paint_layer_ = -1;
+  /* Task 0272: the Paint section's own state for what the console alone did. */
+  std::vector<std::string> palettes_;  // (task 0272: the Palettes list, listed with the project)
+  double palettes_listed_ = -1;
+  std::vector<std::string> smat_saved_;  // (task 0273: the shelf's saved smart materials)
+  bool smat_saved_listed_ = false;
+  int paint_bucket_ = 0;               // 0 off, 1 group, 2 island, 3 material, 4 object: a click on the model fills that part
+  bool paint_bucket_gradient_ = false;  // ...with the gradient from paint_gradient_from_ to _to_
+  std::string paint_alpha_path_, paint_grain_path_, paint_stencil_path_;
+  int sculpt_hide_group_ = 0;
+  void draw_paint_extras(ui::Layout &lay);
+  void refuse_no_mesh_maps(const std::string &what);  // (task 0272)
+  bool row_buttons(ui::Layout &lay, const char *prefix, const std::vector<const char *> &labels, int &hit);
   PaintImagesPtr paint_images_;
   std::shared_ptr<PaintDelta> paint_delta_;
   std::vector<uint32_t> paint_tile_slot_;
@@ -3545,6 +3588,19 @@ class Editor {
   bool surface_load_maps(GameObject *g, ProceduralTexture &pt, std::string *why, bool step = true);
   void surface_sync_emission(const ProceduralTexture &pt);  // the materials using the surface gain or lose its emission map as its layers write emission
   bool surface_new(const std::string &name);
+  /* Task 0273: a layer's operations from the Textures window's layer menu, on that texture (the console's work on the
+   * active object's surface). */
+  bool texture_layer_op(const std::string &asset, const std::string &op, int layer, const std::string &arg);
+  bool smat_write(std::unique_ptr<TextureLayer> grp, const std::string &name);
+  static std::string smat_file_name(const std::string &name);
+  std::string smat_unique_name(const std::string &base);
+  void draw_smat_dialog(const std::function<void()> &close);
+  std::string smat_asset_;  // (the Save as Smart Material dialog: the texture and the layer it saves)
+  int smat_layer_ = -1;
+  bool bake_keep_uvs_textures_ = false;  // (Bake Textures' own: new UVs unless asked, as the menu did before task 0273)
+  int bake_mode_ = 0, bake_size_ = 1024, bake_samples_ = 16;  // (the Bake dialog: 0 mesh maps, 1 textures)
+  bool bake_keep_uvs_ = true;
+  void draw_bake_dialog(const std::function<void()> &close);
   void surface_command(const std::vector<std::string> &t, const std::string &line);
   void surface_poll();
   MeshMapsSettings meshmaps_settings_;
@@ -4586,7 +4642,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {

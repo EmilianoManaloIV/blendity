@@ -53,7 +53,7 @@ void Editor::walk_preset(const std::string &name) {
 /* Generate: the gait keyed into the character's clip (a new one when it has none), one undo step. */
 void Editor::walk_generate() {
   if (!assist_require(Assist::Walk)) return;
-  if (playing_) return Log::warn("Walk Cycle: stop Play first");
+  if (playing_) return refuse("Walk Cycle: stop Play first", "stop", "Stop Play");
   GameObject *root = anim_root();
   const gait::Rig r = walk_rig();
   if (!root || !r.valid()) return Log::warn("Walk Cycle: %s", root ? r.problem.c_str() : "select a character with a skeleton");

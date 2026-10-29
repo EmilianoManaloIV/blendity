@@ -50,7 +50,7 @@ bool Editor::body_midpoint(GameObject *g, const Ray &ray, Vec3 &out) {
 
 bool Editor::autorig_start(GameObject *mesh, RigKind kind) {
   if (playing_) {
-    Log::warn("Auto-Rig: stop Play first (a rig made in Play is gone on Stop)");
+    refuse("Auto-Rig: stop Play first (a rig made in Play is gone on Stop)", "stop", "Stop Play");
     return false;
   }
   if (!mesh || !mesh->mesh_filter() || !mesh->mesh_filter()->mesh || mesh->get<Bone>()) {

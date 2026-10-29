@@ -788,6 +788,15 @@ static bool run_dialog_command(const std::string &cmd, std::string &out) {
 
 bool file_dialogs_available() { return have_tool("zenity") || have_tool("kdialog"); }
 
+/* A folder (task 0271): zenity's or kdialog's directory chooser. */
+bool folder_dialog(Window *, const std::string &title, const std::string &initial_dir, std::string &out_path) {
+  std::string cmd;
+  if (have_tool("zenity")) cmd = "zenity --file-selection --directory --title=" + sh_quote(title) + " --filename=" + sh_quote(initial_dir.empty() ? std::string("./") : initial_dir + "/");
+  else if (have_tool("kdialog")) cmd = "kdialog --title " + sh_quote(title) + " --getexistingdirectory " + sh_quote(initial_dir.empty() ? std::string(".") : initial_dir);
+  else return false;
+  return run_dialog_command(cmd + " 2>/dev/null", out_path);
+}
+
 static bool x11_file_dialog(bool save, const std::string &title, const std::string &initial, const std::vector<FileFilter> &filters,
                             std::string &out, int *filter_index) {
   std::string cmd;

@@ -121,7 +121,7 @@ bool Editor::set_sculpt(bool on) {
     return false;
   }
   if (playing_) {
-    Log::warn("Sculpt: stop Play first");
+    refuse("Sculpt: stop Play first", "stop", "Stop Play");
     return false;
   }
   if (edit_mode_) exit_edit_mode();
@@ -778,7 +778,7 @@ bool Editor::sculpt_load_alpha(const std::string &path) {
   if (path.empty()) return true;
   std::string err;
   Bitmap b;
-  const std::string full = fs::exists(path) ? path : fs::join(assets_dir_, path);
+  const std::string full = fs::exists(path) ? path : fs::exists(resolve_asset_path(path)) ? resolve_asset_path(path) : fs::join(assets_dir_, path);  // (a project path "Assets/..." from the picker, or one under Assets)
   if (!load_image(full, b, err)) {
     Log::warn("sculpt alpha: %s (%s)", err.empty() ? "no image there" : err.c_str(), full.c_str());
     return false;
@@ -1325,11 +1325,11 @@ bool Editor::sculpt_quad_remesh(const meshops::QuadRemeshParams &p) {
     return false;
   }
   if (sculpt_remesh_) {
-    Log::warn("Quad Remesh: one is running (sculpt remesh cancel stops it)");
+    refuse("Quad Remesh: one is running - Quad Remesh's Cancel stops it", "sculpt remesh cancel", "Cancel the remesh");
     return false;
   }
   if (playing_) {
-    Log::warn("Quad Remesh: stop Play first");
+    refuse("Quad Remesh: stop Play first", "stop", "Stop Play");
     return false;
   }
   GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
@@ -1355,7 +1355,7 @@ bool Editor::sculpt_quad_remesh(const meshops::QuadRemeshParams &p) {
     raw->done.store(true, std::memory_order_release);
   });
   sculpt_remesh_ = std::move(job);
-  Log::info("Quad Remesh: working toward %d faces on a worker (Esc or `sculpt remesh cancel` stops it)", p.target_faces);
+  Log::info("Quad Remesh: working toward %d faces on a worker (Esc, or Quad Remesh's Cancel, stops it)", p.target_faces);
   ui_.redraw = true;
   return true;
 }

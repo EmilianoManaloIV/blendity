@@ -31,7 +31,7 @@ void Editor::set_scatter(bool on) {
     if (sculpt_) set_sculpt(false);
     if (strokeobj_) set_strokeobj(false);
     if (scatter_brush_.source.empty() || !scene_->find_by_name(scatter_brush_.source)) {
-      Log::warn("Scatter: name the object to scatter first (scatter <object>)");
+      refuse("Scatter: pick a Source first (Modeling Tools > Scatter)", "window Modeling Tools", "Open Scatter");
       return;
     }
   }

@@ -522,6 +522,22 @@ bool save_file_dialog(Window *, const std::string &title, const std::string &ini
   }
 }
 
+/* A folder (task 0271): NSOpenPanel choosing directories. */
+bool folder_dialog(Window *, const std::string &title, const std::string &initial_dir, std::string &out_path) {
+  @autoreleasepool {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = [NSString stringWithUTF8String:title.c_str()];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.canCreateDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    if (!initial_dir.empty()) panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:initial_dir.c_str()]];
+    if ([panel runModal] != NSModalResponseOK) return false;
+    out_path = [[panel.URL path] UTF8String];
+    return true;
+  }
+}
+
 bool open_file_dialog(Window *, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
                       std::string &out_path) {
   @autoreleasepool {

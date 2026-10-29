@@ -27,6 +27,9 @@ and book chapters behind each idea. Each chapter here names its lesson.
 
 ## 1. Getting around
 
+A refusal's toast often carries a **Fix** button that does what it asks: stop Play, cancel the running job, open the
+window it needs. What UV Report and Scene Statistics find opens in a **Report** dialog; Copy takes the lines.
+
 The **?** beside the status bar's hint opens the Learn lesson for what you are doing. In Tablet Mode the status bar and
 the toasts grow so their buttons (Cancel, Fix) are pen-sized. A **CPU** badge in the Scene view's bar says the views
 draw on the CPU although Auto wanted the graphics card; its tooltip says why.
@@ -373,6 +376,12 @@ Layout > UV Unwrapping puts the **UV Editor** (Ctrl+9) beside the Scene view.
 ---
 
 ## 6. Materials and textures
+
+**GameObject > New Surface** gives the selected object a surface. A layer's menu (its button at the right of the
+layer's row) applies a **Mask Preset**, clears the mask, groups the layer with the one below, and saves a Group as
+a **smart material** (the shelf lists it). **Bake Mesh Maps...** and **Bake Textures...** open a dialog with the
+size, the samples and Keep UVs. In Paint, **Bucket Fill** fills the group, island, material or object you click,
+or a gradient; Brush Alpha, Grain and Stencil pick from the project's images; Save Palette writes the palette.
 
 **Materials** are Unity-style, evaluating Blender's **Principled BSDF**: base colour, metallic, roughness, specular,
 normal and emission, with tiling and offset, and surface types Opaque, Cutout, Transparent and Glass. The

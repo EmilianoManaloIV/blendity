@@ -88,11 +88,11 @@ void Editor::ai_shutdown() {
  * worker (ONNX Runtime loaded there on first use); poll_ai shows the result as a ghost. */
 void Editor::ai_generate(int from, int to) {
   if (!assist_require(Assist::Ai)) return;
-  if (playing_) return Log::warn("AI Inbetween: stop Play first");
+  if (playing_) return refuse("AI Inbetween: stop Play first", "stop", "Stop Play");
   if (ai_.job) return Log::warn("AI Inbetween: still working on the last span");
   ai::ModelInfo info;
-  if (!ai_.rt && !ai::install_problem().empty()) return Log::warn("AI Inbetween needs its download: Preferences > Animation Assistants > Install, or `ai install`");
-  if (!ai_info(info)) return Log::warn("AI Inbetween: the install's inbetween.json can't be read (ai remove, then ai install)");
+  if (!ai_.rt && !ai::install_problem().empty()) return refuse("AI Inbetween needs its download (Preferences > Animation Assistants > Install)", "ai install", "Install");
+  if (!ai_info(info)) return refuse("AI Inbetween: the install's inbetween.json can't be read - Remove and Install it again in Preferences > Animation Assistants", "preferences", "Open Preferences");
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   const gait::Rig rig = walk_rig();
@@ -316,7 +316,7 @@ void Editor::ai_finetune(const std::string &sub) {
     ai_.head_on = sub == "on";
     return Log::info("AI Inbetween: %s", ai_.head_on ? "fitted to your clips (where there is a fit)" : "the shipped model alone");
   }
-  if (ai_.tune) return Log::warn("AI Inbetween: still fitting (ai finetune stop)");
+  if (ai_.tune) return refuse("AI Inbetween: still fitting - the Fitting button stops it", "ai finetune stop", "Stop fitting");
   ai::ModelInfo info;
   if (!root || !ai_info(info)) return Log::warn("AI Inbetween: select a character (and install AI Inbetweening)");
   if (info.hidden <= 0) return Log::warn("AI Inbetween: this model can't be fitted (no last features: an older download)");
@@ -342,7 +342,7 @@ void Editor::ai_finetune(const std::string &sub) {
   tune->rt = ai_.rt, tune->style = ai_.style, tune->path = ai_head_path(*root), tune->character = root->name;
   ai_.tune = tune;
   std::thread([tune] { ai_fit(*tune); }).detach();  // (the tune shared: it outlives the thread)
-  Log::info("AI Inbetween: fitting to %zu clip%s of %s... (ai finetune stop)", tune->clips.size(), tune->clips.size() == 1 ? "" : "s", root->name.c_str());
+  Log::info("AI Inbetween: fitting to %zu clip%s of %s... (the Fitting button stops it)", tune->clips.size(), tune->clips.size() == 1 ? "" : "s", root->name.c_str());
 }
 
 /* A finished fit: kept and saved (a stopped or failed one changes nothing: the previous correction stays). */

@@ -300,9 +300,9 @@ void ProceduralTexture::reflect(Reflector &r) {
          "reading the image; further away, and in path-traced renders and exports, the image at this size.");
   r.field("Surface", surface);
   r.help("The texture is one object's surface in its UV space (task 0244): no wrap, no seamless blend; its Mesh Map layers\n"
-         "read the object's baked maps (`surface maps`) and the neighbourhood filters stay inside the UV islands.");
+         "read the object's baked maps (Textures > Load Mesh Maps) and the neighbourhood filters stay inside the UV islands.");
   r.text("Mesh Maps", maps_from);
-  r.help("The mesh maps record this surface reads (Object > Bake Mesh Maps, then `surface maps`): reloaded when the file opens.");
+  r.help("The mesh maps record this surface reads (Object > Bake Mesh Maps, then Textures > Load Mesh Maps): reloaded when the file opens.");
   r.field("Alpha From Cover", alpha_from_cover);
   r.help("The albedo image's alpha is what the cards cover (task 0150): a Leaves, Grass or Clouds generator covers only\n"
          "its shapes, so a Cutout material shows holes between them (a foliage card, a cloud card). Stacked cards add\n"

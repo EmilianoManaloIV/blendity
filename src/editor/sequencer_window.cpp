@@ -173,7 +173,7 @@ void Editor::seq_set_preview(bool on) {
   if (on == seqr_.preview) return;
   GameObject *root = seq_root();
   if (on && (playing_ || !seq_sequence())) {
-    if (playing_) Log::warn("Sequencer: Preview is for editing; Stop Play first");
+    if (playing_) refuse("Sequencer: Preview is for editing; Stop Play first", "stop", "Stop Play");
     return;
   }
   if (on) {
