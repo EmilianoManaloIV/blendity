@@ -32,7 +32,7 @@ Reproduced locally with the build CI makes (`BLENDITY_NO_LIBS=1`) and without LT
 - Auto Generate's settle uses `clock_now()`, so tests set the clock (`src/editor/lighting.cpp`).
 - Tests: the toast test tolerates Info toasts and prints what is left; the Boolean test accepts the dependency-free
   build's refusal; the autopose time is printed, not asserted; the voxel GI tests set the clock; the modeling test
-  gives the cube its own material copy; the sequencer test waits 0.55 s of wall clock.
+  gives the cube its own material copy; the sequencer test runs half a second on the editor's clock.
 
 ## Tests
 The whole suite in a `BLENDITY_NO_LIBS=1` non-LTCG build, and the chain's builds.

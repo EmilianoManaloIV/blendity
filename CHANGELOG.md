@@ -137,7 +137,7 @@ failed in any build without LTCG.
   editor's clock and the tests set it.
 - **Tests:** the Boolean-by-name test accepts the dependency-free build's refusal (no Manifold); the toast test
   tolerates an Info toast after the Fix; the autopose time is printed, not asserted (ADR 0056); a sequencer Play test
-  waits 0.55 s of wall clock, not 31 frames.
+  runs half a second on the editor's clock, a 60th a frame, not 31 frames of the wall clock.
 - **Review (Opus) taken:** the sequencer Play test still leaned on the wall clock (Play's step is capped at 50 ms, so
   a slow frame gave less Play than wall time) - it runs on the editor's clock at a 60th a frame. Open: `corner_normalize`
   is a call per corner in the normal loops (no stress row measured it this round).
