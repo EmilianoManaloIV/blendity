@@ -5477,6 +5477,10 @@ static void tests_round308() {
     ed.command("preferences");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     auto pref_reach = [&](const std::string &key) {  // (Preferences scrolled until the control is wholly inside it, and stays put)
+      for (int w = 0; w < 1200 && ed.moonray_busy_for_test(); w++) {  // (MoonRay's search, on a thread, adds a row that moves the rows below when it ends: round 317)
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
       Recti last{-1, -1, 0, 0};
       for (int i = 0; i < 80; i++) {
         Recti a;
@@ -5889,6 +5893,10 @@ static void tests_round311() {
       ed.command("preferences");
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
       auto pref_reach = [&](const std::string &key) {
+        for (int w = 0; w < 1200 && ed.moonray_busy_for_test(); w++) {  // (MoonRay's search, on a thread, adds a row that moves the rows below when it ends: round 317)
+          ed.step_frame_headless();
+          std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
         for (int i = 0; i < 80; i++) {
           Recti a;
           const Recti dlg = ed.top_popup_rect_for_test();

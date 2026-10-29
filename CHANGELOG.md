@@ -41,6 +41,9 @@ One entry per round of requests, newest first: what was asked, what changed, and
 - **Noted, not changed:** a deform message rebuilds the whole mesh in Unreal. With CPU access, each rebuild also keeps a
   CPU copy and cooks collision, which may slow the editor on a large deforming mesh. Measuring that is the follow-up.
 - The `livelink` group: 157 checks, 0 failed.
+- **The same race in three more Preferences tests:** the hci Wheel picker test failed once on Windows CI in #233.
+  It and both `pref_reach` helpers in test_editor.cpp now wait for MoonRay's search and for the control to stay
+  put. The hci group: 24 checks, 0 failed; the editor group: 1296 checks, 0 failed.
 
 ## 2026-10-29 (round 316): the Godot and Blender bridges run live (task 0295)
 
