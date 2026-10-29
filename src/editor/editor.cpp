@@ -871,7 +871,7 @@ void Editor::draw_menubar(const Recti &r) {
     });
     u.menu_separator();
     if (u.menu_item("Render Image", key("render.image").c_str(), false, true, Icon::Camera)) start_final_render();
-    if (u.menu_item("Render Animation", key("render.animation").c_str(), ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation();
+    if (u.menu_item("Render Animation", key("render.animation").c_str(), ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation_from_fields();
     u.tooltip("Every frame of the scene's sequence (or the selected object's clip) as PNGs in Renders/, then an MP4 when FFmpeg is there.");
     if (u.menu_item("Save Render...", nullptr, false, render_has_result_)) defer([this] { save_render(); });
     if (u.menu_item("Save Screenshot...", key("render.screenshot").c_str())) screenshot_dialog();
@@ -936,13 +936,26 @@ void Editor::draw_menubar(const Recti &r) {
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
     if (shows(FocusReference)) {
-      if (u.menu_item("Reference Image...")) {
-        std::string path;
-        const std::vector<platform::FileFilter> filters = {{"Images", {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".exr", ".hdr"}}};
-        if (pick_open_path("Reference Image", assets_dir_, filters, path) == PathPick::Chosen) create_reference_image(path, "front");
-      }
-      u.tooltip("A picture to model from: an unlit plane the image's shape, facing the front view, kept out of renders and\n"
-                "shadows. Blender: Add > Image > Reference. Console: refimage <path> [front|side|top].");
+      u.submenu("Reference Image", u.px(160), [this] {  // (task 0287: the side and top views too, the project's images listed)
+        static const char *const kSides[][2] = {{"Front", "front"}, {"Side", "side"}, {"Top", "top"}};
+        for (const auto &s : kSides) {
+          const std::string side = s[1];
+          ui_.submenu(s[0], ui_.px(260), [this, side] {
+            if (ui_.menu_item("Browse..."))
+              defer([this, side] {
+                std::string path;
+                const std::vector<platform::FileFilter> filters = {{"Images", {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".exr", ".hdr"}}};
+                const PathPick got = pick_open_path("Reference Image", assets_dir_, filters, path);
+                if (got == PathPick::Chosen) create_reference_image(path, side);
+                if (got == PathPick::Unavailable) picker_unavailable("Reference Image");
+              });
+            for (const std::string &img : image_assets())
+              if (ui_.menu_item(img)) create_reference_image(img, side);
+          });
+        }
+      });
+      u.tooltip("A picture to model from: an unlit plane the image's shape, facing the front, side or top view, kept out of\n"
+                "renders and shadows. Blender: Add > Image > Reference.");
     }
     if (shows(FocusCreate | FocusDraw | FocusEdit)) {
       u.submenu("Shapes (Parametric)", u.px(190), [this] {
@@ -1000,6 +1013,11 @@ void Editor::draw_menubar(const Recti &r) {
                   "Blender: Options > Affect Only > Origins.");
     });
     if (shows(FocusMaterial)) {
+      u.submenu("Anime Look", u.px(170), [this, has_sel] {  // (task 0286: what only `animemat` did)
+        for (const char *p : {"Leaves", "Grass", "Wall", "Windows", "Roof", "Sky", "Clouds", "Rock", "Water"})
+          if (ui_.menu_item(p, nullptr, false, has_sel)) animemat_command(p);
+      });
+      u.tooltip("An anime-style texture and a flat-toned Toon material on the selected objects (leaves and grass as cut-out cards).");
       if (u.menu_item("New Surface", nullptr, false, has_sel)) surface_new("");  // (task 0273)
       u.tooltip("A layered surface on the selected object's material: Paint, the smart materials and the masks work on it.");
       if (u.menu_item("Bake Textures...", nullptr, false, has_sel)) bake_mode_ = 1, dialog_ = Dialog::Bake;  // (task 0273: the size and Keep UVs in a dialog)
@@ -1103,20 +1121,34 @@ void Editor::draw_menubar(const Recti &r) {
       if (ui_.menu_item("Sketch (pen)", nullptr, sketch_.active)) sketch_.active ? sketch_end() : sketch_begin();
       ui_.tooltip("Draw with the pen over the Scene view: its pressure is the width, its eraser erases, Ctrl keeps a stroke\n"
                   "freehand. Strokes are corrected to lines, arcs, ellipses and curves as the pen lifts (SketchBook's predictive stroke).");
+      draw_sketch_pen_menu();  // (task 0286: the pen's colour, steadiness, the canvases, Clear, Lift to 3D)
       ui_.submenu("Guides", ui_.px(220), [this] {
         static const char *const kGuides[] = {"None", "Ruler", "Ellipse", "French Curve"};
         for (int k = 0; k < 4; k++)
           if (ui_.menu_item(kGuides[k], nullptr, sketch_.guide == k)) sketch_.guide = k;
+        ui_.submenu("French Curve Shape", ui_.px(180), [this] {  // (task 0286)
+          static const char *const kFrench[] = {"Gentle S", "Long C", "Spiral"};
+          for (int k = 0; k < 3; k++)
+            if (ui_.menu_item(kFrench[k], nullptr, sketch_.guide == 3 && sketch_.french == k)) sketch_command({"sketchguide", "french", std::to_string(k)}, "");
+        });
         ui_.menu_separator();
         static const char *const kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
         for (int k = 0; k < 5; k++)
           if (ui_.menu_item(kSym[k], nullptr, sketch_.symmetry == k)) sketch_.symmetry = k;
+        ui_.submenu("Radial Copies", ui_.px(160), [this] {  // (task 0286)
+          for (int n : {3, 4, 5, 6, 8, 12, 16})
+            if (ui_.menu_item(strprintf("%d copies", n), nullptr, sketch_.symmetry == 4 && sketch_.radial == n))
+              sketch_command({"sketchguide", "symmetry", "radial", std::to_string(n)}, "");
+        });
         ui_.menu_separator();
         static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
         for (int k = 0; k < 4; k++)
           if (ui_.menu_item(kPersp[k], nullptr, scene_->sketch.perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
         ui_.menu_separator();
         if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
+        if (ui_.menu_item("Perspective Follows the Camera", nullptr, scene_->sketch.follow_camera))  // (task 0286)
+          sketch_command({"sketchguide", "follow", scene_->sketch.follow_camera ? "off" : "on"}, "");
+        ui_.tooltip("The perspective guide and the camera as one: turning the view moves the vanishing points, dragging a point turns the view.");
       });
       ui_.tooltip("SketchBook's rulers and guides: a stroke follows the ruler, the ellipse or the French curve; symmetry mirrors\n"
                   "it; perspective snaps it to the lines through the nearest vanishing point (drag the points and the horizon).");
@@ -1224,7 +1256,7 @@ void Editor::draw_menubar(const Recti &r) {
         if (ui_.menu_item(l.name.c_str(), nullptr, workspace_ == l.name)) apply_workspace(l.name);
       ui_.menu_separator();
       if (ui_.menu_item("Show All Tools", nullptr, show_all_tools_)) show_all_tools_ = !show_all_tools_;
-      ui_.tooltip("A stage's layout hides the tools other stages use (the keys and the console still reach them).\n"
+      ui_.tooltip("A stage's layout hides the tools other stages use (their keys and the menus still reach them).\n"
                   "Show All Tools shows every one whatever the layout.");
       if (ui_.menu_item("Save Layout...")) layout_save_open_ = true;
       if (ui_.menu_item("Delete Layout...", nullptr, false, !user_layouts_.empty())) layout_delete_open_ = true;
@@ -3103,6 +3135,43 @@ void Editor::draw_smat_dialog(const std::function<void()> &close) {
   smat_write(pt->layers[(size_t)smat_layer_]->clone(), name);
 }
 
+/* The Draw menu's pen (task 0286): what only the console set - the colour, how steady the line is, the canvas the strokes
+ * go on, clearing, and lifting the sketch off the picture into 3D. */
+void Editor::draw_sketch_pen_menu() {
+  auto &u = ui_;
+  u.submenu("Pen Colour", u.px(160), [this] {
+    static const char *const kNames[] = {"Ink", "Pencil Grey", "Red", "Blue", "Green", "White"};
+    static const char *const kHex[] = {"202020", "808080", "D03030", "3060D0", "30A050", "F0F0F0"};
+    for (int k = 0; k < 6; k++)
+      if (ui_.menu_item(kNames[k], nullptr, sketch_.color == Color::hex((uint32_t)std::strtoul(kHex[k], nullptr, 16))))
+        sketch_command({"sketch", "color", kHex[k]}, "");
+  });
+  u.submenu("Steadiness", u.px(170), [this] {
+    static const char *const kNames[] = {"Off", "Light", "Medium", "Strong", "Very Strong"};
+    static const int kPx[] = {0, 10, 25, 50, 100};
+    for (int k = 0; k < 5; k++)
+      if (ui_.menu_item(kNames[k], nullptr, (int)std::lround(sketch_.tether) == kPx[k])) sketch_command({"sketch", "steady", std::to_string(kPx[k])}, "");
+  });
+  u.tooltip("Steadiness (a lazy rope): the line trails the pen by this much, so a shaky hand draws a smooth line.");
+  u.submenu("Canvas", u.px(240), [this] {
+    Sketch &s = scene_->sketch;
+    if (ui_.menu_item("The View (the picture plane)", nullptr, s.active_canvas == 0)) sketch_canvas_command({"sketchcanvas", "view"}, "");
+    if (ui_.menu_item("The Ground")) sketch_canvas_command({"sketchcanvas", "ground"}, "");
+    for (const char *ax : {"X", "Y", "Z"})
+      if (ui_.menu_item(std::string("A Plane Facing ") + ax)) sketch_canvas_command({"sketchcanvas", "plane", to_lower(ax)}, "");
+    if (ui_.menu_item("The Face under the Middle")) sketch_canvas_command({"sketchcanvas", "face"}, "");
+    ui_.menu_separator();
+    for (const SketchCanvas &c : s.canvases)
+      if (c.kind != 2 && ui_.menu_item(strprintf("%d: %s", c.id, c.name.c_str()), nullptr, s.active_canvas == c.id))
+        sketch_canvas_command({"sketchcanvas", std::to_string(c.id)}, "");
+  });
+  u.tooltip("Where the next strokes land: on the picture, or on a plane in the scene (the ground, a plane facing an axis, a face).");
+  if (u.menu_item("Lift the Sketch to 3D")) sketch_refine_command({"sketchlift"});
+  u.tooltip("The strokes drawn on the picture placed in the scene: each on the face under it, or at the depth it was drawn at.");
+  if (u.menu_item("Clear the Sketch")) sketch_command({"sketch", "clear"}, "");
+  u.tooltip("Every stroke removed (Undo brings them back).");
+}
+
 /* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
 void Editor::set_theme(const std::string &name_in, bool save) {
   const int k = ui::theme_index(name_in);
@@ -3746,12 +3815,10 @@ static void scan_files(const std::string &dir, const std::string &ext, std::vect
   }
 }
 
-static int g_dialog_shown = 0;  // which dialog has had its popup opened
-
 void Editor::draw_dialogs() {
   if (ipv_.open && dialog_ != Dialog::ImportPreview && busy_label_.empty()) finish_import_preview(false);  // (the preview clicked away: as Cancel, task 0152)
   if (dialog_ == Dialog::None) {
-    g_dialog_shown = 0;
+    dialog_shown_ = 0;
     return;
   }
   auto &u = ui_;
@@ -3761,12 +3828,12 @@ void Editor::draw_dialogs() {
   int w = u.px(dialog_ == Dialog::About ? 460 : wide || dialog_ == Dialog::Report ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
-    if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
-      g_dialog_shown = 0;
+    if (dialog_shown_ == (int)dialog_) {  // was open and got closed by a click outside
+      dialog_shown_ = 0;
       dialog_ = Dialog::None;
       return;
     }
-    g_dialog_shown = (int)dialog_;
+    dialog_shown_ = (int)dialog_;
     u.open_popup(id, anchor);
     if (dialog_ == Dialog::SaveAs) u.begin_edit(u.id("saveas_name"), dialog_text_, true);
     if (dialog_ == Dialog::ExportTextures) u.begin_edit(u.id("exptex_dir"), dialog_text_, true);
@@ -4042,6 +4109,7 @@ void Editor::draw_dialogs() {
         u.tooltip("Off: only released versions (v0.10.0...). On: also preview builds of single pull requests, when published.");
         draw_libraries_settings();
         draw_moonray_settings();
+        draw_ffmpeg_settings();  // (task 0288)
         draw_assist_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
@@ -4070,7 +4138,7 @@ void Editor::draw_dialogs() {
           rig_control_scale_ = cs;
           save_prefs();
         }
-        u.tooltip("How big the rig's IK and FK handles are drawn, times their own size (1: a fifth of the bone). Console: overlay controls size <x>.");
+        u.tooltip("How big the rig's IK and FK handles are drawn, times their own size (1: a fifth of the bone).");
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;

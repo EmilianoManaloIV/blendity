@@ -278,7 +278,7 @@ void Editor::draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj) {
               "the limbs, and the mesh bound with inpainted weights. Console: autorig humanoid.");
     if (u.button(b, "Quadruped")) autorig_start(mesh_obj, RigKind::Quadruped);
     u.tooltip("Markers on a four-legged animal seen from its left side (nose, skull, withers, hips, tail, paws, knees and\n"
-              "hocks). Console: autorig quadruped.");
+              "hocks).");
     if (!mesh_obj) u.label(lay.row(), "Select the character's mesh first.", u.theme.text_dim);
     return;
   }

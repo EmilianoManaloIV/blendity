@@ -176,7 +176,7 @@ void Editor::edit_command(const std::vector<std::string> &t, const std::string &
     return;
   }
   if (!edit_doc_.is_open()) {
-    Log::warn("Editing: nothing open (develop open <file> | develop open render)");
+    Log::warn("Editing: nothing open (the Editing window's Open..., or a render from the Render window)");
     return;
   }
   if (verb == "add") {

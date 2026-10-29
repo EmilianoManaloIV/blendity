@@ -674,6 +674,18 @@ class Editor {
   int gizmo_hot_for_test() const { return gizmo_hot_; }
   bool sketch_active_for_test() const { return sketch_.active; }
   const Sketch &sketch_for_test() const { return scene_->sketch; }
+  uint32_t sketch_color_for_test() const { return sketch_.color; }  // (task 0286: the Draw menu's pen)
+  float sketch_tether_for_test() const { return sketch_.tether; }
+  int sketch_french_for_test() const { return sketch_.french; }
+  int sketch_radial_for_test() const { return sketch_.radial; }
+  int sketch_symmetry_for_test() const { return sketch_.symmetry; }
+  float part_tau_for_test() const { return part_tau_; }  // (task 0287: the UV editor's Parts options)
+  bool part_multi_tile_for_test() const { return part_multi_tile_; }
+  bool uv_hide_others_for_test() const { return uv_hide_others_; }
+  void set_render_range_for_test(int first, int last, float fps) { ranim_first_ = first, ranim_last_ = last, ranim_fps_ = fps; }  // (task 0288)
+  bool start_render_animation_from_fields_for_test() { return start_render_animation_from_fields(); }
+  const std::string &ffmpeg_path_for_test() const { return ffmpeg_path_; }
+  bool ai_head_on_for_test() const { return ai_.head_on; }
   void sketch_set_ruler_for_test(Vec2 a, Vec2 b) { sketch_.placed = true, sketch_.ruler[0] = a, sketch_.ruler[1] = b; }
   void sketch_set_ellipse_for_test(Vec2 c, float rx, float ry, float angle) { sketch_.placed = true, sketch_.ell_c = c, sketch_.ell_rx = rx, sketch_.ell_ry = ry, sketch_.ell_angle = angle; }
   void sketch_set_symmetry_center_for_test(Vec2 c) { sketch_.placed = true, sketch_.sym_c = c; }
@@ -1255,6 +1267,7 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  bool prefs_open_for_test() const { return dialog_ == Dialog::Preferences; }
   /* The import preview's (task 0152). */
   bool import_preview_open_for_test() const { return ipv_.open; }
   bool begin_import_preview_for_test(const std::string &path) { return begin_import_preview(path, true) && ipv_.open; }
@@ -2099,6 +2112,7 @@ class Editor {
   Recti edit_canvas_rect_{0, 0, 0, 0}, edit_window_rect_{0, 0, 0, 0};
   void uv_report_log();     // task 0179: `uv report`
   void uv_parts_command(const std::vector<std::string> &t);
+  bool uv_parts_settings(const std::vector<std::string> &t);  // (task 0287: without the unwrap)
   float part_tau_ = 1.25f;  // Part Unwrap's distortion bound (`uv parts <bound>`)
   bool part_multi_tile_ = false;
   /* Task 0180: PartField's learned part tree (off by default: its weights are NVIDIA's, non-commercial, and the user
@@ -3542,6 +3556,36 @@ class Editor {
   std::string paint_alpha_path_, paint_grain_path_, paint_stencil_path_;
   int sculpt_hide_group_ = 0;
   void draw_paint_extras(ui::Layout &lay);
+  void draw_sketch_pen_menu();  // (task 0286)
+  void draw_light_aim_point(ui::Layout &lay, GameObject &g);  // (task 0287)
+  void draw_guide_by_numbers(ui::Layout &lay);
+  bool add_guide(Vec3 p, Vec3 d);
+  void draw_uv_parts_options(const Recti &r);
+  /* Task 0288: render, MoonRay and AI without the console. */
+  int ranim_first_ = 0, ranim_last_ = 0;  // (0: the sequence's or the clip's own)
+  float ranim_fps_ = 0.0f;
+  std::string seq_folder_;                // (empty: Renders/<scene>_sequence_<time>)
+  void draw_render_range(ui::Layout &lay);
+  bool start_render_animation_from_fields();
+  void draw_ffmpeg_settings();
+  void draw_moonray_own_row();
+  void draw_ai_span_options(int &x, int y, int bh);
+  /* Task 0289: animation, rigging and the Inspector without the console. */
+  void draw_puppet_body_items();
+  void draw_ragdoll_event_items(GameObject *b, const std::string &here);
+  void autopose_set_lock(GameObject &b, bool on);
+  std::vector<std::string> gait_files_;
+  double gait_files_time_ = -100;
+  GameObject *selected_bone();
+  void draw_walk_style_files(ui::Layout &lay);
+  std::vector<std::string> gait_files();
+  std::vector<std::string> group_choices(const std::string &current);
+  void draw_shape_key_buttons(ui::Layout &lay, GameObject &g);
+  int ai_from_ = 0, ai_to_ = 0;  // (the Animation window's span; 0: the keys around the playhead)
+  Vec3 light_aim_, guide_point_;
+  int guide_axis_ = 0;
+  float wp_clean_below_ = 0.01f;
+  float strokeobj_grass_density_ = 40.0f, strokeobj_grass_height_ = 0.25f, strokeobj_grass_radius_ = 1.0f;
   void refuse_no_mesh_maps(const std::string &what);  // (task 0272)
   bool row_buttons(ui::Layout &lay, const char *prefix, const std::vector<const char *> &labels, int &hit);
   PaintImagesPtr paint_images_;
@@ -3628,7 +3672,7 @@ class Editor {
   std::vector<std::string> scatter_source_choices() const;  // (task 0264: the scene's meshes but the one painted on)
   std::vector<std::string> scatter_mask_choices();          // (task 0264: None, then the surface's layers by name)
   void set_strokeobj(bool on);
-  GameObject *strokeobj_object(bool make);
+  GameObject *strokeobj_object(bool make, bool fresh = false);  // (fresh: a new one even when a Stroke object is selected)
   bool strokeobj_hit(const Recti &view, float x, float y, Vec3 &point, Vec3 &normal, Vec3 &facing);
   bool strokeobj_dab(const Recti &view, float x, float y);
   void strokeobj_ribbon_point(const Recti &view, float x, float y);
@@ -4773,6 +4817,7 @@ class Editor {
 
   /* ---- dialogs ---- */
   enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat } dialog_ = Dialog::None;
+  int dialog_shown_ = 0;  // which dialog has had its popup opened (task 0290: this editor's own - a file static carried one editor's open dialog into the next)
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {

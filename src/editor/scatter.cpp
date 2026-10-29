@@ -289,7 +289,7 @@ void Editor::scatter_command(const std::vector<std::string> &t) {
     b.tint = arg(2, "off") != "off";
     if (b.tint && t.size() >= 5) b.tint_color = Vec3(num(2, 1.0f), num(3, 1.0f), num(4, 1.0f));
   }
-  else if (v == "seed") b.seed = (uint32_t)std::max(0.0f, num(2, 1.0f));
+  else if (v == "seed") b.seed = (uint32_t)clampf(num(2, 1.0f), 0.0f, 1e6f);  // (the panel's Seed field's range: task 0286)
   else if (v == "mask") b.mask_layer = arg(2, "off") == "off" ? -1 : (int)num(2, -1.0f);
   else if (v == "dab" || v == "erase") {
     if (!scatter_) set_scatter(true);

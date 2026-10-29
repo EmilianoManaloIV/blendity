@@ -2,6 +2,102 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 310): the console's last mentions, the reach table, measured (task 0290)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems. (The plan's rounds 294-298, renumbered after the
+bridges and Puppet Posing.)
+
+**Added**
+- Tooltips, help and messages that sent the artist to the Console name the control: **1 place left** of 26 at round
+  291 (a UI file's shortcuts can run console lines: that is what they are); `tools/hci_console_baseline.txt` is 1.
+- **The console-reach table** (`kConsoleReach`, tests/test_editor.cpp): 29 verbs, each with the way to its control;
+  `tools/test_coverage_map.py` lists them.
+- **A dialog's open flag per editor** (was a file static: a second editor closed its own Preferences).
+- **A dialog taller than the window fits it and scrolls** (Preferences reached past 900 px on Linux, where MoonRay's own
+  row is drawn, and its last rows were out of reach on a small screen).
+- Keystroke-level rows 23-27 (docs/hci/klm.md): a contact 12.5 s typed, 4.85 s by the Puppet menu; a walk style
+  kept 8.1 s, 2.55 s; drawing in red 7.9 s, 5.95 s; a modifier's group 5.3 s, 3.75 s; lifting the sketch 6.1 s,
+  4.85 s (model estimates; the typed path also needs the command recalled exactly).
+
+**Checked**
+- `tests_round310`: 29 of 29 verbs reached; `hci_console_audit.py --check` at 1; `hci_klm.py --check` clean.
+- Unit checks (round 310): Windows, in render-cache verify mode, 13,448, 0 failed (1170 tests), 0 stale
+  pictures. Linux with libraries: 12988, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone, as Linux's modeling group did; on Linux task 0288's test clicked Preferences rows below the window (MoonRay's own row makes the dialog taller there) - the dialog now scrolls, the test reaches its rows by the wheel, and the Linux editor and modeling groups then passed, 1299 and 2068 checks.)
+
+## 2026-10-29 (round 309): animation, rigging and Inspector verbs without the console (task 0289)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems. (The plan's rounds 294-298, renumbered after the
+bridges and Puppet Posing.)
+
+**Added**
+- **Puppet > Lock the Selected Bone** (by the bone, so a second character's bone of the same name is its own);
+  **Contacts** (Find, Pin, Add One Here, Remove the One Here, Clear); **Ragdoll Events** where Jolt is built in (a hit
+  from the character's front, back, sides or below, turned with it; limp; strong; clear; the motors' strength).
+- The Walk Cycle's **Save Style** and **Load Style...**; the Inspector's **Vertex Group / Thickness Group** as a dropdown
+  of the mesh's groups (the Inspector's object, pinned or selected); **Add Shape Key** and **Remove...**.
+
+**Checked**
+- `tests_round309` by real clicks, two characters with the same bone names among them: 13 checks.
+- Round 310's unit-check line covers this round (rounds 306 to 310 landed together).
+
+## 2026-10-29 (round 308): render, MoonRay and AI verbs without the console (task 0288)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems. (The plan's rounds 294-298, renumbered after the
+bridges and Puppet Posing.)
+
+**Added**
+- The Render window's **First Frame, Last Frame, Frame Rate** (0: the source's own) used by the button, the Render menu
+  and Ctrl+F12 alike, a backwards range refused, a first frame past the end refused before any folder is made; a
+  **Sequence Folder** (inside the project when relative, as the console's).
+- Preferences: **FFmpeg**'s path; MoonRay's **Your own MoonRay** folder and **Check**; AI Inbetweening's archive by its
+  path or ... and **Check**, on a row of their own under the install state.
+- The Animation window's AI **...** options: a span by frame numbers and Use the Fit to My Clips.
+
+**Checked**
+- `tests_round308` and the Render Animation range test: 8 checks.
+- Round 310's unit-check line covers this round (rounds 306 to 310 landed together).
+
+## 2026-10-29 (round 307): modeling, UV and lighting verbs without the console (task 0287)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems. (The plan's rounds 294-298, renumbered after the
+bridges and Puppet Posing.)
+
+**Added**
+- Mesh Tools' **Mirror Y** and **Clear Custom Normals**; GameObject > Reference Image > **Front / Side / Top**, each
+  listing the project's images beside Browse...; a light aimed at a typed point; a guide line by numbers (Edit Mode's
+  tools), one way with the console's `guide` (a guide already there is said, not doubled); Weight Paint's **Clean
+  Below**.
+- The UV editor's material filter as a list with a check per slot and Others Dimmed / Hidden; a **Parts** button for
+  Part Unwrap's bound, tiles and part tree - setting the next unwrap only (the console's `uv parts` still unwraps).
+- A submenu taller than the window fits it and scrolls.
+
+**Checked**
+- `tests_round307` by real clicks: 13 checks.
+- Round 310's unit-check line covers this round (rounds 306 to 310 landed together).
+
+## 2026-10-29 (round 306): stylized and sketch verbs without the console (task 0286)
+
+**Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them
+a way through the interface, and look for related HCI problems. (The plan's rounds 294-298, renumbered after the
+bridges and Puppet Posing.)
+
+**Added**
+- **Mesh > Draw**: Pen Colour, Steadiness, Clear the Sketch, a Canvas submenu (the view, the ground, a plane facing an
+  axis, the face under the middle, the canvases by name), Lift the Sketch to 3D; Guides gains French Curve Shape,
+  Radial Copies and Perspective Follows the Camera. `sketchlift` joins the console's command list.
+- **GameObject > Anime Look** (the anime presets on the selection); the Strokes section's New Stroke Object, the
+  canopy centre by numbers and Grass (density, height, radius); Scatter's Seed.
+- `strokeobj new` makes a new object even when a Stroke object is selected (it took the selected one).
+
+**Checked**
+- `tests_round306` by real clicks: 19 checks.
+- Round 310's unit-check line covers this round (rounds 306 to 310 landed together).
+
 ## 2026-10-29 (round 305): Puppet Posing written up and measured (task 0285)
 
 **Asked:** the user (2026-10-29, /plan): "How to implement Animatica Marionette". Their choices: a learned pose prior

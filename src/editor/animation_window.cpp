@@ -557,7 +557,7 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     body_command({"body", "show", body_.show_com ? "off" : "on"});
   if (button(u.px(76), "Contacts", false,
              "Find where the feet and hands rest (low and still) and mark those frames as contacts under the ruler (Cascadeur's\n"
-             "fulcrum points). Contacts set by hand (console: body contacts add) are kept. Pin holds them still: body contacts pin."))
+             "fulcrum points). Contacts set by hand (Puppet > Contacts) are kept, and Pin there holds them still."))
     body_contacts_command({"body", "contacts", "find"});
   if (button(u.px(60), "Flight", body_.ghost && body_.kind == "Flight",
              "Physics in the air (Cascadeur's AutoPhysics): between contacts the center of mass follows a parabola under gravity\n"
@@ -573,14 +573,14 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   if (button(u.px(86), "AutoPosing", autopose_.on,
              "Drag a hand, a foot, the head or the hips with the move gizmo and the whole body follows (Cascadeur's AutoPosing):\n"
              "the spine and limbs bend within their limits, the feet stay on the ground, the center of mass stays over them. Keys\n"
-             "at the playhead on release. Locks: autopose lock <bone>."))
+             "at the playhead on release. Puppet > Lock the Selected Bone keeps one still."))
     autopose_command({"autopose", autopose_.on ? "off" : "on"});
   if (ragdoll::available()) {
     const bool rag_shown = body_.ghost && body_.kind == "Ragdoll", rag_busy = body_.solve && body_.solve->kind == "Ragdoll";
     if (button(u.px(70), rag_busy ? "Simulating..." : "Ragdoll", rag_shown || rag_busy,
                "The clip played by an active ragdoll (Jolt): a capsule a bone, its joints' motors following the clip, so hits and\n"
-               "falls react physically. Events in the clip: body ragdoll hit <bone> <frame> <x> <y> <z>, limp <frame> (motors off: a\n"
-               "fall), strong <frame>. Simulated in the background, shown as a ghost, then Apply."))
+               "falls react physically. Hits, limp (motors off: a fall) and strong at the playhead: Puppet > Ragdoll Events.\n"
+               "Simulated in the background, shown as a ghost, then Apply."))
       body_ragdoll_command({"body", "ragdoll", rag_shown || rag_busy ? "off" : "show"});
   }
   if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
@@ -1056,7 +1056,62 @@ void Editor::draw_puppet_menu() {
         if (ui_.menu_item(r ? strprintf("%d frames each side", r) : std::string("The playhead's key only"), nullptr, autopose_.reach == r))
           autopose_command({"autopose", "reach", std::to_string(r)});
     });
+    draw_puppet_body_items();  // (task 0289)
   });
+}
+
+/* The selected bone (the active object when it is one), or null. */
+GameObject *Editor::selected_bone() {
+  GameObject *g = active_object();
+  return g && g->get<Bone>() ? g : nullptr;
+}
+
+/* Task 0289: what only `autopose lock`, `body contacts` and `body ragdoll` did - a bone locked for AutoPosing, contacts
+ * and ragdoll events at the playhead on the selected bone. */
+void Editor::draw_puppet_body_items() {
+  auto &u = ui_;
+  GameObject *b = selected_bone();
+  const bool locked = b && std::find(autopose_.locks.begin(), autopose_.locks.end(), b->id) != autopose_.locks.end();
+  u.menu_separator();
+  if (u.menu_item("Lock the Selected Bone", nullptr, locked, b != nullptr)) autopose_set_lock(*b, !locked);
+  u.tooltip("AutoPosing leaves a locked bone where it is while the rest of the body follows a drag (select a bone first).");
+  if (!assist_on(Assist::Physics)) return;
+  const std::string here = strprintf("%.0f", anim_.frame), later = strprintf("%.0f", anim_.frame + 9.0f);
+  u.submenu("Contacts", u.px(330), [this, b, here, later] {
+    if (ui_.menu_item("Find Contacts")) body_contacts_command({"body", "contacts", "find"});
+    if (ui_.menu_item("Pin Contacts")) body_contacts_command({"body", "contacts", "pin"});
+    ui_.tooltip("Hold the contacts still: the feet and hands planted where they rest.");
+    if (ui_.menu_item("Add One Here (the selected bone, 10 frames)", nullptr, false, b != nullptr)) body_contacts_command({"body", "contacts", "add", b->name, here, later});
+    if (ui_.menu_item("Remove the One Here (the selected bone)", nullptr, false, b != nullptr)) body_contacts_command({"body", "contacts", "remove", b->name, here});
+    if (ui_.menu_item("Clear Contacts")) body_contacts_command({"body", "contacts", "clear"});
+  });
+  u.tooltip("The bars under the ruler: where a foot or a hand rests. Find marks them; set by hand they stay.");
+  if (!ragdoll::available()) return;
+  u.submenu("Ragdoll Events", u.px(260), [this, b, here] { draw_ragdoll_event_items(b, here); });
+  u.tooltip("Hits, falls and recoveries in the clip for the Ragdoll (a 30 N s push, turned with the character; limp; strong), and how\n"
+            "hard its motors follow the clip.");
+}
+
+/* The Ragdoll Events submenu (task 0289): a hit from the character's front, back, sides or below - turned with its root -
+ * then limp, strong, clear and the motors' strength. */
+void Editor::draw_ragdoll_event_items(GameObject *b, const std::string &here) {
+  ui_.submenu("Hit the Selected Bone Here", ui_.px(180), [this, b, here] {
+    static const char *const kFrom[] = {"From the Front", "From Behind", "From the Left", "From the Right", "From Below"};
+    static const Vec3 kPush[] = {{0, 0, -30}, {0, 0, 30}, {30, 0, 0}, {-30, 0, 0}, {0, 30, 0}};
+    const GameObject *root = anim_root();
+    for (int k = 0; k < 5; k++) {
+      if (!ui_.menu_item(kFrom[k], nullptr, false, b != nullptr)) continue;
+      const Vec3 v = root ? root->world_rotation().rotate(kPush[k]) : kPush[k];
+      body_ragdoll_command({"body", "ragdoll", "hit", b->name, here, strprintf("%g", v.x), strprintf("%g", v.y), strprintf("%g", v.z)});
+    }
+  });
+  if (ui_.menu_item("Go Limp Here")) body_ragdoll_command({"body", "ragdoll", "limp", here});
+  ui_.tooltip("The motors off from the playhead: the body falls as a rag.");
+  if (ui_.menu_item("Get Strong Here")) body_ragdoll_command({"body", "ragdoll", "strong", here});
+  if (ui_.menu_item("Clear Events")) body_ragdoll_command({"body", "ragdoll", "clear"});
+  ui_.menu_separator();
+  for (const char *s : {"0.25", "0.5", "0.75", "1"})
+    if (ui_.menu_item(strprintf("Simulate, the Motors at %.0f%%", 100.0 * std::atof(s)))) body_ragdoll_command({"body", "ragdoll", "show", s});
 }
 
 /* anim new [name] | key <object> <property> <axis> <frame> [value] | interp <object> <property> <axis> <frame>

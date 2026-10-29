@@ -1340,6 +1340,7 @@ void Context::draw_popups() {
       r.h = std::min(h, std::max(row_h(), std::max(below, above)));
       r.y = below >= above || h <= below ? p.anchor.bottom() : p.anchor.y - r.h;
     }
+    else if (h > canvas.height()) r.y = 0, r.h = canvas.height();  // (tasks 0287, 0290: a long submenu or a dialog taller than the window - Preferences on a small screen - fits it and scrolls)
     else if (r.bottom() > canvas.height()) r.y = p.submenu ? canvas.height() - r.h : std::max(0, p.anchor.y - r.h);
     r.x = std::max(0, r.x);
     r.y = std::max(0, r.y);

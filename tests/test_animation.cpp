@@ -3,6 +3,7 @@
 #include "test_common.h"
 #include "../src/scene/puppet.h"
 #include "../src/scene/motion_check.h"
+#include "../src/scene/ragdoll.h"
 
 
 /* ===================================================================== */
@@ -4021,6 +4022,50 @@ static void tests_round86_to_round100() {
     CHECK(made);
   });
 
+  test("Render Animation's First / Last / Frame Rate (task 0288): the Render window's button renders the range the fields say, the console's renderanim first last fps by a click", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("engine raster");
+    ed.scene().render.width = 160, ed.scene().render.height = 90;
+    GameObject *root = ed.scene().create("R308");
+    ed.scene().create("Lid", root);
+    ed.command("select R308");
+    ed.command("component Animation");
+    CHECK(root->get<Animation>() != nullptr);
+    if (!root->get<Animation>()) return;
+    root->get<Animation>()->clip = "Assets/Animations/R86Up.anim";
+    ed.command("layout Lighting & Rendering");
+    ed.command("window Render");
+    ed.record_buttons_for_test(true);
+    ed.set_render_range_for_test(30, 40, 12.0f);
+    std::string key;
+    for (int i = 0; i < 4 && key.empty(); i++) {
+      ed.step_frame_headless();
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind("Render Animation", 0) == 0) key = kv.first;
+    }
+    Recti r;
+    const bool found = !key.empty() && ed.button_rect_for_test(key, r);
+    for (platform::EventType t : {platform::EventType::MouseMove, platform::EventType::MouseDown, platform::EventType::MouseUp}) {
+      if (!found) break;
+      platform::Event e;
+      e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+      ed.step_frame_headless({e});
+    }
+    const auto &ra = ed.render_animation_for_test();
+    std::printf("    '%s' clicked %d: active %d, frames %d to %d at %g fps\n", key.c_str(), (int)found, (int)ra.active, ra.first, ra.last, ra.fps);
+    CHECK(found && ra.active && ra.first == 30 && ra.last == 40 && std::fabs(ra.fps - 12.0f) < 1e-4f);
+    const std::string dir = ra.dir;
+    ed.command("renderanim stop");
+    for (const std::string &f : ed.render_animation_for_test().written) fs::remove_file(f);  // (the test project's Renders/ stays small)
+    fs::remove_file(dir);  // (empty now: removed too)
+    ed.set_render_range_for_test(40, 30, 0.0f);  // (backwards: the button is off, Ctrl+F12's way refuses)
+    const bool refused = !ed.start_render_animation_from_fields_for_test() && !ed.render_animation_for_test().active;
+    std::printf("    First 40 after Last 30: refused %d\n", (int)refused);
+    CHECK(refused);
+  });
+
   test("render animation: without a sequence or a clip it refuses; Stop puts the pose back", [=] {
     seq_clips();
     Editor ed;
@@ -5733,6 +5778,149 @@ static AnimationClipPtr r304_faulty(Scene &s, GameObject &rig) {
   return clip;
 }
 
+static void tests_round309() {
+  test("animation, rigging and Inspector verbs without the console (task 0289): Puppet > Lock the Selected Bone, Contacts added, removed and cleared at the playhead (and Ragdoll Events where Jolt is built in); Walk's Save Style and Load Style; a modifier's Vertex Group picked from the mesh's groups; Shape Keys added and removed in the Inspector - all by real clicks", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    Scene &s = ed.scene();
+    GameObject *rig = r300_person(s);
+    ed.mark_changed_for_test("Add the person");
+    ed.command("select " + rig->name);
+    ed.command("anim new Body309");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    ed.command("assist on physics");
+    ed.command("layout Animation");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto rect = [&](const std::string &key, Recti &r) {
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      return ed.button_rect_for_test(key, r);
+    };
+    auto click = [&](const std::string &key) {
+      Recti r;
+      if (!rect(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      return true;
+    };
+    auto move = [](int x, int y) {
+      platform::Event e;
+      e.type = platform::EventType::MouseMove, e.x = x, e.y = y;
+      return e;
+    };
+    auto hover = [&](const std::string &key) {
+      Recti r;
+      if (!rect(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+      ed.step_frame_headless({move(r.x + r.w / 2, r.y + r.h / 2)});
+      ed.step_frame_headless();
+      return true;
+    };
+    auto reach = [&](const std::string &key, WindowKind kind) {  // (a row of a window, scrolled until it is inside)
+      for (int attempt = 0; attempt < 60; attempt++) {
+        ed.step_frame_headless();
+        Recti r;
+        if (!ed.button_rect_for_test(key, r)) continue;
+        const Recti pane = ed.dock_leaf_rect_for_test(kind);
+        const int top = pane.y + 28;
+        if (pane.w <= 0 || (r.y >= top && r.bottom() <= pane.bottom())) return true;
+        platform::Event w;
+        w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < top ? 1.0f : -1.0f;
+        ed.step_frame_headless({move(w.x, w.y)});
+        ed.step_frame_headless({w});
+      }
+      return std::printf("    (no '%s' in its window)\n", key.c_str()), false;
+    };
+    /* Puppet: lock the selected foot; a contact on it at the playhead, removed, then one more cleared. */
+    GameObject *foot = s.find_by_name("mixamorig:LeftFoot");
+    CHECK(foot != nullptr);
+    if (!foot) return;
+    ed.command("select mixamorig:LeftFoot");
+    ed.command("anim frame 12");
+    const bool locked = click("Puppet") && click("menu:Lock the Selected Bone");
+    const bool lock_on = std::find(ed.autopose_locks_for_test().begin(), ed.autopose_locks_for_test().end(), foot->id) != ed.autopose_locks_for_test().end();
+    const bool unlocked = click("Puppet") && click("menu:Lock the Selected Bone");
+    const bool lock_off = std::find(ed.autopose_locks_for_test().begin(), ed.autopose_locks_for_test().end(), foot->id) == ed.autopose_locks_for_test().end();
+    std::printf("    Lock the Selected Bone clicked %d: locked %d; again %d: unlocked %d\n", (int)locked, (int)lock_on, (int)unlocked, (int)lock_off);
+    CHECK(locked && lock_on && unlocked && lock_off);
+    {  /* A second character with the same bone names: its own foot is locked, not the first one's. */
+      GameObject *rig2 = r300_person(s);
+      GameObject *foot2 = nullptr;
+      s.for_each([&](GameObject &c) {
+        if (c.name == "mixamorig:LeftFoot" && &c != foot) foot2 = &c;
+      });
+      CHECK(foot2 && foot2 != foot);
+      if (foot2) ed.select_for_test(foot2->id, false);
+      const bool second = foot2 && click("Puppet") && click("menu:Lock the Selected Bone");
+      const auto &locks = ed.autopose_locks_for_test();
+      const bool its_own = foot2 && std::find(locks.begin(), locks.end(), foot2->id) != locks.end() && std::find(locks.begin(), locks.end(), foot->id) == locks.end();
+      std::printf("    the second character's foot locked by the menu %d: its own %d\n", (int)second, (int)its_own);
+      CHECK(second && its_own);
+      ed.select_for_test(foot->id, false);
+      s.destroy(rig2);
+    }
+    const bool added = click("Puppet") && hover("submenu:Contacts") && click("menu:Add One Here (the selected bone, 10 frames)");
+    clip = ed.anim_clip_for_test();
+    const bool one = clip && clip->contacts.size() == 1 && clip->contacts[0].bone == foot->name && clip->contacts[0].from == 12.0f && clip->contacts[0].to == 21.0f;
+    std::printf("    Contacts > Add One Here clicked %d: %zu contact(s)%s\n", (int)added, clip ? clip->contacts.size() : 0, one ? " (the foot, 12 to 21)" : "");
+    CHECK(added && one);
+    const bool removed = click("Puppet") && hover("submenu:Contacts") && click("menu:Remove the One Here (the selected bone)");
+    clip = ed.anim_clip_for_test();
+    std::printf("    Remove the One Here clicked %d: %zu left\n", (int)removed, clip ? clip->contacts.size() : 0);
+    CHECK(removed && clip && clip->contacts.empty());
+    ed.command("body contacts add mixamorig:RightFoot 0 5");
+    const bool cleared = click("Puppet") && hover("submenu:Contacts") && click("menu:Clear Contacts");
+    clip = ed.anim_clip_for_test();
+    CHECK(cleared && clip && clip->contacts.empty());
+    if (ragdoll::available()) {
+      const bool limp = click("Puppet") && hover("submenu:Ragdoll Events") && click("menu:Go Limp Here");
+      clip = ed.anim_clip_for_test();
+      std::printf("    Ragdoll Events > Go Limp Here clicked %d: %zu event(s)\n", (int)limp, clip ? clip->ragdoll.size() : 0);
+      CHECK(limp && clip && clip->ragdoll.size() == 1);
+    }
+    else std::printf("    (no Jolt in this build: Ragdoll Events not drawn)\n");
+    /* Walk: the style saved as a file, then loaded from the list. */
+    ed.command("assist on walk");
+    ed.command("layout Rigging");
+    ed.command("select " + rig->name);
+    const bool saved = reach("walk:Save Style", WindowKind::Rigging) && click("walk:Save Style");
+    std::string gait;
+    for (const auto &e : fs::list(fs::join(ed.assets_dir_for_test(), "Gaits")))
+      if (fs::extension(e.name) == ".gait") gait = "Gaits/" + e.name;
+    const bool loaded = !gait.empty() && reach("walk:Load Style", WindowKind::Rigging) && click("walk:Load Style") && click("menu:" + gait);
+    std::printf("    Save Style clicked %d: '%s'; Load Style picked it %d\n", (int)saved, gait.c_str(), (int)loaded);
+    CHECK(saved && !gait.empty() && loaded);
+    if (!gait.empty()) std::remove(fs::join(ed.assets_dir_for_test(), gait).c_str());
+    fs::remove_file(fs::join(ed.assets_dir_for_test(), "Gaits"));  // (the test project as it was)
+    fs::remove_file(fs::join(ed.assets_dir_for_test(), "Animations/Body309.anim"));
+    /* The Inspector: a Smooth modifier's Vertex Group from the cube's groups; a shape key added and removed. */
+    ed.command("layout Default");
+    GameObject *cube = s.find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.select_for_test(cube->id, false);
+    ed.command("vgroup add Top309");
+    ed.command("component SmoothModifier");
+    SmoothModifier *sm = cube->get<SmoothModifier>();
+    CHECK(sm != nullptr);
+    const bool picked = sm && reach("group:Vertex Group", WindowKind::Inspector) && click("group:Vertex Group") && click("menu:Top309");
+    std::printf("    Vertex Group's dropdown: Top309 picked %d ('%s')\n", (int)picked, sm ? sm->vertex_group.c_str() : "");
+    CHECK(picked && sm && sm->vertex_group == "Top309");
+    const bool add = reach("shape:Add", WindowKind::Inspector) && click("shape:Add");
+    const size_t keys = cube->mesh_filter() && cube->mesh_filter()->mesh ? cube->mesh_filter()->mesh->shape_keys.size() : 0;
+    const bool rem = reach("shape:Remove", WindowKind::Inspector) && click("shape:Remove") && click("menu:Key 1");
+    const size_t left = cube->mesh_filter() && cube->mesh_filter()->mesh ? cube->mesh_filter()->mesh->shape_keys.size() : 0;
+    std::printf("    Add Shape Key clicked %d: %zu key(s); Remove... > Key 1 clicked %d: %zu left\n", (int)add, keys, (int)rem, left);
+    CHECK(add && keys == 1 && rem && left == 0);
+  });
+}
+
 static void tests_round304() {
   test("Motion Check in the editor (task 0284): the Animation window's Check opens a report of the faults with a Fix a row; a row's Fix by a click takes that fault out (the report again with one fewer); the smooth brush evens keys under a drag over the sheet", [] {
     Editor ed;
@@ -5838,6 +6026,7 @@ void run_animation_tests() {
   tests_round302();
   tests_round303();
   tests_round304();
+  tests_round309();
   round64_tests();
   round69_tests();
   tests_round81();

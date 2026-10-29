@@ -155,7 +155,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   static const B buttons[] = {  // (static: the More menu's popup reads it after this frame's draw - task 0255)
       {"Unwrap", "unwrap", "Unwrap: Least Squares Conformal Maps per seam-bounded island, then pack.\nBlender: UV > Unwrap (Conformal)."},
       {"Smart UV", "smart", "Smart UV Project: group faces by normal, project and pack. No seams needed."},
-      {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (console:\nuv parts [bound] [multi]); ABF++ then LSCM; each part's charts packed together. No seams needed."},
+      {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (the Parts\nbutton sets the bound and the tiles); ABF++ then LSCM; each part's charts packed together. No seams needed."},
       {"Cube", "cube", "Cube Projection: each face projected along its main axis."},
       {"Cylinder", "cylinder", "Cylinder Projection around the object's Y axis."},
       {"Sphere", "sphere", "Sphere Projection (latitude / longitude)."},
@@ -170,7 +170,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   std::vector<const B *> more;  // (task 0255: a narrow window folds the rest into a menu instead of dropping them)
   for (const B &b : buttons) {
     int w = u.font.text_width(b.label) + u.px(14);
-    if (x + w > bar.right() - u.px(470)) {
+    if (x + w > bar.right() - u.px(470) - u.px(48)) {  // (task 0287: room for More left of the Parts button)
       more.push_back(&b);
       continue;
     }
@@ -188,6 +188,7 @@ void Editor::draw_uv_editor(const Recti &r) {
         if (ui_.menu_item(b->label)) uv_op(b->op);
     });
   }
+  draw_uv_parts_options({bar.right() - u.px(466), y, u.px(62), h});  // (task 0287)
   draw_uv_material_filter({bar.right() - u.px(400), y, u.px(144), h});
   static const char *bgs[] = {"Material Texture", "UV Grid", "Color Grid", "None"};
   if (u.combo(u.id("uv_bg"), {bar.right() - u.px(250), y, u.px(150), h}, uv_bg_, bgs, 4)) {
@@ -816,16 +817,44 @@ void Editor::draw_uv_material_filter(const Recti &r) {
   std::vector<std::string> names{"All materials"};
   if (mr)
     for (size_t s = 0; s < mr->materials.size(); s++) names.push_back(strprintf("%zu: %s", s, mr->materials[s] ? mr->materials[s]->name.c_str() : "(none)"));
-  std::vector<const char *> opts;
-  for (const std::string &n : names) opts.push_back(n.c_str());
-  int pick = uv_slots_.empty() ? 0 : uv_slots_[0] + 1;
-  if (pick >= (int)opts.size()) pick = 0;
-  if (u.combo(u.id("uv_mat"), r, pick, opts.data(), (int)opts.size())) {
-    uv_slots_.clear();
-    if (pick > 0) uv_slots_.push_back(pick - 1);
-  }
-  u.tooltip("Edit one material's UVs: the other faces are dimmed and out of reach (unwrap, pack, select, move).\n"
-            "Console: uv material <name> | +<name> (add) | all; uv others dim | hide.");
+  /* Task 0287: a list with a check per slot (several at once, as `uv material +<name>`) and how the others look. */
+  const std::string label = uv_slots_.empty() ? std::string("All materials") : uv_slots_.size() == 1 && uv_slots_[0] + 1 < (int)names.size() ? names[(size_t)uv_slots_[0] + 1]
+                                                                                                                                                : strprintf("%zu material%s", uv_slots_.size(), uv_slots_.size() == 1 ? "" : "s");
+  const ui::Id id = u.id("uv_mat");
+  if (u.record_buttons) u.button_rects["uv:materials"] = r;
+  if (u.button(r, label)) u.open_popup(id, r);
+  u.tooltip("Edit some materials' UVs only: the other faces are dimmed or hidden and out of reach (unwrap, pack, select, move).");
+  u.popup(id, u.px(220), [this, names] {
+    if (ui_.menu_item(names[0], nullptr, uv_slots_.empty())) uv_slots_.clear();
+    for (size_t s = 1; s < names.size(); s++) {
+      const int slot = (int)s - 1;
+      const auto it = std::find(uv_slots_.begin(), uv_slots_.end(), slot);
+      if (!ui_.menu_item(names[s], nullptr, it != uv_slots_.end())) continue;
+      if (it != uv_slots_.end()) uv_slots_.erase(it);
+      else uv_slots_.push_back(slot);
+    }
+    ui_.menu_separator();
+    if (ui_.menu_item("Others Dimmed", nullptr, !uv_hide_others_)) uv_hide_others_ = false;
+    if (ui_.menu_item("Others Hidden", nullptr, uv_hide_others_)) uv_hide_others_ = true;
+  });
+}
+
+/* Part Unwrap's options (task 0287): what `uv parts <bound> multi|single` and `uv parts semantic on|off` set. */
+void Editor::draw_uv_parts_options(const Recti &r) {
+  auto &u = ui_;
+  const ui::Id id = u.id("uv_parts_opts");
+  if (u.record_buttons) u.button_rects["uv:Parts"] = r;
+  if (u.button(r, "Parts")) u.open_popup(id, r);
+  u.tooltip(strprintf("Part Unwrap's options for its next unwrap: the stretch bound (%.2f), one tile or several, the part tree.", part_tau_));
+  u.popup(id, u.px(260), [this] {
+    ui_.menu_label("Stretch bound (lower: more charts)");
+    for (const char *b : {"1.1", "1.25", "1.5", "2"})
+      if (ui_.menu_item(std::string(b) + (std::string(b) == "1.25" ? " (PartUV's)" : ""), nullptr, std::fabs(part_tau_ - std::strtof(b, nullptr)) < 1e-3f))
+        uv_parts_settings({"uv", "parts", b});
+    ui_.menu_separator();
+    if (ui_.menu_item("Several Tiles (UDIM)", nullptr, part_multi_tile_)) uv_parts_settings({"uv", "parts", part_multi_tile_ ? "single" : "multi"});
+    if (ui_.menu_item("Part Tree from PartField", nullptr, part_semantic_)) uv_parts_settings({"uv", "parts", "semantic", part_semantic_ ? "off" : "on"});
+  });
 }
 
 /* The second toolbar row: selection mode and sync, selection, quick transforms. */

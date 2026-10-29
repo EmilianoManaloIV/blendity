@@ -647,10 +647,30 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
+    if (group_field(n, row, v)) return;
     if (u.text_field(fid(n), field_rect(row), v)) {
       record(FieldEdit::Text, n).s_new = v;
       changed = true;
     }
+  }
+  /* Task 0289: a modifier's Vertex Group or Thickness Group as a dropdown of the mesh's own groups (typed names were
+   * the only way); a mesh without groups keeps the typed field. */
+  bool group_field(const char *n, const Recti &row, std::string &v) {
+    if (std::strcmp(n, "Vertex Group") != 0 && std::strcmp(n, "Thickness Group") != 0) return false;
+    const std::vector<std::string> items = ed.group_choices(v);
+    if (items.size() < 2) return false;
+    int cur = 0;
+    for (size_t i = 1; i < items.size(); i++)
+      if (items[i] == v) cur = (int)i;
+    std::vector<const char *> names;
+    for (const std::string &s : items) names.push_back(s.c_str());
+    const Recti f = field_rect(row);
+    if (u.record_buttons) u.button_rects[std::string("group:") + n] = f;
+    if (!u.combo(fid(n), f, cur, names.data(), (int)names.size())) return true;
+    v = cur == 0 ? std::string() : items[(size_t)cur];
+    record(FieldEdit::Text, n).s_new = v;
+    changed = true;
+    return true;
   }
   /* Unity's object field: type the name, or drag the object here from the Hierarchy (of the field's type). */
   void object(const char *n, std::string &v, const char *type) override {
@@ -1279,7 +1299,7 @@ void Editor::draw_inspector(const Recti &r) {
   /* Task 0235: every component folded to its header line, or opened, with one button; the folds are kept. */
   const bool any_open = inspector_any_open(g);
   if (u.button({pb.x - fold_w - u.px(4), pb.y, fold_w, pb.h}, any_open ? "Fold" : "Unfold")) inspector_fold_all(g, !any_open);
-  u.tooltip("Fold every component to its header line (the Transform stays), or open them all; the folds are kept in the preferences (inspector fold|unfold).");
+  u.tooltip("Fold every component to its header line (the Transform stays), or open them all; the folds are kept in the preferences.");
   std::string name = g->name;
   bool committed = false;
   if (u.text_field(u.id("name"), {hr.x + ic * 2 + u.px(12), hr.y + u.px(2), std::max(u.px(40), hr.w - ic * 2 - u.px(14) - pin_w - fold_w - u.px(10)), hr.h - u.px(4)}, name, &committed)) {
@@ -1545,7 +1565,9 @@ void Editor::draw_inspector(const Recti &r) {
           focus_pick_cam_ = picking ? 0 : g->id;
         u.tooltip("Eyedropper: click a surface in the Scene view and the light turns to shine at that point\n"
                   "(its range grows to reach it if needed). Like the camera's Pick Focus Point.");
+        draw_light_aim_point(lay, *g);  // (task 0287: the point by numbers)
       }
+      if (dynamic_cast<MeshRenderer *>(c)) draw_shape_key_buttons(lay, *g);  // (task 0289)
       /* Mesh tools (Blender's Edit Mode operators, object-level). */
       if (auto *mf = dynamic_cast<MeshFilter *>(c)) {
         lay.space(u.px(4));
@@ -2294,9 +2316,11 @@ void Editor::draw_render_window(const Recti &r) {
         stop_render_sequence();
     }
     else if (u.button(sr, strprintf("Render Camera Sequence (%zu camera%s)", cams.size(), cams.size() == 1 ? "" : "s"), false, Icon::Camera))
-      start_render_sequence();
+      start_render_sequence(seq_folder_.empty() ? std::string() : fs::join(project_root_, seq_folder_));
     u.tooltip("Render the scene from every camera with Render in Sequence on (Camera Inspector), in Sequence Order,\n"
-              "each saved to Renders/<scene>_sequence_<time>/NN_<camera>.<format> with these settings.");
+              "each saved as NN_<camera>.<format> with these settings, in the Sequence Folder (or Renders/<scene>_sequence_<time>).");
+    path_picker_row(lay, "Sequence Folder", "render:seqfolder", seq_folder_, PickKind::Folder, {}, [this](const std::string &p) { seq_folder_ = p; });  // (task 0288)
+    u.tooltip("Where Render Camera Sequence saves (a relative folder is inside the project); empty: Renders/<scene>_sequence_<time>.");
     draw_render_animation_button(lay);
     if (!cams.empty() && !seq_.active) {
       std::string names;
@@ -2631,6 +2655,7 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
             scene_->guides.clear();
             mark_changed("Clear Guides");
           }
+          draw_guide_by_numbers(lay);
         }
         if (draw_.active && draw_.shape != 2 && draw_.shape != 3 && draw_.shape != 5) {
           er.field("Corner Radius", draw_fillet_, 0.005f, 0.0f, 1000.0f);
@@ -3323,12 +3348,15 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
   br.field("Mirror X", wp_brush_.mirror_x);
   br.field("Front Faces Only", wp_brush_.front_only);
+  br.field("Clean Below", wp_clean_below_, 0.005f, 0.0f, 1.0f);  // (task 0287: Clean's threshold)
   const int hw = (lay.area.w - u.px(16)) / 2;
   Recti brow = lay.row(u.row_h() + u.px(2));
   if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "Normalize All")) command("wpnormalize");
   u.tooltip("Each vertex's weights over all groups add up to 1 (Blender: Normalize All).");
-  if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "Clean")) command("wpclean 0.01");
-  u.tooltip("Weights under 0.01 become 0 (Blender: Clean).");
+  const Recti cb{brow.x + u.px(8) + hw, brow.y, hw, brow.h};
+  if (u.record_buttons) u.button_rects["wp:Clean"] = cb;
+  if (u.button(cb, "Clean")) weight_paint_command({"wpclean", strprintf("%g", wp_clean_below_)});
+  u.tooltip(strprintf("Weights at or under %g (Clean Below) become 0 (Blender: Clean).", wp_clean_below_));
 }
 
 }  // namespace bl
@@ -3415,7 +3443,7 @@ void Editor::draw_scatter_tools(ui::Layout &lay) {
   const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
   if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, scatter_ ? "Exit Scatter" : "Scatter", scatter_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object to scatter onto.", scatter_, ui::Icon::Vertex)) set_scatter(!scatter_);
-  u.tooltip("Paint instances of an object onto surfaces (rocks, tufts, props): name the source below, then dab; the pen's eraser end removes (scatter <object>, scatter on|off).");
+  u.tooltip("Paint instances of an object onto surfaces (rocks, tufts, props): name the source below, then dab; the pen's eraser end removes.");
   /* Task 0264: the source and the mask by name, not typed: an Unreal user picks an asset from a list. */
   const std::vector<std::string> sources = scatter_source_choices();
   int si = -1;
@@ -3439,6 +3467,10 @@ void Editor::draw_scatter_tools(ui::Layout &lay) {
   br.field("Rotate", scatter_brush_.rotate, 1.0f, 0.0f, 180.0f);
   static const char *aligns[] = {"Surface Normal", "World Up"};
   br.enumeration("Align", scatter_brush_.align, aligns, 2);
+  const int seed_shown = (int)std::min<uint32_t>(scatter_brush_.seed, 1000000u);  // (task 0286: another arrangement of the same dab)
+  int seed = seed_shown;
+  br.field("Seed", seed, 0, 1000000);
+  if (seed != seed_shown) scatter_brush_.seed = (uint32_t)std::max(0, seed);
   br.field("Tint", scatter_brush_.tint);
   if (scatter_brush_.tint) br.color("Tint Color", scatter_brush_.tint_color);
   br.help("Density: instances a square metre of the dab's disc, jittered from the seed (a dab is repeatable). Mask Layer: a Paint layer\n"
@@ -3448,6 +3480,111 @@ void Editor::draw_scatter_tools(ui::Layout &lay) {
   if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Merge Instances", false)) scatter_merge();
 }
 
+/* A group field's choices (task 0289): the whole mesh, the Inspector object's vertex groups, and a typed name the mesh
+ * hasn't kept as it is; a mesh without groups gets none (its field stays typed). */
+std::vector<std::string> Editor::group_choices(const std::string &current) {
+  std::vector<std::string> out{"(the whole mesh)"};
+  const GameObject *g = inspector_object();  // (the Inspector's: pinned, or the selection)
+  const MeshFilter *mf = g ? g->mesh_filter() : nullptr;
+  if (!mf || !mf->mesh || mf->mesh->vertex_groups.empty()) return out;  // (no groups: the typed field stays)
+  for (const VertexGroup &vg : mf->mesh->vertex_groups) out.push_back(vg.name);
+  if (!current.empty() && std::find(out.begin() + 1, out.end(), current) == out.end()) out.push_back(current);
+  return out;
+}
+
+/* Task 0289: shape keys added and removed in the Inspector (MeshRenderer), what `shape add` and `shape remove` did. */
+void Editor::draw_shape_key_buttons(ui::Layout &lay, GameObject &g) {
+  auto &u = ui_;
+  const MeshFilter *mf = g.mesh_filter();
+  if (!mf || !mf->mesh) return;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  const int hw = (row.w - u.px(12)) / 2;
+  const Recti add{row.x + u.px(4), row.y, hw, row.h}, rem{row.x + u.px(8) + hw, row.y, hw, row.h};
+  if (u.record_buttons) u.button_rects["shape:Add"] = add, u.button_rects["shape:Remove"] = rem;
+  const bool selected = &g == active_object();  // (a pinned Inspector shows another object: the keys are the selection's)
+  if (u.button_enabled(add, "Add Shape Key", selected, "The Inspector is pinned to another object: select this one first.")) {
+    std::string name = "Key 1";
+    for (int k = 2; mf->mesh->find_shape(name) >= 0; k++) name = strprintf("Key %d", k);
+    shape_command({"shape", "add", name});
+  }
+  u.tooltip("A shape key (Unity's blend shape): the mesh pushed out a little along its normals, to sculpt or edit; its weight is the\n"
+            "BlendShape field above, and animates.");
+  const ui::Id id = u.id("shape_remove");
+  if (u.button_enabled(rem, "Remove...", selected && !mf->mesh->shape_keys.empty(), selected ? "No shape keys yet." : "The Inspector is pinned to another object: select this one first."))
+    u.open_popup(id, rem);
+  u.popup(id, u.px(220), [this, &g] {
+    const MeshFilter *f = g.mesh_filter();
+    if (!f || !f->mesh) return;
+    std::vector<std::string> names;
+    for (const ShapeKey &k : f->mesh->shape_keys) names.push_back(k.name);
+    for (const std::string &n : names)
+      if (ui_.menu_item(n)) shape_command({"shape", "remove", n});
+  });
+}
+
+/* A light aimed at a point typed in (task 0287): what `aimlight x y z` did, beside the eyedropper. */
+void Editor::draw_light_aim_point(ui::Layout &lay, GameObject &g) {
+  auto &u = ui_;
+  InspectorReflector br(*this, u, lay);
+  br.field("Aim X", light_aim_.x, 0.05f, -1e5f, 1e5f);
+  br.field("Aim Y", light_aim_.y, 0.05f, -1e5f, 1e5f);
+  br.field("Aim Z", light_aim_.z, 0.05f, -1e5f, 1e5f);
+  Recti row = lay.row(u.row_h() + u.px(2));
+  const Recti b{row.x + u.px(4), row.y, row.w - u.px(8), row.h};
+  if (u.record_buttons) u.button_rects["light:Aim"] = b;
+  const Light *l = g.get<Light>();
+  const bool point = l && l->type == 1;
+  if (u.button(b, point ? "Reach These Numbers (sets Range)" : "Aim at These Numbers", false, ui::Icon::Light)) {
+    if (length(light_aim_ - g.world_position()) < 1e-5f) toast(LogLevel::Warning, "That point is the light's own place: type another.");
+    else aim_light(g, light_aim_);
+  }
+  u.tooltip(point ? "The light's range grows to reach the point above (world X, Y, Z)." : "The light turns to shine at the point above (world X, Y, Z).");
+}
+
+/* Guide lines by numbers (task 0287): what `guide px py pz dx dy dz` did - a point and a direction. */
+void Editor::draw_guide_by_numbers(ui::Layout &lay) {
+  auto &u = ui_;
+  InspectorReflector br(*this, u, lay);
+  br.field("Guide Through X", guide_point_.x, 0.05f, -1e5f, 1e5f);
+  br.field("Guide Through Y", guide_point_.y, 0.05f, -1e5f, 1e5f);
+  br.field("Guide Through Z", guide_point_.z, 0.05f, -1e5f, 1e5f);
+  static const char *const kDirs[] = {"Along X", "Along Y", "Along Z"};
+  br.enumeration("Guide Direction", guide_axis_, kDirs, 3);
+  Recti row = lay.row(u.row_h() + u.px(2));
+  const Recti b{row.x + u.px(4), row.y, row.w - u.px(8), row.h};
+  if (u.record_buttons) u.button_rects["guides:Add"] = b;
+  if (!u.button(b, "Add Guide Line", false)) return;
+  Vec3 d;
+  d[guide_axis_] = 1.0f;
+  add_guide(guide_point_, d);
+}
+
+/* A construction line through p along the unit d - the console's `guide` and the panel's Add Guide Line (task 0287);
+ * one already there is said, not added again. */
+bool Editor::add_guide(Vec3 p, Vec3 d) {
+  for (const GuideLine &gl : scene_->guides)
+    if (std::fabs(dot(gl.d, d)) > 0.9999f && length(cross(p - gl.p, gl.d)) < 1e-5f * std::max(1.0f, length(p))) {
+      Log::info("Guide: that one is already there");
+      return false;
+    }
+  scene_->guides.push_back({p, d});
+  show_guides_ = true;
+  mark_changed("Add Guide Line");
+  Log::info("Guide through (%g, %g, %g) along (%g, %g, %g) (%zu guides)", p.x, p.y, p.z, d.x, d.y, d.z, scene_->guides.size());
+  return true;
+}
+
+/* Render Animation's range and frame rate (task 0288: what `renderanim first last fps` set); 0 is the sequence's or
+ * the clip's own. */
+void Editor::draw_render_range(ui::Layout &lay) {
+  auto &u = ui_;
+  InspectorReflector br(*this, u, lay);
+  br.field("First Frame", ranim_first_, 0, 1000000);
+  br.field("Last Frame", ranim_last_, 0, 1000000);
+  br.field("Frame Rate", ranim_fps_, 1.0f, 0.0f, 240.0f);
+  br.help("First, Last and Frame Rate at 0: the scene sequence's own (or the selected object's clip's).");
+}
+
 /* The Strokes section (task 0248): the tool, its kind and sizes, the normals mode. */
 void Editor::draw_strokes_tools(ui::Layout &lay) {
   auto &u = ui_;
@@ -3455,9 +3592,14 @@ void Editor::draw_strokes_tools(ui::Layout &lay) {
   const bool mesh = sel && sel->mesh_filter() && sel->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
   if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, strokeobj_ ? "Exit Strokes" : "Strokes", strokeobj_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object to paint strokes onto.", strokeobj_, ui::Icon::Vertex)) set_strokeobj(!strokeobj_);
-  u.tooltip("Paint geometry: a click on a surface adds a card (a quad facing you), a drag with Ribbon a strip; one Stroke object holds them (strokeobj on|off).");
+  u.tooltip("Paint geometry: a click on a surface adds a card (a quad facing you), a drag with Ribbon a strip; one Stroke object holds them.");
   if (!strokeobj_) return;
   InspectorReflector br(*this, u, lay);
+  row = lay.row(u.row_h() + u.px(2));  // (task 0286: another Stroke object, without the console)
+  const Recti nb{row.x + u.px(4), row.y, row.w - u.px(8), row.h};
+  if (u.record_buttons) u.button_rects["strokes:New Stroke Object"] = nb;
+  if (u.button(nb, "New Stroke Object", false)) strokeobj_command({"strokeobj", "new"});
+  u.tooltip("The next strokes go into a new Stroke object (a second bush, a separate tree).");
   static const char *kinds[] = {"Card", "Ribbon"};
   br.enumeration("Kind", strokeobj_kind_, kinds, 2);
   br.field("Size", strokeobj_size_, 0.01f, 0.001f, 100.0f);
@@ -3468,6 +3610,7 @@ void Editor::draw_strokes_tools(ui::Layout &lay) {
     static const char *modes[] = {"Own", "Surface", "Canopy"};
     const int was = s->normals;
     br.enumeration("Normals", s->normals, modes, 3);
+    u.tooltip("Normals: Own shades each card flat; Surface takes the surface's normal under the dab; Canopy points every card away from the centre so a bush of cards shades as one round volume.");
     if (s->normals != was) strokeobj_rebuild(*g, "Stroke Normals");
     row = lay.row(u.row_h() + u.px(2));
     if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Canopy Centre from Strokes", false)) strokeobj_command({"strokeobj", "canopy"});
@@ -3479,12 +3622,31 @@ void Editor::draw_strokes_tools(ui::Layout &lay) {
     if (u.record_buttons) u.button_rects["strokes:Fill Canopy"] = fill;
     if (u.button(fill, "Fill Canopy", false))
       strokeobj_command({"strokeobj", "canopyfill", strprintf("%g", strokeobj_fill_radius_), std::to_string(strokeobj_fill_count_)});
-    u.tooltip("A shell of cards facing out round the canopy centre: a bush or a tree's crown in one click (strokeobj canopyfill).");
-    u.tooltip("Normals: Own shades each card flat; Surface takes the surface's normal under the dab; Canopy points every card away from the centre so a bush of cards shades as one round volume (strokeobj normals, strokeobj canopy).");
+    u.tooltip("A shell of cards facing out round the canopy centre: a bush or a tree's crown in one click.");
+    /* Task 0286: the centre by numbers too, through the console's handler (it turns Normals to Canopy). Compared with
+     * the clamped value the field shows, so drawing the panel never writes one. */
+    const float lim = 1e6f;
+    const Vec3 shown(clampf(s->canopy.x, -lim, lim), clampf(s->canopy.y, -lim, lim), clampf(s->canopy.z, -lim, lim));
+    Vec3 c = shown;
+    br.field("Canopy X", c.x, 0.05f, -lim, lim);
+    u.tooltip("The canopy centre in the Stroke object's own space; a change sets Normals to Canopy.");
+    br.field("Canopy Y", c.y, 0.05f, -lim, lim);
+    br.field("Canopy Z", c.z, 0.05f, -lim, lim);
+    if (length(c - shown) > 1e-7f) strokeobj_command({"strokeobj", "canopy", strprintf("%.9g", c.x), strprintf("%.9g", c.y), strprintf("%.9g", c.z)});
   }
   /* Task 0264: the cards' alpha from the project's images (a leaf, a petal, a brush stroke). */
   image_picker_row(lay, "Alpha", "strokes:alpha", strokeobj_alpha_, [this](const std::string &p) { strokeobj_command({"strokeobj", "alpha", p.empty() ? std::string("off") : p}); });  // (task 0271: Browse... for one elsewhere)
   br.help("Alpha: an image whose transparency cuts the cards out (a leaf, a petal, a brush stroke): the project's images, or Browse... for one elsewhere.");
+  /* Task 0286: grass from the panel - upright cards on the surface under the view's middle. */
+  br.field("Grass Density", strokeobj_grass_density_, 1.0f, 1.0f, 2000.0f);
+  br.field("Grass Height", strokeobj_grass_height_, 0.01f, 0.01f, 10.0f);
+  br.field("Grass Radius", strokeobj_grass_radius_, 0.05f, 0.05f, 100.0f);
+  Recti gr = lay.row(u.row_h() + u.px(2));
+  const Recti gb{gr.x + u.px(4), gr.y, gr.w - u.px(8), gr.h};
+  if (u.record_buttons) u.button_rects["strokes:Grass"] = gb;
+  if (u.button(gb, "Grass under the View's Middle", false))
+    strokeobj_command({"strokeobj", "grass", strprintf("%g", strokeobj_grass_density_), strprintf("%g", strokeobj_grass_height_), strprintf("%g", strokeobj_grass_radius_)});
+  u.tooltip("Blades as upright cards over a disc of the surface under the Scene view's middle: density a square metre, height, radius.");
 }
 
 void Editor::draw_paint_tools(ui::Layout &lay) {
@@ -3660,7 +3822,7 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   const bool mesh = g && g->mesh_filter() && g->mesh_filter()->mesh;
   Recti row = lay.row(u.row_h() + u.px(2));
   if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, sculpt_ ? "Exit Sculpt" : "Sculpt", sculpt_ || (mesh && !playing_), playing_ ? "Not while playing: stop Play first." : "Select a mesh object to sculpt it.", sculpt_, ui::Icon::Vertex)) set_sculpt(!sculpt_);
-  u.tooltip(mesh || sculpt_ ? "Sculpt the selected mesh with a brush: drag over it; Shift smooths, Alt carves; Esc leaves (sculpt on|off)." : "Select a mesh object to sculpt it.");
+  u.tooltip(mesh || sculpt_ ? "Sculpt the selected mesh with a brush: drag over it; Shift smooths, Alt carves; Esc leaves." : "Select a mesh object to sculpt it.");
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 11);
@@ -3696,11 +3858,11 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   br.field("Dynamic Subdivision", subdiv, 0, 3);
   if (subdiv != subdiv_was) sculpt_subdiv_pending_ = subdiv;  // (a drag passes several values: applied once, at the release)
   if (sculpt_subdiv_pending_ >= 0 && !u.in.down[0]) sculpt_set_subdiv(sculpt_subdiv_pending_), sculpt_subdiv_pending_ = -1;
-  br.help("A Subdivision Surface on the sculpted object, levels 1-3 (0: none): the brush works the cage, the eye sees the surface, each dab re-evaluated locally (sculpt subdiv <n>|off).");
+  br.help("A Subdivision Surface on the sculpted object, levels 1-3 (0: none): the brush works the cage, the eye sees the surface, each dab re-evaluated locally.");
   /* Task 0242: Sculptris Pro. */
   br.field("Dyntopo", sculpt_dyntopo_);
   br.field("Dyntopo Detail", sculpt_dyntopo_detail_, 0.01f, 0.05f, 1.0f);
-  br.help("Dyntopo tessellates the mesh under the brush as it moves: edges longer than Detail x the brush radius are split, shorter than two fifths of it collapsed; a Dyntopo stroke is one undo step holding the mesh (sculpt dyntopo on|off|<detail>).");
+  br.help("Dyntopo tessellates the mesh under the brush as it moves: edges longer than Detail x the brush radius are split, shorter than two fifths of it collapsed; a Dyntopo stroke is one undo step holding the mesh.");
   /* Task 0240: DynaMesh. */
   br.field("DynaMesh Resolution", sculpt_dyna_res_, 8, 256);
   br.field("DynaMesh Smooth", sculpt_dyna_smooth_, 0, 10);

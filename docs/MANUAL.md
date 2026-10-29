@@ -834,7 +834,8 @@ Window names, layouts and the Y-up axis stay Unity's whatever the feel.
 ## 13. The console
 
 Every tool can be driven from the Console's command line (type `help`), which is also how scripts and the tests drive
-the editor. A few that are handy by hand:
+the editor. None needs it any more: since round 310 every verb an artist uses has a menu item, a button or a field
+(Mesh > Draw for the sketch pen, Puppet > Contacts and Ragdoll Events, the Render window's range, Preferences' paths). A few that are handy by hand:
 
 | Command | Does |
 |---|---|

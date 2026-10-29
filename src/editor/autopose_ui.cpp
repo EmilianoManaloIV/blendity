@@ -240,6 +240,14 @@ bool Editor::autopose_gizmo(uint64_t id, Vec3 target) {
 }
 
 /* autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames> */
+/* A bone locked for AutoPosing or free again - by the object, so the Puppet menu locks the selected character's bone
+ * even where another character has one of that name (task 0289). */
+void Editor::autopose_set_lock(GameObject &b, bool on) {
+  autopose_.locks.erase(std::remove(autopose_.locks.begin(), autopose_.locks.end(), b.id), autopose_.locks.end());
+  if (on) autopose_.locks.push_back(b.id);
+  Log::info("AutoPose: %s %s", b.name.c_str(), on ? "stays where it is" : "moves with the body again");
+}
+
 void Editor::autopose_command(const std::vector<std::string> &t) {
   if (!assist_require(Assist::Physics)) return;
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "";
@@ -256,11 +264,7 @@ void Editor::autopose_command(const std::vector<std::string> &t) {
     autopose_to(*b, to);
     return autopose_end();
   }
-  if ((sub == "lock" || sub == "unlock") && b) {
-    autopose_.locks.erase(std::remove(autopose_.locks.begin(), autopose_.locks.end(), b->id), autopose_.locks.end());
-    if (sub == "lock") autopose_.locks.push_back(b->id);
-    return Log::info("AutoPose: %s %s", b->name.c_str(), sub == "lock" ? "stays where it is" : "moves with the body again");
-  }
+  if ((sub == "lock" || sub == "unlock") && b) return autopose_set_lock(*b, sub == "lock");
   if (sub == "prior" && t.size() > 2) {  // (task 0280: the pose prior on or off)
     autopose_.use_prior = to_lower(t[2]) != "off";
     return Log::info("Puppet Posing: the pose prior %s", autopose_.use_prior ? (ai::prior_problem().empty() ? "on" : "on (not installed: the AI download)") : "off: IK alone");

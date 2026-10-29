@@ -3941,6 +3941,14 @@ static void round17_tests() {
     ed.command("preferences");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
+    for (int i = 0; i < 40; i++) {  // (Preferences scrolled until the preset field is inside the window: it is taller than 900 px where MoonRay is found)
+      const Recti c = ed.combo_rect_for_test("km_preset"), dlg = ed.top_popup_rect_for_test();
+      if (c.w <= 0 || c.bottom() <= dlg.bottom()) break;
+      ed.step_frame_headless({ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+      platform::Event w = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+      w.wheel_y = -1.0f;
+      ed.step_frame_headless({w});
+    }
     const Recti r = ed.combo_rect_for_test("km_preset");
     std::printf("    preset combo at %d,%d %dx%d\n", r.x, r.y, r.w, r.h);
     CHECK(r.w > 0 && r.h > 0);

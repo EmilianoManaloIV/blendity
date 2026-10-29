@@ -858,7 +858,7 @@ bool Editor::run_action(const std::string &id) {
   }
   else if (id == "render.image") start_final_render();
   else if (id == "render.screenshot") screenshot_dialog();
-  else if (id == "render.animation") ranim_.active ? stop_render_animation() : (void)start_render_animation();
+  else if (id == "render.animation") ranim_.active ? stop_render_animation() : (void)start_render_animation_from_fields();
   else if (id == "window.render") dock_open(WindowKind::Render);
   else if (id == "window.learn") dock_open(WindowKind::Learn);
   else if (id == "window.history") dock_open(WindowKind::History);
