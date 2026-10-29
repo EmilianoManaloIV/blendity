@@ -3941,13 +3941,25 @@ static void round17_tests() {
     ed.command("preferences");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
-    for (int i = 0; i < 40; i++) {  // (Preferences scrolled until the preset field is inside the window: it is taller than 900 px where MoonRay is found)
+    /* Preferences scrolled until the preset field is inside it and stays put: it is taller than 900 px where MoonRay is
+     * found, and MoonRay's row can appear a moment after it opens and move the rows below (round 316: macOS). */
+    Recti last{-1, -1, 0, 0};
+    for (int i = 0; i < 80; i++) {
       const Recti c = ed.combo_rect_for_test("km_preset"), dlg = ed.top_popup_rect_for_test();
-      if (c.w <= 0 || c.bottom() <= dlg.bottom()) break;
+      if (c.w <= 0) break;
+      const bool still = c.x == last.x && c.y == last.y;
+      last = c;
+      const bool inside = c.y >= dlg.y && c.bottom() <= dlg.bottom();
+      if (inside && still) break;
+      if (inside) {
+        ed.step_frame_headless();
+        continue;
+      }
       ed.step_frame_headless({ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
       platform::Event w = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
-      w.wheel_y = -1.0f;
+      w.wheel_y = c.bottom() > dlg.bottom() ? -1.0f : 1.0f;
       ed.step_frame_headless({w});
+      ed.step_frame_headless();  // (the controls drawn where the scroll put them)
     }
     const Recti r = ed.combo_rect_for_test("km_preset");
     std::printf("    preset combo at %d,%d %dx%d\n", r.x, r.y, r.w, r.h);

@@ -18,6 +18,8 @@ One entry per round of requests, newest first: what was asked, what changed, and
     the parents;
   - the auto-connect test stopped with a script error when no stand-in started, and now fails with its checks.
 - Godot's `.uid` files are kept in the repository and the package; `.godot/` (its cache) is ignored.
+- The keymap dropdown test in Preferences waits for the preset field to stay put before clicking it. It failed once on
+  macOS in #232's CI: MoonRay's row appeared and moved the rows below, the same cause as round 315's fix.
 - **Unreal 5.8:** still waits for the .NET Framework SDK (4.6 or newer) on this machine; the build stops at
   "Could not find NetFxSDK install dir".
 
