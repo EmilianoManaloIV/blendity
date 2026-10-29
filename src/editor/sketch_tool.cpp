@@ -136,7 +136,11 @@ Vec2 Editor::sketch_snap(const Recti &view, Vec2 p) {
   if (g.guide == 2) return sketch::snap_to_ellipse(p, sketch_to_px(view, g.ell_c), g.ell_rx * view.h, g.ell_ry * view.h, g.ell_angle);
   if (g.guide == 3) return sketch::snap_to_polyline(p, sketch_french_px(view));
   const Sketch &s = scene_->sketch;
-  if (s.perspective > 0 && !g.pen.empty()) {
+  /* A freehand stroke - Ctrl held, or a layer whose corrections are Freehand - goes where the pen goes: the
+   * perspective guide is always on, unlike the ruler, ellipse and French curve chosen for the stroke (round 318: the
+   * user's freehand lines still bent onto the vanishing lines). */
+  const bool freehand = g.freehand || scene_->sketch.layer_at(s.active_layer).correct == 0;
+  if (s.perspective > 0 && !g.pen.empty() && !freehand) {
     Vec2 vps[3];
     for (int i = 0; i < s.perspective; i++) vps[i] = sketch_to_px(view, s.vp[i]);
     if (g.snap_vp < 0 && length(p - g.pen[0]) > (float)ui_.px(12)) g.snap_vp = sketch::nearest_vanishing(g.pen[0], p, vps, s.perspective, 20.0f);
@@ -552,7 +556,8 @@ void Editor::sketch_draw(const Recti &view) {
 /* sketch ... and sketchguide ...: the console (task 0223). */
 bool Editor::sketch_command(const std::vector<std::string> &t, const std::string &line) {
   const std::string c0 = t.empty() ? std::string() : to_lower(t[0]);
-  if (c0 == "sketch" || c0 == "sketchguide" || c0 == "sketchstroke") sketch_bind_scene(scene_rect_, true);  // (task 0233: the console draws in the Scene view)
+  if (c0 == "sketchstroke") sketch_bind_scene(scene_rect_, true);  // (task 0233: a scripted stroke is in the Scene view's pixels)
+  else if (c0 == "sketch" || c0 == "sketchguide") sketch_bind_work_view();  // (round 318: the view being drawn in)
   if (c0 == "sketch" && t.size() > 2 && to_lower(t[1]) == "place") {  // sketch place 3d|flat (task 0233)
     sketch_.place3d = to_lower(t[2]) == "3d";
     Log::info("Sketch: strokes %s", sketch_.place3d ? "land in the scene where they are drawn" : "stay on the picture plane");
@@ -598,7 +603,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
   }
   if (c == "sketchguide") {
     const std::string v = to_lower(arg(1, ""));
-    const Recti view = scene_rect_;
+    const Recti view = sketch_view_.view;
     const int gx = t.size() >= 5 ? view.x + std::atoi(t[3].c_str()) : view.x + view.w / 2, gy = t.size() >= 5 ? view.y + std::atoi(t[4].c_str()) : view.y + view.h / 2;
     if (v == "ruler" && to_lower(arg(2, "")) == "edge") {  // (task 0226: along the model's edge under the point)
       if (!sketch_ruler_from_edge(view, gx, gy)) Log::warn("sketchguide ruler edge: no edge of a mesh there");
@@ -624,7 +629,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "follow") {  // (task 0224: the guide and the camera as one)
       s.follow_camera = to_lower(arg(2, "on")) != "off";
       if (s.follow_camera && sketch_view_.cam.ortho) Log::info("sketchguide follow: the guide follows a perspective camera (the view is orthographic now)");
-      if (s.follow_camera && s.perspective > 0 && !sketch_view_.cam.ortho) sketch_guide_from_camera(scene_rect_);
+      if (s.follow_camera && s.perspective > 0 && !sketch_view_.cam.ortho) sketch_guide_from_camera(sketch_view_.view);
       mark_changed("Perspective Guide");
     }
     else if (v == "vp" && t.size() >= 5) {
@@ -632,7 +637,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
       s.vp[i] = {(float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str())};
       s.vp_placed = true;
       mark_changed("Move Vanishing Point");
-      if (s.follow_camera && s.perspective > 0 && !sketch_camera_from_guide(scene_rect_)) Log::warn("sketchguide vp: no camera looks that way");
+      if (s.follow_camera && s.perspective > 0 && !sketch_camera_from_guide(sketch_view_.view)) Log::warn("sketchguide vp: no camera looks that way");
     }
     else Log::info("usage: sketchguide ruler|ellipse|french [0-2]|off|symmetry x|y|xy|radial <n>|off|perspective 1|2|3|off|snap on|off|follow on|off|vp <i> <x> <y>");
     ui_.redraw = true;

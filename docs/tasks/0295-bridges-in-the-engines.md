@@ -1,4 +1,4 @@
-# Task 0295 - The bridges tested in the engines (rounds 315-317) - done
+# Task 0295 - The bridges tested in the engines (rounds 315-318) - done
 
 The user installed Unity, Unreal and Godot so the Live Link bridges (tasks 0274-0278) could be run in them (2026-10-29:
 "Feel free to do testing as needed with these applications when they are fully installed").
@@ -56,3 +56,22 @@ The user installed Unity, Unreal and Godot so the Live Link bridges (tasks 0274-
 ## Blender 5.2.2 - run again (round 316)
 Both tests pass. The add-on connected live to a running Blendity in the same way. The Install a Bridge test, which
 skips without a Blender, passes against it in a scratch user folder.
+
+## Round 318 - live sessions, Install a Bridge, Unreal's deforms
+- **Live:** each bridge followed a running Blendity through a new test pair: `tests_round318` in Blendity's suite
+  (`BLENDITY_TEST_BRIDGE`) and a live-session test per engine. It covers a Box moved, recolored and deformed, a bone
+  turned, the Sphere deleted, an object made, and a 32,514-vertex sphere deformed ten times. All four were LIVE OK.
+  The longest frame or tick while the sphere deformed:
+  - Blender 4.3 ms;
+  - Godot 42.6 ms;
+  - Unity 33.3 ms;
+  - Unreal 145 ms (259 before).
+- **Unreal faults found and fixed:**
+  - A quiet link was taken for a closed one, which reconnected and re-synced every 2 seconds.
+  - A deform rebuilt the whole mesh description and cooked collision. It now changes positions in the kept
+    description, with collision back once the deforms stop.
+  - A deforming mesh's collision setup asked for triangles it hadn't kept.
+- **Install a Bridge:** a fresh Godot, Unity and Unreal project, each set up by Blendity's installer, opened with no
+  error (the Unreal one built first).
+- **Left:** Unreal's own static-mesh build is about 75 ms of a deform of a 32,000-vertex mesh. A dynamic mesh component
+  would remove it.

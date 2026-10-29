@@ -522,13 +522,13 @@ bool Editor::sketch_world_stroke_command(const std::vector<std::string> &t) {
 
 /* sketchcanvas view|ground|face [x y]|plane x|y|z [px py pz]|list|<id>: the canvas the next strokes go on. */
 bool Editor::sketch_canvas_command(const std::vector<std::string> &t, const std::string &line) {
-  if (!t.empty() && t[0] == "sketchcanvas") sketch_bind_scene(scene_rect_, true);  // (task 0233)
+  if (!t.empty() && t[0] == "sketchcanvas") sketch_bind_work_view();  // (task 0233; round 318: the view being drawn in)
   (void)line;
   if (t.empty() || to_lower(t[0]) != "sketchcanvas") return false;
   auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? t[i] : d; };
   Sketch &s = scene_->sketch;
   const std::string v = to_lower(arg(1, "list"));
-  const Recti view = scene_rect_;
+  const Recti view = sketch_view_.view;
   if (v == "view") s.active_canvas = 0;
   else if (v == "ground") {
     SketchCanvas c;

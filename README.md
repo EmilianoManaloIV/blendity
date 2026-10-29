@@ -199,7 +199,8 @@ rest without a keyboard ([the manual](docs/MANUAL.md), chapter 1). **My Tools** 
 takes a key of your own (right-click it > Assign Shortcut...), and one `.blendity-ui` file carries the whole arrangement. On a
 drawing tablet beside the screen, a second Scene view and a pinned Inspector in a window of their own (*Duplicate into New
 Window*), and tabs dock into whichever window they are dropped on. The **Draw tab** is the pad: the scene from the Scene or the Game camera, the
-pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn. The **Layers window** composites the sketch's layers as Photoshop does - opacity,
+pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn;
+its bar has the pen's color, Steadiness, Canvas, the guides and Build from Sketch. The **Layers window** composites the sketch's layers as Photoshop does - opacity,
 blend modes, groups, locks - with rows a pen can work and the Wheel's layers set a hold away. Tabs never clip (icons, then an overflow), related tabs
 fold into one, and a stage layout shows its own tabs; the Scene view's bar reads Layout > Mode > Tool. **Sculpt Mode** (Modeling Tools > Sculpt) pushes, smooths and grabs a dense mesh with
 brushes that touch only what is under them, each stroke one light undo step - ten brushes, symmetry, a lazy mouse, image alphas

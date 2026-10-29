@@ -239,11 +239,13 @@ static void tests_round243() {
     ed.command("sketchguide perspective 2");
     ed.command("sketchguide follow off");  // (a flat guide: task 0224 ties it to the camera)
     ed.command(strprintf("sketchguide vp 0 %g %g", -400.0f / h, 300.0f / h));
-    ed.command(strprintf("sketchguide vp 1 %g %g", 1600.0f / h, 300.0f / h));
-    pen_stroke(ed, wobbled(line_pts({300, 380}, {600, 340}, 20), 4.0f, 7));
+    ed.command(strprintf("sketchguide vp 1 %g %g", 1600.0f / h, 100.0f / h));
+    ed.command("sketch correct light");  // (a freehand layer isn't pulled to the vanishing lines: round 318)
+    pen_stroke(ed, wobbled(line_pts({300, 400}, {600, 331}, 20), 4.0f, 7));  // (13 degrees: the correction levels lines within 4)
+    ed.command("sketch correct none");
     CHECK(s.strokes.size() == 5);
     if (s.strokes.size() == 5) {
-      const Vec2 vp{1600, 300}, a{s.strokes[4].pts[0].x * h, s.strokes[4].pts[0].y * h};  // (the line through the stroke's own start)
+      const Vec2 vp{1600, 100}, a{s.strokes[4].pts[0].x * h, s.strokes[4].pts[0].y * h};  // (the line through the stroke's own start)
       bool on_line = true;
       for (const SketchPoint &p : s.strokes[4].pts) {
         const Vec2 q{p.x * h, p.y * h};
@@ -1602,6 +1604,149 @@ static void tests_round254() {
   });
 }
 
+/* ---------------------------------------------------------------- round 318: freehand isn't snapped to perspective */
+static void tests_round318() {
+  test("freehand drawing goes where the pen goes with a perspective guide on: a layer set to Freehand, and Ctrl held on a corrected layer; a corrected stroke still lies on the vanishing line, and the ruler still holds a freehand stroke", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("sketch on");
+    ed.step_frame_headless();
+    const float h = (float)ed.scene_rect_for_test().h;
+    ed.command("sketchguide perspective 2");
+    ed.command("sketchguide follow off");
+    ed.command(strprintf("sketchguide vp 0 %g %g", -400.0f / h, 300.0f / h));
+    ed.command(strprintf("sketchguide vp 1 %g %g", 1600.0f / h, 100.0f / h));
+    const Sketch &s = ed.sketch_for_test();
+    const Vec2 vp{1600, 100};
+    /* How far the stroke's points stray from the line through its start to the right point, at most. */
+    auto off_line = [&](const SketchStroke &st) {
+      const Vec2 a{st.pts[0].x * h, st.pts[0].y * h};
+      float worst = 0.0f;
+      for (const SketchPoint &p : st.pts) {
+        const Vec2 q{p.x * h, p.y * h};
+        worst = std::max(worst, length(q - sketch::snap_to_line(q, a, vp)));
+      }
+      return worst;
+    };
+    /* A stroke heading right and a little up, bowed 25 px in the middle: near the vanishing line, not on it. */
+    std::vector<Vec2> bowed;
+    for (int i = 0; i <= 20; i++) bowed.push_back({300.0f + i * 15.0f, 400.0f - i * 3.46f - 25.0f * std::sin(i * 3.14159265f / 20.0f)});
+    ed.command("sketch correct none");  // (the Draw bar's Freehand)
+    pen_stroke(ed, bowed);
+    CHECK(s.strokes.size() == 1);
+    const float free_layer = s.strokes.size() == 1 ? off_line(s.strokes[0]) : 0.0f;
+    ed.command("sketch correct full");
+    pen_stroke(ed, bowed, 1.0f, false, platform::MOD_CTRL);
+    CHECK(s.strokes.size() == 2);
+    const float ctrl_held = s.strokes.size() == 2 ? off_line(s.strokes[1]) : 0.0f;
+    pen_stroke(ed, wobbled(line_pts({300, 400}, {600, 331}, 20), 4.0f, 7));  // (13 degrees: the correction levels lines within 4)
+    CHECK(s.strokes.size() == 3);
+    const float corrected = s.strokes.size() == 3 ? off_line(s.strokes[2]) : 99.0f;
+    std::printf("    off the vanishing line: a Freehand layer %.1f px, Ctrl held %.1f px, corrected %.2f px\n", free_layer, ctrl_held, corrected);
+    CHECK(free_layer > 15.0f && ctrl_held > 15.0f);  // (the bow kept: 25 px drawn)
+    CHECK(corrected < 1.5f);
+    /* The ruler is chosen for the stroke: it still holds a freehand one. */
+    ed.command("sketch correct none");
+    ed.command("sketchguide ruler");
+    ed.step_frame_headless();
+    ed.sketch_set_ruler_for_test({100.0f / h, 200.0f / h}, {900.0f / h, 200.0f / h});
+    std::vector<Vec2> wavy;
+    for (int i = 0; i <= 20; i++) wavy.push_back({150.0f + i * 15.0f, 200.0f + 30.0f * std::sin(i * 0.7f)});
+    pen_stroke(ed, wavy);
+    bool on_ruler = s.strokes.size() == 4;
+    for (const SketchPoint &p : s.strokes.size() == 4 ? s.strokes[3].pts : std::vector<SketchPoint>{}) on_ruler = on_ruler && std::fabs(p.y * h - 200.0f) < 1.0f;
+    std::printf("    the ruler: %zu strokes, the last on it %d\n", s.strokes.size(), (int)on_ruler);
+    CHECK(on_ruler);
+    ed.command("sketch off");
+  });
+  test("the Draw tab's bar has the pen and the guides by clicks: a color field, Pen > Pen Color / Steadiness / Canvas, Guides > Perspective Follows the Camera, Build > Build from Sketch; narrow, it wraps and every control stays inside the tab", [] {
+    using platform::EventType;
+    auto mouse_ev = [](EventType t, int x, int y, int key = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key;
+      return e;
+    };
+    Editor ed;
+    ed.init_headless(1600, 900);
+    ed.record_buttons_for_test(true);
+    auto step = [&](std::vector<platform::Event> events = {}) {
+      ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+      ed.step_frame_headless(events);
+    };
+    auto rect = [&](const std::string &key) {
+      Recti r;
+      return ed.button_rect_for_test(key, r) ? r : Recti{};
+    };
+    auto click = [&](const std::string &key) {
+      const Recti r = rect(key);
+      if (r.w <= 0) return false;
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      step({mouse_ev(EventType::MouseMove, x, y)});
+      step({mouse_ev(EventType::MouseDown, x, y)});
+      step({mouse_ev(EventType::MouseUp, x, y)});
+      step();
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      const Recti r = rect(key);
+      if (r.w <= 0) return false;
+      for (int i = 0; i < 4; i++) step({mouse_ev(EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      return true;
+    };
+    ed.command("layout Drawing");
+    step();
+    ed.command("window Draw");
+    step();
+    step();
+    /* Pen > Pen Color > Red. */
+    const bool pen = click("draw:Pen") && ed.popup_count_for_test() == 1;
+    const bool red = hover("submenu:Pen Color") && click("menu:Red");
+    std::printf("    Pen opened %d; Red picked %d: the pen %08X\n", (int)pen, (int)red, (unsigned)ed.sketch_color_for_test());
+    CHECK(pen && red && (ed.sketch_color_for_test() & 0xFFFFFF) == 0xD03030u);
+    /* Pen > Steadiness > Medium (25 px). */
+    CHECK(click("draw:Pen") && hover("submenu:Steadiness") && click("menu:Medium"));
+    CHECK(std::fabs(ed.sketch_tether_for_test() - 25.0f) < 1e-3f);
+    /* Pen > Canvas > The Ground: the next strokes land on a ground canvas. */
+    CHECK(click("draw:Pen") && hover("submenu:Canvas") && click("menu:The Ground"));
+    CHECK(ed.sketch_for_test().active_canvas != 0);
+    /* Guides > Perspective Follows the Camera toggles; Build shows Build from Sketch's shapes. */
+    const bool follow = ed.sketch_for_test().follow_camera;
+    CHECK(click("draw:Guides") && click("menu:Perspective Follows the Camera") && ed.sketch_for_test().follow_camera != follow);
+    CHECK(click("draw:Build") && hover("submenu:Build from Sketch") && rect("menu:Box (three lines at a corner)").w > 0);
+    step({mouse_ev(EventType::KeyDown, 0, 0, platform::KEY_ESCAPE)});
+    step();
+    /* A guide from the model is taken in the pad, with its camera - not the Scene view the tab hides (the review of
+     * round 318): the ruler along the cube's edge under the pad's middle. */
+    ed.command("sketchguide off");
+    const bool picked = click("draw:Build") && hover("submenu:Sketch over the Model") && click("menu:Ruler along the Edge under the Middle");
+    std::printf("    the ruler from the model: picked %d, in view kind %d, guide %d\n", (int)picked, ed.sketch_view_kind_for_test(), ed.sketch_guide_kind_for_test());
+    CHECK(picked && ed.sketch_view_kind_for_test() == 2 && ed.sketch_guide_kind_for_test() == 1);
+    /* The color field opens the Color window. */
+    CHECK(click("draw:color") && ed.popup_count_for_test() >= 1);
+    step({mouse_ev(EventType::KeyDown, 0, 0, platform::KEY_ESCAPE)});
+    step();
+    ed.command("sketch off");
+    /* A narrow window: the bar wraps, and every control of it stays inside the tab. */
+    Editor nw;
+    nw.init_headless(900, 700);
+    nw.record_buttons_for_test(true);
+    nw.command("layout Drawing");
+    nw.step_frame_headless();
+    nw.command("window Draw");
+    for (int i = 0; i < 4; i++) nw.step_frame_headless();
+    const Recti d = nw.window_rect_for_test(WindowKind::Draw);
+    bool inside = d.w > 0;
+    for (const char *key : {"draw:Pen", "draw:Guides", "draw:Build", "Layers", "draw:color"}) {
+      Recti r;
+      inside = inside && nw.button_rect_for_test(key, r) && r.x >= d.x && r.right() <= d.right() && r.y >= d.y;
+    }
+    std::printf("    a %dx%d tab: the bar's rows %d, every control inside %d\n", d.w, d.h, nw.draw_bar_rows_for_test(), (int)inside);
+    CHECK(nw.draw_bar_rows_for_test() >= 2 && inside);
+    nw.command("sketch off");
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
@@ -1611,4 +1756,5 @@ void run_sketch_tests() {
   tests_round248();
   tests_round253();
   tests_round254();
+  tests_round318();
 }

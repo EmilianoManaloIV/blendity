@@ -23,6 +23,25 @@ void Editor::sketch_bind(int kind, const Recti &view, const SceneCamera &cam, co
   sv.vp = p * v;
   sv.inv = sv.vp.inverse();
   sv.eye = cam.position(), sv.fwd = cam.forward();
+  if (kind < 0 || kind > 2) return;
+  sketch_views_[kind] = sv;
+  sketch_view_frame_[kind] = ui_.frame_number();
+  if (hovered) sketch_work_view_ = kind;
+}
+
+/* The view the sketch's commands act in (round 318): the one the pointer was last over - the Draw tab's pad (its bar
+ * too), the Game view or the Scene view - while it is still drawn, else the Scene view. Mesh > Draw's and the Draw tab's
+ * Guides, Canvas, Lift and Build then work on the picture the artist draws in, with its camera. */
+Recti Editor::sketch_bind_work_view() {
+  const int k = sketch_work_view_;
+  const bool shown = k > 0 && ui_.frame_number() <= sketch_view_frame_[k] + 2;
+  if (!shown) {
+    sketch_bind_scene(scene_rect_, true);
+    return scene_rect_;
+  }
+  sketch_view_ = sketch_views_[k];
+  sketch_view_.hovered = true;
+  return sketch_view_.view;
 }
 
 /* The Scene view (its camera is the editor's). */
@@ -193,59 +212,98 @@ void Editor::sketch_prune_depth_canvases() {
 
 /* ---- the Draw tab ---- */
 
-/* The Draw tab's bar: the source (the Scene view's camera or the Game camera), the tool, its width and corrections,
- * the guides, Place in 3D. */
+/* The Draw tab's bar: the source (the Scene view's camera or the Game camera), the tool, the pen's color and its menu
+ * (Pen Color, Steadiness, Canvas, Lift, Clear - Mesh > Draw's own items), its width and corrections, the guides and their
+ * menu, Place in 3D, Build, Layers. Narrower than its controls it wraps to more rows (draw_bar_rows_, round 318). */
 void Editor::draw_draw_bar(const Recti &bar) {
   auto &u = ui_;
-  const int h = bar.h - u.px(6);
-  int x = bar.x + u.px(6);
+  const int h = u.row_h(), gap = u.px(6);
+  int x = bar.x + gap, y = bar.y + u.px(3), rows = 1;
+  auto at = [&](int w) {  // (the next control's rect: on this row, else the next)
+    if (x + w > bar.right() - gap && x > bar.x + gap) x = bar.x + gap, y += h + u.px(6), rows++;
+    const Recti r{x, y, w, h};
+    x += w + gap;
+    return r;
+  };
   static const char *kSources[] = {"Scene camera", "Game camera"};
-  if (u.combo(u.id("draw_source"), {x, bar.y + u.px(3), u.px(130), h}, draw_source_, kSources, 2)) draw_cache_.key = 0;
+  if (u.combo(u.id("draw_source"), at(u.px(130)), draw_source_, kSources, 2)) draw_cache_.key = 0;
   u.tooltip("Whose picture the pad shows: the Scene view's camera (the keyboard moves it) or the Game camera.");
-  x += u.px(136);
-  if (u.button({x, bar.y + u.px(3), u.px(70), h}, sketch_.active ? "Drawing" : "Draw", sketch_.active)) sketch_.active ? sketch_end() : sketch_begin();
+  if (u.button(at(u.px(70)), sketch_.active ? "Drawing" : "Draw", sketch_.active)) sketch_.active ? sketch_end() : sketch_begin();
   u.tooltip("The Sketch tool: the pen's pressure is the width, its eraser end erases, Ctrl keeps a stroke freehand. Esc ends.");
-  x += u.px(76);
-  u.label({x, bar.y, u.px(42), bar.h}, "Width");
-  x += u.px(44);
-  u.float_field(u.id("draw_width"), {x, bar.y + u.px(3), u.px(54), h}, sketch_.width, 0.1f, 0.5f, 40.0f, "%.1f");
-  x += u.px(60);
-  static const char *kGuides[] = {"No guide", "Ruler", "Ellipse", "French curve"};
-  u.combo(u.id("draw_guide"), {x, bar.y + u.px(3), u.px(110), h}, sketch_.guide, kGuides, 4);
-  u.tooltip("Draw > Guides: strokes run along the ruler, follow the ellipse or the French curve.");
-  x += u.px(116);
-  static const char *kPersp[] = {"No perspective", "1-point", "2-point", "3-point"};
-  int persp = std::max(0, std::min(3, scene_->sketch.perspective));
-  if (u.combo(u.id("draw_persp"), {x, bar.y + u.px(3), u.px(120), h}, persp, kPersp, 4))
-    run_console_command(persp == 0 ? std::string("sketchguide perspective off") : strprintf("sketchguide perspective %d", persp));
-  u.tooltip("The perspective guide: its vanishing points are this view's camera's, and follow it.");
-  x += u.px(126);
-  static const char *kSym[] = {"No symmetry", "Mirror X", "Mirror Y", "Mirror XY", "Radial"};
-  u.combo(u.id("draw_sym"), {x, bar.y + u.px(3), u.px(110), h}, sketch_.symmetry, kSym, 5);
-  x += u.px(116);
+  {
+    const Recti cr = at(u.px(40));
+    Vec3 c = Color::to_vec(sketch_.color);
+    if (u.color_field(u.id("draw_color"), cr, c)) sketch_.color = Color::from(c);
+    if (u.record_buttons) u.button_rects["draw:color"] = cr;
+    u.tooltip("The pen's color: click for any color (the Color window), or Pen > Pen Color for the usual inks.");
+  }
+  {
+    const Recti pr = at(u.px(64));
+    if (u.button(pr, "Pen", false, ui::Icon::Menu)) u.open_popup(u.id("draw_pen_menu"), {pr.x, pr.bottom(), 0, 0});
+    if (u.record_buttons) u.button_rects["draw:Pen"] = pr;
+    u.tooltip("The pen: its color, Steadiness, the Canvas the strokes land on, Lift the Sketch to 3D, Clear the Sketch.");
+  }
+  {
+    const Recti wr = at(u.px(98));
+    u.label({wr.x, wr.y, u.px(42), wr.h}, "Width");
+    u.float_field(u.id("draw_width"), {wr.x + u.px(44), wr.y, u.px(54), wr.h}, sketch_.width, 0.1f, 0.5f, 40.0f, "%.1f");
+  }
   static const char *kCorrect[] = {"Freehand", "Light", "Full"};
   int correct = scene_->sketch.layer_at(scene_->sketch.active_layer).correct;
-  if (u.combo(u.id("draw_correct"), {x, bar.y + u.px(3), u.px(90), h}, correct, kCorrect, 3)) {
+  if (u.combo(u.id("draw_correct"), at(u.px(90)), correct, kCorrect, 3)) {
     scene_->sketch.layer_at(scene_->sketch.active_layer).correct = correct;
     mark_changed("Sketch Correction");
   }
-  u.tooltip("How much a stroke is corrected when the pen lifts: a wobbly line made straight, an arch two lines and an arc.");
-  x += u.px(96);
-  u.checkbox({x, bar.y + u.px(5), h - u.px(4), h - u.px(4)}, sketch_.place3d);
-  u.label({x + h, bar.y, u.px(90), bar.h}, "Place in 3D");
-  u.tooltip("A stroke lands in the scene where it was drawn - on the face under the pen, else at the camera's pivot depth -\nand stays in perspective as the camera turns; off, it stays on the picture plane.");
-  x += u.px(96);
-  if (u.button({x, bar.y + u.px(3), u.px(64), h}, "Layers", false, ui::Icon::Menu)) run_console_command("window Layers");  // (task 0234)
+  u.tooltip("How much a stroke is corrected when the pen lifts: a wobbly line made straight, an arch two lines and an arc.\n"
+            "Freehand leaves it as drawn, and the perspective guide doesn't pull it.");
+  static const char *kGuides[] = {"No Guide", "Ruler", "Ellipse", "French Curve"};  // (the Guides menu's words)
+  u.combo(u.id("draw_guide"), at(u.px(110)), sketch_.guide, kGuides, 4);
+  u.tooltip("Draw > Guides: strokes run along the ruler, follow the ellipse or the French curve.");
+  static const char *kPersp[] = {"No Perspective", "1-Point", "2-Point", "3-Point"};
+  int persp = std::max(0, std::min(3, scene_->sketch.perspective));
+  if (u.combo(u.id("draw_persp"), at(u.px(120)), persp, kPersp, 4))
+    run_console_command(persp == 0 ? std::string("sketchguide perspective off") : strprintf("sketchguide perspective %d", persp));
+  u.tooltip("The perspective guide: its vanishing points are this view's camera's, and follow it.");
+  static const char *kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
+  u.combo(u.id("draw_sym"), at(u.px(110)), sketch_.symmetry, kSym, 5);
+  {
+    const Recti gr = at(u.px(78));
+    if (u.button(gr, "Guides", false, ui::Icon::Menu)) u.open_popup(u.id("draw_guides_menu"), {gr.x, gr.bottom(), 0, 0});
+    if (u.record_buttons) u.button_rects["draw:Guides"] = gr;  // (the Game view has a Guides button too)
+    u.tooltip("Every guide: the French curve's shape, radial copies, Snap to Guides, Perspective Follows the Camera, and a ruler\n"
+              "or an ellipse from the model.");
+  }
+  {
+    const Recti pl = at(u.px(96));
+    u.checkbox({pl.x, pl.y + u.px(2), h - u.px(4), h - u.px(4)}, sketch_.place3d);
+    u.label({pl.x + h, pl.y, pl.w - h, pl.h}, "Place in 3D");
+    u.tooltip("A stroke lands in the scene where it was drawn - on the face under the pen, else at the camera's pivot depth -\nand stays in perspective as the camera turns; off, it stays on the picture plane.");
+  }
+  {
+    const Recti br = at(u.px(70));
+    if (u.button(br, "Build", false, ui::Icon::Menu)) u.open_popup(u.id("draw_build_menu"), {br.x, br.bottom(), 0, 0});
+    if (u.record_buttons) u.button_rects["draw:Build"] = br;
+    u.tooltip("Make the model from the sketch: a box, a cylinder, a cone, a sweep or a face from the strokes, or a stroke\n"
+              "projected onto the model, traced into a cut or a curve.");
+  }
+  if (u.button(at(u.px(64)), "Layers", false, ui::Icon::Menu)) run_console_command("window Layers");  // (task 0234)
   u.tooltip("The Layers panel: the sketch's layers with their opacity and blend, reordered by dragging.");
+  if (rows != draw_bar_rows_) u.redraw = true;  // (the tab's height for the bar changes: drawn again at once)
+  draw_bar_rows_ = rows;
+  u.popup(u.id("draw_pen_menu"), u.px(200), [this] { draw_sketch_pen_menu(); });
+  u.popup(u.id("draw_guides_menu"), u.px(240), [this] { draw_sketch_guides_items(); });
+  u.popup(u.id("draw_build_menu"), u.px(240), [this] { draw_sketch_build_items(); });
 }
 
 /* The Draw tab: the scene's picture from the source camera (its own targets and cache, no gizmos, icons or stats), the
  * sketch tool over it in that camera's perspective. Opening it starts the tool and Place in 3D. */
 void Editor::draw_draw_window(const Recti &r) {
   auto &u = ui_;
-  const int bh = u.row_h() + u.px(6);
+  const int bh = draw_bar_rows_ * (u.row_h() + u.px(6));  // (last frame's rows: the bar wraps when narrow)
   const Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
+  const bool over_tab = u.in.mx >= r.x && u.in.mx < r.x + r.w && u.in.my >= r.y && u.in.my < r.y + r.h;
+  if (over_tab && !u.any_popup_open()) sketch_work_view_ = 2;  // (round 318: its bar's menus act on the pad)
   draw_draw_bar(bar);
   const Recti view{r.x, r.y + bh, r.w, r.h - bh};
   if (view.w < 8 || view.h < 8) {

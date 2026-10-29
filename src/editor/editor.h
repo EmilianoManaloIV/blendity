@@ -676,6 +676,7 @@ class Editor {
   const Sketch &sketch_for_test() const { return scene_->sketch; }
   uint32_t sketch_color_for_test() const { return sketch_.color; }  // (task 0286: the Draw menu's pen)
   float sketch_tether_for_test() const { return sketch_.tether; }
+  int draw_bar_rows_for_test() const { return draw_bar_rows_; }  // (round 318)
   int sketch_french_for_test() const { return sketch_.french; }
   int sketch_radial_for_test() const { return sketch_.radial; }
   int sketch_symmetry_for_test() const { return sketch_.symmetry; }
@@ -3570,6 +3571,8 @@ class Editor {
   int sculpt_hide_group_ = 0;
   void draw_paint_extras(ui::Layout &lay);
   void draw_sketch_pen_menu();  // (task 0286)
+  void draw_sketch_guides_items();  // (round 318: Mesh > Draw > Guides and the Draw tab's Guides)
+  void draw_sketch_build_items();  // (round 318: Build from Sketch, Sketch over the Model)
   void draw_light_aim_point(ui::Layout &lay, GameObject &g);  // (task 0287)
   void draw_guide_by_numbers(ui::Layout &lay);
   bool add_guide(Vec3 p, Vec3 d);
@@ -3963,6 +3966,13 @@ class Editor {
   int sketch_depth_canvas(const Recti &view);
   /* The Draw tab (task 0233): its picture's source, targets and cache. */
   int draw_source_ = 0;  // 0 the Scene view's camera, 1 the Game camera
+  int draw_bar_rows_ = 1;  // (round 318: the bar wraps in a narrow window)
+  /* Round 318: each view's last binding (kind 0 the Scene view, 1 the Game view, 2 the Draw tab) and the frame it was
+   * made, and the view the pointer was last over - where Mesh > Draw's and the Draw tab's commands act. */
+  SketchView sketch_views_[3];
+  uint64_t sketch_view_frame_[3] = {0, 0, 0};
+  int sketch_work_view_ = 0;
+  Recti sketch_bind_work_view();
   uint64_t draw_last_frame_ = 0;  // (the UI frame the tab last drew: shown again after a gap, it starts the tool)
   RenderTarget draw_rt_;
   Renderer3D draw_r3d_;

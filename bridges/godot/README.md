@@ -41,6 +41,10 @@ The folder `bridges/godot` is a tiny project holding the add-on:
     godot --headless --path bridges/godot --script res://smoke_test.gd
     godot --headless --path bridges/godot --script res://auto_connect_test.gd -- <python>
 
+`live_session_test.gd` follows a running Blendity: Blendity's suite runs it with `BLENDITY_TEST_BRIDGE` (see
+[LIVELINK.md](../../docs/LIVELINK.md#testing-a-bridge-live-round-318)). Run on 2026-10-29: LIVE OK. The longest poll
+was 42.6 ms while a 32,514-vertex mesh deformed, because every surface is rebuilt and its normals worked out again.
+
 Run `godot --headless --path bridges/godot --import` once first. `<python>` is a real interpreter's path: on Windows
 the `python` on the PATH may be the Microsoft Store's stub, which starts nothing. Godot 4.4+ writes a `.uid` file
 beside each script; they are kept in the repository and the package, and `.godot/` (its cache) is ignored.

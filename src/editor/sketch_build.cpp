@@ -495,7 +495,7 @@ bool Editor::sketch_build_pull() {
 
 /* sketchbuild box|cylinder|cone|sweep|face|pull: a solid from the construction lines. */
 bool Editor::sketch_build_command(const std::vector<std::string> &t) {
-  if (!t.empty() && t[0] == "sketchbuild") sketch_bind_scene(scene_rect_, true);  // (task 0233)
+  if (!t.empty() && t[0] == "sketchbuild") sketch_bind_work_view();  // (task 0233; round 318: the view being drawn in)
   if (t.empty() || to_lower(t[0]) != "sketchbuild") return false;
   const std::string v = t.size() > 1 ? to_lower(t[1]) : "";
   if (playing_) return true;

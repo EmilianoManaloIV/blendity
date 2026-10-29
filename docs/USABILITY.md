@@ -369,6 +369,8 @@ screens themselves.
 | Edit Mode on a 500k-face mesh took 12 ms a frame, Face mode 22, though nothing changed: the cage was worked out again every frame. | It is kept on the card and worked out again only when the mesh, the mode or the selection changes: 6.0 ms, Face mode 8.2 (task 0205). |
 | With the views on the card, a big mesh's view took twice as long a frame as Blender's: the editor waited for the card and copied its depth back every frame. | The frame is left running and the depth comes back when a click needs it: the 500k sphere 8.2 -> 3.9 ms a frame, ahead of Blender's 5.0 (task 0204). |
 | Preferences didn't say which windows the card showed, and switching Viewport Device left the other device's picture on screen until something changed. | Each window's line says where its views draw and who shows it; a switch draws the views again; with no card, the fall back to the CPU is said once (task 0199). |
+| With the perspective guide on, a freehand stroke - Ctrl held, or a layer set to Freehand - was still pulled onto a vanishing line as the pen moved. | Freehand goes where the pen goes; the ruler, ellipse and French curve, chosen for the stroke, still hold it (round 318). |
+| The Draw tab's bar had no pen color, steadiness or canvas, nor the French curve's shape, radial copies, Perspective Follows the Camera or Build from Sketch: they were only in Mesh > Draw. | A color field and Pen, Guides and Build menus on the bar, Mesh > Draw's own items; in a narrow window the bar wraps to a second row (round 318). |
 
 ## Still worth doing
 

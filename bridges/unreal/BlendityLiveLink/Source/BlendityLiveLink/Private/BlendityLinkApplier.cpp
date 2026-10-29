@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Live Link's messages applied to the open level (task 0277). See BlendityLinkApplier.h.
 #include "BlendityLinkApplier.h"
+#include "PhysicsEngine/BodySetup.h"
 
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -227,20 +228,35 @@ void FBlendityLinkApplier::Remove(int64 Id)
 	Slots.Remove(Id);
 	Meshes.Remove(Id);
 	Topology.Remove(Id);
+	Descriptions.Remove(Id);
+	Deforming.Remove(Id);
 	Parts.Remove(Id);
 }
 
-UStaticMesh* FBlendityLinkApplier::BuildMesh(const blendity_link::GlbMesh& G, const FString& Name) const
+/* A mesh's description from its glTF: every vertex its own instance (the glTF's split vertices), a polygon group a section.
+ * Indexing is suspended while it fills - creating each triangle's edges one by one took 88 ms for 46,000 vertices. */
+void FBlendityLinkApplier::FillDescription(const blendity_link::GlbMesh& G, FMeshDescription& Desc)
 {
-	FMeshDescription Desc;
 	FStaticMeshAttributes Attr(Desc);
 	Attr.Register();
 	TVertexAttributesRef<FVector3f> Positions = Attr.GetVertexPositions();
 	TVertexInstanceAttributesRef<FVector3f> Normals = Attr.GetVertexInstanceNormals();
 	TVertexInstanceAttributesRef<FVector2f> Uvs = Attr.GetVertexInstanceUVs();
-	TArray<FVertexInstanceID> Instances;
+	size_t Triangles = 0;
+	for (const std::vector<int>& Tris : G.sections)
+		Triangles += Tris.size() / 3;
+	Desc.SuspendVertexInstanceIndexing();
+	Desc.SuspendEdgeIndexing();
+	Desc.SuspendPolygonIndexing();
+	Desc.SuspendPolygonGroupIndexing();
+	Desc.SuspendUVIndexing();
 	Desc.ReserveNewVertices((int32)G.positions.size());
 	Desc.ReserveNewVertexInstances((int32)G.positions.size());
+	Desc.ReserveNewTriangles((int32)Triangles);
+	Desc.ReserveNewPolygons((int32)Triangles);
+	Desc.ReserveNewEdges((int32)Triangles * 3);
+	TArray<FVertexInstanceID> Instances;
+	Instances.Reserve((int32)G.positions.size());
 	for (size_t I = 0; I < G.positions.size(); I++)
 	{
 		const FVertexID V = Desc.CreateVertex();
@@ -256,13 +272,44 @@ UStaticMesh* FBlendityLinkApplier::BuildMesh(const blendity_link::GlbMesh& G, co
 		for (size_t T = 0; T + 2 < Tris.size(); T += 3)
 			Desc.CreateTriangle(Group, {Instances[Tris[T]], Instances[Tris[T + 1]], Instances[Tris[T + 2]]});
 	}
+	Desc.ResumeVertexInstanceIndexing();
+	Desc.ResumeEdgeIndexing();
+	Desc.ResumePolygonIndexing();
+	Desc.ResumePolygonGroupIndexing();
+	Desc.ResumeUVIndexing();
+}
+
+/* A deform into the kept description: the vertices are in the glTF's order (FillDescription made them so), only their
+ * positions and normals change. False when the counts differ (a newer mesh is on its way). */
+bool FBlendityLinkApplier::DeformDescription(const blendity_link::GlbMesh& G, FMeshDescription& Desc)
+{
+	FStaticMeshAttributes Attr(Desc);
+	TVertexAttributesRef<FVector3f> Positions = Attr.GetVertexPositions();
+	TVertexInstanceAttributesRef<FVector3f> Normals = Attr.GetVertexInstanceNormals();
+	if (Desc.Vertices().Num() != (int32)G.positions.size() || Desc.VertexInstances().Num() != (int32)G.positions.size())
+		return false;
+	for (size_t I = 0; I < G.positions.size(); I++)
+	{
+		Positions[FVertexID((int32)I)] = FVector3f(Vec(G.positions[I]));
+		Normals[FVertexInstanceID((int32)I)] = FVector3f(Vec(G.normals[I]));
+	}
+	return true;
+}
+
+UStaticMesh* FBlendityLinkApplier::BuildMesh(const FMeshDescription& Desc, int32 Sections, const FString& Name, bool bCollision) const
+{
 	UStaticMesh* Mesh = NewObject<UStaticMesh>(GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UStaticMesh::StaticClass(), FName(*Name)), RF_Transient);
-	for (size_t S = 0; S < G.sections.size(); S++)
+	for (int32 S = 0; S < Sections; S++)
 		Mesh->GetStaticMaterials().Add(FStaticMaterial());
+	if (!bCollision)
+	{
+		Mesh->CreateBodySetup();  // (a deforming mesh: no triangles for collision to read, so none asked for)
+		Mesh->GetBodySetup()->CollisionTraceFlag = CTF_UseSimpleAsComplex;
+	}
 	UStaticMesh::FBuildMeshDescriptionsParams Params;
 	Params.bBuildSimpleCollision = false;
 	Params.bFastBuild = true;
-	Params.bAllowCpuAccess = true;  // (the actors keep collision, which reads the triangles on the CPU: traces and clicks in Play)
+	Params.bAllowCpuAccess = bCollision;  // (collision reads the triangles on the CPU: traces and clicks in Play)
 	Params.bMarkPackageDirty = false;  // (transient: nothing to save)
 	Mesh->BuildFromMeshDescriptions({&Desc}, Params);
 	return Mesh;
@@ -277,7 +324,12 @@ void FBlendityLinkApplier::OnMesh(const blendity_link::Json& J, const TArray<uin
 	blendity_link::GlbMesh G;
 	if (!blendity_link::read_glb(Bin.GetData(), Bin.Num(), G))
 		return;
-	A->GetStaticMeshComponent()->SetStaticMesh(BuildMesh(G, A->GetActorLabel()));
+	TSharedRef<FMeshDescription> Desc = MakeShared<FMeshDescription>();
+	FillDescription(G, *Desc);
+	A->GetStaticMeshComponent()->SetStaticMesh(BuildMesh(*Desc, (int32)G.sections.size(), A->GetActorLabel()));
+	Descriptions.Add(Id, Desc);
+	A->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Deforming.Remove(Id);
 	Meshes.Add(Id, MoveTemp(G));
 	Topology.Add(Id, FString::Printf(TEXT("%.17g/%.17g"), J["topology"].number(0), J["verts"].number(0)));
 	AssignMaterials(Id);
@@ -295,8 +347,33 @@ void FBlendityLinkApplier::OnDeform(const blendity_link::Json& J, const TArray<u
 		return;  // (a newer mesh is on its way; a deform follows it)
 	if (!blendity_link::apply_deform(*G, Bin.GetData(), Bin.Num()))
 		return;
-	A->GetStaticMeshComponent()->SetStaticMesh(BuildMesh(*G, A->GetActorLabel()));
+	TSharedPtr<FMeshDescription>* Desc = Descriptions.Find(Id);
+	if (!Desc || !DeformDescription(*G, **Desc))
+		return;
+	A->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);  // (first: setting the mesh would ask for its collision)
+	A->GetStaticMeshComponent()->SetStaticMesh(BuildMesh(**Desc, (int32)G->sections.size(), A->GetActorLabel(), false));  // (no CPU copy, no cooking: Settle)
+	Deforming.Add(Id, FPlatformTime::Seconds());
 	AssignMaterials(Id);
+}
+
+void FBlendityLinkApplier::Settle()
+{
+	const double Now = FPlatformTime::Seconds();
+	for (auto It = Deforming.CreateIterator(); It; ++It)
+	{
+		if (Now - It.Value() < 0.5)
+			continue;
+		const int64 Id = It.Key();
+		It.RemoveCurrent();
+		AStaticMeshActor* A = Cast<AStaticMeshActor>(Alive(Id));
+		const blendity_link::GlbMesh* G = Meshes.Find(Id);
+		const TSharedPtr<FMeshDescription>* Desc = Descriptions.Find(Id);
+		if (!A || !G || !Desc)
+			continue;
+		A->GetStaticMeshComponent()->SetStaticMesh(BuildMesh(**Desc, (int32)G->sections.size(), A->GetActorLabel()));
+		A->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		AssignMaterials(Id);
+	}
 }
 
 void FBlendityLinkApplier::AssignMaterials(int64 Id)

@@ -208,7 +208,7 @@ void Editor::sketch_stroke_end_on_plane(const Recti &view, const SketchCanvas &c
  * on that face's canvas (a line drawn on the surface). The canvas the pen draws on stays as it was. */
 bool Editor::sketch_project() {
   Sketch &s = scene_->sketch;
-  const Recti view = scene_rect_;
+  const Recti view = sketch_view_.view;
   for (size_t i = s.strokes.size(); i-- > 0;) {
     SketchStroke &st = s.strokes[i];
     if (st.canvas != 0 || st.pts.empty() || !sketch_stroke_shown(st)) continue;
@@ -518,7 +518,7 @@ bool Editor::sketch_ellipse_from_face(const Recti &view, int mx, int my) {
  * "Scaffold" wire object - construction lines to build from (the Draw tools snap to its edges), never a mesh. */
 bool Editor::sketch_lift() {
   const Sketch &s = scene_->sketch;
-  const Recti view = scene_rect_;
+  const Recti view = sketch_view_.view;
   if (sketch_view_.cam.ortho) {
     Log::warn("sketchlift: a perspective view is needed (the axes' vanishing points)");
     return false;
@@ -601,7 +601,7 @@ bool Editor::sketch_lift() {
 
 /* sketchproject | sketchtrace edge|curve | sketchlift: the drawing into the model. */
 bool Editor::sketch_refine_command(const std::vector<std::string> &t) {
-  if (!t.empty() && (t[0] == "sketchproject" || t[0] == "sketchtrace" || t[0] == "sketchlift")) sketch_bind_scene(scene_rect_, true);  // (task 0233)
+  if (!t.empty() && (t[0] == "sketchproject" || t[0] == "sketchtrace" || t[0] == "sketchlift")) sketch_bind_work_view();  // (task 0233; round 318)
   if (t.empty()) return false;
   const std::string c = to_lower(t[0]);
   if (c != "sketchproject" && c != "sketchtrace" && c != "sketchlift") return false;

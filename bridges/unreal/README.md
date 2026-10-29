@@ -45,3 +45,15 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
   `BlendityLinkProtocol.cpp`, checks every mesh, the deform, the axes and the discovery file.
 - In Unreal: Session Frontend > Automation > `Blendity.LiveLink.Replay`, or
   `UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests Blendity.LiveLink.Replay; Quit" -unattended -nullrhi`.
+- **Live:** `Blendity.LiveLink.LiveSession` checks what the plugin's own connection made in the editor's level from a
+  running Blendity. Blendity's suite runs it with `BLENDITY_TEST_BRIDGE`, with a short `BLENDITY_TEST_DIR` (see
+  [LIVELINK.md](../../docs/LIVELINK.md#testing-a-bridge-live-round-318)). Run on 2026-10-29: LIVE OK.
+- **What the live run found:**
+  - The link dropped whenever Blendity was quiet. A non-blocking peek with nothing to read also succeeds with 0 bytes,
+    so the plugin took it for a closed connection, and reconnected and re-synced every 2 seconds. It now asks the
+    socket whether it is readable with nothing pending.
+  - A deform of a 32,514-vertex mesh took 259 ms a frame. It now changes the kept mesh description's positions in
+    place, builds without CPU data or collision, and builds once more with them half a second after the deforms
+    stop: 145 ms. Unreal's own static-mesh build (about 75 ms) is most of what is left.
+- **Install a Bridge:** a content-only project with the plugin from Install a Bridge builds
+  (`Build.bat UnrealEditor Win64 Development -Project=<project>`), opens, and its replay test passes.

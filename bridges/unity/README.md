@@ -46,6 +46,10 @@ and scales come across as the same numbers.
   -runTests -testPlatform EditMode`), the package imports without a warning. The run found two faults, fixed:
   `TryAutoConnect` called while connected dropped the link and started over, and opening another scene left the
   linked objects behind with the old one - the link now starts again in the new scene.
+- `LiveSessionTests.FollowsALiveBlendity` follows a running Blendity: Blendity's suite runs it with
+  `BLENDITY_TEST_BRIDGE` (see [LIVELINK.md](../../docs/LIVELINK.md#testing-a-bridge-live-round-318)). Run on
+  2026-10-29: LIVE OK, the longest editor frame 33.3 ms while a 32,514-vertex mesh deformed. A project made by
+  Install a Bridge compiled the package with no error.
 - Without Unity: `ReplayCheck/ReplayCheck.cs` runs the package's framing, JSON and glTF reading on the same session
   with any C# compiler (its header has the command); `ReplayCheck.exe --live <python> <repository's blendity folder>`
   finds the stand-in Live Link (`tools/livelink_fake_server.py`) through the discovery file twice, as the package does.

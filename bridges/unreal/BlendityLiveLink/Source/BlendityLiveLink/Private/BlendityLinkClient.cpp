@@ -110,15 +110,12 @@ bool FBlendityLinkClient::ReadSome()
 	uint32 Pending = 0;
 	if (!Socket->HasPendingData(Pending))
 	{
-		if (Socket->GetConnectionState() != SCS_Connected)
+		/* Closed: readable with nothing to read (the peer's end of stream). A non-blocking Recv can't say it - with
+		 * nothing yet it also succeeds with 0 bytes, which dropped a quiet link every moment (round 318's live test). */
+		const bool bReadable = Socket->Wait(ESocketWaitConditions::WaitForRead, FTimespan::Zero());
+		const bool bClosed = Socket->GetConnectionState() != SCS_Connected || (bReadable && !Socket->HasPendingData(Pending));
+		if (bClosed)
 			Disconnect(bAutoConnect ? TEXT("Blendity closed the connection - waiting for it again") : TEXT("Blendity closed the connection"));
-		else
-		{
-			uint8 Peek = 0;
-			int32 Got = 0;
-			if (Socket->Recv(&Peek, 1, Got, ESocketReceiveFlags::Peek) && Got == 0)  // (a closed peer reads 0 bytes)
-				Disconnect(bAutoConnect ? TEXT("Blendity closed the connection - waiting for it again") : TEXT("Blendity closed the connection"));
-		}
 		return false;
 	}
 	Chunk.SetNumUninitialized(FMath::Min<uint32>(Pending, 1u << 20));
@@ -134,6 +131,8 @@ bool FBlendityLinkClient::ReadSome()
 
 void FBlendityLinkClient::Tick()
 {
+	if (Applier)
+		Applier->Settle();  // (round 318: collision back on a mesh that stopped deforming)
 	if (!Socket)
 	{
 		const double Now = FPlatformTime::Seconds();

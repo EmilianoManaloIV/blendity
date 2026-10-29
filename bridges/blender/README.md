@@ -49,3 +49,7 @@ checks) through the add-on in a headless Blender and checks the scene it leaves:
 ```
 blender -b --factory-startup --python-exit-code 1 -P bridges/blender/smoke_test.py
 ```
+
+`live_session_test.py` follows a running Blendity: Blendity's suite runs it with `BLENDITY_TEST_BRIDGE` (see
+[LIVELINK.md](../../docs/LIVELINK.md#testing-a-bridge-live-round-318)). Run on 2026-10-29: LIVE OK, the longest tick
+4.3 ms while a 32,514-vertex mesh deformed.

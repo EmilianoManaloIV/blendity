@@ -2,6 +2,93 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 318): freehand strokes aren't pulled onto the perspective guide; the Draw tab's pen and guides; every bridge followed a live Blendity
+
+**Asked:** the user (2026-10-29): "When in freehand draw mode, the pen still snaps to the perspective grids", then "For
+the draw tab, shouldn't it also have away to UI to drive Pen Color, Canvas etc.", and "lets finish up all 'What's
+Left'": the bridges against a real Blendity with live edits, Install a Bridge then the engine, Unreal's deform cost,
+and cleaning up the Unreal scratch folder.
+
+**The bridges, live (docs/LIVELINK.md "Testing a bridge live")**
+- **A new Blendity test** (`tests_round318` in test_livelink.cpp) runs an engine's live-session test, named by
+  `BLENDITY_TEST_BRIDGE`.
+  - The engine connects by itself, then follows the Box moved, recolored and deformed, a bone turned, the Sphere
+    deleted, "Late" made, and a 32,514-vertex sphere deformed ten times.
+  - When Live Link stops, the engine writes its report.
+  - The discovery file is in the test's own folder, and a hung engine is reported, not waited on.
+- **New per-engine tests:** `bridges/blender/live_session_test.py`, `bridges/godot/live_session_test.gd`, Unity's
+  `LiveSessionTests.FollowsALiveBlendity`, Unreal's `Blendity.LiveLink.LiveSession`.
+- **All four LIVE OK.** The longest frame or tick while the dense sphere deformed: Blender 4.3 ms, Godot 42.6 ms,
+  Unity 33.3 ms, Unreal 145 ms.
+- **Unreal: the link dropped whenever Blendity was quiet.**
+  - A non-blocking peek with nothing to read also succeeds with 0 bytes, and the plugin took that for a closed
+    connection.
+  - It reconnected and re-synced every 2 seconds (98 objects sent for 12), and deforms were lost.
+  - It now asks whether the socket is readable with nothing pending.
+- **Unreal: a deform of the dense sphere took 259 ms a frame,** which was measured:
+  - filling the mesh description: 88 ms;
+  - Unreal's build: 75 ms;
+  - CPU data and collision: the rest.
+- **The fix:** each mesh keeps its description and a deform changes only its positions and normals. The description
+  is filled with indexing suspended. A deforming mesh is built without CPU data or collision; half a second after the
+  deforms stop it is built once more with them, and its collision comes back. Now 145 ms. Unreal's static-mesh build is
+  most of what is left; a dynamic mesh component would be the next step.
+- **Install a Bridge, then the engine:** a fresh project each, set up by Blendity's installer, opened with no error.
+  - Godot: the add-on enabled.
+  - Unity: the package compiled.
+  - Unreal: the plugin built for the project, opened, and its replay test passed.
+  - Blender: the suite's install test.
+- **Unreal needs a short test folder.** It stops when its shared data cache's path is over 119 characters, and the
+  suite points children's homes at the test folder.
+
+**The review's fixes (Opus)**
+- **The Draw tab's Guides, Canvas, Lift and Build acted on the Scene view's rect and camera,** not the pad's.
+  - Each view now keeps its last binding.
+  - The commands act in the view the pointer was last over, the pad's bar included (`sketch_bind_work_view`).
+  - A test runs Build > Sketch over the Model > Ruler along the Edge under the Middle from the tab: in the pad's view,
+    the ruler set.
+  - Scripted strokes (`sketchstroke`, `sketchline`, `sketchcircle`) stay in the Scene view's pixels.
+- **The new bridge test could have written the discovery file in the artist's `~/.blendity`.** It now uses its own
+  folder, and the suite's `BLENDITY_PREFS_DIR` comes back after it.
+- **Smaller fixes:**
+  - The bar asks for a redraw when its rows change.
+  - Its dropdowns use the menus' words (No Guide, Symmetry X, 1-Point).
+  - Pen, Guides and Build have their own test keys (the Game view has a Guides button too).
+  - The Guides tooltip says freehand strokes aren't pulled.
+
+**Added (the Draw tab's bar)**
+- **A color field for the pen:** any color, through the Color window.
+- **Pen menu:** Pen Color, Steadiness, Canvas, Lift the Sketch to 3D and Clear the Sketch.
+- **Guides menu:** the French curve's shape, Radial Copies, Snap to Guides, Perspective Follows the Camera, and a ruler
+  or an ellipse from the model.
+- **Build menu:** Build from Sketch and Sketch over the Model.
+- **One set of controls:** the menus are Mesh > Draw's own items (`draw_sketch_pen_menu`, `draw_sketch_guides_items`,
+  `draw_sketch_build_items`), so the two places can't drift apart.
+- **Narrow windows:** in a narrow window the bar wraps to a second row instead of running past the tab's edge. At 900
+  px it is two rows, every control inside.
+- **Checked:** a real-click test picks Red, Medium steadiness and the Ground canvas, toggles Perspective Follows the
+  Camera, opens Build from Sketch and the Color window, and checks the narrow bar. Screenshots of the bar at 1600 and
+  900 px, and with the Pen menu open, were looked at.
+
+**Fixed**
+- With a perspective guide on, the pen was pulled onto the line toward the nearest vanishing point as it moved, even
+  for a freehand stroke. That covered both Ctrl held and a layer whose corrections are Freehand (the Draw bar's
+  dropdown, `sketch correct none`). Only the correction applied after the pen lifts was skipped.
+- Freehand now goes where the pen goes. A corrected stroke is still pulled onto its vanishing line.
+- The ruler, ellipse and French curve still hold a freehand stroke: they are chosen for the stroke and turned off
+  with Guides > None.
+- Learn's answer and USABILITY say so.
+
+**Checked**
+- New test (`tests_round318` in test_sketch.cpp): a stroke bowed 25 px near a vanishing line.
+  - It keeps its bow on a Freehand layer and with Ctrl held (24.7 px off the line each).
+  - The same line on a corrected layer lies on the vanishing line (0.75 px).
+  - The ruler still holds a freehand stroke.
+- The guide test of task 0223 draws its perspective stroke on a corrected layer, as a Freehand layer is no longer
+  pulled. Its stroke is now 13 degrees from level: the correction makes lines within 4 degrees level, and that wins
+  over a vanishing line.
+- The sketch group: 294 checks, 0 failed.
+
 ## 2026-10-29 (round 317): the Unreal bridge built and run in Unreal 5.8 (task 0295)
 
 **Asked:** the user (2026-10-29): "Check .NET now." (after installing the .NET Framework 4.8.1 SDK and targeting pack).
