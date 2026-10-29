@@ -262,6 +262,8 @@ UStaticMesh* FBlendityLinkApplier::BuildMesh(const blendity_link::GlbMesh& G, co
 	UStaticMesh::FBuildMeshDescriptionsParams Params;
 	Params.bBuildSimpleCollision = false;
 	Params.bFastBuild = true;
+	Params.bAllowCpuAccess = true;  // (the actors keep collision, which reads the triangles on the CPU: traces and clicks in Play)
+	Params.bMarkPackageDirty = false;  // (transient: nothing to save)
 	Mesh->BuildFromMeshDescriptions({&Desc}, Params);
 	return Mesh;
 }

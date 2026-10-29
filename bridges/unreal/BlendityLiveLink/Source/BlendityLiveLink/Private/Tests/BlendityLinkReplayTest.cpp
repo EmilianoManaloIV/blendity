@@ -10,6 +10,7 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Engine/Engine.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -26,6 +27,7 @@ bool FBlendityLinkReplayTest::RunTest(const FString&)
 	if (!TestTrue(TEXT("the recorded session read"), FFileHelper::LoadFileToArray(Data, *Path)))
 		return false;
 	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false);
+	GEngine->CreateNewWorldContext(EWorldType::Editor).SetCurrentWorld(World);  // (as an editor world has: deleting an actor asks for it)
 	FBlendityLinkApplier Applier(World);
 	blendity_link::Stream S;
 	S.feed(Data.GetData(), Data.Num());
@@ -47,6 +49,7 @@ bool FBlendityLinkReplayTest::RunTest(const FString&)
 		TestTrue(FString::Printf(TEXT("the Box at %s"), *Box->GetActorLocation().ToString()), Box->GetActorLocation().Equals(FVector(300, 100, 200), 1e-3));
 		TestNotNull(TEXT("the Box has a mesh"), Box->GetStaticMeshComponent()->GetStaticMesh().Get());
 	}
+	GEngine->DestroyWorldContext(World);
 	World->DestroyWorld(false);
 	return true;
 }

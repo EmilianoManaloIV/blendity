@@ -31,6 +31,8 @@ struct Json {
   std::vector<std::pair<std::string, Json>> obj;
   const Json &operator[](const char *key) const;
   const Json &operator[](size_t i) const;
+  // (a literal index such as B[0] is an int: without this MSVC finds [0] ambiguous, as 0 is also a null const char *)
+  const Json &operator[](int i) const { return i < 0 ? (*this)[arr.size()] : (*this)[(size_t)i]; }
   double number(double def = 0) const { return type == Num ? num : def; }
   int64_t id() const { return type == Num ? (int64_t)num : 0; }
   bool boolean(bool def = false) const { return type == Bool ? b : def; }

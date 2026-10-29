@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 317): the Unreal bridge built and run in Unreal 5.8 (task 0295)
+
+**Asked:** the user (2026-10-29): "Check .NET now." (after installing the .NET Framework 4.8.1 SDK and targeting pack).
+
+**Fixed**
+- **The plugin didn't compile in Unreal 5.8:**
+  - `B[0]` on the protocol's `Json` was ambiguous to MSVC, since a literal 0 is also a null `const char *`;
+  - an `int` index overload settles it.
+  - Blendity's suite compiles only the protocol layer, not the applier that uses the index, so it never saw this.
+- **Unreal warned about physics on every linked mesh:** the meshes were built without CPU-side data, yet their actors
+  keep collision. They now keep it, so traces and clicks in Play work on them, and the transient meshes no longer
+  mark a package dirty.
+- **The replay test's world had no world context,** so deleting the Sphere warned. It now has one, as an editor world
+  does.
+
+**Checked**
+- Unreal 5.8.4:
+  - BuildPlugin succeeds;
+  - `Blendity.LiveLink.Replay` passes with no warning;
+  - the editor, run headless on a scratch project, connected by itself to `tools/livelink_fake_server.py` within
+    12 s and introduced itself as "Unreal 5.8.4".
+- Blendity's `livelink` group: 153 checks, 0 failed.
+- The Blender Install a Bridge test, which skips without a Blender, was run against Blender 5.2 in a scratch user
+  folder: 2 checks, 0 failed.
+- Every engine bridge has now run in its engine: Blender 5.2, Unity 6000.6, Godot 4.7.2 and Unreal 5.8.
+
 ## 2026-10-29 (round 316): the Godot and Blender bridges run live (task 0295)
 
 **Asked:** the user (2026-10-29): "Godot and .NET should be installed, go check", then "How about the blender bridge?"
