@@ -4,10 +4,45 @@
 // playhead when the character has a clip. The console's `autopose`.
 #include "editor.h"
 #include "../scene/autopose.h"
+#include "../scene/humanoid.h"
+#include "../scene/puppet.h"
+
+#include <thread>
 
 namespace bl {
 
 namespace {
+
+/* Reach (task 0281): the change at frame `f` - the turn `dq` and the move `dp`, in the object's local space - added to
+ * its keyed frames within `reach` frames each side, fading smoothly to nothing at the ends (smoothstep). Only frames
+ * that have keys change; none are made between. */
+void reach_spread(AnimationClip &c, const std::string &path, Quat dq, Vec3 dp, bool turned, bool placed, float f, int reach) {
+  if (reach <= 0) return;
+  std::vector<float> frames;
+  for (const char *prop : {"Rotation", "Position"})
+    for (int a = 0; a < 3; a++)
+      if (const AnimTrack *t = c.find(path, prop, a))
+        for (const AnimKey &k : t->keys)
+          if (std::fabs(k.frame - f) > 0.01f && std::fabs(k.frame - f) < (float)reach) frames.push_back(k.frame);
+  std::sort(frames.begin(), frames.end());
+  frames.erase(std::unique(frames.begin(), frames.end(), [](float a, float b) { return std::fabs(a - b) < 0.01f; }), frames.end());
+  for (float t : frames) {
+    const float x = 1.0f - std::fabs(t - f) / (float)reach, w = x * x * (3.0f - 2.0f * x);
+    if (turned) {
+      Vec3 e;
+      for (int a = 0; a < 3; a++) e[a] = c.track(path, "Rotation", a).sample(t);
+      const Quat q = normalize(slerp(Quat(), dq, w) * Quat::euler(e));
+      const Vec3 n = euler_near(q, e);
+      for (int a = 0; a < 3; a++) c.track(path, "Rotation", a).set_key(t, n[a]);
+    }
+    if (placed)
+      for (int a = 0; a < 3; a++) {
+        AnimTrack &tr = c.track(path, "Position", a);
+        tr.set_key(t, tr.sample(t) + dp[a] * w);
+      }
+  }
+}
+
 GameObject *armature_above(GameObject &g) {
   for (GameObject *a = &g; a; a = a->parent)
     if (a->get<Armature>()) return a;
@@ -50,6 +85,44 @@ void Editor::autopose_begin(GameObject &bone) {
     autopose_.body = body::build(*scene_, *arm, arm->get<Armature>()->body_mass);
     autopose_.body_key = key;
   }
+  autopose_begin_puppet(*arm);
+}
+
+/* Task 0280: the rig as the prior reads it, and the bones whose FK controls must turn with them (a control sets its
+ * bone's turn every frame: left as it was, it would turn the posed bone back). The controls join the drag's start. */
+void Editor::autopose_begin_puppet(GameObject &arm) {
+  autopose_.fk.clear();
+  autopose_.rig = autopose_prior() ? gait::analyse(*scene_, arm) : gait::Rig();
+  scene_->for_each([&](GameObject &g) {
+    if (!g.get<Bone>() || !scene_->is_ancestor(&arm, &g)) return;
+    GameObject *c = humanoid::fk_control(*scene_, &g);
+    if (c == &g) return;
+    autopose_.fk.push_back({g.id, c->id});
+    if (!scene_->is_ancestor(&arm, c)) autopose_.start.push_back({c->id, c->local()});
+  });
+}
+
+/* The prior, once loaded (its load started on a thread the first time it is asked for): null without the AI download,
+ * with the preference off, or while it loads. */
+ai::PriorModel *Editor::autopose_prior() {
+  if (!autopose_.use_prior) return nullptr;
+  if (!autopose_.prior) {
+    if (!ai::prior_problem().empty()) return nullptr;
+    auto load = std::make_shared<AutoPoseView::PriorLoad>();
+    autopose_.prior = load;
+    const std::string dir = ai::install_dir();
+    std::thread([load, dir] {
+      load->model = ai::load_prior(dir, load->error);
+      load->done = true;
+    }).detach();
+    return nullptr;
+  }
+  if (!autopose_.prior->done) return nullptr;
+  if (!autopose_.prior->model && !autopose_.prior->error.empty()) {  // (said once: IK alone from here)
+    Log::warn("Puppet Posing: the pose prior didn't load (%s): IK alone", autopose_.prior->error.c_str());
+    autopose_.prior->error.clear();
+  }
+  return autopose_.prior->model.get();
 }
 
 /* The pins: the ends in contact at the playhead (the clip's contacts), the locked bones, and with neither the feet;
@@ -90,7 +163,13 @@ void Editor::autopose_to(GameObject &bone, Vec3 target) {
   std::vector<GameObject *> pins;
   for (uint64_t id : autopose_.pins)
     if (GameObject *g = scene_->find(id)) pins.push_back(g);
-  autopose_.last = autopose::solve(*arm, {{&bone, target, 1.0f}}, pins, autopose_.body.valid() ? &autopose_.body : nullptr);
+  ai::PriorModel *prior = autopose_.rig.valid() ? autopose_prior() : nullptr;  // (Puppet Posing: the prior, then exact IK)
+  const puppet::Result pr = puppet::pose(*arm, autopose_.rig, prior, {{&bone, target, 1.0f}}, pins, autopose_.body.valid() ? &autopose_.body : nullptr);
+  autopose_.last = pr.ik;
+  autopose_.used_prior = pr.used_prior, autopose_.prior_ms = pr.prior_ms;
+  for (const auto &fk : autopose_.fk)  // (each FK control turned with its bone: the control is what turns it from now on)
+    if (GameObject *b = scene_->find(fk.first))
+      if (GameObject *c = scene_->find(fk.second)) c->set_world_rotation(b->world_rotation());
   for (const auto &ik : autopose_.iks) {
     GameObject *end = scene_->find(ik.bone), *t = scene_->find(ik.target), *p = ik.pole ? scene_->find(ik.pole) : nullptr;
     if (!end || !t) continue;
@@ -112,7 +191,7 @@ void Editor::autopose_end() {
   AnimationClipPtr clip = anim_clip();
   struct Moved {
     GameObject *g;
-    Transform now;
+    Transform now, before;
     bool turned, placed;
   };
   std::vector<Moved> moved;
@@ -122,7 +201,7 @@ void Editor::autopose_end() {
       const Quat a = now.rotation, b = st.second.rotation;
       const bool placed = length(now.position - st.second.position) > 1e-6f;
       const bool turned = std::fabs(a.x - b.x) + std::fabs(a.y - b.y) + std::fabs(a.z - b.z) + std::fabs(a.w - b.w) > 1e-6f;
-      if (placed || turned) moved.push_back({g, now, turned, placed});
+      if (placed || turned) moved.push_back({g, now, st.second, turned, placed});
     }
   autopose_.bone = 0;
   autopose_.start.clear();
@@ -133,16 +212,20 @@ void Editor::autopose_end() {
   anim_edit_keys("AutoPose", [&](AnimationClip &c) {
     for (const Moved &m : moved) {
       if (m.g->get<Bone>() && ik_drives(*scene_, *m.g)) continue;
+      if (m.g->get<Bone>() && humanoid::fk_control(*scene_, m.g) != m.g) continue;  // (its FK control is keyed: it turns the bone)
       const std::string path = anim_path(*root, *m.g);
       const Vec3 e = m.now.rotation.to_euler(), p = m.now.position;
       for (int a = 0; a < 3; a++) {
         if (m.turned) c.track(path, "Rotation", a).set_key(f, e[a]);
         if (m.placed) c.track(path, "Position", a).set_key(f, p[a]);
       }
+      reach_spread(c, path, normalize(m.now.rotation * m.before.rotation.conjugate()), m.now.position - m.before.position, m.turned, m.placed, f,
+                   autopose_.reach);
       keyed++;
     }
   });
-  Log::info("AutoPose: %zu objects keyed at frame %.1f (reached within %.1f mm, the pins within %.1f mm%s)", keyed, f, autopose_.last.error * 1000.0f,
+  Log::info("AutoPose: %zu objects keyed at frame %.1f (%sreached within %.1f mm, the pins within %.1f mm%s)", keyed, f,
+            autopose_.used_prior ? strprintf("the pose prior %.1f ms, ", autopose_.prior_ms).c_str() : "", autopose_.last.error * 1000.0f,
             autopose_.last.pin_error * 1000.0f,
             autopose_.last.balance > 0.0f ? strprintf(", the balance %.1f cm off", autopose_.last.balance * 100.0f).c_str() : "");
 }
@@ -156,7 +239,7 @@ bool Editor::autopose_gizmo(uint64_t id, Vec3 target) {
   return true;
 }
 
-/* autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks */
+/* autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames> */
 void Editor::autopose_command(const std::vector<std::string> &t) {
   if (!assist_require(Assist::Physics)) return;
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "";
@@ -178,12 +261,20 @@ void Editor::autopose_command(const std::vector<std::string> &t) {
     if (sub == "lock") autopose_.locks.push_back(b->id);
     return Log::info("AutoPose: %s %s", b->name.c_str(), sub == "lock" ? "stays where it is" : "moves with the body again");
   }
+  if (sub == "prior" && t.size() > 2) {  // (task 0280: the pose prior on or off)
+    autopose_.use_prior = to_lower(t[2]) != "off";
+    return Log::info("Puppet Posing: the pose prior %s", autopose_.use_prior ? (ai::prior_problem().empty() ? "on" : "on (not installed: the AI download)") : "off: IK alone");
+  }
+  if (sub == "reach" && t.size() > 2) {  // (task 0281)
+    autopose_.reach = std::max(0, std::min(120, std::atoi(t[2].c_str())));
+    return Log::info("AutoPose: an edit reaches %d frames each side (0: the playhead's key only)", autopose_.reach);
+  }
   if (sub == "locks") {
     for (uint64_t id : autopose_.locks)
       if (GameObject *g = scene_->find(id)) Log::info("  %s", g->name.c_str());
     return;
   }
-  Log::warn("autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks");
+  Log::warn("autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames>");
 }
 
 }  // namespace bl

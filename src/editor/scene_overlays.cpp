@@ -258,6 +258,8 @@ void Editor::draw_grid(Renderer3D &r3d) {
 void Editor::render_overlays(const Recti &) {
   if (overlays_extra_for_test_) overlays_extra_for_test_(scene_r3d_);  // (a test's own lines, dots and outlines first)
   draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
+  draw_trails();  // (task 0282: the trails and the onion skin, sampled a few frames at a time)
+  if (autopose_.on) draw_puppet_handles();  // (task 0281)
   if (show_footprints_) draw_footprint_soles();  // (task 0126)
   draw_ai_overlay();       // (task 0130)
   /* Wireframes. */

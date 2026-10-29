@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the physics tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/scene/humanoid.h"
 
 static void physics_tests() {
   test("physics: Jolt drops a box onto a plane and it comes to rest", [] {
@@ -2365,7 +2366,119 @@ static void tests_round188() {
   });
 }
 
+static void tests_round299() {
+  test("one humanoid map (task 0279): limbs read from Biped, Character Creator, VRoid, Daz, UE5, Mixamo and Rigify names with the side anywhere, twist bones skipped; every part of a rig named each way found, in a T pose and an A pose, the arms' drop measured; an FK control keyed for its bone when the rig has one", [] {
+    struct Case {
+      const char *name;
+      int side, limb;  // limb -1: not a limb
+    };
+    const Case cases[] = {
+        {"Bip01 L Thigh", 0, 0}, {"Bip01 R Calf", 1, 1}, {"Bip01 L UpperArm", 0, 2}, {"Bip01 R Forearm", 1, 3},
+        {"CC_Base_L_Thigh", 0, 0}, {"CC_Base_R_Calf", 1, 1}, {"CC_Base_L_Upperarm", 0, 2}, {"CC_Base_R_Forearm", 1, 3}, {"CC_Base_L_UpperarmTwist01", 0, -1},
+        {"J_Bip_L_UpperLeg", 0, 0}, {"J_Bip_R_LowerLeg", 1, 1}, {"J_Bip_L_UpperArm", 0, 2}, {"J_Bip_R_LowerArm", 1, 3},
+        {"lThighBend", 0, 0}, {"rShin", 1, 1}, {"lShldrBend", 0, 2}, {"rForearmBend", 1, 3}, {"lShldrTwist", 0, -1},
+        {"thigh_l", 0, 0}, {"calf_r", 1, 1}, {"upperarm_l", 0, 2}, {"lowerarm_r", 1, 3}, {"thigh_twist_01_l", 0, -1},
+        {"mixamorig:LeftUpLeg", 0, 0}, {"mixamorig:RightLeg", 1, 1}, {"mixamorig:LeftArm", 0, 2}, {"mixamorig:RightForeArm", 1, 3},
+        {"DEF-thigh.L", 0, 0}, {"shin.R", 1, 1}, {"upper_arm.L", 0, 2}, {"forearm.R", 1, 3}};
+    int right = 0, total = 0;
+    for (const Case &c : cases) {
+      int side = -1, limb = -1;
+      const bool is = limb_of(c.name, side, limb);
+      const bool ok = c.limb < 0 ? !is : is && side == c.side && limb == c.limb;
+      if (!ok) std::printf("    %s: limb %d side %d (wanted %d, %d)\n", c.name, is ? limb : -1, side, c.limb, c.side);
+      right += ok, total++;
+    }
+    std::printf("    %d of %d names read right\n", right, total);
+    CHECK(right == total);
+    auto bone = [](Scene &s, const std::string &name, GameObject *parent, Vec3 pos, Quat rot, float len) {
+      GameObject *g = s.create(name, parent);
+      g->set_local_position(pos);
+      g->set_local_rotation(rot);
+      Bone *b = g->add<Bone>();
+      b->length = len;
+      b->rest_position = pos;
+      b->rest_rotation = rot;
+      return g;
+    };
+    /* hips, spine, chest, neck, head, shoulders, arms, hands, legs, feet, toes - named one scheme's way. */
+    struct Names {
+      const char *scheme;
+      std::vector<std::string> n;  // hips spine chest neck head | L shoulder upper lower hand | R ... | L thigh shin foot toe | R ...
+    };
+    const std::vector<Names> schemes = {
+        {"Biped", {"Bip01 Pelvis", "Bip01 Spine", "Bip01 Spine2", "Bip01 Neck", "Bip01 Head", "Bip01 L Clavicle", "Bip01 L UpperArm", "Bip01 L Forearm", "Bip01 L Hand",
+                   "Bip01 R Clavicle", "Bip01 R UpperArm", "Bip01 R Forearm", "Bip01 R Hand", "Bip01 L Thigh", "Bip01 L Calf", "Bip01 L Foot", "Bip01 L Toe0",
+                   "Bip01 R Thigh", "Bip01 R Calf", "Bip01 R Foot", "Bip01 R Toe0"}},
+        {"Character Creator", {"CC_Base_Hip", "CC_Base_Waist", "CC_Base_Spine02", "CC_Base_NeckTwist01", "CC_Base_Head", "CC_Base_L_Clavicle", "CC_Base_L_Upperarm",
+                               "CC_Base_L_Forearm", "CC_Base_L_Hand", "CC_Base_R_Clavicle", "CC_Base_R_Upperarm", "CC_Base_R_Forearm", "CC_Base_R_Hand", "CC_Base_L_Thigh",
+                               "CC_Base_L_Calf", "CC_Base_L_Foot", "CC_Base_L_ToeBase", "CC_Base_R_Thigh", "CC_Base_R_Calf", "CC_Base_R_Foot", "CC_Base_R_ToeBase"}},
+        {"VRoid", {"J_Bip_C_Hips", "J_Bip_C_Spine", "J_Bip_C_UpperChest", "J_Bip_C_Neck", "J_Bip_C_Head", "J_Bip_L_Shoulder", "J_Bip_L_UpperArm", "J_Bip_L_LowerArm",
+                   "J_Bip_L_Hand", "J_Bip_R_Shoulder", "J_Bip_R_UpperArm", "J_Bip_R_LowerArm", "J_Bip_R_Hand", "J_Bip_L_UpperLeg", "J_Bip_L_LowerLeg", "J_Bip_L_Foot",
+                   "J_Bip_L_ToeBase", "J_Bip_R_UpperLeg", "J_Bip_R_LowerLeg", "J_Bip_R_Foot", "J_Bip_R_ToeBase"}},
+        {"Daz", {"hip", "abdomenLower", "chestUpper", "neckLower", "head", "lCollar", "lShldrBend", "lForearmBend", "lHand", "rCollar", "rShldrBend", "rForearmBend",
+                 "rHand", "lThighBend", "lShin", "lFoot", "lToe", "rThighBend", "rShin", "rFoot", "rToe"}},
+        {"UE5", {"pelvis", "spine_01", "spine_03", "neck_01", "head", "clavicle_l", "upperarm_l", "lowerarm_l", "hand_l", "clavicle_r", "upperarm_r", "lowerarm_r",
+                 "hand_r", "thigh_l", "calf_l", "foot_l", "ball_l", "thigh_r", "calf_r", "foot_r", "ball_r"}},
+    };
+    int maps_ok = 0, poses_ok = 0;
+    for (const Names &nm : schemes)
+      for (int a_pose = 0; a_pose < 2; a_pose++) {
+        Scene s;
+        GameObject *rig = s.create("Rig");
+        rig->add<Armature>();
+        const std::vector<std::string> &n = nm.n;
+        const Quat down = Quat::euler({180, 0, 0});
+        const float drop = a_pose ? 40.0f : 0.0f;
+        GameObject *hips = bone(s, n[0], rig, {0, 1, 0}, Quat(), 0.1f);
+        GameObject *spine = bone(s, n[1], hips, {0, 0.1f, 0}, Quat(), 0.2f);
+        GameObject *chest = bone(s, n[2], spine, {0, 0.2f, 0}, Quat(), 0.2f);
+        GameObject *neck = bone(s, n[3], chest, {0, 0.2f, 0}, Quat(), 0.1f);
+        bone(s, n[4], neck, {0, 0.1f, 0}, Quat(), 0.2f);
+        for (int side = 0; side < 2; side++) {
+          const float x = side ? 0.1f : -0.1f;
+          const int a = 5 + side * 4, l = 13 + side * 4;
+          GameObject *sh = bone(s, n[a], chest, {x * 0.5f, 0.15f, 0}, Quat::euler({0, 0, side ? -90.0f : 90.0f}), 0.12f);
+          GameObject *ua = bone(s, n[a + 1], sh, {0, 0.12f, 0}, Quat::euler({0, 0, side ? -drop : drop}), 0.28f);
+          GameObject *la = bone(s, n[a + 2], ua, {0, 0.28f, 0}, Quat(), 0.25f);
+          bone(s, n[a + 3], la, {0, 0.25f, 0}, Quat(), 0.08f);
+          GameObject *up = bone(s, n[l], hips, {x, 0, 0}, down, 0.45f);
+          GameObject *lo = bone(s, n[l + 1], up, {0, 0.45f, 0}, Quat(), 0.43f);
+          GameObject *ft = bone(s, n[l + 2], lo, {0, 0.43f, 0}, Quat::euler({-90, 0, 0}), 0.12f);
+          bone(s, n[l + 3], ft, {0, 0.12f, 0}, Quat(), 0.05f);
+        }
+        const humanoid::Map m = humanoid::map(s, *rig);
+        int named = 0;
+        for (int p = 0; p < humanoid::kParts; p++) {
+          named += m.part[p] && m.part[p]->name == n[(size_t)p];
+          if (!m.part[p] || m.part[p]->name != n[(size_t)p]) std::printf("      %s: %s (wanted %s)\n", humanoid::kPartNames[p], m.part[p] ? m.part[p]->name.c_str() : "-", n[(size_t)p].c_str());
+        }
+        const bool pose_ok = m.a_pose() == (a_pose == 1) && std::fabs(m.arm_drop[0] - drop) < 2.0f && std::fabs(m.arm_drop[1] - drop) < 2.0f;
+        std::printf("    %-18s %s: %s, %d of %d parts found, %d by their own bone; arms down %.1f / %.1f degrees -> %s\n", nm.scheme, a_pose ? "A" : "T",
+                    m.valid() ? "a humanoid" : m.problem.c_str(), m.found(), (int)humanoid::kParts, named, m.arm_drop[0], m.arm_drop[1], m.a_pose() ? "A pose" : "T pose");
+        maps_ok += m.valid() && named == humanoid::kParts;
+        poses_ok += pose_ok;
+      }
+    CHECK(maps_ok == (int)schemes.size() * 2 && poses_ok == (int)schemes.size() * 2);
+    /* An FK control is what gets keyed. */
+    Scene s;
+    GameObject *rig = s.create("Rig"), *other = s.create("Other");
+    GameObject *b = s.create("upperarm_l", rig);
+    b->add<Bone>();
+    CHECK(humanoid::fk_control(s, b) == b);
+    GameObject *c2 = s.create("upperarm_lFK", other);  // (another character's control of the same name: not this bone's)
+    c2->add<RigControl>()->role = RigControl::FK, c2->get<RigControl>()->drives = "upperarm_l";
+    CHECK(humanoid::fk_control(s, b) == b);
+    GameObject *c = s.create("upperarm_lFK", rig);
+    RigControl *rc = c->add<RigControl>();
+    rc->role = RigControl::FK, rc->drives = "upperarm_l";
+    CHECK(humanoid::fk_control(s, b) == c);
+    rc->enabled = false;  // (a control switched off turns nothing: the bone is keyed)
+    CHECK(humanoid::fk_control(s, b) == b);
+  });
+}
+
 void run_physics_tests() {
+  tests_round299();
   physics_tests();
   tests_round137_to_round140();
   tests_round139_to_round172();

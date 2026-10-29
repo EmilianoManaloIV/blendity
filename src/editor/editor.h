@@ -61,6 +61,7 @@
 #include "../scene/footsteps.h"
 #include "../scene/locomotion.h"
 #include "../scene/inbetween.h"
+#include "../scene/motion_check.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -405,6 +406,10 @@ enum class ImportOutline { Keep, Off, Set };
 /* The Animation window's state (task 0059): which clip, the playhead, Preview and Record, the selected keys. */
 struct AnimEditorState {
   uint64_t root = 0;  // the object last animated (its Animation component's clip is edited)
+  bool smooth = false;     // (task 0284: a drag over the sheet is the smooth brush)
+  bool smooth_stroke = false;  // the press began on the sheet
+  int smooth_last_x = -100000; // where it was last applied
+  int smooth_radius = 3;   // frames each side the brush evens
   float frame = 0.0f;
   bool preview = false, record = false, playing = false;
   double play_clock = 0.0;
@@ -756,6 +761,12 @@ class Editor {
   bool bake_dialog_open_for_test() const { return dialog_ == Dialog::Bake; }  // (task 0273)
   bool smat_dialog_open_for_test() const { return dialog_ == Dialog::SaveSmat; }
   const std::string &dialog_text_for_test() const { return dialog_text_; }
+  const std::vector<uint64_t> &autopose_locks_for_test() const { return autopose_.locks; }  // (task 0281)
+  size_t trail_frames_for_test() const { return trails_.frames.size(); }  // (task 0282)
+  int zoe_step_for_test() const { return zoe_.step; }  // (task 0283)
+  size_t motion_issues_for_test() const { return motion_issues_.size(); }  // (task 0284)
+  float anim_frame_for_test() const { return anim_.frame; }
+  bool trail_at_for_test(uint64_t bone, int f, Vec3 &head) const { return trail_at(bone, f, head); }
   bool bake_keep_uvs_for_test(int mode) const { return mode == 1 ? bake_keep_uvs_textures_ : bake_keep_uvs_; }
   int meshmaps_settings_size_for_test() const { return meshmaps_settings_.size; }
   bool scatter_for_test() const { return scatter_; }                          // (task 0261)
@@ -1869,8 +1880,93 @@ class Editor {
     std::vector<Ik> iks;                                    // this drag's IK chains (their targets and poles follow the pose)
     std::vector<uint64_t> locks;                            // bones the user keeps where they are (cleared with the scene)
     autopose::Result last;
+    /* Puppet Posing's prior (task 0280): loaded on a thread of its own when AutoPosing turns on (a session takes a
+     * moment to make), used by the drag once there; the rig as the prior reads it, for this drag. */
+    struct PriorLoad {
+      std::atomic<bool> done{false};
+      std::unique_ptr<ai::PriorModel> model;
+      std::string error;
+    };
+    std::shared_ptr<PriorLoad> prior;
+    bool use_prior = true;                                  // (the Puppet menu's Use the Pose Prior; autopose prior on|off)
+    gait::Rig rig;                                          // this drag's rig (the prior's mapping)
+    std::vector<std::pair<uint64_t, uint64_t>> fk;          // this drag's bones with FK controls: (bone, control)
+    bool used_prior = false;
+    double prior_ms = 0.0;
+    int reach = 0;  // (task 0281: frames each side an edit fades into; 0 the playhead's key only)
   } autopose_;
+  ai::PriorModel *autopose_prior();  // the loaded prior, or null (and its load started)
   void autopose_begin(GameObject &bone);
+  void autopose_begin_puppet(GameObject &arm);
+  /* Puppet Posing's handles (task 0281, puppet_ui.cpp). */
+  struct PuppetView {
+    uint64_t arm = 0, key = 0;     // the rig mapped, and as what (body::body_key)
+    std::vector<uint64_t> handles; // the hands, the feet, the head, the hips
+    uint64_t dragging = 0, hover = 0;
+    Vec3 start, normal;
+    Vec2 press;
+    bool moved = false;
+  } puppet_;
+  const std::vector<uint64_t> &puppet_handles();
+  const std::vector<uint64_t> &rig_ends();
+  bool puppet_pinned(GameObject &arm, uint64_t id);
+  void draw_puppet_handles();
+  bool puppet_handles_update(const Recti &view);
+  bool puppet_drag(const Recti &view, float x, float y);
+  /* Motion trails and onion skin (task 0282, motion_trail.cpp). */
+  struct TrailCache {
+    bool show = false;
+    int onion = 0, onion_step = 2;  // ghosts each side, every this many frames
+    const AnimationClip *clip = nullptr;
+    uint64_t hash = 0, arm = 0;
+    std::map<int, std::vector<std::pair<uint64_t, std::pair<Vec3, Vec3>>>> frames;  // frame -> each bone's head and tip
+    std::vector<int> todo;
+    uint64_t drag_bone = 0;
+    int drag_key = 0;
+    bool retime = false;
+    Vec2 press;
+  } trails_;
+  void trail_refresh();
+  std::vector<uint64_t> trail_bones();
+  bool trail_at(uint64_t bone, int f, Vec3 &head) const;
+  std::vector<int> trail_keys(uint64_t bone);
+  void draw_trails();
+  void draw_onion();
+  bool trail_update(const Recti &view);
+  bool trail_drag(float x, float y);
+  void trail_retime(uint64_t bone, int from, int to);
+  bool trail_command(const std::vector<std::string> &t);
+  uint64_t puppet_overlay_key() const;
+  /* The Zoetrope (task 0283, zoetrope.cpp). */
+  struct ZoeView {
+    bool on = false;
+    int step = 2;
+    Vec2 center;
+    float span = 1.0f;
+    uint64_t drag_bone = 0;
+    int drag_cell = -1, frame = 0;
+    Vec2 press;
+    float scale = 1.0f;
+    Vec3 start;
+    std::unique_ptr<body::PoseGuard> guard;  // (the scene as the drag found it)
+  } zoe_;
+  int zoe_frame(int cell) const;
+  bool zoe_project(int f, const Recti &cell, std::vector<std::pair<uint64_t, std::pair<Vec2, Vec2>>> &out);
+  void zoe_frame_fit();
+  void draw_zoetrope(const Recti &strip);
+  void zoetrope_input(const Recti &strip, int w, int gap);
+  void zoe_drag();
+  bool zoetrope_command(const std::vector<std::string> &t);
+  /* Motion Check, the smooth brush, Lock in Place (task 0284, motion_check_ui.cpp). */
+  std::vector<motion::Issue> motion_issues_;
+  std::vector<std::string> anim_brush_paths();
+  void motion_check_run();
+  void motion_check_fix(size_t i);
+  bool anim_smooth_brush(const Recti &sheet, float end);
+  void anim_lock_selected();
+  void motioncheck_command(const std::vector<std::string> &t);
+  bool anim_motion_command(const std::vector<std::string> &t);
+  void draw_puppet_menu();
   std::vector<GameObject *> autopose_pins(GameObject &arm, GameObject &dragged);
   void autopose_to(GameObject &bone, Vec3 target);
   void autopose_end();
@@ -2596,6 +2692,7 @@ class Editor {
   void draw_report_dialog(const std::function<void()> &close);
   std::string report_title_, report_copied_;
   std::vector<std::string> report_lines_;
+  std::vector<std::pair<std::string, std::string>> report_actions_;  // (task 0284: per line, a command to go there and its Fix)
   bool toasts_on_dock_ = false;  // (task 0271: the Scene view did not draw: the toasts are over the dock area)
   bool ipv_all_notes_ = false;  // (the import preview lists every note)
   /* Work that must run outside the UI frame (native dialogs, screenshots of a

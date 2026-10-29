@@ -228,8 +228,10 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   Light *l = nullptr;
   ProbeVolume *pv = nullptr;
   Component *outline = nullptr;
+  bool bone = false;
   for (auto &c : g.components) switch (c->render_role()) {
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
+      case Component::RenderRole::Bone: bone = true; break;
       case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
       case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
       case Component::RenderRole::ProbeVolume: if (!pv) pv = static_cast<ProbeVolume *>(c.get()); break;
@@ -239,6 +241,10 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   const uint64_t parent = g.parent ? g.parent->id : 0;
   if (!mr && !l && !pv) {
     mix(&parent, 8);
+    if (bone) {  // (the Scene view draws bones: a pose that moves only them - no skin - is a new picture: task 0281)
+      const Mat4 w = g.world_matrix();
+      mix(w.m, sizeof(w.m));
+    }
     return h;
   }
   /* The flags the views draw by (Show in Renders, shadows, wireframe, Display As). */
@@ -1652,6 +1658,8 @@ uint64_t Editor::scene_view_key(const Recti &view) {
       mix(&ch, 8);
     }
   }
+  const uint64_t pk = puppet_overlay_key();  // (tasks 0281-0282: the handles, the trails and the onion skin drawn over it)
+  mix(&pk, 8);
   return h ? h : 1;
 }
 

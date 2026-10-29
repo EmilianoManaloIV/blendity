@@ -626,6 +626,15 @@ turbulence, gusts) blows every chain by its own Wind. Bake writes the swing into
 
 ## 9. Animation
 
+**Puppet Posing.** Turn on AutoPosing (the Animation window) and the selected character's hands, feet, head and hips
+become handles in the Scene view: drag one and the body follows - with the AI download's pose prior, as motion
+capture would put a body there; the planted feet stay. Click a handle to pin it. The **Puppet** menu holds Reach (how
+far each side a pose edit fades in), Motion Trails (drag a key dot to pose that frame, Alt-drag it to move the key in
+time), Onion Skin, the Zoetrope (seven frames side by side, each poseable), Motion Check (sliding feet, pops and
+shaking, each with a Fix), the Smooth Brush (drag over the dope sheet) and Lock in Place. Any humanoid rig works -
+Mixamo, the UE5 mannequin, Character Creator, Daz, VRoid, Biped, Rigify - in a T or an A pose; a rig with FK controls
+is keyed on them.
+
 Ctrl+wheel (or the wheel over the ruler) and a pinch zoom the time about the pointer; Shift+wheel, two fingers or the
 middle button pan it; Home or **Fit** shows the whole clip.
 

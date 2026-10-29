@@ -506,6 +506,7 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   if (button(u.px(26), ">|", false, "Last frame") && clip) anim_set_frame(clip->end_frame());
   int fr = (int)anim_.frame;
   if (u.int_field(u.id("anim_frame"), {x, y, u.px(56), bh}, fr, 0, 100000)) anim_set_frame((float)fr);
+  draw_puppet_menu();
   x += u.px(60);
   /* The clip menu: the clip assets, then Create New Clip. */
   if (!root) return;
@@ -528,6 +529,13 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     const Recti fb{x, y, u.px(36), bh};
     if (u.record_buttons) u.button_rects["anim:Fit"] = fb;
     if (button(u.px(36), "Fit", false, "The whole clip in view (Home). Ctrl+wheel or a pinch zooms the time, Shift+wheel, two fingers or the middle button pans it.")) anim_view_fit();
+  }
+  {  // (tasks 0281-0284: Puppet Posing's tools in one menu - the toolbar is already wider than most windows)
+    const Recti pb{x, y, u.px(70), bh};
+    const bool any = trails_.show || trails_.onion > 0 || zoe_.on || anim_.smooth;
+    if (button(u.px(70), "Puppet", any, "Puppet Posing's tools: motion trails, onion skin, the Zoetrope, Motion Check, the smooth brush,\n"
+                                        "Lock in Place, and how far a pose edit reaches."))
+      u.open_popup(u.id("anim_puppet"), {pb.x, bar.bottom(), 0, 0});
   }
   if (button(u.px(76), "Dopesheet", !anim_.curves, "The keys as diamonds along the time line (Unity's Dopesheet).")) anim_.curves = false;
   if (button(u.px(64), "Curves", anim_.curves,
@@ -949,17 +957,22 @@ void Editor::draw_animation_window(const Recti &r) {
     return;
   }
   draw_anim_add_property(root);
+  Recti body2 = body;  // (task 0283: the Zoetrope's strip above the sheet when on)
+  if (zoe_.on && body.h > u.px(220)) {
+    draw_zoetrope({body.x, body.y, body.w, u.px(130)});
+    body2 = {body.x, body.y + u.px(130), body.w, body.h - u.px(130)};
+  }
   const int row_h = u.row_h(), list_w = std::max(u.px(170), r.w * 3 / 10);
-  const Recti list{body.x, body.y + row_h, list_w, body.h - row_h}, ruler{body.x + list_w, body.y, body.w - list_w - u.px(8), row_h};
-  const Recti sheet{ruler.x, ruler.bottom(), ruler.w, body.h - row_h};
+  const Recti list{body2.x, body2.y + row_h, list_w, body2.h - row_h}, ruler{body2.x + list_w, body2.y, body2.w - list_w - u.px(8), row_h};
+  const Recti sheet{ruler.x, ruler.bottom(), ruler.w, body2.h - row_h};
   const float end = std::max(30.0f, clip->end_frame()) * 1.1f;
   if (anim_.view_for != clip.get()) anim_view_fit(), anim_.view_for = clip.get();  // (another clip: the whole of it)
   anim_view_input(ruler, sheet, end);  // (task 0267: before the rows take the wheel)
   if (anim_.view_span > 0.0f) anim_.view_start = std::max(-anim_.view_span, std::min(end * 4.0f, anim_.view_start));  // (always some of the clip in reach)
-  u.canvas.fill_rect({body.x, body.y, body.w, row_h}, u.theme.strip);
+  u.canvas.fill_rect({body2.x, body2.y, body2.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, sheet, end);
   draw_body_strip(ruler, end);  // (contacts and the flight's frames under the ruler: tasks 0116, 0117)
-  draw_anim_rows(*clip, root, list, body, sheet, row_h, end);
+  draw_anim_rows(*clip, root, list, body2, sheet, row_h, end);
   anim_.sheet = sheet, anim_.sheet_end = end;
   if (anim_.curves) draw_anim_curves(*clip, sheet, end);
   /* The playhead (red while recording). */
@@ -968,7 +981,7 @@ void Editor::draw_animation_window(const Recti &r) {
   if (anim_.drag == 3) u.canvas.rect_outline({std::min(in.mx, anim_.drag_x), std::min(in.my, anim_.drag_y), std::abs(in.mx - anim_.drag_x), std::abs(in.my - anim_.drag_y)}, u.theme.focus);
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
   if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);
-  else anim_sheet_input(*clip, ruler, sheet, row_h, end);
+  else if (!anim_smooth_brush(sheet, end)) anim_sheet_input(*clip, ruler, sheet, row_h, end);  // (task 0284: the brush first when on)
   u.popup(u.id("anim_key_ctx"), u.px(180), [this] {
     if (ui_.menu_item("Clamped Auto")) anim_set_tangent(TanAuto);
     if (ui_.menu_item("Free Smooth")) anim_set_tangent(TanFree);
@@ -1016,6 +1029,36 @@ void Editor::anim_tangent_command(const std::vector<std::string> &t, AnimationCl
   });
 }
 
+/* Puppet Posing's menu (tasks 0281-0284): toggles ticked, actions, Reach as a submenu. */
+void Editor::draw_puppet_menu() {
+  ui_.popup(ui_.id("anim_puppet"), ui_.px(220), [this] {
+    auto &u = ui_;
+    if (u.menu_item("Motion Trails", nullptr, trails_.show)) trail_command({"anim", "trails", trails_.show ? "off" : "on"});
+    u.tooltip("The selected hands', feet', head's or hips' paths (the hands when none is selected), 30 frames each side; drag a key dot\n"
+              "to pose that frame, Alt-drag it sideways to move the key in time.");
+    if (u.menu_item("Onion Skin", nullptr, trails_.onion > 0)) trail_command({"anim", "onion", trails_.onion > 0 ? "off" : "2"});
+    u.tooltip("The poses 2 and 4 frames before (blue) and after (green) the playhead as ghosts.");
+    if (u.menu_item("Zoetrope", nullptr, zoe_.on)) zoetrope_command({"anim", "zoetrope", zoe_.on ? "off" : "on"});
+    u.tooltip("Seven frames around the playhead side by side; drag a hand, a foot, the head or the hips in one to pose that frame.");
+    u.menu_separator();
+    if (u.menu_item("Motion Check")) motion_check_run();
+    u.tooltip("Sliding feet, pops and shaking found in the clip, each with its frames and a Fix.");
+    if (u.menu_item("Smooth Brush", nullptr, anim_.smooth)) anim_.smooth = !anim_.smooth;
+    u.tooltip("Drag over the dope sheet to even the selected bones' keys (all the rig's when none is selected) near the pointer.");
+    if (u.menu_item("Lock in Place")) anim_lock_selected();
+    u.tooltip("The selected hand or foot held where it is from the playhead to the rig's next key, the body solved to it.");
+    u.menu_separator();
+    if (u.menu_item("Use the Pose Prior", nullptr, autopose_.use_prior)) autopose_command({"autopose", "prior", autopose_.use_prior ? "off" : "on"});
+    u.tooltip("AutoPosing's drags of a hand, a foot, the head or the hips ask the AI download's pose prior first (a body as motion\n"
+              "capture would put it), then IK makes it exact. Off, or not installed: IK alone.");
+    u.submenu(strprintf("Reach: %d frames", autopose_.reach), u.px(160), [this] {
+      for (int r : {0, 3, 6, 12, 24})
+        if (ui_.menu_item(r ? strprintf("%d frames each side", r) : std::string("The playhead's key only"), nullptr, autopose_.reach == r))
+          autopose_command({"autopose", "reach", std::to_string(r)});
+    });
+  });
+}
+
 /* anim new [name] | key <object> <property> <axis> <frame> [value] | interp <object> <property> <axis> <frame>
  * auto|linear|constant | frame <n> | preview on|off | record on|off | play | stop (task 0059). The object is by name;
  * "." is the root. */
@@ -1025,6 +1068,9 @@ void Editor::anim_command(const std::vector<std::string> &t) {
   auto on = [&](size_t i) { return to_lower(arg(i, "on")) != "off"; };
   if (verb == "new") return (void)anim_new_clip(anim_root(), arg(2, ""));
   if (verb == "frame") return anim_set_frame((float)std::atof(arg(2, "0").c_str()));
+  if (trail_command(t)) return;  // (anim trails on|off | onion off|<n> [step]: task 0282)
+  if (zoetrope_command(t)) return;  // (anim zoetrope on|off [step]: task 0283)
+  if (anim_motion_command(t)) return;  // (anim smooth | lock: task 0284)
   if (verb == "preview") return anim_set_preview(on(2));
   if (verb == "record") {
     anim_.record = on(2);

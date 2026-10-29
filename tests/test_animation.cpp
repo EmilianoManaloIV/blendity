@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the animation tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/scene/puppet.h"
+#include "../src/scene/motion_check.h"
 
 
 /* ===================================================================== */
@@ -3094,7 +3096,7 @@ static void tests_round83_to_round85() {
     ed.init_headless(1400, 900);
     ed.record_buttons_for_test(true);
     box_with_lid(ed);
-    ed.command("window Animation");
+    ed.command("layout Animation");  // (a wide Animation window: its toolbar whole)
     ed.command("anim new");
     ed.command("anim key Lid Position 1 10 1");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
@@ -3247,7 +3249,7 @@ static void tests_round83_to_round85() {
     Editor ed;
     ed.init_headless(1400, 900);
     box_with_lid(ed);
-    ed.command("window Animation");
+    ed.command("layout Animation");  // (a wide Animation window: its toolbar whole)
     ed.command("anim new");
     ed.command("anim key Lid Position 1 0 0");
     ed.command("anim key Lid Position 1 20 1");
@@ -3303,7 +3305,7 @@ static void tests_round83_to_round85() {
     Editor ed;
     ed.init_headless(1400, 900);
     box_with_lid(ed);
-    ed.command("window Animation");
+    ed.command("layout Animation");  // (a wide Animation window: its toolbar whole)
     ed.command("anim new");
     ed.command("anim key Lid Position 1 0 0");
     ed.command("anim key Lid Position 1 20 1");
@@ -3384,7 +3386,7 @@ static void tests_round83_to_round85() {
     Editor ed;
     ed.init_headless(1400, 900);
     box_with_lid(ed);
-    ed.command("window Animation");
+    ed.command("layout Animation");  // (a wide Animation window: its toolbar whole)
     ed.command("anim new");
     ed.command("anim key Lid Position 1 0 0");
     ed.command("anim key Lid Position 1 20 1");
@@ -5297,7 +5299,545 @@ static void tests_round226() {
   });
 }
 
+/* ---------------------------------------------------------------- round 300: Puppet Posing's pose prior (task 0280) */
+
+/* A person of 1.7 m standing in a T pose, facing +Z, named the Mixamo way: hips, spine, chest, neck, head, arms, legs. */
+static GameObject *r300_person(Scene &s) {
+  GameObject *rig = s.create("Rig");
+  rig->add<Armature>();
+  auto bone = [&](const std::string &name, GameObject *parent, Vec3 pos, Quat rot, float len) {
+    GameObject *g = s.create(name, parent);
+    g->set_local_position(pos);
+    g->set_local_rotation(rot);
+    Bone *b = g->add<Bone>();
+    b->length = len, b->rest_position = pos, b->rest_rotation = rot;
+    return g;
+  };
+  GameObject *hips = bone("mixamorig:Hips", rig, {0, 0.95f, 0}, Quat(), 0.1f);
+  GameObject *spine = bone("mixamorig:Spine", hips, {0, 0.1f, 0}, Quat(), 0.15f);
+  GameObject *chest = bone("mixamorig:Spine2", spine, {0, 0.15f, 0}, Quat(), 0.2f);
+  GameObject *neck = bone("mixamorig:Neck", chest, {0, 0.2f, 0}, Quat(), 0.1f);
+  bone("mixamorig:Head", neck, {0, 0.1f, 0}, Quat(), 0.2f);
+  for (int side = 0; side < 2; side++) {
+    const char *S = side ? "Right" : "Left";
+    const float x = side ? 0.1f : -0.1f;
+    GameObject *sh = bone(std::string("mixamorig:") + S + "Shoulder", chest, {x * 0.5f, 0.15f, 0}, Quat::euler({0, 0, side ? -90.0f : 90.0f}), 0.12f);
+    GameObject *ua = bone(std::string("mixamorig:") + S + "Arm", sh, {0, 0.12f, 0}, Quat(), 0.28f);
+    GameObject *la = bone(std::string("mixamorig:") + S + "ForeArm", ua, {0, 0.28f, 0}, Quat(), 0.25f);
+    bone(std::string("mixamorig:") + S + "Hand", la, {0, 0.25f, 0}, Quat(), 0.08f);
+    GameObject *up = bone(std::string("mixamorig:") + S + "UpLeg", hips, {x, 0, 0}, Quat::euler({180, 0, 0}), 0.45f);
+    GameObject *lo = bone(std::string("mixamorig:") + S + "Leg", up, {0, 0.45f, 0}, Quat(), 0.43f);
+    GameObject *ft = bone(std::string("mixamorig:") + S + "Foot", lo, {0, 0.43f, 0}, Quat::euler({-90, 0, 0}), 0.12f);
+    bone(std::string("mixamorig:") + S + "ToeBase", ft, {0, 0.12f, 0}, Quat(), 0.05f);
+  }
+  return rig;
+}
+
+/* The canonical skeleton the prior was trained on, as posemodel.json gives it (the CMU subjects' mean): a stand-in's. */
+static ai::ModelInfo r300_info() {
+  ai::ModelInfo info;
+  const std::string json =
+      "{\"styles\":[\"pose\"],\"ctx\":1,\"parents\":[-1,0,1,2,3,0,5,6,7,0,9,10,11,12,11,14,15,16,11,18,19,20],"
+      "\"offsets\":[[0,0,0],[0.09,-0.06,0],[0,-0.42,0],[0,-0.41,0],[0,-0.05,0.13],[-0.09,-0.06,0],[0,-0.42,0],[0,-0.41,0],[0,-0.05,0.13],"
+      "[0,0.11,0],[0,0.12,0],[0,0.12,0],[0,0.1,0],[0,0.09,0],[0.04,0.08,0],[0.15,0,0],[0.28,0,0],[0.25,0,0],[-0.04,0.08,0],[-0.15,0,0],[-0.28,0,0],[-0.25,0,0]]}";
+  ai::parse_model_info(json, info);
+  return info;
+}
+
+/* A stand-in prior that answers the pose the rig had when it was made: a perfect oracle for the conversions. */
+struct R300Oracle : ai::PriorModel {
+  std::vector<float> pose;
+  int calls = 0;
+  bool run(const float *, float *out, std::string &) override {
+    calls++;
+    std::copy(pose.begin(), pose.end(), out);
+    return true;
+  }
+};
+
+static void tests_round300() {
+  test("Puppet Posing's pose prior (task 0280): a stand-in prior answering the rig's own pose leaves it where it was (the canonical frame and back are exact); with the prior a dragged hand reaches its goal and the pinned feet stay within a millimetre; without one, AutoPose alone", [] {
+    Scene s;
+    GameObject *rig = r300_person(s);
+    const gait::Rig g = gait::analyse(s, *rig);
+    CHECK(g.valid());
+    const ai::ModelInfo info = r300_info();
+    CHECK(info.valid());
+    const ai::PoseMapping m = ai::pose_mapping(g, info);
+    /* The rig turned and bent a little: the oracle learns this pose in the canonical frame. */
+    rig->set_local_rotation(Quat::euler({0, 35, 0}));
+    GameObject *larm = s.find_by_name("mixamorig:LeftArm"), *lleg = s.find_by_name("mixamorig:LeftLeg");
+    larm->set_local_rotation(Quat::euler({20, 0, -30}));
+    lleg->set_local_rotation(Quat::euler({25, 0, 0}));
+    std::vector<float> frame((size_t)ai::kFeatures);
+    ai::rig_to_frame(ai::pose_mapping(g, info), info, frame.data());
+    float in[ai::kPriorInputs];
+    Quat turn;
+    Vec3 hips;
+    const ai::PoseMapping m2 = ai::pose_mapping(g, info);
+    CHECK(puppet::prior_inputs(m2, info, {}, {}, in, turn, hips));
+    R300Oracle oracle;
+    oracle.info = info;
+    oracle.pose.assign(frame.begin() + 3, frame.end());
+    {  // (the oracle answers in the canonical frame: the hips' turn without the facing)
+      const Quat h = [&] {
+        Vec3 a(frame[3], frame[4], frame[5]), b(frame[6], frame[7], frame[8]);
+        a = normalize(a), b = normalize(b - a * dot(a, b));
+        return quat_from_axes(a, b, cross(a, b));
+      }();
+      const Quat c = normalize(turn * h);
+      const Vec3 a = c.rotate(Vec3(1, 0, 0)), b = c.rotate(Vec3(0, 1, 0));
+      oracle.pose[0] = a.x, oracle.pose[1] = a.y, oracle.pose[2] = a.z, oracle.pose[3] = b.x, oracle.pose[4] = b.y, oracle.pose[5] = b.z;
+    }
+    std::vector<std::pair<GameObject *, Vec3>> before;
+    s.for_each([&](GameObject &o) {
+      if (o.get<Bone>()) before.push_back({&o, o.world_position()});
+    });
+    autopose::Settings st;
+    st.iterations = 0;  // (the prior's pose alone: no IK after it)
+    GameObject *hips0 = s.find_by_name("mixamorig:Hips");  // (the hips where they are: one of the prior's ends, so the prior is asked)
+    const puppet::Result r = puppet::pose(*rig, g, &oracle, {{hips0, hips0->world_position(), 1.0f}}, {}, nullptr, st);
+    float worst = 0.0f;
+    for (const auto &b : before) worst = std::max(worst, length(b.first->world_position() - b.second));
+    std::printf("    the oracle's own pose put back: used %d, worst bone moved %.2f mm\n", (int)r.used_prior, worst * 1000.0f);
+    CHECK(r.used_prior && oracle.calls == 1 && worst < 1e-3f);
+    /* A hand dragged 25 cm down and forward with the feet pinned: reached, the feet held. */
+    GameObject *hand = s.find_by_name("mixamorig:LeftHand");
+    GameObject *lfoot = s.find_by_name("mixamorig:LeftFoot"), *rfoot = s.find_by_name("mixamorig:RightFoot");
+    const Vec3 lf = lfoot->world_position(), rf = rfoot->world_position();
+    const Vec3 target = hand->world_position() + Vec3(0, -0.25f, 0.15f);
+    const puppet::Result r2 = puppet::pose(*rig, g, &oracle, {{hand, target, 1.0f}}, {lfoot, rfoot}, nullptr);
+    const float reach = length(hand->world_position() - target) * 1000.0f;
+    const float pins = std::max(length(lfoot->world_position() - lf), length(rfoot->world_position() - rf)) * 1000.0f;
+    std::printf("    a hand dragged with the prior: used %d, the hand %.2f mm off its goal, the feet %.2f mm off, %d IK iterations\n", (int)r2.used_prior, reach,
+                pins, r2.ik.iterations);
+    CHECK(r2.used_prior && reach < 1.0f && pins < 1.0f);
+    /* A goal a metre past reach with the prior: the pins stay pins (in place and turn), the hips within their shift. */
+    const Quat lq = lfoot->world_rotation();
+    const Vec3 lf2 = lfoot->world_position(), rf2 = rfoot->world_position();
+    const puppet::Result far = puppet::pose(*rig, g, &oracle, {{hand, hand->world_position() + Vec3(1.2f, 0.0f, 0.0f), 1.0f}}, {lfoot, rfoot}, nullptr);
+    const Quat dq = normalize(lfoot->world_rotation() * lq.conjugate());
+    const float slid = std::max(length(lfoot->world_position() - lf2), length(rfoot->world_position() - rf2)) * 1000.0f;
+    const float tilt = 2.0f * std::acos(std::min(1.0f, std::fabs(dq.w))) * 57.29578f;
+    std::printf("    a goal 1.2 m past reach with the prior: the feet %.2f mm and %.2f degrees off\n", slid, tilt);
+    CHECK(far.used_prior && slid < 1.0f && tilt < 1.0f);
+    const puppet::Result r3 = puppet::pose(*rig, g, nullptr, {{hand, target + Vec3(0, 0.05f, 0), 1.0f}}, {lfoot, rfoot}, nullptr);
+    std::printf("    without a prior: '%s', the goal %.2f mm off\n", r3.note.c_str(), length(hand->world_position() - target - Vec3(0, 0.05f, 0)) * 1000.0f);
+    CHECK(!r3.used_prior && !r3.note.empty());
+    (void)m;
+  });
+  test("Puppet Posing in the editor (task 0280): a spine with FK controls posed by dragging the head keeps the pose - the controls turned with their bones and keyed, the bones not (a control sets its bone's turn every frame)", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Pose");
+    ed.command("fk add Spine Chest");
+    ed.step_frame_headless();
+    ed.command("autopose on");
+    Scene &sc = ed.scene();
+    GameObject *head = sc.find_by_name("Head");
+    const Vec3 to = head->world_position() + Vec3(0.0f, -0.12f, 0.2f);
+    ed.command(strprintf("autopose drag Head %f %f %f", to.x, to.y, to.z));
+    const Quat spine_posed = sc.find_by_name("Spine")->world_rotation();
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();  // (the FK controls set their bones: the pose must survive it)
+    const Quat spine_after = sc.find_by_name("Spine")->world_rotation();
+    const float drift = 2.0f * std::acos(std::min(1.0f, std::fabs(spine_posed.x * spine_after.x + spine_posed.y * spine_after.y + spine_posed.z * spine_after.z +
+                                                                       spine_posed.w * spine_after.w))) * 57.29578f;
+    const float bent = 2.0f * std::acos(std::min(1.0f, std::fabs(spine_after.w))) * 57.29578f;
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    GameObject *ctl = sc.find_by_name("SpineFK");
+    const bool control_keyed = clip && ctl && clip->find(anim_path(*rig, *ctl), "Rotation", 0) != nullptr;
+    const bool bone_keyed = clip && clip->find(anim_path(*rig, *sc.find_by_name("Spine")), "Rotation", 0) != nullptr;
+    std::printf("    the head dragged: the spine bent %.1f degrees, %.3f degrees off after the FK solve; SpineFK keyed %d, the Spine bone keyed %d\n", bent, drift,
+                (int)control_keyed, (int)bone_keyed);
+    CHECK(bent > 1.0f && drift < 0.25f && control_keyed && !bone_keyed);  // (acos in float near 1: one ulp of the dot reads as ~0.04 degrees - Linux showed 0.040)
+  });
+  /* With the trained prior (BLENDITY_AI_TEST_INSTALL: a folder with posemodel.onnx, posemodel.json and ONNX Runtime). */
+  test("Puppet Posing's pose prior (task 0280): the trained network loads, a pose takes milliseconds on the CPU, and a hand dragged toward the knee bends the body - the goal met, the feet held (skipped without an install)", [] {
+    const char *real = std::getenv("BLENDITY_AI_TEST_INSTALL");
+    if (!real || !*real) return (void)std::printf("    (no BLENDITY_AI_TEST_INSTALL: skipped)\n");
+    std::string e;
+    std::unique_ptr<ai::PriorModel> prior = ai::load_prior(real, e);
+    std::printf("    the prior: %s\n", prior ? "loaded" : e.c_str());
+    CHECK(prior != nullptr);
+    if (!prior) return;
+    Scene s;
+    GameObject *rig = r300_person(s);
+    const gait::Rig g = gait::analyse(s, *rig);
+    GameObject *hand = s.find_by_name("mixamorig:LeftHand");
+    GameObject *lfoot = s.find_by_name("mixamorig:LeftFoot"), *rfoot = s.find_by_name("mixamorig:RightFoot");
+    GameObject *spine = s.find_by_name("mixamorig:Spine"), *knee = s.find_by_name("mixamorig:LeftLeg");
+    const Vec3 lf = lfoot->world_position(), rf = rfoot->world_position();
+    const Vec3 target = knee->world_position() + Vec3(-0.05f, 0.0f, 0.15f);
+    double best = 1e9;
+    puppet::Result r;
+    for (int i = 0; i < 5; i++) {  // (the first answer warms the session up)
+      r = puppet::pose(*rig, g, prior.get(), {{hand, target, 1.0f}}, {lfoot, rfoot}, nullptr);
+      best = std::min(best, r.prior_ms);
+    }
+    const float reach = length(hand->world_position() - target) * 1000.0f;
+    const float pins = std::max(length(lfoot->world_position() - lf), length(rfoot->world_position() - rf)) * 1000.0f;
+    const Vec3 up = spine->world_rotation().rotate(Vec3(0, 1, 0));
+    const float bend = std::acos(std::max(-1.0f, std::min(1.0f, up.y))) * 57.29578f;
+    std::printf("    a hand to the knee: the prior %.2f ms a pose (the fastest of five), the hand %.2f mm off, the feet %.2f mm off, the spine bent %.1f degrees, %d IK iterations\n",
+                best, reach, pins, bend, r.ik.iterations);
+    CHECK(r.used_prior && reach < 1.0f && pins < 1.0f && bend > 5.0f);
+  });
+}
+
+static void tests_round301() {
+  test("Reach (task 0281): a pose edit at frame 10 with Reach 6 also changes the keys at 5 and 15 a little, those at 0 and 20 not at all, and makes no key between; Reach 0 changes frame 10's key only", [] {
+    Editor ed;
+    ed.init_headless(900, 700);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Bow");
+    for (int f : {0, 5, 10, 15, 20}) ed.command("anim key Spine Rotation 0 " + std::to_string(f) + " 0");
+    ed.step_frame_headless();
+    ed.command("anim frame 10");
+    ed.command("autopose on");
+    ed.command("autopose reach 6");
+    GameObject *head = ed.scene().find_by_name("Head");
+    const Vec3 to = head->world_position() + Vec3(0.0f, -0.1f, 0.2f);
+    ed.command(strprintf("autopose drag Head %f %f %f", to.x, to.y, to.z));
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const std::string spine = anim_path(*rig, *ed.scene().find_by_name("Spine"));
+    auto turn_at = [&](float f) {
+      Vec3 e;
+      for (int a = 0; a < 3; a++) e[a] = clip->find(spine, "Rotation", a) ? clip->find(spine, "Rotation", a)->sample(f) : 0.0f;
+      const Quat q = Quat::euler(e);
+      return 2.0f * std::acos(std::min(1.0f, std::fabs(q.w))) * 57.29578f;
+    };
+    const AnimTrack *tx = clip ? clip->find(spine, "Rotation", 0) : nullptr;
+    const size_t keys = tx ? tx->keys.size() : 0;
+    std::printf("    the spine's turn: frame 0 %.3f, 5 %.3f, 10 %.3f, 15 %.3f, 20 %.3f degrees; %zu keys on its X\n", turn_at(0), turn_at(5), turn_at(10), turn_at(15),
+                turn_at(20), keys);
+    CHECK(clip && turn_at(10) > 2.0f && turn_at(5) > 0.01f && turn_at(5) < turn_at(10) * 0.2f && turn_at(15) > 0.01f && turn_at(0) < 1e-4f && turn_at(20) < 1e-4f && keys == 5);
+    /* Reach 0: only the playhead's key. */
+    ed.command("undo");
+    ed.step_frame_headless();
+    ed.command("autopose reach 0");
+    ed.command(strprintf("autopose drag Head %f %f %f", to.x, to.y, to.z));
+    clip = ed.anim_clip_for_test();
+    std::printf("    Reach 0: frame 5 %.4f, 10 %.3f degrees\n", turn_at(5), turn_at(10));
+    CHECK(turn_at(10) > 2.0f && turn_at(5) < 1e-4f);
+  });
+  test("Puppet Posing's handles (task 0281): with AutoPosing on the selected rig's hands, feet, head and hips are handles; a drag on the left hand's moves it and keys the pose; a click on the right hand's pins it, another frees it - all by real mouse events", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Reach");
+    ed.command("autopose on");
+    ed.command("focus");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    Recti lh, rh, hips;
+    const bool drawn = ed.button_rect_for_test("puppet:LeftHand", lh) && ed.button_rect_for_test("puppet:RightHand", rh) &&
+                       ed.button_rect_for_test("puppet:Hips", hips) && ed.button_rect_for_test("puppet:Head", hips);
+    std::printf("    handles drawn %d\n", (int)drawn);
+    CHECK(drawn);
+    if (!drawn) return;
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    const Vec3 h0 = hand->world_position();
+    const int x0 = lh.x + lh.w / 2, y0 = lh.y + lh.h / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, x0, y0)});
+    ed.step_frame_headless({ev(ET::MouseDown, x0, y0)});
+    for (int i = 1; i <= 6; i++) ed.step_frame_headless({ev(ET::MouseMove, x0 + i * 4, y0 + i * 6)});
+    ed.step_frame_headless({ev(ET::MouseUp, x0 + 24, y0 + 36)});
+    ed.step_frame_headless();
+    const float moved = length(hand->world_position() - h0);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    the left hand's handle dragged 24 x 36 px: the hand moved %.1f cm; the clip has %zu tracks\n", moved * 100.0f, clip ? clip->tracks.size() : (size_t)0);
+    CHECK(moved > 0.02f && clip && !clip->tracks.empty());
+    auto click = [&](const Recti &r) {
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, x, y)});
+      ed.step_frame_headless();
+    };
+    ed.button_rect_for_test("puppet:RightHand", rh);
+    click(rh);
+    const bool pinned = ed.autopose_locks_for_test().size() == 1;
+    ed.button_rect_for_test("puppet:RightHand", rh);
+    click(rh);
+    std::printf("    a click on the right hand's handle: pinned %d; another: %zu pins\n", (int)pinned, ed.autopose_locks_for_test().size());
+    CHECK(pinned && ed.autopose_locks_for_test().empty());
+  });
+}
+
+static void tests_round302() {
+  test("motion trails and onion skin (task 0282): the frames around the playhead are sampled a few at a time and kept; the trail's point at frame 10 is where the hand is at frame 10; an Alt-drag of the hand's key dot at 10 moves its keys to 13 (not past their neighbours); onion skin draws, the scene put back as it was", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Wave");
+    for (int f : {0, 10, 20}) {
+      ed.command("anim key Spine Rotation 2 " + std::to_string(f) + (f == 10 ? " 25" : " 0"));
+      ed.command("anim key LeftHandIK Position 1 " + std::to_string(f) + (f == 10 ? " 1.6" : " 1.0"));
+    }
+    ed.command("focus");
+    GameObject *lamp = ed.scene().create("Lamp", rig);  // (an animated value that isn't a transform: the sampling puts it back)
+    lamp->add<Light>()->intensity = 1.0f;
+    ed.mark_changed_for_test("Add the lamp");
+    ed.command("anim key Lamp Light.Intensity 0 0 1");
+    ed.command("anim key Lamp Light.Intensity 0 20 9");
+    lamp->get<Light>()->intensity = 1.0f;
+    ed.command("anim trails on");
+    ed.command("anim onion 2");
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    const Vec3 before = hand->world_position();
+    int frames = 0;
+    for (; frames < 20 && ed.trail_frames_for_test() < 31; frames++) ed.step_frame_headless();
+    const size_t cached = ed.trail_frames_for_test();
+    const Vec3 after = hand->world_position();
+    std::printf("    %zu frames sampled over %d editor frames; the scene put back: the hand moved %.4f mm, the lamp's intensity %.2f\n", cached, frames,
+                length(after - before) * 1000.0f, lamp->get<Light>()->intensity);
+    CHECK(cached == 31 && frames >= 5 && length(after - before) < 1e-5f && std::fabs(lamp->get<Light>()->intensity - 1.0f) < 1e-5f);
+    Vec3 at10;
+    CHECK(ed.trail_at_for_test(hand->id, 10, at10));
+    ed.command("anim frame 10");
+    ed.command("anim preview on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    the trail at 10 (%.3f, %.3f, %.3f), the hand at frame 10 (%.3f, %.3f, %.3f)\n", at10.x, at10.y, at10.z, hand->world_position().x,
+                hand->world_position().y, hand->world_position().z);
+    CHECK(length(at10 - hand->world_position()) < 1e-3f);
+    ed.command("anim preview off");
+    ed.command("anim frame 0");
+    ed.command("select LeftHandIK");  // (the trail follows the selected ends; the IK target's keys are the hand's)
+    ed.command("select " + rig->name);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    /* The hand's trail: its keys are on the IK target (the hand's own bone has none) - drag the target's dot. */
+    Recti dot;
+    bool found = false;
+    for (int i = 0; i < 6 && !found; i++) {
+      ed.step_frame_headless({[] {
+        platform::Event e;
+        e.type = platform::EventType::MouseMove, e.x = 2, e.y = 2;
+        return e;
+      }()});
+      found = ed.button_rect_for_test("trail:LeftHand 10", dot);
+    }
+    std::printf("    the hand's key dot at 10 drawn %d\n", (int)found);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr && found);
+    if (!found || !clip) return;
+    using ET = platform::EventType;
+    const int x = dot.x + dot.w / 2, y = dot.y + dot.h / 2;
+    auto ev = [&](ET t, int ex, int ey) {
+      platform::Event e;
+      e.type = t, e.x = ex, e.y = ey, e.mods = platform::MOD_ALT;
+      return e;
+    };
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+    ed.step_frame_headless({ev(ET::MouseMove, x + 24, y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x + 24, y)});
+    ed.step_frame_headless();
+    clip = ed.anim_clip_for_test();
+    const AnimTrack *t = clip->find(anim_path(*rig, *ed.scene().find_by_name("Spine")), "Rotation", 2);
+    std::printf("    Alt-drag 24 px right: the spine's key at 10 %d, at 13 %d\n", t ? t->key_at(10.0f) : -9, t ? t->key_at(13.0f) : -9);
+    CHECK(t && t->key_at(10.0f) < 0 && t->key_at(13.0f) >= 0);
+  });
+}
+
+static void tests_round303() {
+  test("the Zoetrope (task 0283): seven cells of the frames around the playhead, every 2; a drag on the left hand in the frame-plus-4 cell keys frame 14 with the playhead staying at 10 and the scene as it was; Ctrl+wheel makes the step 4", [] {
+    Editor ed;
+    ed.init_headless(1400, 1000);
+    ed.record_buttons_for_test(true);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Steps");
+    for (int f : {0, 10, 20}) ed.command("anim key Spine Rotation 0 " + std::to_string(f) + " 0");
+    ed.command("anim frame 10");
+    ed.command("layout Animation");  // (a wide Animation window: its toolbar whole)
+    ed.command("focus");
+    ed.command("autopose on");
+    ed.command("anim zoetrope on");
+    for (int i = 0; i < 12; i++) ed.step_frame_headless();
+    Recti cell;
+    int cells = 0;
+    for (int i = 0; i < 7; i++) cells += ed.button_rect_for_test("zoe:" + std::to_string(i), cell);
+    Recti h;
+    const bool handle = ed.button_rect_for_test("zoe:5 LeftHand", h);
+    std::printf("    %d cells drawn; the left hand's handle in cell 5 %d\n", cells, (int)handle);
+    CHECK(cells == 7 && handle);
+    if (!handle) return;
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    const Vec3 before = hand->world_position();
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    const int x = h.x + h.w / 2, y = h.y + h.h / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+    for (int i = 1; i <= 4; i++) ed.step_frame_headless({ev(ET::MouseMove, x + i * 2, y - i * 5)});
+    ed.step_frame_headless({ev(ET::MouseUp, x + 8, y - 20)});
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    bool keyed14 = false;
+    for (const AnimTrack &t : clip->tracks) keyed14 = keyed14 || t.key_at(14.0f) >= 0;
+    std::printf("    the drag in cell 5: a key at 14 %d; the playhead %.1f; the hand where it was %.4f mm away\n", (int)keyed14, ed.anim_frame_for_test(),
+                length(hand->world_position() - before) * 1000.0f);
+    CHECK(keyed14 && std::fabs(ed.anim_frame_for_test() - 10.0f) < 1e-4f && length(hand->world_position() - before) < 1e-4f);
+    /* Ctrl+wheel over the strip: every 4 frames. */
+    Recti c3;
+    ed.button_rect_for_test("zoe:3", c3);
+    platform::Event w;
+    w.type = ET::Wheel, w.x = c3.x + 5, w.y = c3.y + 5, w.wheel_y = 1.0f, w.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({ev(ET::MouseMove, c3.x + 5, c3.y + 5)});
+    ed.step_frame_headless({w});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    Ctrl+wheel: every %d frames\n", ed.zoe_step_for_test());
+    CHECK(ed.zoe_step_for_test() == 4);
+  });
+}
+
+/* A clip with three faults on the person: the hips creeping 6 cm sideways over frames 0-20 (the planted feet slide),
+ * the left arm turning 40 degrees for frame 10 alone (a pop), the right arm 4 degrees back and forth every frame of
+ * 0-20 (a shake). */
+static AnimationClipPtr r304_faulty(Scene &s, GameObject &rig) {
+  auto clip = std::make_shared<AnimationClip>();
+  clip->length = 20.0f;
+  const std::string hips = anim_path(rig, *s.find_by_name("mixamorig:Hips")), larm = anim_path(rig, *s.find_by_name("mixamorig:LeftArm")),
+                    rarm = anim_path(rig, *s.find_by_name("mixamorig:RightArm"));
+  for (int f = 0; f <= 20; f++) {
+    clip->track(hips, "Position", 0).set_key((float)f, 0.003f * f);
+    clip->track(hips, "Position", 1).set_key((float)f, 0.95f);
+    clip->track(hips, "Position", 2).set_key((float)f, 0.0f);
+    clip->track(larm, "Rotation", 0).set_key((float)f, f == 10 ? 40.0f : 0.5f * f);
+    clip->track(rarm, "Rotation", 0).set_key((float)f, f % 2 ? 4.0f : -4.0f);
+  }
+  return clip;
+}
+
+static void tests_round304() {
+  test("Motion Check in the editor (task 0284): the Animation window's Check opens a report of the faults with a Fix a row; a row's Fix by a click takes that fault out (the report again with one fewer); the smooth brush evens keys under a drag over the sheet", [] {
+    Editor ed;
+    ed.init_headless(1400, 1000);
+    ed.record_buttons_for_test(true);
+    Scene &s = ed.scene();
+    GameObject *rig = r300_person(s);
+    AnimationClipPtr faulty = r304_faulty(s, *rig);
+    ed.mark_changed_for_test("Add the person");
+    ed.command("select " + rig->name);
+    ed.command("anim new Faulty");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    clip->tracks = faulty->tracks, clip->length = faulty->length;
+    ed.command("layout Animation");  // (a wide Animation window: its toolbar whole)
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto click = [&](const std::string &key) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      return true;
+    };
+    const bool checked = click("Puppet") && click("menu:Motion Check");
+    const size_t found = ed.motion_issues_for_test();
+    std::printf("    Check clicked %d: %zu faults, the report open %d\n", (int)checked, found, (int)ed.report_open_for_test());
+    CHECK(checked && found >= 4 && ed.report_open_for_test());
+    ed.command("motioncheck");  // (the console's way: the same report)
+    CHECK(ed.report_open_for_test() && ed.motion_issues_for_test() == found);
+    const bool fixed = click("report:fix 0");
+    std::printf("    a row's Fix clicked %d: %zu faults now\n", (int)fixed, ed.motion_issues_for_test());
+    CHECK(fixed && ed.motion_issues_for_test() < found);
+    ed.close_dialog_for_test();
+    /* The smooth brush: a drag over the sheet's middle. */
+    const std::string rarm = anim_path(*rig, *s.find_by_name("mixamorig:RightArm"));
+    auto jerk = [&] {
+      const AnimTrack *t = ed.anim_clip_for_test()->find(rarm, "Rotation", 0);
+      float m = 0.0f;
+      for (int f = 9; f <= 11; f++) m = std::max(m, std::fabs(t->sample((float)f) - 0.5f * (t->sample(f - 1.0f) + t->sample(f + 1.0f))));  // (under the brush: within its 3 frames)
+      return m;
+    };
+    const float before = jerk();
+    const bool brush = click("Puppet") && click("menu:Smooth Brush");
+    Recti sheet;
+    ed.button_rect_for_test("anim_sheet", sheet);
+    const int y = sheet.y + sheet.h / 2;
+    auto ev = [](ET t, int x, int yy) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = yy;
+      return e;
+    };
+    const int x10 = sheet.x + (int)(sheet.w * 10.0f / (std::max(30.0f, 20.0f) * 1.1f));
+    ed.step_frame_headless({ev(ET::MouseMove, x10, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x10, y)});
+    for (int i = 0; i < 4; i++) ed.step_frame_headless({ev(ET::MouseMove, x10 + (i % 2 ? 6 : -6), y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x10, y)});
+    ed.step_frame_headless();
+    const float after = jerk();
+    std::printf("    Smooth clicked %d; the right arm's back-and-forth at frames 9-11: %.2f -> %.2f degrees\n", (int)brush, before, after);
+    CHECK(brush && after < before * 0.7f);
+  });
+  test("Motion Check (task 0284): a sliding foot, a one-frame pop and a shake are each found with their frames; smoothing takes out the pop and the shake, Lock in Place holds the foot; the check then finds none of them", [] {
+    Scene s;
+    GameObject *rig = r300_person(s);
+    AnimationClipPtr clip = r304_faulty(s, *rig);
+    const std::vector<motion::Issue> found = motion::check(s, *rig, *clip);
+    int slides = 0, pops = 0, shakes = 0;
+    for (const motion::Issue &i : found) {
+      std::printf("    found: %s\n", i.text().c_str());
+      slides += i.kind == motion::Issue::Sliding, pops += i.kind == motion::Issue::Pop && i.bone == "mixamorig:LeftArm",
+          shakes += i.kind == motion::Issue::Shaking && i.bone == "mixamorig:RightArm";
+    }
+    CHECK(slides >= 1 && pops >= 1 && shakes >= 1);
+    /* The fixes. */
+    const std::string larm = anim_path(*rig, *s.find_by_name("mixamorig:LeftArm")), rarm = anim_path(*rig, *s.find_by_name("mixamorig:RightArm"));
+    const size_t a = motion::smooth(*clip, {larm}, 9.0f, 11.0f, 1.0f, 2.0f);
+    const size_t b = motion::smooth(*clip, {rarm}, 0.0f, 20.0f, 1.0f, 3.0f);
+    int locked = 0;
+    for (const motion::Issue &i : found)
+      if (i.kind == motion::Issue::Sliding) locked += motion::lock_in_place(s, *rig, *clip, *s.find_by_name(i.bone), i.from, i.to, 2);
+    const std::vector<motion::Issue> after = motion::check(s, *rig, *clip);
+    int left = 0;
+    for (const motion::Issue &i : after) {
+      std::printf("    after the fixes: %s\n", i.text().c_str());
+      left += (i.kind == motion::Issue::Pop && i.bone == "mixamorig:LeftArm") || (i.kind == motion::Issue::Shaking && i.bone == "mixamorig:RightArm") ||
+              i.kind == motion::Issue::Sliding;
+    }
+    std::printf("    smoothed %zu + %zu keys, %d frames locked; %zu issues left (%d of the three kinds fixed)\n", a, b, locked, after.size(), left);
+    CHECK(a > 0 && b > 0 && locked > 0 && left == 0);
+  });
+}
+
 void run_animation_tests() {
+  tests_round300();
+  tests_round301();
+  tests_round302();
+  tests_round303();
+  tests_round304();
   round64_tests();
   round69_tests();
   tests_round81();

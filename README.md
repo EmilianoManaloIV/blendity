@@ -247,6 +247,9 @@ Report dialog.
 Rounds 294-298: Live Link starts with Blendity and writes where it listens, and bridges for Blender, Unity, Godot and Unreal
 connect by themselves (the Godot and Unreal ones written, their in-engine runs pending); the bridges as installable packages,
 and Window > Live Link > Install a Bridge.
+Rounds 299-305, Puppet Posing: drag a hand, a foot, the head or the hips and a pose prior trained on motion capture bends the
+body, exact IK making the goals and the planted feet hold; any humanoid rig (Mixamo, UE5, Character Creator, Daz, VRoid, Biped,
+Rigify; T or A pose); motion trails, onion skin, a Zoetrope, Reach, Motion Check with Fixes, a smooth brush, Lock in Place.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -277,7 +280,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13357 unit checks in 1154 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13392 unit checks in 1164 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

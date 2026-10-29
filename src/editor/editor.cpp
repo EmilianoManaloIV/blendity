@@ -700,6 +700,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   update_realtime_lightmaps();
   lighting_update_step();
   livelink_tick();  // (task 0172: what changed this frame goes out; nothing without a client)
+  trail_refresh();  // (task 0282: a few more of the trails' frames, before the views draw them)
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */

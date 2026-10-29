@@ -245,6 +245,8 @@ bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
   if (sketch_update(view)) busy = true;
   if (bone_handles_update(view)) busy = true;
+  if (trail_update(view)) busy = true;           // (task 0282: a trail's key dot, before the handles it hands over to)
+  if (puppet_handles_update(view)) busy = true;  // (task 0281: before the gizmo - a handle is the puppet's string)
   if (gizmo_update(view)) busy = true;
   if (wp_update(view)) busy = true;
   if (sculpt_update(view)) busy = true;  // (task 0236)

@@ -192,6 +192,93 @@ std::unique_ptr<Runtime> load_runtime(const std::string &dir, std::string &error
   return r;
 }
 
+namespace {
+
+/* The pose prior's session: one input, one output, a pose at a time (task 0280). */
+class OrtPrior : public PriorModel {
+ public:
+  ~OrtPrior() override {
+    if (!api_) return;
+    if (session_) api_->ReleaseSession(session_);
+    if (mem_) api_->ReleaseMemoryInfo(mem_);
+    if (env_) api_->ReleaseEnv(env_);
+  }
+
+  bool load(const std::string &dir, std::string &error) {
+    std::string text;
+    if (!fs::read_file(fs::join(dir, "posemodel.json"), text) || !parse_model_info(text, info)) return error = "posemodel.json is missing or unreadable", false;
+    void *lib = open_library(fs::join(dir, kLib));
+    if (!lib) return error = std::string(kLib) + " didn't load", false;
+    using GetBase = const OrtApiBase *(ORT_API_CALL *)();
+    GetBase get = (GetBase)symbol(lib, "OrtGetApiBase");
+    const OrtApiBase *base = get ? get() : nullptr;
+    api_ = base ? base->GetApi(ORT_API_VERSION) : nullptr;
+    if (!api_) return error = "ONNX Runtime's API " + std::to_string(ORT_API_VERSION) + " isn't there (an older library?)", false;
+    OrtSessionOptions *so = nullptr;
+    if (!ok(api_->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "blendity-prior", &env_), error) || !ok(api_->CreateSessionOptions(&so), error)) return false;
+    ok(api_->SetIntraOpNumThreads(so, 1), error);  // (one small pose: threads cost more than they give)
+    const std::string model = fs::join(dir, "posemodel.onnx");
+#ifdef _WIN32
+    int n = MultiByteToWideChar(CP_UTF8, 0, model.c_str(), -1, nullptr, 0);
+    std::wstring path(n > 0 ? (size_t)n : 0, L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, model.c_str(), -1, &path[0], n);
+    const bool made = ok(api_->CreateSession(env_, path.c_str(), so, &session_), error);
+#else
+    const bool made = ok(api_->CreateSession(env_, model.c_str(), so, &session_), error);
+#endif
+    api_->ReleaseSessionOptions(so);
+    if (!made) return false;
+    return ok(api_->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem_), error);
+  }
+
+  bool run(const float *goals, float *pose, std::string &error) override {
+    float in_data[kPriorInputs];
+    std::copy(goals, goals + kPriorInputs, in_data);
+    const int64_t shape[2] = {1, kPriorInputs};
+    OrtValue *in = nullptr, *got = nullptr;
+    bool good = ok(api_->CreateTensorWithDataAsOrtValue(mem_, in_data, sizeof(in_data), shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in), error);
+    const char *names[1] = {"goals"}, *outs[1] = {"pose"};
+    if (good) good = ok(api_->Run(session_, nullptr, names, &in, 1, outs, 1, &got), error);
+    float *p = nullptr;
+    size_t count = 0;
+    OrtTensorTypeAndShapeInfo *ts = nullptr;
+    if (good) good = ok(api_->GetTensorTypeAndShape(got, &ts), error) && ok(api_->GetTensorShapeElementCount(ts, &count), error);
+    if (ts) api_->ReleaseTensorTypeAndShapeInfo(ts);
+    if (good && count != (size_t)kPriorOutputs) error = strprintf("the prior answered %zu numbers, not %d", count, kPriorOutputs), good = false;
+    if (good) good = ok(api_->GetTensorMutableData(got, (void **)&p), error);
+    if (good) std::copy(p, p + kPriorOutputs, pose);
+    if (in) api_->ReleaseValue(in);
+    if (got) api_->ReleaseValue(got);
+    return good;
+  }
+
+ private:
+  bool ok(OrtStatus *st, std::string &error) {
+    if (!st) return true;
+    error = api_->GetErrorMessage(st);
+    api_->ReleaseStatus(st);
+    return false;
+  }
+  const OrtApi *api_ = nullptr;
+  OrtEnv *env_ = nullptr;
+  OrtSession *session_ = nullptr;
+  OrtMemoryInfo *mem_ = nullptr;
+};
+
+}  // namespace
+
+std::unique_ptr<PriorModel> load_prior(const std::string &dir, std::string &error) {
+  auto r = std::make_unique<OrtPrior>();
+  if (!r->load(dir, error)) return nullptr;
+  return r;
+}
+
+std::string prior_problem() {
+  const std::string dir = install_dir();
+  if (!fs::exists(fs::join(dir, "posemodel.onnx")) || !fs::exists(fs::join(dir, kLib))) return "the pose prior isn't installed (the AI download)";
+  return "";
+}
+
 std::string install_problem() {
   const std::string dir = install_dir();
   if (!fs::exists(fs::join(dir, "inbetween.onnx")) || !fs::exists(fs::join(dir, kLib))) return "not installed (ai install)";
@@ -210,7 +297,7 @@ std::string tar_program() {
 
 /* The files an install holds: nothing else is unpacked, and nothing else is ever deleted. */
 bool own_file(const std::string &name) {
-  static const char *const files[] = {"inbetween.onnx", "inbetween.json", "README.txt", "LICENSE-onnxruntime.txt", "ThirdPartyNotices-onnxruntime.txt",
+  static const char *const files[] = {"inbetween.onnx", "inbetween.json", "posemodel.onnx", "posemodel.json", "README.txt", "LICENSE-onnxruntime.txt", "ThirdPartyNotices-onnxruntime.txt",
                                       "onnxruntime.dll", "onnxruntime_providers_shared.dll", "libonnxruntime.so", "libonnxruntime.dylib"};
   for (const char *f : files)
     if (name == f) return true;
@@ -314,16 +401,8 @@ Quat rest_world(const GameObject &g) {
 }
 
 /* How the rig is mapped: its bones, their rest turns, the turn taking its facing to +Z, its size against the data's,
- * and the ground under it. */
-struct Mapping {
-  std::vector<GameObject *> bones;
-  std::vector<Quat> rest;
-  std::vector<Quat> align;  // per joint: the rig's rest direction of the bone turned onto the data's (the data's rest has
-                            // the legs splayed and the arms out: a straight-legged rig's rest isn't the data's)
-  Quat face;         // the rig's world into the data's facing (+Z)
-  float scale = 1.0f;
-  float ground = 0.0f;
-};
+ * and the ground under it (the data's rest has the legs splayed and the arms out: `align` turns the rig's onto it). */
+using Mapping = PoseMapping;
 
 /* The joint each joint's bone points at (-1: none, or several - the hips, the ends). */
 int child_of(int j) {
@@ -806,6 +885,15 @@ bool probe(std::string &error, double *ms) {
   for (float v : out)
     if (!std::isfinite(v)) return error = "the test inference gave numbers that aren't", false;
   return true;
+}
+
+PoseMapping pose_mapping(const gait::Rig &rig, const ModelInfo &info) { return mapping_of(rig, info); }
+void rig_to_frame(const PoseMapping &m, const ModelInfo &info, float *f) { frame_of(m, info, f); }
+void frame_to_rig(const PoseMapping &m, const ModelInfo &info, const float *f) { pose_rig(m, info, f); }
+Vec3 world_to_data(const PoseMapping &m, Vec3 w) { return mirror(m.face.rotate(Vec3(w.x, w.y - m.ground, w.z))) * (1.0f / m.scale); }
+Vec3 data_to_world(const PoseMapping &m, Vec3 d) {
+  const Vec3 p = m.face.conjugate().rotate(mirror(d * m.scale));
+  return Vec3(p.x, p.y + m.ground, p.z);
 }
 
 }  // namespace ai

@@ -5472,7 +5472,11 @@ static void tests_round293() {
     CHECK(m3 && pt->layers.size() == layers0 - 1 && pt->layers[0]->children() && pt->layers[0]->children()->size() == 2);
     pt->layers[0]->name = "Smat293";
     const std::string smat = fs::join(ed.assets_dir_for_test(), "Materials/Smart/Smat293.smat");
-    std::remove(smat.c_str());
+    auto clear_smats = [&] {  // (this test's own files, from an earlier run in the same scratch project too)
+      for (const DirEntry &e : fs::list(fs::join(ed.assets_dir_for_test(), "Materials/Smart")))
+        if (e.name.rfind("Smat293", 0) == 0) fs::remove_file(fs::join(fs::join(ed.assets_dir_for_test(), "Materials/Smart"), e.name));
+    };
+    clear_smats();
     const bool m4 = layer_menu(0) && click("menu:Save as Smart Material...");
     const std::string offered = ed.dialog_text_for_test();
     const bool saved = ed.smat_dialog_open_for_test() && click("smat:Save");
@@ -5484,7 +5488,7 @@ static void tests_round293() {
     click("smat:Cancel");
     std::printf("    again %d: the name offered '%s' (the saved one not replaced)\n", (int)again, offered2.c_str());
     CHECK(again && offered2 == "Smat293 2" && !ed.smat_dialog_open_for_test());
-    std::remove(smat.c_str());
+    clear_smats();
     /* A Fill layer can't be one: the item is greyed. */
     ed.command("surface add Fill");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
@@ -5507,6 +5511,9 @@ static void tests_round293() {
     for (int i = 0; i < 400 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
     std::printf("    Keep UVs: Bake Mesh Maps %d, Bake Textures %d (new UVs unless asked)\n", (int)ed.bake_keep_uvs_for_test(0), (int)ed.bake_keep_uvs_for_test(1));
     CHECK(ed.bake_keep_uvs_for_test(0) && !ed.bake_keep_uvs_for_test(1));
+    ed.command("bakedialog textures");  // (the palette's Bake Textures... and the console reach the same dialog)
+    CHECK(ed.bake_dialog_open_for_test());
+    ed.close_dialog_for_test();
   });
   test("the review's fixes (tasks 0271-0273): Export Textures' folder typed or chosen with ... (no dialog here says so); a toast's Fix clicked while another tab hides the Scene view; a Bucket click on empty sky fills nothing and the bucket goes off with Paint", [] {
     Editor ed;

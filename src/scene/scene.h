@@ -1191,6 +1191,8 @@ int add_humanoid_ik(Scene &scene, GameObject *root);
 /* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L"): side 0 left,
  * 1 right; limb 0 upper leg, 1 lower leg, 2 upper arm, 3 lower arm (ik.cpp; the walking rig reads it too, task 0124). */
 bool limb_of(const std::string &name, int &side, int &limb);
+std::vector<std::string> name_words(const std::string &name);  // (task 0279: lower-case words, camel case split)
+int name_side(const std::vector<std::string> &words);          // 0 left, 1 right, -1 none
 /* IK on a bone and its parent with a new target at its tip and a pole off its bend (the Rigging window's Add IK). */
 IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
 /* The object the IK constraint on `bone` aims at, looked for in its own character first (two copies share names). */
