@@ -744,7 +744,8 @@ Markdown table (this chapter's table is kept by hand from it).
 
 **Themes** (Preferences > Theme, or `theme Dark|Light|Emiliano Light|Emiliano Dark|High Contrast`): the editor's colours.
 High Contrast is white on near-black with every text at WCAG's 4.5:1 or more and a yellow focus ring (the tests measure
-every theme's ratios). The two
+every theme's ratios). How the editor's ease of use was measured - the keystroke-level model, the Fitts audit, the
+walkthroughs - and what is still open is in `docs/hci/README.md` and `docs/tasks/0262-hci-measured.md`. The two
 Emiliano themes take the palette of the author's site (its Figma variables): paper #F1EEE5 and charcoal #292927, an amber
 accent #D7882B, mint / red / blue / amber signal colours.
 

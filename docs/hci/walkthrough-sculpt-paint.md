@@ -21,3 +21,19 @@ pen.
 **Baseline score** (an N in any of the four columns): 12 steps, **5 failing** (2, 6, 8, 10, 12). The step most likely
 abandoned: 12 (export), which has no UI at all; the step most likely to frustrate: 2 and 10, the brush size without a
 key or readout.
+
+## After (round 282)
+
+Walked again on the round-281 build with the same profile, by reading each step against what landed; a step is fixed when every column it failed now reads Y. Partly: one of its problems is gone, another is not.
+
+| # | Baseline | After | What changed | What is left |
+|---|---|---|---|---|
+| 2 | fail | fixed | `[` and `]` step the brush in every preset, a toast says the size (0261) | the readout is a toast, not a HUD at the cursor |
+| 6 | fail | partly | As the modelling walkthrough's step 7 | UV panning; nothing warns that a remesh after painting loses the paint |
+| 8 | fail | fail | - | `surface new` is still reached from the console or the Textures window only |
+| 10 | fail | fixed | As step 2 (0261) | - |
+| 12 | fail | fixed | Export Textures... in the Textures toolbar opens a dialog (0257) | - |
+| 5, 7, 11 | doubts (?) | Y | The job tray: progress, time left, Cancel, a done toast (0253) | - |
+| 3, 9 | doubts (?) | ? | - | Okabe-Ito polygroup colours and the eraser's shape cue were not done (0261's Not done) |
+
+**After:** 12 steps, **2 not fully fixed** (8 failing, 6 partly), against 5 failing at the baseline.

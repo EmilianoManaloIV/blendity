@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| The pass had no after-numbers, and the KLM baseline's total was summed by hand (it left out a row). | `tools/hci_klm.py` recounts the table; the Fitts, label and hint audits and the four walkthroughs run again; the study's status written down as not run (task 0262). |
 | A newcomer from Unreal, Blender or Photoshop met Unity's keys and no question; there was no Adobe preset; each brush had its own size keys; no theme was measured for contrast. | The welcome's origin picker (keys and feel in one go, Help asks again), the Adobe preset, `[` `]` for every brush, the High Contrast theme at 4.5:1 with `ui::contrast_ratio` in the tests (task 0261). |
 | The console's history could not be recalled, an unknown command got "type help", a .anim asset opened a text editor, and the Wheel had no animation slice. | Up / Down recall, "Did you mean: ..." from the palette's commands, .anim opens the Animation window, Set Key / Record / Play Clip on the object ring (task 0260). |
 | Weight Paint's Add brush ignored the pen's eraser and Ctrl, and binding a mesh to a skeleton needed a Ctrl+click two-object selection. | The Add brush subtracts with Ctrl or the eraser like every other brush; the Skin section's Skeleton dropdown names the skeleton and enables the bind (task 0259). |

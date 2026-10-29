@@ -234,7 +234,9 @@ with Ctrl or the pen's eraser like every other brush, and the skin binds to a sk
 answers an unknown command with the nearest known ones, a .anim asset opens the Animation window, the Wheel carries Set Key,
 Record and Play Clip. Round 281: the welcome asks where you come from (Unity, Unreal, Blender, Photoshop & Substance) and
 sets the keys and the feel; an Adobe keymap preset (B brush, E eraser, V move, [ ] size); [ ] step every brush; a High
-Contrast theme measured against WCAG's 4.5:1; `keymap table`.
+Contrast theme measured against WCAG's 4.5:1; `keymap table`. Round 282: the HCI pass measured - the KLM estimate for 19
+frequent actions 80.9 s -> 54.65 s, 0 wrong shortcut labels, every tool mode hinted, 24 failing walkthrough steps -> 7;
+the think-aloud study is written but not yet run (`docs/hci/`).
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.

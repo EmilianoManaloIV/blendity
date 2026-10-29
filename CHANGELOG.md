@@ -2,6 +2,28 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 282): the HCI pass measured - KLM, Fitts, hints, labels and walkthroughs after; the study not run (task 0262)
+
+**Asked:** ADR 0085's last round: the measuring sticks of round 271 again on the finished pass, the study, the write-up.
+
+**Added**
+- **The KLM table's after column** and `tools/hci_klm.py`, which recounts each row from the stated operator rules and
+  sums the columns: 19 frequent actions, 80.9 s before (the recount: the baseline's 77.0 left out a row), 54.65 s after
+  in the Unity preset, 50.6 s in the Adobe preset. Model estimates for an expert, not measurements of people.
+- **The audits again:** shortcut labels the keymap does not produce 121 -> 0; tool modes without a hint 2 of 8 -> 0;
+  targets under 7 mm at UI scale 1.0 92 % -> 78 % of a target count half again as large (`docs/hci/fitts-282.md`).
+- **The four walkthroughs walked again:** 24 of 46 steps failing before, 7 failing and 4 partly after; what is left is
+  listed per step (UV panning by pen, Adjust Last outside Edit Mode, the foliage features in the console).
+- **The study's status** (`docs/hci/study-282.md`): **not run** - no artist has used this build, so no SUS score or
+  task time exists; what is ready and what it should test.
+- The write-up in `docs/tasks/0262-hci-measured.md`; research/FEATURES.md rows; a Learn question.
+
+**Checked**
+- `py tools/hci_klm.py --check` passes on the table and fails on a copy with one row's seconds changed.
+- Unit checks (round 282): Windows, in render-cache verify mode, 13230, 0 failed (1138 tests), 0 stale
+  pictures. Linux with libraries: 12770, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone: timing noise.)
+
 ## 2026-10-28 (round 281): onboarding and transfer - the origin picker, the Adobe preset, one brush grammar, a High Contrast theme (task 0261)
 
 **Asked:** ADR 0085's transfer round: an artist arriving from Unity, Unreal, Photoshop and Substance, or Blender met
