@@ -692,6 +692,20 @@ static void tests_round297() {
     ul::Json hj;
     CHECK(ul::parse_json(h.data(), h.size() - 1, hj) && hj["t"].string() == "client" && hj["app"].string() == "Unreal 5.4 \"Editor\"" && hj["bridge"].string() == "1.1");
   });
+  test("the Unreal plugin's protocol (round 317): a JSON array indexed by a literal, a negative number and any integer type - as the plugin's applier does (B[0] didn't compile in Unreal 5.8)", [] {
+    namespace ul = blendity_link;
+    const std::string s = "{\"bones\":[[7,1,2],[8]]}";
+    ul::Json j;
+    CHECK(ul::parse_json(s.data(), s.size(), j));
+    const ul::Json &b = j["bones"][0];
+    const size_t two = 2;
+    const int64_t one64 = 1;
+    const uint32_t zero32 = 0;
+    const long one_l = 1;
+    CHECK(b[0].id() == 7 && b[two].number() == 2 && b[one64].number() == 1 && b[zero32].id() == 7 && b[one_l].number() == 1);
+    CHECK(b[-1].type == ul::Json::Null && b[-1].number(-7) == -7);  // (a negative index is past the end)
+    CHECK(b[3].type == ul::Json::Null && j["bones"][1][0].id() == 8 && j["bones"][2].size() == 0);
+  });
 }
 
 static platform::Event ll_mouse(platform::EventType t, int x, int y) {

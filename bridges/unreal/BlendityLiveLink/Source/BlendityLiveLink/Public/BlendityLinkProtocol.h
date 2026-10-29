@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,9 +31,12 @@ struct Json {
   std::vector<Json> arr;
   std::vector<std::pair<std::string, Json>> obj;
   const Json &operator[](const char *key) const;
-  const Json &operator[](size_t i) const;
-  // (a literal index such as B[0] is an int: without this MSVC finds [0] ambiguous, as 0 is also a null const char *)
-  const Json &operator[](int i) const { return i < 0 ? (*this)[arr.size()] : (*this)[(size_t)i]; }
+  const Json &at(size_t i) const;  // (the null Json past the end)
+  // Any integer index, one overload: a literal such as B[0] is an int, which MSVC found ambiguous between a size_t
+  // overload and the key's (0 is also a null const char *), and two integer overloads would make int64 or uint32
+  // ambiguous instead. A negative index is past the end.
+  template <class I, typename std::enable_if<std::is_integral<I>::value, int>::type = 0>
+  const Json &operator[](I i) const { return static_cast<long long>(i) < 0 ? at(arr.size()) : at(static_cast<size_t>(i)); }
   double number(double def = 0) const { return type == Num ? num : def; }
   int64_t id() const { return type == Num ? (int64_t)num : 0; }
   bool boolean(bool def = false) const { return type == Bool ? b : def; }

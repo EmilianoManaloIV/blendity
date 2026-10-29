@@ -3943,14 +3943,23 @@ static void round17_tests() {
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
     /* Preferences scrolled until the preset field is inside it and stays put: it is taller than 900 px where MoonRay is
      * found, and MoonRay's row can appear a moment after it opens and move the rows below (round 316: macOS). */
+    /* The search for MoonRay runs on a thread (seconds on Windows, where it asks WSL): its row appears when it ends, so
+     * wait for it before reading where the field is (round 317's review). */
+    for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    std::printf("    the MoonRay search: %s\n", ed.moonray_busy_for_test() ? "still running after 30 s" : "done");
     Recti last{-1, -1, 0, 0};
+    bool settled = false;
     for (int i = 0; i < 80; i++) {
       const Recti c = ed.combo_rect_for_test("km_preset"), dlg = ed.top_popup_rect_for_test();
       if (c.w <= 0) break;
       const bool still = c.x == last.x && c.y == last.y;
       last = c;
       const bool inside = c.y >= dlg.y && c.bottom() <= dlg.bottom();
-      if (inside && still) break;
+      settled = inside && still;
+      if (settled) break;
       if (inside) {
         ed.step_frame_headless();
         continue;
@@ -3961,6 +3970,7 @@ static void round17_tests() {
       ed.step_frame_headless({w});
       ed.step_frame_headless();  // (the controls drawn where the scroll put them)
     }
+    CHECK(settled);  // (inside Preferences and not moving: else the clicks below would miss for that reason)
     const Recti r = ed.combo_rect_for_test("km_preset");
     std::printf("    preset combo at %d,%d %dx%d\n", r.x, r.y, r.w, r.h);
     CHECK(r.w > 0 && r.h > 0);
@@ -3971,15 +3981,19 @@ static void round17_tests() {
       ed.step_frame_headless({ev(ET::MouseUp, x, y)});
       ed.step_frame_headless();
     };
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    auto click_field = [&] {  // (where the field is now, not where it was)
+      const Recti f = ed.combo_rect_for_test("km_preset");
+      click(f.x + f.w / 2, f.y + f.h / 2);
+    };
+    click_field();
     std::printf("    after clicking it: dialog %d, popups %zu\n", (int)ed.dialog_open_for_test(), ed.popup_count_for_test());
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 2);
     /* Clicking it again closes only the list. */
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    click_field();
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
     /* Open it and pick "Unreal", the list's second row (Unity, Unreal, Blender, ...: task 0063). The list drops below
      * the field, or opens above it when the field is near the window's bottom (task 0199's lines moved it there). */
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    click_field();
     CHECK(ed.popup_count_for_test() == 2);
     const Recti list = ed.top_popup_rect_for_test();
     const int row = r.h + 4;

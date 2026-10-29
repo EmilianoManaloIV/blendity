@@ -72,7 +72,7 @@ func _initialize() -> void:
 	check(pump(client, 6.0, func(): return client.connected()), "found again on port %d after the restart: '%s'" % [port2, client.status])
 	check(pump(client, 5.0, func(): return client.messages > 20), "the second session applied: %d messages" % client.messages)
 	var ids := {}
-	var live: Node = client.applier.root if client.applier != null else holder
+	var live: Node = client.applier.root if client.applier != null and client.applier.root != null else holder
 	for c in live.find_children("*", "", true, false):
 		if c.has_meta("blendity_id"):
 			ids[int(c.get_meta("blendity_id"))] = ids.get(int(c.get_meta("blendity_id")), 0) + 1

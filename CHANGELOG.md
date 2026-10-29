@@ -28,6 +28,20 @@ One entry per round of requests, newest first: what was asked, what changed, and
   folder: 2 checks, 0 failed.
 - Every engine bridge has now run in its engine: Blender 5.2, Unity 6000.6, Godot 4.7.2 and Unreal 5.8.
 
+**The review's fixes (Opus, rounds 316-317)**
+- **The keymap dropdown test still raced MoonRay's search,** which runs on a thread (seconds on Windows, where it
+  asks WSL). The field could settle before the search ended and then move. The test now waits for the search,
+  checks the field settled, and re-reads where the field is before each click. On this machine the field then sits
+  24 px lower (858, not 834), so the earlier pass was luck.
+- **A second integer overload made `int64` or `uint32` indexes ambiguous instead.** Indexing is now one template over
+  integer types, with negatives past the end. A suite test pins it with literals, a negative, `size_t`, `int64_t`,
+  `uint32_t` and `long`. GCC with `-Wall -Wextra` compiles it clean, and Unreal 5.8 builds and passes again.
+- **The Godot auto-connect test** also guards an applier without a root.
+- **The task spec** (docs/tasks/0295) has the rounds' results and is marked done.
+- **Noted, not changed:** a deform message rebuilds the whole mesh in Unreal. With CPU access, each rebuild also keeps a
+  CPU copy and cooks collision, which may slow the editor on a large deforming mesh. Measuring that is the follow-up.
+- The `livelink` group: 157 checks, 0 failed.
+
 ## 2026-10-29 (round 316): the Godot and Blender bridges run live (task 0295)
 
 **Asked:** the user (2026-10-29): "Godot and .NET should be installed, go check", then "How about the blender bridge?"
