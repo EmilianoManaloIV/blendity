@@ -41,6 +41,12 @@ and cleaning up the Unreal scratch folder.
 - **Unreal needs a short test folder.** It stops when its shared data cache's path is over 119 characters, and the
   suite points children's homes at the test folder.
 
+**Checked (the whole suite)**
+- Windows with Blender's libraries: 13,491 checks in 1,179 tests, 0 failed.
+- Windows dependency-free: 12,883, 0 failed.
+- Linux with libraries: 13,043, 0 failed.
+- The audits are at their baselines: consistency 0, console 1, labels 0, coverage map, Unity .meta.
+
 **The review's fixes (Opus)**
 - **The Draw tab's Guides, Canvas, Lift and Build acted on the Scene view's rect and camera,** not the pad's.
   - Each view now keeps its last binding.
