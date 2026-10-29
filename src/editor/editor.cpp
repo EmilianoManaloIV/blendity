@@ -1103,11 +1103,11 @@ void Editor::draw_menubar(const Recti &r) {
       u.submenu("Boolean", u.px(250), [this, two] {
         auto &u = ui_;
         static const char *kOps[] = {"Difference", "Union", "Intersect"};
-        u.menu_label("Apply now (cutters are removed)");
+        u.menu_label("Apply Now (the cutters are removed)");
         for (int op : {1, 0, 2})
           if (u.menu_item(kOps[op], nullptr, false, two)) boolean_selected(op, true);
         u.menu_separator();
-        u.menu_label("Live modifier (cutter stays as wire)");
+        u.menu_label("Live Modifier (the cutter stays as wire)");
         for (int op : {1, 0, 2})
           if (u.menu_item(std::string(kOps[op]) + " Modifier", nullptr, false, two)) boolean_selected(op, false);
       });
@@ -1275,7 +1275,7 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Learn Blendity", key("window.learn").c_str(), false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
-    if (u.menu_item("Welcome: Where Are You Coming From?")) dialog_ = Dialog::FirstRunTier, welcome_low_ = false;  // (task 0261)
+    if (u.menu_item("Welcome: Where Are You Coming From...")) dialog_ = Dialog::FirstRunTier, welcome_low_ = false;  // (task 0261)
     u.tooltip("The first-run question again: Unity, Unreal, Blender or Photoshop & Substance keys, in one go.");
     if (u.menu_item("Open Manual")) open_manual();
     if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty() || !guide_uses_.empty())) {
@@ -3070,6 +3070,31 @@ void Editor::draw_first_run_tier(const std::function<void()> &close) {
   close();
 }
 
+/* Rig Hair from Mesh's numbers (task 0291): what `hair rig <locks> <bones>` took - how many locks a shell is cut into
+ * (0: its loose parts, the cards) and how many bones a chain has. */
+void Editor::draw_hair_rig_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  u.label({r.x + u.px(12), r.y, u.px(160), r.h}, "Locks");
+  const Recti lf{r.x + u.px(176), r.y + u.px(2), u.px(90), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["hair:locks"] = lf;
+  u.int_field(u.id("hair_locks"), lf, hair_locks_, 0, 64);
+  u.tooltip("0: each loose part (a hair card) is a lock; a number cuts one shell into that many locks around the head.");
+  r = u.popup_row(u.row_h() + u.px(4));
+  u.label({r.x + u.px(12), r.y, u.px(160), r.h}, "Bones a Lock");
+  const Recti bf{r.x + u.px(176), r.y + u.px(2), u.px(90), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["hair:bones"] = bf;
+  u.int_field(u.id("hair_bones"), bf, hair_bones_, 1, 16);
+  u.tooltip("The chain's length from the scalp to the tip: more bends more smoothly and costs more to simulate.");
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti go{b.right() - u.px(184), b.y + u.px(4), u.px(84), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["hair:Rig"] = go, u.button_rects["hair:Cancel"] = cancel;
+  if (u.button(cancel, "Cancel")) return close();
+  if (!u.button(go, "Rig")) return;
+  close();
+  command(strprintf("hair rig %d %d", hair_locks_, hair_bones_));
+}
+
 /* Task 0273: the bakes' settings - the size, the samples (mesh maps), the UVs kept or laid out anew. */
 void Editor::draw_bake_dialog(const std::function<void()> &close) {
   auto &u = ui_;
@@ -3139,7 +3164,7 @@ void Editor::draw_smat_dialog(const std::function<void()> &close) {
  * go on, clearing, and lifting the sketch off the picture into 3D. */
 void Editor::draw_sketch_pen_menu() {
   auto &u = ui_;
-  u.submenu("Pen Colour", u.px(160), [this] {
+  u.submenu("Pen Color", u.px(160), [this] {
     static const char *const kNames[] = {"Ink", "Pencil Grey", "Red", "Blue", "Green", "White"};
     static const char *const kHex[] = {"202020", "808080", "D03030", "3060D0", "30A050", "F0F0F0"};
     for (int k = 0; k < 6; k++)
@@ -3932,6 +3957,10 @@ void Editor::draw_dialogs() {
           close();
         });
         break;
+      case Dialog::HairRig:  // (task 0291)
+        title("Rig Hair from Mesh");
+        draw_hair_rig_dialog(close);
+        break;
       case Dialog::Bake:  // (task 0273)
         title(bake_mode_ == 0 ? "Bake Mesh Maps" : "Bake Textures");
         draw_bake_dialog(close);
@@ -4023,11 +4052,11 @@ void Editor::draw_dialogs() {
         const int bw = u.px(110), bh = b.h - u.px(8), by = b.y + u.px(4);
         const Recti apply{b.x + u.px(12), by, bw, bh}, live{b.x + u.px(12) + bw + u.px(6), by, bw, bh}, cancel{b.right() - u.px(92), by, u.px(80), bh};
         if (u.record_buttons) u.button_rects["bool:Apply"] = apply, u.button_rects["bool:Modifier"] = live, u.button_rects["bool:Cancel"] = cancel;
-        if (u.button_enabled(apply, "Apply now", meshes.size() >= 2, "Select two or more mesh objects.")) {
+        if (u.button_enabled(apply, "Apply Now", meshes.size() >= 2, "Select two or more mesh objects.")) {
           close();
           boolean_selected(boolean_op_, true, boolean_kept_);
         }
-        else if (u.button_enabled(live, "Live modifier", meshes.size() >= 2, "Select two or more mesh objects.")) {
+        else if (u.button_enabled(live, "Live Modifier", meshes.size() >= 2, "Select two or more mesh objects.")) {
           close();
           boolean_selected(boolean_op_, false, boolean_kept_);
         }
@@ -4091,7 +4120,7 @@ void Editor::draw_dialogs() {
         int ti = std::max(0, ui::theme_index(theme_name_));
         if (u.combo(u.id("pref_theme"), {rt.x + u.px(160), rt.y + u.px(2), u.px(160), rt.h - u.px(4)}, ti, ui::kThemeNames, ui::kThemeCount))
           set_theme(ui::kThemeNames[ti]);
-        u.tooltip("The editor's colours: Dark (Blendity's), Light, Emiliano Light / Dark (from your site's palette), or High Contrast\n"
+        u.tooltip("The editor's colors: Dark (Blendity's), Light, Emiliano Light / Dark (from your site's palette), or High Contrast\n"
                   "(white on near-black, every text at WCAG's 4.5:1 or more, a yellow focus ring).");
         Recti r2 = u.popup_row(u.row_h() + u.px(4));
         u.label({r2.x + u.px(12), r2.y, u.px(140), r2.h}, "Move snap");
@@ -4107,6 +4136,14 @@ void Editor::draw_dialogs() {
         if (u.checkbox({ru.x + u.px(320), ru.y + u.px(2), ru.h - u.px(4), ru.h - u.px(4)}, update_previews_)) save_prefs();
         u.label({ru.x + u.px(320) + ru.h, ru.y, u.px(200), ru.h}, "Include every PR's build");
         u.tooltip("Off: only released versions (v0.10.0...). On: also preview builds of single pull requests, when published.");
+        Recti rg = u.popup_row(u.row_h() + u.px(4));  // (task 0291: what `layoutguide on|off` set)
+        u.label({rg.x + u.px(12), rg.y, u.px(140), rg.h}, "Layout guides");
+        bool guides = guides_enabled_;
+        const Recti gb{rg.x + u.px(160), rg.y + u.px(2), rg.h - u.px(4), rg.h - u.px(4)};
+        if (u.record_buttons) u.button_rects["pref:guides"] = gb;
+        if (u.checkbox(gb, guides)) command(guides ? "layoutguide on" : "layoutguide off");
+        u.label({gb.right() + u.px(6), rg.y, u.px(260), rg.h}, "Show each layout's purpose and first steps");
+        u.tooltip("The strip under a layout's tabs saying what the layout is for, until Got it; Window > Layouts > Reset Guides shows them again.");
         draw_libraries_settings();
         draw_moonray_settings();
         draw_ffmpeg_settings();  // (task 0288)

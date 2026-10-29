@@ -272,14 +272,14 @@ void Editor::draw_layer_row(int i, const Recti &row, bool child) {
   if (mid) {
     float op = l.opacity;
     if (u.slider(u.id(("layer_opacity" + std::to_string(i)).c_str()), {x, top, slider_w, a}, op, 0.0f, 1.0f)) l.opacity = op, layers_opacity_dirty_ = true;
-    u.tooltip("Opacity: the layer's strokes mixed in by this much, together (two overlapping strokes stay one tone)");
+    u.tooltip("Opacity: the layer's strokes mixed in by this much, together (two overlapping strokes stay one tone).");
     x += slider_w + u.px(4);
   }
   if (layers_opacity_dirty_ && !in.down[0]) layers_opacity_dirty_ = false, mark_changed("Sketch Layer Opacity");  // (once the slider is let go)
   if (!wide) return;
   int blend = std::max(0, std::min(3, l.blend));
   if (u.combo(u.id(("layer_blend" + std::to_string(i)).c_str()), {x, top, combo_w, a}, blend, kBlendNames, 4)) l.blend = blend, mark_changed("Sketch Layer Blend");
-  u.tooltip("How the layer's colour meets what is under it: Multiply darkens, Screen lightens, Overlay does both");
+  u.tooltip("How the layer's color meets what is under it: Multiply darkens, Screen lightens, Overlay does both.");
 }
 
 /* The name: a press on it or the thumbnail picks the layer, a drag reorders (the display slot is the drag's index),

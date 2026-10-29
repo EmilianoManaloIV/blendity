@@ -297,7 +297,7 @@ struct FillLayer : TextureLayerBase<FillLayer> {
     r.field("Metallic", metallic, 0.01f, 0.0f, 1.0f);
     r.color("Emission", emission);
     r.help("One value per channel over the whole surface (Substance's fill layer); the channels it writes are its\n"
-           "targets, so a fill of Metallic alone leaves the colour below.");
+           "targets, so a fill of Metallic alone leaves the color below.");
   }
   LayerSample sample(float, float, const LayerContext &) const override {
     LayerSample s;
@@ -368,7 +368,7 @@ struct AnchorLayer : TextureLayerBase<AnchorLayer> {
   void reflect(Reflector &r) override {
     r.text("Layer", layer);
     r.help("The name of a layer below whose mask this reads (its Name field): an edge mask made once, read by the\n"
-           "colour layer and the roughness layer alike.");
+           "color layer and the roughness layer alike.");
   }
   bool is_generator() const override { return false; }
   void apply(TexPlanes &p, const LayerContext &c) const override {
@@ -523,7 +523,7 @@ struct PosterizeLayer : TextureLayerBase<PosterizeLayer> {
   PosterizeLayer() { targets = TargetAlbedo; }
   void reflect(Reflector &r) override {
     r.field("Levels", levels, 2, 32);
-    r.help("How many values the colour keeps (its hue and saturation stay): the flat tones of a hand-painted texture.");
+    r.help("How many values the color keeps (its hue and saturation stay): the flat tones of a hand-painted texture.");
   }
   bool is_generator() const override { return false; }
   void apply(TexPlanes &p, const LayerContext &) const override {
@@ -590,7 +590,7 @@ struct CavityLayer : TextureLayerBase<CavityLayer> {
   CavityLayer() { targets = TargetAlbedo; }
   void reflect(Reflector &r) override {
     r.field("Strength", strength, 0.05f, 0.0f, 4.0f);
-    r.help("The occlusion raised to this power multiplies the colour: 1 as baked, above it deeper crevices, below it a hint.");
+    r.help("The occlusion raised to this power multiplies the color: 1 as baked, above it deeper crevices, below it a hint.");
   }
   bool is_generator() const override { return false; }
   float factor(const LayerContext &c, float u, float v) const {

@@ -2,6 +2,110 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 315): the bridges in the engines (task 0295)
+
+**Asked:** the user (2026-10-29, /plan): "Finish all open tasks and maintain HCI consistency. Provide also a write-up
+that includes a checklist to test all features within the program so I can see if certain aspects are efficient";
+then "Do another HCI pass to test all current live features in the program; update anything that we may have missed."
+
+**Added**
+- **Unity 6000.6.7f1:**
+  - both EditMode tests pass in batch mode, the new one connecting by itself to `tools/livelink_fake_server.py`;
+  - fixed: a second auto-connect no longer drops a live link, and opening another scene starts the link again so
+    the objects are built in it.
+- **Unreal 5.8:** the plugin no longer asks for C++17 (5.8 refuses it). Its build waits for the .NET Framework SDK
+  on this machine.
+- **Godot:** not installed yet.
+
+**Checked**
+- Unity: `RecordedSessionLeavesTheScene` and `ConnectsByItselfAndAppliesTheSession` pass; the package imports with
+  no warning.
+- Unit checks (round 315): Windows, in render-cache verify mode, 13,483, 0 failed (1175 tests), 0 stale
+  pictures. Linux with libraries: 13022, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed run again alone; on Linux two tests failed alone and were fixed in the tests (the sweep's count of elided labels depends on the platform's font and is reported, not held; the Preferences helper now waits for a control to stay put, as MoonRay's row appears once found and moves the rows below), and the Linux editor and hci groups then passed, 1307 and 24 checks.)
+
+## 2026-10-29 (round 314): the test checklist and the write-up (task 0294)
+
+**Asked:** the user (2026-10-29, /plan): "Finish all open tasks and maintain HCI consistency. Provide also a write-up
+that includes a checklist to test all features within the program so I can see if certain aspects are efficient";
+then "Do another HCI pass to test all current live features in the program; update anything that we may have missed."
+
+**Added**
+- **The checklist:** 118 tasks in 17 areas (`docs/hci/checklist.json`), each with:
+  - steps by menu names;
+  - the expected result;
+  - a target time from the keystroke-level model or an estimate on its rules.
+- **An interactive page:** tick, time with a stopwatch; slow is over 1.5x the target. Results are kept for Claude
+  to read back, and export as CSV / JSON.
+- **`docs/hci/checklist.md`** and `tools/hci_checklist.py` (`--check`: every control a task names still exists).
+- **The write-up** of rounds 291-313 (`docs/tasks/0294`).
+
+**Checked**
+- `hci_checklist.py --check`: 118 tasks, 0 control names missing.
+- Round 315's unit-check line covers this round (rounds 311 to 315 landed together).
+
+## 2026-10-29 (round 313): the HCI pass over every live feature (task 0293)
+
+**Asked:** the user (2026-10-29, /plan): "Finish all open tasks and maintain HCI consistency. Provide also a write-up
+that includes a checklist to test all features within the program so I can see if certain aspects are efficient";
+then "Do another HCI pass to test all current live features in the program; update anything that we may have missed."
+
+**Added**
+- **The live sweep** (`tests/test_hci.cpp`, `--group hci`): every layout, window, menu, submenu, dialog and component
+  Inspector opened at six configurations (826 screens, about 4 s), with each control checked.
+- **The screenshot review** (`docs/hci/review-313.md`): 12 findings rated on Nielsen's scale.
+- **The fixes:**
+  - a button label that doesn't fit ends in "..." with the whole label as its tooltip;
+  - the Editing window, Install a Bridge, the UV editor's toolbars and the Sequencer lay out for a narrow pane;
+  - the Profiler's labels no longer cover its title;
+  - Preferences' empty reason and the console name in the AI row are fixed;
+  - the Dark theme's dim text is at 4.6:1 (was 3.5);
+  - tooltips where controls had none.
+
+**Checked**
+- The sweep's counts held in the suite (2 elided, 6 rows without a tooltip, 0 overlaps); the full matrix at
+  `tools/hci_sweep_baseline.json`; 0 popups outside the window, 0 disabled buttons without a reason.
+- Round 315's unit-check line covers this round (rounds 311 to 315 landed together).
+
+## 2026-10-29 (round 312): interface conventions, checked (task 0292)
+
+**Asked:** the user (2026-10-29, /plan): "Finish all open tasks and maintain HCI consistency. Provide also a write-up
+that includes a checklist to test all features within the program so I can see if certain aspects are efficient";
+then "Do another HCI pass to test all current live features in the program; update anything that we may have missed."
+
+**Added**
+- **Five conventions written down (USABILITY.md) and checked by `tools/hci_consistency_audit.py` at 0:**
+  - "..." on a control that asks first;
+  - Title Case on buttons and menus;
+  - "Color" in what the artist reads (about 60 strings; saved field names kept);
+  - tooltips as sentences;
+  - no command names.
+
+**Checked**
+- The audit at 0, with literals parsed so a ';' or a URL inside a string hides nothing; the console audit at 1.
+- Round 315's unit-check line covers this round (rounds 311 to 315 landed together).
+
+## 2026-10-29 (round 311): the last console-only items (task 0291)
+
+**Asked:** the user (2026-10-29, /plan): "Finish all open tasks and maintain HCI consistency. Provide also a write-up
+that includes a checklist to test all features within the program so I can see if certain aspects are efficient";
+then "Do another HCI pass to test all current live features in the program; update anything that we may have missed."
+
+**Added**
+- **The Animation key menu's In / Out slopes:** typed, one undo step; a Free key keeps both sides one.
+- **Rig Hair from Mesh...:** a dialog asks for the locks and the bones.
+- **An Anchor's Layer:** a dropdown of the texture's named layers.
+- **A Sequencer trigger's key:** captured by a press. Ctrl / Alt chords and a click elsewhere don't take it.
+- **The Wheel editor:** Pick a Command... (searchable; Enter takes the first match, Esc closes only the list) and
+  Into Ring as a dropdown; the palette's Add to the Wheel offers the rings.
+- **Preferences:** Layout guides.
+- `ui::Context::open_dropdown` and `close_popup`: a list over a dialog closes alone.
+
+**Checked**
+- `tests_round311` and the reviews' cases (the slopes, the trigger capture, the picker, the anchor list) by real
+  events; the reach table at 31 verbs.
+- Round 315's unit-check line covers this round (rounds 311 to 315 landed together).
+
 ## 2026-10-29 (round 310): the console's last mentions, the reach table, measured (task 0290)
 
 **Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them

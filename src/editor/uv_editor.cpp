@@ -168,9 +168,13 @@ void Editor::draw_uv_editor(const Recti &r) {
       {"Seams from Sharp", "seams_from_sharp_unwrap", "Mark a seam on every sharp edge (faces meeting at more than the Seam Angle, or marked sharp),\n"
        "then unwrap. Blender: Select Sharp Edges, Mark Seam, Unwrap."}};
   std::vector<const B *> more;  // (task 0255: a narrow window folds the rest into a menu instead of dropping them)
+  /* Task 0293: narrower than the bar's two halves, the right-hand half (Parts, materials, background, Stretch) gets a row
+   * of its own below, and the tools fold into More only for More's own room. */
+  const bool narrow = r.w < u.px(780);
+  const int fold = narrow ? bar.right() - u.font.text_width("More") - u.px(20) : bar.right() - u.px(470) - u.px(48);
   for (const B &b : buttons) {
     int w = u.font.text_width(b.label) + u.px(14);
-    if (x + w > bar.right() - u.px(470) - u.px(48)) {  // (task 0287: room for More left of the Parts button)
+    if (x + w > fold) {  // (task 0287: room for More left of the Parts button)
       more.push_back(&b);
       continue;
     }
@@ -188,17 +192,39 @@ void Editor::draw_uv_editor(const Recti &r) {
         if (ui_.menu_item(b->label)) uv_op(b->op);
     });
   }
-  draw_uv_parts_options({bar.right() - u.px(466), y, u.px(62), h});  // (task 0287)
-  draw_uv_material_filter({bar.right() - u.px(400), y, u.px(144), h});
-  static const char *bgs[] = {"Material Texture", "UV Grid", "Color Grid", "None"};
-  if (u.combo(u.id("uv_bg"), {bar.right() - u.px(250), y, u.px(150), h}, uv_bg_, bgs, 4)) {
+  int rows = 1;
+  Recti side = bar;  // (where the right-hand half goes: this bar's right, or a row of its own when narrow)
+  int sx = bar.right() - u.px(466);
+  if (narrow) {
+    side = {r.x, r.y + bh, r.w, bh};
+    u.canvas.fill_rect(side, u.theme.bar);
+    sx = side.x + u.px(6);
+    rows = 2;
   }
-  if (u.button({bar.right() - u.px(94), y, u.px(88), h}, "Stretch", uv_stretch_)) uv_stretch_ = !uv_stretch_;
+  /* A control's place on the side row; in a narrow window one that doesn't fit starts another row. */
+  auto place = [&](int w, int gap) {
+    if (narrow && sx + w > side.right() - u.px(4)) {
+      side = {r.x, side.bottom(), r.w, bh};
+      u.canvas.fill_rect(side, u.theme.bar);
+      sx = side.x + u.px(6);
+      rows++;
+    }
+    const Recti at{sx, side.y + u.px(3), w, h};
+    sx += w + gap;
+    return at;
+  };
+  draw_uv_parts_options(place(u.px(62), u.px(4)));  // (task 0287)
+  draw_uv_material_filter(place(u.px(144), narrow ? u.px(4) : u.px(6)));
+  static const char *bgs[] = {"Material Texture", "UV Grid", "Color Grid", "None"};
+  if (u.combo(u.id("uv_bg"), place(u.px(150), narrow ? u.px(4) : u.px(6)), uv_bg_, bgs, 4)) {
+  }
+  u.tooltip("What the UV square shows behind the faces: the material's texture, or a grid to judge stretching by.");
+  if (u.button(place(u.px(88), 0), "Stretch", uv_stretch_)) uv_stretch_ = !uv_stretch_;
   u.tooltip("Color faces by area distortion: blue = compressed, green = even, red = stretched.");
 
-  Recti bar2{r.x, r.y + bh, r.w, bh};
-  draw_uv_tool_row(bar2);
-  Recti view{r.x, r.y + 2 * bh, r.w, r.h - 2 * bh};
+  Recti bar2{r.x, r.y + rows * bh, r.w, bh};
+  rows += draw_uv_tool_row(bar2);
+  Recti view{r.x, r.y + rows * bh, r.w, r.h - rows * bh};
   u.canvas.fill_rect(view, Color::hex(0x262626));
   u.canvas.push_clip(view);
   GameObject *g = nullptr;
@@ -858,11 +884,12 @@ void Editor::draw_uv_parts_options(const Recti &r) {
 }
 
 /* The second toolbar row: selection mode and sync, selection, quick transforms. */
-void Editor::draw_uv_tool_row(const Recti &bar) {
+int Editor::draw_uv_tool_row(const Recti &bar) {
   auto &u = ui_;
   u.canvas.fill_rect(bar, u.theme.strip);
   int x = bar.x + u.px(6);
-  const int y = bar.y + u.px(3), h = bar.h - u.px(6);
+  int y = bar.y + u.px(3);
+  const int h = bar.h - u.px(6);
   static const char *kModes[] = {"Vertex", "Face", "Island"};
   for (int k = 0; k < 3; k++) {
     const int w = u.font.text_width(kModes[k]) + u.px(14);
@@ -901,37 +928,60 @@ void Editor::draw_uv_tool_row(const Recti &bar) {
       {"Fit", [this] { uv_transform("fit"); }, "Scale the selection to fill the 0-1 square (keeps its proportions)."},
       {"Center", [this] { uv_transform("center"); }, "Move the selection to the middle of the 0-1 square."},
   };
+  /* Task 0293: narrower than the row's two halves, the exact values (rotate, scale, move by) get a row of their own. */
+  const bool narrow = bar.w < u.px(760);
+  const int limit = narrow ? bar.right() - u.px(4) : bar.right() - u.px(330);
   for (const B &b : buttons) {
     const int w = u.font.text_width(b.label) + u.px(12);
-    if (x + w > bar.right() - u.px(330)) break;
+    if (x + w > limit) break;
     if (u.button({x, y, w, h}, b.label)) b.fn();
     u.tooltip(b.tip);
     x += w + u.px(2);
   }
   /* Align: one dropdown instead of six buttons. */
-  if (x + u.px(84) <= bar.right() - u.px(330)) {
+  if (x + u.px(84) <= limit) {
     static const char *kAlign[] = {"Align...", "Left", "Right", "Top", "Bottom", "Straight U", "Straight V"};
     static const char *kOps[] = {"", "align_left", "align_right", "align_top", "align_bottom", "align_u", "align_v"};
     int pick = 0;
     if (u.combo(u.id("uv_align"), {x, y, u.px(80), h}, pick, kAlign, 7) && pick > 0) uv_transform(kOps[pick]);
     u.tooltip("Line the selected UVs up on an edge of their bounds, or straighten them into one vertical / horizontal line.");
   }
-  /* Exact values: rotate by, scale by, move by. */
-  int rx = bar.right() - u.px(326);
+  /* Exact values: rotate by, scale by, move by. Narrow, they start a row of their own and wrap again if it runs out. */
+  int rx = bar.right() - u.px(326), rows = 1;
+  Recti row = bar;
+  auto new_row = [&] {
+    row = {bar.x, row.bottom(), bar.w, bar.h};
+    u.canvas.fill_rect(row, u.theme.strip);
+    rx = row.x + u.px(6), y = row.y + u.px(3);
+    rows++;
+  };
+  if (narrow) new_row();
+  auto at = [&](int w) {  // (a control's place; a new row when it would run past the window)
+    if (narrow && rx + w > bar.right() - u.px(4)) new_row();
+    const Recti r{rx, y, w, h};
+    return r;
+  };
   auto num = [&](const char *id, float &v, float speed, const char *tip) {
-    u.float_field(u.id(id), {rx, y, u.px(46), h}, v, speed, -10000.0f, 10000.0f, "%.3g");
+    u.float_field(u.id(id), at(u.px(46)), v, speed, -10000.0f, 10000.0f, "%.3g");
     u.tooltip(tip);
     rx += u.px(48);
   };
   num("uv_rot", uv_rot_field_, 1.0f, "Angle (degrees) for Rotate.");
-  if (u.button({rx, y, u.px(50), h}, "Rotate")) uv_transform("rotate", uv_rot_field_);
+  const bool rot = u.button(at(u.px(50)), "Rotate");
+  u.tooltip("Turn the selected UVs by the angle beside it, around their middle.");
+  if (rot) uv_transform("rotate", uv_rot_field_);
   rx += u.px(54);
   num("uv_scl", uv_scale_field_, 0.01f, "Factor for Scale.");
-  if (u.button({rx, y, u.px(44), h}, "Scale")) uv_transform("scale", uv_scale_field_);
+  const bool scl = u.button(at(u.px(44)), "Scale");
+  u.tooltip("Scale the selected UVs by the factor beside it, around their middle.");
+  if (scl) uv_transform("scale", uv_scale_field_);
   rx += u.px(48);
   num("uv_mu", uv_move_u_, 0.005f, "U offset for Move.");
   num("uv_mv", uv_move_v_, 0.005f, "V offset for Move.");
-  if (u.button({rx, y, u.px(40), h}, "Move")) uv_transform("move", uv_move_u_, uv_move_v_);
+  const bool mov = u.button(at(u.px(40)), "Move");
+  u.tooltip("Move the selected UVs by the U and V offsets beside it.");
+  if (mov) uv_transform("move", uv_move_u_, uv_move_v_);
+  return rows;
 }
 
 }  // namespace bl

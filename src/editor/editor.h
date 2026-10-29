@@ -1268,6 +1268,19 @@ class Editor {
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
   bool prefs_open_for_test() const { return dialog_ == Dialog::Preferences; }
+  bool hair_dialog_for_test() const { return dialog_ == Dialog::HairRig; }  // (task 0291)
+  /* Task 0293's sweep: every dialog by its kind, the UI scale, the layouts. */
+  int dialog_count_for_test() const { return (int)Dialog::HairRig + 1; }
+  void open_dialog_for_test(int k) { dialog_ = (Dialog)k; }
+  int dialog_kind_for_test() const { return (int)dialog_; }
+  void set_ui_scale_for_test(float s) { ui_scale_pref_ = s, apply_ui_scale(); }
+  std::vector<std::string> workspace_names_for_test() const { return workspace_names(); }
+  int fb_width_for_test() const { return fb_.width; }
+  int fb_height_for_test() const { return fb_.height; }
+  int text_width_for_test(const std::string &s) { return ui_.font.text_width(s); }
+  bool guides_enabled_for_test() const { return guides_enabled_; }
+  std::vector<WheelSlice> wheel_set_for_test(const std::string &mode) { return wheel_set(mode); }
+  std::vector<std::string> anchor_layer_names_for_test(const ProceduralTexture &t) const { return anchor_layer_names(t); }
   /* The import preview's (task 0152). */
   bool import_preview_open_for_test() const { return ipv_.open; }
   bool begin_import_preview_for_test(const std::string &path) { return begin_import_preview(path, true) && ipv_.open; }
@@ -3573,6 +3586,16 @@ class Editor {
   /* Task 0289: animation, rigging and the Inspector without the console. */
   void draw_puppet_body_items();
   void draw_ragdoll_event_items(GameObject *b, const std::string &here);
+  /* Task 0291: the last console-only items. */
+  void anim_set_key_tangent(size_t track, float frame, int mode, float in, float out);
+  void draw_key_slope_fields();
+  void draw_hair_rig_dialog(const std::function<void()> &close);
+  int hair_locks_ = 0, hair_bones_ = 3;
+  int seq_key_capture_ = -1;  // (the trigger whose key the next key press sets; -1 none)
+  void seq_capture_trigger_key(size_t k);
+  std::string wheel_pick_search_;
+  std::vector<std::string> wheel_ring_choices(const std::string &mode);
+  std::vector<std::string> anchor_layer_names(const ProceduralTexture &t) const;
   void autopose_set_lock(GameObject &b, bool on);
   std::vector<std::string> gait_files_;
   double gait_files_time_ = -100;
@@ -4692,7 +4715,7 @@ class Editor {
   bool uv_sync_ = true;        // UV face selection = Edit Mode face selection (Blender: UV Sync Selection)
   float uv_rot_field_ = 90.0f, uv_scale_field_ = 2.0f, uv_move_u_ = 0.1f, uv_move_v_ = 0.0f;
   void uv_sync_to_faces(const Mesh &m);
-  void draw_uv_tool_row(const Recti &bar);
+  int draw_uv_tool_row(const Recti &bar);  // (the rows it used: 2 when narrow, task 0293)
 
  public:
   /* The UV editor's selection (all / none / invert / islands / face f / island f) and transforms of it
@@ -4816,7 +4839,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat, HairRig } dialog_ = Dialog::None;
   int dialog_shown_ = 0;  // which dialog has had its popup opened (task 0290: this editor's own - a file static carried one editor's open dialog into the next)
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */

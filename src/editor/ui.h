@@ -30,7 +30,7 @@ struct Theme {
   uint32_t border = Color::hex(0x191919);
   uint32_t separator = Color::hex(0x232323);
   uint32_t text = Color::hex(0xD2D2D2);
-  uint32_t text_dim = Color::hex(0x8C8C8C);
+  uint32_t text_dim = Color::hex(0xA3A3A3);  // (task 0293: 4.6:1 on the panel; 0x8C8C8C was 3.5)
   uint32_t text_bright = Color::hex(0xF0F0F0);
   uint32_t field = Color::hex(0x2A2A2A);
   uint32_t field_border = Color::hex(0x212121);
@@ -156,6 +156,7 @@ class Context {
   /* A menu row right-clicked this frame (task 0189: Quick Favorites takes its command by the row's text). */
   std::string favorite_request;
   std::unordered_map<std::string, Recti> button_rects;
+  std::unordered_map<std::string, std::string> tooltip_texts;  // (tests, task 0293: a widget's tooltip by its rect, "x,y,w,h")
   /* Absolute time at which the UI wants to be woken (tooltips, caret blink); 0 = never. */
   double next_wakeup = 0;
   std::function<std::string()> clipboard_get;
@@ -239,9 +240,14 @@ class Context {
 
   /* --- popups & menus (drawn on top at end_frame) --- */
   void open_popup(Id i, const Recti &anchor, bool submenu_of_top = false);
+  /* A popup opened from a control as a combo's list is (task 0291): inside a dialog it stacks on it, below the
+   * control, and a row picked closes it alone - not the dialog. */
+  void open_dropdown(Id i, const Recti &anchor);
+  std::string elide(const std::string &text, int room);  // (task 0293: cut to fit with "...")
   bool popup_open(Id i) const;
   void close_popups();
   void close_popups_above(Id i);
+  void close_popup(Id i);  // (that popup and those above it; the ones below stay - task 0291)
   /* Declares the popup body for this frame; only runs if open. */
   void popup(Id i, int width, std::function<void()> body);
   bool any_popup_open() const { return !popups_.empty(); }
@@ -354,6 +360,8 @@ class Context {
   int popup_cursor_y_ = 0;
   Recti popup_area_;
   Id hover_id_ = 0;
+  uint64_t elided_key_ = 0;  // (task 0293: the button whose label was cut this frame, and its whole label)
+  std::string elided_label_;
   double hover_start_ = 0;
   std::string tooltip_text_;
   Recti tooltip_anchor_;

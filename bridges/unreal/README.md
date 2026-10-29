@@ -3,8 +3,10 @@
 An Unreal Engine 5.3+ editor plugin (C++) that keeps actors in the open level in step with the scene open in Blendity,
 as you work (task 0277; the protocol is [docs/LIVELINK.md](../../docs/LIVELINK.md)). One way: Blendity is the source.
 
-**Status:** written; its protocol layer is compiled and tested in Blendity's own suite on every build; the plugin itself
-has not yet been built or run in Unreal (its automation test below runs once Unreal is installed).
+**Status:** written; its protocol layer is compiled and tested in Blendity's own suite on every build. Unreal 5.8's
+BuildPlugin (2026-10-29) reached the plugin's rules and stopped on the machine: Unreal's build tool needs the .NET
+Framework SDK 4.6 or newer, which that Visual Studio Build Tools install lacked. It also showed that 5.8 refuses C++17,
+so the plugin now takes the engine's own standard. The build and the automation test below run once that SDK is in.
 
 ## Install
 

@@ -148,7 +148,10 @@ void Editor::draw_tools_window(const Recti &r) {
       if (u.button({rr.x + u.px(4), rr.y, gw, rr.h}, "Guides from Edges")) guides_from_selected_edges();
       u.tooltip("Edit Mode: a construction line along each selected edge.");
       if (u.button({rr.x + u.px(6) + gw, rr.y, gw, rr.h}, show_guides_ ? "Hide Guides" : "Show Guides", show_guides_)) show_guides_ = !show_guides_;
-      if (u.button({rr.x + u.px(8) + 2 * gw, rr.y, gw, rr.h}, strprintf("Clear (%zu)", scene_->guides.size()))) {
+      u.tooltip("The construction lines drawn or hidden (they stay, and still snap, when hidden).");
+      const bool clear = u.button({rr.x + u.px(8) + 2 * gw, rr.y, gw, rr.h}, strprintf("Clear (%zu)", scene_->guides.size()));
+      u.tooltip("Every construction line removed (Undo brings them back).");
+      if (clear) {
         scene_->guides.clear();
         mark_changed("Clear Guides");
       }

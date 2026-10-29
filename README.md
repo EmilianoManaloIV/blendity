@@ -253,6 +253,9 @@ Rigify; T or A pose); motion trails, onion skin, a Zoetrope, Reach, Motion Check
 Rounds 306-310: the rest of the console-only verbs in menus, panels and Preferences - the sketch pen and canvases, Anime Look,
 grass, reference images from the side and top, UV material lists, the render range, MoonRay and AI checks, contacts and
 ragdoll events, gait files, vertex group and shape key pickers - and a test that every one stays reachable.
+Rounds 311-315: the last console-only items in the interface; five interface conventions checked; a live sweep of every
+screen with the fixes it found (labels that don't fit, narrow panes, contrast); a 118-task checklist with target times
+(docs/hci/checklist.md); the Unity bridge run in Unity 6000.6.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -283,7 +286,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13448 unit checks in 1170 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13483 unit checks in 1175 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

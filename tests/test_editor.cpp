@@ -2734,7 +2734,9 @@ static void tests_round205() {
     ed.step_frame_headless(typed("hair"));
     ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
     ed.step_frame_headless();
-    CHECK(ed.last_palette_command_for_test() == "hair rig" && !ed.ui_for_test().any_popup_open());
+    CHECK(ed.last_palette_command_for_test() == "hair dialog" && ed.hair_dialog_for_test());  // (task 0291: its locks and bones asked first)
+    ed.close_dialog_for_test();
+    ed.step_frame_headless();
     CHECK(ed.palette_names_for_test("")[0] == "Rig Hair from Mesh");  // (used lately: first with no query)
     ed.command("palette run create cube");
     CHECK(ed.last_palette_command_for_test() == "create Cube" && ed.active_object_for_test() && ed.active_object_for_test()->name.find("Cube") == 0);
@@ -5423,7 +5425,7 @@ static void tests_round279() {
 static void tests_round308() {
   test("render, MoonRay and AI verbs without the console (task 0288): the Render window's First / Last / Frame Rate and Sequence Folder; Preferences' FFmpeg path typed; AI Inbetweening's From a File... (MoonRay's row and the Check buttons need an install: not here); the Animation window's AI options (the span, the fit on or off) - all by real clicks and keys", [] {
     Editor ed;
-    ed.init_headless(1500, 760);  // (Preferences taller than the window on every system - as on Linux, where MoonRay's own row is drawn)
+    ed.init_headless(1500, 640);  // (Preferences taller than the window on every system - as on Linux, where MoonRay's own row is drawn)
     ed.record_buttons_for_test(true);
     using ET = platform::EventType;
     auto press = [&](const Recti &r) {
@@ -5474,16 +5476,24 @@ static void tests_round308() {
     /* Preferences: FFmpeg typed. */
     ed.command("preferences");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
-    auto pref_reach = [&](const std::string &key) {  // (Preferences scrolled until the control is wholly inside it)
+    auto pref_reach = [&](const std::string &key) {  // (Preferences scrolled until the control is wholly inside it, and stays put)
+      Recti last{-1, -1, 0, 0};
       for (int i = 0; i < 80; i++) {
         Recti a;
         const Recti dlg = ed.top_popup_rect_for_test();
         if (!ed.button_rect_for_test(key, a)) return false;
-        if (a.y >= dlg.y && a.bottom() <= dlg.bottom()) return true;
+        const bool still = a.x == last.x && a.y == last.y;  // (a row can appear above it - MoonRay's, once found - and move it)
+        last = a;
+        if (a.y >= dlg.y && a.bottom() <= dlg.bottom()) {
+          if (still) return true;
+          ed.step_frame_headless();
+          continue;
+        }
         ed.step_frame_headless({mouse_ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
         platform::Event w = mouse_ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
         w.wheel_y = a.bottom() > dlg.bottom() ? -1.0f : 1.0f;
         ed.step_frame_headless({w});
+        ed.step_frame_headless();  // (the controls drawn where the scroll put them)
       }
       return false;
     };
@@ -5704,7 +5714,7 @@ struct ConsoleReach {
   const char *verb, *setup, *path;
 };
 static const ConsoleReach kConsoleReach[] = {
-    {"sketch color", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Pen Colour>menu:Red"},
+    {"sketch color", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Pen Color>menu:Red"},
     {"sketch steady", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Steadiness>menu:Strong"},
     {"sketch clear", "layout Default", "menubar:Mesh>submenu:Draw>menu:Clear the Sketch"},
     {"sketchguide french", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Guides>submenu:French Curve Shape>menu:Spiral"},
@@ -5733,7 +5743,223 @@ static const ConsoleReach kConsoleReach[] = {
     {"autopose lock", "layout Animation;select Cube;component Animation", "open:Puppet>menu:Lock the Selected Bone"},
     {"motioncheck", "layout Animation;select Cube;component Animation", "open:Puppet>menu:Motion Check"},
     {"anim trails", "layout Animation;select Cube;component Animation", "open:Puppet>menu:Motion Trails"},
+    {"hair rig locks bones", "layout Default;select Sphere;hair dialog", "hair:locks"},
+    {"layoutguide on|off", "layout Default;preferences", "pref:guides"},
 };
+
+/* A layer's text field read back (task 0291's Anchor): the other kinds of field are skipped. */
+static std::string texture_layer_text_for_test(TextureLayer &l, const char *name) {
+  struct TextReader : Reflector {
+    const char *want;
+    std::string got;
+    void field(const char *, float &, float, float, float) override {}
+    void field(const char *, int &, int, int) override {}
+    void field(const char *, bool &) override {}
+    void field(const char *, Vec3 &) override {}
+    void color(const char *, Vec3 &) override {}
+    void enumeration(const char *, int &, const char *const *, int) override {}
+    void text(const char *n, std::string &v) override {
+      if (std::strcmp(n, want) == 0) got = v;
+    }
+    void mesh(const char *, MeshPtr &) override {}
+  } r;
+  r.want = name;
+  l.reflect(r);
+  return r.got;
+}
+
+static void tests_round311() {
+  test("the last console-only items (task 0291): a key's In / Out slopes typed in its menu; Rig Hair from Mesh... asks the locks and bones; an Anchor's layer picked from the texture's named layers; the Wheel's Add from the palette's list into a ring chosen from a dropdown; Preferences' Layout guides - all by real clicks and keys", [] {
+    using ET = platform::EventType;
+    auto clicker = [](Editor &ed) {
+      return [&ed](const std::string &key, int button) {
+        Recti r;
+        for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+        if (!ed.button_rect_for_test(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+        ed.step_frame_headless({mouse_ev(ET::MouseDown, r.x + r.w / 2, r.y + r.h / 2, button)});
+        ed.step_frame_headless({mouse_ev(ET::MouseUp, r.x + r.w / 2, r.y + r.h / 2, button)});
+        ed.step_frame_headless();
+        return true;
+      };
+    };
+    auto type_enter = [](Editor &ed, const std::string &text) {
+      ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+      ed.step_frame_headless(typed(text));
+      ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+      ed.step_frame_headless();
+    };
+    /* A key's slopes: the middle key's menu (a right-click in the Curves view), In typed. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.command("layout Animation");
+      ed.command("select Cube");
+      ed.command("anim new Slopes311");
+      ed.command("anim key . Position 1 0 0");
+      ed.command("anim key . Position 1 20 1");
+      ed.command("anim key . Position 1 40 0");
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const bool curves = click("Curves", 0);
+      int kx = 0, ky = 0;
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const bool point = ed.anim_curve_point_for_test(0, 20, -1, kx, ky);
+      if (point) {
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, kx, ky)});
+        ed.step_frame_headless({mouse_ev(ET::MouseDown, kx, ky, 1)});
+        ed.step_frame_headless({mouse_ev(ET::MouseUp, kx, ky, 1)});
+        ed.step_frame_headless();
+      }
+      const bool field = click("key:in", 0);
+      if (field) type_enter(ed, "0.5");
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      const AnimKey *k = clip && !clip->tracks.empty() && clip->tracks[0].keys.size() == 3 ? &clip->tracks[0].keys[1] : nullptr;
+      std::printf("    Curves %d, the key's menu by a right-click %d, In typed 0.5 %d: mode %d, in %.3f, out %.3f\n", (int)curves, (int)point, (int)field, k ? k->tangent : -1,
+                  k ? k->in_slope : 0.0f, k ? k->out_slope : 0.0f);
+      CHECK(curves && point && field && k && k->tangent == TanBroken && std::fabs(k->in_slope - 0.5f) < 1e-4f);
+      /* A Free key: Out typed sets both sides to it, as one undo step (the review's case). */
+      ed.command("anim tangent . Position 1 20 free 0.2");
+      if (point) {
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, kx, ky)});
+        ed.step_frame_headless({mouse_ev(ET::MouseDown, kx, ky, 1)});
+        ed.step_frame_headless({mouse_ev(ET::MouseUp, kx, ky, 1)});
+        ed.step_frame_headless();
+      }
+      const size_t steps = ed.undo_steps_for_test();  // (from the menu open: the typed slope's own step)
+      const bool out_field = click("key:out", 0);
+      if (out_field) type_enter(ed, "0.7");
+      clip = ed.anim_clip_for_test();
+      k = clip && !clip->tracks.empty() && clip->tracks[0].keys.size() == 3 ? &clip->tracks[0].keys[1] : nullptr;
+      std::printf("    a Free key, Out typed 0.7: mode %d, in %.3f, out %.3f, undo steps +%zu\n", k ? k->tangent : -1, k ? k->in_slope : 0.0f, k ? k->out_slope : 0.0f, ed.undo_steps_for_test() - steps);
+      CHECK(out_field && k && k->tangent == TanFree && std::fabs(k->in_slope - 0.7f) < 1e-4f && std::fabs(k->out_slope - 0.7f) < 1e-4f && ed.undo_steps_for_test() == steps + 1);
+    }
+    /* Rig Hair from Mesh...: the dialog's locks and bones reach the rig. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.command("layout Default");
+      ed.command("select Sphere");
+      ed.command("hair dialog");
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const bool open = ed.hair_dialog_for_test();
+      const bool locks = click("hair:locks", 0);
+      if (locks) type_enter(ed, "4");
+      const bool bones = click("hair:bones", 0);
+      if (bones) type_enter(ed, "2");
+      size_t before = 0, after = 0;
+      ed.scene().for_each([&](GameObject &) { before++; });
+      const bool rig = click("hair:Rig", 0);
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      ed.scene().for_each([&](GameObject &) { after++; });
+      std::printf("    the Hair Rig dialog open %d, Locks 4 %d, Bones 2 %d, Rig %d: %zu -> %zu objects (a rig of 4 locks x 2 bones adds 9 or more)\n", (int)open, (int)locks,
+                  (int)bones, (int)rig, before, after);
+      CHECK(open && locks && bones && rig && after >= before + 9 && !ed.hair_dialog_for_test());
+    }
+    /* Preferences: Layout guides off and on again. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.set_guides_for_test(true);
+      ed.command("preferences");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const bool off = click("pref:guides", 0);
+      const bool now_off = !ed.guides_enabled_for_test();
+      const bool on = click("pref:guides", 0);
+      std::printf("    Preferences' Layout guides clicked %d: off %d; again %d: on %d\n", (int)off, (int)now_off, (int)on, (int)ed.guides_enabled_for_test());
+      CHECK(off && now_off && on && ed.guides_enabled_for_test());
+    }
+    /* The Wheel: a ring made, then a command picked from the palette's list into it. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      const std::vector<Editor::WheelSlice> set = ed.wheel_set_for_test("object");
+      if (set.size() >= 8) ed.command("wheel remove object " + set.back().label);  // (room for the ring: a set holds eight)
+      ed.command("wheel ring object Tools311");
+      bool made = false;
+      for (const auto &sl : ed.wheel_set_for_test("object")) made = made || (sl.is_ring && sl.label == "Tools311");
+      std::printf("    the object set had %zu slices; the ring Tools311 made %d\n", set.size(), (int)made);
+      ed.command("preferences");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      auto pref_reach = [&](const std::string &key) {
+        for (int i = 0; i < 80; i++) {
+          Recti a;
+          const Recti dlg = ed.top_popup_rect_for_test();
+          if (!ed.button_rect_for_test(key, a)) return false;
+          if (a.y >= dlg.y && a.bottom() <= dlg.bottom()) return true;
+          ed.step_frame_headless({mouse_ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+          platform::Event w = mouse_ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+          w.wheel_y = a.bottom() > dlg.bottom() ? -1.0f : 1.0f;
+          ed.step_frame_headless({w});
+        }
+        return false;
+      };
+      const bool ring = pref_reach("wheel:ring") && click("wheel:ring", 0) && click("menu:Tools311", 0);
+      const bool picked = pref_reach("wheel:pick") && click("wheel:pick", 0);
+      if (picked) ed.step_frame_headless(typed("unwrap"));
+      ed.step_frame_headless();
+      const bool added = picked && click("menu:Unwrap (LSCM)", 0);
+      bool in_ring = false;
+      for (const auto &s : ed.wheel_set_for_test("object"))
+        if (s.is_ring && s.label == "Tools311")
+          for (const auto &r : s.ring) in_ring = in_ring || r.label.find("Unwrap") != std::string::npos;
+      std::printf("    the Wheel: Into Ring set %d, Pick a Command... opened %d, Unwrap (LSCM) clicked %d: in the ring %d; Preferences still open %d\n", (int)ring, (int)picked,
+                  (int)added, (int)in_ring, (int)ed.prefs_open_for_test());
+      CHECK(ring && picked && added && in_ring && ed.prefs_open_for_test());
+    }
+    /* An Anchor's layer from the texture's named layers. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.command("layout Texturing");
+      ed.command("select Cube");
+      ed.command("surface new Anchor311");
+      ed.command("surface add Fill");
+      ed.command("surface add Fill");
+      ed.step_frame_headless();
+      ProceduralTexturePtr pt = ed.surface_of_for_test(ed.scene().find_by_name("Cube"), nullptr);
+      CHECK(pt && pt->layers.size() >= 2);
+      if (!pt || pt->layers.size() < 2) return;
+      pt->layers[0]->name = "Edges";
+      pt->layers.back()->mask_layers.push_back(create_texture_layer("Anchor"));
+      ed.select_texture_for_test(pt);
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      bool inside = false;
+      for (int i = 0; i < 80 && !inside; i++) {  // (the Textures window scrolled until the field is in it)
+        Recti a;
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Textures);
+        if (!ed.button_rect_for_test("anchor:Layer", a) || pane.w <= 0) {
+          ed.step_frame_headless();
+          continue;
+        }
+        inside = a.y >= pane.y + 28 && a.bottom() <= pane.bottom();
+        if (inside) break;
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, pane.x + pane.w / 2, pane.y + pane.h / 2)});
+        platform::Event w = mouse_ev(ET::Wheel, pane.x + pane.w / 2, pane.y + pane.h / 2);
+        w.wheel_y = a.bottom() > pane.bottom() ? -1.0f : 1.0f;
+        ed.step_frame_headless({w});
+      }
+      std::printf("    the Anchor's field inside the Textures window %d\n", (int)inside);
+      const bool drop = inside && click("anchor:Layer", 0) && click("menu:Edges", 0);
+      const std::vector<std::string> names = ed.anchor_layer_names_for_test(*pt);
+      std::printf("    the Anchor's Layer: the choices %zu (Edges among them %d), Edges picked %d\n", names.size(), (int)(std::find(names.begin(), names.end(), "Edges") != names.end()),
+                  (int)drop);
+      const std::string layer = pt->layers.back()->mask_layers.empty() ? std::string() : texture_layer_text_for_test(*pt->layers.back()->mask_layers.back(), "Layer");
+      std::printf("    the Anchor reads '%s'\n", layer.c_str());
+      CHECK(std::find(names.begin(), names.end(), "Edges") != names.end());
+      CHECK(drop && layer == "Edges");
+    }
+  });
+}
 
 static void tests_round310() {
   test("the console-reach table (task 0290): every verb the console-only-to-UI plan gave a control is drawn where its row says - its menu opened or its window shown - so a renamed button, a moved menu or a lost control fails here", [] {
@@ -5773,7 +5999,7 @@ static void tests_round310() {
 }
 
 static void tests_round306() {
-  test("stylized and sketch verbs without the console (task 0286): the Draw menu's Pen Colour, Steadiness, French Curve Shape, Radial Copies, Perspective Follows the Camera, Canvas, Lift and Clear; GameObject > Anime Look; Strokes' New Stroke Object, canopy centre fields and Grass; Scatter's Seed - all by real clicks", [] {
+  test("stylized and sketch verbs without the console (task 0286): the Draw menu's Pen Color, Steadiness, French Curve Shape, Radial Copies, Perspective Follows the Camera, Canvas, Lift and Clear; GameObject > Anime Look; Strokes' New Stroke Object, canopy centre fields and Grass; Scatter's Seed - all by real clicks", [] {
     Editor ed;
     ed.init_headless(1400, 900);
     ed.record_buttons_for_test(true);
@@ -5834,8 +6060,8 @@ static void tests_round306() {
       return click("menu:" + item);
     };
     /* The pen. */
-    const bool red = draw_menu("Pen Colour", "Red");
-    std::printf("    Pen Colour > Red clicked %d: colour %08X\n", (int)red, ed.sketch_color_for_test());
+    const bool red = draw_menu("Pen Color", "Red");
+    std::printf("    Pen Color > Red clicked %d: colour %08X\n", (int)red, ed.sketch_color_for_test());
     CHECK(red && (ed.sketch_color_for_test() & 0xFFFFFFu) == 0xD03030u);
     const bool steady = draw_menu("Steadiness", "Strong");
     std::printf("    Steadiness > Strong clicked %d: tether %.0f px\n", (int)steady, ed.sketch_tether_for_test());
@@ -7084,5 +7310,6 @@ void run_editor_tests() {
   tests_round307();
   tests_round308();
   tests_round310();
+  tests_round311();
   coverage_tests();
 }

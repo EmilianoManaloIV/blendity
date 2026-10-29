@@ -1040,7 +1040,7 @@ struct ColorRampLayer : TextureLayerBase<ColorRampLayer> {
   void reflect(Reflector &r) override {
     r.color("Low Color", color);
     r.color("High Color", color2);
-    r.help("The albedo from the height: low texels take the first colour, high ones the second.");
+    r.help("The albedo from the height: low texels take the first color, high ones the second.");
   }
   bool is_generator() const override { return false; }
   void apply(TexPlanes &p, const LayerContext &) const override {
@@ -1116,7 +1116,7 @@ struct LeavesLayer : TextureLayerBase<LeavesLayer> {
     r.help("The dark edge's width as a fraction of the leaf.");
     r.field("Cutout", cutout);
     r.help("Nothing between the leaves (with the texture's Alpha From Cover a Cutout material shows holes there); off:\n"
-           "the Background colour.");
+           "the Background color.");
     r.color("Lit", lit);
     r.color("Shade", shade);
     r.color("Line", line);
@@ -1172,7 +1172,7 @@ struct GrassLayer : TextureLayerBase<GrassLayer> {
     r.field("Lean", lean, 0.01f, 0.0f, 0.8f);
     r.help("How far a blade's tip leans sideways (as far as the neighbouring column reaches).");
     r.field("Cutout", cutout);
-    r.help("Nothing between the blades (a grass card with Alpha From Cover); off: the Background colour.");
+    r.help("Nothing between the blades (a grass card with Alpha From Cover); off: the Background color.");
     r.color("Lit", lit);
     r.color("Shade", shade);
     r.color("Tip", tip);
@@ -1342,7 +1342,7 @@ struct SkyGradientLayer : TextureLayerBase<SkyGradientLayer> {
   Vec3 top{0.25f, 0.5f, 0.9f}, bottom{0.75f, 0.88f, 0.98f}, sun_color{1.0f, 0.95f, 0.75f};
   void reflect(Reflector &r) override {
     r.field("Horizon", horizon, 0.01f, 0.05f, 1.0f);
-    r.help("Where the bottom colour is reached, down the tile (0.7: the lower third is the horizon's tone).");
+    r.help("Where the bottom color is reached, down the tile (0.7: the lower third is the horizon's tone).");
     r.field("Sun", sun, 0.01f, 0.0f, 0.5f);
     r.help("A sun's glow radius as a fraction of the tile (0: none).");
     r.field("Sun U", sun_u, 0.01f, 0.0f, 1.0f);
@@ -1386,7 +1386,7 @@ struct CloudsLayer : TextureLayerBase<CloudsLayer> {
     r.field("Shade Depth", shade_depth, 0.005f, 0.0f, 0.3f);
     r.help("How far up from a cloud's underside the flat shadow reaches.");
     r.field("Cutout", cutout);
-    r.help("Nothing between the clouds (a cloud card with Alpha From Cover); off: the Sky colour.");
+    r.help("Nothing between the clouds (a cloud card with Alpha From Cover); off: the Sky color.");
     r.field("Outline", outline);
     r.color("Lit", lit);
     r.color("Shade", shade);
@@ -1500,13 +1500,13 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Wood Floor", "Generators", "Staggered planks with growth rings warped by noise, each plank its own tree.", make<WoodFloorLayer>},
       {"Tatami", "Generators", "1:2 rush mats with a cloth border: a basket weave, running bond, or the pinwheel around a half mat.", make<TatamiLayer>},
       {"Tiles", "Generators", "Square, hexagonal or herringbone tiles with grout and a bevel.", make<TilesLayer>},
-      {"Voronoi", "Generators", "Cells of random colour with edges between them (flagstones, scales).", make<VoronoiLayer>},
+      {"Voronoi", "Generators", "Cells of random color with edges between them (flagstones, scales).", make<VoronoiLayer>},
       {"Noise", "Generators", "Fractal noise, periodic in the tile (Blender's Noise Texture).", make<NoiseLayer>},
       {"Wave", "Generators", "Bands, straight or distorted by noise (Blender's Wave Texture).", make<WaveLayer>},
       {"Checker", "Generators", "A checkerboard.", make<CheckerLayer>},
       {"Stripes", "Generators", "Stripes of a given width.", make<StripesLayer>},
-      {"Gradient", "Generators", "A linear, radial or mirrored gradient between two colours.", make<GradientLayer>},
-      {"Toon Ramp", "Generators", "A toon shadow ramp: 2 to 5 tones from the shadow colour to the lit one, hard or soft (a Toon material's Toon Ramp).",
+      {"Gradient", "Generators", "A linear, radial or mirrored gradient between two colors.", make<GradientLayer>},
+      {"Toon Ramp", "Generators", "A toon shadow ramp: 2 to 5 tones from the shadow color to the lit one, hard or soft (a Toon material's Toon Ramp).",
        make<ToonRampLayer>},
       {"Face Shadow", "Generators", "A face shadow sweep (a Toon material's Face Shadow Map): the shadow crosses the face from the far side as the light turns.",
        make<FaceShadowLayer>},
@@ -1515,7 +1515,7 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Plaster", "Generators", "An anime wall: one flat tone with soft patches of a second and a few thin cracks.", make<PlasterLayer>},
       {"Window Grid", "Generators", "A building's windows: frames, lit and dark glass, a wall tone between.", make<WindowGridLayer>},
       {"Roof Tiles", "Generators", "Rows of overlapping roof tiles with a shadow band under each row and a line between neighbours.", make<RoofTilesLayer>},
-      {"Sky Gradient", "Generators", "A sky from the zenith's colour to the horizon's, with a sun's disc and glow if asked (across only).", make<SkyGradientLayer>},
+      {"Sky Gradient", "Generators", "A sky from the zenith's color to the horizon's, with a sun's disc and glow if asked (across only).", make<SkyGradientLayer>},
       {"Clouds", "Generators", "Bold anime clouds: a lit top, a flat shaded underside, an outline; a cloud card when cut out.", make<CloudsLayer>},
       {"Rocks", "Generators", "Stones with a ground line between them, each lit on its upper left (a path, a wall).", make<RocksLayer>},
       {"Water", "Generators", "Water in one tone with thin bent highlight lines where the ripples catch the light.", make<WaterLayer>},
@@ -1531,15 +1531,15 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Tile", "Filters", "Repeats what is below N x M times.", make<TileLayer>},
       {"Edge Wear", "Filters", "Lightens or darkens the edges found in the height (chips, grime).", make<EdgeWearLayer>},
       {"Height AO", "Filters", "Darkens low texels (mortar, grout) like ambient occlusion.", make<HeightAoLayer>},
-      {"Color Ramp", "Filters", "Colours the albedo from the height.", make<ColorRampLayer>},
+      {"Color Ramp", "Filters", "Colors the albedo from the height.", make<ColorRampLayer>},
       {"Mask by Height", "Filters", "Sets the mask the layers above can fade by.", make<MaskByHeightLayer>},
       /* A surface's filters (task 0244, ADR 0080; surface.cpp). */
       {"Anchor", "Filters", "Another layer's mask, by its name (Substance's anchor point).", make_anchor_layer},
       /* The hand-painted look's filters (task 0247, ADR 0083; surface.cpp). */
-      {"Posterize", "Filters", "The colour's value in N flat steps, its hue kept.", make_posterize_layer},
+      {"Posterize", "Filters", "The color's value in N flat steps, its hue kept.", make_posterize_layer},
       {"Edge Shade", "Filters", "The convex edges (mesh maps' curvature) lightened or darkened: the hand-painter's edge pass.", make_edge_shade_layer},
-      {"Cavity", "Filters", "The colour multiplied by the mesh maps' occlusion through a strength: the cavity pass.", make_cavity_layer},
-      {"Paint", "Filters", "Images the brush writes in Paint Mode (colour, roughness, metallic, height, emission), by their painted coverage.", [] { return std::unique_ptr<TextureLayer>(std::make_unique<PaintLayer>()); }},
+      {"Cavity", "Filters", "The color multiplied by the mesh maps' occlusion through a strength: the cavity pass.", make_cavity_layer},
+      {"Paint", "Filters", "Images the brush writes in Paint Mode (color, roughness, metallic, height, emission), by their painted coverage.", [] { return std::unique_ptr<TextureLayer>(std::make_unique<PaintLayer>()); }},
       {"Group", "Filters", "A folder: its layers evaluated apart and blended back with one opacity and mask.", make_group_layer},
   };
   return infos;

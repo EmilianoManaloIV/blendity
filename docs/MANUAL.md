@@ -831,6 +831,12 @@ Window names, layouts and the Y-up axis stay Unity's whatever the feel.
 
 ---
 
+## Checking how it works for you
+
+`docs/hci/checklist.md` lists 118 tasks across the editor, each with its steps, what should happen and a target
+time. Its interactive page times each task with a stopwatch, marks a task slow at 1.5 times its target, and keeps
+your results so they can be read back and the slow ones improved first.
+
 ## 13. The console
 
 Every tool can be driven from the Console's command line (type `help`), which is also how scripts and the tests drive

@@ -568,7 +568,7 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   if (button(u.px(86), solving ? "Solving..." : "AutoPhysics", shown || solving,
              "The whole clip made physically possible (Cascadeur's AutoPhysics): the center of mass and the spin moved as little as\n"
              "they can while the contacts' forces stay inside their friction and gravity does the rest - the take-offs and landings\n"
-             "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colours, then Apply."))
+             "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colors, then Apply."))
     body_physics_command({"body", "physics", shown || solving ? "off" : "show"});
   if (button(u.px(86), "AutoPosing", autopose_.on,
              "Drag a hand, a foot, the head or the hips with the move gizmo and the whole body follows (Cascadeur's AutoPosing):\n"
@@ -982,11 +982,12 @@ void Editor::draw_animation_window(const Recti &r) {
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
   if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);
   else if (!anim_smooth_brush(sheet, end)) anim_sheet_input(*clip, ruler, sheet, row_h, end);  // (task 0284: the brush first when on)
-  u.popup(u.id("anim_key_ctx"), u.px(180), [this] {
+  u.popup(u.id("anim_key_ctx"), u.px(220), [this] {
     if (ui_.menu_item("Clamped Auto")) anim_set_tangent(TanAuto);
     if (ui_.menu_item("Free Smooth")) anim_set_tangent(TanFree);
     if (ui_.menu_item("Flat")) anim_set_tangent(TanFlat);
     if (ui_.menu_item("Broken")) anim_set_tangent(TanBroken);
+    draw_key_slope_fields();  // (task 0291)
     ui_.menu_separator();
     if (ui_.menu_item("Auto (curve)")) anim_set_interp(AnimAuto);
     if (ui_.menu_item("Linear")) anim_set_interp(AnimLinear);
@@ -1019,14 +1020,50 @@ void Editor::anim_tangent_command(const std::vector<std::string> &t, AnimationCl
     const float v = t.size() > i ? (float)std::atof(t[i].c_str()) : def;
     return std::isfinite(v) ? std::max(-1e6f, std::min(1e6f, v)) : def;
   };
+  const float in = slope(7, tr->in_tangent((size_t)k)), out = slope(8, t.size() > 7 ? in : tr->out_tangent((size_t)k));
+  anim_set_key_tangent(index, frame, mode, in, out);
+}
+
+/* A key's tangent mode and slopes in one undo step - the console's `anim tangent` and the key menu's In / Out fields
+ * (task 0291). Free keeps one slope both sides. */
+void Editor::anim_set_key_tangent(size_t index, float frame, int mode, float in, float out) {
   anim_edit_keys("Key Tangents", [&](AnimationClip &c) {
+    if (index >= c.tracks.size()) return;
     AnimTrack &track = c.tracks[index];
-    const size_t i = (size_t)track.key_at(frame);
-    const float in = slope(7, track.in_tangent(i)), out = slope(8, t.size() > 7 ? in : track.out_tangent(i));
-    AnimKey &key = track.keys[i];
+    const int k = track.key_at(frame);
+    if (k < 0) return;
+    AnimKey &key = track.keys[(size_t)k];
     key.tangent = mode, key.in_slope = in, key.out_slope = mode == TanFree ? in : out;
     if (mode == TanFree || mode == TanBroken) key.interp = AnimAuto;
   });
+}
+
+/* The key menu's slopes (task 0291): with one key selected, its In and Out slopes as numbers (values a frame). A typed
+ * slope makes a Clamped Auto or Flat key Broken; a Free key keeps both sides one. */
+void Editor::draw_key_slope_fields() {
+  if (anim_.selected.size() != 1) return;
+  AnimationClipPtr clip = anim_clip();
+  const auto [track, frame] = *anim_.selected.begin();
+  if (!clip || track < 0 || (size_t)track >= clip->tracks.size()) return;
+  const AnimTrack &t = clip->tracks[(size_t)track];
+  const int k = t.key_at(frame);
+  if (k < 0) return;
+  auto &u = ui_;
+  const int mode = t.keys[(size_t)k].tangent;
+  float in = t.in_tangent((size_t)k), out = t.out_tangent((size_t)k);
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  const int half = (r.w - u.px(16)) / 2;
+  u.label({r.x + u.px(8), r.y, u.px(24), r.h}, "In");
+  const Recti fi{r.x + u.px(32), r.y + u.px(2), half - u.px(28), r.h - u.px(4)}, fo{r.x + u.px(40) + half, r.y + u.px(2), half - u.px(36), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["key:in"] = fi, u.button_rects["key:out"] = fo;
+  const bool in_changed = u.float_field(u.id("key_in_slope"), fi, in, 0.01f, -1e6f, 1e6f);
+  u.label({r.x + u.px(12) + half, r.y, u.px(28), r.h}, "Out");
+  const bool out_changed = u.float_field(u.id("key_out_slope"), fo, out, 0.01f, -1e6f, 1e6f);
+  u.tooltip("The key's slopes in value per frame, coming in and going out; typing one breaks a Clamped Auto key (Free keeps both one).");
+  if (!in_changed && !out_changed) return;
+  const int to = mode == TanFree ? TanFree : TanBroken;
+  const float both = out_changed ? out : in;  // (a Free key: the side typed, both ways)
+  anim_set_key_tangent((size_t)track, frame, to, to == TanFree ? both : in, to == TanFree ? both : out);
 }
 
 /* Puppet Posing's menu (tasks 0281-0284): toggles ticked, actions, Reach as a submenu. */

@@ -934,8 +934,9 @@ void Editor::run_console_command(const std::string &line) {
     customnormals_command(t.size() > 1 ? t[1] : "show");
     return;
   }
-  if (c == "hair") {  // hair rig [locks] [bones]: chains of spring bones from the selected hair mesh (task 0153)
-    if (t.size() < 2 || to_lower(t[1]) != "rig") Log::warn("hair rig [locks] [bones]");
+  if (c == "hair") {  // hair rig [locks] [bones]: chains of spring bones from the selected hair mesh (task 0153); hair dialog (task 0291)
+    if (t.size() > 1 && to_lower(t[1]) == "dialog") dialog_ = Dialog::HairRig;
+    else if (t.size() < 2 || to_lower(t[1]) != "rig") Log::warn("hair rig [locks] [bones] | hair dialog");
     else if (GameObject *mesh_obj = rig_mesh()) rig_hair_from_mesh(mesh_obj, t.size() > 2 ? std::atoi(t[2].c_str()) : 0, t.size() > 3 ? std::atoi(t[3].c_str()) : 3);
     else Log::warn("hair rig: select a mesh");
     return;

@@ -262,7 +262,7 @@ bool Editor::begin_moonray_render(const moonray::ExportScene &sc, const MoonRayF
       if (j->cancel.load()) return j->state.store(MoonRayJob::Cancelled);
       std::string e;
       if (!moonray::convert_texture(tj, e) && j->complaints.size() < 20)
-        j->complaints.push_back("the texture " + tj.source + " couldn't be read (" + e + "): its material's colour is used");
+        j->complaints.push_back("the texture " + tj.source + " couldn't be read (" + e + "): its material's color is used");
     }
     std::string tail, line;
     /* MoonRay's checkpoints, watched twice a second while it renders (it prints nothing meanwhile): each new one read

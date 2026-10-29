@@ -306,12 +306,12 @@ void ProceduralTexture::reflect(Reflector &r) {
   r.field("Alpha From Cover", alpha_from_cover);
   r.help("The albedo image's alpha is what the cards cover (task 0150): a Leaves, Grass or Clouds generator covers only\n"
          "its shapes, so a Cutout material shows holes between them (a foliage card, a cloud card). Stacked cards add\n"
-         "up; Warp and Tile move the cover with the colour; Mask by Height shapes the mask, not this.");
+         "up; Warp and Tile move the cover with the color; Mask by Height shapes the mask, not this.");
   r.layer_list("Layers", layers);
   /* After the stack (the part most used stays at the top of the window). */
   r.field("Normal Map", use_normal);
   r.help("The bumps of the height as a normal map. Off: a flat one (the layers still use the height inside,\n"
-         "for example a Color Ramp colouring by it).");
+         "for example a Color Ramp coloring by it).");
   r.field("Roughness Map", use_roughness);
   r.help("The roughness the layers make. Off: the material's own Roughness everywhere.");
   r.field("Height Map", use_height);

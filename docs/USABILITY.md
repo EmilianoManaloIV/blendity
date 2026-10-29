@@ -55,10 +55,28 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 - Everything Blender users reach for while modeling works: G, the axis keys, typed values, E / I / Ctrl+B with the mouse, F9.
 - The one real clash, R, is a single tick box.
 
+## Interface conventions
+
+Checked by `tools/hci_consistency_audit.py` (task 0292); the live sweep (`tests/test_hci.cpp`, task 0293) checks the
+screens themselves.
+
+1. **"..." means "asks before it acts".** A menu item or button that opens a dialog asking for a file, a name,
+   numbers or a choice ends with "..."; one that only shows something (About, a report) does not.
+2. **Title Case on buttons, menu items and submenus.** The joining words stay lowercase (a, of, the, to, along...).
+   Reply words in dialogs ("Not now", "Got it") and full sentences shown as text are left as said.
+3. **"Color" in what the artist reads** (Unity's and Blender's word). Field names a scene saves by keep their old
+   spelling ("Fog Colour", "Colour Depth"), since renaming them would lose the value in older files.
+4. **A tooltip is a sentence**, ending with ".", "?" or "!".
+5. **No command names in visible text.** Name the control (Mesh > Draw > Lift the Sketch to 3D), not the console line.
+6. **A label that doesn't fit ends in "..."** and its tooltip begins with the whole label. A window narrower than its
+   toolbar lays its controls out on more rows; nothing is drawn past its window or over another control.
+7. **Text contrast at 4.5:1 or more** in every theme, dim text included (WCAG 2.1 AA).
+
 ## What was fixed in this pass
 
 | Problem found | Fix |
 |---|---|
+| The live sweep (826 screens) and a review of a picture of each found:<br>- the Editing window's panel cut to slivers in a side pane;<br>- Install a Bridge's and Lighting's labels cut mid-word;<br>- the UV editor's toolbar running over its tools and past its window in a narrow window or at x1.5;<br>- the Profiler's labels over its title;<br>- Preferences saying "Running without them: .";<br>- the Dark theme's dim text at 3.5:1;<br>- buttons without a word of help;<br>- a second auto-connect dropping Unity's link, and a new scene orphaning its objects. | Labels elided with whole-label tooltips; narrow-pane layouts; the UV toolbars' rows; the contrast at 4.6:1; tooltips; the Unity client's guards; the conventions written down and audited (tasks 0291-0295). |
 | After rounds 291-293, 17 tooltips and messages still sent the artist to the Console, and about 40 verbs had no control: the sketch pen's colour and canvases, Anime Look, grass, side and top reference images, Mirror Y, UV material lists, the render range, FFmpeg's path, MoonRay's folder, AI's archive, contacts, ragdoll events, gait files, vertex groups by name, shape keys. A second editor in one process closed its own Preferences. | Menus, panel fields and Preferences rows for each (tasks 0286-0289); the mentions reworded (1 left, meant); a reach table test over 29 verbs; the dialog flag per editor (task 0290). |
 | Posing a reach took four bones selected and turned (20 s by the keystroke-level model); AutoPose's IK poses looked stiff; rigs named the Biped, CC, VRoid or Daz way were read by shape; a bone with an FK control snapped back after posing; no trails, onion skin or neighbouring frames; foot slides found by scrubbing; the Animation toolbar wider than its window. | Puppet Posing's handles on a learned prior (3.75 s), names read by words, FK controls keyed, trails, onion skin, the Zoetrope, Motion Check with Fixes (6.3 s for a slide), the Puppet menu (tasks 0279-0285). |
 | Live Link took four manual steps each session (Start, read the port, type it in the bridge, Connect), and a restarted Blendity lost every bridge; Godot and Unreal had none; the bridges were folders to zip by hand. | Live Link starts with Blendity and writes where it listens; every bridge connects by itself and again after a restart; Install a Bridge puts it into Blender or a project (tasks 0274-0278). |

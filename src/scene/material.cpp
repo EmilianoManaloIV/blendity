@@ -78,12 +78,12 @@ void Material::reflect(Reflector &r) {
     r.help("Index of refraction: 1.0 air, 1.33 water, 1.45 Blender's default, 1.5 window glass, 2.42 diamond.");
   }
   r.color_alpha("Base Color", base_color, "Alpha", alpha);
-  r.help("Albedo and opacity. The alpha (the bar under the colour) makes Cutout and Transparent surfaces\n"
+  r.help("Albedo and opacity. The alpha (the bar under the color) makes Cutout and Transparent surfaces\n"
          "see-through; it is multiplied by the Base Map's alpha. Blender: Principled BSDF > Base Color / Alpha.\n"
-         "Unity: Base Map colour.");
+         "Unity: Base Map color.");
   r.texture("Base Map", base_map);
   r.enumeration("Procedural", procedural, procs, 5);
-  r.help("Procedural base colour (Cycles SVM checker / noise nodes) or Blender's generated test images.");
+  r.help("Procedural base color (Cycles SVM checker / noise nodes) or Blender's generated test images.");
   if (r.all_fields() || procedural == (int)Procedural::Checker || procedural == (int)Procedural::Noise) {
     r.color("Color 2", procedural_color2);
     r.field("Pattern Scale", procedural_scale, 0.05f, 0.01f, 1000.0f);
@@ -152,14 +152,14 @@ void Material::reflect(Reflector &r) {
       r.field("Rim Width", hp_rim_width, 0.01f, 0.05f, 1.0f);
       r.color("Rim Color", hp_rim_color);
       r.field("Painted Specular", hp_spec, 0.01f, 0.0f, 2.0f);
-      r.help("The texture carries the light (the baked-light layer, the painted highlights): the surface shows its colour as\n"
+      r.help("The texture carries the light (the baked-light layer, the painted highlights): the surface shows its color as\n"
              "it is in every renderer, lights neither shade nor darken it, plus a rim at grazing angles and a highlight where\n"
              "the roughness channel is low. Blizzard's and Riot's hand-painted look; glTF writes it KHR_materials_unlit.");
     }
     r.group_end();
   }
   r.help("Toon: the anime / cel look (Goo Engine; Blender: Shader to RGB + Color Ramp) - light in flat tones with a\n"
-         "hard edge, a shadow colour, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
+         "hard edge, a shadow color, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
          "for the black lines.");
   if (r.all_fields() || shading_model == 1) {
     if (r.group("Toon", true)) {
@@ -176,16 +176,16 @@ void Material::reflect(Reflector &r) {
       r.field("Toon Threshold", toon_threshold, 0.01f, 0.0f, 0.95f);
       r.help("Where light turns into shadow (the light's angle, shadows included).");
       r.color("Toon Shadow Color", toon_shadow);
-      r.help("The shadow side's colour, times the base colour (a cool tint reads as anime shading).");
+      r.help("The shadow side's color, times the base color (a cool tint reads as anime shading).");
       r.texture("Toon Ramp", toon_ramp_map);
-      r.help("A shadow ramp instead of the bands, threshold, softness and shadow colour: its colour at U = how lit the point\n"
-             "is (left dark, right lit; or a vertical ramp, bottom dark, top lit), times the base colour. The Textures\n"
+      r.help("A shadow ramp instead of the bands, threshold, softness and shadow color: its color at U = how lit the point\n"
+             "is (left dark, right lit; or a vertical ramp, bottom dark, top lit), times the base color. The Textures\n"
              "window's Toon Ramp generator makes 2, 3 and 4-tone ramps; MMD's toon images land here.");
       r.texture("Shade Map", shade_map);
       r.help("The shadow side's own picture (MToon's shade texture, the hand-painted shadow of anime art), tinted by the\n"
-             "Toon Shadow Color: where the surface is in shadow this shows instead of the base colour darkened.");
+             "Toon Shadow Color: where the surface is in shadow this shows instead of the base color darkened.");
       r.texture("Shadow Bias Map", toon_shadow_bias_map);
-      r.help("Painted shadow control (Guilty Gear's vertex colours): grey is neutral, white keeps a point lit however the\n"
+      r.help("Painted shadow control (Guilty Gear's vertex colors): grey is neutral, white keeps a point lit however the\n"
              "light falls, black keeps it in shadow (under the chin, inside the hair).");
       r.field("Toon Light Wrap", toon_wrap, 0.01f, 0.0f, 1.0f);
       r.help("Lets the light reach round the form before the tones step (0: none; 0.3: a softer figure).");
@@ -223,7 +223,7 @@ void Material::reflect(Reflector &r) {
       r.enumeration("Face Forward", face_forward, fwd, 4);
       r.help("The way the face looks in the object's own axes (VRM and most glTF characters: +Z; MMD: -Z).");
       r.texture("Line Map", line_map);
-      r.help("Inner contour lines (the folds of a sleeve, the eyelids) multiplied into the colour: white is no line.");
+      r.help("Inner contour lines (the folds of a sleeve, the eyelids) multiplied into the color: white is no line.");
       r.field("Lines Only In Shadow", line_only_shadow);
       r.help("The lines show only in the shadow tones (Guilty Gear's inner lines fade where the light falls).");
       r.texture("Hatch Map", hatch_map);

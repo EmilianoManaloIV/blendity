@@ -21,7 +21,7 @@ struct Curated {
   const char *name, *category, *help, *command;
 };
 const Curated kCurated[] = {
-    {"Rig Hair from Mesh", "Rigging", "Chains of spring bones from the selected hair mesh, the mesh skinned to them.", "hair rig"},
+    {"Rig Hair from Mesh", "Rigging", "Chains of spring bones from the selected hair mesh, the mesh skinned to them (its locks and bones asked first).", "hair dialog"},
     {"Humanoid Rig", "Rigging", "A person's skeleton with IK on the hands and feet.", "rig humanoid"},
     {"Quadruped Rig", "Rigging", "A four-legged skeleton with IK on each foot.", "rig quadruped"},
     {"Auto IK on Selected Skeleton", "Rigging", "Two-bone IK on an imported skeleton's arms and legs.", "rig autoik"},
@@ -191,7 +191,7 @@ void Editor::command_ctx_run(int item, const std::string &panel) {
   const PaletteEntry *e = palette_find(command_ctx_);
   if (!e) return;
   if (item == 0) toggle_favorite(e->name);
-  else if (item == 1) wheel_add(command_ctx_mode_, e->name, "", "");
+  else if (item == 1) wheel_add(command_ctx_mode_, e->name, "", panel);  // (task 0291: `panel` is the ring here)
   else if (item == 2) panel_add(panel.empty() ? panel_free_name() : panel, e->name);  // (task 0231)
   else if (item == 3) capture_shortcut_for(std::string(e->name));  // (a copy: the capture may rebuild the palette)
   ui_.close_popups();
@@ -222,7 +222,13 @@ void Editor::draw_command_palette() {
     u.menu_label(e->name);
     const bool fav = std::find(favorites().begin(), favorites().end(), e->name) != favorites().end();
     if (u.menu_item(fav ? "Remove from Quick Favorites" : "Add to Quick Favorites")) command_ctx_run(0);
-    if (u.menu_item("Add to the Wheel (" + command_ctx_mode_ + ")")) command_ctx_run(1);
+    const std::vector<std::string> rings = wheel_ring_choices(command_ctx_mode_);
+    if (rings.size() < 2 && u.menu_item("Add to the Wheel (" + command_ctx_mode_ + ")")) command_ctx_run(1);
+    if (rings.size() >= 2)  // (task 0291: into one of the set's rings too)
+      u.submenu("Add to the Wheel (" + command_ctx_mode_ + ")", u.px(220), [this, rings] {
+        for (size_t i = 0; i < rings.size(); i++)
+          if (ui_.menu_item(rings[i])) command_ctx_run(1, i == 0 ? std::string() : rings[i]);
+      });
     u.submenu("Add to My Tools", u.px(220), [this] {  // (task 0231)
       auto &u = ui_;
       for (const CustomPanel &p : std::vector<CustomPanel>(panels_))

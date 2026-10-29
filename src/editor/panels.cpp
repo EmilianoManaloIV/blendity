@@ -648,6 +648,7 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     u.label(label_rect(row), n);
     if (group_field(n, row, v)) return;
+    if (anchor_field(n, row, v)) return;
     if (u.text_field(fid(n), field_rect(row), v)) {
       record(FieldEdit::Text, n).s_new = v;
       changed = true;
@@ -666,6 +667,26 @@ struct InspectorReflector : Reflector {
     for (const std::string &s : items) names.push_back(s.c_str());
     const Recti f = field_rect(row);
     if (u.record_buttons) u.button_rects[std::string("group:") + n] = f;
+    if (!u.combo(fid(n), f, cur, names.data(), (int)names.size())) return true;
+    v = cur == 0 ? std::string() : items[(size_t)cur];
+    record(FieldEdit::Text, n).s_new = v;
+    changed = true;
+    return true;
+  }
+  /* Task 0291: an Anchor effect's Layer as a dropdown of the texture's named layers (typed names were the only way). */
+  bool anchor_field(const char *n, const Recti &row, std::string &v) {
+    if (std::strcmp(n, "Layer") != 0 || !edited_texture) return false;
+    std::vector<std::string> items{"(none)"};
+    for (const std::string &name : ed.anchor_layer_names(*edited_texture)) items.push_back(name);
+    if (!v.empty() && std::find(items.begin() + 1, items.end(), v) == items.end()) items.push_back(v);
+    if (items.size() < 2) return false;  // (no named layer yet: the typed field, with its help)
+    int cur = 0;
+    for (size_t i = 1; i < items.size(); i++)
+      if (items[i] == v) cur = (int)i;
+    std::vector<const char *> names;
+    for (const std::string &s : items) names.push_back(s.c_str());
+    const Recti f = field_rect(row);
+    if (u.record_buttons) u.button_rects["anchor:Layer"] = f;
     if (!u.combo(fid(n), f, cur, names.data(), (int)names.size())) return true;
     v = cur == 0 ? std::string() : items[(size_t)cur];
     record(FieldEdit::Text, n).s_new = v;
@@ -1265,7 +1286,7 @@ void Editor::draw_inspector(const Recti &r) {
           return;
         }
       }
-      if (u.button(lay.row(u.row_h() + u.px(4)), "Open with system viewer")) fs::open_external(project_selected_);
+      if (u.button(lay.row(u.row_h() + u.px(4)), "Open with System Viewer")) fs::open_external(project_selected_);
       return;
     }
     u.label({r.x, r.y + u.px(20), r.w, u.row_h()}, "Select a GameObject to inspect it.", u.theme.text_dim, ui::Align::Center);
@@ -1614,9 +1635,9 @@ void Editor::draw_inspector(const Recti &r) {
           u.tooltip("Opens the Rigging window: skeletons, skins, vertex groups, Weight Paint and IK (Window > Rigging).");
         }
         Recti row = lay.row(u.row_h() + u.px(2));
-        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, with_key(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "mode.edit_toggle"), edit_mode_, Icon::Vertex)) {
-          if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
-        }
+        const bool edit_hit = u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, with_key(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "mode.edit_toggle"), edit_mode_, Icon::Vertex);
+        u.tooltip(edit_mode_ ? "Back to whole objects." : "Edit the mesh's vertices, edges and faces (Blender: Edit Mode; Unity ProBuilder's element modes).");
+        if (edit_hit) edit_mode_ ? exit_edit_mode() : enter_edit_mode();
         if (edit_mode_ && g->id == edit_obj_) {
           draw_edit_tools(lay);
         }
@@ -2082,7 +2103,8 @@ void Editor::draw_profiler(const Recti &r) {
   for (float ref : {16.67f, 33.3f}) {
     int yy = graph.bottom() - (int)(ref / maxv * graph.h);
     u.canvas.hline(graph.x, graph.right(), yy, Color::hex(0x555555));
-    u.canvas.text(u.font, graph.x + u.px(4), yy - u.font.line_height(), ref < 20 ? "60 FPS" : "30 FPS", u.theme.text_dim);
+    const int ty = yy - u.font.line_height() < graph.y + u.px(2) ? yy + u.px(2) : yy - u.font.line_height();  // (task 0293: inside the graph, under its title)
+    u.canvas.text(u.font, graph.x + u.px(4), ty, ref < 20 ? "60 FPS" : "30 FPS", u.theme.text_dim);
   }
   plot(frame_history_, Color::hex(0x5AA0E6));
   plot(raster_history_, u.theme.accent);
@@ -2651,6 +2673,7 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
           if (u.button({gr.x + u.px(4), gr.y, gw, gr.h}, "Guides from Edges")) guides_from_selected_edges();
           u.tooltip("A construction line along each selected edge, to draw against.");
           if (u.button({gr.x + u.px(6) + gw, gr.y, gw, gr.h}, show_guides_ ? "Hide Guides" : "Show Guides", show_guides_)) show_guides_ = !show_guides_;
+          u.tooltip("The construction lines drawn or hidden (they stay, and still snap, when hidden).");
           if (u.button({gr.x + u.px(8) + 2 * gw, gr.y, gw, gr.h}, strprintf("Clear Guides (%zu)", scene_->guides.size()))) {
             scene_->guides.clear();
             mark_changed("Clear Guides");
@@ -3478,6 +3501,16 @@ void Editor::draw_scatter_tools(ui::Layout &lay) {
           "select, move or delete them as usual; scatter merge joins them into one mesh for export.");
   row = lay.row(u.row_h() + u.px(2));
   if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Merge Instances", false)) scatter_merge();
+  u.tooltip("The scattered copies joined into one mesh (fewer objects to draw; they stop being separate copies).");
+}
+
+/* The names an Anchor can read (task 0291): the texture's named top-level layers - the ones the stack makes anchors of
+ * (src/texture/surface.cpp); an Anchor reads one below its own layer, so the list runs bottom to top. */
+std::vector<std::string> Editor::anchor_layer_names(const ProceduralTexture &t) const {
+  std::vector<std::string> out;
+  for (const auto &l : t.layers)
+    if (l && !l->name.empty() && std::find(out.begin(), out.end(), l->name) == out.end()) out.push_back(l->name);
+  return out;
 }
 
 /* A group field's choices (task 0289): the whole mesh, the Inspector object's vertex groups, and a typed name the mesh
@@ -3512,6 +3545,7 @@ void Editor::draw_shape_key_buttons(ui::Layout &lay, GameObject &g) {
   const ui::Id id = u.id("shape_remove");
   if (u.button_enabled(rem, "Remove...", selected && !mf->mesh->shape_keys.empty(), selected ? "No shape keys yet." : "The Inspector is pinned to another object: select this one first."))
     u.open_popup(id, rem);
+  u.tooltip("Pick a shape key to remove (Undo brings it back).");
   u.popup(id, u.px(220), [this, &g] {
     const MeshFilter *f = g.mesh_filter();
     if (!f || !f->mesh) return;
@@ -3685,7 +3719,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Jitter Hue", paint_brush_.jitter_h, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Saturation", paint_brush_.jitter_s, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Value", paint_brush_.jitter_v, 0.01f, 0.0f, 1.0f);
-  br.help("Flat turns with the drag (Tip Ratio its width); Bristle is a bundle of small stamps. Wet: how much of the colour under\n"
+  br.help("Flat turns with the drag (Tip Ratio its width); Bristle is a bundle of small stamps. Wet: how much of the color under\n"
           "the last dab the brush carries on (strokes blend as paint). Jitter: a random shift per dab. Smudge pulls the paint\n"
           "along the drag, Blend softens it; Grain is below.");
   /* The palette: a row of swatches (click: the brush's colour), its shades, Add from the brush's colour. */
@@ -3709,7 +3743,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
     }
     const Recti add{prow.right() - u.px(36), prow.y, u.px(32), prow.h};
     if (u.button(add, "+", false)) paint_palette_.push_back(paint_brush_.color), paint_palette_pick_ = (int)paint_palette_.size() - 1;
-    u.tooltip("The palette: click a swatch for its colour, right-click removes it, + adds the brush's colour.");
+    u.tooltip("The palette: click a swatch for its color, right-click removes it, + adds the brush's color.");
   }
   if (paint_palette_pick_ >= 0 && paint_palette_pick_ < (int)paint_palette_.size()) {
     Recti srow = lay.row(u.row_h() + u.px(4));
@@ -3762,7 +3796,7 @@ void Editor::draw_paint_extras(ui::Layout &lay) {
     }
   }
   br.help("Bucket Fill: a click on the model fills that part - its polygroup, its island, its material or the whole object - with\n"
-          "the brush's colour, or a gradient along an axis (it needs the mesh maps: Object > Bake Mesh Maps).");
+          "the brush's color, or a gradient along an axis (it needs the mesh maps: Object > Bake Mesh Maps).");
   int hit = -1;
   if (row_buttons(lay, "paint", {"Bake Light", "Bake Gradient"}, hit)) paint_bake_light({"paint", hit == 0 ? "bakelight" : "bakegradient"}, hit == 1);
   u.tooltip("Light painted in: the scene's light (or a top-to-bottom gradient) baked into a Multiply layer you can paint over.");

@@ -108,7 +108,7 @@ void register_builtin_components() {
                     "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
                     "Inverse Kinematics bone constraint (with Pole Target)");
   reg<RigControl>("Rigging", "A controller shape to grab instead of bones (an IK target or pole, an FK circle): drawn over the scene, "
-                  "coloured by side - left blue, right red, the middle yellow.",
+                  "colored by side - left blue, right red, the middle yellow.",
                   "a custom bone shape (Maya: a NURBS controller curve)");
   reg<Animation>("Animation", "Plays an animation clip (Assets/Animations/*.anim) on this object and the ones below it, in Play. "
                  "Make and edit clips in the Animation window.",
@@ -139,7 +139,7 @@ void register_builtin_components() {
                      "Add Filter picks them by category.",
                      "Compositor nodes on the render (Unity: the Post-processing Layer and Volume profile)");
   reg<Outline>("Rendering",
-               "Toon outlines: a shell around the object in one colour, so it has a line round its silhouette (the inverted "
+               "Toon outlines: a shell around the object in one color, so it has a line round its silhouette (the inverted "
                "hull). Pair it with a Toon material.",
                "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
@@ -297,7 +297,7 @@ void EnvironmentSettings::reflect(Reflector &r) {
       r.field("Sun Disc Softness", sun_disc_softness, 0.01f, 0.0f, 1.0f);
       r.color("Sun Disc Color", sun_disc_color);
       r.field("Horizon Band", horizon_band, 0.01f, 0.0f, 0.5f);
-      r.help("A band of colour along the horizon (its half-width as a share of the sky; 0: none): the warm line of a painted sky.");
+      r.help("A band of color along the horizon (its half-width as a share of the sky; 0: none): the warm line of a painted sky.");
       r.color("Horizon Band Color", horizon_band_color);
     }
     r.group_end();
@@ -308,7 +308,7 @@ void EnvironmentSettings::reflect(Reflector &r) {
     r.field("Fog End", fog_end, 0.1f, 0.0f, 10000.0f);
     r.color("Fog Color", fog_color);
     r.color("Fog Color Far", fog_color_far);
-    r.help("Distance fog: a surface's colour is mixed toward the ramp - Fog Color at Fog Start to Fog Color Far at Fog End and\n"
+    r.help("Distance fog: a surface's color is mixed toward the ramp - Fog Color at Fog Start to Fog Color Far at Fog End and\n"
            "beyond - by its distance from the eye, in the Scene view, the GPU view and renders alike (a stylization: no scattering;\n"
            "the Retro camera filter's fog is a display effect of its own).");
   }
@@ -459,7 +459,7 @@ void Light::reflect(Reflector &r) {
   }
   r.color("Color", color);
   r.field("Use Color Temperature", use_temperature);
-  r.help("Tint the light with a black body's colour at the temperature below, as photographers and\n"
+  r.help("Tint the light with a black body's color at the temperature below, as photographers and\n"
          "lighting artists do (Unity HDRP: Color Temperature; Blender: a Blackbody node).");
   if (use_temperature || all) {
     r.field("Temperature (K)", temperature, 25.0f, 1000.0f, 40000.0f);
@@ -704,14 +704,14 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
   static const std::vector<FilterEffectInfo> infos = {
       {RetroConsoleFilter::kName, "Retro Console",
        "Render the way an old console drew 3D: PlayStation, Nintendo 64, Sega Saturn or a DOS PC (resolution, wobbling vertices, "
-       "warping textures, texture filtering, colour depth and dither).",
+       "warping textures, texture filtering, color depth and dither).",
        [] { return std::make_unique<RetroConsoleFilter>(); }},
       {ColorGradingEffect::kName, "Color", "Exposure, contrast, saturation, white balance and lift / gamma / gain, in linear light.",
        [] { return std::make_unique<ColorGradingEffect>(); }},
-      {PosterizeEffect::kName, "Color", "Fewer shades per channel: flat bands of colour.", [] { return std::make_unique<PosterizeEffect>(); }},
+      {PosterizeEffect::kName, "Color", "Fewer shades per channel: flat bands of color.", [] { return std::make_unique<PosterizeEffect>(); }},
       {GrayscaleEffect::kName, "Color", "Black and white, or a warm old-photo sepia.", [] { return std::make_unique<GrayscaleEffect>(); }},
       {InvertEffect::kName, "Color", "A negative image.", [] { return std::make_unique<InvertEffect>(); }},
-      {ColorRampEffect::kName, "Color", "The picture's brightness through a few colours (Blender's Color Ramp): flat cel tones or a gradient map.",
+      {ColorRampEffect::kName, "Color", "The picture's brightness through a few colors (Blender's Color Ramp): flat cel tones or a gradient map.",
        [] { return std::make_unique<ColorRampEffect>(); }},
       {VignetteEffect::kName, "Lens", "Darker (or tinted) corners, drawing the eye to the middle.", [] { return std::make_unique<VignetteEffect>(); }},
       {ChromaticAberrationEffect::kName, "Lens", "Red and blue fringes toward the edges, as from a cheap lens.",
@@ -719,12 +719,12 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
       {FilmGrainEffect::kName, "Lens", "Film-like noise, strongest in the midtones; it moves in Play mode.", [] { return std::make_unique<FilmGrainEffect>(); }},
       {LensDistortionEffect::kName, "Lens", "Barrel (fisheye-like, below 0) or pincushion (above 0) bending of straight lines.",
        [] { return std::make_unique<LensDistortionEffect>(); }},
-      {PixelateEffect::kName, "Stylize", "Blocks of one colour.", [] { return std::make_unique<PixelateEffect>(); }},
+      {PixelateEffect::kName, "Stylize", "Blocks of one color.", [] { return std::make_unique<PixelateEffect>(); }},
       {EdgeOutlineEffect::kName, "Stylize", "Lines where objects meet and where the depth jumps: a toon / sketch look.",
        [] { return std::make_unique<EdgeOutlineEffect>(); }},
       {CrtEffect::kName, "Stylize", "An old TV: scanlines, a curved tube, phosphor stripes and flicker.", [] { return std::make_unique<CrtEffect>(); }},
       {SharpenEffect::kName, "Stylize", "Crisper edges (an unsharp mask).", [] { return std::make_unique<SharpenEffect>(); }},
-      {HalftoneEffect::kName, "Stylize", "Comic / manga dots: a dot screen whose dots grow with the darkness (Mono ink on paper, or Colour).",
+      {HalftoneEffect::kName, "Stylize", "Comic / manga dots: a dot screen whose dots grow with the darkness (Mono ink on paper, or Color).",
        [] { return std::make_unique<HalftoneEffect>(); }},
       {HatchingEffect::kName, "Stylize", "Pen hatching: lines that cross more densely in darker areas.", [] { return std::make_unique<HatchingEffect>(); }},
       {LineArtEffect::kName, "Stylize", "Ink lines on silhouettes, where objects meet, and on creases sharper than an angle (a manga / anime line).",
@@ -911,19 +911,19 @@ void RetroConsoleFilter::reflect(Reflector &r) {
   r.help("Textures larger than this are drawn from a smaller copy (their mipmap), like a console's small texture memory.\n0: no limit.");
   r.field("Mipmaps", mipmaps);
   r.help("Off: one texture size at every distance (the PS1 had no mipmaps): far textures shimmer.");
-  static const char *depths[] = {"24-bit", "15-bit", "256 colours"};
+  static const char *depths[] = {"24-bit", "15-bit", "256 colors"};
   r.enumeration("Colour Depth", color_depth, depths, 3);
-  r.help("15-bit: 32 levels per channel (PS1, N64, Saturn). 256 colours: a fixed VGA-style palette (DOS).");
+  r.help("15-bit: 32 levels per channel (PS1, N64, Saturn). 256 colors: a fixed VGA-style palette (DOS).");
   if (color_depth != RetroImageParams::Full || all) {
     static const char *dithers[] = {"Off", "PS1 4x4", "Bayer 4x4"};
     r.enumeration("Dither", dither, dithers, 3);
-    r.help("Hides colour banding with a fixed pattern (the PS1's own matrix, or Bayer's).");
+    r.help("Hides color banding with a fixed pattern (the PS1's own matrix, or Bayer's).");
   }
   r.field("Screen-Door Transparency", screen_door);
   r.help("Draw see-through surfaces as a checkerboard of opaque pixels instead of blending (the Saturn's mesh).");
   r.field("Fog", fog);
-  r.help("Fade geometry toward a colour with distance, hiding a short draw distance. The sky is left alone:\n"
-         "set the camera's Background to the fog colour for a classic foggy horizon. Not in path-traced renders.");
+  r.help("Fade geometry toward a color with distance, hiding a short draw distance. The sky is left alone:\n"
+         "set the camera's Background to the fog color for a classic foggy horizon. Not in path-traced renders.");
   if (fog || all) {
     r.field("Fog Start", fog_start, 0.1f, 0.0f, 100000.0f);
     r.field("Fog End", fog_end, 0.1f, 0.0f, 100000.0f);
@@ -970,7 +970,7 @@ void ColorGradingEffect::reflect(Reflector &r) {
   r.field("Tint", tint, 0.01f, -1.0f, 1.0f);
   r.help("Toward magenta (+) or green (-).");
   r.color("Lift", lift);
-  r.help("Raises the shadows by colour (Lift / Gamma / Gain, as in colour grading suites). Black: no change.");
+  r.help("Raises the shadows by color (Lift / Gamma / Gain, as in color grading suites). Black: no change.");
   r.field("Gamma", gamma);
   r.help("Bends the midtones per channel (1: no change; above 1 brighter).");
   r.field("Gain", gain);
@@ -985,7 +985,7 @@ void ColorGradingEffect::contribute(FilterStack &s) const {
 
 void PosterizeEffect::reflect(Reflector &r) {
   r.field("Levels", levels, 2, 256);
-  r.help("Shades per colour channel (256: unchanged). Few levels give flat, poster-like bands.");
+  r.help("Shades per color channel (256: unchanged). Few levels give flat, poster-like bands.");
 }
 void PosterizeEffect::contribute(FilterStack &s) const {
   const int l = levels;
@@ -1025,7 +1025,7 @@ void VignetteEffect::contribute(FilterStack &s) const {
 
 void ChromaticAberrationEffect::reflect(Reflector &r) {
   r.field("Intensity", intensity, 0.01f, 0.0f, 1.0f);
-  r.help("Colour fringes toward the edges, as from a cheap lens.");
+  r.help("Color fringes toward the edges, as from a cheap lens.");
 }
 void ChromaticAberrationEffect::contribute(FilterStack &s) const {
   const float k = intensity;
@@ -1119,7 +1119,7 @@ void BloomEffect::contribute(FilterStack &s) const {
 }
 
 void HalftoneEffect::reflect(Reflector &r) {
-  static const char *modes[] = {"Mono", "Colour"};
+  static const char *modes[] = {"Mono", "Color"};
   r.enumeration("Mode", mode, modes, 2);
   r.field("Cell Size", cell, 0.1f, 2.0f, 128.0f);
   r.help("Dot spacing in pixels at 1080p (the same look at any resolution).");
@@ -1230,7 +1230,7 @@ void AnimeEffect::reflect(Reflector &r) {
     r.field("Crease Angle", crease_angle, 0.5f, 1.0f, 179.0f);
   }
   r.field("Saturation", saturation, 0.01f, -1.0f, 1.0f);
-  r.help("A little more colour (0: unchanged; 1: twice as vivid).");
+  r.help("A little more color (0: unchanged; 1: twice as vivid).");
   r.field("Contrast", contrast, 0.01f, -1.0f, 1.0f);
   r.field("Bloom", bloom, 0.01f, 0.0f, 100.0f);
   r.help("The soft glow round bright things (0: none).");
@@ -1300,7 +1300,7 @@ void Outline::reflect(Reflector &r) {
   r.field("World Space", world_space);
   r.help("Thickness in metres whatever the object's scale (off: in the object's own units).");
   r.color("Color", color);
-  r.help("The line's colour. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
+  r.help("The line's color. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
          "it as a sheet; it suits closed meshes.)");
   r.text("Thickness Group", thickness_group);
   r.help("A vertex group scaling the width per vertex (task 0149; Guilty Gear paints it): 1 the full width, 0 no line\n"

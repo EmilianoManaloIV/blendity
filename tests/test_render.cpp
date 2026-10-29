@@ -7681,7 +7681,7 @@ static void tests_round105() {
     CHECK(ed.update_skip_for_test() == "build-pr80");
     ed.command("update history");
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
-    CHECK(ed.button_rect_for_test("Install this version", b) && b.bottom() <= 720);
+    CHECK(ed.button_rect_for_test("Install This Version", b) && b.bottom() <= 720);
   });
   test("updates (network, BLENDITY_NET_TESTS=1 only): GitHub's real releases list is fetched and read", [] {
     const char *on = std::getenv("BLENDITY_NET_TESTS");

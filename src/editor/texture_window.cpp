@@ -233,7 +233,7 @@ void Editor::draw_textures_window(const Recti &r) {
       dock_open(WindowKind::Editing);
       edit_open_texture(texture_selected_->asset_path);
     }
-    u.tooltip("Open this texture's colour in the Editing tab; Apply to Texture puts the result back as a layer on top.");
+    u.tooltip("Open this texture's color in the Editing tab; Apply to Texture puts the result back as a layer on top.");
     x = eb.right() + u.px(6);
     const Recti db{x, bar.y + u.px(3), u.px(80), bh - u.px(6)};
     texture_ui_rects_["delete"] = db;

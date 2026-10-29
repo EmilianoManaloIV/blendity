@@ -113,7 +113,8 @@ using namespace platform;
 /* ===================================================================== */
 
 void Context::begin_frame(Image *target, double now) {
-  if (record_buttons) button_rects.clear();  // (tests: only what this frame drew)
+  if (record_buttons) button_rects.clear(), tooltip_texts.clear();  // (tests: only what this frame drew)
+  elided_key_ = 0, elided_label_.clear();  // (task 0293: a cut label belongs to the frame that drew it)
   if (!in.down[0] && !in.released[0]) touch_candidate_ = touch_scroll_id_ = 0, finger_widget_drag_ = false;  // (task 0215)
   if (in.pressed[0]) touch_scrolled_ = finger_widget_drag_ = false, finger_press_y_ = in.my;
   canvas.begin(target);
@@ -218,13 +219,17 @@ bool Context::button_enabled(const Recti &r, const std::string &label, bool enab
   if (record_buttons) button_rects[label] = r;
   frame(r, theme.strip, theme.border, px(3));
   const int iw = icon != Icon::None ? font.line_height() - px(4) : 0;
-  const int tw = font.text_width(label);
+  const std::string shown = elide(label, r.w - px(8) - (iw ? iw + px(4) : 0));  // (task 0293: cut with "...", not drawn past the button)
+  const int tw = font.text_width(shown);
   int x = r.x + std::max(px(4), (r.w - tw - (iw ? iw + px(4) : 0)) / 2);
   if (iw) {
     draw_icon(icon, {x, r.y + px(3), iw, iw}, theme.text_dim);
     x += iw + px(4);
   }
-  canvas.text(font, x, r.y + (r.h - font.line_height()) / 2, label, theme.text_dim);
+  canvas.push_clip(r);
+  canvas.text(font, x, r.y + (r.h - font.line_height()) / 2, shown, theme.text_dim);
+  canvas.pop_clip();
+  if (shown != label) elided_key_ = rect_key(r), elided_label_ = label;  // (its whole label before its reason)
   mark_widget(r);  // (the reason is this widget's tooltip; the caller's general tooltip waits until it is enabled)
   reason_key_ = rect_key(r), reason_text_ = why ? why : "";
   if (hovered(r)) {
@@ -247,21 +252,41 @@ bool Context::button(const Recti &r, const std::string &text, bool selected, Ico
   uint32_t bg = selected || (active_ == i && hot) ? theme.button_active : (hot ? theme.button_hover : theme.button);
   frame(r, bg, theme.border, px(3));
   int iw = icon != Icon::None ? r.h - px(6) : 0;
-  int tw = font.text_width(text);
-  int total = tw + (iw ? iw + (text.empty() ? 0 : px(4)) : 0);
+  const int room = r.w - px(8) - (iw ? iw + px(4) : 0);
+  const std::string shown = elide(text, room);  // (task 0293: a label too long for its button ends in "...", not mid-letter)
+  int tw = font.text_width(shown);
+  int total = tw + (iw ? iw + (shown.empty() ? 0 : px(4)) : 0);
   int x = r.x + std::max(px(4), (r.w - total) / 2);
   if (iw) {
     draw_icon(icon, {x, r.y + px(3), iw, iw}, theme.text_bright);
     x += iw + px(4);
   }
-  if (!text.empty()) {
+  if (!shown.empty()) {
     canvas.push_clip(r);
-    canvas.text(font, x, r.y + (r.h - font.line_height()) / 2, text, theme.text_bright);
+    canvas.text(font, x, r.y + (r.h - font.line_height()) / 2, shown, theme.text_bright);
     canvas.pop_clip();
   }
   last_widget_ = r;
   last_hovered_ = hot;
+  if (shown == text) {
+    if (elided_key_ == rect_key(r)) elided_key_ = 0, elided_label_.clear();  // (this button's label fits: nothing to prepend)
+    return clicked;
+  }
+  elided_key_ = rect_key(r), elided_label_ = text;  // (its whole label shows as a tooltip, before the caller's own)
+  tooltip(text);
   return clicked;
+}
+
+/* `text` cut to fit `room` pixels with "..." at its end; as it is when it fits (task 0293). */
+std::string Context::elide(const std::string &text, int room) {
+  if (text.empty() || font.text_width(text) <= room) return text;
+  std::string s = text;
+  while (!s.empty() && font.text_width(s + "...") > room) {
+    while (!s.empty() && ((unsigned char)s.back() & 0xC0) == 0x80) s.pop_back();  // (a UTF-8 character whole: its continuation bytes...)
+    if (!s.empty()) s.pop_back();  // (...then its first byte, or one ASCII character)
+  }
+  while (!s.empty() && s.back() == ' ') s.pop_back();
+  return s.empty() ? std::string() : s + "...";
 }
 
 bool Context::icon_button(const Recti &r, Icon icon, bool selected, const char *tip) {
@@ -327,16 +352,21 @@ bool Context::foldout(const Recti &r, const std::string &text, bool &open, Icon 
 }
 
 void Context::tooltip(const std::string &text) {
+  if (record_buttons && !text.empty())  // (task 0293: the sweep asks which controls explain themselves)
+    tooltip_texts[std::to_string(last_widget_.x) + "," + std::to_string(last_widget_.y) + "," + std::to_string(last_widget_.w) + "," + std::to_string(last_widget_.h)] = text;
   if (!last_hovered_ || active_ != 0 || text.empty()) return;
   if (reason_key_ != 0 && rect_key(last_widget_) == reason_key_ && text != reason_text_) return;  // (a disabled button: its reason, not its help)
-  Id key = rect_key(last_widget_) ^ (id(text) << 1);
+  /* An elided button (task 0293): its whole label first, then what the caller says - one tooltip, one timer. */
+  const bool elided = elided_key_ != 0 && rect_key(last_widget_) == elided_key_;
+  const std::string shown = elided && text != elided_label_ ? elided_label_ + "\n" + text : text;
+  Id key = elided ? rect_key(last_widget_) ^ 0x5BD1E995ull : rect_key(last_widget_) ^ (id(shown) << 1);
   if (key != hover_id_) {
     hover_id_ = key;
     hover_start_ = time;
   }
   double show_at = hover_start_ + 0.5;
   if (time >= show_at) {
-    tooltip_text_ = text;
+    tooltip_text_ = shown;
     tooltip_anchor_ = last_widget_;
   }
   else if (next_wakeup == 0 || show_at < next_wakeup) {
@@ -1270,6 +1300,14 @@ void Context::end_scroll() {
 /* Popups & menus                                                         */
 /* ===================================================================== */
 
+void Context::open_dropdown(Id i, const Recti &anchor) {
+  const bool nested = current_layer_ > 0;
+  open_popup(i, anchor, nested);
+  if (!nested) return;
+  popups_.back().submenu = false;
+  popups_.back().dropdown = true;
+}
+
 void Context::open_popup(Id i, const Recti &anchor, bool submenu_of_top) {
   if (!submenu_of_top) popups_.clear();
   else if ((int)popups_.size() > current_layer_) popups_.resize(current_layer_);
@@ -1294,6 +1332,15 @@ void Context::close_popups() {
   popups_.clear();
   popup_rects_prev_.clear();
   redraw = true;
+}
+
+void Context::close_popup(Id i) {
+  for (size_t k = 0; k < popups_.size(); k++)
+    if (popups_[k].id == i) {
+      popups_.resize(k);
+      redraw = true;
+      return;
+    }
 }
 
 void Context::close_popups_above(Id i) {

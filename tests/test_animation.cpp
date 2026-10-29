@@ -3640,6 +3640,69 @@ static void tests_round86_to_round100() {
     q = ed.seq_for_test_sequence();
     CHECK(q->triggers.size() == 1 && q->triggers[0].instance == "Rise" && q->triggers[0].blend == 0.3f && q->find("Rise"));
   });
+  test("sequencer: a trigger's key is captured by a press (task 0291) - its button waits, the key pressed is taken, one that isn't a trigger key is ignored, Esc keeps the old one", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R311Key");
+    ed.scene().create("Lid", box);
+    ed.command("select R311Key");
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R311Key Sequence.seq").c_str());
+    ed.command("window Sequencer");
+    ed.command("seq new");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0");
+    ed.command("seq trigger K R86Up 0.3");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y, int key = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key;
+      return e;
+    };
+    Recti kb;
+    const bool drawn = ed.button_rect_for_test("seq:key 0", kb);
+    auto press_button = [&] {
+      ed.step_frame_headless({ev(ET::MouseMove, kb.x + kb.w / 2, kb.y + kb.h / 2)});
+      ed.step_frame_headless({ev(ET::MouseDown, kb.x + kb.w / 2, kb.y + kb.h / 2)});
+      ed.step_frame_headless({ev(ET::MouseUp, kb.x + kb.w / 2, kb.y + kb.h / 2)});
+    };
+    auto key = [&](int k) {
+      ed.step_frame_headless({ev(ET::KeyDown, kb.x + kb.w / 2, kb.y + kb.h / 2, k)});
+      ed.step_frame_headless({ev(ET::KeyUp, kb.x + kb.w / 2, kb.y + kb.h / 2, k)});
+    };
+    if (drawn) press_button();
+    key(platform::KEY_TAB);  // (not a trigger key: still waiting)
+    key(platform::KEY_J);
+    SequencePtr q = ed.seq_for_test_sequence();
+    const std::string got = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    if (drawn) press_button();
+    key(platform::KEY_ESCAPE);
+    q = ed.seq_for_test_sequence();
+    const std::string kept = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    std::printf("    the key button drawn %d: Tab ignored, J pressed -> '%s'; again and Esc -> '%s'\n", (int)drawn, got.c_str(), kept.c_str());
+    CHECK(drawn && got == "J" && kept == "J");
+    /* The review's cases: Ctrl+S while waiting is a save, not the S key; a click elsewhere stops the waiting. */
+    if (drawn) press_button();
+    {
+      platform::Event e = ev(ET::KeyDown, kb.x + kb.w / 2, kb.y + kb.h / 2, platform::KEY_S);
+      e.mods = platform::MOD_CTRL;
+      ed.step_frame_headless({e});
+      ed.step_frame_headless();
+    }
+    q = ed.seq_for_test_sequence();
+    const std::string after_ctrl = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    ed.close_dialog_for_test();  // (Ctrl+S saved: an untitled scene asks where; that dialog closed)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.step_frame_headless({ev(ET::MouseMove, kb.x + kb.w / 2, kb.y + 200), ev(ET::MouseDown, kb.x + kb.w / 2, kb.y + 200)});
+    ed.step_frame_headless({ev(ET::MouseUp, kb.x + kb.w / 2, kb.y + 200)});
+    key(platform::KEY_K);
+    q = ed.seq_for_test_sequence();
+    const std::string after_click = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    std::printf("    waiting, Ctrl+S -> '%s' (still J); a click elsewhere, then K -> '%s' (still J: no longer waiting)\n", after_ctrl.c_str(), after_click.c_str());
+    CHECK(after_ctrl == "J" && after_click == "J");
+  });
   test("sequencer: a bar inside another fades in and out within itself; Once holds the last frame; an empty Sequencer leaves the Animation playing", [=] {
     seq_clips();
     Sequence s;
