@@ -695,6 +695,12 @@ clip, blend seconds) jump to a clip in Play, blending from the pose of the momen
 
 ## 10. Files: import and export
 
+**Live Link** sends the scene to Blender, Unity, Godot or Unreal as you work. It starts with Blendity (Preferences >
+Live Link) and writes where it listens, so a bridge connects by itself - and again after you restart Blendity. To put a
+bridge in: Window > Live Link > Install a Bridge > Blender (found and enabled for you), or Unity / Godot / Unreal
+Project... and pick the project's folder. The window lists who is connected. `tools/package_bridges.py` makes the
+packages to install by hand (docs/LIVELINK.md, bridges/*/README.md).
+
 **glTF (.glb / .gltf) carries a rig**: a mesh with a Skin modifier exports at rest with its armature as joints, four
 weights a vertex and its rig's clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and
 Blender import a character that still moves. The other formats write the mesh as posed.

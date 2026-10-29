@@ -36,6 +36,7 @@ const Curated kCurated[] = {
     {"Develop the Last Render", "Editing", "Open the last render in the Editing tab.", "develop open render"},
     {"Use as Camera Look", "Editing", "Give the Main Camera the Editing tab's look.", "develop look"},
     {"Start Live Link", "Live Link", "Send the scene to Blender, Unity, Godot or Unreal live.", "livelink start"},
+    {"Install a Bridge...", "Live Link", "Put the Live Link bridge into Blender, or a Unity, Godot or Unreal project (Window > Live Link).", "window Live Link"},
     {"Subdivide", "Mesh", "Split every face of the selected mesh.", "subdivide"},
     {"Smooth", "Mesh", "Relax the selected mesh's vertices.", "smooth"},
     {"Separate Loose Parts", "Mesh", "One object per loose part of the selected mesh.", "separate loose"},

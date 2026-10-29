@@ -704,6 +704,7 @@ class Editor {
     int count = 1;
   };
   const std::vector<Toast> &toasts_for_test() const { return toasts_; }  // (task 0252)
+  void clear_toasts_for_test() { toasts_.clear(); }
   struct JobView {  // (task 0253: one running job as the tray shows it)
     std::string label;
     float progress = -1.0f;  // (-1: none to show)
@@ -915,6 +916,14 @@ class Editor {
   bool livelink_start(int port);
   void livelink_stop();
   livelink::Link *livelink_for_test() { return livelink_.get(); }
+  std::string livelink_discovery_path() const;  // (task 0274: ~/.blendity/livelink.json, beside the prefs)
+  void livelink_autostart();
+  bool livelink_autostart_pref_for_test() const { return livelink_autostart_; }
+  bool bridge_job_running_for_test() const { return bridge_job_ != nullptr; }
+  std::string bridges_dir_for_test() const { return bridges_dir(); }
+  std::string find_blender_for_test(std::string &version) const { return find_blender(version); }
+  void bridge_job_poll_for_test() { bridge_job_poll(); }
+  const std::string &livelink_note_for_test() const { return livelink_note_; }
   const std::vector<int> &uv_slots_for_test() const { return uv_slots_; }
   /* How the UV Editor draws face `f` of `m`: 0 editable, 1 dimmed (another material), 2 not at all. */
   int uv_face_style_for_test(const Mesh &m, size_t f) const { return uv_slot_active(m, f) ? 0 : uv_hide_others_ ? 2 : 1; }
@@ -2004,6 +2013,27 @@ class Editor {
   void livelink_command(const std::vector<std::string> &t);
   void livelink_status();
   void livelink_tick();  // once a frame, after the scene's changes
+  void livelink_write_discovery();
+  void livelink_remove_discovery();
+  bool livelink_pref(const std::string &k, const std::string &v);
+  std::string livelink_prefs_text() const;
+  void draw_livelink_settings();
+  /* Install a Bridge (task 0278, livelink_install.cpp). */
+  std::string bridges_dir() const;
+  std::string find_blender(std::string &version) const;
+  bool install_bridge_blender();
+  bool install_bridge_unity(const std::string &project);
+  bool install_bridge_godot(const std::string &project);
+  bool install_bridge_unreal(const std::string &project);
+  void livelink_install_command(const std::vector<std::string> &t);
+  void draw_bridge_install(ui::Layout &lay);
+  void bridge_job_poll();
+  struct BridgeJob {
+    std::atomic<bool> done{false}, ok{false};
+    std::string message;  // (written before `done`)
+  };
+  std::shared_ptr<BridgeJob> bridge_job_;  // (Blender enabling the add-on, in the background)
+  static void run_blender_install(BridgeJob &job, const std::string &blender, std::string version, const std::string &from);
   bool seq_drop_clip(const std::string &abs_path, int mx, int my);
   void seq_command(const std::vector<std::string> &t);
   void seq_jump_command(const std::string &name, float blend);
@@ -3165,6 +3195,9 @@ class Editor {
   std::unique_ptr<livelink::Link> livelink_;
   int livelink_port_ = livelink::kDefaultPort;
   std::string livelink_error_;
+  std::string livelink_note_;        // (a fallback port said in the window)
+  bool livelink_autostart_ = true;   // (task 0274: Live Link starts with Blendity unless turned off)
+  bool livelink_discovery_ = false;  // the discovery file written by this process
 
   /* ---- play mode ---- */
   bool playing_ = false, paused_ = false, step_requested_ = false;

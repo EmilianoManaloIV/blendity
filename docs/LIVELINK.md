@@ -2,7 +2,7 @@
 
 Live Link sends the scene open in Blendity to other programs on the same computer as it changes: a bridge in
 Blender, Unity, Godot or Unreal connects, gets the whole scene, and then every change as it happens. It is one way:
-Blendity is the source, and nothing a client sends is read. Start it with Window > Live Link or the console:
+Blendity is the source, and nothing a client sends is read but its hello. Start it with Window > Live Link or the console:
 
 ```
 livelink start [port]    (the default port is 40100; 0 picks any free one)
@@ -12,6 +12,24 @@ livelink stop
 
 Decisions: [ADR 0055](decisions/0055-live-link.md). Code: `src/core/net_server.*` (the transport),
 `src/editor/livelink.*` (what is sent), `tests/test_livelink.cpp`, the stress section `livelink`.
+
+## Finding Blendity: the discovery file
+
+Live Link starts with Blendity (Preferences > Live Link > Start with Blendity; on by default). While it listens,
+Blendity writes `~/.blendity/livelink.json` (beside its preferences; `BLENDITY_PREFS_DIR` moves both):
+
+```
+{"protocol":"blendity-livelink/1","port":40100,"pid":1234,"app":"Blendity","version":"0.11.0","scene":"SampleScene","started":1793000000}
+```
+
+and removes it when Live Link stops or Blendity ends (only its own: another Blendity started since owns the file). A
+bridge with Auto Connect on reads it every 2 seconds while not connected and connects to `port`; a refused connection
+(a stale file after a crash) is just a failed try. Port 40100 taken: Blendity uses the next free of 40100-40109.
+Decisions: [ADR 0086](decisions/0086-livelink-discovery.md). `tools/livelink_fake_server.py` is a stand-in that
+serves the recorded session and writes the file, for a bridge's tests.
+
+A bridge may send one line first, its **hello**: `{"t":"client","app":"Unity 6000.0","bridge":"1.1"}`. Blendity's
+Live Link window lists the client by it. Nothing else a client sends is read.
 
 ## The connection
 

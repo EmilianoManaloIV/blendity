@@ -682,6 +682,10 @@ Window > Live Link (or the console's livelink start) opens a connection that oth
 ! cmd:livelink start; window Live Link | Start Live Link and open its window
 ! cmd:livelink status | What has gone out so far (in the Console)
 ! cmd:livelink stop | Stop it
+Bridges connect by themselves: while Live Link listens (it starts with Blendity unless Preferences > Live Link says otherwise) Blendity writes ~/.blendity/livelink.json with its port, and each bridge reads it every 2 seconds until it connects - again after Blendity restarts. Window > Live Link > Install a Bridge puts the bridge into Blender or a Unity, Godot or Unreal project.
+? You restart Blendity and its port changes because 40100 is taken. Do the bridges need the new port typed? | No. Blendity writes the port it got into ~/.blendity/livelink.json, and every bridge with Auto Connect on reads that file every 2 seconds while it is not connected.
+? Does a bridge's hello let Unity change your Blendity scene? | No. The hello only names the program in the Live Link window; the link stays one way and nothing else a client sends is read.
+! window:Live Link | Open the Live Link window (Install a Bridge is in it)
 )"},
     {"Undo, Selection and Memory", "Snapshots and copy-on-write", R"(
 Unity records undo per object (Undo.RecordObject). Blender's global undo stores snapshots of the whole file ("memfile undo") and only writes the parts that changed. Edit Mode has its own mesh undo.

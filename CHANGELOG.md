@@ -2,6 +2,93 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 298): the bridges as packages, and installed from Blendity (task 0278)
+
+**Asked:** the user (2026-10-29): make add-ons for Unity, Unreal and Godot so that the bridge is established
+automatically (a Unity package, a Blender package...). Their choices: Live Link starts with Blendity by default, Unreal
+as a C++ editor plugin, and they install the engines themselves for the in-engine tests.
+
+**Added**
+- **`tools/package_bridges.py`**: the Blender extension zip, a Unity .tgz and .unitypackage, the Godot zip and the Unreal
+  zip, byte for byte the same from the same sources; CI builds them as artifacts (releases stay the maintainer's).
+- **The installers carry the bridges**; **Install a Bridge** in the Live Link window: Blender found and the add-on
+  enabled by Blender in the background; a Unity, Godot or Unreal project picked, the bridge copied in and enabled.
+
+**Checked**
+- `tests_round298`: scratch projects for the three engines (enabled beside other plugins, still JSON, not twice); a
+  folder that is no project refused; with Blender 5.2.2, the add-on copied, enabled, its preferences saved. Blender's
+  `extension validate` accepts the zip.
+- Unit checks (round 298): Windows, in render-cache verify mode, 13357, 0 failed (1154 tests), 0 stale
+  pictures. Linux with libraries: 12897, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone: timing noise.)
+
+## 2026-10-29 (round 297): the Unreal bridge, a C++ editor plugin (task 0277)
+
+**Asked:** the user (2026-10-29): make add-ons for Unity, Unreal and Godot so that the bridge is established
+automatically (a Unity package, a Blender package...). Their choices: Live Link starts with Blendity by default, Unreal
+as a C++ editor plugin, and they install the engines themselves for the in-engine tests.
+
+**Added**
+- **An Unreal 5.3+ editor plugin** (`bridges/unreal/BlendityLiveLink`): a dock tab, a non-blocking socket ticked by
+  the core ticker, transient actors and static meshes, colours on BasicShapeMaterial, lights and cameras,
+  auto-connect; its protocol layer in standard C++, compiled into Blendity's suite.
+
+**Checked**
+- `tests_round297`: the recorded session through the plugin's own reader - every mesh, normals agreeing at 878 of 878,
+  the deform, the Box at (300, 100, 200) cm, a turn mapping with the points, the discovery file. The plugin itself and
+  its automation test: after Unreal is installed.
+- Round 298's unit-check line covers this round (rounds 294 to 298 landed together).
+
+## 2026-10-29 (round 296): the Godot bridge (task 0276)
+
+**Asked:** the user (2026-10-29): make add-ons for Unity, Unreal and Godot so that the bridge is established
+automatically (a Unity package, a Blender package...). Their choices: Live Link starts with Blendity by default, Unreal
+as a C++ editor plugin, and they install the engines themselves for the in-engine tests.
+
+**Added**
+- **A Godot 4.2+ add-on** (`bridges/godot`): a dock, StreamPeerTCP within 20 ms a frame, ArrayMeshes from the glTF
+  binaries with deforms, StandardMaterial3D, lights and cameras, auto-connect; a tiny test project.
+
+**Checked**
+- `smoke_test.gd` and `auto_connect_test.gd` written; not run (Godot isn't installed here yet).
+- Round 298's unit-check line covers this round (rounds 294 to 298 landed together).
+
+## 2026-10-29 (round 295): the Blender and Unity bridges connect by themselves (task 0275)
+
+**Asked:** the user (2026-10-29): make add-ons for Unity, Unreal and Godot so that the bridge is established
+automatically (a Unity package, a Blender package...). Their choices: Live Link starts with Blendity by default, Unreal
+as a C++ editor plugin, and they install the engines themselves for the in-engine tests.
+
+**Added**
+- **Blender 1.1.0 and Unity 1.1.0**: Auto Connect (on), the discovery file read every 2 seconds while not connected,
+  found again after Blendity restarts, Disconnect holding it off; a hello naming the program.
+- **The Unity package's .meta files** (`tools/unity_meta.py`, stable GUIDs), as a package from a .tgz or git needs.
+
+**Checked**
+- Blender 5.2.2 headless against the stand-in (`auto_connect_test.py`): connected with no port, the session applied,
+  found again on a new port, no duplicates, the hello; the smoke test still passes. `ReplayCheck.exe --live` (csc):
+  found through the file twice, the sessions whole, the hello.
+- Round 298's unit-check line covers this round (rounds 294 to 298 landed together).
+
+## 2026-10-29 (round 294): Live Link starts with Blendity and says where it listens (task 0274)
+
+**Asked:** the user (2026-10-29): make add-ons for Unity, Unreal and Godot so that the bridge is established
+automatically (a Unity package, a Blender package...). Their choices: Live Link starts with Blendity by default, Unreal
+as a C++ editor plugin, and they install the engines themselves for the in-engine tests.
+
+**Added**
+- **Start with Blendity** (Preferences > Live Link, the Live Link window; on by default), the port saved; 40100 taken:
+  the next free up to 40109, said.
+- **The discovery file** `~/.blendity/livelink.json` (the port, the scene, the process) while Live Link listens,
+  removed on Stop and exit (only this process's).
+- **Clients by name**: a bridge's hello line lists it in the window. `tools/livelink_fake_server.py`, a stand-in Live
+  Link for the bridges' tests.
+
+**Checked**
+- `tests_round294`: not started headless; a taken 40100 moves to 40101, said; the file's fields; a hello named; the
+  file gone after Stop and the editor's end; another Blendity's file left alone.
+- Round 298's unit-check line covers this round (rounds 294 to 298 landed together).
+
 ## 2026-10-29 (round 293): texturing and bakes without the console (task 0273)
 
 **Asked:** the user (2026-10-29): many editor features can only be reached by typing console commands; give them

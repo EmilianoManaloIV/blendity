@@ -4,6 +4,8 @@
 #include "test_common.h"
 #include "../src/core/json.h"
 #include "../src/core/net_server.h"
+/* The Unreal plugin's protocol layer (task 0277): standard C++ only, compiled here so every build replays it. */
+#include "../bridges/unreal/BlendityLiveLink/Source/BlendityLiveLink/Private/BlendityLinkProtocol.cpp"
 
 namespace {
 
@@ -535,8 +537,308 @@ static void tests_round267() {
   });
 }
 
+static void tests_round294() {
+  test("livelink discovery (task 0274): Start writes livelink.json beside the prefs with the protocol, the port and this process; a taken 40100 moves to the next port, said; a client's hello names it; Stop and the editor's end remove the file; a headless editor never starts by itself", [] {
+    set_env("BLENDITY_PREFS_DIR", test_dir() + "/prefs294");  // (never the user's own ~/.blendity: a running Blendity's file)
+    std::string path, text;
+    {
+      Editor ed;
+      ed.init_headless(800, 600);
+      path = ed.livelink_discovery_path();
+      fs::remove_file(path);
+      ed.livelink_autostart();
+      const bool idle = !ed.livelink_for_test() || !ed.livelink_for_test()->running();
+      std::printf("    headless, the preference on %d: started by itself %d\n", (int)ed.livelink_autostart_pref_for_test(), (int)!idle);
+      CHECK(idle && ed.livelink_autostart_pref_for_test());
+      /* 40100 taken by another server: the next one. */
+      net::Server blocker;
+      const bool blocked = blocker.start(livelink::kDefaultPort);
+      CHECK(ed.livelink_start(livelink::kDefaultPort));
+      const int port = ed.livelink_for_test()->port();
+      CHECK(fs::read_file(path, text));
+      JsonParser p{text.data(), text.data() + text.size()};
+      const Json j = p.value();
+      std::printf("    40100 held by another %d: listening on %d ('%s'); the file: protocol '%s', port %d, app '%s', scene '%s'\n", (int)blocked, port,
+                  ed.livelink_note_for_test().c_str(), j["protocol"].str.c_str(), j["port"].integer(), j["app"].str.c_str(), j["scene"].str.c_str());
+      CHECK(j["protocol"].str == livelink::kProtocol && j["port"].integer() == port && j["pid"].integer() > 0 && j["app"].str == "Blendity");
+      CHECK(!blocked || (port == livelink::kDefaultPort + 1 && !ed.livelink_note_for_test().empty()));
+      /* A bridge says who it is. */
+      net::LineClient c;
+      CHECK(c.connect(port));
+      CHECK(c.send("{\"t\":\"client\",\"app\":\"Unity 6000.0\",\"bridge\":\"1.1\"}"));
+      std::vector<std::string> names;
+      for (int i = 0; i < 100; i++) {
+        ed.step_frame_headless();
+        std::string line, bin;
+        while (c.read(line, bin, 5)) {}
+        names = ed.livelink_for_test()->client_names();
+        if (!names.empty() && names[0] != "a client") break;
+      }
+      std::printf("    a client's hello: %s\n", names.empty() ? "(none)" : names[0].c_str());
+      CHECK(names.size() == 1 && names[0] == "Unity 6000.0 (bridge 1.1)");
+      c.close();
+      ed.livelink_stop();
+      std::printf("    after Stop: the file %d\n", (int)fs::exists(path));
+      CHECK(!fs::exists(path));
+      blocker.stop();
+      CHECK(ed.livelink_start(0));
+      CHECK(fs::exists(path));
+    }
+    std::printf("    after the editor's end: the file %d\n", (int)fs::exists(path));
+    CHECK(!fs::exists(path));
+    CHECK(path.find("prefs294") != std::string::npos);
+    set_env("BLENDITY_PREFS_DIR", "");
+  });
+  test("livelink discovery (task 0274): another Blendity's file is left alone - Stop removes only this process's", [] {
+    set_env("BLENDITY_PREFS_DIR", test_dir() + "/prefs294");
+    Editor ed;
+    ed.init_headless(800, 600);
+    const std::string path = ed.livelink_discovery_path();
+    CHECK(ed.livelink_start(0));
+    const std::string other = "{\"protocol\":\"blendity-livelink/1\",\"port\":40107,\"pid\":1,\"app\":\"Blendity\"}\n";
+    CHECK(fs::write_file(path, other));  // (another Blendity started since and wrote its own)
+    ed.livelink_stop();
+    std::string text;
+    const bool kept = fs::read_file(path, text) && text == other;
+    std::printf("    the other's file kept after Stop %d\n", (int)kept);
+    CHECK(kept && path.find("prefs294") != std::string::npos);
+    fs::remove_file(path);
+    set_env("BLENDITY_PREFS_DIR", "");
+  });
+}
+
+/* q (x, y, z, w) turning v: v + 2w (q x v) + 2 q x (q x v). */
+static blendity_link::Vec3 quat_turn(const blendity_link::Quat &q, const blendity_link::Vec3 &v) {
+  const double tx = 2 * (q.y * v.z - q.z * v.y), ty = 2 * (q.z * v.x - q.x * v.z), tz = 2 * (q.x * v.y - q.y * v.x);
+  return {v.x + q.w * tx + (q.y * tz - q.z * ty), v.y + q.w * ty + (q.z * tx - q.x * tz), v.z + q.w * tz + (q.x * ty - q.y * tx)};
+}
+
+static void tests_round297() {
+  test("the Unreal plugin's protocol (task 0277): the recorded session framed whole by its own reader, every mesh read with its _VERT in range, the normals worked out again agreeing with the file's, a deform applied; the axes a mirror that keeps turns turning the same way; the discovery file and the hello", [] {
+    namespace ul = blendity_link;
+    const Session s = record_session();
+    ul::Stream st;
+    st.feed((const uint8_t *)s.raw.data(), s.raw.size() / 2);  // (in two pieces: a message cut in the middle waits)
+    st.feed((const uint8_t *)s.raw.data() + s.raw.size() / 2, s.raw.size() - s.raw.size() / 2);
+    ul::Message m;
+    int n = 0, meshes = 0, bad_vert = 0, deforms = 0, deformed = 0;
+    size_t agree = 0, total = 0;
+    std::map<int64_t, ul::GlbMesh> got;
+    ul::Vec3 box{};
+    std::string box_name;
+    std::map<int64_t, std::string> names;
+    while (st.next(m)) {
+      n++;
+      if (m.type == "object") names[m.json["id"].id()] = m.json["name"].string();
+      if (m.type == "transform" && names[m.json["id"].id()] == "Box") box = ul::position_to_unreal(m.json["position"]), box_name = "Box";
+      if (m.type == "deform") {
+        deforms++;
+        auto it = got.find(m.json["id"].id());
+        deformed += it != got.end() && ul::apply_deform(it->second, m.bin.data(), m.bin.size());
+      }
+      if (m.type != "mesh") continue;
+      ul::GlbMesh g;
+      std::string err;
+      CHECK(ul::read_glb(m.bin.data(), m.bin.size(), g, &err));
+      meshes++;
+      const int verts = (int)m.json["verts"].number(0);
+      for (int v : g.vertex_of) bad_vert += v < 0 || v >= verts;
+      /* The mesh's own positions back as a deform (glTF's axes, per mesh vertex): the normals worked out again. */
+      std::vector<float> pos((size_t)verts * 3, 0.0f);
+      for (size_t i = 0; i < g.vertex_of.size(); i++) {
+        const ul::Vec3 &p = g.positions[i];
+        float *o = &pos[(size_t)g.vertex_of[i] * 3];
+        o[0] = (float)(-p.y / 100.0), o[1] = (float)(p.z / 100.0), o[2] = (float)(p.x / 100.0);
+      }
+      const std::vector<ul::Vec3> file_normals = g.normals;
+      ul::GlbMesh again = g;
+      CHECK(ul::apply_deform(again, (const uint8_t *)pos.data(), pos.size() * 4));
+      for (size_t i = 0; i < file_normals.size(); i++) {
+        const ul::Vec3 &a = file_normals[i], &b = again.normals[i];
+        agree += a.x * b.x + a.y * b.y + a.z * b.z > 0.5;
+        total++;
+      }
+      got[m.json["id"].id()] = g;
+    }
+    std::printf("    %d messages framed, %zu bytes left; %d meshes, %d vertices outside their mesh; normals worked out again agree at %zu of %zu; %d of %d deforms applied\n",
+                n, st.pending(), meshes, bad_vert, agree, total, deformed, deforms);
+    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 1 && deformed == 1);
+    /* The Box moved to Blendity's (1, 2, 3): glTF (-1, 2, 3), Unreal (300 cm forward, 100 cm right, 200 cm up). */
+    std::printf("    the Box in Unreal: (%.1f, %.1f, %.1f) cm\n", box.x, box.y, box.z);
+    CHECK(box_name == "Box" && std::fabs(box.x - 300) < 1e-6 && std::fabs(box.y - 100) < 1e-6 && std::fabs(box.z - 200) < 1e-6);
+    /* A turn maps with the points: turning a mapped vector is mapping the turned one. */
+    ul::Json q;
+    const std::string qt = "[0.2,0.5,-0.3,0.787]";
+    ul::parse_json(qt.data(), qt.size(), q);
+    const double len = std::sqrt(0.04 + 0.25 + 0.09 + 0.787 * 0.787);
+    const ul::Quat g{0.2 / len, 0.5 / len, -0.3 / len, 0.787 / len};
+    const ul::Quat u = ul::rotation_to_unreal(q);
+    const ul::Quat un{u.x / len, u.y / len, u.z / len, u.w / len};
+    const ul::Vec3 v{0.3, -0.7, 0.4};
+    const ul::Vec3 turned = quat_turn(g, v);
+    const ul::Vec3 a = quat_turn(un, ul::direction_to_unreal(v.x, v.y, v.z)), b = ul::direction_to_unreal(turned.x, turned.y, turned.z);
+    std::printf("    a turn: mapped then turned (%.4f, %.4f, %.4f), turned then mapped (%.4f, %.4f, %.4f)\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    CHECK(std::fabs(a.x - b.x) < 1e-9 && std::fabs(a.y - b.y) < 1e-9 && std::fabs(a.z - b.z) < 1e-9);
+    /* The discovery file and the hello. */
+    const std::string dir = test_dir() + "/ue297";
+    fs::make_dirs(dir);
+    const std::string file = dir + "/livelink.json";
+    ul::Endpoint ep;
+    CHECK(fs::write_file(file, "{\"protocol\":\"blendity-livelink/1\",\"port\":40103,\"pid\":7,\"app\":\"Blendity\",\"scene\":\"Yard\"}\n"));
+    CHECK(ul::read_discovery(file, ep) && ep.port == 40103 && ep.scene == "Yard");
+    CHECK(fs::write_file(file, "{\"protocol\":\"another/2\",\"port\":40103}"));
+    CHECK(!ul::read_discovery(file, ep));
+    const std::string h = ul::hello("Unreal 5.4 \"Editor\"");
+    ul::Json hj;
+    CHECK(ul::parse_json(h.data(), h.size() - 1, hj) && hj["t"].string() == "client" && hj["app"].string() == "Unreal 5.4 \"Editor\"" && hj["bridge"].string() == "1.1");
+  });
+}
+
+static platform::Event ll_mouse(platform::EventType t, int x, int y) {
+  platform::Event e;
+  e.type = t, e.x = x, e.y = y;
+  return e;
+}
+
+static bool json_ok(const std::string &text) {
+  JsonParser p{text.data(), text.data() + text.size()};
+  p.value();
+  return p.ok;
+}
+
+static std::string last_toast(Editor &ed) {
+  ed.step_frame_headless();  // (a refusal becomes a toast on the frame after)
+  const auto &t = ed.toasts_for_test();
+  return t.empty() ? std::string() : t.front().text;  // (newest first)
+}
+
+static std::string all_toasts(const Editor &ed) {
+  std::string s;
+  for (const auto &t : ed.toasts_for_test()) s += " '" + t.text.substr(0, 90) + "'";
+  return s;
+}
+
+static void tests_round298() {
+  test("Install a Bridge (task 0278): a Unity project gets the package in Packages; a Godot project the add-on and its line in project.godot (beside another plugin, or a new section); an Unreal project the plugin in Plugins and its entry in the .uproject (a list there or not), still JSON; a folder that is no project refused; the window's buttons drawn, an engine's asking for a folder", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    if (ed.bridges_dir_for_test().empty()) {
+      std::printf("    (no bridges folder beside the program or here: not run from the source folder)\n");
+      return;
+    }
+    const std::string root = test_dir() + "/bridges298";
+    fs::make_dirs(root);
+    /* Unity. */
+    const std::string unity = root + "/UnityGame";
+    fs::make_dirs(unity + "/Assets"), fs::make_dirs(unity + "/ProjectSettings");
+    ed.command("livelink install unity " + unity);
+    const bool upkg = fs::exists(unity + "/Packages/com.blendity.livelink/package.json") && fs::exists(unity + "/Packages/com.blendity.livelink/Editor/LiveLinkClient.cs.meta");
+    std::printf("    Unity: the package in Packages with its .meta files %d; '%s'\n", (int)upkg, last_toast(ed).c_str());
+    CHECK(upkg);
+    ed.command("livelink install unity " + root + "/NotAProject");
+    std::printf("    a folder that isn't one: '%s'\n", last_toast(ed).c_str());
+    CHECK(last_toast(ed).find("isn't a Unity project") != std::string::npos);
+    /* Godot, beside another plugin and without the section. */
+    const std::string godot = root + "/GodotGame", godot2 = root + "/GodotBare";
+    fs::make_dirs(godot), fs::make_dirs(godot2);
+    CHECK(fs::write_file(godot + "/project.godot", "config_version=5\n\n[application]\n\nconfig/name=\"G\"\n\n[editor_plugins]\n\nenabled=PackedStringArray(\"res://addons/other/plugin.cfg\")\n\n[rendering]\n\nx=1\n"));
+    CHECK(fs::write_file(godot2 + "/project.godot", "config_version=5\n"));
+    ed.command("livelink install godot " + godot);
+    ed.command("livelink install godot " + godot2);
+    std::string g1, g2;
+    fs::read_file(godot + "/project.godot", g1), fs::read_file(godot2 + "/project.godot", g2);
+    const std::string mine = "\"res://addons/blendity_livelink/plugin.cfg\"";
+    const bool both = g1.find("enabled=PackedStringArray(" + mine + ", \"res://addons/other/plugin.cfg\")") != std::string::npos && g1.find("[rendering]") != std::string::npos;
+    const bool added = g2.find("[editor_plugins]") != std::string::npos && g2.find("enabled=PackedStringArray(" + mine + ")") != std::string::npos;
+    std::printf("    Godot: the add-on copied %d; enabled beside another %d; a new section %d\n", (int)fs::exists(godot + "/addons/blendity_livelink/plugin.cfg"), (int)both, (int)added);
+    CHECK(fs::exists(godot + "/addons/blendity_livelink/plugin.gd") && both && added);
+    const std::string godot3 = root + "/GodotEnd";  // ([editor_plugins] the last line, no newline after it)
+    fs::make_dirs(godot3);
+    CHECK(fs::write_file(godot3 + "/project.godot", "config_version=5\n\n[editor_plugins]"));
+    ed.command("livelink install godot " + godot3);
+    std::string g3;
+    fs::read_file(godot3 + "/project.godot", g3);
+    std::printf("    Godot, the section last with no newline: config first %d, enabled after the section %d\n", (int)(g3.rfind("config_version", 0) == 0),
+                (int)(g3.find("enabled=") > g3.find("[editor_plugins]")));
+    CHECK(g3.rfind("config_version", 0) == 0 && g3.find("enabled=") != std::string::npos && g3.find("enabled=") > g3.find("[editor_plugins]"));
+    ed.command("livelink install godot " + godot);  // (again: not added twice)
+    fs::read_file(godot + "/project.godot", g1);
+    CHECK(g1.find(mine) == g1.rfind(mine));
+    /* Unreal, with a Plugins list and without. */
+    const std::string ue = root + "/UEGame", ue2 = root + "/UEBare";
+    fs::make_dirs(ue), fs::make_dirs(ue2);
+    CHECK(fs::write_file(ue + "/UEGame.uproject", "{\n\t\"FileVersion\": 3,\n\t\"Plugins\": [\n\t\t{\n\t\t\t\"Name\": \"ModelingToolsEditorMode\",\n\t\t\t\"Enabled\": true\n\t\t}\n\t]\n}\n"));
+    CHECK(fs::write_file(ue2 + "/UEBare.uproject", "{\n\t\"FileVersion\": 3,\n\t\"EngineAssociation\": \"5.4\"\n}\n"));
+    ed.command("livelink install unreal " + ue);
+    ed.command("livelink install unreal " + ue2);
+    std::string u1, u2;
+    fs::read_file(ue + "/UEGame.uproject", u1), fs::read_file(ue2 + "/UEBare.uproject", u2);
+    const bool listed = u1.find("\"BlendityLiveLink\"") != std::string::npos && u1.find("ModelingToolsEditorMode") != std::string::npos && json_ok(u1);
+    const bool fresh = u2.find("\"BlendityLiveLink\"") != std::string::npos && json_ok(u2);
+    std::printf("    Unreal: the plugin copied %d (its replay session %d); in a Plugins list %d; a new list %d (both still JSON)\n",
+                (int)fs::exists(ue + "/Plugins/BlendityLiveLink/BlendityLiveLink.uplugin"), (int)fs::exists(ue + "/Plugins/BlendityLiveLink/Resources/livelink_stream.bin"), (int)listed, (int)fresh);
+    CHECK(fs::exists(ue + "/Plugins/BlendityLiveLink/Source/BlendityLiveLink/Private/BlendityLinkProtocol.cpp") && listed && fresh);
+    const std::string ue3 = root + "/UEOff";  // (listed but off: turned on)
+    fs::make_dirs(ue3);
+    CHECK(fs::write_file(ue3 + "/UEOff.uproject", "{\"Plugins\": [{\"Name\": \"BlendityLiveLink\", \"Enabled\": false}, {\"Name\": \"Other\", \"Enabled\": false}]}"));
+    ed.command("livelink install unreal " + ue3);
+    std::string u3;
+    fs::read_file(ue3 + "/UEOff.uproject", u3);
+    std::printf("    Unreal, listed but off: %s\n", u3.c_str());
+    CHECK(u3 == "{\"Plugins\": [{\"Name\": \"BlendityLiveLink\", \"Enabled\": true}, {\"Name\": \"Other\", \"Enabled\": false}]}");
+    /* The window: four buttons; an engine's asks for a folder (no dialog here: said). */
+    ed.record_buttons_for_test(true);
+    ed.command("window Live Link");
+    ed.clear_toasts_for_test();  // (the installs' toasts sit over the bottom of the dock, where the window opens)
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti r;
+    const bool drawn = ed.button_rect_for_test("livelink:install blender", r) && ed.button_rect_for_test("livelink:install unreal", r);
+    if (ed.button_rect_for_test("livelink:install godot", r)) {
+      std::printf("    Godot Project... at %d,%d %dx%d\n", r.x, r.y, r.w, r.h);
+      for (platform::EventType t : {platform::EventType::MouseMove, platform::EventType::MouseDown, platform::EventType::MouseUp}) ed.step_frame_headless({ll_mouse(t, r.x + r.w / 2, r.y + r.h / 2)});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    }
+    std::printf("    the window's buttons drawn %d; Godot Project... here: '%s'\n", (int)drawn, last_toast(ed).c_str());
+    CHECK(drawn && last_toast(ed).find("no file dialog here") != std::string::npos);
+  });
+  test("Install a Bridge (task 0278): Blender - the add-on copied into its extensions and enabled by Blender in the background (BLENDITY_TEST_BLENDER names a Blender; skipped without one)", [] {
+    const char *blender = std::getenv("BLENDITY_TEST_BLENDER");
+    if (!blender || !*blender) {
+      std::printf("    (BLENDITY_TEST_BLENDER not set: skipped)\n");
+      return;
+    }
+    const std::string user = test_dir() + "/blender298";
+    fs::make_dirs(user);
+    set_env("BLENDITY_BLENDER", blender);
+    set_env("BLENDER_USER_RESOURCES", user);
+    Editor ed;
+    ed.init_headless(800, 600);
+    std::string version;
+    ed.step_frame_headless();  // (what is logged before the first frame is history to the toasts)
+    std::printf("    Blender: %s\n", ed.find_blender_for_test(version).c_str());
+    ed.command("livelink install blender");
+    ed.command("livelink install blender");  // (again at once: refused while the first runs)
+    const std::string again = last_toast(ed);
+    for (int i = 0; i < 1200 && ed.bridge_job_running_for_test(); i++) {
+      ed.bridge_job_poll_for_test();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const bool copied = fs::exists(user + "/extensions/user_default/blendity_livelink/__init__.py");
+    std::printf("    a second install at once: '%s'\n", again.c_str());
+    CHECK(again.find("still enabling") != std::string::npos);
+    const std::string said = last_toast(ed);
+    std::printf("    copied %d; the toasts:%s; its preferences saved %d\n", (int)copied, all_toasts(ed).c_str(), (int)fs::exists(user + "/config/userpref.blend"));
+    CHECK(copied && said.find("is on in") != std::string::npos && fs::exists(user + "/config/userpref.blend"));
+    set_env("BLENDITY_BLENDER", "");
+    set_env("BLENDER_USER_RESOURCES", "");
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
   tests_round267();
+  tests_round294();
+  tests_round297();
+  tests_round298();
 }

@@ -7,15 +7,17 @@ An add-on that keeps a collection of the open Blender scene in step with the sce
 
 Blender 4.2 or newer (tested with 5.2.2).
 
-1. Zip the folder `blendity_livelink` (the folder itself, not its contents).
-2. In Blender: Edit > Preferences > Add-ons > the drop-down arrow > Install from Disk, and pick the zip. On 4.2 and
-   newer it installs as an extension (the folder carries `blender_manifest.toml`).
-3. Enable "Blendity Live Link".
+- **From Blendity:** Window > Live Link > Install a Bridge > Blender. Blendity finds Blender, copies the add-on into its
+  extensions and has Blender enable it.
+- **By hand:** `python tools/package_bridges.py` makes `dist/bridges/blendity_livelink-<version>.zip`; in Blender, Edit >
+  Preferences > Get Extensions > the drop-down arrow > Install from Disk, and pick it.
 
 ## Use
 
-1. In Blendity: Window > Live Link > Start (or the console's `livelink start`). It shows the port, 40100 by default.
-2. In Blender: View3D > Sidebar (N) > Blendity > Port, then Connect.
+Nothing to do: with Auto Connect on (the add-on's preferences; on by default) it connects whenever Blendity's Live Link
+runs - Blendity starts it with itself and writes `~/.blendity/livelink.json` saying where - and after Blendity closes
+or restarts it waits for it again. View3D > Sidebar (N) > Blendity shows the state ("Connected to Blendity
+(SampleScene)"). Disconnect holds it off until Connect; a port in the preferences overrides the file's.
 
 The objects appear in a collection "Blendity Live Link". Each has its Blendity id as the custom property
 `blendity_id`; nothing else in the file is touched. Disconnect leaves them there; connecting again brings them up to
@@ -35,6 +37,11 @@ date (and removes what Blendity deleted meanwhile).
 | armatures and bones | empties posed as the bones (skinned meshes come across as moving vertices) |
 
 ## Test
+
+`auto_connect_test.py` (task 0275) runs the add-on against `tools/livelink_fake_server.py`, a stand-in Live Link:
+connected with no port typed, the session applied, found again after a restart on another port, the hello sent.
+
+    blender -b --factory-startup --python-exit-code 1 -P bridges/blender/auto_connect_test.py
 
 `smoke_test.py` replays a recorded session (`tests/fixtures/livelink_stream.bin`, which the C++ suite records and
 checks) through the add-on in a headless Blender and checks the scene it leaves:

@@ -73,6 +73,7 @@ bool SceneCamera::update(double now) {
 
 Editor::Editor() = default;
 Editor::~Editor() {
+  livelink_remove_discovery();  // (task 0274: the bridges stop finding a Blendity that is gone)
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
@@ -193,6 +194,7 @@ bool Editor::init(int argc, char **argv) {
   }
   stable_ = scene_->clone();
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
+  livelink_autostart();  // (task 0274: the bridges connect by themselves)
   if (update_check_ && std::time(nullptr) - update_last_check_ > 86400.0) start_update_check(false);  // (once a day, task 0079)
   check_libraries_at_start();  // (the dependency-free build: offer Blender's libraries, task 0080)
   /* MoonRay (task 0112): offered on the first run, and a day after Not now; looking for it (WSL on Windows) only then. */
@@ -2116,6 +2118,7 @@ bool Editor::open_scene(const std::string &path) {
   scene_dirty_ = false;
   note_recent_scene(path);
   Log::info("Opened %s (%zu objects)", fs::filename(path).c_str(), scene_->object_count());
+  if (livelink_discovery_) livelink_write_discovery();  // (task 0274: the bridges show the scene open now)
   return true;
 }
 
@@ -4044,6 +4047,7 @@ void Editor::draw_dialogs() {
         draw_wheel_settings();  // (task 0230)
         draw_user_shortcuts_settings();  // (task 0231)
         draw_ui_file_settings();
+        draw_livelink_settings();  // (task 0274)
         /* (After the keymap: its preset list opens below its field, and a row above would push the field down until the
          * list had to open upward - task 0152.) */
         Recti ri = u.popup_row(u.row_h() + u.px(4));  // (task 0152)
@@ -4103,6 +4107,7 @@ void Editor::load_prefs() {
     if (moonray_pref(k, v)) continue;
     if (assist_pref(k, v)) continue;
     if (ai_pref(k, v)) continue;
+    if (livelink_pref(k, v)) continue;
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
@@ -4260,6 +4265,7 @@ void Editor::save_prefs() {
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();
+  s += livelink_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
                  other_views_follow_ ? 1 : 0, simpler_while_moving_ ? 1 : 0, cpu_fallback_noticed_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,

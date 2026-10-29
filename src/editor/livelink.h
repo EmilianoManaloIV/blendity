@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace bl {
 
@@ -46,6 +47,9 @@ class Link {
   bool running() const;
   int port() const;
   int clients() const;
+  /* The connected clients by the `app` (and `bridge`) of their hello line - {"t":"client","app":"Unity 6000.0",
+   * "bridge":"1.1"} - or "a client" when they sent none (task 0274). */
+  std::vector<std::string> client_names() const;
 
   /* Once a frame, on the main thread: new clients get the whole scene, every client what changed since the last
    * comparison (at most every 1/60 s). Nothing at all happens while no client is connected. */
