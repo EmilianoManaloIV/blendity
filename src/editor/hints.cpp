@@ -89,23 +89,23 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
       {"sculpt", [](const Editor &e) { return e.sculpt_; },
        [](const Editor &e) {
          return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, e.sculpt_brush_.kind))] +
-                "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate the group  |  [ ]: size  |  Esc: leave" +
+                "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate the group  |  " + e.brush_keys() + ": size  |  Esc: leave" +
                 (e.sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", e.sculpt_subdiv_levels()) : std::string()) +
                 (e.sculpt_dyntopo_ ? strprintf("  |  Dyntopo %.2f", e.sculpt_dyntopo_detail_) : std::string());
        }},
       {"mesh maps job", [](const Editor &e) { return e.meshmaps_job_ != nullptr; },
        [](const Editor &) { return std::string("Mesh Maps: baking on a worker...  |  Esc in the Scene view, the tray's Cancel or `meshmaps cancel`: stop it at the next row"); }},
       {"paint", [](const Editor &e) { return e.paint_; },
-       [](const Editor &) { return std::string("Paint: drag over the model (the pen's eraser end erases)  |  [ ]: size  |  Esc: leave  |  paint color|size|fill ..."); }},
+       [](const Editor &e) { return "Paint: drag over the model (the pen's eraser end erases)  |  " + e.brush_keys() + ": size  |  Esc: leave  |  paint color|size|fill ..."; }},
       {"strokes", [](const Editor &e) { return e.strokeobj_; },
        [](const Editor &e) {
          return std::string("Strokes (") + (e.strokeobj_kind_ == 1 ? "ribbon" : "card") +
-                "): tap the surface for a card, drag for a ribbon  |  Shift: erase  |  Esc: leave  |  strokeobj kind|size|normals ...";
+                "): tap the surface for a card, drag for a ribbon  |  Shift: erase  |  " + e.brush_keys() + ": size  |  Esc: leave  |  strokeobj kind|size|normals ...";
        }},
       {"scatter", [](const Editor &e) { return e.scatter_; },
-       [](const Editor &) { return std::string("Scatter: drag over the surface to drop instances of the source object  |  Alt, or the pen's eraser: remove  |  Esc: leave  |  scatter <object>"); }},
+       [](const Editor &e) { return "Scatter: drag over the surface to drop instances of the source object  |  Alt, or the pen's eraser: remove  |  " + e.brush_keys() + ": radius  |  Esc: leave  |  scatter <object>"; }},
       {"weight paint", [](const Editor &e) { return e.weight_paint_; },
-       [](const Editor &) { return std::string("Weight Paint: drag to add weight to the active bone's group  |  Ctrl: subtract  |  the pen's eraser erases  |  Esc: leave"); }},
+       [](const Editor &e) { return "Weight Paint: drag to add weight to the active bone's group  |  Ctrl: subtract  |  the pen's eraser erases  |  " + e.brush_keys() + ": radius  |  Esc: leave"; }},
       {"surface job", [](const Editor &e) { return e.surface_job_ != nullptr; },
        [](const Editor &) { return std::string("Surface: evaluating the stack on a worker (the views show the last result until it lands)"); }},
       {"hidden faces", [](const Editor &e) { return e.hidden_face_count(e.active_object()) != 0; },

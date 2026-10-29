@@ -13,7 +13,20 @@
 
 namespace bl::ui {
 
-const char *const kThemeNames[kThemeCount] = {"Dark", "Light", "Emiliano Light", "Emiliano Dark"};
+const char *const kThemeNames[kThemeCount] = {"Dark", "Light", "Emiliano Light", "Emiliano Dark", "High Contrast"};
+
+static double relative_luminance(uint32_t c) {
+  auto lin = [](int v8) {
+    const double v = v8 / 255.0;
+    return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin((c >> 16) & 255) + 0.7152 * lin((c >> 8) & 255) + 0.0722 * lin(c & 255);
+}
+
+double contrast_ratio(uint32_t a, uint32_t b) {
+  const double la = relative_luminance(a), lb = relative_luminance(b);
+  return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
 
 /* The themes. Emiliano's from the site's variables: background F1EEE5 / 292927, text 292927 / F1EEE5 (75 % for the
  * light text), accent D7882B and A65E1E, signal mint 45E8A2, magenta ED24C7, blue 4C76FF, red E6533C, amber FF9A00,
@@ -49,7 +62,7 @@ Theme theme_named(const std::string &name) {
     t.field = h(0xFBFAF6), t.field_border = h(0x9A9992), t.field_hover = h(0x6B6B63), t.focus = h(0xD7882B);
     t.button = h(0xE4DFD3), t.button_hover = h(0xEFEBE1), t.button_active = h(0xEBB57A), t.selection = h(0xEFB27A), t.selection_dim = h(0xD8D3C9);
     t.header = h(0xE4DFD3), t.popup = h(0xF6F4EE);
-    t.accent = h(0xD7882B), t.warning = h(0xFF9A00), t.error = h(0xE6533C), t.ok = h(0x2FB57D);
+    t.accent = t.progress = h(0xD7882B), t.warning = h(0xFF9A00), t.error = h(0xE6533C), t.ok = h(0x2FB57D);
     t.axis_x = h(0xE6533C), t.axis_y = h(0x2FB57D), t.axis_z = h(0x4C76FF), t.axis_hot = h(0xFF9A00);
     t.row_alt = h(0xEAE6DB), t.strip = h(0xE0DBCF), t.row_hover = h(0xE4DFD3), t.key = h(0x6B6B63), t.key_group = h(0x292927);
     t.key_selected = h(0xD7882B), t.canvas_bg = h(0xD8D3C9);
@@ -65,7 +78,7 @@ Theme theme_named(const std::string &name) {
     t.field = h(0x1F1F1D), t.field_border = h(0x4A4A45), t.field_hover = h(0x6B6B63), t.focus = h(0x45E8A2);
     t.button = h(0x3D3D39), t.button_hover = h(0x4A4A45), t.button_active = h(0xA65E1E), t.selection = h(0xA65E1E), t.selection_dim = h(0x3D3D39);
     t.header = h(0x33332F), t.popup = h(0x222220);
-    t.accent = h(0xD7882B), t.warning = h(0xFF9A00), t.error = h(0xE6533C), t.ok = h(0x45E8A2);
+    t.accent = t.progress = h(0xD7882B), t.warning = h(0xFF9A00), t.error = h(0xE6533C), t.ok = h(0x45E8A2);
     t.axis_x = h(0xE6533C), t.axis_y = h(0x45E8A2), t.axis_z = h(0x4C76FF), t.axis_hot = h(0xFFE44D);
     t.row_alt = h(0x242422), t.strip = h(0x2A2A27), t.row_hover = h(0x3D3D39), t.key = h(0x9A9992), t.key_group = h(0xF1EEE5);
     t.key_selected = h(0xD7882B), t.canvas_bg = h(0x1A1A1A);
@@ -73,6 +86,22 @@ Theme theme_named(const std::string &name) {
     t.bar = h(0x222220), t.pane = h(0x2E2E2C), t.stripe = h(0x2E2E2C), t.well = h(0x1F1F1D), t.playhead = h(0xF1EEE5);
     t.note_text = h(0xF6E3C8), t.link = h(0x9FB5FF), t.link_icon = h(0x4C76FF);
     t.note = h(0x3A3024), t.question = h(0x33332F), t.question_hover = h(0x3D3D39), t.question_border = h(0x6B6B63);
+  }
+  else if (name == "High Contrast") {  // (task 0261: white on near-black, every text at 4.5:1 or more, a yellow focus ring; contrast_ratio measures it)
+    t.window = t.panel = h(0x101010), t.panel_alt = h(0x161616), t.toolbar = h(0x000000), t.menubar = h(0x000000);
+    t.tabbar = h(0x080808), t.tab_active = h(0x1C1C1C), t.tab_hover = h(0x141414), t.border = h(0x9A9A9A), t.separator = h(0x6A6A6A);
+    t.text = h(0xFFFFFF), t.text_dim = h(0xC8C8C8), t.text_bright = h(0xFFFFFF);
+    t.field = h(0x000000), t.field_border = h(0xC8C8C8), t.field_hover = h(0xFFFFFF), t.focus = h(0x00E5FF);  // (cyan: apart from the yellow warning)
+    t.button = h(0x404040), t.button_hover = h(0x505050), t.button_active = h(0x0046B0), t.selection = h(0x0046B0), t.selection_dim = h(0x404040);
+    t.header = h(0x1C1C1C), t.popup = h(0x080808);
+    t.accent = h(0xFFB000), t.text_on_accent = h(0x000000), t.progress = h(0x0046B0), t.warning = h(0xFFD600), t.error = h(0xFF6B5E), t.ok = h(0x4CE07A);
+    t.axis_x = h(0xFF6B5E), t.axis_y = h(0x4CE07A), t.axis_z = h(0x6FA8FF), t.axis_hot = h(0xFFD600);
+    t.row_alt = h(0x161616), t.strip = h(0x101010), t.row_hover = h(0x303030), t.key = h(0xFFFFFF), t.key_group = h(0xFFFFFF);
+    t.key_selected = h(0xFFD600), t.canvas_bg = h(0x000000);
+    t.tooltip = h(0x000000), t.tooltip_border = h(0xFFFFFF), t.scroll_track = h(0x161616), t.scroll_thumb = h(0xC8C8C8);
+    t.bar = h(0x080808), t.pane = h(0x141414), t.stripe = h(0x1A1A1A), t.well = h(0x000000), t.playhead = h(0xFFFFFF);
+    t.note_text = h(0xFFE9A8), t.link = h(0x8FD3FF), t.link_icon = h(0x8FD3FF);
+    t.note = h(0x2A2000), t.question = h(0x141414), t.question_hover = h(0x202020), t.question_border = h(0xC8C8C8);
   }
   return t;
 }

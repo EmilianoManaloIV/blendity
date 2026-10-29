@@ -232,7 +232,9 @@ render image pans with a left drag, a curve point goes by Alt+click, Assign to S
 the clip, step to a key, Record) in every preset, 18 px key targets, a RECORD cue in the Scene view and a toast for a key asked for during Play. Round 279: Weight Paint's Add brush subtracts
 with Ctrl or the pen's eraser like every other brush, and the skin binds to a skeleton chosen from a dropdown. Round 280: the console recalls its history with Up and Down and
 answers an unknown command with the nearest known ones, a .anim asset opens the Animation window, the Wheel carries Set Key,
-Record and Play Clip.
+Record and Play Clip. Round 281: the welcome asks where you come from (Unity, Unreal, Blender, Photoshop & Substance) and
+sets the keys and the feel; an Adobe keymap preset (B brush, E eraser, V move, [ ] size); [ ] step every brush; a High
+Contrast theme measured against WCAG's 4.5:1; `keymap table`.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -263,7 +265,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13192 unit checks in 1137 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13230 unit checks in 1138 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

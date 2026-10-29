@@ -1,6 +1,6 @@
 # 0260: files and the shell - console recall and suggestions, .anim opens Animation, the Wheel's animation slices
 
-- **Status:** in progress (round 280)
+- **Status:** done (round 280)
 - **Requirements:** R-14
 - **Decisions:** ADR 0085 (the area rounds)
 - **Model:** main session

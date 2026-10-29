@@ -46,6 +46,10 @@ void Editor::start_update_check(bool manual, bool updates) {
 /* Each frame: a finished check becomes the list, and a newer build the Update dialog (unless skipped or quiet). */
 void Editor::poll_updates() {
   poll_update_download();
+  if (upd_.offer_waiting && dialog_ == Dialog::None) {  // (task 0261: the welcome has closed)
+    upd_.offer_waiting = false;
+    offer_after_check(upd_.waiting_manual, upd_.waiting_updates);
+  }
   if (!upd_.check) return;
   const int st = upd_.check->state.load();
   if (st == UpdateCheck::Running) return;
@@ -63,6 +67,15 @@ void Editor::poll_updates() {
   const auto newer = releases::newer(upd_.list, releases::build_tag(), releases::platform(), update_previews_);
   upd_.offer = newer.empty() ? "" : newer.front()->tag;
   if (dialog_ == Dialog::History) return;  // (Version History was waiting for the list: it shows it now)
+  if (dialog_ != Dialog::None) {  // (task 0261: the welcome, or any open question, first; the offer waits for it to close)
+    upd_.offer_waiting = true, upd_.waiting_manual = manual, upd_.waiting_updates = updates;
+    return;
+  }
+  offer_after_check(manual, updates);
+}
+
+/* The questions a finished check may ask, one at a time: MoonRay, AI Inbetweening, the libraries, then a newer build. */
+void Editor::offer_after_check(bool manual, bool updates) {
   if (upd_.want_moonray) {  // (task 0112: the MoonRay question, asked through the same check)
     upd_.want_moonray = false;
     if (offer_moonray()) return;  // (an update is offered by the next check: one question at a time)

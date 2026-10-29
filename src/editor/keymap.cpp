@@ -159,6 +159,10 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"mode.edit_toggle", "Edit Mode On / Off", "Modes", CTX_SCENE},
       {"mode.sculpt_toggle", "Sculpt Mode On / Off", "Modes", CTX_SCENE},  // (task 0236; unbound: the palette, the Wheel, the Tools window)
       {"mode.paint_toggle", "Paint Mode On / Off", "Modes", CTX_SCENE},    // (task 0245)
+      /* Task 0261: one brush grammar - the active brush (Sculpt, Paint, Weight Paint, Strokes, Scatter) answers the same keys. */
+      {"brush.smaller", "Brush Smaller", "Brushes", CTX_SCENE},
+      {"brush.larger", "Brush Larger", "Brushes", CTX_SCENE},
+      {"brush.erase", "Eraser On / Off", "Brushes", CTX_SCENE},  // (Paint's; unbound outside the Adobe preset)
       {"mode.vertex", "Vertex Select Mode", "Modes", CTX_SCENE_EDIT},
       {"mode.edge", "Edge Select Mode", "Modes", CTX_SCENE_EDIT},
       {"mode.face", "Face Select Mode", "Modes", CTX_SCENE_EDIT},
@@ -217,7 +221,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
   return acts;
 }
 
-const char *const kKeymapPresets[kKeymapPresetCount] = {"Unity", "Unreal", "Blender", "Maya", "3ds Max", "SketchUp"};
+const char *const kKeymapPresets[kKeymapPresetCount] = {"Unity", "Unreal", "Blender", "Maya", "3ds Max", "SketchUp", "Adobe"};
 const char *const kEditorFeels[kEditorFeelCount] = {"Unity", "Unreal", "Blender", "Maya"};
 
 /* The bindings shared by every preset: files, undo, windows, rendering. */
@@ -255,6 +259,8 @@ static void common_bindings(Keymap &k) {
   b("object.create_empty_child", {"Alt+Shift+N"});
   b("object.move_to_view", {"Ctrl+Alt+F"});
   b("edit.rename", {"F2"});
+  b("brush.smaller", {"["});  // (task 0261: Photoshop's, Substance's and Blender's size keys, in every preset)
+  b("brush.larger", {"]"});
   const char *wins[] = {"window.scene", "window.game", "window.inspector", "window.hierarchy", "window.project",
                         "window.console", "window.profiler", "window.research", "window.uv"};
   for (int i = 0; i < 9; i++) k[wins[i]] = {KeyChord{platform::KEY_1 + i, platform::MOD_CTRL}};
@@ -277,6 +283,20 @@ static void unreal_bindings(Keymap &k) {
   b("view.top", {"Alt+J"});
   b("view.side", {"Alt+K"});
   b("mesh.tris_to_quads", {});  // (Alt+J is the top view)
+}
+
+/* Photoshop's and Substance Painter's keys on top of Unity's (task 0261): B is the brush (Paint Mode), E the eraser, V the
+ * move tool, [ ] the size (every preset has them). Unity's E (the Rotate tool) gives way: the toolbar has it. */
+static void adobe_bindings(Keymap &k) {
+  auto b = [&](const char *id, std::initializer_list<const char *> chords) {
+    auto &v = k[id];
+    v.clear();
+    for (const char *c : chords) v.push_back(parse_chord(c));
+  };
+  b("mode.paint_toggle", {"B"});
+  b("brush.erase", {"E"});
+  b("tool.rotate", {});
+  b("tool.move", {"V", "W"});  // (Photoshop's V; Unity's W kept)
 }
 
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
@@ -481,6 +501,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     }
   }
   if (p == "unreal") unreal_bindings(k);  // (Unity's keys, with Unreal's own on top)
+  if (p == "adobe") adobe_bindings(k);    // (task 0261: Unity's keys, with Photoshop's brush keys on top)
   return k;
 }
 
@@ -566,6 +587,83 @@ void Editor::set_keymap_preset(const std::string &name) {
   clear_keymap_overrides();  // a preset is a fresh start (Blender: Load Keymap Preset)
   rebuild_keymap();
   Log::info("Keymap: %s", name.c_str());
+}
+
+/* Task 0261: the active brush's size by a quarter step (x 1.25 or / 1.25) - Sculpt's and Weight Paint's radius in pixels,
+ * Paint's radius, Strokes' size and Scatter's radius in metres - said in a toast; nothing with no brush mode on. */
+/* A brush size stepped by a quarter inside its field's limits: pixels by at least one, so 1 grows and 2 shrinks. */
+static float brush_stepped(float r, int dir, float lo, float hi, bool whole_px) {
+  const float f = dir > 0 ? 1.25f : 0.8f;
+  float v = r * f;
+  if (whole_px) v = dir > 0 ? std::max(r + 1.0f, std::round(v)) : std::min(r - 1.0f, std::round(v));
+  return std::max(lo, std::min(hi, v));
+}
+
+bool Editor::brush_step(int dir) {
+  auto px = [&](float &r, const char *what) {
+    r = brush_stepped(r, dir, 1.0f, 500.0f, true);  // (the Inspector's fields' 1-500)
+    toast(LogLevel::Info, strprintf("%s: %.0f px", what, r));
+  };
+  auto metres = [&](float &r, float lo, float hi, const char *what) {
+    r = brush_stepped(r, dir, lo, hi, false);
+    toast(LogLevel::Info, strprintf("%s: %.3g m", what, r));
+  };
+  if (sculpt_) px(sculpt_brush_.radius, "Sculpt radius");
+  else if (paint_) px(paint_brush_.radius, "Paint size");
+  else if (weight_paint_) px(wp_brush_.radius, "Weight Paint radius");
+  else if (strokeobj_) metres(strokeobj_size_, 0.001f, 100.0f, "Stroke size");
+  else if (scatter_) metres(scatter_brush_.radius, 0.01f, 1000.0f, "Scatter radius");
+  else return false;
+  ui_.redraw = true;
+  return true;
+}
+
+/* Task 0261: Paint's eraser (Photoshop's E); in any other mode a toast says whose it is. */
+bool Editor::brush_erase_toggle() {
+  if (!paint_) {
+    refuse("Eraser: it is Paint Mode's (the pen's eraser end erases in every brush mode)", "paint on", "Paint Mode");
+    return false;
+  }
+  paint_brush_.erase = !paint_brush_.erase;
+  toast(LogLevel::Info, paint_brush_.erase ? "Eraser on" : "Eraser off: painting");
+  return true;
+}
+
+/* Task 0261: every action's chords under every preset, a Markdown table (the manual's chapter 12 is pasted from it). */
+std::string Editor::keymap_table() const {
+  std::string s = "| Action |";
+  for (const char *pn : kKeymapPresets) s += std::string(" ") + pn + " |";
+  s += "\n|---|";
+  for (int k = 0; k < kKeymapPresetCount; k++) s += "---|";
+  s += "\n";
+  std::vector<Keymap> maps;
+  for (const char *pn : kKeymapPresets) maps.push_back(keymap_preset(pn, false));
+  for (const ShortcutAction &a : shortcut_actions()) {
+    s += strprintf("| %s: %s |", a.category, a.label);
+    for (const Keymap &m : maps) {
+      const auto it = m.find(a.id);
+      std::string chords;
+      if (it != m.end())
+        for (const KeyChord &c : it->second) chords += (chords.empty() ? "" : " / ") + chord_text(c);
+      s += " " + (chords.empty() ? std::string("-") : chords) + " |";
+    }
+    s += "\n";
+  }
+  return s;
+}
+
+/* Task 0261: the first-run picker's answer. Unity, Unreal, Blender: that feel (keys and navigation). Adobe (Photoshop and
+ * Substance): Unity's feel with the Adobe keys. Anything else: Unity. */
+void Editor::apply_origin(const std::string &origin) {
+  const std::string o = to_lower(origin);
+  const bool adobe = o.find("adobe") != std::string::npos || o.find("photoshop") != std::string::npos || o.find("substance") != std::string::npos;
+  set_editor_feel(o == "unreal" || o == "blender" ? o : "unity");
+  if (adobe) {  // (on Unity's feel; the user's own key changes kept, as the feel keeps them)
+    keymap_preset_ = "Adobe";
+    rebuild_keymap();
+    Log::info("Keymap: Adobe (Unity's keys with B brush, E eraser, V move, [ ] size)");
+  }
+  save_prefs();
 }
 
 std::string Editor::keymap_overrides_text() const {
@@ -711,6 +809,9 @@ bool Editor::run_action(const std::string &id) {
   }
   else if (id == "mode.sculpt_toggle") set_sculpt(!sculpt_);  // (task 0236)
   else if (id == "mode.paint_toggle") set_paint(!paint_);     // (task 0245)
+  else if (id == "brush.smaller") return brush_step(-1);     // (task 0261)
+  else if (id == "brush.larger") return brush_step(1);
+  else if (id == "brush.erase") return brush_erase_toggle();
   else if (id == "mode.vertex") set_edit_element(EditElement::Vertex);
   else if (id == "mode.edge") set_edit_element(EditElement::Edge);
   else if (id == "mode.face") set_edit_element(EditElement::Face);

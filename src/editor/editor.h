@@ -97,8 +97,8 @@ struct ShortcutAction {
 };
 using Keymap = std::unordered_map<std::string, std::vector<KeyChord>>;
 const std::vector<ShortcutAction> &shortcut_actions();
-constexpr int kKeymapPresetCount = 6;
-extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Unreal, Blender, Maya, 3ds Max, SketchUp
+constexpr int kKeymapPresetCount = 7;
+extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Unreal, Blender, Maya, 3ds Max, SketchUp, Adobe (task 0261)
 /* The editor's feel (task 0063): another program's keys and Scene view mouse navigation. */
 enum class NavStyle { Unity, Unreal, Blender, Maya };
 constexpr int kEditorFeelCount = 4;
@@ -741,6 +741,8 @@ class Editor {
   };
   GameObject *scatter_parent_for_test() { return scatter_parent(false); }
   ScatterBrush &scatter_brush_for_test() { return scatter_brush_; }
+  bool scatter_for_test() const { return scatter_; }                          // (task 0261)
+  SculptBrush &sculpt_brush_mut_for_test() { return sculpt_brush_; }          // (task 0261)
   bool scatter_masked_for_test(GameObject &g, Vec3 p, std::string &why) {
     const bool m = scatter_masked(g, p);
     why = scatter_mask_why_;
@@ -2451,6 +2453,10 @@ class Editor {
   void set_keymap_preset(const std::string &name);
   const Keymap &keymap() const { return keymap_; }
   const std::string &keymap_preset_name() const { return keymap_preset_; }
+  std::string keymap_table() const;  // (task 0261: every action's chords under every preset, a Markdown table)
+  bool brush_step(int dir);          // (task 0261: the active brush's size by a quarter step; false with no brush mode on)
+  bool brush_erase_toggle();         // (task 0261: Paint's eraser)
+  void apply_origin(const std::string &origin);  // (task 0261: the first-run picker's choice - a feel, or Adobe's keys on Unity's feel)
   std::string keymap_overrides_text() const;
   void parse_keymap_overrides(const std::string &text);
 
@@ -2982,6 +2988,7 @@ class Editor {
   const HintRow &hint_row_now() const;
   std::string navigation_hint() const;
   std::string hint_key(const char *action, const char *fallback) const;
+  std::string brush_keys() const { return hint_key("brush.smaller", "[") + " " + hint_key("brush.larger", "]"); }  // (task 0261)
   std::string key(const char *action) const;  // (the preset's chord for a label, or nothing: task 0254 F4)
   std::string with_key(const std::string &label, const char *action) const;  // ("Knife (K)", or "Knife" when the preset has no chord)
   std::string op_keys(const EditOpInfo &o) const;
@@ -4531,6 +4538,7 @@ class Editor {
     std::vector<releases::Release> extras;  // the libraries archives' release (task 0082), when GitHub has it
     std::string offer, selected;  // tags
     bool manual = false, history = false, want_libs = false, want_updates = false, want_moonray = false, want_ai = false;
+    bool offer_waiting = false, waiting_manual = false, waiting_updates = false;  // (task 0261: a finished check waiting for the open dialog)
   } upd_;
   /* ---- MoonRay, an external renderer (tasks 0112-0114, ADR 0041; moonray_ui.cpp) ---- */
   struct MoonRayLocate {
@@ -4632,6 +4640,7 @@ class Editor {
   bool use_libs_ = true, libs_never_ask_ = false;  // Preferences > Libraries (read by the launcher too, task 0080)
   void check_libraries_at_start();
   bool offer_libraries();
+  void offer_after_check(bool manual, bool updates);  // (task 0261: MoonRay, AI, the libraries, a newer build - once no dialog is open)
   void draw_libraries_dialog(const std::function<void()> &close);
   void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray = false, bool ai = false);
   static bool unpack_libraries(const std::string &archive, std::string &error);
@@ -4653,6 +4662,9 @@ class Editor {
   void run_installer(const std::string &path);
   void update_command(const std::vector<std::string> &t);
   void draw_first_run_tier(const std::function<void()> &close);  // task 0075
+  bool draw_origin_picker();                                      // task 0261 (true: Just start, close the welcome)
+  std::string origin_chosen_;                                     // (the welcome's pressed button)
+  bool welcome_low_ = false;                                      // (the welcome opened on a Low-tier machine: its tier rows show)
   std::string dialog_text_;
   std::vector<std::string> dialog_files_;
 };

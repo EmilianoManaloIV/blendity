@@ -735,9 +735,16 @@ Surface's Levels at 1 while modelling, and turn on the Low tier for heavy scenes
 ## 12. Shortcuts: Unity and Blender side by side
 
 Blendity uses Unity's keys, and keeps Blender's where Unity has none. Edit > Preferences..., Keymap, starts from
-Unity, Unreal, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
+Unity, Unreal, Blender, Maya, 3ds Max, SketchUp or Adobe and rebinds anything. The first run asks where you come from
+(Unity, Unreal, Blender, Photoshop & Substance) and sets the keys and the Editor Feel together; Help > Welcome asks again.
+The **Adobe** preset is Unity's keys with Photoshop's brush keys: B enters Paint Mode, E toggles the eraser, V is the
+Move tool, `[` and `]` the brush size. In every preset `[` and `]` step the active brush (Sculpt, Paint, Weight Paint,
+Strokes, Scatter) by a quarter. `keymap table` in the console prints every action's chords under every preset as a
+Markdown table (this chapter's table is kept by hand from it).
 
-**Themes** (Preferences > Theme, or `theme Dark|Light|Emiliano Light|Emiliano Dark`): the editor's colours. The two
+**Themes** (Preferences > Theme, or `theme Dark|Light|Emiliano Light|Emiliano Dark|High Contrast`): the editor's colours.
+High Contrast is white on near-black with every text at WCAG's 4.5:1 or more and a yellow focus ring (the tests measure
+every theme's ratios). The two
 Emiliano themes take the palette of the author's site (its Figma variables): paper #F1EEE5 and charcoal #292927, an amber
 accent #D7882B, mint / red / blue / amber signal colours.
 

@@ -69,14 +69,21 @@ struct Theme {
   uint32_t note = Color::hex(0x3A322A), note_text = Color::hex(0xE9D8C4);  // a Learn note box (a cited book)
   uint32_t link = Color::hex(0xA9C9EA), link_icon = Color::hex(0x7FB2E6);   // a Learn source-file link
   uint32_t question = Color::hex(0x30353A), question_hover = Color::hex(0x34393F), question_border = Color::hex(0x47505A);
+  /* Task 0261: text drawn on the accent (the Learn button), and the job tray's fill under its text. */
+  uint32_t text_on_accent = Color::hex(0xFFFFFF);
+  uint32_t progress = Color::hex(0xE87D0D);
 };
 
 /* The theme's index in kThemeNames by name (case aside), or -1. */
 int theme_index(const std::string &name);
 
+/* WCAG 2's contrast ratio between two opaque colours (1 to 21): (L1 + 0.05) / (L2 + 0.05) with L the relative luminance
+ * of the sRGB colour. 4.5 is AA for text, 3 for large text and for a control's edge (1.4.3, 1.4.11). Task 0261. */
+double contrast_ratio(uint32_t a, uint32_t b);
+
 /* The editor's colour themes (task 0073): Dark (Blendity's own), Light, and the two of the user's site (its Figma
  * Variables "Branding Guide", Light and Dark modes). */
-constexpr int kThemeCount = 4;
+constexpr int kThemeCount = 5;  // (task 0261: High Contrast, measured by contrast_ratio)
 extern const char *const kThemeNames[kThemeCount];
 Theme theme_named(const std::string &name);
 

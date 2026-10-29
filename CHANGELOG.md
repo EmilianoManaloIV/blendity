@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-28 (round 281): onboarding and transfer - the origin picker, the Adobe preset, one brush grammar, a High Contrast theme (task 0261)
+
+**Asked:** ADR 0085's transfer round: an artist arriving from Unity, Unreal, Photoshop and Substance, or Blender met
+Unity's keys and no question; there was no Adobe preset; each brush tool had its own size keys or none; no theme was
+measured against WCAG's 4.5:1. Transfer of learning (Singley and Anderson), Nielsen's H2, WCAG 1.4.3 and 1.4.11.
+
+**Added**
+- **The origin picker**: the welcome (every first run now, not only on a Low-tier machine) asks "Where are you coming
+  from?" - Unity, Unreal, Blender, Photoshop & Substance, Just start - and sets the keys and the Editor Feel in one go;
+  Help > "Welcome: Where Are You Coming From?" asks again.
+- **The Adobe preset** (`keymap adobe`): Unity's keys with B for Paint Mode, E for the eraser, V for the Move tool,
+  `[` `]` for the brush size; the Rotate tool's E gives way (the toolbar has it).
+- **One brush grammar**: `[` and `]` (`brush.smaller` / `brush.larger`, every preset) step the active brush's size -
+  Sculpt, Paint, Weight Paint, Strokes, Scatter - by a quarter, a toast saying the value; the five hints name the keys.
+- **A High Contrast theme** (`theme High Contrast`): white on near-black, every text at 4.5:1 or more, a yellow focus
+  ring apart from the yellow warnings, black text on its amber; `ui::contrast_ratio` (WCAG 2) measures every theme and
+  fourteen of High Contrast's pairs in the tests.
+- **`keymap table`**: every action's chords under every preset as a Markdown table, for the manual's chapter 12.
+- **Review (Opus) taken:** the update, AI and libraries offers replaced the welcome on a fresh install - a finished
+  check now waits while any dialog is open and asks once it closes; text on High Contrast's amber (the Learn button,
+  the tray's fill) was 1.8:1 - a text-on-accent colour (black, 11.5:1) and a tray fill of the theme's own (8.4:1),
+  both in the test with dim text on the selection (now 5.0), disabled buttons and tooltips; the focus ring is cyan,
+  apart from the yellow warnings; the benchmarks close the welcome a scratch profile opens; `[` `]` keep inside each
+  brush's field limits (Scatter's 1000 m, 500 px) and never stick at 1 or 2; "Just start" keeps the keys and closes
+  the welcome; the Adobe answer keeps the user's own key changes as the feels do, and the preset keeps Unity's W
+  beside V; the welcome's question in two rows; the hints read `[` `]` from the keymap; the eraser outside Paint is
+  refused with a Paint Mode Fix. Open: a selected key differs from an unselected one by hue (1.4:1) in High Contrast;
+  the deferred offer is not driven by a test (it needs the network check).
+
+**Checked**
+- `tests_round281`: the Adobe preset's B / E / V / `[` / `]` and its unbound Rotate; `]` in every preset; `]` and `[` on
+  the Sculpt radius and the Paint size, the eraser toggled, nothing with no brush on; every theme's ratios printed, the
+  High Contrast theme's least at 4.5 or more and its focus ring at 3 or more; the welcome on every first run, its
+  Adobe and Blender answers, the prefs keeping the Adobe keys; the table's rows and columns. The keymap test's clash
+  check now runs over Adobe too.
+- Unit checks (round 281): Windows, in render-cache verify mode, 13230, 0 failed (1138 tests), 0 stale
+  pictures. Linux with libraries: 12770, 0 failed. The sanitizer leg did not run this round (WSL would not start it; the Linux build and tests passed). `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`: 0 problems. (the gpu group's slow-open test failed under the parallel load and passed alone: timing noise.)
+
 ## 2026-10-28 (round 280): files and the shell - console recall and suggestions, .anim opens Animation, the Wheel's animation slices (task 0260)
 
 **Asked:** ADR 0085's files-and-shell round: the console kept a history nobody could recall and answered an unknown

@@ -848,10 +848,10 @@ void Editor::run_console_command(const std::string &line) {
     delete_assets_command(c, line);
     return;
   }
-  if (c == "theme") {  // theme <Dark|Light|Emiliano Light|Emiliano Dark> (task 0073)
+  if (c == "theme") {  // theme <Dark|Light|Emiliano Light|Emiliano Dark|High Contrast> (tasks 0073, 0261)
     std::string n;
     for (size_t i = 1; i < t.size(); i++) n += (i > 1 ? " " : "") + t[i];
-    if (n.empty()) Log::info("Theme: %s (Dark, Light, Emiliano Light, Emiliano Dark)", theme_name_.c_str());
+    if (n.empty()) Log::info("Theme: %s (Dark, Light, Emiliano Light, Emiliano Dark, High Contrast)", theme_name_.c_str());
     else set_theme(n);
     return;
   }
@@ -1407,8 +1407,14 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "keymap") {
-    /* keymap <Unity|Blender|Maya|3ds Max|SketchUp> | keymap bind <action> <chord>[|<chord>] | keymap clear <action> */
+    /* keymap <Unity|Unreal|Blender|Maya|3ds Max|SketchUp|Adobe> | keymap bind <action> <chord>[|<chord>] | keymap clear <action> |
+     * keymap table (task 0261: every preset's chords as a Markdown table, for the manual's chapter 12) */
     const std::string sub = to_lower(arg(1, ""));
+    if (sub == "table") {
+      std::istringstream ts(keymap_table());
+      for (std::string row; std::getline(ts, row);) Log::info("%s", row.c_str());
+      return;
+    }
     if (sub == "bind" && t.size() >= 4) {
       std::vector<KeyChord> chords;
       std::string spec = t[3];

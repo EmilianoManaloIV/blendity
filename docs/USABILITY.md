@@ -59,6 +59,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 
 | Problem found | Fix |
 |---|---|
+| A newcomer from Unreal, Blender or Photoshop met Unity's keys and no question; there was no Adobe preset; each brush had its own size keys; no theme was measured for contrast. | The welcome's origin picker (keys and feel in one go, Help asks again), the Adobe preset, `[` `]` for every brush, the High Contrast theme at 4.5:1 with `ui::contrast_ratio` in the tests (task 0261). |
 | The console's history could not be recalled, an unknown command got "type help", a .anim asset opened a text editor, and the Wheel had no animation slice. | Up / Down recall, "Did you mean: ..." from the palette's commands, .anim opens the Animation window, Set Key / Record / Play Clip on the object ring (task 0260). |
 | Weight Paint's Add brush ignored the pen's eraser and Ctrl, and binding a mesh to a skeleton needed a Ctrl+click two-object selection. | The Add brush subtracts with Ctrl or the eraser like every other brush; the Skin section's Skeleton dropdown names the skeleton and enables the bind (task 0259). |
 | No preset had an animation key, the palette listed nothing of animation, dopesheet keys were 5 px targets with a right-click-only tangent menu, Record showed as a dot in one window and Set Key in Play did nothing in silence. | `anim.*` actions bound per preset and listed in the palette, 18 px key targets, Alt+click for the tangent menu, a RECORD frame and badge in the Scene view, a toast with Fix: stop Play (task 0258). |

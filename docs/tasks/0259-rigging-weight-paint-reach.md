@@ -1,6 +1,6 @@
 # 0259: rigging and weight paint - the pen's eraser and Ctrl subtract, a skeleton field for the skin
 
-- **Status:** in progress (round 279)
+- **Status:** done (round 279)
 - **Requirements:** R-14
 - **Decisions:** ADR 0085 (the area rounds)
 - **Model:** main session

@@ -990,7 +990,7 @@ static void tests_round101() {
     const bool low = Editor::recommended_tier() == 0;
     std::printf("    this machine: %d threads, recommended %s, the welcome shown %d\n", sys::hardware_threads(), low ? "Low" : "High",
                 (int)ed.first_run_dialog_for_test());
-    CHECK(ed.first_run_dialog_for_test() == low);
+    CHECK(ed.first_run_dialog_for_test());  // (task 0261: every first run asks where the artist comes from)
     /* The minimum machine (BLENDITY_MIN_SPEC emulates it): Low and the welcome; Use High switches and keeps it. */
     set_env("BLENDITY_MIN_SPEC", "1");
     Editor e2;
@@ -1002,7 +1002,9 @@ static void tests_round101() {
     CHECK(e2.first_run_dialog_for_test() && e2.quality_tier() == 0);
     for (int i = 0; i < 2; i++) e2.step_frame_headless();  // (it draws at 1280 x 720)
     Recti b;
-    CHECK(e2.button_rect_for_test("Use High", b) && b.bottom() <= 720 && b.right() <= 1280);  // (it fits 1080p at 150 %)
+    const bool found_high = e2.button_rect_for_test("Use High", b);
+    std::printf("    Use High found %d at %d,%d %dx%d (bottom %d of 720)\n", (int)found_high, b.x, b.y, b.w, b.h, b.bottom());
+    CHECK(found_high && b.bottom() <= 720 && b.right() <= 1280);  // (it fits 1080p at 150 %)
     using ET = platform::EventType;
     for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
       platform::Event e;
@@ -5392,6 +5394,148 @@ static void tests_round279() {
   });
 }
 
+static void tests_round281() {
+  test("onboarding and transfer (ADR 0085, task 0261): the Adobe preset's keys; [ ] step the active brush by a quarter and nothing with no brush on; every theme's WCAG contrast printed and the High Contrast theme's at 4.5 or more; the welcome's origin sets the keys and the feel", [] {
+    /* The Adobe preset. */
+    const Keymap adobe = keymap_preset("Adobe");
+    auto chord = [&](const Keymap &k, const char *id) {
+      const auto it = k.find(id);
+      return it == k.end() || it->second.empty() ? std::string("(none)") : chord_text(it->second[0]);
+    };
+    std::printf("    Adobe: paint %s, eraser %s, move %s, smaller %s, larger %s, rotate %s\n", chord(adobe, "mode.paint_toggle").c_str(), chord(adobe, "brush.erase").c_str(),
+                chord(adobe, "tool.move").c_str(), chord(adobe, "brush.smaller").c_str(), chord(adobe, "brush.larger").c_str(), chord(adobe, "tool.rotate").c_str());
+    CHECK(chord(adobe, "mode.paint_toggle") == "B" && chord(adobe, "brush.erase") == "E" && chord(adobe, "tool.move") == "V");
+    CHECK(adobe.at("tool.move").size() == 2 && chord_text(adobe.at("tool.move")[1]) == "W");
+    CHECK(chord(adobe, "brush.smaller") == "[" && chord(adobe, "brush.larger") == "]" && chord(adobe, "tool.rotate") == "(none)");
+    for (const char *pn : {"Unity", "Blender", "Maya", "SketchUp"}) CHECK(chord(keymap_preset(pn), "brush.larger") == "]");
+    CHECK(chord(keymap_preset("Unity"), "brush.erase") == "(none)");
+    /* The brush step. */
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    CHECK(!ed.run_action_for_test("brush.larger"));  // (no brush mode: nothing)
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube);
+    ed.select_for_test(cube->id, false);
+    CHECK(ed.run_action_for_test("mode.sculpt_toggle") && ed.sculpt_for_test());
+    const float r0 = ed.sculpt_brush_for_test().radius;
+    ed.run_action_for_test("brush.larger");
+    const float r1 = ed.sculpt_brush_for_test().radius;
+    ed.run_action_for_test("brush.smaller");
+    const float r2 = ed.sculpt_brush_for_test().radius;
+    std::printf("    sculpt radius %.0f -> ] %.0f -> [ %.0f px\n", r0, r1, r2);
+    CHECK(std::fabs(r1 - std::round(r0 * 1.25f)) < 0.5f && std::fabs(r2 - std::round(r1 * 0.8f)) < 0.5f);
+    ed.run_action_for_test("mode.sculpt_toggle");
+    ed.command("surface new BrushSurf");  // (Paint wants a surface on the material)
+    CHECK(ed.run_action_for_test("mode.paint_toggle") && ed.paint_for_test());
+    const float p0 = ed.paint_brush_for_test().radius;
+    ed.run_action_for_test("brush.larger");
+    std::printf("    paint size %.0f -> ] %.0f px\n", p0, ed.paint_brush_for_test().radius);
+    CHECK(ed.paint_brush_for_test().radius > p0);
+    CHECK(!ed.paint_brush_for_test().erase && ed.run_action_for_test("brush.erase") && ed.paint_brush_for_test().erase);
+    ed.run_action_for_test("mode.paint_toggle");
+    CHECK(!ed.run_action_for_test("brush.erase"));  // (the eraser is Paint's: refused aloud)
+    /* The other brushes, the limits and the bottom of the scale. */
+    ed.command("create Sphere");
+    ed.select_for_test(cube->id, false);
+    ed.command("scatter Sphere");
+    ed.command("scatter on");
+    CHECK(ed.scatter_for_test());
+    ed.scatter_brush_for_test().radius = 900.0f;
+    ed.run_action_for_test("brush.larger");
+    std::printf("    scatter %d: radius 900 -> ] %.0f m (the field's limit 1000)\n", (int)ed.scatter_for_test(), ed.scatter_brush_for_test().radius);
+    CHECK(std::fabs(ed.scatter_brush_for_test().radius - 1000.0f) < 0.01f);
+    ed.command("scatter off");
+    CHECK(ed.run_action_for_test("mode.sculpt_toggle") && ed.sculpt_for_test());
+    ed.sculpt_brush_mut_for_test().radius = 1.0f;
+    ed.run_action_for_test("brush.larger");
+    const float up_from_1 = ed.sculpt_brush_for_test().radius;
+    ed.sculpt_brush_mut_for_test().radius = 2.0f;
+    ed.run_action_for_test("brush.smaller");
+    const float down_from_2 = ed.sculpt_brush_for_test().radius;
+    ed.sculpt_brush_mut_for_test().radius = 480.0f;
+    ed.run_action_for_test("brush.larger");
+    std::printf("    sculpt 1 -> ] %.0f, 2 -> [ %.0f, 480 -> ] %.0f (the field's 500)\n", up_from_1, down_from_2, ed.sculpt_brush_for_test().radius);
+    CHECK(up_from_1 == 2.0f && down_from_2 == 1.0f && ed.sculpt_brush_for_test().radius == 500.0f);
+    ed.run_action_for_test("mode.sculpt_toggle");
+    /* The themes' contrast (WCAG 2, 1.4.3 and 1.4.11). */
+    double hc_min = 99.0;
+    for (int k = 0; k < ui::kThemeCount; k++) {
+      const ui::Theme t = ui::theme_named(ui::kThemeNames[k]);
+      const double text_window = ui::contrast_ratio(t.text, t.window), text_panel = ui::contrast_ratio(t.text, t.panel), text_button = ui::contrast_ratio(t.text, t.button),
+                   text_field = ui::contrast_ratio(t.text, t.field), dim_panel = ui::contrast_ratio(t.text_dim, t.panel), warn = ui::contrast_ratio(t.warning, t.panel),
+                   err = ui::contrast_ratio(t.error, t.panel), accent = ui::contrast_ratio(t.accent, t.panel), focus = ui::contrast_ratio(t.focus, t.panel);
+      std::printf("    %-14s text/window %.1f  text/panel %.1f  text/button %.1f  text/field %.1f  dim/panel %.1f  warning %.1f  error %.1f  accent %.1f  focus %.1f\n",
+                  ui::kThemeNames[k], text_window, text_panel, text_button, text_field, dim_panel, warn, err, accent, focus);
+      if (std::string(ui::kThemeNames[k]) != "High Contrast") continue;
+      const double on_accent = ui::contrast_ratio(t.text_on_accent, t.accent), on_progress = ui::contrast_ratio(t.text_bright, t.progress),
+                   dim_selection = ui::contrast_ratio(t.text_dim, t.selection), text_selection = ui::contrast_ratio(t.text, t.selection),
+                   dim_strip = ui::contrast_ratio(t.text_dim, t.strip), tip = ui::contrast_ratio(t.text, t.tooltip);
+      std::printf("    High Contrast also: on the accent %.1f  on the tray's fill %.1f  dim on the selection %.1f  text on the selection %.1f  disabled %.1f  tooltip %.1f\n",
+                  on_accent, on_progress, dim_selection, text_selection, dim_strip, tip);
+      hc_min = std::min({text_window, text_panel, text_button, text_field, dim_panel, warn, err, accent, on_accent, on_progress, dim_selection, text_selection, dim_strip, tip});
+      CHECK(focus >= 3.0 && ui::contrast_ratio(t.focus, t.warning) > 1.0);
+    }
+    std::printf("    High Contrast: the least of those %.1f (4.5 asked)\n", hc_min);
+    CHECK(hc_min >= 4.5);
+    CHECK(std::fabs(ui::contrast_ratio(Color::hex(0xFFFFFF), Color::hex(0x000000)) - 21.0) < 0.01 && std::fabs(ui::contrast_ratio(Color::hex(0x777777), Color::hex(0x777777)) - 1.0) < 0.01);
+    /* The welcome asks the origin on every first run; its answer sets the keys and the feel. */
+    Editor w;
+    w.init_headless(1280, 720);
+    const std::string prefs = fs::join(test_dir(), "r281_prefs_none.txt");
+    std::remove(prefs.c_str());
+    w.prefs_for_test(prefs);
+    w.load_prefs_for_test();
+    CHECK(w.first_run_dialog_for_test());
+    /* A real click on the welcome's Unreal button: the keys and the feel follow, the welcome stays for Start. */
+    w.record_buttons_for_test(true);
+    for (int i = 0; i < 2; i++) w.step_frame_headless();
+    Recti ub, sb;
+    const bool found_unreal = w.button_rect_for_test("welcome:Unreal", ub);
+    CHECK(found_unreal);
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = ub.x + ub.w / 2, e.y = ub.y + ub.h / 2;
+      w.step_frame_headless({e});
+    }
+    w.step_frame_headless();
+    std::printf("    Unreal clicked: keys %s, feel %s, welcome %d\n", w.keymap_preset_name().c_str(), kEditorFeels[(int)w.nav_style_for_test()], (int)w.first_run_dialog_for_test());
+    CHECK(w.keymap_preset_name() == "Unreal" && w.nav_style_for_test() == NavStyle::Unreal && w.first_run_dialog_for_test());
+    CHECK(w.button_rect_for_test("welcome:Start", sb) || w.button_rect_for_test("Use High", sb));
+    /* Just start keeps the keys (Unreal's, just chosen) and closes the welcome. */
+    Recti js;
+    CHECK(w.button_rect_for_test("welcome:Just start", js));
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = js.x + js.w / 2, e.y = js.y + js.h / 2;
+      w.step_frame_headless({e});
+    }
+    w.step_frame_headless();
+    std::printf("    Just start: keys %s, welcome %d\n", w.keymap_preset_name().c_str(), (int)w.first_run_dialog_for_test());
+    CHECK(w.keymap_preset_name() == "Unreal" && !w.first_run_dialog_for_test());
+    w.apply_origin("adobe");
+    std::printf("    origin adobe: keys %s, feel %s\n", w.keymap_preset_name().c_str(), kEditorFeels[(int)w.nav_style_for_test()]);
+    CHECK(w.keymap_preset_name() == "Adobe" && w.nav_style_for_test() == NavStyle::Unity && w.shortcut_for_test("mode.paint_toggle") == "B");
+    CHECK(w.shortcut_for_test("tool.move") == "V");  // (W kept beside it)
+    w.apply_origin("blender");
+    CHECK(w.keymap_preset_name() == "Blender" && w.nav_style_for_test() == NavStyle::Blender);
+    /* The prefs keep the Adobe keys. */
+    w.apply_origin("adobe");
+    Editor w2;
+    w2.init_headless(800, 600);
+    w2.prefs_for_test(prefs);
+    w2.load_prefs_for_test();
+    CHECK(!w2.first_run_dialog_for_test() && w2.keymap_preset_name() == "Adobe" && w2.shortcut_for_test("brush.erase") == "E");
+    /* `keymap table`: a row per action, a column per preset. */
+    const std::string table = w.keymap_table();
+    size_t rows = 0;
+    for (char c : table) rows += c == '\n';
+    std::printf("    keymap table: %zu lines, header '%s'\n", rows, table.substr(0, table.find('\n')).c_str());
+    CHECK(rows == shortcut_actions().size() + 2 && table.find("| Brushes: Brush Larger | ] | ] | ] | ] | ] | ] | ] |") != std::string::npos);
+  });
+}
+
 static void tests_round280() {
   test("files and the shell (ADR 0085, task 0260): Up and Down recall the console's history, Down past the newest clears; an unknown command is answered with the nearest known ones; the Wheel's object ring carries Set Key, Record and Play Clip in an Animation ring, every built-in ring within the Wheel's eight slices", [] {
     Editor ed;
@@ -5484,5 +5628,6 @@ void run_editor_tests() {
   tests_round278();
   tests_round279();
   tests_round280();
+  tests_round281();
   coverage_tests();
 }

@@ -1246,6 +1246,8 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Learn Blendity", key("window.learn").c_str(), false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
+    if (u.menu_item("Welcome: Where Are You Coming From?")) dialog_ = Dialog::FirstRunTier, welcome_low_ = false;  // (task 0261)
+    u.tooltip("The first-run question again: Unity, Unreal, Blender or Photoshop & Substance keys, in one go.");
     if (u.menu_item("Open Manual")) open_manual();
     if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty() || !guide_uses_.empty())) {
       guides_seen_.clear();
@@ -1380,8 +1382,8 @@ void Editor::draw_toolbar(const Recti &r) {
   Recti lr{rx, y, learn_w, bh};
   bool hot = u.hovered(lr);
   u.frame(lr, hot ? Color::mix(u.theme.accent, 0xFFFFFFFF, 0.15f) : u.theme.accent, 0, u.px(3));
-  u.draw_icon(Icon::Book, {lr.x + u.px(6), lr.y + u.px(4), bh - u.px(8), bh - u.px(8)}, 0xFFFFFFFF);
-  u.canvas.text(u.font, lr.x + bh, lr.y + (bh - u.font.line_height()) / 2, "Learn", 0xFFFFFFFF);
+  u.draw_icon(Icon::Book, {lr.x + u.px(6), lr.y + u.px(4), bh - u.px(8), bh - u.px(8)}, u.theme.text_on_accent);  // (task 0261: black in High Contrast)
+  u.canvas.text(u.font, lr.x + bh, lr.y + (bh - u.font.line_height()) / 2, "Learn", u.theme.text_on_accent);
   if (hot && u.in.pressed[0]) dock_open(WindowKind::Learn);
   if (playing_) u.canvas.fill_rect({r.x, r.bottom() - u.px(2), r.w, u.px(2)}, u.theme.focus);
   draw_layout_dialogs();  // Save / Delete Layout (task 0055)
@@ -2694,6 +2696,7 @@ the views drawn again each one (as an orbit does), presented by the card, and as
 part's mean frame time printed, the window as the card showed it saved to `out`. */
 int Editor::windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands) {
   windowed_check_ = true;
+  if (dialog_ == Dialog::FirstRunTier) dialog_ = Dialog::None;  // (task 0261: as startup_check)
   for (const std::string &c : commands) command(c);  // (task 0199: the scene to measure)
   std::vector<Event> events;
   auto step = [&](bool redraw_views, bool every_row = false) {
@@ -2852,8 +2855,56 @@ void Editor::update_procedural_shapes() {
 
 /* The first run on a machine near the minimum (4 cores / 8 threads or 8 GB, e.g. an i7 laptop with Iris Xe): what Low
  * does, and High one click away. Either choice can be changed in Preferences > Quality. */
+/* Task 0261: the welcome's first question - where the artist comes from. Each answer sets the keys (and the Scene view's
+ * mouse where the program has its own) in one go; Edit > Preferences > Keymap changes it later; Help > Welcome asks again. */
+bool Editor::draw_origin_picker() {
+  auto &u = ui_;
+  for (const char *l : {"Where are you coming from? Blendity takes that program's keys and mouse.", "Edit > Preferences > Keymap changes it later; Help > Welcome asks again."}) {
+    Recti q = u.popup_row();
+    u.label({q.x + u.px(12), q.y, q.w - u.px(20), q.h}, l);
+  }
+  struct Origin { const char *label, *origin, *keys; };
+  static const Origin kOrigins[] = {{"Unity", "unity", "Unity's keys and navigation (Blendity's own)"},
+                                    {"Unreal", "unreal", "Unreal's: Alt+P plays, End drops to the floor, Alt+G/H/J/K views"},
+                                    {"Blender", "blender", "Blender's: G/R/S, middle-mouse orbit, Shift+I keys"},
+                                    {"Photoshop & Substance", "adobe", "Adobe's brush keys on Unity's feel: B brush, E eraser, V move, [ ] size"},
+                                    {"Just start", "", "Keep the keys as they are and close this (Unity's on a first run)"}};
+  Recti b = u.popup_row(u.row_h() + u.px(10));
+  int x = b.x + u.px(12);
+  bool just_start = false;
+  for (const Origin &o : kOrigins) {
+    const int w = u.px(o.origin[0] == 'a' ? 170 : 90);
+    const Recti r{x, b.y + u.px(4), w, b.h - u.px(8)};
+    if (u.record_buttons) u.button_rects[std::string("welcome:") + o.label] = r;
+    const bool chosen = origin_chosen_ == o.origin && !origin_chosen_.empty();
+    const bool hit = u.button(r, o.label, chosen);
+    if (hit && !o.origin[0]) just_start = true;
+    else if (hit) origin_chosen_ = o.origin, apply_origin(o.origin);
+    u.tooltip(o.keys);
+    x += w + u.px(6);
+  }
+  Recti n = u.popup_row();
+  const std::string now = strprintf("Keys: %s.  Feel: %s.", keymap_preset_.c_str(), kEditorFeels[(int)nav_style_]);
+  u.label({n.x + u.px(12), n.y, n.w - u.px(20), n.h}, now, u.theme.text_dim);
+  return just_start;
+}
+
 void Editor::draw_first_run_tier(const std::function<void()> &close) {
   auto &u = ui_;
+  if (draw_origin_picker()) {  // (task 0261: Just start)
+    save_prefs();
+    close();
+    return;
+  }
+  if (!welcome_low_) {  // (a machine above the minimum, or the welcome asked again from Help: the picker alone, and Start)
+    Recti b = u.popup_row(u.row_h() + u.px(10));
+    const Recti r{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+    if (u.record_buttons) u.button_rects["welcome:Start"] = r;
+    if (!u.button(r, "Start")) return;
+    save_prefs();
+    close();
+    return;
+  }
   const uint64_t ram = sys::physical_memory_bytes();
   const std::string found = strprintf("This machine has %d threads and %.0f GB of memory, near Blendity's minimum.", sys::hardware_threads(), ram / 1073741824.0);
   for (const std::string &l : {found, std::string("Low keeps the editor smooth: the views draw at 67 % and scale up, a 1024 shadow map,"),
@@ -2877,7 +2928,7 @@ void Editor::draw_first_run_tier(const std::function<void()> &close) {
 /* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
 void Editor::set_theme(const std::string &name_in, bool save) {
   const int k = ui::theme_index(name_in);
-  if (k < 0) return Log::warn("theme: Dark, Light, Emiliano Light or Emiliano Dark, not '%s'", name_in.c_str());
+  if (k < 0) return Log::warn("theme: Dark, Light, Emiliano Light, Emiliano Dark or High Contrast, not '%s'", name_in.c_str());
   theme_name_ = ui::kThemeNames[k];
   ui_.theme = ui::theme_named(theme_name_);
   ui_.redraw = true;
@@ -3451,6 +3502,7 @@ bool Editor::bench_scene(const std::string &name) {
 /* Task 0202: Blendity --startup-check - init, the first frames until one is on the screen (the card presents one frame
  * behind: three frames), quit; tools/bench_ui.py times the process. */
 int Editor::startup_check() {
+  if (dialog_ == Dialog::FirstRunTier) dialog_ = Dialog::None;  // (task 0261: a scratch profile's welcome is not what is measured)
   std::vector<Event> events;
   for (int i = 0; i < 3; i++) {
     events.clear();
@@ -3633,7 +3685,7 @@ void Editor::draw_dialogs() {
         });
         break;
       case Dialog::FirstRunTier:
-        title("Welcome: Blendity starts on Low here");
+        title(welcome_low_ ? "Welcome: Blendity starts on Low here" : "Welcome to Blendity");
         draw_first_run_tier(close);
         break;
       case Dialog::MoonRay:
@@ -3776,7 +3828,8 @@ void Editor::draw_dialogs() {
         int ti = std::max(0, ui::theme_index(theme_name_));
         if (u.combo(u.id("pref_theme"), {rt.x + u.px(160), rt.y + u.px(2), u.px(160), rt.h - u.px(4)}, ti, ui::kThemeNames, ui::kThemeCount))
           set_theme(ui::kThemeNames[ti]);
-        u.tooltip("The editor's colours: Dark (Blendity's), Light, or Emiliano Light / Dark (from your site's palette).");
+        u.tooltip("The editor's colours: Dark (Blendity's), Light, Emiliano Light / Dark (from your site's palette), or High Contrast\n"
+                  "(white on near-black, every text at WCAG's 4.5:1 or more, a yellow focus ring).");
         Recti r2 = u.popup_row(u.row_h() + u.px(4));
         u.label({r2.x + u.px(12), r2.y, u.px(140), r2.h}, "Move snap");
         u.float_field(u.id("pref_snap"), {r2.x + u.px(160), r2.y + u.px(2), u.px(80), r2.h - u.px(4)}, snap_move_, 0.01f, 0.001f, 100.0f, "%.3g");
@@ -3840,7 +3893,8 @@ void Editor::load_prefs() {
   rebuild_keymap();
   if (!fs::read_file(prefs_path_, text)) {
     set_quality_tier(recommended_tier());  // the first run: a tier that suits this machine (task 0050)
-    if (recommended_tier() == TierLow && (!headless_ || prefs_for_test_)) dialog_ = Dialog::FirstRunTier;  // ... and says so (task 0075)
+    welcome_low_ = recommended_tier() == TierLow;
+    if (!headless_ || prefs_for_test_) dialog_ = Dialog::FirstRunTier;  // ... and the welcome asks where the artist comes from (task 0261), saying so when Low (task 0075)
     return;
   }
   std::string keymap_text;
