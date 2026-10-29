@@ -2,6 +2,35 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 316): the Godot and Blender bridges run live (task 0295)
+
+**Asked:** the user (2026-10-29): "Godot and .NET should be installed, go check", then "How about the blender bridge?"
+
+**Added**
+- **Godot 4.7.2:**
+  - `smoke_test.gd` and `auto_connect_test.gd` pass headless;
+  - the editor loads the enabled add-on with no error;
+  - the add-on connected by itself to a running Blendity (its sample scene: the camera, the light, the plane, the
+    teapot).
+- **Blender 5.2.2:** both tests pass again, and the add-on connected live to a running Blendity the same way.
+- **Fixed (tests only):**
+  - the smoke test read the camera's global transform before the scene was in the tree, so it now builds it from
+    the parents;
+  - the auto-connect test stopped with a script error when no stand-in started, and now fails with its checks.
+- Godot's `.uid` files are kept in the repository and the package; `.godot/` (its cache) is ignored.
+- **Unreal 5.8:** still waits for the .NET Framework SDK (4.6 or newer) on this machine; the build stops at
+  "Could not find NetFxSDK install dir".
+
+**Checked**
+- Godot:
+  - smoke: 32 messages, every check ok;
+  - auto-connect: two sessions, 9 objects adopted, not duplicated, and the hello names Godot 4.7.2;
+  - the stub-Python case: 7 failed checks and exit 1, no script error.
+- Blender: `SMOKE OK: 32 messages, 9 objects` and `AUTO-CONNECT OK`.
+- Live: Blendity's windowed check with scratch preferences, and each bridge connected to it with no port typed
+  (13 messages, 4 objects).
+- No C++ changed this round.
+
 ## 2026-10-29 (round 315): the bridges in the engines (task 0295)
 
 **Asked:** the user (2026-10-29, /plan): "Finish all open tasks and maintain HCI consistency. Provide also a write-up

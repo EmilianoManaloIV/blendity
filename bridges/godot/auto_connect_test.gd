@@ -72,13 +72,15 @@ func _initialize() -> void:
 	check(pump(client, 6.0, func(): return client.connected()), "found again on port %d after the restart: '%s'" % [port2, client.status])
 	check(pump(client, 5.0, func(): return client.messages > 20), "the second session applied: %d messages" % client.messages)
 	var ids := {}
-	for c in client.applier.root.find_children("*", "", true, false):
+	var live: Node = client.applier.root if client.applier != null else holder
+	for c in live.find_children("*", "", true, false):
 		if c.has_meta("blendity_id"):
 			ids[int(c.get_meta("blendity_id"))] = ids.get(int(c.get_meta("blendity_id")), 0) + 1
 	var dup := 0
 	for k in ids:
 		dup += ids[k] - 1
-	check(dup == 0 and ids.size() == client.applier.objects.size(), "the objects adopted, not duplicated: %d ids, %d followed (%d in the first)" % [ids.size(), client.applier.objects.size(), objects1])
+	var followed: int = client.applier.objects.size() if client.applier != null else 0
+	check(dup == 0 and ids.size() > 0 and ids.size() == followed, "the objects adopted, not duplicated: %d ids, %d followed (%d in the first)" % [ids.size(), followed, objects1])
 	OS.kill(pid2)
 	var said := FileAccess.get_file_as_string(tmp.path_join("hellos.txt"))
 	check(said.contains("\"app\":\"Godot ") and said.contains("\"t\":\"client\""), "the hello said who it is: %s" % said.get_slice("\n", 0))

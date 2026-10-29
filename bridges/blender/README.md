@@ -5,7 +5,7 @@ An add-on that keeps a collection of the open Blender scene in step with the sce
 
 ## Install
 
-Blender 4.2 or newer (tested with 5.2.2).
+Blender 4.2 or newer (tested with 5.2.2: both tests below, and on 2026-10-29 a live connect to a running Blendity).
 
 - **From Blendity:** Window > Live Link > Install a Bridge > Blender. Blendity finds Blender, copies the add-on into its
   extensions and has Blender enable it.
