@@ -736,13 +736,66 @@ void set_cursor(Window *w, Cursor c) {
 
 std::string get_clipboard(Window *w) {
   std::string out;
-  if (!OpenClipboard(w->hwnd)) return out;
+  if (!w || !OpenClipboard(w->hwnd)) return out;
   if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
     if (auto *p = (const wchar_t *)GlobalLock(h)) {
       out = narrow(p);
       GlobalUnlock(h);
     }
   }
+  CloseClipboard();
+  return out;
+}
+
+/* A DIB (as the clipboard holds a screenshot) given its file header, to be read as a BMP: the pixels start after the
+ * header, the colour masks of a 40-byte header with BI_BITFIELDS (12 bytes; 16 with alpha) and the palette. */
+std::string dib_as_bmp(const void *dib, size_t size) {
+  if (!dib || size < sizeof(BITMAPINFOHEADER)) return {};
+  const auto *bi = (const BITMAPINFOHEADER *)dib;
+  const size_t colors = bi->biClrUsed ? bi->biClrUsed : (bi->biBitCount <= 8 ? (size_t)1 << bi->biBitCount : 0);
+  const bool info_header = bi->biSize == sizeof(BITMAPINFOHEADER);  // (not a V4 / V5 header, whose masks are inside it)
+  const size_t masks = info_header && bi->biCompression == BI_BITFIELDS ? 12 : info_header && bi->biCompression == 6 /* BI_ALPHABITFIELDS */ ? 16 : 0;
+  BITMAPFILEHEADER fh{};
+  fh.bfType = 0x4D42;
+  fh.bfSize = (DWORD)(sizeof(fh) + size);
+  fh.bfOffBits = (DWORD)(sizeof(fh) + bi->biSize + masks + colors * 4);
+  std::string out((const char *)&fh, sizeof(fh));
+  out.append((const char *)dib, size);
+  return out;
+}
+
+static std::string clipboard_bytes(UINT format) {
+  std::string out;
+  HANDLE h = GetClipboardData(format);
+  const void *p = h ? GlobalLock(h) : nullptr;
+  if (!p) return out;
+  out.assign((const char *)p, GlobalSize(h));
+  GlobalUnlock(h);
+  return out;
+}
+
+std::string get_clipboard_file(Window *w) {
+  if (!w || !OpenClipboard(w->hwnd)) return {};
+  std::string out;
+  if (auto drop = (HDROP)GetClipboardData(CF_HDROP); drop && DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) > 0) {
+    const UINT len = DragQueryFileW(drop, 0, nullptr, 0);
+    std::vector<wchar_t> path((size_t)len + 1, L'\0');
+    DragQueryFileW(drop, 0, path.data(), len + 1);
+    out = narrow(path.data());
+  }
+  CloseClipboard();
+  return out;
+}
+
+static std::string dib_as_bmp_from_clipboard() {
+  const std::string dib = clipboard_bytes(CF_DIB);
+  return dib_as_bmp(dib.data(), dib.size());
+}
+
+std::string get_clipboard_image(Window *w) {
+  if (!w || !OpenClipboard(w->hwnd)) return {};
+  std::string out = clipboard_bytes(RegisterClipboardFormatW(L"PNG"));  // (browsers and most paint programs put a PNG)
+  if (out.size() < 8 || out.compare(1, 3, "PNG") != 0) out = dib_as_bmp_from_clipboard();  // (a screenshot: the DIB)
   CloseClipboard();
   return out;
 }

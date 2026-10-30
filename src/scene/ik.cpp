@@ -269,7 +269,7 @@ void RigControl::reflect(Reflector &r) {
   r.help("How the control is drawn (Maya's controller curves, Blender's custom bone shapes).");
   static const char *kSides[] = {"Auto (by name)", "Centre", "Left", "Right"};
   r.enumeration("Side", side, kSides, 4);
-  r.help("Its colour: left blue, right red, the middle yellow (Maya's and Blender's convention). Auto reads the name.");
+  r.help("Its color: left blue, right red, the middle yellow (Maya's and Blender's convention). Auto reads the name.");
   static const char *kRoles[] = {"Control", "IK Target", "IK Pole", "FK"};
   r.enumeration("Role", role, kRoles, 4);
   r.field("Size", size, 0.01f, 0.001f, 1000.0f);

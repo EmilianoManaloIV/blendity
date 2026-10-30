@@ -45,7 +45,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   if (u.button(ovr, "Overlays", !every)) u.open_popup(u.id("scene_overlays"), {ovr.x, ovr.bottom(), ovr.w, 0});
   u.tooltip("Which overlays the Scene view draws: bones, rig controls, light and camera icons, curve and lattice points,\n"
             "origins, footprints, the selection outline, grid, gizmos and statistics (Blender: the Overlays popover).\n"
-            "Hide the bones to see a character's mesh with its IK handles still there. Console: overlay <layer> on|off.");
+            "Hide the bones to see a character's mesh with its IK handles still there.");
   u.popup(u.id("scene_overlays"), u.px(250), [this] { draw_overlays_menu(); });
   x += ovr.w + u.px(2);
   if (u.icon_button({x, y, h, h}, Icon::Camera, scene_filters_,
@@ -98,7 +98,7 @@ const char *const kToolNames[] = {"View", "Move", "Rotate", "Scale", "Transform"
 /* The mode the Scene view is in, as the breadcrumb and the hints name it. */
 std::string Editor::mode_name() const {
   if (sculpt_) return "Sculpt";  // (task 0236)
-  if (sketch_.active) return "Sketch";
+  if (sketch_.active && sketch_in_world()) return "Sketch";
   if (weight_paint_) return "Weight Paint";
   if (edit_mode_) return "Edit";
   return "Object";

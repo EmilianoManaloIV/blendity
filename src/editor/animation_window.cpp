@@ -13,6 +13,9 @@
 
 namespace bl {
 
+/* Round 335: what an object can animate, by group (defined with the Add Property menu). */
+static std::vector<std::tuple<std::string, std::string, int>> anim_properties_of(GameObject &g, bool is_root);
+
 using ui::Icon;
 
 namespace {
@@ -27,7 +30,7 @@ struct NumericFields : Reflector {
   void field(const char *n, bool &) override { out.push_back({n, 1}); }
   void field(const char *n, Vec3 &) override { out.push_back({n, 3}); }
   void color(const char *n, Vec3 &) override { out.push_back({n, 3}); }
-  void enumeration(const char *, int &, const char *const *, int) override {}
+  void enumeration(const char *n, int &, const char *const *, int) override { out.push_back({n, 1}); }  // (round 335: a list's choice too)
   void text(const char *, std::string &) override {}
   void mesh(const char *, MeshPtr &) override {}
 };
@@ -161,12 +164,16 @@ void Editor::anim_set_preview(bool on) {
     scene_->for_each([&](GameObject &g) {
       if (g.get<Bone>() && ik_drives(*scene_, g)) anim_.saved_pose.push_back({g.id, g.local()});
     });
+    /* Every number a track could drive (round 335's review: a track Record or Insert Keyframe makes while previewing
+     * goes back too); put back on Preview off only where a track is by then - an edit not keyed stays. */
     anim_.saved_values.clear();
-    if (AnimationClipPtr clip = anim_clip(); clip && root)
-      for (const AnimTrack &t : clip->tracks) {
-        GameObject *g = anim_target(*root, t.path);
-        float v = 0.0f;
-        if (g && read_anim_value(*g, t.property, t.axis, v)) anim_.saved_values.push_back({g->id, t.property, t.axis, v});
+    for (GameObject *g : subtree(root))
+      for (const auto &[group, prop, axes] : anim_properties_of(*g, g == root)) {
+        if (is_transform_property(prop)) continue;  // (saved_pose has those)
+        for (int a = 0; a < axes; a++) {
+          float v = 0.0f;
+          if (read_anim_value(*g, prop, a, v)) anim_.saved_values.push_back({g->id, prop, a, v});
+        }
       }
     anim_.preview = true;
     anim_apply();
@@ -176,8 +183,13 @@ void Editor::anim_set_preview(bool on) {
   commit_undo();  // (edits made while previewing are their own steps, before the pose goes back)
   for (const auto &[id, t] : anim_.saved_pose)
     if (GameObject *g = scene_->find(id)) g->set_local(t);
-  for (const auto &[id, prop, axis, v] : anim_.saved_values)
-    if (GameObject *g = scene_->find(id)) write_anim_value(*g, prop, axis, v);
+  AnimationClipPtr clip_now = anim_clip();
+  GameObject *root_now = anim_root();
+  for (const auto &[id, prop, axis, v] : anim_.saved_values) {
+    GameObject *g = scene_->find(id);
+    if (!g || !clip_now || !root_now || !clip_now->find(anim_path(*root_now, *g), prop, axis)) continue;  // (not animated: as it was left)
+    write_anim_value(*g, prop, axis, v);
+  }
   anim_.saved_pose.clear();
   anim_.saved_values.clear();
   solve_constraints(*scene_);
@@ -434,10 +446,11 @@ void Editor::anim_add_property(GameObject *g, const std::string &property, int a
   if (!root || !g) return;
   const std::string path = anim_path(*root, *g);
   anim_edit_keys("Add Property", [&](AnimationClip &c) {
+    const int interp = anim_value_stepped(*g, property) ? AnimConstant : AnimAuto;  // (a switch, a list, Active: no blend between)
     for (int a = 0; a < axes; a++) {
       float v = 0.0f;
       read_anim_value(*g, property, a, v);
-      c.track(path, property, a).set_key(anim_.frame, v);
+      c.track(path, property, a).set_key(anim_.frame, v, interp);
     }
   });
 }
@@ -483,10 +496,17 @@ const std::vector<std::string> &Editor::anim_clip_paths() {
   return anim_clip_paths_;
 }
 
+/* The toolbar wraps a whole group onto the next row when it doesn't fit (round 324: in a narrow Rigging & Animation
+ * tab the physics and AI tools ran off the window's edge). The rows used are kept for the window's next frame. */
 void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   auto &u = ui_;
-  int x = bar.x + u.px(4);
-  const int bh = bar.h - u.px(6), y = bar.y + u.px(3);
+  const int step = u.row_h() + u.px(6), left = bar.x + u.px(4), right = bar.right() - u.px(4);
+  int x = left, y = bar.y + u.px(3), rows = 1;
+  const int bh = step - u.px(6);
+  auto group = [&](int w) {  // (the next group's width: on a new row unless it fits, or the row is empty)
+    if (x + w <= right || x == left) return;
+    x = left, y += step, rows++;
+  };
   auto button = [&](int w, const char *label, bool on, const char *tip) {
     const Recti b{x, y, w, bh};
     x += w + u.px(3);
@@ -494,6 +514,7 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     u.tooltip(tip);
     return hit;
   };
+  group(u.px(64 + 28 + 26 * 4 + 30 + 56 + 60) + u.px(3) * 7);  // (Preview, Record, the transport and the frame)
   if (button(u.px(64), "Preview", anim_.preview, "Shows the clip at the playhead on the scene; turning it off puts the scene back.")) anim_set_preview(!anim_.preview);
   const Recti rec{x, y, u.px(28), bh};
   if (button(u.px(28), "", anim_.record, "Record (Unity's red button): changes to the animated objects become keys at the playhead.")) anim_toggle_record();
@@ -509,7 +530,8 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   draw_puppet_menu();
   x += u.px(60);
   /* The clip menu: the clip assets, then Create New Clip. */
-  if (!root) return;
+  if (!root) return finish_anim_toolbar(rows);
+  group(u.px(154 + 99 + 39));  // (the clip, Add Property, Fit)
   std::vector<std::string> names{"(no clip)"};
   const std::vector<std::string> &paths = anim_clip_paths();
   int cur = 0;
@@ -523,19 +545,20 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   int pick = cur;
   if (u.combo(u.id("anim_clip"), {x, y, u.px(150), bh}, pick, cn.data(), (int)cn.size()) && pick != cur) anim_pick_clip(root, pick == (int)names.size() - 1 ? "" : pick ? paths[(size_t)pick - 1] : "-");
   x += u.px(154);
-  if (button(u.px(96), "Add Property", false, "Animate a number of the selected object (or the root): Position, Rotation, Scale or a component's.") && clip)
-    u.open_popup(u.id("anim_add_prop"), {x - u.px(99), bar.bottom(), 0, 0});
+  if (button(u.px(96), "Add Property", false, "Animate a property of the selected object (or the root): its Transform, Active, any component's number, switch or color, a material slot's fields - with a search.") && clip)
+    anim_prop_search_.clear(), u.open_popup(u.id("anim_add_prop"), {x - u.px(99), y + bh, 0, 0});
   {
     const Recti fb{x, y, u.px(36), bh};
     if (u.record_buttons) u.button_rects["anim:Fit"] = fb;
     if (button(u.px(36), "Fit", false, "The whole clip in view (Home). Ctrl+wheel or a pinch zooms the time, Shift+wheel, two fingers or the middle button pans it.")) anim_view_fit();
   }
+  group(u.px(73 + 79 + 67));  // (Puppet, Dopesheet, Curves)
   {  // (tasks 0281-0284: Puppet Posing's tools in one menu - the toolbar is already wider than most windows)
     const Recti pb{x, y, u.px(70), bh};
     const bool any = trails_.show || trails_.onion > 0 || zoe_.on || anim_.smooth;
     if (button(u.px(70), "Puppet", any, "Puppet Posing's tools: motion trails, onion skin, the Zoetrope, Motion Check, the smooth brush,\n"
                                         "Lock in Place, and how far a pose edit reaches."))
-      u.open_popup(u.id("anim_puppet"), {pb.x, bar.bottom(), 0, 0});
+      u.open_popup(u.id("anim_puppet"), {pb.x, y + bh, 0, 0});
   }
   if (button(u.px(76), "Dopesheet", !anim_.curves, "The keys as diamonds along the time line (Unity's Dopesheet).")) anim_.curves = false;
   if (button(u.px(64), "Curves", anim_.curves,
@@ -544,20 +567,22 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     anim_.curves = true;
     anim_.v_framed.clear();
   }
+  if (assist_on(Assist::Walk)) group(u.px(83));
   if (assist_on(Assist::Walk) &&
       button(u.px(80), "Walk Cycle", false,
              "A walking or running cycle made from the rig with the Rigging window's Walk Cycle settings (a preset and its numbers):\n"
              "keys on the hips, the feet's IK targets, spine and arms, feet never sliding. Ordinary keys, one undo step."))
     walk_generate();
-  if (assist_on(Assist::Ai)) draw_ai_toolbar(x, y, bh);
-  if (!assist_on(Assist::Physics)) return;  // (Preferences > Animation Assistants: the physics tools off)
+  if (assist_on(Assist::Ai)) group(u.px(380)), draw_ai_toolbar(x, y, bh);  // (AI Inbetween, its span, the style, Fit to Clips)
+  if (!assist_on(Assist::Physics)) return finish_anim_toolbar(rows);  // (Preferences > Animation Assistants: the physics tools off)
+  group(u.px(121 + 79 + 63 + 89 + 89) + (ragdoll::available() ? u.px(73) : 0) + (body_.ghost ? u.px(57) : 0));
   if (button(u.px(118), "Center of Mass", body_.show_com,
              "Physics (Cascadeur's center of mass): the body's center of mass over the whole clip in the Scene view, where it is\n"
              "at the playhead and straight below it. Each bone weighs what its share of the skinned mesh does (Armature > Body Mass)."))
     body_command({"body", "show", body_.show_com ? "off" : "on"});
   if (button(u.px(76), "Contacts", false,
              "Find where the feet and hands rest (low and still) and mark those frames as contacts under the ruler (Cascadeur's\n"
-             "fulcrum points). Contacts set by hand (console: body contacts add) are kept. Pin holds them still: body contacts pin."))
+             "fulcrum points). Contacts set by hand (Puppet > Contacts) are kept, and Pin there holds them still."))
     body_contacts_command({"body", "contacts", "find"});
   if (button(u.px(60), "Flight", body_.ghost && body_.kind == "Flight",
              "Physics in the air (Cascadeur's AutoPhysics): between contacts the center of mass follows a parabola under gravity\n"
@@ -568,23 +593,31 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   if (button(u.px(86), solving ? "Solving..." : "AutoPhysics", shown || solving,
              "The whole clip made physically possible (Cascadeur's AutoPhysics): the center of mass and the spin moved as little as\n"
              "they can while the contacts' forces stay inside their friction and gravity does the rest - the take-offs and landings\n"
-             "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colours, then Apply."))
+             "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colors, then Apply."))
     body_physics_command({"body", "physics", shown || solving ? "off" : "show"});
   if (button(u.px(86), "AutoPosing", autopose_.on,
              "Drag a hand, a foot, the head or the hips with the move gizmo and the whole body follows (Cascadeur's AutoPosing):\n"
              "the spine and limbs bend within their limits, the feet stay on the ground, the center of mass stays over them. Keys\n"
-             "at the playhead on release. Locks: autopose lock <bone>."))
+             "at the playhead on release. Puppet > Lock the Selected Bone keeps one still."))
     autopose_command({"autopose", autopose_.on ? "off" : "on"});
   if (ragdoll::available()) {
     const bool rag_shown = body_.ghost && body_.kind == "Ragdoll", rag_busy = body_.solve && body_.solve->kind == "Ragdoll";
     if (button(u.px(70), rag_busy ? "Simulating..." : "Ragdoll", rag_shown || rag_busy,
                "The clip played by an active ragdoll (Jolt): a capsule a bone, its joints' motors following the clip, so hits and\n"
-               "falls react physically. Events in the clip: body ragdoll hit <bone> <frame> <x> <y> <z>, limp <frame> (motors off: a\n"
-               "fall), strong <frame>. Simulated in the background, shown as a ghost, then Apply."))
+               "falls react physically. Hits, limp (motors off: a fall) and strong at the playhead: Puppet > Ragdoll Events.\n"
+               "Simulated in the background, shown as a ghost, then Apply."))
       body_ragdoll_command({"body", "ragdoll", rag_shown || rag_busy ? "off" : "show"});
   }
   if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
     body_flight_command({"body", "flight", "apply"});
+  finish_anim_toolbar(rows);
+}
+
+/* The rows the toolbar needed: the window is laid out by them on its next frame (another frame now when they changed). */
+void Editor::finish_anim_toolbar(int rows) {
+  if (rows == anim_bar_rows_) return;
+  anim_bar_rows_ = rows;
+  ui_.redraw = true;
 }
 
 /* The clip menu's choice: a clip asset for the root's Animation, none ("-"), or a new clip (""). */
@@ -602,24 +635,121 @@ void Editor::anim_pick_clip(GameObject *root, const std::string &path) {
   mark_changed("Animation Clip");
 }
 
+/* Round 335: what an object can animate, by group - the object (Active), its Transform, each component's numbers,
+ * switches, lists and colours, and each material slot's: {group, property, axes}. */
+static std::vector<std::tuple<std::string, std::string, int>> anim_properties_of(GameObject &g, bool is_root) {
+  std::vector<std::tuple<std::string, std::string, int>> out;
+  if (!is_root) out.emplace_back("Object", "Active", 1);  // (the root's own: off, its Animation would stop and never turn it back on)
+  for (const char *prop : {"Position", "Rotation", "Scale"}) out.emplace_back("Transform", prop, 3);
+  for (auto &c : g.components) {
+    NumericFields nf;
+    c->reflect(nf);
+    for (const auto &[field, axes] : nf.out) out.emplace_back(c->type_name(), std::string(c->type_name()) + "." + field, axes);
+  }
+  MeshRenderer *mr = g.mesh_renderer();
+  for (size_t s = 0; mr && s < mr->materials.size(); s++) {
+    if (!mr->materials[s]) continue;
+    NumericFields nf;
+    mr->materials[s]->reflect(nf);
+    const std::string group = strprintf("Material %zu (%s)", s, mr->materials[s]->name.c_str());
+    for (const auto &[field, axes] : nf.out) out.emplace_back(group, strprintf("Material %zu.", s) + field, axes);
+  }
+  return out;
+}
+
 void Editor::draw_anim_add_property(GameObject *root) {
   auto &u = ui_;
   GameObject *a = active_object();
   bool under = false;
   for (GameObject *x = a; x && !under; x = x->parent) under = x == root;
   GameObject *g = under ? a : root;
-  u.popup(u.id("anim_add_prop"), u.px(240), [this, g] {
+  u.popup(u.id("anim_add_prop"), u.px(280), [this, g] {  // (round 335: a search, and the properties by group)
     auto &u = ui_;
     if (!g) return;
-    for (const char *prop : {"Position", "Rotation", "Scale"})
-      if (u.menu_item(g->name + " : " + prop)) anim_add_property(g, prop, 3);
-    for (auto &c : g->components) {
-      NumericFields nf;
-      c->reflect(nf);
-      for (const auto &[field, axes] : nf.out)
-        if (u.menu_item(g->name + " : " + c->type_name() + "." + field)) anim_add_property(g, std::string(c->type_name()) + "." + field, axes);
+    const Recti sr = u.popup_row(u.row_h() + u.px(6));
+    const ui::Id sid = u.id("anim_prop_search");
+    if (!u.editing(sid) && anim_prop_search_.empty()) u.begin_edit(sid, "", false);
+    u.text_field(sid, sr.shrink(u.px(3)), anim_prop_search_, nullptr, "Search properties");
+    if (u.in.key_pressed[platform::KEY_ESCAPE]) {  // (the search keeps the focus: Esc is the menu's)
+      u.in.key_pressed[platform::KEY_ESCAPE] = false;
+      u.stop_editing();
+      return u.close_popups();
+    }
+    const std::string f = to_lower(anim_prop_search_);
+    std::string group;
+    int shown = 0;
+    for (const auto &[grp, prop, axes] : anim_properties_of(*g, g == anim_root())) {
+      if (!f.empty() && to_lower(prop).find(f) == std::string::npos && to_lower(grp).find(f) == std::string::npos) continue;
+      if (grp != group) u.menu_label(group = grp);
+      shown++;
+      if (!u.menu_item(g->name + " : " + prop)) continue;
+      u.stop_editing();
+      anim_add_property(g, prop, axes);
+    }
+    if (!shown) u.menu_label("No property matches");
+  });
+}
+
+/* Round 335: keying from the Inspector. */
+void Editor::anim_field_cache_refresh() {
+  AnimFieldCache &k = anim_field_cache_;
+  if (k.ui_frame == ui_.frame_number()) return;
+  k.ui_frame = ui_.frame_number();
+  GameObject *root = anim_root();
+  AnimationClipPtr clip = anim_clip();
+  const float frame = std::round(anim_.frame);
+  if (k.root == root && k.clip == clip.get() && clip && k.version == clip->version && k.frame == frame) return;
+  k.root = root, k.clip = clip.get(), k.version = clip ? clip->version : 0, k.frame = frame;
+  k.state.clear();
+  for (const AnimTrack &t : clip ? clip->tracks : std::vector<AnimTrack>()) {
+    if (t.keys.empty()) continue;
+    int &s = k.state[t.path + "|" + t.property];
+    s = std::max(s, t.key_at(frame) >= 0 ? 2 : 1);
+  }
+}
+
+bool Editor::anim_keyable(const GameObject *g) {
+  anim_field_cache_refresh();
+  const GameObject *root = anim_field_cache_.root;
+  if (!g || !root || !anim_field_cache_.clip) return false;
+  for (const GameObject *x = g; x; x = x->parent)
+    if (x == root) return true;
+  return false;
+}
+
+void Editor::anim_key_property(GameObject *g, const std::string &property, int axes) {
+  if (playing_) return refuse("Insert Keyframe: not while Play runs", "stop", "stop Play");  // (Play's edits are discarded: a key would go with them)
+  if (!anim_keyable(g)) return;
+  const std::string path = anim_path(*anim_root(), *g);
+  const float frame = std::round(anim_.frame);
+  const int interp = anim_value_stepped(*g, property) ? AnimConstant : AnimAuto;  // (a switch, a list, Active: no blend between)
+  anim_edit_keys("Insert Keyframe", [&](AnimationClip &c) {
+    for (int a = 0; a < std::max(1, axes); a++) {
+      float v = 0.0f;
+      if (read_anim_value(*g, property, a, v)) c.track(path, property, a).set_key(frame, v, interp);
     }
   });
+}
+
+void Editor::anim_unkey_property(GameObject *g, const std::string &property, int axes) {
+  if (!anim_keyable(g)) return;
+  const std::string path = anim_path(*anim_root(), *g);
+  const float frame = std::round(anim_.frame);
+  anim_edit_keys("Delete Keyframe", [&](AnimationClip &c) {
+    for (int a = 0; a < std::max(1, axes); a++) {
+      AnimTrack *t = c.find(path, property, a);
+      const int k = t ? t->key_at(frame) : -1;
+      if (k < 0) continue;
+      t->keys.erase(t->keys.begin() + k);
+      if (t->keys.empty()) c.tracks.erase(c.tracks.begin() + (t - c.tracks.data()));  // (its last key: the track goes too)
+    }
+  });
+}
+
+int Editor::anim_property_state(GameObject *g, const std::string &property) {
+  if (!anim_keyable(g)) return 0;
+  const auto it = anim_field_cache_.state.find(anim_path(*anim_field_cache_.root, *g) + "|" + property);
+  return it == anim_field_cache_.state.end() ? 0 : it->second;
 }
 
 /* Frames and x through the view window (task 0267): span 0 shows the whole clip, as before. */
@@ -939,7 +1069,7 @@ void Editor::draw_animation_window(const Recti &r) {
   auto &in = u.in;
   if (u.hovered(r) && in.pressed[0]) focused_ = WindowKind::Animation;
   GameObject *root = anim_root();
-  const int bh = u.row_h() + u.px(6);
+  const int bh = (u.row_h() + u.px(6)) * std::max(1, anim_bar_rows_);  // (round 324: as many rows as the toolbar wrapped to)
   const Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.header);
   draw_anim_toolbar(bar, root);
@@ -982,11 +1112,12 @@ void Editor::draw_animation_window(const Recti &r) {
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
   if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);
   else if (!anim_smooth_brush(sheet, end)) anim_sheet_input(*clip, ruler, sheet, row_h, end);  // (task 0284: the brush first when on)
-  u.popup(u.id("anim_key_ctx"), u.px(180), [this] {
+  u.popup(u.id("anim_key_ctx"), u.px(220), [this] {
     if (ui_.menu_item("Clamped Auto")) anim_set_tangent(TanAuto);
     if (ui_.menu_item("Free Smooth")) anim_set_tangent(TanFree);
     if (ui_.menu_item("Flat")) anim_set_tangent(TanFlat);
     if (ui_.menu_item("Broken")) anim_set_tangent(TanBroken);
+    draw_key_slope_fields();  // (task 0291)
     ui_.menu_separator();
     if (ui_.menu_item("Auto (curve)")) anim_set_interp(AnimAuto);
     if (ui_.menu_item("Linear")) anim_set_interp(AnimLinear);
@@ -1019,14 +1150,50 @@ void Editor::anim_tangent_command(const std::vector<std::string> &t, AnimationCl
     const float v = t.size() > i ? (float)std::atof(t[i].c_str()) : def;
     return std::isfinite(v) ? std::max(-1e6f, std::min(1e6f, v)) : def;
   };
+  const float in = slope(7, tr->in_tangent((size_t)k)), out = slope(8, t.size() > 7 ? in : tr->out_tangent((size_t)k));
+  anim_set_key_tangent(index, frame, mode, in, out);
+}
+
+/* A key's tangent mode and slopes in one undo step - the console's `anim tangent` and the key menu's In / Out fields
+ * (task 0291). Free keeps one slope both sides. */
+void Editor::anim_set_key_tangent(size_t index, float frame, int mode, float in, float out) {
   anim_edit_keys("Key Tangents", [&](AnimationClip &c) {
+    if (index >= c.tracks.size()) return;
     AnimTrack &track = c.tracks[index];
-    const size_t i = (size_t)track.key_at(frame);
-    const float in = slope(7, track.in_tangent(i)), out = slope(8, t.size() > 7 ? in : track.out_tangent(i));
-    AnimKey &key = track.keys[i];
+    const int k = track.key_at(frame);
+    if (k < 0) return;
+    AnimKey &key = track.keys[(size_t)k];
     key.tangent = mode, key.in_slope = in, key.out_slope = mode == TanFree ? in : out;
     if (mode == TanFree || mode == TanBroken) key.interp = AnimAuto;
   });
+}
+
+/* The key menu's slopes (task 0291): with one key selected, its In and Out slopes as numbers (values a frame). A typed
+ * slope makes a Clamped Auto or Flat key Broken; a Free key keeps both sides one. */
+void Editor::draw_key_slope_fields() {
+  if (anim_.selected.size() != 1) return;
+  AnimationClipPtr clip = anim_clip();
+  const auto [track, frame] = *anim_.selected.begin();
+  if (!clip || track < 0 || (size_t)track >= clip->tracks.size()) return;
+  const AnimTrack &t = clip->tracks[(size_t)track];
+  const int k = t.key_at(frame);
+  if (k < 0) return;
+  auto &u = ui_;
+  const int mode = t.keys[(size_t)k].tangent;
+  float in = t.in_tangent((size_t)k), out = t.out_tangent((size_t)k);
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  const int half = (r.w - u.px(16)) / 2;
+  u.label({r.x + u.px(8), r.y, u.px(24), r.h}, "In");
+  const Recti fi{r.x + u.px(32), r.y + u.px(2), half - u.px(28), r.h - u.px(4)}, fo{r.x + u.px(40) + half, r.y + u.px(2), half - u.px(36), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["key:in"] = fi, u.button_rects["key:out"] = fo;
+  const bool in_changed = u.float_field(u.id("key_in_slope"), fi, in, 0.01f, -1e6f, 1e6f);
+  u.label({r.x + u.px(12) + half, r.y, u.px(28), r.h}, "Out");
+  const bool out_changed = u.float_field(u.id("key_out_slope"), fo, out, 0.01f, -1e6f, 1e6f);
+  u.tooltip("The key's slopes in value per frame, coming in and going out; typing one breaks a Clamped Auto key (Free keeps both one).");
+  if (!in_changed && !out_changed) return;
+  const int to = mode == TanFree ? TanFree : TanBroken;
+  const float both = out_changed ? out : in;  // (a Free key: the side typed, both ways)
+  anim_set_key_tangent((size_t)track, frame, to, to == TanFree ? both : in, to == TanFree ? both : out);
 }
 
 /* Puppet Posing's menu (tasks 0281-0284): toggles ticked, actions, Reach as a submenu. */
@@ -1056,7 +1223,66 @@ void Editor::draw_puppet_menu() {
         if (ui_.menu_item(r ? strprintf("%d frames each side", r) : std::string("The playhead's key only"), nullptr, autopose_.reach == r))
           autopose_command({"autopose", "reach", std::to_string(r)});
     });
+    draw_puppet_body_items();  // (task 0289)
+    u.menu_separator();
+    u.submenu("Handle Bones", u.px(280), [this] { draw_puppet_handle_items(); });
+    u.tooltip("Which bone each Puppet Posing handle drags - the hands, the feet, the head, the hips. Found from the rig; when it\n"
+              "picks the wrong bone, select the right one and choose Use the Selected Bone (kept with the armature).");
   });
+}
+
+/* The selected bone (the active object when it is one), or null. */
+GameObject *Editor::selected_bone() {
+  GameObject *g = active_object();
+  return g && g->get<Bone>() ? g : nullptr;
+}
+
+/* Task 0289: what only `autopose lock`, `body contacts` and `body ragdoll` did - a bone locked for AutoPosing, contacts
+ * and ragdoll events at the playhead on the selected bone. */
+void Editor::draw_puppet_body_items() {
+  auto &u = ui_;
+  GameObject *b = selected_bone();
+  const bool locked = b && std::find(autopose_.locks.begin(), autopose_.locks.end(), b->id) != autopose_.locks.end();
+  u.menu_separator();
+  if (u.menu_item("Lock the Selected Bone", nullptr, locked, b != nullptr)) autopose_set_lock(*b, !locked);
+  u.tooltip("AutoPosing leaves a locked bone where it is while the rest of the body follows a drag (select a bone first).");
+  if (!assist_on(Assist::Physics)) return;
+  const std::string here = strprintf("%.0f", anim_.frame), later = strprintf("%.0f", anim_.frame + 9.0f);
+  u.submenu("Contacts", u.px(330), [this, b, here, later] {
+    if (ui_.menu_item("Find Contacts")) body_contacts_command({"body", "contacts", "find"});
+    if (ui_.menu_item("Pin Contacts")) body_contacts_command({"body", "contacts", "pin"});
+    ui_.tooltip("Hold the contacts still: the feet and hands planted where they rest.");
+    if (ui_.menu_item("Add One Here (the selected bone, 10 frames)", nullptr, false, b != nullptr)) body_contacts_command({"body", "contacts", "add", b->name, here, later});
+    if (ui_.menu_item("Remove the One Here (the selected bone)", nullptr, false, b != nullptr)) body_contacts_command({"body", "contacts", "remove", b->name, here});
+    if (ui_.menu_item("Clear Contacts")) body_contacts_command({"body", "contacts", "clear"});
+  });
+  u.tooltip("The bars under the ruler: where a foot or a hand rests. Find marks them; set by hand they stay.");
+  if (!ragdoll::available()) return;
+  u.submenu("Ragdoll Events", u.px(260), [this, b, here] { draw_ragdoll_event_items(b, here); });
+  u.tooltip("Hits, falls and recoveries in the clip for the Ragdoll (a 30 N s push, turned with the character; limp; strong), and how\n"
+            "hard its motors follow the clip.");
+}
+
+/* The Ragdoll Events submenu (task 0289): a hit from the character's front, back, sides or below - turned with its root -
+ * then limp, strong, clear and the motors' strength. */
+void Editor::draw_ragdoll_event_items(GameObject *b, const std::string &here) {
+  ui_.submenu("Hit the Selected Bone Here", ui_.px(180), [this, b, here] {
+    static const char *const kFrom[] = {"From the Front", "From Behind", "From the Left", "From the Right", "From Below"};
+    static const Vec3 kPush[] = {{0, 0, -30}, {0, 0, 30}, {30, 0, 0}, {-30, 0, 0}, {0, 30, 0}};
+    const GameObject *root = anim_root();
+    for (int k = 0; k < 5; k++) {
+      if (!ui_.menu_item(kFrom[k], nullptr, false, b != nullptr)) continue;
+      const Vec3 v = root ? root->world_rotation().rotate(kPush[k]) : kPush[k];
+      body_ragdoll_command({"body", "ragdoll", "hit", b->name, here, strprintf("%g", v.x), strprintf("%g", v.y), strprintf("%g", v.z)});
+    }
+  });
+  if (ui_.menu_item("Go Limp Here")) body_ragdoll_command({"body", "ragdoll", "limp", here});
+  ui_.tooltip("The motors off from the playhead: the body falls as a rag.");
+  if (ui_.menu_item("Get Strong Here")) body_ragdoll_command({"body", "ragdoll", "strong", here});
+  if (ui_.menu_item("Clear Events")) body_ragdoll_command({"body", "ragdoll", "clear"});
+  ui_.menu_separator();
+  for (const char *s : {"0.25", "0.5", "0.75", "1"})
+    if (ui_.menu_item(strprintf("Simulate, the Motors at %.0f%%", 100.0 * std::atof(s)))) body_ragdoll_command({"body", "ragdoll", "show", s});
 }
 
 /* anim new [name] | key <object> <property> <axis> <frame> [value] | interp <object> <property> <axis> <frame>
@@ -1091,6 +1317,7 @@ void Editor::anim_command(const std::vector<std::string> &t) {
     for (GameObject *x = g; x && !under; x = x->parent) under = x == root;
     if (!g || !under) return Log::warn("anim %s: no object '%s' below '%s'", verb.c_str(), t[2].c_str(), root->name.c_str());
     const std::string path = anim_path(*root, *g), prop = t[3];
+    if (prop.empty()) return Log::warn("anim %s: which property? (quote one with spaces: \"Material 0.Roughness\")", verb.c_str());
     const int axis = std::max(0, std::min(2, std::atoi(t[4].c_str())));
     const float frame = (float)std::atof(t[5].c_str());
     if (verb == "tangent") return anim_tangent_command(t, *clip, path, prop, axis, frame);

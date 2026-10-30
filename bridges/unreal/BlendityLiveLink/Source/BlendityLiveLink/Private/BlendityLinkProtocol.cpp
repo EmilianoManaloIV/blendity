@@ -26,7 +26,7 @@ const Json &Json::operator[](const char *key) const {
   return null;
 }
 
-const Json &Json::operator[](size_t i) const {
+const Json &Json::at(size_t i) const {
   static const Json null;
   return i < arr.size() ? arr[i] : null;
 }

@@ -241,14 +241,22 @@ void Editor::livelink_install_command(const std::vector<std::string> &t) {
 void Editor::draw_bridge_install(ui::Layout &lay) {
   auto &u = ui_;
   u.label(lay.row(), "Install a Bridge", u.theme.text_bright);
-  const Recti r = lay.row(u.row_h() + u.px(4));
   static const char *const kNames[] = {"Blender", "Unity Project...", "Godot Project...", "Unreal Project..."};
   static const char *const kIds[] = {"blender", "unity", "godot", "unreal"};
-  const int w = (r.w - u.px(18)) / 4;
+  static const char *const kTips[] = {"Install the Blender add-on into the Blender found on this computer and enable it.",
+                                      "Choose a Unity project's folder: the package goes into its Packages and its manifest.",
+                                      "Choose a Godot project's folder: the add-on goes into addons/ and is enabled in project.godot.",
+                                      "Choose an Unreal project's folder: the plugin goes into Plugins/ and its .uproject lists it."};
+  Recti r = lay.row(u.row_h() + u.px(4));
+  const int cols = r.w >= u.px(440) ? 4 : 2;  // (task 0293: two by two in a side pane, the labels whole)
+  const int w = (r.w - u.px(6) * (cols - 1)) / cols;
   for (int i = 0; i < 4; i++) {
-    const Recti b{r.x + i * (w + u.px(6)), r.y, w, r.h};
+    if (i > 0 && i % cols == 0) r = lay.row(u.row_h() + u.px(4));
+    const Recti b{r.x + (i % cols) * (w + u.px(6)), r.y, w, r.h};
     if (u.record_buttons) u.button_rects[std::string("livelink:install ") + kIds[i]] = b;
-    if (!u.button(b, kNames[i])) continue;
+    const bool hit = u.button(b, kNames[i]);
+    u.tooltip(kTips[i]);
+    if (!hit) continue;
     if (i == 0) {
       livelink_install_command({"livelink", "install", "blender"});
       continue;

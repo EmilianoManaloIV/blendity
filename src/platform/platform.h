@@ -114,6 +114,16 @@ void set_title(Window *w, const std::string &title);
 void set_cursor(Window *w, Cursor c);
 std::string get_clipboard(Window *w);
 void set_clipboard(Window *w, const std::string &utf8);
+/* An image on the clipboard as a file's bytes - PNG, or BMP (Windows' DIB with its file header) - empty when there is
+ * none (task 0299: pasted onto the reference board). */
+std::string get_clipboard_image(Window *w);
+/* The first file copied in the system's file browser (Windows' CF_HDROP), UTF-8; empty when there is none or the platform
+ * has no such clipboard (task 0299: added to the board by its path, never read here). */
+std::string get_clipboard_file(Window *w);
+#ifdef _WIN32
+/* A DIB's bytes (the clipboard's CF_DIB) with a BMP file header before them (testable without a clipboard). */
+std::string dib_as_bmp(const void *dib, size_t size);
+#endif
 
 /* Called while the OS runs a modal loop (e.g. live window resize on Win32/macOS)
  * so the app can keep repainting. */

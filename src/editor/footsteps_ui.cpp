@@ -242,10 +242,9 @@ void Editor::draw_steps_section(ui::Layout &lay) {
             "the character keyed walking on them. Console: walk path <curve>.");
   if (!group) return;
   if (u.button({row.x + u.px(8) + w, row.y, w, row.h}, "Update")) steps_command({"walk", "steps", "update"});
-  u.tooltip("Walks the prints where they are now: move, turn or retime one (its Frame) and Update. Console: walk steps update.");
+  u.tooltip("Walks the prints where they are now: move, turn or retime one (its Frame) and Update.");
   if (u.button({row.x + u.px(12) + 2 * w, row.y, w, row.h}, "Re-plan")) steps_command({"walk", "steps", "replan"});
-  u.tooltip("Lays the prints out along the path again (after the path or the style changed), keeping the ones moved by hand.\n"
-            "Console: walk steps replan.");
+  u.tooltip("Lays the prints out along the path again (after the path or the style changed), keeping the ones moved by hand.");
 }
 
 /* The prints in the Scene view: a sole each (left blue, right red, selected orange) at the print's ground - the print's

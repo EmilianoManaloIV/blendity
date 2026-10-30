@@ -286,6 +286,7 @@ inline float clamp01(float v) { return std::isfinite(v) ? std::max(0.0f, std::mi
 
 /* Substance's fill layer: one value per channel. */
 struct FillLayer : TextureLayerBase<FillLayer> {
+  bool mappable() const override { return false; }  // (round 328's review: no Mapping)
   static constexpr const char *kName = "Fill";
   Vec3 color{0.5f, 0.5f, 0.5f}, emission{0.0f, 0.0f, 0.0f};
   float height = 0.5f, roughness = 0.5f, metallic = 0.0f;
@@ -297,7 +298,7 @@ struct FillLayer : TextureLayerBase<FillLayer> {
     r.field("Metallic", metallic, 0.01f, 0.0f, 1.0f);
     r.color("Emission", emission);
     r.help("One value per channel over the whole surface (Substance's fill layer); the channels it writes are its\n"
-           "targets, so a fill of Metallic alone leaves the colour below.");
+           "targets, so a fill of Metallic alone leaves the color below.");
   }
   LayerSample sample(float, float, const LayerContext &) const override {
     LayerSample s;
@@ -309,6 +310,7 @@ struct FillLayer : TextureLayerBase<FillLayer> {
 /* One of the surface's mesh maps through levels: a generator (its height is the value), so it serves as a mask
  * effect and as a layer. */
 struct MeshMapLayer : TextureLayerBase<MeshMapLayer> {
+  bool mappable() const override { return false; }  // (round 328's review: no Mapping)
   static constexpr const char *kName = "Mesh Map";
   int map = 1;  // 0 ambient occlusion, 1 curvature, 2 thickness, 3-5 position x y z, 6-8 world normal x y z
   float low = 0.0f, high = 1.0f, softness = 0.0f;
@@ -368,7 +370,7 @@ struct AnchorLayer : TextureLayerBase<AnchorLayer> {
   void reflect(Reflector &r) override {
     r.text("Layer", layer);
     r.help("The name of a layer below whose mask this reads (its Name field): an edge mask made once, read by the\n"
-           "colour layer and the roughness layer alike.");
+           "color layer and the roughness layer alike.");
   }
   bool is_generator() const override { return false; }
   void apply(TexPlanes &p, const LayerContext &c) const override {
@@ -523,7 +525,7 @@ struct PosterizeLayer : TextureLayerBase<PosterizeLayer> {
   PosterizeLayer() { targets = TargetAlbedo; }
   void reflect(Reflector &r) override {
     r.field("Levels", levels, 2, 32);
-    r.help("How many values the colour keeps (its hue and saturation stay): the flat tones of a hand-painted texture.");
+    r.help("How many values the color keeps (its hue and saturation stay): the flat tones of a hand-painted texture.");
   }
   bool is_generator() const override { return false; }
   void apply(TexPlanes &p, const LayerContext &) const override {
@@ -590,7 +592,7 @@ struct CavityLayer : TextureLayerBase<CavityLayer> {
   CavityLayer() { targets = TargetAlbedo; }
   void reflect(Reflector &r) override {
     r.field("Strength", strength, 0.05f, 0.0f, 4.0f);
-    r.help("The occlusion raised to this power multiplies the colour: 1 as baked, above it deeper crevices, below it a hint.");
+    r.help("The occlusion raised to this power multiplies the color: 1 as baked, above it deeper crevices, below it a hint.");
   }
   bool is_generator() const override { return false; }
   float factor(const LayerContext &c, float u, float v) const {

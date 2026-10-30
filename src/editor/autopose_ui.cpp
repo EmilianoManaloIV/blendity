@@ -240,6 +240,14 @@ bool Editor::autopose_gizmo(uint64_t id, Vec3 target) {
 }
 
 /* autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames> */
+/* A bone locked for AutoPosing or free again - by the object, so the Puppet menu locks the selected character's bone
+ * even where another character has one of that name (task 0289). */
+void Editor::autopose_set_lock(GameObject &b, bool on) {
+  autopose_.locks.erase(std::remove(autopose_.locks.begin(), autopose_.locks.end(), b.id), autopose_.locks.end());
+  if (on) autopose_.locks.push_back(b.id);
+  Log::info("AutoPose: %s %s", b.name.c_str(), on ? "stays where it is" : "moves with the body again");
+}
+
 void Editor::autopose_command(const std::vector<std::string> &t) {
   if (!assist_require(Assist::Physics)) return;
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "";
@@ -256,11 +264,7 @@ void Editor::autopose_command(const std::vector<std::string> &t) {
     autopose_to(*b, to);
     return autopose_end();
   }
-  if ((sub == "lock" || sub == "unlock") && b) {
-    autopose_.locks.erase(std::remove(autopose_.locks.begin(), autopose_.locks.end(), b->id), autopose_.locks.end());
-    if (sub == "lock") autopose_.locks.push_back(b->id);
-    return Log::info("AutoPose: %s %s", b->name.c_str(), sub == "lock" ? "stays where it is" : "moves with the body again");
-  }
+  if ((sub == "lock" || sub == "unlock") && b) return autopose_set_lock(*b, sub == "lock");
   if (sub == "prior" && t.size() > 2) {  // (task 0280: the pose prior on or off)
     autopose_.use_prior = to_lower(t[2]) != "off";
     return Log::info("Puppet Posing: the pose prior %s", autopose_.use_prior ? (ai::prior_problem().empty() ? "on" : "on (not installed: the AI download)") : "off: IK alone");
@@ -269,12 +273,19 @@ void Editor::autopose_command(const std::vector<std::string> &t) {
     autopose_.reach = std::max(0, std::min(120, std::atoi(t[2].c_str())));
     return Log::info("AutoPose: an edit reaches %d frames each side (0: the playhead's key only)", autopose_.reach);
   }
+  if (sub == "handle" && t.size() > 3) {  // (round 324: a handle put on a bone by hand)
+    const int k = puppet_handle_index(t[2]);
+    if (k < 0) return Log::warn("autopose handle lhand|rhand|lfoot|rfoot|head|hips <bone>|auto");
+    std::string bone = t[3];
+    for (size_t i = 4; i < t.size(); i++) bone += " " + t[i];
+    return puppet_set_handle(k, bone);
+  }
   if (sub == "locks") {
     for (uint64_t id : autopose_.locks)
       if (GameObject *g = scene_->find(id)) Log::info("  %s", g->name.c_str());
     return;
   }
-  Log::warn("autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames>");
+  Log::warn("autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames> | handle <part> <bone>|auto");
 }
 
 }  // namespace bl
