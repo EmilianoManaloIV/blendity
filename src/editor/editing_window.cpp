@@ -176,7 +176,7 @@ void Editor::edit_command(const std::vector<std::string> &t, const std::string &
     return;
   }
   if (!edit_doc_.is_open()) {
-    Log::warn("Editing: nothing open (develop open <file> | develop open render)");
+    Log::warn("Editing: nothing open (the Editing window's Open..., or a render from the Render window)");
     return;
   }
   if (verb == "add") {
@@ -291,7 +291,8 @@ void Editor::draw_editing_canvas(const Recti &r) {
   edit_canvas_rect_ = r;
   u.canvas.fill_rect(r, Color::hex(0x262626));
   if (!edit_doc_.is_open()) {
-    u.label(r, "Open Render, Open Image, or drop an image here", u.theme.text_dim, ui::Align::Center);
+    const char *hint = "Open Render, Open Image, or drop an image here";
+    u.label(r, u.font.text_width(hint) + u.px(16) <= r.w ? hint : "Open or drop an image", u.theme.text_dim, ui::Align::Center);  // (task 0293: whole in a narrow pane)
     return;
   }
   edit_update_display();
@@ -365,7 +366,7 @@ void Editor::draw_edit_curve(ui::Layout &lay, int step) {
   box.w = box.h;
   draw_curve_box(box, edit_doc_.stack()[(size_t)step].curve[ch], ch);
   u.mark_widget(box);
-  u.tooltip("Click to add a point, drag to move one, right-click to remove it (on the display axis: 0 black, 1 white).");
+  u.tooltip("Click to add a point, drag to move one, right-click or Alt+click to remove it (on the display axis: 0 black, 1 white).");
   edit_curve_input(box, step, ch);
 }
 
@@ -409,12 +410,13 @@ void Editor::edit_curve_input(const Recti &box, int step, int ch) {
   std::vector<Vec2> pts = edit_doc_.stack()[(size_t)step].curve[ch];
   if (pts.size() < 2) pts = {Vec2(0, 0), Vec2(1, 1)};
   int near = curve_point_near(box, pts);
-  if (u.in.pressed[1] && near > 0 && near + 1 < (int)pts.size()) {
+  if ((u.in.pressed[1] || (u.in.pressed[0] && u.in.alt())) && near > 0 && near + 1 < (int)pts.size()) {  // (task 0257: Alt+click removes too)
     pts.erase(pts.begin() + near);
     edit_doc_.set_curve(step, ch, pts);
     u.redraw = true;
     return;
   }
+  if (u.in.alt()) return;  // (an Alt+click that removed nothing adds nothing either)
   if (!u.in.pressed[0]) return;
   edit_doc_.begin_change();
   if (near < 0) {
@@ -459,9 +461,9 @@ void Editor::draw_edit_step(ui::Layout &lay, int step) {
   u.tooltip(info->help);
   const int bw = h.h;
   const bool up = u.button({h.right() - 3 * bw, h.y, bw, h.h}, "^");
-  u.tooltip("Move up (applied earlier)");
+  u.tooltip("Move up (applied earlier).");
   const bool down = u.button({h.right() - 2 * bw, h.y, bw, h.h}, "v");
-  u.tooltip("Move down (applied later)");
+  u.tooltip("Move down (applied later).");
   const bool gone = u.icon_button({h.right() - bw, h.y, bw, h.h}, ui::Icon::Close, false, "Remove");
   if (up || down || gone) {  // (the step's slot now holds another adjustment: its fields wait for the next frame)
     if (gone) edit_doc_.remove(step);
@@ -497,15 +499,18 @@ void Editor::draw_edit_panel(const Recti &left) {
   lay.row_h = u.row_h();
   const int top = lay.y;
   Recti b = lay.row(u.row_h() + u.px(6));
-  const int bw = (b.w - u.px(12)) / 4;
-  if (u.button({b.x, b.y, bw, b.h}, "Open...", false, ui::Icon::Folder)) defer([this] { edit_open_dialog(); });
+  const int cols = b.w >= u.px(340) ? 4 : 2;  // (task 0293: two by two in a narrow pane, the labels whole)
+  const Recti b2 = cols == 2 ? lay.row(u.row_h() + u.px(6)) : b;
+  const int bw = (b.w - u.px(4) * (cols - 1)) / cols;
+  auto cell = [&](int i) { return Recti{b.x + (i % cols) * (bw + u.px(4)), (i < cols ? b : b2).y, bw, b.h}; };
+  if (u.button(cell(0), "Open...", false, ui::Icon::Folder)) defer([this] { edit_open_dialog(); });
   u.tooltip("Open an image (PNG, JPEG, TGA, BMP, HDR, EXR) or a saved .edit. Dropping an image here opens it too.");
-  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Render", false, ui::Icon::Camera)) edit_open_render();
+  if (u.button(cell(1), "Render", false, ui::Icon::Camera)) edit_open_render();
   u.tooltip("Open the Render window's last render: its light, shown through the render's view transform.");
   const bool open = edit_doc_.is_open();
-  if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Export...", false, ui::Icon::File) && open) defer([this] { edit_export_dialog(); });
+  if (u.button_enabled(cell(2), "Export...", open, "Nothing open: Open an image or Render first.", false, ui::Icon::File) && open) defer([this] { edit_export_dialog(); });
   u.tooltip("Write the result as PNG / JPEG (through the view) or EXR / HDR (linear light).");
-  if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save", false, ui::Icon::Check) && open) edit_save("");
+  if (u.button_enabled(cell(3), "Save", open, "Nothing open: Open an image or Render first.", false, ui::Icon::Check) && open) edit_save("");
   u.tooltip("Save the adjustments as an .edit file beside the image (the image itself is never changed).");
   if (open) {
     Recti row = lay.row();
@@ -522,8 +527,8 @@ void Editor::draw_edit_panel(const Recti &left) {
     if (u.button({row.x + hw + u.px(4), row.y, hw, row.h}, "Before / After", edit_split_ >= 0.0f)) edit_split_ = edit_split_ >= 0.0f ? -1.0f : 0.5f;
     u.tooltip("Split the picture: the source left of the line, the result right (drag the line).");
     const bool can_undo = edit_doc_.can_undo();
-    if (u.button({row.x + 2 * (hw + u.px(4)), row.y, hw / 2 - u.px(2), row.h}, "Undo") && can_undo) edit_doc_.undo();
-    if (u.button({row.x + 2 * (hw + u.px(4)) + hw / 2, row.y, hw / 2, row.h}, "Redo")) edit_doc_.redo();
+    if (u.button_enabled({row.x + 2 * (hw + u.px(4)), row.y, hw / 2 - u.px(2), row.h}, "Undo", can_undo, "Nothing to undo in the Editing window.") && can_undo) edit_doc_.undo();
+    if (u.button_enabled({row.x + 2 * (hw + u.px(4)) + hw / 2, row.y, hw / 2, row.h}, "Redo", edit_doc_.can_redo(), "Nothing to redo in the Editing window.")) edit_doc_.redo();
     draw_edit_targets(lay);
     static std::vector<const char *> add_names;
     if (add_names.empty()) {
@@ -553,19 +558,23 @@ void Editor::draw_edit_targets(ui::Layout &lay) {
   const int bw = texture ? (row.w - u.px(4)) / 2 : row.w;
   if (texture && u.button({row.x, row.y, bw, row.h}, "Apply to Texture")) edit_apply_to_texture();
   if (texture) u.tooltip("Put the result on the texture as an Image layer on top (its procedural layers stay underneath).");
-  if (u.button({row.right() - bw, row.y, bw, row.h}, "Use as Camera Look")) edit_use_as_camera_look();
-  u.tooltip("Give the Main Camera these adjustments as camera filters, so the Game view and F12 carry the look.");
+  if (u.button_enabled({row.right() - bw, row.y, bw, row.h}, "Use as Camera Look", edit_doc_.is_open(), "Nothing open: Open an image or Render first.")) edit_use_as_camera_look();
+  u.tooltip("Give the Main Camera these adjustments as camera filters, so the Game view and " + key("render.image") + " carry the look.");
 }
 
 void Editor::draw_editing_window(const Recti &r) {
   auto &u = ui_;
   edit_window_rect_ = r;
-  const int pw = std::min(u.px(330), r.w * 2 / 5);
-  /* The panel first, so the picture drawn after it shows what the panel just changed. */
+  /* The panel first, so the picture drawn after it shows what the panel just changed. Narrower than 460 px (a side
+   * pane), the picture goes above the panel instead of beside it (task 0293: the panel had a toolbar of slivers). */
+  const bool stacked = r.w < u.px(460);
+  const int pw = std::min(u.px(330), r.w * 2 / 5), ph = r.h * 3 / 5;
+  const Recti panel = stacked ? Recti{r.x, r.bottom() - ph, r.w, ph} : Recti{r.right() - pw, r.y, pw, r.h};
+  const Recti picture = stacked ? Recti{r.x, r.y, r.w, r.h - ph} : Recti{r.x, r.y, r.w - pw, r.h};
   const uint64_t before = edit_doc_.revision();
-  draw_edit_panel({r.right() - pw, r.y, pw, r.h});
+  draw_edit_panel(panel);
   if (edit_doc_.revision() != before) u.redraw = true;
-  draw_editing_canvas({r.x, r.y, r.w - pw, r.h});
+  draw_editing_canvas(picture);
   if (!u.any_popup_open() && edit_drag_id_ != 0 && !u.in.down[0]) edit_drag_id_ = 0;
 }
 

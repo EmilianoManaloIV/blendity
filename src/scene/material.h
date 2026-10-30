@@ -40,7 +40,7 @@ enum class Procedural { None = 0, Checker = 1, Noise = 2, UVGrid = 3, ColorGrid 
  *   Alpha Clipping      Alpha Clip (cutout: holes where alpha < threshold)
  *   Transparent         Alpha Blend (see-through by alpha)
  *   (HDRP refraction)   Glass BSDF / Principled Transmission (refracts by IOR) */
-enum class MaterialSurface { Opaque = 0, Cutout = 1, Transparent = 2, Glass = 3 };
+enum class MaterialSurface { Opaque = 0, Cutout = 1, Transparent = 2, Glass = 3, Volume = 4 };  // (Volume: fog inside the mesh, round 331)
 
 struct Material {
   std::string name = "Material";
@@ -48,6 +48,26 @@ struct Material {
   float metallic = 0.0f;
   float roughness = 0.5f;
   float specular = 0.5f;  // Principled "IOR Level"; 0.5 = F0 of 4% (IOR 1.5)
+  /* Round 330: the Principled BSDF's other layers - Subsurface (light through skin, wax, leaves: a wrap tinted by its
+   * colour), Sheen (velvet, cloth: a grazing glow), Coat (lacquer, car paint: a second clear specular layer over the
+   * base) and Anisotropic (brushed metal, hair: the highlight stretched along the tangent). 0: off. */
+  float subsurface = 0.0f, subsurface_scale = 0.5f;
+  Vec3 subsurface_color{1.0f, 0.3f, 0.2f};
+  float sheen = 0.0f, sheen_roughness = 0.5f;
+  Vec3 sheen_tint{1.0f, 1.0f, 1.0f};
+  float coat = 0.0f, coat_roughness = 0.03f, coat_ior = 1.5f;
+  Vec3 coat_tint{1.0f, 1.0f, 1.0f};
+  float anisotropic = 0.0f, anisotropic_rotation = 0.0f;
+  /* Round 331: a Volume (fog) material - Blender's Principled Volume: the mesh's inside is a medium, its surface
+   * invisible. Density per metre, the light it scatters (Color), how much forward (Anisotropy, Henyey-Greenstein),
+   * its glow, and a noise that makes it wisps. */
+  float volume_density = 1.0f, volume_anisotropy = 0.0f, volume_emission_strength = 0.0f;
+  Vec3 volume_color{0.9f, 0.9f, 0.9f}, volume_emission{1.0f, 1.0f, 1.0f};
+  float volume_noise = 0.0f, volume_noise_scale = 1.0f;
+  bool volume() const { return surface == (int)MaterialSurface::Volume; }
+  /* The density at a point in the object's own space (round 331: the noise in 0..2 times Density). */
+  float volume_density_at(Vec3 local) const;
+  bool principled_extras() const { return subsurface > 0.0f || sheen > 0.0f || coat > 0.0f || anisotropic > 0.0f; }
   float alpha = 1.0f;
   int surface = 0;          // MaterialSurface
   float alpha_clip = 0.5f;  // Cutout threshold
@@ -102,6 +122,10 @@ struct Material {
   TextureRef toon_specular_map;       // where the highlight spot may appear (black: never)
   Vec3 toon_specular_color{1, 1, 1};  // the spot's colour
   bool toon_hair_highlight = false;   // the spot as a band across the hair's tangent (Kajiya-Kay's sheen)
+  /* The Hand-painted model (shading_model 2, ADR 0083, task 0247): the texture's colour as it is, unlit, plus a rim and a
+   * painted specular from the roughness channel; lights neither shade nor darken it (the light is in the paint). */
+  float hp_rim = 0.15f, hp_rim_width = 0.3f, hp_spec = 0.3f;
+  Vec3 hp_rim_color{1.0f, 1.0f, 1.0f};
   int toon_rim_side = 0;              // the rim: 0 all round the silhouette, 1 the lit side only, 2 the shadow side only
   TextureRef toon_rim_map;            // where the rim may show (black: never)
   bool toon_key_light_only = false;   // only the brightest sun bands the tones; other lights add smooth fill
@@ -123,6 +147,8 @@ struct Material {
   std::string asset_path;
 
   void reflect(Reflector &r);
+  void reflect_principled_extras(Reflector &r);
+  void reflect_volume(Reflector &r);
   void touch() { version++; }
 
   /* Resolved textures (cached; reloaded when the path or file changes). */
@@ -156,6 +182,8 @@ const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
 /* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",
  * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */
 const std::vector<std::string> &material_presets();
+/* Round 332: the presets by group (Basic, Glass, Metal, Stylized, Volume), each preset in one. */
+const std::vector<std::pair<std::string, std::vector<std::string>>> &material_preset_groups();
 MaterialPtr make_material_preset(const std::string &preset);
 /* Toon styles (task 0148): Classic, Guilty Gear, Soft Anime, Painterly, Manga. Applying one sets the toon fields
  * (not the maps) and records which; every field stays editable afterwards. -1 for an unknown name. */

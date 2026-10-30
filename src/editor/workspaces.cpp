@@ -15,12 +15,13 @@ namespace bl {
 namespace {
 
 /* Window ids in dock strings: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 8 Profiler 9 Render
- * 10 UV Editor 11 Materials 12 Modeling Tools 13 Lighting 14 Textures 15 Rigging. */
+ * 10 UV Editor 11 Materials 12 Modeling Tools 13 Lighting 14 Textures 15 Rigging 16 Animation 17 Sequencer 18 Live Link
+ * 19 Editing 20 My Tools 21 Draw 22 Layers 23 History 24 Board. */
 const Editor::Workspace kWorkspaces[] = {
     {"Default", "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,8,9:0)),L(3,12:0))", Editor::FocusAll, true},
-    {"Reference & Planning", "H(0.8,V(0.72,H(0.2,L(2:0),L(0,1:0)),L(4,5:0)),L(3:0))",
+    {"Reference & Planning", "H(0.8,V(0.72,H(0.2,L(2:0),L(0,21,24,1:0)),L(4,5:0)),V(0.55,L(3:0),L(22:0)))",
      Editor::FocusCreate | Editor::FocusObject | Editor::FocusSnap | Editor::FocusReference | Editor::FocusLight, true},
-    {"Blocking Out", "H(0.76,V(0.74,H(0.2,L(2:0),L(0,1:0)),L(4,5:0)),L(12,3:0))",
+    {"Blocking Out", "H(0.76,V(0.74,H(0.2,L(2:0),L(0,21,1:0)),L(4,5:0)),L(12,3:0))",
      Editor::FocusCreate | Editor::FocusDraw | Editor::FocusObject | Editor::FocusSnap | Editor::FocusReference, true},
     {"Modeling & Topology", "H(0.74,V(0.76,H(0.18,L(2:0),L(0:0)),L(4,5:0)),L(12,3:0))",
      Editor::FocusCreate | Editor::FocusDraw | Editor::FocusObject | Editor::FocusEdit | Editor::FocusCheck | Editor::FocusSnap |
@@ -30,6 +31,8 @@ const Editor::Workspace kWorkspaces[] = {
      Editor::FocusObject | Editor::FocusEdit | Editor::FocusUV | Editor::FocusMaterial, true},
     {"Texturing & Materials", "H(0.68,V(0.62,H(0.55,L(0:0),L(1:0)),H(0.5,L(11:0),L(14:0))),L(3,2:0))",
      Editor::FocusObject | Editor::FocusMaterial, true},
+    {"Texturing", "H(0.7,V(0.6,L(0:0),L(14:0)),L(12,3:0))", Editor::FocusObject | Editor::FocusMaterial | Editor::FocusEdit, true},  // (task 0246: the Scene view, the stack and shelf, the Paint tools)
+    {"Stylized", "H(0.72,L(0:0),V(0.55,L(12:0),L(13,3:0)))", Editor::FocusObject | Editor::FocusEdit | Editor::FocusMaterial, true},  // (task 0248: the Scene view, the Strokes and Scatter tools, the Lighting window's sky and fog, the Inspector)
     {"Lighting & Rendering", "H(0.74,V(0.62,H(0.55,L(0:0),L(1:0)),L(9,4,5:0)),V(0.55,L(13:0),L(3,2:0)))",
      Editor::FocusObject | Editor::FocusLight | Editor::FocusMaterial, true},
     {"Editing", "H(0.8,V(0.8,L(19,9:0),L(4,5:0)),L(3,2:0))", Editor::FocusObject | Editor::FocusMaterial, true},
@@ -37,6 +40,9 @@ const Editor::Workspace kWorkspaces[] = {
      Editor::FocusCreate | Editor::FocusObject | Editor::FocusRig | Editor::FocusDeform, true},
     {"Skinning & Weight Painting", "H(0.7,V(0.78,H(0.22,L(2:0),L(0:0)),L(4,5:0)),L(15,3:0))", Editor::FocusObject | Editor::FocusRig, true},
     {"Animation", "H(0.74,V(0.6,H(0.5,L(0:0),L(1:0)),L(16,17,4,5:0)),L(3,15,2:0))", Editor::FocusObject | Editor::FocusRig | Editor::FocusLight, true},
+    {"Drawing", "H(0.8,V(0.76,L(21,24,0:0),L(4,5:0)),V(0.5,L(22:0),L(3,2:0)))", Editor::FocusCreate | Editor::FocusDraw | Editor::FocusObject | Editor::FocusReference, true},  // (task 0233: the pad; the Board a tab beside it, task 0299)
+    {"Drawing with References", "H(0.8,V(0.76,H(0.64,L(21,0:0),L(24:0)),L(4,5:0)),V(0.5,L(22:0),L(3,2:0)))",
+     Editor::FocusCreate | Editor::FocusDraw | Editor::FocusObject | Editor::FocusReference, true},  // (task 0299: the pad and the reference board side by side)
     /* The arrangements: every tool. */
     {"2 by 3", "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,8:0),L(3,12:0))))", Editor::FocusAll, false},
     {"Tall", "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,8,9:0))),L(3,12:0))", Editor::FocusAll, false},
@@ -81,6 +87,8 @@ bool Editor::apply_workspace(const std::string &name) {
   dock_reset(w->dock);
   focus_ = w->focus;
   workspace_ = w->name;
+  opened_tabs_.clear();  // (task 0235: the layout decides what shows)
+  note_layout_use(w->name);
   ui_.redraw = true;
   return true;
 }
@@ -207,13 +215,7 @@ GameObject *Editor::create_reference_image(const std::string &path, const std::s
   /* Kept with the project: an image from outside Assets is copied into Assets/Textures/References (a scene that names
    * a path on this machine would lose it elsewhere). */
   std::string src = abs;
-  if (make_asset_relative(abs) == abs && !assets_dir_.empty()) {
-    const std::string dir = fs::join(assets_dir_, "Textures/References");
-    fs::make_dirs(dir);
-    std::string dst = fs::join(dir, fs::filename(abs));
-    if (!fs::exists(dst) && fs::copy_file(abs, dst)) Log::info("Reference Image: copied %s into Assets/Textures/References", fs::filename(abs).c_str());
-    if (fs::exists(dst)) src = dst;
-  }
+  if (make_asset_relative(abs) == abs && !assets_dir_.empty()) src = keep_in_references(abs);  // (round 322: never another file of the same name)
   m->base_map.path = make_asset_relative(src);
   m->cast_shadows = false;
   mr->materials = {m};

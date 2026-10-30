@@ -273,6 +273,24 @@ void pose_frames(Scene &scene, GameObject &anim_root, const AnimationClip &clip,
 }
 }  // namespace
 
+PoseGuard::PoseGuard(Scene &scene, GameObject &anim_root, const AnimationClip &clip) : scene_(scene) {
+  scene.for_each([&](GameObject &g) { saved_.push_back({g.id, g.local()}); });
+  for (const AnimTrack &t : clip.tracks) {
+    if (is_transform_property(t.property)) continue;
+    GameObject *g = anim_target(anim_root, t.path);
+    float v = 0.0f;
+    if (g && read_anim_value(*g, t.property, t.axis, v)) values_.push_back({g->id, t.property, t.axis, v});
+  }
+}
+
+PoseGuard::~PoseGuard() {
+  for (const auto &s : saved_)
+    if (GameObject *g = scene_.find(s.first)) g->set_local(s.second);
+  for (const Value &v : values_)
+    if (GameObject *g = scene_.find(v.id)) write_anim_value(*g, v.property, v.axis, v.v);
+  solve_constraints(scene_);
+}
+
 void for_each_frame(Scene &scene, GameObject &anim_root, const AnimationClip &clip, int first, int last, const std::function<void(int)> &fn) {
   std::vector<float> frames;
   for (int f = first; f <= last; f++) frames.push_back((float)f);

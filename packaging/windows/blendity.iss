@@ -58,10 +58,15 @@ Source: "{#Dist}\Blendity.exe"; DestDir: "{app}"; Flags: ignoreversion; Componen
 Source: "{#Dist}\Blendity-full.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: libs
 Source: "{#Dist}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: libs
 Source: "{#Dist}\datafiles\*"; DestDir: "{app}\datafiles"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: libs
+; The GPU shaders the build compiled (task 0211): the first GPU view doesn't wait for them.
+Source: "{#Dist}\shaders\*"; DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: libs
 Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "..\..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\MANUAL.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+; The Live Link bridges, for the Live Link window's Install a Bridge (task 0278); the Unreal plugin's replay session with it
+Source: "..\..\bridges\*"; DestDir: "{app}\bridges"; Excludes: "__pycache__,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\tests\fixtures\livelink_stream.bin"; DestDir: "{app}\bridges\unreal\BlendityLiveLink\Resources"; Flags: ignoreversion
 Source: "{#Icons}\blendity.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

@@ -2,6 +2,12 @@
 // blendity_tests: the modeling tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/scene/uv_internal.h"
+#include "../src/scene/subdiv_chain.h"
+#include "../src/scene/dynamesh.h"
+#include "../src/scene/quad_remesh.h"
+#include "../src/scene/dyntopo.h"
+
+#include <atomic>
 #include "../src/scene/partfield.h"
 
 static void first_tests() {
@@ -3935,6 +3941,36 @@ static void round17_tests() {
     ed.command("preferences");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
+    /* Preferences scrolled until the preset field is inside it and stays put: it is taller than 900 px where MoonRay is
+     * found, and MoonRay's row can appear a moment after it opens and move the rows below (round 316: macOS). */
+    /* The search for MoonRay runs on a thread (seconds on Windows, where it asks WSL): its row appears when it ends, so
+     * wait for it before reading where the field is (round 317's review). */
+    for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    std::printf("    the MoonRay search: %s\n", ed.moonray_busy_for_test() ? "still running after 30 s" : "done");
+    Recti last{-1, -1, 0, 0};
+    bool settled = false;
+    for (int i = 0; i < 80; i++) {
+      const Recti c = ed.combo_rect_for_test("km_preset"), dlg = ed.top_popup_rect_for_test();
+      if (c.w <= 0) break;
+      const bool still = c.x == last.x && c.y == last.y;
+      last = c;
+      const bool inside = c.y >= dlg.y && c.bottom() <= dlg.bottom();
+      settled = inside && still;
+      if (settled) break;
+      if (inside) {
+        ed.step_frame_headless();
+        continue;
+      }
+      ed.step_frame_headless({ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+      platform::Event w = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+      w.wheel_y = c.bottom() > dlg.bottom() ? -1.0f : 1.0f;
+      ed.step_frame_headless({w});
+      ed.step_frame_headless();  // (the controls drawn where the scroll put them)
+    }
+    CHECK(settled);  // (inside Preferences and not moving: else the clicks below would miss for that reason)
     const Recti r = ed.combo_rect_for_test("km_preset");
     std::printf("    preset combo at %d,%d %dx%d\n", r.x, r.y, r.w, r.h);
     CHECK(r.w > 0 && r.h > 0);
@@ -3945,15 +3981,19 @@ static void round17_tests() {
       ed.step_frame_headless({ev(ET::MouseUp, x, y)});
       ed.step_frame_headless();
     };
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    auto click_field = [&] {  // (where the field is now, not where it was)
+      const Recti f = ed.combo_rect_for_test("km_preset");
+      click(f.x + f.w / 2, f.y + f.h / 2);
+    };
+    click_field();
     std::printf("    after clicking it: dialog %d, popups %zu\n", (int)ed.dialog_open_for_test(), ed.popup_count_for_test());
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 2);
     /* Clicking it again closes only the list. */
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    click_field();
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
     /* Open it and pick "Unreal", the list's second row (Unity, Unreal, Blender, ...: task 0063). The list drops below
      * the field, or opens above it when the field is near the window's bottom (task 0199's lines moved it there). */
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    click_field();
     CHECK(ed.popup_count_for_test() == 2);
     const Recti list = ed.top_popup_rect_for_test();
     const int row = r.h + 4;
@@ -6712,7 +6752,8 @@ static void tests_round112() {
     for (size_t k = 0; k < a.indices.size(); k++) {
       const uint32_t i = a.indices[k], j = b.indices[k];
       if (std::memcmp(&a.positions[i], &b.positions[j], sizeof(Vec3)) != 0) return fail(strprintf("position at triangle corner %zu", k));
-      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0) return fail(strprintf("normal at triangle corner %zu", k));
+      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0)
+        return fail(strprintf("normal at triangle corner %zu: (%a %a %a) in place, (%a %a %a) rebuilt", k, a.normals[i].x, a.normals[i].y, a.normals[i].z, b.normals[j].x, b.normals[j].y, b.normals[j].z));
       if (uv && std::memcmp(&a.uvs[i], &b.uvs[j], sizeof(Vec2)) != 0) return fail(strprintf("UV at triangle corner %zu", k));
     }
     return true;
@@ -6868,7 +6909,15 @@ static void tests_round112() {
     GameObject *cube = ed.scene().find_by_name("Cube");
     CHECK(cube != nullptr);
     if (!cube) return;
-    cube->get<MeshRenderer>()->material(0)->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    /* The cube's own copy of its material (no asset path): the shared Default-Material was saved with this missing map
+     * and every later test in the project warned "cannot read none.png" (the toast test's leftover warning). */
+    auto own = std::make_shared<Material>(*cube->get<MeshRenderer>()->material(0));
+    own->asset_path.clear();
+    own->name = "R34 Normal Mapped";
+    own->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    auto &slots = cube->get<MeshRenderer>()->materials;
+    if (slots.empty()) slots.push_back(own);
+    else slots[0] = own;
     ed.command("select Cube");
     ed.command("edit vertex");
     ed.command("vsel 0 1 2 3 4 5 6 7");
@@ -8116,6 +8165,286 @@ static void tests_round228() {
   });
 }
 
+/* ---------------------------------------------------------------- round 231: modifiers on big meshes (task 0211) */
+static void tests_round231() {
+  test("Array appends its copies array by array: the same mesh as adding each vertex and face - UVs, materials, smooth flags, seams and weights", [] {
+    MeshPtr src = primitives::uv_sphere(1.0f, 24, 12);
+    src->face_material.assign(src->face_count(), 0);
+    for (size_t f = 0; f < src->face_count(); f += 5) src->face_material[f] = 2;
+    src->face_smooth.assign(src->face_count(), 1);
+    for (size_t f = 0; f < src->face_count(); f += 3) src->face_smooth[f] = 0;
+    src->smooth = false;
+    for (uint32_t i = 1; i + 1 < 24; i += 4) src->set_seam(i, i + 1, true);
+    VertexGroup vg;
+    vg.name = "w";
+    for (size_t i = 0; i < src->vert_count(); i++) vg.weights.push_back((float)(i % 7) / 7.0f);
+    src->vertex_groups.push_back(vg);
+    /* What make_array did before task 0211, kept here as the reference. */
+    auto reference = [](Mesh &m, int count, Vec3 relative) {
+      AABB b = m.bounds();
+      Vec3 size = b.max - b.min;
+      Vec3 step = Vec3(relative.x * size.x, relative.y * size.y, relative.z * size.z);
+      const Mesh from = m;
+      const uint32_t nv = (uint32_t)from.vert_count();
+      const bool has_uv = from.has_uvs();
+      for (int c = 1; c < count; c++) {
+        uint32_t off = (uint32_t)m.vert_count();
+        for (uint32_t i = 0; i < nv; i++) {
+          m.add_vert(from.positions[i] + step * (float)c);
+          m.copy_vertex_weights(i);
+        }
+        std::vector<uint32_t> fv;
+        for (size_t f = 0; f < from.face_count(); f++) {
+          fv.assign(from.face_verts(f), from.face_verts(f) + from.face_size(f));
+          for (uint32_t &v : fv) v += off;
+          m.add_face(fv.data(), fv.size(), has_uv ? from.uvs.data() + from.face_offsets[f] : nullptr, from.material_of(f));
+        }
+        for (uint64_t k : from.seams) m.set_seam((uint32_t)(k >> 32) + off, (uint32_t)(k & 0xFFFFFFFF) + off, true);
+      }
+    };
+    Mesh want = *src, got = *src;
+    reference(want, 7, {1.1f, 0.0f, 0.3f});
+    meshops::make_array(got, 7, {1.1f, 0.0f, 0.3f}, {0, 0, 0}, 0.0f);
+    bool same_uvs = got.uvs.size() == want.uvs.size();
+    for (size_t i = 0; same_uvs && i < want.uvs.size(); i++) same_uvs = got.uvs[i].x == want.uvs[i].x && got.uvs[i].y == want.uvs[i].y;
+    CHECK(got.positions == want.positions && got.corner_verts == want.corner_verts && got.face_offsets == want.face_offsets);
+    CHECK(same_uvs && got.face_material == want.face_material && got.face_smooth == want.face_smooth && got.seams == want.seams);
+    CHECK(got.vertex_groups.size() == 1 && got.vertex_groups[0].weights == want.vertex_groups[0].weights);
+    /* Lists out of step with the faces come out as they did: UVs too short (not UVs at all), materials too short, a
+     * smooth list too long, a weight list too short, a seam to a vertex past the mesh, a loose edge. */
+    Mesh odd = *primitives::cube();
+    odd.uvs.resize(4);
+    odd.face_material.assign(3, 1);
+    odd.face_smooth.assign(9, 1);
+    odd.smooth = true;
+    VertexGroup short_group;
+    short_group.name = "s";
+    short_group.weights.assign(5, 0.5f);
+    odd.vertex_groups.push_back(short_group);
+    odd.set_seam(0, 1, true);
+    odd.set_seam(9, 10, true);
+    odd.loose_edges.push_back(Mesh::edge_key(0, 9));
+    Mesh odd_want = odd, odd_got = odd;
+    reference(odd_want, 3, {1, 0, 0});
+    meshops::make_array(odd_got, 3, {1, 0, 0}, {0, 0, 0}, 0.0f);
+    CHECK(odd_got.positions == odd_want.positions && odd_got.corner_verts == odd_want.corner_verts && odd_got.face_offsets == odd_want.face_offsets);
+    CHECK(odd_got.uvs.size() == odd_want.uvs.size() && odd_got.face_material == odd_want.face_material && odd_got.face_smooth == odd_want.face_smooth);
+    CHECK(odd_got.seams == odd_want.seams && odd_got.loose_edges == odd_want.loose_edges && odd_got.vertex_groups[0].weights == odd_want.vertex_groups[0].weights);
+    /* With no materials, flags or UVs nothing is added for them. */
+    Mesh plain = *primitives::cube();
+    plain.uvs.clear();
+    meshops::make_array(plain, 4, {1, 0, 0}, {0, 0, 0}, 0.0f);
+    CHECK(plain.uvs.empty() && plain.face_material.empty() && plain.face_smooth.empty() && plain.face_count() == 24);
+  });
+  test("Boolean's conversions: a union of two UV spheres is closed, the same twice, its faces rebuilt as the spheres' quads where whole, most corners' UVs the inputs' own", [] {
+    if (!meshops::boolean_available()) return;
+    MeshPtr a = primitives::uv_sphere(1.0f, 64, 32), b = primitives::uv_sphere(1.0f, 48, 24);
+    const Mat4 shift = Mat4::translate({0.9f, 0.2f, 0.1f});
+    auto once = [&](Mesh &out) {
+      out = *a;
+      std::string err;
+      return meshops::boolean_op(out, *b, shift, meshops::BooleanOp::Union, &err);
+    };
+    Mesh u, v;
+    ScopedTimer t;
+    CHECK(once(u));
+    std::printf("    union of %zu and %zu faces: %zu faces in %.1f ms\n", a->face_count(), b->face_count(), u.face_count(), t.ms());
+    CHECK(once(v));
+    CHECK(u.corner_verts == v.corner_verts && u.face_offsets == v.face_offsets && u.positions == v.positions);
+    CHECK(closed_manifold(u));
+    size_t quads = 0;
+    for (size_t f = 0; f < u.face_count(); f++) quads += u.face_size(f) == 4;
+    CHECK(quads > u.face_count() / 2);
+    std::set<std::pair<float, float>> inputs;
+    for (const Vec2 &t2 : a->uvs) inputs.insert({t2.x, t2.y});
+    for (const Vec2 &t2 : b->uvs) inputs.insert({t2.x, t2.y});
+    /* (Cut faces get new corners where the two meet; their UVs come from Manifold's interpolation.) */
+    size_t cut = 0;
+    for (size_t i = 0; i < u.uvs.size(); i++) cut += inputs.count({u.uvs[i].x, u.uvs[i].y}) == 0;
+    std::printf("    %zu of %zu corners' UVs taken from the inputs as they were\n", u.uvs.size() - cut, u.uvs.size());
+    CHECK(u.has_uvs() && cut < u.uvs.size() / 4);
+  });
+}
+
+static void tests_round259() {
+  test("subdivision chain (ADR 0075): on an open grid and a cube, after a few vertices move, the chain's local update equals the full subdivision bit for bit at levels 1-3, Catmull-Clark and simple, and recomputes only the moved vertices' footprint", [] {
+    for (int which = 0; which < 3; which++) {  // (an open grid of quads, a cube, a UV sphere with its triangle fans and a loose vertex)
+      MeshPtr base = which == 0 ? primitives::grid(2.0f, 6, 6) : which == 1 ? primitives::cube(1.0f) : primitives::uv_sphere(0.5f, 12, 8);
+      if (which == 2) base->positions.push_back(Vec3(2.0f, 0.0f, 0.0f)), base->touch();
+      for (int levels = 1; levels <= 3; levels++)
+        for (int smooth = 1; smooth >= 0; smooth--) {
+          Mesh out;
+          std::shared_ptr<meshops::SubdivChain> chain = meshops::SubdivChain::build(*base, levels, smooth == 1, out);
+          CHECK(chain);
+          if (!chain) continue;
+          Mesh moved = *base;
+          moved.positions[0] += Vec3(0.1f, 0.2f, -0.05f);
+          moved.positions[moved.vert_count() / 2] += Vec3(0.0f, 0.3f, 0.0f);
+          const size_t n = chain->update(moved.positions, out);
+          const Mesh full = meshops::subdivide(moved, levels, smooth == 1);
+          size_t diff = 0;
+          float worst = 0.0f;
+          for (size_t v = 0; v < out.positions.size() && v < full.positions.size(); v++) {
+            if (std::memcmp(&out.positions[v], &full.positions[v], sizeof(Vec3)) == 0) continue;
+            diff++, worst = std::max(worst, length(out.positions[v] - full.positions[v]));
+          }
+          std::printf("    %s level %d %s: %zu of %zu vertices recomputed, %zu differ from the full subdivision (worst %.2e); the chain %zu KB\n", which == 0 ? "grid" : which == 1 ? "cube" : "uv sphere + a loose vertex", levels,
+                      smooth ? "Catmull-Clark" : "simple", n, out.vert_count(), diff, worst, chain->memory_bytes() / 1024);
+          CHECK(out.vert_count() == full.vert_count() && diff == 0 && n > 0 && (which == 1 || n < out.vert_count()));  // (two of a cube's eight vertices reach the whole cube)
+          /* Nothing moved: nothing recomputed. */
+          CHECK(chain->update(moved.positions, out) == 0);
+        }
+    }
+  });
+}
+
+static void tests_round260() {
+  test("DynaMesh (ADR 0076): a cube at 16 and 32 comes out closed, all quads, its volume within 10 % (the corners round to the cell); a lone plane encloses nothing and is refused", [] {
+    auto closed = [](const Mesh &m, size_t &bad, size_t &nonq) {
+      std::unordered_map<uint64_t, int> edges;
+      nonq = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+        nonq += n == 4 ? 0 : 1;
+        for (uint32_t c = 0; c < n; c++) edges[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+      }
+      bad = 0;
+      for (const auto &e : edges) bad += e.second == 2 ? 0 : 1;
+      return bad == 0 && nonq == 0;
+    };
+    auto volume = [](const Mesh &m) {
+      double v = 0.0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+        for (uint32_t c = 1; c + 1 < n; c++) v += (double)dot(m.positions[fv[0]], cross(m.positions[fv[c]], m.positions[fv[c + 1]]));
+      }
+      return v / 6.0;
+    };
+    const MeshPtr cube = primitives::cube(1.0f);
+    for (int res : {16, 32}) {
+      Mesh out;
+      meshops::DynaMeshStats st;
+      CHECK(meshops::dynamesh(*cube, res, 1, out, &st));
+      size_t bad = 0, nonq = 0;
+      const bool ok = closed(out, bad, nonq);
+      const double v = volume(out);
+      std::printf("    cube at %d: %zu vertices, %zu quads, %zu bad edges, %zu non-quads, volume %.4f of 1 (%.1f ms)\n", res, out.vert_count(), out.face_count(), bad, nonq, v, st.ms_total);
+      CHECK(ok && std::fabs(v - 1.0) < 0.1);
+    }
+    const MeshPtr plane = primitives::grid(2.0f, 4, 4);
+    Mesh slab;
+    std::string why;
+    const bool refused = !meshops::dynamesh(*plane, 16, 0, slab, nullptr, &why);
+    std::printf("    a lone plane at 16: refused %d (%s)\n", (int)refused, why.c_str());
+    CHECK(refused && why.find("closed") != std::string::npos);
+  });
+}
+
+static void tests_round261() {
+  test("quad remesh (ADR 0077): a cube to 200 faces and a UV sphere to 600 come out closed, all quads, within a quarter of the target (skipped without QuadriFlow); an empty mesh and a cancel are refused with a reason", [] {
+    Mesh out;
+    std::string why;
+    Mesh empty;
+    CHECK(!meshops::quad_remesh(empty, {}, out, nullptr, &why) && !why.empty());
+    if (!meshops::quad_remesh_available()) {
+      std::printf("    (no QuadriFlow in this build: %s)\n", why.c_str());
+      return;
+    }
+    auto closed = [](const Mesh &m, size_t &bad, size_t &nonq) {
+      std::unordered_map<uint64_t, int> edges;
+      nonq = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+        nonq += n == 4 ? 0 : 1;
+        for (uint32_t c = 0; c < n; c++) edges[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+      }
+      bad = 0;
+      for (const auto &e : edges) bad += e.second == 2 ? 0 : 1;
+      return bad == 0 && nonq == 0;
+    };
+    struct Case {
+      const char *name;
+      MeshPtr mesh;
+      int target;
+    } cases[] = {{"cube", primitives::cube(1.0f), 200}, {"uv sphere", primitives::uv_sphere(0.5f, 48, 32), 600}};
+    for (const Case &c : cases) {
+      meshops::QuadRemeshParams p;
+      p.target_faces = c.target;
+      meshops::QuadRemeshStats st;
+      why.clear();
+      const bool ok = meshops::quad_remesh(*c.mesh, p, out, &st, &why);
+      size_t bad = 0, nonq = 0;
+      const bool manifold = ok && closed(out, bad, nonq);
+      std::printf("    %s to %d: ok %d (%s), %zu vertices, %zu faces, %zu bad edges, %zu non-quads, %.0f ms\n", c.name, c.target, (int)ok, why.c_str(), out.vert_count(), out.face_count(), bad, nonq, st.ms_total);
+      CHECK(ok && manifold && out.face_count() >= (size_t)(c.target * 3 / 4) && out.face_count() <= (size_t)(c.target * 5 / 4));
+    }
+    std::atomic<bool> cancel{true};
+    meshops::QuadRemeshParams p;
+    CHECK(!meshops::quad_remesh(*cases[0].mesh, p, out, nullptr, &why, &cancel) && why == "cancelled");
+  });
+}
+
+static void tests_round262() {
+  test("Dyntopo (ADR 0078): a cube's top face region refined to a detail - triangulated, the long edges split until none is over the size, manifold, compact after finish with no degenerate face; a collapse that would fold a triangle is refused", [] {
+    MeshPtr cube = primitives::cube(1.0f);
+    Mesh m = *cube;
+    meshops::Dyntopo dyn(m);
+    std::vector<uint32_t> region, made;
+    for (uint32_t v = 0; v < (uint32_t)m.vert_count(); v++)
+      if (m.positions[v].y > 0.0f) region.push_back(v);  // (the top four corners)
+    const meshops::Dyntopo::Result r = dyn.refine(region, Vec3(0.0f, 0.5f, 0.0f), 1.5f, 0.3f, made);  // (a sphere over the top face and its edges)
+    dyn.finish();
+    std::unordered_map<uint64_t, int> edges;
+    size_t degenerate = 0, over = 0, total_edges = 0;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      bool same = true;
+      for (uint32_t c = 1; c < n; c++) same = same && fv[c] == fv[0];
+      degenerate += same ? 1 : 0;
+      for (uint32_t c = 0; c < n; c++) {
+        if (!edges.emplace(Mesh::edge_key(fv[c], fv[(c + 1) % n]), 0).second) continue;
+        total_edges++;
+      }
+    }
+    /* The edges of faces touching the region: none longer than the detail (an edge both of whose ends are in the top face's fan). */
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      bool top = true;
+      for (uint32_t c = 0; c < n; c++) top = top && m.positions[fv[c]].y > 0.49f;
+      if (!top) continue;
+      for (uint32_t c = 0; c < n; c++) over += length(m.positions[fv[c]] - m.positions[fv[(c + 1) % n]]) > 0.3f * 1.001f ? 1 : 0;
+    }
+    size_t bad = 0;
+    std::unordered_map<uint64_t, int> count;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      for (uint32_t c = 0; c < n; c++) count[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+    }
+    for (const auto &e : count) bad += e.second == 2 ? 0 : 1;
+    std::printf("    a cube's top refined to 0.3: %zu triangulated, %zu split, %zu collapsed; %zu vertices, %zu faces, %zu edges; %zu bad edges, %zu degenerate, %zu top edges over the detail\n", r.triangulated,
+                r.split, r.collapsed, m.vert_count(), m.face_count(), total_edges, bad, degenerate, over);
+    CHECK(r.split > 0 && made.size() == r.split && bad == 0 && degenerate == 0 && over == 0 && m.vert_count() == 8 + made.size());
+    /* The whole cube at a huge detail: collapses run until the checks stop them (a double face, too few faces); what is
+     * left is still manifold and nothing is folded. */
+    Mesh c2 = *cube;
+    meshops::Dyntopo dyn2(c2);
+    std::vector<uint32_t> all, made2;
+    for (uint32_t v = 0; v < (uint32_t)c2.vert_count(); v++) all.push_back(v);
+    const meshops::Dyntopo::Result r2 = dyn2.refine(all, Vec3(0.0f), 3.0f, 10.0f, made2);  // (a detail of 10: every edge of 1 is "short")
+    dyn2.finish();
+    std::unordered_map<uint64_t, int> count2;
+    for (size_t f = 0; f < c2.face_count(); f++) {
+      const uint32_t n = c2.face_size(f), *fv = c2.face_verts(f);
+      for (uint32_t c = 0; c < n; c++) count2[Mesh::edge_key(fv[c], fv[(c + 1) % n])]++;
+    }
+    size_t bad2 = 0;
+    for (const auto &e : count2) bad2 += e.second == 2 ? 0 : 1;
+    std::printf("    the cube at detail 10: %zu collapsed (refused where a face would fold, double or an edge pinch), %zu vertices and %zu faces left, %zu bad edges\n", r2.collapsed, c2.vert_count(),
+                c2.face_count(), bad2);
+    CHECK(c2.vert_count() >= 4 && c2.face_count() >= 4 && bad2 == 0);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8152,4 +8481,9 @@ void run_modeling_tests() {
   tests_round208();
   tests_round221();
   tests_round228();
+  tests_round231();
+  tests_round259();
+  tests_round260();
+  tests_round261();
+  tests_round262();
 }

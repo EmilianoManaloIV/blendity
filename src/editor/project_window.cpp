@@ -583,10 +583,14 @@ void Editor::draw_project(const Recti &r) {
         project_dir_ = full;
         project_listed_ = -100;
       }
-      else if (ext == ".scene") open_scene(full);
+      else if (ext == ".scene") open_scene_asked(full);  // (task 0254)
       else if (ext == ".ptex") {
         if (ProceduralTexturePtr t = texture_asset(make_asset_relative(full))) texture_selected_ = t;
         dock_open(WindowKind::Textures);
+      }
+      else if (ext == ".anim") {  // (task 0260: a clip opens the Animation window, not a text editor)
+        dock_open(WindowKind::Animation);
+        Log::info("%s is an animation clip: give it to a character's Animation component (its Clip field) and the Animation window edits it", fs::filename(full).c_str());
       }
       else if (model_extension_supported(ext) || motion_extension_supported(ext)) import_model_file(full, false);
       else if (ext != ".mat" && ext != ".ptex") fs::open_external(full);
@@ -683,13 +687,13 @@ void Editor::draw_project(const Recti &r) {
     }
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false, fs::is_dir(sel) && in_assets ? sel : dir_now);
     u.menu_separator();
-    if (u.menu_item("Rename", "F2", false, in_assets)) {
+    if (u.menu_item("Rename", key("edit.rename").c_str(), false, in_assets)) {
       project_rename_ = sel;
       project_rename_buf_ = fs::is_dir(sel) ? fs::filename(sel) : fs::stem(sel);
     }
     if (delete_menu_item(project_multi_.items.size(), "Delete", "Items", in_assets)) request_project_delete(sel);
     u.menu_separator();
-    if (u.menu_item("Open with system viewer")) fs::open_external(sel);
+    if (u.menu_item("Open with System Viewer")) fs::open_external(sel);
     if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::is_dir(sel) ? sel : fs::parent(sel));
     if (u.menu_item("Refresh")) invalidate_project_listing();
   });

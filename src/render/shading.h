@@ -74,6 +74,7 @@ struct SurfaceSample {
   Vec3 normal;  // after normal mapping
   bool unlit = false;
   const Material *toon = nullptr;  // a Toon material (ADR 0020): lights shade it through shade_toon
+  const Material *handpainted = nullptr;  // a Hand-painted material (ADR 0083): unlit plus its rim and painted specular (the CPU raster)
   /* The toon maps at this point (task 0148): the shadow side's own albedo, the painted shadow bias (0.5 neutral), the
    * highlight's and the rim's masks, the ramp (sampled per light by how lit), and the tangent for a hair highlight. */
   Vec3 toon_shade;
@@ -87,7 +88,15 @@ struct SurfaceSample {
   Vec3 toon_shadow_mul{1.0f, 1.0f, 1.0f};
   Vec3 toon_n_dx, toon_n_dy;  // task 0164: the normal's change across the pixel (sp.normal_dx / dy), for the band edges
   float face_sdf = -1.0f, face_sdf_mirror = -1.0f;
+  /* Round 330: the Principled extras at the point (0: off), and the tangent the anisotropy follows. */
+  float subsurface = 0.0f, subsurface_scale = 0.5f, sheen = 0.0f, sheen_roughness = 0.5f, coat = 0.0f, coat_roughness = 0.03f, coat_f0 = 0.04f;
+  float anisotropic = 0.0f;
+  Vec3 subsurface_color{1.0f}, sheen_tint{1.0f}, coat_tint{1.0f}, aniso_tangent;
+  bool extras = false;
 };
+/* Round 330: the Principled extras of a material onto a sample (the tangent: the surface's, turned by the rotation). */
+void apply_principled_extras(const Material &m, SurfaceSample &s, Vec3 tangent, bool has_tangent);
+Vec3 principled_base(const SurfaceSample &s, Vec3 n, Vec3 v);
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
 /* Whether a material is the same at every point of a surface but for its normal (task 0088): no textures, no
@@ -148,7 +157,28 @@ struct Environment {
   float rotation = 0.0f;  // degrees around +Y
   Vec3 sh[9];             // irradiance spherical harmonics (computed from map)
   bool sh_valid = false;
-
+  /* The stylized sky and fog (task 0248, ADR 0084). */
+  Vec3 sun_dir{0.3f, 0.8f, 0.5f};   // toward the sun (the disc's centre)
+  float disc_cos = 2.0f;            // cos of the disc's half-angle (2: no disc)
+  float disc_soft = 0.3f;
+  Vec3 disc_color{1.0f, 0.95f, 0.8f};
+  float band_width = 0.0f;          // the horizon band's half-width in d.y (0: none)
+  Vec3 band_color{0.95f, 0.75f, 0.6f};
+  bool fog = false;
+  float fog_start = 10.0f, fog_end = 60.0f;
+  Vec3 fog_color{0.6f, 0.65f, 0.75f}, fog_far{0.75f, 0.8f, 0.9f};
+  float fog_amount(float dist) const {  // 0 at fog_start, 1 at fog_end and beyond
+    if (!fog) return 0.0f;
+    const float e = std::max(fog_start + 1e-3f, fog_end);
+    const float t = (dist - fog_start) / (e - fog_start);
+    return t <= 0.0f ? 0.0f : t >= 1.0f ? 1.0f : t;
+  }
+  Vec3 fog_apply(Vec3 c, float dist) const {
+    const float f = fog_amount(dist);
+    if (f <= 0.0f) return c;
+    const Vec3 fc = fog_color + (fog_far - fog_color) * f;
+    return c + (fc - c) * f;
+  }
   Vec3 radiance(Vec3 dir, float lod = 0.0f) const;       // background / reflections
   Vec3 irradiance(Vec3 n) const;                          // cosine-convolved (diffuse)
   Vec3 specular(Vec3 r, float roughness) const;           // pre-filtered by roughness

@@ -51,6 +51,8 @@ const char *material_unsupported(const Material &m) {
   /* (A cutout draws on the card since task 0163, Transparent and Glass since task 0195 - but not toon ones, whose
    * lighting reads the neighbouring pixels' normals in the g-buffer.) */
   if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout && m.shading_model == 1) return "a see-through toon material";
+  if (m.volume()) return "a Volume (fog) material";  // (round 331)
+  if (m.shading_model == 0 && m.principled_extras()) return "a material with Subsurface, Sheen, Coat or Anisotropic";  // (round 330: the card's g-buffer has no room for them yet)
   const Material::Resolved &tx = m.textures();
   /* (A live procedural texture draws on the card since task 0196, except seen close up: gpu_view_draw's live_close_up.)
    * Axis materials draw on the card since task 0195 - not toon ones (the toon maps aren't read through the parts), nor
@@ -66,6 +68,7 @@ const char *material_unsupported(const Material &m) {
 /* Why an object can't be drawn on the GPU yet, or null. */
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
+  if (it.flattened) return "a Camera Flatten (the card has no room for its true shape's shading)";  // (round 334)
   for (uint32_t slot : mesh_slots(*it.mesh))
     if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
   return nullptr;
@@ -483,6 +486,14 @@ void raster_world(gpu::RasterFrame &fr, const LightingEnv &env, const Camera *ca
   set3(fr.equator, e ? e->equator : env.equator);
   set3(fr.ground, e ? e->ground : env.ground);
   if (e) set3(fr.env_color, e->color);
+  if (e) {  // (task 0248: the stylized sky and the fog)
+    set3(fr.sky_disc, e->sun_dir), fr.sky_disc[3] = e->disc_cos;
+    set3(fr.sky_disc_color, e->disc_color), fr.sky_disc_color[3] = e->disc_soft;
+    set3(fr.sky_band, e->band_color), fr.sky_band[3] = e->band_width;
+    fr.fog[0] = e->fog_start, fr.fog[1] = e->fog_end, fr.fog[2] = e->fog ? 1.0f : 0.0f;
+    set3(fr.fog_color, e->fog_color), set3(fr.fog_far, e->fog_far);
+  }
+  else fr.sky_disc[3] = 2.0f, fr.sky_band[3] = 0.0f, fr.fog[2] = 0.0f;
   fr.view_transform = (int)env.view_transform;
   fr.exposure = env.exposure;
   if (cam && cam->clear_flags == 1) {
@@ -724,6 +735,20 @@ int Editor::gpu_texture(const TexturePtr &t, std::string &err) {
   return id;
 }
 
+/* Task 0245: a texture painted in place - its rows [y0, y1) go up when the card holds it (nothing otherwise: it is
+ * uploaded whole when first drawn). */
+void Editor::gpu_texture_rows_changed(const TexturePtr &t, int y0, int y1) {
+  if (!t || !gpu_view_) return;
+  auto found = gpu_textures_.find(t.get());
+  if (found == gpu_textures_.end() || found->second.id < 0) return;
+  std::string err;
+  if (!gpu_view_->update_texture_rows(found->second.id, *t, y0, y1, &err)) {
+    gpu_view_->remove_texture(found->second.id);  // (its slot freed; the whole texture goes up again at the next frame)
+    gpu_textures_.erase(found);
+    if (!err.empty()) Log::warn("GPU view: %s", err.c_str());
+  }
+}
+
 /* Task 0099: the card's copy is the render mesh this one moved from in place: only what the move changed goes up. */
 bool Editor::gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err) {
   if (e.id < 0 || rm.moved_from == 0 || e.serial != rm.moved_from || e.vertices != rm.positions.size() || e.indices != rm.indices.size()) return false;
@@ -772,13 +797,18 @@ void Editor::gpu_forget_meshes() {
 
 /* The view's slot of targets: the one it had, else the least recently used. */
 int Editor::gpu_slot(const RenderTarget &rt) {
+  auto mine = [&](int i) { return gpu_slot_rt_[i] == &rt && gpu_slot_win_[i] == active_window_; };  // (task 0232: per window)
   int best = 0;
   for (int i = 0; i < gpu::Raster::kSlots; i++) {
-    if (gpu_slot_rt_[i] == &rt) best = i;
-    else if (gpu_slot_rt_[best] != &rt && gpu_slot_used_[i] < gpu_slot_used_[best]) best = i;
+    if (mine(i)) best = i;
+    else if (!mine(best) && gpu_slot_used_[i] < gpu_slot_used_[best]) best = i;
   }
-  if (best == scene_planes_slot_ && gpu_slot_rt_[best] != &rt) scene_planes_slot_ = -1;  // (task 0204: another view takes the slot)
+  if (best == scene_planes_slot_ && !mine(best)) scene_planes_slot_ = -1;  // (task 0204: another view takes the slot)
+  if (!mine(best))  // (task 0232: another window's Scene view had planes waiting in it)
+    for (auto &w : windows_)
+      if (w->view && w->view->scene_planes_slot == best) w->view->scene_planes_slot = -1;
   gpu_slot_rt_[best] = &rt;
+  gpu_slot_win_[best] = active_window_;
   gpu_slot_used_[best] = gpu_calls_ + 1;
   return best;
 }
@@ -1151,7 +1181,7 @@ void Editor::ensure_scene_planes() {
   scene_planes_slot_ = -1;
   RenderTarget &rt = scene_rt_;
   /* (Still the Scene view's slot, at the size it drew: else the target's own planes are newer than the card's.) */
-  if (gpu_slot_rt_[slot] != &rt || scene_planes_w_ != rt.width || scene_planes_h_ != rt.height) return;
+  if (gpu_slot_rt_[slot] != &rt || gpu_slot_win_[slot] != active_window_ || scene_planes_w_ != rt.width || scene_planes_h_ != rt.height) return;
   std::string err;
   if (gpu_view_ && rt.depth.size() == (size_t)rt.width * rt.height &&
       gpu_view_->read_back(slot, nullptr, rt.depth.data(), rt.ids.size() == rt.depth.size() ? rt.ids.data() : nullptr, &err))

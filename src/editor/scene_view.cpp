@@ -42,27 +42,31 @@ void Editor::draw_scene_view(const Recti &r) {
     return;
   }
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
+                   !(obj_last_valid() && obj_last_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
-  scene_navigation(view);
+  const bool quick_menu_took = wheel_took_;  // (task 0230: the Wheel's frame step took the press or release)
+  /* Task 0232: an interaction begun in another window's Scene view (a drag, a stroke, a gizmo, G / R / S, a brush) is
+   * that window's: this view draws, and leaves the tools alone until it ends. */
+  const bool other_owns = interaction_window_ >= 0 && interaction_window_ != active_window_;
+  /* Task 0252: a click or a hover on a toast is the toast's - before the navigation and the tools, so a Fix click is
+   * neither a selection nor a dab nor an orbit. */
+  const bool toast_took = !quick_menu_took && !other_owns && toasts_update(view);
+  if (!quick_menu_took && !other_owns && !toast_took) scene_navigation(view);
+  if (!other_owns) view_gizmo_drag(view);  // (a drag begun on the Scene Gizmo or its hand / magnifier: task 0216)
   update_pilot_camera();  // flying a camera: it follows the view
 
   /* Gizmo math and picking need this frame's camera matrices before we
    * render, so transforms applied by a drag show up in the same frame. */
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
-  bool gizmo_busy = bone_handles_update(view);  // (before the gizmo: a pressed handle is the bone's, task 0066)
-  if (gizmo_update(view)) gizmo_busy = true;
-  if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
-  /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
-  if (pushpull_update(view)) gizmo_busy = true;
-  if (modal_update(view)) gizmo_busy = true;
-  if (transform_update(view)) gizmo_busy = true;
-  if (focus_pick_update(view)) gizmo_busy = true;
-  if (autorig_update(view)) gizmo_busy = true;
-  if (knife_update(view)) gizmo_busy = true;
-  if (draw_update(view)) gizmo_busy = true;
+  bool gizmo_busy = quick_menu_took || other_owns || toast_took;
+  if (!other_owns) gizmo_busy = scene_tool_updates(view, gizmo_busy);
+  if (!other_owns) interaction_window_ = scene_interacting() ? active_window_ : -1;
 
   auto &in = u.in;
+  /* (Task 0217's pen held still is the frame's now, with a finger's: wheel_frame, task 0230.) */
+  /* Task 0214: in Tablet Mode a finger the gizmo and the tools didn't take orbits (a tap still selects). */
+  if (finger_navigates() && drag_ == Drag::None && scene_hovered_ && in.pressed[0] && !gizmo_busy && !u.any_active()) finger_orbit_start();
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
   if (drag_ == Drag::None && scene_hovered_ && in.pressed[0] && !in.alt() && !gizmo_busy && tool_ != Tool::View &&
       !u.any_active()) {
@@ -81,19 +85,14 @@ void Editor::draw_scene_view(const Recti &r) {
   if (drag_ == Drag::Box) {
     bool moved = box.w > u.px(4) || box.h > u.px(4);
     box_visible = moved;
-    if (in.released[0] || !in.down[0]) {
+    if (in.cancelled) drag_ = Drag::None, box_visible = false;  // (a finger's press taken back: task 0213)
+    if (drag_ == Drag::Box && (in.released[0] || !in.down[0])) {
       int mode = (in.shift() || in.ctrl()) ? SEL_TOGGLE : SEL_REPLACE;
       if (moved) {
         if (edit_mode_) edit_box_select(view, box, mode == SEL_TOGGLE ? SEL_ADD : SEL_REPLACE);
         else box_select(view, box, mode == SEL_TOGGLE ? SEL_ADD : SEL_REPLACE);
       }
-      else {
-        if (edit_mode_) edit_pick(view, in.mx, in.my, mode);
-        else if (!point_pick(view, in.mx, in.my, mode)) {
-          pt_sel_.clear();
-          pick(view, in.mx, in.my, mode);
-        }
-      }
+      else click_select(view, in.mx, in.my, mode);
       if (moved && !edit_mode_) pt_sel_.clear();
       drag_ = Drag::None;
       box_visible = false;
@@ -102,8 +101,9 @@ void Editor::draw_scene_view(const Recti &r) {
   /* Esc drops a curve's point selection (the object stays selected). */
   if (!pt_sel_.empty() && scene_hovered_ && drag_ == Drag::None && in.key_pressed[platform::KEY_ESCAPE] && !u.wants_keyboard())
     pt_sel_.clear();
-  /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). */
-  if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_) frame_selected();
+  /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). A finger's double tap
+   * in Tablet Mode does it as it lifts (task 0214). */
+  if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && !sculpt_ && active_ && !finger_orbit_) frame_selected();  // (task 0236: two dabs close together aren't a frame)
 
   {
     /* The 3D layer is reused while nothing it shows has changed (an idle frame, the mouse over a panel,
@@ -149,8 +149,18 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
+  if (sketch_in_world()) {  // (round 324: not while the Draw tab draws on Paper)
+    sketch_bind_scene(view, scene_hovered_);  // (task 0233: the camera may have moved since the update)
+    sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
+  }
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
+  sculpt_draw(view);  // (task 0236)
+  paint_draw(view);   // (task 0245)
+  strokeobj_draw(view);  // (task 0248)
+  scatter_draw(view);
+  if (anim_.record) ui_.canvas.rect_outline(view, Color::hex(0xB03030), ui_.px(3));  // (task 0258: the Record frame round the view)
+  draw_toasts(view);  // (task 0252: over the picture, under the handles)
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
   draw_pushpull(view);
@@ -189,8 +199,11 @@ void Editor::draw_scene_view(const Recti &r) {
   }
   if (show_gizmos_ && !playing_) draw_camera_preview(view);
   else cam_preview_rect_ = Recti{};
-  if (edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
+  const bool obj_last = obj_last_valid();  // (task 0266: the newest step's panel; Edit Mode's gives way to it)
+  if (!obj_last && edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
   else last_op_rect_ = Recti{};
+  if (obj_last && !last_op_hidden_) draw_obj_last_panel(view);
+  else obj_last_rect_ = Recti{};
   if (playing_) u.canvas.rect_outline(view, Color::hex(0x3A79BB, 120), u.px(2));
 }
 
@@ -201,6 +214,12 @@ void Editor::draw_scene_view(const Recti &r) {
 std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   const auto &in = ui_.in;
   const bool unity_like = nav_style_ == NavStyle::Unity || nav_style_ == NavStyle::Unreal;
+  /* Task 0216: a pen with its side button held (Windows sends it as the right button) navigates in every feel - orbit,
+   * Shift pans, Ctrl zooms - as the middle button does in Blender's pen setup. */
+  const int barrel_button = in.pressed[1] ? 1 : in.pressed[0] ? 0 : -1;
+  if (sculpt_ && in.pressed[0] && !in.barrel) return {Drag::None, 0};  // (task 0236: the left button is the brush's, Shift and Alt its smooth and carve)
+  if (in.pen && in.barrel && barrel_button >= 0 && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal)
+    return {in.shift() ? Drag::Pan : in.ctrl() ? Drag::Zoom : Drag::Orbit, barrel_button};
   if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal) {  // a right-click cancels a running Push/Pull, Inset, Bevel or bone Extrude instead
     if (nav_style_ == NavStyle::Unreal && in.down[0]) return {Drag::Pan, 1};
     if (in.alt() && nav_style_ != NavStyle::Blender) return {Drag::Zoom, 1};
@@ -220,23 +239,56 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   return {Drag::None, 0};
 }
 
+/* The Scene view's tools, in their order of precedence (the sketch tool first: while sketching the pen draws, over
+ * gizmos and tools, task 0223; a pressed bone handle before the gizmo, task 0066; the Weight Paint brush, a running
+ * Push/Pull, the modal and transform operators, the focus pick, the auto-rig, the Knife, the Draw tools). True when one
+ * of them owns the mouse this frame. */
+bool Editor::scene_tool_updates(const Recti &view, bool busy) {
+  if (sketch_in_world()) sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
+  if (sketch_in_world() && sketch_update(view)) busy = true;
+  if (bone_handles_update(view)) busy = true;
+  if (trail_update(view)) busy = true;           // (task 0282: a trail's key dot, before the handles it hands over to)
+  if (puppet_handles_update(view)) busy = true;  // (task 0281: before the gizmo - a handle is the puppet's string)
+  if (gizmo_update(view)) busy = true;
+  if (wp_update(view)) busy = true;
+  if (sculpt_update(view)) busy = true;  // (task 0236)
+  if (paint_update(view)) busy = true;   // (task 0245)
+  if (strokeobj_update(view)) busy = true;  // (task 0248)
+  if (scatter_update(view)) busy = true;
+  if (pushpull_update(view)) busy = true;
+  if (modal_update(view)) busy = true;
+  if (transform_update(view)) busy = true;
+  if (focus_pick_update(view)) busy = true;
+  if (autorig_update(view)) busy = true;
+  if (knife_update(view)) busy = true;
+  if (draw_update(view)) busy = true;
+  return busy;
+}
+
 void Editor::scene_navigation(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
-  double now = now_seconds();
+  double now = clock_now();
   float k_pan = (2.0f * cam_.distance * std::tan(cam_.fov * 0.5f * kDeg2Rad)) / std::max(1, view.h);
+  finger_glide(now);
 
   if (nav_style_ == NavStyle::Unreal && drag_ == Drag::Box && in.pressed[1]) {  // Unreal: LMB then RMB held pans too
     drag_ = Drag::Pan;
     drag_button_ = 1;
   }
+  if (barrel_nav_ && drag_ != Drag::None && !in.down[drag_button_]) barrel_nav_ = false;  // (a click without moving: the Wheel's frame step opened it, task 0230)
   if (drag_ == Drag::None && scene_hovered_ && !u.any_active()) {
     std::tie(drag_, drag_button_) = nav_drag_for_press();
+    barrel_nav_ = drag_ != Drag::None && in.pen && in.barrel;
     if (drag_ == Drag::Fly) {
       fly_last_ = now;
       fly_accel_ = 1.0f;
     }
-    if (drag_button_ == 0 && in.alt() && (drag_ == Drag::Orbit || drag_ == Drag::Pan || drag_ == Drag::AltClick)) {
+    /* A pen's side button that came as the left button: its press is navigation's alone - no tool, bone handle or
+     * brush after this takes it, and no Alt+click loop select (task 0216). */
+    const bool barrel_left = drag_ != Drag::None && drag_button_ == 0 && in.pen && in.barrel;
+    if (barrel_left) in.pressed[0] = false;
+    if (!barrel_left && drag_button_ == 0 && in.alt() && (drag_ == Drag::Orbit || drag_ == Drag::Pan || drag_ == Drag::AltClick)) {
       alt_click_ = true;  // a click without moving selects a loop (Blender's Alt+click) instead
       alt_click_ring_ = in.ctrl();
     }
@@ -279,11 +331,13 @@ void Editor::scene_navigation(const Recti &view) {
     }
     case Drag::Orbit:
       if (!in.down[drag_button_]) {
-        if (drag_button_ == 0) alt_click_release(view);
+        if (finger_orbit_) finger_orbit_end(view, now);
+        else if (drag_button_ == 0) alt_click_release(view);
         drag_ = Drag::None;
         break;
       }
       u.cursor = Cursor::Move;
+      if (finger_orbit_ && !finger_orbit_move(dx, dy, now)) break;  // (a tap's jitter doesn't turn the view)
       cam_.yaw += dx * 0.3f;
       cam_.pitch = clampf(cam_.pitch + dy * 0.3f, -89.9f, 89.9f);
       break;
@@ -305,7 +359,8 @@ void Editor::scene_navigation(const Recti &view) {
       break;
     case Drag::AltClick:
       if (!in.down[0]) {
-        alt_click_release(view);
+        if (!in.cancelled) alt_click_release(view);
+        alt_click_ = false;
         drag_ = Drag::None;
       }
       break;
@@ -346,6 +401,86 @@ void Editor::touch_navigate(float k_pan) {
     cam_.pivot += cam_.up() * (in.touch_pan_y * k_pan);
   }
   if (std::isfinite(in.touch_rotate)) cam_.yaw -= in.touch_rotate;
+  ui_.redraw = true;
+}
+
+/* A click's selection at (x, y): Edit Mode's elements, else a point of a curve, else an object. */
+void Editor::click_select(const Recti &view, int x, int y, int mode) {
+  if (edit_mode_) {
+    edit_pick(view, x, y, mode);
+    return;
+  }
+  if (point_pick(view, x, y, mode)) return;
+  pt_sel_.clear();
+  pick(view, x, y, mode);
+}
+
+/* ---- a finger in Tablet Mode (task 0214) ---- */
+
+void Editor::finger_orbit_start() {
+  const auto &in = ui_.in;
+  drag_ = Drag::Orbit;
+  drag_button_ = 0;
+  finger_orbit_ = true;
+  finger_double_ = in.double_clicked[0];
+  finger_press_x_ = in.mx, finger_press_y_ = in.my;
+  finger_travel_ = finger_vel_yaw_ = finger_vel_pitch_ = 0.0f;
+  finger_last_ = clock_now();
+  glide_yaw_ = glide_pitch_ = 0.0f;
+  cam_.animating = false;
+}
+
+/* The finger's speed, smoothed over the last few moves (the glide starts from it). False while it is still within a
+ * tap's reach (8 px): the view doesn't turn for a tap's jitter. */
+bool Editor::finger_orbit_move(int dx, int dy, double now) {
+  const bool orbiting = finger_travel_ >= ui_.px(8);
+  finger_travel_ += std::abs((float)dx) + std::abs((float)dy);
+  const float dt = (float)std::max(now - finger_last_, 1.0 / 240.0);
+  finger_last_ = now;
+  finger_vel_yaw_ = finger_vel_yaw_ * 0.5f + dx * 0.3f / dt * 0.5f;
+  finger_vel_pitch_ = finger_vel_pitch_ * 0.5f + dy * 0.3f / dt * 0.5f;
+  return orbiting;
+}
+
+/* Let go: a tap selects where it touched (a double tap frames the selection); a flick still moving glides on. A
+ * press taken back (a second finger) does neither. */
+void Editor::finger_orbit_end(const Recti &view, double now) {
+  finger_orbit_ = false;
+  const auto &in = ui_.in;
+  if (in.cancelled) return;
+  if (finger_travel_ < ui_.px(8)) {
+    /* A double tap: Edit Mode's edge loop, as a double-click selects it, else the selection framed. */
+    if (finger_double_ && edit_mode_ && elem_ != EditElement::Face) edit_select_loop(view, finger_press_x_, finger_press_y_, in.shift());
+    else if (finger_double_) frame_selected();
+    else click_select(view, finger_press_x_, finger_press_y_, (in.shift() || in.ctrl()) ? SEL_TOGGLE : SEL_REPLACE);
+    return;
+  }
+  const bool still_moving = now - finger_last_ < 0.06;  // (a finger that stopped before lifting doesn't glide)
+  const float speed = std::hypot(finger_vel_yaw_, finger_vel_pitch_);
+  if (!still_moving || speed < 60.0f) return;
+  const float cap = std::min(1.0f, 720.0f / speed);  // (at most two turns a second)
+  glide_yaw_ = finger_vel_yaw_ * cap, glide_pitch_ = finger_vel_pitch_ * cap;
+  glide_last_ = now;
+}
+
+/* The glide: it slows by about 4x every half second and stops at the next touch, press, wheel or gesture. */
+void Editor::finger_glide(double now) {
+  if (glide_yaw_ == 0.0f && glide_pitch_ == 0.0f) return;
+  const auto &in = ui_.in;
+  const bool touched = in.pressed[0] || in.pressed[1] || in.pressed[2] || in.wheel_y != 0.0f || in.touch_zoom != 1.0f ||
+                       in.touch_pan_x != 0.0f || in.touch_pan_y != 0.0f || in.touch_rotate != 0.0f;
+  /* (A glide whose view wasn't drawn for a while - another tab over it - ends rather than jumping on.) */
+  if (touched || drag_ != Drag::None || now - glide_last_ > 0.2) {
+    glide_yaw_ = glide_pitch_ = 0.0f;
+    return;
+  }
+  const float dt = (float)std::min(now - glide_last_, 0.1);
+  glide_last_ = now;
+  cam_.yaw += glide_yaw_ * dt;
+  cam_.pitch = clampf(cam_.pitch + glide_pitch_ * dt, -89.9f, 89.9f);
+  const float decay = std::exp(-2.8f * dt);
+  glide_yaw_ *= decay, glide_pitch_ *= decay;
+  if (std::hypot(glide_yaw_, glide_pitch_) < 4.0f) glide_yaw_ = glide_pitch_ = 0.0f;
   ui_.redraw = true;
 }
 
@@ -424,7 +559,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     const Material &mat0 = *mr->material(0);
     it.albedo = mat0.base_color;
     it.specular = mat0.specular * 0.5f;
-    it.unlit = mat0.unlit;
+    it.unlit = mat0.unlit || mat0.shading_model == 2;  // (task 0247: Hand-painted shows its texture as painted in the solid modes too)
     it.double_sided = mat0.double_sided || editing;
     it.materials = &mr->materials;
     it.receive_shadows = mr->receive_shadows;
@@ -435,6 +570,12 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
       it.vertex_colors = wp_colors(*mf->mesh, *it.mesh);
       it.unlit = false;
       it.materials = nullptr;  // (with materials, Solid shades per pixel from them: the weight colours are the point here)
+    }
+    if (!game && sculpt_ && g.id == sculpt_obj_ && g.evaluated_mesh(editing ? 2 : 0) == mf->mesh.get() && sculpt_colors_wanted(*mf->mesh)) {  // Sculpt Mode: the mask darkens, the groups colour (task 0238; on the cage only when the cage is what is drawn - task 0239)
+      it.mesh = &mf->mesh->render_mesh();
+      it.vertex_colors = sculpt_colors(*mf->mesh, *it.mesh, it.albedo);
+      it.unlit = false;
+      it.materials = nullptr;
     }
     items.push_back(it);
   });
@@ -623,7 +764,7 @@ void Editor::frame_selected() {
   }
   float radius = std::max(0.25f, length(b.extent()));
   float dist = radius / std::sin(cam_.fov * 0.5f * kDeg2Rad) * 1.1f;
-  cam_.animate_to(b.center(), cam_.yaw, cam_.pitch, dist, now_seconds());
+  cam_.animate_to(b.center(), cam_.yaw, cam_.pitch, dist, clock_now());
 }
 
 /* ===================================================================== */
@@ -648,7 +789,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || weight_paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || sculpt_ || paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1090,8 +1231,8 @@ bool Editor::gizmo_update(const Recti &view) {
       drag_ = Drag::None;
       gizmo_axis_ = -1;
       if (autopose_.bone) autopose_end();  // (the pose keyed at the playhead: the same undo step as the drag)
-      /* Faces dropped onto another face of the mesh merge into it. */
-      if (edit_mode_ && auto_fuse_ && elem_ == EditElement::Face)
+      /* Faces dropped onto another face of the mesh merge into it (not when the press was taken back: task 0213). */
+      if (edit_mode_ && auto_fuse_ && elem_ == EditElement::Face && !ui_.in.cancelled)
         if (MeshPtr *mp = edit_mesh_ptr())
           if (try_auto_fuse(*mesh_make_mutable(*mp))) {
             (*mp)->touch();
@@ -1105,7 +1246,7 @@ bool Editor::gizmo_update(const Recti &view) {
 
 void Editor::draw_gizmo(const Recti &view) {
   auto &u = ui_;
-  if (tool_ == Tool::View || weight_paint_) return;  // Weight Paint: the brush, not the gizmo
+  if (tool_ == Tool::View || weight_paint_ || sculpt_ || paint_) return;  // Weight Paint, Sculpt, Paint: the brush, not the gizmo
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
   if (!has_target) return;
   /* Snapping markers: the vertex / surface point a move is snapping to, and with V
@@ -1243,6 +1384,8 @@ MeshPtr *Editor::edit_mesh_ptr() {
 
 void Editor::enter_edit_mode() {
   if (weight_paint_) set_weight_paint(false);  // one mode at a time
+  if (sculpt_) set_sculpt(false);
+  if (paint_) set_paint(false);  // (task 0245)
   if (playing_) return;
   if (pilot_cam_) toggle_pilot_camera();  // piloting hides the editor's overlays: editing needs them back
   GameObject *g = active_object();
@@ -1576,6 +1719,7 @@ void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
   else if (op == "grid") { L.segments = grid_cols_; L.count = grid_rows_; }
   else if (op == "pipe") { L.amount = pipe_radius_; L.segments = pipe_sides_; }
   else if (op == "array") { L.count = array_count_; L.amount = array_spacing_; L.axis = array_axis_; }
+  else if (op == "sketch_box" || op == "sketch_cylinder") { L.size = last_op_size_; L.segments = 24; }  // (task 0225)
   else if (op == "taper") { L.amount = taper_distance_; L.amount2 = taper_scale_; }
   else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
   else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
@@ -1639,7 +1783,7 @@ void Editor::select_sharp_op(const Mesh &m) {
   return;
 }
 
-/* Select Z-Fighting: the faces the check finds on top of each other. */
+/* Select Overlapping Faces: the faces the z-fighting check finds on top of each other. */
 void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
   /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
   const size_t n = zfight_scan(false);
@@ -1651,7 +1795,7 @@ void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
     if (z.obj_b == g.id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
   }
   sync_vert_face_selection(true);
-  Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
+  Log::info(n ? "Select Overlapping Faces: %zu pair(s) of faces on top of each other selected" : "Select Overlapping Faces: none found", n);
   return;
 }
 
@@ -2123,20 +2267,20 @@ const std::vector<EditOpPair> &edit_op_pairs() {
 const std::vector<EditOpInfo> &edit_op_table() {
   enum { V = 1, E = 2, F = 4, ALL = 7 };
   static const std::vector<EditOpInfo> ops = {
-      {"extrude_edges", "Extrude", "E", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
+      {"extrude_edges", "Extrude Edges", "", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
        "a new edge (start a shape from one vertex). Blender: E in vertex / edge mode.", V | E},
-      {"merge_center", "Merge at Center", "Alt+M", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
-      {"connect", "Connect Vertex Path", "J", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
-      {"fill", "Make Face", "Alt+F", "Close the holes and wire loops in the selection with faces (every hole when nothing is selected):\n"
+      {"merge_center", "Merge at Center", "mesh.merge_center", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
+      {"connect", "Connect Vertex Path", "mesh.connect", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
+      {"fill", "Make Face", "mesh.fill", "Close the holes and wire loops in the selection with faces (every hole when nothing is selected):\n"
        "flat ones get one face, bent ones a fan, cracks with no area are welded shut. Selected vertices that are\n"
        "no loop (loose points, a chain) become one face through them. Blender: F and Fill Holes. SketchUp: closing a loop.", ALL},
       {"smooth", "Smooth Vertices", "", "Laplacian smoothing of the selected vertices. Blender: Smooth Vertices.", V},
-      {"dissolve_vertices", "Dissolve Vertices", "Ctrl+X", "Remove the selected vertices; the faces around each one merge (a vertex on a straight edge just goes).\nBlender: Dissolve Vertices.", V},
-      {"bevel", "Bevel", "Ctrl+B", "Round off the selected edges with a strip of faces. Blender: Ctrl+B.", E},
-      {"loopcut", "Loop Cut", "Ctrl+R", "Cut the quad ring across the selected edge (or hover an edge and press Ctrl+R). Blender: Ctrl+R.", E},
+      {"dissolve_vertices", "Dissolve Vertices", "mesh.dissolve", "Remove the selected vertices; the faces around each one merge (a vertex on a straight edge just goes).\nBlender: Dissolve Vertices.", V},
+      {"bevel", "Bevel", "mesh.bevel", "Round off the selected edges with a strip of faces. Blender: Ctrl+B.", E},
+      {"loopcut", "Loop Cut", "mesh.loop_cut", "Cut the quad ring across the selected edge (or hover an edge and press Ctrl+R). Blender: Ctrl+R.", E},
       {"select_loop", "Select Edge Loop", "Double-click", "Extend the selected edge to its whole loop. Blender: Alt+click.", E},
       {"subdivide_edges", "Subdivide", "", "Split the selected edges into equal parts. Blender: Subdivide.", E},
-      {"dissolve", "Dissolve", "Ctrl+X", "Remove the selected edges, merging the faces on both sides. Blender: Dissolve Edges.", E},
+      {"dissolve", "Dissolve", "mesh.dissolve", "Remove the selected edges, merging the faces on both sides. Blender: Dissolve Edges.", E},
       {"collapse", "Collapse", "", "Merge each selected edge (or connected group) into one vertex at its centre. Blender: Collapse.", E},
       {"mark_seam", "Mark Seam", "", "UV unwrapping cuts the mesh along these edges. Blender: Mark Seam.", E},
       {"clear_seam", "Clear Seam", "", "Remove UV seams from the selected edges.", E},
@@ -2150,11 +2294,11 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"select_by_material", "Same Material", "", "Select every face using the selected faces' material slots. Blender: Material > Select.", F},
       {"seams_from_sharp", "Seams from Sharp", "", "Mark a seam on every sharp edge: faces meeting at more than the Sharp Angle, or edges marked sharp.\n"
        "Blender: Select Sharp Edges, then Mark Seam.", E},
-      {"shell", "Shell", "", "Hollow the solid: the selected faces open up and the rest becomes a wall of the Thickness (F9 adjusts it).\n"
+      {"shell", "Shell", "", "Hollow the solid: the selected faces open up and the rest becomes a wall of the Thickness (Adjust Last Operation sets it).\n"
        "Plasticity / CAD: Shell.", F},
-      {"draft", "Draft", "", "Tilt the selected side faces by the Angle (F9) so they narrow toward the top (a mould's draft).\n"
+      {"draft", "Draft", "", "Tilt the selected side faces by the Angle (Adjust Last Operation) so they narrow toward the top (a mould's draft).\n"
        "Plasticity: Draft Face.", F},
-      {"thicken", "Thicken", "", "Give the whole surface a Thickness, set in F9 (a flat face becomes a slab). Plasticity: Thicken.", ALL},
+      {"thicken", "Thicken", "", "Give the whole surface a Thickness, set in Adjust Last Operation (a flat face becomes a slab). Plasticity: Thicken.", ALL},
       {"slice", "Slice", "", "Cut the mesh with a plane through the selection (or the origin) across the Slice Axis.\n"
        "UModeler: Slice. Blender: Bisect.", ALL},
       {"select_sharp", "Select Sharp Edges", "", "Select the edges whose faces meet at more than the Sharp Angle (and edges marked sharp).\n"
@@ -2163,30 +2307,30 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"clear_sharp", "Clear Sharp", "", "Let smooth shading run across the selected edges again.", E},
       {"edge_split", "Edge Split", "", "Disconnect the faces along the selected edges (hard edges, or to pull pieces apart). Blender: Edge Split.", E},
       {"select_ring", "Select Edge Ring", "", "Extend the selected edges across their quads (the rungs of a ladder). Blender: Ctrl+Alt+click.", E},
-      {"push_pull", "Push/Pull", "P", "Move the selected faces along their normal like SketchUp: sides stretch into coplanar\nneighbours, pushing to the far side makes a hole, pulling onto a face joins it.\nMove the mouse or type a distance, click to confirm, Esc to cancel.", F},
-      {"extrude", "Extrude", "Ctrl+E", "Extrude the selected faces along their normals. Blender: E.", F},
-      {"inset", "Inset", "Ctrl+I", "Make a smaller copy of the selected faces inside them: each face on its own (Individual),\n"
-       "or the whole selection as one face (Inset Individual off). F9 switches between them. Blender: I.", F},
-      {"push_through", "Push Through", "Alt+P", "Cut a hole through the object along the selected face's normal.\nTip: Inset first so the hole has a rim.", F},
+      {"push_pull", "Push/Pull", "mesh.push_pull", "Move the selected faces along their normal like SketchUp: sides stretch into coplanar\nneighbours, pushing to the far side makes a hole, pulling onto a face joins it.\nMove the mouse or type a distance, click to confirm, Esc to cancel.", F},
+      {"extrude", "Extrude", "mesh.extrude", "Extrude the selected faces along their normals. Blender: E.", F},
+      {"inset", "Inset", "mesh.inset", "Make a smaller copy of the selected faces inside them: each face on its own (Individual),\n"
+       "or the whole selection as one face (Inset Individual off). Adjust Last Operation switches between them. Blender: I.", F},
+      {"push_through", "Push Through", "mesh.push_through", "Cut a hole through the object along the selected face's normal.\nTip: Inset first so the hole has a rim.", F},
       {"fuse", "Fuse onto Face", "", "Join selected faces that lie on another face of the mesh (the touching area becomes an opening).", F},
       {"extrude_individual", "Extrude Individual", "", "Extrude each selected face on its own, with its own walls. Blender: Extrude Individual Faces.", F},
       {"poke", "Poke Faces", "", "Split each selected face into a fan of triangles around its centre. Blender: Face > Poke Faces.", F},
-      {"triangulate_faces", "Triangulate", "Ctrl+T", "Split the selected faces into triangles. Blender: Ctrl+T.", F},
-      {"tris_to_quads", "Tris to Quads", "Alt+J", "Join pairs of selected triangles into quads where they are nearly flat. Blender: Alt+J.", F},
-      {"dissolve_faces", "Dissolve Faces", "Ctrl+X", "Merge each connected group of selected faces into one face. Blender: Dissolve Faces.", F},
+      {"triangulate_faces", "Triangulate", "mesh.triangulate", "Split the selected faces into triangles. Blender: Ctrl+T.", F},
+      {"tris_to_quads", "Tris to Quads", "mesh.tris_to_quads", "Join pairs of selected triangles into quads where they are nearly flat. Blender: Alt+J.", F},
+      {"dissolve_faces", "Dissolve Faces", "mesh.dissolve", "Merge each connected group of selected faces into one face. Blender: Dissolve Faces.", F},
       {"flip_faces", "Flip Normals", "", "Turn the selected faces around (their normals point the other way). Blender: Mesh > Normals > Flip.", F},
-      {"duplicate", "Duplicate", "Shift+D", "Copy the selected faces in place; the copy is selected, ready to move. Blender: Shift+D. Unity: Ctrl+D.", F},
+      {"duplicate", "Duplicate", "mesh.duplicate", "Copy the selected faces in place; the copy is selected, ready to move. Blender: Shift+D. Unity: Ctrl+D.", F},
       {"split", "Split", "", "Detach the selected faces from the rest of the mesh (same place, own vertices). Blender: Y.", F},
       {"shade_smooth", "Shade Smooth", "", "Smooth shading on the selected faces only (Blender: Face > Shade Smooth).\nIt stops at flat faces and at edges marked sharp.", F},
       {"shade_flat", "Shade Flat", "", "Flat (faceted) shading on the selected faces only.", F},
-      {"bridge", "Bridge", "Ctrl+Shift+B", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
-      {"delete", "Delete", "Del", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
+      {"bridge", "Bridge", "mesh.bridge", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
+      {"delete", "Delete", "edit.delete", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
       {"merge_distance", "Merge by Distance", "", "Weld the selected vertices that are closer than the Merge Distance (all of them if nothing\n"
-       "is selected). F9: the distance, and Unselected to weld onto unselected vertices too. Blender: Merge > By Distance.", ALL},
-      {"select_overlapping", "Select Z-Fighting", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
+       "is selected). Adjust Last Operation: the distance, and Unselected to weld onto unselected vertices too. Blender: Merge > By Distance.", ALL},
+      {"select_overlapping", "Select Overlapping Faces", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
        "Modeling Tools > Check: Z-Fighting lists them and removes the ones that can go.", ALL},
       {"grid", "Grid", "", "Cut each selected quad into a grid of Grid Columns x Grid Rows (neighbours are split to match).\n"
-       "Click it for the helper: the wheel sets columns, Shift+wheel rows (F9 afterwards).", F},
+       "Click it for the helper: the wheel sets columns, Shift+wheel rows (Adjust Last Operation afterwards).", F},
       {"pipe", "Pipe", "", "A round tube of Pipe Radius along the selected edges (a chain), or along wire edges drawn with the\n"
        "Polyline tool; capped at both ends. Helper: the mouse sets the radius, the wheel the sides.", V | E},
       {"array", "Array", "", "Repeat the selected faces Array Count times, Array Spacing apart along the selection's X / Y / Z\n"
@@ -2195,26 +2339,26 @@ const std::vector<EditOpInfo> &edit_op_table() {
        "Helper: the mouse sets the distance, the wheel the end's scale.", F},
       {"recess", "Recess / Plate", "", "Inset the selection as one panel by Recess Border, then push its middle in by Recess Depth\n"
        "(negative: a raised plate). Helper: the mouse sets the depth, the wheel the border.", F},
-      {"select_overlaps", "Select Overlapping", "", "Select vertices lying on top of each other and edges running along each other\n"
+      {"select_overlaps", "Select Doubled Vertices", "", "Select vertices lying on top of each other and edges running along each other\n"
        "(shown live as yellow rings and magenta lines; Modeling Tools > Check: Overlapping Vertices & Edges).", ALL},
       {"merge_overlaps", "Merge Overlapping", "", "Weld vertices lying on top of each other (doubled edges on them become one).", ALL},
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
        "or in the whole mesh when nothing is selected. Blender: Mesh > Clean Up > Delete Loose.", ALL},
-      {"recalc_normals", "Recalculate Normals", "Shift+N", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
-      {"shrink_fatten", "Shrink/Fatten", "Alt+S", "Move the selected vertices along their normals (F9 sets the distance). Blender: Alt+S.", ALL},
-      {"to_sphere", "To Sphere", "Shift+Alt+S", "Pull the selected vertices onto a sphere around their centre (F9 sets how far). Blender: Shift+Alt+S.", ALL},
-      {"randomize", "Randomize", "", "Jitter the selected vertices (F9: amount and seed). Blender: Transform > Randomize.", ALL},
-      {"knife", "Knife / Line", "K", "Draw a line across a face to split it: click a corner or an edge, then another on the same face.\n"
+      {"recalc_normals", "Recalculate Normals", "mesh.recalc_normals", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
+      {"shrink_fatten", "Shrink/Fatten", "mesh.shrink_fatten", "Move the selected vertices along their normals (Adjust Last Operation sets the distance). Blender: Alt+S.", ALL},
+      {"to_sphere", "To Sphere", "mesh.to_sphere", "Pull the selected vertices onto a sphere around their centre (Adjust Last Operation sets how far). Blender: Shift+Alt+S.", ALL},
+      {"randomize", "Randomize", "", "Jitter the selected vertices (Adjust Last Operation: amount and seed). Blender: Transform > Randomize.", ALL},
+      {"knife", "Knife / Line", "mesh.knife", "Draw a line across a face to split it: click a corner or an edge, then another on the same face.\n"
        "Snaps to endpoints (green), midpoints (cyan) and edges (red). SketchUp: Line tool. Blender: K.", ALL},
       {"dissolve_limited", "Merge Coplanar", "", "Turn every flat region into one n-gon and drop corners on straight edges - within the selected\n"
        "faces only when some are selected (the rest of the mesh keeps its edges), the whole mesh otherwise.\n"
        "Blender: Delete > Limited Dissolve. SketchUp shows flat regions this way.", ALL},
       {"origin_to_selection", "Origin to Selection", "", "Move the object's origin to the centre of the selected elements (the mesh stays put).\n"
        "Blender: Shift+S > Cursor to Selected, then Set Origin > Origin to 3D Cursor.", ALL},
-      {"select_linked", "Select Linked", "Ctrl+L", "Select everything connected to the selection. Blender: Ctrl+L.", ALL},
-      {"select_more", "Select More", "Ctrl+=", "Grow the selection by one ring. Blender: Ctrl+Numpad +.", ALL},
-      {"select_less", "Select Less", "Ctrl+-", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
-      {"select_invert", "Invert Selection", "Ctrl+Shift+I", "Select what isn't, deselect what is. Blender: Ctrl+I.", ALL},
+      {"select_linked", "Select Linked", "select.linked", "Select everything connected to the selection. Blender: Ctrl+L.", ALL},
+      {"select_more", "Select More", "select.more", "Grow the selection by one ring. Blender: Ctrl+Numpad +.", ALL},
+      {"select_less", "Select Less", "select.less", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
+      {"select_invert", "Invert Selection", "select.invert", "Select what isn't, deselect what is. Blender: Ctrl+I.", ALL},
       {"select_non_manifold", "Select Non-Manifold", "", "Select holes and edges shared by more than two faces. Blender: Select > All by Trait > Non Manifold.", ALL},
       {"select_coplanar", "Select Coplanar", "", "Add every face lying in the same plane as a selected face (the same direction and the same\n"
        "height), joined to it or not. Blender: Select > Select Similar > Coplanar.", ALL},
@@ -2553,6 +2697,13 @@ void Editor::draw_game_view(const Recti &r) {
     game_guides_frame_ = frame;
     draw_camera_guides(*cam, frame);
   }
+  /* Task 0233: the sketch tool in the Game view - the pen draws in the game camera's perspective (Play stopped or
+   * paused: a running game takes the keys and the clicks). */
+  if (sketch_.active && !playing_ && sketch_in_world()) {
+    sketch_bind_game(img, *cam, *owner, v, p, u.hovered(img) && !u.any_popup_open());
+    sketch_update(img);
+    sketch_draw(img);
+  }
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};
     u.frame(box, Color::hex(0x101010, 200), 0, u.px(4));
@@ -2578,7 +2729,7 @@ bool Editor::edit_op_redoable(const std::string &op) const {
   return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" || op == "merge_distance" ||
          op == "loopcut" || op == "smooth" || op == "push_pull" || op == "poke" || op == "extrude_individual" ||
          op == "shrink_fatten" || op == "to_sphere" || op == "randomize" || op == "grid" || op == "pipe" || op == "array" || op == "taper" ||
-         op == "recess" || op == "shell" || op == "thicken" || op == "draft";
+         op == "recess" || op == "shell" || op == "thicken" || op == "draft" || op == "sketch_box" || op == "sketch_cylinder";
 }
 
 bool Editor::last_op_valid() {
@@ -2690,6 +2841,11 @@ void Editor::run_last_op(bool first) {
     face_sel_.assign(m.face_count(), 0);
     vert_sel_.assign(m.vert_count(), 0);
     if (L.elem == EditElement::Edge) edge_sel_.clear();
+  }
+  else if (op == "sketch_box" || op == "sketch_cylinder") {  // (task 0225: the whole mesh from its numbers)
+    sketch_build_mesh(op, m, L.size, L.segments);
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
   }
   else if (op == "array") {
     Quat frame;
@@ -2814,13 +2970,14 @@ void Editor::draw_last_op_panel(const Recti &view) {
       {"to_sphere", "To Sphere"},      {"randomize", "Randomize"},
       {"grid", "Grid"},                {"pipe", "Pipe"},
       {"array", "Array"},              {"taper", "Taper Extrude"},
+      {"sketch_box", "Box from Sketch"}, {"sketch_cylinder", "Cylinder / Cone from Sketch"},
       {"recess", "Recess / Plate"},   {"shell", "Shell"},
       {"thicken", "Thicken"},          {"draft", "Draft"}};
   auto it = titles.find(L.op);
   std::string title = it == titles.end() ? L.op : it->second;
   const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
   /* Rows: the operator's own fields, then Move, Along Normal, Orientation. */
-  int fields = L.op == "bevel" ? 4 : L.op == "push_pull" || L.op == "array" ? 3 :
+  int fields = L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" ? 3 :
                L.op == "grid" || L.op == "pipe" || L.op == "taper" || L.op == "recess" ? 2 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
   int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
@@ -2922,6 +3079,17 @@ void Editor::draw_last_op_panel(const Recti &view) {
     fl("Distance", L.amount, 0.01f, -10000.0f, 10000.0f);
     fl("End Scale", L.amount2, 0.01f, 0.0f, 100.0f);
   }
+  else if (L.op == "sketch_box") {
+    fl("Length X", L.size.x, 0.01f, -10000.0f, 10000.0f);
+    fl("Length Y", L.size.y, 0.01f, -10000.0f, 10000.0f);
+    fl("Length Z", L.size.z, 0.01f, -10000.0f, 10000.0f);
+  }
+  else if (L.op == "sketch_cylinder") {
+    fl("Base Radius", L.size.x, 0.005f, 0.0001f, 10000.0f);
+    fl("Top Radius", L.size.z, 0.005f, 0.0f, 10000.0f);
+    fl("Height", L.size.y, 0.01f, 0.001f, 10000.0f);
+    ifield("Sides", L.segments, 3, 128);
+  }
   else if (L.op == "recess") {
     fl("Depth", L.amount, 0.005f, -10000.0f, 10000.0f);
     u.tooltip("Positive: pushed in (a recess). Negative: pulled out (a raised plate).");
@@ -2989,6 +3157,7 @@ void Editor::remember_last_op_settings() {
   else if (op == "grid") grid_cols_ = L.segments, grid_rows_ = L.count;
   else if (op == "pipe") pipe_radius_ = L.amount, pipe_sides_ = L.segments;
   else if (op == "array") array_count_ = L.count, array_spacing_ = L.amount, array_axis_ = L.axis;
+  else if (op == "sketch_box" || op == "sketch_cylinder") last_op_size_ = L.size;
   else if (op == "taper") taper_distance_ = L.amount, taper_scale_ = L.amount2;
   else if (op == "recess") recess_depth_ = L.amount, recess_border_ = L.amount2;
   else if (op == "shell" || op == "thicken") shell_thickness_ = L.amount;
@@ -3096,6 +3265,28 @@ void Editor::modal_finish(bool keep) {
   Log::info("%s cancelled", modal_.op.c_str());
 }
 
+/* Task 0265: the step bar of a modal operator whose value the wheel steps (Bevel's segments, Array's count, Grid's rows,
+ * Pipe's sides, Taper's and Recess's second amount): centred at the bottom of the view, its - and + buttons 36 px
+ * (UI scale 1) - a pen's target - so the value is reachable without a wheel or a keyboard. Empty for the others. */
+Editor::ModalStepBar Editor::modal_step_bar(const Recti &view) const {
+  ModalStepBar b;
+  const LastOp &L = last_op_;
+  const std::string &op = modal_.op;
+  if (op == "bevel") b.name = "Segments", b.value = std::to_string(L.segments);
+  else if (op == "array") b.name = "Count", b.value = std::to_string(L.count);
+  else if (op == "grid") b.name = "Rows", b.value = std::to_string(L.segments);
+  else if (op == "pipe") b.name = "Sides", b.value = std::to_string(L.segments);
+  else if (op == "taper") b.name = "Taper", b.value = strprintf("%.2f", L.amount2);
+  else if (op == "recess") b.name = "Depth", b.value = strprintf("%.3g", L.amount2);
+  else return b;
+  const auto &u = ui_;
+  const int s = u.px(36), w = u.px(150) + 2 * s;
+  b.bar = {view.x + (view.w - w) / 2, view.bottom() - s - u.px(40), w, s};
+  b.minus = {b.bar.x, b.bar.y, s, s};
+  b.plus = {b.bar.right() - s, b.bar.y, s, s};
+  return b;
+}
+
 bool Editor::modal_update(const Recti &view) {
   if (!modal_.active) return false;
   auto &u = ui_;
@@ -3116,7 +3307,19 @@ bool Editor::modal_update(const Recti &view) {
   float amount;
   double typed = 0;
   const float d = length(Vec2((float)in.mx, (float)in.my) - modal_.center);
+  /* Task 0265: the step bar. While the pointer is on it the amount holds (a pen travelling to it would change the
+   * width); leaving it, the drag goes on from there. A tap on - or + is the wheel's step, not a confirm. */
+  const ModalStepBar sb = modal_step_bar(view);
+  const bool over_bar = sb.name && sb.bar.contains(in.mx, in.my);
+  if (over_bar && in.pressed[0]) {
+    in.wheel_y = sb.plus.contains(in.mx, in.my) ? 1.0f : sb.minus.contains(in.mx, in.my) ? -1.0f : 0.0f;
+    in.pressed[0] = false;
+    u.consume_click();
+  }
+  if (modal_over_bar_ && !over_bar) modal_.start_amount = modal_.amount, modal_.start_len = d, modal_.precise = false;
+  modal_over_bar_ = over_bar;
   if (!modal_.typed.empty() && ui::eval_number(modal_.typed, typed)) amount = (float)typed;
+  else if (over_bar) amount = modal_.amount;
   else {
     /* Shift: a tenth of the speed from where it was pressed (Blender). */
     if (in.shift() && !modal_.precise) {
@@ -3148,6 +3351,11 @@ bool Editor::modal_update(const Recti &view) {
     last_op_.profile = clampf(std::round((last_op_.profile + (in.wheel_y > 0 ? 0.05f : -0.05f)) * 20.0f) / 20.0f, 0.0f, 1.0f);
     in.wheel_y = 0;
     changed = true;
+  }
+  if (!u.wants_keyboard()) {  // (task 0255: ] and [ set what the wheel sets - segments, count, sides - for a pen or a finger; + and - are typed values)
+    const bool up = in.key_pressed[platform::KEY_RBRACKET], down = in.key_pressed[platform::KEY_LBRACKET];
+    if (up || down) in.wheel_y = up ? 1.0f : -1.0f;
+    if (up || down) in.key_pressed[platform::KEY_RBRACKET] = in.key_pressed[platform::KEY_LBRACKET] = false;
   }
   if (in.wheel_y != 0 && modal_.op != "bevel" && modal_.op != "inset") {
     const int dir = in.wheel_y > 0 ? 1 : -1;
@@ -3192,6 +3400,14 @@ void Editor::draw_modal(const Recti &view) {
   if (!modal_.active) return;
   auto &u = ui_;
   u.canvas.push_clip(view);
+  if (const ModalStepBar sb = modal_step_bar(view); sb.name) {  // (task 0265)
+    u.frame(sb.bar, u.theme.popup, u.theme.border, u.px(4));
+    for (const Recti &r : {sb.minus, sb.plus}) u.frame(r, r.contains(u.in.mx, u.in.my) ? u.theme.button_hover : u.theme.button, u.theme.border, u.px(4));
+    u.label(sb.minus, "-", u.theme.text_bright, ui::Align::Center);
+    u.label(sb.plus, "+", u.theme.text_bright, ui::Align::Center);
+    u.label({sb.minus.right(), sb.bar.y, sb.plus.x - sb.minus.right(), sb.bar.h}, std::string(sb.name) + "  " + sb.value, u.theme.text_bright, ui::Align::Center);
+    if (u.record_buttons) u.button_rects["modal:-"] = sb.minus, u.button_rects["modal:+"] = sb.plus;
+  }
   /* A dashed line from the centre to the cursor, as Blender draws it. */
   const Vec2 m((float)u.in.mx, (float)u.in.my);
   const Vec2 d = m - modal_.center;
@@ -3292,7 +3508,7 @@ void Editor::pushpull_begin() {
   pp_.start = closest_on_line_to_ray(pp_.origin, pp_.axis,
                                      scene_r3d_.screen_ray((float)(in.mx - scene_rect_.x), (float)(in.my - scene_rect_.y)));
   pp_.lim = meshops::push_pull_limits(m, pp_.fsel);
-  pp_.keep = in.ctrl();
+  pp_.keep = in.ctrl();  // (Ctrl keeps the original face: Alt is the orbit modifier - task 0223, kept by task 0255)
   pp_.active = true;
   ui_.redraw = true;
 }

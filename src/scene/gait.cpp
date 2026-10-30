@@ -107,7 +107,7 @@ Rig analyse(const Scene &scene, GameObject &armature) {
       Arm arm;
       arm.upper = b, arm.lower = lower, arm.side = side;
       arm.hand = next_down(*lower, "hand");
-      if (is_bone(b->parent) && (has_word(b->parent->name, "shoulder") || has_word(b->parent->name, "clavicle"))) arm.shoulder = b->parent;
+      if (is_bone(b->parent) && (has_word(b->parent->name, "shoulder") || has_word(b->parent->name, "clavicle") || has_word(b->parent->name, "collar"))) arm.shoulder = b->parent;
       rig.arms.push_back(arm);
     }
   }

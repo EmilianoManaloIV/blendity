@@ -69,10 +69,12 @@ bool Editor::set_weight_paint(bool on) {
     return false;
   }
   if (playing_) {
-    Log::warn("Weight Paint: stop Play first");
+    refuse("Weight Paint: stop Play first", "stop", "Stop Play");
     return false;
   }
   if (edit_mode_) exit_edit_mode();
+  if (sculpt_) set_sculpt(false);  // (task 0236: one mode at a time)
+  if (paint_) set_paint(false);    // (task 0245)
   if (mf->mesh->vertex_groups.empty()) vgroup_op("add", "", "", 1.0f);  // something to paint
   weight_paint_ = true;
   wp_obj_ = g->id;
@@ -140,6 +142,7 @@ bool Editor::wp_begin_stroke() {
   for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);
   wp_prepare(m);
   wp_start_ = m.vertex_groups[(size_t)wp_group(m)].weights;  // a stroke's changes are measured from here (no accumulation)
+  wp_stroke_mode_ = wp_effective_mode(ui_.in.ctrl(), ui_.in.eraser);  // (task 0259: the mode for the whole stroke)
   wp_alpha_.assign(m.vert_count(), 0.0f);
   wp_stroke_mesh_ = &m;
   wp_stroking_ = true;
@@ -226,7 +229,8 @@ void Editor::wp_dab(float x, float y) {
       if (amount[v] <= wp_alpha_[v]) continue;  // within this stroke, the strongest dab so far decides
       wp_alpha_[v] = amount[v];
       const float a = wp_alpha_[v], s = wp_start_[v];
-      float nw = wp_brush_.mode == 0 ? s + a * target : wp_brush_.mode == 1 ? s - a * target : s + (target - s) * a;
+      const int mode = wp_stroke_mode_;  // (task 0259: Ctrl or the pen's eraser at the stroke's start makes an Add stroke subtract)
+      float nw = mode == 0 ? s + a * target : mode == 1 ? s - a * target : s + (target - s) * a;
       nw = std::max(0.0f, std::min(nw, 1.0f));
       changed = changed || nw != w[v];
       w[v] = nw;
@@ -296,7 +300,7 @@ void Editor::wp_draw(const Recti &view) {
   if (!weight_paint_ || !scene_hovered_) return;
   auto &u = ui_;
   const float R = std::max(1.0f, wp_brush_.radius * u.scale);
-  u.canvas.circle((float)u.in.mx, (float)u.in.my, R, Color::hex(0xFFFFFF, 200), 1.5f);
+  draw_brush_ring((float)u.in.mx, (float)u.in.my, R, wp_effective_mode(u.in.ctrl(), u.in.eraser) == 1, Color::hex(0xFFFFFF, 200));  // (task 0269: subtracting, dashed with an E)
   u.canvas.circle((float)u.in.mx, (float)u.in.my, R * std::max(0.05f, std::min(1.0f, wp_brush_.strength)), Color::hex(0xFFFFFF, 90), 1.0f);
   (void)view;
 }
@@ -317,6 +321,10 @@ const std::vector<Vec3> *Editor::wp_colors(const Mesh &m, const RenderMesh &rm) 
   wp_colors_serial_ = rm.serial, wp_colors_version_ = wp_version_, wp_colors_group_ = gi;
   return &wp_colors_;
 }
+
+/* The brush mode a dab uses: the Add brush subtracts while Ctrl is held or the pen's eraser end is down, as Paint's and
+ * Sculpt's do (task 0259); the other brushes are left as they are. */
+int Editor::wp_effective_mode(bool ctrl, bool eraser) const { return wp_brush_.mode == 0 && (ctrl || eraser) ? 1 : wp_brush_.mode; }
 
 /* weightpaint on|off|toggle; wpbrush <add|subtract|draw|blur> [radius] [strength] [weight]; wpfalloff <name>;
  * wpmirror on|off; wpfront on|off; wpstroke x y x y ... (window pixels: one stroke); wpnormalize; wpclean [threshold]. */
@@ -363,7 +371,7 @@ void Editor::weight_paint_command(const std::vector<std::string> &t) {
   GameObject *g = weight_paint_ ? (wp_mesh() ? scene_->find(wp_obj_) : nullptr) : active_object();
   Mesh *mp = g && g->mesh_filter() && g->mesh_filter()->mesh ? mesh_make_mutable(g->mesh_filter()->mesh).get() : nullptr;
   if (!mp || mp->vertex_groups.empty()) {
-    Log::warn("%s: a mesh with vertex groups first", c.c_str());
+    Log::warn("Weight Paint: a mesh with vertex groups first (the Rigging window's Add Group)");
     return;
   }
   Mesh &m = *mp;

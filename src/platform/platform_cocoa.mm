@@ -4,6 +4,7 @@
 #ifdef __APPLE__
 
 #include "platform.h"
+#include "../core/pen_axes.h"
 
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
@@ -97,6 +98,22 @@ static int map_keycode(unsigned short kc) {
 
 static void push(Window *w, Event e) { w->queue.push_back(std::move(e)); }
 
+/* Task 0220: the tablet's end in proximity is its eraser - one for the program (the pen comes near over any window, or
+ * while another app is in front), read from every event before a window gets it: a proximity event of its own, or a
+ * mouse event carrying it (Wacom's driver often sends it so). */
+static bool g_pen_eraser = false;
+
+static void note_proximity(NSEvent *e) {
+  const NSEventType t = [e type];
+  const bool own = t == NSEventTypeTabletProximity;
+  const bool mouse = t == NSEventTypeLeftMouseDown || t == NSEventTypeLeftMouseUp || t == NSEventTypeRightMouseDown ||
+                     t == NSEventTypeRightMouseUp || t == NSEventTypeOtherMouseDown || t == NSEventTypeOtherMouseUp ||
+                     t == NSEventTypeMouseMoved || t == NSEventTypeLeftMouseDragged || t == NSEventTypeRightMouseDragged ||
+                     t == NSEventTypeOtherMouseDragged;
+  if (!own && !(mouse && [e subtype] == NSEventSubtypeTabletProximity)) return;
+  if ([e isEnteringProximity]) g_pen_eraser = [e pointingDeviceType] == NSPointingDeviceTypeEraser;
+}
+
 }  // namespace bl::platform
 
 using namespace bl::platform;
@@ -116,6 +133,38 @@ using namespace bl::platform;
   ev.button = b;
   ev.x = (int)(p.x * s);
   ev.y = (int)(p.y * s);
+  ev.mods = mods_from_flags([e modifierFlags]);
+  /* Task 0220: a tablet's point (Wacom, Sidecar's Apple Pencil): the pen, its pressure, tilt and eraser; its side
+   * buttons (the right and other buttons) as the right button with the barrel held, as Windows sends them. */
+  if ([e subtype] == NSEventSubtypeTabletPoint) {
+    ev.pointer = Pointer::Pen, ev.pen = true;
+    ev.pressure = t == EventType::MouseUp ? 1.0f : (float)[e pressure];
+    const NSPoint tilt = [e tilt];
+    ev.tilt_x = bl::pen::tilt_from_unit(tilt.x), ev.tilt_y = bl::pen::tilt_from_unit(tilt.y);
+    ev.eraser = g_pen_eraser;
+    if (b != 0) ev.button = 1, ev.barrel = true;
+  }
+  push(self.owner, ev);
+}
+/* Task 0220: the trackpad's pinch and twist as the Scene view's two-finger gesture (two-finger scrolling stays the
+ * wheel: lists and panels scroll with it). */
+- (void)magnifyWithEvent:(NSEvent *)e {
+  NSPoint p = [self convertPoint:[e locationInWindow] fromView:nil];
+  CGFloat s = [[self window] backingScaleFactor];
+  Event ev;
+  ev.type = EventType::Gesture;
+  ev.x = (int)(p.x * s), ev.y = (int)(p.y * s);
+  ev.zoom = bl::pen::pinch_zoom([e magnification]);
+  ev.mods = mods_from_flags([e modifierFlags]);
+  push(self.owner, ev);
+}
+- (void)rotateWithEvent:(NSEvent *)e {
+  NSPoint p = [self convertPoint:[e locationInWindow] fromView:nil];
+  CGFloat s = [[self window] backingScaleFactor];
+  Event ev;
+  ev.type = EventType::Gesture;
+  ev.x = (int)(p.x * s), ev.y = (int)(p.y * s);
+  ev.rotate = (float)[e rotation];  // (degrees, counter-clockwise)
   ev.mods = mods_from_flags([e modifierFlags]);
   push(self.owner, ev);
 }
@@ -355,6 +404,7 @@ void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
     for (;;) {
       NSEvent *e = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:until inMode:NSDefaultRunLoopMode dequeue:YES];
       if (!e) break;
+      note_proximity(e);  // (task 0220: before any window has it)
       [NSApp sendEvent:e];
       until = [NSDate distantPast];
     }
@@ -398,6 +448,8 @@ void get_framebuffer_size(Window *w, int &width, int &height) {
 
 float dpi_scale(Window *w) { return (float)[w->window backingScaleFactor]; }
 
+bool tablet_posture() { return false; }  // (task 0218: a Mac has none)
+
 void set_title(Window *w, const std::string &title) {
   [w->window setTitle:[NSString stringWithUTF8String:title.c_str()]];
 }
@@ -418,6 +470,27 @@ void set_cursor(Window *w, Cursor c) {
 std::string get_clipboard(Window *) {
   NSString *s = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
   return s ? std::string([s UTF8String]) : std::string();
+}
+
+std::string get_clipboard_image(Window *) {
+  @autoreleasepool {  // (the pasteboard's data and the PNG made from a TIFF go with the pool: review 322)
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    NSData *d = [pb dataForType:NSPasteboardTypePNG];
+    if (!d) {  // (a screenshot: TIFF, made a PNG)
+      NSData *tiff = [pb dataForType:NSPasteboardTypeTIFF];
+      NSBitmapImageRep *rep = tiff ? [NSBitmapImageRep imageRepWithData:tiff] : nil;
+      d = rep ? [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] : nil;
+    }
+    return d ? std::string((const char *)d.bytes, d.length) : std::string();
+  }
+}
+
+std::string get_clipboard_file(Window *) {
+  @autoreleasepool {  // (Finder's copied file: its URL)
+    NSArray *urls = [[NSPasteboard generalPasteboard] readObjectsForClasses:@[ [NSURL class] ] options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+    NSURL *u = urls.count ? urls[0] : nil;
+    return u && u.path ? std::string(u.path.UTF8String) : std::string();
+  }
 }
 
 void set_clipboard(Window *, const std::string &utf8) {
@@ -466,6 +539,22 @@ bool save_file_dialog(Window *, const std::string &title, const std::string &ini
     if ([panel runModal] != NSModalResponseOK) return false;
     out_path = [[panel.URL path] UTF8String];
     if (filter_index) *filter_index = k;
+    return true;
+  }
+}
+
+/* A folder (task 0271): NSOpenPanel choosing directories. */
+bool folder_dialog(Window *, const std::string &title, const std::string &initial_dir, std::string &out_path) {
+  @autoreleasepool {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = [NSString stringWithUTF8String:title.c_str()];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.canCreateDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    if (!initial_dir.empty()) panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:initial_dir.c_str()]];
+    if ([panel runModal] != NSModalResponseOK) return false;
+    out_path = [[panel.URL path] UTF8String];
     return true;
   }
 }

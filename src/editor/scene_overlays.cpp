@@ -27,7 +27,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 4)) shading_ = (Shading)m;
   u.tooltip("Draw mode (Blender: Z pie).\nSolid = fast vertex lighting (Workbench).\n"
             "Shaded = materials, textures, shadows (EEVEE / Unity Shaded).\n"
-            "Path tracing: F12, the Render window, or the Camera Preview's Rendered toggle.");
+            "Path tracing: " + key("render.image") + ", the Render window, or the Camera Preview's Rendered toggle.");
   x += u.px(176);
   if (u.icon_button({x, y, h, h}, Icon::Lightbulb, scene_lighting_, "Scene lighting on/off.\nOff = headlight from the camera, like Blender's Studio lighting.")) scene_lighting_ = !scene_lighting_;
   x += h + u.px(2);
@@ -45,7 +45,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   if (u.button(ovr, "Overlays", !every)) u.open_popup(u.id("scene_overlays"), {ovr.x, ovr.bottom(), ovr.w, 0});
   u.tooltip("Which overlays the Scene view draws: bones, rig controls, light and camera icons, curve and lattice points,\n"
             "origins, footprints, the selection outline, grid, gizmos and statistics (Blender: the Overlays popover).\n"
-            "Hide the bones to see a character's mesh with its IK handles still there. Console: overlay <layer> on|off.");
+            "Hide the bones to see a character's mesh with its IK handles still there.");
   u.popup(u.id("scene_overlays"), u.px(250), [this] { draw_overlays_menu(); });
   x += ovr.w + u.px(2);
   if (u.icon_button({x, y, h, h}, Icon::Camera, scene_filters_,
@@ -53,19 +53,95 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
                     "Console: filters on / off."))
     scene_filters_ = !scene_filters_;
   x += h + u.px(10);
+  if (anim_.record && bar.right() - x > u.px(420)) {  // (task 0258: Record said in the view's bar, not only the Animation window's dot - a word, not a colour alone; when the bar has room)
+    const int rw = u.font.text_width("RECORD") + u.px(14);
+    const Recti rr{x, bar.y + u.px(3), rw, h};
+    u.canvas.fill_round_rect(rr, u.px(3), Color::hex(0xB03030));
+    u.label(rr, "RECORD", Color::hex(0xFFFFFF), ui::Align::Center);
+    u.mark_widget(rr);
+    u.tooltip("Record is on: every edit of the animated objects becomes a key at the playhead (the Animation window's red button turns it off).");
+    if (u.record_buttons) u.button_rects["overlay:RECORD"] = rr;
+    x += rw + u.px(10);
+  }
+  if (gpu_view_wanted() && !gpu_view_ && gpu_view_tried_ && !gpu_view_opening_.valid() && bar.right() - x > u.px(420)) {
+    /* Task 0269: the views wanted the card and draw on the CPU - said in the bar as long as it lasts, not once in the log. */
+    const int cw = u.font.text_width("CPU") + u.px(14);
+    const Recti cr{x, bar.y + u.px(3), cw, h};
+    u.frame(cr, u.theme.strip, u.theme.warning, u.px(3));
+    u.label(cr, "CPU", u.theme.text_bright, ui::Align::Center);
+    u.mark_widget(cr);
+    u.tooltip("The views draw on the CPU: " + (gpu_view_error_.empty() ? std::string("the GPU couldn't be opened") : gpu_view_error_) +
+              ". It works, more slowly; Edit > Preferences > Viewport Device chooses (Auto tries the GPU again at the next start).");
+    if (u.record_buttons) u.button_rects["overlay:CPU"] = cr;
+    x += cw + u.px(10);
+  }
   /* Blender-style Edit Mode toggle - Unity has no built-in mesh editing (ProBuilder adds it). */
-  int ew = u.font.text_width("Edit Mode (Tab)") + h + u.px(12);
+  const std::string edit_label = with_key("Edit Mode", "mode.edit_toggle");  // (the key from the keymap: task 0254)
+  int ew = u.font.text_width(edit_label) + h + u.px(12);
   Recti er{bar.right() - ew - u.px(6), y, ew, h};
+  draw_breadcrumb(x, y, h, er.x - u.px(160));  // (task 0235: layout > mode > tool, each a dropdown)
   bool can_edit = edit_mode_ || (active_object() && active_object()->get<MeshFilter>());
   bool hot = u.hovered(er);
   uint32_t bg = edit_mode_ ? u.theme.accent : (hot && can_edit ? u.theme.button_hover : u.theme.button);
   u.frame(er, bg, u.theme.border, u.px(3));
   const uint32_t ink = !can_edit ? u.theme.text_dim : edit_mode_ ? 0xFFFFFFFF : u.theme.text_bright;  // (white on the accent only)
   u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
-  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", ink);
+  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, edit_label, ink);
   if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
   u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
-  (void)x;
+}
+
+namespace {
+const char *const kToolNames[] = {"View", "Move", "Rotate", "Scale", "Transform"}, *const kToolCommands[] = {"view", "move", "rotate", "scale", "transform"};
+}
+
+/* The mode the Scene view is in, as the breadcrumb and the hints name it. */
+std::string Editor::mode_name() const {
+  if (sculpt_) return "Sculpt";  // (task 0236)
+  if (sketch_.active && sketch_in_world()) return "Sketch";
+  if (weight_paint_) return "Weight Paint";
+  if (edit_mode_) return "Edit";
+  return "Object";
+}
+
+std::string Editor::breadcrumb_text() const { return workspace_ + " > " + mode_name() + " > " + kToolNames[(int)tool_]; }
+
+/* Layout > Mode > Tool in the Scene view's bar, each part a button opening its choices; drawn only when it fits before
+ * `limit` (a narrow view keeps its controls). Returns the x after it. */
+int Editor::draw_breadcrumb(int x, int y, int h, int limit) {
+  auto &u = ui_;
+  const std::string parts[3] = {workspace_, mode_name(), kToolNames[(int)tool_]};
+  const int sep = u.font.text_width(">") + u.px(8);
+  int total = 0;
+  for (const std::string &p : parts) total += u.font.text_width(p) + u.px(14);
+  total += 2 * sep;
+  if (x + total > limit) return x;
+  const ui::Id ids[3] = {u.id("crumb_layout"), u.id("crumb_mode"), u.id("crumb_tool")};
+  for (int i = 0; i < 3; i++) {
+    const Recti br{x, y, u.font.text_width(parts[i]) + u.px(14), h};
+    if (u.button(br, parts[i])) u.open_popup(ids[i], {br.x, br.bottom(), br.w, 0});
+    u.tooltip(i == 0 ? "The layout: a stage of the work, its windows and tools (Window > Layouts)" : i == 1 ? "The mode: Object, Edit, Weight Paint or Sketch" : "The tool (Q W E R T)");
+    if (u.record_buttons) u.button_rects[i == 0 ? "crumb_layout" : i == 1 ? "crumb_mode" : "crumb_tool"] = br;
+    x = br.right();
+    if (i < 2) u.label({x, y, sep, h}, ">", u.theme.text_dim, ui::Align::Center), x += sep;
+  }
+  u.popup(ids[0], u.px(220), [this] {
+    for (const std::string &n : workspace_names())
+      if (ui_.menu_item(n, nullptr, n == workspace_)) apply_workspace(n);
+  });
+  u.popup(ids[1], u.px(160), [this] {
+    const std::string m = mode_name();
+    if (ui_.menu_item("Object", nullptr, m == "Object")) run_console_command("sketch off"), run_console_command("weightpaint off"), run_console_command("sculpt off"), run_console_command("edit off");
+    if (ui_.menu_item("Sculpt", nullptr, m == "Sculpt")) run_console_command("sculpt on");
+    if (ui_.menu_item("Edit", nullptr, m == "Edit")) run_console_command("edit");
+    if (ui_.menu_item("Weight Paint", nullptr, m == "Weight Paint")) run_console_command("weightpaint on");
+    if (ui_.menu_item("Sketch", nullptr, m == "Sketch")) run_console_command("sketch on");
+  });
+  u.popup(ids[2], u.px(160), [this] {
+    for (int i = 0; i < 5; i++)
+      if (ui_.menu_item(kToolNames[i], nullptr, (int)tool_ == i)) run_console_command(std::string("tool ") + kToolCommands[i]);
+  });
+  return x + u.px(10);
 }
 
 /* overlay list | overlay all [on|off] | overlay <bones|controls|icons|points|origins|footprints|outline|grid|gizmos|stats>
@@ -182,6 +258,8 @@ void Editor::draw_grid(Renderer3D &r3d) {
 void Editor::render_overlays(const Recti &) {
   if (overlays_extra_for_test_) overlays_extra_for_test_(scene_r3d_);  // (a test's own lines, dots and outlines first)
   draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
+  draw_trails();  // (task 0282: the trails and the onion skin, sampled a few frames at a time)
+  if (autopose_.on) draw_puppet_handles();  // (task 0281)
   if (show_footprints_) draw_footprint_soles();  // (task 0126)
   draw_ai_overlay();       // (task 0130)
   /* Wireframes. */
@@ -645,7 +723,53 @@ void Editor::draw_origins(const Recti &view) {
 Recti Editor::view_gizmo_rect(const Recti &view) const {
   const int size = ui_.px(84);
   const float cx = view.right() - size * 0.62f, cy = view.y + size * 0.62f;
-  return {(int)(cx - size * 0.6f), (int)(cy - size * 0.6f), (int)(size * 1.2f), (int)(size * 1.2f) + ui_.row_h() + ui_.px(4)};
+  const int buttons = nav_buttons_shown() ? ui_.px(34) : 0;  // (the hand and the magnifier under the label)
+  return {(int)(cx - size * 0.6f), (int)(cy - size * 0.6f), (int)(size * 1.2f), (int)(size * 1.2f) + ui_.row_h() + ui_.px(4) + buttons};
+}
+
+/* The hand (0) and the magnifier (1), side by side under the Scene Gizmo's label (task 0216). */
+Recti Editor::nav_button_rect(const Recti &view, int which) const {
+  const Recti a = view_gizmo_rect(view);
+  const int d = ui_.px(28), y = a.bottom() - ui_.px(32);
+  const int cx = a.x + a.w / 2;
+  return {which == 0 ? cx - d - ui_.px(3) : cx + ui_.px(3), y, d, d};
+}
+
+/* A drag that began on the Scene Gizmo or its buttons (task 0216): it goes on wherever the pointer goes until it is let
+ * go. A press on the gizmo that never moved is a click: look along the axis, or switch the projection. */
+void Editor::view_gizmo_drag(const Recti &view) {
+  auto &in = ui_.in;
+  if (gizmo_nav_ == GizmoNav::None) return;
+  const int dx = in.dx(), dy = in.dy();
+  if (gizmo_nav_ == GizmoNav::Pending && std::max(std::abs(in.mx - gizmo_nav_x_), std::abs(in.my - gizmo_nav_y_)) > ui_.px(3)) gizmo_nav_ = GizmoNav::Orbit;
+  if (!in.down[0]) {
+    if (gizmo_nav_ == GizmoNav::Pending && !in.cancelled) view_gizmo_click(gizmo_nav_hot_);
+    gizmo_nav_ = GizmoNav::None;
+    return;
+  }
+  cam_.animating = false;
+  ui_.redraw = true;
+  if (gizmo_nav_ == GizmoNav::Orbit) {
+    cam_.yaw += dx * 0.3f;
+    cam_.pitch = clampf(cam_.pitch + dy * 0.3f, -89.9f, 89.9f);
+  }
+  if (gizmo_nav_ == GizmoNav::Pan) {
+    const float k_pan = (2.0f * cam_.distance * std::tan(cam_.fov * 0.5f * kDeg2Rad)) / std::max(1, view.h);
+    cam_.pivot -= cam_.right() * (dx * k_pan);
+    cam_.pivot += cam_.up() * (dy * k_pan);
+  }
+  if (gizmo_nav_ == GizmoNav::Zoom) cam_.distance = clampf(cam_.distance * std::exp(dy * 0.008f), 0.01f, 100000.0f);  // (up: closer)
+}
+
+/* The Scene Gizmo clicked: an axis looks along it (isometric), anywhere else switches the projection. */
+void Editor::view_gizmo_click(int axis) {
+  static const float kYaw[6] = {-90, 90, 0, 0, 180, 0}, kPitch[6] = {0, 0, 90, -90, 0, 0};
+  if (axis < 0 || axis >= 6) {
+    cam_.ortho = !cam_.ortho;
+    return;
+  }
+  cam_.animate_to(cam_.pivot, kYaw[axis], kPitch[axis], cam_.distance, clock_now());
+  cam_.ortho = true;
 }
 
 void Editor::draw_view_gizmo(const Recti &view) {
@@ -706,16 +830,32 @@ void Editor::draw_view_gizmo(const Recti &view) {
     u.canvas.fill_round_rect({lr.x + (lr.w - tw) / 2, lr.y + u.px(1), tw, lr.h - u.px(2)}, u.px(3), Color::hex(0x000000, hot_label ? 150 : 100));
   }
   u.label(lr, label, hot_label ? u.theme.text_bright : u.theme.text, ui::Align::Center);
-  if (hover_area && u.in.pressed[0] && drag_ == Drag::None) {
+  /* The hand and the magnifier (task 0216). */
+  int hot_button = -1;
+  for (int b = 0; nav_buttons_shown() && b < 2; b++) {
+    const Recti br = nav_button_rect(view, b);
+    const bool hb = u.hovered(br) || (gizmo_nav_ == (b == 0 ? GizmoNav::Pan : GizmoNav::Zoom));
+    if (u.hovered(br)) hot_button = b;
+    u.canvas.fill_circle(br.x + br.w * 0.5f, br.y + br.h * 0.5f, br.w * 0.5f, Color::hex(0x000000, hb ? 150 : 90));
+    const int s = br.w - u.px(10);
+    u.draw_icon(b == 0 ? ui::Icon::Hand : ui::Icon::Search, {br.x + (br.w - s) / 2, br.y + (br.h - s) / 2, s, s}, hb ? u.theme.text_bright : u.theme.text);
+  }
+  /* (Only the gizmo's own disc, its label and its buttons take a press: the strip beside the buttons is the view's.) */
+  const bool on_disc = length(Vec2((float)u.in.mx, (float)u.in.my) - Vec2(cx, cy)) < rad + u.px(14);
+  if (hover_area && (on_disc || hot_label || hot_button >= 0) && u.in.pressed[0] && drag_ == Drag::None && gizmo_nav_ == GizmoNav::None) {
     if (hot_label) cam_.ortho = !cam_.ortho;  // Unity: click the label to switch projection
-    else if (hot >= 0) {
-      cam_.animate_to(cam_.pivot, axes[hot].yaw, axes[hot].pitch, cam_.distance, now_seconds());
-      cam_.ortho = true;
+    else if (hot_button >= 0) gizmo_nav_ = hot_button == 0 ? GizmoNav::Pan : GizmoNav::Zoom;
+    else {
+      gizmo_nav_ = GizmoNav::Pending;  // (a click looks along the axis; a drag orbits: task 0216)
+      gizmo_nav_hot_ = hot >= 0 ? hot : -1;
+      gizmo_nav_x_ = u.in.mx, gizmo_nav_y_ = u.in.my;
     }
-    else cam_.ortho = !cam_.ortho;
     u.consume_click();
   }
-  if (hover_area) u.tooltip("Scene Gizmo: click an axis to look along it, click the centre to toggle Perspective/Isometric.\nBlender: the navigation gizmo / numpad 1, 3, 7 and 5.");
+  if (hover_area && hot_button == 0) u.tooltip("Drag to pan the view (Blender: the navigation gizmo's hand).");
+  else if (hover_area && hot_button == 1) u.tooltip("Drag up to zoom in, down to zoom out (Blender: the navigation gizmo's magnifier).");
+  else if (hover_area)
+    u.tooltip("Scene Gizmo: click an axis to look along it, click the centre to toggle Perspective/Isometric, drag to orbit.\nBlender: the navigation gizmo / numpad 1, 3, 7 and 5.");
 }
 
 }  // namespace bl

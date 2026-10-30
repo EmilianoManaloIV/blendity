@@ -64,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install compiler + X11 headers
-        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core
       - name: Build
         env:
           BLENDITY_FETCH_OPTIX: "1"  # (task 0169: the OptiX device, as on Windows)
@@ -154,7 +154,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install compiler + X11 headers
-        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core
       - name: Build the tests with sanitizers
         env:
           EXTRA_FLAGS: -O1 -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer

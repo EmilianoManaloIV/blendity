@@ -5,12 +5,14 @@
 //   Blendity --scene file.scene    open a scene (or Blendity file.scene: a double-clicked file, with its project)
 //   Blendity --layout Learning     start with a layout preset
 //   Blendity --scale 1.5           force a UI scale
+//   Blendity --hci-log study.log   append toasts, fixes, hints, undo steps and layouts to a file (the HCI study)
 //   Blendity --headless-screenshot out.png [--size 1600x900] [--cmd "console command"]...  [--click X Y]...
 //       renders the editor without a window (CI, docs, visual tests)
 #include "../core/core.h"
 #include "../core/launch.h"
 #include "../editor/editor.h"
 #include "../render/gpu_device.h"
+#include "../render/gpu_raster.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -92,6 +94,15 @@ int main(int argc, char **argv) {
   if (const int code = launch::hand_over(argc, argv); code >= 0) return code;
   for (int i = 1; i < argc; i++)
     if (std::strcmp(argv[i], "--headless-screenshot") == 0) return headless(argc, argv);
+  /* Task 0211: --warm-shaders <dir> - the build compiles the GPU shaders into dist's shaders folder (build.bat app). */
+  for (int i = 1; i + 1 < argc; i++) {
+    if (std::strcmp(argv[i], "--warm-shaders") != 0) continue;
+    std::string report;
+    const bool ok = gpu::warm_shaders(argv[i + 1], &report);
+    std::printf("%s\n", report.c_str());
+    std::fflush(nullptr);
+    std::_Exit(ok ? 0 : 1);  // (as the checks below: a GPU's threads may still be inside the driver)
+  }
   /* Task 0202: --startup-check - the editor opened and its first frame drawn, then quit (the process timed from outside). */
   for (int i = 1; i < argc; i++) {
     if (std::strcmp(argv[i], "--startup-check") != 0) continue;

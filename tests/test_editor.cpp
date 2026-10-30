@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the editor tests (task 0177: one file a subsystem; the groups keep their rounds' order).
+#include "../src/scene/raycast.h"
+#include "../src/scene/stroke_object.h"
 #include "test_common.h"
+#include "../src/render/canvas.h"
+#include "../src/texture/smart_material.h"
+#include "../src/texture/paint_layer.h"
+#include "../src/texture/surface.h"
+#include "../src/render/mesh_maps.h"
+#include <cstring>
+#include "../src/render/texture_bake.h"
+
+#include <chrono>
+#include <thread>
 
 
 
@@ -785,6 +797,15 @@ static void tests_round88() {
       return std::find(l.begin(), l.end(), "shown:" + text) != l.end();
     };
     CHECK(shows("None (Armature)"));
+    for (int i = 0; i < 40; i++) {  // (the Inspector scrolled until the Skin's field is inside it: the cube's components fill a short window)
+      Recti f;
+      const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Inspector);
+      if (!ed.button_rect_for_test("field:Armature", f) || pane.w <= 0 || f.bottom() <= pane.bottom()) break;
+      ed.step_frame_headless({at(ET::MouseMove, pane.x + pane.w / 2, pane.y + pane.h / 2)});
+      platform::Event w = at(ET::Wheel, pane.x + pane.w / 2, pane.y + pane.h / 2);
+      w.wheel_y = -3;
+      ed.step_frame_headless({w});
+    }
     const size_t steps = ed.undo_steps_for_test();
     CHECK(drag_onto("Sphere", "Armature"));
     std::printf("    after dropping the Sphere: '%s'\n", cube->get<SkinModifier>()->object.c_str());
@@ -978,7 +999,7 @@ static void tests_round101() {
     const bool low = Editor::recommended_tier() == 0;
     std::printf("    this machine: %d threads, recommended %s, the welcome shown %d\n", sys::hardware_threads(), low ? "Low" : "High",
                 (int)ed.first_run_dialog_for_test());
-    CHECK(ed.first_run_dialog_for_test() == low);
+    CHECK(ed.first_run_dialog_for_test());  // (task 0261: every first run asks where the artist comes from)
     /* The minimum machine (BLENDITY_MIN_SPEC emulates it): Low and the welcome; Use High switches and keeps it. */
     set_env("BLENDITY_MIN_SPEC", "1");
     Editor e2;
@@ -990,7 +1011,9 @@ static void tests_round101() {
     CHECK(e2.first_run_dialog_for_test() && e2.quality_tier() == 0);
     for (int i = 0; i < 2; i++) e2.step_frame_headless();  // (it draws at 1280 x 720)
     Recti b;
-    CHECK(e2.button_rect_for_test("Use High", b) && b.bottom() <= 720 && b.right() <= 1280);  // (it fits 1080p at 150 %)
+    const bool found_high = e2.button_rect_for_test("Use High", b);
+    std::printf("    Use High found %d at %d,%d %dx%d (bottom %d of 720)\n", (int)found_high, b.x, b.y, b.w, b.h, b.bottom());
+    CHECK(found_high && b.bottom() <= 720 && b.right() <= 1280);  // (it fits 1080p at 150 %)
     using ET = platform::EventType;
     for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
       platform::Event e;
@@ -2711,7 +2734,9 @@ static void tests_round205() {
     ed.step_frame_headless(typed("hair"));
     ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
     ed.step_frame_headless();
-    CHECK(ed.last_palette_command_for_test() == "hair rig" && !ed.ui_for_test().any_popup_open());
+    CHECK(ed.last_palette_command_for_test() == "hair dialog" && ed.hair_dialog_for_test());  // (task 0291: its locks and bones asked first)
+    ed.close_dialog_for_test();
+    ed.step_frame_headless();
     CHECK(ed.palette_names_for_test("")[0] == "Rig Hair from Mesh");  // (used lately: first with no query)
     ed.command("palette run create cube");
     CHECK(ed.last_palette_command_for_test() == "create Cube" && ed.active_object_for_test() && ed.active_object_for_test()->name.find("Cube") == 0);
@@ -3015,6 +3040,4217 @@ static void tests_round227() {
   });
 }
 
+/* Task 0232 (ADR 0070): a kind once per window, the view state per window, drops onto other windows, duplicates, the
+ * Inspector's pin. */
+static void tests_round252() {
+  using platform::EventType;
+  test("windows: a tab dragged out of the main window and dropped over another editor window joins that window's dock (the main one no longer has it); dock move <Window> window <n> does the same from the console", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const int id = ed.open_window_for_test(WindowKind::Render, 600, 500);
+    EditorWindow *w = ed.window_for_test(id);
+    CHECK(w != nullptr);
+    if (!w) return;
+    w->x = 1300, w->y = 100;  // (beside the main window, not over it)
+    ed.step_window_headless(id, {});
+    ed.step_frame_headless();
+    const Recti leaf = ed.dock_leaf_rect_for_test(WindowKind::Inspector);
+    CHECK(leaf.w > 0);
+    const int tx = leaf.x + 12, ty = leaf.y + 6;
+    ed.step_frame_headless({mouse_ev(EventType::MouseMove, tx, ty)});
+    ed.step_frame_headless({mouse_ev(EventType::MouseDown, tx, ty)});
+    ed.step_frame_headless({mouse_ev(EventType::MouseMove, tx + 300, ty + 40)});
+    /* Over the other window's middle (1300 + 300, 100 + 300 on the desktop = the main window's 1600, 400). */
+    ed.step_frame_headless({mouse_ev(EventType::MouseMove, 1600, 400)});
+    ed.step_frame_headless({mouse_ev(EventType::MouseUp, 1600, 400)});
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    std::printf("    windows %zu; the Inspector in window %d: %d, in the main dock: %d\n", ed.window_count_for_test(), id,
+                ed.in_window_dock_for_test(id, WindowKind::Inspector), ed.in_main_dock_for_test(WindowKind::Inspector));
+    CHECK(ed.window_count_for_test() == 2 && ed.in_window_dock_for_test(id, WindowKind::Inspector) && !ed.in_main_dock_for_test(WindowKind::Inspector));
+    ed.command(strprintf("dock move Hierarchy window %d", id));
+    ed.step_frame_headless();
+    CHECK(ed.in_window_dock_for_test(id, WindowKind::Hierarchy) && !ed.in_main_dock_for_test(WindowKind::Hierarchy));
+    ed.command("dock move Hierarchy main");
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Hierarchy) && !ed.in_window_dock_for_test(id, WindowKind::Hierarchy));
+  });
+
+  test("windows: dock duplicate Scene opens a second Scene view in a window of its own with a camera of its own (an orbit there leaves the main one's alone), the main dock keeps its Scene view, a layout reset keeps both, and the cameras round-trip the windows preference", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const float yaw0 = ed.scene_camera_for_test().yaw;
+    ed.command("dock duplicate Scene");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2 && ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(1, WindowKind::Scene));
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    ed.step_window_headless(1, {});
+    const SceneCamera *cam = ed.window_camera_for_test(1);
+    CHECK(cam && std::fabs(cam->yaw - yaw0) < 1e-4f);
+    /* Alt+LMB drag in the second window orbits it (Unity's navigation). */
+    const int cx = w->fb.width / 2, cy = w->fb.height / 2;
+    platform::Event down = mouse_ev(EventType::MouseDown, cx, cy);
+    down.mods = platform::MOD_ALT;
+    ed.step_window_headless(1, {mouse_ev(EventType::MouseMove, cx, cy)});
+    ed.step_window_headless(1, {down});
+    for (int i = 1; i <= 10; i++) {
+      platform::Event mv = mouse_ev(EventType::MouseMove, cx + 12 * i, cy);
+      mv.mods = platform::MOD_ALT;
+      ed.step_window_headless(1, {mv});
+    }
+    platform::Event up = mouse_ev(EventType::MouseUp, cx + 120, cy);
+    up.mods = platform::MOD_ALT;
+    ed.step_window_headless(1, {up});
+    ed.step_frame_headless();
+    cam = ed.window_camera_for_test(1);
+    std::printf("    the main camera's yaw %.1f, the second window's %.1f\n", ed.scene_camera_for_test().yaw, cam ? cam->yaw : 0.0f);
+    CHECK(cam && std::fabs(cam->yaw - yaw0) > 5.0f && std::fabs(ed.scene_camera_for_test().yaw - yaw0) < 1e-4f);
+    ed.command("layout Default");
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(1, WindowKind::Scene));
+    /* The windows preference carries the second window's camera. */
+    const std::string saved = ed.windows_layout_for_test();
+    CHECK(saved.find(";V(") != std::string::npos);
+    Editor ed2;
+    ed2.init_headless(1200, 800);
+    ed2.step_frame_headless();
+    ed2.set_monitors_for_test({{0, 0, 3000, 2000, 1.0f, "Test", true}});
+    ed2.restore_windows_for_test(saved);
+    ed2.step_frame_headless();
+    const SceneCamera *cam2 = ed2.window_camera_for_test(1);
+    CHECK(ed2.window_count_for_test() == 2 && ed2.in_main_dock_for_test(WindowKind::Scene) && cam2 && std::fabs(cam2->yaw - cam->yaw) < 1e-3f);
+  });
+
+  test("windows: an Inspector pinned to an object keeps showing it while the selection moves on, and follows again when unpinned (the pin is the window's own)", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    CHECK(ed.selected_objects_for_test().size() == 1);
+    const uint64_t cube = ed.selected_objects_for_test().empty() ? 0 : ed.selected_objects_for_test()[0]->id;  // (the new one: the sample scene has a Cube too)
+    ed.command("inspector lock");
+    CHECK(ed.inspector_lock_for_test() == cube && cube != 0);
+    ed.command("create Sphere");
+    ed.step_frame_headless();
+    CHECK(ed.inspector_lock_for_test() == cube && !ed.selected_objects_for_test().empty() && ed.selected_objects_for_test()[0]->id != cube);
+    ed.command("inspector unlock");
+    CHECK(ed.inspector_lock_for_test() == 0);
+    /* A second Inspector in its own window has a pin of its own. */
+    ed.command("dock duplicate Inspector");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 2 && ed.in_main_dock_for_test(WindowKind::Inspector) && ed.in_window_dock_for_test(1, WindowKind::Inspector));
+    ed.command("inspector lock");  // (the main window's: the console runs with the main state)
+    CHECK(ed.inspector_lock_for_test() != 0);
+    ed.step_window_headless(1, {});
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w && w->view && w->view->inspector_lock == 0);
+    ed.command("inspector unlock");
+  });
+
+  test("windows: a pen stroke begun in a duplicate Scene view goes on while the main window's Scene view draws (the interaction is the window's), and lands as one stroke; a duplicate Game view opens; closing the windows frees their caches and returns the tabs", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("dock duplicate Scene");
+    ed.step_frame_headless();
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    ed.step_window_headless(1, {});
+    ed.command("sketch on");
+    const size_t strokes0 = ed.sketch_for_test().strokes.size();
+    auto pen = [](EventType t, int x, int y) {
+      platform::Event e = mouse_ev(t, x, y);
+      e.pointer = platform::Pointer::Pen, e.pen = true, e.pressure = 0.8f;
+      return e;
+    };
+    const int sx = w->fb.width / 2, sy = w->fb.height / 2;
+    ed.step_window_headless(1, {pen(EventType::MouseMove, sx, sy)});
+    ed.step_window_headless(1, {pen(EventType::MouseDown, sx, sy)});
+    for (int i = 1; i <= 8; i++) {
+      ed.step_window_headless(1, {pen(EventType::MouseMove, sx + 10 * i, sy + 4 * i)});  // (each window frame runs the main frame too)
+      CHECK(ed.sketch_for_test().strokes.size() == strokes0);  // (the main window's Scene view doesn't end it)
+      CHECK(ed.interaction_window_for_test() == 1);
+    }
+    ed.step_window_headless(1, {pen(EventType::MouseUp, sx + 90, sy + 36)});
+    ed.step_frame_headless();
+    std::printf("    strokes %zu -> %zu\n", strokes0, ed.sketch_for_test().strokes.size());
+    CHECK(ed.sketch_for_test().strokes.size() == strokes0 + 1 && ed.interaction_window_for_test() == -1);
+    ed.command("sketch off");
+    ed.command("dock duplicate Game");
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 3 && ed.in_main_dock_for_test(WindowKind::Game) && ed.in_window_dock_for_test(2, WindowKind::Game));
+    CHECK(ed.window_caches_for_test() >= 1);
+    ed.command("dock bringback");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.window_count_for_test() == 1 && ed.window_caches_for_test() == 0 && ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_main_dock_for_test(WindowKind::Game));
+  });
+
+  test("windows: a duplicate moved to another window takes its own instance (the main window keeps its Scene view), and a kind the target already holds is shown there", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("dock duplicate Scene");
+    ed.step_frame_headless();
+    const int other = ed.open_window_for_test(WindowKind::Render, 600, 500);
+    ed.step_frame_headless();
+    CHECK(other == 2 && ed.in_window_dock_for_test(1, WindowKind::Scene));
+    WindowMove m;
+    m.kind = WindowMove::ToWindow, m.tab = WindowKind::Scene, m.window_id = other, m.x = 300, m.y = 300, m.source = 1;
+    ed.queue_window_move_for_test(m);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(other, WindowKind::Scene) && ed.window_for_test(1) == nullptr);
+    /* The main window's Scene view moved onto a window that has one: shown there, the main one gone. */
+    ed.command(strprintf("dock move Scene window %d", other));
+    ed.step_frame_headless();
+    CHECK(!ed.in_main_dock_for_test(WindowKind::Scene) && ed.in_window_dock_for_test(other, WindowKind::Scene));
+    ed.command("dock bringback");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.in_main_dock_for_test(WindowKind::Scene));
+  });
+}
+
+/* Task 0235 (ADR 0073): the module registry; tabs that fit, fold and follow the stage; the breadcrumb; the Inspector's
+ * fold toggle; the layout guide after two sessions. */
+static void tests_round255() {
+  using platform::EventType;
+  auto step = [](Editor &ed, std::vector<platform::Event> events = {}) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  };
+  auto mouse = [](EventType t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    return e;
+  };
+  auto click = [&](Editor &ed, const Recti r) {  // (by value: button_rects is rebuilt every frame, so a reference into it dangles after the first step)
+    step(ed, {mouse(EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed, {mouse(EventType::MouseDown, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed, {mouse(EventType::MouseUp, r.x + r.w / 2, r.y + r.h / 2)});
+    step(ed);
+  };
+  /* A click that must take: pressed again (up to three times) until `done` says so - a frame may be drawn without the
+   * widget under the pointer having been laid out yet. */
+  auto click_until = [&](Editor &ed, const std::string &button, std::function<bool()> done) {
+    for (int attempt = 0; attempt < 3 && !done(); attempt++) {
+      const auto &br = ed.ui_for_test().button_rects;
+      if (!br.count(button)) {
+        step(ed);
+        continue;
+      }
+      const Recti r = br.at(button);
+      click(ed, r);
+      if (!done()) std::printf("    (the click on %s at (%d,%d %dx%d) didn't take on attempt %d)\n", button.c_str(), r.x, r.y, r.w, r.h, attempt + 1);
+    }
+    return done();
+  };
+  auto inside = [](const Recti &r, const Recti &leaf) { return r.w > 0 && r.x >= leaf.x && r.right() <= leaf.right(); };
+  const WindowKind six[6] = {WindowKind::Materials, WindowKind::Textures, WindowKind::Lighting, WindowKind::Rigging, WindowKind::Animation, WindowKind::Sequencer};
+
+  test("the registry: a module per window kind, each title unique; the titles and icons the editor shows are the registry's", [] {
+    int n = 0;
+    const Module *m = modules(n);
+    CHECK(n == (int)WindowKind::Count);
+    std::set<std::string> names;
+    for (int i = 0; i < n; i++) {
+      CHECK((int)m[i].kind == i && std::string(window_title(m[i].kind)) == m[i].name && window_icon(m[i].kind) == m[i].icon);
+      names.insert(m[i].name);
+    }
+    CHECK((int)names.size() == n);
+    CHECK(module_of(WindowKind::Materials).folds && std::string(module_of(WindowKind::Materials).group) == "Shading" && !module_of(WindowKind::Scene).folds && module_of(WindowKind::Scene).duplicates && !module_of(WindowKind::Layers).duplicates);
+  });
+
+  test("tabs that fit: a 600-px leaf with six tabs shows all six inside the strip (icons for the inactive ones), a 170-px leaf shows the active one and lists the rest in the overflow", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("tabs fold off");
+    ed.command("layout H(0.43,L(11,14,13,15,16,17:0),L(0:0))");
+    step(ed);
+    step(ed);
+    const Recti leaf = ed.dock_leaf_rect_for_test(WindowKind::Materials);
+    std::printf("    the leaf %d px wide\n", leaf.w);
+    CHECK(leaf.w > 500 && leaf.w < 700 && ed.tab_overflow_for_test().empty());
+    int right_most = 0;
+    for (WindowKind k : six) {
+      const Recti r = ed.tab_rect_for_test(k);
+      CHECK(inside(r, leaf) && r.x >= right_most);  // (in order, none over another)
+      right_most = r.right();
+    }
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w > ed.tab_rect_for_test(WindowKind::Textures).w);  // (the active one keeps its label)
+    ed.command("layout H(0.12,L(11,14,13,15,16,17:0),L(0:0))");
+    step(ed);
+    step(ed);
+    const Recti narrow = ed.dock_leaf_rect_for_test(WindowKind::Materials);
+    const std::vector<WindowKind> over = ed.tab_overflow_for_test();
+    std::printf("    the narrow leaf %d px wide; %zu tabs in the overflow\n", narrow.w, over.size());
+    CHECK(narrow.w < 200 && !over.empty() && inside(ed.tab_rect_for_test(WindowKind::Materials), narrow));
+    for (WindowKind k : six) {
+      const bool overflowed = std::find(over.begin(), over.end(), k) != over.end();
+      CHECK(overflowed ? ed.tab_rect_for_test(k).w == 0 : inside(ed.tab_rect_for_test(k), narrow));
+    }
+    ed.command("tabs fold on");
+  });
+
+  test("tab groups: Materials, Textures and Lighting in one leaf show as one Shading tab with a row of the three under it; a member pressed becomes the leaf's active tab; Fold Groups off shows three tabs", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("layout H(0.5,L(11,14,13:0),L(0:0))");
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_label_for_test(WindowKind::Materials) == "Shading" && ed.tab_label_for_test(WindowKind::Lighting) == "Shading");
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).x == ed.tab_rect_for_test(WindowKind::Textures).x && ed.window_rect_for_test(WindowKind::Materials).w > 0);
+    const auto &br = ed.ui_for_test().button_rects;
+    CHECK(br.count("Textures") && br.count("Lighting"));
+    CHECK(click_until(ed, "Textures", [&] { return ed.window_rect_for_test(WindowKind::Textures).w > 0; }));
+    CHECK(ed.tab_label_for_test(WindowKind::Textures) == "Shading");
+    ed.command("tabs fold off");
+    step(ed);
+    CHECK(ed.tab_label_for_test(WindowKind::Materials) == "Materials" && ed.tab_rect_for_test(WindowKind::Materials).x != ed.tab_rect_for_test(WindowKind::Textures).x);
+    ed.command("tabs fold on");
+    ed.record_buttons_for_test(false);
+  });
+
+  test("a stage's tabs: the Rigging layout hides a Materials tab (listed under the strip's +1) unless it was asked for or Show All Tabs is on; the Default layout hides nothing", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("layout H(0.72,V(0.74,H(0.22,L(2:0),L(0,1:0)),L(4,5:0)),L(11,15,3:0))");  // (the Rigging layout with a Materials tab kept in the Inspector's leaf)
+    ed.set_focus_for_test(Editor::FocusCreate | Editor::FocusObject | Editor::FocusRig | Editor::FocusDeform);
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w == 0 && ed.tab_rect_for_test(WindowKind::Rigging).w > 0 && ed.window_rect_for_test(WindowKind::Rigging).w > 0);  // (the leaf shows Rigging; a hidden tab keeps last frame's window rect)
+    CHECK(ed.tab_hidden_for_test() == std::vector<WindowKind>{WindowKind::Materials} && ed.ui_for_test().button_rects.count("+1"));  // (the strip says so)
+    ed.command("window Materials");  // (asked for: shown whatever the stage)
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w > 0 && ed.window_rect_for_test(WindowKind::Materials).w > 0);
+    ed.forget_opened_tabs_for_test();  // (the next session)
+    step(ed);
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w == 0 && ed.tab_rect_for_test(WindowKind::Rigging).w > 0 && ed.window_rect_for_test(WindowKind::Rigging).w > 0);  // (the leaf shows Rigging; a hidden tab keeps last frame's window rect)
+    ed.command("tabs all on");
+    step(ed);
+    CHECK(ed.tab_rect_for_test(WindowKind::Materials).w > 0);
+    ed.command("tabs all off");
+    ed.command("layout Default");
+    step(ed);
+    step(ed);
+    for (WindowKind k : {WindowKind::Scene, WindowKind::Materials, WindowKind::Render, WindowKind::Inspector}) CHECK(ed.tab_rect_for_test(k).w > 0);
+  });
+
+  test("the breadcrumb reads layout > mode > tool and `where` prints it; the Inspector's Fold folds every component and Unfold opens them, the folds in the preferences; a layout picked in two sessions hides its guide and Reset Guides brings it back", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("layout Modeling & Topology");
+    ed.command("edit");
+    ed.command("tool move");
+    step(ed);
+    std::printf("    %s\n", ed.breadcrumb_for_test().c_str());
+    CHECK(ed.breadcrumb_for_test() == "Modeling & Topology > Edit > Move");
+    ed.command("where");
+    ed.command("edit off");
+    ed.command("layout Default");
+    ed.command("select Cube");
+    step(ed);
+    step(ed);
+    const auto &br = ed.ui_for_test().button_rects;
+    CHECK(br.count("Fold") && ed.folded_components_for_test() == 0);
+    CHECK(click_until(ed, "Fold", [&] { return ed.folded_components_for_test() > 0; }));  // (the header's button)
+    const int folded = ed.folded_components_for_test();
+    CHECK(click_until(ed, "Unfold", [&] { return ed.folded_components_for_test() == 0; }));
+    ed.command("inspector fold");  // (the same from the console)
+    step(ed);
+    std::printf("    %d components folded; %s\n", folded, ed.full_prefs_text_for_test().c_str());
+    CHECK(folded >= 2 && br.count("Unfold") && ed.full_prefs_text_for_test().find("fold=") != std::string::npos && ed.full_prefs_text_for_test().find("MeshFilter0") != std::string::npos);  // (the keys' order is the map's: it differs between platforms)
+    ed.command("inspector unfold");
+    step(ed);
+    CHECK(ed.folded_components_for_test() == 0);
+    /* The guide: one use a session however many times the layout is picked; hidden from the third session. */
+    ed.command("layoutguide reset");  // (an earlier test may have dismissed it in the shared preferences)
+    ed.command("layout Rigging");
+    ed.command("layout Default");
+    ed.command("layout Rigging");
+    std::printf("    Rigging uses %d, hidden %d\n", ed.guide_uses_for_test("Rigging"), (int)ed.layout_guide_hidden_for_test());
+    CHECK(ed.guide_uses_for_test("Rigging") == 1 && !ed.layout_guide_hidden_for_test() && ed.full_prefs_text_for_test().find("Rigging:1") != std::string::npos);
+    ed.set_guide_uses_for_test("Rigging", 3);
+    CHECK(ed.layout_guide_hidden_for_test());
+    ed.command("layoutguide reset");
+    CHECK(!ed.layout_guide_hidden_for_test() && ed.guide_uses_for_test("Rigging") == 0);
+    CHECK(Editor::component_fold_key("MeshRenderer1") && Editor::component_fold_key("ModifierStack") && !Editor::component_fold_key("proj_C:/x") && !Editor::component_fold_key("mat_0x1F") && !Editor::component_fold_key("grp_0x1Fname"));
+    ed.record_buttons_for_test(false);
+  });
+}
+
+static void tests_round263() {
+  test("mesh maps in the editor: the bake runs on a worker (the slowest frame printed), lands as five PNGs and a record on the Mesh Renderer in one undo step, undo clears the record; a mesh changed meanwhile drops the result; cancel; the record round-trips through the scene file and reads stale after a change", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();  // (the cold frames: the render mesh, the pictures)
+    int slowest_at = -1;
+    auto wait = [&](double &slowest) {
+      slowest = 0.0;
+      for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) {
+        const auto t0 = std::chrono::steady_clock::now();
+        ed.step_frame_headless();
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (ms > slowest) slowest = ms, slowest_at = i;
+        if (ed.meshmaps_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      return !ed.meshmaps_busy_for_test();
+    };
+    const size_t steps0 = ed.undo_steps_for_test();
+    const std::vector<Vec2> uvs0 = G()->mesh_filter()->mesh->uvs;
+    const bool own_usable = own_uvs_usable(*G()->mesh_filter()->mesh, 256);
+    ed.command("meshmaps 256 8");
+    CHECK(ed.meshmaps_busy_for_test());
+    double slowest = 0.0;
+    CHECK(wait(slowest));
+    ed.command("meshmaps status");  // (commits the pending step)
+    const MeshRenderer *mr = G()->get<MeshRenderer>();
+    const std::string rel = mr ? mr->mesh_maps : "";
+    auto files_of = [&](const std::string &base) {
+      bool all = !base.empty();
+      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"}) all = all && fs::exists(ed.resolve_asset_path_for_test(base + suffix));
+      return all;
+    };
+    auto png_count = [&] {
+      size_t n = 0;
+      for (const DirEntry &e : fs::list(ed.resolve_asset_path_for_test("Assets/Textures/MeshMaps")))
+        if (!e.is_dir && e.name.size() > 4 && e.name.compare(e.name.size() - 4, 4, ".png") == 0) n++;
+      return n;
+    };
+    const bool files = files_of(rel);
+    /* Usable own UVs are kept byte for byte (a textured object keeps its look); else the generated layout became the
+     * mesh's UVs: one per corner, inside 0..1. */
+    const std::vector<Vec2> &uvs1 = G()->mesh_filter()->mesh->uvs;
+    bool uvs_ok = uvs1.size() == G()->mesh_filter()->mesh->corner_verts.size();
+    for (const Vec2 &uv : uvs1) uvs_ok = uvs_ok && uv.x >= 0.0f && uv.x <= 1.0f && uv.y >= 0.0f && uv.y <= 1.0f;
+    const bool kept = uvs1.size() == uvs0.size() && std::memcmp(uvs1.data(), uvs0.data(), uvs0.size() * sizeof(Vec2)) == 0;
+    std::printf("    the sphere's own UVs usable %d, kept byte for byte %d\n", (int)own_usable, (int)kept);
+    CHECK(uvs_ok && kept == own_usable);
+    std::printf("    mesh maps: record '%s', the five files %d, %zu step(s), the slowest frame while they baked %.1f ms (frame %d; the last one lands the record), stale %d\n", rel.c_str(), (int)files,
+                ed.undo_steps_for_test() - steps0, slowest, slowest_at, (int)ed.mesh_maps_stale_for_test(G()));
+    CHECK(files && ed.undo_steps_for_test() == steps0 + 1 && !ed.mesh_maps_stale_for_test(G()));
+    /* The file round trip. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const GameObject *gb = back.find(gid);
+    const MeshRenderer *mrb = gb ? gb->get<MeshRenderer>() : nullptr;
+    CHECK(mrb && mrb->mesh_maps == rel && mrb->mesh_maps_key == mr->mesh_maps_key);
+    /* The loaded object's mesh keys the same: the record reads current after a reopen (a hash, not a session count). */
+    CHECK(gb && gb->mesh_filter() && gb->mesh_filter()->mesh && mesh_maps_key_text(*gb->mesh_filter()->mesh, gb->world_matrix()) == mrb->mesh_maps_key);
+    /* Shade Smooth / Flat and the object's transform are in the key: the normal map and the world reads change. */
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->smooth = !mp->smooth;
+      mp->touch();
+      ed.mark_changed_for_test("shading");
+    }
+    CHECK(ed.mesh_maps_stale_for_test(G()));
+    ed.command("undo");
+    CHECK(!ed.mesh_maps_stale_for_test(G()));
+    const Mat4 before_turn = G()->world_matrix();
+    G()->set_local_euler(Vec3(0.0f, 90.0f, 0.0f)), ed.mark_changed_for_test("a turn");
+    ed.step_frame_headless();
+    const bool turned = std::memcmp(before_turn.m, G()->world_matrix().m, sizeof before_turn.m) != 0;
+    const bool stale_turned = ed.mesh_maps_stale_for_test(G());
+    ed.command("undo");
+    std::printf("    the turn changed the world matrix %d; stale after it %d, after its undo %d\n", (int)turned, (int)stale_turned, (int)ed.mesh_maps_stale_for_test(G()));
+    CHECK(stale_turned && !ed.mesh_maps_stale_for_test(G()));
+    /* Stale after the mesh moves; undo clears the record. */
+    ed.command("sculpt on");
+    ed.command("sculpt off");
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->positions[0] += Vec3(0.0f, 0.01f, 0.0f);
+      mp->deform_version++;
+      ed.mark_changed_for_test("a nudge");
+    }
+    CHECK(ed.mesh_maps_stale_for_test(G()));
+    ed.command("undo");  // (the nudge)
+    ed.command("undo");  // (the maps' record)
+    CHECK(G()->get<MeshRenderer>()->mesh_maps.empty() && files_of(rel));  // (the files stay, as Bake Textures' do)
+    /* A change while it bakes drops the result and its files; the first bake's files survive; a cancel writes nothing. */
+    const size_t pngs = png_count();
+    ed.command("meshmaps 256 8");
+    {
+      MeshPtr &mp = G()->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->positions[0] += Vec3(0.0f, 0.01f, 0.0f);
+      mp->deform_version++;
+      ed.mark_changed_for_test("a nudge meanwhile");
+    }
+    CHECK(wait(slowest));
+    std::printf("    after a bake dropped for a change meanwhile: %zu PNGs (%zu before), the first bake's files %d\n", png_count(), pngs, (int)files_of(rel));
+    CHECK(G()->get<MeshRenderer>()->mesh_maps.empty() && png_count() == pngs && files_of(rel));
+    ed.command("meshmaps 256 8");
+    ed.command("meshmaps cancel");
+    CHECK(wait(slowest));
+    CHECK(G()->get<MeshRenderer>()->mesh_maps.empty() && png_count() == pngs);
+  });
+}
+
+static const Material &G_material(const GameObject *g) {
+  static Material none;
+  const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+  return mr && !mr->materials.empty() && mr->materials[0] ? *mr->materials[0] : none;
+}
+
+static void tests_round264() {
+  test("a surface in the editor: surface new makes a surface asset on the active object's material (albedo, normal, roughness, metallic, emission maps), add / mask preset / set / group edit it with undo, and a changed stack evaluates on a worker while the frames go on (the slowest printed)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };  // (an undo rebuilds the scene: the pointer must be looked up again)
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    const size_t steps_before_new = ed.undo_steps_for_test();
+    ed.command("surface new TestSurface");
+    const MeshRenderer *mr = g->get<MeshRenderer>();
+    CHECK(mr && !mr->materials.empty() && mr->materials[0]);
+    if (!mr || mr->materials.empty() || !mr->materials[0]) return;
+    const Material &m = *mr->materials[0];
+    std::string asset;
+    int out = -1;
+    /* Four maps and Metallic 1 (the map multiplies it); no emission map until a layer writes emission (an emission map
+     * makes the object a light in the path tracer). */
+    const bool maps = split_texture_ref(m.base_map.path, asset, out) && out == 0 && split_texture_ref(m.metallic_map.path, asset, out) && out == (int)TextureOutput::Metallic &&
+                      m.emission_map.path.empty() && !m.normal_map.path.empty() && !m.roughness_map.path.empty() && m.metallic == 1.0f;
+    ProceduralTexturePtr pt = texture_asset(asset);
+    std::printf("    surface new: %s, surface %d, %zu layer(s), the material's four maps and Metallic 1 %d, no emission map %d\n", asset.c_str(), pt ? (int)pt->surface : -1,
+                pt ? pt->layers.size() : (size_t)0, (int)maps, (int)m.emission_map.path.empty());
+    CHECK(pt && pt->surface && pt->layers.size() == 1 && maps);
+    if (!pt) return;
+    ed.step_frame_headless();
+    std::printf("    surface new made %zu step(s)\n", ed.undo_steps_for_test() - steps_before_new);
+    CHECK(ed.undo_steps_for_test() == steps_before_new + 1);  // (one step, its maps' load included)
+    ed.command("surface add Noise");
+    ed.command("surface mask preset 1 edgewear");
+    ed.command("surface set L1 Opacity 0.5");
+    CHECK(pt->layers.size() == 2 && pt->layers[1]->mask_layers.size() == 2 && std::fabs(pt->layers[1]->opacity - 0.5f) < 1e-6f);
+    ed.command("surface set L1 M0 Low 0.4");
+    bool low_set = false;
+    {
+      struct Read : Reflector {
+        float low = -1.0f;
+        void field(const char *n, float &v, float, float, float) override { if (std::string(n) == "L1 M0 Low") low = v; }
+        void field(const char *, int &, int, int) override {}
+        void field(const char *, bool &) override {}
+        void field(const char *, Vec3 &) override {}
+        void color(const char *, Vec3 &) override {}
+        void enumeration(const char *, int &, const char *const *, int) override {}
+        void text(const char *, std::string &) override {}
+        void mesh(const char *, MeshPtr &) override {}
+      } rd;
+      pt->reflect(rd);
+      low_set = std::fabs(rd.low - 0.4f) < 1e-6f;
+    }
+    CHECK(low_set);
+    ed.step_frame_headless();  // (the pending step of the last field edit commits)
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("surface group 0 1");
+    ed.step_frame_headless();  // (the step commits)
+    std::printf("    after surface group 0 1: %zu layer(s), the first %s with %zu children, %zu step(s)\n", pt->layers.size(), pt->layers.empty() ? "-" : pt->layers[0]->type_name(),
+                pt->layers.empty() || !pt->layers[0]->children() ? (size_t)0 : pt->layers[0]->children()->size(), ed.undo_steps_for_test() - steps);
+    CHECK(pt->layers.size() == 1 && std::string(pt->layers[0]->type_name()) == "Group" && pt->layers[0]->children() && pt->layers[0]->children()->size() == 2 && ed.undo_steps_for_test() == steps + 1);
+    ed.command("undo");
+    pt = texture_asset(asset);
+    std::printf("    after undo: %zu layer(s)\n", pt ? pt->layers.size() : (size_t)0);
+    CHECK(pt && pt->layers.size() == 2);
+    /* The worker: the stack changed, the frames step while it evaluates, the images land. */
+    ed.command("surface add Blur");
+    ed.command("surface set L2 Writes Emission 1");  // (the emission map follows the stack once the worker lands)
+    double slowest = 0.0;
+    int frames = 0;
+    bool ran = false;
+    for (int i = 0; i < 4000 && (i < 3 || ed.surface_busy_for_test()); i++) {
+      const auto t0 = std::chrono::steady_clock::now();
+      ed.step_frame_headless();
+      slowest = std::max(slowest, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+      frames++;
+      ran = ran || ed.surface_busy_for_test();
+      if (ed.surface_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::printf("    the surface's worker ran %d, %d frame(s) meanwhile, the slowest %.1f ms; busy still %d\n", (int)ran, frames, slowest, (int)ed.surface_busy_for_test());
+    CHECK(ran && !ed.surface_busy_for_test());
+    for (int i = 0; i < 4000 && (i < 3 || ed.surface_busy_for_test()); i++) {  // (the set after the add is a second job: let it land)
+      ed.step_frame_headless();
+      if (ed.surface_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const bool emission_now = split_texture_ref(G_material(G()).emission_map.path, asset, out) && out == (int)TextureOutput::Emission;
+    std::printf("    after a layer writes emission: the material's emission map %d\n", (int)emission_now);
+    CHECK(emission_now);
+    ed.command("surface eval 10 10 74 74");
+    ed.command("surface list");
+  });
+}
+
+static void tests_round265() {
+  test("Paint Mode (ADR 0081): a dab paints the texels under the brush's disc on the near side only, with the brush's colour at the centre; the material brush writes roughness, metallic and height too; the eraser clears; Mirror X paints the mirror; a fill of the object covers it; the stroke's undo restores the tiles bit for bit, holding only the touched tiles", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    ed.command("delete");
+    ed.command("create Sphere");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    G()->set_local_scale(Vec3(6.0f));  // (a sphere of three units nine units off fills a good part of the view: a dab is a part of it)
+    ed.mark_changed_for_test("a big sphere");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.command("surface new PaintSurf");
+    ed.command("meshmaps 256 4");
+    for (int i = 0; i < 4000 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    ed.command("surface maps");
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    Vec2 px;
+    CHECK(ed.project_for_test(G()->world_position(), px));
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();  // (the id plane holds the sphere)
+    ed.command("paint color 0.9 0.2 0.1");
+    ed.command("paint roughness 0.2");
+    ed.command("paint metallic 1");
+    ed.command("paint height 0.8");
+    ed.command("paint hardness 1");  // (the whole disc at full weight: the colour test reads any painted texel)
+    ed.command("paint size 40");
+    ed.command(strprintf("paint dab %g %g", px.x, px.y));
+    PaintImagesPtr im = ed.paint_images_for_test();
+    CHECK(im && !im->empty());
+    if (!im || im->empty()) return;
+    std::printf("    the stroke's undo step holds %zu bytes against the images' %zu\n", ed.paint_last_step_bytes_for_test(), im->size() * 13);
+    CHECK(ed.paint_last_step_bytes_for_test() < im->size() * 13 / 4);
+    const std::vector<uint32_t> after_dab = im->color;
+    const std::vector<uint8_t> cover_dab = im->cover;
+    size_t painted = 0, colour_ok = 0, values_ok = 0;
+    for (size_t i = 0; i < im->size(); i++) {
+      if (!im->cover[i]) continue;
+      painted++;
+      const uint32_t c = im->color[i];
+      colour_ok += std::abs((int)((c >> 16) & 0xFF) - 243) <= 1 && std::abs((int)((c >> 8) & 0xFF) - 124) <= 1 && std::abs((int)(c & 0xFF) - 89) <= 1 ? 1 : 0;  // (0.9 0.2 0.1 in sRGB)
+      values_ok += std::abs((int)im->rough[i] - 51) <= 1 && im->metal[i] == 255 && std::abs((int)im->height[i] - 204) <= 1 ? 1 : 0;
+    }
+    /* The far side: the surface's maps hold the world normal. The painted texels' mean normal faces the camera (a
+     * 40-px disc on a sphere that fills a third of the view is a cap of some 15 degrees); a texel whose normal opposes
+     * it is on the far side, and none of those may be painted. */
+    std::string why;
+    ProceduralTexturePtr pt = ed.surface_of_for_test(G(), &why);
+    const std::shared_ptr<const SurfaceMaps> maps_keep = pt ? pt->maps : nullptr;  // (held: the test reads them after undos)
+    const SurfaceMaps *maps = maps_keep.get();
+    size_t far_painted = 0, far_total = 0, near_total = 0;
+    if (maps && maps->w == im->w) {
+      Vec3 mean(0.0f);
+      for (size_t i = 0; i < im->size(); i++)
+        if (im->cover[i] && maps->cover[i] > 0.5f) mean += maps->normal[i];
+      const Vec3 to_cam = length(mean) > 1e-6f ? normalize(mean) : Vec3(0.0f, 0.0f, 1.0f);
+      for (size_t i = 0; i < im->size(); i++) {
+        if (maps->cover[i] < 0.5f) continue;
+        const bool far = dot(maps->normal[i], to_cam) < -0.3f;
+        if (far) far_total++, far_painted += im->cover[i] ? 1 : 0;
+        else near_total++;
+      }
+    }
+    std::printf("    a dab of 40 px on the sphere: %zu texels painted (%zu the brush's colour within 1/255, %zu its roughness / metallic / height), %zu of %zu far-side texels painted (%zu near-side texels)\n",
+                painted, colour_ok, values_ok, far_painted, far_total, near_total);
+    CHECK(painted > 100 && colour_ok == painted && values_ok == painted && painted < near_total + far_total);
+    CHECK(maps && far_total > 0 && far_painted == 0);
+    /* The eraser clears what the dab painted. */
+    ed.command("paint erase on");
+    ed.command(strprintf("paint dab %g %g", px.x, px.y));
+    size_t left = 0;
+    for (uint8_t c : im->cover) left += c ? 1 : 0;
+    ed.command("paint erase off");
+    std::printf("    the eraser over the same dab: %zu texels still covered\n", left);
+    CHECK(left < painted / 10);
+    /* Undo both strokes: bit for bit the images before them, the buffers kept, the steps' tiles small. */
+    const uint32_t *buf_before = im->color.data();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("undo");
+    CHECK(im->color == after_dab && im->cover == cover_dab);
+    ed.command("undo");
+    size_t any = 0;
+    for (uint8_t c : im->cover) any += c ? 1 : 0;
+    std::printf("    after two undos: %zu covered texels, the buffer %s, %zu step(s) fewer; the surface keeps its maps %d\n", any, im->color.data() == buf_before ? "kept" : "reallocated",
+                steps - ed.undo_steps_for_test(), (int)(pt->maps == maps_keep));
+    CHECK(any == 0 && im->color.data() == buf_before && ed.undo_steps_for_test() == steps - 2 && pt->maps == maps_keep);
+    ed.command("redo");
+    CHECK(im->color == after_dab);
+    ed.command("undo");
+    /* Mirror X: the dab and its mirror; then a fill of the whole object. */
+    Vec2 side_px;  // (a point on the sphere a third of a radius right of its centre, as seen: on the surface whatever its size on screen)
+    CHECK(ed.project_for_test(G()->world_position() + Vec3(1.0f, 0.0f, 0.0f), side_px));
+    ed.command("paint symmetry x");
+    ed.command(strprintf("paint dab %g %g", side_px.x, side_px.y));
+    size_t mirrored = 0;
+    for (uint8_t c : im->cover) mirrored += c ? 1 : 0;
+    ed.command("paint symmetry none");
+    ed.command("undo");
+    ed.command(strprintf("paint dab %g %g", side_px.x, side_px.y));
+    size_t single = 0;
+    for (uint8_t c : im->cover) single += c ? 1 : 0;
+    std::printf("    a dab beside the centre: %zu texels; with Mirror X %zu\n", single, mirrored);
+    CHECK(single > 0 && mirrored > single * 3 / 2);
+    ed.command("undo");
+    ed.command("paint fill object");
+    size_t filled = 0, maps_covered = 0;
+    for (size_t i = 0; i < im->size(); i++) filled += im->cover[i] ? 1 : 0, maps_covered += maps && maps->cover[i] > 0.5f ? 1 : 0;
+    std::printf("    paint fill object: %zu texels of %zu the maps cover (%d triangles; the editor's images are the test's %d)\n", filled, maps_covered, ed.paint_last_fill_for_test(),
+                (int)(ed.paint_images_for_test() == im));
+    CHECK(filled > maps_covered * 9 / 10);
+    ed.command("paint off");
+    CHECK(!ed.paint_for_test());
+  });
+}
+
+static void tests_round266() {
+  test("smart materials in the editor: smat apply puts Painted Metal on the active object's surface as one step and smat save writes it; a 2D dab lands at its UV; a stencil black on the left masks a dab there; the Texturing layout opens", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    ed.command("surface new SmatSurf");
+    ed.step_frame_headless();  // (the step commits)
+    std::string why;
+    ProceduralTexturePtr pt = ed.surface_of_for_test(G(), &why);
+    CHECK(pt && pt->layers.size() == 1);
+    if (!pt) return;
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("smat apply Painted Metal");
+    ed.step_frame_headless();
+    std::printf("    smat apply: %zu layers, the top '%s' with %zu children, %zu step(s)\n", pt->layers.size(), pt->layers.back()->name.c_str(),
+                pt->layers.back()->children() ? pt->layers.back()->children()->size() : (size_t)0, ed.undo_steps_for_test() - steps);
+    CHECK(pt->layers.size() == 2 && pt->layers.back()->name == "Painted Metal" && pt->layers.back()->children() && pt->layers.back()->children()->size() == 2 && ed.undo_steps_for_test() == steps + 1);
+    ed.command("smat save 1 MyMetal");
+    CHECK(fs::exists(ed.resolve_asset_path_for_test("Assets/Materials/Smart/MyMetal.smat")));
+    ed.command("smat apply MyMetal");
+    CHECK(pt->layers.size() == 3 && pt->layers.back()->name == "MyMetal");
+    /* Another object's surface takes the saved file too: its hash moves, and its generators read its own maps. */
+    ed.command("select Sphere");
+    ed.step_frame_headless();
+    GameObject *sphere = ed.active_object_for_test();
+    CHECK(sphere && sphere != G());
+    ed.command("surface new SphereSurf");
+    ed.step_frame_headless();
+    ProceduralTexturePtr ps = ed.surface_of_for_test(sphere, &why);
+    CHECK(ps && ps != pt && ps->layers.size() == 1);
+    if (ps) {
+      const uint64_t h0 = ps->hash();
+      ed.command("smat apply MyMetal");
+      ed.step_frame_headless();
+      CHECK(ps->layers.size() == 2 && ps->hash() != h0 && pt->layers.size() == 3);
+      ed.command("undo");
+      ed.command("undo");  // (the sphere's surface too: the cube's undos below count from its own edits)
+    }
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.command("undo");
+    std::printf("    after one undo: %zu layers\n", pt->layers.size());
+    ed.command("undo");
+    pt = ed.surface_of_for_test(G(), &why);
+    std::printf("    after two undos: %zu layers (%s)\n", pt ? pt->layers.size() : (size_t)0, why.c_str());
+    CHECK(pt && pt->layers.size() == 1);
+    /* 2D painting: a dab at (0.25, 0.75) on the 1024 surface lands around image texel (256, 256). */
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    ed.command("paint size 16");
+    ed.command("paint hardness 1");
+    CHECK(ed.paint_dab_uv_for_test(0.25f, 0.75f));
+    PaintImagesPtr im = ed.paint_images_for_test();
+    CHECK(im && !im->empty());
+    if (!im || im->empty()) return;
+    size_t painted = 0, off = 0;
+    for (size_t i = 0; i < im->size(); i++) {
+      if (!im->cover[i]) continue;
+      painted++;
+      const int x = (int)(i % im->w), y = (int)(i / im->w);
+      if (std::abs(x - 256) > 19 || std::abs(y - 256) > 19) off++;  // (the disc of 16 plus the two-texel dilation)
+    }
+    std::printf("    a 2D dab at (0.25, 0.75): %zu texels around (256, 256), %zu elsewhere\n", painted, off);
+    CHECK(painted > 600 && off == 0);
+    ed.command("undo");
+    /* The canvas by real events: the Textures window open on the surface, 2D painting on, a press on the preview pane,
+     * a drag over several frames and the release - one stroke, one step, the coverage capped at the opacity. */
+    ed.command("layout Texturing");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Textures).w > 0 && ed.window_rect_for_test(WindowKind::Scene).w > 0 && ed.window_rect_for_test(WindowKind::Inspector).w > 0 && ed.window_rect_for_test(WindowKind::Tools).w > 0);
+    ed.select_texture_for_test(pt);
+    ed.command("paint 2d on");
+    ed.command("paint opacity 0.5");
+    ed.command("paint size 24");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(pane.w > 0);
+    if (pane.w > 0) {
+      const size_t steps0 = ed.undo_steps_for_test();
+      const int y = pane.y + pane.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, pane.x + pane.w / 4, y)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, pane.x + pane.w / 4, y)});
+      std::printf("    after the press on the canvas: %s\n", ed.paint_canvas_state_for_test().c_str());
+      for (int i = 1; i <= 6; i++) ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, pane.x + pane.w / 4 + i * pane.w / 12, y)});
+      const size_t steps_held = ed.undo_steps_for_test();
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, pane.x + pane.w * 3 / 4, y)});
+      ed.step_frame_headless();
+      im = ed.paint_images_for_test();
+      size_t covered = 0, over = 0, maxc = 0;
+      if (im)
+        for (uint8_t c : im->cover) covered += c ? 1 : 0, over += c > 130 ? 1 : 0, maxc = std::max(maxc, (size_t)c);
+      std::printf("    a canvas drag over 6 frames: %zu texels, the highest coverage %zu of 255 (opacity 0.5), %zu steps while held, %zu at the release\n", covered, maxc, steps_held - steps0, ed.undo_steps_for_test() - steps0);
+      CHECK(covered > 5000 && over == 0 && steps_held == steps0 && ed.undo_steps_for_test() == steps0 + 1);
+      if (ed.undo_steps_for_test() == steps0 + 1) ed.command("undo");
+    }
+    ed.command("paint 2d off");
+    ed.command("paint opacity 1");
+    ed.command("paint size 16");
+    /* A stencil black on its left half: a dab projected into the left half of the view paints nothing; the right half paints. */
+    Bitmap st;
+    st.width = st.height = 2;
+    st.rgba8 = {0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255};
+    std::string err;
+    const std::string stencil = fs::join(scratch_project(), "stencil.png");
+    {
+      const uint32_t px[4] = {0xFF000000u, 0xFFFFFFFFu, 0xFF000000u, 0xFFFFFFFFu};
+      CHECK(write_png(stencil, px, 2, 2, 2, false));
+    }
+    ed.command("paint stencil " + stencil);
+    Vec2 px;
+    CHECK(ed.project_for_test(G()->world_position(), px));
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_rect_for_test();
+    /* The square stencil is fit to the view's shorter side at its top left; the offset puts its black half over the cube,
+     * then its white half. */
+    const float sw = (float)std::min(view.w, view.h);
+    ed.command(strprintf("paint stencil offset %g 0", px.x - sw * 0.25f));  // (the cube in the black half)
+    ed.command("paint stencil scale 1");
+    ed.command(strprintf("paint dab %g %g", px.x - 2.0f, px.y));
+    size_t masked = 0;
+    for (uint8_t c : im->cover) masked += c ? 1 : 0;
+    ed.command(strprintf("paint stencil offset %g 0", px.x - sw * 0.75f));  // (the cube in the white half)
+    ed.command(strprintf("paint dab %g %g", px.x - 2.0f, px.y));
+    size_t through = 0;
+    for (uint8_t c : im->cover) through += c ? 1 : 0;
+    std::printf("    a stencil over the view: %zu texels painted through its black half, %zu through its white half\n", masked, through);
+    CHECK(masked == 0 && through > 0);
+    /* A NaN offset or a float image never reaches a bad index. */
+    ed.command("paint stencil offset nan 0");
+    ed.command(strprintf("paint dab %g %g", px.x, px.y));
+    ed.command("paint stencil off");
+    ed.command("paint off");
+    /* --assign: the material reads the exported files (the separate maps for roughness and metallic beside the packing). */
+    ed.command("export textures gltf Exports/Assigned --assign");
+    const MeshRenderer *mr = G()->get<MeshRenderer>();
+    const Material *am = mr && !mr->materials.empty() ? mr->materials[0].get() : nullptr;
+    std::printf("    --assign: base '%s' rough '%s' metal '%s' emit '%s' metallic %g roughness %g\n", am ? am->base_map.path.c_str() : "-", am ? am->roughness_map.path.c_str() : "-", am ? am->metallic_map.path.c_str() : "-", am ? am->emission_map.path.c_str() : "-", am ? am->metallic : -1.0f, am ? am->roughness : -1.0f);
+    const std::string ex = "Exports/Assigned/" + pt->name + "_";  // (the scratch project keeps earlier runs' assets: the surface's name may carry a number)
+    /* The emission map follows the live rule (the stack writes emission - the Paint layer does); whether the live material already
+     * carried one depends on the worker having landed, which the sanitizer build's timing made false: either is right here. */
+    const bool assigned = am && am->base_map.path == ex + "Albedo.png" && am->roughness_map.path == ex + "Roughness.png" && am->metallic_map.path == ex + "Metallic.png" && (am->emission_map.path.empty() || am->emission_map.path == ex + "Emission.png") && am->metallic == 1.0f && am->roughness == 1.0f;
+    CHECK(assigned && fs::exists(ed.resolve_asset_path_for_test(ex + "ORM.png")) && fs::exists(ed.resolve_asset_path_for_test(ex + "Metallic.png")));
+    ed.command("undo");
+  });
+}
+
+static void tests_round267() {
+  test("the painterly brush (ADR 0083): a Bristle stamp has several peaks inside the disc and a Round one, a Flat tip turned 90 degrees swaps its extents; a wet blue stroke over red ends between them; jitter 0 paints the exact colour and jitter 0.2 in value stays within it; a checker grain halves the painted texels; Smudge pulls a patch's edge along the drag", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    g->set_local_scale(Vec3(6.0f));  // (the cube fills a good part of the view: a 30 px dab is a patch, not the whole face)
+    ed.command("surface new BrushSurf");
+    ed.step_frame_headless();
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    PaintBrush &b = ed.paint_brush_for_test();
+    /* The stamps, sampled on a 41 x 41 grid over the disc. */
+    auto peaks = [&](int tip) {
+      b.tip = tip, b.hardness = 0.0f;  // (no plateau: a peak is one cell)
+      const int n = 41;
+      std::vector<float> w((size_t)n * n);
+      for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) w[(size_t)y * n + x] = ed.paint_stamp_for_test({(x - 20) / 20.0f, (y - 20) / 20.0f}, {1.0f, 0.0f}, 7u);
+      int count = 0;
+      for (int y = 1; y < n - 1; y++)
+        for (int x = 1; x < n - 1; x++) {
+          const float c = w[(size_t)y * n + x];
+          if (c <= 0.05f) continue;
+          bool top = true;
+          for (int dy = -1; dy <= 1 && top; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+              if ((dx || dy) && w[(size_t)(y + dy) * n + x + dx] > c) top = false;
+          /* A plateau (the hard centre) counts once: only its first texel in scan order. */
+          bool first = true;
+          for (int dy = -1; dy <= 0 && first; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+              if ((dy < 0 || dx < 0) && w[(size_t)(y + dy) * n + x + dx] == c) first = false;
+          if (top && first) count++;
+        }
+      return count;
+    };
+    const int round_peaks = peaks(0), bristle_peaks = peaks(2);
+    b.tip = 1, b.tip_ratio = 0.3f, b.hardness = 0.5f;  // (0.5 along the drag is inside the hard centre; 0.5 across is 1.67 radii out of the 0.3-wide ellipse)
+    const float along = ed.paint_stamp_for_test({0.5f, 0.0f}, {1.0f, 0.0f}, 7u), across = ed.paint_stamp_for_test({0.0f, 0.5f}, {1.0f, 0.0f}, 7u);
+    const float along_t = ed.paint_stamp_for_test({0.5f, 0.0f}, {0.0f, 1.0f}, 7u), across_t = ed.paint_stamp_for_test({0.0f, 0.5f}, {0.0f, 1.0f}, 7u);
+    std::printf("    stamps: Round %d peak(s), Bristle %d; Flat along / across the drag %.2f / %.2f, turned 90 degrees %.2f / %.2f\n", round_peaks, bristle_peaks, along, across, along_t, across_t);
+    CHECK(round_peaks == 1 && bristle_peaks >= 6 && along > 0.5f && across == 0.0f && along_t == 0.0f && across_t > 0.5f);
+    b.tip = 0;
+    /* The dabs below go on the cube's front face, at the view's centre. */
+    Vec2 px;
+    CHECK(ed.project_for_test(g->world_position(), px));
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    auto stroke = [&](float x0, float x1, int dabs) { ed.command(strprintf("paint stroke %g %g %g %g %d", x0, px.y, x1, px.y, dabs)); };  // (one stroke: the brush carries its pickup along it)
+    auto count_where = [&](std::function<bool(uint32_t)> f) {
+      PaintImagesPtr im = ed.paint_images_for_test();
+      size_t n = 0;
+      if (im)
+        for (size_t i = 0; i < im->size(); i++)
+          if (im->cover[i] && f(im->color[i])) n++;
+      return n;
+    };
+    auto count = [&] { return count_where([](uint32_t) { return true; }); };
+    ed.command("paint size 30");
+    ed.command("paint hardness 1");
+    ed.command("paint opacity 1");
+    /* Wet: red first, then blue over it with wet 0.5 - texels with both red and blue above 0.2. */
+    ed.command("paint color 1 0 0");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    ed.command("paint color 0 0 1");
+    ed.command("paint wet 0.5");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const size_t mixed = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) > 51 && (c & 0xFF) > 51; }), pure_blue = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) == 0 && (c & 0xFF) == 255; });
+    std::printf("    a wet blue stroke over red: %zu mixed texels (red and blue both above 0.2), %zu pure blue\n", mixed, pure_blue);
+    CHECK(mixed > 500 && pure_blue < mixed);
+    ed.command("paint wet 0");
+    ed.command("undo");
+    ed.command("undo");
+    /* Jitter: 0 paints the brush's exact colour; 0.2 in value keeps every texel's value within 0.2 (sRGB bytes compared in linear). */
+    ed.command("paint color 0.5 0.25 0.1");
+    ed.command("paint jitter 0 0 0");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const uint32_t exact = 0xFF000000u | (uint32_t)display::linear_to_srgb8(0.5f) << 16 | (uint32_t)display::linear_to_srgb8(0.25f) << 8 | display::linear_to_srgb8(0.1f);
+    const size_t all0 = count(), same0 = count_where([&](uint32_t c) { return c == exact; });
+    ed.command("undo");
+    ed.command("paint jitter 0 0 0.2");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    size_t distinct = 0, out_of_range = 0;
+    {
+      std::set<uint32_t> seen;
+      PaintImagesPtr im = ed.paint_images_for_test();
+      for (size_t i = 0; im && i < im->size(); i++) {
+        if (!im->cover[i]) continue;
+        seen.insert(im->color[i]);
+        const float v = std::max({((im->color[i] >> 16) & 0xFF) / 255.0f, ((im->color[i] >> 8) & 0xFF) / 255.0f, (im->color[i] & 0xFF) / 255.0f});
+        const float v0 = display::linear_to_srgb8(0.5f) / 255.0f;
+        if (std::fabs(v - v0) > 0.2f + 0.02f) out_of_range++;  // (0.2 in linear value is less in sRGB bytes: a loose bound with a tolerance)
+      }
+      distinct = seen.size();
+    }
+    std::printf("    jitter 0: %zu of %zu texels the exact colour; jitter 0.2 in value: %zu distinct colours, %zu out of range\n", same0, all0, distinct, out_of_range);
+    CHECK(all0 > 0 && same0 == all0 && distinct > 3 && out_of_range == 0);
+    ed.command("paint jitter 0 0 0");
+    ed.command("undo");
+    /* Grain: a 2 x 2 checker at scale 1 lets every other texel through - about half the texels. */
+    const std::string grain = fs::join(scratch_project(), "grain.png");
+    {
+      const uint32_t px4[4] = {0xFFFFFFFFu, 0xFF000000u, 0xFF000000u, 0xFFFFFFFFu};
+      CHECK(write_png(grain, px4, 2, 2, 2, false));
+    }
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const size_t plain = count();
+    ed.command("undo");
+    ed.command("paint grain " + grain + " 16");
+    stroke(px.x - 40.0f, px.x + 40.0f, 8);
+    const size_t grained = count();
+    ed.command("paint grain off");
+    ed.command("undo");
+    std::printf("    grain: %zu texels with a 2 x 2 checker at 16 texels a cell against %zu without (the dilation fills two texels of each hole's rim)\n", grained, plain);
+    CHECK(grained > 0 && grained < plain * 0.85f);
+    /* Smudge: a red patch, then a smudge stroke dragging rightwards on screen pulls red along the drag - in texel space, which
+     * way the face's UVs run (measured first: two dabs at the drag's ends, their texel columns compared). */
+    ed.command("paint color 1 0 0");
+    ed.command("paint size 20");
+    auto red_column = [&] {
+      PaintImagesPtr imp = ed.paint_images_for_test();
+      double sx = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; imp && i < imp->size(); i++)
+        if (imp->cover[i] && ((imp->color[i] >> 16) & 0xFF) > 128) sx += (double)(i % imp->w), n++;
+      return n ? (float)(sx / n) : 0.0f;
+    };
+    ed.command(strprintf("paint dab %g %g", px.x - 36.0f, px.y));
+    const float col_start = red_column();
+    ed.command("undo");
+    ed.command(strprintf("paint dab %g %g", px.x + 30.0f, px.y));
+    const float col_end = red_column();
+    ed.command("undo");
+    const float drag_sign = col_end > col_start ? 1.0f : -1.0f;
+    ed.command(strprintf("paint dab %g %g", px.x - 30.0f, px.y));
+    const size_t red_before = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) > 128; });
+    PaintImagesPtr im = ed.paint_images_for_test();
+    float cx_before = 0.0f;
+    {
+      double sx = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; im && i < im->size(); i++)
+        if (im->cover[i] && ((im->color[i] >> 16) & 0xFF) > 128) sx += (double)(i % im->w), n++;
+      cx_before = n ? (float)(sx / n) : 0.0f;
+    }
+    ed.command("paint brush smudge");
+    stroke(px.x - 36.0f, px.x + 30.0f, 22);
+    ed.command("paint brush round");
+    const size_t red_after = count_where([](uint32_t c) { return ((c >> 16) & 0xFF) > 128; });
+    float cx_after = 0.0f;
+    {
+      double sx = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; im && i < im->size(); i++)
+        if (im->cover[i] && ((im->color[i] >> 16) & 0xFF) > 128) sx += (double)(i % im->w), n++;
+      cx_after = n ? (float)(sx / n) : 0.0f;
+    }
+    std::printf("    smudge: %zu red texels before, %zu after; the red's centre moved from texel column %.1f to %.1f (the screen drag runs toward %s in this face's texels: the paint goes with it)\n", red_before, red_after, cx_before, cx_after, drag_sign > 0.0f ? "+x" : "-x");
+    CHECK(red_before > 0 && red_after > red_before && (cx_after - cx_before) * drag_sign > 1.0f);
+    ed.command("paint off");
+  });
+}
+
+static void tests_round267b() {
+  test("lighting painted in (ADR 0083): paint bakelight with a key from +X adds one Multiply Image layer as one step whose PNG is brighter on the sphere's +X side than its -X side; paint bakegradient is brighter at the top; the Gradient fill over the object is brighter at the top than the bottom; a palette saved and loaded has the same swatches and picks the brush's colour", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Sphere");
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto G = [&] { return ed.scene().find(gid); };
+    G()->set_local_scale(Vec3(4.0f));
+    ed.command("surface new LightSurf");
+    ed.step_frame_headless();
+    ed.command("meshmaps 128 2");
+    for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    ed.command("meshmaps status");
+    ed.command("surface maps");
+    ed.step_frame_headless();
+    std::string why;
+    ProceduralTexturePtr pt = ed.surface_of_for_test(G(), &why);
+    CHECK(pt && pt->maps && !pt->maps->empty());
+    if (!pt || !pt->maps || pt->maps->empty()) return;
+    const size_t layers0 = pt->layers.size(), steps0 = ed.undo_steps_for_test();
+    ed.command("paint bakelight key 1 0 0");
+    for (int i = 0; i < 20000 && ed.bakelight_busy_for_test(); i++) ed.step_frame_headless();  // (the worker: the layer lands on a frame)
+    ed.step_frame_headless();
+    const bool added = pt->layers.size() == layers0 + 1 && std::string(pt->layers.back()->type_name()) == "Image" && pt->layers.back()->blend == (int)LayerBlend::Multiply;
+    std::string rel;
+    if (added) {  // (the layer's file: a name of its own per bake, so an earlier layer keeps its image)
+      struct ReadPath : Reflector {
+        std::string path;
+        bool all_fields() const override { return true; }
+        void field(const char *, float &, float, float, float) override {}
+        void field(const char *, int &, int, int) override {}
+        void field(const char *, bool &) override {}
+        void field(const char *, Vec3 &) override {}
+        void color(const char *, Vec3 &) override {}
+        void enumeration(const char *, int &, const char *const *, int) override {}
+        void text(const char *, std::string &) override {}
+        void mesh(const char *, MeshPtr &) override {}
+        void texture(const char *n, TextureRef &v) override {
+          if (std::string(n) == "Image") path = v.path;
+        }
+      } rp;
+      pt->layers.back()->reflect(rp);
+      rel = rp.path;
+    }
+    Bitmap bm;
+    std::string err;
+    const bool loaded = !rel.empty() && load_image(ed.resolve_asset_path_for_test(rel), bm, err) && bm.width == pt->maps->w;
+    float plus = 0.0f, minus = 0.0f;
+    size_t pn = 0, mn = 0;
+    for (size_t i = 0; loaded && i < pt->maps->normal.size(); i++) {
+      if (pt->maps->cover[i] < 0.5f) continue;
+      const float nx = pt->maps->normal[i].x, lum = bm.rgba8[i * 4] / 255.0f;
+      if (nx > 0.8f) plus += lum, pn++;
+      else if (nx < -0.8f) minus += lum, mn++;
+    }
+    std::printf("    bakelight from +X: %zu layer(s) (+%zu), %zu step(s); the PNG's +X side %.3f against -X %.3f\n", pt->layers.size(), pt->layers.size() - layers0, ed.undo_steps_for_test() - steps0, pn ? plus / pn : 0.0f, mn ? minus / mn : 0.0f);
+    CHECK(added && ed.undo_steps_for_test() == steps0 + 1 && loaded && pn && mn && plus / pn > minus / mn + 0.2f);
+    ed.command("undo");
+    pt = ed.surface_of_for_test(G(), &why);
+    CHECK(pt && pt->layers.size() == layers0);
+    if (!pt) return;
+    /* The scene's sun as the key: a directional light aimed down (-Y) makes the top brighter than the underside. */
+    ed.command("select Directional Light");
+    ed.step_frame_headless();
+    GameObject *sun = ed.active_object_for_test();
+    if (sun && sun->get<Light>()) {
+      sun->set_local_euler(Vec3(90.0f, 0.0f, 0.0f));  // (+Z turned to -Y: the light points down)
+      ed.command("select Sphere");
+      ed.step_frame_headless();
+      ed.command("paint bakelight");
+      for (int i = 0; i < 20000 && ed.bakelight_busy_for_test(); i++) ed.step_frame_headless();
+      ed.step_frame_headless();
+      std::string rel2;
+      if (pt->layers.size() == layers0 + 1) {
+        struct ReadPath2 : Reflector {
+          std::string path;
+          bool all_fields() const override { return true; }
+          void field(const char *, float &, float, float, float) override {}
+          void field(const char *, int &, int, int) override {}
+          void field(const char *, bool &) override {}
+          void field(const char *, Vec3 &) override {}
+          void color(const char *, Vec3 &) override {}
+          void enumeration(const char *, int &, const char *const *, int) override {}
+          void text(const char *, std::string &) override {}
+          void mesh(const char *, MeshPtr &) override {}
+          void texture(const char *n, TextureRef &v) override {
+            if (std::string(n) == "Image") path = v.path;
+          }
+        } rp2;
+        pt->layers.back()->reflect(rp2);
+        rel2 = rp2.path;
+      }
+      Bitmap sm;
+      const bool sl = !rel2.empty() && rel2 != rel && load_image(ed.resolve_asset_path_for_test(rel2), sm, err) && sm.width == pt->maps->w;
+      float up = 0.0f, down = 0.0f;
+      size_t un = 0, dn = 0;
+      for (size_t i = 0; sl && i < pt->maps->normal.size(); i++) {
+        if (pt->maps->cover[i] < 0.5f) continue;
+        const float ny = pt->maps->normal[i].y, lum = sm.rgba8[i * 4] / 255.0f;
+        if (ny > 0.8f) up += lum, un++;
+        else if (ny < -0.8f) down += lum, dn++;
+      }
+      std::printf("    bakelight from the scene's sun aimed down: the top %.3f against the underside %.3f (its own file: %d)\n", un ? up / un : 0.0f, dn ? down / dn : 0.0f, (int)(rel2 != rel));
+      CHECK(sl && un && dn && up / un > down / dn + 0.2f);
+      ed.command("undo");
+    }
+    else ed.command("select Sphere");
+    ed.command("paint bakegradient 1 1 1 0 0 0");
+    for (int i = 0; i < 20000 && ed.bakelight_busy_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    std::string grel;
+    if (pt->layers.size() == layers0 + 1) {
+      struct ReadPath3 : Reflector {
+        std::string path;
+        bool all_fields() const override { return true; }
+        void field(const char *, float &, float, float, float) override {}
+        void field(const char *, int &, int, int) override {}
+        void field(const char *, bool &) override {}
+        void field(const char *, Vec3 &) override {}
+        void color(const char *, Vec3 &) override {}
+        void enumeration(const char *, int &, const char *const *, int) override {}
+        void text(const char *, std::string &) override {}
+        void mesh(const char *, MeshPtr &) override {}
+        void texture(const char *n, TextureRef &v) override {
+          if (std::string(n) == "Image") path = v.path;
+        }
+      } rp3;
+      pt->layers.back()->reflect(rp3);
+      grel = rp3.path;
+    }
+    Bitmap gm;
+    const bool gl = !grel.empty() && load_image(ed.resolve_asset_path_for_test(grel), gm, err) && gm.width == pt->maps->w;
+    float top = 0.0f, bottom = 0.0f;
+    size_t tn = 0, bn = 0;
+    for (size_t i = 0; gl && i < pt->maps->position.size(); i++) {
+      if (pt->maps->cover[i] < 0.5f) continue;
+      const float y = pt->maps->position[i].y, lum = gm.rgba8[i * 4] / 255.0f;
+      if (y > 0.9f) top += lum, tn++;
+      else if (y < 0.1f) bottom += lum, bn++;
+    }
+    std::printf("    bakegradient: the top %.3f against the bottom %.3f\n", tn ? top / tn : 0.0f, bn ? bottom / bn : 0.0f);
+    CHECK(gl && tn && bn && top / tn > bottom / bn + 0.5f);
+    ed.command("undo");
+    /* The Gradient fill: dark at the bottom to light at the top over the object, read back by the maps' position. */
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (!ed.paint_for_test()) return;
+    ed.command("paint gradient 0.1 0.1 0.1 0.9 0.9 0.9 object y");
+    PaintImagesPtr im = ed.paint_images_for_test();
+    CHECK(im && !im->empty());
+    float gtop = 0.0f, gbottom = 0.0f;
+    size_t gtn = 0, gbn = 0;
+    for (size_t i = 0; im && i < im->size(); i++) {
+      if (!im->cover[i]) continue;
+      const int x = (int)(i % im->w), y = (int)(i / im->w);
+      const Vec3 q = pt->maps->sample3(pt->maps->position, (x + 0.5f) / im->w, 1.0f - (y + 0.5f) / im->h);
+      const float lum = ((im->color[i] >> 16) & 0xFF) / 255.0f;
+      if (q.y > 0.9f) gtop += lum, gtn++;
+      else if (q.y < 0.1f) gbottom += lum, gbn++;
+    }
+    std::printf("    the Gradient fill: %zu texels; the top %.3f against the bottom %.3f\n", im ? im->size() : (size_t)0, gtn ? gtop / gtn : 0.0f, gbn ? gbottom / gbn : 0.0f);
+    CHECK(gtn && gbn && gtop / gtn > gbottom / gbn + 0.5f);
+    ed.command("undo");
+    /* The palette. */
+    ed.command("paint palette add 1 0 0");
+    ed.command("paint palette add 0 1 0");
+    ed.command("paint palette add 0.2 0.3 0.4");
+    ed.command("paint palette save TestPal");
+    CHECK(fs::exists(ed.resolve_asset_path_for_test("Assets/Palettes/TestPal.pal")));
+    ed.command("paint palette remove 0");
+    ed.command("paint palette remove 0");
+    CHECK(ed.paint_palette_for_test().size() == 1);
+    ed.command("paint palette load TestPal");
+    const auto &pal = ed.paint_palette_for_test();
+    CHECK(pal.size() == 3 && length(pal[2] - Vec3(0.2f, 0.3f, 0.4f)) < 1e-5f);
+    ed.command("paint palette pick 1");
+    CHECK(length(ed.paint_brush_for_test().color - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);
+    ed.command("paint palette shade 0");
+    std::printf("    palette: %zu swatches after load; shade 0 of green is (%.2f, %.2f, %.2f)\n", pal.size(), ed.paint_brush_for_test().color.x, ed.paint_brush_for_test().color.y, ed.paint_brush_for_test().color.z);
+    CHECK(std::fabs(ed.paint_brush_for_test().color.y - 0.5f) < 1e-4f && ed.paint_brush_for_test().color.x < 1e-6f);
+    ed.command("paint off");
+  });
+}
+
+static void tests_round268() {
+  test("stroke objects (ADR 0084): a dab on the cube makes a Stroke object with one card facing the camera, Surface normals take the face's axis normal, Canopy normals point from the centre; a ribbon of N points is a strip of 2N vertices and N - 1 quads; each stroke is one undo step; the list survives its text form", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube);
+    if (!cube) return;
+    cube->set_local_scale(Vec3(4.0f));
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    Vec2 px;
+    CHECK(ed.project_for_test(cube->world_position(), px));
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("strokeobj size 0.3");
+    ed.command(strprintf("strokeobj dab %g %g", px.x, px.y));
+    ed.step_frame_headless();
+    GameObject *so = ed.strokeobj_object_for_test();
+    const Strokes *st = so ? so->get<Strokes>() : nullptr;
+    const MeshFilter *mf = so ? so->mesh_filter() : nullptr;
+    CHECK(ed.strokeobj_for_test() && st && mf && mf->mesh && st->cards.size() == 1 && mf->mesh->vert_count() == 4 && mf->mesh->face_count() == 2 && mf->mesh->custom_normals.size() == 4);  // (a card is two faces back to back: the back-side flip never turns the custom normal)
+    if (!st || !mf || !mf->mesh || st->cards.empty()) return;
+    const Ray ray = ed.screen_ray_for_test(px);
+    const Vec3 toward = normalize(ray.dir) * -1.0f;
+    const float facing_dot = dot(normalize(mf->mesh->custom_normals[0]), toward);
+    std::printf("    a card at the cube's centre: %zu card(s), %zu vertices, its normal against the view direction %.4f (one degree is %.4f), %zu step(s)\n", st->cards.size(), mf->mesh->vert_count(), facing_dot, std::cos(1.0f * 3.14159265f / 180.0f), ed.undo_steps_for_test() - steps0);
+    CHECK(facing_dot > std::cos(1.0f * 3.14159265f / 180.0f) && ed.undo_steps_for_test() == steps0 + 1);
+    /* Surface normals: the cube's face under the dab is axis-aligned. */
+    ed.command("strokeobj normals surface");
+    ed.step_frame_headless();
+    const Vec3 sn = normalize(mf->mesh->custom_normals[0]);
+    const float axis_max = std::max({std::fabs(sn.x), std::fabs(sn.y), std::fabs(sn.z)});
+    std::printf("    Surface normals: (%.3f, %.3f, %.3f)\n", sn.x, sn.y, sn.z);
+    CHECK(axis_max > 0.999f);
+    /* Canopy normals: from the centre given. */
+    ed.command("strokeobj canopy 0 -10 0");
+    ed.step_frame_headless();
+    const Vec3 cn = normalize(mf->mesh->custom_normals[0]), expect = normalize(mf->mesh->positions[0] - Vec3(0.0f, -10.0f, 0.0f));  // (per vertex: from the centre to the corner)
+    std::printf("    Canopy normals: (%.3f, %.3f, %.3f) against the expected (%.3f, %.3f, %.3f)\n", cn.x, cn.y, cn.z, expect.x, expect.y, expect.z);
+    CHECK(dot(cn, expect) > 0.9999f);
+    ed.command("strokeobj normals own");
+    /* A ribbon along the face. */
+    ed.command("strokeobj ribbon");
+    ed.command("strokeobj width 0.1");
+    ed.command(strprintf("strokeobj stroke %g %g %g %g 9", px.x - 60.0f, px.y, px.x + 60.0f, px.y));
+    ed.step_frame_headless();
+    const size_t n = st->ribbons.empty() ? 0 : st->ribbons[0].points.size();
+    std::printf("    a ribbon: %zu ribbon(s) of %zu points; the mesh %zu vertices, %zu faces\n", st->ribbons.size(), n, mf->mesh->vert_count(), mf->mesh->face_count());
+    CHECK(st->ribbons.size() == 1 && n >= 3 && mf->mesh->vert_count() == 4 + 2 * n && mf->mesh->face_count() == 2 + 2 * (n - 1));
+    /* The text form round-trips. */
+    Strokes copy;
+    const std::string text = strokes_to_text(*st);
+    CHECK(strokes_from_text(text, copy) && strokes_to_text(copy) == text && copy.cards.size() == 1 && copy.ribbons.size() == 1 && copy.ribbons[0].points.size() == n);
+    /* Foliage: a canopy of 100 cards on a 1 m shell round (0, 3, 0), each facing out from the centre; grass of density
+     * 40 on the plane's visible spot - about 40 pi blades, upright, their normals up. */
+    const uint64_t orig_id = so->id;
+    ed.command("strokeobj canopyfill 1 100 0 3 0");  // (a canopy has its own centre: a Stroke object of its own)
+    ed.step_frame_headless();
+    GameObject *soc = ed.strokeobj_object_for_test();
+    const Strokes *stc = soc ? soc->get<Strokes>() : nullptr;
+    bool outward = stc && soc != so && stc->cards.size() == 100;
+    float shell_err = 0.0f;
+    for (size_t i = 0; stc && i < stc->cards.size() && outward; i++) {
+      const Vec3 w = soc->world_matrix().point(stc->cards[i].center) - Vec3(0.0f, 3.0f, 0.0f);
+      shell_err = std::max(shell_err, std::fabs(length(w) - 1.0f));
+      outward = outward && dot(normalize(w), normalize(stc->cards[i].facing)) > 0.999f;
+    }
+    std::printf("    canopyfill: a new Stroke object %d with %zu cards, on the shell within %.4f, facing out %d; its mesh %zu vertices\n", (int)(soc && soc != so), stc ? stc->cards.size() : (size_t)0, shell_err, (int)outward, soc && soc->mesh_filter() && soc->mesh_filter()->mesh ? soc->mesh_filter()->mesh->vert_count() : (size_t)0);
+    CHECK(outward && shell_err < 1e-3f && stc->normals == 2 && soc->mesh_filter() && soc->mesh_filter()->mesh && soc->mesh_filter()->mesh->vert_count() == 400);
+    ed.command("undo");
+    ed.select_object(orig_id);
+    ed.step_frame_headless();
+    {
+      const GameObject *plane = ed.scene().find_by_name("Plane");
+      Vec2 gp;
+      bool gfound = false;
+      for (const Vec3 &cand : {Vec3(-3.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, -3.0f), Vec3(-3.0f, 0.0f, -3.0f), Vec3(3.0f, 0.0f, -3.0f)}) {
+        Vec2 p;
+        if (!plane || !ed.project_for_test(cand, p)) continue;
+        const Ray ray = ed.screen_ray_for_test(p);
+        SceneHit hit;
+        if (!scene_raycast(ed.scene(), ray.origin, ray.dir, 1e5f, hit) || hit.object != plane) continue;
+        gp = p, gfound = true;
+        break;
+      }
+      CHECK(gfound);
+      if (gfound) {
+        GameObject *so3 = ed.strokeobj_object_for_test();
+        const Strokes *st3 = so3 ? so3->get<Strokes>() : nullptr;
+        const size_t before = st3 ? st3->cards.size() : 0;
+        ed.command(strprintf("strokeobj grass 40 0.25 1 %g %g", gp.x, gp.y));
+        ed.step_frame_headless();
+        so3 = ed.strokeobj_object_for_test();
+        st3 = so3 ? so3->get<Strokes>() : nullptr;
+        const size_t blades = st3 ? st3->cards.size() - (so3 == ed.scene().find(orig_id) ? before : 0) : 0;
+        bool upright = st3 != nullptr;
+        for (size_t i = before; st3 && i < st3->cards.size(); i++) upright = upright && std::fabs(st3->cards[i].facing.y) < 1e-3f && std::fabs(st3->cards[i].size - 0.25f) < 1e-5f;
+        const size_t want = (size_t)std::lround(40.0f * 3.14159265f);
+        std::printf("    grass: %zu blades (about %zu wanted), upright %d, normals mode %d\n", blades, want, (int)upright, st3 ? st3->normals : -1);
+        CHECK(blades >= want * 8 / 10 && blades <= want * 12 / 10 + 1 && upright && st3->normals == 2);
+        ed.command("undo");
+        ed.select_object(orig_id);
+        ed.step_frame_headless();
+      }
+    }
+    so = ed.strokeobj_object_for_test();
+    st = so ? so->get<Strokes>() : nullptr;
+    mf = so ? so->mesh_filter() : nullptr;
+    CHECK(so && st && mf && mf->mesh);
+    if (!so || !st || !mf || !mf->mesh) return;
+    const uint64_t so_id = so->id;
+    ed.command("undo");  // (the scene is rebuilt: the object is looked up again)
+    GameObject *so2 = ed.scene().find(so_id);
+    const Strokes *st2 = so2 ? so2->get<Strokes>() : nullptr;
+    CHECK(st2 && st2->ribbons.empty() && st2->cards.size() == 1 && so2->mesh_filter() && so2->mesh_filter()->mesh && so2->mesh_filter()->mesh->vert_count() == 4);
+    ed.command("strokeobj off");
+    CHECK(!ed.strokeobj_for_test());
+  });
+}
+
+static void tests_round268b() {
+  test("the Scatter brush (ADR 0084): a dab of density 4 in a 1 m disc on a ground plane places about 4 pi instances of the Sphere as children of one Scatter object, none where a Paint layer's mask covers the plane; the eraser removes them; merge joins them into one mesh with the instances' faces summed", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    GameObject *ground = ed.scene().find_by_name("Plane");  // (the sample scene's ground, at y = 0)
+    CHECK(ground && ground->mesh_filter() && ground->mesh_filter()->mesh);
+    if (!ground || !ground->mesh_filter() || !ground->mesh_filter()->mesh) return;
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();
+    /* A ground spot the view sees and nothing hides: candidates projected and traced back along the pixel's ray. */
+    Vec3 spot;
+    Vec2 px;
+    bool found = false;
+    const std::vector<Vec3> cands = {Vec3(-3.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, -3.0f), Vec3(-3.0f, 0.0f, -3.0f), Vec3(-1.5f, 0.0f, -3.0f), Vec3(-3.0f, 0.0f, 1.5f), Vec3(3.0f, 0.0f, -3.0f), Vec3(0.0f, 0.0f, 3.0f)};  // (well inside the plane, a metre or more from the cube and the sphere)
+    for (const Vec3 &cand : cands) {
+      Vec2 p;
+      if (!ed.project_for_test(cand, p)) continue;
+      const Recti view = ed.scene_rect_for_test();
+      if (p.x < 10.0f || p.y < 10.0f || p.x > view.w - 10.0f || p.y > view.h - 10.0f) continue;
+      const Ray ray = ed.screen_ray_for_test(p);
+      SceneHit hit;
+      if (!scene_raycast(ed.scene(), ray.origin, ray.dir, 1e5f, hit) || hit.object != ground) continue;
+      spot = hit.point, px = p, found = true;
+      break;
+    }
+    std::printf("    the ground spot (%.2f, %.2f, %.2f) at pixel (%.0f, %.0f)\n", spot.x, spot.y, spot.z, px.x, px.y);
+    CHECK(std::fabs(spot.y) < 0.01f);
+    CHECK(found);
+    if (!found) return;
+    const GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(sphere && sphere->mesh_filter() && sphere->mesh_filter()->mesh);
+    if (!sphere || !sphere->mesh_filter() || !sphere->mesh_filter()->mesh) return;
+    const size_t sphere_faces = sphere->mesh_filter()->mesh->face_count();
+    ed.command("scatter Sphere");
+    ed.command("scatter density 4");
+    ed.command("scatter radius 1");
+    ed.command("scatter scale 0.1 0.1");  // (small: the drops do not land on each other)
+    ed.command("scatter seed 3");
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command(strprintf("scatter dab %g %g", px.x, px.y));
+    ed.step_frame_headless();
+    GameObject *parent = ed.scatter_parent_for_test();
+    const size_t n = parent ? parent->children.size() : 0;
+    const float want = 4.0f * 3.14159265f;
+    std::printf("    a dab of density 4 in a 1 m disc: %zu instances (about %.1f wanted), %zu step(s)\n", n, want, ed.undo_steps_for_test() - steps0);
+    CHECK(parent && n >= (size_t)(want * 0.8f) && n <= (size_t)(want * 1.2f) + 1 && ed.undo_steps_for_test() == steps0 + 1);
+    if (!parent) return;
+    bool on_plane = true;
+    for (const GameObject *c : parent->children) on_plane = on_plane && std::fabs(c->world_position().y) < 0.01f && length(Vec2(c->world_position().x, c->world_position().z) - Vec2(spot.x, spot.z)) <= 1.05f;
+    if (!parent->children.empty()) {
+      const Vec3 p0 = parent->children[0]->world_position();
+      std::printf("    the first instance at (%.3f, %.3f, %.3f)\n", p0.x, p0.y, p0.z);
+    }
+    CHECK(on_plane);
+    /* Merge: one mesh with the instances' faces. */
+    ed.command("scatter merge");
+    const GameObject *merged = ed.scene().find_by_name("Scatter Merged");
+    std::printf("    merged: %zu faces against %zu x %zu\n", merged && merged->mesh_filter() && merged->mesh_filter()->mesh ? merged->mesh_filter()->mesh->face_count() : (size_t)0, n, sphere_faces);
+    CHECK(merged && merged->mesh_filter() && merged->mesh_filter()->mesh && merged->mesh_filter()->mesh->face_count() == n * sphere_faces);
+    ed.command("undo");
+    /* The eraser: everything within the disc goes. */
+    ed.command(strprintf("scatter erase %g %g", px.x, px.y));
+    parent = ed.scatter_parent_for_test();
+    std::printf("    after the eraser: %zu instance(s)\n", parent ? parent->children.size() : (size_t)0);
+    CHECK(parent && parent->children.empty());
+    /* The mask: the ground's surface with a Paint layer filled over the object keeps every instance off. */
+    ed.command("select Plane");
+    ed.step_frame_headless();
+    ed.command("surface new GroundSurf");
+    ed.step_frame_headless();
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    if (ed.paint_for_test()) {
+      ed.command("paint fill object");
+      ed.command("paint off");
+      ed.command("scatter mask 1");  // (the Paint layer sits above the surface's Fill)
+      {
+        std::string why;
+        GameObject *gr = ed.scene().find_by_name("Plane");
+        const bool m = gr && ed.scatter_masked_for_test(*gr, spot, why);
+        std::printf("    the mask at the spot: %d (%s)\n", (int)m, why.c_str());
+      }
+      ed.command(strprintf("scatter dab %g %g", px.x, px.y));
+      parent = ed.scatter_parent_for_test();
+      std::printf("    with the painted mask: %zu instance(s)\n", parent ? parent->children.size() : (size_t)0);
+      CHECK(parent && parent->children.empty());
+      ed.command("scatter mask off");
+    }
+    ed.command("scatter off");
+  });
+}
+
+/* The HCI measuring sticks (ADR 0085, task 0251): the widget rectangles every window and tool mode records, dumped for
+ * tools/hci_fitts_audit.py; the status bar's hint over every mode and state. Both print their numbers; the thresholds
+ * become assertions as the rounds fix what they find. */
+static std::string hci_dump_dir() {  // (BLENDITY_HCI_DUMP_DIR, else the test's own folder: nothing left in the shared project)
+  const char *e = std::getenv("BLENDITY_HCI_DUMP_DIR");
+  const std::string d = e && *e ? std::string(e) : fs::join(test_dir(), "hci");
+  fs::make_dirs(d);
+  return d;
+}
+
+static std::string json_escape(const std::string &s) {
+  std::string o;
+  for (unsigned char c : s) {
+    if (c == '"' || c == '\\') o += '\\', o += (char)c;
+    else if (c < 32) o += strprintf("\\u%04x", (int)c);
+    else o += (char)c;
+  }
+  return o;
+}
+
+static void tests_round271() {
+  test("hci: the Fitts dump - every window's and tool mode's recorded widget rectangles written as JSON at UI scales 1.0 and 1.5 for tools/hci_fitts_audit.py (the counts printed; the audit's threshold becomes an assertion in the area rounds)", [] {
+    for (float scale : {1.0f, 1.5f}) {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      ed.set_clock_for_test(100.0);
+      if (scale != 1.0f) ed.command("window tablet on");  // (Tablet Mode: the UI at 1.5x, as a 2-in-1 shows it)
+      for (int i = 0; i < 5; i++) ed.step_frame_headless();
+      ed.record_buttons_for_test(true);
+      std::string json = "{\"scale\":" + strprintf("%.1f", scale) + ",";
+      {
+        const Recti v = ed.scene_rect_for_test();
+        json += strprintf("\"scene\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d},", v.x, v.y, v.w, v.h);
+      }
+      json += "\"contexts\":{";
+      size_t contexts = 0, targets = 0;
+      auto snapshot = [&](const std::string &context) {
+        if (std::getenv("BLENDITY_HCI_TRACE")) std::printf("    snapshot %s\n", context.c_str()), std::fflush(stdout);
+        for (int i = 0; i < 3; i++) ed.step_frame_headless();
+        const auto &rects = ed.ui_for_test().button_rects;
+        if (rects.empty()) return;
+        if (contexts++) json += ",";
+        json += "\"" + json_escape(context) + "\":{";
+        bool first = true;
+        for (const auto &kv : rects) {
+          if (kv.first.rfind("file:", 0) == 0 || kv.first.rfind("mat:", 0) == 0) continue;  // (the project's and the materials' tiles: what the scratch project holds, not the editor's controls)
+          json += (first ? "" : ",") + ("\"" + json_escape(kv.first) + "\":") + strprintf("{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", kv.second.x, kv.second.y, kv.second.w, kv.second.h);
+          first = false;
+          targets++;
+        }
+        json += "}";
+        ed.record_buttons_for_test(false);
+        ed.record_buttons_for_test(true);
+      };
+      /* Every window, opened through the Window menu's command. */
+      for (int k = 0; k < (int)WindowKind::Count; k++) {
+        const std::string title = window_title((WindowKind)k);
+        if (title.empty()) continue;
+        if (std::getenv("BLENDITY_HCI_TRACE")) std::printf("    opening %s\n", title.c_str()), std::fflush(stdout);
+        ed.command("window " + title);
+        snapshot("window:" + title);
+      }
+      /* The tool modes on the sample scene's objects, with the Modeling Tools window open (the sections hold the brush controls). */
+      if (std::getenv("BLENDITY_HCI_TRACE")) std::printf("    modes\n"), std::fflush(stdout);
+      ed.command("layout Default");
+      ed.command("window Modeling Tools");
+      ed.command("alltools on");  // (every section, whatever the layout's stage: the brush controls are what the audit is for)
+      ed.command("select Cube");
+      snapshot("mode:object");
+      ed.command("edit");
+      snapshot("mode:edit");
+      ed.command("edit off");
+      ed.command("sculpt on");
+      snapshot("mode:sculpt");
+      const bool sculpt_controls = json.find("\"field:Size\"") != std::string::npos && json.find("\"field:Strength\"") != std::string::npos;  // (Modeling Tools' Sculpt section is in the dump)
+      if (!sculpt_controls) std::printf("    (no field:Size / field:Strength in the sculpt snapshot; the Tools window %dx%d, sculpt %d)\n", ed.window_rect_for_test(WindowKind::Tools).w, ed.window_rect_for_test(WindowKind::Tools).h, (int)ed.sculpt_for_test());
+      ed.command("sculpt off");
+      ed.command("surface new FittsSurf");
+      ed.command("paint on");
+      snapshot("mode:paint");
+      ed.command("paint off");
+      CHECK(sculpt_controls);
+      ed.command("strokeobj on");
+      snapshot("mode:strokes");
+      ed.command("strokeobj off");
+      ed.command("scatter Sphere");
+      ed.command("scatter on");
+      snapshot("mode:scatter");
+      ed.command("scatter off");
+      json += "}}";
+      const std::string path = fs::join(hci_dump_dir(), strprintf("fitts-%.1f.json", scale));
+      CHECK(fs::write_file(path, json));
+      std::printf("    scale %.1f: %zu contexts, %zu targets -> %s\n", scale, contexts, targets, path.c_str());
+      CHECK(contexts >= 20 && targets > 100);
+    }
+  });
+
+  test("hci: the status bar's hint over every tool mode and selection state (a table printed for docs/hci/hints-<round>.md; the holes are the baseline round 274 fills)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    struct Mode {
+      const char *name, *on, *off, *word;  // (word: what a hint of the mode's own names)
+    };
+    const Mode modes[] = {{"object", "", "", "Move"}, {"edit", "edit", "edit off", "Edit"}, {"sculpt", "sculpt on", "sculpt off", "Sculpt"}, {"paint", "paint on", "paint off", "Paint"}, {"strokes", "strokeobj on", "strokeobj off", "Stroke"}, {"scatter", "scatter on", "scatter off", "Scatter"}, {"sketch", "sketch on", "sketch off", "Sketch"}};
+    ed.command("select Cube");
+    ed.command("surface new HintSurf");
+    ed.command("scatter Sphere");
+    int holes = 0, cells = 0;
+    std::printf("    | mode | nothing selected | the Cube selected |\n    |---|---|---|\n");
+    for (const Mode &m : modes) {
+      std::string cell[2];
+      for (int sel = 0; sel < 2; sel++) {
+        if (sel) ed.command("select Cube"); else ed.clear_selection_for_test();
+        if (!sel && *m.on) {  // (a tool mode needs a selection to turn on: not a hint's hole, a refusal's)
+          cell[sel] = "n/a (needs a selection)";
+          continue;
+        }
+        if (*m.on) ed.command(m.on);
+        for (int i = 0; i < 2; i++) ed.step_frame_headless();
+        ed.set_scene_hovered_for_test(true);  // (a frame resets the hover: read the hint at once, as the pointer over the view would)
+        std::string h = ed.statusbar_hint_for_test();
+        if (*m.off) ed.command(m.off);
+        const bool generic = h.find(m.word) == std::string::npos;  // (a hole: the hint does not name the mode)
+        cells++, holes += generic ? 1 : 0;
+        if (h.size() > 60) h = h.substr(0, 57) + "...";
+        for (char &c : h)
+          if (c == '|') c = '/';
+        cell[sel] = generic ? "**(none)** " + h : h;
+      }
+      std::printf("    | %s | %s | %s |\n", m.name, cell[0].c_str(), cell[1].c_str());
+    }
+    std::printf("    %d of %d cells have no hint of their own\n", holes, cells);
+    CHECK(cells == 8);  // (object both ways; the six tool modes with the Cube selected)
+    CHECK(holes == 0);  // (round 274's hint table: every mode names itself)
+  });
+}
+
+static void tests_round272() {
+  test("toasts (ADR 0085 F1): a refusal becomes a toast over the Scene view; one that knows its remedy carries a Fix button that runs the command; the same message twice is one toast with a count; a toast leaves after three seconds; Generate Lighting and the Editing window's Export are disabled with their reasons; the HCI log receives the events", [] {
+    const std::string hci = fs::join(scratch_project(), "hci-272.log");
+    fs::remove_file(hci);
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", hci.c_str());
+#else
+    setenv("BLENDITY_HCI_LOG", hci.c_str(), 1);
+#endif
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.record_buttons_for_test(true);
+    /* A refusal with no remedy: a toast with the text, no fix. */
+    ed.clear_selection_for_test();
+    ed.command("paint on");
+    ed.step_frame_headless();
+    const auto &toasts = ed.toasts_for_test();
+    std::printf("    after 'paint on' with nothing selected: %zu toast(s)%s\n", toasts.size(), toasts.empty() ? "" : (": \"" + toasts[0].text + "\"").c_str());
+    CHECK(toasts.size() == 1 && toasts[0].fix_cmd.empty() && toasts[0].text.find("select") != std::string::npos);
+    /* The same refusal again within the window: one toast, counted. */
+    ed.command("paint on");
+    ed.step_frame_headless();
+    if (!(toasts.size() == 1 && toasts[0].count == 2))
+      for (const auto &t : toasts) std::printf("    (toast: \"%s\" x%d)\n", t.text.c_str(), t.count);
+    CHECK(toasts.size() == 1 && toasts[0].count == 2);
+    /* It leaves after three seconds: there at 2.9 s, gone at 3.6 s. */
+    ed.set_clock_for_test(102.9);
+    ed.step_frame_headless();
+    CHECK(toasts.size() == 1);
+    ed.set_clock_for_test(103.6);
+    ed.step_frame_headless();
+    ed.set_clock_for_test(104.2);
+    ed.step_frame_headless();
+    std::printf("    3.6 s later: %zu toast(s)\n", toasts.size());
+    CHECK(toasts.empty());
+    /* A refusal that knows its remedy: the cube has no surface; the Fix button makes one and Paint Mode then opens. */
+    ed.command("select Cube");
+    ed.command("paint on");
+    ed.step_frame_headless();
+    CHECK(toasts.size() == 1 && toasts[0].fix_cmd == "surface new" && toasts[0].fix_label == "make a surface");
+    std::printf("    with the cube and no surface: %zu toast(s), fix '%s'\n", toasts.size(), toasts.empty() ? "" : toasts[0].fix_cmd.c_str());
+    auto click_label = [&](const std::string &label) {  // (a click on a recorded widget by its label, through real events)
+      for (int attempt = 0; attempt < 3; attempt++) {
+        ed.step_frame_headless();
+        const auto &br = ed.ui_for_test().button_rects;
+        if (!br.count(label)) continue;
+        const Recti r = br.at(label);
+        const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+        return true;
+      }
+      return false;
+    };
+    std::string why_none;
+    const bool clicked = click_label("Fix: make a surface");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const bool fixed = clicked && ed.surface_of_for_test(ed.active_object_for_test(), &why_none) != nullptr;
+    if (!fixed) {
+      std::string lg;
+      fs::read_file(hci, lg);
+      std::printf("    (fix click %d, toasts %zu, why '%s'; the HCI log so far:\n%s)\n", (int)clicked, toasts.size(), why_none.c_str(), lg.c_str());
+    }
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    /* The refusal is gone; an Info toast may have come after it - the surface's evaluation ends with "done in ..."
+     * when it takes over a second (task 0253), as on CI's runners. */
+    size_t warnings_left = 0;
+    for (const auto &t : toasts) {
+      std::printf("    a toast after the fix: [%s] \"%s\"\n", t.level == LogLevel::Info ? "info" : "warning", t.text.c_str());
+      warnings_left += t.level != LogLevel::Info;
+    }
+    CHECK(fixed && warnings_left == 0);
+    ed.command("paint on");
+    ed.step_frame_headless();
+    std::printf("    after the fix: Paint Mode %d\n", (int)ed.paint_for_test());
+    CHECK(ed.paint_for_test());
+    ed.command("paint off");
+    /* Disabled with a reason: Generate Lighting during Play, the Editing window's Export with nothing open. */
+    ed.command("toast a toast by hand");
+    ed.step_frame_headless();
+    CHECK(!toasts.empty() && toasts[0].text == "a toast by hand");
+    /* Hovered, a toast waits: the pointer kept on it through four seconds, it is still there; moved off, it leaves. */
+    ed.set_clock_for_test(110.0);
+    ed.command("toast a toast that waits");
+    ed.step_frame_headless();
+    {
+      const auto &br = ed.ui_for_test().button_rects;
+      const bool recorded = br.count("toast:a toast that waits") > 0;
+      const Recti r = recorded ? br.at("toast:a toast that waits") : Recti{};
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.set_clock_for_test(112.0);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.set_clock_for_test(114.0);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      const auto waits = [](const Editor::Toast &t) { return t.text == "a toast that waits"; };
+      const bool kept = recorded && std::any_of(toasts.begin(), toasts.end(), waits);
+      std::printf("    hovered for 4 s: frame recorded %d, still shown %d\n", (int)recorded, (int)kept);
+      CHECK(kept);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, r.x + r.w + 40, r.y + r.h + 40)});
+      ed.set_clock_for_test(118.0);
+      ed.step_frame_headless();
+      const bool gone = std::none_of(toasts.begin(), toasts.end(), waits);
+      std::printf("    4 s after the pointer left: gone %d\n", (int)gone);
+      CHECK(gone);
+    }
+    ed.command("layout Lighting & Rendering");  // (the layout that shows the Lighting window; `window Lighting` alone folds it behind its tab group)
+    ed.command("window Lighting");
+    ed.command("play");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    {
+      const Recti lw = ed.window_rect_for_test(WindowKind::Lighting);
+      std::printf("    (Lighting window %dx%d, Generate Lighting drawn %d, status '%s')\n", lw.w, lw.h, (int)ed.ui_for_test().button_rects.count("Generate Lighting"), ed.statusbar_text_for_test().substr(0, 40).c_str());
+    }
+    const std::string why_play = ed.button_disabled_why_for_test("Generate Lighting");
+    {  /* The reason is the button's tooltip: the pointer on it through the tooltip's delay. */
+      const auto &br = ed.ui_for_test().button_rects;
+      const Recti gr = br.count("Generate Lighting") ? br.at("Generate Lighting") : Recti{};
+      const int cx = gr.x + gr.w / 2, cy = gr.y + gr.h / 2;
+      ed.set_clock_for_test(120.0);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.set_clock_for_test(120.8);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      const std::string tip = ed.ui_for_test().tooltip_text_for_test();
+      std::printf("    Generate Lighting hovered in Play, the tooltip: '%s'\n", tip.c_str());
+      CHECK(tip.find("playing") != std::string::npos);
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, 2, 2)});
+    }
+    ed.command("stop");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why_stopped = ed.button_disabled_why_for_test("Generate Lighting");
+    std::printf("    Generate Lighting in Play: '%s'; after Stop: '%s'\n", why_play.c_str(), why_stopped.c_str());
+    CHECK(why_play.find("playing") != std::string::npos);
+    CHECK(why_stopped.empty() || why_stopped.find("Baked Global Illumination") != std::string::npos);
+    const std::string why_clear = ed.button_disabled_why_for_test("Clear Baked Data");
+    std::printf("    Clear Baked Data with nothing baked: '%s'\n", why_clear.c_str());
+    CHECK(why_clear.find("Nothing baked") != std::string::npos);
+    ed.command("window Editing");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why_export = ed.button_disabled_why_for_test("Export...");
+    std::printf("    Editing > Export with nothing open: '%s'\n", why_export.c_str());
+    CHECK(why_export.find("Nothing open") != std::string::npos);
+    /* The Strokes and Scatter mode buttons with nothing selected. */
+    ed.command("layout Default");
+    ed.command("window Modeling Tools");
+    ed.command("alltools on");
+    ed.clear_selection_for_test();
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why_strokes = ed.button_disabled_why_for_test("Strokes"), why_scatter = ed.button_disabled_why_for_test("Scatter");
+    std::printf("    nothing selected: Strokes '%s', Scatter '%s'\n", why_strokes.c_str(), why_scatter.c_str());
+    CHECK(why_strokes.find("Select") != std::string::npos && why_scatter.find("Select") != std::string::npos);
+    /* The HCI log. */
+    std::string log;
+    CHECK(fs::read_file(hci, log) && log.find("toast\tPaint:") != std::string::npos && log.find("fix\tsurface new") != std::string::npos && log.find("hint\t") != std::string::npos);
+    std::printf("    the HCI log: %zu lines\n", (size_t)std::count(log.begin(), log.end(), '\n'));
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", "");
+#else
+    unsetenv("BLENDITY_HCI_LOG");
+#endif
+  });
+}
+
+static void tests_round273() {
+  test("the job tray (ADR 0085 F2): a Mesh Maps bake is in the status bar's tray from its first frame with its start time and a Cancel, its progress moves (the frames until it does printed), its end raises an Info toast with the time and the HCI log has the start and done lines; a second bake cancelled through the tray's Cancel button lands nothing; `jobs` lists the running jobs", [] {
+    const std::string hci = fs::join(scratch_project(), "hci-273.log");
+    fs::remove_file(hci);
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", hci.c_str());
+#else
+    setenv("BLENDITY_HCI_LOG", hci.c_str(), 1);
+#endif
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(200.0);
+    ed.record_buttons_for_test(true);
+    ed.command("select Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();  // (the cold frames)
+    const auto &toasts = ed.toasts_for_test();
+    auto has_toast = [&](const char *words) {
+      return std::any_of(toasts.begin(), toasts.end(), [&](const Editor::Toast &t) { return t.text.find(words) != std::string::npos; });
+    };
+    double clock = 200.0;
+    bool saw_partial = false;  // (a progress strictly between 0 and 1 seen in the tray)
+    auto wait = [&](int *first_progress) {  // (the frames while the worker runs; the test clock 0.1 s a frame)
+      for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) {
+        clock += 0.1;
+        ed.set_clock_for_test(clock);
+        ed.step_frame_headless();
+        const std::vector<Editor::JobView> jobs = ed.jobs_for_test();
+        if (first_progress && *first_progress < 0 && !jobs.empty() && jobs[0].progress > 0.0f) *first_progress = i;
+        saw_partial = saw_partial || (!jobs.empty() && jobs[0].progress > 0.0f && jobs[0].progress < 1.0f);
+        if (ed.meshmaps_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      return !ed.meshmaps_busy_for_test();
+    };
+    ed.command("meshmaps 1024 16");
+    ed.step_frame_headless();
+    {
+      const std::vector<Editor::JobView> jobs = ed.jobs_for_test();
+      std::printf("    after the first frame: %zu job(s)%s\n", jobs.size(),
+                  jobs.empty() ? "" : strprintf(" - '%s' started at %.1f, progress %.2f", jobs[0].label.c_str(), jobs[0].started, jobs[0].progress).c_str());
+      CHECK(jobs.size() == 1 && jobs[0].label == "Mesh Maps" && jobs[0].started == 200.0 && jobs[0].cancellable);
+      CHECK(ed.ui_for_test().button_rects.count("job:Cancel") > 0 && ed.ui_for_test().button_rects.count("job:tray") > 0);
+    }
+    int first_progress = -1;
+    CHECK(wait(&first_progress));
+    ed.step_frame_headless();
+    std::printf("    the progress first moved after %d frame(s), a partial value seen %d; %zu job(s) in the tray after the bake\n", first_progress, (int)saw_partial, ed.jobs_for_test().size());
+    CHECK(saw_partial);
+    for (const auto &t : toasts) std::printf("    (toast: \"%s\")\n", t.text.c_str());
+    CHECK(ed.jobs_for_test().empty());
+    CHECK(has_toast("Mesh Maps done in"));
+    const GameObject *G = ed.scene().find(gid);
+    CHECK(G && G->get<MeshRenderer>() && !G->get<MeshRenderer>()->mesh_maps.empty());
+    /* The second bake, larger, cancelled through the tray's button (a real click on its recorded rectangle). */
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("meshmaps 2048 16");
+    ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    int attempts = 0;
+    bool cancel_sent = false;
+    for (; attempts < 5 && !cancel_sent && ed.meshmaps_busy_for_test(); attempts++) {  // (the click re-aimed each try: the frame under load)
+      if (!br.count("job:Cancel")) {
+        ed.step_frame_headless();
+        continue;
+      }
+      const Recti r = br.at("job:Cancel");
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      std::string so_far;
+      cancel_sent = fs::read_file(hci, so_far) && so_far.find("job\tcancel Mesh Maps") != std::string::npos;
+    }
+    std::printf("    the tray's Cancel: %d attempt(s), registered %d, the bake still running %d\n", attempts, (int)cancel_sent, (int)ed.meshmaps_busy_for_test());
+    CHECK(cancel_sent);
+    CHECK(wait(nullptr));
+    ed.step_frame_headless();
+    std::printf("    after Cancel: %zu job(s), undo steps %zu (were %zu)\n", ed.jobs_for_test().size(), ed.undo_steps_for_test(), steps);
+    for (const auto &t : toasts) std::printf("    (toast: \"%s\")\n", t.text.c_str());
+    CHECK(ed.jobs_for_test().empty() && ed.undo_steps_for_test() == steps);
+    CHECK(has_toast("Mesh Maps cancelled in"));
+    ed.command("jobs");
+    ed.step_frame_headless();
+    std::string log;
+    CHECK(fs::read_file(hci, log) && log.find("job\tstart Mesh Maps") != std::string::npos && log.find("job\tdone Mesh Maps") != std::string::npos &&
+          log.find("job\tcancel Mesh Maps") != std::string::npos && log.find("job\tcancelled Mesh Maps") != std::string::npos);
+    std::printf("    the HCI log: %zu lines\n", (size_t)std::count(log.begin(), log.end(), '\n'));
+#ifdef _WIN32
+    _putenv_s("BLENDITY_HCI_LOG", "");
+#else
+    unsetenv("BLENDITY_HCI_LOG");
+#endif
+  });
+}
+
+static void tests_round274() {
+  test("the History window (ADR 0085 F6): the status bar's Last opens it; four changes list as four steps with the last current; a click on the first jumps back three steps, a click on the last undone step redoes them", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(300.0);
+    ed.command("select Cube");
+    ed.command("layout Default");
+    ed.mark_changed_for_test("Step zero");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    {  /* The status bar's "Last:" opens the window. */
+      const auto &br = ed.ui_for_test().button_rects;
+      const bool last = br.count("status:Last") > 0;
+      if (last) {
+        const Recti r = br.at("status:Last");
+        const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      }
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const Recti hw = ed.window_rect_for_test(WindowKind::History);
+      std::printf("    'Last:' recorded %d; the History window %dx%d after the click\n", (int)last, hw.w, hw.h);
+      CHECK(last && hw.w > 0);
+    }
+    for (const char *label : {"Step one", "Step two", "Step three"}) {
+      ed.mark_changed_for_test(label);
+      ed.step_frame_headless();
+    }
+    Editor::HistoryRows rows = ed.history_rows_for_test();
+    std::printf("    after three changes: %zu past, %zu future; the Hierarchy's leaf shows History %d\n", rows.past.size(), rows.future.size(), (int)(ed.ui_for_test().button_rects.count("history:0") > 0));
+    CHECK(rows.past.size() == 4 && rows.future.empty() && rows.past[3] == "Step three");
+    auto click = [&](const std::string &key) {
+      const auto &br = ed.ui_for_test().button_rects;
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      return true;
+    };
+    CHECK(click("history:0"));
+    rows = ed.history_rows_for_test();
+    std::printf("    after a click on the first step: %zu past, %zu future (undo steps %zu)\n", rows.past.size(), rows.future.size(), ed.undo_steps_for_test());
+    CHECK(rows.past.size() == 1 && rows.future.size() == 3 && ed.undo_steps_for_test() == 1);
+    CHECK(click("history:redo:2"));
+    rows = ed.history_rows_for_test();
+    std::printf("    after a click on the last undone step: %zu past, %zu future\n", rows.past.size(), rows.future.size());
+    CHECK(rows.past.size() == 4 && rows.future.empty());
+  });
+  test("the hint table (ADR 0085 F3): the rows are listed by name; the row showing follows the state - Object Mode's tools, Edit Mode, Sculpt, Paint, Strokes, Scatter, the UV editor under the pointer, elsewhere the palette's; the shortcuts in the texts come from the keymap", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(320.0);
+    const std::vector<std::string> names = ed.hint_row_names_for_test();
+    std::printf("    %zu hint rows: ", names.size());
+    for (const std::string &n : names) std::printf("%s; ", n.c_str());
+    std::printf("\n");
+    CHECK(names.size() >= 26 && names.back() == "object tools");
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    auto row_hovered = [&] {
+      ed.set_scene_hovered_for_test(true);
+      return ed.statusbar_hint_row_for_test();
+    };
+    struct Case {
+      const char *on, *off, *row;
+    };
+    const Case cases[] = {{"", "", "object tools"}, {"edit", "edit off", "edit mode"}, {"sculpt on", "sculpt off", "sculpt"}, {"paint on", "paint off", "paint"},
+                          {"strokeobj on", "strokeobj off", "strokes"}, {"scatter on", "scatter off", "scatter"}};
+    ed.command("surface new HintSurf");
+    ed.command("scatter Sphere");
+    ed.step_frame_headless();
+    for (const Case &c : cases) {
+      if (*c.on) ed.command(c.on);
+      ed.step_frame_headless();
+      const std::string row = row_hovered();
+      std::printf("    %-12s -> row '%s'\n", *c.on ? c.on : "(object)", row.c_str());
+      CHECK(row == c.row);
+      if (*c.off) ed.command(c.off);
+      ed.step_frame_headless();
+    }
+    ed.set_scene_hovered_for_test(false);
+    const std::string elsewhere = ed.statusbar_hint_for_test();
+    std::printf("    elsewhere: row '%s': %s\n", ed.statusbar_hint_row_for_test().c_str(), elsewhere.c_str());
+    CHECK(ed.statusbar_hint_row_for_test() == "elsewhere" && elsewhere.find("find any command") != std::string::npos);
+    ed.set_binding("edit.palette", {KeyChord{platform::KEY_K, platform::MOD_CTRL | platform::MOD_SHIFT}});  // (the hint follows the keymap)
+    ed.step_frame_headless();
+    const std::string rebound = ed.statusbar_hint_for_test();
+    std::printf("    with the palette rebound: %s\n", rebound.c_str());
+    CHECK(rebound.find("Ctrl+Shift+K: find any command") != std::string::npos);
+    ed.command("keymap Unity");
+    ed.command("layout Texturing");
+    ed.command("window UV Editor");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti uv = ed.window_rect_for_test(WindowKind::UVEditor);
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, uv.x + uv.w / 2, uv.y + uv.h / 2)});
+    ed.set_scene_hovered_for_test(false);
+    std::printf("    the UV editor %dx%d under the pointer: row '%s'\n", uv.w, uv.h, ed.statusbar_hint_row_for_test().c_str());
+    CHECK(uv.w > 0 && ed.statusbar_hint_row_for_test() == "uv editor");
+  });
+  test("labels from the keymap (ADR 0085 F4): the Edit menu's shortcuts beside Select All, Duplicate, Delete and Frame Selected are the preset's chords under Unity and under Blender; the Window menu's too; the label audit's inventory is for the chain", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(330.0);
+    ed.step_frame_headless();
+    auto open_menu = [&](const char *name) {
+      const auto &br = ed.ui_for_test().button_rects;
+      const std::string key = std::string("menubar:") + name;
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    struct Row {
+      const char *label, *action;
+    };
+    const Row rows[] = {{"Select All", "edit.select_all"}, {"Duplicate", "edit.duplicate"}, {"Delete", "edit.delete"}, {"Frame Selected", "view.frame"}};
+    for (const char *preset : {"Unity", "Blender"}) {
+      ed.command(std::string("keymap ") + preset);
+      ed.step_frame_headless();
+      CHECK(open_menu("Edit"));
+      for (const Row &row : rows) {
+        const std::string drawn = ed.menu_shortcut_for_test(row.label), want = ed.shortcut_text_for_test(row.action);
+        std::printf("    %-8s %-15s drawn '%s', the keymap's '%s'\n", preset, row.label, drawn.c_str(), want.c_str());
+        CHECK(drawn == want);
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+      ed.step_frame_headless();
+      CHECK(open_menu("Window"));
+      const std::string hier = ed.menu_shortcut_for_test("Hierarchy"), want_h = ed.shortcut_text_for_test("window.hierarchy");
+      std::printf("    %-8s Window > Hierarchy drawn '%s', the keymap's '%s'\n", preset, hier.c_str(), want_h.c_str());
+      CHECK(hier == want_h);
+      ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+      ed.step_frame_headless();
+    }
+    ed.command("keymap Unity");
+    std::printf("    the Mesh menu's rows: extrude -> '%s' (the keymap's '%s'), select_loop -> '%s'\n", ed.op_keys_for_test("extrude").c_str(), ed.shortcut_text_for_test("mesh.extrude").c_str(), ed.op_keys_for_test("select_loop").c_str());
+    CHECK(ed.op_keys_for_test("extrude") == ed.shortcut_text_for_test("mesh.extrude") && !ed.op_keys_for_test("extrude").empty() && ed.op_keys_for_test("select_loop") == "Double-click");
+  });
+  test("unsaved changes (ADR 0085 F5): New Scene with a changed scene asks - Cancel keeps it, Don't Save replaces it, Save with a file writes it then replaces; Exit during Play leaves Play before the auto-save, so the file holds the pre-Play edits (Play's own changes are discarded, as Unity does)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(310.0);
+    auto click = [&](const std::string &key) {
+      const auto &br = ed.ui_for_test().button_rects;
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      return true;
+    };
+    ed.command("select Cube");
+    ed.mark_changed_for_test("An edit");
+    ed.step_frame_headless();
+    CHECK(ed.scene_dirty_for_test());
+    ed.new_scene_asked();
+    ed.step_frame_headless();
+    std::printf("    New Scene asked with a dirty scene: the prompt open %d, undo steps %zu\n", (int)ed.unsaved_dialog_open_for_test(), ed.undo_steps_for_test());
+    CHECK(ed.unsaved_dialog_open_for_test() && ed.undo_steps_for_test() == 1);
+    CHECK(click("unsaved:Cancel"));
+    CHECK(!ed.unsaved_dialog_open_for_test() && ed.undo_steps_for_test() == 1 && ed.scene_dirty_for_test());
+    ed.step_frame_headless();  // (a frame with no dialog open: the next ask is a fresh popup, as a user's would be)
+    ed.new_scene_asked();
+    ed.step_frame_headless();
+    CHECK(click("unsaved:Don't Save"));
+    std::printf("    after Don't Save: undo steps %zu, dirty %d, scene '%s'\n", ed.undo_steps_for_test(), (int)ed.scene_dirty_for_test(), ed.scene().name.c_str());
+    CHECK(ed.undo_steps_for_test() == 0 && !ed.scene_dirty_for_test());
+    /* Save, with a file: the scene is written, then replaced. */
+    const std::string path = fs::join(scratch_project(), "Scenes/t274.scene");
+    fs::make_dirs(fs::parent(path));
+    fs::remove_file(path);
+    ed.scene().path = path;
+    ed.scene().name = "t274";
+    ed.command("select Cube");
+    ed.mark_changed_for_test("Another edit");
+    ed.step_frame_headless();
+    ed.new_scene_asked();
+    ed.step_frame_headless();
+    CHECK(click("unsaved:Save"));
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    after Save: the file exists %d, undo steps %zu, scene '%s'\n", (int)fs::exists(path), ed.undo_steps_for_test(), ed.scene().name.c_str());
+    CHECK(fs::exists(path) && ed.undo_steps_for_test() == 0 && ed.scene().name == "Untitled");
+    /* Exit during Play: Play ends first, then the auto-save. */
+    ed.scene().path = path;
+    ed.scene().name = "t274";
+    ed.command("select Cube");
+    ed.mark_changed_for_test("Before Play");
+    ed.step_frame_headless();
+    ed.command("play");
+    ed.step_frame_headless();
+    CHECK(ed.playing_for_test());
+    const bool before = fs::exists(path);
+    fs::remove_file(path);
+    ed.request_close_for_test();
+    std::printf("    Exit during Play: playing after %d, the scene written %d (existed before %d)\n", (int)ed.playing_for_test(), (int)fs::exists(path), (int)before);
+    CHECK(!ed.playing_for_test() && fs::exists(path));
+  });
+}
+
+static void tests_round275() {
+  test("modeling, placing and UV (ADR 0085, task 0255): the Hierarchy's drop zones are thirds; the edit operations' new names; ] and [ set a bevel modal's segments as the wheel does", [] {
+    std::printf("    drop zones of a 30 px row: %d %d %d %d %d (0 into, 1 before, 2 after)\n", hier_drop_mode(0, 30), hier_drop_mode(9, 30), hier_drop_mode(15, 30), hier_drop_mode(21, 30), hier_drop_mode(29, 30));
+    CHECK(hier_drop_mode(0, 30) == 1 && hier_drop_mode(9, 30) == 1 && hier_drop_mode(10, 30) == 0 && hier_drop_mode(15, 30) == 0 && hier_drop_mode(20, 30) == 0 && hier_drop_mode(21, 30) == 2 && hier_drop_mode(29, 30) == 2);
+    const EditOpInfo *ee = find_edit_op("extrude_edges"), *of = find_edit_op("select_overlapping"), *dv = find_edit_op("select_overlaps");
+    CHECK(ee && std::string(ee->label) == "Extrude Edges" && of && std::string(of->label) == "Select Overlapping Faces" && dv && std::string(dv->label) == "Select Doubled Vertices");
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(400.0);
+    ed.command("select Cube");
+    ed.command("edit");
+    ed.command("edit edge all");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_view_rect();
+    const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless({key_ev(platform::KEY_B, platform::MOD_CTRL)});  // (Unity's Bevel chord starts the modal over the view)
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 40, cy)});
+    const bool modal = ed.modal_active_for_test();
+    const int segs0 = ed.last_op_segments_for_test();
+    ed.step_frame_headless({key_ev(platform::KEY_RBRACKET)});
+    ed.step_frame_headless({key_ev(platform::KEY_RBRACKET)});
+    const int segs2 = ed.last_op_segments_for_test();
+    ed.step_frame_headless({key_ev(platform::KEY_LBRACKET)});
+    const int segs1 = ed.last_op_segments_for_test();
+    std::printf("    the bevel modal started %d; segments %d -> %d after ] twice -> %d after [\n", (int)modal, segs0, segs2, segs1);
+    CHECK(modal && segs2 == segs0 + 2 && segs1 == segs0 + 1);
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(!ed.modal_active_for_test());
+  });
+  test("Boolean by name (task 0255): the object kept is chosen, not the one selected last - Cube kept and cut by the Sphere gives the same mesh whichever was selected last; the UV editor's hint names the keymap's tool chords", [] {
+    size_t faces[2] = {0, 0};
+    for (int order = 0; order < 2; order++) {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      const GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+      CHECK(cube && sphere);
+      if (!cube || !sphere) return;
+      const uint64_t cube_id = cube->id;
+      ed.scene().find(sphere->id)->set_world_position(ed.scene().find(cube_id)->world_position() + Vec3(0.5f, 0.5f, 0.5f));
+      ed.select_for_test(order == 0 ? cube_id : sphere->id, false);
+      ed.select_for_test(order == 0 ? sphere->id : cube_id, true);
+      ed.step_frame_headless();
+      if (order == 0) ed.boolean_for_test(0, true, cube_id);
+      else ed.command("boolean difference kept Cube");  // (the console's form)
+      ed.step_frame_headless();
+      const GameObject *kept = ed.scene().find(cube_id);
+      faces[order] = kept && kept->get<MeshFilter>() && kept->get<MeshFilter>()->mesh ? kept->get<MeshFilter>()->mesh->face_count() : 0;
+      std::printf("    %s selected last: the Cube kept with %zu faces, the Sphere %s\n", order == 0 ? "Sphere" : "Cube", faces[order], ed.scene().find_by_name("Sphere") ? "still there" : "removed");
+    }
+    if (meshops::boolean_available()) CHECK(faces[0] > 6 && faces[0] == faces[1]);
+    else CHECK(faces[0] == 6 && faces[1] == 6);  // (the dependency-free build has no Manifold: the Boolean refuses and changes nothing)
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("layout Texturing");
+    ed.command("window UV Editor");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti uv = ed.window_rect_for_test(WindowKind::UVEditor);
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, uv.x + uv.w / 2, uv.y + uv.h / 2)});
+    ed.command("keymap Blender");
+    ed.step_frame_headless();
+    ed.set_scene_hovered_for_test(false);
+    const std::string blender_hint = ed.statusbar_hint_for_test();
+    ed.command("keymap Unity");
+    ed.step_frame_headless();
+    ed.set_scene_hovered_for_test(false);
+    const std::string unity_hint = ed.statusbar_hint_for_test();
+    std::printf("    the UV editor's hint under Unity: %s\n    under Blender: %s\n", unity_hint.c_str(), blender_hint.c_str());
+    CHECK(uv.w > 0 && unity_hint.find("W E R: move, turn, scale") != std::string::npos && blender_hint != unity_hint);
+  });
+}
+
+static void tests_round276() {
+  test("lighting and rendering in one place (ADR 0085, task 0256): the Render window points at the Lighting window for the Environment (a click opens it); its Render Devices section carries the Viewport and GI device rows; Add Component lists the Rendering components in a modeling layout", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(500.0);
+    ed.command("layout Default");  // (a layout without the Lighting window: the click must bring it)
+    ed.command("window Render");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    const bool open_lighting = br.count("Open Lighting") > 0, sky_field = br.count("field:Sky Color") > 0, lighting_before = ed.window_rect_for_test(WindowKind::Lighting).w > 0;
+    std::printf("    Render window: Open Lighting button %d, an Environment field of its own %d, the Lighting window shown before the click %d\n", (int)open_lighting, (int)sky_field, (int)lighting_before);
+    CHECK(open_lighting && !sky_field && !lighting_before);
+    auto click = [&](const std::string &key) {
+      if (!br.count(key)) return false;
+      const Recti r = br.at(key);
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    {  /* The Render window is short in this layout: scroll its settings column until the button is in view. */
+      const Recti rw = ed.window_rect_for_test(WindowKind::Render);
+      int scrolls = 0;
+      for (; scrolls < 60 && br.count("Open Lighting") && br.at("Open Lighting").bottom() > rw.bottom() - 4; scrolls++) {
+        platform::Event w;
+        w.type = platform::EventType::Wheel;
+        w.x = rw.x + 40, w.y = rw.y + rw.h / 2;
+        w.wheel_y = -3;
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, w.x, w.y)});
+        ed.step_frame_headless({w});
+      }
+      std::printf("    the Render window %dx%d: %d scroll step(s) to bring Open Lighting into view\n", rw.w, rw.h, scrolls);
+    }
+    CHECK(click("Open Lighting"));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti lw = ed.window_rect_for_test(WindowKind::Lighting), rw2 = ed.window_rect_for_test(WindowKind::Render);
+    std::printf("    after the click: the Lighting window %dx%d, the Render window %dx%d, focused %d (Lighting %d)\n", lw.w, lw.h, rw2.w, rw2.h, ed.focused_window_for_test(), (int)WindowKind::Lighting);
+    if (lw.w == 0) {
+      ed.command("window Lighting");
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const Recti lw2 = ed.window_rect_for_test(WindowKind::Lighting);
+      std::printf("    (the console's `window Lighting` in this layout: %dx%d)\n", lw2.w, lw2.h);
+    }
+    CHECK(lw.w > 0);
+    ed.command("window Render");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool vrow = br.count("render:Viewport Device") > 0, grow = br.count("render:GI Device") > 0;
+    std::printf("    Render Devices: the Viewport Device row %d, the GI Device row %d\n", (int)vrow, (int)grow);
+    CHECK(vrow && grow);
+    /* Add Component in a modeling layout lists the Rendering components. */
+    ed.command("layout Default");
+    ed.command("select Cube");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    for (int i = 0; i < 40; i++) {  // (the Inspector scrolled until Add Component is inside it: a cube's components fill a short window)
+      Recti r;
+      const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Inspector);
+      if (!ed.button_rect_for_test("Add Component", r) || pane.w <= 0 || r.bottom() <= pane.bottom()) break;
+      platform::Event w;
+      w.type = platform::EventType::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = -3;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, w.x, w.y)});
+      ed.step_frame_headless({w});
+    }
+    const bool opened = click("Add Component");
+    const bool filters = br.count("menu:Camera Filters") > 0, light = br.count("menu:Light") > 0;
+    std::printf("    Add Component in the Default layout: opened %d, Camera Filters %d, Light %d\n", (int)opened, (int)filters, (int)light);
+    CHECK(opened && filters && light);
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+  });
+}
+
+static void tests_round277() {
+  test("compositing and materials within a pen's reach (ADR 0085, task 0257): a left drag pans the Render window's image; the Materials toolbar's Assign to Selection is disabled with its reason when nothing is selected; the Textures toolbar's Export Textures... opens the dialog", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(600.0);
+    ed.command("layout Lighting & Rendering");
+    ed.command("window Render");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("preview");  // (a quick render: the image area pans only with a picture in it)
+    for (int i = 0; i < 400 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Recti rw = ed.window_rect_for_test(WindowKind::Render);
+    const Vec2 pan0 = ed.render_pan_for_test();
+    const int cx = rw.x + rw.w * 2 / 3, cy = rw.y + rw.h * 2 / 3;  // (the image area: right of the settings column, below the bar)
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 30, cy + 10)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 60, cy + 20)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx + 60, cy + 20)});
+    const Vec2 pan1 = ed.render_pan_for_test();
+    /* A press that began outside the image (the settings column) and crossed into it pans nothing. */
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, rw.x + 20, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, rw.x + 20, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 50, cy)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx + 50, cy)});
+    const Vec2 pan2 = ed.render_pan_for_test();
+    std::printf("    the Render window %dx%d with a preview rendered %d: a left drag of 60 px moved the pan (%.0f, %.0f) -> (%.0f, %.0f)\n", rw.w, rw.h, (int)(ed.render_image_for_test().width > 0), pan0.x, pan0.y, pan1.x, pan1.y);
+    std::printf("    a press from the settings column crossing the image: pan (%.0f, %.0f) -> (%.0f, %.0f)\n", pan1.x, pan1.y, pan2.x, pan2.y);
+    CHECK(rw.w > 0 && pan1.x > pan0.x && pan2.x == pan1.x && pan2.y == pan1.y);
+    ed.command("layout Texturing");
+    ed.command("window Materials");
+    ed.clear_selection_for_test();
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string why = ed.button_disabled_why_for_test("Assign to Selection");
+    const Recti mw = ed.window_rect_for_test(WindowKind::Materials);
+    std::printf("    the Materials window %dx%d: Assign to Selection drawn %d, disabled: '%s'\n", mw.w, mw.h, (int)(ed.ui_for_test().button_rects.count("Assign to Selection") > 0), why.c_str());
+    CHECK(mw.w > 0 && ed.ui_for_test().button_rects.count("Assign to Selection") > 0 && why.find("Select") != std::string::npos);
+    ed.command("select Cube");
+    ed.command("surface new ExportSurf");
+    ed.command("window Textures");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    const bool button = br.count("Export Textures...") > 0;
+    if (button) {
+      const Recti r = br.at("Export Textures...");
+      const int bx = r.x + r.w / 2, by = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, bx, by)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, bx, by)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, bx, by)});
+      ed.step_frame_headless();
+    }
+    std::printf("    Textures toolbar: Export Textures... drawn %d, the dialog open %d, its Export button recorded %d\n", (int)button, (int)ed.export_textures_dialog_for_test(), (int)(br.count("exptex:Export") > 0));
+    CHECK(button && ed.export_textures_dialog_for_test() && br.count("exptex:Export") > 0 && br.count("exptex:Cancel") > 0);
+    ed.close_dialog_for_test();
+  });
+}
+
+static void tests_round278() {
+  test("animation within reach (ADR 0085, task 0258): the five animation actions exist and the presets bind them as stated, colliding with no other action's chord; Set Key adds a key on every track at the playhead, Record toggles, Next Key moves the playhead; the Scene view's bar carries the RECORD badge while Record is on", [] {
+    struct Bind {
+      const char *preset, *action, *chord;
+    };
+    const Bind binds[] = {{"Unity", "anim.key", "Shift+K"}, {"Unity", "anim.record", "Ctrl+Shift+K"}, {"Unity", "anim.prev_key", ","}, {"Unity", "anim.next_key", "."},
+                          {"Unreal", "anim.key", "Shift+K"}, {"Blender", "anim.key", "Shift+I"}, {"Blender", "anim.next_key", "Up"}, {"Blender", "anim.prev_key", "Down"}, {"Maya", "anim.key", "S"}};
+    for (const Bind &b : binds) {
+      const Keymap k = keymap_preset(b.preset);
+      const auto it = k.find(b.action);
+      const std::string got = it == k.end() || it->second.empty() ? std::string("(none)") : chord_text(it->second[0]);
+      std::printf("    %-8s %-14s %s\n", b.preset, b.action, got.c_str());
+      CHECK(got == b.chord);
+    }
+    /* No animation chord collides with another action's in its preset. */
+    int collisions = 0;
+    for (const char *preset : {"Unity", "Unreal", "Blender", "Maya", "SketchUp"}) {
+      const Keymap k = keymap_preset(preset);
+      for (const auto &kv : k) {
+        if (kv.first.rfind("anim.", 0) != 0) continue;
+        for (const KeyChord &c : kv.second)
+          for (const auto &other : k) {
+            if (other.first == kv.first || std::find(other.second.begin(), other.second.end(), c) == other.second.end()) continue;
+            collisions++;
+            std::printf("    collision in %s: %s and %s share %s\n", preset, kv.first.c_str(), other.first.c_str(), chord_text(c).c_str());
+          }
+      }
+    }
+    CHECK(collisions == 0);
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(700.0);
+    ed.command("select Cube");
+    ed.command("layout Default");
+    ed.command("window Animation");  // (Record sees the edits from the Animation window's frame)
+    ed.command("anim new Hop");
+    ed.command("anim key . Position 1 0 0");  // (two tracks - Y and X - with keys at 0 and 30)
+    ed.command("anim key . Position 1 30 1");
+    ed.command("anim key . Position 0 0 0");
+    ed.command("anim key . Position 0 30 2");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("anim frame 12");
+    ed.step_frame_headless();
+    const AnimationClipPtr clip = ed.scene().find_by_name("Cube") ? ed.anim_clip_for_test() : nullptr;
+    const size_t tracks = clip ? clip->tracks.size() : 0;
+    size_t keys0 = 0, keys1 = 0;
+    if (clip) for (const AnimTrack &t : clip->tracks) keys0 += t.keys.size();
+    CHECK(ed.run_action("anim.key"));
+    ed.step_frame_headless();
+    if (clip) for (const AnimTrack &t : clip->tracks) keys1 += t.keys.size();
+    std::printf("    the clip: %zu track(s), %zu key(s) -> %zu after Set Key at frame 12\n", tracks, keys0, keys1);
+    CHECK(tracks == 2 && keys1 == keys0 + tracks);
+    ed.command("anim frame 0");
+    CHECK(ed.run_action("anim.next_key"));
+    std::printf("    Next Key from frame 0: the playhead at %.0f (the Set Key at 12)\n", ed.anim_for_test().frame);
+    CHECK(ed.anim_for_test().frame == 12.0f);
+    /* The chord itself, over the Scene view: Shift+K under Unity adds a key at the playhead. */
+    ed.command("anim frame 20");
+    const Recti view = ed.scene_view_rect();
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, view.x + view.w / 2, view.y + view.h / 2)});
+    ed.step_frame_headless({key_ev(platform::KEY_K, platform::MOD_SHIFT)});
+    size_t keys2 = 0;
+    if (clip) for (const AnimTrack &t : clip->tracks) keys2 += t.keys.size();
+    std::printf("    Shift+K over the view at frame 20: %zu -> %zu keys\n", keys1, keys2);
+    CHECK(keys2 == keys1 + tracks);
+    /* In Play, Set Key refuses aloud with the fix. */
+    ed.command("play");
+    ed.step_frame_headless();
+    CHECK(ed.run_action("anim.key"));
+    ed.step_frame_headless();
+    const auto &toasts = ed.toasts_for_test();
+    const bool refused = std::any_of(toasts.begin(), toasts.end(), [](const Editor::Toast &t) { return t.text.find("not while Play") != std::string::npos && t.fix_cmd == "stop"; });
+    std::printf("    Set Key in Play: refused with Fix: stop %d\n", (int)refused);
+    CHECK(refused);
+    ed.command("stop");
+    ed.step_frame_headless();
+    CHECK(ed.run_action("anim.record"));
+    ed.step_frame_headless();
+    const bool badge_on = ed.ui_for_test().button_rects.count("overlay:RECORD") > 0, rec_on = ed.anim_for_test().record;
+    CHECK(ed.run_action("anim.record"));
+    ed.step_frame_headless();
+    const bool badge_off = ed.ui_for_test().button_rects.count("overlay:RECORD") > 0;
+    std::printf("    Record toggled on: record %d, the RECORD badge %d; toggled off: badge %d\n", (int)rec_on, (int)badge_on, (int)badge_off);
+    CHECK(rec_on && badge_on && !badge_off && !ed.anim_for_test().record);
+  });
+}
+
+static void tests_round279() {
+  test("rigging and weight paint within reach (ADR 0085, task 0259): the Add brush subtracts with Ctrl or the pen's eraser and the other brushes are left alone; a second mesh selected alone gets a Skeleton dropdown in the Skin section and, the skeleton picked, Add Armature (Skin) binds it to that skeleton", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(800.0);
+    ed.wp_brush_mode_for_test(0);
+    const int add_plain = ed.wp_effective_mode_for_test(false, false), add_ctrl = ed.wp_effective_mode_for_test(true, false), add_eraser = ed.wp_effective_mode_for_test(false, true);
+    ed.wp_brush_mode_for_test(3);
+    const int blur_ctrl = ed.wp_effective_mode_for_test(true, false);
+    ed.wp_brush_mode_for_test(0);
+    std::printf("    Add brush: plain %d, Ctrl %d, eraser %d (0 add, 1 subtract); Blur with Ctrl %d\n", add_plain, add_ctrl, add_eraser, blur_ctrl);
+    CHECK(add_plain == 0 && add_ctrl == 1 && add_eraser == 1 && blur_ctrl == 3);
+    /* A skeleton rigged on the Cube; then the Sphere, selected alone, binds to it through the dropdown. */
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<std::string> roots = ed.skeleton_roots_for_test();
+    std::printf("    skeleton roots after `create Armature`: %zu", roots.size());
+    for (const std::string &r : roots) std::printf(" '%s'", r.c_str());
+    std::printf("\n");
+    CHECK(!roots.empty());
+    if (roots.empty()) return;
+    ed.command("select Sphere");
+    ed.command("layout Rigging & Animation");
+    ed.command("window Rigging");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &br = ed.ui_for_test().button_rects;
+    const bool dropdown = br.count("skin:Skeleton") > 0;
+    const std::string why_none = ed.button_disabled_why_for_test("Add Armature (Skin)");
+    GameObject *root = ed.scene().find_by_name(roots[0]);
+    const GameObject *arm_parent_before = root ? root->parent : nullptr;
+    const GameObject *sphere_parent_before = ed.scene().find_by_name("Sphere") ? ed.scene().find_by_name("Sphere")->parent : nullptr;
+    ed.skin_pick_root_for_test(root ? root->id : 0);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool enabled = ed.button_disabled_why_for_test("Add Armature (Skin)").empty() && br.count("Add Armature (Skin)") > 0;
+    std::printf("    the Skin section: Skeleton dropdown %d; Add Armature before a pick disabled '%s'; after the pick enabled %d\n", (int)dropdown, why_none.c_str(), (int)enabled);
+    CHECK(dropdown && enabled);
+    if (br.count("Add Armature (Skin)")) {
+      const Recti r = br.at("Add Armature (Skin)");
+      const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseDown, cx, cy)});
+      ed.step_frame_headless({mouse_ev(platform::EventType::MouseUp, cx, cy)});
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    }
+    const GameObject *sphere = ed.scene().find_by_name("Sphere"), *cube_after = ed.scene().find_by_name("Cube"), *arm = ed.scene().find_by_name(roots[0]);
+    const SkinModifier *sk = sphere ? sphere->get<SkinModifier>() : nullptr;
+    const bool armature = arm && arm->get<Armature>(), arm_parent_same = arm && arm->parent == arm_parent_before, sphere_parent_same = sphere && sphere->parent == sphere_parent_before;
+    const size_t groups = sphere && sphere->get<MeshFilter>() && sphere->get<MeshFilter>()->mesh ? sphere->get<MeshFilter>()->mesh->vertex_groups.size() : 0;
+    std::printf("    after Add Armature (Skin): the Sphere's Skin modifier %d, bound to '%s' (an Armature %d), %zu vertex group(s); the armature's parent unchanged %d, the Sphere's %d, the Cube still skinned %d\n",
+                (int)(sk != nullptr), sk ? sk->object.c_str() : "", (int)armature, groups, (int)arm_parent_same, (int)sphere_parent_same, (int)(cube_after && cube_after->get<SkinModifier>()));
+    CHECK(sk && sk->object == roots[0] && armature && groups > 0 && arm_parent_same && sphere_parent_same && cube_after && cube_after->get<SkinModifier>());
+  });
+}
+
+static void tests_round308() {
+  test("render, MoonRay and AI verbs without the console (task 0288): the Render window's First / Last / Frame Rate and Sequence Folder; Preferences' FFmpeg path typed; AI Inbetweening's From a File... (MoonRay's row and the Check buttons need an install: not here); the Animation window's AI options (the span, the fit on or off) - all by real clicks and keys", [] {
+    Editor ed;
+    ed.init_headless(1500, 640);  // (Preferences taller than the window on every system - as on Linux, where MoonRay's own row is drawn)
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    auto press = [&](const Recti &r) {
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+    };
+    auto rect = [&](const std::string &key, Recti &r) {
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      return ed.button_rect_for_test(key, r);
+    };
+    auto click = [&](const std::string &key) {
+      Recti r;
+      if (!rect(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+      press(r);
+      return true;
+    };
+    auto reach = [&](const std::string &key, WindowKind kind) {  // (a row of a window, scrolled until it is inside)
+      for (int attempt = 0; attempt < 60; attempt++) {
+        ed.step_frame_headless();
+        Recti r;
+        if (!ed.button_rect_for_test(key, r)) continue;
+        const Recti pane = ed.dock_leaf_rect_for_test(kind);
+        const int top = pane.y + 28;
+        if (pane.w <= 0 || (r.y >= top && r.bottom() <= pane.bottom())) return true;
+        platform::Event w;
+        w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < top ? 1.0f : -1.0f;
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, w.x, w.y)});
+        ed.step_frame_headless({w});
+      }
+      return std::printf("    (no '%s' in its window)\n", key.c_str()), false;
+    };
+    auto said = [&](const char *part) {
+      for (const auto &t : ed.toasts_for_test())
+        if (t.text.find(part) != std::string::npos) return true;
+      return false;
+    };
+    /* The Render window. */
+    ed.command("layout Lighting & Rendering");
+    ed.command("window Render");
+    const bool range = reach("field:First Frame", WindowKind::Render) && reach("field:Last Frame", WindowKind::Render) && reach("field:Frame Rate", WindowKind::Render);
+    const bool folder = reach("render:seqfolder:field", WindowKind::Render) && reach("render:seqfolder:...", WindowKind::Render);
+    std::printf("    the Render window: First / Last / Frame Rate drawn %d, Sequence Folder drawn %d\n", (int)range, (int)folder);
+    CHECK(range && folder);
+    /* Preferences: FFmpeg typed. */
+    ed.command("preferences");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto pref_reach = [&](const std::string &key) {  // (Preferences scrolled until the control is wholly inside it, and stays put)
+      for (int w = 0; w < 1200 && ed.moonray_busy_for_test(); w++) {  // (MoonRay's search, on a thread, adds a row that moves the rows below when it ends: round 317)
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      Recti last{-1, -1, 0, 0};
+      for (int i = 0; i < 80; i++) {
+        Recti a;
+        const Recti dlg = ed.top_popup_rect_for_test();
+        if (!ed.button_rect_for_test(key, a)) return false;
+        const bool still = a.x == last.x && a.y == last.y;  // (a row can appear above it - MoonRay's, once found - and move it)
+        last = a;
+        if (a.y >= dlg.y && a.bottom() <= dlg.bottom()) {
+          if (still) return true;
+          ed.step_frame_headless();
+          continue;
+        }
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+        platform::Event w = mouse_ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+        w.wheel_y = a.bottom() > dlg.bottom() ? -1.0f : 1.0f;
+        ed.step_frame_headless({w});
+        ed.step_frame_headless();  // (the controls drawn where the scroll put them)
+      }
+      return false;
+    };
+    const bool ff = pref_reach("pref:ffmpeg:field") && click("pref:ffmpeg:field");
+    ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+    for (char c : std::string("C:/tools/ffmpeg308.exe")) {
+      platform::Event e;
+      e.type = ET::Text, e.codepoint = (uint32_t)c;
+      ed.step_frame_headless({e});
+    }
+    ed.step_frame_headless({key_ev(platform::KEY_ENTER, 0)});
+    ed.step_frame_headless();
+    std::printf("    FFmpeg's field clicked %d, typed and Enter: '%s'\n", (int)ff, ed.ffmpeg_path_for_test().c_str());
+    CHECK(ff && ed.ffmpeg_path_for_test() == "C:/tools/ffmpeg308.exe");
+    ed.command("renderanim ffmpeg");
+    /* AI Inbetweening: From a File... without a file dialog says how else. */
+    const bool from_file = pref_reach("pref:aiarchive:...") && click("pref:aiarchive:...");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    AI's archive ... clicked %d: no dialog here said %d (its path can be typed)\n", (int)from_file, (int)said("no file dialog here"));
+    CHECK(from_file && said("no file dialog here"));
+    ed.close_dialog_for_test();
+    ed.step_frame_headless();
+    /* The Animation window: the AI options' popup turns the fit off and on. */
+    ed.command("layout Animation");
+    ed.command("select Cube");
+    ed.command("component Animation");  // (the toolbar's tools need an animated object)
+    ed.command("assist on ai");
+    ed.command("window Animation");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const bool was = ed.ai_head_on_for_test();
+    const bool off = click("ai:options") && click("menu:Use the Fit to My Clips");
+    const bool now = ed.ai_head_on_for_test();
+    Recti span_row;
+    const bool span = click("ai:options") && rect("menu:Make This Span", span_row);
+    std::printf("    the AI options: the fit %d -> %d (clicked %d), Make This Span listed %d\n", (int)was, (int)now, (int)off, (int)span);
+    CHECK(off && now != was && span);
+    const bool made = click("menu:Make This Span");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    Make This Span clicked %d without the download: refused with an Install fix %d\n", (int)made, (int)said("AI Inbetween"));
+    CHECK(made && said("AI Inbetween"));
+    ed.command("assist off ai");
+    /* Preferences taller than a 600 px window (task 0290): it fits the window and scrolls, its last rows reached by the wheel. */
+    Editor small;
+    small.init_headless(1200, 600);
+    small.record_buttons_for_test(true);
+    small.command("preferences");
+    for (int i = 0; i < 3; i++) small.step_frame_headless();
+    const Recti dlg = small.top_popup_rect_for_test();
+    Recti row = small.combo_rect_for_test("km_preset");  // (low in Preferences: below a 600 px window)
+    const bool below = row.w > 0 && row.bottom() > dlg.bottom();
+    int wheels = 0;
+    for (; wheels < 60 && (row = small.combo_rect_for_test("km_preset")).w > 0 && row.bottom() > dlg.bottom(); wheels++) {
+      small.step_frame_headless({mouse_ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+      platform::Event w = mouse_ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+      w.wheel_y = -1.0f;
+      small.step_frame_headless({w});
+    }
+    row = small.combo_rect_for_test("km_preset");
+    const bool inside = row.w > 0 && row.y >= dlg.y && row.bottom() <= dlg.bottom();
+    std::printf("    Preferences at 600 px: %dx%d at y %d (the window's height at most), the keymap preset below it %d, inside after %d wheel step(s) %d\n", dlg.w, dlg.h,
+                dlg.y, (int)below, wheels, (int)inside);
+    CHECK(dlg.y >= 0 && dlg.bottom() <= 600 && below && inside);
+  });
+}
+
+static void tests_round307() {
+  test("modeling, UV and lighting verbs without the console (task 0287): Mirror Y and Clear Custom Normals in Mesh Tools; GameObject > Reference Image > Front / Side with the project's images; a light aimed at typed numbers; a guide line by numbers; Weight Paint's Clean Below; the UV editor's material list (several, the others hidden) and Part Unwrap's options - all by real clicks", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    const std::string img = fs::join(ed.assets_dir_for_test(), "0ref287.png");
+    std::vector<uint32_t> px(64, 0xFF808080u);
+    CHECK(write_png(img, px.data(), 8, 8, 8, true));
+    using ET = platform::EventType;
+    auto press = [&](const Recti &r) {
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+    };
+    auto rect = [&](const std::string &key, Recti &r) {
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      return ed.button_rect_for_test(key, r);
+    };
+    auto click = [&](const std::string &key) {
+      Recti r;
+      if (!rect(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+      press(r);
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      Recti r;
+      if (!rect(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+      ed.step_frame_headless({mouse_ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      ed.step_frame_headless();
+      return true;
+    };
+    auto reach = [&](const std::string &key, WindowKind kind, bool press_it) {  // (a row of a window, scrolled until it is inside)
+      for (int attempt = 0; attempt < 60; attempt++) {
+        ed.step_frame_headless();
+        Recti r;
+        if (!ed.button_rect_for_test(key, r)) continue;
+        const Recti pane = ed.dock_leaf_rect_for_test(kind);
+        const int top = pane.y + 28;
+        if (pane.w > 0 && (r.y < top || r.bottom() > pane.bottom())) {
+          platform::Event w;
+          w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < top ? 1.0f : -1.0f;
+          ed.step_frame_headless({mouse_ev(ET::MouseMove, w.x, w.y)});
+          ed.step_frame_headless({w});
+          continue;
+        }
+        if (press_it) press(r);
+        return true;
+      }
+      return std::printf("    (no '%s' in its window)\n", key.c_str()), false;
+    };
+    /* Mesh Tools: Mirror Y doubles the cube's faces; Clear Custom Normals is there. */
+    ed.command("layout Modeling & Topology");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->mesh_filter() && cube->mesh_filter()->mesh);
+    if (!cube || !cube->mesh_filter() || !cube->mesh_filter()->mesh) return;
+    ed.select_for_test(cube->id, false);
+    ed.command("position Cube 0 1 0");
+    const size_t faces = cube->mesh_filter()->mesh->face_count();
+    const bool mirrored = reach("Mirror Y", WindowKind::Tools, true);
+    std::printf("    Mirror Y clicked %d: %zu -> %zu faces\n", (int)mirrored, faces, cube->mesh_filter()->mesh->face_count());
+    CHECK(mirrored && cube->mesh_filter()->mesh->face_count() == 2 * faces);
+    const bool normals = reach("Clear Custom Normals", WindowKind::Tools, true);
+    std::printf("    Clear Custom Normals clicked %d\n", (int)normals);
+    CHECK(normals);
+    /* GameObject > Reference Image > Front / Side: the project's images listed; the side one turned from the front one. */
+    ed.command("layout Reference & Planning");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::string rel;
+    const bool listed = click("menubar:GameObject") && hover("submenu:Reference Image") && hover("submenu:Front");
+    for (const auto &kv : ed.ui_for_test().button_rects)
+      if (kv.first.rfind("menu:", 0) == 0 && kv.first.find("0ref287.png") != std::string::npos) rel = kv.first;
+    const bool front = listed && !rel.empty() && click(rel);
+    GameObject *ref_front = ed.scene().find_by_name("Reference 0ref287");
+    const bool side = click("menubar:GameObject") && hover("submenu:Reference Image") && hover("submenu:Side") && click(rel);
+    GameObject *ref_side = ed.scene().find_by_name("Reference 0ref287.001");
+    const Quat qf = ref_front ? ref_front->world_rotation() : Quat(), qs = ref_side ? ref_side->world_rotation() : Quat();
+    const float turned = 2.0f * std::acos(std::min(1.0f, std::fabs(qf.x * qs.x + qf.y * qs.y + qf.z * qs.z + qf.w * qs.w))) * 57.29578f;
+    std::printf("    Reference Image > Front listed '%s' and clicked %d, Side clicked %d: objects %d %d, the side one turned %.0f degrees from the front one\n", rel.c_str(), (int)front,
+                (int)side, (int)(ref_front != nullptr), (int)(ref_side != nullptr), turned);
+    CHECK(front && side && ref_front && ref_side && turned > 45.0f);
+    /* A light aimed at typed numbers (the fields' default: the origin). */
+    ed.command("layout Lighting & Rendering");
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    CHECK(sun != nullptr);
+    if (sun) {
+      ed.select_for_test(sun->id, false);
+      sun->set_local_rotation(Quat());
+      const Vec3 before = sun->world_rotation().rotate(Vec3(0, 0, 1));
+      const bool fields = reach("field:Aim X", WindowKind::Inspector, false) && reach("field:Aim Z", WindowKind::Inspector, false);
+      const bool aimed = reach("light:Aim", WindowKind::Inspector, true);
+      const Vec3 fwd = sun->world_rotation().rotate(Vec3(0, 0, 1)), to = normalize(Vec3() - sun->world_position());
+      std::printf("    the Aim fields drawn %d, Aim clicked %d: forward (%.2f %.2f %.2f) -> (%.2f %.2f %.2f), toward the origin (%.2f %.2f %.2f)\n", (int)fields, (int)aimed,
+                  before.x, before.y, before.z, fwd.x, fwd.y, fwd.z, to.x, to.y, to.z);
+      CHECK(fields && aimed && length(fwd - before) > 0.01f && length(fwd - to) < 1e-3f);
+    }
+    /* A guide line by numbers (Edit Mode's tools). */
+    ed.command("layout Modeling & Topology");
+    cube = ed.scene().find_by_name("Cube");
+    if (cube) ed.select_for_test(cube->id, false);
+    ed.command("edit on");
+    const size_t guides = ed.scene().guides.size();
+    const bool guide = reach("guides:Add", WindowKind::Tools, true);
+    std::printf("    Add Guide Line clicked %d: guides %zu -> %zu\n", (int)guide, guides, ed.scene().guides.size());
+    CHECK(guide && ed.scene().guides.size() == guides + 1 && std::fabs(ed.scene().guides.back().d.x - 1.0f) < 1e-5f);
+    ed.command("edit off");
+    /* Weight Paint's Clean Below (the Rigging window). */
+    ed.command("layout Rigging");
+    if (cube) ed.select_for_test(cube->id, false);
+    ed.command("vgroup add Clean287");
+    ed.command("weightpaint on");
+    const bool clean = reach("field:Clean Below", WindowKind::Rigging, false) && reach("wp:Clean", WindowKind::Rigging, true);
+    std::printf("    Clean Below drawn and Clean clicked %d\n", (int)clean);
+    CHECK(clean);
+    ed.command("weightpaint off");
+    /* The UV editor: two materials picked from the list, the others hidden; Part Unwrap's bound and tiles. */
+    ed.command("layout UV Unwrapping");
+    if (cube) ed.select_for_test(cube->id, false);
+    ed.command("newslotmat 1");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    auto slot_row = [&](size_t i) {  // (the list's row: "<slot>: <material>")
+      const MeshRenderer *mr = cube ? cube->mesh_renderer() : nullptr;
+      const std::string name = mr && i < mr->materials.size() && mr->materials[i] ? mr->materials[i]->name : "(none)";
+      return strprintf("menu:%zu: %s", i, name.c_str());
+    };
+    const bool m0 = click("uv:materials") && click(slot_row(0));
+    const bool m1 = click("uv:materials") && click(slot_row(1));
+    const bool hide = click("uv:materials") && click("menu:Others Hidden");
+    std::printf("    the material list: slot 0 clicked %d, slot 1 clicked %d (%zu slots edited), Others Hidden clicked %d (%d)\n", (int)m0, (int)m1, ed.uv_slots_for_test().size(), (int)hide,
+                (int)ed.uv_hide_others_for_test());
+    CHECK(m0 && m1 && ed.uv_slots_for_test().size() == 2 && hide && ed.uv_hide_others_for_test());
+    const bool all = click("uv:materials") && click("menu:All materials");
+    CHECK(all && ed.uv_slots_for_test().empty());
+    const std::vector<Vec2> uvs = cube && cube->mesh_filter() && cube->mesh_filter()->mesh ? cube->mesh_filter()->mesh->uvs : std::vector<Vec2>();
+    const bool bound = click("uv:Parts") && click("menu:1.5");
+    const bool tiles = click("uv:Parts") && click("menu:Several Tiles (UDIM)");
+    std::printf("    Parts: bound 1.5 clicked %d (%.2f), Several Tiles clicked %d (%d)\n", (int)bound, ed.part_tau_for_test(), (int)tiles, (int)ed.part_multi_tile_for_test());
+    CHECK(bound && std::fabs(ed.part_tau_for_test() - 1.5f) < 1e-4f && tiles && ed.part_multi_tile_for_test());
+    const bool kept = cube && cube->mesh_filter() && cube->mesh_filter()->mesh && cube->mesh_filter()->mesh->uvs.size() == uvs.size() &&
+                      std::equal(uvs.begin(), uvs.end(), cube->mesh_filter()->mesh->uvs.begin(), [](Vec2 a, Vec2 b) { return a.x == b.x && a.y == b.y; });
+    std::printf("    the options left the UVs as they were %d (they set the next unwrap's settings only)\n", (int)kept);
+    CHECK(kept);
+    std::remove(img.c_str());
+  });
+}
+
+/* The console-reach table (task 0290): each verb the console-only-to-UI plan gave a control, the commands that show its
+ * window, and the way to it - "menubar:X" opened, "submenu:X" hovered, "open:<key>" clicked, then the control's key,
+ * which must be drawn. A renamed button, a moved menu or a control lost shows here. tools/test_coverage_map.py reads it. */
+struct ConsoleReach {
+  const char *verb, *setup, *path;
+};
+static const ConsoleReach kConsoleReach[] = {
+    {"sketch color", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Pen Color>menu:Red"},
+    {"sketch steady", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Steadiness>menu:Strong"},
+    {"sketch clear", "layout Default", "menubar:Mesh>submenu:Draw>menu:Clear the Sketch"},
+    {"sketchguide french", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Guides>submenu:French Curve Shape>menu:Spiral"},
+    {"sketchguide symmetry radial", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Guides>submenu:Radial Copies>menu:6 copies"},
+    {"sketchguide follow", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Guides>menu:Perspective Follows the Camera"},
+    {"sketchcanvas", "layout Default", "menubar:Mesh>submenu:Draw>submenu:Canvas>menu:The Ground"},
+    {"sketchlift", "layout Default", "menubar:Mesh>submenu:Draw>menu:Lift the Sketch to 3D"},
+    {"animemat", "layout Default;select Cube", "menubar:GameObject>submenu:Anime Look>menu:Rock"},
+    {"surface new", "layout Texturing;select Cube", "menubar:GameObject>menu:New Surface"},
+    {"refimage", "layout Reference & Planning", "menubar:GameObject>submenu:Reference Image>submenu:Side>menu:Browse..."},
+    {"strokeobj new", "layout Stylized;select Cube;strokeobj on", "strokes:New Stroke Object"},
+    {"strokeobj grass", "layout Stylized;select Cube;strokeobj on", "strokes:Grass"},
+    {"scatter seed", "layout Stylized;select Cube;scatter on", "field:Seed"},
+    {"meshop mirror_y", "layout Modeling & Topology;select Cube", "Mirror Y"},
+    {"customnormals clear", "layout Modeling & Topology;select Cube", "Clear Custom Normals"},
+    {"uv others", "layout UV Unwrapping;select Cube", "open:uv:materials>menu:Others Hidden"},
+    {"uv parts", "layout UV Unwrapping;select Cube", "open:uv:Parts>menu:1.5"},
+    {"renderanim first last fps", "layout Lighting & Rendering;window Render", "field:First Frame"},
+    {"rendersequence", "layout Lighting & Rendering;window Render", "render:seqfolder:field"},
+    {"aimlight", "layout Lighting & Rendering;select Directional Light", "light:Aim"},
+    {"renderanim ffmpeg", "layout Default;preferences", "pref:ffmpeg:field"},
+    {"ai install", "layout Default;preferences", "pref:aiarchive:field"},
+    {"shape add", "layout Default;select Cube", "shape:Add"},
+    {"ai span", "layout Animation;select Cube;component Animation;assist on ai", "open:ai:options>menu:Make This Span"},
+    {"ai finetune", "layout Animation;select Cube;component Animation;assist on ai", "open:ai:options>menu:Use the Fit to My Clips"},
+    {"autopose lock", "layout Animation;select Cube;component Animation", "open:Puppet>menu:Lock the Selected Bone"},
+    {"motioncheck", "layout Animation;select Cube;component Animation", "open:Puppet>menu:Motion Check"},
+    {"anim trails", "layout Animation;select Cube;component Animation", "open:Puppet>menu:Motion Trails"},
+    {"hair rig locks bones", "layout Default;select Sphere;hair dialog", "hair:locks"},
+    {"layoutguide on|off", "layout Default;preferences", "pref:guides"},
+};
+
+/* A layer's text field read back (task 0291's Anchor): the other kinds of field are skipped. */
+static std::string texture_layer_text_for_test(TextureLayer &l, const char *name) {
+  struct TextReader : Reflector {
+    const char *want;
+    std::string got;
+    void field(const char *, float &, float, float, float) override {}
+    void field(const char *, int &, int, int) override {}
+    void field(const char *, bool &) override {}
+    void field(const char *, Vec3 &) override {}
+    void color(const char *, Vec3 &) override {}
+    void enumeration(const char *, int &, const char *const *, int) override {}
+    void text(const char *n, std::string &v) override {
+      if (std::strcmp(n, want) == 0) got = v;
+    }
+    void mesh(const char *, MeshPtr &) override {}
+  } r;
+  r.want = name;
+  l.reflect(r);
+  return r.got;
+}
+
+static void tests_round311() {
+  test("the last console-only items (task 0291): a key's In / Out slopes typed in its menu; Rig Hair from Mesh... asks the locks and bones; an Anchor's layer picked from the texture's named layers; the Wheel's Add from the palette's list into a ring chosen from a dropdown; Preferences' Layout guides - all by real clicks and keys", [] {
+    using ET = platform::EventType;
+    auto clicker = [](Editor &ed) {
+      return [&ed](const std::string &key, int button) {
+        Recti r;
+        for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+        if (!ed.button_rect_for_test(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+        ed.step_frame_headless({mouse_ev(ET::MouseDown, r.x + r.w / 2, r.y + r.h / 2, button)});
+        ed.step_frame_headless({mouse_ev(ET::MouseUp, r.x + r.w / 2, r.y + r.h / 2, button)});
+        ed.step_frame_headless();
+        return true;
+      };
+    };
+    auto type_enter = [](Editor &ed, const std::string &text) {
+      ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+      ed.step_frame_headless(typed(text));
+      ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+      ed.step_frame_headless();
+    };
+    /* A key's slopes: the middle key's menu (a right-click in the Curves view), In typed. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.command("layout Animation");
+      ed.command("select Cube");
+      ed.command("anim new Slopes311");
+      ed.command("anim key . Position 1 0 0");
+      ed.command("anim key . Position 1 20 1");
+      ed.command("anim key . Position 1 40 0");
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const bool curves = click("Curves", 0);
+      int kx = 0, ky = 0;
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const bool point = ed.anim_curve_point_for_test(0, 20, -1, kx, ky);
+      if (point) {
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, kx, ky)});
+        ed.step_frame_headless({mouse_ev(ET::MouseDown, kx, ky, 1)});
+        ed.step_frame_headless({mouse_ev(ET::MouseUp, kx, ky, 1)});
+        ed.step_frame_headless();
+      }
+      const bool field = click("key:in", 0);
+      if (field) type_enter(ed, "0.5");
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      const AnimKey *k = clip && !clip->tracks.empty() && clip->tracks[0].keys.size() == 3 ? &clip->tracks[0].keys[1] : nullptr;
+      std::printf("    Curves %d, the key's menu by a right-click %d, In typed 0.5 %d: mode %d, in %.3f, out %.3f\n", (int)curves, (int)point, (int)field, k ? k->tangent : -1,
+                  k ? k->in_slope : 0.0f, k ? k->out_slope : 0.0f);
+      CHECK(curves && point && field && k && k->tangent == TanBroken && std::fabs(k->in_slope - 0.5f) < 1e-4f);
+      /* A Free key: Out typed sets both sides to it, as one undo step (the review's case). */
+      ed.command("anim tangent . Position 1 20 free 0.2");
+      if (point) {
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, kx, ky)});
+        ed.step_frame_headless({mouse_ev(ET::MouseDown, kx, ky, 1)});
+        ed.step_frame_headless({mouse_ev(ET::MouseUp, kx, ky, 1)});
+        ed.step_frame_headless();
+      }
+      const size_t steps = ed.undo_steps_for_test();  // (from the menu open: the typed slope's own step)
+      const bool out_field = click("key:out", 0);
+      if (out_field) type_enter(ed, "0.7");
+      clip = ed.anim_clip_for_test();
+      k = clip && !clip->tracks.empty() && clip->tracks[0].keys.size() == 3 ? &clip->tracks[0].keys[1] : nullptr;
+      std::printf("    a Free key, Out typed 0.7: mode %d, in %.3f, out %.3f, undo steps +%zu\n", k ? k->tangent : -1, k ? k->in_slope : 0.0f, k ? k->out_slope : 0.0f, ed.undo_steps_for_test() - steps);
+      CHECK(out_field && k && k->tangent == TanFree && std::fabs(k->in_slope - 0.7f) < 1e-4f && std::fabs(k->out_slope - 0.7f) < 1e-4f && ed.undo_steps_for_test() == steps + 1);
+    }
+    /* Rig Hair from Mesh...: the dialog's locks and bones reach the rig. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.command("layout Default");
+      ed.command("select Sphere");
+      ed.command("hair dialog");
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const bool open = ed.hair_dialog_for_test();
+      const bool locks = click("hair:locks", 0);
+      if (locks) type_enter(ed, "4");
+      const bool bones = click("hair:bones", 0);
+      if (bones) type_enter(ed, "2");
+      size_t before = 0, after = 0;
+      ed.scene().for_each([&](GameObject &) { before++; });
+      const bool rig = click("hair:Rig", 0);
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      ed.scene().for_each([&](GameObject &) { after++; });
+      std::printf("    the Hair Rig dialog open %d, Locks 4 %d, Bones 2 %d, Rig %d: %zu -> %zu objects (a rig of 4 locks x 2 bones adds 9 or more)\n", (int)open, (int)locks,
+                  (int)bones, (int)rig, before, after);
+      CHECK(open && locks && bones && rig && after >= before + 9 && !ed.hair_dialog_for_test());
+    }
+    /* Preferences: Layout guides off and on again. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.set_guides_for_test(true);
+      ed.command("preferences");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const bool off = click("pref:guides", 0);
+      const bool now_off = !ed.guides_enabled_for_test();
+      const bool on = click("pref:guides", 0);
+      std::printf("    Preferences' Layout guides clicked %d: off %d; again %d: on %d\n", (int)off, (int)now_off, (int)on, (int)ed.guides_enabled_for_test());
+      CHECK(off && now_off && on && ed.guides_enabled_for_test());
+    }
+    /* The Wheel: a ring made, then a command picked from the palette's list into it. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      const std::vector<Editor::WheelSlice> set = ed.wheel_set_for_test("object");
+      if (set.size() >= 8) ed.command("wheel remove object " + set.back().label);  // (room for the ring: a set holds eight)
+      ed.command("wheel ring object Tools311");
+      bool made = false;
+      for (const auto &sl : ed.wheel_set_for_test("object")) made = made || (sl.is_ring && sl.label == "Tools311");
+      std::printf("    the object set had %zu slices; the ring Tools311 made %d\n", set.size(), (int)made);
+      ed.command("preferences");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      auto pref_reach = [&](const std::string &key) {
+        for (int w = 0; w < 1200 && ed.moonray_busy_for_test(); w++) {  // (MoonRay's search, on a thread, adds a row that moves the rows below when it ends: round 317)
+          ed.step_frame_headless();
+          std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        for (int i = 0; i < 80; i++) {
+          Recti a;
+          const Recti dlg = ed.top_popup_rect_for_test();
+          if (!ed.button_rect_for_test(key, a)) return false;
+          if (a.y >= dlg.y && a.bottom() <= dlg.bottom()) return true;
+          ed.step_frame_headless({mouse_ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+          platform::Event w = mouse_ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+          w.wheel_y = a.bottom() > dlg.bottom() ? -1.0f : 1.0f;
+          ed.step_frame_headless({w});
+        }
+        return false;
+      };
+      const bool ring = pref_reach("wheel:ring") && click("wheel:ring", 0) && click("menu:Tools311", 0);
+      const bool picked = pref_reach("wheel:pick") && click("wheel:pick", 0);
+      if (picked) ed.step_frame_headless(typed("unwrap"));
+      ed.step_frame_headless();
+      const bool added = picked && click("menu:Unwrap (LSCM)", 0);
+      bool in_ring = false;
+      for (const auto &s : ed.wheel_set_for_test("object"))
+        if (s.is_ring && s.label == "Tools311")
+          for (const auto &r : s.ring) in_ring = in_ring || r.label.find("Unwrap") != std::string::npos;
+      std::printf("    the Wheel: Into Ring set %d, Pick a Command... opened %d, Unwrap (LSCM) clicked %d: in the ring %d; Preferences still open %d\n", (int)ring, (int)picked,
+                  (int)added, (int)in_ring, (int)ed.prefs_open_for_test());
+      CHECK(ring && picked && added && in_ring && ed.prefs_open_for_test());
+    }
+    /* An Anchor's layer from the texture's named layers. */
+    {
+      Editor ed;
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      auto click = clicker(ed);
+      ed.command("layout Texturing");
+      ed.command("select Cube");
+      ed.command("surface new Anchor311");
+      ed.command("surface add Fill");
+      ed.command("surface add Fill");
+      ed.step_frame_headless();
+      ProceduralTexturePtr pt = ed.surface_of_for_test(ed.scene().find_by_name("Cube"), nullptr);
+      CHECK(pt && pt->layers.size() >= 2);
+      if (!pt || pt->layers.size() < 2) return;
+      pt->layers[0]->name = "Edges";
+      pt->layers.back()->mask_layers.push_back(create_texture_layer("Anchor"));
+      ed.select_texture_for_test(pt);
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      bool inside = false;
+      for (int i = 0; i < 80 && !inside; i++) {  // (the Textures window scrolled until the field is in it)
+        Recti a;
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Textures);
+        if (!ed.button_rect_for_test("anchor:Layer", a) || pane.w <= 0) {
+          ed.step_frame_headless();
+          continue;
+        }
+        inside = a.y >= pane.y + 28 && a.bottom() <= pane.bottom();
+        if (inside) break;
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, pane.x + pane.w / 2, pane.y + pane.h / 2)});
+        platform::Event w = mouse_ev(ET::Wheel, pane.x + pane.w / 2, pane.y + pane.h / 2);
+        w.wheel_y = a.bottom() > pane.bottom() ? -1.0f : 1.0f;
+        ed.step_frame_headless({w});
+      }
+      std::printf("    the Anchor's field inside the Textures window %d\n", (int)inside);
+      const bool drop = inside && click("anchor:Layer", 0) && click("menu:Edges", 0);
+      const std::vector<std::string> names = ed.anchor_layer_names_for_test(*pt);
+      std::printf("    the Anchor's Layer: the choices %zu (Edges among them %d), Edges picked %d\n", names.size(), (int)(std::find(names.begin(), names.end(), "Edges") != names.end()),
+                  (int)drop);
+      const std::string layer = pt->layers.back()->mask_layers.empty() ? std::string() : texture_layer_text_for_test(*pt->layers.back()->mask_layers.back(), "Layer");
+      std::printf("    the Anchor reads '%s'\n", layer.c_str());
+      CHECK(std::find(names.begin(), names.end(), "Edges") != names.end());
+      CHECK(drop && layer == "Edges");
+    }
+  });
+}
+
+static void tests_round310() {
+  test("the console-reach table (task 0290): every verb the console-only-to-UI plan gave a control is drawn where its row says - its menu opened or its window shown - so a renamed button, a moved menu or a lost control fails here", [] {
+    using ET = platform::EventType;
+    int reached = 0;
+    std::string missing;
+    for (const ConsoleReach &row : kConsoleReach) {
+      Editor ed;  // (each row from a fresh editor: no state carried from the row before)
+      ed.init_headless(1500, 1000);
+      ed.record_buttons_for_test(true);
+      for (const std::string &c : split_list(row.setup, ';')) ed.command(c);
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const std::vector<std::string> steps = split_list(row.path, '>');
+      bool ok = true;
+      for (size_t i = 0; i < steps.size() && ok; i++) {
+        const bool open = steps[i].rfind("open:", 0) == 0;
+        const std::string key = open ? steps[i].substr(5) : steps[i];
+        Recti r;
+        for (int k = 0; k < 4 && !ed.button_rect_for_test(key, r); k++) ed.step_frame_headless();
+        ok = ed.button_rect_for_test(key, r);
+        if (!ok || i + 1 == steps.size()) break;
+        if (key.rfind("submenu:", 0) == 0) {
+          ed.step_frame_headless({mouse_ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+          ed.step_frame_headless();
+          continue;
+        }
+        for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({mouse_ev(t, r.x + r.w / 2, r.y + r.h / 2)});
+        ed.step_frame_headless();
+      }
+      reached += ok;
+      if (!ok) missing += std::string(" '") + row.verb + "'";
+    }
+    const int rows = (int)(sizeof(kConsoleReach) / sizeof(kConsoleReach[0]));
+    std::printf("    %d of %d verbs reached through the interface%s%s\n", reached, rows, missing.empty() ? "" : "; not reached:", missing.c_str());
+    CHECK(reached == rows);
+  });
+}
+
+static void tests_round306() {
+  test("stylized and sketch verbs without the console (task 0286): the Draw menu's Pen Color, Steadiness, French Curve Shape, Radial Copies, Perspective Follows the Camera, Canvas, Lift and Clear; GameObject > Anime Look; Strokes' New Stroke Object, canopy centre fields and Grass; Scatter's Seed - all by real clicks", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Stylized");
+    ed.step_frame_headless();
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.select_for_test(cube->id, false);
+    using ET = platform::EventType;
+    auto press = [&](const Recti &r) {
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+    };
+    auto rect = [&](const std::string &key, Recti &r) {
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      return ed.button_rect_for_test(key, r);
+    };
+    auto click = [&](const std::string &key) {
+      Recti r;
+      if (!rect(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+      press(r);
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      Recti r;
+      if (!rect(key, r)) return std::printf("    (no '%s')\n", key.c_str()), false;
+      ed.step_frame_headless({mouse_ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      ed.step_frame_headless();
+      return true;
+    };
+    auto tool = [&](const std::string &key, bool press_it) {  // (a Tools row, the pane scrolled until it is inside)
+      for (int attempt = 0; attempt < 60; attempt++) {
+        ed.step_frame_headless();
+        Recti r;
+        if (!ed.button_rect_for_test(key, r)) continue;
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Tools);
+        const int top = pane.y + 28;
+        if (r.y < top || r.bottom() > pane.bottom()) {
+          platform::Event w;
+          w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < top ? 1.0f : -1.0f;
+          ed.step_frame_headless({mouse_ev(ET::MouseMove, w.x, w.y)});
+          ed.step_frame_headless({w});
+          continue;
+        }
+        if (press_it) press(r);
+        return true;
+      }
+      return std::printf("    (no '%s' in the Tools pane)\n", key.c_str()), false;
+    };
+    auto draw_menu = [&](const char *sub, const std::string &item) {  // Mesh > Draw > sub > item (sub null: an item of Draw)
+      if (!click("menubar:Mesh") || !hover("submenu:Draw")) return false;
+      if (sub && !hover(std::string("submenu:") + sub)) return false;
+      return click("menu:" + item);
+    };
+    /* The pen. */
+    const bool red = draw_menu("Pen Color", "Red");
+    std::printf("    Pen Color > Red clicked %d: colour %08X\n", (int)red, ed.sketch_color_for_test());
+    CHECK(red && (ed.sketch_color_for_test() & 0xFFFFFFu) == 0xD03030u);
+    const bool steady = draw_menu("Steadiness", "Strong");
+    std::printf("    Steadiness > Strong clicked %d: tether %.0f px\n", (int)steady, ed.sketch_tether_for_test());
+    CHECK(steady && std::fabs(ed.sketch_tether_for_test() - 50.0f) < 0.5f);
+    /* The guides. */
+    const bool spiral = click("menubar:Mesh") && hover("submenu:Draw") && hover("submenu:Guides") && hover("submenu:French Curve Shape") && click("menu:Spiral");
+    std::printf("    Guides > French Curve Shape > Spiral clicked %d: french %d\n", (int)spiral, ed.sketch_french_for_test());
+    CHECK(spiral && ed.sketch_french_for_test() == 2);
+    const bool radial = click("menubar:Mesh") && hover("submenu:Draw") && hover("submenu:Guides") && hover("submenu:Radial Copies") && click("menu:6 copies");
+    std::printf("    Guides > Radial Copies > 6 clicked %d: symmetry %d, copies %d\n", (int)radial, ed.sketch_symmetry_for_test(), ed.sketch_radial_for_test());
+    CHECK(radial && ed.sketch_symmetry_for_test() == 4 && ed.sketch_radial_for_test() == 6);
+    const bool was_follow = ed.sketch_for_test().follow_camera;
+    const bool follow = click("menubar:Mesh") && hover("submenu:Draw") && hover("submenu:Guides") && click("menu:Perspective Follows the Camera");
+    std::printf("    Perspective Follows the Camera clicked %d: %d -> %d\n", (int)follow, (int)was_follow, (int)ed.sketch_for_test().follow_camera);
+    CHECK(follow && ed.sketch_for_test().follow_camera != was_follow);
+    /* The canvases. */
+    const size_t canvases = ed.sketch_for_test().canvases.size();
+    const bool ground = draw_menu("Canvas", "The Ground");
+    const int on_ground = ed.sketch_for_test().active_canvas;
+    std::printf("    Canvas > The Ground clicked %d: canvases %zu -> %zu, active %d\n", (int)ground, canvases, ed.sketch_for_test().canvases.size(), on_ground);
+    CHECK(ground && ed.sketch_for_test().canvases.size() == canvases + 1 && on_ground != 0);
+    const bool view = draw_menu("Canvas", "The View (the picture plane)");
+    std::printf("    Canvas > The View clicked %d: active %d\n", (int)view, ed.sketch_for_test().active_canvas);
+    CHECK(view && ed.sketch_for_test().active_canvas == 0);
+    const std::string ground_name = ed.sketch_for_test().canvases.empty() ? std::string() : ed.sketch_for_test().canvases.back().name;
+    const bool listed = draw_menu("Canvas", strprintf("%d: %s", on_ground, ground_name.c_str()));
+    std::printf("    the ground canvas picked from the list %d: active %d\n", (int)listed, ed.sketch_for_test().active_canvas);
+    CHECK(listed && ed.sketch_for_test().active_canvas == on_ground);
+    /* Lift: a corner's three axis lines on the picture, labelled by 3-point perspective, become a Scaffold. */
+    ed.command("sketchcanvas view");
+    ed.command("sketchguide symmetry none");
+    ed.command("sketch steady 0");  // (Strong steadiness above: its 50 px rope would swallow these short lines)
+    ed.command("sketchguide perspective 3");
+    ed.step_frame_headless();
+    const Vec3 corner{0.0f, 1.2f, 0.0f};
+    for (int k = 0; k < 3; k++) {
+      Vec3 e;
+      e[k] = 0.7f;
+      Vec2 a, b;
+      if (ed.project_for_test(corner, a) && ed.project_for_test(corner + e, b)) ed.command(strprintf("sketchstroke %g %g %g %g", a.x, a.y, b.x, b.y));
+    }
+    const size_t strokes = ed.sketch_for_test().strokes.size();
+    std::vector<LogEntry> log_before;
+    const size_t log_at = Log::fetch(0, log_before);
+    const bool lift = draw_menu(nullptr, "Lift the Sketch to 3D");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *scaffold = ed.scene().find_by_name("Scaffold");
+    std::vector<LogEntry> said;
+    Log::fetch(log_at, said);
+    std::printf("    Lift the Sketch to 3D clicked %d over %zu lines: a Scaffold %d\n", (int)lift, strokes, (int)(scaffold != nullptr));
+    for (const LogEntry &e : said)
+      if (e.text.find("ift") != std::string::npos || e.text.find("caffold") != std::string::npos) std::printf("      log: %s\n", e.text.c_str());
+    CHECK(lift && strokes == 3 && scaffold);
+    const size_t before_clear = ed.sketch_for_test().strokes.size();
+    const bool clear = draw_menu(nullptr, "Clear the Sketch");
+    const size_t after_clear = ed.sketch_for_test().strokes.size();
+    ed.command("undo");
+    std::printf("    Clear the Sketch clicked %d: %zu -> %zu strokes, %zu after Undo\n", (int)clear, before_clear, after_clear, ed.sketch_for_test().strokes.size());
+    CHECK(clear && after_clear == 0 && ed.sketch_for_test().strokes.size() == before_clear);
+    /* GameObject > Anime Look. */
+    cube = ed.scene().find_by_name("Cube");  // (Undo rebuilt the scene)
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.select_for_test(cube->id, false);
+    MeshRenderer *mr = cube->mesh_renderer();
+    const MaterialPtr before = mr && !mr->materials.empty() ? mr->materials[0] : nullptr;
+    const bool rock = click("menubar:GameObject") && hover("submenu:Anime Look") && click("menu:Rock");
+    const MaterialPtr after = mr && !mr->materials.empty() ? mr->materials[0] : nullptr;
+    std::printf("    GameObject > Anime Look > Rock clicked %d: material '%s' -> '%s'\n", (int)rock, before ? before->name.c_str() : "", after ? after->name.c_str() : "");
+    CHECK(rock && after && after != before && after->name == "Anime Rock");
+    /* Strokes. */
+    ed.select_for_test(cube->id, false);
+    ed.command("strokeobj on");
+    ed.command("strokeobj new");  // (one there already: the button must make another)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const uint64_t first = ed.strokeobj_object_for_test() ? ed.strokeobj_object_for_test()->id : 0;
+    CHECK(first != 0);
+    const bool made = tool("strokes:New Stroke Object", true);
+    GameObject *so = ed.strokeobj_object_for_test();
+    std::printf("    New Stroke Object clicked %d: object %llu -> %llu\n", (int)made, (unsigned long long)first, (unsigned long long)(so ? so->id : 0));
+    CHECK(made && so && so->id != first && ed.active_object_for_test() == so);
+    const bool fields = tool("field:Grass Density", false) && tool("field:Grass Height", false) && tool("field:Grass Radius", false);
+    std::printf("    the grass fields drawn %d\n", (int)fields);
+    CHECK(fields);
+    const size_t cards = ed.strokeobj_cards_for_test();
+    const bool grass = tool("strokes:Grass", true);
+    std::printf("    Grass clicked %d: %zu -> %zu cards\n", (int)grass, cards, ed.strokeobj_cards_for_test());
+    CHECK(grass && ed.strokeobj_cards_for_test() > cards);
+    const bool canopy = tool("field:Canopy X", false) && tool("field:Canopy Y", false) && tool("field:Canopy Z", false);
+    std::printf("    the canopy centre's fields drawn %d\n", (int)canopy);
+    CHECK(canopy);
+    ed.command("strokeobj off");
+    /* Scatter's seed. */
+    ed.select_for_test(cube->id, false);
+    ed.command("scatter on");
+    const bool seed = tool("field:Seed", false);
+    std::printf("    Scatter's Seed field drawn %d\n", (int)seed);
+    CHECK(seed);
+    ed.command("scatter off");
+  });
+}
+
+static void tests_round293() {
+  test("texturing without the console (task 0273): GameObject > New Surface makes one; a layer's menu gives a Mask Preset, Clear Mask, Group with the Layer Below and Save as Smart Material; Bake Mesh Maps... opens a dialog whose size and Bake start the bake - all by real clicks", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Texturing");
+    ed.command("select Cube");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto press = [&](const Recti &r) {
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+    };
+    auto click = [&](const std::string &key) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      press(r);
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      ed.step_frame_headless({mouse_ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      ed.step_frame_headless();
+      return true;
+    };
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    std::string why;
+    CHECK(cube && !ed.surface_of_for_test(cube, &why));
+    const bool menu = click("menubar:GameObject") && click("menu:New Surface");
+    ProceduralTexturePtr pt = ed.surface_of_for_test(cube, &why);
+    std::printf("    GameObject > New Surface clicked %d: a surface %d (%s)\n", (int)menu, (int)(pt != nullptr), pt ? pt->name.c_str() : why.c_str());
+    CHECK(menu && pt);
+    if (!pt) return;
+    ed.command("surface add Fill");
+    ed.select_texture_for_test(pt);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto layer_menu = [&](int i) {  // (the layer's menu button, the Textures window scrolled to show it)
+      const std::string key = "layer" + std::to_string(i);
+      for (int attempt = 0; attempt < 80; attempt++) {
+        const Recti r = ed.texture_ui_rect_for_test(key);
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Textures);
+        if (r.w <= 0 || pane.w <= 0) return false;
+        if (r.y >= pane.y + 28 && r.bottom() <= pane.bottom()) return press(r), true;
+        ed.step_frame_headless({mouse_ev(ET::MouseMove, pane.x + pane.w / 2, pane.y + pane.h / 2)});
+        platform::Event w;
+        w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < pane.y + 28 ? 1.0f : -1.0f;
+        ed.step_frame_headless({w});
+        ed.step_frame_headless();
+      }
+      return false;
+    };
+    const bool m1 = layer_menu(0) && hover("submenu:Mask Preset") && click("menu:edgewear");
+    const size_t effects = pt->layers.empty() ? 0 : pt->layers[0]->mask_layers.size();
+    const bool m2 = layer_menu(0) && click("menu:Clear Mask");
+    const size_t cleared = pt->layers.empty() ? 99 : pt->layers[0]->mask_layers.size();
+    std::printf("    layer 0's menu: Mask Preset > edgewear %d (%zu effects); Clear Mask %d (%zu)\n", (int)m1, effects, (int)m2, cleared);
+    CHECK(m1 && effects > 0 && m2 && cleared == 0);
+    const size_t layers0 = pt->layers.size();
+    const bool m3 = layer_menu(0) && click("menu:Group with the Layer Below");
+    std::printf("    Group with the Layer Below %d: %zu -> %zu layers, the first a %s\n", (int)m3, layers0, pt->layers.size(), pt->layers.empty() ? "" : pt->layers[0]->type_name());
+    CHECK(m3 && pt->layers.size() == layers0 - 1 && pt->layers[0]->children() && pt->layers[0]->children()->size() == 2);
+    pt->layers[0]->name = "Smat293";
+    const std::string smat = fs::join(ed.assets_dir_for_test(), "Materials/Smart/Smat293.smat");
+    auto clear_smats = [&] {  // (this test's own files, from an earlier run in the same scratch project too)
+      for (const DirEntry &e : fs::list(fs::join(ed.assets_dir_for_test(), "Materials/Smart")))
+        if (e.name.rfind("Smat293", 0) == 0) fs::remove_file(fs::join(fs::join(ed.assets_dir_for_test(), "Materials/Smart"), e.name));
+    };
+    clear_smats();
+    const bool m4 = layer_menu(0) && click("menu:Save as Smart Material...");
+    const std::string offered = ed.dialog_text_for_test();
+    const bool saved = ed.smat_dialog_open_for_test() && click("smat:Save");
+    std::printf("    Save as Smart Material... %d: the name offered '%s', Save %d: the file %d\n", (int)m4, offered.c_str(), (int)saved, (int)fs::exists(smat));
+    CHECK(m4 && offered == "Smat293" && saved && fs::exists(smat));
+    /* Again: a free name offered, the first file kept. */
+    const bool again = layer_menu(0) && click("menu:Save as Smart Material...");
+    const std::string offered2 = ed.dialog_text_for_test();
+    click("smat:Cancel");
+    std::printf("    again %d: the name offered '%s' (the saved one not replaced)\n", (int)again, offered2.c_str());
+    CHECK(again && offered2 == "Smat293 2" && !ed.smat_dialog_open_for_test());
+    clear_smats();
+    /* A Fill layer can't be one: the item is greyed. */
+    ed.command("surface add Fill");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const int fill_i = (int)pt->layers.size() - 1;
+    const bool fill_menu = layer_menu(fill_i);
+    click("menu:Save as Smart Material...");
+    std::printf("    on a Fill layer (%d): the menu %d, the dialog after its item %d\n", fill_i, (int)fill_menu, (int)ed.smat_dialog_open_for_test());
+    CHECK(fill_menu && !ed.smat_dialog_open_for_test());
+    ed.close_dialog_for_test();
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    /* The Bake dialog. */
+    const bool opened = click("menubar:GameObject") && click("menu:Bake Mesh Maps...");
+    CHECK(opened && ed.bake_dialog_open_for_test());
+    const bool sized = click("bake:size") && click("menu:512");
+    const bool baked = click("bake:Bake");
+    std::printf("    Bake Mesh Maps... %d, size 512 picked %d, Bake %d: the dialog %d, the bake running %d at %d\n", (int)opened, (int)sized, (int)baked,
+                (int)ed.bake_dialog_open_for_test(), (int)ed.meshmaps_busy_for_test(), ed.meshmaps_settings_size_for_test());
+    CHECK(baked && !ed.bake_dialog_open_for_test() && ed.meshmaps_settings_size_for_test() == 512);
+    ed.command("meshmaps cancel");
+    for (int i = 0; i < 400 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    std::printf("    Keep UVs: Bake Mesh Maps %d, Bake Textures %d (new UVs unless asked)\n", (int)ed.bake_keep_uvs_for_test(0), (int)ed.bake_keep_uvs_for_test(1));
+    CHECK(ed.bake_keep_uvs_for_test(0) && !ed.bake_keep_uvs_for_test(1));
+    ed.command("bakedialog textures");  // (the palette's Bake Textures... and the console reach the same dialog)
+    CHECK(ed.bake_dialog_open_for_test());
+    ed.close_dialog_for_test();
+  });
+  test("the review's fixes (tasks 0271-0273): Export Textures' folder typed or chosen with ... (no dialog here says so); a toast's Fix clicked while another tab hides the Scene view; a Bucket click on empty sky fills nothing and the bucket goes off with Paint", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    auto press = [&](const Recti &r) {
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+    };
+    auto click = [&](const std::string &key) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      press(r);
+      return true;
+    };
+    ed.command("layout Texturing");
+    ed.command("select Cube");
+    ed.command("surface new Fix293");
+    ed.command("window Textures");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const bool opened = click("Export Textures...");
+    CHECK(opened && ed.export_textures_dialog_for_test());
+    /* Typed: the field has the focus when the dialog opens. */
+    ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+    for (char c : std::string("Exports/Typed293")) {
+      platform::Event e;
+      e.type = ET::Text, e.codepoint = (uint32_t)c;
+      ed.step_frame_headless({e});
+    }
+    ed.step_frame_headless();
+    const std::string typed = ed.dialog_text_for_test();
+    const bool dots = click("exptex:...");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    bool said = false;
+    for (const auto &t : ed.toasts_for_test()) said = said || t.text.find("no file dialog here") != std::string::npos;
+    std::printf("    Export Textures: typed '%s'; ... clicked %d, no dialog here said %d, the dialog still open %d\n", typed.c_str(), (int)dots, (int)said, (int)ed.export_textures_dialog_for_test());
+    CHECK(typed == "Exports/Typed293" && dots && said && ed.export_textures_dialog_for_test());
+    ed.close_dialog_for_test();
+    ed.step_frame_headless();
+    /* The Scene view hidden by another tab: a refusal's Fix still drawn and clicked. */
+    ed.command("layout Default");
+    ed.command("window Game");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const bool hidden = !ed.scene_drawn_for_test();
+    ed.command("play");
+    ed.command("sculpt on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool fixed = click("Fix: Stop Play");
+    std::printf("    the Scene view hidden %d: Fix: Stop Play clicked %d, playing after %d\n", (int)hidden, (int)fixed, (int)ed.playing_for_test());
+    CHECK(hidden && fixed && !ed.playing_for_test());
+    /* The Bucket: a miss fills nothing; Paint off turns it off. */
+    ed.command("layout Texturing");
+    ed.command("select Cube");
+    ed.command("paint on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.paint_command_for_test({"paint", "bucketmode", "4"});
+    const size_t steps0 = ed.undo_steps_for_test();
+    const Recti view = ed.scene_view_rect();
+    press({view.x + 6, view.y + 40, 4, 4});  // (the sky in the view's corner)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const size_t steps1 = ed.undo_steps_for_test();
+    ed.command("paint off");
+    std::printf("    Bucket on a miss: undo steps %zu -> %zu; after Paint off the bucket %d\n", steps0, steps1, ed.paint_bucket_for_test());
+    CHECK(steps1 == steps0 && ed.paint_bucket_for_test() == 0);
+  });
+}
+
+static void tests_round292() {
+  test("Sculpt and Paint without the console (task 0272): Fill Mask, From Materials and Invert Hidden / Show All are buttons; Sculpt's alpha is picked from the project's images; Paint's Bucket Fill fills the object under a click; the palette is saved by a button and a swatch removed by a right-click - all by real clicks", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    const std::string img = fs::join(ed.assets_dir_for_test(), "0alpha292.png");
+    std::vector<uint32_t> px(16 * 16);
+    for (int i = 0; i < 256; i++) px[(size_t)i] = 0xFF000000u | (uint32_t)((i % 16) * 16) * 0x010101u;
+    CHECK(write_png(img, px.data(), 16, 16, 16, false));
+    ed.command("layout Texturing");
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto press = [&](const Recti &r, int button) {
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2, e.button = button;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+    };
+    auto click = [&](const std::string &key, int button = 0) {  // (a Tools row scrolled into its pane; a list row anywhere)
+      for (int attempt = 0; attempt < 80; attempt++) {
+        ed.step_frame_headless();
+        Recti r;
+        if (!ed.button_rect_for_test(key, r)) continue;
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Tools);
+        if (key.rfind("menu:", 0) != 0 && (r.y < pane.y + 28 || r.bottom() > pane.bottom())) {
+          ed.step_frame_headless({mouse_ev(ET::MouseMove, pane.x + pane.w / 2, pane.y + pane.h / 2)});
+          platform::Event w;
+          w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < pane.y + 28 ? 1.0f : -1.0f;
+          ed.step_frame_headless({w});
+          continue;
+        }
+        press(r, button);
+        return true;
+      }
+      return false;
+    };
+    auto cube_mesh = [&]() -> const Mesh * {
+      const GameObject *g = ed.scene().find_by_name("Cube");
+      return g && g->get<MeshFilter>() ? g->get<MeshFilter>()->mesh.get() : nullptr;
+    };
+    /* Sculpt. */
+    ed.command("sculpt on");
+    CHECK(ed.sculpt_for_test());
+    const bool filled = click("sculpt:Fill Mask");
+    float mask_min = 1.0f;
+    for (float v : cube_mesh()->sculpt_mask) mask_min = std::min(mask_min, v);
+    std::printf("    Fill Mask clicked %d: the mask's least %.2f over %zu vertices\n", (int)filled, mask_min, cube_mesh()->sculpt_mask.size());
+    CHECK(filled && !cube_mesh()->sculpt_mask.empty() && mask_min > 0.99f);
+    click("sculpt:Clear Mask");
+    const bool grouped = click("sculpt:From Materials");
+    std::printf("    From Materials clicked %d: %zu face group entries\n", (int)grouped, cube_mesh()->face_group.size());
+    CHECK(grouped && cube_mesh()->face_group.size() == cube_mesh()->face_count());
+    const bool inverted = click("sculpt:Invert Hidden");
+    size_t hidden = 0;
+    for (size_t f = 0; f < cube_mesh()->face_count(); f++) hidden += cube_mesh()->face_hidden(f);
+    const bool shown = click("sculpt:Show All");
+    size_t hidden_after = 0;
+    for (size_t f = 0; f < cube_mesh()->face_count(); f++) hidden_after += cube_mesh()->face_hidden(f);
+    std::printf("    Invert Hidden %d: %zu faces hidden; Show All %d: %zu\n", (int)inverted, hidden, (int)shown, hidden_after);
+    CHECK(hidden == cube_mesh()->face_count() && hidden_after == 0);
+    const bool alpha_list = click("sculpt:alpha");
+    const bool alpha_pick = alpha_list && click("menu:Assets/0alpha292.png");
+    std::printf("    the Alpha list %d, the image clicked %d: alpha '%s'\n", (int)alpha_list, (int)alpha_pick, ed.sculpt_brush_for_test().alpha.c_str());
+    CHECK(ed.sculpt_brush_for_test().alpha.find("0alpha292.png") != std::string::npos);
+    ed.command("sculpt off");
+    /* Paint. */
+    ed.command("surface new Bucket292");
+    ed.command("paint on");
+    CHECK(ed.paint_for_test());
+    const bool bucket_list = click("paint:bucket");
+    const bool bucket_pick = bucket_list && click("menu:Object");
+    const size_t steps0 = ed.undo_steps_for_test();
+    const Recti view = ed.scene_view_rect();
+    press({view.x + view.w / 2 - 2, view.y + view.h / 2 - 2, 4, 4}, 0);  // (the cube at the view's centre)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    Bucket Fill set %d (mode %d); a click on the cube: undo steps %zu -> %zu\n", (int)bucket_pick, ed.paint_bucket_for_test(), steps0, ed.undo_steps_for_test());
+    CHECK(ed.paint_bucket_for_test() == 4 && ed.undo_steps_for_test() > steps0);
+    ed.command("paint palette add 1 0 0");
+    ed.command("paint palette add 0 1 0");
+    const size_t swatches = ed.paint_palette_size_for_test();
+    const std::string pal = fs::join(ed.assets_dir_for_test(), "Palettes/Palette.pal");
+    std::remove(pal.c_str());
+    const bool saved = click("paint:Save Palette");
+    const bool removed = swatches > 0 && click("paint:swatch 0", 1);
+    std::printf("    Save Palette %d: the file %d; a right-click on swatch 0 %d: %zu -> %zu swatches\n", (int)saved, (int)fs::exists(pal), (int)removed, swatches, ed.paint_palette_size_for_test());
+    CHECK(saved && fs::exists(pal));
+    CHECK(swatches >= 2 && removed && ed.paint_palette_size_for_test() == swatches - 1);
+    std::remove(img.c_str());
+  });
+}
+
+static void tests_round291() {
+  test("the console round's foundations (task 0271): a report shows what a command printed, and Copy takes it; refusals carry a Fix that does what they ask - Stop in Play, Cancel a running bake, Realtime GI on - each through a real click; Browse... with no file dialog says how else; the status hints name controls, not commands", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto click = [&](const std::string &key) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+      return true;
+    };
+    /* The report. */
+    ed.command("report stats");
+    ed.step_frame_headless();
+    const size_t lines = ed.report_lines_for_test().size();
+    const bool copied = click("report:Copy");
+    std::printf("    report stats: open %d, %zu line(s), the first '%s'; Copy clicked %d, %zu characters copied\n", (int)ed.report_open_for_test(), lines,
+                lines ? ed.report_lines_for_test()[0].c_str() : "", (int)copied, ed.report_copied_for_test().size());
+    CHECK(lines >= 1 && copied && !ed.report_copied_for_test().empty());
+    click("report:Close");
+    CHECK(!ed.report_open_for_test());
+    /* Refusals and their Fix. */
+    const auto &toasts = ed.toasts_for_test();
+    auto fix_of = [&](const std::string &start) {
+      for (const auto &t : toasts)
+        if (t.text.rfind(start, 0) == 0) return t.fix_cmd + " / " + t.fix_label;
+      return std::string("(no toast)");
+    };
+    ed.command("select Cube");
+    ed.command("play");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("sculpt on");
+    ed.step_frame_headless();
+    const std::string sculpt_fix = fix_of("Sculpt: stop Play first");
+    const bool stopped = click("Fix: Stop Play");
+    std::printf("    sculpt in Play: fix '%s', clicked %d, playing after %d\n", sculpt_fix.c_str(), (int)stopped, (int)ed.playing_for_test());
+    CHECK(sculpt_fix == "stop / Stop Play" && stopped && !ed.playing_for_test());
+    ed.command("set Lighting.RealtimeGI false");
+    ed.run_action_for_test("lighting.update");
+    ed.step_frame_headless();
+    const std::string gi_fix = fix_of("Update Lighting: Realtime GI is off");
+    const bool gi_clicked = click("Fix: Turn Realtime GI on");
+    std::printf("    Update Lighting with Realtime GI off: fix '%s', clicked %d, Realtime GI after %d\n", gi_fix.c_str(), (int)gi_clicked, (int)ed.scene().lighting.realtime_gi);
+    CHECK(gi_clicked && ed.scene().lighting.realtime_gi);
+    ed.command("surface new BusySurf");
+    ed.command("meshmaps 1024 32");
+    ed.command("meshmaps 512");
+    ed.step_frame_headless();
+    const std::string busy_fix = fix_of("Mesh Maps: a bake is running");
+    const bool cancel_clicked = click("Fix: Cancel the bake");
+    for (int i = 0; i < 400 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    std::printf("    a second bake while one runs: fix '%s', clicked %d, still baking %d\n", busy_fix.c_str(), (int)cancel_clicked, (int)ed.meshmaps_busy_for_test());
+    CHECK(busy_fix == "meshmaps cancel / Cancel the bake" && cancel_clicked && !ed.meshmaps_busy_for_test());
+    /* Browse... with no file dialog (headless): said how else. */
+    ed.command("layout Stylized");
+    ed.command("strokeobj on");
+    ed.command("strokeobj new");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto click_in_tools = [&](const std::string &key) {  // (scrolled until the row is inside the Tools pane; list rows anywhere)
+      for (int attempt = 0; attempt < 60; attempt++) {
+        ed.step_frame_headless();
+        Recti r;
+        if (!ed.button_rect_for_test(key, r)) continue;
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Tools);
+        if (key.rfind("menu:", 0) != 0 && (r.y < pane.y + 28 || r.bottom() > pane.bottom())) {
+          ed.step_frame_headless({mouse_ev(ET::MouseMove, pane.x + pane.w / 2, pane.y + pane.h / 2)});
+          platform::Event w;
+          w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < pane.y + 28 ? 1.0f : -1.0f;
+          ed.step_frame_headless({w});
+          continue;
+        }
+        return click(key);
+      }
+      return false;
+    };
+    const bool opened = click_in_tools("strokes:alpha");
+    const bool browsed = opened && click_in_tools("menu:Browse...");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();  // (the dialog is deferred past the frame)
+    std::printf("    the Alpha list opened %d, Browse... clicked %d\n", (int)opened, (int)browsed);
+    bool said = false;
+    std::string shown;
+    for (const auto &t : toasts) said = said || t.text.find("no file dialog here") != std::string::npos, shown += " '" + t.text.substr(0, 60) + "'";
+    std::printf("    Browse... without a file dialog: said so %d (toasts:%s)\n", (int)said, shown.c_str());
+    CHECK(said);
+    /* The hints name controls. */
+    ed.command("scatter Sphere");  // (a Source first: Scatter refuses without one)
+    ed.command("scatter on");
+    ed.step_frame_headless();
+    const std::string hint = ed.statusbar_hint_for_test();
+    std::printf("    the Scatter hint: '%s'\n", hint.c_str());
+    CHECK(hint.find("Modeling Tools > Scatter") != std::string::npos && hint.find("scatter <") == std::string::npos);
+  });
+}
+
+static void tests_round290() {
+  test("the pen's targets (task 0270): in Tablet Mode (UI 1.5x) the Scene view's navigation buttons, a modal's step buttons, the job tray's Cancel and a toast's Fix are 7 mm or more on a 96 dpi screen, asserted; the status hint's ? opens the Learn lesson for the tool under way (Sculpting while sculpting)", [] {
+    Editor ed;
+    ed.init_headless(1700, 1000);
+    ed.record_buttons_for_test(true);
+    ed.command("window tablet on");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const float scale = ed.ui_for_test().scale, mm7 = 7.0f / 25.4f * 96.0f * scale;
+    struct Target { std::string name; Recti r; };
+    std::vector<Target> targets;
+    targets.push_back({"navigation (orbit / pan)", ed.nav_button_rect_for_test(0)});
+    targets.push_back({"navigation (zoom)", ed.nav_button_rect_for_test(1)});
+    /* A toast with a Fix: Paint on a cube without a surface. */
+    ed.command("select Cube");
+    ed.command("paint on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti r;
+    if (ed.button_rect_for_test("Fix: make a surface", r)) targets.push_back({"a toast's Fix", r});
+    /* The job tray's Cancel: a mesh-maps bake. */
+    ed.command("surface new PenSurf");
+    ed.command("meshmaps 1024 32");  // (big enough to be running for a frame)
+    ed.step_frame_headless();
+    if (ed.button_rect_for_test("job:Cancel", r)) targets.push_back({"the job tray's Cancel", r});
+    ed.command("meshmaps cancel");
+    for (int i = 0; i < 400 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    /* A modal's step buttons: Bevel. */
+    ed.command("edit");
+    ed.command("edit edge all");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_view_rect();
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, view.x + view.w / 2, view.y + view.h / 2)});
+    ed.step_frame_headless({key_ev(platform::KEY_B, platform::MOD_CTRL)});
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, view.x + view.w / 2 + 40, view.y + view.h / 2)});
+    if (ed.button_rect_for_test("modal:+", r)) targets.push_back({"a modal's +", r});
+    if (ed.button_rect_for_test("modal:-", r)) targets.push_back({"a modal's -", r});
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    int small = 0;
+    for (const Target &t : targets) {
+      const int side = std::min(t.r.w, t.r.h);
+      std::printf("    %-24s %3d x %3d px (7 mm is %.1f px)%s\n", t.name.c_str(), t.r.w, t.r.h, mm7, side < mm7 ? "  UNDER" : "");
+      small += side + 0.5f < mm7;
+    }
+    CHECK(targets.size() == 6);
+    CHECK(small == 0);
+    /* Two ways in that no test drove (the coverage map's empty rows): Quick Favorites and the Live Link window. */
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    const size_t popups0 = ed.popup_count_for_test();
+    const bool fav = ed.run_action_for_test("edit.favorites");
+    ed.step_frame_headless();
+    const size_t popups1 = ed.popup_count_for_test();
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.command("window Live Link");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti ll = ed.dock_leaf_rect_for_test(WindowKind::LiveLink);
+    std::printf("    Quick Favorites ran %d (popups %zu -> %zu); the Live Link window %dx%d\n", (int)fav, popups0, popups1, ll.w, ll.h);
+    CHECK(fav && popups1 > popups0 && ll.w > 0 && ll.h > 0);
+    /* The hint's ?: Sculpting while sculpting. */
+    ed.command("edit off");
+    ed.command("sculpt on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti q;
+    const bool shown = ed.button_rect_for_test("status:?", q);
+    if (shown)
+      for (platform::EventType t : {platform::EventType::MouseMove, platform::EventType::MouseDown, platform::EventType::MouseUp}) ed.step_frame_headless({mouse_ev(t, q.x + q.w / 2, q.y + q.h / 2)});
+    const std::string title = lesson(ed.lesson_for_test()).title;
+    std::printf("    the hint's ? shown %d; after the click the Learn lesson '%s'\n", (int)shown, title.c_str());
+    CHECK(shown && title == "Sculpting");
+  });
+}
+
+static void tests_round289() {
+  test("accessibility (task 0269): polygroups take Okabe-Ito's eight colours then lighter and darker tiers; the paint brush's ring says erasing by its shape; a Scene view whose views wanted the card and draw on the CPU says CPU in its bar", [] {
+    const Vec3 orange = sculpt_group_color(0), sky = sculpt_group_color(1), light = sculpt_group_color(8), dark = sculpt_group_color(16);
+    std::printf("    group 0 (%.3f %.3f %.3f), 1 (%.3f %.3f %.3f), 8 (%.3f %.3f %.3f), 16 (%.3f %.3f %.3f)\n", orange.x, orange.y, orange.z, sky.x, sky.y, sky.z, light.x, light.y, light.z, dark.x,
+                dark.y, dark.z);
+    CHECK(std::fabs(orange.x - 0.902f) < 1e-3f && std::fabs(orange.y - 0.624f) < 1e-3f && orange.z == 0.0f);  // (#E69F00)
+    auto lum = [](Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; };
+    CHECK(lum(light) > lum(orange) && lum(dark) < lum(orange));
+    int same = 0;
+    for (int a = 0; a < 8; a++)
+      for (int b = a + 1; b < 8; b++) same += length(sculpt_group_color(a) - sculpt_group_color(b)) < 0.1f;
+    CHECK(same == 0);
+    Editor ed;
+    ed.init_headless(1700, 900);  // (the bar's badges show when it has room)
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("surface new RingSurf");
+    ed.command("paint on");
+    const Recti view = ed.scene_view_rect();
+    const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless();
+    const bool plain = ed.brush_ring_erasing_for_test();
+    ed.paint_brush_for_test().erase = true;
+    ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, cx + 3, cy)});
+    const bool erasing = ed.brush_ring_erasing_for_test();
+    std::printf("    paint on %d: the ring erasing %d; the eraser on: %d\n", (int)ed.paint_for_test(), (int)plain, (int)erasing);
+    CHECK(ed.paint_for_test() && !plain && erasing);
+    ed.paint_brush_for_test().erase = false;
+    ed.command("paint off");
+    /* The tests draw on the CPU by choice (BLENDITY_VIEWPORT_DEVICE=cpu): no badge. Auto with no card: the badge. */
+    Recti badge;
+    ed.step_frame_headless();
+    const bool by_choice = ed.button_rect_for_test("overlay:CPU", badge);
+    const char *was = std::getenv("BLENDITY_VIEWPORT_DEVICE");
+    const std::string keep = was ? was : "";
+    set_env("BLENDITY_VIEWPORT_DEVICE", "auto");
+    ed.force_cpu_views_for_test("no Vulkan GPU (a test)");  // (before any frame asks for the card: none is opened)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool fallen_back = ed.button_rect_for_test("overlay:CPU", badge);
+    const std::string state = ed.cpu_badge_state_for_test();
+    set_env("BLENDITY_VIEWPORT_DEVICE", keep.empty() ? "cpu" : keep.c_str());
+    std::printf("    the CPU badge: the CPU chosen %d, Auto with no card %d (%s)\n", (int)by_choice, (int)fallen_back, state.c_str());
+    CHECK(!by_choice && fallen_back);
+  });
+}
+
+static void tests_round288() {
+  test("glTF export of a rig (task 0268): a cube with an Armature (Skin bound) and a clip turning its bone exports with a skin - joints, inverse bind matrices, JOINTS_0 / WEIGHTS_0 - and an animation; Blendity's own importer reads it back with the bone, the weights and the clip's turn", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("create Armature");  // (the Cube inside "Cube Rig" with an Armature and a Skin bound by automatic weights)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig && ed.scene().find_by_name("Cube")->get<SkinModifier>());
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R288");
+    ed.command("anim key Bone Rotation 2 0 0");  // (the object by name, below the rig)
+    ed.command("anim key Bone Rotation 2 30 45");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    {
+      const AnimationClipPtr c = ed.anim_clip_for_test();
+      const Animation *an = rig->get<Animation>();
+      std::printf("    the rig's Animation %d (clip '%s'), the clip %d with %zu track(s)%s\n", (int)(an != nullptr), an ? an->clip.c_str() : "", (int)(c != nullptr), c ? c->tracks.size() : (size_t)0,
+                  c && !c->tracks.empty() ? (" - '" + c->tracks[0].path + "' " + c->tracks[0].property).c_str() : "");
+    }
+    ed.command("anim frame 30");
+    ed.command("anim preview off");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    bone->set_local_euler({0, 0, 270});  // (an Inspector angle past 180: the export must leave it as it is)
+    const Vec3 hint0 = bone->local().euler_hint;
+    ed.command("select Cube");
+    ExportOptions o = export_defaults((int)ExportFormat::GLB);
+    const std::string path = fs::join(test_dir(), "r288_rig.glb");
+    std::remove(path.c_str());
+    ed.export_model_for_test(o, path);
+    const Vec3 hint1 = bone->local().euler_hint;
+    std::printf("    the bone's Inspector angle before the export %.1f, after %.1f\n", hint0.z, hint1.z);
+    CHECK(std::fabs(hint1.z - hint0.z) < 1e-3f);
+    std::string glb;
+    CHECK(fs::read_file(path, glb) && glb.size() > 20);
+    const std::string json = glb.size() > 20 ? glb.substr(20, std::min<size_t>(glb.size() - 20, *reinterpret_cast<const uint32_t *>(glb.data() + 12))) : std::string();
+    const bool has_skin = json.find("\"skins\"") != std::string::npos && json.find("\"inverseBindMatrices\"") != std::string::npos;
+    const bool has_attrs = json.find("\"JOINTS_0\"") != std::string::npos && json.find("\"WEIGHTS_0\"") != std::string::npos;
+    const bool has_anim = json.find("\"animations\"") != std::string::npos && json.find("\"path\":\"rotation\"") != std::string::npos;
+    std::printf("    the file: %zu bytes; skins %d, JOINTS_0 / WEIGHTS_0 %d, animations %d\n", glb.size(), (int)has_skin, (int)has_attrs, (int)has_anim);
+    CHECK(has_skin && has_attrs && has_anim);
+    ImportResult res;
+    CHECK(import_model(path, res));
+    size_t bones = 0, groups = 0;
+    for (const ImportedNode &n : res.nodes) {
+      bones += n.is_bone && n.name == "Bone";
+      if (n.mesh)
+        for (const VertexGroup &vg : n.mesh->vertex_groups) groups += vg.name == "Bone";
+    }
+    float turn = -999.0f;
+    for (const AnimationClip &c : res.clips)
+      for (const AnimTrack &t : c.tracks)
+        if (t.path.size() >= 4 && t.path.compare(t.path.size() - 4, 4, "Bone") == 0 && t.property == "Rotation" && t.axis == 2) turn = t.sample(30.0f * c.frame_rate / 60.0f);
+    std::printf("    imported: %zu skin(s), the Bone %zu, its vertex group on the mesh %zu, %zu clip(s); the bone's Z turn at the clip's end %.2f degrees\n", res.skins.size(), bones, groups,
+                res.clips.size(), turn);
+    CHECK(res.skins.size() == 1 && bones == 1 && groups == 1 && res.clips.size() == 1);
+    CHECK(std::fabs(turn - 45.0f) < 1.0f);
+    std::remove(path.c_str());
+  });
+}
+
+static void tests_round287() {
+  test("reach (task 0267): the 3D Object menu is in every layout's GameObject menu; the Animation window's time zooms with Ctrl+wheel and a pinch about the pointer, pans with Shift+wheel, and Fit puts the whole clip back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    for (const char *layout : {"Lighting & Rendering", "Animation", "Texturing", "Editing"}) {
+      ed.command(std::string("layout ") + layout);
+      ed.step_frame_headless();
+      Recti mb;
+      bool has = false;
+      if (ed.button_rect_for_test("menubar:GameObject", mb)) {
+        for (platform::EventType t : {platform::EventType::MouseMove, platform::EventType::MouseDown, platform::EventType::MouseUp}) {
+          platform::Event e;
+          e.type = t, e.x = mb.x + mb.w / 2, e.y = mb.y + mb.h / 2;
+          ed.step_frame_headless({e});
+        }
+        Recti sub;
+        has = ed.button_rect_for_test("submenu:3D Object", sub);
+        ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+      }
+      std::printf("    %s: the GameObject menu has 3D Object %d\n", layout, (int)has);
+      CHECK(has);
+    }
+    ed.command("layout Animation");
+    ed.command("select Cube");
+    ed.command("anim new R287");
+    ed.command("anim key . Position 1 0 0");
+    ed.command("anim key . Position 1 100 1");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti sheet;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet));
+    using ET = platform::EventType;
+    const int mx = sheet.x + sheet.w / 2, my = sheet.y + sheet.h / 2;
+    const float f_mid0 = ed.anim_frame_at_for_test(mx), f_right0 = ed.anim_frame_at_for_test(sheet.right() - 1);
+    platform::Event mv;
+    mv.type = ET::MouseMove, mv.x = mx, mv.y = my;
+    ed.step_frame_headless({mv});
+    platform::Event w;
+    w.type = ET::Wheel, w.x = mx, w.y = my, w.wheel_y = 1.0f, w.mods = platform::MOD_CTRL;
+    for (int i = 0; i < 3; i++) ed.step_frame_headless({w});
+    const float f_mid1 = ed.anim_frame_at_for_test(mx), span1 = ed.anim_frame_at_for_test(sheet.right() - 1) - ed.anim_frame_at_for_test(sheet.x);
+    std::printf("    Ctrl+wheel x3: the frame under the pointer %.1f -> %.1f, the frames in view %.1f -> %.1f\n", f_mid0, f_mid1, f_right0, span1);
+    CHECK(std::fabs(f_mid1 - f_mid0) < 0.6f && span1 < (f_right0 - 0.0f) * 0.6f);
+    w.mods = platform::MOD_SHIFT;
+    const float start0 = ed.anim_frame_at_for_test(sheet.x);
+    w.wheel_y = -1.0f;
+    ed.step_frame_headless({w});
+    const float start1 = ed.anim_frame_at_for_test(sheet.x);
+    std::printf("    Shift+wheel: the first frame in view %.1f -> %.1f\n", start0, start1);
+    CHECK(start1 > start0);
+    platform::Event g;
+    g.type = ET::Gesture, g.x = mx, g.y = my, g.zoom = 0.5f;  // (two fingers apart to half: zoom out)
+    const float span_before_pinch = ed.anim_frame_at_for_test(sheet.right() - 1) - ed.anim_frame_at_for_test(sheet.x);
+    ed.step_frame_headless({g});
+    const float span_after_pinch = ed.anim_frame_at_for_test(sheet.right() - 1) - ed.anim_frame_at_for_test(sheet.x);
+    std::printf("    a pinch to half: the frames in view %.1f -> %.1f\n", span_before_pinch, span_after_pinch);
+    CHECK(span_after_pinch > span_before_pinch * 1.5f);
+    Recti fit;
+    CHECK(ed.button_rect_for_test("anim:Fit", fit));
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = fit.x + fit.w / 2, e.y = fit.y + fit.h / 2;
+      ed.step_frame_headless({e});
+    }
+    const float after_fit = ed.anim_frame_at_for_test(sheet.right() - 1);
+    std::printf("    Fit: the last frame in view %.1f (it was %.1f before zooming)\n", after_fit, f_right0);
+    CHECK(std::fabs(after_fit - f_right0) < 0.01f);
+  });
+}
+
+static void tests_round286() {
+  test("Adjust Last outside Edit Mode (task 0266): an added Cylinder's segments, a UV unwrap's margin and a drawn circle's segments changed in the panel by typing - each re-run from before into the same undo step (one Ctrl+Z goes back to before it), the panel gone once another step is made", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto type_into = [&](const std::string &key, const std::string &text) {  // (a double-click enters the field, then typing and Enter)
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = x, e.y = y;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+      for (char c : text) {
+        platform::Event e;
+        e.type = ET::Text, e.codepoint = (uint32_t)c;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      return true;
+    };
+    /* A Cylinder: 24 segments, then 8 typed into the panel. */
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("create Cylinder");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const uint64_t cyl_id = ed.active_object_for_test() ? ed.active_object_for_test()->id : 0;  // (the sample scene has a Cylinder of its own: by id, not name)
+    auto cyl_faces = [&] {
+      const GameObject *g = ed.scene().find(cyl_id);
+      return g && g->get<MeshFilter>() && g->get<MeshFilter>()->mesh ? g->get<MeshFilter>()->mesh->face_count() : (size_t)0;
+    };
+    const size_t faces24 = cyl_faces(), steps1 = ed.undo_steps_for_test();
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().what == "Cylinder");
+    const bool typed = type_into("adjust:Segments", "8");
+    const size_t faces8 = cyl_faces();
+    std::printf("    Cylinder: %zu faces at 24 segments, typed 8 (%d): %zu faces; undo steps %zu -> %zu -> %zu; the panel's %s n %d, valid %d\n", faces24, (int)typed, faces8, steps0,
+                steps1, ed.undo_steps_for_test(), ed.obj_last_for_test().what.c_str(), ed.obj_last_for_test().n, (int)ed.obj_last_valid());
+    CHECK(typed && faces24 == 24 + 2 && faces8 == 8 + 2 && ed.undo_steps_for_test() == steps1);  // (the same step, amended)
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.scene().find(cyl_id));  // (one Ctrl+Z: back to before it was added)
+    /* A UV unwrap of the Cube: the margin typed; the step amended. */
+    ed.command("select Cube");
+    ed.command("uv unwrap");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const size_t uv_steps = ed.undo_steps_for_test();
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().what == "unwrap");
+    const GameObject *cube = ed.scene().find_by_name("Cube");
+    const Vec2 uv0 = cube->get<MeshFilter>()->mesh->uvs[0];
+    const bool typed_margin = type_into("adjust:Margin", "0.2");
+    const Vec2 uv1 = ed.scene().find_by_name("Cube")->get<MeshFilter>()->mesh->uvs[0];
+    std::printf("    Unwrap: margin typed 0.2 (%d): the first UV (%.3f %.3f) -> (%.3f %.3f), margin %.2f, steps %zu -> %zu\n", (int)typed_margin, uv0.x, uv0.y, uv1.x, uv1.y,
+                ed.obj_last_for_test().a, uv_steps, ed.undo_steps_for_test());
+    CHECK(typed_margin && std::fabs(ed.obj_last_for_test().a - 0.2f) < 1e-4f && (uv0.x != uv1.x || uv0.y != uv1.y) && ed.undo_steps_for_test() == uv_steps);
+    /* Undo ends it (the step is no longer the newest); redo brings the step back, not the panel. */
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const bool after_undo = ed.obj_last_valid();
+    ed.command("redo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    the panel after Undo %d, after Redo %d\n", (int)after_undo, (int)ed.obj_last_valid());
+    CHECK(!after_undo && !ed.obj_last_valid());
+    /* Another step ends the panel. */
+    ed.command("create Cube");
+    ed.command("delete");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.obj_last_valid());
+    /* A drawn circle: 24 segments, then 6. */
+    ed.clear_selection_for_test();  // (nothing selected: Draw makes its own Drawing object)
+    ed.command("draw circle");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_view_rect();
+    const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+    for (auto [x, y] : {std::pair<int, int>{cx, cy}, {cx + 60, cy}}) {
+      ed.step_frame_headless({mouse_ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({mouse_ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({mouse_ev(ET::MouseUp, x, y)});
+    }
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const GameObject *dr = ed.edit_object_for_test();
+    const size_t v24 = dr && dr->get<MeshFilter>()->mesh ? dr->get<MeshFilter>()->mesh->vert_count() : 0;
+    const bool drawn = ed.obj_last_valid() && ed.obj_last_for_test().kind == "draw";
+    const bool typed_sides = drawn && type_into("adjust:Segments", "6");
+    const GameObject *dr2 = ed.edit_object_for_test();
+    const size_t v6 = dr2 && dr2->get<MeshFilter>()->mesh ? dr2->get<MeshFilter>()->mesh->vert_count() : 0;
+    std::printf("    Draw Circle: recorded %d, %zu vertices at %d segments, typed 6 (%d): %zu vertices\n", (int)drawn, v24, drawn ? ed.obj_last_for_test().n : -1, (int)typed_sides, v6);
+    CHECK(drawn && typed_sides && v24 >= 24 && v6 == 6);
+  });
+}
+
+static void tests_round285() {
+  test("pen reach (task 0265): the modal step bar's + and - step Bevel's segments by a tap, without confirming, and the amount holds while the pointer is on the bar; the UV editor's Pan toggle makes a left drag pan", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(400.0);
+    ed.command("select Cube");
+    ed.command("edit");
+    ed.command("edit edge all");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto tap = [&](const std::string &key) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless();
+      return true;
+    };
+    const Recti view = ed.scene_view_rect();
+    const int vx = view.x + view.w / 2, vy = view.y + view.h / 2;
+    ed.step_frame_headless({mouse_ev(ET::MouseMove, vx, vy)});
+    ed.step_frame_headless({key_ev(platform::KEY_B, platform::MOD_CTRL)});  // (Unity's Bevel chord starts the modal over the view)
+    ed.step_frame_headless({mouse_ev(ET::MouseMove, vx + 40, vy)});
+    CHECK(ed.modal_active_for_test());
+    const int seg0 = ed.last_op_segments_for_test();
+    const float amount0 = ed.last_op_amount_for_test();
+    const bool t1 = tap("modal:+"), t2 = tap("modal:+");
+    const int seg2 = ed.last_op_segments_for_test();
+    const bool t3 = tap("modal:-");
+    const int seg1 = ed.last_op_segments_for_test();
+    std::printf("    bevel: segments %d -> + + %d -> - %d (taps %d %d %d), still running %d, amount %.4f -> %.4f\n", seg0, seg2, seg1, (int)t1, (int)t2, (int)t3,
+                (int)ed.modal_active_for_test(), amount0, ed.last_op_amount_for_test());
+    CHECK(t1 && t2 && t3 && seg2 == seg0 + 2 && seg1 == seg0 + 1 && ed.modal_active_for_test());
+    CHECK(std::fabs(ed.last_op_amount_for_test() - amount0) < 1e-6f);  // (travelling to the bar and tapping changed no width)
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(!ed.modal_active_for_test());
+    /* The UV editor: Pan on, a left drag moves the view. */
+    ed.command("layout UV Unwrapping");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const bool pan_on = tap("uv:Pan");
+    const Vec2 p0 = ed.uv_pan_for_test();
+    const Recti uv = ed.uv_rect_for_test();
+    const int cx = uv.x + uv.w / 2, cy = uv.y + uv.h / 2 + 40;
+    platform::Event e;
+    e.type = ET::MouseMove, e.x = cx, e.y = cy;
+    ed.step_frame_headless({e});
+    e.type = ET::MouseDown;
+    ed.step_frame_headless({e});
+    for (int k = 1; k <= 5; k++) {
+      e.type = ET::MouseMove, e.x = cx + 10 * k, e.y = cy + 6 * k;
+      ed.step_frame_headless({e});
+    }
+    e.type = ET::MouseUp;
+    ed.step_frame_headless({e});
+    const Vec2 p1 = ed.uv_pan_for_test();
+    std::printf("    UV editor: Pan tapped %d (on %d), a left drag of (50, 30) moved the view by (%.0f, %.0f)\n", (int)pan_on, (int)ed.uv_hand_for_test(), p1.x - p0.x, p1.y - p0.y);
+    CHECK(pan_on && ed.uv_hand_for_test() && std::fabs(p1.x - p0.x - 50.0f) < 1.0f && std::fabs(p1.y - p0.y - 30.0f) < 1.0f);
+  });
+}
+
+static void tests_round284() {
+  test("the stylized tools in the panels (task 0264): Scatter's source and mask picked from dropdowns by name; Strokes' alpha picked from the project's images and Fill Canopy pressed - each through real clicks", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    const std::string img = fs::join(ed.assets_dir_for_test(), "0leaf284.png");  // (written before the image list is read - it is cached 3 s; first in the sorted list, however many images other tests left)
+    std::vector<uint32_t> leaf(64);
+    for (int y = 0; y < 8; y++)
+      for (int x = 0; x < 8; x++) leaf[(size_t)y * 8 + x] = (x + y) % 2 ? 0xFF20A020u : 0x00000000u;
+    CHECK(write_png(img, leaf.data(), 8, 8, 8, true));
+    ed.command("layout Stylized");
+    ed.step_frame_headless();
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && ed.scene().find_by_name("Sphere"));
+    if (!cube) return;
+    ed.select_for_test(cube->id, false);
+    using ET = platform::EventType;
+    auto click = [&](const std::string &key) {  // (a recorded rectangle; a tool row scrolled until it is inside the Tools pane)
+      for (int attempt = 0; attempt < 60; attempt++) {
+        ed.step_frame_headless();
+        const auto &br = ed.ui_for_test().button_rects;
+        if (!br.count(key)) continue;
+        const Recti r = br.at(key);
+        const Recti pane = ed.dock_leaf_rect_for_test(WindowKind::Tools);
+        const bool list_row = key.rfind("menu:", 0) == 0;
+        if (list_row && (r.y < 0 || r.bottom() > 900)) {  // (a long list scrolls: the wheel over it)
+          platform::Event w;
+          w.type = ET::Wheel, w.x = r.x + 8, w.y = std::max(10, std::min(890, r.y + r.h / 2)), w.wheel_y = r.y < 0 ? 1.0f : -1.0f;
+          ed.step_frame_headless({w});
+          continue;
+        }
+        const int top = pane.y + 28;  // (below the pane's tab)
+        if (attempt == 59) std::printf("    ('%s' at y %d-%d, the Tools pane y %d-%d)\n", key.c_str(), r.y, r.bottom(), pane.y, pane.bottom());
+        if (!list_row && (r.y < top || r.bottom() > pane.bottom())) {
+          platform::Event w;
+          w.type = ET::Wheel, w.x = pane.x + pane.w / 2, w.y = pane.y + pane.h / 2, w.wheel_y = r.y < top ? 1.0f : -1.0f;
+          platform::Event over;  // (the pointer over the pane first: the wheel scrolls what is under it)
+          over.type = ET::MouseMove, over.x = w.x, over.y = w.y;
+          ed.step_frame_headless({over});
+          ed.step_frame_headless({w});
+          continue;
+        }
+        for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+          platform::Event e;
+          e.type = t, e.x = r.x + r.w / 2, e.y = r.y + r.h / 2;
+          ed.step_frame_headless({e});
+        }
+        ed.step_frame_headless();  // (a dropdown's pick reaches its field on the next frame)
+        return true;
+      }
+      std::string rows;
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind("menu:", 0) == 0) rows += " '" + kv.first + "'";
+      std::printf("    (no '%s'; the list rows recorded:%s)\n", key.c_str(), rows.empty() ? " none" : rows.c_str());
+      return false;
+    };
+    /* Scatter: the source by name. */
+    ed.command("scatter on");
+    const std::vector<std::string> sources = ed.scatter_source_choices_for_test();
+    std::printf("    scatter's sources: %zu (Sphere among them %d, the Cube painted on left out %d)\n", sources.size(),
+                (int)(std::find(sources.begin(), sources.end(), "Sphere") != sources.end()), (int)(std::find(sources.begin(), sources.end(), "Cube") == sources.end()));
+    CHECK(std::find(sources.begin(), sources.end(), "Sphere") != sources.end() && std::find(sources.begin(), sources.end(), "Cube") == sources.end());
+    const bool opened = click("scatter:source");
+    const bool picked = opened && click("menu:Sphere");
+    std::printf("    the Source dropdown opened %d, Sphere clicked %d: source '%s'\n", (int)opened, (int)picked, ed.scatter_brush_for_test().source.c_str());
+    CHECK(ed.scatter_brush_for_test().source == "Sphere");
+    /* The mask by layer name, once the Cube has a surface. */
+    ed.command("surface new MaskSurf");
+    ed.step_frame_headless();
+    const std::vector<std::string> masks = ed.scatter_mask_choices_for_test();
+    std::printf("    mask choices: %zu ('%s' first, '%s' next)\n", masks.size(), masks.empty() ? "" : masks[0].c_str(), masks.size() > 1 ? masks[1].c_str() : "");
+    CHECK(masks.size() >= 2 && masks[0] == "None" && masks[1].rfind("0: ", 0) == 0);
+    if (masks.size() >= 2 && click("scatter:mask") && click("menu:" + masks[1])) std::printf("    mask layer after the click: %d\n", ed.scatter_brush_for_test().mask_layer);
+    CHECK(ed.scatter_brush_for_test().mask_layer == 0);
+    ed.command("scatter off");
+    /* Strokes: an image in the project, picked as the cards' alpha; Fill Canopy. */
+    ed.command("strokeobj on");
+    ed.command("strokeobj new");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const bool alpha_open = click("strokes:alpha");
+    std::string leaf_rel;
+    for (const auto &kv : ed.ui_for_test().button_rects)
+      if (kv.first.find("leaf284.png") != std::string::npos && kv.first.rfind("menu:", 0) == 0) leaf_rel = kv.first;
+    if (leaf_rel.empty()) {
+      size_t rows = 0;
+      std::string some;
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind("menu:", 0) == 0 && rows++ < 3) some += " '" + kv.first + "'";
+      std::printf("    (the Alpha list: %zu rows recorded%s; the leaf on disk %d)\n", rows, some.c_str(), (int)fs::exists(img));
+    }
+    const bool alpha_picked = alpha_open && !leaf_rel.empty() && click(leaf_rel);
+    std::printf("    the Alpha dropdown opened %d, the leaf listed '%s' and clicked %d: alpha '%s'\n", (int)alpha_open, leaf_rel.c_str(), (int)alpha_picked, ed.strokeobj_alpha_for_test().c_str());
+    CHECK(ed.strokeobj_alpha_for_test().find("leaf284.png") != std::string::npos);
+    const size_t before = ed.strokeobj_cards_for_test();
+    const bool filled = click("strokes:Fill Canopy");
+    const size_t after = ed.strokeobj_cards_for_test();
+    std::printf("    Fill Canopy clicked %d: %zu -> %zu cards\n", (int)filled, before, after);
+    CHECK(filled && after >= before + 100);
+    std::remove(img.c_str());
+  });
+}
+
+static void tests_round281() {
+  test("onboarding and transfer (ADR 0085, task 0261): the Adobe preset's keys; [ ] step the active brush by a quarter and nothing with no brush on; every theme's WCAG contrast printed and the High Contrast theme's at 4.5 or more; the welcome's origin sets the keys and the feel", [] {
+    /* The Adobe preset. */
+    const Keymap adobe = keymap_preset("Adobe");
+    auto chord = [&](const Keymap &k, const char *id) {
+      const auto it = k.find(id);
+      return it == k.end() || it->second.empty() ? std::string("(none)") : chord_text(it->second[0]);
+    };
+    std::printf("    Adobe: paint %s, eraser %s, move %s, smaller %s, larger %s, rotate %s\n", chord(adobe, "mode.paint_toggle").c_str(), chord(adobe, "brush.erase").c_str(),
+                chord(adobe, "tool.move").c_str(), chord(adobe, "brush.smaller").c_str(), chord(adobe, "brush.larger").c_str(), chord(adobe, "tool.rotate").c_str());
+    CHECK(chord(adobe, "mode.paint_toggle") == "B" && chord(adobe, "brush.erase") == "E" && chord(adobe, "tool.move") == "V");
+    CHECK(adobe.at("tool.move").size() == 2 && chord_text(adobe.at("tool.move")[1]) == "W");
+    CHECK(chord(adobe, "brush.smaller") == "[" && chord(adobe, "brush.larger") == "]" && chord(adobe, "tool.rotate") == "(none)");
+    for (const char *pn : {"Unity", "Blender", "Maya", "SketchUp"}) CHECK(chord(keymap_preset(pn), "brush.larger") == "]");
+    CHECK(chord(keymap_preset("Unity"), "brush.erase") == "(none)");
+    /* The brush step. */
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    CHECK(!ed.run_action_for_test("brush.larger"));  // (no brush mode: nothing)
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube);
+    ed.select_for_test(cube->id, false);
+    CHECK(ed.run_action_for_test("mode.sculpt_toggle") && ed.sculpt_for_test());
+    const float r0 = ed.sculpt_brush_for_test().radius;
+    ed.run_action_for_test("brush.larger");
+    const float r1 = ed.sculpt_brush_for_test().radius;
+    ed.run_action_for_test("brush.smaller");
+    const float r2 = ed.sculpt_brush_for_test().radius;
+    std::printf("    sculpt radius %.0f -> ] %.0f -> [ %.0f px\n", r0, r1, r2);
+    CHECK(std::fabs(r1 - std::round(r0 * 1.25f)) < 0.5f && std::fabs(r2 - std::round(r1 * 0.8f)) < 0.5f);
+    ed.run_action_for_test("mode.sculpt_toggle");
+    ed.command("surface new BrushSurf");  // (Paint wants a surface on the material)
+    CHECK(ed.run_action_for_test("mode.paint_toggle") && ed.paint_for_test());
+    const float p0 = ed.paint_brush_for_test().radius;
+    ed.run_action_for_test("brush.larger");
+    std::printf("    paint size %.0f -> ] %.0f px\n", p0, ed.paint_brush_for_test().radius);
+    CHECK(ed.paint_brush_for_test().radius > p0);
+    CHECK(!ed.paint_brush_for_test().erase && ed.run_action_for_test("brush.erase") && ed.paint_brush_for_test().erase);
+    ed.run_action_for_test("mode.paint_toggle");
+    CHECK(!ed.run_action_for_test("brush.erase"));  // (the eraser is Paint's: refused aloud)
+    /* The other brushes, the limits and the bottom of the scale. */
+    ed.command("create Sphere");
+    ed.select_for_test(cube->id, false);
+    ed.command("scatter Sphere");
+    ed.command("scatter on");
+    CHECK(ed.scatter_for_test());
+    ed.scatter_brush_for_test().radius = 900.0f;
+    ed.run_action_for_test("brush.larger");
+    std::printf("    scatter %d: radius 900 -> ] %.0f m (the field's limit 1000)\n", (int)ed.scatter_for_test(), ed.scatter_brush_for_test().radius);
+    CHECK(std::fabs(ed.scatter_brush_for_test().radius - 1000.0f) < 0.01f);
+    ed.command("scatter off");
+    CHECK(ed.run_action_for_test("mode.sculpt_toggle") && ed.sculpt_for_test());
+    ed.sculpt_brush_mut_for_test().radius = 1.0f;
+    ed.run_action_for_test("brush.larger");
+    const float up_from_1 = ed.sculpt_brush_for_test().radius;
+    ed.sculpt_brush_mut_for_test().radius = 2.0f;
+    ed.run_action_for_test("brush.smaller");
+    const float down_from_2 = ed.sculpt_brush_for_test().radius;
+    ed.sculpt_brush_mut_for_test().radius = 480.0f;
+    ed.run_action_for_test("brush.larger");
+    std::printf("    sculpt 1 -> ] %.0f, 2 -> [ %.0f, 480 -> ] %.0f (the field's 500)\n", up_from_1, down_from_2, ed.sculpt_brush_for_test().radius);
+    CHECK(up_from_1 == 2.0f && down_from_2 == 1.0f && ed.sculpt_brush_for_test().radius == 500.0f);
+    ed.run_action_for_test("mode.sculpt_toggle");
+    /* The themes' contrast (WCAG 2, 1.4.3 and 1.4.11). */
+    double hc_min = 99.0;
+    for (int k = 0; k < ui::kThemeCount; k++) {
+      const ui::Theme t = ui::theme_named(ui::kThemeNames[k]);
+      const double text_window = ui::contrast_ratio(t.text, t.window), text_panel = ui::contrast_ratio(t.text, t.panel), text_button = ui::contrast_ratio(t.text, t.button),
+                   text_field = ui::contrast_ratio(t.text, t.field), dim_panel = ui::contrast_ratio(t.text_dim, t.panel), warn = ui::contrast_ratio(t.warning, t.panel),
+                   err = ui::contrast_ratio(t.error, t.panel), accent = ui::contrast_ratio(t.accent, t.panel), focus = ui::contrast_ratio(t.focus, t.panel);
+      std::printf("    %-14s text/window %.1f  text/panel %.1f  text/button %.1f  text/field %.1f  dim/panel %.1f  warning %.1f  error %.1f  accent %.1f  focus %.1f\n",
+                  ui::kThemeNames[k], text_window, text_panel, text_button, text_field, dim_panel, warn, err, accent, focus);
+      if (std::string(ui::kThemeNames[k]) != "High Contrast") continue;
+      const double on_accent = ui::contrast_ratio(t.text_on_accent, t.accent), on_progress = ui::contrast_ratio(t.text_bright, t.progress),
+                   dim_selection = ui::contrast_ratio(t.text_dim, t.selection), text_selection = ui::contrast_ratio(t.text, t.selection),
+                   dim_strip = ui::contrast_ratio(t.text_dim, t.strip), tip = ui::contrast_ratio(t.text, t.tooltip);
+      std::printf("    High Contrast also: on the accent %.1f  on the tray's fill %.1f  dim on the selection %.1f  text on the selection %.1f  disabled %.1f  tooltip %.1f\n",
+                  on_accent, on_progress, dim_selection, text_selection, dim_strip, tip);
+      hc_min = std::min({text_window, text_panel, text_button, text_field, dim_panel, warn, err, accent, on_accent, on_progress, dim_selection, text_selection, dim_strip, tip});
+      CHECK(focus >= 3.0 && ui::contrast_ratio(t.focus, t.warning) > 1.0);
+    }
+    std::printf("    High Contrast: the least of those %.1f (4.5 asked)\n", hc_min);
+    CHECK(hc_min >= 4.5);
+    CHECK(std::fabs(ui::contrast_ratio(Color::hex(0xFFFFFF), Color::hex(0x000000)) - 21.0) < 0.01 && std::fabs(ui::contrast_ratio(Color::hex(0x777777), Color::hex(0x777777)) - 1.0) < 0.01);
+    /* The welcome asks the origin on every first run; its answer sets the keys and the feel. */
+    Editor w;
+    w.init_headless(1280, 720);
+    const std::string prefs = fs::join(test_dir(), "r281_prefs_none.txt");
+    std::remove(prefs.c_str());
+    w.prefs_for_test(prefs);
+    w.load_prefs_for_test();
+    CHECK(w.first_run_dialog_for_test());
+    /* A real click on the welcome's Unreal button: the keys and the feel follow, the welcome stays for Start. */
+    w.record_buttons_for_test(true);
+    for (int i = 0; i < 2; i++) w.step_frame_headless();
+    Recti ub, sb;
+    const bool found_unreal = w.button_rect_for_test("welcome:Unreal", ub);
+    CHECK(found_unreal);
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = ub.x + ub.w / 2, e.y = ub.y + ub.h / 2;
+      w.step_frame_headless({e});
+    }
+    w.step_frame_headless();
+    std::printf("    Unreal clicked: keys %s, feel %s, welcome %d\n", w.keymap_preset_name().c_str(), kEditorFeels[(int)w.nav_style_for_test()], (int)w.first_run_dialog_for_test());
+    CHECK(w.keymap_preset_name() == "Unreal" && w.nav_style_for_test() == NavStyle::Unreal && w.first_run_dialog_for_test());
+    CHECK(w.button_rect_for_test("welcome:Start", sb) || w.button_rect_for_test("Use High", sb));
+    /* Just start keeps the keys (Unreal's, just chosen) and closes the welcome. */
+    Recti js;
+    CHECK(w.button_rect_for_test("welcome:Just start", js));
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = js.x + js.w / 2, e.y = js.y + js.h / 2;
+      w.step_frame_headless({e});
+    }
+    w.step_frame_headless();
+    std::printf("    Just start: keys %s, welcome %d\n", w.keymap_preset_name().c_str(), (int)w.first_run_dialog_for_test());
+    CHECK(w.keymap_preset_name() == "Unreal" && !w.first_run_dialog_for_test());
+    w.apply_origin("adobe");
+    std::printf("    origin adobe: keys %s, feel %s\n", w.keymap_preset_name().c_str(), kEditorFeels[(int)w.nav_style_for_test()]);
+    CHECK(w.keymap_preset_name() == "Adobe" && w.nav_style_for_test() == NavStyle::Unity && w.shortcut_for_test("mode.paint_toggle") == "B");
+    CHECK(w.shortcut_for_test("tool.move") == "V");  // (W kept beside it)
+    w.apply_origin("blender");
+    CHECK(w.keymap_preset_name() == "Blender" && w.nav_style_for_test() == NavStyle::Blender);
+    /* The prefs keep the Adobe keys. */
+    w.apply_origin("adobe");
+    Editor w2;
+    w2.init_headless(800, 600);
+    w2.prefs_for_test(prefs);
+    w2.load_prefs_for_test();
+    CHECK(!w2.first_run_dialog_for_test() && w2.keymap_preset_name() == "Adobe" && w2.shortcut_for_test("brush.erase") == "E");
+    /* `keymap table`: a row per action, a column per preset. */
+    const std::string table = w.keymap_table();
+    size_t rows = 0;
+    for (char c : table) rows += c == '\n';
+    std::printf("    keymap table: %zu lines, header '%s'\n", rows, table.substr(0, table.find('\n')).c_str());
+    CHECK(rows == shortcut_actions().size() + 2 && table.find("| Brushes: Brush Larger | ] | ] | ] | ] | ] | ] | ] |") != std::string::npos);
+  });
+}
+
+static void tests_round280() {
+  test("files and the shell (ADR 0085, task 0260): Up and Down recall the console's history, Down past the newest clears; an unknown command is answered with the nearest known ones; the Wheel's object ring carries Set Key, Record and Play Clip in an Animation ring, every built-in ring within the Wheel's eight slices", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();  // (the first frame: the log so far is history to the toasts)
+    ed.console_history_push_for_test("select Cube");
+    ed.console_history_push_for_test("meshmaps 256 8");
+    ed.console_recall_for_test(-1);
+    const std::string up1 = ed.console_input_for_test();
+    ed.console_recall_for_test(-1);
+    const std::string up2 = ed.console_input_for_test();
+    ed.console_recall_for_test(1);
+    const std::string down1 = ed.console_input_for_test();
+    ed.console_recall_for_test(1);
+    const std::string down2 = ed.console_input_for_test();
+    std::printf("    Up: '%s', Up: '%s', Down: '%s', Down: '%s'\n", up1.c_str(), up2.c_str(), down1.c_str(), down2.c_str());
+    CHECK(up1 == "meshmaps 256 8" && up2 == "select Cube" && down1 == "meshmaps 256 8" && down2.empty());
+    const std::vector<std::string> near = ed.command_suggestions_for_test("meshmap"), none = ed.command_suggestions_for_test("qzxv"), sk = ed.command_suggestions_for_test("sketchlin");
+    std::printf("    'meshmap' -> %zu suggestion(s)%s; 'qzxv' -> %zu; 'sketchlin' -> %s\n", near.size(), near.empty() ? "" : (": " + near[0]).c_str(), none.size(), sk.empty() ? "(none)" : sk[0].c_str());
+    CHECK(!near.empty() && near[0] == "meshmaps" && none.empty() && !sk.empty() && sk[0] == "sketchline");
+    ed.console_history_push_for_test("x");
+    ed.console_recall_for_test(1);  // (Down with no recall active: the field is left alone - here empty, so still empty)
+    CHECK(ed.console_input_for_test().empty());
+    ed.command("meshmap");
+    ed.step_frame_headless();
+    const auto &toasts = ed.toasts_for_test();
+    const bool said = std::any_of(toasts.begin(), toasts.end(), [](const Editor::Toast &t) { return t.text.find("Did you mean: meshmaps") != std::string::npos; });
+    std::printf("    the console's answer: %s\n", toasts.empty() ? "(nothing)" : toasts[0].text.c_str());
+    CHECK(said);
+    int widest = 0;
+    for (const char *set : {"object", "edit", "sculpt", "paint"}) widest = std::max(widest, ed.wheel_set_max_ring_for_test(set));
+    std::printf("    the widest built-in ring: %d slices (the Wheel shows %d)\n", widest, Editor::kWheelMaxSlicesForTest);
+    CHECK(widest > 0 && widest <= Editor::kWheelMaxSlicesForTest);
+    const std::vector<std::string> wheel = ed.wheel_set_labels_for_test("object");
+    const bool set_key = std::find(wheel.begin(), wheel.end(), "Set Key") != wheel.end(), record = std::find(wheel.begin(), wheel.end(), "Record") != wheel.end(), play = std::find(wheel.begin(), wheel.end(), "Play Clip") != wheel.end();
+    std::printf("    the object ring's slices: %zu; Set Key %d, Record %d, Play Clip %d\n", wheel.size(), (int)set_key, (int)record, (int)play);
+    CHECK(set_key && record && play);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -3047,5 +7283,41 @@ void run_editor_tests() {
   tests_round209();
   tests_round222();
   tests_round227();
+  tests_round252();
+  tests_round255();
+  tests_round263();
+  tests_round264();
+  tests_round265();
+  tests_round266();
+  tests_round267();
+  tests_round267b();
+  tests_round268();
+  tests_round268b();
+  tests_round271();
+  tests_round272();
+  tests_round273();
+  tests_round274();
+  tests_round275();
+  tests_round276();
+  tests_round277();
+  tests_round278();
+  tests_round279();
+  tests_round280();
+  tests_round281();
+  tests_round284();
+  tests_round285();
+  tests_round286();
+  tests_round287();
+  tests_round288();
+  tests_round289();
+  tests_round290();
+  tests_round291();
+  tests_round292();
+  tests_round293();
+  tests_round306();
+  tests_round307();
+  tests_round308();
+  tests_round310();
+  tests_round311();
   coverage_tests();
 }

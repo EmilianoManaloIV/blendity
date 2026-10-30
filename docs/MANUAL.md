@@ -27,6 +27,13 @@ and book chapters behind each idea. Each chapter here names its lesson.
 
 ## 1. Getting around
 
+A refusal's toast often carries a **Fix** button that does what it asks: stop Play, cancel the running job, open the
+window it needs. What UV Report and Scene Statistics find opens in a **Report** dialog; Copy takes the lines.
+
+The **?** beside the status bar's hint opens the Learn lesson for what you are doing. In Tablet Mode the status bar and
+the toasts grow so their buttons (Cancel, Fix) are pen-sized. A **CPU** badge in the Scene view's bar says the views
+draw on the CPU although Auto wanted the graphics card; its tooltip says why.
+
 **The windows.** Scene (the 3D view you edit in), Game (what the active camera sees), Hierarchy (the objects as a
 tree), Inspector (the selected object's components), Project (the files in `Assets`), Console (messages and a
 command line), plus the UV Editor, Render, Materials, Textures, Modeling Tools, Lighting, Rigging, Animation,
@@ -35,6 +42,13 @@ Profiler and Learn windows under **Window**. Drag a tab onto another tab bar to 
 **Layouts for each stage.** The **Layout** dropdown (top right, as in Unity; Blender calls them Workspaces) arranges
 the windows for a stage of the work and shows only that stage's tools, so the editor never feels like every tool at
 once:
+
+A layout is a stage of the work: it shows that stage's tools *and tabs* (task 0235). A tab you open from the Window
+menu shows for the session whatever the stage; right-click a tab > *Show All Tabs* shows every tab. In one area,
+Materials, Textures and Lighting fold into one *Shading* tab with a row of the three under it (Rigging & Animation
+and Tools fold the same way; *Fold Groups* in the tab menu turns it off). A strip whose labels don't fit shows the
+inactive tabs as icons, then lists the last ones under »; the stage's hidden tabs are listed under +N. The Scene view's bar reads
+*Layout > Mode > Tool*, each part a dropdown.
 
 | Layout | Windows | Tools shown |
 |---|---|---|
@@ -55,6 +69,37 @@ Tools** shows everything. **Save Layout...** keeps your own arrangement.
 **Navigating** (Unity's mouse): Alt+left drag orbits, middle drag pans, the wheel zooms, hold the right button and use
 W A S D (Q / E down / up, Shift faster) to fly, F frames the selection. Click the cones of the gizmo in the corner for
 front / top / side views, its centre for perspective / orthographic.
+
+**Fingers and a pen on a 2-in-1.** Tablet Mode (the tab menu, or Preferences > Pen and touch > Tablet Mode: Auto turns
+it on when the keyboard folds away) makes the targets half as big again, and then fingers navigate while the pen
+works:
+
+| Action | In Tablet Mode | Otherwise |
+|---|---|---|
+| One finger drags in the Scene view | orbits round the pivot; a flick glides on | box-selects, as the mouse |
+| One finger taps / double taps | selects / frames the selection (Edit Mode on vertices or edges: the edge loop) | clicks / double-clicks |
+| Two fingers | pinch zooms, drag pans, twist turns | the same |
+| One finger drags a list or panel | scrolls it (sideways still moves sliders and numbers) | as the mouse |
+| The pen | selects, moves, draws, paints, as the mouse | the same |
+| The pen's side button held while dragging | orbits; Shift pans, Ctrl zooms | the same |
+| The pen in the **Draw tab** (Window > Draw) or over the Game view | draws in that view's perspective; the arrows, A / D, W / S orbit and dolly the Scene camera and Shift+arrows pan while the pen is up (Q / E too in the Scene view; over the pad E is the Eraser, round 320); Place in 3D puts each stroke in the scene at the depth under the pen (task 0233). Its toolbar (round 319, SketchBook Pro's order): Undo, Redo, Brush (Pen Color, Steadiness, Canvas, Lift, Clear), the color with its opacity, Size, Ruler, Ellipse, Curve, Symmetry, Perspective, Steady Stroke, Predictive Stroke, Layers, the zoom (click: fit) and More (Source: Scene Camera / Game Camera / Paper, Paper Color, Pen, Guides, Build, Place in 3D, Fit, Zoom, Turn, Flip Canvas, Hide the Tools). The wheel zooms about the pointer, a middle-drag or Space+drag pans, Shift with either turns (Ctrl: 15 degree steps), two fingers pinch and twist, Home or a double middle-click fits, a tap of Space opens the Wheel; Tab hides the tools (Tab or Esc brings them back). The brush palette (round 320; the toolbar's Brush shows and hides it): the puck - drag sideways for the size, up and down for the opacity - and a tile a brush (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser; double-click for Brush Properties: Size, Opacity, Edge, Pressure, Min Size, Steadiness; Duplicate, Reset). Over the pad: B the last brush, E the Eraser (it cuts what it crosses; the pen's eraser end too), [ ] the size, Shift+[ ] the opacity, B held and dragged the puck at the pen. Space tapped over the pad, or the pen held still on it half a second, opens the Wheel's draw set (Pencil, Inker, Marker, Eraser, Ruler, Fit, Hide Tools, More; round 321). Over the pad, Photoshop's view keys: Ctrl+= / Ctrl+- zoom about the pen, Ctrl+1 is 100%, Ctrl+0 fits; 4 / 6 turn the canvas, 5 sets it upright; More > Wheel / Dial makes the wheel zoom, size the brush, turn the canvas or fade the brush (Ctrl+wheel always zooms; round 323) | the same |
+| The pen in **Sculpt Mode** (Modeling Tools > Sculpt; `sculpt on`) | drags a brush over the mesh: Draw raises along the normal (Alt carves), Shift smooths keeping the volume, Grab pulls what is under the first dab; the pen's pressure drives the strength or the size (Pressure); only the vertices in the circle move; a stroke is one undo step (task 0236) | the same with the mouse |
+| The pen with the **brush set** (the Sculpt section; the Wheel's Brushes and Symmetry rings; `sculpt brush|symmetry|lazy|alpha|stroke`) | ten brushes (Clay Buildup, Inflate, Flatten, Scrape, Pinch, Crease, Snake Hook join Draw, Smooth, Grab); Mirror X / Y / Z and Radial apply each dab at its instances, summed where they overlap; Lazy Mouse steadies the stroke; an image alpha shapes the dab, turned to the stroke; Dots, Drag Dot, Drag Rect, Freehand and Spray lay the dabs down (task 0237) | the same with the mouse |
+| The pen with **Ctrl in Sculpt Mode** (the Sculpt section's mask and group rows; the Wheel's Masks ring; `sculpt mask|group|hide|show`) | paints the mask that holds the surface (Ctrl+Alt takes it away; off the model a click inverts, a drag masks a rectangle); Ctrl+Shift on a face shows its polygroup alone, off the model shows all; hidden faces leave the picture, the id plane and the brush (task 0238) | the same with the mouse |
+| The pen on a **subdivided object** (Dynamic Subdivision in the Sculpt section; `sculpt subdiv <n>|off`; the Wheel's Subdivide + / -) | works the cage while the eye sees the Subdivision Surface: the pick is moved onto the cage along the ray, and each dab recomputes only the subdivided points it reaches, bit for bit the full subdivision (task 0239) | the same with the mouse |
+| **DynaMesh** (the Sculpt section's Resolution, Smooth and button; `sculpt dynamesh [res] [smooth]`; the Wheel's Brushes ring) | rebuilds the mesh as a closed shell of even quads at the resolution, overlaps merged and inner walls gone, the mask kept, one undo step (task 0240) | the same with the mouse |
+| **Quad Remesh** (the Sculpt section's Target Faces and button; `sculpt remesh [faces] ...`) | QuadriFlow on a worker: quads that follow the form at about the count, the mask kept, one undo step when it lands; Esc cancels (task 0241) | the same with the mouse |
+| The pen with **Dyntopo** on (the Sculpt section's Dyntopo and Detail; `sculpt dyntopo on|off|<detail>`; the Wheel's Size ring) | tessellates under the brush as it moves: edges longer than Detail x the radius split, shorter than two fifths collapsed, then the brush moves; one undo step a stroke holding the mesh (task 0242) | the same with the mouse |
+| The pen in the **Layers window** (Window > Layers; the Draw tab's Layers button) | a press on a row picks the layer, a drag on its name reorders, the eye hides (Alt: solo), the lock keeps the pen and the eraser off it, the slider is the layer's opacity (two overlapping strokes stay one tone), the combo its blend mode; held still on a row it opens the Wheel's layers set (task 0234) | the same, with double-click to rename and right-click for the row's menu |
+| The pen's side button clicked, or the pen or a finger held still half a second | the Wheel: flick or tap Undo, Delete, Extrude, Face... (Space opens it with a keyboard; right-click any menu row > Add to the Wheel puts a command on it) | the same |
+| Drag the Scene Gizmo / its hand / its magnifier | orbits / pans / zooms | the gizmo orbits (the hand and magnifier show with Preferences > Pen and touch > Navigation buttons: Always) |
+
+A finger's press waits a moment before it counts, so a pinch never starts a box select. On Windows a palm resting on
+the screen while the pen is near is ignored. On Linux, fingers and pens come through XInput 2 where the system has it,
+and touches are ignored while the pen is moving; on a Mac, the trackpad's pinch and twist navigate and a tablet's pen
+has its pressure and tilt.
+
+> Learn: *The Editor Layout > Fingers and a pen on a 2-in-1*.
 
 **Selecting and moving.** Click to select, Ctrl+click to add, drag a box. Q W E R Y pick the View, Move, Rotate,
 Scale and Transform tools; Blender's G / R / S also work, with X / Y / Z to lock an axis and a typed number. Hold Ctrl
@@ -84,8 +129,28 @@ and Animation (chapter 9).
 
 **Find any command.** Ctrl+K (or F3) opens the command palette: type a few words and every action, window, layout,
 creatable object and console command that matches is listed with its shortcut; Enter runs it, even a tool the current
-layout hides. Right-click a row (or a menu row) to keep it in Quick Favorites (Shift+Q, one list per layout). The
-status bar says what the mouse and keys do where the mouse is, and offers Undo for the last action. The Inspector shows
+layout hides. Right-click a row (or a menu row) for its small menu: Quick Favorites (Shift+Q, one list per layout), the Wheel
+(Space; the set for where the mouse is), **My Tools** (a window of your own panels, each a grid of commands; `panel`), or
+**Assign Shortcut...** (the next key you press binds it, anywhere; `shortcut <chord> <command>`). Preferences > UI file saves
+the whole arrangement - layout, windows, feel, keymap and your shortcuts, panels, the Wheel's sets, favorites, theme, scale -
+as one `.blendity-ui` file and loads it back (`ui save|load`; two built-ins, Blender-like and ZBrush-like). The
+status bar says what the mouse and keys do where the mouse is, and offers Undo for the last action. A warning appears as
+a toast over the Scene view for three seconds, with a Fix button when a command puts it right (Paint on a mesh with no
+surface offers one); a button that cannot work now is dim, and its tooltip says why. A long job (a bake, a remesh, a render) shows in the status
+bar's right slot with its progress, the time it has run and an estimate left, and a Cancel; when it ends a toast says so.
+Every shortcut you see in a menu or a tooltip is the one your keymap preset binds (Preferences > Keymap), and New or Open
+asks "Save changes?" when the scene has changes since its last save. Window > History lists every undo step; a click goes
+back to it. Ctrl snaps a drag (the increment is the dropdown beside the magnet), keeps Push/Pull's original face or a Sketch
+stroke freehand - the hint says which - and `]` / `[` set a modal's segments or count when you have no wheel. The sky, fog and ambient light are edited in one place, the
+Lighting window (the Render window points there); the Render window's Render Devices section is where every device choice
+is read, Auto meaning the GPU when there is one. The Render window's image pans with a left drag (a pen has no middle
+button), a Tone Curve point goes by Alt+click, the Materials toolbar has Assign to Selection, and the Textures toolbar's
+Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. Animation has keys of its own in every preset -
+set a key, play the clip, step to the previous or next key, Record (Shift+K and Ctrl+Shift+K under Unity, Shift+I and Up / Down
+under Blender; the menus and the palette show your preset's) - and while Record is on the Scene view wears a red frame and a RECORD badge.
+In Weight Paint, Ctrl or the pen's eraser subtracts weight with the Add brush, as in every other brush; in the Rigging
+window's Skin section a Skeleton dropdown picks the skeleton to bind to, no Ctrl+click needed. In the Console, Up and Down recall the commands
+you typed, and a mistyped command is answered with the nearest known ones. The Inspector shows
 each component's first seven fields (Show more for the rest, All Fields for everything); each stage layout's first use
 shows a guide strip with its next three steps. While dragging a gizmo arrow, type a number to move exactly that far.
 
@@ -93,7 +158,11 @@ shows a guide strip with its next three steps. While dragging a gizmo arrow, typ
 go; right-click a tab for Move to New Window, Move to Display N or Move to Main Window. Each window is a dock of its
 own, at its own display's scale; the scene, selection and undo stay one, and the windows come back with the layout.
 A Render or Game tab in its own window can be Render Only (the picture alone, fitted, its controls at the top) and Full
-Screen on that display - a second monitor showing the render large. **Tablet Mode** (the tab menu) makes a window's
+Screen on that display - a second monitor showing the render large. A tab dragged onto **another editor window** docks
+there (a tab in its bar, a split at its edges), and the Scene view, the Game view and the Inspector can be **duplicated**
+(the tab menu's Duplicate into New Window; `dock duplicate Scene`): a second Scene view has a camera of its own, a second
+Inspector a **Pin** that keeps one object while the selection moves on - a drawing tablet beside the screen holds both
+while the main window keeps its own. **Tablet Mode** (the tab menu) makes a window's
 UI half as big again for a pen or a finger; a pen's pressure and tilt shape the Editing tab's brush, its eraser end
 erases, and a palm resting on the screen is ignored.
 
@@ -105,6 +174,14 @@ erases, and a palm resting on the screen is ignored.
 > *Hierarchy, Parenting and the Scene Graph*, *Move, Rotate, Scale*.
 
 ---
+
+**Your editor, your way.** Everything above is movable: the **Wheel** (hold the pen's button or Tab in a view: one radial
+menu with the tools, brushes and sizes of whatever mode you are in), **panels** that dock into any window or float on a
+second screen, a **shortcut for anything** (Assign Shortcut... on any menu item, `shortcut <chord> <command>`), a **UI file**
+(Preferences > UI file) that saves the whole arrangement to share or restore, and the **module registry** (Window > Modules)
+that hides what you do not use. The layouts are stages of one pipeline - Reference, Blocking, Modeling, Sculpting, UV,
+Texturing, Stylized, Lighting, Rigging, Animation - and each shows the tools of its stage first (Show All Tools shows the
+rest). The Learn tab's *Customizing the Editor* lesson walks through it.
 
 ## 2. Reference and planning
 
@@ -135,6 +212,12 @@ click.
 
 ## 3. Blocking out
 
+GameObject > 3D Object is in every layout. Right after adding a primitive, the **Adjust Last** panel at the bottom
+left of the Scene view (F9) changes its size, segments or rings; the change stays one undo step. A click-made Draw
+shape gets the panel too: a circle's or an arc's segments, a polygon's sides, a rectangle's fillet. While Bevel, Array,
+Grid, Pipe, Taper or Recess runs, the bar at the bottom of the view steps its count with - and + (a pen's way to the
+wheel).
+
 **Primitives and parametric shapes.** GameObject > 3D Object: cube, sphere, icosphere, cylinder, cone, torus, plane,
 quad and the Utah teapot. GameObject > Shapes (Parametric): box, plane, cylinder, cone, sphere, icosphere, torus,
 capsule, pipe, arch, stairs, wedge and prism, which keep their settings in the Inspector and rebuild as you change
@@ -156,6 +239,28 @@ UModeler and Plasticity: **Follow** (sweep a face along a path), **Spin / Lathe*
 **Snapping.** Hold Ctrl for grid snapping; drawing snaps to the faces' own axes and to parallel and perpendicular
 edges; X / Y / Z lay construction lines while drawing.
 
+**Drawing in perspective, building from the construction.** For a drawing pad or a pen: **Draw > Sketch (pen)** draws
+over the Scene view with SketchBook's aids under **Draw > Guides** - a ruler, an ellipse (its minor axis shown), French
+curves, symmetry, and 1-, 2- and 3-point perspective with draggable vanishing points. The pen's pressure is the width,
+its eraser erases, Ctrl keeps a stroke freehand. When the pen lifts the stroke is corrected to what it meant: split at
+its corners, each piece a line, an arc, an ellipse or a curve, pulled vertical, horizontal or onto a vanishing line,
+its ends joined to other strokes' (an arch is two lines and an arc). The 3-point guide *is* the camera: orbit and its
+points move; drag a point and the camera turns to put it there. A **canvas** can be a plane in the scene - the ground,
+a face, a wall through a point (`sketchcanvas ground|face|plane`) - and a stroke on it is corrected in the plane's
+metres and sits in the scene from every view; a line along the plane's axis becomes a construction line. **Draw >
+Build from Sketch** makes solids from the strokes that fix them, 3-Sweep's way: a box from three lines at a corner,
+a cylinder or cone from two circles (or a circle and a line), a sweep from two circles and a path, a face from a
+closed outline and its Push/Pull from a line along its normal - boxes and cylinders with their numbers in F9. **Draw >
+Sketch over the Model** keeps the drawing true from its view (a layer fades as you orbit away; Back to the Layer's
+View), projects a stroke onto the face under it and traces it into a cut or a curve, and shows the model's edges to
+draw against. `sketchlift` lifts a whole scaffold drawn under the 3-point guide into a wire object to build from.
+
+**Example: a box from a drawing**
+1. Draw > Sketch (pen); `sketchcanvas ground`. Draw two lines from one point along the red and the blue axis (they
+   snap along the axes and become construction lines).
+2. `sketchcanvas plane z 0 0 0` (a wall through the origin) and draw the upright from the same corner.
+3. Draw > Build from Sketch > Box: the box stands on the three lines; F9 corrects its lengths.
+
 **Example: a doorway in a wall**
 1. GameObject > Shapes (Parametric) > Box; in the Inspector make it 4 x 3 x 0.2.
 2. Select the box, Draw > Rectangle (Mesh menu or Inspector), and draw a rectangle about 1 x 2.1 on its front face
@@ -169,9 +274,17 @@ edges; X / Y / Z lay construction lines while drawing.
 
 **Use cases:** level greyboxing; architectural massing; quick props.
 
-> Learn: *Points, Lines, N-gons and Booleans*, *Move, Rotate, Scale*.
+> Learn: *Points, Lines, N-gons and Booleans*, *Move, Rotate, Scale*, *Drawing in Perspective*.
 
 ---
+
+**Stylized environments.** For a Ghibli-styled or oil-paint scene: **Modeling Tools > Strokes** paints geometry - a
+click on a surface adds a card (a quad facing you), a drag with Ribbon a strip - into one Stroke object whose cards shade by
+their own facing, by the surface's normal, or away from a **Canopy** centre so a bush of flat cards reads as one round
+volume; `strokeobj canopyfill` fills a shell round the centre, `strokeobj grass` drops blades onto the ground. **Modeling
+Tools > Scatter** places instances of a named object by density (`scatter Rock`, then dab; the eraser end removes; a
+painted mask keeps them off a path; `scatter merge` joins them for export). The World's **Sun Disc**, **Horizon Band** and
+**Fog** finish the look in every renderer alike. The `Stylized` layout gathers these.
 
 ## 4. Modeling and topology
 
@@ -220,7 +333,19 @@ others).
 2. Make a torus for a link; add an Array modifier with Fit Type: Fit Curve and the path as its Curve (drag the path
    from the Hierarchy onto the field), and a Curve modifier on the same path.
 
-**Use cases:** hard-surface props, architecture details, game-ready low poly with Subdivision Surface previews.
+**Sculpting.** **Modeling Tools > Sculpt** (`sculpt on`) is ZBrush's workflow on the mesh under the pen: **brushes**
+(Clay, Draw, Inflate, Smooth, Grab, Snake Hook, Crease, Flatten, Pinch) with Mirror symmetry, a lazy mouse, alpha images
+and stroke types; **masks** (Ctrl paints, Ctrl+I inverts, Shift+Ctrl clears) that keep a brush off a region;
+**polygroups** (one per island, by the mask, or grown from a face) and **hiding** (H / Alt+H) to work on a part alone.
+Four ways to add resolution: **Dynamic Subdivision** (a Catmull-Clark preview the brush edits through: the base mesh stays
+light), **DynaMesh** (the Sculpt section's Resolution and button: the shell retopologized evenly from its winding number,
+two shapes merged into one skin), **Quad Remesh** (QuadriFlow: a clean quad mesh at a target face count, sharp edges and
+boundaries kept, on a worker), and **Dyntopo** (Sculptris Pro: the mesh tessellated under the brush as it moves, finer where
+the detail is). The pipeline order that keeps a model clean: *sculpt > remesh > unwrap > bake mesh maps > paint* - a remesh
+after painting would throw the paint's UVs away.
+
+**Use cases:** hard-surface props, architecture details, game-ready low poly with Subdivision Surface previews; organic
+sculpts for characters and creatures, retopologized for games.
 
 > Learn: *Meshes: Vertices, Edges, Faces*, *Edit Mode: Modeling Like Blender*, *Modifiers vs Components*,
 > *Advanced Modeling Tools*, *Bevel, Bridge and Push Through*.
@@ -228,6 +353,9 @@ others).
 ---
 
 ## 5. UV unwrapping
+
+After Unwrap, Smart UV or Pack, the Adjust Last panel changes the margin (and Smart UV's angle). The UV editor's **Pan**
+toggle makes a left drag pan, for a pen; two fingers pan too.
 
 Layout > UV Unwrapping puts the **UV Editor** (Ctrl+9) beside the Scene view.
 
@@ -249,8 +377,14 @@ Layout > UV Unwrapping puts the **UV Editor** (Ctrl+9) beside the Scene view.
 
 ## 6. Materials and textures
 
+**GameObject > New Surface** gives the selected object a surface. A layer's menu (its button at the right of the
+layer's row) applies a **Mask Preset**, clears the mask, groups the layer with the one below, and saves a Group as
+a **smart material** (the shelf lists it). **Bake Mesh Maps...** and **Bake Textures...** open a dialog with the
+size, the samples and Keep UVs. In Paint, **Bucket Fill** fills the group, island, material or object you click,
+or a gradient; Brush Alpha, Grain and Stencil pick from the project's images; Save Palette writes the palette.
+
 **Materials** are Unity-style, evaluating Blender's **Principled BSDF**: base colour, metallic, roughness, specular,
-normal and emission, with tiling and offset, and surface types Opaque, Cutout, Transparent and Glass. The
+normal and emission, with tiling and offset, and surface types Opaque, Cutout, Transparent, Glass and Volume (Fog). The
 **Materials** window shows every material as a sphere: drag one onto an object (the face under the mouse picks the
 slot) or onto a face in Edit Mode. **Material assets** (`Assets/Materials/<name>.mat`) are shared by every object
 that uses them, as in Unity.
@@ -261,11 +395,123 @@ blend mode. The **Textures** window makes and edits them; one texture gives albe
 maps, and stays sharp at any distance with Live Shading. Its **Physical Size** is the metres one tile covers:
 changing it re-tiles every material using the texture (Tiling = 1 / size), except one tiled by hand.
 
+**New** lists the presets by theme (round 327): Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal &
+Fabric and Stone - the anime ones with their subject. Every pattern generator has a folded **Mapping** group, as Blender's
+Mapping node: Map Offset U / V, Map Rotation and Map Scale U / V move, turn and repeat the pattern across the tile;
+**Map Seamless** (on) keeps whole repeats and quarter turns so the tile still meets itself.
+
+Blender's texture nodes as layers (round 328): **Perlin Noise** (Ken Perlin's gradient noise, with Turbulence), **Noise**
+with Musgrave's types (fBm, Multifractal, Ridged, Hybrid, Hetero Terrain), **Voronoi**'s features (F1, F2, Smooth F1,
+Distance to Edge, N-Sphere Radius) and distances (Euclidean, Manhattan, Chebyshev, Minkowski), **Wave** rings and
+profiles, **Magic**, **White Noise** and **Gabor** - all repeating without a seam.
+
+Blender's converters as filters (round 329): the **Color Ramp** is a gradient bar - click to add a stop, drag one to
+move it, drag it off to remove it; Constant, Linear, Ease or B-Spline; from the height, the mask or the luminance.
+**Map Range**, **Clamp** and **Math** (15 operations, with a value or another plane) work on one plane; **RGB Curves**
+has a curve box per channel; **Separate Channel** puts the albedo's R, G, B, H, S or V into the mask. A layer's
+**Blend** has Blender's Mix modes too (Darken... Linear Light, and Hue, Saturation, Color, Value in HSV).
+
+A PBR material's folded **Principled: Subsurface, Sheen, Coat** group (round 330): Subsurface for skin, wax and leaves;
+Sheen for cloth; Coat for lacquer and car paint; Anisotropic for brushed metal and hair (needs UVs). The CPU views, the
+path tracers (CPU, GPU and OptiX) draw them; a GPU view with such a material is drawn on the CPU and says so.
+
+**Working faster** (round 332): right-click a field's name > **Reset to Default**; Add Layer's search (type part of a
+name: "noi", "ramp"); **Alt+click** a layer's name to see the stack up to it; a row says why a layer does nothing; a
+texture tile says "not used" until a material uses it; the Materials window's **Of Type...** makes a material of a kind.
+
+**Fog** (round 331): Surface Type **Volume (Fog)** makes a mesh's inside fog and hides its surface - a box around a
+room, a sphere for a cloud. Its **Volume (Fog)** group has Blender's Principled Volume fields: Fog Density (1 dims what
+is 1 m behind to about a third), Fog Color, Fog Anisotropy (0.5-0.8 for light shafts toward the sun), Fog Emission
+(fire, a magic cloud) and Fog Density Noise for wisps. The presets Fog, Smoke and Mist start you off. The mesh must be
+closed: an open one says so above the fields. F12 with Path Tracing draws it truly - scattered light, soft shadows,
+shafts; the views show the fog's thickness only. GPU path tracing and the GPU views don't have it yet: such scenes go
+to the CPU and say so.
+
+**Blender's shader nodes in Blendity** (rounds 327-333). Blendity has no node canvas: each node is a texture layer, a
+layer's option or a material field, in the order they are stacked.
+
+| Blender node | In Blendity |
+|---|---|
+| Texture Coordinate (UV, Generated) | The material's Mapping: UV, Box (Triplanar), Generated (Object Bounds) |
+| Mapping | Every pattern layer's folded Mapping group: Map Offset, Map Rotation, Map Scale, Seamless |
+| Noise Texture (with 4.1's Musgrave types) | The Noise layer and its Type: Perlin fBm, Multifractal, Ridged, Hybrid Multifractal, Hetero Terrain |
+| (Ken Perlin's noise) | The Perlin Noise layer: Detail, Roughness, Lacunarity, Distortion, Turbulence |
+| Voronoi, Wave, Magic, White Noise, Gabor, Checker, Brick, Gradient Texture | The layers of those names (Voronoi's Feature and Distance, Wave's Bands / Rings and profiles) |
+| Image Texture | The Image layer, or a material's Base Map |
+| Sky Texture, Environment Texture | The Lighting window's Environment; the Sky Gradient layer for a texture |
+| Mix Color | A layer's Blend: Normal, Multiply, Add, Screen, Overlay, Darken ... Linear Light, Hue, Saturation, Color, Value |
+| RGB Curves, Invert, Hue / Saturation / Value, Bright / Contrast | The RGB Curves, Invert, Hue / Saturation and Levels layers |
+| Color Ramp | The Color Ramp layer: stops on a bar, Constant / Linear / Ease / Cardinal |
+| Map Range, Clamp, Math | The layers of those names, on a plane (height, roughness, metallic, mask, albedo) |
+| Separate RGB / HSV | The Separate Channel layer, into the mask |
+| Bump | A texture's Height, given as its normal (the Normal Map switch) |
+| Normal Map | The material's Normal Map |
+| Displacement | The Displace modifier on the mesh |
+| Principled BSDF | The material: base, metallic, roughness, specular, emission, and the folded Subsurface, Sheen, Coat, Anisotropic |
+| Glass BSDF, Transparent BSDF | Surface Type Glass, Transparent |
+| Principled Volume, Volume Scatter / Absorption | Surface Type Volume (Fog) |
+| Toon BSDF, Shader to RGB | Shading Model Toon |
+| Mix Shader, Add Shader | Not yet (an axis material mixes three materials by slope) |
+| Light Path, Attribute, Object Info, Geometry, Combine RGB | Not yet |
+
+**Animating any property** (round 335): with a clip on the object's root (Animation window > the clip menu), right-click
+any field's name in the Inspector > **Insert Keyframe** (or press I over it) - a light's intensity, a camera's focus, a
+material slot's Base Color or Roughness, a modifier's amount; the object's Active through Add Property > Object. A
+diamond after the name marks an animated field. Switches, lists and Active key as Constant (they switch, not fade).
+A second component of a type (two Array modifiers) isn't keyable: a track names the first. **Record** keys whatever you change at the playhead. **Add Property** searches all of them. A material
+shared by other objects changes on them too: give the object its own first (the slot's New Material).
+
+**The 2D look - Camera Flatten** (round 334): Add Component > Rendering > Camera Flatten squashes the object's depth
+toward the camera about a pivot, as Guilty Gear Xrd does: the near parts no longer swell, so the picture is the drawn
+shape, and the shading stays as modelled (piloting a camera and the Draw tab's camera picture show it too, being
+through a camera). Put it on a character's root with Pivot Bone and the head bone's exact name
+(`flatten preset anime` does that); Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
+view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that.
+
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.
 
 **Bake Textures** turns everything an object's materials do into plain images on new UVs, so other programs show what
 Blendity renders.
+
+**Bake Mesh Maps** (Object > Bake Mesh Maps; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
+layout - world normal, position, curvature, ambient occlusion, thickness: Substance Painter's mesh maps - under
+Assets/Textures/MeshMaps, on a worker while you keep working (Esc or `meshmaps cancel` stops it). The Mesh Renderer
+records them; `meshmaps status` says whether the mesh has changed since. The layer stack's generators read them.
+
+**A surface** (`surface new` on the selected object) is a texture in the object's own UV space whose layers write colour,
+height, roughness, metallic and emission; each layer has a **mask that is a stack of effects** (the Textures window's Add
+Effect: a Mesh Map through levels, Noise, Levels, Blur, an Anchor to another layer's mask), and `surface mask preset <layer>
+edgewear|dirt|dust|metaledgewear|positiongradient|thickness` builds the usual ones from the baked mesh maps. A Group holds a
+sub-stack. Editing a layer redoes only the layers above it inside the edited rectangle; a changed surface evaluates on a
+worker while the views keep the last images.
+
+**Paint Mode** (Modeling Tools > Paint; `paint on`) paints the surface's Paint layer on the model: what is under the brush's
+disc and facing you takes the brush's colour, roughness, metallic, height and emission at once (the Paints boxes choose),
+the far side and anything behind are left alone, the pen's eraser end erases, Mirror X / Y / Z paint the mirror. `paint
+fill group|island|material|object` fills a part. A stroke is one undo step holding only the tiles it touched. The painted
+images are saved beside the surface's texture when the project saves.
+
+**Smart materials** are groups of layers with their masks saved as assets: the Textures window's shelf applies a built-in
+(Worn Steel, Painted Metal, Rubber, Wood, Plastic, Concrete, Gold) on top of the surface, where its generators read this
+object's mesh maps; `smat save <layer> <name>` keeps a group of your own under Assets/Materials/Smart and `smat apply
+<name>` drops it onto another surface. `export textures gltf|unity|hdrp|unreal|separate <dir>` writes the surface as the
+images a game engine reads, packed as it expects. `paint 2d on` paints on the Textures window's canvas instead of the
+model; `paint stencil <image>` holds an image over the view that masks the brush.
+
+**The hand-painted look.** The Paint section's Tip (Round, Flat turned to the drag, Bristle) and Mode (Paint, Smudge, Blend),
+Wet (the brush carries the colour it went over), Jitter and `paint grain <image>` make the brush behave like paint; the palette
+row keeps swatches and the picked one's shades. `paint bakelight` bakes the mesh maps' occlusion and a key light into a Multiply
+layer to paint over (`paint bakegradient` the top-down value gradient), `paint gradient` lays one as paint. Set the material's
+Shading Model to Hand-painted so every renderer shows the texture as painted (a rim and a painted highlight in the CPU raster;
+glTF writes it unlit). Posterize, Edge Shade and Cavity are filters in the Textures window's Add Layer menu.
+
+**Stylized environments.** Modeling Tools > Strokes paints geometry: a click on a surface adds a card (a quad facing you), a drag
+with Ribbon a strip; set Normals to Canopy so a bush of cards shades as one round volume; `strokeobj canopyfill` fills a shell
+round the centre, `strokeobj grass` drops blades onto the ground; give the material an alpha image for leaves. Modeling Tools >
+Scatter places instances of a named object by density (`scatter Rock`, then dab; the eraser end removes; `scatter mask 1` keeps
+them off a painted path; `scatter merge` joins them for export). The Lighting window's World has a Sun Disc, a Horizon Band and
+Fog (near and far colours) that every renderer shows alike.
 
 **Many at once.** The Materials, Textures and Project windows select like the Hierarchy: Ctrl+click, Shift+click a
 range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Trash).
@@ -279,7 +525,29 @@ range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Tr
 1. Make a material, set Axis Mode: World; Axis Top: a grass material asset, Axis Side: rock, Axis Bottom: dirt.
 2. Set Axis High to a snow material with High Start 30 (metres), and Axis Noise so the borders wander.
 
-**Use cases:** game assets with real PBR maps; architectural materials; stylised (toon, anime, manga) renders.
+**Painting the surface** - the Substance Painter pipeline, in order. 1. **Object > Bake Mesh Maps** (`meshmaps`): the
+normal, position, curvature, occlusion and thickness of the mesh baked into its UVs on a worker. 2. **A surface** (`surface
+new`): a texture flagged as this object's, its layers reading those maps - **Fill** layers with a **mask stack** (a Mesh Map
+through levels, Noise, Blur, Levels, an Anchor to another layer's mask) and the **smart masks** (edge wear, dirt, dust,
+metal edge wear, position gradient, thickness), **Group** layers, metallic and emission channels; editing a layer redoes
+only the layers above it inside the edited rectangle. 3. **Paint Mode** (Modeling Tools > Paint): a material brush paints
+colour, roughness, metallic, height and emission by projection, the far side left alone, fills by polygroup / island /
+material / object, a stroke one light undo step of the tiles it touched; `paint 2d on` paints on the Textures window's
+canvas; `paint stencil` masks the brush with an image. 4. **Smart materials** (the Textures window's shelf: Worn Steel,
+Painted Metal, Rubber, Wood, Plastic, Concrete, Gold; `smat save` keeps your own group) dropped onto any surface, their
+generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|hdrp|unreal|separate <dir>`): the
+texture set packed as the engine reads it.
+
+**The hand-painted look.** When the light should live in the texture (Blizzard's and Riot's style): `paint bakelight` bakes
+the maps' occlusion and a key light into a Multiply layer to paint over (`paint bakegradient` the top-down value gradient,
+`paint gradient` lays one as paint); the Paint section's **Tip** (Flat turns with the drag, Bristle streaks), **Wet** mixing,
+**Jitter** and `paint grain` make the brush behave like paint; Smudge pulls, Blend softens; the **palette** row keeps
+swatches and shades; **Posterize**, **Edge Shade** and **Cavity** filters flatten and accent the stack; the material's
+**Shading Model: Hand-painted** shows the texture as painted in every renderer (a rim and a painted highlight in the CPU
+raster) and glTF writes it unlit.
+
+**Use cases:** game assets with real PBR maps; architectural materials; stylised (toon, anime, manga) renders; hand-painted
+textures for stylized games.
 
 > Learn: *Materials and Textures*, *Assets, Scenes and Files*.
 
@@ -431,6 +699,18 @@ turbulence, gusts) blows every chain by its own Wind. Bake writes the swing into
 
 ## 9. Animation
 
+**Puppet Posing.** Turn on AutoPosing (the Animation window) and the selected character's hands, feet, head and hips
+become handles in the Scene view: drag one and the body follows - with the AI download's pose prior, as motion
+capture would put a body there; the planted feet stay. Click a handle to pin it. The **Puppet** menu holds Reach (how
+far each side a pose edit fades in), Motion Trails (drag a key dot to pose that frame, Alt-drag it to move the key in
+time), Onion Skin, the Zoetrope (seven frames side by side, each poseable), Motion Check (sliding feet, pops and
+shaking, each with a Fix), the Smooth Brush (drag over the dope sheet) and Lock in Place. Any humanoid rig works -
+Mixamo, the UE5 mannequin, Character Creator, Daz, VRoid, Biped, Rigify - in a T or an A pose; a rig with FK controls
+is keyed on them.
+
+Ctrl+wheel (or the wheel over the ruler) and a pinch zoom the time about the pointer; Shift+wheel, two fingers or the
+middle button pan it; Home or **Fit** shows the whole clip.
+
 Window > **Animation** is Unity's Animation window, a dopesheet (the Animation layout puts it along the bottom).
 
 1. Select the object (a character's root, a door) and press **Create**: it gets an **Animation** component and a clip,
@@ -497,6 +777,16 @@ clip, blend seconds) jump to a clip in Play, blending from the pose of the momen
 
 ## 10. Files: import and export
 
+**Live Link** sends the scene to Blender, Unity, Godot or Unreal as you work. It starts with Blendity (Preferences >
+Live Link) and writes where it listens, so a bridge connects by itself - and again after you restart Blendity. To put a
+bridge in: Window > Live Link > Install a Bridge > Blender (found and enabled for you), or Unity / Godot / Unreal
+Project... and pick the project's folder. The window lists who is connected. `tools/package_bridges.py` makes the
+packages to install by hand (docs/LIVELINK.md, bridges/*/README.md).
+
+**glTF (.glb / .gltf) carries a rig**: a mesh with a Skin modifier exports at rest with its armature as joints, four
+weights a vertex and its rig's clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and
+Blender import a character that still moves. The other formats write the mesh as posed.
+
 **Import** (File > Import Model, or drop files on the window): OBJ + MTL, FBX, glTF, STL, PLY and USD text; their
 materials and textures come along, and rigged files come with their skeletons and skins. The model is shown first in
 the Import Preview (Preferences > Import turns it off): its shading switchable before anything is written - As
@@ -536,8 +826,8 @@ class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 
 says so on the first run, with High one click away. There, editing frames run at about 35-40 fps and orbiting at 60.
 The GPU is for path tracing, baking and realtime GI; an integrated one gets a quarter of the RAM for it.
 
-**Touch and pen (Windows):** two fingers over the Scene view pinch to zoom, drag to pan and twist to turn round the
-pivot, in every editor feel; one finger is the mouse. A pen's pressure scales the weight-paint brush.
+**Touch and pen:** on a 2-in-1, see *Fingers and a pen on a 2-in-1* in chapter 1: Tablet Mode follows the fold, fingers
+navigate and the pen works. A pen's pressure scales the weight-paint brush.
 
 **Quality tiers** (Edit > Preferences..., Quality):
 
@@ -562,9 +852,17 @@ Surface's Levels at 1 while modelling, and turn on the Low tier for heavy scenes
 ## 12. Shortcuts: Unity and Blender side by side
 
 Blendity uses Unity's keys, and keeps Blender's where Unity has none. Edit > Preferences..., Keymap, starts from
-Unity, Unreal, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
+Unity, Unreal, Blender, Maya, 3ds Max, SketchUp or Adobe and rebinds anything. The first run asks where you come from
+(Unity, Unreal, Blender, Photoshop & Substance) and sets the keys and the Editor Feel together; Help > Welcome asks again.
+The **Adobe** preset is Unity's keys with Photoshop's brush keys: B enters Paint Mode, E toggles the eraser, V is the
+Move tool, `[` and `]` the brush size. In every preset `[` and `]` step the active brush (Sculpt, Paint, Weight Paint,
+Strokes, Scatter) by a quarter. `keymap table` in the console prints every action's chords under every preset as a
+Markdown table (this chapter's table is kept by hand from it).
 
-**Themes** (Preferences > Theme, or `theme Dark|Light|Emiliano Light|Emiliano Dark`): the editor's colours. The two
+**Themes** (Preferences > Theme, or `theme Dark|Light|Emiliano Light|Emiliano Dark|High Contrast`): the editor's colours.
+High Contrast is white on near-black with every text at WCAG's 4.5:1 or more and a yellow focus ring (the tests measure
+every theme's ratios). How the editor's ease of use was measured - the keystroke-level model, the Fitts audit, the
+walkthroughs - and what is still open is in `docs/hci/README.md` and `docs/tasks/0262-hci-measured.md`. The two
 Emiliano themes take the palette of the author's site (its Figma variables): paper #F1EEE5 and charcoal #292927, an amber
 accent #D7882B, mint / red / blue / amber signal colours.
 
@@ -606,10 +904,17 @@ Window names, layouts and the Y-up axis stay Unity's whatever the feel.
 
 ---
 
+## Checking how it works for you
+
+`docs/hci/checklist.md` lists 118 tasks across the editor, each with its steps, what should happen and a target
+time. Its interactive page times each task with a stopwatch, marks a task slow at 1.5 times its target, and keeps
+your results so they can be read back and the slow ones improved first.
+
 ## 13. The console
 
 Every tool can be driven from the Console's command line (type `help`), which is also how scripts and the tests drive
-the editor. A few that are handy by hand:
+the editor. None needs it any more: since round 310 every verb an artist uses has a menu item, a button or a field
+(Mesh > Draw for the sketch pen, Puppet > Contacts and Ragdoll Events, the Render window's range, Preferences' paths). A few that are handy by hand:
 
 | Command | Does |
 |---|---|
@@ -619,10 +924,80 @@ the editor. A few that are handy by hand:
 | `autorig humanoid`, `autorig build` | the marker auto-rig |
 | `anim new`, `anim frame 30`, `anim record on` | the Animation window |
 | `matdelete Bricks, Wood Floor` | delete materials by name |
+| `meshmaps 1024 16`, `meshmaps status` | bake the mesh maps on a worker; the record and whether it is stale |
+| `surface new`, `surface mask preset 1 edgewear`, `surface eval 0 0 128 128` | a surface for the object, a smart mask on layer 1, the rect engine timed |
+| `paint on`, `paint color 0.8 0.1 0.1`, `paint fill island` | Paint Mode, the brush's colour, a fill of the UV island under the pointer |
+| `smat apply Worn Steel`, `export textures gltf Exports/Crate`, `paint 2d on` | a smart material on the surface, the texture set in the glTF packing, the canvas takes the brush |
+| `paint brush bristle`, `paint wet 0.5`, `paint bakelight key 1 1 0.5` | a bristle tip, wet mixing, the light baked into a layer to paint over |
+| `strokeobj on`, `strokeobj grass 40 0.25 1`, `scatter Rock`, `set world.Fog 1` | cards and ribbons as geometry, grass on the ground, rocks scattered by density, distance fog |
 | `libs` | which of Blender's libraries this build uses |
+| `sketch on`, `sketchguide perspective 3`, `sketchcanvas ground` | the Sketch tool, its guides and canvases |
+| `sketchbuild box`, `sketchtrace edge`, `sketchlift` | solids, cuts and a scaffold from the construction lines |
+| `sculpt on`, `sculpt brush clay`, `sculpt dynamesh 128`, `sculpt remesh 2000`, `sculpt dyntopo on` | Sculpt Mode, a brush, the remeshers, Sculptris Pro |
+| `meshmaps 1024 16`, `surface new`, `surface mask preset 1 edgewear`, `paint on`, `smat apply Worn Steel`, `export textures unity Exports/Crate` | the paint pipeline from the bake to the texture set |
+| `paint brush bristle`, `paint wet 0.5`, `paint bakelight`, `strokeobj grass 40 0.25 1`, `scatter Rock`, `set world.Fog 1` | the hand-painted look and a stylized scene |
+| `toast <text>` | a toast over the Scene view by hand (lessons, tests) |
+| `jobs`, `jobs cancel [label]` | the running jobs with their progress and time; stop one |
+| `window History` | the undo steps as a list, a click jumps to one |
+| `boolean difference kept Cube` | cut the Cube by the other selected meshes, whichever was selected last |
+| `export textures unity Exports/Hero --assign` | the texture set packed for Unity, assigned to the material (the Textures toolbar's Export Textures... does the same) |
 
 ---
 
 *This manual condenses the README's feature list, the lighting guide and the Learn lessons. Developer documents -
 how it's built and why - are in [`ARCHITECTURE.md`](ARCHITECTURE.md), [`decisions/`](decisions/),
 [`tasks/`](tasks/), [`PERFORMANCE.md`](PERFORMANCE.md) and the [`CHANGELOG`](../CHANGELOG.md).*
+
+## A pen display's dial and express keys (round 323)
+Pen displays such as XPPen's Artist 13.3 Pro V2 send their express keys as keyboard shortcuts (Photoshop's, by
+default) and their dial as a key pair or the scroll wheel. Blendity answers them where the pen draws, over the Draw
+tab's pad and the reference board.
+
+| Control | Set in the tablet's driver | What it does in Blendity |
+|---|---|---|
+| Dial (key mode) | KL `Ctrl -`, KR `Ctrl =` (the default zoom pair) | zoom about the pen |
+| Dial (key mode) | KL `[`, KR `]` | the brush's size |
+| Dial (key mode) | KL `4`, KR `6` | turn the canvas (`5` sets it upright) |
+| Dial | Mouse wheel scroll | whatever More > Wheel / Dial says: zoom, brush size, turn, opacity (Ctrl+wheel zooms) |
+| Express keys | `B`, `E`, `Ctrl Z`, `Ctrl Y`, `Space` (held), `[`, `]`, `Ctrl 0` | brush, Eraser, undo, redo, pan while the pen drags, size, fit |
+| Pen side button | Right click or "Mouse button" | the Wheel at the pen |
+
+## Papers (round 324)
+The Draw tab's More > Source > Paper draws on a paper: a page of its own in `Assets/Papers`, not in the scene. While
+the pad is on Paper the Scene and Game views show no sketch and take no pen, and a paper's perspective guide never
+moves a camera.
+
+| To | Do |
+|---|---|
+| Start another paper | More > Paper > New Paper (or `paper new <name>`) |
+| Go back to one | More > Paper > Open Paper (`paper open <name>`) |
+| Copy or remove it | More > Paper > Duplicate Paper / Delete Paper (to the system's trash) |
+| Undo on the paper | Ctrl+Z / Ctrl+Y over the pad or the Layers window, or the toolbar's Undo / Redo |
+| Draw in the scene again | More > Source > Scene Camera: the scene's own sketch, as it was |
+
+A paper saves itself a second after each change and on closing; the paper used last opens again. Place in 3D, Build
+and Lift need a camera source.
+
+**Papers on the board (round 325):** Boards > New Paper Here or Add Paper, a `.paper` dragged from the Project window,
+or More > Paper > Pin to the Board. The board shows the drawing and keeps it up to date; double-click it to draw on it.
+One paper can be on many boards; a rename keeps them linked.
+
+**Export a board (round 326):** Boards > Export... - What, Format (PNG, JPEG, PDF), Size, Background - then Export...
+It is written in the background, at full sharpness. `board export <path> [png|jpg|pdf] [size <px>] [selection|view]
+[bg board|white|none]`.
+
+**Puppet handles on the right bones:** if a Puppet Posing handle sits on the wrong bone, select the right bone, then
+Animation > Puppet > Handle Bones > that handle > Use the Selected Bone (`autopose handle <part> <bone>|auto`).
+
+## The reference board (round 322)
+Window > Board (a tab beside the Draw tab in the Drawing layout; beside it in Drawing with References).
+
+| To | Do |
+|---|---|
+| Put images on it | Drop files from the system, drag from the Project window, Add Image..., or Ctrl+V (a screenshot, a copied picture or file) |
+| Move around | Wheel: zoom about the pointer; middle-drag: pan; two fingers: pinch and pan; Home or Ctrl+0: fit everything; F: frame the selection; Ctrl+= / Ctrl+-: zoom |
+| Pick | Click an image (Shift: add or take away), drag on empty board for a marquee, Ctrl+A for all |
+| Change | Drag to move, a corner to scale (about the opposite corner), the round handle to turn (Ctrl: 15 degree steps); arrows nudge (Shift: 10 px) |
+| Arrange | Ctrl+] to the front, Ctrl+[ to the back; Ctrl+D duplicates; Delete removes |
+| Undo | Ctrl+Z / Ctrl+Y over the board (its own history, 100 steps) |
+| Keep it | Nothing to do: it saves itself to Assets/Boards a second after a change and on closing, and opens again next time; Boards > New Board or another to switch |

@@ -1,0 +1,161 @@
+{
+ "title": "Blendity test checklist",
+ "about": "Every feature, as an artist reaches it. Time each task from your first move to the result; a task over 1.5x its target is marked slow. Targets are an expert's times from the keystroke-level model (docs/hci/klm.md) or estimates on the same rules; the first time through, expect to be slower.",
+ "areas": [
+  {"id": "A", "name": "Getting around and Preferences", "items": [
+   {"id": "A1", "task": "Switch to the Animation layout and back to Default", "steps": "Layout dropdown (top right) > Animation; then > Default", "expect": "Windows rearrange; the guide strip says the layout's purpose", "target": 4, "source": "walkthrough", "ui": ["Default"]},
+   {"id": "A2", "task": "Open a window that isn't shown", "steps": "Window > Live Link", "expect": "Live Link opens as a tab beside the Hierarchy", "target": 3, "source": "reach", "ui": []},
+   {"id": "A3", "task": "Change the editor feel to Blender and back", "steps": "Edit > Editor Feel > Blender; then > Unity", "expect": "MMB orbits in Blender's feel; RMB + WASD flies in Unity's", "target": 6, "source": "estimate", "ui": []},
+   {"id": "A4", "task": "Set the theme to Light, then High Contrast, then Dark", "steps": "Edit > Preferences > Theme", "expect": "All text readable in each; dim text still legible", "target": 8, "source": "estimate", "ui": ["Theme"]},
+   {"id": "A5", "task": "Raise the UI scale to 1.5", "steps": "Edit > Preferences > UI Scale 1.5", "expect": "Everything larger; long Preferences scroll; labels end in ... with tooltips where cut", "target": 5, "source": "sweep", "ui": []},
+   {"id": "A6", "task": "Turn layout guides off and on", "steps": "Edit > Preferences > Layout guides", "expect": "The guide strip under the tabs hides and shows", "target": 4, "source": "reach", "ui": ["Layout guides"]},
+   {"id": "A7", "task": "Find any command by name", "steps": "Ctrl+K, type unwrap, Enter", "expect": "The selected mesh is unwrapped", "target": 3.5, "source": "klm", "ui": []},
+   {"id": "A8", "task": "Pin a command to Quick Favorites", "steps": "Ctrl+K, right-click a row > Add to Quick Favorites; Shift+Q", "expect": "The command shows in Quick Favorites", "target": 6, "source": "estimate", "ui": ["Add to Quick Favorites"]},
+   {"id": "A9", "task": "Undo and redo three edits", "steps": "Move a cube three times; Ctrl+Z x3; Ctrl+Y x3", "expect": "Each step back and forward; Edit > History lists them", "target": 6, "source": "estimate", "ui": []}
+  ]},
+  {"id": "B", "name": "Navigation and selection", "items": [
+   {"id": "B1", "task": "Frame the selected object", "steps": "Select Cube, F", "expect": "The Scene view centres and fits the cube", "target": 2, "source": "klm", "ui": []},
+   {"id": "B2", "task": "Orbit, pan and zoom with the mouse (Unity feel)", "steps": "Alt+LMB orbit, MMB pan, wheel zoom", "expect": "Smooth, no jumps", "target": 5, "source": "estimate", "ui": []},
+   {"id": "B3", "task": "Orbit with the pen only", "steps": "Drag the Scene Gizmo; drag the hand below it to pan", "expect": "The view follows the pen", "target": 5, "source": "estimate", "ui": []},
+   {"id": "B4", "task": "Box-select three objects", "steps": "Drag a rectangle over Cube, Sphere and Cylinder", "expect": "Three selected; the Inspector shows multi-edit", "target": 3, "source": "estimate", "ui": []},
+   {"id": "B5", "task": "Snap a move to the grid", "steps": "Hold Ctrl while moving the cube", "expect": "Steps of the Move snap (0.25 m)", "target": 4, "source": "estimate", "ui": []},
+   {"id": "B6", "task": "Look through the top view and back", "steps": "Click the gizmo's Y; then Persp", "expect": "An orthographic top view; perspective again", "target": 3, "source": "estimate", "ui": []}
+  ]},
+  {"id": "C", "name": "Hierarchy and Inspector", "items": [
+   {"id": "C1", "task": "Parent the Sphere under the Cube", "steps": "Drag Sphere onto Cube in the Hierarchy", "expect": "Sphere indents under Cube; moving Cube moves it", "target": 3, "source": "estimate", "ui": []},
+   {"id": "C2", "task": "Rename an object", "steps": "Double-click it in the Hierarchy, type, Enter", "expect": "The new name everywhere", "target": 5, "source": "estimate", "ui": []},
+   {"id": "C3", "task": "Add a component by search", "steps": "Inspector > Add Component, type light, Enter", "expect": "A Light component on the object", "target": 5, "source": "estimate", "ui": ["Add Component"]},
+   {"id": "C4", "task": "Edit a field on three objects at once", "steps": "Select three, change Position Y", "expect": "All three move; a differing field shows a dash", "target": 5, "source": "estimate", "ui": []},
+   {"id": "C5", "task": "Pin the Inspector and select something else", "steps": "Inspector > Pin; click another object", "expect": "The Inspector keeps the pinned object", "target": 3, "source": "estimate", "ui": ["Pin"]},
+   {"id": "C6", "task": "Pick a modifier's vertex group from the list", "steps": "Add a Smooth modifier on a mesh with groups; Vertex Group dropdown", "expect": "The mesh's groups listed; picking one limits the smoothing", "target": 3.75, "source": "klm", "ui": []},
+   {"id": "C7", "task": "Add and remove a shape key", "steps": "Inspector > MeshRenderer > Add Shape Key; Remove... > Key 1", "expect": "BlendShape/Key 1 appears, then goes", "target": 6, "source": "reach", "ui": ["Add Shape Key", "Remove..."]}
+  ]},
+  {"id": "D", "name": "Modeling and Edit Mode", "items": [
+   {"id": "D1", "task": "Add a cube and bevel its edges", "steps": "GameObject > 3D Object > Cube; Tab; 2 (edges); select all; Bevel", "expect": "Rounded edges; F9 adjusts the last operation", "target": 10, "source": "walkthrough", "ui": []},
+   {"id": "D2", "task": "Extrude a face", "steps": "Edit Mode, 3 (faces), click a face, E, drag", "expect": "A new face pulled out", "target": 5, "source": "estimate", "ui": []},
+   {"id": "D3", "task": "Loop cut", "steps": "Edit Mode, Ctrl+R over an edge ring, click", "expect": "A loop across the ring", "target": 4, "source": "estimate", "ui": []},
+   {"id": "D4", "task": "Mirror a half model along Y", "steps": "Modeling Tools > Mirror Y", "expect": "The mirrored half added, faces doubled", "target": 3, "source": "reach", "ui": ["Mirror Y"]},
+   {"id": "D5", "task": "Add a Subdivision Surface modifier", "steps": "Add Component > Subdivision Surface, Levels 2", "expect": "Smooth surface, cage kept", "target": 6, "source": "estimate", "ui": []},
+   {"id": "D6", "task": "Boolean difference", "steps": "Select cutter then target; Modeling Tools > Difference", "expect": "The cutter's shape removed", "target": 5, "source": "estimate", "ui": ["Difference"]},
+   {"id": "D7", "task": "Clear imported custom normals", "steps": "Modeling Tools > Clear Custom Normals", "expect": "Shading follows the faces and smooth angle", "target": 3, "source": "reach", "ui": ["Clear Custom Normals"]},
+   {"id": "D8", "task": "Undo a bevel's segments in F9", "steps": "After a bevel, F9; change Segments to 4", "expect": "The bevel redone with 4 segments", "target": 5, "source": "estimate", "ui": []},
+   {"id": "D9", "task": "Add a guide line by numbers", "steps": "Edit Mode tools > Guide Through X/Y/Z, Guide Direction > Add Guide Line", "expect": "A construction line appears", "target": 8, "source": "reach", "ui": ["Add Guide Line"]}
+  ]},
+  {"id": "E", "name": "Drawing, sketch and Push-Pull", "items": [
+   {"id": "E1", "task": "Draw a rectangle on the ground and push-pull it", "steps": "Mesh > Draw > Rectangle; click twice; P, drag", "expect": "A box from the rectangle", "target": 8, "source": "estimate", "ui": []},
+   {"id": "E2", "task": "Sketch with the pen in red", "steps": "Mesh > Draw > Pen Color > Red; draw a stroke", "expect": "A red stroke, corrected to a line or curve", "target": 5.95, "source": "klm", "ui": ["Pen Color"]},
+   {"id": "E3", "task": "Steady a shaky line", "steps": "Mesh > Draw > Steadiness > Strong; draw", "expect": "The line trails the pen and comes out smooth", "target": 5, "source": "reach", "ui": ["Steadiness"]},
+   {"id": "E4", "task": "Draw on the ground plane", "steps": "Mesh > Draw > Canvas > The Ground; draw", "expect": "The stroke lies on the ground in 3D", "target": 5, "source": "reach", "ui": ["Canvas"]},
+   {"id": "E5", "task": "Three-point perspective guide", "steps": "Mesh > Draw > Guides > 3-Point Perspective; draw lines", "expect": "Lines snap to the vanishing points", "target": 6, "source": "estimate", "ui": []},
+   {"id": "E6", "task": "Lift a corner's three lines to 3D", "steps": "Draw three lines toward the axes; Mesh > Draw > Lift the Sketch to 3D", "expect": "A Scaffold wire object", "target": 4.85, "source": "klm", "ui": ["Lift the Sketch to 3D"]},
+   {"id": "E7", "task": "Clear the sketch", "steps": "Mesh > Draw > Clear the Sketch; Ctrl+Z", "expect": "Strokes gone, then back", "target": 3, "source": "reach", "ui": ["Clear the Sketch"]},
+   {"id": "E8", "task": "Build a box from three lines", "steps": "Mesh > Draw > Build from Sketch > Box", "expect": "A box mesh from the sketched corner", "target": 5, "source": "estimate", "ui": []},
+   {"id": "E9", "task": "Zoom in on the Draw tab to draw a detail, turn the canvas, then fit", "steps": "Drawing layout; wheel over the detail; Shift+middle-drag to turn; draw; Home", "expect": "The canvas zooms about the pointer and turns; the stroke lands where drawn; Home fits", "target": 8, "source": "estimate", "ui": ["More"]},
+   {"id": "E10", "task": "Switch to the Marker and make it bigger and fainter with the puck", "steps": "Draw tab > Brush; the Marker tile; drag the puck right and down", "expect": "A wider, fainter Marker; its stroke has one tone where it crosses itself", "target": 6, "source": "estimate", "ui": ["Brush", "Duplicate"]},
+   {"id": "E11", "task": "Erase the middle of a line, then pick the last brush back", "steps": "Over the pad: E; drag across the line; B", "expect": "Two pieces either side of the cut; the brush you were drawing with again", "target": 5, "source": "estimate", "ui": []}
+  ]},
+  {"id": "F", "name": "UV", "items": [
+   {"id": "F1", "task": "Smart UV project", "steps": "UV Unwrapping layout > Smart UV", "expect": "Islands packed in 0-1, no overlaps", "target": 3, "source": "estimate", "ui": ["Smart UV"]},
+   {"id": "F2", "task": "Mark seams from sharp edges and unwrap", "steps": "UV editor > Seams from Sharp", "expect": "Seams on sharp edges, unwrapped", "target": 3, "source": "estimate", "ui": ["Seams from Sharp"]},
+   {"id": "F3", "task": "Part Unwrap at a looser bound", "steps": "UV editor > Parts > 1.5; then Part Unwrap", "expect": "Fewer charts; the options alone don't unwrap", "target": 6, "source": "reach", "ui": ["Parts", "Part Unwrap"]},
+   {"id": "F4", "task": "Edit only two materials' UVs, the others hidden", "steps": "UV editor > material list > tick two; Others Hidden", "expect": "Only their faces shown and editable", "target": 6, "source": "reach", "ui": ["Others Hidden"]},
+   {"id": "F5", "task": "Rotate selected UVs by 90", "steps": "Select an island; type 90 in the field; Rotate", "expect": "The island turns 90 degrees", "target": 5, "source": "estimate", "ui": ["Rotate"]},
+   {"id": "F6", "task": "Check stretching", "steps": "UV editor > Stretch", "expect": "Faces coloured blue / green / red by distortion", "target": 2, "source": "estimate", "ui": ["Stretch"]},
+   {"id": "F7", "task": "UV editor in a narrow window", "steps": "Shrink the UV editor below about 700 px", "expect": "Its right-hand controls move to their own row; nothing overlaps", "target": 3, "source": "sweep", "ui": []}
+  ]},
+  {"id": "G", "name": "Materials, textures, Paint and Sculpt", "items": [
+   {"id": "G1", "task": "Give an object a new material and change its color", "steps": "Inspector > Material > New; Base Color", "expect": "The object recolours", "target": 6, "source": "walkthrough", "ui": []},
+   {"id": "G2", "task": "Add a surface for painting", "steps": "GameObject > New Surface", "expect": "A texture stack on the object", "target": 3, "source": "klm", "ui": ["New Surface"]},
+   {"id": "G3", "task": "Bake mesh maps", "steps": "GameObject > Bake Mesh Maps...; size 1024; Bake", "expect": "AO, curvature and thickness baked", "target": 6, "source": "reach", "ui": ["Bake Mesh Maps..."]},
+   {"id": "G4", "task": "Add an edge-wear mask preset", "steps": "Textures > a layer's menu > Mask Preset > edgewear", "expect": "Wear on the edges", "target": 6, "source": "reach", "ui": ["Mask Preset"]},
+   {"id": "G5", "task": "Read one layer's mask from another (Anchor)", "steps": "Name a layer; add an Anchor to another's mask; pick the name from Layer", "expect": "The anchored mask reused", "target": 8, "source": "reach", "ui": []},
+   {"id": "G6", "task": "Save a layer group as a smart material", "steps": "Layer menu > Save as Smart Material...", "expect": "A free name offered; it appears in the shelf", "target": 8, "source": "reach", "ui": ["Save as Smart Material..."]},
+   {"id": "G7", "task": "Paint a stroke on the model", "steps": "Paint section > Paint; drag over the model", "expect": "Paint follows the surface", "target": 4, "source": "estimate", "ui": ["Paint"]},
+   {"id": "G8", "task": "Bucket-fill an island", "steps": "Paint > Bucket Fill (Island); click the model", "expect": "That island filled; a miss fills nothing", "target": 4, "source": "reach", "ui": []},
+   {"id": "G9", "task": "Sculpt with Clay, then smooth", "steps": "Sculpt > Clay; drag; Shift-drag", "expect": "Clay builds; Shift smooths", "target": 5, "source": "estimate", "ui": ["Sculpt"]},
+   {"id": "G10", "task": "Make the sculpt brush bigger by one step", "steps": "]", "expect": "Radius up a quarter", "target": 1.95, "source": "klm", "ui": []},
+   {"id": "G11", "task": "Export the textures to a folder", "steps": "Textures > Export Textures...; type or pick a folder", "expect": "PNG maps written", "target": 8, "source": "reach", "ui": ["Export Textures..."]}
+  ]},
+  {"id": "H", "name": "Stylized", "items": [
+   {"id": "H1", "task": "Give an object the anime rock look", "steps": "GameObject > Anime Look > Rock", "expect": "Flat-toned toon rock", "target": 4, "source": "reach", "ui": ["Anime Look"]},
+   {"id": "H2", "task": "Paint grass cards", "steps": "Strokes > Grass Density / Height / Radius; Grass under the View's Middle", "expect": "Upright blades on the surface", "target": 6, "source": "reach", "ui": ["Grass under the View's Middle"]},
+   {"id": "H3", "task": "Start a second bush", "steps": "Strokes > New Stroke Object; paint", "expect": "A new Stroke object holds the new cards", "target": 3, "source": "reach", "ui": ["New Stroke Object"]},
+   {"id": "H4", "task": "Fill a canopy", "steps": "Strokes > Canopy Centre from Strokes; Fill Canopy", "expect": "A round shell of cards", "target": 5, "source": "estimate", "ui": ["Fill Canopy"]},
+   {"id": "H5", "task": "Scatter rocks with another seed", "steps": "Scatter > Source; Seed 7; dab", "expect": "A different arrangement for the same dab", "target": 6, "source": "reach", "ui": ["Seed"]},
+   {"id": "H6", "task": "Sun disc and fog", "steps": "Lighting > Sky: sun disc; fog on", "expect": "A sun in the sky; distance fog", "target": 8, "source": "estimate", "ui": []}
+  ]},
+  {"id": "I", "name": "Lighting and rendering", "items": [
+   {"id": "I1", "task": "Aim a light at a point by numbers", "steps": "Select the light; Inspector > Aim X/Y/Z; Aim at These Numbers", "expect": "The light turns toward the point", "target": 8, "source": "reach", "ui": ["Aim at These Numbers"]},
+   {"id": "I2", "task": "Bake lighting", "steps": "Lighting > Generate Lighting", "expect": "Lightmaps baked in the background; the view stays responsive", "target": 3, "source": "estimate", "ui": ["Generate Lighting"]},
+   {"id": "I3", "task": "Render an image", "steps": "F12", "expect": "The Render window shows the frame", "target": 2, "source": "estimate", "ui": []},
+   {"id": "I4", "task": "Render frames 30-40 at 12 fps", "steps": "Render window > First 30, Last 40, Frame Rate 12; Render Animation", "expect": "11 PNGs and an MP4", "target": 10, "source": "reach", "ui": ["First Frame", "Last Frame", "Frame Rate"]},
+   {"id": "I5", "task": "Render a camera sequence to a folder", "steps": "Render window > Sequence Folder; Render Camera Sequence", "expect": "One image per camera in that folder", "target": 8, "source": "reach", "ui": ["Sequence Folder"]},
+   {"id": "I6", "task": "Path-traced preview", "steps": "Render window > Preview with the path tracer", "expect": "Noise clears progressively", "target": 4, "source": "estimate", "ui": ["Preview"]},
+   {"id": "I7", "task": "Develop a render (exposure, curve)", "steps": "Editing window > Render; adjust Exposure", "expect": "The picture brightens; Save keeps an .edit", "target": 8, "source": "estimate", "ui": ["Render"]},
+   {"id": "I8", "task": "Point Blendity at your own ffmpeg", "steps": "Preferences > FFmpeg; type the path, Enter", "expect": "Render Animation uses it", "target": 8, "source": "reach", "ui": []},
+   {"id": "I9", "task": "MoonRay: check it works (needs MoonRay)", "steps": "Preferences > Renderers > Check", "expect": "A test render's result and time", "target": 4, "source": "reach", "ui": ["Check"]}
+  ]},
+  {"id": "J", "name": "Rigging, skinning and hair", "items": [
+   {"id": "J1", "task": "Rig a humanoid", "steps": "Rigging > Humanoid Rig", "expect": "A skeleton with IK on hands and feet", "target": 4, "source": "estimate", "ui": []},
+   {"id": "J2", "task": "Auto-rig from markers", "steps": "Rigging > Auto-Rig; place the markers; Build", "expect": "A fitted skeleton", "target": 30, "source": "estimate", "ui": []},
+   {"id": "J3", "task": "Skin a mesh with automatic weights", "steps": "Select the mesh and the armature; Bind", "expect": "The mesh follows the bones", "target": 5, "source": "walkthrough", "ui": []},
+   {"id": "J4", "task": "Clean small weights", "steps": "Rigging > Weight Paint; Clean Below 0.05; Clean", "expect": "Weights under 0.05 become 0", "target": 6, "source": "reach", "ui": ["Clean Below"]},
+   {"id": "J5", "task": "Rig hair from a mesh with 4 locks of 2 bones", "steps": "Rigging > Rig Hair from Mesh...; Locks 4, Bones a Lock 2; Rig", "expect": "Spring-bone chains, the mesh skinned", "target": 8, "source": "reach", "ui": ["Rig Hair from Mesh..."]},
+   {"id": "J6", "task": "Add spring bones (jiggle)", "steps": "Select bones; Add Component > Spring Bones", "expect": "Bones sway in Play", "target": 6, "source": "estimate", "ui": []}
+  ]},
+  {"id": "K", "name": "Animation, Puppet Posing, physics and AI", "items": [
+   {"id": "K1", "task": "Key a position at frame 0 and 30", "steps": "Animation window > New clip; move; Shift+K at 0 and 30", "expect": "Two keys; the object moves between them", "target": 8, "source": "estimate", "ui": []},
+   {"id": "K2", "task": "Pose a reach by the hand (Puppet Posing)", "steps": "AutoPosing on; drag the hand's dot", "expect": "The body follows, feet planted", "target": 3.75, "source": "klm", "ui": ["AutoPosing"]},
+   {"id": "K3", "task": "Pose with the learned prior (local AI install)", "steps": "Puppet > Use the Pose Prior; drag the hand toward the knee", "expect": "The spine bends naturally; the hand reaches exactly", "target": 4, "source": "estimate", "ui": ["Use the Pose Prior"]},
+   {"id": "K4", "task": "Lock a foot", "steps": "Select the foot bone; Puppet > Lock the Selected Bone", "expect": "It stays put while the body moves", "target": 3, "source": "reach", "ui": ["Lock the Selected Bone"]},
+   {"id": "K5", "task": "Mark a contact on the foot at the playhead", "steps": "Puppet > Contacts > Add One Here", "expect": "A bar under the ruler, 10 frames", "target": 4.85, "source": "klm", "ui": ["Contacts"]},
+   {"id": "K6", "task": "Find and fix a foot slide", "steps": "Puppet > Motion Check; a row's Fix", "expect": "The slide gone; the report one row shorter", "target": 6.3, "source": "klm", "ui": ["Motion Check"]},
+   {"id": "K7", "task": "Motion trails and onion skin", "steps": "Puppet > Motion Trails; Onion Skin", "expect": "A hand's path with key dots; ghosts before and after", "target": 4, "source": "reach", "ui": ["Motion Trails", "Onion Skin"]},
+   {"id": "K8", "task": "Pose a neighbouring frame in the Zoetrope", "steps": "Puppet > Zoetrope; drag a hand in the +2 cell", "expect": "That frame keyed, the playhead unmoved", "target": 5, "source": "reach", "ui": ["Zoetrope"]},
+   {"id": "K9", "task": "Type a key's slopes", "steps": "Curves view; right-click a key; In 0.5", "expect": "The key goes Broken with that slope", "target": 6, "source": "reach", "ui": []},
+   {"id": "K10", "task": "AI Inbetween a span (local AI install)", "steps": "AI Inbetween; Apply", "expect": "A ghost between the keys, then keys", "target": 5, "source": "estimate", "ui": ["AI Inbetween"]},
+   {"id": "K11", "task": "AI: a span by frame numbers", "steps": "AI ... options > From / To > Make This Span", "expect": "Only that span made", "target": 8, "source": "reach", "ui": ["Make This Span"]},
+   {"id": "K12", "task": "Ragdoll a fall (needs Blender's libraries)", "steps": "Puppet > Ragdoll Events > Go Limp Here; Ragdoll", "expect": "The body falls and settles", "target": 6, "source": "reach", "ui": ["Ragdoll Events"]},
+   {"id": "K13", "task": "Generate a walk cycle and keep the style", "steps": "Rigging > Walk Cycle > Generate into the Clip; Save Style", "expect": "A walking clip; Assets/Gaits/<name>.gait", "target": 8.1, "source": "klm", "ui": ["Save Style", "Load Style..."]}
+  ]},
+  {"id": "L", "name": "Sequencer and Play", "items": [
+   {"id": "L1", "task": "Make a sequence of two clips", "steps": "Sequencer > Create; drop two clips on a track", "expect": "Bars on the timeline; preview plays them", "target": 10, "source": "estimate", "ui": ["Create"]},
+   {"id": "L2", "task": "Add a trigger key", "steps": "Sequencer > Add Trigger; click its key; press J", "expect": "J jumps to its clip in Play", "target": 5, "source": "reach", "ui": ["Add Trigger"]},
+   {"id": "L3", "task": "Enter and leave Play", "steps": "Ctrl+P (or the Play button) twice", "expect": "The scene runs; edits made in Play are put back", "target": 2, "source": "estimate", "ui": []}
+  ]},
+  {"id": "M", "name": "Import, export and assets", "items": [
+   {"id": "M1", "task": "Import an FBX character", "steps": "File > Import... (or drop it on the Scene view)", "expect": "A preview, then the character with its textures", "target": 8, "source": "estimate", "ui": []},
+   {"id": "M2", "task": "Export the selection as glTF", "steps": "File > Export...; glTF; Selection only", "expect": "A .glb that opens in Blender", "target": 8, "source": "estimate", "ui": []},
+   {"id": "M3", "task": "Add a reference image from the side", "steps": "Reference & Planning; GameObject > Reference Image > Side > an image", "expect": "A plane facing the side view", "target": 5, "source": "reach", "ui": ["Reference Image"]},
+   {"id": "M4", "task": "Save the scene and open a new one", "steps": "Ctrl+S; Ctrl+N", "expect": "Saved; a new scene; unsaved changes prompt if any", "target": 3.9, "source": "klm", "ui": []},
+   {"id": "M5", "task": "Find an asset in the Project window", "steps": "Project > Search: brick", "expect": "Matching assets listed", "target": 4, "source": "estimate", "ui": []}
+  ]},
+  {"id": "N", "name": "Live Link and the bridges", "items": [
+   {"id": "N1", "task": "Start Live Link", "steps": "Window > Live Link > Start", "expect": "Listening on 40100 (or the next free port)", "target": 3, "source": "estimate", "ui": ["Start"]},
+   {"id": "N2", "task": "Install the Blender bridge", "steps": "Live Link > Install a Bridge > Blender", "expect": "The add-on installed and enabled", "target": 4, "source": "reach", "ui": ["Install a Bridge"]},
+   {"id": "N3", "task": "Blender connects by itself", "steps": "Open Blender with Blendity running", "expect": "Blender's panel: Connected to Blendity; edits stream", "target": 10, "source": "estimate", "ui": []},
+   {"id": "N4", "task": "Install the Unity bridge into a project", "steps": "Live Link > Install a Bridge > Unity Project...; pick the folder", "expect": "The package in Packages; Unity connects", "target": 10, "source": "estimate", "ui": ["Unity Project..."]},
+   {"id": "N5", "task": "Install the Godot add-on", "steps": "Install a Bridge > Godot Project...", "expect": "addons/blendity_livelink, enabled in project.godot", "target": 10, "source": "estimate", "ui": ["Godot Project..."]},
+   {"id": "N6", "task": "Install the Unreal plugin", "steps": "Install a Bridge > Unreal Project...", "expect": "Plugins/BlendityLiveLink, listed in the .uproject", "target": 10, "source": "estimate", "ui": ["Unreal Project..."]}
+  ]},
+  {"id": "O", "name": "Palette, Wheel, My Tools and UI files", "items": [
+   {"id": "O1", "task": "Open the Wheel and pick a slice", "steps": "Space over the Scene view; click a slice", "expect": "The command runs", "target": 2, "source": "estimate", "ui": []},
+   {"id": "O2", "task": "Add a command to a Wheel ring", "steps": "Preferences > Wheel > Into Ring; Pick a Command...; type, click", "expect": "The command in that ring; Preferences stays open", "target": 8, "source": "reach", "ui": ["Pick a Command..."]},
+   {"id": "O3", "task": "Make a My Tools panel", "steps": "My Tools > +; name it; right-click a menu row > Add to My Tools", "expect": "A panel with that button", "target": 10, "source": "estimate", "ui": []},
+   {"id": "O4", "task": "Assign a shortcut", "steps": "Ctrl+K, right-click a row > Assign Shortcut...; press keys", "expect": "The shortcut runs it", "target": 8, "source": "estimate", "ui": ["Assign Shortcut..."]},
+   {"id": "O5", "task": "Save your UI to a file and load it", "steps": "Preferences > UI file > Save...; Load", "expect": "Layout, keys and panels restored", "target": 10, "source": "estimate", "ui": []}
+  ]},
+  {"id": "P", "name": "Learn and help", "items": [
+   {"id": "P1", "task": "Open a lesson and use its Try It", "steps": "Learn > a lesson > Try it", "expect": "The scene set up as the lesson says", "target": 4, "source": "estimate", "ui": []},
+   {"id": "P2", "task": "Answer a lesson's question", "steps": "Learn > a question > reveal", "expect": "The answer and the feature named", "target": 4, "source": "estimate", "ui": []},
+   {"id": "P3", "task": "Read a tooltip on a cut-off button", "steps": "Hover a button whose label ends in ...", "expect": "The whole label first, then its help", "target": 2, "source": "sweep", "ui": []},
+   {"id": "P4", "task": "Follow a refusal's Fix", "steps": "In Play, try Set Key; click the toast's Fix", "expect": "Play stops; the key can be set", "target": 4, "source": "estimate", "ui": []}
+  ]},
+  {"id": "Q", "name": "Performance", "items": [
+   {"id": "Q1", "task": "Orbit a 1M-triangle scene", "steps": "Benchmark scene million; orbit", "expect": "Smooth (the status bar's fps at 30 or more on the GPU)", "target": 5, "source": "estimate", "ui": []},
+   {"id": "Q2", "task": "Edit Mode on a 200k-face mesh", "steps": "Tab on a big mesh; select and move a face", "expect": "No pause over a fraction of a second", "target": 5, "source": "estimate", "ui": []},
+   {"id": "Q3", "task": "First render after start", "steps": "Start Blendity; F12", "expect": "The first render as fast as the second (no long cold start)", "target": 5, "source": "estimate", "ui": []},
+   {"id": "Q4", "task": "Resize a window to 1024 x 640", "steps": "Shrink the window", "expect": "Nothing overlaps; long labels end in ...", "target": 3, "source": "sweep", "ui": []}
+  ]}
+ ]
+}

@@ -4,6 +4,7 @@
 #ifdef _WIN32
 
 #include "platform.h"
+#include "../core/touch_gestures.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
@@ -13,12 +14,16 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#include <shlobj.h>
+#include <objbase.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <windowsx.h>
 #include <mmsystem.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cwchar>
 
 #ifdef _MSC_VER
 #  pragma comment(lib, "user32.lib")
@@ -39,10 +44,11 @@ struct Window {
   uint32_t high_surrogate = 0;
   int buttons_down = 0;
   bool in_refresh = false;
-  /* Touch and pen (task 0075): the gesture so far, and the pen's last pressure. */
-  double gesture_dist = 0.0, gesture_angle = 0.0;
-  POINT gesture_at{};
+  /* Touch and pen (task 0075; task 0213: the fingers through WM_POINTER into the recognizer), and the pen's last
+   * pressure. */
+  TouchRecognizer touch;
   float pen_pressure = 1.0f;
+  bool pen_barrel = false;
   float pen_tilt_x = 0.0f, pen_tilt_y = 0.0f;
   bool pen_eraser = false, pen_near = false;  // (near: a pen in range - a touch then is a palm, not a finger: task 0188)
   UINT32 pen_id = 0;  // (the pen's pointer: only its leaving clears pen_near)
@@ -142,56 +148,61 @@ static bool message_from_touch() { return (GetMessageExtraInfo() & 0xFFFFFF80) =
 
 static void push(Window *w, Event e) {
   const bool pointer = e.type == EventType::MouseMove || e.type == EventType::MouseDown || e.type == EventType::MouseUp;
+  /* (A mouse message Windows made from a touch only where the touch path below couldn't take it: an old Windows.) */
   if ((e.type == EventType::MouseMove || e.type == EventType::MouseDown) && w->pen_near && message_from_touch()) return;  // (a palm while the pen is near; a button-up always passes)
-  if (e.type == EventType::Gesture && w->pen_near) return;
-  if (pointer && message_from_pen()) e.pen = true, e.eraser = w->pen_eraser, e.tilt_x = w->pen_tilt_x, e.tilt_y = w->pen_tilt_y;
+  if (pointer && message_from_touch()) e.pointer = Pointer::Touch;
+  if (pointer && message_from_pen())
+    e.pen = true, e.pointer = Pointer::Pen, e.eraser = w->pen_eraser, e.tilt_x = w->pen_tilt_x, e.tilt_y = w->pen_tilt_y, e.barrel = w->pen_barrel;
   if (e.type == EventType::MouseMove || e.type == EventType::MouseDown) e.pressure = message_from_pen() ? w->pen_pressure : 1.0f;
   w->queue.push_back(std::move(e));
 }
 
-/* Two fingers (Windows' gestures): pinch to zoom, drag to pan, twist to rotate; each event the change since the last.
- * One finger stays the mouse (single-finger panning is turned off in create_window). */
-static void gesture_zoom(Window *w, const GESTUREINFO &gi, bool begin, Event &e) {
-  const double d = (double)gi.ullArguments;
-  if (!begin && w->gesture_dist > 0.0 && d > 0.0) e.zoom = (float)(d / w->gesture_dist);
-  w->gesture_dist = d;
-}
-
-static void gesture_pan(Window *w, POINT p, bool begin, Event &e) {
-  if (!begin) e.pan_x = (float)(p.x - w->gesture_at.x), e.pan_y = (float)(p.y - w->gesture_at.y);
-  w->gesture_at = p;
-}
-
-static void gesture_rotate(Window *w, const GESTUREINFO &gi, bool begin, Event &e) {
-  const double a = GID_ROTATE_ANGLE_FROM_ARGUMENT(LOWORD(gi.ullArguments)) * 57.29577951308232;  // (radians to degrees)
-  if (!begin) e.rotate = (float)(a - w->gesture_angle);
-  w->gesture_angle = a;
-}
-
-static LRESULT on_gesture(Window *w, HWND hwnd, WPARAM wp, LPARAM lp) {
-  GESTUREINFO gi{};
-  gi.cbSize = sizeof(gi);
-  if (!GetGestureInfo((HGESTUREINFO)lp, &gi)) return DefWindowProcW(hwnd, WM_GESTURE, wp, lp);
-  const bool ours = gi.dwID == GID_ZOOM || gi.dwID == GID_PAN || gi.dwID == GID_ROTATE;
-  if (!ours) return DefWindowProcW(hwnd, WM_GESTURE, wp, lp);  // (GID_BEGIN / END and the taps: Windows' own; it closes the handle)
-  POINT p{gi.ptsLocation.x, gi.ptsLocation.y};
-  ScreenToClient(hwnd, &p);
-  const bool begin = (gi.dwFlags & GF_BEGIN) != 0;
-  Event e;
-  e.type = EventType::Gesture;
-  e.x = p.x, e.y = p.y;
-  e.mods = current_mods();
-  if (gi.dwID == GID_ZOOM) gesture_zoom(w, gi, begin, e);
-  if (gi.dwID == GID_PAN) gesture_pan(w, p, begin, e);
-  if (gi.dwID == GID_ROTATE) gesture_rotate(w, gi, begin, e);
-  CloseGestureInfoHandle((HGESTUREINFO)lp);
-  if (!begin) push(w, e);
-  return 0;
+/* The recognizer's steps as events (task 0213): one finger as the left button tagged Touch, two as a Gesture. */
+static void push_touch_steps(Window *w, const std::vector<TouchStep> &steps) {
+  for (const TouchStep &s : steps) {
+    Event e;
+    e.x = (int)std::lround(s.x), e.y = (int)std::lround(s.y);
+    e.mods = current_mods();
+    e.pointer = Pointer::Touch;
+    switch (s.kind) {
+      case TouchStep::Down: e.type = EventType::MouseDown; break;
+      case TouchStep::Move: e.type = EventType::MouseMove; break;
+      case TouchStep::Up: e.type = EventType::MouseUp; break;
+      case TouchStep::Cancel: e.type = EventType::MouseUp, e.cancel = true; break;
+      case TouchStep::Gesture: e.type = EventType::Gesture, e.zoom = s.zoom, e.pan_x = s.pan_x, e.pan_y = s.pan_y, e.rotate = s.rotate; break;
+    }
+    w->queue.push_back(std::move(e));
+  }
 }
 
 /* Windows 8's pointer calls, looked up so the program still starts where they're missing. */
 using GetPointerTypeFn = BOOL(WINAPI *)(UINT32, POINTER_INPUT_TYPE *);
 using GetPointerPenInfoFn = BOOL(WINAPI *)(UINT32, POINTER_PEN_INFO *);
+using GetPointerInfoFn = BOOL(WINAPI *)(UINT32, POINTER_INFO *);
+
+static double touch_clock() { return GetTickCount64() / 1000.0; }
+
+/* A finger (task 0213): into the recognizer, and handled here - Windows then makes no mouse messages or gestures of
+ * it. False for a pen or a mouse (they go on to Windows' mouse messages) or where the pointer calls are missing. */
+static bool on_touch_pointer(Window *w, HWND hwnd, UINT msg, WPARAM wp) {
+  static auto get_type = (GetPointerTypeFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetPointerType");
+  static auto get_info = (GetPointerInfoFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetPointerInfo");
+  const UINT32 id = GET_POINTERID_WPARAM(wp);
+  POINTER_INPUT_TYPE type = PT_POINTER;
+  POINTER_INFO pi{};
+  if (!get_type || !get_info || !get_type(id, &type) || type != PT_TOUCH || !get_info(id, &pi)) return false;
+  POINT p = pi.ptPixelLocation;
+  ScreenToClient(hwnd, &p);
+  std::vector<TouchStep> steps;
+  const double now = touch_clock();
+  const bool canceled = (pi.pointerFlags & POINTER_FLAG_CANCELED) != 0;
+  if (w->pen_near || canceled || msg == WM_POINTERCAPTURECHANGED) w->touch.clear(steps);  // (a palm while the pen is near; a touch Windows took away)
+  else if (msg == WM_POINTERDOWN) w->touch.down(id, (float)p.x, (float)p.y, now, steps);
+  else if (msg == WM_POINTERUPDATE) w->touch.move(id, (float)p.x, (float)p.y, now, steps);
+  else if (msg == WM_POINTERUP) w->touch.up(id, (float)p.x, (float)p.y, now, steps);
+  push_touch_steps(w, steps);
+  return true;
+}
 
 /* A pen's pressure, noted from its pointer messages before Windows turns them into mouse messages (which carry it). */
 static void note_pointer(Window *w, WPARAM wp) {
@@ -205,6 +216,7 @@ static void note_pointer(Window *w, WPARAM wp) {
   w->pen_tilt_x = (pen.penMask & PEN_MASK_TILT_X) ? (float)pen.tiltX : 0.0f;
   w->pen_tilt_y = (pen.penMask & PEN_MASK_TILT_Y) ? (float)pen.tiltY : 0.0f;
   w->pen_eraser = (pen.penFlags & (PEN_FLAG_ERASER | PEN_FLAG_INVERTED)) != 0;
+  w->pen_barrel = (pen.penFlags & PEN_FLAG_BARREL) != 0;
   w->pen_near = true;
   w->pen_id = id;
 }
@@ -336,16 +348,22 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     }
-    case WM_GESTURE: return on_gesture(w, hwnd, wp, lp);
     case WM_POINTERDOWN:
     case WM_POINTERUPDATE:
+      if (on_touch_pointer(w, hwnd, msg, wp)) return 0;
       note_pointer(w, wp);
-      break;  // (on to DefWindowProc: the pen and fingers still arrive as the mouse)
+      break;  // (on to DefWindowProc: the pen still arrives as the mouse)
     case WM_POINTERUP:
     case WM_POINTERLEAVE:
     case WM_POINTERCAPTURECHANGED:
+      if (msg != WM_POINTERLEAVE && on_touch_pointer(w, hwnd, msg, wp)) return 0;
       if (msg == WM_POINTERLEAVE && GET_POINTERID_WPARAM(wp) == w->pen_id) w->pen_near = false;  // (the pen out of range: touches are fingers again)
       w->pen_pressure = 1.0f;  // (lifted or gone: nothing presses)
+      w->pen_barrel = false;
+      break;
+    case WM_SETTINGCHANGE:
+      /* Task 0218: the laptop folded or unfolded - a frame, so Tablet Mode follows at once. */
+      if (lp && std::wcscmp((const wchar_t *)lp, L"ConvertibleSlateMode") == 0) push(w, Event{EventType::Repaint});
       break;
     case WM_DROPFILES: {
       HDROP drop = (HDROP)wp;
@@ -471,11 +489,8 @@ static Window *make_window(const char *title, int x, int y, int ow, int oh) {
   SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
   w->dpi = window_dpi(w->hwnd);
   DragAcceptFiles(w->hwnd, TRUE);
-  /* Two-finger gestures for the Scene view; one finger is the mouse, so single-finger panning is off. */
-  GESTURECONFIG gc[] = {{GID_ZOOM, GC_ZOOM, 0},
-                        {GID_ROTATE, GC_ROTATE, 0},
-                        {GID_PAN, GC_PAN, GC_PAN_WITH_SINGLE_FINGER_VERTICALLY | GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY | GC_PAN_WITH_INERTIA}};
-  SetGestureConfig(w->hwnd, 0, 3, gc, sizeof(GESTURECONFIG));
+  /* Task 0217: a pen held still is the editor's (its quick menu), not Windows' press-and-hold right click. */
+  SetPropW(w->hwnd, L"MicrosoftTabletPenServiceProperty", (HANDLE)(UINT_PTR)0x00000001);  // (TABLET_DISABLE_PRESSANDHOLD)
   return w;
 }
 
@@ -631,12 +646,16 @@ void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) { poll_even
 void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
   MSG msg;
   bool any = PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE) || !w->queue.empty();
+  if (w->touch.holding()) seconds = std::min(seconds, 0.02);  // (a finger's held press is let through on time)
   if (!any && seconds > 0.0) wait_for_input(seconds);
   while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
     if (msg.message == WM_QUIT) w->queue.push_back({EventType::Quit});
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }
+  std::vector<TouchStep> held;
+  w->touch.poll(touch_clock(), held);
+  push_touch_steps(w, held);
   for (auto &e : w->queue) out.push_back(std::move(e));
   w->queue.clear();
 }
@@ -683,6 +702,19 @@ void get_framebuffer_size(Window *w, int &width, int &height) {
 
 float dpi_scale(Window *w) { return w->dpi; }
 
+/* The convertible's posture: Windows' slate mode means something only on a machine that has one. Many desktops and
+ * ordinary laptops read 0 (slate) too, so - as Chromium does - only a touch screen, undocked, on a mobile or slate
+ * power role is asked. */
+bool tablet_posture() {
+  if (GetSystemMetrics(SM_MAXIMUMTOUCHES) <= 0 || GetSystemMetrics(SM_SYSTEMDOCKED) != 0) return false;
+  using RoleFn = int(WINAPI *)(ULONG);  // (PowerDeterminePlatformRoleEx: 2 mobile, 8 slate)
+  static HMODULE pp = LoadLibraryW(L"powrprof.dll");
+  static auto role_of = pp ? (RoleFn)GetProcAddress(pp, "PowerDeterminePlatformRoleEx") : nullptr;
+  const int role = role_of ? role_of(2 /* POWER_PLATFORM_ROLE_V2 */) : 0;
+  if (role != 2 && role != 8) return false;
+  return GetSystemMetrics(SM_CONVERTIBLESLATEMODE) == 0;  // (0: slate - the keyboard away)
+}
+
 void set_title(Window *w, const std::string &title) { SetWindowTextW(w->hwnd, widen(title).c_str()); }
 
 void set_cursor(Window *w, Cursor c) {
@@ -704,13 +736,66 @@ void set_cursor(Window *w, Cursor c) {
 
 std::string get_clipboard(Window *w) {
   std::string out;
-  if (!OpenClipboard(w->hwnd)) return out;
+  if (!w || !OpenClipboard(w->hwnd)) return out;
   if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
     if (auto *p = (const wchar_t *)GlobalLock(h)) {
       out = narrow(p);
       GlobalUnlock(h);
     }
   }
+  CloseClipboard();
+  return out;
+}
+
+/* A DIB (as the clipboard holds a screenshot) given its file header, to be read as a BMP: the pixels start after the
+ * header, the colour masks of a 40-byte header with BI_BITFIELDS (12 bytes; 16 with alpha) and the palette. */
+std::string dib_as_bmp(const void *dib, size_t size) {
+  if (!dib || size < sizeof(BITMAPINFOHEADER)) return {};
+  const auto *bi = (const BITMAPINFOHEADER *)dib;
+  const size_t colors = bi->biClrUsed ? bi->biClrUsed : (bi->biBitCount <= 8 ? (size_t)1 << bi->biBitCount : 0);
+  const bool info_header = bi->biSize == sizeof(BITMAPINFOHEADER);  // (not a V4 / V5 header, whose masks are inside it)
+  const size_t masks = info_header && bi->biCompression == BI_BITFIELDS ? 12 : info_header && bi->biCompression == 6 /* BI_ALPHABITFIELDS */ ? 16 : 0;
+  BITMAPFILEHEADER fh{};
+  fh.bfType = 0x4D42;
+  fh.bfSize = (DWORD)(sizeof(fh) + size);
+  fh.bfOffBits = (DWORD)(sizeof(fh) + bi->biSize + masks + colors * 4);
+  std::string out((const char *)&fh, sizeof(fh));
+  out.append((const char *)dib, size);
+  return out;
+}
+
+static std::string clipboard_bytes(UINT format) {
+  std::string out;
+  HANDLE h = GetClipboardData(format);
+  const void *p = h ? GlobalLock(h) : nullptr;
+  if (!p) return out;
+  out.assign((const char *)p, GlobalSize(h));
+  GlobalUnlock(h);
+  return out;
+}
+
+std::string get_clipboard_file(Window *w) {
+  if (!w || !OpenClipboard(w->hwnd)) return {};
+  std::string out;
+  if (auto drop = (HDROP)GetClipboardData(CF_HDROP); drop && DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) > 0) {
+    const UINT len = DragQueryFileW(drop, 0, nullptr, 0);
+    std::vector<wchar_t> path((size_t)len + 1, L'\0');
+    DragQueryFileW(drop, 0, path.data(), len + 1);
+    out = narrow(path.data());
+  }
+  CloseClipboard();
+  return out;
+}
+
+static std::string dib_as_bmp_from_clipboard() {
+  const std::string dib = clipboard_bytes(CF_DIB);
+  return dib_as_bmp(dib.data(), dib.size());
+}
+
+std::string get_clipboard_image(Window *w) {
+  if (!w || !OpenClipboard(w->hwnd)) return {};
+  std::string out = clipboard_bytes(RegisterClipboardFormatW(L"PNG"));  // (browsers and most paint programs put a PNG)
+  if (out.size() < 8 || out.compare(1, 3, "PNG") != 0) out = dib_as_bmp_from_clipboard();  // (a screenshot: the DIB)
   CloseClipboard();
   return out;
 }
@@ -811,6 +896,78 @@ bool save_file_dialog(Window *w, const std::string &title, const std::string &in
 bool open_file_dialog(Window *w, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
                       std::string &out_path) {
   return run_file_dialog(w, false, title, initial_dir, filters, out_path, nullptr);
+}
+
+/* The shell's folder chooser (task 0271), COM initialised for it on this thread; the initial folder through its callback. */
+static int CALLBACK folder_dialog_start(HWND h, UINT msg, LPARAM, LPARAM data) {
+  if (msg == BFFM_INITIALIZED && data) SendMessageW(h, BFFM_SETSELECTIONW, TRUE, data);
+  return 0;
+}
+
+/* The Vista folder picker: true when chosen; `made` false when the dialog couldn't be created (the caller falls back). */
+static bool pick_folder_vista(HWND owner, const std::wstring &title, const std::wstring &start, std::string &out_path, bool &made) {
+  IFileOpenDialog *dlg = nullptr;
+  made = SUCCEEDED(CoCreateInstance(__uuidof(FileOpenDialog), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)));
+  if (!made) return false;
+  DWORD opts = 0;
+  dlg->GetOptions(&opts);
+  dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+  dlg->SetTitle(title.c_str());
+  IShellItem *folder = nullptr;
+  if (!start.empty() && SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
+    dlg->SetFolder(folder);
+    folder->Release();
+  }
+  bool ok = false;
+  IShellItem *item = nullptr;
+  if (SUCCEEDED(dlg->Show(owner)) && SUCCEEDED(dlg->GetResult(&item))) {
+    PWSTR path = nullptr;
+    ok = SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path;
+    if (ok) out_path = narrow(path);
+    if (path) CoTaskMemFree(path);
+    item->Release();
+  }
+  dlg->Release();
+  return ok;
+}
+
+bool folder_dialog(Window *w, const std::string &title, const std::string &initial_dir, std::string &out_path) {
+  const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  const std::wstring wtitle = widen(title), start = widen(initial_dir);
+  const bool was_refresh = w ? w->in_refresh : false;
+  if (w) {
+    w->in_refresh = true;
+    if (w->buttons_down) w->buttons_down = 0, ReleaseCapture();
+  }
+  bool made = false;
+  const bool chosen = pick_folder_vista(w ? w->hwnd : nullptr, wtitle, start, out_path, made);
+  if (w) w->in_refresh = was_refresh;
+  if (made) {
+    if (SUCCEEDED(co)) CoUninitialize();
+    return chosen;
+  }
+  BROWSEINFOW bi{};
+  bi.hwndOwner = w ? w->hwnd : nullptr;
+  bi.lpszTitle = wtitle.c_str();
+  bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+  bi.lpfn = folder_dialog_start;
+  bi.lParam = start.empty() ? 0 : (LPARAM)start.c_str();
+  const bool was = w ? w->in_refresh : false;
+  if (w) {
+    w->in_refresh = true;
+    if (w->buttons_down) w->buttons_down = 0, ReleaseCapture();
+  }
+  PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+  if (w) w->in_refresh = was;
+  bool ok = false;
+  if (pidl) {
+    wchar_t buf[MAX_PATH * 4] = {0};
+    ok = SHGetPathFromIDListW(pidl, buf) != FALSE;
+    if (ok) out_path = narrow(buf);
+    CoTaskMemFree(pidl);
+  }
+  if (SUCCEEDED(co)) CoUninitialize();
+  return ok;
 }
 
 }  // namespace bl::platform

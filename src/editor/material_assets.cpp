@@ -144,14 +144,18 @@ void Editor::update_asset_drag() {
     if (!in.down[0]) project_select_on_release_.clear();  // (a field took the drop)
     return;
   }
-  if (!d.dragging && (std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6))) d.dragging = true;  // (before the click test)
+  /* Task 0215: in Tablet Mode a finger scrolls the Project window and taps files; dragging them is the pen's and the
+   * mouse's. A finger that moved is a scroll, not a click. */
+  const bool finger = ui_.touch_scroll && in.touch;
+  const bool moved = std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6);
+  if (finger && moved) project_select_on_release_.clear();
+  if (!finger && !d.dragging && moved) d.dragging = true;  // (before the click test)
   if (!in.down[0] && !d.dragging && !project_select_on_release_.empty() && d.path == project_select_on_release_) {
     clear_selection();  // a click on a file row: it is selected now (the Inspector shows it)
     project_selected_ = project_select_on_release_;
     project_multi_.only(project_selected_);
   }
   if (!in.down[0]) project_select_on_release_.clear();
-  if (!d.dragging && (std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6))) d.dragging = true;
   if (d.dragging) {
     const bool image = !d.mat && image_extension_supported(fs::extension(d.path));
     const bool ptex = !d.mat && fs::extension(d.path) == ".ptex";  // a texture asset: objects (rows, the Scene view) or a folder
@@ -168,6 +172,7 @@ void Editor::update_asset_drag() {
       if (!image && !ptex && s.r.contains(in.mx, in.my)) target = s.r;
     for (auto &t : drop_textures_)
       if (image && t.r.contains(in.mx, in.my)) target = t.r;
+    if ((image || fs::extension(d.path) == ".paper") && board_has_mouse()) target = board_rect_;  // (task 0299: onto the reference board; 0305: a paper)
     for (auto &r : drop_rows_)
       if (!image && r.first.contains(in.mx, in.my)) target = r.first;
     if (fs::extension(d.path) == ".anim")
@@ -183,7 +188,7 @@ void Editor::update_asset_drag() {
     ui_.cursor = platform::Cursor::Hand;
   }
   if (!in.down[0]) {
-    if (d.dragging) {
+    if (d.dragging && !in.cancelled) {  // (a press taken back drops nothing: task 0213)
       /* Onto a folder in the Project window: move it there (a scene material is saved there as an asset). */
       const std::pair<Recti, std::string> *folder = nullptr;
       for (auto &f : drop_folders_)
@@ -195,6 +200,10 @@ void Editor::update_asset_drag() {
           if (fs::normalize(fs::parent(src)) != fs::normalize(folder->second)) move_project_entry(src, folder->second);
         }
       }
+      else if (image_extension_supported(fs::extension(d.path)) && !d.mat && board_has_mouse())
+        board_add_image(d.path, board_from_screen({(float)in.mx, (float)in.my}), true);  // (task 0299)
+      else if (fs::extension(d.path) == ".paper" && board_has_mouse())
+        board_add_paper(d.path, board_from_screen({(float)in.mx, (float)in.my}));  // (task 0305)
       else if (fs::extension(d.path) == ".ptex") drop_texture_asset(d.path, in.mx, in.my);
       else if (fs::extension(d.path) == ".anim") seq_drop_clip(d.path, in.mx, in.my);
       else if (d.mat || fs::extension(d.path) == ".mat" || image_extension_supported(fs::extension(d.path)))

@@ -10,11 +10,14 @@
 #include "../image/image.h"
 #include "../scene/scene.h"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace bl {
+
+struct SurfaceMaps;  // surface.h (task 0244)
 
 /* The planes a stack works on, one float per texel: the height (0..1), the albedo (linear RGB), the
  * roughness (0..1) and a mask (0..1) that the layers above a Mask layer are faded by. */
@@ -27,6 +30,19 @@ struct TexPlanes {
    * with Alpha From Cover. Apart from the mask, which Mask by Height shapes for the layers above it. */
   std::vector<float> alpha;
   bool alpha_written = false;
+  /* Task 0244: the metallic and the emission (linear RGB) channels. */
+  std::vector<float> metal;
+  std::vector<Vec3> emit;
+  /* The active rect (task 0244's rect evaluation): layers write inside it only; empty (x1 <= x0) means the whole. */
+  int rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0;
+  bool has_rect() const { return rx1 > rx0 && ry1 > ry0; }
+  void set_rect(int x0, int y0, int x1, int y1) { rx0 = x0, ry0 = y0, rx1 = x1, ry1 = y1; }
+  int x_begin() const { return has_rect() ? rx0 : 0; }
+  int x_end() const { return has_rect() ? rx1 : w; }
+  int y_begin() const { return has_rect() ? ry0 : 0; }
+  int y_end() const { return has_rect() ? ry1 : h; }
+  /* The layer being applied's own mask (its mask stack evaluated), one weight per texel; null: none. Transient. */
+  const std::vector<float> *layer_mask = nullptr;
   void reset(int width, int height_);
   size_t size() const { return (size_t)w * h; }
   /* Wrapped texel reads (every generator is periodic in the tile; filters that read neighbours wrap too). */
@@ -42,6 +58,10 @@ struct LayerContext {
   /* This evaluation's size over the texture's set size (below 1 for the drag preview): radii given in texels
    * of the set size (Blur, Edge Wear, Height AO) are scaled by it, so the preview looks like the result. */
   float texel_scale = 1.0f;
+  /* A surface (task 0244, ADR 0080): the object's mesh maps and coverage, and the layers' anchors by name. */
+  bool surface = false;
+  const SurfaceMaps *maps = nullptr;
+  const std::map<std::string, std::vector<float>> *anchors = nullptr;
 };
 
 /* What a generator produces at one texel: the planes it writes (by the layer's targets) and how much
@@ -49,6 +69,8 @@ struct LayerContext {
 struct LayerSample {
   float height = 0.0f, rough = 0.5f, cover = 1.0f;
   Vec3 albedo{0.5f, 0.5f, 0.5f};
+  float metal = 0.0f;  // (task 0244)
+  Vec3 emit{0.0f, 0.0f, 0.0f};
 };
 
 /* One point of the planes (live shading, task 0031): what TexPlanes holds per texel. */
@@ -57,6 +79,9 @@ struct TexPoint {
   Vec3 albedo{0.5f, 0.5f, 0.5f};
   float alpha = 1.0f;  // the cover plane at the point (task 0150)
   bool alpha_written = false;
+  float metal = 0.0f;  // (task 0244)
+  Vec3 emit{0.0f, 0.0f, 0.0f};
+  float layer_mask = 1.0f;  // the layer being applied's own mask at the point (transient, as TexPlanes::layer_mask)
 };
 
 /* What a neighbourhood filter keeps from the set-resolution evaluation so it can be applied at a point (live
@@ -75,8 +100,13 @@ struct LayerAux {
   float sample_plane(const std::vector<float> &pl, float u, float v) const;
 };
 
-enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin };
-enum LayerTarget { TargetAlbedo = 1, TargetHeight = 2, TargetRoughness = 4, TargetMask = 8, TargetAlpha = 16 };  // (Alpha: a card's cover into the cover plane, task 0150)
+enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin,
+                        /* round 330: Blender's Mix node's modes */ Darken, Lighten, Difference, Exclusion, Subtract, Divide, ColorDodge, ColorBurn,
+                        SoftLight, LinearLight, Hue, Saturation, Color, Value, Count };
+enum LayerTarget { TargetAlbedo = 1, TargetHeight = 2, TargetRoughness = 4, TargetMask = 8, TargetAlpha = 16, TargetMetallic = 32, TargetEmission = 64 };  // (Alpha: a card's cover into the cover plane, task 0150; Metallic / Emission: task 0244)
+
+struct TextureLayer;
+using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
 
 struct TextureLayer {
   bool enabled = true;
@@ -85,7 +115,29 @@ struct TextureLayer {
   float opacity = 1.0f;
   int targets = TargetAlbedo | TargetHeight | TargetRoughness;
   bool use_mask = false;    // faded by the mask plane (a Mask by Height layer below sets it)
-  virtual ~TextureLayer() = default;
+  /* Task 0244 (ADR 0080): the layer's name (an Anchor reads its mask by it) and its own mask - a stack of effects
+   * whose height is the mask (a generator's values, Levels, Blur, Mesh Map, Anchor), multiplying the layer's weight. */
+  std::string name;
+  TextureLayerList mask_layers;
+  /* Round 327: Blender's Mapping node on a generator - its pattern moved, turned and scaled across the tile before it
+   * is sampled. Seamless keeps the scale to whole numbers and the turn to quarter turns, so the tile still repeats. */
+  float map_offset[2] = {0.0f, 0.0f}, map_rotation = 0.0f, map_scale[2] = {1.0f, 1.0f};
+  bool map_seamless = true;
+  /* A layer whose pattern can be moved across the tile (a Fill, a Mesh Map, Face Shadow and Toon Ramp can't). */
+  virtual bool mappable() const { return is_generator(); }
+  bool mapped() const { return mappable() && (map_offset[0] != 0.0f || map_offset[1] != 0.0f || map_rotation != 0.0f || map_scale[0] != 1.0f || map_scale[1] != 1.0f); }
+  void map_uv(float &u, float &v) const;
+  virtual ~TextureLayer();
+  TextureLayer() = default;
+  TextureLayer(const TextureLayer &o);
+  TextureLayer &operator=(const TextureLayer &o);
+  /* The texels a neighbourhood filter reads around a texel (its radius at this evaluation's size): the rect engine
+   * grows the edited rect by it. A Warp or Tile reads anywhere. */
+  virtual int halo_texels(const LayerContext &) const { return 0; }
+  virtual bool reads_anywhere() const { return false; }
+  /* A group's sub-stack (null for every other layer). */
+  virtual TextureLayerList *children() { return nullptr; }
+  const TextureLayerList *children_const() const { return const_cast<TextureLayer *>(this)->children(); }  // (children() mutates nothing: a Group's list)
   virtual const char *type_name() const = 0;
   virtual std::unique_ptr<TextureLayer> clone() const = 0;
   virtual void reflect(Reflector &r) = 0;
@@ -104,25 +156,36 @@ struct TextureLayer {
   virtual bool remap(float &, float &, const LayerContext &) const { return false; }
   /* The blend, opacity, targets and mask fields (reflected first by every layer). */
   void reflect_common(Reflector &r, bool with_enabled = true);
+  void reflect_mapping(Reflector &r);  // (round 327: after the layer's own fields)
 };
 template<class T> struct TextureLayerBase : TextureLayer {
   const char *type_name() const override { return T::kName; }
   std::unique_ptr<TextureLayer> clone() const override { return std::make_unique<T>(static_cast<const T &>(*this)); }
 };
-using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
 
 struct TextureLayerInfo {
   std::string name, category, help;
   std::unique_ptr<TextureLayer> (*create)();
 };
-/* A blend mode applied to one value (the layers' and an Image layer's blending). */
+/* A blend mode applied to one value (the layers' and an Image layer's blending), and to a colour. */
 float texture_blend(int mode, float below, float v);
+Vec3 texture_blend_color(int mode, Vec3 below, Vec3 v);
 /* A layer of a type this build doesn't know (read from a newer file): kept, disabled, doing nothing. */
 std::unique_ptr<TextureLayer> create_missing_texture_layer(const std::string &name);
 /* Every layer type, in menu order (Generators, then Filters). */
 const std::vector<TextureLayerInfo> &texture_layer_infos();
+/* Round 332: the Add Layer menu's groups, by Blender's node categories (Texture, Color, Converter...), in menu order;
+ * a layer's group ("Other" for one not listed). */
+const std::vector<std::string> &texture_layer_groups();
+const std::string &texture_layer_group(const std::string &layer_name);
+/* Round 332: why an enabled layer changes nothing ("Opacity 0", "Writes nothing"), or "" - its row in the stack says so. */
+std::string texture_layer_no_effect(const TextureLayer &l);
 const TextureLayerInfo *find_texture_layer_info(const std::string &name);
 std::unique_ptr<TextureLayer> create_texture_layer(const std::string &name);
+/* Round 328: the periodic Perlin noise (0 at the lattice points), and a Voronoi layer's features at a point (F1, F2,
+ * Smooth F1, the distance to the edge, the N-sphere radius) - for tests and the docs' numbers. */
+float texture_perlin(float x, float y, int period, uint32_t seed);
+bool texture_voronoi_features(const TextureLayer &l, float u, float v, uint32_t seed, float out[5]);
 
 /* A texture asset (Assets/Textures/<name>.ptex). */
 struct ProceduralTexture {
@@ -141,6 +204,12 @@ struct ProceduralTexture {
    * height inside: a Color Ramp from the height colours the albedo without the bricks also bumping the surface. */
   bool use_normal = true, use_roughness = true, use_height = true;
   bool alpha_from_cover = false;  // the albedo image's alpha is the cover plane (task 0150: a foliage card's cutout from a Leaves generator's cover)
+  /* A surface (task 0244, ADR 0080): one object's UV space - no wrap, no seamless blend - with its mesh maps (set by
+   * the editor from the object's record; not a field: the maps are files of their own) read by the Mesh Map layers
+   * and gating the neighbourhood filters. */
+  bool surface = false;
+  std::shared_ptr<const SurfaceMaps> maps;
+  std::string maps_from;  // the record the maps came from (Assets/Textures/MeshMaps/<name>): saved, so a reopened or undone surface reloads them
   bool output_on(int which) const {
     return which == 1 ? use_normal : which == 2 ? use_roughness : which == 3 ? use_height : true;
   }
@@ -155,6 +224,8 @@ struct ProceduralTexture {
   /* The stack evaluated into planes of the texture's size (or `size`, a preview's), and what each
    * neighbourhood layer keeps for point evaluation when `aux` is given (one entry per layer). */
   void evaluate(TexPlanes &out, std::vector<LayerAux> *aux = nullptr, int size = 0) const;
+  /* The composite of the layers before `n` (task 0244's rect engine keeps it and evaluates from `n` up). */
+  void evaluate_below(TexPlanes &out, size_t n, std::map<std::string, std::vector<float>> *anchors = nullptr) const;
   LayerContext context(int w, int h) const;
   /* One output as an image: 0 albedo (sRGB), 1 normal (+Y up, from the height), 2 roughness, 3 height. */
   Bitmap output(int which, const TexPlanes &planes) const;
@@ -195,8 +266,8 @@ class LiveTexture {
 };
 using LiveTexturePtr = std::shared_ptr<const LiveTexture>;
 
-enum class TextureOutput { Albedo = 0, Normal, Roughness, Height, Count };
-const char *texture_output_name(int which);  // "albedo", "normal", "roughness", "height"
+enum class TextureOutput { Albedo = 0, Normal, Roughness, Height, Metallic, Emission, Count };  // (Metallic, Emission: task 0244)
+const char *texture_output_name(int which);  // "albedo", "normal", "roughness", "height", "metallic", "emission"
 int texture_output_index(const std::string &name);  // -1 if unknown
 /* "Assets/Textures/Bricks.ptex#normal" -> the asset path and the output; false if not such a reference. */
 bool split_texture_ref(const std::string &path, std::string &asset, int &output);
@@ -214,9 +285,27 @@ bool procedural_texture_preview();  // any texture in preview
 void procedural_texture_cache_clear();
 /* One asset's cached outputs dropped (task 0183: an Image layer's file rewritten under the same path). */
 void procedural_texture_cache_forget(const std::string &asset_path);
+/* Task 0244: an asset evaluated off the main thread. Async on, a request for outputs whose hash moved on returns the
+ * cached (older) outputs instead of evaluating - the editor's worker stores the fresh planes with cache_store. */
+void procedural_texture_set_async(const std::string &asset_path, bool on);
+uint64_t procedural_texture_cache_hash(ProceduralTexture &t);                 // the hash the cache keys outputs by (Live Shading left out)
+bool procedural_texture_cached(const std::string &asset_path, uint64_t hash);  // the cache holds this hash's outputs
+/* The outputs built from evaluated planes (the six images with their mips, the live snapshot) - on any thread - and
+ * stored under the asset's path on the main thread. */
+struct TextureOutputsHandle;
+std::shared_ptr<TextureOutputsHandle> procedural_texture_cache_build(const ProceduralTexture &t, uint64_t hash, TexPlanes &planes, std::vector<LayerAux> aux);
+void procedural_texture_cache_store(const std::string &asset_path, const std::shared_ptr<TextureOutputsHandle> &built);
 
 /* Presets the Textures window and `newtex` start from: "Bricks", "Wood Floor", "Tatami", "Tiles", "Noise". */
+/* The presets by theme (round 327): Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal & Fabric, Stone. */
+struct TexturePreset {
+  const char *name, *theme;
+  bool anime;  // (a cel-toned one, task 0150: tagged in the menu)
+};
+const std::vector<TexturePreset> &texture_presets();
+const std::vector<std::string> &texture_preset_themes();
 const std::vector<std::string> &texture_preset_names();
+int texture_preset_field_misses();  // (presets naming a field their layer hasn't, since start: tests want 0)
 bool apply_texture_preset(ProceduralTexture &t, const std::string &preset);
 
 /* Hashing helpers shared by the generators (deterministic per texel / cell). */

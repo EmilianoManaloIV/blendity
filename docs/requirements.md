@@ -20,6 +20,8 @@ What Blendity must do and the constraints it works under. Task specs (`docs/task
 | R-11 | Global illumination like Unity's: baked lighting (Contribute GI, light modes Realtime / Mixed / Baked, generated lightmap UVs, Generate Lighting into lightmaps) and probe volumes (automatically placed light probes, as Unity 6's Adaptive Probe Volumes), kept current by realtime GI so lighting changes don't need a manual re-bake. |
 | R-12 | Realtime global illumination from the research folder: voxel-based GI (Thiedemann et al., I3D 2011) for one bounce of light and sky occlusion in the rasterized views, feeding the lightmaps and probes of R-11. |
 | R-13 | Animation with physics as in Cascadeur: the body weighed from its skin, its center of mass, contacts, ballistic flight and angular momentum, a full physics solve, spring bones, an active ragdoll and AutoPosing; corrections written as ordinary keys (tasks 0115-0123). |
+| R-14 | Fingers and a pen on a touch screen (a 2-in-1): in Tablet Mode fingers navigate (one orbits, two pinch / pan / twist) and the pen selects and manipulates, with a pen quick menu for tools without a keyboard; Tablet Mode follows the laptop's tablet posture; the same model on Windows, Linux (XInput 2) and macOS (trackpad, pen tablets). |
+| R-15 | Drawing in perspective with SketchBook-style rulers and guides (ruler, ellipse, French curves, symmetry, 1/2/3-point perspective) over the Scene view, pen strokes corrected toward what they meant (lines, arcs, ellipses, curves split at corners) and kept as scene data; the perspective guide is the scene camera, canvases are planes in the scene, and the model is built from the construction lines by the artist's own steps (boxes, cylinders, extrusions), never guessed. |
 
 ## Quality
 

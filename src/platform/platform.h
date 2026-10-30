@@ -36,6 +36,9 @@ enum class EventType {
   Gesture  // two fingers on a touch screen or pad (task 0075): zoom, pan, rotate
 };
 
+/* What made a pointer event (task 0213, ADR 0062): one finger comes as the mouse's left button, tagged Touch. */
+enum class Pointer { Mouse, Pen, Touch };
+
 struct Event {
   EventType type = EventType::Invalid;
   int x = 0, y = 0;        // pixels, top-left origin
@@ -54,6 +57,10 @@ struct Event {
    * is the eraser end. */
   bool pen = false, eraser = false;
   float tilt_x = 0.0f, tilt_y = 0.0f;
+  /* Task 0213: what made it (pen is pointer == Pen), a pen's side button held, and a MouseUp that takes its press back
+   * (a finger joined by a second: nothing clicks, a box select is dropped). */
+  Pointer pointer = Pointer::Mouse;
+  bool barrel = false, cancel = false;
 };
 
 enum class Cursor { Arrow, IBeam, ResizeH, ResizeV, Move, Hand };
@@ -100,10 +107,23 @@ void get_framebuffer_size(Window *w, int &width, int &height);
 void *native_handle(Window *w);
 void *native_display(Window *w);
 float dpi_scale(Window *w);
+/* Task 0218: the laptop in its tablet posture - folded back, or its keyboard detached (Windows' slate mode). False
+ * where the system doesn't say (Linux, macOS, a desktop). */
+bool tablet_posture();
 void set_title(Window *w, const std::string &title);
 void set_cursor(Window *w, Cursor c);
 std::string get_clipboard(Window *w);
 void set_clipboard(Window *w, const std::string &utf8);
+/* An image on the clipboard as a file's bytes - PNG, or BMP (Windows' DIB with its file header) - empty when there is
+ * none (task 0299: pasted onto the reference board). */
+std::string get_clipboard_image(Window *w);
+/* The first file copied in the system's file browser (Windows' CF_HDROP), UTF-8; empty when there is none or the platform
+ * has no such clipboard (task 0299: added to the board by its path, never read here). */
+std::string get_clipboard_file(Window *w);
+#ifdef _WIN32
+/* A DIB's bytes (the clipboard's CF_DIB) with a BMP file header before them (testable without a clipboard). */
+std::string dib_as_bmp(const void *dib, size_t size);
+#endif
 
 /* Called while the OS runs a modal loop (e.g. live window resize on Win32/macOS)
  * so the app can keep repainting. */
@@ -126,6 +146,8 @@ bool save_file_dialog(Window *w, const std::string &title, const std::string &in
                       std::string &out_path, int *filter_index = nullptr);
 bool open_file_dialog(Window *w, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
                       std::string &out_path);
+/* A folder (task 0271): the system's chooser; false on cancel or when there is none. */
+bool folder_dialog(Window *w, const std::string &title, const std::string &initial_dir, std::string &out_path);
 /* UTF-8 helper shared by backends. */
 void append_utf8(std::string &s, uint32_t cp);
 

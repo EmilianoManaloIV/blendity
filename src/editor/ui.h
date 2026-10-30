@@ -8,6 +8,7 @@
 
 #include "../platform/platform.h"
 #include "../render/canvas.h"
+#include "../core/ramp.h"
 
 #include <functional>
 #include <string>
@@ -30,7 +31,7 @@ struct Theme {
   uint32_t border = Color::hex(0x191919);
   uint32_t separator = Color::hex(0x232323);
   uint32_t text = Color::hex(0xD2D2D2);
-  uint32_t text_dim = Color::hex(0x8C8C8C);
+  uint32_t text_dim = Color::hex(0xA3A3A3);  // (task 0293: 4.6:1 on the panel; 0x8C8C8C was 3.5)
   uint32_t text_bright = Color::hex(0xF0F0F0);
   uint32_t field = Color::hex(0x2A2A2A);
   uint32_t field_border = Color::hex(0x212121);
@@ -69,14 +70,21 @@ struct Theme {
   uint32_t note = Color::hex(0x3A322A), note_text = Color::hex(0xE9D8C4);  // a Learn note box (a cited book)
   uint32_t link = Color::hex(0xA9C9EA), link_icon = Color::hex(0x7FB2E6);   // a Learn source-file link
   uint32_t question = Color::hex(0x30353A), question_hover = Color::hex(0x34393F), question_border = Color::hex(0x47505A);
+  /* Task 0261: text drawn on the accent (the Learn button), and the job tray's fill under its text. */
+  uint32_t text_on_accent = Color::hex(0xFFFFFF);
+  uint32_t progress = Color::hex(0xE87D0D);
 };
 
 /* The theme's index in kThemeNames by name (case aside), or -1. */
 int theme_index(const std::string &name);
 
+/* WCAG 2's contrast ratio between two opaque colours (1 to 21): (L1 + 0.05) / (L2 + 0.05) with L the relative luminance
+ * of the sRGB colour. 4.5 is AA for text, 3 for large text and for a control's edge (1.4.3, 1.4.11). Task 0261. */
+double contrast_ratio(uint32_t a, uint32_t b);
+
 /* The editor's colour themes (task 0073): Dark (Blendity's own), Light, and the two of the user's site (its Figma
  * Variables "Branding Guide", Light and Dark modes). */
-constexpr int kThemeCount = 4;
+constexpr int kThemeCount = 5;  // (task 0261: High Contrast, measured by contrast_ratio)
 extern const char *const kThemeNames[kThemeCount];
 Theme theme_named(const std::string &name);
 
@@ -84,7 +92,8 @@ enum class Icon {
   None, Hand, Move, Rotate, Scale, Transform, Play, Pause, Step, Cube, Camera, Light, Folder, File, Scene, Eye,
   Plus, Gear, Book, Paper, Chart, Info, Warning, Error, ArrowRight, ArrowDown, Check, Close, Grid, Vertex, Face,
   Magnet, Globe, Local, Pivot, Center, Empty, Mesh, Terminal, Flask, Lightbulb, Search, Menu, PushPull,
-  Wind, Spin, Wave  // task 0158: the effectors' icons in the Scene view (a Wind, a Rotator, an Oscillator)
+  Wind, Spin, Wave,  // task 0158: the effectors' icons in the Scene view (a Wind, a Rotator, an Oscillator)
+  Lock  // task 0234: a locked sketch layer
 };
 
 struct Input {
@@ -92,6 +101,9 @@ struct Input {
   bool down[3] = {}, pressed[3] = {}, released[3] = {}, double_clicked[3] = {};
   double last_click[3] = {-1, -1, -1};  // (the double-click's first click, per window: task 0187)
   bool pen = false, eraser = false;  // (task 0188: the pointer is a pen; its eraser end)
+  /* Task 0213: the pointer is a finger; a pen's side button is held; this frame's release took its press back (a
+   * finger joined by a second) - nothing is hovered, so nothing clicks, and drags end without acting. */
+  bool touch = false, barrel = false, cancelled = false;
   float tilt_x = 0.0f, tilt_y = 0.0f;  // (a pen's tilt in degrees)
   int last_click_x[3] = {}, last_click_y[3] = {};
   float wheel_x = 0, wheel_y = 0;
@@ -145,6 +157,7 @@ class Context {
   /* A menu row right-clicked this frame (task 0189: Quick Favorites takes its command by the row's text). */
   std::string favorite_request;
   std::unordered_map<std::string, Recti> button_rects;
+  std::unordered_map<std::string, std::string> tooltip_texts;  // (tests, task 0293: a widget's tooltip by its rect, "x,y,w,h")
   /* Absolute time at which the UI wants to be woken (tooltips, caret blink); 0 = never. */
   double next_wakeup = 0;
   std::function<std::string()> clipboard_get;
@@ -184,6 +197,11 @@ class Context {
   /* --- widgets --- */
   void label(const Recti &r, const std::string &text, uint32_t color = 0, Align align = Align::Left);
   bool button(const Recti &r, const std::string &label, bool selected = false, Icon icon = Icon::None);
+  /* A button that may be disabled with a reason (task 0252, ADR 0085 F1): drawn with the strip colour and dim text, the
+   * reason as its tooltip, the click swallowed; `disabled_reasons` keeps the reason by label for the tests. */
+  bool button_enabled(const Recti &r, const std::string &label, bool enabled, const char *why, bool selected = false, Icon icon = Icon::None);
+  std::unordered_map<std::string, std::string> disabled_reasons;
+  std::unordered_map<std::string, std::string> menu_shortcuts;  // (tests: the shortcut drawn beside a menu row, by its label; task 0254)
   bool icon_button(const Recti &r, Icon icon, bool selected = false, const char *tip = nullptr);
   bool checkbox(const Recti &r, bool &v);
   bool toggle_row(const Recti &r, const std::string &label, bool &v);
@@ -203,6 +221,16 @@ class Context {
   bool slider(Id i, const Recti &r, float &v, float mn, float mx);
   bool combo(Id i, const Recti &r, int &v, const char *const *options, int count);
   bool color_field(Id i, const Recti &r, Vec3 &c, float *alpha = nullptr);  // Unity's colour field + Color window
+  /* Round 329: Blender's ColorRamp - the gradient bar with a handle a stop below it: click the bar to add a stop, drag a
+   * handle to move it, drag it well below to remove it (two always stay). `sel` the stop picked. Linear colours. */
+  bool color_ramp(Id i, const Recti &r, std::vector<RampStop> &stops, int interp, int &sel);
+  /* Round 329: Blender's curve - points in a square box, a monotone cubic through them: drag a point, click to add one,
+   * drag one out of the box to remove it (two always stay). */
+  bool curve_field(Id i, const Recti &r, std::vector<Vec2> &pts, int &sel);
+  bool ramp_add_stop(std::vector<RampStop> &st, float t, int interp, int &sel);
+  bool curve_add_point(std::vector<Vec2> &pts, Vec2 p, int &sel);
+  Vec2 widget_grab_;      // (round 329: where a ramp's stop or a curve's point was taken, from the pointer)
+  Id widget_tap_ = 0;     // (a finger's press on a ramp or curve: a tap adds there on release, unless it scrolled)
   bool foldout(const Recti &r, const std::string &label, bool &open, Icon icon = Icon::None);
   void tooltip(const std::string &text);  // for the most recent hovered widget
   void separator(const Recti &r);
@@ -213,12 +241,24 @@ class Context {
   void end_scroll();
   void scroll_to(Id i, int offset) { scroll_[i] = offset; }
   int scroll_offset(Id i) { return scroll_[i]; }
+  /* Task 0215: in Tablet Mode (set by the editor each frame) a finger dragging up or down in a scrolled area scrolls it
+   * - once it has gone 10 px and mostly up or down, so a slider or a number dragged sideways still edits - and a flick
+   * glides on. The press is taken from the widget under it: nothing clicks. */
+  bool touch_scroll = false;
+  bool touch_scrolling() const { return touch_scroll_id_ != 0; }
+  bool touch_scrolled() const { return touch_scrolled_; }  // (this press scrolled: its release selects nothing)
+  bool touch_gliding() const { return touch_glide_id_ != 0; }
 
   /* --- popups & menus (drawn on top at end_frame) --- */
   void open_popup(Id i, const Recti &anchor, bool submenu_of_top = false);
+  /* A popup opened from a control as a combo's list is (task 0291): inside a dialog it stacks on it, below the
+   * control, and a row picked closes it alone - not the dialog. */
+  void open_dropdown(Id i, const Recti &anchor);
+  std::string elide(const std::string &text, int room);  // (task 0293: cut to fit with "...")
   bool popup_open(Id i) const;
   void close_popups();
   void close_popups_above(Id i);
+  void close_popup(Id i);  // (that popup and those above it; the ones below stay - task 0291)
   /* Declares the popup body for this frame; only runs if open. */
   void popup(Id i, int width, std::function<void()> body);
   bool any_popup_open() const { return !popups_.empty(); }
@@ -236,6 +276,17 @@ class Context {
   void menu_label(const std::string &text);
   Recti popup_row(int h = -1);  // reserve a row in the current popup
   Recti last_widget() const { return last_widget_; }  // where the last widget (or menu row) was drawn
+  /* A panel floating over a window (the Draw tab's brush palette, round 320): its frame and title bar, dragged by the
+   * title and kept inside `bounds`; `r` is its place, kept by the caller. With `close`, a Close button in the title sets
+   * it. Returns the rect under the title for the panel's body. */
+  Recti floating_panel(Id i, Recti &r, const Recti &bounds, const std::string &title, bool *close = nullptr);
+  /* Words over several lines (a board's note, task 0300): wrapped to the rect's width on `paper` in `ink`. A
+   * double-click edits it - the keys type, Enter starts a line, the arrows move the caret (up and down by lines), Home
+   * and End go to the line's ends; a click away or Ctrl+Enter keeps the text, Esc gives it back. True when kept. */
+  bool text_area(Id i, const Recti &r, std::string &s, uint32_t paper, uint32_t ink);
+  /* The lines `s` wraps to in `width` pixels: each line's first byte and one past its last (a line break ends one). */
+  std::vector<std::pair<size_t, size_t>> wrap_lines(const std::string &s, int width);
+  std::string tooltip_text_for_test() const { return tooltip_text_; }  // (the tooltip the last frame showed)
   /* A widget drawn by hand (frames and labels): the next tooltip() belongs to it. */
   void mark_widget(const Recti &r) {
     last_widget_ = r;
@@ -261,6 +312,8 @@ class Context {
     bool dropdown = false;  // a combo's list opened inside a dialog: below its field, closes on its own
     int width = 200;
     int content_h = 0;
+    int scroll = 0;  // (task 0264: a list taller than the room it has scrolls by the wheel)
+    bool list = false;  // (a combo's list: fitted and scrolled; a dialog or a menu keeps its own placement)
     bool declared = false;
     std::function<void()> body;
   };
@@ -270,6 +323,18 @@ class Context {
     int content_h;
     int offset;
   };
+  void touch_scroll_update(Id i, const Recti &r, int &off);
+  Id touch_candidate_ = 0, touch_scroll_id_ = 0, touch_glide_id_ = 0;
+  bool touch_scrolled_ = false;
+  /* A finger's slider or number drag: it waits until the finger has gone sideways (a scroll goes up or down), and once
+   * it changes a value the scroll can't take the press. */
+  bool finger_widget_drag_ = false;
+  int finger_press_y_ = 0;
+  bool finger_sideways(int press_x) const;
+  int slider_press_x_ = 0;
+  int touch_press_x_ = 0, touch_press_y_ = 0, touch_off0_ = 0, touch_last_off_ = 0;
+  float touch_vel_ = 0.0f, touch_glide_vel_ = 0.0f;  // (pixels a second, the offset's)
+  double touch_last_ = 0.0, touch_glide_last_ = 0.0;
   bool covered(int x, int y) const;
   void draw_popups();
   void draw_tooltip();
@@ -279,6 +344,7 @@ class Context {
 
   std::vector<Id> id_stack_;
   Id active_ = 0;
+  int float_grab_x_ = 0, float_grab_y_ = 0;  // (floating_panel: where its title was taken)
   Id edit_id_ = 0;
   std::string edit_buf_, edit_original_;
   size_t edit_cursor_ = 0;
@@ -316,11 +382,15 @@ class Context {
   int popup_cursor_y_ = 0;
   Recti popup_area_;
   Id hover_id_ = 0;
+  uint64_t elided_key_ = 0;  // (task 0293: the button whose label was cut this frame, and its whole label)
+  std::string elided_label_;
   double hover_start_ = 0;
   std::string tooltip_text_;
   Recti tooltip_anchor_;
   Recti last_widget_;
   bool last_hovered_ = false;
+  uint64_t reason_key_ = 0;  // (task 0252: the disabled button whose reason is its tooltip; the general tooltip after it waits)
+  std::string reason_text_;
   std::vector<std::function<void()>> overlays_;
   std::unordered_map<Id, int> int_results_;
   std::unordered_map<Id, Recti> combo_rects_;

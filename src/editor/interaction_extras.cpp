@@ -21,8 +21,10 @@ const Guide kGuides[] = {
     {"Modeling & Topology", "Shape the mesh in Edit Mode: extrude, inset, bevel, loop cuts.", {"Create Cube", "Subdivide", "Modeling Tools Window"}},
     {"UV Unwrapping", "Lay the surface flat for textures: seams, unwrap, pack.", {"Smart UV Project", "Part Unwrap", "Pack Islands"}},
     {"Texturing & Materials", "Give surfaces their look: materials, procedural textures.", {"Materials Window", "Textures Window", "New Material Asset"}},
+    {"Texturing", "Paint and layer a surface: smart materials, masks from the mesh maps, the brush.", {"New Surface", "Bake Mesh Maps...", "Paint Mode On / Off"}},  // (task 0273: the first two steps by name)
+    {"Stylized", "Build a painted world: strokes as geometry, scattered props, a stylized sky and fog.", {"Modeling Tools Window", "Lighting Window", "Scene Window"}},
     {"Lighting & Rendering", "Light the scene and render it.", {"Create Area Light", "Generate Lighting", "Render Preview"}},
-    {"Editing", "Develop a render or an image: exposure, colour, crop, masks.", {"Develop the Last Render", "Editing Window", "Use as Camera Look"}},
+    {"Editing", "Develop a render or an image: exposure, color, crop, masks.", {"Develop the Last Render", "Editing Window", "Use as Camera Look"}},
     {"Rigging", "Give a character bones: a rig, IK, hair chains.", {"Humanoid Rig", "Auto IK on Selected Skeleton", "Rig Hair from Mesh"}},
     {"Skinning & Weight Painting", "Bind a mesh to its bones and paint the weights.", {"Rigging Window", "Humanoid Rig", "Inspector Window"}},
     {"Animation", "Pose and key over time: clips, curves, the Sequencer.", {"Animation Window", "Sequencer Window", "Play / Stop"}},
@@ -40,7 +42,7 @@ const Guide *guide_for(const std::string &layout) {
 Recti Editor::draw_layout_guide(const Recti &area) {
   auto &u = ui_;
   const Guide *g = guides_enabled_ ? guide_for(workspace_) : nullptr;
-  if (!g || guides_seen_.count(workspace_)) return area;
+  if (!g || layout_guide_hidden()) return area;
   const int h = u.row_h() + u.px(10);
   const Recti strip{area.x, area.y, area.w, h};
   u.canvas.fill_rect({area.x, area.y, area.w, h + u.px(2)}, u.theme.border);  // (the gap under the strip too: the frame isn't cleared)
@@ -56,7 +58,7 @@ Recti Editor::draw_layout_guide(const Recti &area) {
     const int bw = u.font.text_width(step) + u.px(20);
     if (x + bw > strip.right() - u.px(90)) break;
     if (u.button({x, strip.y + u.px(4), bw, h - u.px(8)}, step)) palette_run(*e);
-    if (!e->help.empty()) u.tooltip(e->help);
+    u.tooltip(e->help.empty() ? std::string("Opens ") + step + "." : e->help);  // (task 0293: a window's step says so too)
     x += bw + u.px(6);
   }
   if (u.button({strip.right() - u.px(80), strip.y + u.px(4), u.px(74), h - u.px(8)}, "Got it")) {
@@ -65,6 +67,20 @@ Recti Editor::draw_layout_guide(const Recti &area) {
   }
   u.tooltip("Hide this layout's guide for good (Help > Reset Guides shows them again).");
   return {area.x, area.y + h + u.px(2), area.w, std::max(0, area.h - h - u.px(2))};
+}
+
+/* Dismissed, or the layout picked in two earlier sessions (the user knows it: task 0235). */
+bool Editor::layout_guide_hidden() const {
+  if (guides_seen_.count(workspace_)) return true;
+  auto it = guide_uses_.find(workspace_);
+  return it != guide_uses_.end() && it->second > 2;
+}
+
+/* A layout picked: counted once a session. */
+void Editor::note_layout_use(const std::string &name) {
+  if (guide_counted_.count(name)) return;
+  guide_counted_.insert(name);
+  guide_uses_[name]++;
 }
 
 std::vector<std::string> Editor::palette_guide_steps_for_test(const std::string &layout) {
@@ -88,7 +104,8 @@ std::string Editor::prefs_text_0190() const {
     if (p.find(';') == std::string::npos) recent += (recent.empty() ? "" : ";") + p;
   for (const std::string &g : guides_seen_) seen += (seen.empty() ? "" : ";") + g;
   return "recent_scenes=" + recent + "\ninspector_essentials=" + (inspector_essentials_ ? "1" : "0") + "\nguides=" + (guides_enabled_ ? "1" : "0") +
-         "\nguides_seen=" + seen + "\n";
+         "\nguides_seen=" + seen + "\nnav_buttons=" + (nav_buttons_always_ ? "always" : "tablet") +
+         "\ntablet_mode=" + (tablet_pref_ == 1 ? "on" : tablet_pref_ == 2 ? "off" : "auto") + "\n";
 }
 
 /* Digits typed while dragging a gizmo's axis: the move is exactly that far along it (an expression works: 2*1.5).

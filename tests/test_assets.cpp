@@ -474,7 +474,12 @@ static void round50_tests() {
     const Recti pop = r50_popup(ed);
     CHECK(pop.w > 0);
     if (pop.w <= 0) return;
-    r50_pick_row(ed, pop, 0);  // the first preset: Bricks
+    /* Round 327: the presets by theme - Architecture (the second row) opens its list, Bricks first in it. */
+    const int row = ed.ui_for_test().row_h();
+    for (int i = 0; i < 4; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, pop.x + pop.w / 2, pop.y + ed.ui_for_test().px(4) + row + row / 2)});
+    const Recti sub = r50_popup(ed);
+    CHECK(sub.x != pop.x || sub.y != pop.y);
+    r50_pick_row(ed, sub, 0);  // the Architecture list's first: Bricks
     ProceduralTexturePtr t = ed.texture_selected_for_test();
     std::printf("    popup %d,%d %dx%d; selected: %s\n", pop.x, pop.y, pop.w, pop.h, t ? t->name.c_str() : "none");
     /* (Named Bricks, or Bricks 2, 3... when earlier runs left one in the scratch project.) */
@@ -534,30 +539,58 @@ static void round50_tests() {
     CHECK(t && t->layers.size() == 1);
     if (!t) return;
     r34_steps(ed, 3);
-    const Recti ab = ed.texture_ui_rect_for_test("add_layer");
+    /* A row's rect scrolled into the window (the stack's rows run past the pane since a layer shows its Name, its
+     * channels and its mask's Add Effect row, task 0244): the wheel over the pane until it is inside. */
+    auto tex_rect = [&](const std::string &key) {
+      const Recti w = ed.window_rect_for_test(WindowKind::Textures);
+      for (int tries = 0; tries < 80; tries++) {
+        const Recti f = ed.texture_ui_rect_for_test(key);
+        if (f.w <= 0) {
+          r34_steps(ed, 1);
+          continue;
+        }
+        if (f.y >= w.y && f.y + f.h <= w.bottom()) return f;
+        platform::Event mv, wheel;
+        mv.type = platform::EventType::MouseMove;
+        wheel.type = platform::EventType::Wheel;
+        mv.x = wheel.x = f.x + f.w / 2;
+        mv.y = wheel.y = w.bottom() - ed.ui_for_test().px(30);
+        wheel.wheel_y = f.y > w.bottom() ? -3.0f : 3.0f;
+        ed.step_frame_headless({mv});
+        ed.step_frame_headless({wheel});
+        ed.step_frame_headless();
+      }
+      std::printf("    '%s' never came into view\n", key.c_str());
+      return Recti{0, 0, 0, 0};
+    };
+    const Recti ab = tex_rect("add_layer");
     CHECK(ab.w > 0);
     if (ab.w <= 0) return;
     r34_click(ed, ab.x + ab.w / 2, ab.y + ab.h / 2);
     r34_steps(ed, 2);
-    Recti pop = r50_popup(ed);
-    /* Rows: "Generators", 11 generators, "Filters", then Blur. */
-    int blur_row = 0;  // the layers before it plus a label row per category so far
-    std::string category;
-    for (const TextureLayerInfo &li : texture_layer_infos()) {
-      if (li.category != category) category = li.category, blur_row++;
-      if (li.name == "Blur") break;
-      blur_row++;
-    }
-    r50_pick_row(ed, pop, blur_row);
+    /* Blur by its name in the menu (round 332 put a search field and Blender's groups before it, so its row moved). */
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    Recti blur{0, 0, 0, 0};
+    CHECK(ed.button_rect_for_test("menu:Blur", blur));
+    r34_click(ed, blur.x + blur.w / 2, blur.y + blur.h / 2);
+    r34_steps(ed, 2);
     CHECK(t->layers.size() == 2 && std::string(t->layers[1]->type_name()) == "Blur");
-    const Recti mr = ed.texture_ui_rect_for_test("layer1");
+    const Recti mr = tex_rect("layer1");
     CHECK(mr.w > 0);
     r34_click(ed, mr.x + mr.w / 2, mr.y + mr.h / 2);
     r34_steps(ed, 2);
-    pop = r50_popup(ed);
+    const Recti pop = r50_popup(ed);
     r50_pick_row(ed, pop, 0);  // Move Up
     CHECK(std::string(t->layers[0]->type_name()) == "Blur");
-    const Recti cb = ed.texture_ui_rect_for_test("layer_enabled0");
+    for (int i = 0; i < 6; i++) {  // (the settings scrolled back to the top: a longer layer below - round 328's Noise - left them scrolled)
+      platform::Event wheel;
+      wheel.type = platform::EventType::Wheel;
+      wheel.x = mr.x + mr.w / 2, wheel.y = mr.y + mr.h / 2, wheel.wheel_y = 3.0f;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+      ed.step_frame_headless({wheel});
+    }
+    const Recti cb = tex_rect("layer_enabled0");
     r34_click(ed, cb.x + cb.w / 2, cb.y + cb.h / 2);
     r34_steps(ed, 2);
     CHECK(!t->layers[0]->enabled);
@@ -4209,6 +4242,1041 @@ static void tests_round229() {
   });
 }
 
+/* ---------------------------------------------------------------- round 230: big scenes saved and opened (task 0210) */
+static void tests_round230() {
+  test("a scene with a big mesh - its positions, faces and UVs written and read on every core - comes back exactly, writes the same text twice, and a bad vertex deep in its faces is reported at its own line", [] {
+    Scene s;
+    GameObject *g = s.create("Big");
+    MeshPtr big = primitives::uv_sphere(1.0f, 512, 256);  // (131k faces: past the blocks' threshold)
+    g->add<MeshFilter>()->mesh = big;
+    g->add<MeshRenderer>();
+    ScopedTimer ts;
+    const std::string text = save_scene_text(s);
+    const double save_ms = ts.ms();
+    CHECK(save_scene_text(s) == text);
+    Scene back;
+    std::string err;
+    ScopedTimer tl;
+    const bool ok = load_scene_text(text, back, err);
+    const double load_ms = tl.ms();
+    std::printf("    %s of text: saved in %.1f ms, read in %.1f ms\n", format_bytes(text.size()).c_str(), save_ms, load_ms);
+    CHECK(ok);
+    GameObject *bg = back.find_by_name("Big");
+    const Mesh *m = bg && bg->get<MeshFilter>() ? bg->get<MeshFilter>()->mesh.get() : nullptr;
+    CHECK(m && m->positions.size() == big->positions.size() && m->corner_verts == big->corner_verts && m->face_offsets == big->face_offsets);
+    bool same = m != nullptr && m->uvs.size() == big->uvs.size();
+    for (size_t i = 0; same && i < big->positions.size(); i++) same = m->positions[i] == big->positions[i];
+    for (size_t i = 0; same && i < big->uvs.size(); i++) same = m->uvs[i].x == big->uvs[i].x && m->uvs[i].y == big->uvs[i].y;
+    CHECK(same);
+    /* A face 100,000 lines into its block names a vertex that isn't there: the error names that line. */
+    const size_t mesh_at = text.find("\nmesh "), fstart = text.find("\nf ", mesh_at);
+    size_t at = fstart + 1;
+    for (int i = 0; i < 100000; i++) at = text.find('\n', at) + 1;
+    const size_t line_end = text.find('\n', at);
+    std::string bad = text.substr(0, at) + "f 3 0 1 999999999" + text.substr(line_end);
+    const int want = 1 + (int)std::count(bad.begin(), bad.begin() + (ptrdiff_t)at, '\n');
+    Scene broken;
+    std::string berr;
+    CHECK(!load_scene_text(bad, broken, berr));
+    std::printf("    the bad line: %s (want line %d)\n", berr.c_str(), want);
+    CHECK(berr.find(strprintf("line %d:", want)) == 0);
+    /* The same text with Windows line ends and a blank line 70,000 lines into each block reads as the same mesh (the
+     * blocks stop at the blank line, and the rest is read line by line); read back from a file, it is every byte. */
+    std::string odd;
+    for (const char *tag : {"\nv ", "\nf ", "\nt "}) {
+      size_t q = text.find(tag, mesh_at) + 1;
+      for (int i = 0; i < 70000; i++) q = text.find('\n', q) + 1;
+      CHECK(q > 0 && q < text.size());
+    }
+    size_t lines = 0, block_line = 0;
+    for (char ch : text) {
+      if (ch == '\n') {
+        lines++;
+        odd += "\r\n";
+        if (++block_line == 70000) odd += "\r\n", block_line = 0;  // (blank lines all through: inside every block)
+        continue;
+      }
+      odd += ch;
+    }
+    Scene odd_back;
+    std::string oerr;
+    CHECK(load_scene_text(odd, odd_back, oerr));
+    GameObject *og = odd_back.find_by_name("Big");
+    const Mesh *om = og && og->get<MeshFilter>() ? og->get<MeshFilter>()->mesh.get() : nullptr;
+    bool odd_same = om && om->positions == big->positions && om->corner_verts == big->corner_verts && om->face_offsets == big->face_offsets &&
+                    om->uvs.size() == big->uvs.size();
+    for (size_t i = 0; odd_same && i < big->uvs.size(); i++) odd_same = om->uvs[i].x == big->uvs[i].x && om->uvs[i].y == big->uvs[i].y;
+    std::printf("    %zu lines with Windows ends and blank lines: %s\n", lines, odd_same ? "the same mesh" : oerr.c_str());
+    CHECK(odd_same);
+    const std::string dir = fs::join(test_dir(), "test_round230");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "big.scene");
+    std::string read;
+    CHECK(fs::write_file(path, odd) && fs::read_file(path, read) && read == odd);
+    CHECK(fs::write_file(path, "") && fs::read_file(path, read) && read.empty());
+  });
+}
+
+/* Round 327 (task 0307): the texture presets by theme, and Blender's Mapping on every generator. */
+static void tests_round327() {
+  test("texture presets by theme: every preset in a theme of the menu's list, none twice, the old fifteen still there; each builds and evaluates at 64 px with a picture of its own", [] {
+    std::set<std::string> themes(texture_preset_themes().begin(), texture_preset_themes().end()), names, used;
+    bool ok = true;
+    for (const TexturePreset &p : texture_presets()) {
+      ok = ok && themes.count(p.theme) && names.insert(p.name).second;
+      used.insert(p.theme);
+    }
+    for (const char *old : {"Bricks", "Wood Floor", "Tatami", "Tiles", "Noise", "Checker", "Anime Leaves", "Anime Grass", "Anime Wall", "Anime Windows",
+                            "Anime Roof", "Anime Sky", "Anime Clouds", "Anime Rock", "Anime Water"})
+      ok = ok && names.count(old);
+    CHECK(ok && used.size() == themes.size() && names.size() >= 35);
+    std::set<long> looks;
+    int built = 0;
+    for (const TexturePreset &p : texture_presets()) {
+      ProceduralTexture t;
+      if (!apply_texture_preset(t, p.name) || t.layers.empty()) {
+        std::printf("    %s didn't build\n", p.name);
+        continue;
+      }
+      TexPlanes pl;
+      t.evaluate(pl, nullptr, 64);
+      Vec3 sum(0.0f);
+      for (const Vec3 &a : pl.albedo) sum = sum + a;
+      sum = sum / (float)std::max<size_t>(1, pl.albedo.size());
+      looks.insert(std::lround(sum.x * 100) * 1000000 + std::lround(sum.y * 100) * 1000 + std::lround(sum.z * 100));
+      built += pl.w == 64 && pl.albedo.size() == 64 * 64;
+    }
+    std::printf("    %zu presets in %zu themes; %d built at 64 px; %zu different average colours\n", names.size(), used.size(), built, looks.size());
+    CHECK(built == (int)names.size() && looks.size() * 10 >= names.size() * 7);
+  });
+  test("Mapping (Blender's Mapping node) on a generator: scale 2 doubles a Checker's cells, an offset moves it a quarter tile, a quarter turn turns it; Seamless rounds 1.5 to 2; the tile's edges still meet; saved and read back", [] {
+    auto make = [](float su, float off, float rot, bool seamless) {
+      ProceduralTexture t;
+      apply_texture_preset(t, "Checker");
+      TextureLayer &l = *t.layers[0];
+      l.map_scale[0] = l.map_scale[1] = su, l.map_offset[0] = off, l.map_rotation = rot, l.map_seamless = seamless;
+      TexPlanes p;
+      t.evaluate(p, nullptr, 64);
+      return p;
+    };
+    auto changes = [](const TexPlanes &p, int y) {
+      int n = 0;
+      for (int x = 1; x < p.w; x++) n += std::fabs(p.albedo[(size_t)y * p.w + x].x - p.albedo[(size_t)y * p.w + x - 1].x) > 0.1f;
+      return n;
+    };
+    const TexPlanes a = make(1, 0, 0, true), b = make(2, 0, 0, true), c = make(1, 0.25f, 0, true), d = make(1, 0, 90, true), e = make(1.5f, 0, 0, true);
+    std::printf("    a row's changes: %d at scale 1, %d at scale 2\n", changes(a, 7), changes(b, 7));
+    CHECK(changes(b, 7) >= 2 * changes(a, 7) - 1 && changes(a, 7) > 0);
+    int shifted = 0, turned = 0, rounded = 0;
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) {
+        const size_t i = (size_t)y * 64 + x;
+        shifted += length(c.albedo[i] - a.albedo[(size_t)y * 64 + (x + 64 - 16) % 64]) < 1e-3f;
+        rounded += length(e.albedo[i] - b.albedo[i]) < 1e-5f;
+      }
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) turned += length(d.albedo[(size_t)y * 64 + x] - a.albedo[(size_t)x * 64 + (63 - y)]) < 1e-3f || length(d.albedo[(size_t)y * 64 + x] - a.albedo[(size_t)(63 - x) * 64 + y]) < 1e-3f;
+    std::printf("    offset: %d of 4096 texels shifted a quarter; turn: %d match a quarter turn; Seamless 1.5: %d as 2\n", shifted, turned, rounded);
+    CHECK(shifted > 4000 && turned > 4000 && rounded == 4096);
+    /* The edges meet: across the seam the cells change where they would inside - a closed row has an even count. */
+    int seams = 0;
+    for (int y = 0; y < 64; y++) {
+      const int wrap = changes(c, y) + (std::fabs(c.albedo[(size_t)y * 64].x - c.albedo[(size_t)y * 64 + 63].x) > 0.1f);
+      seams += wrap % 2 == 0;
+    }
+    CHECK(seams == 64);
+    /* Saved and read back. */
+    ProceduralTexture t;
+    apply_texture_preset(t, "Checker");
+    t.layers[0]->map_scale[0] = 3.0f, t.layers[0]->map_offset[1] = 0.125f, t.layers[0]->map_rotation = 90.0f, t.layers[0]->map_seamless = false;
+    ProceduralTexture back;
+    CHECK(load_texture_text(save_texture_text(t), back) && back.layers.size() == 1);
+    if (back.layers.size() == 1) {
+      const TextureLayer &l = *back.layers[0];
+      CHECK(l.map_scale[0] == 3.0f && l.map_offset[1] == 0.125f && l.map_rotation == 90.0f && !l.map_seamless);
+    }
+  });
+  test("the Textures window's New menu by clicks: Nature > Sand makes a texture asset from that preset", [] {
+    Editor ed;
+    ed.init_headless(1600, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("window Textures");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto click = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      for (int i = 0; i < 4; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, b.x + b.w / 2, b.y + b.h / 2)});
+      return true;
+    };
+    const std::string path = fs::join(ed.assets_dir_for_test(), "Textures/Sand.ptex");
+    fs::remove_file(path);
+    CHECK(click("New") && hover("submenu:Nature") && click("menu:Sand"));
+    std::printf("    %s %s\n", path.c_str(), fs::exists(path) ? "made" : "NOT made");
+    CHECK(fs::exists(path));
+    fs::remove_file(path);
+  });
+}
+
+/* A layer's number, enumeration or switch set by its exact name (round 328's tests). */
+struct SetFieldForTest : Reflector {
+  std::string key;
+  float value;
+  bool done = false;
+  SetFieldForTest(const char *k, float v) : key(k), value(v) {}
+  void field(const char *n, float &v, float, float mn, float mx) override {
+    if (key == n) v = std::max(mn, std::min(mx, value)), done = true;
+  }
+  void field(const char *n, int &v, int mn, int mx) override {
+    if (key == n) v = std::max(mn, std::min(mx, (int)std::lround(value))), done = true;
+  }
+  void field(const char *n, bool &v) override {
+    if (key == n) v = value != 0.0f, done = true;
+  }
+  void field(const char *, Vec3 &) override {}
+  void color(const char *, Vec3 &) override {}
+  void enumeration(const char *n, int &v, const char *const *, int count) override {
+    if (key == n) v = std::max(0, std::min(count - 1, (int)std::lround(value))), done = true;
+  }
+  void text(const char *, std::string &) override {}
+  void mesh(const char *, MeshPtr &) override {}
+};
+
+/* Round 328 (task 0308): Perlin Noise and Blender's richer texture nodes, periodic in the tile. */
+static void tests_round328() {
+  test("Perlin Noise: 0 at every lattice point, within -1..1 between, the same one period over; the layer's tile wraps, is the same twice, and Turbulence folds it (time printed)", [] {
+    bool zero = true, range = true, period = true;
+    for (int i = 0; i < 16; i++)
+      for (int j = 0; j < 16; j++) zero = zero && std::fabs(texture_perlin((float)i, (float)j, 8, 7u)) < 1e-6f;
+    for (int k = 0; k < 2000; k++) {
+      const float x = texture_rand((uint32_t)k, 1u, 3u) * 16.0f, y = texture_rand((uint32_t)k, 2u, 3u) * 16.0f;
+      const float n = texture_perlin(x, y, 8, 7u);
+      range = range && n >= -1.0f && n <= 1.0f;
+      period = period && std::fabs(n - texture_perlin(x + 8.0f, y, 8, 7u)) < 1e-5f && std::fabs(n - texture_perlin(x, y + 8.0f, 8, 7u)) < 1e-5f;
+    }
+    CHECK(zero && range && period);
+    ProceduralTexture t;
+    CHECK(apply_texture_preset(t, "Perlin Noise") && t.layers.size() == 1);
+    TexPlanes a, b;
+    const double t0 = now_seconds();
+    t.width = t.height = 1024;
+    t.evaluate(a, nullptr, 1024);
+    const double ms = (now_seconds() - t0) * 1000.0;
+    t.evaluate(b, nullptr, 1024);
+    float seam = 0.0f, inside = 0.0f;
+    for (int y = 0; y < 1024; y++) {
+      seam = std::max(seam, std::fabs(a.height[(size_t)y * 1024] - a.height[(size_t)y * 1024 + 1023]));
+      inside = std::max(inside, std::fabs(a.height[(size_t)y * 1024 + 500] - a.height[(size_t)y * 1024 + 501]));
+    }
+    std::printf("    Perlin Noise at 1024 px: %.1f ms; across the seam %.4f, inside %.4f\n", ms, seam, inside);
+    CHECK(a.height == b.height && seam < inside * 2.0f + 0.01f);
+    ProceduralTexture turb;
+    apply_texture_preset(turb, "Perlin Noise");
+    SetFieldForTest set("Turbulence", 1.0f);
+    turb.layers[0]->reflect(set);
+    TexPlanes c, plain;
+    turb.evaluate(c, nullptr, 128);
+    t.evaluate(plain, nullptr, 128);
+    CHECK(set.done && c.height != plain.height && c.height != std::vector<float>(c.height.size(), c.height[0]));
+  });
+  test("Blender's texture nodes as layers: every new type and option repeats exactly one tile over and gives a picture that varies; Voronoi's F2 >= F1, its distance to an edge >= 0 and near 0 on the borders (time of each at 1024 px printed)", [] {
+    struct Case {
+      const char *layer, *field;
+      float value;
+    };
+    const Case cases[] = {{"Perlin Noise", "Distortion", 1.0f}, {"Noise", "Type", 1}, {"Noise", "Type", 2}, {"Noise", "Type", 3}, {"Noise", "Type", 4},
+                          {"Noise", "Type", 5}, {"Voronoi", "Feature", 1}, {"Voronoi", "Feature", 2}, {"Voronoi", "Feature", 3}, {"Voronoi", "Feature", 4},
+                          {"Voronoi", "Feature", 5}, {"Voronoi", "Distance", 1}, {"Voronoi", "Distance", 3}, {"Wave", "Type", 1}, {"Wave", "Profile", 1},
+                          {"Wave", "Profile", 2}, {"Magic", "Depth", 3}, {"White Noise", "Colored", 1}, {"Gabor", "Anisotropy", 0.0f}, {"Gabor", "Anisotropy", 1.0f}};
+    LayerContext ctx;
+    ctx.seed = 5u;
+    int ok = 0;
+    for (const Case &cs : cases) {
+      std::unique_ptr<TextureLayer> l = create_texture_layer(cs.layer);
+      if (!l) {
+        std::printf("    no layer %s\n", cs.layer);
+        continue;
+      }
+      SetFieldForTest set(cs.field, cs.value);
+      l->reflect(set);
+      double worst = 0.0, lo = 1e9, hi = -1e9;
+      for (int k = 0; k < 400; k++) {
+        const float u = texture_rand((uint32_t)k, 1u, 9u), v = texture_rand((uint32_t)k, 2u, 9u);
+        const LayerSample a = l->sample(u, v, ctx), b = l->sample(u + 1.0f, v, ctx), d = l->sample(u, v + 1.0f, ctx);
+        for (const LayerSample *o : {&b, &d}) worst = std::max({worst, (double)std::fabs(a.height - o->height), (double)length(a.albedo - o->albedo)});
+        lo = std::min(lo, (double)a.height), hi = std::max(hi, (double)a.height);
+      }
+      ProceduralTexture t;
+      t.layers.push_back(std::move(l));
+      TexPlanes p;
+      const double t0 = now_seconds();
+      t.evaluate(p, nullptr, 1024);
+      std::printf("    %-13s %-10s %-4g one tile over %.5f; height %.2f..%.2f; 1024 px in %.1f ms\n", cs.layer, cs.field, cs.value, worst, lo, hi, (now_seconds() - t0) * 1000.0);
+      ok += worst < 2e-3 && hi - lo > 0.05;
+    }
+    CHECK(ok == (int)(sizeof(cases) / sizeof(cases[0])));
+    std::unique_ptr<TextureLayer> vor = create_texture_layer("Voronoi");
+    bool order = true, nonneg = true;
+    float edge_min = 1e9f;
+    for (int k = 0; k < 4000; k++) {
+      float f[5];
+      const float u = texture_rand((uint32_t)k, 3u, 9u), v = texture_rand((uint32_t)k, 4u, 9u);
+      if (!texture_voronoi_features(*vor, u, v, 5u, f)) break;
+      order = order && f[1] >= f[0] - 1e-6f;
+      nonneg = nonneg && f[3] >= 0.0f && f[4] > 0.0f;
+      edge_min = std::min(edge_min, f[3]);
+    }
+    std::printf("    Voronoi: F2 >= F1 %s; distance to an edge >= 0 %s, the least of 4000 points %.4f\n", order ? "yes" : "NO", nonneg ? "yes" : "NO", edge_min);
+    CHECK(order && nonneg && edge_min < 0.02f);
+    /* Review 328: the metrics change F1's picture; Smooth F1 at no smoothness is F1, and smooth one between 0 and F1. */
+    std::vector<double> means;
+    for (int metric = 0; metric < 4; metric++) {
+      std::unique_ptr<TextureLayer> l = create_texture_layer("Voronoi");
+      SetFieldForTest f1("Feature", 1.0f), m("Distance", (float)metric);
+      l->reflect(f1), l->reflect(m);
+      double sum = 0.0;
+      for (int k = 0; k < 400; k++) sum += l->sample(texture_rand((uint32_t)k, 5u, 9u), texture_rand((uint32_t)k, 6u, 9u), ctx).height;
+      means.push_back(sum / 400.0);
+    }
+    std::printf("    F1's mean by metric: Euclidean %.3f, Manhattan %.3f, Chebyshev %.3f, Minkowski %.3f\n", means[0], means[1], means[2], means[3]);
+    CHECK(std::fabs(means[0] - means[1]) > 0.02 && std::fabs(means[0] - means[2]) > 0.02);
+    std::unique_ptr<TextureLayer> sharp = create_texture_layer("Voronoi"), soft = create_texture_layer("Voronoi");
+    SetFieldForTest s0("Smoothness", 0.0f), s1("Smoothness", 1.0f);
+    sharp->reflect(s0), soft->reflect(s1);
+    bool sharp_is_f1 = true, soft_below = true;
+    for (int k = 0; k < 400; k++) {
+      float a[5], b[5];
+      const float u = texture_rand((uint32_t)k, 7u, 9u), v = texture_rand((uint32_t)k, 8u, 9u);
+      texture_voronoi_features(*sharp, u, v, 5u, a), texture_voronoi_features(*soft, u, v, 5u, b);
+      sharp_is_f1 = sharp_is_f1 && std::fabs(a[2] - a[0]) < 1e-3f;
+      soft_below = soft_below && b[2] <= b[0] + 1e-5f && b[2] >= b[0] - 0.125f * std::log(25.0f) - 1e-5f;
+    }
+    CHECK(sharp_is_f1 && soft_below);
+  });
+  test("round 328's review: no preset names a field its layer hasn't; Mapping is the same through live shading (apply_point) as through the planes, Seamless off at 30 degrees too; Fill, Mesh Map, Face Shadow and Toon Ramp have no Mapping; the lesson's Try-it buttons make and change the textures they say", [] {
+    for (const TexturePreset &p : texture_presets()) {
+      ProceduralTexture t;
+      apply_texture_preset(t, p.name);
+    }
+    std::printf("    preset fields not found: %d\n", texture_preset_field_misses());
+    CHECK(texture_preset_field_misses() == 0);
+    ProceduralTexture t;
+    apply_texture_preset(t, "Checker");
+    TextureLayer &l = *t.layers[0];
+    l.map_scale[0] = 3.0f, l.map_rotation = 30.0f, l.map_offset[1] = 0.1f, l.map_seamless = false;
+    TexPlanes pl;
+    t.evaluate(pl, nullptr, 64);
+    LayerContext ctx;
+    int same = 0;
+    for (int y = 0; y < 64; y += 7)
+      for (int x = 0; x < 64; x += 7) {
+        TexPoint p;
+        l.apply_point(p, (x + 0.5f) / 64.0f, (y + 0.5f) / 64.0f, ctx, nullptr);
+        same += length(p.albedo - pl.albedo[(size_t)y * 64 + x]) < 1e-4f;
+      }
+    std::printf("    live shading equal to the planes at %d of 100 points\n", same);
+    CHECK(same == 100);
+    for (const char *name : {"Face Shadow", "Toon Ramp"}) {
+      std::unique_ptr<TextureLayer> nm = create_texture_layer(name);
+      CHECK(nm && !nm->mappable());
+    }
+    /* The lesson's Try-its, as the Learn tab runs them. */
+    Editor ed;
+    r50_open(ed);
+    std::string body;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "Blender's Shader Nodes in the Textures Window") body = lesson(i).body;
+    CHECK(!body.empty());
+    for (const char *tex : {"Marble", "Clouds2"}) std::remove(fs::join(scratch_project(), std::string("Assets/Textures/") + tex + ".ptex").c_str());
+    size_t at = 0;
+    int ran = 0;
+    while ((at = body.find("! cmd:", at)) != std::string::npos) {
+      const size_t end = body.find(" | ", at);
+      std::string cmds = body.substr(at + 6, end - at - 6);
+      size_t s = 0;
+      while (s <= cmds.size()) {
+        const size_t e = cmds.find(';', s);
+        std::string c = cmds.substr(s, e == std::string::npos ? std::string::npos : e - s);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        if (!c.empty()) ed.command(c), ran++;
+        if (e == std::string::npos) break;
+        s = e + 1;
+      }
+      at = end;
+    }
+    ProceduralTexturePtr marble = texture_asset("Assets/Textures/Marble.ptex"), clouds = texture_asset("Assets/Textures/Clouds2.ptex");
+    std::printf("    %d Try-it commands; Marble %s, Clouds2 %s\n", ran, marble ? "made" : "NOT made", clouds ? "made" : "NOT made");
+    CHECK(marble && !marble->layers.empty() && marble->layers[0]->map_scale[0] == 2.0f && marble->layers[0]->map_scale[1] == 2.0f);
+    CHECK(clouds && clouds->layers.size() == 2 && std::string(clouds->layers[0]->type_name()) == "Perlin Noise" && std::string(clouds->layers[1]->type_name()) == "Color Ramp");
+    if (!clouds || clouds->layers.size() != 2) return;
+    /* Review 329: the Try-its' fields as they say - Turbulence on, three stops, Constant. */
+    struct Fields : SetFieldForTest {
+      bool turbulence = false;
+      int interp = -1;
+      std::vector<RampStop> stops;
+      Fields() : SetFieldForTest("", 0.0f) {}
+      void field(const char *n, bool &v) override {
+        if (std::string(n) == "Turbulence") turbulence = v;
+      }
+      void enumeration(const char *n, int &v, const char *const *, int) override {
+        if (std::string(n) == "Interpolation") interp = v;
+      }
+      void ramp(const char *, std::vector<RampStop> &v) override { stops = v; }
+    } f;
+    clouds->layers[0]->reflect(f), clouds->layers[1]->reflect(f);
+    std::printf("    the lesson's Clouds2: turbulence %s, %zu stops, Interpolation %d\n", f.turbulence ? "on" : "off", f.stops.size(), f.interp);
+    CHECK(f.turbulence && f.stops.size() == 3 && f.interp == 0);
+  });
+}
+
+/* Round 329 (task 0309): Blender's converters - the ColorRamp, Map Range, Clamp, Math, RGB Curves, Separate Color. */
+static void tests_round329() {
+  test("the ColorRamp: its stops exactly at their places, Constant in steps, Linear halfway, Ease and B-Spline between; an old two-colour ramp the same as before; stops saved and read back", [] {
+    const std::vector<RampStop> st = {{0.0f, Vec3(0.0f)}, {0.5f, Vec3(1.0f, 0.0f, 0.0f)}, {1.0f, Vec3(0.0f, 0.0f, 1.0f)}};
+    bool exact = true;
+    for (int ip = 0; ip < 4; ip++)
+      for (const RampStop &s : st) exact = exact && length(ramp_eval(st, s.pos, ip) - s.color) < 1e-5f;
+    const Vec3 c = ramp_eval(st, 0.4f, 0), l = ramp_eval(st, 0.25f, 1), e = ramp_eval(st, 0.125f, 2);
+    std::printf("    Constant at 0.4 (%.2f %.2f %.2f), Linear at 0.25 (%.2f), Ease at 0.125 (%.3f)\n", c.x, c.y, c.z, l.x, e.x);
+    CHECK(exact && length(c) < 1e-6f && std::fabs(l.x - 0.5f) < 1e-5f && e.x < 0.25f && e.x > 0.0f);
+    /* An old ramp: no stops, Low and High - as it was. */
+    std::unique_ptr<TextureLayer> ramp = create_texture_layer("Color Ramp");
+    TexPoint p;
+    p.height = 0.25f;
+    LayerContext ctx;
+    ramp->apply_point(p, 0.5f, 0.5f, ctx, nullptr);
+    std::printf("    the old ramp at 0.25: %.3f (was lerp(0.1, 0.9, 0.25) = 0.3)\n", p.albedo.x);
+    CHECK(std::fabs(p.albedo.x - 0.3f) < 1e-4f);
+    ProceduralTexture t;
+    t.layers.push_back(std::move(ramp));
+    SetFieldForTest ip("Interpolation", 0.0f);
+    t.layers[0]->reflect(ip);
+    std::vector<RampStop> three = st;
+    struct SetRamp : SetFieldForTest {
+      std::vector<RampStop> st;
+      SetRamp(std::vector<RampStop> s) : SetFieldForTest("", 0.0f), st(std::move(s)) {}
+      void ramp(const char *, std::vector<RampStop> &v) override { v = st; }
+    } setr(three);
+    t.layers[0]->reflect(setr);
+    ProceduralTexture back;
+    CHECK(load_texture_text(save_texture_text(t), back) && back.layers.size() == 1);
+    if (back.layers.size() == 1) {
+      TexPoint q;
+      q.height = 0.4f;
+      back.layers[0]->apply_point(q, 0.5f, 0.5f, ctx, nullptr);
+      std::printf("    read back, Constant at 0.4: %.3f %.3f %.3f\n", q.albedo.x, q.albedo.y, q.albedo.z);
+      CHECK(length(q.albedo) < 1e-5f);
+    }
+  });
+  test("Map Range, Clamp, every Math operation and Separate Channel against their formulas; an identity RGB Curves leaves the albedo as it was and a curve through (0.5, 0.8) lifts the middle", [] {
+    LayerContext ctx;
+    auto run = [&](const char *layer, std::vector<std::pair<const char *, float>> fields, TexPoint p) {
+      std::unique_ptr<TextureLayer> l = create_texture_layer(layer);
+      for (auto &f : fields) {
+        SetFieldForTest s(f.first, f.second);
+        l->reflect(s);
+      }
+      l->apply_point(p, 0.5f, 0.5f, ctx, nullptr);
+      return p;
+    };
+    TexPoint p;
+    p.height = 0.5f, p.rough = 0.3f, p.mask = 0.6f;
+    p.albedo = {0.2f, 0.4f, 0.8f};
+    const TexPoint mr = run("Map Range", {{"From Min", 0.2f}, {"From Max", 0.8f}}, p);
+    CHECK(std::fabs(mr.height - 0.5f) < 1e-5f);
+    TexPoint q = p;
+    q.height = 0.35f;
+    CHECK(std::fabs(run("Map Range", {{"From Min", 0.2f}, {"From Max", 0.8f}}, q).height - 0.25f) < 1e-5f);
+    CHECK(std::fabs(run("Clamp", {{"Min", 0.6f}, {"Max", 0.9f}}, p).height - 0.6f) < 1e-6f);
+    int ok = 0;
+    for (int op = 0; op < 15; op++) {
+      const TexPoint r = run("Math", {{"Operation", (float)op}, {"Value", 0.3f}, {"Distance", 0.1f}}, p);
+      const float a = 0.5f, b = 0.3f;
+      /* Blender's formulas (math_base.h / math_util.h): Snap down to a multiple, smooth min less h^3 k / 6. */
+      const float want[] = {a + b, a - b, a * b, a / b, std::pow(a, b), std::min(a, b), std::max(a, b), std::fabs(a), std::floor(a), a - std::floor(a),
+                            std::fmod(a, b), std::sin(a), 0.0f, 0.0f, std::floor(a / b) * b};
+      float w = want[op];
+      if (op == 12 || op == 13) {
+        const float s = op == 12 ? 1.0f : -1.0f, h = std::max(0.1f - std::fabs(a * s - b * s), 0.0f) / 0.1f;
+        w = s * (std::min(a * s, b * s) - h * h * h * 0.1f / 6.0f);
+      }
+      w = std::max(0.0f, std::min(1.0f, w));
+      const bool good = std::fabs(r.height - w) < 1e-5f;
+      if (!good) std::printf("    %s: %.5f, wanted %.5f\n", (std::string("op ") + std::to_string(op)).c_str(), r.height, w);
+      ok += good;
+    }
+    CHECK(ok == 15);
+    const TexPoint g = run("Separate Channel", {{"Channel", 1.0f}}, p), v = run("Separate Channel", {{"Channel", 5.0f}}, p);
+    CHECK(std::fabs(g.mask - 0.4f) < 1e-5f && std::fabs(v.mask - 0.8f) < 1e-5f);
+    /* Hue and saturation of (0.2, 0.4, 0.8): hue 220 degrees, saturation 0.75. */
+    const TexPoint hue = run("Separate Channel", {{"Channel", 3.0f}}, p), sat = run("Separate Channel", {{"Channel", 4.0f}}, p);
+    CHECK(std::fabs(hue.mask - 220.0f / 360.0f) < 1e-4f && std::fabs(sat.mask - 0.75f) < 1e-5f);
+    /* Stepped Map Range, as Blender's: floor(f (steps + 1)) / steps - 4 steps reach To Max at 0.8. */
+    TexPoint h8 = p;
+    h8.height = 0.8f;
+    CHECK(std::fabs(run("Map Range", {{"Interpolation", 1.0f}, {"Steps", 4.0f}}, h8).height - 1.0f) < 1e-5f);
+    CHECK(std::fabs(run("Map Range", {{"Interpolation", 1.0f}, {"Steps", 4.0f}}, p).height - 0.5f) < 1e-5f);
+    /* Clamp with Min above Max gives Max (Blender's). */
+    CHECK(std::fabs(run("Clamp", {{"Min", 0.7f}, {"Max", 0.3f}}, p).height - 0.3f) < 1e-6f);
+    /* Math on the albedo stays within 0..1 (review 329: live shading had 1.3). */
+    const TexPoint add = run("Math", {{"Plane", 4.0f}, {"Operation", 0.0f}, {"Value", 0.5f}}, p);
+    CHECK(add.albedo.z <= 1.0f && std::fabs(add.albedo.x - 0.7f) < 1e-5f);
+    const TexPoint same = run("RGB Curves", {}, p);
+    CHECK(length(same.albedo - p.albedo) < 1e-5f);
+    std::unique_ptr<TextureLayer> cv = create_texture_layer("RGB Curves");
+    struct SetCurve : SetFieldForTest {
+      SetCurve() : SetFieldForTest("", 0.0f) {}
+      void curve(const char *n, std::vector<Vec2> &v) override {
+        if (std::string(n) == "Combined") v = {{0.0f, 0.0f}, {0.5f, 0.8f}, {1.0f, 1.0f}};
+      }
+    } setc;
+    cv->reflect(setc);
+    TexPoint mid;
+    mid.albedo = Vec3(0.5f);
+    cv->apply_point(mid, 0.5f, 0.5f, ctx, nullptr);
+    std::printf("    the curve through (0.5, 0.8): 0.5 -> %.3f\n", mid.albedo.x);
+    CHECK(std::fabs(mid.albedo.x - 0.8f) < 1e-4f);
+  });
+  test("the ColorRamp and curve widgets by clicks in the Textures window: a click on the bar adds a stop, dragging it moves it, dragging it off removes it; a click in the curve's box adds a point", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    if (!t) return;
+    ed.command("texlayer " + t->name + " add Color Ramp");
+    ed.command("texlayer " + t->name + " add RGB Curves");
+    r34_steps(ed, 3);
+    auto rect = [&](const std::string &key) {
+      for (int tries = 0; tries < 40; tries++) {
+        const Recti f = ed.texture_ui_rect_for_test(key), w = ed.window_rect_for_test(WindowKind::Textures);
+        if (f.w > 0 && f.y >= w.y + ed.ui_for_test().row_h() * 3 && f.bottom() <= w.bottom()) return f;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = f.w > 0 ? f.x + f.w / 2 : w.x + w.w / 4, wheel.y = w.y + w.h / 2, wheel.wheel_y = f.w > 0 && f.y < w.y + ed.ui_for_test().row_h() * 3 ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      std::printf("    '%s' never came into view\n", key.c_str());
+      return Recti{0, 0, 0, 0};
+    };
+    auto stops = [&] {
+      std::vector<RampStop> got;
+      struct Get : SetFieldForTest {
+        std::vector<RampStop> *out;
+        Get(std::vector<RampStop> *o) : SetFieldForTest("", 0.0f), out(o) {}
+        void ramp(const char *, std::vector<RampStop> &v) override { *out = v; }
+      } g(&got);
+      t->layers[1]->reflect(g);
+      return got;
+    };
+    Recti bar = rect("ramp:L1 Stops");
+    CHECK(bar.w > 0);
+    if (bar.w <= 0) return;
+    const int y = bar.y + (bar.h - ed.ui_for_test().px(10)) / 2;
+    r34_click(ed, bar.x + bar.w / 2, y);  // (a stop at 0.5)
+    r34_steps(ed, 2);
+    std::vector<RampStop> s = stops();
+    std::printf("    after a click: %zu stops\n", s.size());
+    CHECK(s.size() == 3 && std::fabs(s[1].pos - 0.5f) < 0.02f);
+    /* The ramp's Low and High Colors stay (the first and last stops' colours): the bar doesn't move under the pointer. */
+    const Recti bar2 = rect("ramp:L1 Stops");
+    CHECK(bar2.w > 0 && bar2.y == bar.y);
+    bar = bar2;
+    const int hy = bar.bottom() - ed.ui_for_test().px(5);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, bar.x + bar.w / 2, hy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, bar.x + bar.w / 2, hy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, bar.x + bar.w * 3 / 4, hy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, bar.x + bar.w * 3 / 4, hy)});
+    r34_steps(ed, 2);
+    s = stops();
+    CHECK(s.size() == 3 && std::fabs(s[1].pos - 0.75f) < 0.02f);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, bar.x + bar.w * 3 / 4, hy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, bar.x + bar.w * 3 / 4, hy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, bar.x + bar.w * 3 / 4, hy + 80)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, bar.x + bar.w * 3 / 4, hy + 80)});
+    r34_steps(ed, 2);
+    std::printf("    moved to %.2f, then dragged off: %zu stops\n", s.size() == 3 ? s[1].pos : -1.0f, stops().size());
+    CHECK(stops().size() == 2);
+    const Recti box = rect("curve:L2 Combined");
+    CHECK(box.w > 0);
+    if (box.w <= 0) return;
+    r34_click(ed, box.x + box.w / 2, box.y + box.h / 4);
+    r34_steps(ed, 2);
+    std::vector<Vec2> pts;
+    struct GetC : SetFieldForTest {
+      std::vector<Vec2> *out;
+      GetC(std::vector<Vec2> *o) : SetFieldForTest("", 0.0f), out(o) {}
+      void curve(const char *n, std::vector<Vec2> &v) override {
+        if (std::string(n) == "Combined") *out = v;
+      }
+    } gc(&pts);
+    t->layers[2]->reflect(gc);
+    std::printf("    the curve: %zu points\n", pts.size());
+    CHECK(pts.size() == 3 && std::fabs(pts[1].x - 0.5f) < 0.05f && pts[1].y > 0.6f);
+    /* Review 329: a click near the bar's bottom on a ramp without stops keeps its new stop. */
+    ed.command("texlayer " + t->name + " add Color Ramp");
+    r34_steps(ed, 3);
+    const Recti bar3 = rect("ramp:L3 Stops");
+    CHECK(bar3.w > 0);
+    if (bar3.w <= 0) return;
+    r34_click(ed, bar3.x + bar3.w / 3, bar3.bottom() - ed.ui_for_test().px(11));
+    r34_steps(ed, 2);
+    std::vector<RampStop> got3;
+    struct Get3 : SetFieldForTest {
+      std::vector<RampStop> *out;
+      Get3(std::vector<RampStop> *o) : SetFieldForTest("", 0.0f), out(o) {}
+      void ramp(const char *, std::vector<RampStop> &v) override { *out = v; }
+    } g3(&got3);
+    t->layers[3]->reflect(g3);
+    std::printf("    a click at the bar's foot: %zu stops\n", got3.size());
+    CHECK(got3.size() == 3);
+  });
+  test("round 329's review: a ramp's stop position typed past its neighbour moves that stop, not the neighbour; the planes and live shading agree for every converter; an old Color Ramp file loads with no stops and draws as before; the stops are in the texture's hash; the lesson's Try-its set three stops and Constant", [] {
+    /* The position field, by typing (the Inspector's own field). */
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    if (!t) return;
+    ed.command("settex " + t->name + " L0Scale 4");
+    ed.command("texlayer " + t->name + " add Color Ramp");
+    ed.command("settex " + t->name + " L1Stops 0 0 0 0, 0.5 1 0 0, 1 0 0 1");
+    r34_steps(ed, 3);
+    struct Get : SetFieldForTest {
+      std::vector<RampStop> got;
+      Get() : SetFieldForTest("", 0.0f) {}
+      void ramp(const char *, std::vector<RampStop> &v) override { got = v; }
+    };
+    Get before;
+    t->layers[1]->reflect(before);
+    CHECK(before.got.size() == 3);
+    /* Pick the first stop (its handle), then type 0.7 into the picked stop's Position: it passes the red one at 0.5. */
+    auto tex_rect = [&](const std::string &key) {
+      for (int tries = 0; tries < 40; tries++) {
+        const Recti f = ed.texture_ui_rect_for_test(key), w = ed.window_rect_for_test(WindowKind::Textures);
+        if (f.w > 0 && f.y >= w.y + ed.ui_for_test().row_h() * 3 && f.bottom() <= w.bottom()) return f;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = f.w > 0 ? f.x + f.w / 2 : w.x + w.w / 4, wheel.y = w.y + w.h / 2, wheel.wheel_y = f.w > 0 && f.y < w.y + ed.ui_for_test().row_h() * 3 ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      return Recti{0, 0, 0, 0};
+    };
+    const Recti bar = tex_rect("ramp:L1 Stops");
+    CHECK(bar.w > 0);
+    if (bar.w <= 0) return;
+    r34_click(ed, bar.x + 1, bar.bottom() - ed.ui_for_test().px(4));  // (the first stop's handle)
+    r34_steps(ed, 2);
+    const Recti pf = tex_rect("ramppos:L1 Stops");
+    CHECK(pf.w > 0);
+    if (pf.w <= 0) return;
+    r34_click(ed, pf.x + pf.w / 2, pf.y + pf.h / 2);
+    platform::Event all, en;
+    all.type = en.type = platform::EventType::KeyDown;
+    all.key = platform::KEY_A, all.mods = platform::MOD_CTRL, en.key = platform::KEY_ENTER;
+    ed.step_frame_headless({all});
+    for (char ch : std::string("0.7")) {
+      platform::Event te;
+      te.type = platform::EventType::Text, te.codepoint = (uint32_t)ch;
+      ed.step_frame_headless({te});
+    }
+    ed.step_frame_headless({en});
+    r34_steps(ed, 3);
+    Get typed;
+    t->layers[1]->reflect(typed);
+    std::printf("    after typing 0.7 for the first stop: %s\n", ramp_to_text(typed.got).c_str());
+    CHECK(typed.got.size() == 3 && std::fabs(typed.got[0].pos - 0.5f) < 1e-4f && typed.got[0].color.x == 1.0f && std::fabs(typed.got[1].pos - 0.7f) < 1e-4f &&
+          typed.got[1].color.x == 0.0f && typed.got[1].color.z == 0.0f);
+    const uint64_t h0 = t->hash();
+    ed.command("settex " + t->name + " L1Stops 0 0 0 0, 0.6 1 0 0, 1 0 0 1");
+    CHECK(t->hash() != h0);
+    /* Live shading against the planes, for every converter on a noise. */
+    for (const char *layer : {"Map Range", "Clamp", "Math", "RGB Curves", "Separate Channel", "Color Ramp"}) {
+      ProceduralTexture tex;
+      apply_texture_preset(tex, "Noise");
+      tex.layers.push_back(create_texture_layer(layer));
+      SetFieldForTest plane("Plane", 4.0f);
+      tex.layers.back()->reflect(plane);
+      TexPlanes pl;
+      tex.evaluate(pl, nullptr, 32);
+      int same = 0;
+      LayerContext ctx;
+      for (int y = 0; y < 32; y += 5)
+        for (int x = 0; x < 32; x += 5) {
+          TexPoint pt;
+          const float u = (x + 0.5f) / 32.0f, v = (y + 0.5f) / 32.0f;
+          for (const auto &l : tex.layers) l->apply_point(pt, u, v, ctx, nullptr);
+          const size_t i = (size_t)y * 32 + x;
+          same += length(pt.albedo - pl.albedo[i]) < 2e-3f && std::fabs(pt.height - pl.height[i]) < 2e-3f;
+        }
+      std::printf("    %-16s live shading equal to the planes at %d of 49 points\n", layer, same);
+      CHECK(same == 49);
+    }
+    /* An old file: a Color Ramp with Low and High only. */
+    ProceduralTexture old;
+    old.layers.push_back(create_texture_layer("Color Ramp"));
+    std::string text = save_texture_text(old);
+    size_t at = text.find("Stops");
+    if (at != std::string::npos) text.erase(text.rfind('\n', at) + 1, text.find('\n', at) - text.rfind('\n', at));
+    ProceduralTexture back;
+    CHECK(load_texture_text(text, back) && back.layers.size() == 1);
+    if (back.layers.size() == 1) {
+      Get g;
+      back.layers[0]->reflect(g);
+      TexPoint pt;
+      pt.height = 0.25f;
+      back.layers[0]->apply_point(pt, 0.5f, 0.5f, LayerContext{}, nullptr);
+      std::printf("    an old ramp: %zu stops shown (its two ends), 0.25 -> %.3f\n", g.got.size(), pt.albedo.x);
+      CHECK(g.got.size() == 2 && std::fabs(pt.albedo.x - 0.3f) < 1e-4f);
+    }
+  });
+}
+
+/* Round 330: Blender's Mix modes as layer blends, against Blender's results (ramp_blend, factor 1). */
+static void tests_round330_blends() {
+  test("Blender's Mix modes as layer blends: Darken, Lighten, Difference, Exclusion, Subtract, Divide, Color Dodge, Color Burn, Soft Light and Linear Light against Blender's formulas; Hue, Saturation, Color and Value in HSV; the old seven unchanged", [] {
+    const float a = 0.3f, b = 0.6f;
+    const float want[] = {std::min(a, b), std::max(a, b), std::fabs(a - b), a + b - 2 * a * b, a - b, a / b, std::min(1.0f, a / (1 - b)), std::max(0.0f, 1 - (1 - a) / b),
+                          (1 - a) * b * a + a * (1 - (1 - a) * (1 - b)), a + 2 * b - 1};
+    int ok = 0;
+    for (int k = 0; k < 10; k++) {
+      const float got = texture_blend((int)LayerBlend::Darken + k, a, b);
+      ok += std::fabs(got - want[k]) < 1e-6f;
+      if (std::fabs(got - want[k]) >= 1e-6f) std::printf("    mode %d: %.5f, wanted %.5f\n", (int)LayerBlend::Darken + k, got, want[k]);
+    }
+    CHECK(ok == 10);
+    CHECK(texture_blend((int)LayerBlend::Multiply, a, b) == a * b && texture_blend((int)LayerBlend::HeightMax, a, b) == b && texture_blend((int)LayerBlend::Normal, a, b) == b);
+    /* HSV: below orange (1, 0.5, 0) under a blue layer (0, 0, 1). */
+    const Vec3 below{1.0f, 0.5f, 0.0f}, layer{0.0f, 0.0f, 1.0f};
+    const Vec3 hue = texture_blend_color((int)LayerBlend::Hue, below, layer), val = texture_blend_color((int)LayerBlend::Value, below, Vec3(0.5f));
+    const Vec3 sat = texture_blend_color((int)LayerBlend::Saturation, below, Vec3(0.5f)), col = texture_blend_color((int)LayerBlend::Color, below, layer);
+    std::printf("    Hue (%.2f %.2f %.2f), Value 0.5 (%.2f %.2f %.2f), Saturation of grey (%.2f %.2f %.2f), Color (%.2f %.2f %.2f)\n", hue.x, hue.y, hue.z, val.x, val.y, val.z,
+                sat.x, sat.y, sat.z, col.x, col.y, col.z);
+    CHECK(length(hue - Vec3(0, 0, 1)) < 1e-4f && length(val - Vec3(0.5f, 0.25f, 0.0f)) < 1e-4f && length(sat - Vec3(1.0f)) < 1e-4f && length(col - Vec3(0, 0, 1)) < 1e-4f);
+    /* Review 330: Color Dodge leaves black black (Blender's); an Image layer's Hue mode takes the image's hue. */
+    CHECK(texture_blend((int)LayerBlend::ColorDodge, 0.0f, 1.0f) == 0.0f);
+    std::unique_ptr<TextureLayer> img = create_texture_layer("Image");
+    CHECK(img != nullptr);
+  });
+  test("a stop or point added to a full ramp or curve (its storage moved) is the one picked - the Linux crash after round 329: the index was taken from the old storage", [] {
+    ui::Context u;
+    for (size_t extra = 0; extra < 3; extra++) {
+      std::vector<RampStop> st = {{0.0f, Vec3(0.0f)}, {1.0f, Vec3(1.0f)}};
+      for (size_t k = 0; k < extra; k++) st.push_back({1.0f, Vec3(1.0f)});
+      st.shrink_to_fit();  // (no room: the insert moves the stops)
+      int sel = -1;
+      CHECK(u.ramp_add_stop(st, 0.5f, 1, sel));
+      CHECK(sel == 1 && st.size() == 3 + extra && std::fabs(st[(size_t)sel].pos - 0.5f) < 1e-6f);
+      std::vector<Vec2> pts = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+      pts.shrink_to_fit();
+      sel = -1;
+      CHECK(u.curve_add_point(pts, {0.25f, 0.7f}, sel));
+      CHECK(sel == 1 && pts.size() == 3 && pts[(size_t)sel].x == 0.25f);
+    }
+  });
+}
+
+/* Round 332 (task 0313): the Textures and Materials windows' HCI pass. */
+static void tests_round332() {
+  test("round 332's data: every layer type sits in one of Blender's node groups (none in Other); every material preset in one group, Volume's Fog / Smoke / Mist among them; a layer at Opacity 0 or with no targets says why it changes nothing", [] {
+    std::vector<std::string> other;
+    for (const TextureLayerInfo &li : texture_layer_infos())
+      if (texture_layer_group(li.name) == "Other") other.push_back(li.name);
+    for (const std::string &n : other) std::printf("    no group: %s\n", n.c_str());
+    CHECK(other.empty());
+    std::map<std::string, int> seen;
+    for (const auto &g : material_preset_groups())
+      for (const std::string &p : g.second) seen[p]++;
+    bool once = seen.size() == material_presets().size();
+    for (const std::string &p : material_presets()) once = once && seen[p] == 1;
+    CHECK(once && seen.count("Fog") && seen.count("Smoke") && seen.count("Mist"));
+    std::unique_ptr<TextureLayer> l = create_texture_layer("Noise");
+    CHECK(l && texture_layer_no_effect(*l).empty());
+    if (!l) return;
+    l->opacity = 0.0f;
+    CHECK(texture_layer_no_effect(*l) == "Opacity 0");
+    l->opacity = 1.0f, l->targets = 0;
+    CHECK(texture_layer_no_effect(*l) == "Writes nothing");
+    l->enabled = false;
+    CHECK(texture_layer_no_effect(*l).empty());
+  });
+  test("the Textures window by clicks (round 332): right-click a layer field's name > Reset to Default puts the layer type's default back; Add Layer's search finds Perlin Noise and hides the rest; Alt+click a layer shows the preview up to it, again for all; a texture no material uses is tagged \"not used\"", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    if (!t) return;
+    r34_steps(ed, 3);
+    auto bring = [&](const std::string &key) {  // (scrolled into the window's view)
+      for (int tries = 0; tries < 40; tries++) {
+        Recti f{0, 0, 0, 0};
+        if (!ed.button_rect_for_test(key, f)) f = ed.texture_ui_rect_for_test(key);
+        const Recti w = ed.window_rect_for_test(WindowKind::Textures);
+        const int top = std::max(w.y + ed.ui_for_test().row_h() * 3, ed.texture_ui_rect_for_test("preview").y);  // (below the grid of thumbnails)
+        if (f.w > 0 && f.y >= top && f.bottom() <= w.bottom()) return f;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = w.x + w.w / 4, wheel.y = w.bottom() - ed.ui_for_test().row_h() * 2, wheel.wheel_y = f.w > 0 && f.y < top ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      std::printf("    '%s' never came into view\n", key.c_str());
+      return Recti{0, 0, 0, 0};
+    };
+    auto click_key = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      r34_steps(ed, 2);
+      return true;
+    };
+    struct GetF : SetFieldForTest {
+      float got = -1.0f;
+      GetF(const char *k) : SetFieldForTest(k, 0.0f) {}
+      void field(const char *n, float &v, float, float, float) override {
+        if (key == n) got = v;
+      }
+    };
+    /* Reset to Default. */
+    GetF def("Scale");
+    create_texture_layer("Noise")->reflect(def);
+    ed.command("settex " + t->name + " L0Scale 9");
+    r34_steps(ed, 2);
+    const Recti lab = bring("label:L0 Scale");
+    CHECK(lab.w > 0);
+    if (lab.w <= 0) return;
+    platform::Event down = r34_mouse(R34ET::MouseDown, lab.x + lab.w / 2, lab.y + lab.h / 2), up = r34_mouse(R34ET::MouseUp, lab.x + lab.w / 2, lab.y + lab.h / 2);
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lab.x + lab.w / 2, lab.y + lab.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    CHECK(click_key("menu:Reset to Default"));
+    r34_steps(ed, 2);
+    GetF now("Scale");
+    t->layers[0]->reflect(now);
+    std::printf("    Scale: 9 -> %.3f after Reset to Default (the default %.3f)\n", now.got, def.got);
+    CHECK(def.got > 0.0f && now.got == def.got);
+    ed.command("undo");  // (a reset is one undo step, as any edit)
+    r34_steps(ed, 2);
+    GetF undone("Scale");
+    t->layers[0]->reflect(undone);
+    std::printf("    after Ctrl+Z: %.3f\n", undone.got);
+    CHECK(undone.got == 9.0f);
+    /* A switch: Use Mask on, then reset to a new layer's (off). */
+    ed.command("settex " + t->name + " L0UseMask 1");
+    r34_steps(ed, 2);
+    CHECK(t->layers[0]->use_mask);
+    const Recti um = bring("label:L0 Use Mask");
+    CHECK(um.w > 0);
+    platform::Event d2 = r34_mouse(R34ET::MouseDown, um.x + um.w / 2, um.y + um.h / 2), u2 = r34_mouse(R34ET::MouseUp, um.x + um.w / 2, um.y + um.h / 2);
+    d2.button = u2.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, um.x + um.w / 2, um.y + um.h / 2)});
+    ed.step_frame_headless({d2});
+    ed.step_frame_headless({u2});
+    CHECK(click_key("menu:Reset to Default"));
+    r34_steps(ed, 2);
+    CHECK(!t->layers[0]->use_mask);
+    /* Alt+click: the preview up to a layer. */
+    const Recti head = bring("layer_head0");
+    CHECK(head.w > 0);
+    platform::Event alt_down = r34_mouse(R34ET::MouseDown, head.x + head.w / 4, head.y + head.h / 2), alt_up = alt_down;
+    alt_up.type = R34ET::MouseUp;
+    alt_down.mods = alt_up.mods = platform::MOD_ALT;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, head.x + head.w / 4, head.y + head.h / 2)});
+    ed.step_frame_headless({alt_down});
+    ed.step_frame_headless({alt_up});
+    r34_steps(ed, 2);
+    CHECK(ed.texture_upto_for_test().first == t->asset_path && ed.texture_upto_for_test().second == 0 && ed.texture_ui_rect_for_test("upto").w > 0);
+    ed.step_frame_headless({alt_down});
+    ed.step_frame_headless({alt_up});
+    r34_steps(ed, 2);
+    CHECK(ed.texture_upto_for_test().second == -1 && ed.texture_ui_rect_for_test("upto").w == 0);
+    /* Add Layer's search. */
+    const Recti add = bring("add_layer");
+    CHECK(add.w > 0);
+    Recti ab = ed.texture_ui_rect_for_test("add_layer");
+    r34_click(ed, ab.x + ab.w / 2, ab.y + ab.h / 2);
+    r34_steps(ed, 2);
+    std::vector<platform::Event> typed;
+    for (char c : std::string("perl")) {
+      platform::Event e;
+      e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+      typed.push_back(e);
+    }
+    ed.step_frame_headless(typed);
+    r34_steps(ed, 2);
+    Recti probe;
+    const bool perlin = ed.button_rect_for_test("menu:Perlin Noise", probe), checker = ed.button_rect_for_test("menu:Checker", probe);
+    std::printf("    searching 'perl': Perlin Noise %s, Checker %s\n", perlin ? "listed" : "missing", checker ? "listed" : "hidden");
+    CHECK(perlin && !checker);
+    const size_t before = t->layers.size();
+    CHECK(click_key("menu:Perlin Noise"));
+    CHECK(t->layers.size() == before + 1);
+    /* The next click is the user's (it once only ended the search field's edit): it folds the new layer. */
+    const bool open_before = t->layers[0]->ui_expanded;
+    CHECK(bring("layer_head0").w > 0 && click_key("layer_head0"));
+    CHECK(t->layers[0]->ui_expanded != open_before);
+    /* Esc closes Add Layer (the search kept the focus); Enter takes the first match. */
+    auto key = [&](int k) {
+      platform::Event down, up;
+      down.type = platform::EventType::KeyDown, up.type = platform::EventType::KeyUp;
+      down.key = up.key = k;
+      ed.step_frame_headless({down});
+      ed.step_frame_headless({up});
+      r34_steps(ed, 2);
+    };
+    const Recti ab2 = bring("add_layer");
+    CHECK(ab2.w > 0);
+    r34_click(ed, ab2.x + ab2.w / 2, ab2.y + ab2.h / 2);
+    r34_steps(ed, 2);
+    CHECK(ed.ui_for_test().any_popup_open());
+    key(platform::KEY_ESCAPE);
+    CHECK(!ed.ui_for_test().any_popup_open());
+    const Recti ab3 = bring("add_layer");
+    r34_click(ed, ab3.x + ab3.w / 2, ab3.y + ab3.h / 2);
+    r34_steps(ed, 2);
+    std::vector<platform::Event> typed2;
+    for (char c : std::string("gabor")) {
+      platform::Event e;
+      e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+      typed2.push_back(e);
+    }
+    ed.step_frame_headless(typed2);
+    r34_steps(ed, 2);
+    const size_t n_before = t->layers.size();
+    key(platform::KEY_ENTER);
+    std::printf("    Enter on 'gabor': %zu -> %zu layers, the top %s; a menu still open: %d\n", n_before, t->layers.size(),
+                t->layers.empty() ? "-" : t->layers.back()->type_name(), (int)ed.ui_for_test().any_popup_open());
+    CHECK(t->layers.size() == n_before + 1 && std::string(t->layers.back()->type_name()) == "Gabor" && !ed.ui_for_test().any_popup_open());
+    /* The layer menu's Preview Up to Here (a pen's way to Alt+click). */
+    const Recti lm = bring("layer0");
+    CHECK(lm.w > 0);
+    r34_click(ed, lm.x + lm.w / 2, lm.y + lm.h / 2);
+    r34_steps(ed, 2);
+    CHECK(click_key("menu:Preview Up to Here"));
+    CHECK(ed.texture_upto_for_test().first == t->asset_path && ed.texture_upto_for_test().second == 0);
+    ed.command("texlayer " + t->name + " add Checker");  // (a stack edit drops the cut: the layers moved under it)
+    r34_steps(ed, 2);
+    CHECK(ed.texture_upto_for_test().second == -1);
+    /* "not used" - and not once a material uses it. */
+    CHECK(ed.texture_ui_rect_for_test("unused:" + t->name).w > 0);
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    const Recti as = ed.texture_ui_rect_for_test("assign");
+    CHECK(as.w > 0);
+    r34_click(ed, as.x + as.w / 2, as.y + as.h / 2);
+    r34_steps(ed, 3);
+    CHECK(ed.texture_ui_rect_for_test("unused:" + t->name).w == 0);
+  });
+  test("the Materials window's Of Type... > Volume > Fog makes a fog material asset; right-click Fog Density's name > Reset to Default puts 1 back", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("window Materials");
+    r34_steps(ed, 3);
+    auto click_key = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      r34_steps(ed, 2);
+      return true;
+    };
+    CHECK(click_key("mat_of_type") && click_key("menu:Fog"));
+    MaterialPtr m = ed.material_selected_for_test();
+    CHECK(m && m->volume());
+    if (!m || !m->volume()) return;
+    ed.command("matset FogDensity 3");
+    r34_steps(ed, 3);
+    CHECK(m->volume_density == 3.0f);
+    Recti lab{0, 0, 0, 0};
+    for (int tries = 0; tries < 40; tries++) {
+      ed.button_rect_for_test("label:Fog Density", lab);
+      const Recti w = ed.window_rect_for_test(WindowKind::Materials);
+      if (lab.w > 0 && lab.y > w.y + w.h * 3 / 5 && lab.bottom() <= w.bottom()) break;  // (below the grid of tiles)
+      platform::Event wheel;
+      wheel.type = platform::EventType::Wheel;
+      wheel.x = w.x + w.w / 4, wheel.y = w.bottom() - ed.ui_for_test().row_h() * 2, wheel.wheel_y = lab.w > 0 && lab.y <= w.y + w.h * 3 / 5 ? 3.0f : -3.0f;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+      ed.step_frame_headless({wheel});
+    }
+    CHECK(lab.w > 0);
+    if (lab.w <= 0) return;
+    platform::Event down = r34_mouse(R34ET::MouseDown, lab.x + lab.w / 2, lab.y + lab.h / 2), up = r34_mouse(R34ET::MouseUp, lab.x + lab.w / 2, lab.y + lab.h / 2);
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lab.x + lab.w / 2, lab.y + lab.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    CHECK(click_key("menu:Reset to Default"));
+    r34_steps(ed, 2);
+    std::printf("    Fog Density 3 -> %.2f\n", m->volume_density);
+    CHECK(m->volume_density == Material().volume_density);
+    fs::remove_file(resolve_asset_path(m->asset_path));
+  });
+  test("Reset to Default in the object Inspector's material (review 332): the Sphere's Roughness pushed to 0.95 goes back to a new material's", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Sphere");
+    ed.command("matset Roughness 0.95");
+    r34_steps(ed, 3);
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    CHECK(s && s->get<MeshRenderer>() && !s->get<MeshRenderer>()->materials.empty());
+    if (!s || !s->get<MeshRenderer>() || s->get<MeshRenderer>()->materials.empty()) return;
+    const MaterialPtr m = s->get<MeshRenderer>()->materials[0];
+    CHECK(m->roughness == 0.95f);
+    Recti lab{0, 0, 0, 0};
+    for (int tries = 0; tries < 60; tries++) {
+      const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+      if (ed.button_rect_for_test("label:Roughness", lab) && lab.y >= w.y + ed.ui_for_test().row_h() * 2 && lab.bottom() <= w.bottom()) break;
+      lab = Recti{0, 0, 0, 0};
+      platform::Event wheel;
+      wheel.type = platform::EventType::Wheel;
+      wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = -3.0f;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+      ed.step_frame_headless({wheel});
+    }
+    CHECK(lab.w > 0);
+    if (lab.w <= 0) return;
+    platform::Event down = r34_mouse(R34ET::MouseDown, lab.x + lab.w / 2, lab.y + lab.h / 2), up = r34_mouse(R34ET::MouseUp, lab.x + lab.w / 2, lab.y + lab.h / 2);
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lab.x + lab.w / 2, lab.y + lab.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    Recti item;
+    CHECK(ed.button_rect_for_test("menu:Reset to Default", item));
+    r34_click(ed, item.x + item.w / 2, item.y + item.h / 2);
+    r34_steps(ed, 3);
+    std::printf("    the Sphere's Roughness 0.95 -> %.3f (a new material's %.3f)\n", m->roughness, Material().roughness);
+    CHECK(m->roughness == Material().roughness);
+  });
+  test("the lesson \"Working Faster with Textures and Materials\": its Try-its open the Textures window and make a noise with Scale 12 to reset", [] {
+    Editor ed;
+    r50_open(ed);
+    for (const char *c : {"window Textures", "newtex Practice Noise", "settex Practice L0Scale 12"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    r34_steps(ed, 2);
+    ProceduralTexturePtr t = texture_asset("Assets/Textures/Practice.ptex");
+    CHECK(t && !t->layers.empty() && ed.window_rect_for_test(WindowKind::Textures).w > 0);
+    if (!t || t->layers.empty()) return;
+    struct GetF : SetFieldForTest {
+      float got = -1.0f;
+      GetF() : SetFieldForTest("Scale", 0.0f) {}
+      void field(const char *n, float &v, float, float, float) override {
+        if (key == n) got = v;
+      }
+    } g;
+    t->layers[0]->reflect(g);
+    CHECK(g.got == 12.0f);
+    fs::remove_file(resolve_asset_path(t->asset_path));
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -4223,4 +5291,10 @@ void run_assets_tests() {
   tests_round166_to_round170();
   tests_round169();
   tests_round229();
+  tests_round230();
+  tests_round327();
+  tests_round328();
+  tests_round329();
+  tests_round330_blends();
+  tests_round332();
 }

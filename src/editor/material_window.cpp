@@ -88,7 +88,7 @@ const Preview &material_preview(const Material &m, int size) {
       const float spec = std::pow(std::max(0.0f, dot(n, H)), shin) * (shin + 8) / (8 * kPi) * ndl;
       /* A sky-ish ambient for the shadowed side, and a fake reflection for metals. */
       const Vec3 sky = Vec3(0.35f, 0.40f, 0.48f) * (0.5f + 0.5f * n.y);
-      Vec3 c = m.unlit ? albedo : albedo * (1 - m.metallic) * (ndl * 0.9f + 0.12f) + f0 * spec + f0 * sky * (0.3f + 0.7f * m.metallic);
+      Vec3 c = m.unlit || m.shading_model == 2 ? albedo : albedo * (1 - m.metallic) * (ndl * 0.9f + 0.12f) + f0 * spec + f0 * sky * (0.3f + 0.7f * m.metallic);
       c += m.emission * m.emission_strength;
       if (m.alpha < 1.0f) c = c * m.alpha + bg * (1 - m.alpha);
       /* Soft edge. */
@@ -132,10 +132,37 @@ void Editor::request_material_delete(const MaterialPtr &one) {
   else material_delete_ = one, material_delete_many_.clear();
 }
 
+/* Round 332: the presets by group as menu items (Basic, Glass, Metal, Stylized, Volume): the one picked, or "". */
+std::string Editor::material_preset_menu() {
+  std::string picked;
+  for (const auto &group : material_preset_groups()) {
+    ui_.menu_label(group.first);
+    for (const std::string &p : group.second)
+      if (ui_.menu_item(p)) picked = p;
+  }
+  return picked;
+}
+
+/* Round 332: the Materials window's Of Type... button and its menu. */
+void Editor::draw_material_of_type(const Recti &b) {
+  auto &u = ui_;
+  if (u.record_buttons) u.button_rects["mat_of_type"] = b;
+  if (u.button(b, "Of Type...")) u.open_popup(u.id("mat_of_type"), b);
+  u.tooltip("A new material asset from a preset: Solid, Glass, Metal, Toon, a Volume fog...");
+  u.popup(u.id("mat_of_type"), u.px(200), [this] {
+    const std::string p = material_preset_menu();
+    if (p.empty()) return;
+    material_selected_ = new_material_asset(make_material_preset(p), false);
+    material_search_.clear();
+    ui_.redraw = true;
+  });
+}
+
 void Editor::draw_materials_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
   if (u.hovered(r) && in.pressed[0]) focused_ = WindowKind::Materials;
+  expire_field_reset();
   /* Everything: the scene's materials and the asset files (assets first). */
   struct Entry {
     MaterialPtr m;
@@ -173,11 +200,25 @@ void Editor::draw_materials_window(const Recti &r) {
     u.redraw = true;
   }
   u.tooltip("A new .mat in Assets/Materials (Unity: Create > Material).");
+  /* Round 332: a new material of a type, by group (Basic, Glass, Metal, Stylized, Volume) - fog among them; the search
+   * after it, both left of Assign and Edit UVs (which show when there is room). */
+  const bool of_type_fits = bar.w >= u.px(330);
+  const Recti tb{bar.x + u.px(162), bar.y + u.px(3), of_type_fits ? u.px(90) : 0, bh - u.px(6)};
+  if (of_type_fits) draw_material_of_type(tb);
+  const int right_buttons = bar.w > u.px(640) ? u.px(258) : (material_selected_ && bar.w > u.px(480)) ? u.px(102) : 0;
   if (material_selected_ && bar.w > u.px(480)) {  // (task 0186: the UV Editor on this material's faces)
     if (u.button({bar.right() - u.px(96), bar.y + u.px(3), u.px(90), bh - u.px(6)}, "Edit UVs")) uv_edit_material(material_selected_);
     u.tooltip("The UV Editor on the selected object's faces of this material (the others dimmed).");
   }
-  const Recti sf{bar.x + u.px(162), bar.y + u.px(4), std::min(u.px(200), bar.w - u.px(170)), bh - u.px(8)};
+  if (bar.w > u.px(640)) {  // (task 0257: Assign to Selection as a button, not only the right-click item)
+    const bool can = material_selected_ && !selection_.empty();
+    if (u.button_enabled({bar.right() - u.px(96) - u.px(156), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "Assign to Selection", can,
+                         material_selected_ ? "Select an object to assign it to." : "Select a material first."))
+      for (GameObject *g : selected_objects(false)) assign_material(g, 0, material_selected_);
+    u.tooltip("Put the selected material on the selected objects' first slot (also: right-click the tile).");
+  }
+  const int search_x = (of_type_fits ? tb.right() : bar.x + u.px(156)) + u.px(6);
+  const Recti sf{search_x, bar.y + u.px(4), std::max(0, std::min(u.px(200), bar.right() - right_buttons - search_x - u.px(6))), bh - u.px(8)};
   u.text_field(u.id("mat_search"), sf, material_search_, nullptr, "Search materials");
   if (!f.empty() && list.size() < all)  // say that the search hides some
     u.label({sf.right() + u.px(8), bar.y, std::max(0, bar.right() - sf.right() - u.px(12)), bh},

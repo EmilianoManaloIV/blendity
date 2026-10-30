@@ -72,6 +72,7 @@ bool material_uniform(const Material &m, const Material::Resolved &tx) {
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
   SurfaceSample s = evaluate_any(m, tx, sp);
   if (m.shading_model == 1) s.toon = &m;  // an axis material's parts shade by the parent's model
+  if (m.shading_model == 2) s.handpainted = &m, s.unlit = true;  // (task 0247)
   return s;
 }
 
@@ -249,7 +250,7 @@ static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &t
     out.emission = out.emission * inv;
   }
   out.normal = length(nsum) > 1e-6f ? normalize(nsum) : sp.normal;
-  out.unlit = m.unlit;
+  out.unlit = m.unlit || m.shading_model == 2;  // (task 0247: Hand-painted shows the texture as it is)
   return out;
 }
 
@@ -300,8 +301,9 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
   s.roughness = m.roughness;
   s.specular = m.specular;
   s.alpha = m.alpha;
-  s.unlit = m.unlit;
+  s.unlit = m.unlit || m.shading_model == 2;  // (task 0247)
   s.normal = sp.normal;
+  if (m.principled_extras()) apply_principled_extras(m, s, sp.tangent.xyz(), sp.has_tangent);  // (round 330)
 
   /* Texture coordinates (Blender: Texture Coordinate + Mapping nodes). */
   Vec2 uv = {sp.uv.x * m.tiling.x + m.offset.x, sp.uv.y * m.tiling.y + m.offset.y};
@@ -479,6 +481,70 @@ Vec3 fresnel_f0(const SurfaceSample &s) {
   return lerp(Vec3(0.08f * s.specular), s.albedo, s.metallic);
 }
 
+void apply_principled_extras(const Material &m, SurfaceSample &s, Vec3 tangent, bool has_tangent) {
+  auto unit = [](float v) { return finite_bits(v) ? std::max(0.0f, std::min(1.0f, v)) : 0.0f; };
+  s.subsurface = unit(m.subsurface), s.subsurface_scale = unit(m.subsurface_scale), s.subsurface_color = vmax(Vec3(0.0f), m.subsurface_color);
+  s.sheen = unit(m.sheen), s.sheen_roughness = unit(m.sheen_roughness), s.sheen_tint = vmax(Vec3(0.0f), m.sheen_tint);
+  s.coat = unit(m.coat), s.coat_roughness = unit(m.coat_roughness), s.coat_tint = vmax(Vec3(0.0f), m.coat_tint);
+  const float ior = finite_bits(m.coat_ior) ? std::max(1.0f, std::min(3.0f, m.coat_ior)) : 1.5f, r0 = (ior - 1.0f) / (ior + 1.0f);
+  s.coat_f0 = r0 * r0;
+  s.anisotropic = has_tangent ? unit(m.anisotropic) : 0.0f;
+  s.aniso_tangent = tangent;
+  if (s.anisotropic > 0.0f && m.anisotropic_rotation != 0.0f) {  // (turned about the normal by the rotation's turns)
+    const float a = unit(m.anisotropic_rotation) * 2.0f * kPi;
+    const Vec3 b = cross(s.normal, tangent);
+    s.aniso_tangent = tangent * std::cos(a) + b * std::sin(a);
+  }
+  s.extras = s.subsurface > 0.0f || s.sheen > 0.0f || s.coat > 0.0f || s.anisotropic > 0.0f;
+}
+
+namespace {
+/* The Principled extras' share of one light (round 330), and the base's weight under the coat. nl may be below 0 for
+ * Subsurface's wrap. Approximations a real-time renderer uses: Subsurface a tinted wrap, Sheen Disney's grazing
+ * (1 - l.h)^5, Coat a second GGX with its own Fresnel over the base, Anisotropic an anisotropic GGX distribution. */
+struct Extras {
+  Vec3 add{0.0f};
+  float base = 1.0f;     // what of the base's light passes the coat
+  Vec3 tint{1.0f};       // the coat's tint on the base
+  float aniso_D = -1.0f; // (>= 0: the base specular's distribution, stretched)
+};
+Extras principled_extras(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, float nl, float nv, Vec3 h, float a) {
+  Extras e;
+  const float vh = std::max(dot(v, h), 0.0f), lh = std::max(dot(l, h), 0.0f);
+  if (nl <= 0.0f) return e;
+  if (s.subsurface > 0.0f) {  // (an energy-conserving wrap, (nl + w) / (1 + w)^2, tinted: the terminator softened; the plain diffuse fades by the weight)
+    const float w = std::max(0.05f, s.subsurface_scale);
+    e.add += s.albedo * s.subsurface_color * (s.subsurface * (1.0f - s.metallic) / kPi * (nl + w) / ((1.0f + w) * (1.0f + w)));
+  }
+  if (s.sheen > 0.0f) {
+    float f = 1.0f - lh;
+    f = f * f * f * f * f;
+    const float soft = 1.0f - 0.5f * s.sheen_roughness;
+    e.add += s.sheen_tint * (s.sheen * f * soft * (1.0f - s.metallic) * nl);
+  }
+  if (s.coat > 0.0f) {
+    const float ac = std::max(s.coat_roughness * s.coat_roughness, 0.002f), a2 = ac * ac, nh = std::max(dot(n, h), 0.0f);
+    const float d = nh * nh * (a2 - 1.0f) + 1.0f, D = a2 / (kPi * d * d);
+    const float vis = 0.5f / (nl * std::sqrt(nv * nv * (1 - a2) + a2) + nv * std::sqrt(nl * nl * (1 - a2) + a2));
+    float fw = 1.0f - vh;
+    fw = fw * fw * fw * fw * fw;
+    const float F = s.coat_f0 + (1.0f - s.coat_f0) * fw;
+    e.add += Vec3(s.coat * F * D * vis * nl);
+    float fv = 1.0f - nv;
+    fv = fv * fv * fv * fv * fv;
+    e.base = 1.0f - s.coat * (s.coat_f0 + (1.0f - s.coat_f0) * fv);
+    e.tint = lerp(Vec3(1.0f), s.coat_tint, s.coat);
+  }
+  if (s.anisotropic > 0.0f) {  // (Disney's: aspect sqrt(1 - 0.9 an), alpha_x = a / aspect, alpha_y = a * aspect)
+    const Vec3 t = normalize(s.aniso_tangent - n * dot(n, s.aniso_tangent)), b = cross(n, t);
+    const float aspect = std::sqrt(1.0f - 0.9f * s.anisotropic), ax = std::max(0.002f, a / aspect), ay = std::max(0.002f, a * aspect);
+    const float th = dot(t, h) / ax, bh = dot(b, h) / ay, nh = dot(n, h), k = th * th + bh * bh + nh * nh;
+    e.aniso_D = 1.0f / (kPi * ax * ay * k * k);
+  }
+  return e;
+}
+}  // namespace
+
 Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l) {
   float nl = dot(n, l);
   if (nl <= 0.0f) return Vec3(0.0f);
@@ -493,9 +559,11 @@ Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l) {
   float fw = (1.0f - vh) * (1.0f - vh);
   fw = fw * fw * (1.0f - vh);  // (1 - v.h)^5 without pow()
   Vec3 F = f0 + (Vec3(1.0f) - f0) * fw;
-  Vec3 spec = F * (D * vis);
-  Vec3 diff = s.albedo * ((1.0f - s.metallic) / kPi);
-  return (diff * (Vec3(1.0f) - F) + spec) * nl;
+  if (!s.extras) return (s.albedo * ((1.0f - s.metallic) / kPi) * (Vec3(1.0f) - F) + F * (D * vis)) * nl;
+  const Extras e = principled_extras(s, n, v, l, nl, nv, h, a);
+  Vec3 spec = F * ((e.aniso_D >= 0.0f ? e.aniso_D : D) * vis);
+  Vec3 diff = s.albedo * ((1.0f - s.metallic) * (1.0f - s.subsurface) / kPi);
+  return (diff * (Vec3(1.0f) - F) + spec) * nl * e.base * e.tint + e.add;
 }
 
 void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffuse, Vec3 &specular) {
@@ -505,6 +573,7 @@ void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffu
   if (nl <= 0.0f) {  // no specular from below the horizon; the diffuse with the normal-incidence Fresnel
     diffuse = diff * (Vec3(1.0f) - f0);
     specular = Vec3(0.0f);
+    if (s.extras) diffuse = diffuse * principled_base(s, n, v);  // (round 330's review: no seam as the light's direction crosses)
     return;
   }
   float nv = std::max(dot(n, v), 1e-4f);
@@ -519,6 +588,23 @@ void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffu
   Vec3 F = f0 + (Vec3(1.0f) - f0) * fw;
   diffuse = diff * (Vec3(1.0f) - F);
   specular = F * (D * vis * nl);
+  if (!s.extras) return;
+  /* Round 330: the extras ride the specular part (an area light shades the diffuse from its irradiance); the base under
+   * the coat dims and takes the tint. */
+  const Extras e = principled_extras(s, n, v, l, nl, nv, h, a);
+  if (e.aniso_D >= 0.0f) specular = F * (e.aniso_D * vis * nl);
+  diffuse = diffuse * principled_base(s, n, v);  // (the subsurface's own diffuse is in e.add, with the sheen and the coat)
+  specular = specular * e.base * e.tint + e.add;
+}
+
+/* What of the base's diffuse is left beside the extras: less the subsurface's share, under the coat's dimming and tint. */
+Vec3 principled_base(const SurfaceSample &s, Vec3 n, Vec3 v) {
+  float base = 1.0f - s.subsurface;
+  if (s.coat <= 0.0f) return Vec3(base);
+  float fv = 1.0f - std::max(dot(n, v), 1e-4f);
+  fv = fv * fv * fv * fv * fv;
+  base *= 1.0f - s.coat * (s.coat_f0 + (1.0f - s.coat_f0) * fv);
+  return lerp(Vec3(1.0f), s.coat_tint, s.coat) * base;
 }
 
 Vec3 env_brdf_approx(Vec3 f0, float roughness, float nv) {
@@ -578,8 +664,16 @@ Vec3 equirect_to_dir(Vec2 uv, float rot) {
 
 static Vec3 gradient(const Environment &e, Vec3 d) {
   float t = d.y;
-  if (t >= 0) return lerp(e.equator, e.sky, std::sqrt(saturate(t)));
-  return lerp(e.equator, e.ground, std::sqrt(saturate(-t * 4.0f)));
+  Vec3 c = t >= 0 ? lerp(e.equator, e.sky, std::sqrt(saturate(t))) : lerp(e.equator, e.ground, std::sqrt(saturate(-t * 4.0f)));
+  /* The stylized sky (task 0248): a horizon band fading over its half-width, a sun disc with a soft edge. */
+  if (e.band_width > 0.0f) c = lerp(c, e.band_color, saturate(1.0f - std::fabs(t) / e.band_width));
+  if (e.disc_cos < 1.0f) {
+    const float cd = dot(d, e.sun_dir);
+    const float edge = (1.0f - e.disc_cos) * std::max(0.0f, std::min(1.0f, e.disc_soft));
+    const float k = saturate((cd - e.disc_cos) / std::max(1e-6f, edge));
+    if (k > 0.0f) c = lerp(c, e.disc_color, k);
+  }
+  return c;
 }
 
 Vec3 Environment::radiance(Vec3 dir, float lod) const {

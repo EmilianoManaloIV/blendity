@@ -15,6 +15,10 @@ iconutil -c icns build/icons/blendity.iconset -o build/icons/blendity.icns
 mkdir -p "$APP/Contents/Resources" "$APP/Contents/Resources/docs"
 cp build/icons/blendity.icns "$APP/Contents/Resources/"
 cp docs/MANUAL.md "$APP/Contents/Resources/docs/"
+cp -R bridges "$APP/Contents/Resources/bridges"  # (the Live Link window's Install a Bridge, task 0278)
+find "$APP/Contents/Resources/bridges" -name __pycache__ -prune -exec rm -rf {} +
+mkdir -p "$APP/Contents/Resources/bridges/unreal/BlendityLiveLink/Resources"
+cp tests/fixtures/livelink_stream.bin "$APP/Contents/Resources/bridges/unreal/BlendityLiveLink/Resources/"
 rm -rf "$APP/Contents/Resources/licenses"
 cp -R licenses "$APP/Contents/Resources/licenses"
 cp LICENSE "$APP/Contents/Resources/"

@@ -122,5 +122,39 @@ int apply(Scene &scene, GameObject &anim_root, const gait::Rig &rig, const Anima
 /* The interpolation the network corrects (the root lerped, the turns slerped): also what the tests' stand-in returns. */
 void interpolate_gap(std::vector<float> &frames, int ctx, int gap);
 
+/* ---- One pose to and from the canonical skeleton (task 0280: Puppet Posing's prior uses the same mapping) ---- */
+struct PoseMapping {
+  std::vector<GameObject *> bones;  // the rig's bone for each canonical joint (null: none)
+  std::vector<Quat> rest;
+  std::vector<Quat> align;  // per joint: the rig's rest direction of the bone turned onto the data's
+  Quat face;                // the rig's world into the data's facing (+Z)
+  float scale = 1.0f;       // the rig's metres for one of the data's
+  float ground = 0.0f;
+};
+PoseMapping pose_mapping(const gait::Rig &rig, const ModelInfo &info);
+/* The rig as posed now as one frame (kFeatures: the hips' place in the data's world, each joint's turn from its parent). */
+void rig_to_frame(const PoseMapping &m, const ModelInfo &info, float *f);
+/* One frame put on the rig: the hips placed, each mapped bone turned. */
+void frame_to_rig(const PoseMapping &m, const ModelInfo &info, const float *f);
+/* A world point into the data's world (metres above the ground, the rig's facing to +Z), and back. */
+Vec3 world_to_data(const PoseMapping &m, Vec3 w);
+Vec3 data_to_world(const PoseMapping &m, Vec3 d);
+
+/* ---- Puppet Posing's pose prior (task 0280, ADR 0087): tools/posemodel's network, in the same install ---- */
+constexpr int kPriorGoals = 5, kPriorInputs = kPriorGoals * 4 + 2, kPriorOutputs = kJoints * 6;
+/* The goals' joints, in the network's order: the hands, the feet, the head; then the hips' height. */
+constexpr int kPriorGoalJoint[kPriorGoals] = {17, 21, 3, 7, 13};
+class PriorModel {
+ public:
+  virtual ~PriorModel() = default;
+  /* goals (kPriorInputs) -> each joint's turn from its parent as 6D (kPriorOutputs), the hips' in the hips-at-origin,
+   * facing-+Z frame. */
+  virtual bool run(const float *goals, float *pose, std::string &error) = 0;
+  ModelInfo info;
+};
+/* posemodel.onnx and posemodel.json in `dir` (with ONNX Runtime beside them): null with `error`. */
+std::unique_ptr<PriorModel> load_prior(const std::string &dir, std::string &error);
+std::string prior_problem();  // "" when the install has the prior
+
 }  // namespace ai
 }  // namespace bl

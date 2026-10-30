@@ -212,6 +212,10 @@ struct RasterFrame {
   float sky[3] = {0.45f, 0.52f, 0.62f}, equator[3] = {0.32f, 0.34f, 0.36f}, ground[3] = {0.16f, 0.15f, 0.14f};
   float env_color[3] = {0.05f, 0.05f, 0.05f};
   float env_strength = 1.0f;
+  /* Task 0248: the stylized sky (the disc's direction, cos and softness, its colour; the band's colour and half-width)
+   * and the fog (start, end, on; the near and far colours). */
+  float sky_disc[4] = {0.3f, 0.8f, 0.5f, 2.0f}, sky_disc_color[4] = {1.0f, 0.95f, 0.8f, 0.3f}, sky_band[4] = {0.95f, 0.75f, 0.6f, 0.0f};
+  float fog[4] = {10.0f, 60.0f, 0.0f, 0.0f}, fog_color[4] = {0.6f, 0.65f, 0.75f, 0.0f}, fog_far[4] = {0.75f, 0.8f, 0.9f, 0.0f};
   /* The background: 0 one colour (`clear`, as displayed), 1 the editor's own sky (bg_*: Renderer3D::clear_sky's
    * gradient, not tone mapped), 2 the world (as lit, through the view transform). */
   int background = 0;
@@ -256,6 +260,12 @@ struct RasterMatch {
 RasterMatch raster_match(const uint32_t *cpu_color, const uint32_t *cpu_ids, const uint32_t *gpu_color, const uint32_t *gpu_ids, int width,
                          int height);
 
+/* Task 0211: compiles the shaders of the GPU tracer and of a GPU view on the first card into `dir` (the build's
+ * dist/<platform>/shaders, read when the user's own cache lacks one). False, with why, when no card opens. The
+ * shaders a card without some feature never asks for (dual-source blending, geometry shaders) are compiled only when
+ * this card has it; another card compiles those itself, once. */
+bool warm_shaders(const std::string &dir, std::string *report);
+
 class Raster {
  public:
   static constexpr int kSlots = 4;
@@ -297,6 +307,18 @@ class Raster {
    * is RasterInstance::tex's. -1 when it doesn't fit (the error says why). */
   virtual int add_texture(const Texture &t, std::string *error) = 0;
   virtual void remove_texture(int texture) = 0;
+  /* Task 0245: rows [y0, y1) of the texture's level 0 replaced from `t` (a paint stroke's rows, not the mip chain). */
+  virtual bool update_texture_rows(int texture, const Texture &t, int y0, int y1, std::string *error) {
+    (void)texture, (void)t, (void)y0, (void)y1;
+    if (error) *error = "not on this device";
+    return false;
+  }
+  /* The card's copy of level 0, read back (tests: a rows update leaves it as a whole upload would). */
+  virtual bool read_texture(int texture, std::vector<uint32_t> &px8, std::string *error) {
+    (void)texture, (void)px8;
+    if (error) *error = "not on this device";
+    return false;
+  }
   /* What the card holds for a mesh, read back (tests: partial updates leave it as a whole upload would). */
   virtual bool read_mesh(int mesh, std::vector<RasterVertex> &v, std::vector<uint32_t> &indices, std::string *error) = 0;
   /* An OpenColorIO view's LUT as colormanagement::view_lut gives it (size^3 colours, red fastest, a log2 shaper);

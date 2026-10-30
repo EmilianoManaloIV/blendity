@@ -8,7 +8,9 @@
 #include "../core/math.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 #if defined(BL_WITH_VULKAN)
 #  include "gpu_vk.h"
@@ -69,6 +71,11 @@ RasterMatch raster_match(const uint32_t *cpu_color, const uint32_t *cpu_ids, con
 std::unique_ptr<Raster> Raster::create(int, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
   return nullptr;
+}
+
+bool warm_shaders(const std::string &, std::string *report) {
+  if (report) *report = "this build has no GPU rendering";
+  return false;
 }
 
 #else
@@ -135,6 +142,8 @@ layout(std140, set = 0, binding = 0) uniform Frame {
   vec4 cage;           // the Edit Mode cage: its lines' depth bias, its dots' radius
   vec4 probe;          // task 0197: the probes' normal bias, view bias, leak reduction, live
   vec4 gi;             // task 0197: realtime GI's specular occlusion
+  vec4 sky_disc; vec4 sky_disc_color; vec4 sky_band;  // task 0248: the stylized sky (dir + cos, colour + softness, colour + width)
+  vec4 fog; vec4 fog_color; vec4 fog_far;             // task 0248: start, end, on; the near and far colours
 };
 layout(std430, set = 0, binding = 21) readonly buffer Lights { Light lights[]; };  // task 0195: any number (view.z of them)
 layout(std430, set = 0, binding = 22) readonly buffer VertexColors { vec4 vcol[]; };  // task 0195: Weight Paint's (Inst.toon5.y)
@@ -1204,7 +1213,21 @@ vec3 irradiance(vec3 n) {
 vec3 radiance(vec3 d, float lod) {
   if (int(env.x + 0.5) == 1) return env_color.rgb * env.y;
   if (env_has_map()) return tex_sample(int(env_map.x), dir_to_equirect(d, env_map.y), lod, 0, 2).xyz * env.y;
-  return (d.y >= 0.0 ? mix(equator.rgb, sky.rgb, sqrt(clamp(d.y, 0.0, 1.0))) : mix(equator.rgb, ground.rgb, sqrt(clamp(-d.y * 4.0, 0.0, 1.0)))) * env.y;
+  vec3 g = d.y >= 0.0 ? mix(equator.rgb, sky.rgb, sqrt(clamp(d.y, 0.0, 1.0))) : mix(equator.rgb, ground.rgb, sqrt(clamp(-d.y * 4.0, 0.0, 1.0)));
+  if (sky_band.w > 0.0) g = mix(g, sky_band.rgb, clamp(1.0 - abs(d.y) / sky_band.w, 0.0, 1.0));  // (task 0248: the horizon band)
+  if (sky_disc.w < 1.0) {  // (the sun disc)
+    float cd = dot(d, sky_disc.xyz);
+    float edge = (1.0 - sky_disc.w) * clamp(sky_disc_color.w, 0.0, 1.0);
+    g = mix(g, sky_disc_color.rgb, clamp((cd - sky_disc.w) / max(1e-6, edge), 0.0, 1.0));
+  }
+  return g * env.y;
+}
+/* Task 0248: distance fog at a lit pixel (Environment::fog_apply). */
+vec3 fog_apply(vec3 c, vec3 P) {
+  if (fog.z < 0.5) return c;
+  float fe = max(fog.x + 1e-3, fog.y);
+  float f = clamp((length(P - eye.xyz) - fog.x) / (fe - fog.x), 0.0, 1.0);
+  return mix(c, mix(fog_color.rgb, fog_far.rgb, f), f);
 }
 vec3 radiance(vec3 d) { return radiance(d, 0.0); }
 vec3 env_specular(vec3 r, float rough) {
@@ -1432,7 +1455,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     if (kind == 1 || kind == 2 || kind == 4) amb = A.rgb;
     else if (I.toon3.y > 0.5) amb = (irradiance(vec3(0.0, 1.0, 0.0)) + irradiance(vec3(0.0, -1.0, 0.0))) * 0.5 * (kind == 3 ? gsky : 1.0) + (kind == 3 ? A.rgb : vec3(0.0));
     else amb = kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
-    return display(lo + amb * albedo + toon_rim(I, n, V, keyL) * clamp(T.t2.x, 0.0, 1.0) + emission);
+    return display(fog_apply(lo + amb * albedo + toon_rim(I, n, V, keyL) * clamp(T.t2.x, 0.0, 1.0) + emission, P));
   }
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
@@ -1462,7 +1485,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   vec3 spec = env_specular(R, rough) * env_brdf_approx(f0, rough, nv);
   vec3 amb = kind == 1 || kind == 2 || kind == 4 ? A.rgb : kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
   if (kind == 3) spec *= 1.0 + (gsky - 1.0) * gi.x;  // (realtime GI's sky share occludes the reflection, not over a lightmap)
-  return display(lo + amb * albedo * (1.0 - metallic) + spec + emission);
+  return display(fog_apply(lo + amb * albedo * (1.0 - metallic) + spec + emission, P));
 }
 )";
 
@@ -1918,6 +1941,7 @@ struct FrameUbo {
   float eye[4], sky[4], equator[4], ground[4], view[4], shadow[4], background[4];
   float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4], env_map[4], sh[9][4], cage[4];
   float probe[4], gi[4];  // (task 0197)
+  float sky_disc[4], sky_disc_color[4], sky_band[4], fog[4], fog_color[4], fog_far[4];  // (task 0248)
 };
 struct InstGpu {
   float model[16], albedo_rough[4], metal_spec[4], emission[4];
@@ -3160,6 +3184,45 @@ class VulkanRaster final : public Raster {
     for (Slot &sl : slots_) bind_buffers(sl.set);
     return true;
   }
+  /* Task 0245: rows [y0, y1) of level 0 replaced from `t`, through the staging buffer (a paint stroke's rows). */
+  bool update_texture_rows(int texture, const Texture &t, int y0, int y1, std::string *err) override {
+    if (!settle(err)) return false;
+    if (texture < 0 || texture >= (int)texs_.size() || !texs_[(size_t)texture].live || t.levels.empty()) return fail(err, "no such texture");
+    TexSlot &s = texs_[(size_t)texture];
+    const Texture::Level &l = t.levels[0];
+    if (s.levels.empty() || s.levels[0].first != l.w || s.levels[0].second != l.h || s.is_float != t.is_float) return fail(err, "the texture's level 0 changed size");
+    y0 = std::max(0, y0), y1 = std::min(l.h, y1);
+    if (y1 <= y0) return true;
+    const size_t elem = s.is_float ? 16 : 4, bytes = (size_t)(y1 - y0) * l.w * elem, from = (size_t)y0 * l.w;
+    if (!staging_.buf || staging_.size < bytes) {
+      free_buffer(staging_);
+      if (!make_buffer(staging_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props())) return fail(err, info_.name + ": out of memory for an upload");
+    }
+    std::memcpy(staging_.mapped, s.is_float ? (const void *)(l.pxf.data() + from) : (const void *)(l.px8.data() + from), bytes);
+    Buf &arena = s.is_float ? texf_ : tex8_;
+    begin();
+    const VkBufferCopy c{0, (s.at + from) * elem, bytes};
+    f_.vkCmdCopyBuffer(cmd_, staging_.buf, arena.buf, 1, &c);
+    uploaded();
+    return submit_wait(err);
+  }
+  bool read_texture(int texture, std::vector<uint32_t> &px8, std::string *err) override {
+    if (!settle(err)) return false;
+    if (texture < 0 || texture >= (int)texs_.size() || !texs_[(size_t)texture].live) return fail(err, "no such texture");
+    const TexSlot &s = texs_[(size_t)texture];
+    if (s.is_float || s.levels.empty()) return fail(err, "a float texture");
+    const size_t n = (size_t)s.levels[0].first * s.levels[0].second, bytes = n * 4;
+    free_buffer(staging_);  // (the upload staging is a copy source only: a buffer that can be written to, for this read)
+    if (!make_buffer(staging_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props())) return fail(err, info_.name + ": out of memory for a read");
+    begin();
+    const VkBufferCopy c{s.at * 4, 0, bytes};
+    f_.vkCmdCopyBuffer(cmd_, tex8_.buf, staging_.buf, 1, &c);
+    uploaded();
+    if (!submit_wait(err)) return false;
+    px8.resize(n);
+    std::memcpy(px8.data(), staging_.mapped, bytes);
+    return true;
+  }
   /* A texture's levels one after another at an offset of its arena, written straight into the staging buffer (no
    * copy of the chain between). A staging buffer grown past 64 MB for it is let go after. */
   bool upload_levels(Buf &dst, size_t offset, const Texture &t, size_t elem, size_t bytes, std::string *err) {
@@ -3573,6 +3636,7 @@ class VulkanRaster final : public Raster {
     u.bg[0] = (float)fr.background;
     u.probe[0] = fr.probe_normal_bias, u.probe[1] = fr.probe_view_bias, u.probe[2] = fr.probe_leak ? 1.0f : 0.0f, u.probe[3] = fr.probe_live ? 1.0f : 0.0f;
     u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = u.gi[2] = u.gi[3] = 0.0f;  // (task 0197)
+    for (int k = 0; k < 4; k++) u.sky_disc[k] = fr.sky_disc[k], u.sky_disc_color[k] = fr.sky_disc_color[k], u.sky_band[k] = fr.sky_band[k], u.fog[k] = fr.fog[k], u.fog_color[k] = fr.fog_color[k], u.fog_far[k] = fr.fog_far[k];  // (task 0248)
     u.cage[0] = fr.cage_bias;
     u.cage[1] = fr.cage_point_radius;
     u.lut[0] = (float)lut_size_;
@@ -4150,6 +4214,45 @@ std::unique_ptr<Raster> Raster::create(int index, std::string *error) {
   auto r = std::make_unique<VulkanRaster>();
   if (!r->init(index, error)) return nullptr;
   return r;
+}
+
+bool warm_shaders(const std::string &dir, std::string *report) {
+  /* Only a new or empty folder: what the run leaves besides the SPIR-V (the driver's pipeline cache) is removed after,
+   * and nothing else of a folder may go with it. */
+  std::error_code dec;
+  if (!std::filesystem::is_empty(std::filesystem::u8path(dir), dec) && !dec) {
+    if (report) *report = "--warm-shaders needs a new or empty folder: " + dir;
+    return false;
+  }
+  /* The compiles' cache pointed at `dir` for this run (cache_dir reads it on every call). */
+  fs::make_dirs(dir);
+#  ifdef _WIN32
+  _putenv_s("BLENDITY_CACHE_DIR", dir.c_str());
+#  else
+  setenv("BLENDITY_CACHE_DIR", dir.c_str(), 1);
+#  endif
+  if (!available() || devices().empty()) {
+    if (report) *report = "no GPU to compile for";
+    return false;
+  }
+  ScopedTimer t;
+  std::string err;
+  bool ok = compile_kernels(devices()[0].hardware_rt, &err);
+  ok = Raster::create(0, &err) != nullptr && ok;
+  /* Only the SPIR-V travels with the build: the driver's pipeline cache belongs to its card. */
+  size_t kept = 0;
+  std::error_code ec;
+  for (const auto &e : std::filesystem::directory_iterator(std::filesystem::u8path(dir), ec)) {
+    const std::string name = e.path().filename().u8string();
+    if (name.rfind("gpu_kernel_", 0) == 0 && name.size() > 4 && name.compare(name.size() - 4, 4, ".spv") == 0) {
+      kept++;
+      continue;
+    }
+    std::error_code rec;
+    std::filesystem::remove(e.path(), rec);
+  }
+  if (report) *report = strprintf("%zu shaders compiled into %s in %.1f s%s%s", kept, dir.c_str(), t.ms() / 1000.0, err.empty() ? "" : ": ", err.c_str());
+  return ok;
 }
 
 #endif

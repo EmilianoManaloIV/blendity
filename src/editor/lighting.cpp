@@ -112,7 +112,7 @@ bool Editor::live_gi_needed(std::string *why) {
     return false;
   }
   if (lighting_manual() && !lighting_update_requested_) {
-    say("Live GI: frozen (Lighting Updates: Manual; Update Lighting or Ctrl+Shift+L refreshes it)");
+    say(("Live GI: frozen (Lighting Updates: Manual; Update Lighting or " + key("lighting.update") + " refreshes it)").c_str());
     return false;
   }
   if (!ls.baked_gi || lighting_data_.empty()) {
@@ -258,12 +258,12 @@ int Editor::choose_bake_gpu() {
 void Editor::bake_start() {
   if (baking_) return;
   if (playing_) {
-    Log::warn("Generate Lighting: not while playing.");
+    refuse("Generate Lighting: not while playing.", "stop", "stop Play");
     return;
   }
   const LightingSettings &ls = scene_->lighting;
   if (!ls.baked_gi) {
-    Log::warn("Generate Lighting: Baked Global Illumination is off (Lighting window).");
+    refuse("Generate Lighting: Baked Global Illumination is off (Lighting window).", "window Lighting", "Open Lighting");
     return;
   }
   std::vector<BakeObject> objects;
@@ -617,7 +617,7 @@ void Editor::auto_generate_step() {
     settle_since_ = 0;
     return;
   }
-  const double now = now_seconds();
+  const double now = clock_now();  // (the test clock when a test sets one: a slow build's frames no longer pass the second)
   if (settle_since_ == 0 || ood_key_ != settle_key_) {  // still changing: wait for it to settle
     settle_key_ = ood_key_;
     settle_since_ = now;
@@ -634,7 +634,7 @@ void Editor::auto_generate_step() {
  * probes - and freezes again when they have all caught up (a frame on a GPU, a few on the CPU). */
 void Editor::lighting_update() {
   if (!scene_->lighting.realtime_gi) {
-    Log::warn("Update Lighting: Realtime GI is off (Lighting window); Generate Lighting bakes.");
+    refuse("Update Lighting: Realtime GI is off (Lighting window); Generate Lighting bakes.", "set Lighting.RealtimeGI true", "Turn Realtime GI on");
     return;
   }
   lighting_update_requested_ = true;

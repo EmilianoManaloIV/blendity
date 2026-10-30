@@ -217,6 +217,19 @@ std::vector<DirEntry> list(const std::string &dir) {
 bool read_file(const std::string &path, std::string &out) {
   std::ifstream f(P(path), std::ios::binary);
   if (!f) return false;
+  /* Task 0210: the size first, then one read into the string (through a stream buffer and a copy it was most of opening
+   * a big scene). A file that can't seek, says it is empty or reads short (a pipe, /proc, one being written) is read
+   * through the stream as before. */
+  f.seekg(0, std::ios::end);
+  const std::streamoff size = f ? (std::streamoff)f.tellg() : -1;
+  if (size > 0) {
+    f.seekg(0);
+    out.resize((size_t)size);
+    f.read(&out[0], (std::streamsize)size);
+    if (f.gcount() == (std::streamsize)size) return true;
+  }
+  f.clear();
+  f.seekg(0);
   std::ostringstream ss;
   ss << f.rdbuf();
   out = ss.str();

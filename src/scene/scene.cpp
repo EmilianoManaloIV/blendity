@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "subdiv_chain.h"
 #include "../core/json.h"
 #include "animation.h"
 #include "sequence.h"
 #include "curve.h"
+#include "stroke_object.h"
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -56,6 +58,67 @@ template<class T> static void reg(const char *category, const char *help, const 
   register_component({T::kName, category, help, blender, [] { return std::make_unique<T>(); }});
 }
 
+/* ---- round 329: ramps and curves as text (the shortest text that reads back exactly: append_float) ---- */
+
+namespace {
+constexpr size_t kRampMax = 32;  // (the stops or points a ramp or curve keeps; the widgets add no more)
+size_t next_item(const std::string &s, size_t at) {
+  const size_t a = s.find(';', at), b = s.find(',', at);
+  return std::min(a == std::string::npos ? s.size() : a, b == std::string::npos ? s.size() : b);
+}
+}  // namespace
+
+std::string ramp_to_text(const std::vector<RampStop> &stops) {
+  std::string s;
+  for (const RampStop &r : stops) {
+    if (!s.empty()) s += "; ";
+    for (float v : {r.pos, r.color.x, r.color.y, r.color.z}) append_float(s, v), s += ' ';
+    s.pop_back();
+  }
+  return s;
+}
+
+bool ramp_from_text(const std::string &s, std::vector<RampStop> &stops) {
+  std::vector<RampStop> out;
+  size_t at = 0;
+  while (at < s.size()) {
+    const size_t end = next_item(s, at);
+    RampStop r;
+    float p, x, y, z;
+    if (std::sscanf(s.substr(at, end - at).c_str(), "%f %f %f %f", &p, &x, &y, &z) == 4 && std::isfinite(p + x + y + z))
+      r.pos = std::max(0.0f, std::min(1.0f, p)), r.color = {std::max(0.0f, x), std::max(0.0f, y), std::max(0.0f, z)}, out.push_back(r);
+    at = end + 1;
+  }
+  if (out.size() > kRampMax) out.resize(kRampMax);
+  std::stable_sort(out.begin(), out.end(), [](const RampStop &a, const RampStop &b) { return a.pos < b.pos; });
+  stops = out;
+  return true;
+}
+
+std::string curve_to_text(const std::vector<Vec2> &pts) {
+  std::string s;
+  for (const Vec2 &p : pts) {
+    if (!s.empty()) s += "; ";
+    append_float(s, p.x), s += ' ', append_float(s, p.y);
+  }
+  return s;
+}
+
+bool curve_from_text(const std::string &s, std::vector<Vec2> &pts) {
+  std::vector<Vec2> out;
+  size_t at = 0;
+  while (at < s.size()) {
+    const size_t end = next_item(s, at);
+    float x, y;
+    if (std::sscanf(s.substr(at, end - at).c_str(), "%f %f", &x, &y) == 2 && std::isfinite(x + y)) out.push_back({std::max(0.0f, std::min(1.0f, x)), std::max(0.0f, std::min(1.0f, y))});
+    at = end + 1;
+  }
+  if (out.size() > kRampMax) out.resize(kRampMax);
+  std::stable_sort(out.begin(), out.end(), [](const Vec2 &a, const Vec2 &b) { return a.x < b.x; });
+  pts = out;
+  return true;
+}
+
 /* Component names may have spaces, but no word of a name may start with a digit: scene files
  * write "component <name> <flags...>" and the loader takes words up to the first number. */
 void register_builtin_components() {
@@ -106,7 +169,7 @@ void register_builtin_components() {
                     "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
                     "Inverse Kinematics bone constraint (with Pole Target)");
   reg<RigControl>("Rigging", "A controller shape to grab instead of bones (an IK target or pole, an FK circle): drawn over the scene, "
-                  "coloured by side - left blue, right red, the middle yellow.",
+                  "colored by side - left blue, right red, the middle yellow.",
                   "a custom bone shape (Maya: a NURBS controller curve)");
   reg<Animation>("Animation", "Plays an animation clip (Assets/Animations/*.anim) on this object and the ones below it, in Play. "
                  "Make and edit clips in the Animation window.",
@@ -126,6 +189,7 @@ void register_builtin_components() {
   reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
+  reg<Strokes>("Mesh", "Brush strokes as geometry (task 0248): cards and ribbons painted onto surfaces, the object's mesh rebuilt from them with custom normals (Own, Surface or Canopy).", "Grease Pencil strokes / a cards mesh with custom normals");
   reg<ProbeVolume>("Rendering",
                    "Light probes placed automatically (dense near geometry): objects without a lightmap take their indirect "
                    "light from them. Baked by Generate Lighting, kept live by Realtime GI.",
@@ -136,9 +200,13 @@ void register_builtin_components() {
                      "Add Filter picks them by category.",
                      "Compositor nodes on the render (Unity: the Post-processing Layer and Volume profile)");
   reg<Outline>("Rendering",
-               "Toon outlines: a shell around the object in one colour, so it has a line round its silhouette (the inverted "
+               "Toon outlines: a shell around the object in one color, so it has a line round its silhouette (the inverted "
                "hull). Pair it with a Toon material.",
                "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
+  reg<CameraFlatten>("Rendering",
+                     "The 2D look: the object's depth squashed toward the camera about a pivot (the body, the head), so it "
+                     "draws as its shape seen head-on - in the Game view and renders; its shading stays as modelled.",
+                     "Guilty Gear Xrd's flattened models (a mesh scaled along the view by a driver)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Wind>("Scripts", "A wind along this object's forward (or away from it): spring chains - hair, cloth, tails - move in it (task 0153).", "Blender's Wind force field");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
@@ -165,6 +233,7 @@ void MeshRenderer::reflect(Reflector &r) {
   r.field("Show in Renders", show_in_renders);
   r.help("Off: the Game view and rendered images leave the object out, as Blender does for Boolean cutters\n"
          "(Object > Visibility > Renders).");
+  if (r.serializing()) r.text("Mesh Maps", mesh_maps), r.text("Mesh Maps Key", mesh_maps_key);  // (task 0243: the record, not for hand editing)
   /* Shape keys (task 0135): files and hashes keep the weights as a list (whatever order the components come in, a
    * key's exact name); the Inspector and clips get a slider per key of the mesh (BlendShape/<name>). */
   if (r.serializing()) r.weight_list("Shape Weights", shape_weights);
@@ -287,7 +356,28 @@ void EnvironmentSettings::reflect(Reflector &r) {
     r.color("Sky Color", sky);
     r.color("Equator Color", equator);
     r.color("Ground Color", ground);
+    if (r.group("Stylized Sky", false)) {  // (task 0248)
+      r.field("Sun Disc", sun_disc, 0.1f, 0.0f, 30.0f);
+      r.help("A painted sun on the gradient sky: the disc's size in degrees (0: none), toward the first Directional Light.");
+      r.field("Sun Disc Softness", sun_disc_softness, 0.01f, 0.0f, 1.0f);
+      r.color("Sun Disc Color", sun_disc_color);
+      r.field("Horizon Band", horizon_band, 0.01f, 0.0f, 0.5f);
+      r.help("A band of color along the horizon (its half-width as a share of the sky; 0: none): the warm line of a painted sky.");
+      r.color("Horizon Band Color", horizon_band_color);
+    }
+    r.group_end();
   }
+  if (r.group("Fog", false)) {  // (task 0248: in every renderer, by the view distance)
+    r.field("Fog", fog);
+    r.field("Fog Start", fog_start, 0.1f, 0.0f, 10000.0f);
+    r.field("Fog End", fog_end, 0.1f, 0.0f, 10000.0f);
+    r.color("Fog Color", fog_color);
+    r.color("Fog Color Far", fog_color_far);
+    r.help("Distance fog: a surface's color is mixed toward the ramp - Fog Color at Fog Start to Fog Color Far at Fog End and\n"
+           "beyond - by its distance from the eye, in the Scene view, the GPU view and renders alike (a stylization: no scattering;\n"
+           "the Retro camera filter's fog is a display effect of its own).");
+  }
+  r.group_end();
   if (all || mode == 1) {
     r.field("Turbidity", turbidity, 0.02f, 1.0f, 10.0f);
     r.help("Haze in the atmosphere (Hosek-Wilkie model). The sun direction comes from the first Directional Light.");
@@ -434,7 +524,7 @@ void Light::reflect(Reflector &r) {
   }
   r.color("Color", color);
   r.field("Use Color Temperature", use_temperature);
-  r.help("Tint the light with a black body's colour at the temperature below, as photographers and\n"
+  r.help("Tint the light with a black body's color at the temperature below, as photographers and\n"
          "lighting artists do (Unity HDRP: Color Temperature; Blender: a Blackbody node).");
   if (use_temperature || all) {
     r.field("Temperature (K)", temperature, 25.0f, 1000.0f, 40000.0f);
@@ -679,14 +769,14 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
   static const std::vector<FilterEffectInfo> infos = {
       {RetroConsoleFilter::kName, "Retro Console",
        "Render the way an old console drew 3D: PlayStation, Nintendo 64, Sega Saturn or a DOS PC (resolution, wobbling vertices, "
-       "warping textures, texture filtering, colour depth and dither).",
+       "warping textures, texture filtering, color depth and dither).",
        [] { return std::make_unique<RetroConsoleFilter>(); }},
       {ColorGradingEffect::kName, "Color", "Exposure, contrast, saturation, white balance and lift / gamma / gain, in linear light.",
        [] { return std::make_unique<ColorGradingEffect>(); }},
-      {PosterizeEffect::kName, "Color", "Fewer shades per channel: flat bands of colour.", [] { return std::make_unique<PosterizeEffect>(); }},
+      {PosterizeEffect::kName, "Color", "Fewer shades per channel: flat bands of color.", [] { return std::make_unique<PosterizeEffect>(); }},
       {GrayscaleEffect::kName, "Color", "Black and white, or a warm old-photo sepia.", [] { return std::make_unique<GrayscaleEffect>(); }},
       {InvertEffect::kName, "Color", "A negative image.", [] { return std::make_unique<InvertEffect>(); }},
-      {ColorRampEffect::kName, "Color", "The picture's brightness through a few colours (Blender's Color Ramp): flat cel tones or a gradient map.",
+      {ColorRampEffect::kName, "Color", "The picture's brightness through a few colors (Blender's Color Ramp): flat cel tones or a gradient map.",
        [] { return std::make_unique<ColorRampEffect>(); }},
       {VignetteEffect::kName, "Lens", "Darker (or tinted) corners, drawing the eye to the middle.", [] { return std::make_unique<VignetteEffect>(); }},
       {ChromaticAberrationEffect::kName, "Lens", "Red and blue fringes toward the edges, as from a cheap lens.",
@@ -694,12 +784,12 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
       {FilmGrainEffect::kName, "Lens", "Film-like noise, strongest in the midtones; it moves in Play mode.", [] { return std::make_unique<FilmGrainEffect>(); }},
       {LensDistortionEffect::kName, "Lens", "Barrel (fisheye-like, below 0) or pincushion (above 0) bending of straight lines.",
        [] { return std::make_unique<LensDistortionEffect>(); }},
-      {PixelateEffect::kName, "Stylize", "Blocks of one colour.", [] { return std::make_unique<PixelateEffect>(); }},
+      {PixelateEffect::kName, "Stylize", "Blocks of one color.", [] { return std::make_unique<PixelateEffect>(); }},
       {EdgeOutlineEffect::kName, "Stylize", "Lines where objects meet and where the depth jumps: a toon / sketch look.",
        [] { return std::make_unique<EdgeOutlineEffect>(); }},
       {CrtEffect::kName, "Stylize", "An old TV: scanlines, a curved tube, phosphor stripes and flicker.", [] { return std::make_unique<CrtEffect>(); }},
       {SharpenEffect::kName, "Stylize", "Crisper edges (an unsharp mask).", [] { return std::make_unique<SharpenEffect>(); }},
-      {HalftoneEffect::kName, "Stylize", "Comic / manga dots: a dot screen whose dots grow with the darkness (Mono ink on paper, or Colour).",
+      {HalftoneEffect::kName, "Stylize", "Comic / manga dots: a dot screen whose dots grow with the darkness (Mono ink on paper, or Color).",
        [] { return std::make_unique<HalftoneEffect>(); }},
       {HatchingEffect::kName, "Stylize", "Pen hatching: lines that cross more densely in darker areas.", [] { return std::make_unique<HatchingEffect>(); }},
       {LineArtEffect::kName, "Stylize", "Ink lines on silhouettes, where objects meet, and on creases sharper than an angle (a manga / anime line).",
@@ -886,19 +976,19 @@ void RetroConsoleFilter::reflect(Reflector &r) {
   r.help("Textures larger than this are drawn from a smaller copy (their mipmap), like a console's small texture memory.\n0: no limit.");
   r.field("Mipmaps", mipmaps);
   r.help("Off: one texture size at every distance (the PS1 had no mipmaps): far textures shimmer.");
-  static const char *depths[] = {"24-bit", "15-bit", "256 colours"};
+  static const char *depths[] = {"24-bit", "15-bit", "256 colors"};
   r.enumeration("Colour Depth", color_depth, depths, 3);
-  r.help("15-bit: 32 levels per channel (PS1, N64, Saturn). 256 colours: a fixed VGA-style palette (DOS).");
+  r.help("15-bit: 32 levels per channel (PS1, N64, Saturn). 256 colors: a fixed VGA-style palette (DOS).");
   if (color_depth != RetroImageParams::Full || all) {
     static const char *dithers[] = {"Off", "PS1 4x4", "Bayer 4x4"};
     r.enumeration("Dither", dither, dithers, 3);
-    r.help("Hides colour banding with a fixed pattern (the PS1's own matrix, or Bayer's).");
+    r.help("Hides color banding with a fixed pattern (the PS1's own matrix, or Bayer's).");
   }
   r.field("Screen-Door Transparency", screen_door);
   r.help("Draw see-through surfaces as a checkerboard of opaque pixels instead of blending (the Saturn's mesh).");
   r.field("Fog", fog);
-  r.help("Fade geometry toward a colour with distance, hiding a short draw distance. The sky is left alone:\n"
-         "set the camera's Background to the fog colour for a classic foggy horizon. Not in path-traced renders.");
+  r.help("Fade geometry toward a color with distance, hiding a short draw distance. The sky is left alone:\n"
+         "set the camera's Background to the fog color for a classic foggy horizon. Not in path-traced renders.");
   if (fog || all) {
     r.field("Fog Start", fog_start, 0.1f, 0.0f, 100000.0f);
     r.field("Fog End", fog_end, 0.1f, 0.0f, 100000.0f);
@@ -945,7 +1035,7 @@ void ColorGradingEffect::reflect(Reflector &r) {
   r.field("Tint", tint, 0.01f, -1.0f, 1.0f);
   r.help("Toward magenta (+) or green (-).");
   r.color("Lift", lift);
-  r.help("Raises the shadows by colour (Lift / Gamma / Gain, as in colour grading suites). Black: no change.");
+  r.help("Raises the shadows by color (Lift / Gamma / Gain, as in color grading suites). Black: no change.");
   r.field("Gamma", gamma);
   r.help("Bends the midtones per channel (1: no change; above 1 brighter).");
   r.field("Gain", gain);
@@ -960,7 +1050,7 @@ void ColorGradingEffect::contribute(FilterStack &s) const {
 
 void PosterizeEffect::reflect(Reflector &r) {
   r.field("Levels", levels, 2, 256);
-  r.help("Shades per colour channel (256: unchanged). Few levels give flat, poster-like bands.");
+  r.help("Shades per color channel (256: unchanged). Few levels give flat, poster-like bands.");
 }
 void PosterizeEffect::contribute(FilterStack &s) const {
   const int l = levels;
@@ -1000,7 +1090,7 @@ void VignetteEffect::contribute(FilterStack &s) const {
 
 void ChromaticAberrationEffect::reflect(Reflector &r) {
   r.field("Intensity", intensity, 0.01f, 0.0f, 1.0f);
-  r.help("Colour fringes toward the edges, as from a cheap lens.");
+  r.help("Color fringes toward the edges, as from a cheap lens.");
 }
 void ChromaticAberrationEffect::contribute(FilterStack &s) const {
   const float k = intensity;
@@ -1094,7 +1184,7 @@ void BloomEffect::contribute(FilterStack &s) const {
 }
 
 void HalftoneEffect::reflect(Reflector &r) {
-  static const char *modes[] = {"Mono", "Colour"};
+  static const char *modes[] = {"Mono", "Color"};
   r.enumeration("Mode", mode, modes, 2);
   r.field("Cell Size", cell, 0.1f, 2.0f, 128.0f);
   r.help("Dot spacing in pixels at 1080p (the same look at any resolution).");
@@ -1205,7 +1295,7 @@ void AnimeEffect::reflect(Reflector &r) {
     r.field("Crease Angle", crease_angle, 0.5f, 1.0f, 179.0f);
   }
   r.field("Saturation", saturation, 0.01f, -1.0f, 1.0f);
-  r.help("A little more colour (0: unchanged; 1: twice as vivid).");
+  r.help("A little more color (0: unchanged; 1: twice as vivid).");
   r.field("Contrast", contrast, 0.01f, -1.0f, 1.0f);
   r.field("Bloom", bloom, 0.01f, 0.0f, 100.0f);
   r.help("The soft glow round bright things (0: none).");
@@ -1269,13 +1359,31 @@ void MangaEffect::contribute(FilterStack &s) const {
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }
 
+void CameraFlatten::reflect(Reflector &r) {
+  r.field("Amount", amount, 0.01f, 0.0f, 1.0f);
+  r.help("How much of the depth along the view goes: 0 as modelled, 1 flat as a card (2 % kept). The Scene view shows\n"
+         "the true shape; the Game view and renders the flattened one, shaded as the true one.");
+  static const char *kPivots[] = {"Bounds Center", "Object Origin", "Bone"};
+  r.enumeration("Pivot", pivot, kPivots, 3);
+  r.help("What stays put while the depth squashes: the middle of this object and the meshes below it, its origin, or a\n"
+         "bone (the head, so the face keeps its place).");
+  r.text("Pivot Bone", bone);
+  r.help("With Pivot Bone: the bone's name, below this object (Head, head...).");
+  static const char *kDirs[] = {"Toward the Camera", "View Axis"};
+  r.enumeration("Direction", direction, kDirs, 2);
+  r.help("Toward the Camera: along the line from the camera to the pivot. View Axis: along the view's forward (an\n"
+         "orthographic camera uses it always).");
+  r.field("Children", children);
+  r.help("The meshes below this object flatten too; one with a Camera Flatten of its own uses that instead.");
+}
+
 void Outline::reflect(Reflector &r) {
   r.field("Thickness", thickness, 0.001f, 0.0f, 10.0f);
   r.help("How far the outline shell stands out from the surface.");
   r.field("World Space", world_space);
   r.help("Thickness in metres whatever the object's scale (off: in the object's own units).");
   r.color("Color", color);
-  r.help("The line's colour. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
+  r.help("The line's color. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
          "it as a sheet; it suits closed meshes.)");
   r.text("Thickness Group", thickness_group);
   r.help("A vertex group scaling the width per vertex (task 0149; Guilty Gear paints it): 1 the full width, 0 no line\n"
@@ -2082,6 +2190,7 @@ uint64_t GameObject::evaluated_key(int kind) const {
   auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
+  mix(mf->mesh->deform_version);  // (as evaluated_keys: a positions-only change is a change the views must see)
   mix((uint64_t)kind);
   for (auto &c : components)
     if (c->is_modifier() && (kind == 1 ? c->show_in_render : c->enabled && (kind == 0 || c->show_in_editmode))) {
@@ -2102,6 +2211,7 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
     out[kind] = kFnvBasis;
     mix(out[kind], (uint64_t)(uintptr_t)mf->mesh.get());
     mix(out[kind], mf->mesh->version);
+    mix(out[kind], mf->mesh->deform_version);  // (ADR 0022: a positions-only change - a sculpt dab, task 0236 - is a change the views must see)
     mix(out[kind], (uint64_t)kind);
   }
   /* The shape keys' weights (task 0135): renders and the viewport show them, Edit Mode's cage the basis. */
@@ -2173,6 +2283,9 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
+  uint64_t topo_key = key;  // (ADR 0075: the key without the base's deform_version - what the subdivision chain follows)
+  auto tmix = [&](uint64_t v) { topo_key = (topo_key ^ v) * kFnvPrime; };
+  mix(mf->mesh->deform_version);  // (ADR 0075: a positions-only change - a sculpt dab - re-evaluates the stack; the views' keys already read it)
   /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
    * Edit Mode's cage (kind 2) shows the basis it edits, as Blender does. */
   const MeshRenderer *shaping = kind == 2 ? nullptr : get<MeshRenderer>();
@@ -2186,28 +2299,82 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   size_t split = 0;
   for (size_t i = 0; i < components.size(); i++)
     if (on(*components[i]) && (!components[i]->is_deform_only() || kind == 2)) split = i + 1;
-  uint64_t head_key = key;
+  uint64_t head_key = key, head_topo_key = topo_key;
   bool any_head = false, any_tail = false;
+  const SubdivisionSurface *chain_sub = nullptr;  // (ADR 0075: the head is one Subdivision Surface, levels 1-3)
+  int head_count = 0;
   for (size_t i = 0; i < components.size(); i++) {
     Component &c = *components[i];
     if (!on(c)) continue;
     any = true;
     (i < split ? any_head : any_tail) = true;
-    mix(hash_component(c));
-    mix(c.modifier_dependency_hash());
-    if (i + 1 == split) head_key = key;
+    const uint64_t hc = hash_component(c), hd = c.modifier_dependency_hash();
+    mix(hc);
+    mix(hd);
+    if (i < split) tmix(hc), tmix(hd), head_count++, chain_sub = dynamic_cast<const SubdivisionSurface *>(&c);
+    if (i + 1 == split) head_key = key, head_topo_key = topo_key;
   }
+  if (head_count != 1 || !chain_sub || chain_sub->levels < 1 || chain_sub->levels > 3) chain_sub = nullptr;
   /* The weights are part of the head when a modifier runs before the tail; otherwise the keys are added on the
    * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
-  if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime;
+  if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime, head_topo_key = (head_topo_key ^ shape_hash) * kFnvPrime;
   if (shaped) mix(shape_hash);
   if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
-  if (!any && !shaped) return mf->mesh.get();
+  if (!any && !shaped) {  // (nothing drawn over the mesh: the caches go with it - a chain's tables are not kept for nothing)
+    eval_mesh_[kind] = nullptr, eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
+    return mf->mesh.get();
+  }
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
       if (on(*components[i])) run_modifier(*components[i], m);
   };
+  /* The head: built whole when its key changed - or, for one Subdivision Surface whose base only moved (ADR 0075),
+   * followed in place by its chain, the moved vertices' footprint recomputed level by level. */
+  bool head_followed = false;  // (the chain moved the head's positions only: its tail may deform again in place)
+  auto chain_follows = [&]() {
+    if (!chain_sub || !eval_chain_[kind] || !eval_head_[kind] || eval_head_topo_[kind] != head_topo_key) return false;
+    std::vector<Vec3> base = mf->mesh->positions;
+    apply_shape_keys(*mf->mesh, shaping, base);
+    const bool shared_out = eval_mesh_[kind] == eval_head_[kind];
+    if (eval_head_[kind].use_count() > (shared_out ? 2 : 1)) {  // (a snapshot holds the head: it is written through a copy)
+      auto c = std::make_shared<Mesh>(*eval_head_[kind]);
+      if (shared_out) eval_mesh_[kind] = c;
+      eval_head_[kind] = c;
+    }
+    const size_t written = eval_chain_[kind]->update(base, *eval_head_[kind]);
+    if (written == meshops::SubdivChain::kRefused) return false;  // (not the mesh the chain was built for: rebuilt)
+    if (written) eval_head_[kind]->deform_version++;
+    eval_head_key_[kind] = head_key;
+    head_followed = true;
+    return true;
+  };
+  auto refresh_head = [&]() {
+    if (eval_head_[kind] && eval_head_key_[kind] == head_key) return;
+    if (chain_follows()) return;
+    auto h = std::make_shared<Mesh>(*mf->mesh);
+    apply_shape_keys(*mf->mesh, shaping, h->positions);
+    h->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
+    eval_chain_[kind] = nullptr;
+    if (chain_sub) {
+      const Mesh in = *h;
+      eval_chain_[kind] = meshops::SubdivChain::build(in, chain_sub->levels, chain_sub->smooth, *h);
+      if (eval_chain_[kind] && chain_sub->smooth) h->smooth = true;                                   // (as the modifier sets it)
+      if (eval_chain_[kind] && !in.vertex_groups.empty()) meshops::transfer_vertex_groups(in, *h);  // (as run_modifier carries them, by position)
+    }
+    if (!eval_chain_[kind]) run(*h, 0, split);
+    h->touch();
+    eval_head_[kind] = h;
+    eval_head_key_[kind] = head_key;
+    eval_head_topo_[kind] = head_topo_key;
+  };
+  if (!any_tail && chain_sub) {  // (the stack is the subdivision alone: the head is the result)
+    refresh_head();
+    eval_mesh_[kind] = eval_head_[kind];
+    eval_key_[kind] = key;
+    eval_from_[kind] = 0;
+    return eval_mesh_[kind].get();
+  }
   if (!any_tail) {
     auto m = std::make_shared<Mesh>(*mf->mesh);
     apply_shape_keys(*mf->mesh, shaping, m->positions);
@@ -2218,27 +2385,24 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     eval_key_[kind] = key;
     eval_from_[kind] = 0;
     eval_head_[kind] = nullptr;  // nothing to deform from: don't keep a second copy
+    eval_chain_[kind] = nullptr;
     return eval_mesh_[kind].get();
   }
   const Mesh *head = mf->mesh.get();
   if (any_head) {
-    if (!eval_head_[kind] || eval_head_key_[kind] != head_key) {
-      auto h = std::make_shared<Mesh>(*mf->mesh);
-      apply_shape_keys(*mf->mesh, shaping, h->positions);
-      h->shape_keys.clear();
-      run(*h, 0, split);
-      h->touch();
-      eval_head_[kind] = h;
-      eval_head_key_[kind] = head_key;
-    }
+    refresh_head();
     head = eval_head_[kind].get();
   }
   else
-    eval_head_[kind] = nullptr;
+    eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
   std::shared_ptr<Mesh> m = eval_mesh_[kind];
   const bool same_topology = m && m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
                              m->face_offsets.size() == head->face_offsets.size();
-  if (m && eval_from_[kind] == head_key && same_topology) {
+  /* The tail deforms again in place when the head is the one it was deformed from (its key), or when the chain moved
+   * that head's positions only (its topology key); a head rebuilt whole takes the full path - its connectivity may
+   * have changed under the same counts. */
+  const bool same_head = eval_from_[kind] == head_key || (head_followed && eval_from_topo_[kind] == head_topo_key);
+  if (m && same_head && same_topology) {
     /* Deform again from the head's positions. A copy shared with a snapshot (Scene::clone) or another
      * scene is never written: it is copied first, render mesh included, which still saves the rebuild. */
     if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
@@ -2264,6 +2428,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   eval_mesh_[kind] = m;
   eval_key_[kind] = key;
   eval_from_[kind] = head_key;
+  eval_from_topo_[kind] = head_topo_key;
   return eval_mesh_[kind].get();
 }
 
@@ -2303,6 +2468,7 @@ void Scene::move_from(Scene &o) {
   render = o.render;
   lighting = o.lighting;
   guides = std::move(o.guides);
+  sketch = std::move(o.sketch);
   active_camera = o.active_camera;
   sequence = o.sequence;
   director.reset();  // (a Play session's player belongs to it)
@@ -2481,6 +2647,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->render = render;
   s->lighting = lighting;
   s->guides = guides;
+  s->sketch = sketch;
   s->active_camera = active_camera;
   s->sequence = sequence;
   s->objects_.reserve(objects_.size());

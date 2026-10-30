@@ -56,6 +56,11 @@ call :lib tbb              BL_WITH_TBB         "tbb\include"                    
 call :lib embree           BL_WITH_EMBREE      "embree\include"                                "embree\lib\embree4.lib"
 call :lib openimagedenoise BL_WITH_OIDN        "openimagedenoise\include"                      "openimagedenoise\lib\OpenImageDenoise.lib"
 call :lib eigen            BL_WITH_EIGEN       "eigen\include\eigen3"                          ""
+rem QuadriFlow (task 0241, ADR 0077): Blender's bundled copy in extern\quadriflow, with Eigen.
+if exist "%L%\eigen\include\eigen3" set USE_QUADRIFLOW=1
+rem (WIN32: LEMON's Windows paths key on Blender's define; __TBB_NO_IMPLICIT_LINKAGE: with WIN32 on, a TBB header reached through the libraries' includes auto-linked tbb12.lib by its bare name)
+if "%USE_QUADRIFLOW%"=="1" set LIBDEFS=%LIBDEFS% /DBL_WITH_QUADRIFLOW /D_USE_MATH_DEFINES /DWIN32 /D__TBB_NO_IMPLICIT_LINKAGE
+if "%USE_QUADRIFLOW%"=="1" set LIBINC=%LIBINC% /Iextern\quadriflow\src /Iextern\quadriflow\3rd\pcg32 /Iextern\quadriflow\3rd\lemon-1.3.1 /Iextern\quadriflow\lemon_gen
 call :lib opensubdiv       BL_WITH_OPENSUBDIV  "opensubdiv\include"                            "opensubdiv\lib\osdCPU.lib"
 call :lib openexr          BL_WITH_OPENEXR     "openexr\include openexr\include\OpenEXR imath\include imath\include\Imath" "openexr\lib\OpenEXR.lib openexr\lib\OpenEXRCore.lib openexr\lib\Iex.lib openexr\lib\IlmThread.lib imath\lib\Imath.lib"
 call :lib opencolorio      BL_WITH_OCIO        "opencolorio\include"                           "opencolorio\lib\OpenColorIO.lib"
@@ -134,12 +139,15 @@ set SRCRSP=%OBJ%\sources.rsp
   echo extern\ufbx\ufbx.c
   echo extern\sky\source\sky_hosek.cpp
   if "%USE_OPTIX%"=="1" echo extern\cuew\src\cuew.c
+  if "%USE_QUADRIFLOW%"=="1" for %%f in (adjacent-matrix dedge hierarchy loader localsat merge-vertex optimizer parametrizer parametrizer-flip parametrizer-int parametrizer-mesh parametrizer-scale parametrizer-sing subdivide) do echo extern\quadriflow\src\%%f.cpp
+  if "%USE_QUADRIFLOW%"=="1" for %%f in (arg_parser base color lp_base lp_skeleton random) do echo extern\quadriflow\3rd\lemon-1.3.1\lemon\%%f.cc
+  if "%USE_QUADRIFLOW%"=="1" echo extern\quadriflow\3rd\lemon-1.3.1\lemon\bits\windows.cc
 )
 set LIBSRC=@%SRCRSP%
-set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib ws2_32.lib %LIBLINK%
+set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%BLENDITY_NO_LTCG%"=="1" set FLAGS=!FLAGS:/GL=!
 if "%BLENDITY_NO_LTCG%"=="1" set LINKFLAGS=!LINKFLAGS:/LTCG=!
-if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib ws2_32.lib %LIBLINK%
+if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto app
@@ -155,6 +163,20 @@ rem BLENDITY_OUT lets you build while a copy of the editor is still running.
 if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
 cl %FLAGS% /Fo%OBJ%\ /Fe:%BLENDITY_OUT% %LIBSRC% src\app\main.cpp %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
 if errorlevel 1 exit /b 1
+rem Task 0211: the GPU shaders compiled now into "shaders" beside the editor, so a new build's first GPU view doesn't
+rem wait for them. Only the build with Blender's libraries has a GPU path (and the dependency-free one, built beside
+rem it, must not remove its shaders); BLENDITY_NO_WARM=1 skips it; without a card the first GPU view compiles them.
+if not "%BLENDITY_NO_LIBS%"=="" goto app_warmed
+if not "%BLENDITY_NO_WARM%"=="" goto app_warmed
+for %%d in ("%BLENDITY_OUT%") do set "SHADERS=%%~dpdshaders"
+if exist "%SHADERS%" rmdir /s /q "%SHADERS%"
+start "" /wait "%BLENDITY_OUT%" --warm-shaders "%SHADERS%"
+if errorlevel 1 goto app_not_warmed
+echo [blendity] GPU shaders compiled into "%SHADERS%"
+goto app_warmed
+:app_not_warmed
+echo [blendity] No GPU shaders compiled ahead: no card opened. The first GPU view compiles them.
+:app_warmed
 if /i "%TARGET%"=="installer" goto installer
 if /i not "%TARGET%"=="all" goto done
 

@@ -33,6 +33,8 @@ void Mesh::clear() {
   face_smooth.clear();
   sharp_edges.clear();
   loose_edges.clear();
+  sculpt_mask.clear();  // (task 0238)
+  face_group.clear();
   touch();
 }
 
@@ -86,6 +88,10 @@ void Mesh::sync_attributes() {
   if (!uvs.empty()) uvs.resize(corner_verts.size());
   if (!face_material.empty()) face_material.resize(face_count(), 0);
   if (!face_smooth.empty()) face_smooth.resize(face_count(), smooth ? 1 : 0);
+  /* Task 0238: the groups and the mask are per face and per vertex by index; a topology change that left them the
+   * wrong size has renumbered what they belong to, so they go rather than land on the wrong faces or vertices. */
+  if (face_group.size() != face_count()) face_group.clear();
+  if (sculpt_mask.size() != positions.size()) sculpt_mask.clear();
 }
 
 int Mesh::find_group(const std::string &group) const {
@@ -135,6 +141,21 @@ bool Mesh::any_smooth() const {
   for (uint8_t s : face_smooth)
     if (s) return true;
   return false;
+}
+
+/* Task 0238: any face hidden (a negative group). */
+bool Mesh::any_hidden() const {
+  for (int32_t g : face_group)
+    if (g < 0) return true;
+  return false;
+}
+
+/* A face hidden or shown, its group kept (the array is made when the first face hides). */
+void Mesh::set_face_hidden(size_t f, bool hidden) {
+  if (f >= face_count()) return;
+  if (face_group.size() != face_count()) face_group.resize(face_count(), 0);
+  const int g = std::max(0, std::min(kMaxGroup, group_of(f)));
+  face_group[f] = hidden ? -(g + 1) : g;
 }
 
 void Mesh::set_face_smooth(size_t f, bool on) {
@@ -299,11 +320,12 @@ uint64_t Mesh::topology_serial() const {
   const Topology &t = topo_;
   const bool same = topo_serial_ && t.verts == positions.size() && same_bytes(t.face_offsets, face_offsets) &&
                     same_bytes(t.corner_verts, corner_verts) && same_bytes(t.uvs, uvs) && same_bytes(t.face_material, face_material) &&
-                    same_bytes(t.face_smooth, face_smooth) && same_bytes(t.seams, seams) && same_bytes(t.sharp_edges, sharp_edges) &&
+                    same_bytes(t.face_smooth, face_smooth) && same_bytes(t.face_group, face_group) && same_bytes(t.seams, seams) &&
+                    same_bytes(t.sharp_edges, sharp_edges) &&
                     same_bytes(t.loose_edges, loose_edges) && t.smooth == smooth && t.seams_sharp == seams_sharp &&
                     std::memcmp(&t.smooth_angle, &smooth_angle, sizeof(float)) == 0;
   if (same) return topo_serial_;
-  topo_ = Topology{positions.size(), face_offsets, corner_verts, uvs, face_material, face_smooth, seams, sharp_edges, loose_edges,
+  topo_ = Topology{positions.size(), face_offsets, corner_verts, uvs, face_material, face_smooth, face_group, seams, sharp_edges, loose_edges,
                    smooth, seams_sharp, smooth_angle};
   /* From one counter for every mesh: a copy keeps its source's serial, but two copies that change apart never meet
    * on one (the overlap check's answers are keyed on it, task 0108). */
@@ -355,7 +377,7 @@ size_t Mesh::edge_count() const {
 
 size_t Mesh::memory_bytes() const {
   size_t b = positions.capacity() * sizeof(Vec3) + face_offsets.capacity() * 4 + corner_verts.capacity() * 4;
-  b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8;
+  b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8 + sculpt_mask.capacity() * 4 + face_group.capacity() * 4;
   for (const RenderMesh &c : cache_)
     b += c.positions.capacity() * sizeof(Vec3) * 2 + c.uvs.capacity() * sizeof(Vec2) + c.tangents.capacity() * sizeof(Vec4) +
          c.indices.capacity() * 4 + c.tri_face.capacity() * 6 + c.tri_corner.capacity() * 4;
@@ -504,6 +526,16 @@ Vec3 Mesh::face_weighted(size_t f) const {
   return w;
 }
 
+/* Every corner normal - the full build's and the in-place pass's - is normalized here, out of line: under /fp:fast without
+ * whole-program optimization MSVC inlined normalize differently into the two and they disagreed in the last bit (the
+ * Edit Mode drag test, in a BLENDITY_NO_LTCG build). One copy of the instructions gives one answer. */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static Vec3 corner_normalize(Vec3 s) { return normalize(s); }
+
 /* Which of sides_ touch each vertex, once per topology: a vertex's smooth fans only join across those. */
 void Mesh::build_vertex_sides() const {
   build_edge_sides();
@@ -604,7 +636,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
         for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) sum[root(c)] += fweighted[f];
       for (size_t f = 0; f < nf; f++)
         for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++)
-          cnormal[c] = smooth_of(f) ? normalize(sum[root(c)]) : fnormal[f];
+          cnormal[c] = smooth_of(f) ? corner_normalize(sum[root(c)]) : fnormal[f];
     }
     else if (smooth_angle >= 179.9f) {
       /* Each vertex adds its corners' faces in corner order - the face loop's order, so the same sum to the bit - on
@@ -618,7 +650,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
         for (int64_t v = a; v < b; v++) {
           Vec3 n(0.0f);
           for (uint32_t k = share_.cv_off[(size_t)v]; k < share_.cv_off[(size_t)v + 1]; k++) n += fweighted[corner_face[share_.cv_by[k]]];
-          vn[(size_t)v] = normalize(n);
+          vn[(size_t)v] = corner_normalize(n);
         }
       });
       js.parallel_for((int64_t)corner_verts.size(), 16384, [&](int64_t a, int64_t b) {
@@ -640,7 +672,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
           Vec3 sum(0.0f);
           for (uint32_t k = off[v]; k < off[v + 1]; k++)
             if (dot(fnormal[adj[k]], fnormal[f]) >= cos_limit) sum += fweighted[adj[k]];
-          cnormal[c] = normalize(sum);
+          cnormal[c] = corner_normalize(sum);
         }
     }
   }
@@ -701,7 +733,7 @@ void Mesh::smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, fl
   for (size_t i = 0; i < n; i++) sum[root((uint32_t)i)] += st.fweighted[at[i].second];
   for (size_t i = 0; i < n; i++) {
     const uint32_t c = at[i].first, f = at[i].second;
-    st.cnormal[c] = smooth_of(f) ? normalize(sum[root((uint32_t)i)]) : st.fnormal[f];
+    st.cnormal[c] = smooth_of(f) ? corner_normalize(sum[root((uint32_t)i)]) : st.fnormal[f];
   }
 }
 
@@ -709,7 +741,7 @@ void Mesh::smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, fl
 void Mesh::smooth_vertex_at(NormalState &st, const CornerFaces &at) const {
   Vec3 sum(0.0f);
   for (const auto &cf : at) sum += st.fweighted[cf.second];
-  const Vec3 n = normalize(sum);
+  const Vec3 n = corner_normalize(sum);
   for (const auto &cf : at) st.cnormal[cf.first] = n;
 }
 
@@ -720,7 +752,7 @@ void Mesh::smooth_by_angle_at(NormalState &st, const VertexFaces &vf, uint32_t v
     Vec3 sum(0.0f);
     for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++)
       if (dot(st.fnormal[vf.faces[k]], st.fnormal[cf.second]) >= cos_limit) sum += st.fweighted[vf.faces[k]];
-    st.cnormal[cf.first] = normalize(sum);
+    st.cnormal[cf.first] = corner_normalize(sum);
   }
 }
 
@@ -942,7 +974,7 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const
     tri_big_ = false;
     for (size_t f = 0; f < nf; f++) {
       const uint32_t n = face_size(f);
-      tri_start_[f + 1] = tri_start_[f] + (n >= 3 ? n - 2 : 0);
+      tri_start_[f + 1] = tri_start_[f] + (n >= 3 && !face_hidden(f) ? n - 2 : 0);  // (a hidden face has none: task 0238)
       tri_big_ = tri_big_ || n > 3;
     }
     tri_topo_ = topo;
@@ -953,7 +985,7 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const
   JobSystem::global().parallel_for((int64_t)nf, 1024, [&](int64_t f0, int64_t f1) {
     std::vector<uint32_t> local;
     for (int64_t f = f0; f < f1; f++) {
-      if (face_size((size_t)f) <= 3) continue;
+      if (face_size((size_t)f) <= 3 || face_hidden((size_t)f)) continue;
       if (moved && (size_t)f < moved->size() && !(*moved)[(size_t)f]) continue;  // (its triangles stand: only its own corners decide them)
       triangulate_face(*this, (size_t)f, local);
       const uint32_t base = face_offsets[(size_t)f];
@@ -1055,6 +1087,7 @@ void Mesh::render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnorm
   std::vector<uint32_t> local;
   rm.indices.reserve(corner_verts.size() * 2);
   for (size_t f = 0; f < nf; f++) {
+    if (face_hidden(f)) continue;  // (task 0238)
     uint32_t base = face_offsets[f];
     triangulate_face(*this, f, local);
     uint16_t mat = (uint16_t)std::max(0, std::min(65535, material_of(f)));
@@ -1204,6 +1237,7 @@ const std::vector<uint32_t> &Mesh::tessellation() const {
       std::vector<uint32_t> &out = tris[(size_t)k];
       out.reserve(4 * (m.face_offsets[f1] - m.face_offsets[f0]));  // (a face of n corners: n - 2 triangles)
       for (size_t f = f0; f < f1; f++) {
+        if (m.face_hidden(f)) continue;  // (task 0238: no triangles)
         triangulate_face(m, f, local);
         const uint32_t fb = m.face_offsets[f];
         for (size_t i = 0; i + 2 < local.size(); i += 3) out.insert(out.end(), {fb + local[i], fb + local[i + 1], fb + local[i + 2], (uint32_t)f});
@@ -1842,6 +1876,7 @@ static Mesh subdivide_impl(const Mesh &in, bool smooth) {
   if (uv) out.uvs.resize(nc * 4);
   if (!in.face_material.empty()) out.face_material.resize(nc);
   if (!in.face_smooth.empty()) out.face_smooth.resize(nc);
+  if (in.face_group.size() == nf) out.face_group.resize(nc);  // (task 0238: a child face keeps its parent's group, hidden stays hidden)
   const uint32_t ebase = (uint32_t)nv, fbase = (uint32_t)(nv + ne);
   js.parallel_for((int64_t)nf, 2048, [&](int64_t b, int64_t e) {
     for (int64_t f = b; f < e; f++) {
@@ -1868,6 +1903,7 @@ static Mesh subdivide_impl(const Mesh &in, bool smooth) {
         }
         if (!out.face_material.empty()) out.face_material[c] = in.material_of((size_t)f);
         if (!out.face_smooth.empty()) out.face_smooth[c] = in.smooth_of((size_t)f) ? 1 : 0;
+        if (!out.face_group.empty()) out.face_group[c] = in.face_group[(size_t)f];
       }
     }
   });
@@ -2716,23 +2752,46 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
   AABB b = m.bounds();
   Vec3 size = b.max - b.min;
   Vec3 step = Vec3(relative.x * size.x, relative.y * size.y, relative.z * size.z) + constant;
-  const Mesh src = m;
-  const uint32_t nv = (uint32_t)src.vert_count();
-  const bool has_uv = src.has_uvs();
+  /* Task 0211: each copy appended array by array, as Blender's Array copies them (each vertex and face was added one
+   * at a time, from a copy of the whole mesh). What a face gets is what add_face gave it: the source's UVs and
+   * material, the mesh's smooth flag where faces keep their own; a material or smooth list of the wrong length is
+   * fitted to the faces first, as add_face fitted it. The arrays are reserved first, so reading the original's part
+   * while appending is safe. */
+  const uint32_t nv = (uint32_t)m.vert_count();
+  const size_t nc = m.corner_verts.size(), nf = m.face_count();
+  const bool has_uv = m.has_uvs(), has_mat = !m.face_material.empty(), has_smooth = !m.face_smooth.empty(), has_group = m.face_group.size() == nf;
+  if (has_mat) m.face_material.resize(nf, 0);
+  if (has_smooth) m.face_smooth.resize(nf, m.smooth ? 1 : 0);
+  const std::vector<uint64_t> seams = m.seams;
+  /* Seams between the original's vertices: each copy's follow every earlier one in order. Any other (a stale one)
+   * goes through set_seam, as before. */
+  const bool seams_inside = std::all_of(seams.begin(), seams.end(), [&](uint64_t k) { return (k & 0xFFFFFFFF) < nv; });
   m.positions.reserve(nv * (size_t)count);
+  m.corner_verts.reserve(nc * (size_t)count);
+  m.face_offsets.reserve(nf * (size_t)count + 1);
+  if (has_uv) m.uvs.reserve(nc * (size_t)count);
+  if (has_mat) m.face_material.reserve(nf * (size_t)count);
+  if (has_smooth) m.face_smooth.reserve(nf * (size_t)count);
+  if (has_group) m.face_group.reserve(nf * (size_t)count);  // (task 0238: a copy keeps its groups and hidden faces)
+  m.seams.reserve(seams.size() * (size_t)count);
   for (int c = 1; c < count; c++) {
-    uint32_t off = (uint32_t)m.vert_count();
+    const uint32_t off = nv * (uint32_t)c, corner_off = (uint32_t)(nc * (size_t)c);
+    const Vec3 shift = step * (float)c;
     for (uint32_t i = 0; i < nv; i++) {
-      m.add_vert(src.positions[i] + step * (float)c);
+      m.positions.push_back(m.positions[i] + shift);
       m.copy_vertex_weights(i);
     }
-    std::vector<uint32_t> fv;
-    for (size_t f = 0; f < src.face_count(); f++) {
-      fv.assign(src.face_verts(f), src.face_verts(f) + src.face_size(f));
-      for (uint32_t &v : fv) v += off;
-      m.add_face(fv.data(), fv.size(), has_uv ? src.uvs.data() + src.face_offsets[f] : nullptr, src.material_of(f));
+    for (size_t i = 0; i < nc; i++) m.corner_verts.push_back(m.corner_verts[i] + off);
+    for (size_t f = 1; f <= nf; f++) m.face_offsets.push_back(m.face_offsets[f] + corner_off);
+    for (size_t i = 0; has_uv && i < nc; i++) m.uvs.push_back(m.uvs[i]);
+    for (size_t f = 0; has_mat && f < nf; f++) m.face_material.push_back(m.face_material[f]);
+    if (has_smooth) m.face_smooth.insert(m.face_smooth.end(), nf, m.smooth ? 1 : 0);
+    for (size_t f = 0; has_group && f < nf; f++) m.face_group.push_back(m.face_group[f]);
+    for (uint64_t k : seams) {
+      const uint32_t a = (uint32_t)(k >> 32) + off, b = (uint32_t)(k & 0xFFFFFFFF) + off;
+      if (seams_inside) m.seams.push_back(Mesh::edge_key(a, b));
+      else m.set_seam(a, b, true);
     }
-    for (uint64_t k : src.seams) m.set_seam((uint32_t)(k >> 32) + off, (uint32_t)(k & 0xFFFFFFFF) + off, true);
   }
   /* Blender merges only neighbouring copies; welding everything within the
    * distance gives the same result for ordinary arrays. */

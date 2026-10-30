@@ -121,6 +121,22 @@ jobs:
             dist/installers/*
             installed-windows-*.png
 
+  # The Live Link bridges as files to install (task 0278): built on every run and kept as this run's artifacts.
+  # Attaching them to a release is the maintainer's decision (the release step publishes the installers only).
+  bridges:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unity's .meta files complete
+        run: python3 tools/unity_meta.py --check
+      - name: The five bridge packages
+        run: python3 tools/package_bridges.py --out dist/bridges
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridges
+          path: dist/bridges/*
+
   linux:
     needs: meta
     # The oldest supported Ubuntu: an AppImage runs on systems at least as new as the one it was built on.
@@ -134,7 +150,7 @@ jobs:
         # GCC 14 (Ubuntu's toolchain PPA): Blender's libraries call its C++ runtime, which build.sh ships in lib/.
         run: |
           sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          sudo apt-get update && sudo apt-get install -y g++-14 libx11-dev fonts-dejavu-core git-lfs
+          sudo apt-get update && sudo apt-get install -y g++-14 libx11-dev libxi-dev fonts-dejavu-core git-lfs
           echo "CXX=g++-14" >> "$GITHUB_ENV" && echo "CC=gcc-14" >> "$GITHUB_ENV"
       - name: Blender's libraries (cached by their pinned commits)
         uses: actions/cache@v4

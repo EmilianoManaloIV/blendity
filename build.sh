@@ -25,7 +25,7 @@ if [ "$OS" = "Darwin" ]; then
   OUT="dist/macos"
 else
   PLATFORM_SRC="src/platform/platform_x11.cpp"
-  LIBS="-lX11 -static-libstdc++ -static-libgcc"
+  LIBS="-lX11 -ldl -static-libstdc++ -static-libgcc"
   OUT="dist/linux"
 fi
 
@@ -36,6 +36,7 @@ fi
 if [ "$OS" = "Darwin" ]; then LIBPLAT=macos_arm64; SOEXT=dylib; else LIBPLAT=linux_x64; SOEXT=so; fi
 LIBDIR="${BLENDITY_LIBDIR:-../blender/lib/$LIBPLAT}"
 USE_LIBS=0
+USE_QUADRIFLOW=0
 LIBFLAGS=""
 LIBLINK=""
 LIBDIRS=""
@@ -55,6 +56,11 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   addlib embree           BL_WITH_EMBREE     "embree/include"                 "embree/lib/libembree4.$SOEXT"
   addlib openimagedenoise BL_WITH_OIDN       "openimagedenoise/include"       "openimagedenoise/lib/libOpenImageDenoise.$SOEXT"
   addlib eigen            BL_WITH_EIGEN      "eigen/include/eigen3"           ""
+  # QuadriFlow (task 0241, ADR 0077): Blender's bundled copy in extern/quadriflow, with Eigen.
+  if [ -d "$LIBDIR/eigen/include/eigen3" ]; then
+    USE_QUADRIFLOW=1
+    LIBFLAGS="$LIBFLAGS -DBL_WITH_QUADRIFLOW -D_USE_MATH_DEFINES -Iextern/quadriflow/src -Iextern/quadriflow/3rd/pcg32 -Iextern/quadriflow/3rd/lemon-1.3.1 -Iextern/quadriflow/lemon_gen"
+  fi
   addlib opensubdiv       BL_WITH_OPENSUBDIV "opensubdiv/include"             "opensubdiv/lib/libosdCPU.$SOEXT"
   addlib openexr          BL_WITH_OPENEXR    "openexr/include openexr/include/OpenEXR imath/include imath/include/Imath" \
                                              "openexr/lib/libOpenEXR.$SOEXT openexr/lib/libOpenEXRCore.$SOEXT openexr/lib/libIex.$SOEXT openexr/lib/libIlmThread.$SOEXT imath/lib/libImath.$SOEXT"
@@ -139,7 +145,11 @@ if [ "$(cat "$OBJ/flags.txt" 2>/dev/null)" != "$CXX $FLAGS" ]; then
   echo "$CXX $FLAGS" > "$OBJ/flags.txt"
 fi
 
-LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC $OPTIX_SRC"
+QUADRIFLOW_SRC=""
+if [ "$USE_QUADRIFLOW" = 1 ]; then  # (the sources CMake lists: main.cpp and post-solver.cpp - a Ceres tool - are not built)
+  QUADRIFLOW_SRC="$(for f in adjacent-matrix dedge hierarchy loader localsat merge-vertex optimizer parametrizer parametrizer-flip parametrizer-int parametrizer-mesh parametrizer-scale parametrizer-sing subdivide; do echo extern/quadriflow/src/$f.cpp; done) $(for f in arg_parser base color lp_base lp_skeleton random bits/windows; do echo extern/quadriflow/3rd/lemon-1.3.1/lemon/$f.cc; done)"
+fi
+LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC $OPTIX_SRC $QUADRIFLOW_SRC"
 # Blender's libc_compat: the -ffast-math math symbols newer glibc dropped that its prebuilt static codecs (FFmpeg's
 # x265) still call (Linux only; empty elsewhere).
 [ "$USE_LIBS" = 1 ] && [ "$OS" != "Darwin" ] && LIB_SRC="$LIB_SRC extern/libc_compat/libc_compat.c"
@@ -212,6 +222,15 @@ if [ "$USE_LIBS" = 1 ]; then
   fi
 fi
 
+# Task 0211: the GPU shaders compiled now into "shaders" beside the editor, once its libraries are beside it too. Only
+# the build with Blender's libraries has a GPU path; BLENDITY_NO_WARM=1 skips it; without a card the first GPU view
+# compiles them, as before.
+if [ "$USE_LIBS" = 1 ] && [ -z "${BLENDITY_NO_WARM:-}" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; then
+  rm -rf "$OUT/shaders"
+  if "$OUT/${BLENDITY_APP:-Blendity}" --warm-shaders "$OUT/shaders"; then echo "[blendity] GPU shaders compiled into $OUT/shaders"
+  else echo "[blendity] No GPU shaders compiled ahead (no card opened): the first GPU view compiles them."; fi
+fi
+
 if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; then
   # Wrap the editor in a minimal .app bundle so it can be double-clicked in Finder.
   APP="$OUT/Blendity.app/Contents"
@@ -220,9 +239,10 @@ if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; 
   for exe in Blendity Blendity-full; do [ -f "$OUT/$exe" ] && cp "$OUT/$exe" "$APP/MacOS/$exe"; done
   # Blender's libraries and the colour config beside the program inside the bundle (its rpath is
   # @executable_path/lib; executable_dir() finds datafiles/ there).
-  rm -rf "$APP/MacOS/lib" "$APP/MacOS/datafiles"
+  rm -rf "$APP/MacOS/lib" "$APP/MacOS/datafiles" "$APP/MacOS/shaders"
   [ -d "$OUT/lib" ] && cp -R "$OUT/lib" "$APP/MacOS/lib"
   [ -d "$OUT/datafiles" ] && cp -R "$OUT/datafiles" "$APP/MacOS/datafiles"
+  [ -d "$OUT/shaders" ] && cp -R "$OUT/shaders" "$APP/MacOS/shaders"
   BUNDLE_VERSION="$(tr -d ' \r\n' < VERSION)"  # (VERSION's number: task 0081)
   cat > "$APP/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
