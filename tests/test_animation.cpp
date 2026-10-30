@@ -3640,6 +3640,69 @@ static void tests_round86_to_round100() {
     q = ed.seq_for_test_sequence();
     CHECK(q->triggers.size() == 1 && q->triggers[0].instance == "Rise" && q->triggers[0].blend == 0.3f && q->find("Rise"));
   });
+  test("sequencer: a trigger's key is captured by a press (task 0291) - its button waits, the key pressed is taken, one that isn't a trigger key is ignored, Esc keeps the old one", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R311Key");
+    ed.scene().create("Lid", box);
+    ed.command("select R311Key");
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R311Key Sequence.seq").c_str());
+    ed.command("window Sequencer");
+    ed.command("seq new");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0");
+    ed.command("seq trigger K R86Up 0.3");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y, int key = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key;
+      return e;
+    };
+    Recti kb;
+    const bool drawn = ed.button_rect_for_test("seq:key 0", kb);
+    auto press_button = [&] {
+      ed.step_frame_headless({ev(ET::MouseMove, kb.x + kb.w / 2, kb.y + kb.h / 2)});
+      ed.step_frame_headless({ev(ET::MouseDown, kb.x + kb.w / 2, kb.y + kb.h / 2)});
+      ed.step_frame_headless({ev(ET::MouseUp, kb.x + kb.w / 2, kb.y + kb.h / 2)});
+    };
+    auto key = [&](int k) {
+      ed.step_frame_headless({ev(ET::KeyDown, kb.x + kb.w / 2, kb.y + kb.h / 2, k)});
+      ed.step_frame_headless({ev(ET::KeyUp, kb.x + kb.w / 2, kb.y + kb.h / 2, k)});
+    };
+    if (drawn) press_button();
+    key(platform::KEY_TAB);  // (not a trigger key: still waiting)
+    key(platform::KEY_J);
+    SequencePtr q = ed.seq_for_test_sequence();
+    const std::string got = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    if (drawn) press_button();
+    key(platform::KEY_ESCAPE);
+    q = ed.seq_for_test_sequence();
+    const std::string kept = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    std::printf("    the key button drawn %d: Tab ignored, J pressed -> '%s'; again and Esc -> '%s'\n", (int)drawn, got.c_str(), kept.c_str());
+    CHECK(drawn && got == "J" && kept == "J");
+    /* The review's cases: Ctrl+S while waiting is a save, not the S key; a click elsewhere stops the waiting. */
+    if (drawn) press_button();
+    {
+      platform::Event e = ev(ET::KeyDown, kb.x + kb.w / 2, kb.y + kb.h / 2, platform::KEY_S);
+      e.mods = platform::MOD_CTRL;
+      ed.step_frame_headless({e});
+      ed.step_frame_headless();
+    }
+    q = ed.seq_for_test_sequence();
+    const std::string after_ctrl = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    ed.close_dialog_for_test();  // (Ctrl+S saved: an untitled scene asks where; that dialog closed)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.step_frame_headless({ev(ET::MouseMove, kb.x + kb.w / 2, kb.y + 200), ev(ET::MouseDown, kb.x + kb.w / 2, kb.y + 200)});
+    ed.step_frame_headless({ev(ET::MouseUp, kb.x + kb.w / 2, kb.y + 200)});
+    key(platform::KEY_K);
+    q = ed.seq_for_test_sequence();
+    const std::string after_click = q && !q->triggers.empty() ? q->triggers[0].key : "";
+    std::printf("    waiting, Ctrl+S -> '%s' (still J); a click elsewhere, then K -> '%s' (still J: no longer waiting)\n", after_ctrl.c_str(), after_click.c_str());
+    CHECK(after_ctrl == "J" && after_click == "J");
+  });
   test("sequencer: a bar inside another fades in and out within itself; Once holds the last frame; an empty Sequencer leaves the Animation playing", [=] {
     seq_clips();
     Sequence s;
@@ -4712,6 +4775,46 @@ static void tests_round141() {
                 std::max(length(lf->world_position() - lf0), length(rf->world_position() - rf0)) * 1000.0f, foot_turn, dk.x, dk.y, dk.z);
     CHECK(r.error < 0.01f && length(lf->world_position() - lf0) < 0.005f && length(rf->world_position() - rf0) < 0.005f && foot_turn < 1.0f);
     CHECK(dk.z > 0.03f && std::fabs(dk.x) < 0.5f * dk.z);  // (forward, the way the knee already bends - the rig faces +Z)
+  });
+  test("puppet handles set by hand (round 324): Animation > Puppet > Handle Bones > Left Hand > Use the Selected Bone puts the left-hand handle on the bone picked; kept with the armature; Found Automatically and `autopose handle lhand auto` put it back", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("window Animation");
+    ed.command("select LeftLowerArm");
+    ed.command("anim new Pose");
+    ed.command("autopose on");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto click = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      for (int i = 0; i < 4; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, b.x + b.w / 2, b.y + b.h / 2)});
+      return true;
+    };
+    Recti h;
+    CHECK(ed.button_rect_for_test("puppet:LeftHand", h));  // (found: the hand)
+    CHECK(click("Puppet") && hover("submenu:Handle Bones") && hover("submenu:Left Hand: LeftHand") && click("menu:Use the Selected Bone (LeftLowerArm)"));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Armature *a = ed.scene().find_by_name(rig->name) ? ed.scene().find_by_name(rig->name)->get<Armature>() : nullptr;
+    std::printf("    the armature's Puppet Handles: \"%s\"\n", a ? a->puppet_bones.c_str() : "(none)");
+    CHECK(a && a->puppet_bones == "Left Hand=LeftLowerArm");
+    CHECK(ed.button_rect_for_test("puppet:LeftLowerArm", h));
+    ed.record_buttons_for_test(false), ed.record_buttons_for_test(true);
+    ed.command("autopose handle lhand auto");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("puppet:LeftHand", h) && !ed.button_rect_for_test("puppet:LeftLowerArm", h) && a && a->puppet_bones.empty());
+    ed.command("autopose handle lhand NoSuchBone");
+    CHECK(a && a->puppet_bones.empty());
+    ed.command("autopose off");
   });
   test("autopose in the editor: a drag poses the body, keys it at the playhead (one undo step); IK targets follow; a locked hand stays", [&] {
     Editor ed;
@@ -6020,6 +6123,248 @@ static void tests_round304() {
   });
 }
 
+/* Round 335 (task 0315): animate almost any property of an object. */
+static void tests_round335() {
+  test("round 335's tracks: a material slot's fields (Roughness, Base Color) and the object's Active are read, written and played by a clip; a slot that isn't there or a field that isn't refuses", [] {
+    Scene s;
+    build_default_scene(s);
+    GameObject *sphere = s.find_by_name("Sphere");
+    CHECK(sphere && sphere->get<MeshRenderer>() && !sphere->get<MeshRenderer>()->materials.empty());
+    if (!sphere || !sphere->get<MeshRenderer>() || sphere->get<MeshRenderer>()->materials.empty()) return;
+    const MaterialPtr m = sphere->get<MeshRenderer>()->materials[0];
+    float v = -1.0f;
+    CHECK(read_anim_value(*sphere, "Material 0.Roughness", 0, v) && v == m->roughness);
+    const uint64_t version = m->version;
+    CHECK(write_anim_value(*sphere, "Material 0.Roughness", 0, 0.9f) && m->roughness == 0.9f && m->version != version);
+    CHECK(write_anim_value(*sphere, "Material 0.Base Color", 1, 0.25f) && m->base_color.y == 0.25f);
+    CHECK(!write_anim_value(*sphere, "Material 3.Roughness", 0, 0.1f) && !write_anim_value(*sphere, "Material 0.No Such Field", 0, 0.1f));
+    CHECK(read_anim_value(*sphere, "Active", 0, v) && v == 1.0f);
+    AnimationClip clip;
+    clip.track("Sphere", "Material 0.Roughness", 0).set_key(0, 0.1f, AnimLinear);
+    clip.track("Sphere", "Material 0.Roughness", 0).set_key(10, 0.7f, AnimLinear);
+    clip.track("Sphere", "Active", 0).set_key(0, 1.0f, AnimConstant);
+    clip.track("Sphere", "Active", 0).set_key(10, 0.0f, AnimConstant);
+    GameObject root;
+    root.name = "Root";
+    GameObject *parent = sphere->parent;
+    sphere->parent = &root;
+    root.children.push_back(sphere);
+    apply_clip(clip, root, 5.0f);
+    std::printf("    at frame 5: Roughness %.3f, Active %d\n", m->roughness, (int)sphere->active);
+    CHECK(std::fabs(m->roughness - 0.4f) < 1e-4f && sphere->active);
+    apply_clip(clip, root, 10.0f);
+    CHECK(std::fabs(m->roughness - 0.7f) < 1e-4f && !sphere->active);
+    root.children.clear();
+    sphere->parent = parent;
+    sphere->active = true;
+  });
+  test("keying from the Inspector by clicks (round 335): right-click Roughness in the Sphere's material > Insert Keyframe, I over Cast Shadows, a diamond on animated fields; with Record on, ticking a field keys it at the playhead; Add Property's search finds the material's fields", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Sphere");
+    ed.command("anim new R335Sphere");
+    r34_steps(ed, 2);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    auto bring = [&](const std::string &key) {
+      Recti lab{0, 0, 0, 0};
+      for (int tries = 0; tries < 60; tries++) {
+        const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+        if (ed.button_rect_for_test(key, lab) && lab.y >= w.y + ed.ui_for_test().row_h() * 2 && lab.bottom() <= w.bottom()) return lab;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = lab.w > 0 && lab.y < w.y + ed.ui_for_test().row_h() * 2 ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      std::printf("    '%s' never came into view\n", key.c_str());
+      return Recti{0, 0, 0, 0};
+    };
+    /* Right-click > Insert Keyframe. */
+    const Recti rough = bring("label:Roughness");
+    CHECK(rough.w > 0);
+    if (rough.w <= 0) return;
+    platform::Event down = r34_mouse(R34ET::MouseDown, rough.x + rough.w / 2, rough.y + rough.h / 2), up = down;
+    up.type = R34ET::MouseUp;
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, rough.x + rough.w / 2, rough.y + rough.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    Recti item;
+    CHECK(ed.button_rect_for_test("menu:Insert Keyframe", item));
+    r34_click(ed, item.x + item.w / 2, item.y + item.h / 2);
+    r34_steps(ed, 2);
+    const AnimTrack *tr = clip->find("", "Material 0.Roughness", 0);
+    std::printf("    Material 0.Roughness: %s\n", tr ? strprintf("%zu key(s), the first at frame %.0f", tr->keys.size(), tr->keys.empty() ? -1.0f : tr->keys[0].frame).c_str() : "no track");
+    CHECK(tr && tr->keys.size() == 1 && tr->keys[0].frame == 0.0f);
+    /* I over a field's name. */
+    const Recti cs = bring("label:Cast Shadows");
+    CHECK(cs.w > 0);
+    platform::Event kd, ku;
+    kd.type = platform::EventType::KeyDown, ku.type = platform::EventType::KeyUp;
+    kd.key = ku.key = platform::KEY_I;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, cs.x + cs.w / 2, cs.y + cs.h / 2)});
+    ed.step_frame_headless({kd});
+    ed.step_frame_headless({ku});
+    r34_steps(ed, 2);
+    CHECK(clip->find("", "MeshRenderer.Cast Shadows", 0) != nullptr);
+    /* Record: frame 12, Receive Shadows ticked - a key there. */
+    ed.command("anim record on");
+    ed.command("anim frame 12");
+    r34_steps(ed, 2);
+    const Recti rs = bring("field:Receive Shadows");
+    CHECK(rs.w > 0);
+    r34_click(ed, rs.x + rs.h / 2, rs.y + rs.h / 2);
+    r34_steps(ed, 2);
+    const AnimTrack *rec = clip->find("", "MeshRenderer.Receive Shadows", 0);
+    std::printf("    Record: Receive Shadows %s\n", rec ? strprintf("keyed at %.0f", rec->keys.empty() ? -1.0f : rec->keys.back().frame).c_str() : "not keyed");
+    CHECK(rec && !rec->keys.empty() && rec->keys.back().frame == 12.0f);
+    ed.command("anim record off");
+    /* Add Property's search: "rough" lists the material's Roughness, not Position. */
+    ed.command("window Animation");
+    r34_steps(ed, 3);
+    Recti ap;
+    CHECK(ed.button_rect_for_test("Add Property", ap));
+    r34_click(ed, ap.x + ap.w / 2, ap.y + ap.h / 2);
+    r34_steps(ed, 2);
+    std::vector<platform::Event> typed;
+    for (char ch : std::string("rough")) {
+      platform::Event e;
+      e.type = platform::EventType::Text, e.codepoint = (uint32_t)ch;
+      typed.push_back(e);
+    }
+    ed.step_frame_headless(typed);
+    r34_steps(ed, 2);
+    Recti probe;
+    const bool listed = ed.button_rect_for_test("menu:Sphere : Material 0.Roughness", probe), position = ed.button_rect_for_test("menu:Sphere : Position", probe);
+    std::printf("    Add Property 'rough': Material 0.Roughness %s, Position %s\n", listed ? "listed" : "missing", position ? "listed" : "hidden");
+    CHECK(listed && !position);
+    std::remove(resolve_asset_path("Assets/Animations/R335Sphere.anim").c_str());
+  });
+  test("animating any property, review 335: a track made while previewing goes back when Preview is off (an edit not keyed stays); a held material key touches nothing; switches key Constant; Delete Keyframe takes an emptied track; a second component of a type offers no keys; Ctrl+I and an empty property key nothing; Esc closes Add Property; the diamond's state", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Sphere");
+    ed.command("anim new R335Review");
+    r34_steps(ed, 2);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(clip && sphere && sphere->get<MeshRenderer>());
+    if (!clip || !sphere || !sphere->get<MeshRenderer>()) return;
+    const MaterialPtr m = sphere->get<MeshRenderer>()->materials[0];
+    const float rough0 = m->roughness;
+    /* Preview on, then a new track: off puts the roughness back. An edit not keyed stays. */
+    ed.command("anim preview on");
+    ed.command("anim key . \"Material 0.Roughness\" 0 0 0.2");
+    ed.command("anim key . \"Material 0.Roughness\" 0 30 0.6");
+    ed.command("anim frame 15");
+    r34_steps(ed, 2);
+    std::printf("    previewing at 15: %.3f (was %.3f)\n", m->roughness, rough0);
+    CHECK(std::fabs(m->roughness - 0.4f) < 0.02f && std::fabs(rough0 - 0.4f) > 0.05f);
+    m->metallic = 0.75f;  // (not animated)
+    ed.command("anim preview off");
+    r34_steps(ed, 2);
+    std::printf("    Preview off: %.3f; the unkeyed Metallic %.2f\n", m->roughness, m->metallic);
+    CHECK(m->roughness == rough0 && m->metallic == 0.75f);
+    /* A held value touches nothing. */
+    const uint64_t v0 = m->version;
+    CHECK(write_anim_value(*sphere, "Material 0.Roughness", 0, m->roughness) && m->version == v0);
+    CHECK(write_anim_value(*sphere, "Material 0.Roughness", 0, 0.33f) && m->version != v0);
+    CHECK(!write_anim_value(*sphere, "Material x.Roughness", 0, 0.5f) && !write_anim_value(*sphere, "Material .Roughness", 0, 0.5f));
+    /* Switches key Constant; the diamond. */
+    ed.command("anim frame 0");
+    r34_steps(ed, 1);
+    CHECK(ed.anim_property_state_for_test(sphere, "MeshRenderer.Cast Shadows") == 0);
+    ed.anim_key_property_for_test(sphere, "MeshRenderer.Cast Shadows", 1);
+    const AnimTrack *cs = clip->find("", "MeshRenderer.Cast Shadows", 0);
+    CHECK(cs && cs->keys.size() == 1 && cs->keys[0].interp == AnimConstant);
+    r34_steps(ed, 1);
+    CHECK(ed.anim_property_state_for_test(sphere, "MeshRenderer.Cast Shadows") == 2);
+    ed.command("anim frame 5");
+    r34_steps(ed, 1);
+    CHECK(ed.anim_property_state_for_test(sphere, "MeshRenderer.Cast Shadows") == 1);
+    ed.command("anim frame 0");
+    r34_steps(ed, 1);
+    ed.anim_unkey_property_for_test(sphere, "MeshRenderer.Cast Shadows", 1);
+    CHECK(!clip->find("", "MeshRenderer.Cast Shadows", 0));
+    /* An empty property, quoted: nothing. */
+    const size_t tracks = clip->tracks.size();
+    ed.command("anim key . \"\" 0 0 1");
+    CHECK(clip->tracks.size() == tracks);
+    /* Ctrl+I over a name keys nothing. */
+    auto bring = [&](const std::string &key) {
+      Recti lab{0, 0, 0, 0};
+      for (int tries = 0; tries < 60; tries++) {
+        const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+        if (ed.button_rect_for_test(key, lab) && lab.y >= w.y + ed.ui_for_test().row_h() * 2 && lab.bottom() <= w.bottom()) return lab;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = lab.w > 0 && lab.y < w.y + ed.ui_for_test().row_h() * 2 ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      return Recti{0, 0, 0, 0};
+    };
+    const Recti rs = bring("label:Receive Shadows");
+    CHECK(rs.w > 0);
+    platform::Event kd, ku;
+    kd.type = platform::EventType::KeyDown, ku.type = platform::EventType::KeyUp;
+    kd.key = ku.key = platform::KEY_I;
+    kd.mods = ku.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, rs.x + rs.w / 2, rs.y + rs.h / 2)});
+    ed.step_frame_headless({kd});
+    ed.step_frame_headless({ku});
+    r34_steps(ed, 2);
+    CHECK(!clip->find("", "MeshRenderer.Receive Shadows", 0));
+    /* A second Array: its Count offers no keys (a track names the first). */
+    sphere->add<ArrayModifier>()->ui_expanded = false;  // (the first folded: the second's Count is the one drawn)
+    sphere->add<ArrayModifier>()->ui_expanded = true;
+    ed.mark_changed_for_test("Two Arrays");
+    r34_steps(ed, 3);
+    const Recti cf = bring("field:Count");  // (the second's field - its name has no menu, so no label is recorded: right-click just left of the field)
+    CHECK(cf.w > 0);
+    const Recti count{cf.x - ed.ui_for_test().px(40), cf.y, ed.ui_for_test().px(30), cf.h};
+    platform::Event down = r34_mouse(R34ET::MouseDown, count.x + count.w / 2, count.y + count.h / 2), up = down;
+    up.type = R34ET::MouseUp;
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, count.x + count.w / 2, count.y + count.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    Recti probe;
+    CHECK(!ed.button_rect_for_test("menu:Insert Keyframe", probe));
+    ed.step_frame_headless({[] { platform::Event e; e.type = platform::EventType::KeyDown; e.key = platform::KEY_ESCAPE; return e; }()});
+    r34_steps(ed, 2);
+    /* Esc closes Add Property. */
+    ed.command("window Animation");
+    r34_steps(ed, 3);
+    Recti ap;
+    CHECK(ed.button_rect_for_test("Add Property", ap));
+    r34_click(ed, ap.x + ap.w / 2, ap.y + ap.h / 2);
+    r34_steps(ed, 2);
+    CHECK(ed.ui_for_test().any_popup_open());
+    platform::Event ed_ = kd, eu = ku;
+    ed_.key = eu.key = platform::KEY_ESCAPE, ed_.mods = eu.mods = 0;
+    ed.step_frame_headless({ed_});
+    ed.step_frame_headless({eu});
+    r34_steps(ed, 2);
+    CHECK(!ed.ui_for_test().any_popup_open());
+    std::remove(resolve_asset_path("Assets/Animations/R335Review.anim").c_str());
+  });
+  test("the lesson \"Animating Any Property\": its Try-its make a clip on the Sphere and key its material's Roughness at frames 0 and 30", [] {
+    Editor ed;
+    r50_open(ed);
+    for (const char *c : {"select Sphere", "anim new R335Lesson", "anim key . \"Material 0.Roughness\" 0 0 0.2", "anim key . \"Material 0.Roughness\" 0 30 0.9"}) ed.command(c);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *tr = clip ? clip->find("", "Material 0.Roughness", 0) : nullptr;
+    std::printf("    %s\n", tr ? strprintf("%zu keys", tr->keys.size()).c_str() : "no track");
+    CHECK(tr && tr->keys.size() == 2);
+    std::remove(resolve_asset_path("Assets/Animations/R335Lesson.anim").c_str());
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -6027,6 +6372,7 @@ void run_animation_tests() {
   tests_round303();
   tests_round304();
   tests_round309();
+  tests_round335();
   round64_tests();
   round69_tests();
   tests_round81();

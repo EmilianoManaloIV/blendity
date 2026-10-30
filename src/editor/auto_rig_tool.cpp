@@ -355,7 +355,7 @@ void Editor::draw_autorig_diagram(ui::Layout &lay) {
     u.canvas.fill_circle(p.x, p.y, (float)u.px(is_next ? 6 : 4), c);
   }
   u.label({fig.x + u.px(4), fig.y + u.px(2), fig.w, u.row_h()}, autorig_.view + " view", u.theme.text);
-  u.tooltip("The markers to place, coloured by body part: left blue, right red, the middle yellow, a tail purple; the ringed\n"
+  u.tooltip("The markers to place, colored by body part: left blue, right red, the middle yellow, a tail purple; the ringed\n"
             "one is next, dark ones aren't placed yet. A humanoid starts from the front (its left on your right), a quadruped\n"
             "from its left side.");
 }

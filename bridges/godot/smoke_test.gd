@@ -18,6 +18,17 @@ func check(ok: bool, what: String) -> void:
 		failures += 1
 
 
+# The node's transform in the holder's space, built from its parents: a script's _initialize runs before the root
+# enters the tree, so global_transform isn't there yet.
+func world(n: Node3D) -> Transform3D:
+	var t := n.transform
+	var p := n.get_parent() as Node3D
+	while p != null:
+		t = p.transform * t
+		p = p.get_parent() as Node3D
+	return t
+
+
 func find(root: Node, name: String) -> Node:
 	return root.find_child(name, true, false)
 
@@ -70,7 +81,7 @@ func _initialize() -> void:
 				cam = c
 	check(cam != null and absf(cam.fov - 60.0) < 0.01, "the camera's vertical angle is 60")
 	if cam != null:
-		var forward := -cam.global_transform.basis.z
+		var forward := -world(cam).basis.z
 		# Blendity's camera at (0, 2.2, -6.5) looks along +Z at the origin: in Godot (the same axes, X mirrored) still +Z, down a little
 		check(forward.z > 0.9 and forward.y < 0.0, "the camera looks at the scene: %s" % str(forward))
 	var sun := find(live, "Directional Light")

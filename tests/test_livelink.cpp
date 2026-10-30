@@ -692,6 +692,20 @@ static void tests_round297() {
     ul::Json hj;
     CHECK(ul::parse_json(h.data(), h.size() - 1, hj) && hj["t"].string() == "client" && hj["app"].string() == "Unreal 5.4 \"Editor\"" && hj["bridge"].string() == "1.1");
   });
+  test("the Unreal plugin's protocol (round 317): a JSON array indexed by a literal, a negative number and any integer type - as the plugin's applier does (B[0] didn't compile in Unreal 5.8)", [] {
+    namespace ul = blendity_link;
+    const std::string s = "{\"bones\":[[7,1,2],[8]]}";
+    ul::Json j;
+    CHECK(ul::parse_json(s.data(), s.size(), j));
+    const ul::Json &b = j["bones"][0];
+    const size_t two = 2;
+    const int64_t one64 = 1;
+    const uint32_t zero32 = 0;
+    const long one_l = 1;
+    CHECK(b[0].id() == 7 && b[two].number() == 2 && b[one64].number() == 1 && b[zero32].id() == 7 && b[one_l].number() == 1);
+    CHECK(b[-1].type == ul::Json::Null && b[-1].number(-7) == -7);  // (a negative index is past the end)
+    CHECK(b[3].type == ul::Json::Null && j["bones"][1][0].id() == 8 && j["bones"][2].size() == 0);
+  });
 }
 
 static platform::Event ll_mouse(platform::EventType t, int x, int y) {
@@ -834,6 +848,118 @@ static void tests_round298() {
   });
 }
 
+/* Round 318: a real bridge in its engine follows a live session - the engine's own live-session test, run by the command
+ * BLENDITY_TEST_BRIDGE names (a live-session test in each of bridges/blender, godot, unity and unreal), connects by itself through the
+ * discovery file and writes BLENDITY_BRIDGE_DUMP.ready once it has the Box; then the edits arrive as changes, not as a
+ * first sync. When Live Link stops (the discovery file goes) the bridge checks its scene and writes its report. */
+static void tests_round318() {
+  test("Live Link with a real bridge (round 318): the engine connects by itself, then follows a Box moved, recolored and deformed, a bone turned, the Sphere deleted, an object made and a dense mesh deformed ten times (BLENDITY_TEST_BRIDGE runs one; skipped without)", [] {
+    const char *cmd = std::getenv("BLENDITY_TEST_BRIDGE");
+    if (!cmd || !*cmd) {
+      std::printf("    skipped: BLENDITY_TEST_BRIDGE names no bridge command\n");
+      return;
+    }
+    const std::string dump = test_dir() + "/bridge_live.txt", ready = dump + ".ready";
+    fs::remove_file(dump);
+    fs::remove_file(ready);
+    /* The discovery file in the test's own folder, never the artist's ~/.blendity; both cleared however the test ends. */
+    struct Env {  // (the suite's own BLENDITY_PREFS_DIR, if it was given one, comes back)
+      std::string prefs = std::getenv("BLENDITY_PREFS_DIR") ? std::getenv("BLENDITY_PREFS_DIR") : "";
+      ~Env() {
+        set_env("BLENDITY_BRIDGE_DUMP", "");
+        set_env("BLENDITY_PREFS_DIR", prefs);
+      }
+    } env;
+    fs::make_dirs(test_dir() + "/prefs318");
+    set_env("BLENDITY_PREFS_DIR", test_dir() + "/prefs318");
+    set_env("BLENDITY_BRIDGE_DUMP", dump);
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *box = make_cube(ed, "Box");
+    GameObject *root = ed.scene().create("Rig");
+    root->add<Armature>();
+    GameObject *upper = ed.scene().create("Upper", root);
+    upper->add<Bone>();
+    GameObject *lower = ed.scene().create("Lower", upper);
+    lower->add<Bone>();
+    lower->set_local_position(Vec3(0, 1, 0));
+    ed.command("create Sphere");
+    GameObject *dense = ed.active_object_for_test();
+    const bool started = box && dense && ed.livelink_start(0);
+    CHECK(started && fs::exists(test_dir() + "/prefs318/livelink.json"));
+    if (!started) return;
+    dense->name = "Dense";
+    dense->set_local_position(Vec3(0, 0, 8));
+    dense->mesh_filter()->mesh = primitives::uv_sphere(1.0f, 256, 128);  // (about 33,000 vertices: the deform cost)
+    const size_t dense_verts = dense->mesh_filter()->mesh->vert_count();
+    Material &mat = *box->mesh_renderer()->materials[0];
+    mat.name = "Cel";
+    /* The engine on a thread; if it never ends, the test says so and leaves it rather than hang. */
+    auto bridge_rc = std::make_shared<std::atomic<int>>(-1);
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    const std::string command = cmd;
+    std::thread engine([bridge_rc, done, command] {
+      bridge_rc->store(std::system(command.c_str()));
+      done->store(true);
+    });
+    auto run = [&](double seconds) {
+      const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(seconds * 1000));
+      while (std::chrono::steady_clock::now() < end) {
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+      }
+    };
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 2400 && !fs::exists(ready) && !done->load(); i++) run(0.25);  // (up to 10 minutes: Unity and Unreal start slowly)
+    const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    the bridge ready after %.1f s: %d; clients:", waited, (int)fs::exists(ready));
+    for (const std::string &n : ed.livelink_for_test()->client_names()) std::printf(" '%s'", n.c_str());
+    std::printf("\n");
+    CHECK(fs::exists(ready));
+    if (fs::exists(ready)) {
+      box->set_local_position(Vec3(1, 2, 3));
+      run(0.5);
+      mat.base_color = Vec3(0.9f, 0.4f, 0.2f);
+      mat.touch();
+      run(0.5);
+      MeshPtr m = std::make_shared<Mesh>(*box->mesh_filter()->mesh);
+      m->positions[0] = m->positions[0] + Vec3(0.25f, 0, 0);
+      m->touch();
+      box->mesh_filter()->mesh = m;
+      run(0.5);
+      lower->set_local_rotation(Quat::euler(Vec3(30.0f, 0, 0)));  // (degrees)
+      run(0.5);
+      if (GameObject *sphere = ed.scene().find_by_name("Sphere")) ed.scene().destroy(sphere);
+      run(0.5);
+      GameObject *late = make_cube(ed, "Late");
+      if (late) late->set_local_position(Vec3(0, 5, 0));
+      run(1.5);
+      const MeshPtr base = dense->mesh_filter()->mesh;
+      for (int k = 1; k <= 10; k++) {  // (every vertex moves: a deform of the whole dense mesh each time, the last at radius 1.2)
+        MeshPtr d = std::make_shared<Mesh>(*base);
+        for (Vec3 &p : d->positions) p = p * (1.0f + 0.02f * (float)k);
+        d->touch();
+        dense->mesh_filter()->mesh = d;
+        run(0.4);
+      }
+      run(2.0);
+    }
+    const livelink::Stats st = ed.livelink_for_test()->stats();
+    std::printf("    sent: %llu objects, %llu transforms, %llu meshes, %llu deforms, %llu materials, %llu deletes, %llu poses; the dense mesh %zu vertices\n",
+                (unsigned long long)st.objects, (unsigned long long)st.transforms, (unsigned long long)st.meshes, (unsigned long long)st.deforms,
+                (unsigned long long)st.materials, (unsigned long long)st.deletes, (unsigned long long)st.poses, dense_verts);
+    ed.livelink_stop();  // (the discovery file goes: the bridge checks its scene and writes its report)
+    for (int i = 0; i < 1200 && !done->load(); i++) run(0.1);  // (the engine writes its report and quits: 2 minutes at most)
+    const bool ended = done->load();
+    if (ended) engine.join();
+    else engine.detach();
+    std::string report;
+    fs::read_file(dump, report);
+    std::printf("    the bridge's command %s %d; its report:\n%s", ended ? "exited" : "still running after 2 minutes; last code", bridge_rc->load(), report.c_str());
+    CHECK(ended && bridge_rc->load() == 0 && report.find("LIVE OK") != std::string::npos && report.find("FAILED") == std::string::npos);
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -841,4 +967,5 @@ void run_livelink_tests() {
   tests_round294();
   tests_round297();
   tests_round298();
+  tests_round318();
 }

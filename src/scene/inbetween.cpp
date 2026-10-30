@@ -281,7 +281,7 @@ std::string prior_problem() {
 
 std::string install_problem() {
   const std::string dir = install_dir();
-  if (!fs::exists(fs::join(dir, "inbetween.onnx")) || !fs::exists(fs::join(dir, kLib))) return "not installed (ai install)";
+  if (!fs::exists(fs::join(dir, "inbetween.onnx")) || !fs::exists(fs::join(dir, kLib))) return "not installed (Install...)";
   return "";
 }
 

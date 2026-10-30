@@ -291,7 +291,8 @@ void Editor::draw_editing_canvas(const Recti &r) {
   edit_canvas_rect_ = r;
   u.canvas.fill_rect(r, Color::hex(0x262626));
   if (!edit_doc_.is_open()) {
-    u.label(r, "Open Render, Open Image, or drop an image here", u.theme.text_dim, ui::Align::Center);
+    const char *hint = "Open Render, Open Image, or drop an image here";
+    u.label(r, u.font.text_width(hint) + u.px(16) <= r.w ? hint : "Open or drop an image", u.theme.text_dim, ui::Align::Center);  // (task 0293: whole in a narrow pane)
     return;
   }
   edit_update_display();
@@ -460,9 +461,9 @@ void Editor::draw_edit_step(ui::Layout &lay, int step) {
   u.tooltip(info->help);
   const int bw = h.h;
   const bool up = u.button({h.right() - 3 * bw, h.y, bw, h.h}, "^");
-  u.tooltip("Move up (applied earlier)");
+  u.tooltip("Move up (applied earlier).");
   const bool down = u.button({h.right() - 2 * bw, h.y, bw, h.h}, "v");
-  u.tooltip("Move down (applied later)");
+  u.tooltip("Move down (applied later).");
   const bool gone = u.icon_button({h.right() - bw, h.y, bw, h.h}, ui::Icon::Close, false, "Remove");
   if (up || down || gone) {  // (the step's slot now holds another adjustment: its fields wait for the next frame)
     if (gone) edit_doc_.remove(step);
@@ -498,15 +499,18 @@ void Editor::draw_edit_panel(const Recti &left) {
   lay.row_h = u.row_h();
   const int top = lay.y;
   Recti b = lay.row(u.row_h() + u.px(6));
-  const int bw = (b.w - u.px(12)) / 4;
-  if (u.button({b.x, b.y, bw, b.h}, "Open...", false, ui::Icon::Folder)) defer([this] { edit_open_dialog(); });
+  const int cols = b.w >= u.px(340) ? 4 : 2;  // (task 0293: two by two in a narrow pane, the labels whole)
+  const Recti b2 = cols == 2 ? lay.row(u.row_h() + u.px(6)) : b;
+  const int bw = (b.w - u.px(4) * (cols - 1)) / cols;
+  auto cell = [&](int i) { return Recti{b.x + (i % cols) * (bw + u.px(4)), (i < cols ? b : b2).y, bw, b.h}; };
+  if (u.button(cell(0), "Open...", false, ui::Icon::Folder)) defer([this] { edit_open_dialog(); });
   u.tooltip("Open an image (PNG, JPEG, TGA, BMP, HDR, EXR) or a saved .edit. Dropping an image here opens it too.");
-  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Render", false, ui::Icon::Camera)) edit_open_render();
+  if (u.button(cell(1), "Render", false, ui::Icon::Camera)) edit_open_render();
   u.tooltip("Open the Render window's last render: its light, shown through the render's view transform.");
   const bool open = edit_doc_.is_open();
-  if (u.button_enabled({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Export...", open, "Nothing open: Open an image or Render first.", false, ui::Icon::File) && open) defer([this] { edit_export_dialog(); });
+  if (u.button_enabled(cell(2), "Export...", open, "Nothing open: Open an image or Render first.", false, ui::Icon::File) && open) defer([this] { edit_export_dialog(); });
   u.tooltip("Write the result as PNG / JPEG (through the view) or EXR / HDR (linear light).");
-  if (u.button_enabled({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save", open, "Nothing open: Open an image or Render first.", false, ui::Icon::Check) && open) edit_save("");
+  if (u.button_enabled(cell(3), "Save", open, "Nothing open: Open an image or Render first.", false, ui::Icon::Check) && open) edit_save("");
   u.tooltip("Save the adjustments as an .edit file beside the image (the image itself is never changed).");
   if (open) {
     Recti row = lay.row();
@@ -561,12 +565,16 @@ void Editor::draw_edit_targets(ui::Layout &lay) {
 void Editor::draw_editing_window(const Recti &r) {
   auto &u = ui_;
   edit_window_rect_ = r;
-  const int pw = std::min(u.px(330), r.w * 2 / 5);
-  /* The panel first, so the picture drawn after it shows what the panel just changed. */
+  /* The panel first, so the picture drawn after it shows what the panel just changed. Narrower than 460 px (a side
+   * pane), the picture goes above the panel instead of beside it (task 0293: the panel had a toolbar of slivers). */
+  const bool stacked = r.w < u.px(460);
+  const int pw = std::min(u.px(330), r.w * 2 / 5), ph = r.h * 3 / 5;
+  const Recti panel = stacked ? Recti{r.x, r.bottom() - ph, r.w, ph} : Recti{r.right() - pw, r.y, pw, r.h};
+  const Recti picture = stacked ? Recti{r.x, r.y, r.w, r.h - ph} : Recti{r.x, r.y, r.w - pw, r.h};
   const uint64_t before = edit_doc_.revision();
-  draw_edit_panel({r.right() - pw, r.y, pw, r.h});
+  draw_edit_panel(panel);
   if (edit_doc_.revision() != before) u.redraw = true;
-  draw_editing_canvas({r.x, r.y, r.w - pw, r.h});
+  draw_editing_canvas(picture);
   if (!u.any_popup_open() && edit_drag_id_ != 0 && !u.in.down[0]) edit_drag_id_ = 0;
 }
 

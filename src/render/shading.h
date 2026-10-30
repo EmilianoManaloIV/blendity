@@ -88,7 +88,15 @@ struct SurfaceSample {
   Vec3 toon_shadow_mul{1.0f, 1.0f, 1.0f};
   Vec3 toon_n_dx, toon_n_dy;  // task 0164: the normal's change across the pixel (sp.normal_dx / dy), for the band edges
   float face_sdf = -1.0f, face_sdf_mirror = -1.0f;
+  /* Round 330: the Principled extras at the point (0: off), and the tangent the anisotropy follows. */
+  float subsurface = 0.0f, subsurface_scale = 0.5f, sheen = 0.0f, sheen_roughness = 0.5f, coat = 0.0f, coat_roughness = 0.03f, coat_f0 = 0.04f;
+  float anisotropic = 0.0f;
+  Vec3 subsurface_color{1.0f}, sheen_tint{1.0f}, coat_tint{1.0f}, aniso_tangent;
+  bool extras = false;
 };
+/* Round 330: the Principled extras of a material onto a sample (the tangent: the surface's, turned by the rotation). */
+void apply_principled_extras(const Material &m, SurfaceSample &s, Vec3 tangent, bool has_tangent);
+Vec3 principled_base(const SurfaceSample &s, Vec3 n, Vec3 v);
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
 /* Whether a material is the same at every point of a surface but for its normal (task 0088): no textures, no

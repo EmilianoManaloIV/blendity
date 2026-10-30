@@ -11,6 +11,7 @@ using System;
 using System.Diagnostics;
 using System.Net.Sockets;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 namespace Blendity.LiveLink
@@ -58,11 +59,23 @@ namespace Blendity.LiveLink
         {
             AssemblyReloadEvents.beforeAssemblyReload += BeforeReload;
             EditorApplication.update += Watch;
+            EditorSceneManager.sceneOpened += (scene, mode) => SceneChanged();
+            EditorSceneManager.newSceneCreated += (scene, setup, mode) => SceneChanged();
             int port = SessionState.GetInt(ReconnectKey, 0);
             if (port == 0)
                 return;
             SessionState.EraseInt(ReconnectKey);
             EditorApplication.delayCall += () => Connect(port);
+        }
+
+        /// <summary>Another scene opened (task 0295): the linked objects went with the old one, so the link starts again and
+        /// Blendity's first sync builds them in this scene.</summary>
+        static void SceneChanged()
+        {
+            if (!Busy)
+                return;
+            Disconnect("The scene changed - connecting again");
+            nextWatch = 0;  // (the poll reconnects at once, not in 2 s)
         }
 
         static void BeforeReload()
@@ -89,6 +102,8 @@ namespace Blendity.LiveLink
 
         public static bool TryAutoConnect()
         {
+            if (Busy)  // (task 0295: connected or connecting already - a second try would drop that link and start over)
+                return Connected;
             var found = LiveLinkDiscovery.Read();
             int port = EditorPrefs.GetInt(PortKey, 0);
             if (port == 0 && found != null)

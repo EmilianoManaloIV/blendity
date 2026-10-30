@@ -693,7 +693,7 @@ void Editor::draw_project(const Recti &r) {
     }
     if (delete_menu_item(project_multi_.items.size(), "Delete", "Items", in_assets)) request_project_delete(sel);
     u.menu_separator();
-    if (u.menu_item("Open with system viewer")) fs::open_external(sel);
+    if (u.menu_item("Open with System Viewer")) fs::open_external(sel);
     if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::is_dir(sel) ? sel : fs::parent(sel));
     if (u.menu_item("Refresh")) invalidate_project_listing();
   });
