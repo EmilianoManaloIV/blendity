@@ -28,7 +28,7 @@ def main():
         with open(os.path.join(SRC, name), encoding="utf-8", errors="replace") as f:
             for n, line in enumerate(f, 1):
                 if "shortcut_text(" in line or "Log::" in line or "help(" in line: continue  # (keymap-driven, log lines and help prose are not labels)
-                if "key(" in line or "op_keys(" in line: continue  # (task 0254: the chord comes from the keymap on this line)
+                if "key(" in line or "op_keys(" in line or "brush_keys(" in line: continue  # (tasks 0254, 0261: the chord comes from the keymap on this line)
                 for m in SHORTCUT.finditer(line):
                     lit = m.group(1)
                     if OTHER_TOOLS.search(lit): continue  # ("Blender: Ctrl+T": another tool's key, said on purpose)

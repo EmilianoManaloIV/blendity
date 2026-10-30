@@ -1,6 +1,6 @@
 # 0258: animation - keymap actions, bigger key targets, a Record cue, Play-time refusals
 
-- **Status:** in progress (round 278)
+- **Status:** done (round 278)
 - **Requirements:** R-14
 - **Decisions:** ADR 0085 (the area rounds)
 - **Model:** main session

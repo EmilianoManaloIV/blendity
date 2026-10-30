@@ -108,7 +108,7 @@ std::unique_ptr<TextureLayer> group_of(const char *name, std::vector<std::unique
 }  // namespace
 
 std::string smart_material_refusal(const TextureLayer &group) {
-  if (std::string(group.type_name()) != "Group") return "a smart material is a Group layer (surface group <from> <to> makes one)";
+  if (std::string(group.type_name()) != "Group") return "a smart material is a Group layer (a layer's menu > Group with the Layer Below makes one)";
   if (holds_paint(group)) return "the group holds a Paint layer: its images belong to one surface (procedural layers and masks only)";
   return "";
 }

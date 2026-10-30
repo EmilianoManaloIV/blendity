@@ -128,6 +128,7 @@ void Editor::draw_anim_curve(const AnimationClip &c, size_t t, const Recti &a, f
     const float s = (float)u.px(sel ? 4 : 3);
     u.canvas.fill_rect({(int)(kx - s), (int)(ky - s), (int)(2 * s), (int)(2 * s)}, sel ? u.theme.key_selected : u.theme.key_group);
     if (!sel) continue;
+    u.canvas.rect_outline({(int)(kx - s) - u.px(2), (int)(ky - s) - u.px(2), (int)(2 * s) + u.px(4), (int)(2 * s) + u.px(4)}, u.theme.text_bright);  // (task 0269: by shape too)
     /* The selected key's handles: before it (unless it's the first) and after it (unless the last, or held). */
     for (int side : {0, 1}) {
       if (!anim_handle_shown(tr, i, side)) continue;

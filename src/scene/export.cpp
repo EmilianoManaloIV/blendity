@@ -52,6 +52,11 @@ void ExportOptions::reflect(Reflector &r) {
   r.field("Selected Only", selection_only);
   r.help("Only the selected objects and their children (Blender: Limit to > Selected Only).");
   r.field("Apply Modifiers", apply_modifiers);
+  if (f == ExportFormat::GLB || f == ExportFormat::GLTF) {
+    r.field("Armatures and Animation", skins);
+    r.help("Skinned meshes go at rest with their skeleton, their weights and their rig's clip, so Unity, Unreal and Blender\n"
+           "import a character that still moves (Blender: Armature, Skinning, Animation). Off: the mesh as posed now.");
+  }
   r.help("Export the meshes as the modifier stack makes them (Blender: Apply Modifiers).");
   r.field("Scale", scale, 0.01f, 0.0001f, 10000.0f);
   r.help("Multiplies every coordinate (Blender: Scale). 1 unit = 1 metre.");
@@ -75,7 +80,7 @@ void ExportOptions::reflect(Reflector &r) {
   if (f != ExportFormat::STL && f != ExportFormat::PLY) {
     r.field("Materials", materials);
     r.help(f == ExportFormat::GLB || f == ExportFormat::GLTF ? "Write materials (PBR metallic-roughness) and their textures."
-                                                              : "Write materials (colour, metallic, roughness, emission, alpha) and their textures.");
+                                                              : "Write materials (color, metallic, roughness, emission, alpha) and their textures.");
   }
   if (materials && (f == ExportFormat::OBJ || f == ExportFormat::FBX || f == ExportFormat::GLB || f == ExportFormat::GLTF)) {
     r.field("Bake Textures", bake_textures);
@@ -132,6 +137,7 @@ Vec3 to_out(Vec3 v, int up) { return up ? Vec3(-v.x, -v.z, v.y) : Vec3(-v.x, v.y
 
 struct Prepared {
   std::string name;
+  std::shared_ptr<const ExportSkin> skin;  // (task 0268)
   Mesh mesh;                  // output space and scale, winding reversed
   std::vector<Vec3> normals;  // per corner, output space
   std::vector<MaterialPtr> materials;
@@ -241,6 +247,7 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     Prepared p;
     p.name = it.name.empty() ? src.name : it.name;
     p.materials = it.materials;
+    p.skin = it.skin;
     Mesh &m = p.mesh;
     m.name = src.name;
     m.positions = src.positions;
@@ -330,6 +337,7 @@ struct SplitVerts {
   std::vector<Vec3> pos, nrm;
   std::vector<Vec2> uv;
   std::vector<float> vid;  // each vertex's index in the mesh, when `ids` (glTF's _VERT, task 0172)
+  std::vector<uint32_t> src;  // each vertex's index in the mesh (task 0268: its joints and weights)
   bool ids = false;
   std::unordered_map<SplitKey, uint32_t, SplitKeyHash> index;
   uint32_t add(const Prepared &p, uint32_t corner, bool normals, bool uvs) {
@@ -351,6 +359,7 @@ struct SplitVerts {
     if (normals) nrm.push_back(p.normals[corner]);
     if (uvs) uv.push_back(p.mesh.uvs[corner]);
     if (ids) vid.push_back((float)k.v);
+    src.push_back(k.v);
     index.emplace(k, id);
     return id;
   }
@@ -1085,11 +1094,24 @@ std::string export_usda(const std::vector<ExportItem> &items, const ExportOption
 /* glTF 2.0                                                               */
 /* ===================================================================== */
 
+/* Task 0268: a transform in the file's space - X mirrored on both sides (S M S, as the vertices), translations scaled. */
+static Vec3 gltf_t(Vec3 t, float s) { return Vec3(-t.x, t.y, t.z) * s; }
+static Quat gltf_q(Quat q) { return Quat(q.x, -q.y, -q.z, q.w); }
+static Mat4 gltf_m(const Mat4 &m, float s) {
+  Mat4 r = m;
+  for (int c = 0; c < 4; c++)
+    for (int k = 0; k < 4; k++)
+      if ((c == 0) != (k == 0)) r.at(k, c) = -r.at(k, c);
+  for (int k = 0; k < 3; k++) r.at(k, 3) *= s;
+  return r;
+}
+
 std::string export_gltf(const std::vector<ExportItem> &items, const ExportOptions &o, bool binary, const std::string &bin_name,
                         std::string *bin_out, std::vector<std::pair<std::string, std::string>> *copy_textures) {
   std::vector<Prepared> prepared = prepare(items, o, 0);  // glTF is Y up by definition
   std::string bin;
-  std::vector<std::string> views, accessors, meshes, nodes, materials, images, textures;
+  std::vector<std::string> views, accessors, meshes, nodes, materials, images, textures, skins, animations;
+  std::vector<int> roots;  // (task 0268: the scene's top nodes - a skeleton's joints hang under its base)
   auto align4 = [&] {
     while (bin.size() % 4) bin += '\0';
   };
@@ -1207,6 +1229,20 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC2\"}", view, t.size()));
         attrs += strprintf(",\"TEXCOORD_0\":%zu", accessors.size() - 1);
       }
+      const bool skinned = o.skins && p.skin && p.skin->vjoints.size() == m.positions.size() && p.skin->vweights.size() == m.positions.size();
+      if (skinned) {  // (task 0268) each vertex's four joints and weights, from its mesh vertex
+        std::vector<uint16_t> js;
+        std::vector<float> ws;
+        for (uint32_t v : sv.src) {
+          for (int k = 0; k < 4; k++) js.push_back(p.skin->vjoints[v][(size_t)k]), ws.push_back(p.skin->vweights[v][(size_t)k]);
+        }
+        const int jv = add_view(js.data(), js.size() * sizeof(uint16_t), 34962);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5123,\"count\":%zu,\"type\":\"VEC4\"}", jv, sv.src.size()));
+        attrs += strprintf(",\"JOINTS_0\":%zu", accessors.size() - 1);
+        const int wv = add_view(ws.data(), ws.size() * sizeof(float), 34962);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC4\"}", wv, sv.src.size()));
+        attrs += strprintf(",\"WEIGHTS_0\":%zu", accessors.size() - 1);
+      }
       if (o.vertex_ids) {  // (task 0172) each vertex's index in the mesh, for Live Link's deform messages
         const int view = add_view(sv.vid.data(), sv.vid.size() * sizeof(float), 34962);
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"SCALAR\"}", view, sv.vid.size()));
@@ -1221,7 +1257,87 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     }
     if (prims.empty()) continue;
     meshes.push_back("{\"name\":\"" + json_escape(p.name) + "\",\"primitives\":[" + prims + "]}");
-    nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu}", meshes.size() - 1));
+    const bool with_skin = o.skins && p.skin && !p.skin->joints.empty() && p.skin->vjoints.size() == m.positions.size();
+    roots.push_back((int)nodes.size());
+    nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu", meshes.size() - 1) +
+                    (with_skin ? strprintf(",\"skin\":%zu}", skins.size()) : std::string("}")));
+    if (!with_skin) continue;
+    /* Task 0268: the base (a node holding the skeleton where it stands), the joints under it at rest, their inverse
+     * bind matrices from the rest pose (the vertices are in the file's world: the mesh node has no transform). */
+    const ExportSkin &sk = *p.skin;
+    const int base = (int)nodes.size(), first_joint = base + 1;
+    const size_t nj = sk.joints.size();
+    std::vector<std::vector<int>> kids(nj);
+    std::vector<int> top;
+    for (size_t j = 0; j < nj; j++) (sk.joints[j].parent >= 0 && sk.joints[j].parent < (int)j ? kids[(size_t)sk.joints[j].parent] : top).push_back(first_joint + (int)j);
+    auto int_list = [](const std::vector<int> &v) {
+      std::string r = "[";
+      for (size_t i = 0; i < v.size(); i++) r += (i ? "," : "") + std::to_string(v[i]);
+      return r + "]";
+    };
+    const Mat4 bm = gltf_m(sk.base, o.scale);
+    std::string mat = "[";
+    for (int e = 0; e < 16; e++) mat += (e ? "," : "") + num(bm.m[e]);
+    roots.push_back(base);
+    nodes.push_back("{\"name\":\"" + json_escape(sk.base_name) + "\",\"matrix\":" + mat + "],\"children\":" + int_list(top) + "}");
+    std::vector<Mat4> world(nj);
+    std::vector<float> ibm;
+    for (size_t j = 0; j < nj; j++) {
+      const ExportSkin::Joint &jt = sk.joints[j];
+      const Vec3 t = gltf_t(jt.t, o.scale);
+      const Quat q = gltf_q(normalize(jt.r));
+      const Mat4 local = Mat4::trs(t, q, jt.s);
+      world[j] = (jt.parent >= 0 && jt.parent < (int)j ? world[(size_t)jt.parent] : bm) * local;
+      const Mat4 inv = world[j].inverse();
+      ibm.insert(ibm.end(), inv.m, inv.m + 16);
+      std::string node = "{\"name\":\"" + json_escape(jt.name) + "\",\"translation\":[" + num(t.x) + "," + num(t.y) + "," + num(t.z) +
+                         "],\"rotation\":[" + num(q.x) + "," + num(q.y) + "," + num(q.z) + "," + num(q.w) + "],\"scale\":[" + num(jt.s.x) + "," +
+                         num(jt.s.y) + "," + num(jt.s.z) + "]";
+      if (!kids[j].empty()) node += ",\"children\":" + int_list(kids[j]);
+      nodes.push_back(node + "}");
+    }
+    const int iv = add_view(ibm.data(), ibm.size() * sizeof(float), 0);
+    accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"MAT4\"}", iv, nj));
+    std::vector<int> joint_nodes;
+    for (size_t j = 0; j < nj; j++) joint_nodes.push_back(first_joint + (int)j);
+    skins.push_back("{\"name\":\"" + json_escape(sk.base_name) + strprintf("\",\"inverseBindMatrices\":%zu,\"skeleton\":%d,\"joints\":", accessors.size() - 1, base) +
+                    int_list(joint_nodes) + "}");
+    /* The clip: every joint's local translation, rotation and scale at each frame, linear between (sampled, as
+     * Blender's exporter samples by default). */
+    for (const ExportSkin::Anim &an : sk.anims) {
+      if (an.frames < 1 || an.t.size() != nj || an.r.size() != nj || an.s.size() != nj) continue;
+      std::vector<float> times((size_t)an.frames);
+      for (int f = 0; f < an.frames; f++) times[(size_t)f] = (float)f / std::max(1.0f, an.fps);
+      const int tv = add_view(times.data(), times.size() * sizeof(float), 0);
+      accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"SCALAR\",\"min\":[", tv, an.frames) + num(times.front()) +
+                          "],\"max\":[" + num(times.back()) + "]}");
+      const size_t time_acc = accessors.size() - 1;
+      std::string samplers, channels;
+      int si = 0;
+      auto channel = [&](const std::vector<float> &vals, const char *type, size_t joint, const char *path) {
+        const int vv = add_view(vals.data(), vals.size() * sizeof(float), 0);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"%s\"}", vv, an.frames, type));
+        samplers += strprintf("%s{\"input\":%zu,\"output\":%zu,\"interpolation\":\"LINEAR\"}", si ? "," : "", time_acc, accessors.size() - 1);
+        channels += strprintf("%s{\"sampler\":%d,\"target\":{\"node\":%d,\"path\":\"%s\"}}", si ? "," : "", si, first_joint + (int)joint, path);
+        si++;
+      };
+      for (size_t j = 0; j < nj; j++) {
+        if ((int)an.t[j].size() < an.frames || (int)an.r[j].size() < an.frames || (int)an.s[j].size() < an.frames) continue;
+        std::vector<float> tv3, rv4, sv3;
+        for (int f = 0; f < an.frames; f++) {
+          const Vec3 t = gltf_t(an.t[j][(size_t)f], o.scale);
+          const Quat q = gltf_q(normalize(an.r[j][(size_t)f]));
+          const Vec3 s = an.s[j][(size_t)f];
+          tv3.insert(tv3.end(), {t.x, t.y, t.z});
+          rv4.insert(rv4.end(), {q.x, q.y, q.z, q.w});
+          sv3.insert(sv3.end(), {s.x, s.y, s.z});
+        }
+        channel(tv3, "VEC3", j, "translation");
+        channel(rv4, "VEC4", j, "rotation");
+        channel(sv3, "VEC3", j, "scale");
+      }
+      animations.push_back("{\"name\":\"" + json_escape(an.name) + "\",\"samplers\":[" + samplers + "],\"channels\":[" + channels + "]}");
+    }
   }
   align4();
   auto list = [](const std::vector<std::string> &v) {
@@ -1230,7 +1346,7 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     return r + "]";
   };
   std::string scene_nodes = "[";
-  for (size_t i = 0; i < nodes.size(); i++) scene_nodes += (i ? "," : "") + std::to_string(i);
+  for (size_t i = 0; i < roots.size(); i++) scene_nodes += (i ? "," : "") + std::to_string(roots[i]);
   std::string json = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"Blendity\"}";
   if (use.emissive_strength || use.toon || use.unlit) {
     std::string used = use.emissive_strength ? "\"KHR_materials_emissive_strength\"" : "";
@@ -1241,6 +1357,8 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
   json += ",\"scene\":0,\"scenes\":[{\"name\":\"Scene\",\"nodes\":" + scene_nodes + "]}]";
   json += ",\"nodes\":" + list(nodes) + ",\"meshes\":" + list(meshes);
   if (!materials.empty()) json += ",\"materials\":" + list(materials);
+  if (!skins.empty()) json += ",\"skins\":" + list(skins);  // (task 0268)
+  if (!animations.empty()) json += ",\"animations\":" + list(animations);
   if (!textures.empty()) json += ",\"textures\":" + list(textures) + ",\"images\":" + list(images);
   json += ",\"accessors\":" + list(accessors) + ",\"bufferViews\":" + list(views);
   json += strprintf(",\"buffers\":[{\"byteLength\":%zu", bin.size()) + (binary ? std::string("}]") : ",\"uri\":\"" + json_escape(bin_name) + "\"}]");

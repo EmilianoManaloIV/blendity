@@ -66,11 +66,12 @@ void Material::reflect(Reflector &r) {
   static const char *procs[] = {"None (use Base Map)", "Checker", "Noise", "UV Grid", "Color Grid"};
   static const char *wraps[] = {"Repeat", "Extend", "Clip", "Mirror"};
   static const char *filters[] = {"Closest", "Linear", "Trilinear (Mipmaps)"};
-  static const char *surfaces[] = {"Opaque (Solid)", "Cutout (Alpha Clip)", "Transparent (Alpha Blend)", "Glass (Refraction)"};
+  static const char *surfaces[] = {"Opaque (Solid)", "Cutout (Alpha Clip)", "Transparent (Alpha Blend)", "Glass (Refraction)", "Volume (Fog)"};
   r.text("Name", name);
-  r.enumeration("Surface Type", surface, surfaces, 4);
+  r.enumeration("Surface Type", surface, surfaces, 5);
   r.help("Opaque: solid. Cutout: holes where Alpha (or the Base Map's alpha) is below the threshold.\n"
          "Transparent: see-through by Alpha. Glass: clear refracting material tinted by Base Color.\n"
+         "Volume (Fog): the surface is invisible and the closed mesh's inside is fog (Blender's Principled Volume).\n"
          "Unity: Surface Type + Alpha Clipping. Blender: Blend Mode / Glass BSDF.");
   if (r.all_fields() || surface == (int)MaterialSurface::Cutout) r.field("Alpha Clip Threshold", alpha_clip, 0.01f, 0.0f, 1.0f);
   if (r.all_fields() || surface == (int)MaterialSurface::Glass) {
@@ -78,12 +79,12 @@ void Material::reflect(Reflector &r) {
     r.help("Index of refraction: 1.0 air, 1.33 water, 1.45 Blender's default, 1.5 window glass, 2.42 diamond.");
   }
   r.color_alpha("Base Color", base_color, "Alpha", alpha);
-  r.help("Albedo and opacity. The alpha (the bar under the colour) makes Cutout and Transparent surfaces\n"
+  r.help("Albedo and opacity. The alpha (the bar under the color) makes Cutout and Transparent surfaces\n"
          "see-through; it is multiplied by the Base Map's alpha. Blender: Principled BSDF > Base Color / Alpha.\n"
-         "Unity: Base Map colour.");
+         "Unity: Base Map color.");
   r.texture("Base Map", base_map);
   r.enumeration("Procedural", procedural, procs, 5);
-  r.help("Procedural base colour (Cycles SVM checker / noise nodes) or Blender's generated test images.");
+  r.help("Procedural base color (Cycles SVM checker / noise nodes) or Blender's generated test images.");
   if (r.all_fields() || procedural == (int)Procedural::Checker || procedural == (int)Procedural::Noise) {
     r.color("Color 2", procedural_color2);
     r.field("Pattern Scale", procedural_scale, 0.05f, 0.01f, 1000.0f);
@@ -152,14 +153,14 @@ void Material::reflect(Reflector &r) {
       r.field("Rim Width", hp_rim_width, 0.01f, 0.05f, 1.0f);
       r.color("Rim Color", hp_rim_color);
       r.field("Painted Specular", hp_spec, 0.01f, 0.0f, 2.0f);
-      r.help("The texture carries the light (the baked-light layer, the painted highlights): the surface shows its colour as\n"
+      r.help("The texture carries the light (the baked-light layer, the painted highlights): the surface shows its color as\n"
              "it is in every renderer, lights neither shade nor darken it, plus a rim at grazing angles and a highlight where\n"
              "the roughness channel is low. Blizzard's and Riot's hand-painted look; glTF writes it KHR_materials_unlit.");
     }
     r.group_end();
   }
   r.help("Toon: the anime / cel look (Goo Engine; Blender: Shader to RGB + Color Ramp) - light in flat tones with a\n"
-         "hard edge, a shadow colour, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
+         "hard edge, a shadow color, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
          "for the black lines.");
   if (r.all_fields() || shading_model == 1) {
     if (r.group("Toon", true)) {
@@ -176,16 +177,16 @@ void Material::reflect(Reflector &r) {
       r.field("Toon Threshold", toon_threshold, 0.01f, 0.0f, 0.95f);
       r.help("Where light turns into shadow (the light's angle, shadows included).");
       r.color("Toon Shadow Color", toon_shadow);
-      r.help("The shadow side's colour, times the base colour (a cool tint reads as anime shading).");
+      r.help("The shadow side's color, times the base color (a cool tint reads as anime shading).");
       r.texture("Toon Ramp", toon_ramp_map);
-      r.help("A shadow ramp instead of the bands, threshold, softness and shadow colour: its colour at U = how lit the point\n"
-             "is (left dark, right lit; or a vertical ramp, bottom dark, top lit), times the base colour. The Textures\n"
+      r.help("A shadow ramp instead of the bands, threshold, softness and shadow color: its color at U = how lit the point\n"
+             "is (left dark, right lit; or a vertical ramp, bottom dark, top lit), times the base color. The Textures\n"
              "window's Toon Ramp generator makes 2, 3 and 4-tone ramps; MMD's toon images land here.");
       r.texture("Shade Map", shade_map);
       r.help("The shadow side's own picture (MToon's shade texture, the hand-painted shadow of anime art), tinted by the\n"
-             "Toon Shadow Color: where the surface is in shadow this shows instead of the base colour darkened.");
+             "Toon Shadow Color: where the surface is in shadow this shows instead of the base color darkened.");
       r.texture("Shadow Bias Map", toon_shadow_bias_map);
-      r.help("Painted shadow control (Guilty Gear's vertex colours): grey is neutral, white keeps a point lit however the\n"
+      r.help("Painted shadow control (Guilty Gear's vertex colors): grey is neutral, white keeps a point lit however the\n"
              "light falls, black keeps it in shadow (under the chin, inside the hair).");
       r.field("Toon Light Wrap", toon_wrap, 0.01f, 0.0f, 1.0f);
       r.help("Lets the light reach round the form before the tones step (0: none; 0.3: a softer figure).");
@@ -223,7 +224,7 @@ void Material::reflect(Reflector &r) {
       r.enumeration("Face Forward", face_forward, fwd, 4);
       r.help("The way the face looks in the object's own axes (VRM and most glTF characters: +Z; MMD: -Z).");
       r.texture("Line Map", line_map);
-      r.help("Inner contour lines (the folds of a sleeve, the eyelids) multiplied into the colour: white is no line.");
+      r.help("Inner contour lines (the folds of a sleeve, the eyelids) multiplied into the color: white is no line.");
       r.field("Lines Only In Shadow", line_only_shadow);
       r.help("The lines show only in the shadow tones (Guilty Gear's inner lines fade where the light falls).");
       r.texture("Hatch Map", hatch_map);
@@ -233,6 +234,66 @@ void Material::reflect(Reflector &r) {
     }
     r.group_end();
   }
+  reflect_principled_extras(r);
+  reflect_volume(r);
+}
+
+/* Round 331: the Volume (fog) settings, shown with the Volume surface (appended: edits match by order). */
+void Material::reflect_volume(Reflector &r) {
+  if (!r.all_fields() && !volume()) return;
+  if (r.group("Volume (Fog)", true)) {
+    r.field("Fog Density", volume_density, 0.01f, 0.0f, 100.0f);
+    r.help("How thick the fog is, per metre: 1 dims what is 1 m behind it to about a third.");
+    r.color("Fog Color", volume_color);
+    r.help("The light the fog scatters (Blender's Principled Volume Color): white mist, a blue haze, brown smoke.");
+    r.field("Fog Anisotropy", volume_anisotropy, 0.01f, -0.95f, 0.95f);
+    r.help("Above 0 the fog scatters light forward - bright toward the sun, light shafts; below 0 back toward the light.");
+    r.color("Fog Emission", volume_emission);
+    r.field("Fog Emission Strength", volume_emission_strength, 0.05f, 0.0f, 100.0f);
+    r.help("The fog's own glow (fire, a magic cloud).");
+    r.field("Fog Density Noise", volume_noise, 0.01f, 0.0f, 1.0f);
+    r.help("Wisps: the density varied by a noise, from 0 to twice the Fog Density where it is 1.");
+    r.field("Fog Noise Scale", volume_noise_scale, 0.01f, 0.01f, 100.0f);
+    r.help("The wisps' size, in metres of the object's own space.");
+  }
+  r.group_end();
+}
+
+float Material::volume_density_at(Vec3 local) const {
+  const float d = finite_bits(volume_density) ? std::max(0.0f, volume_density) : 0.0f;
+  const float k = finite_bits(volume_noise) ? std::max(0.0f, std::min(1.0f, volume_noise)) : 0.0f;
+  if (k <= 0.0f) return d;
+  const float s = finite_bits(volume_noise_scale) && volume_noise_scale > 0.01f ? volume_noise_scale : 1.0f;
+  const float n = fbm_noise(local / s, 4, 0.5f) * 0.5f + 0.5f;  // (about 0..1)
+  return d * std::max(0.0f, std::min(2.0f, 1.0f + k * (2.0f * n - 1.0f) * 1.5f));
+}
+
+/* Round 330: the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic, folded (appended: the Inspector matches a
+ * field's edit by its order). */
+void Material::reflect_principled_extras(Reflector &r) {
+  if (!r.all_fields() && shading_model != 0) return;
+  if (r.group("Principled: Subsurface, Sheen, Coat", false)) {
+    r.field("Subsurface", subsurface, 0.01f, 0.0f, 1.0f);
+    r.help("Light passing under the surface and out again (skin, wax, leaves, marble): the shadow side softened and tinted\n"
+           "by Subsurface Color. Blender's Subsurface Weight.");
+    r.color("Subsurface Color", subsurface_color);
+    r.field("Subsurface Scale", subsurface_scale, 0.01f, 0.0f, 1.0f);
+    r.help("How far round into the shadow the light reaches.");
+    r.field("Sheen", sheen, 0.01f, 0.0f, 1.0f);
+    r.help("A soft glow at grazing angles, as on velvet and other cloth (Blender's Sheen Weight).");
+    r.color("Sheen Tint", sheen_tint);
+    r.field("Sheen Roughness", sheen_roughness, 0.01f, 0.0f, 1.0f);
+    r.field("Coat", coat, 0.01f, 0.0f, 1.0f);
+    r.help("A clear lacquer layer over the material - car paint, varnished wood - with a highlight of its own.");
+    r.field("Coat Roughness", coat_roughness, 0.01f, 0.0f, 1.0f);
+    r.field("Coat IOR", coat_ior, 0.01f, 1.0f, 3.0f);
+    r.color("Coat Tint", coat_tint);
+    r.field("Anisotropic", anisotropic, 0.01f, 0.0f, 1.0f);
+    r.help("The highlight stretched along the surface's tangent (brushed metal, a record's grooves, hair). Needs the mesh's\n"
+           "tangents (UVs).");
+    r.field("Anisotropic Rotation", anisotropic_rotation, 0.01f, 0.0f, 1.0f);
+  }
+  r.group_end();
 }
 
 const Material::Resolved &Material::textures() const {
@@ -334,12 +395,34 @@ MaterialPtr make_material(const std::string &name, Vec3 color) {
 }
 
 const std::vector<std::string> &material_presets() {
-  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit", "Toon"};
+  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit", "Toon", "Fog", "Smoke", "Mist"};
   return names;
+}
+
+const std::vector<std::pair<std::string, std::vector<std::string>>> &material_preset_groups() {
+  static const std::vector<std::pair<std::string, std::vector<std::string>>> g = {{"Basic", {"Solid", "Transparent", "Cutout", "Unlit"}},
+                                                                                  {"Glass", {"Glass", "Frosted Glass"}},
+                                                                                  {"Metal", {"Metal"}},
+                                                                                  {"Stylized", {"Toon", "Emissive"}},
+                                                                                  {"Volume", {"Fog", "Smoke", "Mist"}}};
+  return g;
+}
+
+/* Round 331: the Volume presets - Fog (a grey haze), Smoke (dark, wispy), Mist (thin, forward-scattering). */
+static bool volume_preset(Material &m, const std::string &preset) {
+  if (preset != "Fog" && preset != "Smoke" && preset != "Mist") return false;
+  m.surface = (int)MaterialSurface::Volume;
+  m.volume_density = preset == "Fog" ? 0.6f : preset == "Smoke" ? 2.0f : 0.15f;
+  m.volume_color = preset == "Smoke" ? Vec3(0.25f, 0.24f, 0.22f) : Vec3(0.9f, 0.92f, 0.95f);
+  m.volume_anisotropy = preset == "Mist" ? 0.6f : 0.2f;
+  m.volume_noise = preset == "Smoke" ? 0.8f : 0.0f;
+  m.volume_noise_scale = 0.5f;
+  return true;
 }
 
 MaterialPtr make_material_preset(const std::string &preset) {
   auto m = make_material(preset, Vec3(0.8f));
+  if (volume_preset(*m, preset)) return m;
   if (preset == "Transparent") {
     m->surface = (int)MaterialSurface::Transparent;
     m->base_color = {0.2f, 0.5f, 0.9f};

@@ -162,7 +162,7 @@ bool Editor::steps_apply(const steps::Plan &plan, const std::vector<steps::Plan:
 /* Walk Along Path: prints along the curve at the style's step, the character keyed on them. */
 void Editor::steps_walk_path(const std::string &curve_name, bool keep_moved) {
   if (!assist_require(Assist::Footsteps)) return;
-  if (playing_) return Log::warn("Footsteps: stop Play first");
+  if (playing_) return refuse("Footsteps: stop Play first", "stop", "Stop Play");
   GameObject *root = steps_root();
   if (!root) return;
   GameObject *curve = scene_->find_by_name(curve_name);
@@ -192,9 +192,9 @@ void Editor::steps_walk_path(const std::string &curve_name, bool keep_moved) {
 /* Update: the character walks the prints where they are now (moved, turned, retimed by hand). */
 void Editor::steps_update() {
   if (!assist_require(Assist::Footsteps)) return;
-  if (playing_) return Log::warn("Footsteps: stop Play first");
+  if (playing_) return refuse("Footsteps: stop Play first", "stop", "Stop Play");
   GameObject *group = steps_group();
-  if (!group) return Log::warn("Footsteps: the character has no footprints (walk path <curve> first)");
+  if (!group) return refuse("Footsteps: the character has no footprints - Rigging > Footsteps > Walk Along Path makes them", "window Rigging", "Open Rigging");
   steps::Plan plan;
   std::vector<steps::Plan::Print> planned;
   plan.prints = steps_prints(*group, &planned);
@@ -215,7 +215,7 @@ void Editor::steps_command(const std::vector<std::string> &t) {
   if (what == "update") return steps_update();
   if (what == "replan") {
     GameObject *g = steps_group();
-    if (!g) return Log::warn("Footsteps: the character has no footprints (walk path <curve> first)");
+    if (!g) return refuse("Footsteps: the character has no footprints - Rigging > Footsteps > Walk Along Path makes them", "window Rigging", "Open Rigging");
     return steps_walk_path(g->get<Footsteps>()->path, true);
   }
   Log::warn("walk path <curve> | walk steps update | walk steps replan");
@@ -242,10 +242,9 @@ void Editor::draw_steps_section(ui::Layout &lay) {
             "the character keyed walking on them. Console: walk path <curve>.");
   if (!group) return;
   if (u.button({row.x + u.px(8) + w, row.y, w, row.h}, "Update")) steps_command({"walk", "steps", "update"});
-  u.tooltip("Walks the prints where they are now: move, turn or retime one (its Frame) and Update. Console: walk steps update.");
+  u.tooltip("Walks the prints where they are now: move, turn or retime one (its Frame) and Update.");
   if (u.button({row.x + u.px(12) + 2 * w, row.y, w, row.h}, "Re-plan")) steps_command({"walk", "steps", "replan"});
-  u.tooltip("Lays the prints out along the path again (after the path or the style changed), keeping the ones moved by hand.\n"
-            "Console: walk steps replan.");
+  u.tooltip("Lays the prints out along the path again (after the path or the style changed), keeping the ones moved by hand.");
 }
 
 /* The prints in the Scene view: a sole each (left blue, right red, selected orange) at the print's ground - the print's

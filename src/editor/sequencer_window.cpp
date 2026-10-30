@@ -173,7 +173,7 @@ void Editor::seq_set_preview(bool on) {
   if (on == seqr_.preview) return;
   GameObject *root = seq_root();
   if (on && (playing_ || !seq_sequence())) {
-    if (playing_) Log::warn("Sequencer: Preview is for editing; Stop Play first");
+    if (playing_) refuse("Sequencer: Preview is for editing; Stop Play first", "stop", "Stop Play");
     return;
   }
   if (on) {
@@ -359,11 +359,12 @@ void Editor::draw_seq_toolbar(const Recti &bar, GameObject *root) {
   std::vector<const char *> cn;
   for (const std::string &n : names) cn.push_back(n.c_str());
   int pick = cur;
-  if (u.combo(u.id("seq_pick"), {x, y, u.px(160), bh}, pick, cn.data(), (int)cn.size()) && pick != cur) {
+  const int cw = std::max(u.px(80), std::min(u.px(160), bar.right() - x - u.px(4)));  // (task 0293: inside a narrow pane)
+  if (u.combo(u.id("seq_pick"), {x, y, cw, bh}, pick, cn.data(), (int)cn.size()) && pick != cur) {
     if (pick == (int)names.size() - 1) seq_new(root, "");
     else seq_pick(root, pick ? paths[(size_t)pick - 1] : "");
   }
-  x += u.px(164);
+  x += cw + u.px(4);
   if (button(u.px(76), "Add Track", false, "A new track on top: its clips win over the ones below for the numbers they animate.") && s)
     seq_edit("Add Track", [](Sequence &q) {
       q.tracks.emplace_back();
@@ -574,6 +575,36 @@ bool Editor::seq_rename(const std::string &from, const std::string &to) {
   });
 }
 
+/* The key pressed while a trigger's key button waits (task 0291): the first of the keys a trigger can use, as
+ * `trigger_key_code` reads them; Esc stops waiting. */
+void Editor::seq_capture_trigger_key(size_t k) {
+  auto &in = ui_.in;
+  if (in.key_pressed[platform::KEY_ESCAPE] || in.key_down[platform::KEY_ESCAPE]) {  // (a popup may have taken the press: the key held counts)
+    in.key_pressed[platform::KEY_ESCAPE] = false;
+    seq_key_capture_ = -1;
+    return;
+  }
+  in.text.clear();  // (the key is the trigger's, not a field's)
+  if (in.ctrl() || in.alt()) return;  // (Ctrl+S saves, it isn't the S key)
+  static std::vector<std::string> names;
+  if (names.empty()) {
+    for (char c = 'A'; c <= 'Z'; c++) names.push_back(std::string(1, c));
+    for (char c = '0'; c <= '9'; c++) names.push_back(std::string(1, c));
+    names.push_back("Space");
+    for (int f = 1; f <= 12; f++) names.push_back("F" + std::to_string(f));
+  }
+  for (const std::string &n : names) {
+    const int code = trigger_key_code(n);
+    if (code <= 0 || !in.key_pressed[code]) continue;
+    in.key_pressed[code] = false;
+    seq_key_capture_ = -1;
+    seq_edit("Trigger Key", [&](Sequence &q) {
+      if (k < q.triggers.size()) q.triggers[k].key = n;
+    });
+    return;
+  }
+}
+
 /* The triggers: a key, the clip it jumps to, the blend time; Add Trigger. */
 void Editor::draw_seq_triggers(Sequence &s, const Recti &r) {
   auto &u = ui_;
@@ -586,14 +617,18 @@ void Editor::draw_seq_triggers(Sequence &s, const Recti &r) {
     for (const SeqInstance &i : t.items) names.push_back(i.name);
   std::vector<const char *> cn;
   for (const std::string &n : names) cn.push_back(n.c_str());
+  if (seq_key_capture_ >= (int)s.triggers.size()) seq_key_capture_ = -1;  // (the trigger it waited for is gone)
   for (size_t k = 0; k < s.triggers.size() && y + h <= r.bottom(); k++, y += h + u.px(2)) {
     const SeqTrigger g = s.triggers[k];
     int x = r.x + u.px(6);
-    std::string key = g.key;
-    bool committed = false;
-    u.text_field(u.id("seq_tkey" + std::to_string(k)), {x, y, u.px(56), h}, key, &committed, "Key");
+    const Recti kb{x, y, u.px(56), h};  // (task 0291: the key captured by a press, not typed)
+    if (u.record_buttons) u.button_rects["seq:key " + std::to_string(k)] = kb;
+    const bool capturing = seq_key_capture_ == (int)k;
+    if (u.button(kb, capturing ? "Press..." : g.key, capturing)) seq_key_capture_ = capturing ? -1 : (int)k;
+    else if (capturing && u.in.pressed[0] && !u.hovered(kb)) seq_key_capture_ = -1;  // (a click elsewhere: no longer waiting)
+    u.tooltip("Click, then press the key: a letter, a digit, Space or a function key (Esc keeps the old one).");
     x += u.px(62);
-    if (committed && key != g.key) seq_edit("Trigger Key", [&](Sequence &q) { q.triggers[k].key = key; });
+    if (seq_key_capture_ == (int)k) seq_capture_trigger_key(k);  // (not if a click elsewhere just cancelled it)
     int pick = (int)(std::find(names.begin(), names.end(), g.instance) - names.begin());
     if (!cn.empty() && u.combo(u.id("seq_tclip" + std::to_string(k)), {x, y, u.px(140), h}, pick, cn.data(), (int)cn.size()) && pick < (int)names.size())
       seq_edit("Trigger Clip", [&](Sequence &q) { q.triggers[k].instance = names[(size_t)pick]; });
@@ -602,6 +637,7 @@ void Editor::draw_seq_triggers(Sequence &s, const Recti &r) {
     if (u.float_field(u.id("seq_tblend" + std::to_string(k)), {x, y, u.px(56), h}, blend, 0.01f, 0.0f, 10.0f)) seq_edit("Trigger Blend", [&](Sequence &q) { q.triggers[k].blend = blend; });
     x += u.px(62);
     if (u.button({x, y, u.px(24), h}, "x")) {
+      seq_key_capture_ = -1;  // (the list changes: no capture carries to another trigger)
       seq_edit("Remove Trigger", [&](Sequence &q) { q.triggers.erase(q.triggers.begin() + (std::ptrdiff_t)k); });
       break;
     }
@@ -628,6 +664,7 @@ void Editor::draw_sequencer_window(const Recti &r) {
     u.label({body.x + u.px(10), body.y + u.px(10), body.w - u.px(20), u.row_h()},
             "The scene has no sequence: create one, then drag clips onto its tracks (each plays on the object you choose).", u.theme.text_dim);
     if (u.button({body.x + u.px(10), body.y + u.px(16) + u.row_h(), u.px(110), u.row_h() + u.px(4)}, "Create")) seq_new(root, "");
+    u.tooltip("A sequence for this scene: tracks of clips played one after another, with triggers that jump between them in Play.");
     return;
   }
   const int row_h = u.row_h(), lane_h = row_h + u.px(10), list_w = std::max(u.px(110), r.w / 6);
