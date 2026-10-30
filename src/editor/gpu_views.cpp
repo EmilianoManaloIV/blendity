@@ -51,6 +51,7 @@ const char *material_unsupported(const Material &m) {
   /* (A cutout draws on the card since task 0163, Transparent and Glass since task 0195 - but not toon ones, whose
    * lighting reads the neighbouring pixels' normals in the g-buffer.) */
   if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout && m.shading_model == 1) return "a see-through toon material";
+  if (m.shading_model == 0 && m.principled_extras()) return "a material with Subsurface, Sheen, Coat or Anisotropic";  // (round 330: the card's g-buffer has no room for them yet)
   const Material::Resolved &tx = m.textures();
   /* (A live procedural texture draws on the card since task 0196, except seen close up: gpu_view_draw's live_close_up.)
    * Axis materials draw on the card since task 0195 - not toon ones (the toon maps aren't read through the parts), nor

@@ -999,7 +999,7 @@ struct ImageLayer : TextureLayerBase<ImageLayer> {
           const float kk = op * (use_mask ? p.mask[i] : 1.0f) * (own ? (*own)[i] : 1.0f);
           if (kk <= 0.0f) continue;
           if (wa)
-            p.albedo[i] = lerp(p.albedo[i], Vec3(texture_blend(blend, p.albedo[i].x, a.x), texture_blend(blend, p.albedo[i].y, a.y), texture_blend(blend, p.albedo[i].z, a.z)), kk);
+            p.albedo[i] = vmin(Vec3(1.0f), vmax(Vec3(0.0f), lerp(p.albedo[i], texture_blend_color(blend, p.albedo[i], a), kk)));  // (round 330: the HSV modes, clamped)
           if (wh) p.height[i] = clampf(lerpf(p.height[i], texture_blend(blend, p.height[i], lum), kk), 0.0f, 1.0f);
           if (wr) p.rough[i] = clampf(lerpf(p.rough[i], texture_blend(blend, p.rough[i], lum), kk), 0.0f, 1.0f);
         }
@@ -1023,7 +1023,7 @@ struct ImageLayer : TextureLayerBase<ImageLayer> {
     const Vec3 a = vmax(Vec3(0.0f), vmin(Vec3(1.0f), fin3(Vec3(s.x, s.y, s.z), Vec3(0.5f))));
     const float lum = 0.2126f * a.x + 0.7152f * a.y + 0.0722f * a.z;
     if (targets & TargetAlbedo)
-      p.albedo = lerp(p.albedo, Vec3(texture_blend(blend, p.albedo.x, a.x), texture_blend(blend, p.albedo.y, a.y), texture_blend(blend, p.albedo.z, a.z)), kk);
+      p.albedo = vmin(Vec3(1.0f), vmax(Vec3(0.0f), lerp(p.albedo, texture_blend_color(blend, p.albedo, a), kk)));
     if (targets & TargetHeight) p.height = clampf(lerpf(p.height, texture_blend(blend, p.height, lum), kk), 0.0f, 1.0f);
     if (targets & TargetRoughness) p.rough = clampf(lerpf(p.rough, texture_blend(blend, p.rough, lum), kk), 0.0f, 1.0f);
   }

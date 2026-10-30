@@ -1602,7 +1602,7 @@ void Renderer3D::shade_deferred() {
     }
     T.item = &it;
 #ifdef BL_RASTER_X86
-    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
+    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
     if (T.fast) {
       SurfaceSample fs = T.surface;
       if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);  // (as the pixel loop applies it)

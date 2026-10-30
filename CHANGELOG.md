@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 330): Blender's Mix modes, and the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic
+
+**Asked:** the shader-graph request (round 327); the user chose all four groups, Principled's extras among them.
+
+**Added (task 0310)**
+- **Blender's Mix modes as layer blends**, after the seven there were (old textures unchanged): Darken, Lighten,
+  Difference, Exclusion, Subtract, Divide, Color Dodge, Color Burn, Soft Light, Linear Light, and Hue, Saturation,
+  Color and Value in HSV - Blender's formulas.
+- **The material's "Principled: Subsurface, Sheen, Coat" group** (folded, PBR materials):
+  - Subsurface, its Color and Scale: a softer terminator, tinted - brighter where the light grazes, dimmer facing it
+    (an energy-conserving wrap, not Blender's random walk);
+  - Sheen, its Tint and Roughness: the grazing glow of cloth (Disney's);
+  - Coat, its Roughness, IOR and Tint: a clear layer with its own highlight over the base, which it dims and tints;
+  - Anisotropic and its Rotation: the highlight stretched along the mesh's tangent (needs UVs).
+- **Where:** the CPU raster (the per-pixel shader: its 8-wide one leaves such materials to it) and the CPU path tracer
+  (one BRDF), and the GPU path tracer and the OptiX device (the extras in a record of their own after the materials:
+  the kernel's material struct can't grow past SPIR-V's id bound; the PTX regenerated). Both path tracers sample the
+  coat as a lobe of its own. The GPU views don't draw them yet - their g-buffer has no room - so a view with such a
+  material goes to the CPU and says why.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The OptiX kernel's PTX was stale (its hash test failed; OptiX ignored the extras): regenerated.
+- The CPU raster's 8-wide shader ignored the extras (a coat only near triangle edges): such materials use the
+  per-pixel shader.
+- Subsurface darkened the lit side and its "past the terminator" light was never reached by any light loop: an
+  energy-conserving wrap on the lit side.
+- Coat's sharp highlight was only met by chance (fireflies, the sky's reflection missing): sampled as a lobe in both
+  path tracers.
+- An Image layer's Hue / Saturation / Color did nothing and Value replaced the colour: blended as a colour, clamped.
+  Color Dodge keeps black black, as Blender's. An area light's diffuse had a seam as its direction crossed the horizon.
+- The lesson's Mix-mode Try-it changed round 328's demo texture (its test then failed): it has its own; a Try-it lacquers
+  the sphere.
+
+**Fixed (round 329's Linux crash):** a click that added a stop to a ColorRamp, or a point to a curve, could crash the
+editor on Linux. The new stop's index was worked out as `insert(...) - begin()`, and GCC read `begin()` from the
+vector's old storage before the insert moved it, so the picked stop was a wild index (MSVC happened to read it after).
+The index is now taken before the insert. Found by tracing the intermittent segfault in the assets group with a
+backtrace on SIGSEGV; checked by a test that adds to a full ramp and curve, and by the click test passing 8 runs of 8.
+
+**Checked:** `tests_round330`, `tests_round330_blends` - all extras at 0 give exactly the old BRDF; Sheen adds at
+grazing, Coat a highlight of its own, Anisotropic a different highlight along the tangent than across it (the isotropic
+one the same both ways), Subsurface brighter at a grazing light and dimmer facing it; a white material with everything
+on reflects at most 0.70 of a white furnace; a coated sphere's middle changes in all 169 pixels in the CPU view; the GPU path tracer against the CPU on a coated, sheened, subsurface ball and an anisotropic
+one (run on main, which has the GPU); the views' fallback and its reason; ten Mix modes and the four HSV ones against
+Blender's results.
+
 ## 2026-10-30 (round 329): Blender's converters - ColorRamp, Map Range, Clamp, Math, RGB Curves, Separate Color
 
 **Asked:** the shader-graph request (round 327); the user chose all four groups of Blender's additions.

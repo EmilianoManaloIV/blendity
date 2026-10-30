@@ -233,6 +233,35 @@ void Material::reflect(Reflector &r) {
     }
     r.group_end();
   }
+  reflect_principled_extras(r);
+}
+
+/* Round 330: the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic, folded (appended: the Inspector matches a
+ * field's edit by its order). */
+void Material::reflect_principled_extras(Reflector &r) {
+  if (!r.all_fields() && shading_model != 0) return;
+  if (r.group("Principled: Subsurface, Sheen, Coat", false)) {
+    r.field("Subsurface", subsurface, 0.01f, 0.0f, 1.0f);
+    r.help("Light passing under the surface and out again (skin, wax, leaves, marble): the shadow side softened and tinted\n"
+           "by Subsurface Color. Blender's Subsurface Weight.");
+    r.color("Subsurface Color", subsurface_color);
+    r.field("Subsurface Scale", subsurface_scale, 0.01f, 0.0f, 1.0f);
+    r.help("How far round into the shadow the light reaches.");
+    r.field("Sheen", sheen, 0.01f, 0.0f, 1.0f);
+    r.help("A soft glow at grazing angles, as on velvet and other cloth (Blender's Sheen Weight).");
+    r.color("Sheen Tint", sheen_tint);
+    r.field("Sheen Roughness", sheen_roughness, 0.01f, 0.0f, 1.0f);
+    r.field("Coat", coat, 0.01f, 0.0f, 1.0f);
+    r.help("A clear lacquer layer over the material - car paint, varnished wood - with a highlight of its own.");
+    r.field("Coat Roughness", coat_roughness, 0.01f, 0.0f, 1.0f);
+    r.field("Coat IOR", coat_ior, 0.01f, 1.0f, 3.0f);
+    r.color("Coat Tint", coat_tint);
+    r.field("Anisotropic", anisotropic, 0.01f, 0.0f, 1.0f);
+    r.help("The highlight stretched along the surface's tangent (brushed metal, a record's grooves, hair). Needs the mesh's\n"
+           "tangents (UVs).");
+    r.field("Anisotropic Rotation", anisotropic_rotation, 0.01f, 0.0f, 1.0f);
+  }
+  r.group_end();
 }
 
 const Material::Resolved &Material::textures() const {

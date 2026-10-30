@@ -988,6 +988,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
     }
 #endif
+    /* Round 330's review: a coat is sampled as a lobe of its own (half the time at Coat 1), else its sharp highlight
+     * would only be met by chance - fireflies, and the sky's reflection missing. */
+    const float p_coat = s.extras && !s.toon ? 0.5f * s.coat : 0.0f;
+    GGX gc{std::max(s.coat_roughness * s.coat_roughness, 0.002f), 0};
+    gc.a2 = gc.a * gc.a;
     /* Solid-angle pdf with which this vertex samples `dir` (BSDF lobes and guiding). */
     auto sampling_pdf = [&](Vec3 dir) {
       float nl = dot(n, dir);
@@ -995,6 +1000,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       Vec3 hh = normalize(V + dir);
       float pdf_spec = g.D(std::max(dot(n, hh), 0.0f)) * g.G1(nv) / (4.0f * nv);
       float pdf = p_spec * pdf_spec + (1.0f - p_spec) * (nl / kPi);
+      if (p_coat > 0.0f) pdf = p_coat * gc.D(std::max(dot(n, hh), 0.0f)) * gc.G1(nv) / (4.0f * nv) + (1.0f - p_coat) * pdf;
 #ifdef BL_WITH_OPENPGL
       if (pg > 0.0f) pdf = (1.0f - pg) * pdf + pg * guide->ssd.PDF(pgl_v(dir));
 #endif
@@ -1120,6 +1126,12 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       pgl_vec3f d = guide->ssd.Sample({rnd(rng), rnd(rng)});
       dir = normalize(Vec3(d.x, d.y, d.z));
 #endif
+    }
+    else if (p_coat > 0.0f && rnd(rng) < p_coat) {
+      Vec3 vl{dot(V, tt), dot(V, bb), dot(V, n)};
+      Vec3 hl = gc.sample_vndf(vl, rnd(rng), rnd(rng));
+      Vec3 hw = normalize(tt * hl.x + bb * hl.y + n * hl.z);
+      dir = hw * (2.0f * dot(V, hw)) - V;
     }
     else if (rnd(rng) < p_spec) {
       Vec3 vl{dot(V, tt), dot(V, bb), dot(V, n)};
@@ -2029,6 +2041,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     return id;
   };
   std::vector<std::pair<uint32_t, const Material *>> axis_parents;  // patched once every object's slots are in
+  std::vector<gpu::GMaterial> extras;  // (round 330: one a material, after them all)
   auto material = [&](const Material &m, bool as_part) {
     gpu::GMaterial g{};
     for (int k = 0; k < 4; k++) g.axis_i[k] = -1;
@@ -2099,7 +2112,22 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     std::memcpy(&g.tex3[3], &packed3, 4);
     const float t3[4] = {m.toon_specular_color.x, m.toon_specular_color.y, m.toon_specular_color.z, clampf(m.toon_wrap, 0.0f, 1.0f)};
     std::memcpy(g.toon3, t3, 16);
+    /* Round 330: the Principled extras in a record of their own after every material (the kernel's Material can't grow:
+     * SPIR-V's id bound), read at a hit when flags[3] bit 4096 says so. */
+    gpu::GMaterial x{};
+    if (m.principled_extras() && m.shading_model == 0) {
+      SurfaceSample ex;
+      apply_principled_extras(m, ex, Vec3(1.0f, 0.0f, 0.0f), true);
+      g.flags[3] |= 4096;
+      const float b[4] = {ex.subsurface, ex.sheen, ex.coat, finite_bits(m.anisotropic) ? clampf(m.anisotropic, 0.0f, 1.0f) : 0.0f};
+      const float e[4] = {ex.subsurface_color.x, ex.subsurface_color.y, ex.subsurface_color.z, ex.subsurface_scale};
+      const float p[4] = {ex.sheen_tint.x, ex.sheen_tint.y, ex.sheen_tint.z, ex.sheen_roughness};
+      const float t[4] = {ex.coat_tint.x, ex.coat_tint.y, ex.coat_tint.z, ex.coat_f0};
+      const float o[4] = {finite_bits(m.anisotropic_rotation) ? clampf(m.anisotropic_rotation, 0.0f, 1.0f) : 0.0f, ex.coat_roughness, 0.0f, 0.0f};
+      std::memcpy(x.base_color, b, 16), std::memcpy(x.emission, e, 16), std::memcpy(x.params, p, 16), std::memcpy(x.tiling, t, 16), std::memcpy(x.offset, o, 16);
+    }
     s.materials.push_back(g);
+    extras.push_back(x);
   };
   material(*default_material(), false);  // index 0
   struct MeshRec { uint32_t node_off, tri_off, vtx_off, idx_off, blas; };
@@ -2219,6 +2247,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
   p.key_light[0] = toon_key_L_.x, p.key_light[1] = toon_key_L_.y, p.key_light[2] = toon_key_L_.z, p.key_light[3] = (float)toon_key_;  // (task 0148)
   p.misc[0] = 8.0f, p.misc[1] = p.misc[2] = p.misc[3] = 0.0f;  // (task 0149: the kernel's toon map reads)
+  p.misc[2] = (float)s.materials.size();  // (round 330: the extras' records follow the materials)
+  s.materials.insert(s.materials.end(), extras.begin(), extras.end());
   p.env_f[0] = env_.strength;
   p.env_f[1] = env_.rotation;
   auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };

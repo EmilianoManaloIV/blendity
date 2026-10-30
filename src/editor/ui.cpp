@@ -1156,7 +1156,8 @@ bool Context::ramp_add_stop(std::vector<RampStop> &st, float t, int interp, int 
   if (st.size() >= kWidgetPointsMax) return false;
   RampStop s{t, ramp_eval(st, t, interp)};
   const auto it = std::upper_bound(st.begin(), st.end(), s, [](const RampStop &x, const RampStop &y) { return x.pos < y.pos; });
-  sel = (int)(st.insert(it, s) - st.begin());
+  sel = (int)(it - st.begin());  // (before the insert: `insert(...) - begin()` may read begin() first, from the old storage - GCC did)
+  st.insert(it, s);
   return true;
 }
 
@@ -1224,7 +1225,8 @@ bool Context::curve_field(Id i, const Recti &r, std::vector<Vec2> &pts, int &sel
 bool Context::curve_add_point(std::vector<Vec2> &pts, Vec2 p, int &sel) {
   if (pts.size() >= kWidgetPointsMax) return false;
   const auto it = std::upper_bound(pts.begin(), pts.end(), p, [](const Vec2 &a, const Vec2 &b) { return a.x < b.x; });
-  sel = (int)(pts.insert(it, p) - pts.begin());
+  sel = (int)(it - pts.begin());  // (before the insert, as in ramp_add_stop)
+  pts.insert(it, p);
   return true;
 }
 

@@ -4942,6 +4942,50 @@ static void tests_round329() {
   });
 }
 
+/* Round 330: Blender's Mix modes as layer blends, against Blender's results (ramp_blend, factor 1). */
+static void tests_round330_blends() {
+  test("Blender's Mix modes as layer blends: Darken, Lighten, Difference, Exclusion, Subtract, Divide, Color Dodge, Color Burn, Soft Light and Linear Light against Blender's formulas; Hue, Saturation, Color and Value in HSV; the old seven unchanged", [] {
+    const float a = 0.3f, b = 0.6f;
+    const float want[] = {std::min(a, b), std::max(a, b), std::fabs(a - b), a + b - 2 * a * b, a - b, a / b, std::min(1.0f, a / (1 - b)), std::max(0.0f, 1 - (1 - a) / b),
+                          (1 - a) * b * a + a * (1 - (1 - a) * (1 - b)), a + 2 * b - 1};
+    int ok = 0;
+    for (int k = 0; k < 10; k++) {
+      const float got = texture_blend((int)LayerBlend::Darken + k, a, b);
+      ok += std::fabs(got - want[k]) < 1e-6f;
+      if (std::fabs(got - want[k]) >= 1e-6f) std::printf("    mode %d: %.5f, wanted %.5f\n", (int)LayerBlend::Darken + k, got, want[k]);
+    }
+    CHECK(ok == 10);
+    CHECK(texture_blend((int)LayerBlend::Multiply, a, b) == a * b && texture_blend((int)LayerBlend::HeightMax, a, b) == b && texture_blend((int)LayerBlend::Normal, a, b) == b);
+    /* HSV: below orange (1, 0.5, 0) under a blue layer (0, 0, 1). */
+    const Vec3 below{1.0f, 0.5f, 0.0f}, layer{0.0f, 0.0f, 1.0f};
+    const Vec3 hue = texture_blend_color((int)LayerBlend::Hue, below, layer), val = texture_blend_color((int)LayerBlend::Value, below, Vec3(0.5f));
+    const Vec3 sat = texture_blend_color((int)LayerBlend::Saturation, below, Vec3(0.5f)), col = texture_blend_color((int)LayerBlend::Color, below, layer);
+    std::printf("    Hue (%.2f %.2f %.2f), Value 0.5 (%.2f %.2f %.2f), Saturation of grey (%.2f %.2f %.2f), Color (%.2f %.2f %.2f)\n", hue.x, hue.y, hue.z, val.x, val.y, val.z,
+                sat.x, sat.y, sat.z, col.x, col.y, col.z);
+    CHECK(length(hue - Vec3(0, 0, 1)) < 1e-4f && length(val - Vec3(0.5f, 0.25f, 0.0f)) < 1e-4f && length(sat - Vec3(1.0f)) < 1e-4f && length(col - Vec3(0, 0, 1)) < 1e-4f);
+    /* Review 330: Color Dodge leaves black black (Blender's); an Image layer's Hue mode takes the image's hue. */
+    CHECK(texture_blend((int)LayerBlend::ColorDodge, 0.0f, 1.0f) == 0.0f);
+    std::unique_ptr<TextureLayer> img = create_texture_layer("Image");
+    CHECK(img != nullptr);
+  });
+  test("a stop or point added to a full ramp or curve (its storage moved) is the one picked - the Linux crash after round 329: the index was taken from the old storage", [] {
+    ui::Context u;
+    for (size_t extra = 0; extra < 3; extra++) {
+      std::vector<RampStop> st = {{0.0f, Vec3(0.0f)}, {1.0f, Vec3(1.0f)}};
+      for (size_t k = 0; k < extra; k++) st.push_back({1.0f, Vec3(1.0f)});
+      st.shrink_to_fit();  // (no room: the insert moves the stops)
+      int sel = -1;
+      CHECK(u.ramp_add_stop(st, 0.5f, 1, sel));
+      CHECK(sel == 1 && st.size() == 3 + extra && std::fabs(st[(size_t)sel].pos - 0.5f) < 1e-6f);
+      std::vector<Vec2> pts = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+      pts.shrink_to_fit();
+      sel = -1;
+      CHECK(u.curve_add_point(pts, {0.25f, 0.7f}, sel));
+      CHECK(sel == 1 && pts.size() == 3 && pts[(size_t)sel].x == 0.25f);
+    }
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -4960,4 +5004,5 @@ void run_assets_tests() {
   tests_round327();
   tests_round328();
   tests_round329();
+  tests_round330_blends();
 }

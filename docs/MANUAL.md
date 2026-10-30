@@ -408,7 +408,12 @@ profiles, **Magic**, **White Noise** and **Gabor** - all repeating without a sea
 Blender's converters as filters (round 329): the **Color Ramp** is a gradient bar - click to add a stop, drag one to
 move it, drag it off to remove it; Constant, Linear, Ease or B-Spline; from the height, the mask or the luminance.
 **Map Range**, **Clamp** and **Math** (15 operations, with a value or another plane) work on one plane; **RGB Curves**
-has a curve box per channel; **Separate Channel** puts the albedo's R, G, B, H, S or V into the mask.
+has a curve box per channel; **Separate Channel** puts the albedo's R, G, B, H, S or V into the mask. A layer's
+**Blend** has Blender's Mix modes too (Darken... Linear Light, and Hue, Saturation, Color, Value in HSV).
+
+A PBR material's folded **Principled: Subsurface, Sheen, Coat** group (round 330): Subsurface for skin, wax and leaves;
+Sheen for cloth; Coat for lacquer and car paint; Anisotropic for brushed metal and hair (needs UVs). The CPU views, the
+path tracers (CPU, GPU and OptiX) draw them; a GPU view with such a material is drawn on the CPU and says so.
 
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.

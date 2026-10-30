@@ -64,7 +64,9 @@ float texture_rand(uint32_t a, uint32_t b, uint32_t c) { return (texture_hash(a,
 /* Layers: the common fields and the generator blend                      */
 /* ===================================================================== */
 
-static const char *kBlendNames[] = {"Normal", "Multiply", "Add", "Screen", "Overlay", "Height Max", "Height Min"};
+static const char *kBlendNames[] = {"Normal", "Multiply", "Add", "Screen", "Overlay", "Height Max", "Height Min", "Darken", "Lighten", "Difference",
+                                    "Exclusion", "Subtract", "Divide", "Color Dodge", "Color Burn", "Soft Light", "Linear Light", "Hue", "Saturation",
+                                    "Color", "Value"};
 
 /* The target bits as three checkboxes (files, undo and hashing see three bools). */
 static void reflect_targets(Reflector &r, int &targets) {
@@ -81,8 +83,9 @@ void TextureLayer::reflect_common(Reflector &r, bool with_enabled) {
   if (with_enabled) r.field("Enabled", enabled);
   r.text("Name", name);
   r.help("A name an Anchor effect in another layer's mask reads this layer's mask by (task 0244).");
-  r.enumeration("Blend", blend, kBlendNames, 7);
-  r.help("How this layer combines with what is below (Substance's layer blend modes; Height Max / Min for stacking heights).");
+  r.enumeration("Blend", blend, kBlendNames, (int)LayerBlend::Count);
+  r.help("How this layer combines with what is below (Substance's layer blend modes; Height Max / Min for stacking heights;\n"
+         "from Darken on, Blender's Mix node's modes - Hue, Saturation, Color and Value mix in HSV).");
   r.field("Opacity", opacity, 0.01f, 0.0f, 1.0f);
   reflect_targets(r, targets);
   r.field("Use Mask", use_mask);
@@ -144,19 +147,61 @@ Vec3 LayerAux::sample_c(float u, float v) const {
 /* Finite and sane, else the default (finite_bits: a `v == v` test can be folded away under /fp:fast). */
 static inline float fin1(float v, float d) { return finite_bits(v) && std::fabs(v) < 1e30f ? v : d; }
 
+/* One value's blend (Blender's ramp_blend for the Mix modes, factor 1: the layer's opacity is its factor). A scalar
+ * plane under Hue, Saturation or Color keeps what is below; under Value it takes the layer's. */
 float texture_blend(int mode, float below, float v) {
   switch ((LayerBlend)mode) {
     case LayerBlend::Multiply: return below * v;
     case LayerBlend::Add: return below + v;
     case LayerBlend::Screen: return 1.0f - (1.0f - below) * (1.0f - v);
     case LayerBlend::Overlay: return below < 0.5f ? 2.0f * below * v : 1.0f - 2.0f * (1.0f - below) * (1.0f - v);
-    case LayerBlend::HeightMax: return std::max(below, v);
-    case LayerBlend::HeightMin: return std::min(below, v);
+    case LayerBlend::HeightMax: case LayerBlend::Lighten: return std::max(below, v);
+    case LayerBlend::HeightMin: case LayerBlend::Darken: return std::min(below, v);
+    case LayerBlend::Difference: return std::fabs(below - v);
+    case LayerBlend::Exclusion: return below + v - 2.0f * below * v;
+    case LayerBlend::Subtract: return below - v;
+    case LayerBlend::Divide: return v != 0.0f ? below / v : below;
+    case LayerBlend::ColorDodge: return below == 0.0f ? 0.0f : v >= 1.0f ? 1.0f : std::min(1.0f, below / (1.0f - v));  // (Blender's: black stays black)
+    case LayerBlend::ColorBurn: return v <= 0.0f ? 0.0f : clampf(1.0f - (1.0f - below) / v, 0.0f, 1.0f);
+    case LayerBlend::SoftLight: return (1.0f - below) * v * below + below * (1.0f - (1.0f - below) * (1.0f - v));
+    case LayerBlend::LinearLight: return below + 2.0f * v - 1.0f;
+    case LayerBlend::Hue: case LayerBlend::Saturation: case LayerBlend::Color: return below;
     default: return v;
   }
 }
+
+namespace {
+Vec3 rgb_to_hsv(Vec3 c) {
+  const float mx = std::max({c.x, c.y, c.z}), mn = std::min({c.x, c.y, c.z}), d = mx - mn;
+  float h = 0.0f;
+  if (d > 1e-6f) h = mx == c.x ? (c.y - c.z) / d : mx == c.y ? 2.0f + (c.z - c.x) / d : 4.0f + (c.x - c.y) / d;
+  h /= 6.0f;
+  if (h < 0.0f) h += 1.0f;
+  return {h, mx > 1e-6f ? d / mx : 0.0f, mx};
+}
+Vec3 hsv_to_rgb(Vec3 c) {
+  const float h = (c.x - std::floor(c.x)) * 6.0f, s = c.y, v = c.z;
+  const int i = (int)h % 6;
+  const float f = h - std::floor(h), p = v * (1.0f - s), q = v * (1.0f - s * f), t = v * (1.0f - s * (1.0f - f));
+  const Vec3 out[6] = {{v, t, p}, {q, v, p}, {p, v, t}, {p, q, v}, {t, p, v}, {v, p, q}};
+  return out[i];
+}
+}  // namespace
+
+/* A colour's blend: the HSV modes as Blender's (Hue: the layer's hue where it has saturation; Saturation: the layer's
+ * saturation where below has some; Color: the layer's hue and saturation; Value: the layer's value), the rest per
+ * channel. */
 static inline Vec3 blend_color(int mode, Vec3 below, Vec3 v) {
-  return {texture_blend(mode, below.x, v.x), texture_blend(mode, below.y, v.y), texture_blend(mode, below.z, v.z)};
+  const LayerBlend m = (LayerBlend)mode;
+  if (m != LayerBlend::Hue && m != LayerBlend::Saturation && m != LayerBlend::Color && m != LayerBlend::Value)
+    return {texture_blend(mode, below.x, v.x), texture_blend(mode, below.y, v.y), texture_blend(mode, below.z, v.z)};
+  Vec3 a = rgb_to_hsv(below);
+  const Vec3 b = rgb_to_hsv(v);
+  if (m == LayerBlend::Hue && b.y > 0.0f) a.x = b.x;
+  if (m == LayerBlend::Saturation && a.y > 0.0f) a.y = b.y;
+  if (m == LayerBlend::Color && b.y > 0.0f) a.x = b.x, a.y = b.y;
+  if (m == LayerBlend::Value) a.z = b.z;
+  return hsv_to_rgb(a);
 }
 
 void TextureLayer::apply_point(TexPoint &p, float u, float v, const LayerContext &c, const LayerAux *) const {

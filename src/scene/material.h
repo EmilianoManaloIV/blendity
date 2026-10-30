@@ -48,6 +48,17 @@ struct Material {
   float metallic = 0.0f;
   float roughness = 0.5f;
   float specular = 0.5f;  // Principled "IOR Level"; 0.5 = F0 of 4% (IOR 1.5)
+  /* Round 330: the Principled BSDF's other layers - Subsurface (light through skin, wax, leaves: a wrap tinted by its
+   * colour), Sheen (velvet, cloth: a grazing glow), Coat (lacquer, car paint: a second clear specular layer over the
+   * base) and Anisotropic (brushed metal, hair: the highlight stretched along the tangent). 0: off. */
+  float subsurface = 0.0f, subsurface_scale = 0.5f;
+  Vec3 subsurface_color{1.0f, 0.3f, 0.2f};
+  float sheen = 0.0f, sheen_roughness = 0.5f;
+  Vec3 sheen_tint{1.0f, 1.0f, 1.0f};
+  float coat = 0.0f, coat_roughness = 0.03f, coat_ior = 1.5f;
+  Vec3 coat_tint{1.0f, 1.0f, 1.0f};
+  float anisotropic = 0.0f, anisotropic_rotation = 0.0f;
+  bool principled_extras() const { return subsurface > 0.0f || sheen > 0.0f || coat > 0.0f || anisotropic > 0.0f; }
   float alpha = 1.0f;
   int surface = 0;          // MaterialSurface
   float alpha_clip = 0.5f;  // Cutout threshold
@@ -127,6 +138,7 @@ struct Material {
   std::string asset_path;
 
   void reflect(Reflector &r);
+  void reflect_principled_extras(Reflector &r);
   void touch() { version++; }
 
   /* Resolved textures (cached; reloaded when the path or file changes). */

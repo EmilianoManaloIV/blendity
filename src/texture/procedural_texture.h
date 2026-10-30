@@ -100,7 +100,9 @@ struct LayerAux {
   float sample_plane(const std::vector<float> &pl, float u, float v) const;
 };
 
-enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin };
+enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin,
+                        /* round 330: Blender's Mix node's modes */ Darken, Lighten, Difference, Exclusion, Subtract, Divide, ColorDodge, ColorBurn,
+                        SoftLight, LinearLight, Hue, Saturation, Color, Value, Count };
 enum LayerTarget { TargetAlbedo = 1, TargetHeight = 2, TargetRoughness = 4, TargetMask = 8, TargetAlpha = 16, TargetMetallic = 32, TargetEmission = 64 };  // (Alpha: a card's cover into the cover plane, task 0150; Metallic / Emission: task 0244)
 
 struct TextureLayer;

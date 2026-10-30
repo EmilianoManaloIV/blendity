@@ -11037,6 +11037,160 @@ static void tests_round268() {
   });
 }
 
+static float grade_lum(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+
+/* Round 330 (task 0310): the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic in every renderer. */
+static void tests_round330() {
+  test("Principled extras on the CPU: all at 0 the BRDF is exactly the old one; Sheen glows at grazing, Coat adds a highlight of its own, Anisotropic stretches the highlight along the tangent, Subsurface softens the terminator; a white coated, sheened surface reflects no more than it receives (white furnace)", [] {
+    Material plain, m;
+    plain.base_color = m.base_color = Vec3(0.6f);
+    plain.roughness = m.roughness = 0.4f;
+    SurfaceSample a, b;
+    a.albedo = b.albedo = Vec3(0.6f), a.roughness = b.roughness = 0.4f;
+    a.normal = b.normal = {0, 1, 0};
+    apply_principled_extras(plain, b, {1, 0, 0}, true);
+    const Vec3 n{0, 1, 0}, v = normalize(Vec3(0.3f, 1.0f, 0.2f)), l = normalize(Vec3(-0.5f, 0.8f, 0.1f));
+    CHECK(!b.extras && brdf_eval(a, n, v, l) == brdf_eval(b, n, v, l));
+    auto with = [&](void (*set)(Material &)) {
+      Material x = plain;
+      set(x);
+      SurfaceSample s = a;
+      apply_principled_extras(x, s, {1, 0, 0}, true);
+      return s;
+    };
+    const Vec3 vg = normalize(Vec3(0.0f, 0.15f, 1.0f)), lg = normalize(Vec3(0.0f, 0.2f, -1.0f));  // (grazing, from behind)
+    const SurfaceSample sheen = with([](Material &x) { x.sheen = 1.0f; });
+    const float s0 = grade_lum(brdf_eval(a, n, vg, lg)), s1 = grade_lum(brdf_eval(sheen, n, vg, lg));
+    const Vec3 lm = Vec3(-v.x, v.y, -v.z);  // (the mirror direction)
+    const SurfaceSample coat = with([](Material &x) { x.coat = 1.0f; });
+    const float c0 = grade_lum(brdf_eval(a, n, v, lm)), c1 = grade_lum(brdf_eval(coat, n, v, lm));
+    const SurfaceSample aniso = with([](Material &x) { x.anisotropic = 1.0f; });
+    /* (the half vector tilted along the tangent, then across it) */
+    const Vec3 vt = normalize(Vec3(0.6f, 1.0f, 0.0f)), lt = normalize(Vec3(0.2f, 1.0f, 0.0f)), vb = normalize(Vec3(0.0f, 1.0f, 0.6f)), lb = normalize(Vec3(0.0f, 1.0f, 0.2f));
+    const float along = grade_lum(brdf_eval(aniso, n, vt, lt)), across = grade_lum(brdf_eval(aniso, n, vb, lb)), iso_t = grade_lum(brdf_eval(a, n, vt, lt)),
+                iso_b = grade_lum(brdf_eval(a, n, vb, lb));
+    /* Subsurface (review 330): a softer terminator - brighter where the light grazes, dimmer facing it (energy kept). */
+    const SurfaceSample ss = with([](Material &x) { x.subsurface = 1.0f; x.roughness = 1.0f; });
+    SurfaceSample plain_rough = a;
+    plain_rough.roughness = 1.0f;
+    const Vec3 vtop{0, 1, 0}, graze = normalize(Vec3(1.0f, 0.1f, 0.0f));
+    const float g0 = grade_lum(brdf_eval(plain_rough, n, vtop, graze)), g1 = grade_lum(brdf_eval(ss, n, vtop, graze));
+    const float f0 = grade_lum(brdf_eval(plain_rough, n, vtop, vtop)), f1 = grade_lum(brdf_eval(ss, n, vtop, vtop));
+    std::printf("    sheen at grazing %.4f -> %.4f; coat at the mirror %.4f -> %.4f; anisotropic along %.4f / across %.4f (isotropic %.4f / %.4f); subsurface at a grazing light %.4f -> %.4f, facing it %.4f -> %.4f\n",
+                s0, s1, c0, c1, along, across, iso_t, iso_b, g0, g1, f0, f1);
+    CHECK(s1 > s0 + 0.05f && c1 > c0 * 1.2f && std::fabs(along - across) > 0.2f * std::max(along, across) && std::fabs(iso_t - iso_b) < 1e-4f && g1 > g0 * 1.15f && f1 < f0);  // (the specular is the same both ways: the diffuse alone gains more)
+    /* The white furnace: a white material with every extra on reflects at most what comes in, at three view angles. */
+    Material white;
+    white.base_color = Vec3(1.0f), white.roughness = 0.5f, white.coat = 1.0f, white.sheen = 1.0f, white.subsurface = 0.5f;
+    SurfaceSample w;
+    w.albedo = Vec3(1.0f), w.roughness = 0.5f, w.normal = n;
+    apply_principled_extras(white, w, {1, 0, 0}, true);
+    float worst = 0.0f;
+    for (float vy : {0.95f, 0.6f, 0.25f}) {
+      const Vec3 vv = normalize(Vec3(std::sqrt(1.0f - vy * vy), vy, 0.0f));
+      double sum = 0.0;
+      const int N = 40000;
+      for (int k = 0; k < N; k++) {  // (cosine-free uniform hemisphere: brdf_eval carries N.L, the pdf is 1 / 2 pi)
+        const float u1 = texture_rand((uint32_t)k, 1u, 3u), u2 = texture_rand((uint32_t)k, 2u, 3u);
+        const float z = u1, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = 2.0f * kPi * u2;
+        sum += grade_lum(brdf_eval(w, n, vv, {r * std::cos(phi), z, r * std::sin(phi)})) * 2.0 * kPi;
+      }
+      worst = std::max(worst, (float)(sum / N));
+    }
+    std::printf("    the white furnace: at most %.3f of the light reflected\n", worst);
+    CHECK(worst < 1.05f);
+  });
+  test("Principled extras in the CPU views (review 330): a coated sphere's middle changes everywhere, not only near its triangles' edges (the 8-wide shader leaves such a material to the per-pixel one)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("shading shaded");
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    CHECK(ball && ball->get<MeshRenderer>());
+    if (!ball || !ball->get<MeshRenderer>()) return;
+    MaterialPtr plain = make_material("Plain Red", {0.7f, 0.15f, 0.1f});
+    plain->roughness = 0.6f;
+    ball->get<MeshRenderer>()->materials = {plain};
+    ed.mark_changed_for_test("Plain");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(ball->world_position(), cx, cy));
+    auto block = [&] {
+      std::vector<uint32_t> out;
+      const Image &fb = ed.main_fb_for_test();
+      for (int y = cy - 6; y <= cy + 6; y++)
+        for (int x = cx - 6; x <= cx + 6; x++) out.push_back(fb.pixels[(size_t)y * fb.width + x]);
+      return out;
+    };
+    const std::vector<uint32_t> before = block();
+    MaterialPtr coated = make_material("Coated Red", {0.7f, 0.15f, 0.1f});
+    coated->roughness = 0.6f, coated->coat = 1.0f, coated->coat_tint = {0.6f, 0.8f, 1.0f};
+    ball->get<MeshRenderer>()->materials = {coated};
+    ed.mark_changed_for_test("Coat");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::vector<uint32_t> after = block();
+    int changed = 0;
+    for (size_t i = 0; i < before.size(); i++) changed += before[i] != after[i];
+    std::printf("    %d of %zu pixels in the sphere's middle changed with the coat\n", changed, before.size());
+    CHECK(changed * 10 >= (int)before.size() * 9);
+  });
+  test("Principled extras on the GPU path tracer: a coated, sheened, subsurface ball with an anisotropic one beside it renders as on the CPU; the GPU views send such a material to the CPU and say why (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    auto plane = primitives::plane(6.0f, 1);
+    auto sphere = primitives::uv_sphere(0.5f, 32, 16);
+    MaterialPtr ball = make_material("lacquer", {0.7f, 0.2f, 0.15f}), brushed = make_material("brushed", {0.8f, 0.8f, 0.8f});
+    ball->coat = 1.0f, ball->coat_roughness = 0.05f, ball->sheen = 0.6f, ball->subsurface = 0.5f, ball->roughness = 0.6f;
+    brushed->metallic = 1.0f, brushed->roughness = 0.35f, brushed->anisotropic = 0.9f, brushed->anisotropic_rotation = 0.25f;
+    std::vector<MaterialPtr> mp = {make_material("floor", {0.8f, 0.8f, 0.8f})}, mb = {ball}, mm = {brushed};
+    std::vector<PTObject> objs = {{&plane->render_mesh_tangents(), Mat4::identity(), &mp},
+                                  {&sphere->render_mesh_tangents(), Mat4::translate({-0.6f, 0.5f, 0.2f}), &mb},
+                                  {&sphere->render_mesh_tangents(), Mat4::translate({0.6f, 0.5f, 0.0f}), &mm}};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.4f, -1, 0.3f));
+    Environment env;
+    const int W = 48, H = 32, SPP = 128;
+    auto render = [&](bool cpu) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = cpu;
+      if (!cpu) st.gpus = {gpu::devices()[0].index};
+      st.denoise = false;
+      st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 1.5f, -3.5f}, {0, 0.4f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 50), W, H);
+      CHECK(pt.render(1e9, SPP) == SPP);
+      if (!cpu) {
+        if (!pt.gpu_error().empty()) std::printf("    GPU error: %s\n", pt.gpu_error().c_str());
+        CHECK(pt.gpu_error().empty() && pt.stats().cpu_samples == 0);
+      }
+      return pt.linear_rgb(false);
+    };
+    const std::vector<float> cpu = render(true), gpu_img = render(false);
+    double mc = 0, mg = 0, err = 0;
+    for (size_t i = 0; i < cpu.size(); i++) mc += cpu[i], mg += gpu_img[i], err += std::fabs(cpu[i] - gpu_img[i]);
+    mc /= cpu.size(), mg /= cpu.size(), err /= cpu.size();
+    std::printf("    CPU mean %.4f, GPU mean %.4f, mean |difference| %.4f\n", mc, mg, err);
+    CHECK(std::fabs(mc - mg) < 0.03 * mc && err < 0.06 * mc);
+    /* The GPU views: such a material goes to the CPU, with the reason. */
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    MaterialPtr coat = make_material("Coated", {0.5f, 0.5f, 0.6f});
+    coat->coat = 1.0f;
+    cube->get<MeshRenderer>()->materials = {coat};
+    ed.mark_changed_for_test("Coat the cube");
+    ed.viewport_device_for_test(2);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    std::printf("    the views: %s\n", ed.gpu_view_status().c_str());
+    CHECK(ed.gpu_view_reason().find("Subsurface, Sheen, Coat or Anisotropic") != std::string::npos);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -11082,4 +11236,5 @@ void run_render_tests() {
   tests_round266();
   tests_round267();
   tests_round268();
+  tests_round330();
 }
