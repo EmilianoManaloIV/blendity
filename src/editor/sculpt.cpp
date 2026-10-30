@@ -121,7 +121,7 @@ bool Editor::set_sculpt(bool on) {
     return false;
   }
   if (playing_) {
-    Log::warn("Sculpt: stop Play first");
+    refuse("Sculpt: stop Play first", "stop", "Stop Play");
     return false;
   }
   if (edit_mode_) exit_edit_mode();
@@ -434,6 +434,7 @@ void Editor::sculpt_end_stroke() {
   s.label = mask ? kMaskModes[std::max(1, std::min(3, (int)sculpt_mask_mode_))] : std::string("Sculpt ") + kSculptBrushes[std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind))];
   s.bytes = s.delta->ids.size() * (sizeof(uint32_t) + (mask ? 2 * sizeof(float) : 2 * sizeof(Vec3)));
   undo_.push_back(std::move(s));
+  undo_serial_++;
   trim_undo();
   redo_.clear();
   scene_dirty_ = true;
@@ -777,7 +778,7 @@ bool Editor::sculpt_load_alpha(const std::string &path) {
   if (path.empty()) return true;
   std::string err;
   Bitmap b;
-  const std::string full = fs::exists(path) ? path : fs::join(assets_dir_, path);
+  const std::string full = fs::exists(path) ? path : fs::exists(resolve_asset_path(path)) ? resolve_asset_path(path) : fs::join(assets_dir_, path);  // (a project path "Assets/..." from the picker, or one under Assets)
   if (!load_image(full, b, err)) {
     Log::warn("sculpt alpha: %s (%s)", err.empty() ? "no image there" : err.c_str(), full.c_str());
     return false;
@@ -1324,11 +1325,11 @@ bool Editor::sculpt_quad_remesh(const meshops::QuadRemeshParams &p) {
     return false;
   }
   if (sculpt_remesh_) {
-    Log::warn("Quad Remesh: one is running (sculpt remesh cancel stops it)");
+    refuse("Quad Remesh: one is running - Quad Remesh's Cancel stops it", "sculpt remesh cancel", "Cancel the remesh");
     return false;
   }
   if (playing_) {
-    Log::warn("Quad Remesh: stop Play first");
+    refuse("Quad Remesh: stop Play first", "stop", "Stop Play");
     return false;
   }
   GameObject *g = sculpt_ ? scene_->find(sculpt_obj_) : active_object();
@@ -1354,7 +1355,7 @@ bool Editor::sculpt_quad_remesh(const meshops::QuadRemeshParams &p) {
     raw->done.store(true, std::memory_order_release);
   });
   sculpt_remesh_ = std::move(job);
-  Log::info("Quad Remesh: working toward %d faces on a worker (Esc or `sculpt remesh cancel` stops it)", p.target_faces);
+  Log::info("Quad Remesh: working toward %d faces on a worker (Esc, or Quad Remesh's Cancel, stops it)", p.target_faces);
   ui_.redraw = true;
   return true;
 }
@@ -1449,18 +1450,17 @@ bool Editor::sculpt_colors_wanted(const Mesh &m) const {
   return sculpt_ && ((sculpt_show_mask_ && mask_any(m)) || (sculpt_show_groups_ && !m.face_group.empty()));
 }
 
-static Vec3 group_hue(int g) {
-  const float h = std::fmod((float)g * 0.618034f + 0.11f, 1.0f) * 6.0f, s = 0.55f, v = 0.85f;
-  const int i = (int)h;
-  const float f = h - (float)i, p = v * (1.0f - s), q = v * (1.0f - s * f), t = v * (1.0f - s * (1.0f - f));
-  switch (i % 6) {
-    case 0: return {v, t, p};
-    case 1: return {q, v, p};
-    case 2: return {p, v, t};
-    case 3: return {p, q, v};
-    case 4: return {t, p, v};
-    default: return {v, p, q};
-  }
+/* A polygroup's colour (task 0269): Okabe and Ito's palette, told apart under the common colour-vision deficiencies,
+ * then the same eight lighter and darker - past eight groups the lightness changes too, which every viewer sees. */
+Vec3 sculpt_group_color(int g) {
+  static const Vec3 kOkabeIto[8] = {{0.902f, 0.624f, 0.000f}, {0.337f, 0.706f, 0.914f}, {0.000f, 0.620f, 0.451f}, {0.941f, 0.894f, 0.259f},
+                                    {0.000f, 0.447f, 0.698f}, {0.835f, 0.369f, 0.000f}, {0.800f, 0.475f, 0.655f}, {0.600f, 0.600f, 0.600f}};
+  const unsigned k = (unsigned)std::max(0, g);
+  const Vec3 c = kOkabeIto[k % 8];
+  const unsigned tier = (k / 8) % 3;
+  if (tier == 1) return c * 0.55f + Vec3(0.45f);  // lighter
+  if (tier == 2) return c * 0.55f;                 // darker
+  return c;
 }
 
 const std::vector<Vec3> *Editor::sculpt_colors(const Mesh &m, const RenderMesh &rm, Vec3 albedo) {
@@ -1475,7 +1475,7 @@ const std::vector<Vec3> *Editor::sculpt_colors(const Mesh &m, const RenderMesh &
     const uint32_t c = rm.tri_corner[k], rv = rm.indices[k];
     if (c >= m.corner_verts.size() || rv >= sculpt_colors_.size()) continue;
     Vec3 col = albedo;
-    if ((flags & 2) && k / 3 < rm.tri_face.size()) col = group_hue(m.group_of(rm.tri_face[k / 3]));
+    if ((flags & 2) && k / 3 < rm.tri_face.size()) col = sculpt_group_color(m.group_of(rm.tri_face[k / 3]));
     if (flags & 1) {
       const uint32_t v = m.corner_verts[c];
       const float mk = kMaskDarkening * std::max(0.0f, std::min(1.0f, v < m.sculpt_mask.size() ? m.sculpt_mask[v] : 0.0f));

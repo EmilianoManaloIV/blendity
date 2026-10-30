@@ -634,7 +634,7 @@ void Renderer3D::flush() {
   js.parallel_for((int64_t)n_items, 64, [&](int64_t i0, int64_t i1) {
     for (int64_t i = i0; i < i1; i++)
       if (visible[i]) {
-        const Mat4 inv = items_[i].model.inverse();
+        const Mat4 inv = (items_[i].flattened ? items_[i].shade_model : items_[i].model).inverse();  // (round 334: shaded as the true shape)
         normal_mats_[i] = inv.transposed();
         const Vec3 lk = inv.dir(toon_key_L_);  // (task 0149: the face shadow map reads the key light in the object's space)
         const float len = length(lk);
@@ -1602,7 +1602,7 @@ void Renderer3D::shade_deferred() {
     }
     T.item = &it;
 #ifdef BL_RASTER_X86
-    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
+    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
     if (T.fast) {
       SurfaceSample fs = T.surface;
       if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);  // (as the pixel loop applies it)
@@ -2106,7 +2106,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
       for (int k = 1; k + 1 < np; k++) {
         int a = 0, b = k, d = k + 1;
         float area = (sx[b] - sx[a]) * (sy[d] - sy[a]) - (sx[d] - sx[a]) * (sy[b] - sy[a]);
-        if (area == 0.0f || (area * facing < 0.0f && !two_sided)) continue;
+        if (area == 0.0f || (area * facing < 0.0f && !two_sided && !mat->volume())) continue;  // (a fog's back faces: the view from inside it)
         if (area < 0.0f) std::swap(b, d);
         FTri t;
         int ord[3] = {a, b, d};
@@ -2155,6 +2155,10 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
       const Material &mat = *t.mat;
       const bool highlighted = it.face_highlight && !rm.tri_face.empty() && rm.tri_face[t.prim] < it.face_highlight->size() &&
                                (*it.face_highlight)[rm.tri_face[t.prim]];
+      /* A fog (round 331): its object's space once a triangle, and whether the eye is in it (then its back faces draw it). */
+      const Mat4 fog_inv = mat.volume() ? it.model.inverse() : Mat4::identity();
+      const Vec3 le = fog_inv.point(eye), bmn = rm.bounds.min, bmx = rm.bounds.max;
+      const bool eye_in_fog = mat.volume() && le.x > bmn.x && le.y > bmn.y && le.z > bmn.z && le.x < bmx.x && le.y < bmx.y && le.z < bmx.z;
       for (int y = iy0; y <= iy1; y++) {
         const float py = y + 0.5f;
         for (int x = ix0; x <= ix1; x++) {
@@ -2165,7 +2169,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           if (w0 < 0 || w1 < 0 || w2 < 0) continue;
           const size_t pi = (size_t)y * W + x;
           float z = w0 * t.z[0] + w1 * t.z[1] + w2 * t.z[2];
-          if (z < 0.0f || z >= depth[pi]) continue;
+          if (z < 0.0f || (z >= depth[pi] && !mat.volume())) continue;  // (a fog behind what is drawn still covers what is in it: draw_volume_pixel cuts it there)
           /* Perspective-correct barycentrics in the source triangle. */
           float q0 = w0 * t.iw[0], q1 = w1 * t.iw[1], q2 = w2 * t.iw[2], s = q0 + q1 + q2;
           Vec3 B = (t.c[0] * q0 + t.c[1] * q1 + t.c[2] * q2) * (1.0f / (std::fabs(s) < 1e-20f ? 1e-20f : s));
@@ -2188,9 +2192,16 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
             sp.has_tangent = true;
           }
           Vec3 V = normalize(eye - sp.position);
-          if (dot(sp.geo_normal, V) < 0) {
+          const bool back_face = dot(sp.geo_normal, V) < 0;
+          if (back_face) {
             sp.normal = -sp.normal;
             sp.geo_normal = -sp.geo_normal;
+          }
+          if (mat.volume()) {  // (round 331: the fog's front faces draw what the view crosses of it; from inside, its back faces)
+            if (back_face != eye_in_fog) continue;
+            const float cover = draw_volume_pixel(it, fog_inv, mat, eye, sp.position, back_face, x, y, depth[pi], env);
+            if (!back_face && cover >= 0.3f) ids[pi] = it.id;  // (a thick enough fog is clicked and outlined, as Transparent; never from inside it)
+            continue;
           }
           const bool door = opt_.screen_door && mat.surface == (int)MaterialSurface::Transparent;
           if (door && ((x + y) & 1)) continue;  // the mesh's holes: not even shaded
@@ -2251,6 +2262,65 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
       }
     }
   });
+}
+
+/* Round 331: a Volume material in the CPU views - the view ray's length through the mesh's own bounds (exact for a
+ * box, the bounding box for other shapes) cut where something opaque is drawn behind, dimming what is behind by
+ * exp(-density x length) toward the fog's colour lit by the sky and each sun (Henyey-Greenstein toward it). */
+float Renderer3D::draw_volume_pixel(const DrawItem &it, const Mat4 &inv, const Material &mat, Vec3 eye, Vec3 front, bool from_eye, int x, int y, float behind_z, const Environment &env) {
+  const RenderMesh &rm = *it.mesh;
+  const Vec3 d = normalize(front - eye);
+  const Vec3 lo = inv.point(eye), ld = inv.dir(d);
+  float t0 = 0.0f, t1 = 1e30f;
+  for (int k = 0; k < 3; k++) {  // (the slab test: t is world distance, as ld carries the scale)
+    const float o = k == 0 ? lo.x : k == 1 ? lo.y : lo.z, v = k == 0 ? ld.x : k == 1 ? ld.y : ld.z;
+    const float mn = k == 0 ? rm.bounds.min.x : k == 1 ? rm.bounds.min.y : rm.bounds.min.z, mx = k == 0 ? rm.bounds.max.x : k == 1 ? rm.bounds.max.y : rm.bounds.max.z;
+    if (std::fabs(v) < 1e-12f) {  // (parallel to this slab: inside it all along, or never)
+      if (o < mn || o > mx) return 0.0f;
+      continue;
+    }
+    float a = (mn - o) / v, b = (mx - o) / v;
+    if (a > b) std::swap(a, b);
+    t0 = std::max(t0, a), t1 = std::min(t1, b);
+  }
+  const float t_front = from_eye ? 0.0f : length(front - eye);  // (from_eye: the eye is in the fog, `front` its far side)
+  float t_back = t1;
+  if (behind_z < 1.0f) {  // (something drawn behind: the fog stops there)
+    const int W = rt_->width, H = rt_->height;
+    Vec4 p = inv_vp_ * Vec4((x + 0.5f) / W * 2.0f - 1.0f, 1.0f - (y + 0.5f) / H * 2.0f, behind_z, 1.0f);
+    if (std::fabs(p.w) > 1e-12f) t_back = std::min(t_back, length(Vec3(p.x, p.y, p.z) / p.w - eye));
+  }
+  const float thick = std::max(0.0f, t_back - std::max(t_front, t0));
+  const float a = 1.0f - std::exp(-std::max(0.0f, mat.volume_density) * thick);
+  if (!(a > 0.002f)) return 0.0f;  // (and NaN: an infinite density through no thickness)
+  const Vec3 albedo = vmax(Vec3(0.0f), vmin(Vec3(1.0f), mat.volume_color));
+  Vec3 light = (env_.sky + env_.equator + env_.ground) * (1.0f / 3.0f);  // (the sky's light from every side)
+  const float g = std::max(-0.95f, std::min(0.95f, mat.volume_anisotropy));
+  for (const RenderLight &l : env_.lights) {
+    if (l.type != RenderLight::Directional) continue;
+    const float c = dot(d, -l.direction), dd = 1.0f + g * g - 2.0f * g * c;
+    light += l.color * (l.intensity * kPi * (1.0f - g * g) / (4.0f * kPi * dd * std::sqrt(std::max(1e-6f, dd))));
+  }
+  Vec3 c = albedo * light + mat.volume_emission * std::max(0.0f, mat.volume_emission_strength);
+  if (env.fog) c = env.fog_apply(c, t_front);
+  uint32_t fog;
+  display::encode_span(&c.x, &fog, 1, env_.view_transform, env_.exposure);
+  uint32_t *dst = rt_->color + (size_t)y * rt_->stride + x;
+  auto ch = [&](uint32_t v, int s) { return ((v >> s) & 255) / 255.0f; };
+  auto mix = [&](int s) { return (uint32_t)std::lround(clampf(ch(*dst, s) * (1.0f - a) + ch(fog, s) * a, 0.0f, 1.0f) * 255.0f) << s; };
+  *dst = 0xFF000000u | mix(16) | mix(8) | mix(0);
+  if (!rt_->hdr.empty()) rt_->hdr[(size_t)y * rt_->width + x] = Vec3(-1.0f, 0.0f, 0.0f);
+  return a;
+}
+
+Mat4 flatten_matrix(Vec3 p, Vec3 d, float keep) {
+  Mat4 m = Mat4::identity();
+  const float s = keep - 1.0f, dv[3] = {d.x, d.y, d.z};
+  for (int c = 0; c < 3; c++)
+    for (int r = 0; r < 3; r++) m.at(r, c) += s * dv[r] * dv[c];
+  const Vec3 sp = m.dir(p);
+  m.at(0, 3) = p.x - sp.x, m.at(1, 3) = p.y - sp.y, m.at(2, 3) = p.z - sp.z;
+  return m;
 }
 
 Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds) {

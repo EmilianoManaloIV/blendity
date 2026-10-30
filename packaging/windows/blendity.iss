@@ -64,6 +64,9 @@ Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion re
 Source: "..\..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\MANUAL.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+; The Live Link bridges, for the Live Link window's Install a Bridge (task 0278); the Unreal plugin's replay session with it
+Source: "..\..\bridges\*"; DestDir: "{app}\bridges"; Excludes: "__pycache__,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\tests\fixtures\livelink_stream.bin"; DestDir: "{app}\bridges\unreal\BlendityLiveLink\Resources"; Flags: ignoreversion
 Source: "{#Icons}\blendity.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

@@ -44,6 +44,13 @@ struct SketchStroke {
   bool closed = false;
   std::vector<SketchPoint> pts;  // what is drawn: the corrected stroke
   std::vector<SketchPoint> raw;  // as the pen drew it (empty when pts is it), kept for another correction later
+  /* The brush it was drawn with (task 0297, ADR 0088): its preset, the stroke's opacity (composited once, so it doesn't
+   * darken where it crosses itself), its edge (0 hard to 1 soft), what the pen's pressure drives (bit 1 the width, bit 2
+   * the opacity) and the width at no pressure (a fraction). An older scene's strokes are the Pen's. */
+  int brush = 1;
+  float opacity = 1.0f, soft = 0.0f;
+  int pressure_to = 1;
+  float min_size = 0.0f;
   /* The fit's parameters, in the canvas's frame (an arc, an ellipse): the centre, the radii, the first axis's angle,
    * where the arc starts and how far it sweeps (radians, counter-clockwise on a y-down canvas is negative). */
   Vec2 center;
@@ -101,7 +108,26 @@ struct Sketch {
   SketchCanvas *canvas_at(int id);
 };
 
+/* SketchBook's brushes as the strokes' numbers (task 0297, ADR 0088). kind 0 draws, 1 the Eraser (cuts strokes),
+ * 2 the Stroke Eraser (whole strokes). */
+struct SketchBrush {
+  std::string name;
+  int kind = 0;
+  float width = 2.0f, opacity = 1.0f, soft = 0.0f;
+  int pressure_to = 1;  // (bit 1 the width, bit 2 the opacity)
+  float min_size = 0.0f, steady = 0.0f;  // (steady: the lazy rope, pixels)
+  uint32_t color = 0xFF202020;
+  int base = -1;  // (a brush of the user's own: the preset it was duplicated from, for Reset)
+};
+/* The presets, in the palette's order: Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser. A
+ * stroke's `brush` is its index here (the Pen is 1). */
+const std::vector<SketchBrush> &sketch_brush_presets();
+
 namespace sketch {
+
+/* The runs of points outside a circle: each run's first and one-past-last index, runs of two points or more (an
+ * eraser's cut: the pieces a stroke leaves). */
+std::vector<std::pair<size_t, size_t>> runs_outside(const std::vector<Vec2> &pts, Vec2 c, float r);
 
 /* One piece of a corrected stroke. */
 struct Fit {

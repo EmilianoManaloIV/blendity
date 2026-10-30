@@ -269,7 +269,7 @@ void RigControl::reflect(Reflector &r) {
   r.help("How the control is drawn (Maya's controller curves, Blender's custom bone shapes).");
   static const char *kSides[] = {"Auto (by name)", "Centre", "Left", "Right"};
   r.enumeration("Side", side, kSides, 4);
-  r.help("Its colour: left blue, right red, the middle yellow (Maya's and Blender's convention). Auto reads the name.");
+  r.help("Its color: left blue, right red, the middle yellow (Maya's and Blender's convention). Auto reads the name.");
   static const char *kRoles[] = {"Control", "IK Target", "IK Pole", "FK"};
   r.enumeration("Role", role, kRoles, 4);
   r.field("Size", size, 0.01f, 0.001f, 1000.0f);
@@ -450,30 +450,57 @@ GameObject *create_rig(Scene &s, bool quadruped, Vec3 at) {
 
 /* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L", plain
  * "UpperArm.R" / "Left Forearm"): side 0 left, 1 right; limb 0 upper leg, 1 lower leg, 2 upper arm, 3 lower arm. */
+/* A bone's name as lower-case words: split at anything not a letter or digit and where a lower-case letter meets an
+ * upper-case one ("lThighBend" -> l, thigh, bend; "J_Bip_L_UpperLeg" -> j, bip, l, upper, leg), the namespace
+ * (mixamorig:) dropped (task 0279). */
+std::vector<std::string> name_words(const std::string &raw) {
+  const size_t colon = raw.rfind(':');
+  const std::string n = colon == std::string::npos ? raw : raw.substr(colon + 1);
+  std::vector<std::string> words;
+  std::string w;
+  for (size_t i = 0; i < n.size(); i++) {
+    const unsigned char c = (unsigned char)n[i];
+    if (!std::isalnum(c)) {
+      if (!w.empty()) words.push_back(w), w.clear();
+      continue;
+    }
+    if (std::isupper(c) && !w.empty() && std::islower((unsigned char)n[i - 1])) words.push_back(w), w.clear();
+    w += (char)std::tolower(c);
+  }
+  if (!w.empty()) words.push_back(w);
+  return words;
+}
+
+/* The side a name says: a word "l", "left", "r", "right" anywhere (Biped's "Bip01 L Thigh", CC's "CC_Base_L_Thigh",
+ * UE's "thigh_l", Rigify's "thigh.L", Daz's "lThighBend"); -1 when none. */
+int name_side(const std::vector<std::string> &words) {
+  for (const std::string &w : words) {
+    if (w == "l" || w == "left" || w.rfind("left", 0) == 0) return 0;
+    if (w == "r" || w == "right" || w.rfind("right", 0) == 0) return 1;
+  }
+  return -1;
+}
+
 bool limb_of(const std::string &raw, int &side, int &limb) {
-  std::string n = to_lower(raw);
-  const size_t colon = n.rfind(':');
-  if (colon != std::string::npos) n = n.substr(colon + 1);  // a namespace (mixamorig:)
-  side = -1;
-  auto ends = [&](const char *suffix) {
-    const size_t l = std::strlen(suffix);
-    return n.size() > l && n.compare(n.size() - l, l, suffix) == 0;
-  };
-  if (n.find("left") != std::string::npos || ends(".l") || ends("_l") || ends(" l") || n.rfind("l_", 0) == 0) side = 0;
-  if (n.find("right") != std::string::npos || ends(".r") || ends("_r") || ends(" r") || n.rfind("r_", 0) == 0) side = 1;
+  const std::vector<std::string> words = name_words(raw);
+  side = name_side(words);
   if (side < 0) return false;
   std::string core;
-  for (char c : n)
-    if (std::isalpha((unsigned char)c)) core += c;
+  for (const std::string &w : words) {
+    if (w == "l" || w == "r" || w == "left" || w == "right") continue;
+    for (char c : w)
+      if (std::isalpha((unsigned char)c)) core += c;
+  }
   for (const char *w : {"left", "right"}) {
     const size_t at = core.find(w);
     if (at != std::string::npos) core.erase(at, std::strlen(w));
   }
   auto has = [&](const char *w) { return core.find(w) != std::string::npos; };
+  if (has("twist") || has("roll") || has("share") || has("helper")) return false;  // (a twist or helper bone beside the limb's own)
   if (has("upleg") || has("upperleg") || has("thigh")) limb = 0;
   else if (has("lowerleg") || has("shin") || has("calf") || has("knee") || (has("leg") && !has("upleg"))) limb = 1;
   else if (has("forearm") || has("lowerarm") || has("elbow")) limb = 3;
-  else if (has("upperarm") || has("arm")) limb = 2;
+  else if (has("upperarm") || has("shldr") || (has("arm") && !has("armature"))) limb = 2;
   else return false;
   return true;
 }

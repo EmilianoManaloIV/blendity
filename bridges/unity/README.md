@@ -5,13 +5,20 @@ A Unity Editor package that keeps GameObjects in the open scene in step with the
 
 ## Install
 
-Unity 2022.3 LTS or newer. Window > Package Manager > + > Add package from disk, and pick
-`bridges/unity/com.blendity.livelink/package.json` in the Blendity repository.
+Unity 2022.3 LTS or newer.
+
+- **From Blendity:** Window > Live Link > Install a Bridge > Unity Project..., and pick the project's folder: the package
+  goes into its `Packages` folder (an embedded package Unity loads when the project opens).
+- **By hand:** `python tools/package_bridges.py` makes `com.blendity.livelink-<version>.tgz` (Package Manager > + > Add
+  package from tarball) and `BlendityLiveLink-<version>.unitypackage` (Assets > Import Package > Custom Package); or
+  Add package from disk with `bridges/unity/com.blendity.livelink/package.json`. Every file has its `.meta`
+  (`tools/unity_meta.py`), as an immutable package needs.
 
 ## Use
 
-1. In Blendity: Window > Live Link > Start (or the console's `livelink start`). It shows the port, 40100 by default.
-2. In Unity: Window > Blendity Live Link > Port, then Connect.
+Nothing to do: with Auto Connect on (Window > Blendity Live Link; on by default) it connects whenever Blendity's Live
+Link runs - Blendity starts it with itself and writes `~/.blendity/livelink.json` saying where - and after Blendity
+closes or restarts it waits for it again. Disconnect holds it off until Connect; a port overrides the file's.
 
 The objects appear under a GameObject "Blendity Live Link" in the open scene. Each carries a `BlendityLink` with its
 Blendity id; nothing else in the scene is touched. Blendity is Unity's own left-handed Y up, so positions, rotations
@@ -33,5 +40,16 @@ and scales come across as the same numbers.
 - In Unity: add `"testables": ["com.blendity.livelink"]` to the project's `Packages/manifest.json` (a package's tests
   show only then), then Window > General > Test Runner > EditMode > `RecordedSessionLeavesTheScene` replays the
   recorded session in the repository (`tests/fixtures/livelink_stream.bin`).
+- `ConnectsByItselfAndAppliesTheSession` connects with no port typed: start `py tools/livelink_fake_server.py --dir
+  <folder>` first and give Unity the same `BLENDITY_PREFS_DIR=<folder>`; without a fake server it is skipped.
+- **Run (2026-10-29, Unity 6000.6.7f1, batch mode):** both pass (`Unity -batchmode -nographics -projectPath <project>
+  -runTests -testPlatform EditMode`), the package imports without a warning. The run found two faults, fixed:
+  `TryAutoConnect` called while connected dropped the link and started over, and opening another scene left the
+  linked objects behind with the old one - the link now starts again in the new scene.
+- `LiveSessionTests.FollowsALiveBlendity` follows a running Blendity: Blendity's suite runs it with
+  `BLENDITY_TEST_BRIDGE` (see [LIVELINK.md](../../docs/LIVELINK.md#testing-a-bridge-live-round-318)). Run on
+  2026-10-29: LIVE OK, the longest editor frame 33.3 ms while a 32,514-vertex mesh deformed. A project made by
+  Install a Bridge compiled the package with no error.
 - Without Unity: `ReplayCheck/ReplayCheck.cs` runs the package's framing, JSON and glTF reading on the same session
-  with any C# compiler (its header has the command).
+  with any C# compiler (its header has the command); `ReplayCheck.exe --live <python> <repository's blendity folder>`
+  finds the stand-in Live Link (`tools/livelink_fake_server.py`) through the discovery file twice, as the package does.

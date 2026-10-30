@@ -88,11 +88,11 @@ void Editor::ai_shutdown() {
  * worker (ONNX Runtime loaded there on first use); poll_ai shows the result as a ghost. */
 void Editor::ai_generate(int from, int to) {
   if (!assist_require(Assist::Ai)) return;
-  if (playing_) return Log::warn("AI Inbetween: stop Play first");
+  if (playing_) return refuse("AI Inbetween: stop Play first", "stop", "Stop Play");
   if (ai_.job) return Log::warn("AI Inbetween: still working on the last span");
   ai::ModelInfo info;
-  if (!ai_.rt && !ai::install_problem().empty()) return Log::warn("AI Inbetween needs its download: Preferences > Animation Assistants > Install, or `ai install`");
-  if (!ai_info(info)) return Log::warn("AI Inbetween: the install's inbetween.json can't be read (ai remove, then ai install)");
+  if (!ai_.rt && !ai::install_problem().empty()) return refuse("AI Inbetween needs its download (Preferences > Animation Assistants > Install)", "ai install", "Install");
+  if (!ai_info(info)) return refuse("AI Inbetween: the install's inbetween.json can't be read - Remove and Install it again in Preferences > Animation Assistants", "preferences", "Open Preferences");
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   const gait::Rig rig = walk_rig();
@@ -179,8 +179,9 @@ void Editor::draw_ai_toolbar(int &x, int y, int bh) {
   if (button(u.px(92), busy ? "Working..." : "AI Inbetween", ai_.ghost || busy,
              "The motion between the keys around the playhead made by a network trained on motion capture (Cascadeur's AI\n"
              "Inbetweening), in the style picked beside it. Shown as a ghost; Apply writes it as keys - only that span changes.\n"
-             "Needs its download (Preferences > Animation Assistants). Console: ai span [from to], ai style <name>, ai apply."))
+             "Needs its download (Preferences > Animation Assistants). The ... beside the style sets a span by frame numbers."))
     ai_command({"ai", ai_.ghost ? "off" : "span"});
+  draw_ai_span_options(x, y, bh);  // (task 0288)
   ai::ModelInfo info;
   if (!ai_info(info)) return;
   std::vector<const char *> names;
@@ -195,13 +196,42 @@ void Editor::draw_ai_toolbar(int &x, int y, int bh) {
   } else if (button(u.px(92), "Fit to Clips", false,
                     "Fine-tune on your own clips: every clip of this project that animates this character teaches the network's last layer\n"
                     "how this character moves (a few seconds to a minute, in the background). Saved as Assets/AI/<character>.aihead;\n"
-                    "console: ai finetune off goes back to the shipped model.")) {
+                    "the ... options turn it off for the shipped model.")) {
     ai_finetune("");
   }
   if (!ai_.ghost) return;
   if (button(u.px(70), "Variation", false, "The same span made again a little differently (the frames before it taken faster or slower)."))
     ai_command({"ai", "variation"});
   if (button(u.px(54), "Apply", false, "Write the made span into the clip (one undo step). Every other key stays as it is.")) ai_apply();
+}
+
+/* Task 0288: AI Inbetween's span by frame numbers and the fitted model on or off - what `ai span from to` and
+ * `ai finetune on|off` did - in a small popup beside the style. */
+void Editor::draw_ai_span_options(int &x, int y, int bh) {
+  auto &u = ui_;
+  const Recti b{x, y, u.px(28), bh};
+  x += b.w + u.px(3);
+  const ui::Id id = u.id("ai_opts");
+  if (u.record_buttons) u.button_rects["ai:options"] = b;
+  if (u.button(b, "...")) u.open_popup(id, b);
+  u.tooltip("AI Inbetween's options: a span by frame numbers, and whether the fit to your clips is used.");
+  u.popup(id, u.px(260), [this] {
+    auto &u = ui_;
+    Recti r = u.popup_row(u.row_h() + u.px(4));
+    const int half = (r.w - u.px(24)) / 2;
+    u.label({r.x + u.px(8), r.y, u.px(40), r.h}, "From");
+    u.int_field(u.id("ai_from"), {r.x + u.px(48), r.y + u.px(2), half - u.px(44), r.h - u.px(4)}, ai_from_, 0, 1000000);
+    u.label({r.x + u.px(12) + half, r.y, u.px(24), r.h}, "To");
+    u.int_field(u.id("ai_to"), {r.x + u.px(40) + half, r.y + u.px(2), half - u.px(36), r.h - u.px(4)}, ai_to_, 0, 1000000);
+    u.tooltip("The keyed frames the made motion runs between (it changes only the frames inside); To at 0: the keys around the playhead (From unused).");
+    if (ui_.menu_item("Make This Span", nullptr, false, ai_to_ > ai_from_ || ai_to_ == 0)) {
+      ai_.seed = 0;
+      ai_generate(ai_to_ > 0 ? ai_from_ : -1, ai_to_ > 0 ? ai_to_ : -1);
+    }
+    ui_.menu_separator();
+    if (ui_.menu_item("Use the Fit to My Clips", nullptr, ai_.head_on)) ai_finetune(ai_.head_on ? "off" : "on");
+    ui_.tooltip("Off: the shipped model alone, as downloaded; on: with this character's fit (Fit to Clips), where there is one.");
+  });
 }
 
 /* Apply: the made span into the clip, one undo step (refused when the keys changed since: it would undo that edit). */
@@ -316,7 +346,7 @@ void Editor::ai_finetune(const std::string &sub) {
     ai_.head_on = sub == "on";
     return Log::info("AI Inbetween: %s", ai_.head_on ? "fitted to your clips (where there is a fit)" : "the shipped model alone");
   }
-  if (ai_.tune) return Log::warn("AI Inbetween: still fitting (ai finetune stop)");
+  if (ai_.tune) return refuse("AI Inbetween: still fitting - the Fitting button stops it", "ai finetune stop", "Stop fitting");
   ai::ModelInfo info;
   if (!root || !ai_info(info)) return Log::warn("AI Inbetween: select a character (and install AI Inbetweening)");
   if (info.hidden <= 0) return Log::warn("AI Inbetween: this model can't be fitted (no last features: an older download)");
@@ -342,7 +372,7 @@ void Editor::ai_finetune(const std::string &sub) {
   tune->rt = ai_.rt, tune->style = ai_.style, tune->path = ai_head_path(*root), tune->character = root->name;
   ai_.tune = tune;
   std::thread([tune] { ai_fit(*tune); }).detach();  // (the tune shared: it outlives the thread)
-  Log::info("AI Inbetween: fitting to %zu clip%s of %s... (ai finetune stop)", tune->clips.size(), tune->clips.size() == 1 ? "" : "s", root->name.c_str());
+  Log::info("AI Inbetween: fitting to %zu clip%s of %s... (the Fitting button stops it)", tune->clips.size(), tune->clips.size() == 1 ? "" : "s", root->name.c_str());
 }
 
 /* A finished fit: kept and saved (a stopped or failed one changes nothing: the previous correction stays). */
@@ -427,10 +457,27 @@ void Editor::draw_ai_settings(const Recti &r) {
   const std::string p = ai::install_problem();
   u.label({r.x + u.px(372), r.y, std::max(0, r.w - u.px(510)), r.h}, p.empty() ? "installed" : p,
           p.empty() ? u.theme.text : u.theme.text_dim);
-  u.tooltip("The network and ONNX Runtime, in " + ai::install_dir() + ". Console: ai status | install [archive] | remove | check");
+  u.tooltip("The network and ONNX Runtime, in " + ai::install_dir() + ".");
   const Recti btn{r.right() - u.px(130), r.y + u.px(2), u.px(118), r.h - u.px(4)};
   if (p.empty() && u.button(btn, "Remove")) ai_command({"ai", "remove"});
   else if (!p.empty() && u.button(btn, "Install...")) ai_install("");
+  /* Task 0288: an archive already downloaded (another PC, a slow line), and a check of the installed one - on a row of
+   * their own, under the state they would cover. */
+  const Recti r2 = u.popup_row(u.row_h() + u.px(4));
+  const int right = p.empty() ? r2.right() - u.px(88) : r2.right() - u.px(12);
+  u.label({r2.x + u.px(160), r2.y, u.px(120), r2.h}, "From an archive", u.theme.text_dim);
+  std::string &text = picker_text_["pref:aiarchive"];
+  const std::vector<platform::FileFilter> filters = {{"AI archives", {".zip", ".tar.gz", ".tgz"}}};
+  if (path_picker_field({r2.x + u.px(284), r2.y + u.px(2), right - r2.x - u.px(284), r2.h - u.px(4)}, u.id("pref_aiarchive"), "pref:aiarchive", text, PickKind::Open, filters,
+                        [this](const std::string &f) { ai_install(f); }) &&
+      !text.empty())
+    ai_install(text);
+  u.tooltip("Install the AI download from an archive you have (its .sha256 beside it is checked when there is one): its path, or ... to choose it.");
+  if (!p.empty()) return;
+  const Recti check{r2.right() - u.px(82), r2.y + u.px(2), u.px(70), r2.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["pref:AI Check"] = check;
+  if (u.button(check, "Check")) ai_command({"ai", "check"});
+  u.tooltip("Run the network once on a test motion: says whether it works here, and how long it took.");
 }
 
 /* Turned on for the first time and not installed: the download offered, once (never at startup). */

@@ -112,6 +112,9 @@ void Armature::reflect(Reflector &r) {
   r.help("Shows every skin bound to this armature unposed (Blender: Rest Position).");
   r.field("In Front", in_front);
   if (!show_body_mass && !r.all_fields()) return;  // (the physics tools switched off: not shown; files and undo keep it)
+  r.text("Puppet Handles", puppet_bones);
+  r.help("The Puppet Posing handles put on bones by hand (Animation > Puppet > Handle Bones, or autopose handle <part>\n"
+         "<bone>): \"Left Hand=Bone.003; Head=head\". A handle not named here is found by the rig's analysis.");
   r.field("Body Mass", body_mass, 0.5f, 0.01f, 100000.0f);
   r.help("The whole body in kilograms, shared among the bones by the volume of mesh each moves (Animation > Physics:\n"
          "the center of mass, ballistic jumps). Cascadeur: the character's mass.");

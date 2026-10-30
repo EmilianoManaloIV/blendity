@@ -28,6 +28,9 @@ struct Settings {
   float balance_weight = 0.5f;
   float limit_deg = 75.0f;     // a joint turns at most this far from its starting pose (spine and neck half of it)
   float max_hips_shift = 0.3f; // metres the hips may go with the feet pinned (a lean, not a step)
+  /* Where each pin is held (its head and its turn, in `pins`' order); null: where it is when the solve starts. Puppet
+   * Posing moves the body to the prior's pose first, so it passes where the pins were before (task 0280). */
+  const std::vector<std::pair<Vec3, Quat>> *pin_poses = nullptr;
 };
 
 struct Result {

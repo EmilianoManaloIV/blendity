@@ -71,6 +71,13 @@ def widgets():
         for m in re.finditer(r'\bbr\.(?:field|color|enumeration|text)\("([^"\\%]{1,40})"', t): out.add(("field", m.group(1)))
     return sorted(out)  # (the Tools window's section headers are labels with a hover press, not in button_rects: no row for them yet)
 
+def reach_rows():
+    """Task 0290: the console-reach table in tests/test_editor.cpp - a verb and the control that reaches it."""
+    t = read(os.path.join(TESTS, "test_editor.cpp"))
+    m = re.search(r"kConsoleReach\[\] = \{(.*?)\n\};", t, re.S)
+    if not m: return []
+    return re.findall(r'\{"([^"]+)", "[^"]*", "([^"]+)"\}', m.group(1))
+
 def test_index():
     """test name -> its text, over every tests/test_*.cpp."""
     tests = {}
@@ -107,6 +114,9 @@ def main():
         if w in titles: pats.append(r'"window ' + re.escape(titles[w]) + '"')
         rows.append(("window", w, users(pats)))
     rows = [(k, n, ts if n not in EXTERNAL else ["(" + EXTERNAL[n] + ")"]) for k, n, ts in rows]
+    reach = reach_rows()  # (task 0290: a verb's control, by the table test)
+    for verb, path in reach:
+        rows.append(("reach", verb + " -> " + path.split(">")[-1], users([r"kConsoleReach"])))
     widget_rows = []
     for kind, label in widgets():
         pats = [r'click_until\([^,]+,\s*"' + re.escape(label) + r'"', r'button_rect_for_test\("' + re.escape(label) + r'"', r'"field:' + re.escape(label) + r'"', r'"menu:' + re.escape(label) + r'"']

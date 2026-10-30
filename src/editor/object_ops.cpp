@@ -93,7 +93,7 @@ static void make_name_unique(Scene &s, GameObject *g) {
   while (taken(g->name)) g->name = strprintf("%s.%03d", base.c_str(), ++n);
 }
 
-void Editor::boolean_selected(int op, bool apply) {
+void Editor::boolean_selected(int op, bool apply, uint64_t kept) {
   static const char *kOps[] = {"Difference", "Union", "Intersect"};
   if (edit_mode_) {
     Log::warn("Boolean works on objects: leave Edit Mode first (Tab)");
@@ -103,9 +103,9 @@ void Editor::boolean_selected(int op, bool apply) {
     Log::warn("Boolean needs the Manifold library (build with Blender's libraries)");
     return;
   }
-  GameObject *a = active_object();
+  GameObject *a = kept ? scene_->find(kept) : active_object();  // (task 0255: the dialog names the object kept; else the active one)
   if (!a || !a->get<MeshFilter>() || !a->get<MeshFilter>()->mesh) {
-    Log::warn("Boolean: the active object (selected last) is the one that gets cut; it needs a mesh");
+    Log::warn("Boolean: the object kept (the active one, or the dialog's choice) is the one that gets cut; it needs a mesh");
     return;
   }
   std::vector<GameObject *> cutters = other_mesh_objects(selected_objects(false), a);

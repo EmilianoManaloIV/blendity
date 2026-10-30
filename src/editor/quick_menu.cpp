@@ -40,14 +40,14 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
         {"Delete", "Delete", {}},
         {"Undo", "Undo", {}},
         {"Edit Mode", "Edit Mode On / Off", {}},
-        {"More", "",
+        {"More", "",  // (eight slices at most a ring: the selection and the animation in rings of their own, task 0260)
          {{"Frame", "Frame Selected", {}},
           {"Redo", "Redo", {}},
           {"Add to Selection", "", {}},
-          {"Select All", "Select All", {}},
-          {"Deselect", "Deselect All", {}},
           {"Rename", "Rename", {}},
           {"Drop to Floor", "Drop to Floor", {}},
+          {"Selection", "", {{"Select All", "Select All", {}}, {"Deselect", "Deselect All", {}}}},
+          {"Animation", "", {{"Set Key", "Set Key (every track, at the playhead)", {}}, {"Record", "Record (keys from edits)", {}}, {"Play Clip", "Play / Pause the Clip", {}}}},
           {"Palette", "Command Palette", {}}}}}},
       {"edit",
        {{"Extrude", "Extrude", {}},
@@ -83,6 +83,23 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
           {"Redo", "Redo", {}},
           {"Palette", "Command Palette", {}}}},
         {"Stop Sketching", "Sketch (pen)", {}}}},
+      {"draw",  // (round 321: the Draw tab's own - SketchBook's marking menu: brushes, guides, the pad's view)
+       {{"Pencil", "sketch brush Pencil", {}},
+        {"Inker", "sketch brush Inker", {}},
+        {"Marker", "sketch brush Marker", {}},
+        {"Eraser", "sketch brush Eraser", {}},
+        {"Ruler", "sketchguide ruler", {}},
+        {"Fit", "draw view fit", {}},
+        {"Hide Tools", "draw tools toggle", {}},
+        {"More", "",
+         {{"Pen", "sketch brush Pen", {}},
+          {"Felt Pen", "sketch brush Felt Pen", {}},
+          {"Airbrush", "sketch brush Airbrush", {}},
+          {"Stroke Eraser", "sketch brush Stroke Eraser", {}},
+          {"Ellipse", "sketchguide ellipse", {}},
+          {"No Guide", "sketchguide off", {}},
+          {"Flip Canvas", "draw view flip", {}},
+          {"Undo", "Undo", {}}}}}},
       {"layers",  // (task 0234: a pen held on a row - the press picked the layer)
        {{"New", "sketch layer add", {}},
         {"Duplicate", "sketch layer duplicate", {}},
@@ -250,6 +267,32 @@ void cap_slices(std::vector<Editor::WheelSlice> &set) {
 
 }  // namespace
 
+/* The largest ring in a built-in set (task 0260's test: every ring fits the Wheel's slice count). */
+int Editor::wheel_set_max_ring_for_test(const char *set) {
+  int most = 0;
+  std::function<void(const std::vector<DefaultSlice> &)> walk = [&](const std::vector<DefaultSlice> &ring) {
+    most = std::max(most, (int)ring.size());
+    for (const DefaultSlice &d : ring) walk(d.ring);
+  };
+  for (const auto &kv : default_sets())
+    if (std::string(kv.first) == set) walk(kv.second);
+  return most;
+}
+
+/* A built-in set's slice labels, its rings unfolded (task 0260's test). */
+std::vector<std::string> Editor::wheel_set_labels_for_test(const char *set) {
+  std::vector<std::string> out;
+  std::function<void(const std::vector<DefaultSlice> &)> walk = [&](const std::vector<DefaultSlice> &ring) {
+    for (const DefaultSlice &d : ring) {
+      out.push_back(d.label);
+      walk(d.ring);
+    }
+  };
+  for (const auto &kv : default_sets())
+    if (std::string(kv.first) == set) walk(kv.second);
+  return out;
+}
+
 /* The preferences' separators inside a label or an entry are written as %XX (`sketchguide perspective 3` has none; a
  * console line with `=` or `;` keeps them). Shared with the panels and the user actions (task 0231). */
 std::string pref_escape(const std::string &s) {
@@ -322,7 +365,7 @@ std::string Editor::wheel_mode_at(int x, int y) {
     return wheel_has_own_set(kind) ? kind : "other";
   }
   if (edit_mode_) return "edit";
-  if (sketch_.active) return "sketch";
+  if (sketch_.active && sketch_in_world()) return "sketch";
   if (sculpt_) return "sculpt";  // (task 0236)
   if (weight_paint_) return "weight paint";
   return "object";
@@ -555,9 +598,10 @@ bool Editor::wheel_hold_busy() {
   const auto &in = ui_.in;
   if (ui_.any_active() || modal_.active || xf_.active || pp_.active || sculpt_stroking_ || sculpt_gesture_) return true;  // (task 0236: a stroke under way; 0238: a Ctrl gesture)
   const WindowKind under = wheel_window_at(hold_x_, hold_y_);
-  if (sketch_.active && (under == WindowKind::Draw || under == WindowKind::Game)) return true;  // (task 0233: the pen draws there too)
+  if (sketch_.active && sketch_in_world() && under == WindowKind::Game) return true;  // (task 0233: the pen draws there too)
+  if (sketch_.active && under == WindowKind::Draw) return !pad_hold_opens_wheel();  // (round 321: a pen held still on the pad)
   if (under != WindowKind::Scene) return false;
-  if (sketch_.active) return true;
+  if (sketch_.active && sketch_in_world()) return true;
   const bool finger_still = in.touch && drag_button_ == 0 && (drag_ == Drag::Orbit || drag_ == Drag::Pan || finger_orbit_);
   return !(drag_ == Drag::None || drag_ == Drag::Box || finger_still);
 }
@@ -592,6 +636,10 @@ void Editor::wheel_take_press() {
   finger_orbit_ = false;
   hier_drag_ = 0, hier_dragging_ = false, hier_pending_select_ = 0;
   wp_abort_stroke();
+  if (sketch_.stroking && sketch_.view_kind == 2) {  // (round 321: the pad's dot under the held pen isn't drawn)
+    sketch_.stroking = false;
+    sketch_.pen.clear(), sketch_.pressure.clear();
+  }
   edit_brush_stroke_ = false;
   uv_drag_ = UvDrag::None;
   bone_drag_ = BoneDrag{};
@@ -925,8 +973,44 @@ void Editor::draw_wheel_settings() {
     draw_wheel_row(mode, s, "");
     for (const WheelSlice &r : s.ring) draw_wheel_row(mode, r, s.label);
   }
+  Recti pr = row(u.row_h() + u.px(4));  // (task 0291: a command picked from the palette's list, not typed)
+  u.label({pr.x, pr.y, u.px(150), pr.h}, "Add a command");
+  const Recti pb{pr.x + u.px(150), pr.y + u.px(2), u.px(200), pr.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["wheel:pick"] = pb;
+  const ui::Id pick_id = u.id("wheel_pick");
+  if (u.button(pb, "Pick a Command...")) {
+    if (u.popup_open(pick_id)) u.close_popup(pick_id);
+    else wheel_pick_search_.clear(), u.open_dropdown(pick_id, pb);  // (over Preferences, not instead of it)
+  }
+  u.tooltip("Every command of the palette (" + key("edit.palette") + "), searchable: the one clicked goes on the set, or into the ring chosen below.");
+  u.popup(pick_id, u.px(300), [this, mode] {
+    auto &u = ui_;
+    const Recti sr = u.popup_row(u.row_h() + u.px(6));
+    const ui::Id fid = u.id("wheel_pick_search");
+    if (!u.editing(fid) && wheel_pick_search_.empty()) u.begin_edit(fid, "", false);
+    u.text_field(fid, sr.shrink(u.px(3)), wheel_pick_search_, nullptr, "Search");
+    const std::string f = to_lower(wheel_pick_search_);
+    if (u.in.key_pressed[platform::KEY_ESCAPE]) {  // (the search keeps the focus: Esc is the list's to close)
+      u.in.key_pressed[platform::KEY_ESCAPE] = false;
+      return u.close_popup(u.id("wheel_pick"));
+    }
+    const bool enter = u.in.key_pressed[platform::KEY_ENTER];
+    int shown = 0;
+    for (const PaletteEntry &e : palette_entries()) {
+      if (shown >= 40) break;
+      if (!f.empty() && to_lower(e.name).find(f) == std::string::npos) continue;
+      shown++;
+      if (shown == 1 && enter && !f.empty()) {  // (Enter: the first match)
+        u.in.key_pressed[platform::KEY_ENTER] = false;
+        wheel_add(mode, e.name, "", wheel_add_ring_);
+        return u.close_popup(u.id("wheel_pick"));
+      }
+      if (u.menu_item(e.name)) wheel_add(mode, e.name, "", wheel_add_ring_);
+    }
+    if (!shown) u.menu_label("No command matches");
+  });
   Recti ar = row(u.row_h() + u.px(4));
-  u.label({ar.x, ar.y, u.px(150), ar.h}, "Add");
+  u.label({ar.x, ar.y, u.px(150), ar.h}, "Or a console line");
   u.text_field(u.id("wheel_add"), {ar.x + u.px(150), ar.y + u.px(2), ar.w - u.px(150) - u.px(230), ar.h - u.px(4)}, wheel_add_text_, nullptr,
                "a command's name, or a console line");
   if (u.button({ar.right() - u.px(220), ar.y + u.px(2), u.px(70), ar.h - u.px(4)}, "Add") && !wheel_add_text_.empty())
@@ -934,10 +1018,27 @@ void Editor::draw_wheel_settings() {
   if (u.button({ar.right() - u.px(145), ar.y + u.px(2), u.px(100), ar.h - u.px(4)}, "New Ring") && !wheel_add_text_.empty())
     if (wheel_make_ring(mode, wheel_add_text_)) wheel_add_ring_ = wheel_add_text_, wheel_add_text_.clear();
   u.tooltip("New Ring makes a slice that opens a ring of its own, named by the field; Add then puts commands into the ring\n"
-            "named under Into ring, or onto the set itself when that is empty.");
+            "chosen under Into Ring, or onto the set itself.");
   Recti ir = row(u.row_h() + u.px(4));
-  u.label({ir.x, ir.y, u.px(150), ir.h}, "Into ring");
-  u.text_field(u.id("wheel_ring"), {ir.x + u.px(150), ir.y + u.px(2), u.px(200), ir.h - u.px(4)}, wheel_add_ring_, nullptr, "(the set itself)");
+  u.label({ir.x, ir.y, u.px(150), ir.h}, "Into Ring");
+  const std::vector<std::string> rings = wheel_ring_choices(mode);  // (task 0291: the set's rings, not a typed name)
+  std::vector<const char *> names;
+  for (const std::string &n : rings) names.push_back(n.c_str());
+  int cur = 0;
+  for (size_t i = 1; i < rings.size(); i++)
+    if (rings[i] == wheel_add_ring_) cur = (int)i;
+  if (cur == 0) wheel_add_ring_.clear();  // (a ring removed or reset away: the set itself, as the dropdown shows)
+  const Recti rc{ir.x + u.px(150), ir.y + u.px(2), u.px(200), ir.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["wheel:ring"] = rc;
+  if (u.combo(u.id("wheel_ring"), rc, cur, names.data(), (int)names.size())) wheel_add_ring_ = cur == 0 ? std::string() : rings[(size_t)cur];
+}
+
+/* The rings a command can go into (task 0291): "(the set itself)" first, then each ring slice of the mode's set. */
+std::vector<std::string> Editor::wheel_ring_choices(const std::string &mode) {
+  std::vector<std::string> out{"(the set itself)"};
+  for (const WheelSlice &s : wheel_set(mode))
+    if (s.is_ring) out.push_back(s.label);
+  return out;
 }
 
 }  // namespace bl

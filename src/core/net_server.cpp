@@ -138,8 +138,9 @@ template<class Go> bool send_all(sock_t s, const std::string &data, Go go) {
   return true;
 }
 
-/* True when the peer has closed: what it sent (nothing is expected) is read and dropped on the way. */
-bool peer_closed(sock_t s) {
+/* True when the peer has closed. What it sent is read on the way: the first line (up to 512 bytes, a bridge's hello -
+ * task 0274) is kept in `first`, everything else dropped. */
+bool peer_closed(sock_t s, std::string &first, bool &first_done) {
   char drain[4096];
   for (int i = 0; i < 16; i++) {
     const int r = wait_readable(s, 0);
@@ -148,6 +149,10 @@ bool peer_closed(sock_t s) {
     const int n = (int)::recv(s, drain, sizeof(drain), 0);
     if (n < 0 && would_block()) return false;
     if (n <= 0) return true;
+    for (int k = 0; k < n && !first_done; k++) {
+      if (drain[k] == '\n' || first.size() >= 512) first_done = true;
+      else first += drain[k];
+    }
   }
   return false;
 }
@@ -188,6 +193,9 @@ struct Client {
   uint64_t head = 0, tail = 0, barrier = 0;
   std::unordered_map<uint64_t, uint64_t> where;
   bool ready = false;  // (guarded by the server's mutex)
+  std::string first;   // the client's first line, read by its thread (task 0274); `hello` holds it once whole
+  bool first_done = false;
+  std::string hello;   // (guarded by m)
   std::atomic<bool> alive{true};
   std::atomic<bool> done{false};
 };
@@ -250,7 +258,12 @@ bool Server::Impl::take_next(Client &c, Msg &out) {
       return true;
     }
     lk.unlock();
-    if (peer_closed(c.s)) return false;
+    const bool was_done = c.first_done;
+    if (peer_closed(c.s, c.first, c.first_done)) return false;
+    if (c.first_done && !was_done) {
+      std::lock_guard<std::mutex> hk(c.m);
+      c.hello = c.first;
+    }
   }
 }
 
@@ -411,6 +424,21 @@ std::vector<int> Server::ready_clients() const {
   return out;
 }
 
+std::vector<std::string> Server::client_hellos() const {
+  std::vector<std::shared_ptr<Client>> list;
+  {
+    std::lock_guard<std::mutex> lk(d_->m);
+    for (const auto &c : d_->clients)
+      if (c->alive) list.push_back(c);
+  }
+  std::vector<std::string> out;
+  for (const auto &c : list) {
+    std::lock_guard<std::mutex> hk(c->m);
+    out.push_back(c->hello);
+  }
+  return out;
+}
+
 int Server::client_count() const {
   std::lock_guard<std::mutex> lk(d_->m);
   d_->reap_locked();
@@ -527,6 +555,12 @@ bool LineClient::read(std::string &line, std::string &bin, int timeout_ms) {
   bin.assign(buf_, nl + 1, need);
   buf_.erase(0, nl + 1 + need);
   return true;
+}
+
+/* A line to the server (its newline added): a bridge's hello. */
+bool LineClient::send(const std::string &line) {
+  if (sock_ == -1) return false;
+  return send_all(to_sock(sock_), line + "\n", [] { return true; });
 }
 
 void LineClient::close() {
