@@ -73,6 +73,7 @@ bool SceneCamera::update(double now) {
 
 Editor::Editor() = default;
 Editor::~Editor() {
+  livelink_remove_discovery();  // (task 0274: the bridges stop finding a Blendity that is gone)
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
@@ -193,6 +194,7 @@ bool Editor::init(int argc, char **argv) {
   }
   stable_ = scene_->clone();
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
+  livelink_autostart();  // (task 0274: the bridges connect by themselves)
   if (update_check_ && std::time(nullptr) - update_last_check_ > 86400.0) start_update_check(false);  // (once a day, task 0079)
   check_libraries_at_start();  // (the dependency-free build: offer Blender's libraries, task 0080)
   /* MoonRay (task 0112): offered on the first run, and a day after Not now; looking for it (WSL on Windows) only then. */
@@ -386,6 +388,8 @@ int Editor::run() {
 }
 
 void Editor::request_close() {
+  if (board_dirty_) board_save();  // (task 0299: a change in the last second is kept)
+  if (paper_dirty_) paper_save();  // (round 324)
   if (playing_) exit_play();  // (task 0254: first, so the auto-save runs on the scene Play restores - the edits made before Play - not on Play's discarded state)
   if (scene_dirty_) {
     std::string path = scene_->path.empty() ? fs::join(assets_dir_, "Scenes/" + scene_->name + ".scene") : scene_->path;
@@ -631,7 +635,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   auto &c = ui_.canvas;
   int mh = ui_.row_h() + ui_.px(2);
   int th = ui_.px(36);
-  int sh = ui_.row_h();
+  int sh = tablet_ ? std::max(ui_.row_h(), ui_.px(34)) : ui_.row_h();  // (task 0270: its buttons 7 mm tall for a pen in Tablet Mode)
   Recti menubar{0, 0, fb_.width, mh};
   Recti toolbar{0, mh, fb_.width, th};
   Recti status{0, fb_.height - sh, fb_.width, sh};
@@ -660,7 +664,10 @@ void Editor::frame_body(std::vector<Event> &events) {
   draw_toolbar(toolbar);
   dock_area = draw_layout_guide(dock_area);  // (task 0190: the layout's first-run guide, until dismissed)
   dock_layout(dock_.get(), dock_area);
+  if (toasts_on_dock_) toasts_update(dock_area);  // (task 0271: drawn over the dock last frame - its clicks are taken here, before the windows)
   dock_draw(dock_.get());
+  toasts_on_dock_ = !scene_drawn_;
+  if (toasts_on_dock_) draw_toasts(dock_area);  // (in Play or a layout without the Scene view, a refusal and its Fix still show)
   if (sculpt_stroking_ && !scene_drawn_) sculpt_end_stroke();  // (task 0236: the Scene view stopped drawing mid-stroke - a tab switch: the stroke ends as it is)
   if (sculpt_gesture_ && !scene_drawn_) sculpt_gesture_ = false;  // (task 0238: a Ctrl gesture the same way, dropped)
   sculpt_remesh_poll();  // (task 0241: a finished Quad Remesh lands as a step)
@@ -682,6 +689,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (pointer_window_ == active_window_) update_asset_drag();  // (a drag belongs to the window it started in: task 0187)
   handle_drop();
   handle_shortcuts();
+  board_frame_tick();  // (task 0299: pictures landed, and the board saved a second after a change, shown or not)
+  paper_frame_tick();  // (round 324: the paper saved a second after a change)
 
   update_tab_drag();
 
@@ -695,6 +704,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   update_realtime_lightmaps();
   lighting_update_step();
   livelink_tick();  // (task 0172: what changed this frame goes out; nothing without a client)
+  trail_refresh();  // (task 0282: a few more of the trails' frames, before the views draw them)
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
@@ -865,7 +875,7 @@ void Editor::draw_menubar(const Recti &r) {
     });
     u.menu_separator();
     if (u.menu_item("Render Image", key("render.image").c_str(), false, true, Icon::Camera)) start_final_render();
-    if (u.menu_item("Render Animation", key("render.animation").c_str(), ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation();
+    if (u.menu_item("Render Animation", key("render.animation").c_str(), ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation_from_fields();
     u.tooltip("Every frame of the scene's sequence (or the selected object's clip) as PNGs in Renders/, then an MP4 when FFmpeg is there.");
     if (u.menu_item("Save Render...", nullptr, false, render_has_result_)) defer([this] { save_render(); });
     if (u.menu_item("Save Screenshot...", key("render.screenshot").c_str())) screenshot_dialog();
@@ -924,19 +934,32 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Create Empty", key("object.create_empty").c_str())) create_object("Empty");
     if (u.menu_item("Create Empty Child", key("object.create_empty_child").c_str(), false, has_sel)) create_object("Empty", true);
     /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
-    if (shows(FocusCreate | FocusDraw | FocusEdit | FocusRig))
-      u.submenu("3D Object", u.px(170), [this] {
+    /* Task 0267: in every layout - the walkthrough's first step (add a cube) failed in the other layouts. */
+    u.submenu("3D Object", u.px(170), [this] {
         for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
     if (shows(FocusReference)) {
-      if (u.menu_item("Reference Image...")) {
-        std::string path;
-        const std::vector<platform::FileFilter> filters = {{"Images", {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".exr", ".hdr"}}};
-        if (pick_open_path("Reference Image", assets_dir_, filters, path) == PathPick::Chosen) create_reference_image(path, "front");
-      }
-      u.tooltip("A picture to model from: an unlit plane the image's shape, facing the front view, kept out of renders and\n"
-                "shadows. Blender: Add > Image > Reference. Console: refimage <path> [front|side|top].");
+      u.submenu("Reference Image", u.px(160), [this] {  // (task 0287: the side and top views too, the project's images listed)
+        static const char *const kSides[][2] = {{"Front", "front"}, {"Side", "side"}, {"Top", "top"}};
+        for (const auto &s : kSides) {
+          const std::string side = s[1];
+          ui_.submenu(s[0], ui_.px(260), [this, side] {
+            if (ui_.menu_item("Browse..."))
+              defer([this, side] {
+                std::string path;
+                const std::vector<platform::FileFilter> filters = {{"Images", {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".exr", ".hdr"}}};
+                const PathPick got = pick_open_path("Reference Image", assets_dir_, filters, path);
+                if (got == PathPick::Chosen) create_reference_image(path, side);
+                if (got == PathPick::Unavailable) picker_unavailable("Reference Image");
+              });
+            for (const std::string &img : image_assets())
+              if (ui_.menu_item(img)) create_reference_image(img, side);
+          });
+        }
+      });
+      u.tooltip("A picture to model from: an unlit plane the image's shape, facing the front, side or top view, kept out of\n"
+                "renders and shadows. Blender: Add > Image > Reference.");
     }
     if (shows(FocusCreate | FocusDraw | FocusEdit)) {
       u.submenu("Shapes (Parametric)", u.px(190), [this] {
@@ -967,7 +990,7 @@ void Editor::draw_menubar(const Recti &r) {
     }
     if (shows(FocusRig)) {
       if (u.menu_item("Armature")) create_object("Armature");
-      u.tooltip("A skeleton: a root with one bone (add more with the console's `bone add`). Select a mesh first and it gets\n"
+      u.tooltip("A skeleton: a root with one bone (add more with the Rigging window's Add Bone). Select a mesh first and it gets\n"
                 "a Skin modifier with automatic weights. Blender: Add > Armature.");
     }
     if (shows(FocusRig))
@@ -994,25 +1017,21 @@ void Editor::draw_menubar(const Recti &r) {
                   "Blender: Options > Affect Only > Origins.");
     });
     if (shows(FocusMaterial)) {
-      u.submenu("Bake Textures", u.px(200), [this, has_sel] {
-        for (int size : {512, 1024, 2048, 4096})
-          if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) bake_object_textures(size);
+      u.submenu("Anime Look", u.px(170), [this, has_sel] {  // (task 0286: what only `animemat` did)
+        for (const char *p : {"Leaves", "Grass", "Wall", "Windows", "Roof", "Sky", "Clouds", "Rock", "Water"})
+          if (ui_.menu_item(p, nullptr, false, has_sel)) animemat_command(p);
       });
+      u.tooltip("An anime-style texture and a flat-toned Toon material on the selected objects (leaves and grass as cut-out cards).");
+      if (u.menu_item("New Surface", nullptr, false, has_sel)) surface_new("");  // (task 0273)
+      u.tooltip("A layered surface on the selected object's material: Paint, the smart materials and the masks work on it.");
+      if (u.menu_item("Bake Textures...", nullptr, false, has_sel)) bake_mode_ = 1, dialog_ = Dialog::Bake;  // (task 0273: the size and Keep UVs in a dialog)
       u.tooltip("Bake the active object's look (procedural textures, axis materials, Box mapping, every material slot) into\n"
                 "one set of images on new UVs, and give it a material that uses them: what it looks like, as plain images\n"
-                "any program shows. Undo restores it. Blender: Cycles Bake. (Console: baketex [size] [keepuvs])");
-      u.submenu("Bake Mesh Maps", u.px(200), [this, has_sel] {  // (task 0243)
-        for (int size : {512, 1024, 2048})
-          if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) {
-            MeshMapsSettings s = meshmaps_settings_;
-            s.size = size;
-            meshmaps_settings_ = s;
-            bake_mesh_maps_start(s);
-          }
-      });
+                "any program shows. Undo restores it. Blender: Cycles Bake.");
+      if (u.menu_item("Bake Mesh Maps...", nullptr, false, has_sel)) bake_mode_ = 0, dialog_ = Dialog::Bake;  // (tasks 0243, 0273)
       u.tooltip("Bake the active object's geometry into its UV layout - world normal, position, curvature, ambient occlusion,\n"
                 "thickness - on a worker, the images under Assets/Textures/MeshMaps: what the layer stack's generators read\n"
-                "(Substance Painter's mesh maps). (Console: meshmaps [size] [samples] [keepuvs])");
+                "(Substance Painter's mesh maps).");
     }
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
@@ -1072,7 +1091,7 @@ void Editor::draw_menubar(const Recti &r) {
       if (u.menu_item("N-gon Mode (SketchUp)", nullptr, ngon_mode_)) ngon_mode_ = !ngon_mode_;
       u.tooltip("A flat region of faces acts as one face: its inner edges hide and a click selects all of it.\n"
                 + std::string("Merge Coplanar turns those regions into real n-gons; the Knife (") + key("mesh.knife") + ") splits them again.");
-      if (u.menu_item("Adjust Last Operation", key("edit.adjust_last").c_str(), last_op_open_)) last_op_open_ = !last_op_open_;
+      if (u.menu_item("Adjust Last Operation", key("edit.adjust_last").c_str(), last_op_open_)) run_action("edit.adjust_last");  // (task 0266: as F9, the object panel too)
       u.menu_separator();
     }
     if (!edit_mode_) {
@@ -1088,11 +1107,11 @@ void Editor::draw_menubar(const Recti &r) {
       u.submenu("Boolean", u.px(250), [this, two] {
         auto &u = ui_;
         static const char *kOps[] = {"Difference", "Union", "Intersect"};
-        u.menu_label("Apply now (cutters are removed)");
+        u.menu_label("Apply Now (the cutters are removed)");
         for (int op : {1, 0, 2})
           if (u.menu_item(kOps[op], nullptr, false, two)) boolean_selected(op, true);
         u.menu_separator();
-        u.menu_label("Live modifier (cutter stays as wire)");
+        u.menu_label("Live Modifier (the cutter stays as wire)");
         for (int op : {1, 0, 2})
           if (u.menu_item(std::string(kOps[op]) + " Modifier", nullptr, false, two)) boolean_selected(op, false);
       });
@@ -1106,42 +1125,12 @@ void Editor::draw_menubar(const Recti &r) {
       if (ui_.menu_item("Sketch (pen)", nullptr, sketch_.active)) sketch_.active ? sketch_end() : sketch_begin();
       ui_.tooltip("Draw with the pen over the Scene view: its pressure is the width, its eraser erases, Ctrl keeps a stroke\n"
                   "freehand. Strokes are corrected to lines, arcs, ellipses and curves as the pen lifts (SketchBook's predictive stroke).");
-      ui_.submenu("Guides", ui_.px(220), [this] {
-        static const char *const kGuides[] = {"None", "Ruler", "Ellipse", "French Curve"};
-        for (int k = 0; k < 4; k++)
-          if (ui_.menu_item(kGuides[k], nullptr, sketch_.guide == k)) sketch_.guide = k;
-        ui_.menu_separator();
-        static const char *const kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
-        for (int k = 0; k < 5; k++)
-          if (ui_.menu_item(kSym[k], nullptr, sketch_.symmetry == k)) sketch_.symmetry = k;
-        ui_.menu_separator();
-        static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
-        for (int k = 0; k < 4; k++)
-          if (ui_.menu_item(kPersp[k], nullptr, scene_->sketch.perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
-        ui_.menu_separator();
-        if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
-      });
+      draw_sketch_pen_menu();  // (task 0286: the pen's colour, steadiness, the canvases, Clear, Lift to 3D)
+      ui_.submenu("Guides", ui_.px(240), [this] { draw_sketch_guides_items(); });  // (round 318: the Draw tab's Guides too)
       ui_.tooltip("SketchBook's rulers and guides: a stroke follows the ruler, the ellipse or the French curve; symmetry mirrors\n"
-                  "it; perspective snaps it to the lines through the nearest vanishing point (drag the points and the horizon).");
-      ui_.submenu("Build from Sketch", ui_.px(220), [this] {  // (task 0225)
-        static const char *const kBuild[][2] = {{"Box (three lines at a corner)", "box"}, {"Cylinder (two circles)", "cylinder"}, {"Cone (a circle and a line)", "cone"},
-                                                {"Sweep (two circles and a path)", "sweep"}, {"Face (a closed outline)", "face"}, {"Pull the Face (a line along its normal)", "pull"}};
-        for (const auto &b : kBuild)
-          if (ui_.menu_item(b[0])) sketch_build_command({"sketchbuild", b[1]});
-      });
-      ui_.submenu("Sketch over the Model", ui_.px(240), [this] {  // (task 0226)
-        if (ui_.menu_item("Project the Stroke onto the Face")) sketch_refine_command({"sketchproject"});
-        ui_.tooltip("The last stroke on the picture plane pushed onto the face under it, along the view: a line on the surface.");
-        if (ui_.menu_item("Trace into a Cut")) sketch_refine_command({"sketchtrace", "edge"});
-        ui_.tooltip("The last stroke on a face: a line cuts across the face (the Knife), a closed outline is imprinted as a face.");
-        if (ui_.menu_item("Trace into a Curve")) sketch_refine_command({"sketchtrace", "curve"});
-        ui_.menu_separator();
-        if (ui_.menu_item("Back to the Layer's View")) sketch_layer_view();
-        ui_.tooltip("The camera the layer's first stroke was drawn in: a picture-plane drawing fades as the view turns away from it.");
-        if (ui_.menu_item("Model Edges Overlay", nullptr, sketch_.overlay)) sketch_.overlay = !sketch_.overlay;
-        if (ui_.menu_item("Ruler along the Edge under the Middle")) sketch_command({"sketchguide", "ruler", "edge"}, "");
-        if (ui_.menu_item("Ellipse on the Face under the Middle")) sketch_command({"sketchguide", "ellipse", "face"}, "");
-      });
+                  "it; perspective snaps it to the lines through the nearest vanishing point (drag the points and the horizon) -\n"
+                  "not a freehand stroke (Ctrl held, or a layer set to Freehand).");
+      draw_sketch_build_items();  // (tasks 0225, 0226; round 318: the Draw tab's Build too)
     });
     u.tooltip("Draw a polyline, rectangle, circle, arc or polygon onto the mesh (or the ground) with snapping.\n"
               "With nothing selected it starts a new mesh. UModeler / SketchUp drawing tools.");
@@ -1227,7 +1216,7 @@ void Editor::draw_menubar(const Recti &r) {
         if (ui_.menu_item(l.name.c_str(), nullptr, workspace_ == l.name)) apply_workspace(l.name);
       ui_.menu_separator();
       if (ui_.menu_item("Show All Tools", nullptr, show_all_tools_)) show_all_tools_ = !show_all_tools_;
-      ui_.tooltip("A stage's layout hides the tools other stages use (the keys and the console still reach them).\n"
+      ui_.tooltip("A stage's layout hides the tools other stages use (their keys and the menus still reach them).\n"
                   "Show All Tools shows every one whatever the layout.");
       if (ui_.menu_item("Save Layout...")) layout_save_open_ = true;
       if (ui_.menu_item("Delete Layout...", nullptr, false, !user_layouts_.empty())) layout_delete_open_ = true;
@@ -1246,6 +1235,8 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Learn Blendity", key("window.learn").c_str(), false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
+    if (u.menu_item("Welcome: Where Are You Coming From...")) dialog_ = Dialog::FirstRunTier, welcome_low_ = false;  // (task 0261)
+    u.tooltip("The first-run question again: Unity, Unreal, Blender or Photoshop & Substance keys, in one go.");
     if (u.menu_item("Open Manual")) open_manual();
     if (u.menu_item("Reset Guides", nullptr, false, !guides_seen_.empty() || !guide_uses_.empty())) {
       guides_seen_.clear();
@@ -1380,8 +1371,8 @@ void Editor::draw_toolbar(const Recti &r) {
   Recti lr{rx, y, learn_w, bh};
   bool hot = u.hovered(lr);
   u.frame(lr, hot ? Color::mix(u.theme.accent, 0xFFFFFFFF, 0.15f) : u.theme.accent, 0, u.px(3));
-  u.draw_icon(Icon::Book, {lr.x + u.px(6), lr.y + u.px(4), bh - u.px(8), bh - u.px(8)}, 0xFFFFFFFF);
-  u.canvas.text(u.font, lr.x + bh, lr.y + (bh - u.font.line_height()) / 2, "Learn", 0xFFFFFFFF);
+  u.draw_icon(Icon::Book, {lr.x + u.px(6), lr.y + u.px(4), bh - u.px(8), bh - u.px(8)}, u.theme.text_on_accent);  // (task 0261: black in High Contrast)
+  u.canvas.text(u.font, lr.x + bh, lr.y + (bh - u.font.line_height()) / 2, "Learn", u.theme.text_on_accent);
   if (hot && u.in.pressed[0]) dock_open(WindowKind::Learn);
   if (playing_) u.canvas.fill_rect({r.x, r.bottom() - u.px(2), r.w, u.px(2)}, u.theme.focus);
   draw_layout_dialogs();  // Save / Delete Layout (task 0055)
@@ -1431,6 +1422,10 @@ void Editor::draw_statusbar_log(const Recti &r) {
 
 void Editor::handle_drop() {
   if (ui_.in.dropped.empty()) return;
+  if (board_has_point(ui_.in.drop_x, ui_.in.drop_y)) {  // (task 0299: dropped on the board - its images placed there, in a row; the rest named)
+    board_add_images(ui_.in.dropped, board_from_screen({(float)ui_.in.drop_x, (float)ui_.in.drop_y}));
+    return;
+  }
   for (const std::string &path : ui_.in.dropped) {
     std::string ext = fs::extension(path);
     std::string name = fs::filename(path);
@@ -1624,7 +1619,8 @@ void Editor::dock_draw(DockNode *n) {
   if (u.hovered(content) && (u.in.pressed[0] || u.in.pressed[1] || u.in.pressed[2])) focused_ = n->tabs[n->active];
   window_rects_[n->tabs[n->active]] = content;
   /* The Scene and Game views paint every pixel of their content themselves. */
-  if (n->tabs[n->active] != WindowKind::Scene && n->tabs[n->active] != WindowKind::Game && n->tabs[n->active] != WindowKind::Draw)
+  if (n->tabs[n->active] != WindowKind::Scene && n->tabs[n->active] != WindowKind::Game && n->tabs[n->active] != WindowKind::Draw &&
+      n->tabs[n->active] != WindowKind::Board)
     u.canvas.fill_rect(content, u.theme.panel);
   u.canvas.push_clip(content);
   dock_draw_window(n->tabs[n->active], content);
@@ -1655,6 +1651,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Draw: draw_draw_window(r); break;  // (task 0233)
     case WindowKind::Layers: draw_layers_window(r); break;  // (task 0234)
     case WindowKind::History: draw_history_window(r); break;  // (task 0254)
+    case WindowKind::Board: draw_board_window(r); break;  // (task 0299)
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1988,6 +1985,7 @@ size_t Editor::undo_bytes() const {
 
 void Editor::undo() {
   if (playing_) return;
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();  // (its item may not be where it was)
   sketch_layers_reset();  // (task 0234)
   cancel_skin_job();  // (its result was solved for the state being undone)
@@ -2041,6 +2039,7 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
 
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();
   sketch_layers_reset();  // (task 0234)
   cancel_skin_job();
@@ -2060,6 +2059,7 @@ void Editor::redo() {
 /* ===================================================================== */
 
 void Editor::new_scene() {
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   set_sculpt(false);
   sketch_layers_reset();  // (task 0234: a solo or a rename is an index into this scene's stack)
@@ -2089,6 +2089,7 @@ void Editor::new_scene() {
 }
 
 bool Editor::open_scene(const std::string &path) {
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);
   set_sculpt(false);
   cancel_skin_job();
@@ -2116,6 +2117,7 @@ bool Editor::open_scene(const std::string &path) {
   scene_dirty_ = false;
   note_recent_scene(path);
   Log::info("Opened %s (%zu objects)", fs::filename(path).c_str(), scene_->object_count());
+  if (livelink_discovery_) livelink_write_discovery();  // (task 0274: the bridges show the scene open now)
   return true;
 }
 
@@ -2126,7 +2128,7 @@ void Editor::save_scene_cmd(bool save_as) {
   save_dirty_sequence_assets();
   if (playing_) {
     after_save_ = nullptr;  // (task 0254: nothing waits on a save that did not happen)
-    Log::warn("Cannot save while in Play mode (Unity has the same rule). Press Stop first.");
+    refuse("Cannot save while in Play mode (Unity has the same rule). Press Stop first.", "stop", "Stop Play");
     return;
   }
   commit_undo();  // an edit this frame: its vertex groups mended before they are written
@@ -2284,8 +2286,8 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
    * or stretch the base's images, so they are refused. */
   const Mesh *ev = g->evaluated_mesh();
   if (ev && ev != mf->mesh.get() && (ev->corner_verts.size() != mf->mesh->corner_verts.size() || ev->face_count() != mf->mesh->face_count())) {
-    Log::warn("Bake Textures: %s's modifiers add or remove geometry; apply them first (Mesh > Apply Modifiers), or use "
-              "File > Export with Bake Textures, which bakes what it exports", g->name.c_str());
+    refuse(strprintf("Bake Textures: %s's modifiers add or remove geometry; apply them first (Mesh > Apply Modifiers), or use "
+                     "File > Export with Bake Textures, which bakes what it exports", g->name.c_str()), "applymods", "Apply Modifiers");
     return false;
   }
   const Mesh &source = ev ? *ev : *mf->mesh;
@@ -2396,6 +2398,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
 }
 
 bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name, int outer, const std::string &which) {
+  if (op != "reset" && texture_upto_.first == asset) texture_upto_ = {"", -1};  // (round 332's review: the layers moved under the preview's cut)
   ProceduralTexturePtr pt = texture_asset(asset);
   if (!pt) return false;
   /* The list worked: the stack, or a layer's mask stack / group children (task 0244). */
@@ -2549,17 +2552,128 @@ std::vector<std::pair<MaterialPtr, bool>> Editor::texture_followers(const std::s
 /* File > Export (Blender: File > Export; Unity: the FBX Exporter). The
  * selection - or the whole scene - with world transforms baked in, materials
  * and UVs, in any of the formats Blender exports meshes to. */
+/* Task 0268: a skinned mesh's rig for glTF - the armature's objects as joints (each bone at its rest, anything else
+ * where it stands), the mesh's vertex groups as each vertex's four strongest joints, and the clip of the Animation
+ * component above the armature sampled at every frame (the scene's pose put back after). */
+std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin) {
+  auto sk = std::make_shared<ExportSkin>();
+  sk->base = armature_base(arm);
+  sk->base_name = arm.parent ? arm.parent->name + " Skeleton" : std::string("Skeleton");
+  std::vector<GameObject *> objs;
+  std::vector<std::pair<GameObject *, int>> stack{{&arm, -1}};
+  while (!stack.empty() && objs.size() < 4096) {
+    auto [g, parent] = stack.back();
+    stack.pop_back();
+    ExportSkin::Joint j;
+    j.name = g->name, j.parent = parent;
+    const Bone *b = g->get<Bone>();
+    const Transform &l = g->local();
+    j.t = b ? b->rest_position : l.position, j.r = b ? b->rest_rotation : l.rotation, j.s = b ? b->rest_scale : l.scale;
+    const int me = (int)sk->joints.size();
+    sk->joints.push_back(j);
+    objs.push_back(g);
+    for (size_t c = g->children.size(); c-- > 0;) stack.push_back({g->children[c], me});
+  }
+  /* The weights as the Skin modifier deforms: deforming bones with an invertible rest, at most its Max Influences (and
+   * four, glTF's), its vertex group limiting which vertices follow. A vertex that follows no bone stays at rest in
+   * Blendity: in the file it follows the mesh's own object (a joint when the mesh sits under the rig) or the first
+   * joint, with weight 1 - glTF's weights must add up to 1 (all zeros collapse to the origin in most engines). */
+  std::unordered_map<std::string, int> by_name;
+  int still = 0;
+  for (size_t k = 0; k < objs.size(); k++) {
+    if (objs[k] == &owner) still = (int)k;
+    const Bone *b = objs[k]->get<Bone>();
+    if (!b || !b->deform) continue;
+    const Mat4 rm = b->rest_matrix();
+    const float det = dot(cross(rm.column(0), rm.column(1)), rm.column(2));
+    if (std::fabs(det) > 1e-12f && finite_bits(det)) by_name.emplace(objs[k]->name, (int)k);
+  }
+  std::vector<int> group_joint(m.vertex_groups.size(), -1);  // (each group's joint looked up once)
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    const auto it = by_name.find(m.vertex_groups[gi].name);
+    if (it != by_name.end()) group_joint[gi] = it->second;
+  }
+  bool invert = false;
+  const std::string *limit = skin.limit_group(invert);
+  const int limit_gi = limit && !limit->empty() ? m.find_group(*limit) : -1;
+  const size_t most = (size_t)std::max(1, std::min(4, skin.max_influences));
+  sk->vjoints.assign(m.vert_count(), {(uint16_t)still, 0, 0, 0});
+  sk->vweights.assign(m.vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+  std::vector<std::pair<float, int>> w;
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    if (limit_gi >= 0) {
+      const std::vector<float> &lw = m.vertex_groups[(size_t)limit_gi].weights;
+      const bool in_group = v < lw.size() && lw[v] > 0.0f;
+      if (in_group == invert) continue;  // (left out by the modifier's group: at rest)
+    }
+    w.clear();
+    for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+      const std::vector<float> &gw = m.vertex_groups[gi].weights;
+      if (group_joint[gi] >= 0 && v < gw.size() && gw[v] > 0.0f && finite_bits(gw[v])) w.push_back({gw[v], group_joint[gi]});
+    }
+    if (w.empty()) continue;
+    std::sort(w.begin(), w.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    float sum = 0.0f;
+    for (size_t k = 0; k < w.size() && k < most; k++) sum += w[k].first;
+    sk->vjoints[v] = {0, 0, 0, 0}, sk->vweights[v] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (size_t k = 0; k < w.size() && k < most; k++) sk->vjoints[v][k] = (uint16_t)w[k].second, sk->vweights[v][k] = w[k].first / sum;
+  }
+  /* The clip: the Animation component on the armature or above it. */
+  GameObject *root = &arm;
+  while (root && !(root->get<Animation>() && !root->get<Animation>()->clip.empty())) root = root->parent;
+  const AnimationClipPtr clip = root ? clip_asset(root->get<Animation>()->clip) : nullptr;
+  if (!clip || clip->tracks.empty()) return sk;
+  /* What sampling will write, kept to put back: every transform under the root (the whole Transform, its Inspector
+   * angles too) and every other number the clip's tracks name (a light's intensity, a component's field). */
+  std::vector<std::pair<GameObject *, Transform>> saved;
+  std::vector<GameObject *> under{root};
+  while (!under.empty()) {
+    GameObject *g = under.back();
+    under.pop_back();
+    saved.push_back({g, g->local()});
+    for (GameObject *c : g->children) under.push_back(c);
+  }
+  std::vector<std::tuple<GameObject *, std::string, int, float>> numbers;
+  for (const AnimTrack &tr : clip->tracks) {
+    if (tr.property == "Position" || tr.property == "Rotation" || tr.property == "Scale") continue;
+    GameObject *g = anim_target(*root, tr.path);
+    float v = 0.0f;
+    if (g && read_anim_value(*g, tr.property, tr.axis, v)) numbers.emplace_back(g, tr.property, tr.axis, v);
+  }
+  ExportSkin::Anim an;
+  an.name = clip->name, an.fps = clip->frame_rate > 0.0f ? clip->frame_rate : 30.0f;
+  an.frames = std::max(1, std::min(100000, (int)std::ceil(std::max(clip->length, clip->end_frame())) + 1));  // (keys past the length too)
+  an.t.assign(objs.size(), {}), an.r.assign(objs.size(), {}), an.s.assign(objs.size(), {});
+  for (int f = 0; f < an.frames; f++) {
+    apply_clip(*clip, *root, (float)f);
+    for (size_t k = 0; k < objs.size(); k++) {
+      const Transform &l = objs[k]->local();
+      an.t[k].push_back(l.position), an.r[k].push_back(l.rotation), an.s[k].push_back(l.scale);
+    }
+  }
+  for (auto &[g, t] : saved) g->set_local(t);
+  for (auto &[g, prop, axis, v] : numbers) write_anim_value(*g, prop, axis, v);
+  sk->anims.push_back(std::move(an));
+  return sk;
+}
+
 std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
   std::vector<ExportItem> items;
   auto add = [&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mf = g.get<MeshFilter>();
-    const Mesh *m = o.apply_modifiers ? g.evaluated_mesh() : (mf && mf->mesh ? mf->mesh.get() : nullptr);
+    /* Task 0268: a skinned mesh in glTF goes at rest with its rig (the skin is the file's to apply). */
+    const bool gltf = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF;
+    const SkinModifier *skm = o.skins && gltf ? g.get<SkinModifier>() : nullptr;
+    GameObject *arm = skm && !skm->object.empty() ? scene_->find_by_name(skm->object) : nullptr;
+    if (arm && !arm->get<Armature>()) arm = nullptr;
+    const Mesh *m = arm && mf && mf->mesh ? mf->mesh.get() : o.apply_modifiers ? g.evaluated_mesh() : (mf && mf->mesh ? mf->mesh.get() : nullptr);
     if (!m || !m->face_count()) return;
     ExportItem it;
     it.name = g.name;
     it.mesh = m;
     it.world = g.world_matrix();
+    if (arm) it.skin = export_skin_of(*arm, *m, g, *skm);
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
     items.push_back(it);
     /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
@@ -2694,6 +2808,7 @@ the views drawn again each one (as an orbit does), presented by the card, and as
 part's mean frame time printed, the window as the card showed it saved to `out`. */
 int Editor::windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands) {
   windowed_check_ = true;
+  if (dialog_ == Dialog::FirstRunTier) dialog_ = Dialog::None;  // (task 0261: as startup_check)
   for (const std::string &c : commands) command(c);  // (task 0199: the scene to measure)
   std::vector<Event> events;
   auto step = [&](bool redraw_views, bool every_row = false) {
@@ -2852,8 +2967,56 @@ void Editor::update_procedural_shapes() {
 
 /* The first run on a machine near the minimum (4 cores / 8 threads or 8 GB, e.g. an i7 laptop with Iris Xe): what Low
  * does, and High one click away. Either choice can be changed in Preferences > Quality. */
+/* Task 0261: the welcome's first question - where the artist comes from. Each answer sets the keys (and the Scene view's
+ * mouse where the program has its own) in one go; Edit > Preferences > Keymap changes it later; Help > Welcome asks again. */
+bool Editor::draw_origin_picker() {
+  auto &u = ui_;
+  for (const char *l : {"Where are you coming from? Blendity takes that program's keys and mouse.", "Edit > Preferences > Keymap changes it later; Help > Welcome asks again."}) {
+    Recti q = u.popup_row();
+    u.label({q.x + u.px(12), q.y, q.w - u.px(20), q.h}, l);
+  }
+  struct Origin { const char *label, *origin, *keys; };
+  static const Origin kOrigins[] = {{"Unity", "unity", "Unity's keys and navigation (Blendity's own)"},
+                                    {"Unreal", "unreal", "Unreal's: Alt+P plays, End drops to the floor, Alt+G/H/J/K views"},
+                                    {"Blender", "blender", "Blender's: G/R/S, middle-mouse orbit, Shift+I keys"},
+                                    {"Photoshop & Substance", "adobe", "Adobe's brush keys on Unity's feel: B brush, E eraser, V move, [ ] size"},
+                                    {"Just start", "", "Keep the keys as they are and close this (Unity's on a first run)"}};
+  Recti b = u.popup_row(u.row_h() + u.px(10));
+  int x = b.x + u.px(12);
+  bool just_start = false;
+  for (const Origin &o : kOrigins) {
+    const int w = u.px(o.origin[0] == 'a' ? 170 : 90);
+    const Recti r{x, b.y + u.px(4), w, b.h - u.px(8)};
+    if (u.record_buttons) u.button_rects[std::string("welcome:") + o.label] = r;
+    const bool chosen = origin_chosen_ == o.origin && !origin_chosen_.empty();
+    const bool hit = u.button(r, o.label, chosen);
+    if (hit && !o.origin[0]) just_start = true;
+    else if (hit) origin_chosen_ = o.origin, apply_origin(o.origin);
+    u.tooltip(o.keys);
+    x += w + u.px(6);
+  }
+  Recti n = u.popup_row();
+  const std::string now = strprintf("Keys: %s.  Feel: %s.", keymap_preset_.c_str(), kEditorFeels[(int)nav_style_]);
+  u.label({n.x + u.px(12), n.y, n.w - u.px(20), n.h}, now, u.theme.text_dim);
+  return just_start;
+}
+
 void Editor::draw_first_run_tier(const std::function<void()> &close) {
   auto &u = ui_;
+  if (draw_origin_picker()) {  // (task 0261: Just start)
+    save_prefs();
+    close();
+    return;
+  }
+  if (!welcome_low_) {  // (a machine above the minimum, or the welcome asked again from Help: the picker alone, and Start)
+    Recti b = u.popup_row(u.row_h() + u.px(10));
+    const Recti r{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+    if (u.record_buttons) u.button_rects["welcome:Start"] = r;
+    if (!u.button(r, "Start")) return;
+    save_prefs();
+    close();
+    return;
+  }
   const uint64_t ram = sys::physical_memory_bytes();
   const std::string found = strprintf("This machine has %d threads and %.0f GB of memory, near Blendity's minimum.", sys::hardware_threads(), ram / 1073741824.0);
   for (const std::string &l : {found, std::string("Low keeps the editor smooth: the views draw at 67 % and scale up, a 1024 shadow map,"),
@@ -2874,10 +3037,190 @@ void Editor::draw_first_run_tier(const std::function<void()> &close) {
   close();
 }
 
+/* Rig Hair from Mesh's numbers (task 0291): what `hair rig <locks> <bones>` took - how many locks a shell is cut into
+ * (0: its loose parts, the cards) and how many bones a chain has. */
+void Editor::draw_hair_rig_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  u.label({r.x + u.px(12), r.y, u.px(160), r.h}, "Locks");
+  const Recti lf{r.x + u.px(176), r.y + u.px(2), u.px(90), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["hair:locks"] = lf;
+  u.int_field(u.id("hair_locks"), lf, hair_locks_, 0, 64);
+  u.tooltip("0: each loose part (a hair card) is a lock; a number cuts one shell into that many locks around the head.");
+  r = u.popup_row(u.row_h() + u.px(4));
+  u.label({r.x + u.px(12), r.y, u.px(160), r.h}, "Bones a Lock");
+  const Recti bf{r.x + u.px(176), r.y + u.px(2), u.px(90), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["hair:bones"] = bf;
+  u.int_field(u.id("hair_bones"), bf, hair_bones_, 1, 16);
+  u.tooltip("The chain's length from the scalp to the tip: more bends more smoothly and costs more to simulate.");
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti go{b.right() - u.px(184), b.y + u.px(4), u.px(84), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["hair:Rig"] = go, u.button_rects["hair:Cancel"] = cancel;
+  if (u.button(cancel, "Cancel")) return close();
+  if (!u.button(go, "Rig")) return;
+  close();
+  command(strprintf("hair rig %d %d", hair_locks_, hair_bones_));
+}
+
+/* Task 0273: the bakes' settings - the size, the samples (mesh maps), the UVs kept or laid out anew. */
+void Editor::draw_bake_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  static const char *kSizes[] = {"512", "1024", "2048", "4096"};
+  int si = bake_size_ <= 512 ? 0 : bake_size_ <= 1024 ? 1 : bake_size_ <= 2048 ? 2 : 3;
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  u.label({r.x + u.px(12), r.y, u.px(110), r.h}, "Size");
+  const Recti sc{r.x + u.px(126), r.y + u.px(2), u.px(110), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["bake:size"] = sc;
+  if (u.combo(u.id("bake_size"), sc, si, kSizes, 4)) bake_size_ = std::atoi(kSizes[si]);
+  if (bake_mode_ == 0) {
+    r = u.popup_row(u.row_h() + u.px(4));
+    u.label({r.x + u.px(12), r.y, u.px(110), r.h}, "Samples");
+    const Recti sf{r.x + u.px(126), r.y + u.px(2), u.px(110), r.h - u.px(4)};
+    if (u.record_buttons) u.button_rects["bake:samples"] = sf;
+    u.int_field(u.id("bake_samples"), sf, bake_samples_, 4, 64);
+    u.tooltip("Rays a texel for the occlusion and the thickness: more is smoother and slower.");
+  }
+  r = u.popup_row(u.row_h() + u.px(4));
+  const Recti kc{r.x + u.px(12), r.y + u.px(2), u.row_h() - u.px(4), u.row_h() - u.px(4)};
+  if (u.record_buttons) u.button_rects["bake:keep"] = kc;
+  bool &keep = bake_mode_ == 1 ? bake_keep_uvs_textures_ : bake_keep_uvs_;  // (each bake its own: Bake Textures makes new UVs unless asked)
+  u.checkbox(kc, keep);
+  u.label({kc.right() + u.px(6), r.y, r.w - u.px(40), r.h}, "Keep the mesh's UVs (when they lie in 0-1 and don't overlap)", u.theme.text_dim);
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti go{b.right() - u.px(184), b.y + u.px(4), u.px(84), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["bake:Bake"] = go, u.button_rects["bake:Cancel"] = cancel;
+  if (u.button(cancel, "Cancel")) return close();
+  if (!u.button(go, "Bake")) return;
+  close();
+  if (bake_mode_ == 1) return (void)bake_object_textures(bake_size_, bake_keep_uvs_textures_);
+  MeshMapsSettings s = meshmaps_settings_;
+  s.size = bake_size_, s.samples = std::max(4, std::min(64, bake_samples_)), s.keep_uvs = bake_keep_uvs_;
+  meshmaps_settings_ = s;
+  bake_mesh_maps_start(s);
+}
+
+/* Save as Smart Material (task 0273): the name, said when it would replace a saved one; Save writes the layer. */
+void Editor::draw_smat_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  Recti r = u.popup_row(u.row_h() + u.px(8));
+  u.label({r.x + u.px(12), r.y, u.px(90), r.h}, "Name");
+  bool done = false;
+  const Recti fr{r.x + u.px(106), r.y + u.px(3), r.w - u.px(120), r.h - u.px(6)};
+  if (u.record_buttons) u.button_rects["smat:name"] = fr;
+  u.text_field(u.id("smat_name"), fr, dialog_text_, &done);
+  const std::string file = smat_file_name(dialog_text_);
+  const bool exists = !file.empty() && fs::exists(resolve_asset_path("Assets/Materials/Smart/" + file + ".smat"));
+  r = u.popup_row();
+  u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h},
+          exists ? "A smart material of this name is saved: Replace writes over it." : "Saved under Assets/Materials/Smart; the shelf lists it.",
+          exists ? u.theme.accent : u.theme.text_dim);
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti go{b.right() - u.px(184), b.y + u.px(4), u.px(84), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["smat:Save"] = go, u.button_rects["smat:Cancel"] = cancel;
+  if (u.button(cancel, "Cancel")) return close();
+  const bool save = u.button_enabled(go, exists ? "Replace" : "Save", !file.empty(), "Name it.") || (done && !file.empty() && !exists);
+  if (!save) return;
+  ProceduralTexturePtr pt = texture_asset(smat_asset_);
+  const std::string name = dialog_text_;
+  close();
+  if (!pt || smat_layer_ < 0 || smat_layer_ >= (int)pt->layers.size()) return refuse("Save as Smart Material: the layer is gone", "", "");
+  smat_write(pt->layers[(size_t)smat_layer_]->clone(), name);
+}
+
+/* The Draw menu's pen (task 0286): what only the console set - the colour, how steady the line is, the canvas the strokes
+ * go on, clearing, and lifting the sketch off the picture into 3D. */
+void Editor::draw_sketch_pen_menu() {
+  auto &u = ui_;
+  u.submenu("Pen Color", u.px(160), [this] {
+    static const char *const kNames[] = {"Ink", "Pencil Grey", "Red", "Blue", "Green", "White"};
+    static const char *const kHex[] = {"202020", "808080", "D03030", "3060D0", "30A050", "F0F0F0"};
+    for (int k = 0; k < 6; k++)
+      if (ui_.menu_item(kNames[k], nullptr, sketch_.color == Color::hex((uint32_t)std::strtoul(kHex[k], nullptr, 16))))
+        sketch_command({"sketch", "color", kHex[k]}, "");
+  });
+  u.submenu("Steadiness", u.px(170), [this] {
+    static const char *const kNames[] = {"Off", "Light", "Medium", "Strong", "Very Strong"};
+    static const int kPx[] = {0, 10, 25, 50, 100};
+    for (int k = 0; k < 5; k++)
+      if (ui_.menu_item(kNames[k], nullptr, (int)std::lround(sketch_.tether) == kPx[k])) sketch_command({"sketch", "steady", std::to_string(kPx[k])}, "");
+  });
+  u.tooltip("Steadiness (a lazy rope): the line trails the pen by this much, so a shaky hand draws a smooth line.");
+  u.submenu("Canvas", u.px(240), [this] {
+    Sketch &s = sketch_doc();
+    if (ui_.menu_item("The View (the picture plane)", nullptr, s.active_canvas == 0)) sketch_canvas_command({"sketchcanvas", "view"}, "");
+    if (ui_.menu_item("The Ground")) sketch_canvas_command({"sketchcanvas", "ground"}, "");
+    for (const char *ax : {"X", "Y", "Z"})
+      if (ui_.menu_item(std::string("A Plane Facing ") + ax)) sketch_canvas_command({"sketchcanvas", "plane", to_lower(ax)}, "");
+    if (ui_.menu_item("The Face under the Middle")) sketch_canvas_command({"sketchcanvas", "face"}, "");
+    ui_.menu_separator();
+    for (const SketchCanvas &c : s.canvases)
+      if (c.kind != 2 && ui_.menu_item(strprintf("%d: %s", c.id, c.name.c_str()), nullptr, s.active_canvas == c.id))
+        sketch_canvas_command({"sketchcanvas", std::to_string(c.id)}, "");
+  });
+  u.tooltip("Where the next strokes land: on the picture, or on a plane in the scene (the ground, a plane facing an axis, a face).");
+  if (u.menu_item("Lift the Sketch to 3D")) sketch_refine_command({"sketchlift"});
+  u.tooltip("The strokes drawn on the picture placed in the scene: each on the face under it, or at the depth it was drawn at.");
+  if (u.menu_item("Clear the Sketch")) sketch_command({"sketch", "clear"}, "");
+  u.tooltip("Every stroke removed (Undo brings them back).");
+}
+
+/* Mesh > Draw > Guides, and the Draw tab's Guides menu (round 318). */
+void Editor::draw_sketch_guides_items() {
+  static const char *const kGuides[] = {"None", "Ruler", "Ellipse", "French Curve"};
+  for (int k = 0; k < 4; k++)
+    if (ui_.menu_item(kGuides[k], nullptr, sketch_.guide == k)) sketch_.guide = k;
+  ui_.submenu("French Curve Shape", ui_.px(180), [this] {  // (task 0286)
+    static const char *const kFrench[] = {"Gentle S", "Long C", "Spiral"};
+    for (int k = 0; k < 3; k++)
+      if (ui_.menu_item(kFrench[k], nullptr, sketch_.guide == 3 && sketch_.french == k)) sketch_command({"sketchguide", "french", std::to_string(k)}, "");
+  });
+  ui_.menu_separator();
+  static const char *const kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
+  for (int k = 0; k < 5; k++)
+    if (ui_.menu_item(kSym[k], nullptr, sketch_.symmetry == k)) sketch_.symmetry = k;
+  ui_.submenu("Radial Copies", ui_.px(160), [this] {  // (task 0286)
+    for (int n : {3, 4, 5, 6, 8, 12, 16})
+      if (ui_.menu_item(strprintf("%d copies", n), nullptr, sketch_.symmetry == 4 && sketch_.radial == n))
+        sketch_command({"sketchguide", "symmetry", "radial", std::to_string(n)}, "");
+  });
+  ui_.menu_separator();
+  static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
+  for (int k = 0; k < 4; k++)
+    if (ui_.menu_item(kPersp[k], nullptr, sketch_doc().perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
+  ui_.menu_separator();
+  if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
+  if (ui_.menu_item("Perspective Follows the Camera", nullptr, sketch_doc().follow_camera))  // (task 0286)
+    sketch_command({"sketchguide", "follow", sketch_doc().follow_camera ? "off" : "on"}, "");
+  ui_.tooltip("The perspective guide and the camera as one: turning the view moves the vanishing points, dragging a point turns the view.");
+}
+
+/* Build from Sketch and Sketch over the Model: Mesh > Draw's, and the Draw tab's Build menu (round 318). */
+void Editor::draw_sketch_build_items() {
+  ui_.submenu("Build from Sketch", ui_.px(220), [this] {  // (task 0225)
+    static const char *const kBuild[][2] = {{"Box (three lines at a corner)", "box"}, {"Cylinder (two circles)", "cylinder"}, {"Cone (a circle and a line)", "cone"},
+                                            {"Sweep (two circles and a path)", "sweep"}, {"Face (a closed outline)", "face"}, {"Pull the Face (a line along its normal)", "pull"}};
+    for (const auto &b : kBuild)
+      if (ui_.menu_item(b[0])) sketch_build_command({"sketchbuild", b[1]});
+  });
+  ui_.submenu("Sketch over the Model", ui_.px(240), [this] {  // (task 0226)
+    if (ui_.menu_item("Project the Stroke onto the Face")) sketch_refine_command({"sketchproject"});
+    ui_.tooltip("The last stroke on the picture plane pushed onto the face under it, along the view: a line on the surface.");
+    if (ui_.menu_item("Trace into a Cut")) sketch_refine_command({"sketchtrace", "edge"});
+    ui_.tooltip("The last stroke on a face: a line cuts across the face (the Knife), a closed outline is imprinted as a face.");
+    if (ui_.menu_item("Trace into a Curve")) sketch_refine_command({"sketchtrace", "curve"});
+    ui_.menu_separator();
+    if (ui_.menu_item("Back to the Layer's View")) sketch_layer_view();
+    ui_.tooltip("The camera the layer's first stroke was drawn in: a picture-plane drawing fades as the view turns away from it.");
+    if (ui_.menu_item("Model Edges Overlay", nullptr, sketch_.overlay)) sketch_.overlay = !sketch_.overlay;
+    if (ui_.menu_item("Ruler along the Edge under the Middle")) sketch_command({"sketchguide", "ruler", "edge"}, "");
+    if (ui_.menu_item("Ellipse on the Face under the Middle")) sketch_command({"sketchguide", "ellipse", "face"}, "");
+  });
+}
+
 /* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
 void Editor::set_theme(const std::string &name_in, bool save) {
   const int k = ui::theme_index(name_in);
-  if (k < 0) return Log::warn("theme: Dark, Light, Emiliano Light or Emiliano Dark, not '%s'", name_in.c_str());
+  if (k < 0) return Log::warn("theme: Dark, Light, Emiliano Light, Emiliano Dark or High Contrast, not '%s'", name_in.c_str());
   theme_name_ = ui::kThemeNames[k];
   ui_.theme = ui::theme_named(theme_name_);
   ui_.redraw = true;
@@ -3051,6 +3394,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   if (parent) expanded_.insert(parent->id);
   select(g->id);
   mark_changed("Create " + kind);
+  record_primitive_last(g, kind);  // (task 0266: its size and segments in the Adjust Last panel)
   return g;
 }
 
@@ -3451,6 +3795,7 @@ bool Editor::bench_scene(const std::string &name) {
 /* Task 0202: Blendity --startup-check - init, the first frames until one is on the screen (the card presents one frame
  * behind: three frames), quit; tools/bench_ui.py times the process. */
 int Editor::startup_check() {
+  if (dialog_ == Dialog::FirstRunTier) dialog_ = Dialog::None;  // (task 0261: a scratch profile's welcome is not what is measured)
   std::vector<Event> events;
   for (int i = 0; i < 3; i++) {
     events.clear();
@@ -3462,6 +3807,7 @@ int Editor::startup_check() {
 }
 
 void Editor::enter_play() {
+  obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   sculpt_remesh_cancel();  // (task 0241: Play clones the scene; a result landing in the clone would be thrown away by Stop)
   set_weight_paint(false);
   set_sculpt(false);  // (task 0236: the stable clone shares meshes)
@@ -3514,30 +3860,29 @@ static void scan_files(const std::string &dir, const std::string &ext, std::vect
   }
 }
 
-static int g_dialog_shown = 0;  // which dialog has had its popup opened
-
 void Editor::draw_dialogs() {
   if (ipv_.open && dialog_ != Dialog::ImportPreview && busy_label_.empty()) finish_import_preview(false);  // (the preview clicked away: as Cancel, task 0152)
   if (dialog_ == Dialog::None) {
-    g_dialog_shown = 0;
+    dialog_shown_ = 0;
     return;
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
   const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
                     dialog_ == Dialog::MoonRay || dialog_ == Dialog::Ai;
-  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : wide || dialog_ == Dialog::Report ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
-    if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
-      g_dialog_shown = 0;
+    if (dialog_shown_ == (int)dialog_) {  // was open and got closed by a click outside
+      dialog_shown_ = 0;
       dialog_ = Dialog::None;
       return;
     }
-    g_dialog_shown = (int)dialog_;
+    dialog_shown_ = (int)dialog_;
     u.open_popup(id, anchor);
     if (dialog_ == Dialog::SaveAs) u.begin_edit(u.id("saveas_name"), dialog_text_, true);
     if (dialog_ == Dialog::ExportTextures) u.begin_edit(u.id("exptex_dir"), dialog_text_, true);
+    if (dialog_ == Dialog::SaveSmat) u.begin_edit(u.id("smat_name"), dialog_text_, true);
     dialog_files_.clear();
     if (dialog_ == Dialog::OpenScene) scan_files(assets_dir_, ".scene", dialog_files_);
     if (dialog_ == Dialog::ImportObj) {
@@ -3632,8 +3977,20 @@ void Editor::draw_dialogs() {
           close();
         });
         break;
+      case Dialog::HairRig:  // (task 0291)
+        title("Rig Hair from Mesh");
+        draw_hair_rig_dialog(close);
+        break;
+      case Dialog::Bake:  // (task 0273)
+        title(bake_mode_ == 0 ? "Bake Mesh Maps" : "Bake Textures");
+        draw_bake_dialog(close);
+        break;
+      case Dialog::Report:  // (task 0271)
+        title(report_title_.c_str());
+        draw_report_dialog(close);
+        break;
       case Dialog::FirstRunTier:
-        title("Welcome: Blendity starts on Low here");
+        title(welcome_low_ ? "Welcome: Blendity starts on Low here" : "Welcome to Blendity");
         draw_first_run_tier(close);
         break;
       case Dialog::MoonRay:
@@ -3658,10 +4015,12 @@ void Editor::draw_dialogs() {
         u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, kPackingMaps[export_packing_], u.theme.text_dim);
         r = u.popup_row(u.row_h() + u.px(8));
         u.label({r.x + u.px(12), r.y, u.px(90), r.h}, "Folder");
-        bool done = false;
-        u.text_field(u.id("exptex_dir"), {r.x + u.px(106), r.y + u.px(3), r.w - u.px(120), r.h - u.px(6)}, dialog_text_, &done);
+        const bool done = path_picker_field({r.x + u.px(106), r.y + u.px(3), r.w - u.px(120), r.h - u.px(6)}, u.id("exptex_dir"), "exptex", dialog_text_,
+                                            PickKind::Folder, {}, [this](const std::string &p) {
+                                              if (dialog_ == Dialog::ExportTextures) dialog_text_ = p;  // (task 0271's folder dialog)
+                                            });
         r = u.popup_row();
-        u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, "Under the project folder (Exports/Textures by default).", u.theme.text_dim);
+        u.label({r.x + u.px(106), r.y, r.w - u.px(120), r.h}, "Under the project folder (Exports/Textures by default), or ... for one anywhere.", u.theme.text_dim);
         r = u.popup_row();
         u.checkbox({r.x + u.px(12), r.y + u.px(2), u.row_h() - u.px(4), u.row_h() - u.px(4)}, export_assign_);
         u.label({r.x + u.px(12) + u.row_h(), r.y, r.w - u.px(40), r.h}, "Assign the exported images to the material", u.theme.text_dim);
@@ -3676,6 +4035,11 @@ void Editor::draw_dialogs() {
           close();
           export_textures_command(t);
         }
+        break;
+      }
+      case Dialog::SaveSmat: {  // (task 0273: the name asked, a file replaced only when said)
+        title("Save as Smart Material");
+        draw_smat_dialog(close);
         break;
       }
       case Dialog::Boolean: {  // (task 0255: the object kept and the cutters named, whatever the order of selection)
@@ -3708,11 +4072,11 @@ void Editor::draw_dialogs() {
         const int bw = u.px(110), bh = b.h - u.px(8), by = b.y + u.px(4);
         const Recti apply{b.x + u.px(12), by, bw, bh}, live{b.x + u.px(12) + bw + u.px(6), by, bw, bh}, cancel{b.right() - u.px(92), by, u.px(80), bh};
         if (u.record_buttons) u.button_rects["bool:Apply"] = apply, u.button_rects["bool:Modifier"] = live, u.button_rects["bool:Cancel"] = cancel;
-        if (u.button_enabled(apply, "Apply now", meshes.size() >= 2, "Select two or more mesh objects.")) {
+        if (u.button_enabled(apply, "Apply Now", meshes.size() >= 2, "Select two or more mesh objects.")) {
           close();
           boolean_selected(boolean_op_, true, boolean_kept_);
         }
-        else if (u.button_enabled(live, "Live modifier", meshes.size() >= 2, "Select two or more mesh objects.")) {
+        else if (u.button_enabled(live, "Live Modifier", meshes.size() >= 2, "Select two or more mesh objects.")) {
           close();
           boolean_selected(boolean_op_, false, boolean_kept_);
         }
@@ -3776,7 +4140,8 @@ void Editor::draw_dialogs() {
         int ti = std::max(0, ui::theme_index(theme_name_));
         if (u.combo(u.id("pref_theme"), {rt.x + u.px(160), rt.y + u.px(2), u.px(160), rt.h - u.px(4)}, ti, ui::kThemeNames, ui::kThemeCount))
           set_theme(ui::kThemeNames[ti]);
-        u.tooltip("The editor's colours: Dark (Blendity's), Light, or Emiliano Light / Dark (from your site's palette).");
+        u.tooltip("The editor's colors: Dark (Blendity's), Light, Emiliano Light / Dark (from your site's palette), or High Contrast\n"
+                  "(white on near-black, every text at WCAG's 4.5:1 or more, a yellow focus ring).");
         Recti r2 = u.popup_row(u.row_h() + u.px(4));
         u.label({r2.x + u.px(12), r2.y, u.px(140), r2.h}, "Move snap");
         u.float_field(u.id("pref_snap"), {r2.x + u.px(160), r2.y + u.px(2), u.px(80), r2.h - u.px(4)}, snap_move_, 0.01f, 0.001f, 100.0f, "%.3g");
@@ -3791,14 +4156,24 @@ void Editor::draw_dialogs() {
         if (u.checkbox({ru.x + u.px(320), ru.y + u.px(2), ru.h - u.px(4), ru.h - u.px(4)}, update_previews_)) save_prefs();
         u.label({ru.x + u.px(320) + ru.h, ru.y, u.px(200), ru.h}, "Include every PR's build");
         u.tooltip("Off: only released versions (v0.10.0...). On: also preview builds of single pull requests, when published.");
+        Recti rg = u.popup_row(u.row_h() + u.px(4));  // (task 0291: what `layoutguide on|off` set)
+        u.label({rg.x + u.px(12), rg.y, u.px(140), rg.h}, "Layout guides");
+        bool guides = guides_enabled_;
+        const Recti gb{rg.x + u.px(160), rg.y + u.px(2), rg.h - u.px(4), rg.h - u.px(4)};
+        if (u.record_buttons) u.button_rects["pref:guides"] = gb;
+        if (u.checkbox(gb, guides)) command(guides ? "layoutguide on" : "layoutguide off");
+        u.label({gb.right() + u.px(6), rg.y, u.px(260), rg.h}, "Show each layout's purpose and first steps");
+        u.tooltip("The strip under a layout's tabs saying what the layout is for, until Got it; Window > Layouts > Reset Guides shows them again.");
         draw_libraries_settings();
         draw_moonray_settings();
+        draw_ffmpeg_settings();  // (task 0288)
         draw_assist_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
         draw_wheel_settings();  // (task 0230)
         draw_user_shortcuts_settings();  // (task 0231)
         draw_ui_file_settings();
+        draw_livelink_settings();  // (task 0274)
         /* (After the keymap: its preset list opens below its field, and a row above would push the field down until the
          * list had to open upward - task 0152.) */
         Recti ri = u.popup_row(u.row_h() + u.px(4));  // (task 0152)
@@ -3820,7 +4195,7 @@ void Editor::draw_dialogs() {
           rig_control_scale_ = cs;
           save_prefs();
         }
-        u.tooltip("How big the rig's IK and FK handles are drawn, times their own size (1: a fifth of the bone). Console: overlay controls size <x>.");
+        u.tooltip("How big the rig's IK and FK handles are drawn, times their own size (1: a fifth of the bone).");
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -3840,7 +4215,8 @@ void Editor::load_prefs() {
   rebuild_keymap();
   if (!fs::read_file(prefs_path_, text)) {
     set_quality_tier(recommended_tier());  // the first run: a tier that suits this machine (task 0050)
-    if (recommended_tier() == TierLow && (!headless_ || prefs_for_test_)) dialog_ = Dialog::FirstRunTier;  // ... and says so (task 0075)
+    welcome_low_ = recommended_tier() == TierLow;
+    if (!headless_ || prefs_for_test_) dialog_ = Dialog::FirstRunTier;  // ... and the welcome asks where the artist comes from (task 0261), saying so when Low (task 0075)
     return;
   }
   std::string keymap_text;
@@ -3857,6 +4233,8 @@ void Editor::load_prefs() {
     if (moonray_pref(k, v)) continue;
     if (assist_pref(k, v)) continue;
     if (ai_pref(k, v)) continue;
+    if (livelink_pref(k, v)) continue;
+    if (sketch_brush_pref(k, v)) continue;  // (task 0297)
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
@@ -4011,9 +4389,11 @@ void Editor::save_prefs() {
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += hci_prefs_text();  // (task 0235)
+  s += sketch_brush_prefs_text();  // (task 0297)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();
+  s += livelink_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
                  other_views_follow_ ? 1 : 0, simpler_while_moving_ ? 1 : 0, cpu_fallback_noticed_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,

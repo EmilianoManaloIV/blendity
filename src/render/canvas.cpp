@@ -2,6 +2,7 @@
 #include "canvas.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -623,6 +624,10 @@ void Canvas::round_rect_outline(const Recti &r, int radius, uint32_t color) {
 }
 
 void Canvas::line(float x0, float y0, float x1, float y1, uint32_t color, float thickness) {
+  if (xf_on_) {
+    const Vec2 p = xf_.map({x0, y0}), q = xf_.map({x1, y1});
+    x0 = p.x, y0 = p.y, x1 = q.x, y1 = q.y;
+  }
   float hw = thickness * 0.5f;
   Vec2 a{x0, y0}, b{x1, y1}, d = b - a;
   float len2 = dot(d, d);
@@ -630,7 +635,7 @@ void Canvas::line(float x0, float y0, float x1, float y1, uint32_t color, float 
     Vec2 p{px, py};
     float t = len2 > 0 ? clampf(dot(p - a, d) / len2, 0.0f, 1.0f) : 0.0f;
     Vec2 q = a + d * t;
-    return saturate(hw + 0.5f - length(p - q));
+    return edge(hw - length(p - q));
   };
   /* Walk the major axis; only touch pixels within the stroke band. */
   bool steep = std::fabs(d.y) > std::fabs(d.x);
@@ -658,16 +663,24 @@ void Canvas::line(float x0, float y0, float x1, float y1, uint32_t color, float 
 }
 
 void Canvas::fill_circle(float cx, float cy, float r, uint32_t color) {
+  if (xf_on_) {
+    const Vec2 c = xf_.map({cx, cy});
+    cx = c.x, cy = c.y;
+  }
   int x0 = std::max(clip_.x, (int)std::floor(cx - r - 1)), x1 = std::min(clip_.right() - 1, (int)std::ceil(cx + r + 1));
   int y0 = std::max(clip_.y, (int)std::floor(cy - r - 1)), y1 = std::min(clip_.bottom() - 1, (int)std::ceil(cy + r + 1));
   for (int y = y0; y <= y1; y++)
     for (int x = x0; x <= x1; x++) {
       float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
-      blend_px_a(x, y, color, saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy)));
+      blend_px_a(x, y, color, edge(r - std::sqrt(dx * dx + dy * dy)));
     }
 }
 
 void Canvas::circle(float cx, float cy, float r, uint32_t color, float t) {
+  if (xf_on_) {
+    const Vec2 c = xf_.map({cx, cy});
+    cx = c.x, cy = c.y;
+  }
   float hw = t * 0.5f;
   const float band = hw + 1.0f;  // pixels farther than this from the ring get no coverage
   int y0 = std::max(clip_.y, (int)std::floor(cy - r - hw - 1)), y1 = std::min(clip_.bottom() - 1, (int)std::ceil(cy + r + hw + 1));
@@ -697,6 +710,12 @@ void Canvas::circle(float cx, float cy, float r, uint32_t color, float t) {
 void Canvas::fill_polygon(const Vec2 *pts, int n, uint32_t color) {
   /* Convex polygon with analytic-ish AA from signed edge distances. */
   if (n < 3) return;
+  std::vector<Vec2> mapped;
+  if (xf_on_) {
+    mapped.assign(pts, pts + n);
+    for (Vec2 &p : mapped) p = xf_.map(p);
+    pts = mapped.data();
+  }
   float area = 0;
   for (int i = 0; i < n; i++) {
     Vec2 a = pts[i], b = pts[(i + 1) % n];
@@ -743,6 +762,35 @@ void Canvas::blit(const Image &src, int dx, int dy) {
   Recti r = Recti{dx, dy, src.width, src.height}.intersect(clip_);
   for (int y = r.y; y < r.bottom(); y++)
     std::memcpy(img_->row(y) + r.x, src.pixels.data() + (size_t)(y - dy) * src.width + (r.x - dx), (size_t)r.w * 4);
+}
+
+static inline uint32_t lerp_argb(uint32_t a, uint32_t b, uint32_t c, uint32_t d, float tx, float ty) {
+  uint32_t out = 0;
+  for (int sh = 0; sh < 32; sh += 8) {
+    const float top = ((a >> sh) & 255) + (((b >> sh) & 255) - (float)((a >> sh) & 255)) * tx;
+    const float bot = ((c >> sh) & 255) + (((d >> sh) & 255) - (float)((c >> sh) & 255)) * tx;
+    out |= (uint32_t)std::lround(top + (bot - top) * ty) << sh;
+  }
+  return out;
+}
+
+void Canvas::blit_affine(const Image &src, const Recti &dst, const Xform &to_src) {
+  const Recti r = dst.intersect(clip_);
+  if (r.w <= 0 || r.h <= 0 || src.width < 2 || src.height < 2) return;
+  const int w = src.width, h = src.height;
+  JobSystem::global().parallel_for(r.h, 16, [&](int64_t y0, int64_t y1) {
+    for (int y = r.y + (int)y0; y < r.y + (int)y1; y++) {
+      uint32_t *row = img_->row(y);
+      for (int x = r.x; x < r.right(); x++) {
+        const Vec2 s = to_src.map({x + 0.5f, y + 0.5f});
+        const float fx = s.x - 0.5f, fy = s.y - 0.5f;
+        if (fx < -0.5f || fy < -0.5f || fx > w - 0.5f || fy > h - 0.5f) continue;
+        const int ix = std::max(0, std::min(w - 2, (int)std::floor(fx))), iy = std::max(0, std::min(h - 2, (int)std::floor(fy)));
+        const uint32_t *p0 = src.pixels.data() + (size_t)iy * w + ix, *p1 = p0 + w;
+        row[x] = lerp_argb(p0[0], p0[1], p1[0], p1[1], saturate(fx - ix), saturate(fy - iy));
+      }
+    }
+  });
 }
 
 int Canvas::text(Font &f, int x, int y, const std::string &s, uint32_t color) {

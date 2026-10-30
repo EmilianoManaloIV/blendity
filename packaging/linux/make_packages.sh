@@ -25,6 +25,10 @@ cp "$DIST/Blendity" "$STAGE/"
 cp -a licenses "$STAGE/licenses"
 cp LICENSE "$STAGE/"
 cp docs/MANUAL.md "$STAGE/docs/"
+cp -a bridges "$STAGE/bridges"  # (the Live Link window's Install a Bridge, task 0278)
+find "$STAGE/bridges" -name __pycache__ -prune -exec rm -rf {} +
+mkdir -p "$STAGE/bridges/unreal/BlendityLiveLink/Resources"
+cp tests/fixtures/livelink_stream.bin "$STAGE/bridges/unreal/BlendityLiveLink/Resources/"
 cp build/icons/blendity.png "$STAGE/"
 tar -C build/package -czf "$OUT/blendity-$VERSION-linux-x86_64.tar.gz" "blendity-$VERSION-linux-x86_64"
 echo "made $OUT/blendity-$VERSION-linux-x86_64.tar.gz"

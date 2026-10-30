@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Window > Blendity Live Link: the port (Blendity's Window > Live Link shows it), Connect / Disconnect, the status.
+// Window > Blendity Live Link: Auto Connect (on: the link finds Blendity by itself), the port (0: the one Blendity's
+// discovery file names), Connect / Disconnect, the status.
 using UnityEditor;
 using UnityEngine;
 
@@ -7,29 +8,31 @@ namespace Blendity.LiveLink
 {
     public sealed class LiveLinkWindow : EditorWindow
     {
-        int port = 40100;
-
         [MenuItem("Window/Blendity Live Link")]
         static void Open()
         {
             GetWindow<LiveLinkWindow>("Blendity Live Link");
         }
 
-        void OnEnable()
-        {
-            port = EditorPrefs.GetInt("Blendity.LiveLink.Port", 40100);
-        }
-
         void OnGUI()
         {
-            port = Mathf.Clamp(EditorGUILayout.IntField("Port", port), 1, 65535);
-            EditorPrefs.SetInt("Blendity.LiveLink.Port", port);
-            if (GUILayout.Button(LiveLinkClient.Connected ? "Disconnect" : "Connect"))
+            bool auto = EditorGUILayout.Toggle(new GUIContent("Auto Connect", "Connect by itself whenever Blendity's Live Link runs (it writes ~/.blendity/livelink.json)."), LiveLinkClient.AutoConnect);
+            if (auto != LiveLinkClient.AutoConnect)
+                LiveLinkClient.AutoConnect = auto;
+            int port = EditorPrefs.GetInt(LiveLinkClient.PortKey, 0);
+            int typed = Mathf.Clamp(EditorGUILayout.IntField(new GUIContent("Port", "0: the port Blendity's discovery file names. Another: always this one."), port), 0, 65535);
+            if (typed != port)
+                EditorPrefs.SetInt(LiveLinkClient.PortKey, typed);
+            if (GUILayout.Button(LiveLinkClient.Busy ? "Disconnect" : "Connect"))
             {
-                if (LiveLinkClient.Connected)
-                    LiveLinkClient.Disconnect();
+                if (LiveLinkClient.Busy)
+                    LiveLinkClient.Hold();
                 else
-                    LiveLinkClient.Connect(port);
+                {
+                    LiveLinkClient.Held = false;
+                    if (!LiveLinkClient.TryAutoConnect() && !LiveLinkClient.Busy && typed == 0)
+                        LiveLinkClient.Connect(40100);
+                }
                 GUIUtility.ExitGUI();  // (the layout below changes with the state: start the next frame afresh)
             }
             EditorGUILayout.HelpBox(LiveLinkClient.Status, MessageType.None);

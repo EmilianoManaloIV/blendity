@@ -128,8 +128,9 @@ Result solve(GameObject &armature, const std::vector<Goal> &goals, const std::ve
   std::vector<Point> pts;
   for (const Goal &g : goals)
     if (g.bone) pts.push_back({g.bone, g.target, std::max(0.0f, g.weight), {}});
-  for (GameObject *p : pins)
-    if (p) pts.push_back({p, p->world_position(), 10.0f, {}});  // (pins far firmer than goals: the feet don't slide to reach)
+  auto pin_at = [&](size_t k) { return s.pin_poses && k < s.pin_poses->size() ? (*s.pin_poses)[k].first : pins[k]->world_position(); };
+  for (size_t k = 0; k < pins.size(); k++)
+    if (pins[k]) pts.push_back({pins[k], pin_at(k), 10.0f, {}});  // (pins far firmer than goals: the feet don't slide to reach)
   for (Point &p : pts) {
     p.above.assign((size_t)B, 0);
     for (int b = index_of(p.bone); b >= 0; b = parent[(size_t)b]) p.above[(size_t)b] = 1;
@@ -138,15 +139,19 @@ Result solve(GameObject &armature, const std::vector<Goal> &goals, const std::ve
   std::vector<std::pair<int, Quat>> held;
   for (const Point &p : pts) {
     const int i = index_of(p.bone);
-    if (i >= 0 && bones[(size_t)i] == p.bone) held.push_back({i, p.bone->world_rotation()});
+    if (i < 0 || bones[(size_t)i] != p.bone) continue;
+    Quat turn = p.bone->world_rotation();
+    for (size_t k = 0; s.pin_poses && k < pins.size() && k < s.pin_poses->size(); k++)
+      if (pins[k] == p.bone) turn = (*s.pin_poses)[k].second;  // (a pin's own turn from before the body moved)
+    held.push_back({i, turn});
   }
   /* Balance over the pins on the ground (within 10 cm of the lowest): the feet's, not a locked hand's; one foot too. */
   std::vector<Vec3> ground;
   float low = 1e30f;
-  for (GameObject *p : pins)
-    if (p) low = std::min(low, p->world_position().y);
-  for (GameObject *p : pins)
-    if (p && p->world_position().y <= low + 0.1f) ground.push_back(p->world_position());
+  for (size_t k = 0; k < pins.size(); k++)
+    if (pins[k]) low = std::min(low, pin_at(k).y);
+  for (size_t k = 0; k < pins.size(); k++)
+    if (pins[k] && pin_at(k).y <= low + 0.1f) ground.push_back(pin_at(k));
   const bool balance = s.balance && body && body->valid() && !ground.empty();
   Vec3 support(0.0f);
   for (const Vec3 &g : ground) support = support + g / (float)ground.size();

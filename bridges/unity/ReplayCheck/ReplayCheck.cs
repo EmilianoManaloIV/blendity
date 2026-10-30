@@ -2,9 +2,11 @@
 // The Unity bridge's parts that need no Unity (the framing, the JSON reader, the glTF reader), run on the recorded
 // Live Link session without Unity: any C# compiler, even the .NET Framework's own (C# 5):
 //
-//   csc /out:ReplayCheck.exe ReplayCheck.cs ..\com.blendity.livelink\Editor\LiveLinkStream.cs
+//   csc /out:ReplayCheck.exe ReplayCheck.cs DiscoveryCheck.cs ..\com.blendity.livelink\Editor\LiveLinkStream.cs
 //       ..\com.blendity.livelink\Editor\MiniJson.cs ..\com.blendity.livelink\Editor\GlbReader.cs
+//       ..\com.blendity.livelink\Editor\LiveLinkDiscovery.cs
 //   ReplayCheck.exe ..\..\..\tests\fixtures\livelink_stream.bin
+//   ReplayCheck.exe --live <python> <repository's blendity folder>   (the discovery file and a reconnect: task 0275)
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -14,6 +16,8 @@ static class ReplayCheck
 {
     static int Main(string[] args)
     {
+        if (args.Length >= 3 && args[0] == "--live")
+            return DiscoveryCheck.Run(args[1], args[2]);
         var data = File.ReadAllBytes(args.Length > 0 ? args[0] : Path.Combine("..", "..", "..", "tests", "fixtures", "livelink_stream.bin"));
         var s = new LiveLinkStream();
         s.Feed(data, data.Length);

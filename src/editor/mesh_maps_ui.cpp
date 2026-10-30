@@ -39,11 +39,11 @@ const Mesh *bake_source(const GameObject *g, const MeshFilter *mf, std::string *
  * writes the layout onto the mesh and is a step on the object). */
 bool Editor::bake_mesh_maps_start(const MeshMapsSettings &s) {
   if (meshmaps_job_) {
-    Log::warn("Mesh Maps: a bake is running (meshmaps cancel stops it)");
+    refuse("Mesh Maps: a bake is running - the tray's Cancel stops it", "meshmaps cancel", "Cancel the bake");
     return false;
   }
   if (playing_) {
-    Log::warn("Mesh Maps: stop Play first");
+    refuse("Mesh Maps: stop Play first", "stop", "Stop Play");
     return false;
   }
   GameObject *g = active_object();
@@ -84,7 +84,7 @@ bool Editor::bake_mesh_maps_start(const MeshMapsSettings &s) {
     raw->done.store(true, std::memory_order_release);
   });
   meshmaps_job_ = std::move(job);
-  Log::info("Mesh Maps: baking %d x %d with %d samples on a worker (Esc in the Scene view or `meshmaps cancel` stops it)", s.size, s.size, s.samples);
+  Log::info("Mesh Maps: baking %d x %d with %d samples on a worker (Esc in the Scene view or the tray's Cancel stops it)", s.size, s.size, s.samples);
   ui_.redraw = true;
   return true;
 }
