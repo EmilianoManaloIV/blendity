@@ -190,7 +190,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten };
   // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
@@ -621,6 +621,20 @@ struct Outline : ComponentBase<Outline> {
   mutable ShellCache shells_[kShellSlots];
   mutable std::vector<MaterialPtr> mats_;
   mutable Vec3 mats_color_{-1.0f, -1.0f, -1.0f};
+};
+
+/* Round 334 (task 0314, ADR 0093): the "2D in 3D" look - the object's depth squashed along the camera's view about a
+ * pivot, in the Game view and renders only (the Scene view keeps the true shape for modelling), its shading the true
+ * shape's. On a parent it reaches the meshes below it; a child's own Camera Flatten wins for its subtree. */
+struct CameraFlatten : ComponentBase<CameraFlatten> {
+  static constexpr const char *kName = "CameraFlatten";
+  float amount = 0.6f;   // 0: as modelled, 1: flat (2 % of the depth kept)
+  int pivot = 0;         // Bounds Center (of this object and the meshes below), Object Origin, Bone
+  std::string bone;      // (Pivot Bone) a bone below this object, by name
+  int direction = 0;     // Toward the Camera (the line from the eye to the pivot), View Axis
+  bool children = true;  // the meshes below this object flatten with it
+  RenderRole render_role() const override { return RenderRole::CameraFlatten; }  // (the views' hash; found without a cast)
+  void reflect(Reflector &r) override;
 };
 
 struct Rotator : ComponentBase<Rotator> {

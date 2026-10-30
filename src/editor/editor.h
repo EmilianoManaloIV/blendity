@@ -1324,6 +1324,14 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   std::string volume_mesh_note_for_test(const MaterialPtr &m) { return volume_mesh_note(m); }  // (round 331)
+  /* Round 334: the items the Game view would draw from this camera (flattened where a Camera Flatten says), or the
+   * Scene view's (game false: never flattened). */
+  std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye) {
+    if (game) set_flatten_view(view, proj, eye);
+    std::vector<DrawItem> items = collect_items(game, false);
+    flatten_view_.on = false;
+    return items;
+  }
   /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
    * asset path and the layer, or -1. */
   std::pair<std::string, int> texture_upto_for_test() const { return texture_upto_; }
@@ -1698,6 +1706,19 @@ class Editor {
     float px_per_m = 0.0f;
     bool ortho = false;  // an orthographic view: the width on screen doesn't depend on the distance
   } outline_view_;
+  /* Round 334: the camera the Game view or a render flattens toward (Camera Flatten); off for the Scene view, bakes,
+   * exports and MoonRay, which keep the true shape. */
+  struct FlattenView {
+    bool on = false;
+    Vec3 eye{0.0f}, forward{0.0f, 0.0f, 1.0f};
+    bool ortho = false;
+  } flatten_view_;
+  std::unordered_map<uint64_t, Vec3> flatten_pivots_;  // (each Camera Flatten's pivot, once a collect)
+  bool flatten_any_ = false;                            // (a Camera Flatten in the scene, this collect)
+  void apply_camera_flatten(const GameObject &g, DrawItem &it);
+  Vec3 camera_flatten_pivot(const GameObject &owner, const CameraFlatten &cf);
+  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye);
+  void flatten_command(const std::vector<std::string> &t);
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);

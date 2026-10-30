@@ -385,6 +385,7 @@ screens themselves.
 | What one layer added to the texture couldn't be seen without switching every layer above it off. | Alt+click its name: the preview up to it, and again for all (round 332). |
 | A layer at Opacity 0 or with no targets looked broken: on, and doing nothing. | Its row says why: "Opacity 0", "Writes nothing" (round 332). |
 | The Materials window couldn't make a material of a type (Glass, Toon, a fog); the slot's list was one flat list of 12. | Of Type... beside New Material Asset, and both lists grouped: Basic, Glass, Metal, Stylized, Volume (round 332). |
+| A 3D character close to the camera looked like a 3D model, not a drawing: perspective swelled the nose and a hand reaching forward. | Camera Flatten: the depth squashed toward the camera about the body or the head, shaded as modelled, in the Game view and renders - the Scene view keeps the true shape (round 334). |
 
 ## Still worth doing
 

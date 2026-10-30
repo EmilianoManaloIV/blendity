@@ -203,6 +203,10 @@ void register_builtin_components() {
                "Toon outlines: a shell around the object in one color, so it has a line round its silhouette (the inverted "
                "hull). Pair it with a Toon material.",
                "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
+  reg<CameraFlatten>("Rendering",
+                     "The 2D look: the object's depth squashed toward the camera about a pivot (the body, the head), so it "
+                     "draws as its shape seen head-on - in the Game view and renders; its shading stays as modelled.",
+                     "Guilty Gear Xrd's flattened models (a mesh scaled along the view by a driver)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Wind>("Scripts", "A wind along this object's forward (or away from it): spring chains - hair, cloth, tails - move in it (task 0153).", "Blender's Wind force field");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
@@ -1354,6 +1358,24 @@ void MangaEffect::contribute(FilterStack &s) const {
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }
+
+void CameraFlatten::reflect(Reflector &r) {
+  r.field("Amount", amount, 0.01f, 0.0f, 1.0f);
+  r.help("How much of the depth along the view goes: 0 as modelled, 1 flat as a card (2 % kept). The Scene view shows\n"
+         "the true shape; the Game view and renders the flattened one, shaded as the true one.");
+  static const char *kPivots[] = {"Bounds Center", "Object Origin", "Bone"};
+  r.enumeration("Pivot", pivot, kPivots, 3);
+  r.help("What stays put while the depth squashes: the middle of this object and the meshes below it, its origin, or a\n"
+         "bone (the head, so the face keeps its place).");
+  r.text("Pivot Bone", bone);
+  r.help("With Pivot Bone: the bone's name, below this object (Head, head...).");
+  static const char *kDirs[] = {"Toward the Camera", "View Axis"};
+  r.enumeration("Direction", direction, kDirs, 2);
+  r.help("Toward the Camera: along the line from the camera to the pivot. View Axis: along the view's forward (an\n"
+         "orthographic camera uses it always).");
+  r.field("Children", children);
+  r.help("The meshes below this object flatten too; one with a Camera Flatten of its own uses that instead.");
+}
 
 void Outline::reflect(Reflector &r) {
   r.field("Thickness", thickness, 0.001f, 0.0f, 10.0f);

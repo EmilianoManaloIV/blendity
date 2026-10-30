@@ -178,8 +178,9 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   for (const PTObject &ob : objects_) {
     const Mat4 inv = ob.model.inverse();
     inv_models_.push_back(inv);
-    normal_mats_.push_back(inv.transposed());
-    const Vec3 lk = inv.dir(toon_key_L_);
+    const Mat4 shade_inv = ob.flattened ? ob.shade_model.inverse() : inv;  // (round 334: Camera Flatten shades the true shape)
+    normal_mats_.push_back(shade_inv.transposed());
+    const Vec3 lk = shade_inv.dir(toon_key_L_);
     const float len = length(lk);
     local_keys_.push_back(finite_bits(len) && len > 1e-12f ? lk / len : Vec3(0, 1, 0));
   }

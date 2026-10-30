@@ -634,7 +634,7 @@ void Renderer3D::flush() {
   js.parallel_for((int64_t)n_items, 64, [&](int64_t i0, int64_t i1) {
     for (int64_t i = i0; i < i1; i++)
       if (visible[i]) {
-        const Mat4 inv = items_[i].model.inverse();
+        const Mat4 inv = (items_[i].flattened ? items_[i].shade_model : items_[i].model).inverse();  // (round 334: shaded as the true shape)
         normal_mats_[i] = inv.transposed();
         const Vec3 lk = inv.dir(toon_key_L_);  // (task 0149: the face shadow map reads the key light in the object's space)
         const float len = length(lk);
@@ -2311,6 +2311,16 @@ float Renderer3D::draw_volume_pixel(const DrawItem &it, const Mat4 &inv, const M
   *dst = 0xFF000000u | mix(16) | mix(8) | mix(0);
   if (!rt_->hdr.empty()) rt_->hdr[(size_t)y * rt_->width + x] = Vec3(-1.0f, 0.0f, 0.0f);
   return a;
+}
+
+Mat4 flatten_matrix(Vec3 p, Vec3 d, float keep) {
+  Mat4 m = Mat4::identity();
+  const float s = keep - 1.0f, dv[3] = {d.x, d.y, d.z};
+  for (int c = 0; c < 3; c++)
+    for (int r = 0; r < 3; r++) m.at(r, c) += s * dv[r] * dv[c];
+  const Vec3 sp = m.dir(p);
+  m.at(0, 3) = p.x - sp.x, m.at(1, 3) = p.y - sp.y, m.at(2, 3) = p.z - sp.z;
+  return m;
 }
 
 Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds) {

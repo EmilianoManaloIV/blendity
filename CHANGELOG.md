@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 334): Camera Flatten - the 2D look
+
+**Asked:** "I've heard a method in getting that 2D look at 3D. You simply flatten the object relative to the camera
+(face, body, etc.) Is that a feature we can implement to make things look further 2D in 3D?" The user chose to keep
+the original shading, the Game view and renders only, and a component with per-part overrides.
+
+**Added (task 0314, ADR 0093)**
+- **Camera Flatten** (Add Component > Rendering): the object's depth squashed along the camera's view about a pivot -
+  Guilty Gear Xrd's trick, so perspective no longer swells what is near the camera and the picture is the drawn shape.
+  Amount (1: flat as a card, 2 % kept), Pivot (Bounds Center, Object Origin, or a Bone below it by name - the head),
+  Direction (toward the camera, or the view axis), Children (a parent's reaches the meshes below; a child's own wins).
+- **Shaded as modelled:** the normals and the toon face map read the true placement - only where things are drawn
+  changes.
+- **Where:** the Game view, F12 (raster and path tracing) and Camera Preview's traced picture; the Scene view keeps
+  the true shape for modelling, and bakes, exports and MoonRay too. The GPU views draw a flattened object on the CPU
+  and say why.
+- **Console:** `flatten 0.6`, `flatten pivot bone head`, `flatten direction axis`, `flatten preset anime` (0.6 about
+  the head bone if there is one), `flatten remove`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The Game view, Camera Preview and the live preview kept their old picture when a Camera Flatten was added, edited or
+  removed: the component is in the views' hash now (with a render role, found without a cast, and no hierarchy walk
+  when the scene has none).
+- An outlined flattened object had a line 1.25x as thick and its shell rebuilt at every camera move: the shell is
+  built for the true size - the same one from any camera.
+- The GPU and OptiX path tracers read a toon face map's key light in the flattened space: the true one, as the CPU.
+- `flatten pivot` (no word after it), `flatten preset toon` and other unknown words set the Amount to 0: refused with
+  the usage now; `flatten remove` with nothing to remove makes no undo step; an unknown Pivot Bone is warned of.
+- Realtime lightmaps followed the camera (laid out again at every move): laid out and lit by the true placement.
+- The docs say where else the flattened shape shows (piloting a camera, the Draw tab's camera picture) and its limits
+  (World-mapped axis materials, Realtime GI's voxels).
+
+**Checked:** `tests_round334` - the matrix; the Game view flattened, the Scene view not; the views' hash with every
+edit; one outline shell from two cameras; the console's refusals; Children and overrides; through
+an orthographic camera a flattened sphere draws as the true one - the CPU raster 4 pixels of 4096 differ (1494 with
+the flattened normals), the path tracer 0.6 % (34.9 %); the lesson's Try-its.
+
 ## 2026-10-30 (round 333): the shader-graph work written up
 
 **Asked:** the shader-graph request (round 327) - its write-up, as planned.

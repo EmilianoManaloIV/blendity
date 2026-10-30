@@ -68,6 +68,7 @@ const char *material_unsupported(const Material &m) {
 /* Why an object can't be drawn on the GPU yet, or null. */
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
+  if (it.flattened) return "a Camera Flatten (the card has no room for its true shape's shading)";  // (round 334)
   for (uint32_t slot : mesh_slots(*it.mesh))
     if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
   return nullptr;

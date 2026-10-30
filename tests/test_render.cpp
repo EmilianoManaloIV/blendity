@@ -11474,6 +11474,171 @@ static void tests_round331() {
   });
 }
 
+/* Round 334 (task 0314): Camera Flatten - the 2D look. */
+static void tests_round334() {
+  test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
+    const Vec3 p{1, 2, 3}, d = normalize(Vec3(0, 0.6f, -0.8f)), across = normalize(cross(d, Vec3(1, 0, 0)));
+    const Mat4 m = flatten_matrix(p, d, 0.25f);
+    CHECK(length(m.point(p) - p) < 1e-5f);
+    CHECK(length(m.point(p + d) - (p + d * 0.25f)) < 1e-5f);
+    CHECK(length(m.point(p + across) - (p + across)) < 1e-5f);
+    const Mat4 flat = flatten_matrix(p, d, 0.02f);
+    bool finite = true;
+    for (float v : flat.inverse().m) finite = finite && std::isfinite(v);
+    CHECK(finite);
+  });
+  test("Camera Flatten in the editor: the Game view's Cube is flattened toward its camera, the Scene view's isn't; a child flattens with its parent unless Children is off, and its own Camera Flatten wins; flatten remove takes it off", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(cube && sphere);
+    if (!cube || !sphere) return;
+    ed.command("select Cube");
+    ed.command("flatten 0.5");
+    CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf && cf->amount == 0.5f);
+    const Vec3 eye{0, 1, -6};
+    const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto item_of = [&](const std::vector<DrawItem> &items, const GameObject *g) -> const DrawItem * {
+      for (const DrawItem &it : items)
+        if (it.id == (uint32_t)g->id && !it.always_cull) return &it;
+      return nullptr;
+    };
+    std::vector<DrawItem> game = ed.collect_items_for_test(true, v, p, eye), scene = ed.collect_items_for_test(false, v, p, eye);
+    const DrawItem *g = item_of(game, cube), *s = item_of(scene, cube);
+    CHECK(g && s && g->flattened && !s->flattened);
+    if (!g || !s) return;
+    /* The Cube's corner nearest the camera comes halfway to the pivot along the line to the eye. */
+    const Vec3 c = cube->world_bounds().center(), dir = normalize(eye - c);
+    const Vec3 near_pt = s->model.inverse().point(c + dir * 0.4f);  // (a point inside the cube toward the camera, in its own space)
+    const float before = dot(s->model.point(near_pt) - c, dir), after = dot(g->model.point(near_pt) - c, dir);
+    std::printf("    toward the camera from the pivot: %.3f m as modelled, %.3f m in the Game view\n", before, after);
+    CHECK(std::fabs(after - before * 0.5f) < 1e-3f);
+    CHECK(length(g->shade_model.point(near_pt) - s->model.point(near_pt)) < 1e-5f);
+    /* A child: with the parent's (Children on), not with it off, and its own wins. */
+    ed.scene().set_parent(sphere, cube);
+    CHECK(item_of(ed.collect_items_for_test(true, v, p, eye), sphere) && item_of(ed.collect_items_for_test(true, v, p, eye), sphere)->flattened);
+    cf->children = false;
+    CHECK(!item_of(ed.collect_items_for_test(true, v, p, eye), sphere)->flattened);
+    ed.command("select Sphere");
+    ed.command("flatten 1");  // (all of it: 2 % kept, the matrix still finite)
+    const DrawItem *own = item_of(ed.collect_items_for_test(true, v, p, eye), sphere);
+    CHECK(own && own->flattened && std::isfinite(own->model.inverse().m[0]));
+    ed.command("select Cube");
+    ed.command("flatten remove");
+    CHECK(!cube->get<CameraFlatten>());
+  });
+  test("Camera Flatten keeps the shading: through an orthographic camera a sphere flattened along the view draws as the true one (the CPU raster and the path tracer), while the flattened normals alone would change it", [] {
+    auto ball = primitives::uv_sphere(0.5f, 48, 24);
+    MaterialPtr m = make_material("ball", {0.8f, 0.5f, 0.3f});
+    m->roughness = 0.6f;
+    const Mat4 model = Mat4::translate({0, 0, 3});
+    const Vec3 fwd{0, 0, 1};
+    const Mat4 flat = flatten_matrix({0, 0, 3}, -fwd, 0.3f) * model;
+    const Mat4 v = Mat4::look_at({0, 0, 0}, {0, 0, 3}, {0, 1, 0}), p = Mat4::ortho(0.7f, 1.0f, 0.1f, 20.0f);
+    const int W = 64, H = 64;
+    /* The CPU raster. */
+    auto raster = [&](const Mat4 &placed, bool flattened) {
+      CfScene sc;
+      sc.add(ball, placed, 1, m);
+      sc.seal();
+      sc.items[0].flattened = flattened, sc.items[0].shade_model = model;
+      Image img;
+      RenderTarget rt;
+      cf_render(img, rt, W, H, v, p, RasterOptions(), sc);
+      return img.pixels;
+    };
+    const std::vector<uint32_t> truth = raster(model, false), kept = raster(flat, true), bent = raster(flat, false);
+    auto differ = [&](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      int n = 0;
+      for (size_t i = 0; i < a.size(); i++) {
+        const int dr = std::abs((int)(a[i] >> 16 & 255) - (int)(b[i] >> 16 & 255)), dg = std::abs((int)(a[i] >> 8 & 255) - (int)(b[i] >> 8 & 255));
+        n += std::max(dr, dg) > 3;
+      }
+      return n;
+    };
+    const int d_kept = differ(truth, kept), d_bent = differ(truth, bent);
+    std::printf("    the raster: %d pixels differ from the true sphere with the shading kept, %d with the flattened normals\n", d_kept, d_bent);
+    CHECK(d_kept * 20 < d_bent && d_bent > 100);
+    /* The path tracer. */
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-1.0f, -0.3f, 0.6f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    std::vector<MaterialPtr> mats = {m};
+    auto trace = [&](const Mat4 &placed, bool flattened) {
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false;
+      pt.set_settings(st);
+      PTObject o{&ball->render_mesh_tangents(), placed, &mats, 1};
+      o.flattened = flattened, o.shade_model = model;
+      pt.build({o}, {sun}, env);
+      pt.set_camera(v, p, W, H);
+      pt.render(1e9, 16);
+      return pt.linear_rgb(false);
+    };
+    const std::vector<float> t_true = trace(model, false), t_kept = trace(flat, true), t_bent = trace(flat, false);
+    double e_kept = 0, e_bent = 0, sum = 0;
+    for (size_t i = 0; i < t_true.size(); i++) e_kept += std::fabs(t_kept[i] - t_true[i]), e_bent += std::fabs(t_bent[i] - t_true[i]), sum += t_true[i];
+    std::printf("    the path tracer: off by %.1f%% with the shading kept, %.1f%% with the flattened normals\n", 100 * e_kept / sum, 100 * e_bent / sum);
+    CHECK(sum > 0 && e_kept < 0.05 * sum && e_bent > 2 * e_kept);
+  });
+  test("Camera Flatten, review 334: the views' hash moves when one is added, edited, switched off or removed (the Game view draws again); an outlined flattened object keeps one shell, of its true size, from any camera; the console refuses words it doesn't know and leaves the Amount alone", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube);
+    if (!cube) return;
+    ed.command("select Cube");
+    const uint64_t h0 = ed.render_hash_uncached_for_test();
+    ed.command("flatten 0.5");
+    const uint64_t h1 = ed.render_hash_uncached_for_test();
+    ed.command("flatten 0.7");
+    const uint64_t h2 = ed.render_hash_uncached_for_test();
+    cube->get<CameraFlatten>()->enabled = false;
+    const uint64_t h3 = ed.render_hash_uncached_for_test();
+    cube->get<CameraFlatten>()->enabled = true;
+    ed.command("flatten remove");
+    const uint64_t h4 = ed.render_hash_uncached_for_test();
+    CHECK(h1 != h0 && h2 != h1 && h3 != h2 && h4 == h0);
+    /* The console: unknown or incomplete words change nothing. */
+    ed.command("flatten 0.5");
+    for (const char *bad : {"flatten pivot", "flatten direction", "flatten preset toon", "flatten pivto bone head", "flatten pivot bone"}) ed.command(bad);
+    const CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf && cf->amount == 0.5f && cf->pivot == 0 && cf->direction == 0);
+    ed.command("flatten direction axis");
+    ed.command("flatten pivot origin");
+    CHECK(cf->direction == 1 && cf->pivot == 1 && cf->amount == 0.5f);
+    /* An outline: the same shell from two cameras, as thick as on the true shape. */
+    Outline *ol = cube->add<Outline>();
+    (void)ol;
+    ed.command("flatten direction camera");
+    auto shell_of = [&](Vec3 eye) -> const RenderMesh * {
+      const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+      for (const DrawItem &it : ed.collect_items_for_test(true, v, p, eye))
+        if (it.id == (uint32_t)cube->id && it.always_cull) return it.mesh;
+      return nullptr;
+    };
+    const RenderMesh *a = shell_of({0, 1, -6}), *b = shell_of({4, 2, -5});
+    CHECK(a && b && a == b);
+    const RenderMesh *plain = nullptr;
+    ed.command("flatten remove");
+    plain = shell_of({0, 1, -6});
+    std::printf("    the outline's shell: %s from two cameras, %s as without the flatten\n", a == b ? "the same" : "rebuilt", a == plain ? "the same" : "not the same");
+    CHECK(plain && plain->positions.size() == a->positions.size());
+  });
+  test("the lesson \"Flatten to the Camera (the 2D Look)\": its Try-its put Camera Flatten on the Sphere at 0.6 toward the camera, then about its origin", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Sphere", "flatten 0.6", "flatten pivot origin"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const CameraFlatten *cf = s ? s->get<CameraFlatten>() : nullptr;
+    CHECK(cf && cf->amount == 0.6f && cf->pivot == 1 && cf->direction == 0);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -11521,4 +11686,5 @@ void run_render_tests() {
   tests_round268();
   tests_round330();
   tests_round331();
+  tests_round334();
 }

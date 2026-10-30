@@ -1508,6 +1508,18 @@ The Materials window's Of Type... makes a material from a preset, grouped: Basic
 ? A stack of six layers looks wrong and you suspect the third. How do you see what the stack looks like up to it? | Alt+click the third layer's name: the preview shows the first three only (a line over it says "Up to ..."). Alt+click it again to see all six.
 ? A Levels layer is on but nothing changes, and its row says "Writes nothing". What now? | Every Writes switch of it is off, so it changes no output: open the layer and tick Writes Albedo, Writes Roughness or whichever it should change.
 )"},
+    {"Flatten to the Camera (the 2D Look)", "Camera Flatten: depth squashed toward the camera, shaded as modelled", R"(
+Anime games such as Guilty Gear Xrd look drawn partly because their characters are flattened toward the camera: the depth along the view is squashed about a point in the body or the head, so perspective no longer swells the nose or a hand reaching toward you. The picture is the shape an artist would draw, and the lighting stays as modelled.
+# Camera Flatten
+Add Component > Rendering > Camera Flatten. Amount is how much of the depth goes (0.5-0.7 is usual; 1 is a flat card). Pivot is what stays put: the middle of the object (and the meshes below it), its origin, or a bone by name - the head, so the face keeps its place. Direction toward the camera follows the line from the eye to the pivot; View Axis uses the view's forward.
+! cmd:select Sphere; flatten 0.6 | The Sphere flattened toward the camera: look at it in the Game view
+! cmd:flatten pivot origin | About its origin instead of its bounds' middle
+# Where it shows
+The Game view, F12 and Camera Preview show the flattened shape; the Scene view keeps the true one, so you model as usual. On a character's root it reaches every mesh below; a child with its own Camera Flatten (a separate face mesh) uses that. `flatten preset anime` puts 0.6 about the head bone on the selected root.
+? Your character's nose looks too long when the camera is close, as a wide lens would draw it. What do you add, and where? | Camera Flatten on the character's root, Pivot Bone with the head bone's name, Amount about 0.6: the depth toward the camera is squashed about the head, so the near parts no longer swell. The Scene view still shows the true model.
+? With Amount at 1 the lighting still looks round. Why isn't it flat too? | Only where things are drawn changes: the shading reads the true shape's normals, so the light and the toon bands stay as modelled - that is what keeps the 2D look from looking like a cardboard cut-out.
+? The face and the body are one skinned mesh and you want the face flatter than the body. Can you? | Not with one mesh: a Camera Flatten reaches whole meshes. Split the face into its own mesh object below the root and give it its own Camera Flatten with a higher Amount - a child's own one wins.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

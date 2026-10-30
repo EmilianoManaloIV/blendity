@@ -843,7 +843,9 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     int toon_key = int(P.key_light.w);
     ToonIn tin = ToonIn(vec3(0.0), false, 0.5, 1.0, 1.0, vec3(0.0), false, vec3(1.0), vec3(1.0), -1.0);
     if (toon_here) {
-      toon_maps(m, sp, (insts[h.obj].to_local * vec4(toon_keyL, 0.0)).xyz, tin);  // (task 0149: the key light in the object's space, for the face shadow map)
+      const mat4 nmk = insts[h.obj].normal_mat;  // (round 334: the true placement's inverse, transposed - its columns dotted with the light: the true inverse's direction, a flattened object's too)
+      const vec3 key_local = vec3(dot((nmk * vec4(1, 0, 0, 0)).xyz, toon_keyL), dot((nmk * vec4(0, 1, 0, 0)).xyz, toon_keyL), dot((nmk * vec4(0, 0, 1, 0)).xyz, toon_keyL));
+      toon_maps(m, sp, key_local, tin);  // (task 0149: the key light in the object's space, for the face shadow map)
       s.albedo *= tin.line;  // (the line map into the colour; only in shadow it went into shadow_mul)
       vec3 c = beta * toon_rim(m, tin, n, V, toon_keyL);
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
