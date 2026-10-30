@@ -559,13 +559,23 @@ std::string Editor::sketch_brush_prefs_text() {
   for (const SketchBrush &b : sketch_brushes_)
     s += strprintf("sketch_brush=%s|%d|%g|%g|%g|%d|%g|%g|%u|%d\n", b.name.c_str(), b.kind, b.width, b.opacity, b.soft, b.pressure_to, b.min_size, b.steady,
                    (unsigned)b.color, b.base);
-  s += strprintf("sketch_brush_pick=%d\ndraw_palette=%d %d %d\n", sketch_brush_, draw_palette_rect_.x, draw_palette_rect_.y, draw_palette_shown_ ? 1 : 0);
+  s += strprintf("sketch_brush_pick=%d\ndraw_palette=%d %d %d\ndraw_wheel=%d\n", sketch_brush_, draw_palette_rect_.x, draw_palette_rect_.y,
+                 draw_palette_shown_ ? 1 : 0, pad_wheel_mode_);
+  if (!board_last_.empty()) s += "board_last=" + board_last_ + "\n";
   return s;
 }
 
 bool Editor::sketch_brush_pref(const std::string &k, const std::string &v) {
   if (k == "sketch_brush_pick") {  // (after the brushes' lines: the pen takes the picked brush's numbers, nothing stored back)
     sketch_brush_pick(std::atoi(v.c_str()), false);
+    return true;
+  }
+  if (k == "board_last") {  // (task 0299: opened again the first time the board is used)
+    board_last_ = v;
+    return true;
+  }
+  if (k == "draw_wheel") {  // (task 0303)
+    pad_wheel_mode_ = std::max(0, std::min(3, std::atoi(v.c_str())));
     return true;
   }
   if (k == "draw_palette") {

@@ -20,6 +20,10 @@ using namespace platform;
 namespace {
 constexpr float kPadZoomMin = 0.1f, kPadZoomMax = 16.0f;
 constexpr float kPadWheelStep = 1.15f;  // (one wheel notch's zoom)
+constexpr float kPadKeyZoom = 1.25f;    // (Ctrl+= / Ctrl+-: a pen display's dial in its default key mode, Photoshop's zoom keys)
+constexpr float kPadDialTurn = 5.0f;    // (degrees a notch, when the wheel turns the canvas)
+constexpr float kPadDialSize = 1.1f, kPadDialOpacity = 0.05f;  // (a notch: the brush's size times this, its opacity plus this)
+constexpr float kSketchWidthMin = 0.5f, kSketchWidthMax = 200.0f;  // (sketch_brushes.cpp's brush widths)
 constexpr float kPadPanMax = 1e6f;      // (pixels: a pan past this is clamped - a console typo can't overflow the mapping)
 constexpr int kPadPictureMax = 4096;    // (the off-screen picture's longest side)
 const uint32_t kPadSurround = 0xFF2E2E30;
@@ -106,10 +110,36 @@ void Editor::pad_fit() {
   ui_.redraw = true;
 }
 
+/* ---- the wheel and the dial (task 0303) ---- */
+
+/* A notch of the wheel - a mouse's, or a pen display's dial set to scroll - does what the Draw tab's Wheel / Dial
+ * setting says: zoom (about the pointer), the brush's size, the canvas's turn, or the brush's opacity. Ctrl with it
+ * always zooms. */
+void Editor::pad_wheel(float notches, Vec2 at, bool ctrl) {
+  const int mode = ctrl ? 0 : pad_wheel_mode_;
+  if (mode == 0) pad_zoom_at(std::pow(kPadWheelStep, notches), at);
+  if (mode == 1) sketch_.width = clampf(sketch_.width * std::pow(kPadDialSize, notches), kSketchWidthMin, kSketchWidthMax), sketch_brush_store();
+  if (mode == 2) pad_set_angle(pad_.angle + notches * kPadDialTurn, at);
+  if (mode == 3) {
+    sketch_brushes_init();
+    SketchBrush &b = sketch_brushes_[(size_t)sketch_brush_];
+    b.opacity = clampf(b.opacity + kPadDialOpacity * notches, 0.02f, 1.0f);
+  }
+  ui_.redraw = true;
+}
+
+const char *const kPadWheelModes[] = {"zoom", "size", "turn", "opacity"};
+
 /* ---- navigation ---- */
 
 /* Space over the pad (the keymap's Wheel key): held, a drag navigates; let go without one, the Wheel opens where it was
  * pressed (SketchBook's Space is its navigation, Blendity's the Wheel: both). */
+/* Where a key's zoom or turn is about: the pointer when it is over the pad, else the pad's middle. */
+Vec2 Editor::pad_keys_point() const {
+  if (pad_rect_.contains(ui_.in.mx, ui_.in.my)) return {(float)ui_.in.mx, (float)ui_.in.my};
+  return {pad_rect_.x + pad_rect_.w * 0.5f, pad_rect_.y + pad_rect_.h * 0.5f};
+}
+
 bool Editor::pad_takes_space() const {
   return pad_hovered_ && active_window_ == pad_window_ && ui_.frame_number() <= draw_last_frame_ + 2;  // (the window the pad is in: review 319)
 }
@@ -128,7 +158,7 @@ bool Editor::pad_hold_opens_wheel() const {
 /* A stroke, an erase or a guide's handle under way: the view stays put (the stroke's points are the picture's pixels as
  * they were when it began). */
 bool Editor::pad_busy() const {
-  return sketch_.stroking || sketch_.erasing || sketch_.drag_handle >= 0;
+  return sketch_.stroking || sketch_.erasing || sketch_.drag_handle >= 0 || draw_puck_drag_;  // (the puck: its drag sets the size)
 }
 
 void Editor::pad_space_begin() {
@@ -192,9 +222,13 @@ bool Editor::pad_navigate(bool hovered) {
   if (pad_nav_) return pad_nav_drag();
   if (!hovered || pad_busy()) return false;
   const Vec2 m{(float)in.mx, (float)in.my};
-  if (in.wheel_y != 0.0f) {
-    pad_zoom_at(std::pow(kPadWheelStep, in.wheel_y), m);
+  if (in.wheel_y != 0.0f) {  // (a mouse wheel, or a pen display's dial sending one: task 0303)
+    pad_wheel(in.wheel_y, m, in.ctrl());
     in.wheel_y = 0.0f;
+  }
+  if (in.wheel_x != 0.0f) {  // (a sideways wheel or a dial sending one: turns the canvas)
+    pad_set_angle(pad_.angle + in.wheel_x * kPadDialTurn, m);
+    in.wheel_x = 0.0f;
   }
   pad_touch(m);
   if (in.double_clicked[2]) {
@@ -461,6 +495,12 @@ void Editor::draw_pad_more_menu() {
   u.tooltip("The pad turned 15 degrees (Shift+middle-drag or Shift+Space+drag turns it freely).");
   if (u.menu_item("Turn Right")) run_console_command("draw view turn 15");
   if (u.menu_item("Flip Canvas", nullptr, pad_.flip)) run_console_command("draw view flip");
+  u.submenu("Wheel / Dial", u.px(200), [this] {  // (task 0303)
+    static const char *const kNames[] = {"Zoom", "Brush Size", "Turn the Canvas", "Brush Opacity"};
+    for (int k = 0; k < 4; k++)
+      if (ui_.menu_item(kNames[k], nullptr, pad_wheel_mode_ == k)) run_console_command(std::string("draw wheel ") + kPadWheelModes[k]);
+  });
+  u.tooltip("What the mouse wheel - or a pen display's dial set to scroll - does over the pad (Ctrl with it always zooms).");
   u.tooltip("The pad mirrored left to right, to see the drawing fresh (the strokes don't change).");
   u.menu_separator();
   if (u.menu_item("Hide the Tools", "Tab", pad_ui_hidden_)) run_console_command("draw tools toggle");
@@ -625,6 +665,7 @@ bool Editor::draw_tab_command(const std::vector<std::string> &t) {
   if (verb == "paper") return draw_paper_command(w);
   if (verb == "view") return draw_view_command(t);
   if (verb == "tools") return draw_tools_command(w);
+  if (verb == "wheel") return draw_wheel_command(w);
   return false;
 }
 
@@ -663,6 +704,9 @@ bool Editor::draw_view_command(const std::vector<std::string> &t) {
   const Vec2 mid{pad_rect_.x + pad_rect_.w * 0.5f, pad_rect_.y + pad_rect_.h * 0.5f};
   if (w == "fit") pad_fit();
   else if (w == "zoom") pad_zoom_at(num(3, 1.0f), t.size() > 5 ? Vec2{num(4, 0), num(5, 0)} : mid);
+  else if (w == "in" || w == "out") pad_zoom_at(w == "in" ? kPadKeyZoom : 1.0f / kPadKeyZoom, pad_keys_point());
+  else if (w == "actual") pad_zoom_at(1.0f / pad_.zoom, pad_keys_point());
+  else if (w == "upright") pad_set_angle(0.0f, mid);
   else if (w == "turn") pad_set_angle(pad_.angle + num(3, 0.0f), mid);
   else if (w == "flip") pad_flip();
   else if (w == "pan") {
@@ -673,6 +717,18 @@ bool Editor::draw_view_command(const std::vector<std::string> &t) {
   else if (w.empty()) Log::info("draw view: zoom %.0f%%, turned %.1f, %s, panned %.0f %.0f", pad_.zoom * 100.0f, pad_.angle,
                                 pad_.flip ? "flipped" : "not flipped", pad_.pan_x, pad_.pan_y);
   else Log::info("usage: draw view fit|zoom <factor> [x y]|turn <degrees>|flip|pan <dx> <dy>");
+  return true;
+}
+
+/* draw wheel zoom|size|turn|opacity (task 0303) */
+bool Editor::draw_wheel_command(const std::string &w) {
+  for (int k = 0; k < 4; k++)
+    if (w == kPadWheelModes[k]) {
+      pad_wheel_mode_ = k;
+      save_prefs();
+      return true;
+    }
+  Log::info("usage: draw wheel zoom|size|turn|opacity (now %s)", kPadWheelModes[pad_wheel_mode_]);
   return true;
 }
 

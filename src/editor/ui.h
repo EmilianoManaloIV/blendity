@@ -269,6 +269,12 @@ class Context {
    * title and kept inside `bounds`; `r` is its place, kept by the caller. With `close`, a Close button in the title sets
    * it. Returns the rect under the title for the panel's body. */
   Recti floating_panel(Id i, Recti &r, const Recti &bounds, const std::string &title, bool *close = nullptr);
+  /* Words over several lines (a board's note, task 0300): wrapped to the rect's width on `paper` in `ink`. A
+   * double-click edits it - the keys type, Enter starts a line, the arrows move the caret (up and down by lines), Home
+   * and End go to the line's ends; a click away or Ctrl+Enter keeps the text, Esc gives it back. True when kept. */
+  bool text_area(Id i, const Recti &r, std::string &s, uint32_t paper, uint32_t ink);
+  /* The lines `s` wraps to in `width` pixels: each line's first byte and one past its last (a line break ends one). */
+  std::vector<std::pair<size_t, size_t>> wrap_lines(const std::string &s, int width);
   std::string tooltip_text_for_test() const { return tooltip_text_; }  // (the tooltip the last frame showed)
   /* A widget drawn by hand (frames and labels): the next tooltip() belongs to it. */
   void mark_widget(const Recti &r) {

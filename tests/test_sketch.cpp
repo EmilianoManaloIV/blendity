@@ -1919,7 +1919,7 @@ void tests_round319() {
     platform::Event mid_wheel = PadRig::ev(EventType::Wheel, x - 30, y + 5);
     mid_wheel.wheel_y = 2.0f;
     r.step({mid_wheel});
-    const bool kept = v.zoom == 1.0f && !r.ed.run_action_for_test("draw.flip") && !v.flip;
+    const bool kept = v.zoom == 1.0f && r.ed.run_action_for_test("draw.flip") && !v.flip;  // (taken and held: the view kept)
     r.step({pen_ev(EventType::MouseMove, x, y + 10)});
     r.step({pen_ev(EventType::MouseUp, x, y + 10)});
     std::printf("    the wheel and Flip mid-stroke: the view kept %d\n", (int)kept);
@@ -2433,6 +2433,88 @@ void tests_round320_review() {
   });
 }
 
+/* Round 323 (task 0303): a pen display's dial and express keys (XPPen's Artist 13.3 Pro V2: its keys send Photoshop's
+ * shortcuts, its dial a key pair or the scroll wheel). */
+void tests_round323() {
+  test("a pen display's keys over the pad: Ctrl+= / Ctrl+Shift+= and Ctrl+- zoom about the pen, Ctrl+1 is 100%, Ctrl+0 fits, 4 and 6 turn the canvas 15 degrees, 5 sets it upright", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid(), at{c.x + 120.0f, c.y + 40.0f};
+    auto key = [&](int k, int mods = 0) {
+      platform::Event d = PadRig::ev(EventType::KeyDown, (int)at.x, (int)at.y, k), u = PadRig::ev(EventType::KeyUp, (int)at.x, (int)at.y, k);
+      d.mods = u.mods = mods;
+      r.step({PadRig::ev(EventType::MouseMove, (int)at.x, (int)at.y)});
+      r.step({d});
+      r.step({u});
+    };
+    const auto &v = r.ed.pad_view_for_test();
+    const Vec2 q0 = r.ed.pad_from_screen_for_test(at);
+    key(platform::KEY_EQUALS, platform::MOD_CTRL);
+    const Vec2 s1 = r.ed.pad_to_screen_for_test(c + (q0 - c) * v.zoom);
+    std::printf("    Ctrl+=: zoom %.3f, the spot under the pen at (%.1f, %.1f)\n", v.zoom, s1.x, s1.y);
+    CHECK(std::fabs(v.zoom - 1.25f) < 1e-3f && length(s1 - at) < 1.0f);
+    key(platform::KEY_EQUALS, platform::MOD_CTRL | platform::MOD_SHIFT);
+    CHECK(std::fabs(v.zoom - 1.5625f) < 1e-3f);
+    key(platform::KEY_MINUS, platform::MOD_CTRL);
+    CHECK(std::fabs(v.zoom - 1.25f) < 1e-3f);
+    key('1', platform::MOD_CTRL);
+    CHECK(std::fabs(v.zoom - 1.0f) < 1e-4f);
+    key('6');
+    CHECK(std::fabs(v.angle - 15.0f) < 1e-3f);
+    key('4');
+    key('4');
+    CHECK(std::fabs(v.angle + 15.0f) < 1e-3f);
+    key('5');
+    CHECK(v.angle == 0.0f);
+    r.ed.command("draw view zoom 3");
+    key('0', platform::MOD_CTRL);
+    CHECK(v.zoom == 1.0f && v.pan_x == 0.0f);
+    for (const char *id : {"draw.zoom_in", "draw.zoom_out", "draw.zoom_actual", "draw.turn_left", "draw.turn_right", "draw.turn_reset"}) CHECK(r.ed.run_action_for_test(id));
+    r.ed.command("sketch off");
+  });
+  test("the wheel over the pad (a dial set to scroll) does what More > Wheel / Dial says: zoom, the brush's size, the canvas's turn or its opacity; Ctrl with it always zooms; a sideways wheel turns the canvas", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 100, y = (int)c.y;
+    auto wheel = [&](float dy, float dx = 0.0f, int mods = 0) {
+      platform::Event w = PadRig::ev(EventType::Wheel, x, y);
+      w.wheel_y = dy, w.wheel_x = dx, w.mods = mods;
+      r.step({PadRig::ev(EventType::MouseMove, x, y)});
+      r.step({w});
+    };
+    const auto &v = r.ed.pad_view_for_test();
+    CHECK(r.click("draw:More") && r.hover("submenu:Wheel / Dial") && r.click("menu:Brush Size") && r.ed.pad_wheel_mode_for_test() == 1);
+    const float w0 = r.ed.sketch_width_for_test();
+    wheel(2.0f);
+    std::printf("    size: %.2f -> %.2f, zoom %.2f\n", w0, r.ed.sketch_width_for_test(), v.zoom);
+    CHECK(std::fabs(r.ed.sketch_width_for_test() - w0 * 1.21f) < 1e-3f && v.zoom == 1.0f);
+    wheel(1.0f, 0.0f, platform::MOD_CTRL);
+    CHECK(std::fabs(v.zoom - 1.15f) < 1e-3f);
+    r.ed.command("draw view fit");
+    r.ed.command("draw wheel turn");
+    wheel(-2.0f);
+    CHECK(std::fabs(v.angle + 10.0f) < 1e-3f);
+    r.ed.command("draw wheel opacity");
+    const float o0 = r.ed.sketch_brush_opacity_for_test();
+    wheel(-2.0f);
+    CHECK(std::fabs(r.ed.sketch_brush_opacity_for_test() - std::max(0.02f, o0 - 0.1f)) < 1e-4f);
+    r.ed.command("draw view fit");
+    r.ed.command("draw wheel zoom");
+    wheel(0.0f, 3.0f);
+    CHECK(std::fabs(v.angle - 15.0f) < 1e-3f && v.zoom == 1.0f);
+    /* Kept in the preferences. */
+    r.ed.command("draw wheel size");
+    const std::string text = r.ed.brush_prefs_text_for_test();
+    Editor back;
+    back.init_headless(800, 600);
+    CHECK(text.find("draw_wheel=1") != std::string::npos && back.brush_pref_for_test("draw_wheel", "1") && back.pad_wheel_mode_for_test() == 1);
+    r.ed.command("draw wheel nothing");  // (the usage: nothing changes)
+    CHECK(r.ed.pad_wheel_mode_for_test() == 1);
+    r.ed.command("sketch off");
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
@@ -2447,4 +2529,5 @@ void run_sketch_tests() {
   tests_round320();
   tests_round320_review();
   tests_round321();
+  tests_round323();
 }

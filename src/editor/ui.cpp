@@ -561,6 +561,111 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   return changed;
 }
 
+std::vector<std::pair<size_t, size_t>> Context::wrap_lines(const std::string &s, int width) {
+  std::vector<std::pair<size_t, size_t>> out;
+  size_t a = 0;
+  while (a <= s.size()) {
+    const size_t nl = s.find('\n', a);
+    const size_t end = nl == std::string::npos ? s.size() : nl;
+    size_t b = a;
+    while (b < end) {  // (the longest run of words from a that fits; a word wider than the line is cut)
+      size_t fit = b, sp = std::string::npos;
+      while (fit < end && font.text_width(s.c_str() + b, utf8_after(s, fit) - b) <= width) {
+        if (s[fit] == ' ') sp = fit;
+        fit = utf8_after(s, fit);
+      }
+      if (fit < end && sp != std::string::npos && sp > b) fit = sp + 1;
+      if (fit == b) fit = utf8_after(s, b);
+      out.push_back({b, fit});
+      b = fit;
+    }
+    if (b == a) out.push_back({a, a});  // (an empty line)
+    if (nl == std::string::npos) break;
+    a = nl + 1;
+  }
+  return out;
+}
+
+bool Context::text_area(Id i, const Recti &r, std::string &s, uint32_t paper, uint32_t ink) {
+  const bool hot = hovered(r);
+  last_widget_ = r;
+  last_hovered_ = hot;
+  const int pad = px(6), lh = font.line_height();
+  canvas.fill_rect(r, paper);
+  if (edit_id_ != i) {
+    canvas.push_clip(r.intersect(canvas.clip()));
+    int y = r.y + pad;
+    for (const auto &l : wrap_lines(s, r.w - 2 * pad)) {
+      canvas.text(font, r.x + pad, y, s.c_str() + l.first, l.second - l.first, ink);
+      y += lh;
+    }
+    canvas.pop_clip();
+    if (hot && in.double_clicked[0]) begin_edit(i, s, false);
+    return false;
+  }
+  edit_seen_ = true;
+  std::string &buf = edit_buf_;
+  const auto lines = wrap_lines(buf, r.w - 2 * pad);
+  size_t line = 0;
+  for (size_t k = 0; k < lines.size(); k++)
+    if (edit_cursor_ >= lines[k].first) line = k;
+  auto caret_x = [&](size_t k, size_t at) { return font.text_width(buf.c_str() + lines[k].first, std::min(at, lines[k].second) - lines[k].first); };
+  auto at_x = [&](size_t k, int x) { return lines[k].first + font.hit_index(buf.substr(lines[k].first, lines[k].second - lines[k].first), x); };
+  if (in.pressed[0] && !r.contains(in.mx, in.my)) {  // (a click away keeps it)
+    s = buf;
+    edit_id_ = 0;
+    return true;
+  }
+  if (in.pressed[0]) {
+    const size_t k = std::min(lines.size() - 1, (size_t)std::max(0, (in.my - r.y - pad) / std::max(1, lh)));
+    edit_cursor_ = at_x(k, in.mx - r.x - pad);
+  }
+  if (in.key_pressed[KEY_ESCAPE]) {
+    edit_id_ = 0;
+    in.key_pressed[KEY_ESCAPE] = false;
+    return false;
+  }
+  if (in.key_pressed[KEY_ENTER] && in.ctrl()) {
+    s = buf;
+    edit_id_ = 0;
+    return true;
+  }
+  if (!in.text.empty()) buf.insert(edit_cursor_, in.text), edit_cursor_ += in.text.size();
+  if (in.key_pressed[KEY_ENTER]) buf.insert(edit_cursor_, "\n"), edit_cursor_++;
+  if (in.key_pressed[KEY_BACKSPACE] && edit_cursor_ > 0) {
+    const size_t p = utf8_prev(buf, edit_cursor_);
+    buf.erase(p, edit_cursor_ - p);
+    edit_cursor_ = p;
+  }
+  if (in.key_pressed[KEY_DELETE] && edit_cursor_ < buf.size()) buf.erase(edit_cursor_, utf8_after(buf, edit_cursor_) - edit_cursor_);
+  if (in.key_pressed[KEY_LEFT]) edit_cursor_ = utf8_prev(buf, edit_cursor_);
+  if (in.key_pressed[KEY_RIGHT]) edit_cursor_ = utf8_after(buf, edit_cursor_);
+  if (in.key_pressed[KEY_UP] && line > 0) edit_cursor_ = at_x(line - 1, caret_x(line, edit_cursor_));
+  if (in.key_pressed[KEY_DOWN] && line + 1 < lines.size()) edit_cursor_ = at_x(line + 1, caret_x(line, edit_cursor_));
+  if (in.key_pressed[KEY_HOME]) edit_cursor_ = lines[line].first;
+  if (in.key_pressed[KEY_END]) edit_cursor_ = lines[line].second;
+  if (in.ctrl() && in.key_pressed[KEY_V] && clipboard_get) {
+    const std::string clip = clipboard_get();
+    buf.insert(edit_cursor_, clip), edit_cursor_ += clip.size();
+  }
+  edit_cursor_ = std::min(edit_cursor_, buf.size());
+  /* Drawn again with the edit, the caret on its line. */
+  const auto drawn = wrap_lines(buf, r.w - 2 * pad);
+  canvas.push_clip(r.intersect(canvas.clip()));
+  int y = r.y + pad, cx = r.x + pad, cy = y;
+  for (size_t k = 0; k < drawn.size(); k++, y += lh) {
+    canvas.text(font, r.x + pad, y, buf.c_str() + drawn[k].first, drawn[k].second - drawn[k].first, ink);
+    if (edit_cursor_ >= drawn[k].first && (edit_cursor_ <= drawn[k].second || k + 1 == drawn.size()))
+      cx = r.x + pad + font.text_width(buf.c_str() + drawn[k].first, std::min(edit_cursor_, drawn[k].second) - drawn[k].first), cy = y;
+  }
+  if (std::fmod(time, 1.0) < 0.5) canvas.fill_rect({cx, cy, std::max(1, px(1)), lh}, ink);
+  canvas.rect_outline(r, theme.focus, std::max(1, px(1)));
+  canvas.pop_clip();
+  cursor = Cursor::IBeam;
+  redraw = true;
+  return false;
+}
+
 /* Tab moves to the next number or text field, Shift+Tab to the previous one
  * (Unity). The key is consumed so the next field doesn't commit at once. */
 void Context::tab_to(Id previous) {

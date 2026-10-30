@@ -82,7 +82,7 @@ works:
 | One finger drags a list or panel | scrolls it (sideways still moves sliders and numbers) | as the mouse |
 | The pen | selects, moves, draws, paints, as the mouse | the same |
 | The pen's side button held while dragging | orbits; Shift pans, Ctrl zooms | the same |
-| The pen in the **Draw tab** (Window > Draw) or over the Game view | draws in that view's perspective; the arrows, A / D, W / S orbit and dolly the Scene camera and Shift+arrows pan while the pen is up (Q / E too in the Scene view; over the pad E is the Eraser, round 320); Place in 3D puts each stroke in the scene at the depth under the pen (task 0233). Its toolbar (round 319, SketchBook Pro's order): Undo, Redo, Brush (Pen Color, Steadiness, Canvas, Lift, Clear), the color with its opacity, Size, Ruler, Ellipse, Curve, Symmetry, Perspective, Steady Stroke, Predictive Stroke, Layers, the zoom (click: fit) and More (Source: Scene Camera / Game Camera / Paper, Paper Color, Pen, Guides, Build, Place in 3D, Fit, Zoom, Turn, Flip Canvas, Hide the Tools). The wheel zooms about the pointer, a middle-drag or Space+drag pans, Shift with either turns (Ctrl: 15 degree steps), two fingers pinch and twist, Home or a double middle-click fits, a tap of Space opens the Wheel; Tab hides the tools (Tab or Esc brings them back). The brush palette (round 320; the toolbar's Brush shows and hides it): the puck - drag sideways for the size, up and down for the opacity - and a tile a brush (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser; double-click for Brush Properties: Size, Opacity, Edge, Pressure, Min Size, Steadiness; Duplicate, Reset). Over the pad: B the last brush, E the Eraser (it cuts what it crosses; the pen's eraser end too), [ ] the size, Shift+[ ] the opacity, B held and dragged the puck at the pen. Space tapped over the pad, or the pen held still on it half a second, opens the Wheel's draw set (Pencil, Inker, Marker, Eraser, Ruler, Fit, Hide Tools, More; round 321) | the same |
+| The pen in the **Draw tab** (Window > Draw) or over the Game view | draws in that view's perspective; the arrows, A / D, W / S orbit and dolly the Scene camera and Shift+arrows pan while the pen is up (Q / E too in the Scene view; over the pad E is the Eraser, round 320); Place in 3D puts each stroke in the scene at the depth under the pen (task 0233). Its toolbar (round 319, SketchBook Pro's order): Undo, Redo, Brush (Pen Color, Steadiness, Canvas, Lift, Clear), the color with its opacity, Size, Ruler, Ellipse, Curve, Symmetry, Perspective, Steady Stroke, Predictive Stroke, Layers, the zoom (click: fit) and More (Source: Scene Camera / Game Camera / Paper, Paper Color, Pen, Guides, Build, Place in 3D, Fit, Zoom, Turn, Flip Canvas, Hide the Tools). The wheel zooms about the pointer, a middle-drag or Space+drag pans, Shift with either turns (Ctrl: 15 degree steps), two fingers pinch and twist, Home or a double middle-click fits, a tap of Space opens the Wheel; Tab hides the tools (Tab or Esc brings them back). The brush palette (round 320; the toolbar's Brush shows and hides it): the puck - drag sideways for the size, up and down for the opacity - and a tile a brush (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser; double-click for Brush Properties: Size, Opacity, Edge, Pressure, Min Size, Steadiness; Duplicate, Reset). Over the pad: B the last brush, E the Eraser (it cuts what it crosses; the pen's eraser end too), [ ] the size, Shift+[ ] the opacity, B held and dragged the puck at the pen. Space tapped over the pad, or the pen held still on it half a second, opens the Wheel's draw set (Pencil, Inker, Marker, Eraser, Ruler, Fit, Hide Tools, More; round 321). Over the pad, Photoshop's view keys: Ctrl+= / Ctrl+- zoom about the pen, Ctrl+1 is 100%, Ctrl+0 fits; 4 / 6 turn the canvas, 5 sets it upright; More > Wheel / Dial makes the wheel zoom, size the brush, turn the canvas or fade the brush (Ctrl+wheel always zooms; round 323) | the same |
 | The pen in **Sculpt Mode** (Modeling Tools > Sculpt; `sculpt on`) | drags a brush over the mesh: Draw raises along the normal (Alt carves), Shift smooths keeping the volume, Grab pulls what is under the first dab; the pen's pressure drives the strength or the size (Pressure); only the vertices in the circle move; a stroke is one undo step (task 0236) | the same with the mouse |
 | The pen with the **brush set** (the Sculpt section; the Wheel's Brushes and Symmetry rings; `sculpt brush|symmetry|lazy|alpha|stroke`) | ten brushes (Clay Buildup, Inflate, Flatten, Scrape, Pinch, Crease, Snake Hook join Draw, Smooth, Grab); Mirror X / Y / Z and Radial apply each dab at its instances, summed where they overlap; Lazy Mouse steadies the stroke; an image alpha shapes the dab, turned to the stroke; Dots, Drag Dot, Drag Rect, Freehand and Spray lay the dabs down (task 0237) | the same with the mouse |
 | The pen with **Ctrl in Sculpt Mode** (the Sculpt section's mask and group rows; the Wheel's Masks ring; `sculpt mask|group|hide|show`) | paints the mask that holds the surface (Ctrl+Alt takes it away; off the model a click inverts, a drag masks a rectangle); Ctrl+Shift on a face shows its polygroup alone, off the model shows all; hidden faces leave the picture, the id plane and the brush (task 0238) | the same with the mouse |
@@ -874,3 +874,30 @@ the editor. None needs it any more: since round 310 every verb an artist uses ha
 *This manual condenses the README's feature list, the lighting guide and the Learn lessons. Developer documents -
 how it's built and why - are in [`ARCHITECTURE.md`](ARCHITECTURE.md), [`decisions/`](decisions/),
 [`tasks/`](tasks/), [`PERFORMANCE.md`](PERFORMANCE.md) and the [`CHANGELOG`](../CHANGELOG.md).*
+
+## A pen display's dial and express keys (round 323)
+Pen displays such as XPPen's Artist 13.3 Pro V2 send their express keys as keyboard shortcuts (Photoshop's, by
+default) and their dial as a key pair or the scroll wheel. Blendity answers them where the pen draws, over the Draw
+tab's pad and the reference board.
+
+| Control | Set in the tablet's driver | What it does in Blendity |
+|---|---|---|
+| Dial (key mode) | KL `Ctrl -`, KR `Ctrl =` (the default zoom pair) | zoom about the pen |
+| Dial (key mode) | KL `[`, KR `]` | the brush's size |
+| Dial (key mode) | KL `4`, KR `6` | turn the canvas (`5` sets it upright) |
+| Dial | Mouse wheel scroll | whatever More > Wheel / Dial says: zoom, brush size, turn, opacity (Ctrl+wheel zooms) |
+| Express keys | `B`, `E`, `Ctrl Z`, `Ctrl Y`, `Space` (held), `[`, `]`, `Ctrl 0` | brush, Eraser, undo, redo, pan while the pen drags, size, fit |
+| Pen side button | Right click or "Mouse button" | the Wheel at the pen |
+
+## The reference board (round 322)
+Window > Board (a tab beside the Draw tab in the Drawing layout; beside it in Drawing with References).
+
+| To | Do |
+|---|---|
+| Put images on it | Drop files from the system, drag from the Project window, Add Image..., or Ctrl+V (a screenshot, a copied picture or file) |
+| Move around | Wheel: zoom about the pointer; middle-drag: pan; two fingers: pinch and pan; Home or Ctrl+0: fit everything; F: frame the selection; Ctrl+= / Ctrl+-: zoom |
+| Pick | Click an image (Shift: add or take away), drag on empty board for a marquee, Ctrl+A for all |
+| Change | Drag to move, a corner to scale (about the opposite corner), the round handle to turn (Ctrl: 15 degree steps); arrows nudge (Shift: 10 px) |
+| Arrange | Ctrl+] to the front, Ctrl+[ to the back; Ctrl+D duplicates; Delete removes |
+| Undo | Ctrl+Z / Ctrl+Y over the board (its own history, 100 steps) |
+| Keep it | Nothing to do: it saves itself to Assets/Boards a second after a change and on closing, and opens again next time; Boards > New Board or another to switch |

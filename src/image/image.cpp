@@ -680,6 +680,10 @@ static bool decode_tga(const uint8_t *d, size_t n, Bitmap &out, std::string &err
     return false;
   }
   size_t pos = 18 + idlen;
+  if (pos > n) {  // (the id field runs past the data: not a TGA - before the palette is read from beyond it)
+    err = "not a TGA";
+    return false;
+  }
   std::vector<uint8_t> pal;
   if (cmap) {
     int eb = (cmbits + 7) / 8;
@@ -687,6 +691,13 @@ static bool decode_tga(const uint8_t *d, size_t n, Bitmap &out, std::string &err
     pos += (size_t)cmlen * eb;
   }
   int bytes = (bpp + 7) / 8;
+  /* Bounded (review 322: any data of 18 bytes reaches this decoder last - a ZIP's header read as a 23k x 65k "TGA"): the
+   * header inside the data, a pixel size of 1-4 bytes, a sane pixel count, and an unpacked picture's pixels all there. */
+  const uint64_t count = (uint64_t)w * (uint64_t)h;
+  if (pos > n || bytes < 1 || bytes > 4 || count > (1ull << 28) || (!rle && pos + count * (uint64_t)bytes > n)) {
+    err = "not a TGA";
+    return false;
+  }
   out.width = w;
   out.height = h;
   out.rgba8.assign((size_t)w * h * 4, 255);

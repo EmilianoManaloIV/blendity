@@ -2,6 +2,115 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 322): the reference board - PureRef's endless canvas as a tab
+
+**Asked:** the user (2026-10-29): "Have an additional tab for making mood/reference boards. Utilize good HCI and other
+art applications for reference and usability." Their choices: PureRef's canvas, an eyedropper to the pen, side by side
+with Draw with a reference floating over the pad, and sending an image to the scene. The window, its file and getting
+images in are task 0299; the tools, the links and the HCI pass follow (tasks 0300-0302).
+
+**Added (task 0299, ADR 0089, `editor/board_window.cpp`, `scene/board.h`)**
+- **The Board window.**
+  - A tab beside the Draw tab in the Drawing layout. A new **Drawing with References** layout shows the two side by
+    side.
+  - A board is `Assets/Boards/<name>.board`. It saves itself a second after each change, whether shown or not, and on
+    closing. The board used last opens again in the next session.
+  - The Boards menu makes a new board or opens another.
+- **Images in:**
+  - dropped from the system (in a row at the drop point, one undo step);
+  - dragged from the Project window;
+  - Add Image...;
+  - Ctrl+V: the clipboard's image through a new `platform::get_clipboard_image`.
+    - Windows: PNG, else the screenshot's DIB, else a file copied in Explorer.
+    - X11: image/png.
+    - macOS: PNG or TIFF.
+- **Images from outside the project** are copied into `Assets/Textures/References`. A different file of the same name
+  gets the next free name ("image 2.png"); the Reference Image shares this.
+- **Pictures load on a thread of their own** into the board's cache: at most 2048 px on their long side, with mips. HDR
+  and EXR are tone-mapped. An unreadable file is taken off the board, with the copy the board made of it.
+- **Moving around:** the wheel zooms about the pointer, a middle-drag pans, two fingers pinch, Home fits, F frames the
+  selection.
+- **Handles:** a click picks (Shift adds), a marquee picks what it meets, a drag moves, a corner scales about the
+  opposite corner, and the turn handle turns (Ctrl: 15 degrees). The arrows nudge.
+- **Its own keys over it:** Delete, Ctrl+D, Ctrl+A, Ctrl+V, Ctrl+] / Ctrl+[, and Ctrl+Z / Ctrl+Y for its own undo
+  (100 steps, a drag one step).
+- **Console:** `board ...`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- **Saving:** changes in the last second, or made while the board was hidden, were lost on closing.
+- **Files of the same name:** a second file of the same name showed the first's picture.
+- **Large photos:** they stalled the editor, and a board of many made the texture cache reload every frame.
+- **HDR and EXR** showed as Missing.
+- **The last board** wasn't opened again.
+- **Mid-drag keys:** Ctrl+Z, Delete or Ctrl+D in the middle of a drag broke the history.
+- **Clicks:** a press that didn't move shifted things; an item of no size caught every click; the empty corner of a
+  turned image caught a click.
+- **Platforms:** the macOS paste leaked, and X11 stored a late image answer as text.
+- **Pressed mid-stroke or mid-drag,** a Draw tab or board key is held, so it never reaches the scene behind.
+- **Tests:** they now clean up References first, so a copy is really made.
+
+**The second review's fixes (Opus code-reviewer, changes needed)**
+- **"Loading" for good:** a picture that landed while a press or a drag held the items, or between two undo steps, left
+  its image "Loading" for the session. Sizes are now filled from the cache every frame and after undo, redo, a drag and
+  opening a board.
+- **A file copied in Explorer:** Ctrl+V read it whole, and a ZIP's bytes decoded as a 23,000 x 65,000 TGA (gigabytes).
+  Now:
+  - such a file is added by its path, and only when it is an image;
+  - the TGA decoder is bounded. It had also read a palette past the end of its data: a crash on any data whose second
+    byte is non-zero.
+- **The picture cache** only grew. Pictures no item, undo step or drag names now go when a board is opened or made.
+- **Loading:** at most three pictures load at a time, and a loader's failure becomes the picture's error, not a crash.
+- **Pasting:** a pasted screenshot is kept as it came (PNG or BMP) and read on the loader thread.
+- **Reused file names:** a reused name, or an unreadable file replaced, reads the picture afresh.
+- **Smaller fixes:**
+  - copying reads a same-named file only when the sizes match;
+  - a row laid out late keeps an image the user moved;
+  - an unreadable file leaves the undo history too;
+  - the brush keys wait while the puck is dragged.
+
+**Checked**
+- `tests/test_board.cpp` (`--group board`), 13 tests by real events:
+  - drops, pastes (PNG and BMP), a Project drag;
+  - the handles, undo, and the keys;
+  - saving on close and reopening;
+  - same-name files, HDR, an unreadable file;
+  - undo mid-drag and the 100-step cap;
+  - a turned image's corner;
+  - every `board` verb.
+- The dependency-free suite: 13,102 checks, 0 failed.
+- Main (rounds 322-323):
+  - Windows with libraries: 13,710 checks (1210 tests), 0 failed;
+  - Linux: 13,262, 0 failed. That run found a crash: X11's clipboard calls had no guard for a headless editor's missing
+    window, and they now do.
+
+## 2026-10-29 (round 323): a pen display's dial and express keys - XPPen's Artist 13.3 Pro V2
+
+**Asked:** the user (2026-10-29): "I have the artist 13.3 Pro V2 drawing tablet, make it so that the scroll wheel can be
+used; buttons are compatible."
+
+**Added (task 0303)**
+- **Photoshop's view keys over the Draw tab's pad.** The tablet's express keys send Photoshop's shortcuts, and its dial
+  sends Ctrl- / Ctrl+ by default:
+  - Ctrl+= or Ctrl+Shift+= and Ctrl+- zoom about the pen;
+  - Ctrl+1 is 100% and Ctrl+0 fits;
+  - 4 and 6 turn the canvas, and 5 sets it upright.
+
+  The zoom keys and Ctrl+0 work over the reference board too.
+- **More > Wheel / Dial** chooses what the wheel (or the dial set to scroll) does over the pad: zoom, brush size, turn
+  the canvas, or brush opacity.
+  - Ctrl with it always zooms, and a sideways wheel turns the canvas.
+  - The choice is kept with the preferences; `draw wheel zoom|size|turn|opacity`.
+- **Driver settings:** the MANUAL has a table of what to set in XPPen's driver for each dial and key.
+
+**Checked**
+- `tests_round323`:
+  - the keys by real key events, the zoom about the pen within 1 px;
+  - the four wheel modes, chosen by clicks, and Ctrl with the wheel;
+  - a sideways wheel;
+  - the preferences.
+- The board's zoom keys.
+- The keymap presets have no clash.
+
 ## 2026-10-29 (round 321): the Wheel on the Draw tab, the pen held still opening it, the lesson "Drawing like SketchBook"
 
 **Asked:** the last part of the SketchBook Pro request (tasks 0296-0298).

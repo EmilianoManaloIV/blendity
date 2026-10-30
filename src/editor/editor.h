@@ -34,6 +34,7 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/board.h"
 #include "../scene/quad_remesh.h"
 #include "../scene/dyntopo.h"
 #include "../render/mesh_maps.h"
@@ -70,6 +71,7 @@
 #include <memory>
 #include <set>
 #include <future>
+#include <deque>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -149,7 +151,7 @@ extern const char *const kSculptStrokes[5];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Board, Count };
 const char *window_title(WindowKind k);
 /* The Hierarchy's drop zones (task 0255): 1 before, 2 after, 0 into - the outer thirds and the middle of a row. */
 int hier_drop_mode(int ry, int rh);
@@ -683,6 +685,7 @@ class Editor {
   };
   const PadView &pad_view_for_test() const { return pad_; }
   int pad_pic_renders_for_test() const { return pad_pic_renders_; }
+  int pad_wheel_mode_for_test() const { return pad_wheel_mode_; }
   int sketch_brush_for_test() const { return sketch_brush_; }  // (round 320)
   std::string brush_prefs_text_for_test() { return sketch_brush_prefs_text(); }
   bool brush_pref_for_test(const std::string &k, const std::string &v) { return sketch_brush_pref(k, v); }
@@ -697,6 +700,17 @@ class Editor {
   bool draw_palette_shown_for_test() const { return draw_palette_shown_; }
   uint32_t draw_paper_for_test() const { return draw_paper_; }
   int pad_bar_folded_for_test() const { return pad_bar_folded_; }  // (round 319: the toolbar's groups folded into More)
+  const Board &board_for_test() const { return board_; }  // (task 0299)
+  const std::vector<uint64_t> &board_sel_for_test() const { return board_sel_; }
+  const std::string &board_file_for_test() const { return board_file_; }
+  Recti board_rect_for_test() const { return board_rect_; }
+  Vec2 board_to_screen_for_test(Vec2 p) const { return board_to_screen(p); }
+  void board_paste_bytes_for_test(const std::string &b) { board_paste_for_test_ = b; }
+  void board_wait_for_test();
+  size_t board_pictures_for_test() const { return board_pics_.size(); }
+  int board_undo_depth_for_test() const { return (int)board_undo_.size(); }
+  bool board_dirty_for_test() const { return board_dirty_; }
+  void start_asset_drag_for_test(const std::string &path) { asset_drag_ = {true, false, path, nullptr, ui_.in.mx, ui_.in.my}; }  // (a Project window file pressed)
   bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
   int draw_source_for_test() const { return draw_source_; }
   Recti pad_rect_for_test() const { return pad_rect_; }
@@ -4058,9 +4072,101 @@ class Editor {
   std::string sketch_brush_prefs_text();
   bool sketch_brush_pref(const std::string &k, const std::string &v);
   int pad_pic_renders_ = 0;  // (the off-screen picture's renders: a pan or a zoom within a step makes none)
+  /* Task 0299 (editor/board_window.cpp, ADR 0089): the reference board - PureRef's endless canvas, its file, its own undo. */
+  Board board_;
+  std::string board_file_;  // (absolute; empty until first saved)
+  bool board_dirty_ = false;
+  double board_changed_at_ = 0.0;
+  std::vector<std::vector<BoardItem>> board_undo_, board_redo_;
+  std::vector<uint64_t> board_sel_;
+  Recti board_rect_;
+  uint64_t board_frame_ = 0;
+  int board_window_ = 0;
+  int board_drag_ = 0, board_drag_corner_ = 0;  // (a drag: 1 move, 2 scale, 3 turn, 4 marquee, 5 pan)
+  bool board_drag_moved_ = false;
+  Vec2 board_drag_from_, board_drag_last_, board_drag_pivot_;
+  std::vector<BoardItem> board_drag_start_;
+  std::string board_paste_for_test_;
+  Vec2 board_to_screen(Vec2 p) const;
+  Vec2 board_from_screen(Vec2 s) const;
+  void board_zoom_at(float factor, Vec2 at);
+  void board_frame(bool selection);
+  bool board_has_point(int x, int y) const;
+  bool board_has_mouse() const;
+  void board_begin_change();
+  void board_changed();
+  void board_undo();
+  void board_redo();
+  void board_select_existing();
+  std::string board_dir() const;
+  void board_frame_tick();
+  Vec2 board_middle() const;
+  std::shared_ptr<BoardPicture> board_picture(const std::string &rel);
+  void board_poll_pictures(bool wait);
+  void board_picture_landed(const std::string &abs, const BoardPicture &pic);
+  void board_drop_unreadable(const std::string &abs, const std::string &error, const std::vector<uint64_t> &ids);
+  void board_layout_rows();
+  void board_open_last();
+  std::string keep_in_references(const std::string &abs, bool *copied = nullptr);
+  bool board_paste_path(Vec2 at);
+  float board_handle_radius() const;
+  Vec2 board_turn_handle(Vec2 lo, Vec2 hi) const;
+  void board_press_item(Vec2 m);
+  void board_drag_item(BoardItem &it, Vec2 a, Vec2 b);
+  void board_marquee_end();
+  bool board_marquee_meets(const BoardItem &it, Vec2 lo, Vec2 hi) const;
+  void board_select_command(const std::string &w);
+  void board_start_loads();
+  void board_fill_sizes(std::vector<BoardItem> &items);
+  void board_trim_pictures();
+  bool board_paste_file(Vec2 at);
+  std::deque<std::string> board_queue_;  // (pictures waiting to load: at most three decode at a time)
+  std::map<std::string, std::shared_ptr<BoardPicture>> board_pics_;   // (by absolute path)
+  std::map<std::string, std::future<std::shared_ptr<BoardPicture>>> board_loading_;
+  std::vector<std::pair<Vec2, std::vector<uint64_t>>> board_rows_;   // (images dropped together, laid out when sized)
+  std::set<std::string> board_copied_;  // (files the board copied into References: deleted again if unreadable)
+  std::string board_last_;              // (the board opened again in the next session: a preference)
+  bool board_opened_once_ = false;
+  double board_nudge_at_ = -10.0;
+  bool board_save();
+  std::string board_clean_name(std::string name) const;
+  void board_new(const std::string &name);
+  bool board_open(const std::string &name);
+  std::vector<std::string> board_names() const;
+  std::string board_keep_image(const std::string &path);
+  uint64_t board_add_image(const std::string &path, Vec2 at, bool undo_step);
+  int board_add_images(const std::vector<std::string> &paths, Vec2 at);
+  bool board_paste();
+  bool board_selected(uint64_t id) const;
+  bool board_sel_box(Vec2 &lo, Vec2 &hi) const;
+  int board_handle_at(Vec2 m) const;
+  void board_move(Vec2 d);
+  void board_scale(float f, Vec2 pivot);
+  void board_turn(float degrees, Vec2 pivot);
+  void board_delete();
+  void board_duplicate();
+  void board_restack(bool front);
+  void draw_board_image(const BoardItem &it);
+  void draw_board_selection();
+  void board_input(bool hovered);
+  void board_nudge_keys();
+  void board_drag_begin(int kind, Vec2 m);
+  void board_drag_update(Vec2 m);
+  void board_drag_end();
+  void draw_board_window(const Recti &r);
+  void draw_board_toolbar(const Recti &bar);
+  void draw_board_menu();
+  void board_add_image_dialog();
+  bool board_asset_drag_over() const;
+  bool board_command(const std::vector<std::string> &t);
+  int window_action(const std::string &id);
   int pad_window_ = 0;       // (the OS window the pad last drew in: its keys are that window's)
   bool pad_busy() const;
   bool pad_hold_opens_wheel() const;
+  int pad_wheel_mode_ = 0;  // (task 0303: what the wheel - a pen display's dial - does over the pad: 0 zoom, 1 size, 2 turn, 3 opacity)
+  void pad_wheel(float notches, Vec2 at, bool ctrl);
+  bool draw_wheel_command(const std::string &w);
+  Vec2 pad_keys_point() const;
   void draw_pad_zoom_button(const Recti &zoom);
   void draw_pad_set_correct(int correct);
   double pad_render_ms_ = 0.0, pad_blit_ms_ = 0.0;
