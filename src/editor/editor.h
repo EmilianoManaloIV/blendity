@@ -1324,6 +1324,9 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   std::string volume_mesh_note_for_test(const MaterialPtr &m) { return volume_mesh_note(m); }  // (round 331)
+  /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
+   * asset path and the layer, or -1. */
+  std::pair<std::string, int> texture_upto_for_test() const { return texture_upto_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
   bool prefs_open_for_test() const { return dialog_ == Dialog::Preferences; }
   bool hair_dialog_for_test() const { return dialog_ == Dialog::HairRig; }  // (task 0291)
@@ -2437,6 +2440,8 @@ class Editor {
   size_t slots_using(const std::function<bool(const MaterialPtr &)> &match);
   void select_objects_using(const MaterialPtr &m);  // the Materials window's "Select Objects Using It"
   size_t materials_using_texture(const ProceduralTexturePtr &t);  // scene and asset materials whose maps name it
+  std::unordered_set<std::string> used_texture_assets();          // (round 332: the texture assets some material's maps name)
+  void draw_texture_upto(ProceduralTexture &t, int upto, int which, const Recti &pane);  // (round 332: the preview up to a layer)
   void request_material_delete(const MaterialPtr &one);  // one, or the multi-selection when it holds more
   void request_texture_delete();
   void request_project_delete(const std::string &one);
@@ -2806,6 +2811,15 @@ class Editor {
   /* Round 331: "" or why a Volume material on the inspected object's mesh can't hold fog (an open mesh: the rays
    * that leave by a hole never meet its far side). The count is kept per mesh and its topology. */
   std::string volume_mesh_note(const MaterialPtr &m);
+  ui::Id field_reset_ = 0;                    // (round 332: a field's Reset to Default, landing when it draws next)
+  uint64_t field_reset_frame_ = 0;            // (dropped two frames on if that field isn't drawn again)
+  void expire_field_reset() {
+    if (field_reset_ && ui_.frame_number() > field_reset_frame_ + 2) field_reset_ = 0;
+  }
+  std::string material_preset_menu();         // (round 332: the presets by group as menu items; the one picked, or "")
+  void draw_material_of_type(const Recti &b);
+  std::string add_layer_search_;              // (round 332: the Add Layer menu's search)
+  std::pair<std::string, int> texture_upto_{"", -1};  // (round 332: Alt+click a layer - the preview up to it)
   const Mesh *volume_note_mesh_ = nullptr;
   uint64_t volume_note_version_ = 0;  // (the faces' and corners' counts: its topology)
   size_t volume_note_open_ = 0;

@@ -2147,6 +2147,37 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
   return infos;
 }
 
+const std::vector<std::string> &texture_layer_groups() {
+  static const std::vector<std::string> g = {"Texture", "Pattern", "Toon", "Input", "Color", "Converter", "Filter", "Mask & Wear", "Layout", "Other"};
+  return g;
+}
+
+const std::string &texture_layer_group(const std::string &layer_name) {
+  static const std::unordered_map<std::string, std::string> by_name = {
+      {"Noise", "Texture"},        {"Perlin Noise", "Texture"},  {"Voronoi", "Texture"},      {"Wave", "Texture"},
+      {"Magic", "Texture"},        {"White Noise", "Texture"},   {"Gabor", "Texture"},        {"Checker", "Texture"},
+      {"Brick", "Texture"},        {"Gradient", "Texture"},      {"Image", "Texture"},        {"Wood Floor", "Pattern"},
+      {"Tatami", "Pattern"},       {"Tiles", "Pattern"},         {"Stripes", "Pattern"},      {"Plaster", "Pattern"},
+      {"Window Grid", "Pattern"},  {"Roof Tiles", "Pattern"},    {"Leaves", "Pattern"},       {"Grass", "Pattern"},
+      {"Rocks", "Pattern"},        {"Water", "Pattern"},         {"Sky Gradient", "Pattern"}, {"Clouds", "Pattern"},
+      {"Toon Ramp", "Toon"},       {"Face Shadow", "Toon"},      {"Fill", "Input"},           {"Mesh Map", "Input"},
+      {"Paint", "Input"},          {"Levels", "Color"},          {"Invert", "Color"},         {"Posterize", "Color"},
+      {"RGB Curves", "Color"},     {"Hue / Saturation", "Color"}, {"Color Ramp", "Converter"},  {"Map Range", "Converter"},  {"Clamp", "Converter"},
+      {"Math", "Converter"},       {"Separate Channel", "Converter"}, {"Blur", "Filter"},     {"Warp", "Filter"},
+      {"Tile", "Filter"},          {"Mask by Height", "Mask & Wear"}, {"Anchor", "Mask & Wear"}, {"Edge Wear", "Mask & Wear"},
+      {"Edge Shade", "Mask & Wear"}, {"Cavity", "Mask & Wear"},  {"Height AO", "Mask & Wear"}, {"Group", "Layout"}};
+  static const std::string other = "Other";
+  const auto it = by_name.find(layer_name);
+  return it == by_name.end() ? other : it->second;
+}
+
+std::string texture_layer_no_effect(const TextureLayer &l) {
+  if (!l.enabled) return "";  // (its title is dimmed already)
+  if (!(l.opacity > 0.0f)) return "Opacity 0";
+  if (l.targets == 0) return "Writes nothing";
+  return "";
+}
+
 const TextureLayerInfo *find_texture_layer_info(const std::string &name) {
   auto key = [](const std::string &v) {
     std::string k;

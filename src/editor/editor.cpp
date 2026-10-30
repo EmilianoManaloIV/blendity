@@ -2398,6 +2398,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
 }
 
 bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name, int outer, const std::string &which) {
+  if (op != "reset" && texture_upto_.first == asset) texture_upto_ = {"", -1};  // (round 332's review: the layers moved under the preview's cut)
   ProceduralTexturePtr pt = texture_asset(asset);
   if (!pt) return false;
   /* The list worked: the stack, or a layer's mask stack / group children (task 0244). */

@@ -384,7 +384,7 @@ size, the samples and Keep UVs. In Paint, **Bucket Fill** fills the group, islan
 or a gradient; Brush Alpha, Grain and Stencil pick from the project's images; Save Palette writes the palette.
 
 **Materials** are Unity-style, evaluating Blender's **Principled BSDF**: base colour, metallic, roughness, specular,
-normal and emission, with tiling and offset, and surface types Opaque, Cutout, Transparent and Glass. The
+normal and emission, with tiling and offset, and surface types Opaque, Cutout, Transparent, Glass and Volume (Fog). The
 **Materials** window shows every material as a sphere: drag one onto an object (the face under the mouse picks the
 slot) or onto a face in Edit Mode. **Material assets** (`Assets/Materials/<name>.mat`) are shared by every object
 that uses them, as in Unity.
@@ -415,6 +415,10 @@ A PBR material's folded **Principled: Subsurface, Sheen, Coat** group (round 330
 Sheen for cloth; Coat for lacquer and car paint; Anisotropic for brushed metal and hair (needs UVs). The CPU views, the
 path tracers (CPU, GPU and OptiX) draw them; a GPU view with such a material is drawn on the CPU and says so.
 
+**Working faster** (round 332): right-click a field's name > **Reset to Default**; Add Layer's search (type part of a
+name: "noi", "ramp"); **Alt+click** a layer's name to see the stack up to it; a row says why a layer does nothing; a
+texture tile says "not used" until a material uses it; the Materials window's **Of Type...** makes a material of a kind.
+
 **Fog** (round 331): Surface Type **Volume (Fog)** makes a mesh's inside fog and hides its surface - a box around a
 room, a sphere for a cloud. Its **Volume (Fog)** group has Blender's Principled Volume fields: Fog Density (1 dims what
 is 1 m behind to about a third), Fog Color, Fog Anisotropy (0.5-0.8 for light shafts toward the sun), Fog Emission
@@ -422,6 +426,33 @@ is 1 m behind to about a third), Fog Color, Fog Anisotropy (0.5-0.8 for light sh
 closed: an open one says so above the fields. F12 with Path Tracing draws it truly - scattered light, soft shadows,
 shafts; the views show the fog's thickness only. GPU path tracing and the GPU views don't have it yet: such scenes go
 to the CPU and say so.
+
+**Blender's shader nodes in Blendity** (rounds 327-333). Blendity has no node canvas: each node is a texture layer, a
+layer's option or a material field, in the order they are stacked.
+
+| Blender node | In Blendity |
+|---|---|
+| Texture Coordinate (UV, Generated) | The material's Mapping: UV, Box (Triplanar), Generated (Object Bounds) |
+| Mapping | Every pattern layer's folded Mapping group: Map Offset, Map Rotation, Map Scale, Seamless |
+| Noise Texture (with 4.1's Musgrave types) | The Noise layer and its Type: Perlin fBm, Multifractal, Ridged, Hybrid Multifractal, Hetero Terrain |
+| (Ken Perlin's noise) | The Perlin Noise layer: Detail, Roughness, Lacunarity, Distortion, Turbulence |
+| Voronoi, Wave, Magic, White Noise, Gabor, Checker, Brick, Gradient Texture | The layers of those names (Voronoi's Feature and Distance, Wave's Bands / Rings and profiles) |
+| Image Texture | The Image layer, or a material's Base Map |
+| Sky Texture, Environment Texture | The Lighting window's Environment; the Sky Gradient layer for a texture |
+| Mix Color | A layer's Blend: Normal, Multiply, Add, Screen, Overlay, Darken ... Linear Light, Hue, Saturation, Color, Value |
+| RGB Curves, Invert, Hue / Saturation / Value, Bright / Contrast | The RGB Curves, Invert, Hue / Saturation and Levels layers |
+| Color Ramp | The Color Ramp layer: stops on a bar, Constant / Linear / Ease / Cardinal |
+| Map Range, Clamp, Math | The layers of those names, on a plane (height, roughness, metallic, mask, albedo) |
+| Separate RGB / HSV | The Separate Channel layer, into the mask |
+| Bump | A texture's Height, given as its normal (the Normal Map switch) |
+| Normal Map | The material's Normal Map |
+| Displacement | The Displace modifier on the mesh |
+| Principled BSDF | The material: base, metallic, roughness, specular, emission, and the folded Subsurface, Sheen, Coat, Anisotropic |
+| Glass BSDF, Transparent BSDF | Surface Type Glass, Transparent |
+| Principled Volume, Volume Scatter / Absorption | Surface Type Volume (Fog) |
+| Toon BSDF, Shader to RGB | Shading Model Toon |
+| Mix Shader, Add Shader | Not yet (an axis material mixes three materials by slope) |
+| Light Path, Attribute, Object Info, Geometry, Combine RGB | Not yet |
 
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.

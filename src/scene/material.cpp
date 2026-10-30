@@ -399,6 +399,15 @@ const std::vector<std::string> &material_presets() {
   return names;
 }
 
+const std::vector<std::pair<std::string, std::vector<std::string>>> &material_preset_groups() {
+  static const std::vector<std::pair<std::string, std::vector<std::string>>> g = {{"Basic", {"Solid", "Transparent", "Cutout", "Unlit"}},
+                                                                                  {"Glass", {"Glass", "Frosted Glass"}},
+                                                                                  {"Metal", {"Metal"}},
+                                                                                  {"Stylized", {"Toon", "Emissive"}},
+                                                                                  {"Volume", {"Fog", "Smoke", "Mist"}}};
+  return g;
+}
+
 /* Round 331: the Volume presets - Fog (a grey haze), Smoke (dark, wispy), Mist (thin, forward-scattering). */
 static bool volume_preset(Material &m, const std::string &preset) {
   if (preset != "Fog" && preset != "Smoke" && preset != "Mist") return false;

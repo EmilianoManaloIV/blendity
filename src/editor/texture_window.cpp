@@ -153,6 +153,45 @@ size_t Editor::materials_using_texture(const ProceduralTexturePtr &t) {
   return users.size();
 }
 
+/* Round 332: every texture asset a scene or asset material names in one of its maps, in one pass (the grid tags the
+ * others "not used"). */
+std::unordered_set<std::string> Editor::used_texture_assets() {
+  std::unordered_set<std::string> used;
+  auto check = [&](const Material *m) {
+    if (!m) return;
+    for (const TextureRef *map : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
+                                  &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map, &m->face_shadow_map, &m->line_map, &m->hatch_map}) {
+      const size_t hash = map->path.rfind('#');  // (as split_texture_ref: a texture's own path may hold one)
+      if (hash != std::string::npos) used.insert(map->path.substr(0, hash));
+    }
+  };
+  slots_using([&](const MaterialPtr &m) {
+    check(m.get());
+    return false;
+  });
+  for (const auto &kv : loaded_material_assets()) check(kv.second.get());
+  return used;
+}
+
+/* Round 332: the preview showing the stack up to one layer (Alt+click its name; Substance's solo): a copy cut there,
+ * under a name of its own in the thumbnails' cache, with a line saying so over the pane. */
+void Editor::draw_texture_upto(ProceduralTexture &t, int upto, int which, const Recti &pane) {
+  auto &u = ui_;
+  ProceduralTexture part = t;
+  part.layers.resize((size_t)upto + 1);
+  part.asset_path += "#upto";
+  const int ps = std::min(256, std::max(64, std::max(t.width, t.height)));
+  const TexThumb &th = texture_thumb(part, which, ps);
+  draw_pixels(u, th.px, th.size, th.size, pane, texture_preview_tiled_ ? 2 : 1);
+  texture_preview_size_ = th.size;
+  const TextureLayer &l = *t.layers[(size_t)upto];
+  const std::string name = l.name.empty() ? std::string(l.type_name()) : l.name;
+  const Recti band{pane.x, pane.y, pane.w, u.row_h()};
+  texture_ui_rects_["upto"] = band;
+  u.canvas.fill_rect(band, u.theme.bar);
+  u.label({band.x + u.px(4), band.y, band.w - u.px(8), band.h}, "Up to " + name + " - Alt+click it again for all", u.theme.accent);
+}
+
 void Editor::request_texture_delete() {
   if (texture_multi_.items.size() > 1) texture_delete_many_ = texture_multi_.items, texture_delete_ = nullptr;
   else texture_delete_ = texture_selected_, texture_delete_many_.clear();
@@ -175,6 +214,7 @@ void Editor::draw_textures_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
   texture_ui_rects_.clear();
+  expire_field_reset();
   if (u.hovered(r) && in.pressed[0]) focused_ = WindowKind::Textures;
   /* The list: every .ptex under Assets (loaded on first sight), filtered by the search. */
   std::vector<ProceduralTexturePtr> list;
@@ -268,6 +308,7 @@ void Editor::draw_textures_window(const Recti &r) {
   const int cols = std::max(1, (grid.w - pad) / (tile + pad));
   const int rows = ((int)list.size() + cols - 1) / cols;
   const int off = u.begin_scroll(u.id("tex_grid"), grid, rows * (tile + u.row_h() + pad) + pad);
+  const std::unordered_set<std::string> used = used_texture_assets();
   for (size_t i = 0; i < list.size(); i++) {
     const int cx = grid.x + pad + (int)(i % (size_t)cols) * (tile + pad);
     const int cy = grid.y + pad + (int)(i / (size_t)cols) * (tile + u.row_h() + pad) - off;
@@ -281,8 +322,16 @@ void Editor::draw_textures_window(const Recti &r) {
     const TexThumb &th = texture_thumb(*t, 0, 64);
     draw_pixels(u, th.px, th.size, th.size, {cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)});
     u.label({cx, cy + tile, tile, u.row_h()}, t->name, u.theme.text, ui::Align::Center);
+    const bool unused = !used.count(t->asset_path);
+    if (unused) {  // (round 332: visibility of what nothing uses yet)
+      const Recti tag{cx + u.px(4), cy + tile - u.px(4) - u.row_h() * 3 / 4, tile - u.px(8), u.row_h() * 3 / 4};
+      texture_ui_rects_["unused:" + t->name] = tag;
+      u.canvas.fill_rect(tag, u.theme.bar);
+      u.label(tag, "not used", u.theme.text_dim, ui::Align::Center);  // (in this scene or the materials loaded)
+    }
     u.tooltip(t->name + "  (" + t->asset_path + strprintf(")\n%d x %d, %zu layer(s). Click to edit; drag onto an object or a Hierarchy row to use it.", t->width, t->height,
-                                                          t->layers.size()));
+                                                          t->layers.size()) +
+              (unused ? "\nNo material in this scene (or among the material assets opened) uses it: Assign to Selection, or drag it onto an object." : ""));
     if (hot && in.pressed[0] && !asking) {
       /* Ctrl toggles, Shift selects the range from the last click (task 0053); a plain click selects it and may drag. */
       texture_multi_.click(list, i, in.ctrl(), in.shift());
@@ -360,7 +409,9 @@ void Editor::draw_textures_window(const Recti &r) {
     u.tooltip("Show the texture tiled 2 x 2: its edges meet in the middle.");
     ProceduralTexture &t = *texture_selected_;
     const int which = std::max(0, std::min(5, texture_preview_output_));
-    if (texture_dragging_) {
+    const int upto = texture_upto_.first == t.asset_path && texture_upto_.second < (int)t.layers.size() ? texture_upto_.second : -1;
+    if (upto >= 0) draw_texture_upto(t, upto, which, pane);
+    else if (texture_dragging_) {
       const int ps = std::min(256, std::max(64, std::max(t.width, t.height)));
       const TexThumb &th = texture_thumb(t, which, ps);
       draw_pixels(u, th.px, th.size, th.size, pane, texture_preview_tiled_ ? 2 : 1);

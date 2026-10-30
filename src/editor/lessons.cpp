@@ -1492,6 +1492,22 @@ F12 with Path Tracing draws the fog truly: light scattered inside it, its soft s
 ? Above your fog's fields: "This mesh is open", with 4 open edges. What went wrong and what do you do? | The fog is on an open mesh - a Plane, or a box with a face deleted - so a ray that enters never meets the far side. Use a closed mesh: Make Faces (Close Holes) in the Tools window fills the holes, and Select Non-Manifold finds them.
 ? Blender lets one material have both a glass surface and smoke inside. How do you do that here? | With two meshes: the glass shell with a Glass material, and a slightly smaller copy inside it with a Volume (Fog) material such as the Smoke preset. A material here is either a surface or a fog.
 )"},
+    {"Working Faster with Textures and Materials", "Reset to Default, Add Layer's search, the preview up to a layer", R"(
+The Textures and Materials windows have a few habits from Blender and Substance that save time.
+# Reset to Default
+Right-click a field's name (Scale, Roughness, Fog Density...) and pick Reset to Default: it goes back to the value a new layer of that type, or a new material, starts with - Blender's Backspace over a field.
+! cmd:window Textures | The Textures window
+! cmd:newtex Practice Noise; settex Practice L0Scale 12 | A noise texture with its Scale pushed to 12: right-click Scale's name to reset it
+# Finding a layer
+Add Layer starts with a search: type part of a name ("noi", "ramp", "curve") and only those stay. Without a search the layers sit under Blender's node groups - Texture, Pattern, Color, Converter, Filter, Mask & Wear.
+# Seeing one layer's part
+Alt+click a layer's name - or its menu's Preview Up to Here - and the preview shows the stack only up to that layer, with a line over it saying so; Alt+click it again for all. A layer that changes nothing says why at the end of its row - Opacity 0, or no Writes switch on.
+# Materials of a kind
+The Materials window's Of Type... makes a material from a preset, grouped: Basic, Glass, Metal, Stylized and Volume (fog, smoke, mist). A texture tile that no material uses yet says "not used".
+? You pushed a Voronoi's Randomness to 1 and its Cells to 40 and don't remember what they were. How do you get them back without undoing everything since? | Right-click each field's name and choose Reset to Default: each goes back to a new Voronoi's value, the other edits stay.
+? A stack of six layers looks wrong and you suspect the third. How do you see what the stack looks like up to it? | Alt+click the third layer's name: the preview shows the first three only (a line over it says "Up to ..."). Alt+click it again to see all six.
+? A Levels layer is on but nothing changes, and its row says "Writes nothing". What now? | Every Writes switch of it is off, so it changes no output: open the layer and tick Writes Albedo, Writes Roughness or whichever it should change.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

@@ -422,6 +422,54 @@ struct ApplyEditReflector : Reflector {
 
 /* Draws any component through the Reflector interface (Unity's default
  * inspector / Blender's RNA-driven property panels). */
+/* Round 332: the default value of each field of a thing - a texture layer of its type, a mask effect, a material - for
+ * Reset to Default (Blender: Backspace over a field). Read once by a reflector over a new one. */
+struct FieldDefaults {
+  std::unordered_map<std::string, float> f;
+  std::unordered_map<std::string, int> i;  // (numbers and enumerations)
+  std::unordered_map<std::string, bool> b;
+  std::unordered_map<std::string, Vec3> c;  // (colours)
+  std::unordered_map<std::string, Vec3> v;  // (vectors: Tiling, Offset)
+};
+struct DefaultsReader : Reflector {
+  FieldDefaults &d;
+  explicit DefaultsReader(FieldDefaults &o) : d(o) {}
+  bool all_fields() const override { return true; }
+  void field(const char *n, float &v, float, float, float) override { d.f.emplace(n, v); }
+  void field(const char *n, int &v, int, int) override { d.i.emplace(n, v); }
+  void field(const char *n, bool &v) override { d.b.emplace(n, v); }
+  void field(const char *n, Vec3 &v) override { d.v.emplace(n, v); }
+  void color(const char *n, Vec3 &v) override { d.c.emplace(n, v); }
+  void enumeration(const char *n, int &v, const char *const *, int) override { d.i.emplace(n, v); }
+  void text(const char *, std::string &) override {}
+  void mesh(const char *, MeshPtr &) override {}
+};
+const FieldDefaults &layer_defaults(const std::string &type, bool mask_effect) {
+  static std::unordered_map<std::string, FieldDefaults> cache;
+  const std::string key = (mask_effect ? "mask:" : "") + type;
+  const auto it = cache.find(key);
+  if (it != cache.end()) return it->second;
+  FieldDefaults &d = cache[key];
+  std::unique_ptr<TextureLayer> l = create_texture_layer(type);
+  if (!l) return d;
+  if (mask_effect) make_mask_effect(*l);  // (as Add Effect makes one: it writes the mask's height)
+  DefaultsReader r(d);
+  l->reflect_common(r, true);
+  l->reflect(r);
+  l->reflect_mapping(r);
+  return d;
+}
+const FieldDefaults &material_defaults() {
+  static const FieldDefaults d = [] {
+    FieldDefaults o;
+    Material m;
+    DefaultsReader r(o);
+    m.reflect(r);
+    return o;
+  }();
+  return d;
+}
+
 struct InspectorReflector : Reflector {
   Editor &ed;
   ui::Context &u;
@@ -432,6 +480,7 @@ struct InspectorReflector : Reflector {
   std::vector<FieldEdit> edits;  // what changed this frame (for multi-object editing)
   std::string record_prefix;     // a filter effect's "E<i> ": edits carry the name other objects' reflectors see
   const std::set<std::string> *mixed = nullptr;  // fields whose values differ across the materials edited at once (task 0147): drawn as a dash
+  const FieldDefaults *defaults = nullptr;       // (round 332: what Reset to Default sets: the layer's or material's)
   int label_w;
   /* Progressive disclosure (task 0190): past `limit` fields (-1: none) the rest aren't drawn, only counted. */
   int limit = -1, seen = 0, hidden = 0;
@@ -458,6 +507,26 @@ struct InspectorReflector : Reflector {
     if (!mixed || !mixed->count(n) || u.hovered(f) || u.is_active(fid(n)) || u.editing(fid(n))) return;
     u.canvas.fill_rect(f.shrink(u.px(2)), u.theme.field);
     u.label({f.x + u.px(5), f.y, f.w - u.px(8), f.h}, "-", u.theme.text_dim);
+  }
+  /* Round 332: a right-click on a field's name offers Reset to Default when the thing edited has a default for it; the
+   * reset lands when the field is drawn next (the menu's body runs after this frame's fields), recorded as any edit. */
+  template<class T> bool reset_field(const char *n, const Recti &label, const std::unordered_map<std::string, T> *defs, T &v) {
+    if (!defs) return false;
+    const auto it = defs->find(n);
+    if (it == defs->end()) return false;
+    const ui::Id rid = fid(n) ^ 0x2E5E7ull;
+    if (u.record_buttons) u.button_rects["label:" + record_prefix + n] = label;
+    if (u.hovered(label) && u.in.pressed[1]) u.open_popup(rid, {u.in.mx, u.in.my, 0, 0});
+    const bool differs = !(it->second == v) || (mixed && mixed->count(n));  // (the others selected may differ)
+    Editor *edp = &ed;
+    u.popup(rid, u.px(170), [edp, rid, differs] {
+      if (edp->ui_.menu_item("Reset to Default", nullptr, false, differs)) edp->field_reset_ = rid, edp->field_reset_frame_ = edp->ui_.frame_number();
+      edp->ui_.tooltip("The value a new one starts with (Blender: Backspace over a field). Toon Style's reset picks Classic, with its settings.");
+    });
+    if (ed.field_reset_ != rid) return false;
+    ed.field_reset_ = 0;
+    v = it->second;
+    return true;
   }
   /* A number typed into a mixed field that the active material already holds: no change on it, but the others take
    * it (and an expression at the clamp still reaches them), so the edit is recorded anyway. */
@@ -486,6 +555,12 @@ struct InspectorReflector : Reflector {
       u.number_committed(fid(n), &e.expr);
     }
     else ch = mixed_commit(n, FieldEdit::Float, v);
+    if (reset_field(n, label_rect(row), defaults ? &defaults->f : nullptr, v)) {
+      FieldEdit &e = record(FieldEdit::Float, n);
+      e.f_old = old;
+      e.f_new = v;
+      ch = true;
+    }
     changed |= ch;
   }
   void field(const char *n, int &v, int mn, int mx) override {
@@ -504,6 +579,12 @@ struct InspectorReflector : Reflector {
       u.number_committed(fid(n), &e.expr);
     }
     else ch = mixed_commit(n, FieldEdit::Int, (float)v);
+    if (reset_field(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
+      FieldEdit &e = record(FieldEdit::Int, n);
+      e.f_old = (float)old;
+      e.i_new = v;
+      ch = true;
+    }
     changed |= ch;
   }
   /* Sample counts: type any number, halve / double it, or pick a power of two
@@ -551,7 +632,7 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
     u.label(label_rect(row), n);
-    if (u.checkbox(field_rect(row), v)) {
+    if (u.checkbox(field_rect(row), v) || reset_field(n, label_rect(row), defaults ? &defaults->b : nullptr, v)) {
       record(FieldEdit::Bool, n).b_new = v;
       changed = true;
     }
@@ -574,13 +655,19 @@ struct InspectorReflector : Reflector {
       u.number_committed(fid(n), &e.expr, &e.component);
       changed = true;
     }
+    if (reset_field(n, label_rect(row), defaults ? &defaults->v : nullptr, v)) {
+      FieldEdit &e = record(FieldEdit::Vec, n);
+      e.v_old = old;
+      e.v_new = v;
+      changed = true;
+    }
   }
   void color(const char *n, Vec3 &v) override {
     if (skip()) return;
     Recti row = lay.row();
     if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
     u.label(label_rect(row), n);
-    if (u.color_field(fid(n), field_rect(row), v)) {
+    if (u.color_field(fid(n), field_rect(row), v) || reset_field(n, label_rect(row), defaults ? &defaults->c : nullptr, v)) {
       record(FieldEdit::Color, n).v_new = v;
       changed = true;
     }
@@ -592,7 +679,13 @@ struct InspectorReflector : Reflector {
     u.label(label_rect(row), n);
     const Vec3 old_rgb = v;
     const float old_a = a;
-    if (u.color_field(fid(n), field_rect(row), v, &a)) {
+    bool ch = u.color_field(fid(n), field_rect(row), v, &a);
+    if (reset_field(n, label_rect(row), defaults ? &defaults->c : nullptr, v)) {  // (the colour and its alpha, as a new one has them)
+      const auto da = defaults->f.find(alpha_name);
+      if (da != defaults->f.end()) a = da->second;
+      ch = true;
+    }
+    if (ch) {
       /* Recorded as the two fields they are saved as, so multi-object editing works too. */
       if (v != old_rgb) record(FieldEdit::Color, n).v_new = v;
       if (a != old_a) {
@@ -658,7 +751,7 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    if (u.combo(fid(n), field_rect(row), v, opts, count)) {
+    if (u.combo(fid(n), field_rect(row), v, opts, count) || reset_field(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
       record(FieldEdit::Enum, n).i_new = v;
       if (material && std::strcmp(n, "Toon Style") == 0) apply_toon_style(*material, v);  // (task 0148: the preset's fields, picked again too)
       changed = true;
@@ -941,11 +1034,10 @@ struct InspectorReflector : Reflector {
         }
         uc->tooltip("A new material, saved as an asset in Assets/Materials (a copy of this slot's material, if it has one).");
         uc->submenu("New Material of Type", uc->px(200), [uc, pid, e] {
-          for (const std::string &p : material_presets())
-            if (uc->menu_item(p)) {
-              results[pid] = {e->new_slot_material(nullptr, p), false};
-              uc->redraw = true;
-            }
+          const std::string p = e->material_preset_menu();  // (round 332: by group - Basic, Glass, Metal, Stylized, Volume)
+          if (p.empty()) return;
+          results[pid] = {e->new_slot_material(nullptr, p), false};
+          uc->redraw = true;
         });
         if (uc->menu_item("None")) {
           results[pid] = {nullptr, true};
@@ -1015,6 +1107,7 @@ struct InspectorReflector : Reflector {
       InspectorReflector sub(ed, u, lay);
       sub.label_w = label_w;
       sub.material = m.get();
+      sub.defaults = &material_defaults();  // (round 332's review: Reset to Default here too, where most materials are edited)
       if (others.size() > 1) sub.mixed = &mixed;
       m->reflect(sub);
       u.pop_id();
@@ -1099,11 +1192,23 @@ struct InspectorReflector : Reflector {
       const TextureLayerInfo *info = find_texture_layer_info(l.type_name());
       Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
       const std::string title = l.name.empty() ? std::string(l.type_name()) : l.name + "  (" + l.type_name() + ")";
+      const std::string why = which == "Mask" ? std::string() : texture_layer_no_effect(l);  // (a mask effect always shapes the mask)
+      if (!why.empty()) {  // (round 332: a layer that changes nothing says why, at the row's end)
+        const int ww = u.font.text_width(why) + u.px(8);
+        u.label({tr.right() - ww, h.y, ww, h.h}, why, u.theme.warning);
+        tr.w -= ww;
+      }
+      const bool upto = !nested && ed.texture_upto_.first == path && ed.texture_upto_.second == i;
+      if (upto) u.canvas.rect_outline(h, u.theme.accent);
       u.label(tr, title, l.enabled ? u.theme.text_bright : u.theme.text_dim);
+      if (!nested && u.hovered(tr) && u.in.pressed[0] && u.in.alt()) {  // (round 332: Alt+click - the preview up to this layer, Substance's solo)
+        ed.texture_upto_ = upto ? std::make_pair(std::string(), -1) : std::make_pair(path, i);
+        u.consume_click();
+      }
       if (u.hovered(tr) && u.in.pressed[0]) l.ui_expanded = !l.ui_expanded;
       if (!path.empty() && !nested) ed.stack_drag_item("layers:" + path, i, tr, h, &l.ui_expanded);  // (an unsaved texture can't move)
       if (u.record_buttons) u.button_rects[key + "layer_head" + std::to_string(i)] = tr;  // (tests)
-      if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
+      if (info) u.tooltip(texture_layer_group(info->name) + " > " + info->name + "\n" + info->help + (nested ? "" : "\nAlt+click: the preview shows the stack up to this layer."));
       const int bs = h.h - u.px(4);
       Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
       ui::Id mid = u.id("layer_menu");
@@ -1118,6 +1223,10 @@ struct InspectorReflector : Reflector {
         if (uu.menu_item("Move Up", nullptr, false, i > 0)) edp->texture_stack_op(path, "move", i, i - 1, "", outer, which);
         if (uu.menu_item("Move Down", nullptr, false, i + 1 < n)) edp->texture_stack_op(path, "move", i, i + 1, "", outer, which);
         if (uu.menu_item("Reset")) edp->texture_stack_op(path, "reset", i, 0, "", outer, which);
+        if (outer < 0) {  // (round 332: Alt+click's preview up to this layer, for a pen)
+          const bool shown = edp->texture_upto_.first == path && edp->texture_upto_.second == i;
+          if (uu.menu_item(shown ? "Preview All Layers" : "Preview Up to Here")) edp->texture_upto_ = shown ? std::make_pair(std::string(), -1) : std::make_pair(path, i);
+        }
         uu.menu_separator();
         if (uu.menu_item(which == "Mask" ? "Remove Effect" : "Remove Layer")) edp->texture_stack_op(path, "remove", i, 0, "", outer, which);
         if (outer >= 0) return;  // (task 0273: what follows is for a top-level layer)
@@ -1136,9 +1245,12 @@ struct InspectorReflector : Reflector {
         record_prefix = outer_prefix + item_prefix + std::to_string(i) + " ";
         layer_depth++;
         layer_outer = i;
+        const FieldDefaults *outer_defaults = defaults;
+        defaults = &layer_defaults(l.type_name(), which == "Mask");
         l.reflect_common(*this, false);
         l.reflect(*this);
         l.reflect_mapping(*this);
+        defaults = outer_defaults;
         layer_depth--;
         layer_outer = outer;
         record_prefix = outer_prefix;
@@ -1156,22 +1268,45 @@ struct InspectorReflector : Reflector {
     ui::Id add = u.id(!nested ? "add_layer" : which == "Mask" ? "add_effect" : "add_child");
     ed.texture_ui_rects_[key + "add_layer"] = ab;
     const char *add_label = !nested ? "Add Layer" : which == "Mask" ? "Add Effect" : "Add to Group";
-    if (u.button(ab, add_label, false, Icon::Plus)) u.open_popup(add, ab);
+    if (u.button(ab, add_label, false, Icon::Plus)) {
+      ed.add_layer_search_.clear();
+      u.open_popup(add, ab);
+    }
     u.tooltip(!nested ? "Add a generator (a pattern) or a filter (changes what is below) to the top of the stack."
                       : which == "Mask" ? "Add an effect to this layer's mask: a generator's values, a Mesh Map through levels, Levels, Blur, an Anchor to another layer's mask."
                                         : "Add a layer inside the group.");
     Editor *edp = &ed;
-    u.popup(add, u.px(240), [edp, path, outer, which] {
+    u.popup(add, u.px(240), [edp, path, outer, which] {  // (round 332: a search, and Blender's node groups)
       auto &uu = edp->ui_;
-      std::string category;
-      for (const TextureLayerInfo &li : texture_layer_infos()) {
-        if (li.category != category) {
-          category = li.category;
-          uu.menu_label(category);
-        }
-        if (uu.menu_item(li.name)) edp->texture_stack_op(path, "add", 0, 0, li.name, outer, which);
-        uu.tooltip(li.help);
+      const Recti sr = uu.popup_row(uu.row_h() + uu.px(6));
+      const ui::Id sid = uu.id("add_layer_search");
+      if (!uu.editing(sid) && edp->add_layer_search_.empty()) uu.begin_edit(sid, "", false);
+      uu.text_field(sid, sr.shrink(uu.px(3)), edp->add_layer_search_, nullptr, "Search layers");
+      if (uu.in.key_pressed[platform::KEY_ESCAPE]) {  // (the search keeps the focus: Esc is the menu's to close, as the Wheel picker's)
+        uu.in.key_pressed[platform::KEY_ESCAPE] = false;
+        uu.stop_editing();
+        return uu.close_popups();
       }
+      const std::string f = to_lower(edp->add_layer_search_);
+      const bool enter = uu.in.key_pressed[platform::KEY_ENTER] && !f.empty();
+      int shown = 0;
+      for (const std::string &group : texture_layer_groups()) {
+        bool labelled = false;
+        for (const TextureLayerInfo &li : texture_layer_infos()) {
+          if (texture_layer_group(li.name) != group) continue;
+          if (!f.empty() && to_lower(li.name).find(f) == std::string::npos && to_lower(group).find(f) == std::string::npos) continue;
+          if (!labelled) uu.menu_label(group), labelled = true;
+          const bool first_by_enter = ++shown == 1 && enter;  // (Enter: the first match)
+          if (first_by_enter) uu.in.key_pressed[platform::KEY_ENTER] = false;
+          if (uu.menu_item(li.name) || first_by_enter) {
+            uu.stop_editing();  // (the search is done with: the next click is the user's, not the field's end)
+            edp->texture_stack_op(path, "add", 0, 0, li.name, outer, which);
+            if (first_by_enter) return uu.close_popups();
+          }
+          uu.tooltip(li.help);
+        }
+      }
+      if (!shown) uu.menu_label("No layer matches");
     });
   }
   void filter_effects(const char *, FilterEffectList &effects) override {
@@ -1303,6 +1438,7 @@ void Editor::draw_inspector(const Recti &r) {
   /* A menu choice not applied by the next frame (nothing selected, a folded section, an undo in
    * between) is dropped rather than kept for later. */
   if (inspector_action_.obj && u.frame_number() > inspector_action_.frame + 2) inspector_action_ = {};
+  expire_field_reset();
   GameObject *g = inspector_object();
   if (!g) {
     /* Project file selected? Show file info, like Unity's asset inspector. */
@@ -2959,6 +3095,7 @@ void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const s
   }
   InspectorReflector ir(*this, ui_, lay);
   ir.material = m.get();
+  ir.defaults = &material_defaults();
   if (many) ir.mixed = &mixed;
   m->reflect(ir);
   if (ir.changed) {

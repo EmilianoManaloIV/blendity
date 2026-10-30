@@ -174,6 +174,12 @@ Vec3 texture_blend_color(int mode, Vec3 below, Vec3 v);
 std::unique_ptr<TextureLayer> create_missing_texture_layer(const std::string &name);
 /* Every layer type, in menu order (Generators, then Filters). */
 const std::vector<TextureLayerInfo> &texture_layer_infos();
+/* Round 332: the Add Layer menu's groups, by Blender's node categories (Texture, Color, Converter...), in menu order;
+ * a layer's group ("Other" for one not listed). */
+const std::vector<std::string> &texture_layer_groups();
+const std::string &texture_layer_group(const std::string &layer_name);
+/* Round 332: why an enabled layer changes nothing ("Opacity 0", "Writes nothing"), or "" - its row in the stack says so. */
+std::string texture_layer_no_effect(const TextureLayer &l);
 const TextureLayerInfo *find_texture_layer_info(const std::string &name);
 std::unique_ptr<TextureLayer> create_texture_layer(const std::string &name);
 /* Round 328: the periodic Perlin noise (0 at the lattice points), and a Voronoi layer's features at a point (F1, F2,

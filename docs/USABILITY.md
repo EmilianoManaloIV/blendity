@@ -380,6 +380,11 @@ screens themselves.
 | References for a drawing lived outside Blendity: another app's window to switch to, pictures not kept with the project. | The Board: drop, paste or drag images onto an endless canvas beside the pad (Drawing with References), move, scale and turn them by their handles, its own undo; it saves itself a second after each change and on closing, keeps outside images in Assets/Textures/References, and opens again next time (round 322). |
 | A pen display's dial and express keys did little on the Draw tab: the dial's default Ctrl- / Ctrl+ and Photoshop's Ctrl+0 / Ctrl+1 didn't zoom the pad, and the dial set to scroll could only zoom. | Photoshop's view keys over the pad and the board, 4 / 6 / 5 to turn the canvas, and More > Wheel / Dial (zoom, brush size, turn, opacity); the MANUAL's table says what to set in the tablet's driver (round 323). |
 | Over the Draw tab the Wheel showed the generic set, and a pen held on the pad never opened it: switching brush with the pen alone meant reaching for the palette. | The Wheel's own draw set (brushes, the Ruler, Fit, Hide Tools), opened by Space or by the pen held still on the pad - SketchBook's marking menu (round 321). |
+| A texture layer's or material's field pushed too far had no way back but remembering its value or undoing every step. | Right-click its name > Reset to Default: the value a new one starts with (round 332). |
+| Add Layer listed 48 layers under two headings; finding one meant reading the list. | A search field first, and Blender's node groups (Texture, Pattern, Color, Converter, Filter, Mask & Wear...) (round 332). |
+| What one layer added to the texture couldn't be seen without switching every layer above it off. | Alt+click its name: the preview up to it, and again for all (round 332). |
+| A layer at Opacity 0 or with no targets looked broken: on, and doing nothing. | Its row says why: "Opacity 0", "Writes nothing" (round 332). |
+| The Materials window couldn't make a material of a type (Glass, Toon, a fog); the slot's list was one flat list of 12. | Of Type... beside New Material Asset, and both lists grouped: Basic, Glass, Metal, Stylized, Volume (round 332). |
 
 ## Still worth doing
 

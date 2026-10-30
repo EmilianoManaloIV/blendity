@@ -182,6 +182,8 @@ const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
 /* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",
  * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */
 const std::vector<std::string> &material_presets();
+/* Round 332: the presets by group (Basic, Glass, Metal, Stylized, Volume), each preset in one. */
+const std::vector<std::pair<std::string, std::vector<std::string>>> &material_preset_groups();
 MaterialPtr make_material_preset(const std::string &preset);
 /* Toon styles (task 0148): Classic, Guilty Gear, Soft Anime, Painterly, Manga. Applying one sets the toon fields
  * (not the maps) and records which; every field stays editable afterwards. -1 for an unknown name. */

@@ -568,22 +568,19 @@ static void round50_tests() {
     if (ab.w <= 0) return;
     r34_click(ed, ab.x + ab.w / 2, ab.y + ab.h / 2);
     r34_steps(ed, 2);
-    Recti pop = r50_popup(ed);
-    /* Rows: "Generators", 11 generators, "Filters", then Blur. */
-    int blur_row = 0;  // the layers before it plus a label row per category so far
-    std::string category;
-    for (const TextureLayerInfo &li : texture_layer_infos()) {
-      if (li.category != category) category = li.category, blur_row++;
-      if (li.name == "Blur") break;
-      blur_row++;
-    }
-    r50_pick_row(ed, pop, blur_row);
+    /* Blur by its name in the menu (round 332 put a search field and Blender's groups before it, so its row moved). */
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    Recti blur{0, 0, 0, 0};
+    CHECK(ed.button_rect_for_test("menu:Blur", blur));
+    r34_click(ed, blur.x + blur.w / 2, blur.y + blur.h / 2);
+    r34_steps(ed, 2);
     CHECK(t->layers.size() == 2 && std::string(t->layers[1]->type_name()) == "Blur");
     const Recti mr = tex_rect("layer1");
     CHECK(mr.w > 0);
     r34_click(ed, mr.x + mr.w / 2, mr.y + mr.h / 2);
     r34_steps(ed, 2);
-    pop = r50_popup(ed);
+    const Recti pop = r50_popup(ed);
     r50_pick_row(ed, pop, 0);  // Move Up
     CHECK(std::string(t->layers[0]->type_name()) == "Blur");
     for (int i = 0; i < 6; i++) {  // (the settings scrolled back to the top: a longer layer below - round 328's Noise - left them scrolled)
@@ -4986,6 +4983,300 @@ static void tests_round330_blends() {
   });
 }
 
+/* Round 332 (task 0313): the Textures and Materials windows' HCI pass. */
+static void tests_round332() {
+  test("round 332's data: every layer type sits in one of Blender's node groups (none in Other); every material preset in one group, Volume's Fog / Smoke / Mist among them; a layer at Opacity 0 or with no targets says why it changes nothing", [] {
+    std::vector<std::string> other;
+    for (const TextureLayerInfo &li : texture_layer_infos())
+      if (texture_layer_group(li.name) == "Other") other.push_back(li.name);
+    for (const std::string &n : other) std::printf("    no group: %s\n", n.c_str());
+    CHECK(other.empty());
+    std::map<std::string, int> seen;
+    for (const auto &g : material_preset_groups())
+      for (const std::string &p : g.second) seen[p]++;
+    bool once = seen.size() == material_presets().size();
+    for (const std::string &p : material_presets()) once = once && seen[p] == 1;
+    CHECK(once && seen.count("Fog") && seen.count("Smoke") && seen.count("Mist"));
+    std::unique_ptr<TextureLayer> l = create_texture_layer("Noise");
+    CHECK(l && texture_layer_no_effect(*l).empty());
+    if (!l) return;
+    l->opacity = 0.0f;
+    CHECK(texture_layer_no_effect(*l) == "Opacity 0");
+    l->opacity = 1.0f, l->targets = 0;
+    CHECK(texture_layer_no_effect(*l) == "Writes nothing");
+    l->enabled = false;
+    CHECK(texture_layer_no_effect(*l).empty());
+  });
+  test("the Textures window by clicks (round 332): right-click a layer field's name > Reset to Default puts the layer type's default back; Add Layer's search finds Perlin Noise and hides the rest; Alt+click a layer shows the preview up to it, again for all; a texture no material uses is tagged \"not used\"", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    if (!t) return;
+    r34_steps(ed, 3);
+    auto bring = [&](const std::string &key) {  // (scrolled into the window's view)
+      for (int tries = 0; tries < 40; tries++) {
+        Recti f{0, 0, 0, 0};
+        if (!ed.button_rect_for_test(key, f)) f = ed.texture_ui_rect_for_test(key);
+        const Recti w = ed.window_rect_for_test(WindowKind::Textures);
+        const int top = std::max(w.y + ed.ui_for_test().row_h() * 3, ed.texture_ui_rect_for_test("preview").y);  // (below the grid of thumbnails)
+        if (f.w > 0 && f.y >= top && f.bottom() <= w.bottom()) return f;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = w.x + w.w / 4, wheel.y = w.bottom() - ed.ui_for_test().row_h() * 2, wheel.wheel_y = f.w > 0 && f.y < top ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      std::printf("    '%s' never came into view\n", key.c_str());
+      return Recti{0, 0, 0, 0};
+    };
+    auto click_key = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      r34_steps(ed, 2);
+      return true;
+    };
+    struct GetF : SetFieldForTest {
+      float got = -1.0f;
+      GetF(const char *k) : SetFieldForTest(k, 0.0f) {}
+      void field(const char *n, float &v, float, float, float) override {
+        if (key == n) got = v;
+      }
+    };
+    /* Reset to Default. */
+    GetF def("Scale");
+    create_texture_layer("Noise")->reflect(def);
+    ed.command("settex " + t->name + " L0Scale 9");
+    r34_steps(ed, 2);
+    const Recti lab = bring("label:L0 Scale");
+    CHECK(lab.w > 0);
+    if (lab.w <= 0) return;
+    platform::Event down = r34_mouse(R34ET::MouseDown, lab.x + lab.w / 2, lab.y + lab.h / 2), up = r34_mouse(R34ET::MouseUp, lab.x + lab.w / 2, lab.y + lab.h / 2);
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lab.x + lab.w / 2, lab.y + lab.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    CHECK(click_key("menu:Reset to Default"));
+    r34_steps(ed, 2);
+    GetF now("Scale");
+    t->layers[0]->reflect(now);
+    std::printf("    Scale: 9 -> %.3f after Reset to Default (the default %.3f)\n", now.got, def.got);
+    CHECK(def.got > 0.0f && now.got == def.got);
+    ed.command("undo");  // (a reset is one undo step, as any edit)
+    r34_steps(ed, 2);
+    GetF undone("Scale");
+    t->layers[0]->reflect(undone);
+    std::printf("    after Ctrl+Z: %.3f\n", undone.got);
+    CHECK(undone.got == 9.0f);
+    /* A switch: Use Mask on, then reset to a new layer's (off). */
+    ed.command("settex " + t->name + " L0UseMask 1");
+    r34_steps(ed, 2);
+    CHECK(t->layers[0]->use_mask);
+    const Recti um = bring("label:L0 Use Mask");
+    CHECK(um.w > 0);
+    platform::Event d2 = r34_mouse(R34ET::MouseDown, um.x + um.w / 2, um.y + um.h / 2), u2 = r34_mouse(R34ET::MouseUp, um.x + um.w / 2, um.y + um.h / 2);
+    d2.button = u2.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, um.x + um.w / 2, um.y + um.h / 2)});
+    ed.step_frame_headless({d2});
+    ed.step_frame_headless({u2});
+    CHECK(click_key("menu:Reset to Default"));
+    r34_steps(ed, 2);
+    CHECK(!t->layers[0]->use_mask);
+    /* Alt+click: the preview up to a layer. */
+    const Recti head = bring("layer_head0");
+    CHECK(head.w > 0);
+    platform::Event alt_down = r34_mouse(R34ET::MouseDown, head.x + head.w / 4, head.y + head.h / 2), alt_up = alt_down;
+    alt_up.type = R34ET::MouseUp;
+    alt_down.mods = alt_up.mods = platform::MOD_ALT;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, head.x + head.w / 4, head.y + head.h / 2)});
+    ed.step_frame_headless({alt_down});
+    ed.step_frame_headless({alt_up});
+    r34_steps(ed, 2);
+    CHECK(ed.texture_upto_for_test().first == t->asset_path && ed.texture_upto_for_test().second == 0 && ed.texture_ui_rect_for_test("upto").w > 0);
+    ed.step_frame_headless({alt_down});
+    ed.step_frame_headless({alt_up});
+    r34_steps(ed, 2);
+    CHECK(ed.texture_upto_for_test().second == -1 && ed.texture_ui_rect_for_test("upto").w == 0);
+    /* Add Layer's search. */
+    const Recti add = bring("add_layer");
+    CHECK(add.w > 0);
+    Recti ab = ed.texture_ui_rect_for_test("add_layer");
+    r34_click(ed, ab.x + ab.w / 2, ab.y + ab.h / 2);
+    r34_steps(ed, 2);
+    std::vector<platform::Event> typed;
+    for (char c : std::string("perl")) {
+      platform::Event e;
+      e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+      typed.push_back(e);
+    }
+    ed.step_frame_headless(typed);
+    r34_steps(ed, 2);
+    Recti probe;
+    const bool perlin = ed.button_rect_for_test("menu:Perlin Noise", probe), checker = ed.button_rect_for_test("menu:Checker", probe);
+    std::printf("    searching 'perl': Perlin Noise %s, Checker %s\n", perlin ? "listed" : "missing", checker ? "listed" : "hidden");
+    CHECK(perlin && !checker);
+    const size_t before = t->layers.size();
+    CHECK(click_key("menu:Perlin Noise"));
+    CHECK(t->layers.size() == before + 1);
+    /* The next click is the user's (it once only ended the search field's edit): it folds the new layer. */
+    const bool open_before = t->layers[0]->ui_expanded;
+    CHECK(bring("layer_head0").w > 0 && click_key("layer_head0"));
+    CHECK(t->layers[0]->ui_expanded != open_before);
+    /* Esc closes Add Layer (the search kept the focus); Enter takes the first match. */
+    auto key = [&](int k) {
+      platform::Event down, up;
+      down.type = platform::EventType::KeyDown, up.type = platform::EventType::KeyUp;
+      down.key = up.key = k;
+      ed.step_frame_headless({down});
+      ed.step_frame_headless({up});
+      r34_steps(ed, 2);
+    };
+    const Recti ab2 = bring("add_layer");
+    CHECK(ab2.w > 0);
+    r34_click(ed, ab2.x + ab2.w / 2, ab2.y + ab2.h / 2);
+    r34_steps(ed, 2);
+    CHECK(ed.ui_for_test().any_popup_open());
+    key(platform::KEY_ESCAPE);
+    CHECK(!ed.ui_for_test().any_popup_open());
+    const Recti ab3 = bring("add_layer");
+    r34_click(ed, ab3.x + ab3.w / 2, ab3.y + ab3.h / 2);
+    r34_steps(ed, 2);
+    std::vector<platform::Event> typed2;
+    for (char c : std::string("gabor")) {
+      platform::Event e;
+      e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+      typed2.push_back(e);
+    }
+    ed.step_frame_headless(typed2);
+    r34_steps(ed, 2);
+    const size_t n_before = t->layers.size();
+    key(platform::KEY_ENTER);
+    std::printf("    Enter on 'gabor': %zu -> %zu layers, the top %s; a menu still open: %d\n", n_before, t->layers.size(),
+                t->layers.empty() ? "-" : t->layers.back()->type_name(), (int)ed.ui_for_test().any_popup_open());
+    CHECK(t->layers.size() == n_before + 1 && std::string(t->layers.back()->type_name()) == "Gabor" && !ed.ui_for_test().any_popup_open());
+    /* The layer menu's Preview Up to Here (a pen's way to Alt+click). */
+    const Recti lm = bring("layer0");
+    CHECK(lm.w > 0);
+    r34_click(ed, lm.x + lm.w / 2, lm.y + lm.h / 2);
+    r34_steps(ed, 2);
+    CHECK(click_key("menu:Preview Up to Here"));
+    CHECK(ed.texture_upto_for_test().first == t->asset_path && ed.texture_upto_for_test().second == 0);
+    ed.command("texlayer " + t->name + " add Checker");  // (a stack edit drops the cut: the layers moved under it)
+    r34_steps(ed, 2);
+    CHECK(ed.texture_upto_for_test().second == -1);
+    /* "not used" - and not once a material uses it. */
+    CHECK(ed.texture_ui_rect_for_test("unused:" + t->name).w > 0);
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    const Recti as = ed.texture_ui_rect_for_test("assign");
+    CHECK(as.w > 0);
+    r34_click(ed, as.x + as.w / 2, as.y + as.h / 2);
+    r34_steps(ed, 3);
+    CHECK(ed.texture_ui_rect_for_test("unused:" + t->name).w == 0);
+  });
+  test("the Materials window's Of Type... > Volume > Fog makes a fog material asset; right-click Fog Density's name > Reset to Default puts 1 back", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("window Materials");
+    r34_steps(ed, 3);
+    auto click_key = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      r34_steps(ed, 2);
+      return true;
+    };
+    CHECK(click_key("mat_of_type") && click_key("menu:Fog"));
+    MaterialPtr m = ed.material_selected_for_test();
+    CHECK(m && m->volume());
+    if (!m || !m->volume()) return;
+    ed.command("matset FogDensity 3");
+    r34_steps(ed, 3);
+    CHECK(m->volume_density == 3.0f);
+    Recti lab{0, 0, 0, 0};
+    for (int tries = 0; tries < 40; tries++) {
+      ed.button_rect_for_test("label:Fog Density", lab);
+      const Recti w = ed.window_rect_for_test(WindowKind::Materials);
+      if (lab.w > 0 && lab.y > w.y + w.h * 3 / 5 && lab.bottom() <= w.bottom()) break;  // (below the grid of tiles)
+      platform::Event wheel;
+      wheel.type = platform::EventType::Wheel;
+      wheel.x = w.x + w.w / 4, wheel.y = w.bottom() - ed.ui_for_test().row_h() * 2, wheel.wheel_y = lab.w > 0 && lab.y <= w.y + w.h * 3 / 5 ? 3.0f : -3.0f;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+      ed.step_frame_headless({wheel});
+    }
+    CHECK(lab.w > 0);
+    if (lab.w <= 0) return;
+    platform::Event down = r34_mouse(R34ET::MouseDown, lab.x + lab.w / 2, lab.y + lab.h / 2), up = r34_mouse(R34ET::MouseUp, lab.x + lab.w / 2, lab.y + lab.h / 2);
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lab.x + lab.w / 2, lab.y + lab.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    CHECK(click_key("menu:Reset to Default"));
+    r34_steps(ed, 2);
+    std::printf("    Fog Density 3 -> %.2f\n", m->volume_density);
+    CHECK(m->volume_density == Material().volume_density);
+    fs::remove_file(resolve_asset_path(m->asset_path));
+  });
+  test("Reset to Default in the object Inspector's material (review 332): the Sphere's Roughness pushed to 0.95 goes back to a new material's", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Sphere");
+    ed.command("matset Roughness 0.95");
+    r34_steps(ed, 3);
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    CHECK(s && s->get<MeshRenderer>() && !s->get<MeshRenderer>()->materials.empty());
+    if (!s || !s->get<MeshRenderer>() || s->get<MeshRenderer>()->materials.empty()) return;
+    const MaterialPtr m = s->get<MeshRenderer>()->materials[0];
+    CHECK(m->roughness == 0.95f);
+    Recti lab{0, 0, 0, 0};
+    for (int tries = 0; tries < 60; tries++) {
+      const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+      if (ed.button_rect_for_test("label:Roughness", lab) && lab.y >= w.y + ed.ui_for_test().row_h() * 2 && lab.bottom() <= w.bottom()) break;
+      lab = Recti{0, 0, 0, 0};
+      platform::Event wheel;
+      wheel.type = platform::EventType::Wheel;
+      wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = -3.0f;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+      ed.step_frame_headless({wheel});
+    }
+    CHECK(lab.w > 0);
+    if (lab.w <= 0) return;
+    platform::Event down = r34_mouse(R34ET::MouseDown, lab.x + lab.w / 2, lab.y + lab.h / 2), up = r34_mouse(R34ET::MouseUp, lab.x + lab.w / 2, lab.y + lab.h / 2);
+    down.button = up.button = 1;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lab.x + lab.w / 2, lab.y + lab.h / 2)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    Recti item;
+    CHECK(ed.button_rect_for_test("menu:Reset to Default", item));
+    r34_click(ed, item.x + item.w / 2, item.y + item.h / 2);
+    r34_steps(ed, 3);
+    std::printf("    the Sphere's Roughness 0.95 -> %.3f (a new material's %.3f)\n", m->roughness, Material().roughness);
+    CHECK(m->roughness == Material().roughness);
+  });
+  test("the lesson \"Working Faster with Textures and Materials\": its Try-its open the Textures window and make a noise with Scale 12 to reset", [] {
+    Editor ed;
+    r50_open(ed);
+    for (const char *c : {"window Textures", "newtex Practice Noise", "settex Practice L0Scale 12"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    r34_steps(ed, 2);
+    ProceduralTexturePtr t = texture_asset("Assets/Textures/Practice.ptex");
+    CHECK(t && !t->layers.empty() && ed.window_rect_for_test(WindowKind::Textures).w > 0);
+    if (!t || t->layers.empty()) return;
+    struct GetF : SetFieldForTest {
+      float got = -1.0f;
+      GetF() : SetFieldForTest("Scale", 0.0f) {}
+      void field(const char *n, float &v, float, float, float) override {
+        if (key == n) got = v;
+      }
+    } g;
+    t->layers[0]->reflect(g);
+    CHECK(g.got == 12.0f);
+    fs::remove_file(resolve_asset_path(t->asset_path));
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -5005,4 +5296,5 @@ void run_assets_tests() {
   tests_round328();
   tests_round329();
   tests_round330_blends();
+  tests_round332();
 }

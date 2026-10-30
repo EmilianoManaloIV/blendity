@@ -2,6 +2,54 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 333): the shader-graph work written up
+
+**Asked:** the shader-graph request (round 327) - its write-up, as planned.
+
+**Added (task 0312):** the MANUAL's table of Blender's shader nodes and where each is in Blendity (a layer, a layer's
+option or a material field) - and the ones not there yet (Mix / Add Shader, Light Path, Attribute, Object Info,
+Geometry, Combine RGB); the Materials paragraph names Volume (Fog). The Learn lessons of rounds 327-332 ("Blender's
+Shader Nodes in the Textures Window", "Fog with a Volume Material", "Working Faster with Textures and Materials") are
+the Try-it side.
+
+## 2026-10-30 (round 332): the Textures and Materials windows, easier
+
+**Asked:** "Look into improving HCI experience in texture and material tab."
+
+**Found** by a cognitive walkthrough of five tasks and Nielsen's heuristics (`docs/hci/walkthrough-textures-materials.md`).
+
+**Changed (task 0313)**
+- **Reset to Default:** right-click any field's name in a texture layer or a material - the value a new one starts
+  with (Blender: Backspace over a field).
+- **Add Layer** has a search field first and Blender's node groups: Texture, Pattern, Toon, Input, Color, Converter,
+  Filter, Mask & Wear, Layout (the 48 layers were under Generators and Filters).
+- **Alt+click a layer's name:** the preview shows the stack up to it (Substance's solo), and says so; again for all.
+- **A layer that changes nothing says why** at its row's end: "Opacity 0", "Writes nothing".
+- **"not used"** on a texture tile no material uses.
+- **Materials:** Of Type... beside New Material Asset (Basic, Glass, Metal, Stylized, Volume - fog among them); a
+  slot's New Material of Type by the same groups.
+
+**Fixed on the way:** after picking from Add Layer's search the search field stayed in its edit.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- Reset to Default was missing from the object Inspector's material, where most materials are edited: there too now.
+- Esc no longer closed Add Layer (its search kept the keyboard): it does, as the Wheel picker's; Enter takes the first
+  match; "No layer matches" when none does.
+- A mask effect's reset took a plain layer's defaults (Writes Albedo on), and its row said "Writes nothing" though it
+  shapes the mask: a new effect's defaults, and no such line on mask effects.
+- Reset to Default reaches Base Color with its Alpha and the vectors (Tiling, Offset); a field whose materials differ
+  can be reset though the active one is at its default; a pending reset is dropped if its field isn't drawn again.
+- "not used" read a texture's path to its first '#' (a file named "Wall #2" was never in use) and claimed more than it
+  knew: it says this scene and the materials opened.
+- The preview's cut followed an index: a stack edit now drops it. The layer's menu has Preview Up to Here, for a pen.
+- The Materials toolbar ran past its edge when narrow: Of Type... shows when it fits, the search fits what is left.
+
+**Checked:** `tests_round332` - all by clicks: Reset to Default puts Scale 9 back to 4 (Ctrl+Z gives 9 again), Use Mask
+off, Fog Density 3 back to 1 and the Sphere's Roughness in the Inspector 0.95 back to 0.5; Esc closes Add Layer, Enter
+on "gabor" adds Gabor; the layer menu's Preview Up to Here; a texture assigned to the Cube loses its "not used";
+"perl" lists Perlin Noise and hides Checker; Alt+click shows the preview up to the layer and again for all; the next
+click after Add Layer folds a row; "not used" on a new texture; every layer in a group, every material preset in one.
+
 ## 2026-10-30 (round 331): a Volume (fog) material
 
 **Asked:** "For material types there should be a volume like material that adds 'fog'." (round 327); the user chose a
