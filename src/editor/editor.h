@@ -4228,6 +4228,7 @@ class Editor {
   std::vector<std::string> paper_names() const;
   bool paper_command(const std::vector<std::string> &t);
   void draw_paper_menu();
+  void draw_texture_preset_items(const std::string &theme);
   bool board_opened_once_ = false;
   double board_nudge_at_ = -10.0;
   bool board_save();

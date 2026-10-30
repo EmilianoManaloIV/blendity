@@ -42,6 +42,8 @@ TextureLayer::TextureLayer(const TextureLayer &o) { *this = o; }
 TextureLayer &TextureLayer::operator=(const TextureLayer &o) {
   if (this == &o) return *this;
   enabled = o.enabled, ui_expanded = o.ui_expanded, blend = o.blend, opacity = o.opacity, targets = o.targets, use_mask = o.use_mask, name = o.name;
+  map_offset[0] = o.map_offset[0], map_offset[1] = o.map_offset[1], map_rotation = o.map_rotation;
+  map_scale[0] = o.map_scale[0], map_scale[1] = o.map_scale[1], map_seamless = o.map_seamless;
   mask_layers.clear();
   for (const auto &l : o.mask_layers) mask_layers.push_back(l->clone());
   return *this;
@@ -87,6 +89,38 @@ void TextureLayer::reflect_common(Reflector &r, bool with_enabled) {
   r.layer_list("Mask", mask_layers, "M");  // (task 0244: the layer's own mask as a stack of effects, "M0 ...")
 }
 
+/* Round 327: Blender's Mapping node, folded, after the layer's own fields (its edits are matched by the fields' order,
+ * so a folded group can't sit before them). */
+void TextureLayer::reflect_mapping(Reflector &r) {
+  if (!mappable()) return;
+  if (r.group("Mapping", false)) {  // (the fields' names start "Map": a `settex L0Scale` never lands on them by prefix - review 328)
+    r.field("Map Offset U", map_offset[0], 0.01f, -100.0f, 100.0f);
+    r.help("The pattern moved across the tile (1 is the tile's width), as Blender's Mapping node's Location.");
+    r.field("Map Offset V", map_offset[1], 0.01f, -100.0f, 100.0f);
+    r.field("Map Rotation", map_rotation, 1.0f, -360.0f, 360.0f);
+    r.help("The pattern turned about the tile's middle, in degrees (Seamless: to the nearest quarter turn).");
+    r.field("Map Scale U", map_scale[0], 0.05f, 0.01f, 100.0f);
+    r.help("How many times the pattern repeats across the tile (Seamless: a whole number).");
+    r.field("Map Scale V", map_scale[1], 0.05f, 0.01f, 100.0f);
+    r.field("Map Seamless", map_seamless);
+    r.help("Keeps the tile repeating without a seam: the scale to whole numbers, the turn to quarter turns.");
+  }
+  r.group_end();
+}
+
+/* The point a generator samples for the tile's (u, v): scaled and turned about the tile's middle, then moved; wrapped
+ * into the tile. Seamless: whole repeats and quarter turns, so the tile's edges still meet. */
+void TextureLayer::map_uv(float &u, float &v) const {
+  const auto fin1 = [](float x, float d) { return finite_bits(x) && std::fabs(x) < 1e30f ? x : d; };  // (as the file's fin1, declared below)
+  float su = fin1(map_scale[0], 1.0f), sv = fin1(map_scale[1], 1.0f), deg = fin1(map_rotation, 0.0f);
+  if (map_seamless) su = std::max(1.0f, std::round(su)), sv = std::max(1.0f, std::round(sv)), deg = 90.0f * std::round(deg / 90.0f);
+  const float a = deg * kPi / 180.0f, c = std::cos(a), s = std::sin(a);
+  const float x = u - 0.5f, y = v - 0.5f;
+  float mu = (c * x - s * y) * su + 0.5f - fin1(map_offset[0], 0.0f), mv = (s * x + c * y) * sv + 0.5f - fin1(map_offset[1], 0.0f);
+  mu -= std::floor(mu), mv -= std::floor(mv);
+  u = mu, v = mv;
+}
+
 LayerSample TextureLayer::sample(float, float, const LayerContext &) const { return LayerSample{}; }
 
 float LayerAux::sample_plane(const std::vector<float> &pl, float u, float v) const {
@@ -129,6 +163,7 @@ void TextureLayer::apply_point(TexPoint &p, float u, float v, const LayerContext
   /* A generator's blend at one point: exactly apply()'s per texel. */
   const float op = clampf(fin1(opacity, 1.0f), 0.0f, 1.0f);
   if (op <= 0.0f || !is_generator()) return;
+  if (mapped()) map_uv(u, v);  // (round 327)
   const LayerSample s = sample(u, v, c);
   const float cover = clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f), below = p.mask;  // (the mask read before anything here writes)
   const bool card = targets & TargetAlpha;
@@ -167,7 +202,9 @@ void TextureLayer::apply(TexPlanes &p, const LayerContext &c) const {
       const float v = (y + 0.5f) / p.h;
       for (int x = rx0; x < rx1; x++) {
         const size_t i = (size_t)y * p.w + x;
-        const LayerSample s = sample((x + 0.5f) / p.w, v, c);
+        float su = (x + 0.5f) / p.w, sv = v;
+        if (mapped()) map_uv(su, sv);  // (round 327: the Mapping)
+        const LayerSample s = sample(su, sv, c);
         const float cover = clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f), below = p.mask[i], mine = own ? (*own)[i] : 1.0f;
         if (card) {
           const float cov = (use_mask ? cover * below : cover) * mine;  // (with Use Mask: only where the mask below allows)
@@ -241,6 +278,7 @@ void Reflector::layer_list(const char *name, TextureLayerList &layers, const cha
     LayerPrefixReflector p(*this, std::string(item_prefix) + std::to_string(i) + " ");
     layers[i]->reflect_common(p);
     layers[i]->reflect(p);
+    layers[i]->reflect_mapping(p);
   }
 }
 
@@ -701,11 +739,174 @@ void procedural_texture_cache_clear() {
 /* Presets                                                                */
 /* ===================================================================== */
 
+/* The presets by theme (round 327), the themes in their menu's order; an anime one sits with its subject. */
+const std::vector<TexturePreset> &texture_presets() {
+  static const std::vector<TexturePreset> presets = {
+      {"Noise", "Basics", false},          {"Perlin Noise", "Basics", false},    {"Checker", "Basics", false},         {"Gradient", "Basics", false},
+      {"Stripes", "Basics", false},        {"Bricks", "Architecture", false},    {"Tiles", "Architecture", false},
+      {"Plaster", "Architecture", false},  {"Roof Tiles", "Architecture", false}, {"Windows", "Architecture", false},
+      {"Anime Wall", "Architecture", true}, {"Anime Windows", "Architecture", true}, {"Anime Roof", "Architecture", true},
+      {"Wood Floor", "Floors & Wood", false}, {"Planks", "Floors & Wood", false}, {"Tatami", "Floors & Wood", false},
+      {"Grass", "Nature", false},          {"Leaves", "Nature", false},          {"Rock", "Nature", false},
+      {"Water", "Nature", false},          {"Sand", "Nature", false},            {"Moss", "Nature", false},
+      {"Snow", "Nature", false},           {"Anime Grass", "Nature", true},      {"Anime Leaves", "Nature", true},
+      {"Anime Rock", "Nature", true},      {"Anime Water", "Nature", true},      {"Sky", "Sky & Weather", false},
+      {"Clouds", "Sky & Weather", false},  {"Anime Sky", "Sky & Weather", true}, {"Anime Clouds", "Sky & Weather", true},
+      {"Brushed Metal", "Metal & Fabric", false}, {"Rust", "Metal & Fabric", false}, {"Fabric Weave", "Metal & Fabric", false},
+      {"Marble", "Stone", false},          {"Granite", "Stone", false},
+  };
+  return presets;
+}
+
+const std::vector<std::string> &texture_preset_themes() {
+  static const std::vector<std::string> themes = {"Basics", "Architecture", "Floors & Wood", "Nature", "Sky & Weather", "Metal & Fabric", "Stone"};
+  return themes;
+}
+
+
 const std::vector<std::string> &texture_preset_names() {
-  static const std::vector<std::string> names = {"Bricks", "Wood Floor", "Tatami", "Tiles", "Noise", "Checker", "Anime Leaves", "Anime Grass", "Anime Wall",
-                                                 "Anime Windows", "Anime Roof", "Anime Sky", "Anime Clouds", "Anime Rock", "Anime Water"};
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> n;
+    for (const TexturePreset &p : texture_presets()) n.push_back(p.name);
+    return n;
+  }();
   return names;
 }
+
+namespace {
+/* A preset's layer field set by its name (round 327): numbers, enumerations by index, colours. */
+struct PresetField : Reflector {
+  std::string key;
+  float number = 0.0f;
+  Vec3 colour{0.0f};
+  bool is_colour = false, done = false;
+  void field(const char *n, float &v, float, float mn, float mx) override {
+    if (!done && !is_colour && key == n) v = std::max(mn, std::min(mx, number)), done = true;
+  }
+  void field(const char *n, int &v, int mn, int mx) override {
+    if (!done && !is_colour && key == n) v = std::max(mn, std::min(mx, (int)std::lround(number))), done = true;
+  }
+  void field(const char *n, bool &v) override {
+    if (!done && !is_colour && key == n) v = number != 0.0f, done = true;
+  }
+  void field(const char *, Vec3 &) override {}
+  void color(const char *n, Vec3 &v) override {
+    if (!done && is_colour && key == n) v = colour, done = true;
+  }
+  void enumeration(const char *n, int &v, const char *const *, int count) override {
+    if (!done && !is_colour && key == n) v = std::max(0, std::min(count - 1, (int)std::lround(number))), done = true;
+  }
+  void text(const char *, std::string &) override {}
+  void mesh(const char *, MeshPtr &) override {}
+};
+Vec3 hex_colour(uint32_t c) { return {((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f}; }
+int g_preset_misses = 0;  // (a preset naming a field its layer hasn't: counted, and the tests want none - review 328)
+void set_num(TextureLayer *l, const char *k, float v) {
+  if (!l) return;
+  PresetField f;
+  f.key = k, f.number = v;
+  l->reflect(f);
+  if (!f.done) g_preset_misses++, Log::warn("texture preset: %s has no field '%s'", l->type_name(), k);
+}
+void set_col(TextureLayer *l, const char *k, uint32_t c) {
+  if (!l) return;
+  PresetField f;
+  f.key = k, f.colour = hex_colour(c), f.is_colour = true;
+  l->reflect(f);
+  if (!f.done) g_preset_misses++, Log::warn("texture preset: %s has no colour '%s'", l->type_name(), k);
+}
+
+/* The presets made in round 327 from the layers there are. False for other names. */
+bool themed_texture_preset(ProceduralTexture &t, const std::string &preset) {
+  auto noise = [&](float scale, uint32_t col, int blend, float op, int targets) {
+    TextureLayer *n = t.add("Noise");
+    set_num(n, "Scale", scale), set_col(n, "Color", col);
+    if (n) n->blend = blend, n->opacity = op, n->targets = targets;
+    return n;
+  };
+  const int mul = (int)LayerBlend::Multiply, over = (int)LayerBlend::Overlay, normal = (int)LayerBlend::Normal;
+  if (preset == "gradient") return t.add("Gradient"), true;
+  if (preset == "perlin noise") return t.add("Perlin Noise"), true;  // (round 328)
+  if (preset == "stripes") return t.add("Stripes"), true;
+  if (preset == "plaster") {
+    t.physical_size = 2.0f;
+    t.add("Plaster");
+    noise(8.0f, 0xD8D2C4, mul, 0.2f, TargetAlbedo | TargetHeight);
+    return true;
+  }
+  if (preset == "roof tiles") return t.physical_size = 2.0f, t.add("Roof Tiles"), true;
+  if (preset == "windows") return t.physical_size = 6.0f, t.add("Window Grid"), true;
+  if (preset == "planks") {
+    t.physical_size = 3.0f;
+    TextureLayer *w = t.add("Wood Floor");
+    set_num(w, "Rows", 4);
+    noise(6.0f, 0x6B4A2B, over, 0.25f, TargetAlbedo);
+    return true;
+  }
+  if (preset == "grass") return t.add("Grass"), noise(10.0f, 0x3F6B2A, mul, 0.3f, TargetAlbedo), true;
+  if (preset == "leaves") return t.add("Leaves"), true;
+  if (preset == "rock") return t.physical_size = 2.0f, t.add("Rocks"), noise(4.0f, 0x777068, over, 0.3f, TargetAlbedo | TargetHeight), true;
+  if (preset == "water") return t.physical_size = 4.0f, t.add("Water"), true;
+  if (preset == "sand") {
+    noise(24.0f, 0xD9C08A, normal, 1.0f, TargetAlbedo | TargetHeight | TargetRoughness);
+    TextureLayer *w = t.add("Wave");
+    set_num(w, "Bands", 6), set_col(w, "Color", 0xCDB27A), set_col(w, "Color 2", 0xE3CC98);
+    if (w) w->blend = over, w->opacity = 0.35f;
+    return true;
+  }
+  if (preset == "moss") {
+    noise(6.0f, 0x4C6B2E, normal, 1.0f, TargetAlbedo | TargetHeight | TargetRoughness);
+    TextureLayer *v = t.add("Voronoi");
+    set_num(v, "Cells", 14), set_col(v, "Color", 0x5E7F36), set_col(v, "Edge Color", 0x2F4419);
+    if (v) v->blend = over, v->opacity = 0.5f;
+    return true;
+  }
+  if (preset == "snow") {
+    noise(10.0f, 0xF2F5FA, normal, 1.0f, TargetAlbedo | TargetHeight | TargetRoughness);
+    noise(40.0f, 0xDDE6F2, mul, 0.2f, TargetAlbedo);
+    return true;
+  }
+  if (preset == "sky") return t.physical_size = 100.0f, t.add("Sky Gradient"), true;
+  if (preset == "clouds") return t.physical_size = 20.0f, t.add("Clouds"), true;
+  if (preset == "brushed metal") {  // (Gabor kernels all along one way: brushed - round 328)
+    TextureLayer *g = t.add("Gabor");
+    set_num(g, "Scale", 24), set_num(g, "Frequency", 3.0f), set_num(g, "Anisotropy", 1.0f), set_col(g, "Color", 0xC4C8CE), set_col(g, "Color 2", 0x8E939A);
+    if (g) g->targets = TargetAlbedo | TargetHeight | TargetRoughness | TargetMetallic;
+    noise(30.0f, 0xAEB2B8, over, 0.2f, TargetAlbedo);
+    return true;
+  }
+  if (preset == "rust") {
+    noise(5.0f, 0x8A4B22, normal, 1.0f, TargetAlbedo | TargetHeight | TargetRoughness);
+    TextureLayer *w = t.add("Edge Wear");
+    if (w) w->opacity = 0.7f;
+    noise(18.0f, 0x5A2E14, mul, 0.4f, TargetAlbedo);
+    return true;
+  }
+  if (preset == "fabric weave") {
+    TextureLayer *c = t.add("Checker");
+    set_num(c, "Count", 64), set_col(c, "Color", 0x5B6F8C), set_col(c, "Color 2", 0x4A5C76);
+    noise(40.0f, 0x55698A, over, 0.3f, TargetAlbedo | TargetHeight);
+    return true;
+  }
+  if (preset == "marble") {
+    TextureLayer *w = t.add("Wave");
+    set_num(w, "Bands", 3), set_num(w, "Distortion", 1.6f), set_num(w, "Direction", 2), set_col(w, "Color", 0xF4F1EC), set_col(w, "Color 2", 0x9C9A98);
+    TextureLayer *warp = t.add("Warp");
+    set_num(warp, "Strength", 0.08f);
+    return true;
+  }
+  if (preset == "granite") {
+    TextureLayer *v = t.add("Voronoi");
+    set_num(v, "Cells", 40), set_num(v, "Color Jitter", 0.6f), set_col(v, "Color", 0x8C8783), set_col(v, "Edge Color", 0x3C3936);
+    noise(30.0f, 0x6E6A66, over, 0.5f, TargetAlbedo | TargetHeight);
+    return true;
+  }
+  return false;
+}
+}  // namespace
+
+int texture_preset_field_misses() { return g_preset_misses; }
+
 /* The anime background presets (task 0150): one cel-toned generator each; the cards (leaves, grass, clouds) cut out
  * by their cover. Returns false for other names. */
 static bool anime_texture_preset(ProceduralTexture &t, const std::string &preset) {
@@ -757,7 +958,7 @@ bool apply_texture_preset(ProceduralTexture &t, const std::string &preset_in) {
   else if (preset == "checker") {
     t.add("Checker");
   }
-  else if (!anime_texture_preset(t, preset)) {
+  else if (!anime_texture_preset(t, preset) && !themed_texture_preset(t, preset)) {
     t.touch();
     return false;
   }

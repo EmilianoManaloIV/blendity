@@ -395,6 +395,21 @@ blend mode. The **Textures** window makes and edits them; one texture gives albe
 maps, and stays sharp at any distance with Live Shading. Its **Physical Size** is the metres one tile covers:
 changing it re-tiles every material using the texture (Tiling = 1 / size), except one tiled by hand.
 
+**New** lists the presets by theme (round 327): Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal &
+Fabric and Stone - the anime ones with their subject. Every pattern generator has a folded **Mapping** group, as Blender's
+Mapping node: Map Offset U / V, Map Rotation and Map Scale U / V move, turn and repeat the pattern across the tile;
+**Map Seamless** (on) keeps whole repeats and quarter turns so the tile still meets itself.
+
+Blender's texture nodes as layers (round 328): **Perlin Noise** (Ken Perlin's gradient noise, with Turbulence), **Noise**
+with Musgrave's types (fBm, Multifractal, Ridged, Hybrid, Hetero Terrain), **Voronoi**'s features (F1, F2, Smooth F1,
+Distance to Edge, N-Sphere Radius) and distances (Euclidean, Manhattan, Chebyshev, Minkowski), **Wave** rings and
+profiles, **Magic**, **White Noise** and **Gabor** - all repeating without a seam.
+
+Blender's converters as filters (round 329): the **Color Ramp** is a gradient bar - click to add a stop, drag one to
+move it, drag it off to remove it; Constant, Linear, Ease or B-Spline; from the height, the mask or the luminance.
+**Map Range**, **Clamp** and **Math** (15 operations, with a value or another plane) work on one plane; **RGB Curves**
+has a curve box per channel; **Separate Channel** puts the albedo's R, G, B, H, S or V into the mask.
+
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.
 

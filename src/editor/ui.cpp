@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ui.h"
+#include "../render/display.h"
 
 #include "../core/core.h"
 
@@ -1082,11 +1083,151 @@ static void checker(Canvas &c, const Recti &r, int cell) {
   c.pop_clip();
 }
 
-/* Unity's colour field: the colour, with the alpha as a white bar along the
- * bottom (black for the transparent part). Clicking opens a Color window: a
- * saturation / value square with a hue strip, RGB 0-255 / RGB 0-1 / HSV
- * sliders, Alpha, Hex (RRGGBB or RRGGBBAA), and a palette of presets and
- * recently used colours. alpha may be null (no alpha channel). */
+namespace {
+uint32_t display(Vec3 c) {  // (a linear colour as the screen shows it)
+  return 0xFF000000u | (uint32_t)display::linear_to_srgb8(c.x) << 16 | (uint32_t)display::linear_to_srgb8(c.y) << 8 | display::linear_to_srgb8(c.z);
+}
+constexpr size_t kWidgetPointsMax = 32;  // (as a ramp's or curve's text keeps)
+}  // namespace
+
+bool Context::color_ramp(Id i, const Recti &r, std::vector<RampStop> &st, int interp, int &sel) {
+  if (st.size() < 2) st = {{0.0f, Vec3(0.0f)}, {1.0f, Vec3(1.0f)}};
+  const int hh = px(10);
+  const Recti bar{r.x, r.y, std::max(8, r.w), std::max(6, r.h - hh)};
+  auto pos_x = [&](float p) { return (float)bar.x + p * (float)(bar.w - 1); };
+  auto at_x = [&](int x) { return std::max(0.0f, std::min(1.0f, (x - bar.x) / (float)std::max(1, bar.w - 1))); };
+  for (int x = bar.x; x < bar.right(); x++) canvas.vline(x, bar.y, bar.bottom() - 1, display(ramp_eval(st, at_x(x), interp)));
+  canvas.rect_outline(bar, theme.border);
+  bool changed = false;
+  sel = std::max(0, std::min((int)st.size() - 1, sel));
+  const bool remove = is_active(i) && in.my > r.bottom() + px(24) && st.size() > 2;
+  for (size_t k = 0; k < st.size(); k++) {
+    const float x = pos_x(st[k].pos);
+    const Vec2 a{x, (float)bar.bottom()}, b{x - px(5), (float)bar.bottom() + hh}, c{x + px(5), (float)bar.bottom() + hh};
+    const bool picked = (int)k == sel;
+    canvas.fill_triangle(a, b, c, picked ? (remove ? theme.text_dim : theme.accent) : theme.text);
+    canvas.fill_rect({(int)x - px(3), bar.bottom() + hh - px(3), px(6), px(3)}, display(st[k].color));
+  }
+  if (is_active(i)) {
+    const bool finger = touch_scroll && in.touch;
+    if (finger && !finger_widget_drag_ && in.down[0] && finger_sideways((int)(widget_grab_.x + pos_x(st[(size_t)sel].pos)))) finger_widget_drag_ = true;
+    if (in.down[0] && !remove && (!finger || finger_widget_drag_)) {
+      const float moved = at_x(in.mx - (int)widget_grab_.x);  // (from where it was taken: a click to pick doesn't move it - review 329)
+      if (moved != st[(size_t)sel].pos) st[(size_t)sel].pos = moved, changed = true;
+      /* kept in order: the dragged stop follows its colour past a neighbour */
+      while (sel > 0 && st[(size_t)sel].pos < st[(size_t)sel - 1].pos) std::swap(st[(size_t)sel], st[(size_t)sel - 1]), sel--;
+      while (sel + 1 < (int)st.size() && st[(size_t)sel].pos > st[(size_t)sel + 1].pos) std::swap(st[(size_t)sel], st[(size_t)sel + 1]), sel++;
+    }
+    if (!in.down[0]) {
+      if (remove) st.erase(st.begin() + sel), sel = std::max(0, sel - 1), changed = true;
+      clear_active();
+    }
+    redraw = true;
+    return changed;
+  }
+  const Recti grab{r.x - px(6), r.y, r.w + px(12), r.h + px(2)};
+  const bool finger = touch_scroll && in.touch;
+  if (widget_tap_ == i && in.released[0]) {  // (a finger's tap on the bar, not a scroll: the stop now)
+    widget_tap_ = 0;
+    if (!touch_scrolled_ && hovered(bar)) return ramp_add_stop(st, at_x(in.mx), interp, sel);
+  }
+  if (!hovered(grab) || !in.pressed[0]) return false;
+  int near = -1;
+  float best = (float)px(7);
+  for (size_t k = 0; k < st.size(); k++) {
+    const float d = std::fabs(pos_x(st[k].pos) - in.mx);
+    if (d < best) best = d, near = (int)k;
+  }
+  if (near < 0 && in.my >= bar.bottom()) return false;
+  if (near < 0 && finger) return widget_tap_ = i, false;  // (a finger may be scrolling: it adds on release)
+  if (near < 0) {  // (a click on the bar: a stop there, of the colour the ramp has there)
+    changed = ramp_add_stop(st, at_x(in.mx), interp, sel);
+    near = sel;
+  }
+  sel = near;
+  widget_grab_ = {in.mx - pos_x(st[(size_t)sel].pos), 0.0f};
+  set_active(i);
+  if (!finger) consume_click();
+  return changed;
+}
+
+/* A stop at t of the colour the ramp has there (no more than kWidgetPointsMax). */
+bool Context::ramp_add_stop(std::vector<RampStop> &st, float t, int interp, int &sel) {
+  if (st.size() >= kWidgetPointsMax) return false;
+  RampStop s{t, ramp_eval(st, t, interp)};
+  const auto it = std::upper_bound(st.begin(), st.end(), s, [](const RampStop &x, const RampStop &y) { return x.pos < y.pos; });
+  sel = (int)(st.insert(it, s) - st.begin());
+  return true;
+}
+
+bool Context::curve_field(Id i, const Recti &r, std::vector<Vec2> &pts, int &sel) {
+  if (pts.size() < 2) pts = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+  canvas.fill_rect(r, theme.field);
+  for (int k = 1; k < 4; k++) {
+    canvas.vline(r.x + r.w * k / 4, r.y, r.bottom() - 1, theme.border);
+    canvas.hline(r.x, r.right() - 1, r.y + r.h * k / 4, theme.border);
+  }
+  canvas.rect_outline(r, theme.border);
+  auto to_px = [&](Vec2 p) { return Vec2{r.x + p.x * (r.w - 1), r.bottom() - 1 - p.y * (r.h - 1)}; };
+  auto from_px = [&](int x, int y) { return Vec2{std::max(0.0f, std::min(1.0f, (x - r.x) / (float)std::max(1, r.w - 1))), std::max(0.0f, std::min(1.0f, (r.bottom() - 1 - y) / (float)std::max(1, r.h - 1)))}; };
+  Vec2 prev = to_px({0.0f, curve_eval(pts, 0.0f)});
+  for (int x = 1; x < r.w; x++) {
+    const float fx = x / (float)std::max(1, r.w - 1);
+    const Vec2 p = to_px({fx, curve_eval(pts, fx)});
+    canvas.line(prev.x, prev.y, p.x, p.y, theme.text, 1.5f);
+    prev = p;
+  }
+  sel = std::max(0, std::min((int)pts.size() - 1, sel));
+  const bool remove = is_active(i) && pts.size() > 2 && (in.mx < r.x - px(20) || in.mx > r.right() + px(20) || in.my < r.y - px(20) || in.my > r.bottom() + px(20));
+  for (size_t k = 0; k < pts.size(); k++) {
+    const Vec2 p = to_px(pts[k]);
+    canvas.fill_circle(p.x, p.y, (float)px(4), (int)k == sel ? (remove ? theme.text_dim : theme.accent) : theme.text);
+  }
+  bool changed = false;
+  if (is_active(i)) {
+    const bool finger = touch_scroll && in.touch;
+    if (finger && !finger_widget_drag_ && in.down[0] && finger_sideways((int)(widget_grab_.x + to_px(pts[(size_t)sel]).x))) finger_widget_drag_ = true;
+    if (in.down[0] && !remove && (!finger || finger_widget_drag_)) {
+      const Vec2 to = from_px(in.mx - (int)widget_grab_.x, in.my - (int)widget_grab_.y);
+      if (to.x != pts[(size_t)sel].x || to.y != pts[(size_t)sel].y) pts[(size_t)sel] = to, changed = true;
+      while (sel > 0 && pts[(size_t)sel].x < pts[(size_t)sel - 1].x) std::swap(pts[(size_t)sel], pts[(size_t)sel - 1]), sel--;
+      while (sel + 1 < (int)pts.size() && pts[(size_t)sel].x > pts[(size_t)sel + 1].x) std::swap(pts[(size_t)sel], pts[(size_t)sel + 1]), sel++;
+    }
+    if (!in.down[0]) {
+      if (remove) pts.erase(pts.begin() + sel), sel = std::max(0, sel - 1), changed = true;
+      clear_active();
+    }
+    redraw = true;
+    return changed;
+  }
+  const bool finger = touch_scroll && in.touch;
+  if (widget_tap_ == i && in.released[0]) {  // (a finger's tap in the box: the point now)
+    widget_tap_ = 0;
+    if (!touch_scrolled_ && hovered(r)) return curve_add_point(pts, from_px(in.mx, in.my), sel);
+  }
+  if (!hovered(r) || !in.pressed[0]) return false;
+  int near = -1;
+  float best = (float)px(8);
+  for (size_t k = 0; k < pts.size(); k++) {
+    const float d = length(to_px(pts[k]) - Vec2{(float)in.mx, (float)in.my});
+    if (d < best) best = d, near = (int)k;
+  }
+  if (near < 0 && finger) return widget_tap_ = i, false;
+  if (near < 0) changed = curve_add_point(pts, from_px(in.mx, in.my), sel), near = sel;
+  sel = near;
+  widget_grab_ = Vec2{(float)in.mx, (float)in.my} - to_px(pts[(size_t)sel]);
+  set_active(i);
+  if (!finger) consume_click();
+  return changed;
+}
+
+bool Context::curve_add_point(std::vector<Vec2> &pts, Vec2 p, int &sel) {
+  if (pts.size() >= kWidgetPointsMax) return false;
+  const auto it = std::upper_bound(pts.begin(), pts.end(), p, [](const Vec2 &a, const Vec2 &b) { return a.x < b.x; });
+  sel = (int)(pts.insert(it, p) - pts.begin());
+  return true;
+}
+
 bool Context::color_field(Id i, const Recti &r, Vec3 &c, float *alpha) {
   bool changed = false;
   auto it = color_results_.find(i);

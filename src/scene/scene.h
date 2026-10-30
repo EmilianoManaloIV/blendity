@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include "../core/math.h"
+#include "../core/ramp.h"
 #include "material.h"
 #include "sketch.h"
 #include "mesh.h"
@@ -41,10 +42,18 @@ using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
 struct TextureLayer;  // texture/procedural_texture.h
 using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
 
+/* Round 329: a colour ramp's stops and a curve's points as text (RampStop, ramp_eval, curve_eval: core/ramp.h); ';' or
+ * ',' between items (',' lets a Try-it's ';'-separated commands carry one). */
+std::string ramp_to_text(const std::vector<RampStop> &stops);
+bool ramp_from_text(const std::string &s, std::vector<RampStop> &stops);
+std::string curve_to_text(const std::vector<Vec2> &pts);
+bool curve_from_text(const std::string &s, std::vector<Vec2> &pts);
+
 /* ------------------------------------------------------------ Reflection */
 /* One description of a component's fields drives the Inspector, the scene
  * file format, undo and change detection - the same trick as Unity's
  * SerializedProperty and Blender's RNA (blender/source/blender/makesrna). */
+
 struct Reflector {
   virtual ~Reflector() = default;
   virtual void field(const char *name, float &v, float speed = 0.05f, float min = -FLT_MAX, float max = FLT_MAX) = 0;
@@ -77,6 +86,20 @@ struct Reflector {
     text(name, path);
   }
   virtual void mesh(const char *name, MeshPtr &m) = 0;
+  /* Round 329: a colour ramp's stops and a curve's points - text to files, undo, hashing and edits ("pos r g b; ..."
+   * and "x y; ..."); the Inspector draws Blender's ColorRamp and RGB Curves widgets. */
+  virtual void ramp(const char *name, std::vector<RampStop> &stops) {
+    std::string s = ramp_to_text(stops);
+    const std::string before = s;
+    text(name, s);
+    if (s != before) ramp_from_text(s, stops);
+  }
+  virtual void curve(const char *name, std::vector<Vec2> &pts) {
+    std::string s = curve_to_text(pts);
+    const std::string before = s;
+    text(name, s);
+    if (s != before) curve_from_text(s, pts);
+  }
   /* Help text for the previous field (shown as an Inspector tooltip). */
   virtual void help(const char *) {}
   /* A collapsible group of fields (task 0145): the Inspector draws a foldout row and skips the fields while it is

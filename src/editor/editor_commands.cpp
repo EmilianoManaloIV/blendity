@@ -1707,7 +1707,7 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "undo") undo();  // Ctrl+Z
   else if (c == "newtex") {
-    /* newtex <name> [preset]: a new Assets/Textures/<name>.ptex (presets: Bricks, Wood Floor, Tatami, Tiles, Noise, Checker). */
+    /* newtex <name> [preset]: a new Assets/Textures/<name>.ptex (a preset by name: texture_presets(), by theme since round 327). */
     const std::string name = arg(1, "");
     if (name.empty()) {
       Log::warn("newtex <name> [preset]");
@@ -1717,7 +1717,7 @@ void Editor::run_console_command(const std::string &line) {
     for (size_t i = 2; i < t.size(); i++) preset += (i > 2 ? " " : "") + t[i];
     ProceduralTexture src;
     src.name = name;
-    if (!preset.empty() && !apply_texture_preset(src, preset)) Log::warn("newtex: no preset '%s' (Bricks, Wood Floor, Tatami, Tiles, Noise, Checker)", preset.c_str());
+    if (!preset.empty() && !apply_texture_preset(src, preset)) Log::warn("newtex: no preset '%s' (the Textures window's New menu lists them by theme)", preset.c_str());
     const std::string rel = "Assets/Textures/" + name + ".ptex";
     if (ProceduralTexturePtr pt = create_texture_asset(src, rel)) {
       Log::info("Created %s (%zu layer%s)", rel.c_str(), pt->layers.size(), pt->layers.size() == 1 ? "" : "s");

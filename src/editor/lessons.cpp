@@ -1453,6 +1453,28 @@ A reference board can hold your papers beside your images: Boards > New Paper He
 ! cmd:board newpaper | A new paper on the board
 ? You keep a character's references and three sketches of it. How do you get them in one place, and send the whole sheet to a friend? | Put the images and the papers on one board (Boards > Add Paper, or New Paper Here, or drag a .paper from the Project window); each paper shows its drawing. Then Boards > Export... > Format: PDF (or PNG) > Export...: one picture of the whole board, written in the background.
 )"},
+    {"Blender's Shader Nodes in the Textures Window", "The texture stack with Blender's node ideas: presets by theme, Mapping", R"(
+A Blendity texture is a stack of layers, not a node graph: each layer is what one or a few of Blender's shader nodes do, in the order they are stacked. A generator is a texture node (Noise, Voronoi, Wave, Checker, Brick, Gradient), a filter a converter (Color Ramp, Levels, Hue / Saturation, Invert), and a layer's Blend is a Mix node's mode.
+# Presets by theme
+New lists the presets by theme: Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal & Fabric and Stone. The anime ones sit with their subject.
+! cmd:window Textures | The Textures window
+! cmd:newtex Marble Marble | A Marble texture, from the Stone theme
+# Mapping
+Every pattern generator has Blender's Mapping node folded after its fields: Map Offset moves the pattern, Map Rotation turns it, Map Scale repeats it across the tile. Seamless keeps whole repeats and quarter turns, so the tile still meets itself when it repeats on a wall.
+! cmd:settex Marble L0MapScaleU 2; settex Marble L0MapScaleV 2 | The marble's pattern twice across the tile, both ways
+# Perlin Noise and Blender's other texture nodes
+Perlin Noise is a layer of its own: Ken Perlin's gradient noise, with Detail for finer octaves and Turbulence for sharp creases (veins, fire). Noise has Blender's Musgrave types under Type, Voronoi its features (F1, F2, Distance to Edge...) and distances, Wave rings and saw or triangle profiles; Magic, White Noise and Gabor are generators too. All of them repeat without a seam.
+! cmd:newtex Clouds2 Perlin Noise | A Perlin Noise texture
+! cmd:settex Clouds2 L0Turbulence 1 | Turbulence: the noise folded into creases
+# Converters: ColorRamp, Map Range, Math, RGB Curves
+Blender's converter nodes are filters here. The Color Ramp is a gradient bar: click it to add a stop, drag a stop to move it, drag it off the bar to remove it; Constant gives hard bands. Map Range, Clamp and Math work on one plane - the height, roughness, metallic, mask or the albedo - Math with a value or another plane. RGB Curves bends each colour channel; Separate Channel puts one into the mask for the layers above.
+! cmd:texlayer Clouds2 add Color Ramp | A Color Ramp on Clouds2's noise
+! cmd:settex Clouds2 L1Stops 0 0.1 0.1 0.1, 0.45 0.45 0.45 0.5, 0.6 0.85 0.85 0.9 | Three stops: dark, middle, light
+! cmd:settex Clouds2 L1Interpolation Constant | Constant: hard bands, a toon look
+? In Blender you would run a Noise Texture into a ColorRamp set to Constant to get three hard tones. Here? | Add a Color Ramp layer above the noise; click the bar where you want a third tone (a stop of the ramp's colour there), pick each stop's colour under the bar, and set Interpolation to Constant. Input: Height reads the noise below.
+? You want cracked dry mud: dark lines where cells meet, lighter in the middle of each. Which layer and settings? | A Voronoi layer with Feature: Distance to Edge - 0 on the borders between cells (Edge Color there), rising toward each cell's middle (Color); Cells sets how many. For tiles with straighter sides use F1 with Distance: Manhattan (diamonds) or Chebyshev (squares) - Distance to Edge always measures straight, as Blender's does.
+? In Blender you would put a Mapping node between Texture Coordinate and a Noise Texture to make the noise twice as fine and turned. Where is that here, and why might Scale 1.5 come out as 2? | In the Noise layer's Mapping group: Map Scale U and V 2, Map Rotation as you like. With Seamless on, the scale is a whole number of repeats (and the turn a quarter turn), so the tile's edges still meet - 1.5 would leave a seam where the tile repeats. Turn Seamless off for a one-off picture.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

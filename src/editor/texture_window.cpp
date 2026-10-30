@@ -158,6 +158,19 @@ void Editor::request_texture_delete() {
   else texture_delete_ = texture_selected_, texture_delete_many_.clear();
 }
 
+/* One theme's presets (round 327): the one picked made, and shown - a search left from earlier would hide it. */
+void Editor::draw_texture_preset_items(const std::string &theme) {
+  for (const TexturePreset &p : texture_presets()) {
+    if (theme != p.theme) continue;
+    if (ui_.menu_item(p.name)) {
+      new_texture_asset(p.name);
+      texture_search_.clear();
+      ui_.redraw = true;
+    }
+    if (p.anime) ui_.tooltip("Cel-toned, for an anime background: flat tones, no normal map.");
+  }
+}
+
 void Editor::draw_textures_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
@@ -182,11 +195,12 @@ void Editor::draw_textures_window(const Recti &r) {
   Recti nb{bar.x + u.px(6), bar.y + u.px(3), u.px(90), bh - u.px(6)};
   texture_ui_rects_["new"] = nb;
   if (u.button(nb, "New", false, ui::Icon::Plus)) u.open_popup(u.id("tex_new"), nb);
-  u.tooltip("A new texture asset in Assets/Textures from a preset (Bricks, Wood Floor, Tatami...).");
-  u.popup(u.id("tex_new"), u.px(180), [this] {
+  u.tooltip("A new texture asset in Assets/Textures from a preset, by theme: Basics, Architecture, Floors & Wood, Nature,\n"
+            "Sky & Weather, Metal & Fabric, Stone (the anime ones with their subject).");
+  u.popup(u.id("tex_new"), u.px(200), [this] {
     bool made = false;
-    for (const std::string &p : texture_preset_names())
-      if (ui_.menu_item(p.c_str())) new_texture_asset(p), made = true;
+    for (const std::string &theme : texture_preset_themes())  // (round 327: by theme; review 328: a submenu's body runs later - nothing by reference)
+      ui_.submenu(theme, ui_.px(190), [this, theme] { draw_texture_preset_items(theme); });
     ui_.menu_separator();
     if (ui_.menu_item("Empty")) new_texture_asset(""), made = true;
     ui_.menu_separator();

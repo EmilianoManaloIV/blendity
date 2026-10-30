@@ -2,6 +2,103 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 329): Blender's converters - ColorRamp, Map Range, Clamp, Math, RGB Curves, Separate Color
+
+**Asked:** the shader-graph request (round 327); the user chose all four groups of Blender's additions.
+
+**Added (task 0309, ADR 0091)**
+- **The Color Ramp is Blender's ColorRamp:** a gradient bar in the Textures window - click it to add a stop, drag a
+  stop's handle to move it, drag it well below to remove it - with the picked stop's position and colour under it;
+  Interpolation Constant, Linear, Ease or Cardinal; Input the height, the mask or the albedo's luminance. A ramp of
+  two stops at its ends is the old Low and High Colors (old textures unchanged).
+- **Map Range** (From / To, Linear, Stepped, Smooth Step, Smoother Step, Clamp), **Clamp** and **Math** (Add,
+  Subtract, Multiply, Divide, Power, Minimum, Maximum, Absolute, Floor, Fraction, Modulo, Sine, Smooth Minimum, Smooth
+  Maximum, Snap - with a value or another plane) on one plane: the height, roughness, metallic, mask or the albedo.
+- **RGB Curves:** a curve box each for Combined, Red, Green and Blue - drag a point, click to add one, drag it out to
+  remove it; a monotone cubic through the points (no overshoot).
+- **Separate Channel:** the albedo's red, green, blue, hue, saturation or value into the mask (a later layer's Use Mask
+  follows it) or the height.
+- `Reflector::ramp` / `curve`: text to files, undo and edits ("pos r g b; ..." and "x y; ..."); `core/ramp.h`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The first stop added to a ramp was often taken away again on release: the Low and High Color rows vanished under
+  the click and moved the bar. They stay (the first and last stops' colours, editable either way).
+- Dragging the picked stop's Position past a neighbour edited the neighbour: the picked stop follows its value.
+- Blender's formulas: Snap down to a multiple, smooth min / max less h^3 k / 6, stepped Map Range reaching To Max,
+  RGB Curves' Combined before the channels, Clamp's Min above Max giving Max; "B-Spline" is Cardinal (what it is).
+- The converters kept the albedo within 0..1 in the planes but not in live shading: both now. No list built per
+  live-shading point. A press picks a stop or point without moving it; a finger scrolls the Textures window unless
+  it taps or goes sideways; 32 stops or points at most, the text written exactly.
+- The lesson's "Constant" Try-it turned the clouds one flat grey: it sets three stops first (`settex ... L1Stops` takes
+  ',' between stops).
+
+**Checked:** `tests_round329` - the ramp's stops exact under every interpolation, Constant steps, Linear halfway, Ease
+between; an old two-colour ramp gives 0.300 at 0.25 as before; stops saved and read back; Map Range, Clamp, all fifteen
+Math operations and Separate Channel against their formulas; an identity curve changes nothing and one through (0.5,
+0.8) gives 0.800; by clicks in the Textures window a stop added, moved to 0.76 and dragged off, and a curve point added;
+a click at a fresh ramp's foot keeps its stop; a Position typed past the neighbour moves the right stop; every converter
+the same in the planes and live shading; an old ramp file loads as two stops and draws 0.300 at 0.25; the stops in the
+hash; hue, saturation, stepped Map Range, Clamp reversed and Math on the albedo against Blender's results; the lesson's
+Try-its leave Turbulence on, three stops and Constant.
+
+## 2026-10-30 (round 328): Perlin Noise, and Blender's Noise, Voronoi, Wave, Magic, White Noise and Gabor
+
+**Asked:** the user (2026-10-29): "Make sure to add perlin noise!" - with the shader-graph request (round 327).
+
+**Added (task 0308)** - every one periodic in the tile, so a texture still repeats without a seam:
+- **Perlin Noise**, a generator of its own: Ken Perlin's improved gradient noise (0 at every lattice point), fractal
+  (Detail 1-16, Roughness, a whole-number Lacunarity), Distortion, Offset, Turbulence (Perlin's |noise|, for veins and
+  fire), Seed, two colours. A "Perlin Noise" preset in Basics.
+- **Noise > Type** (Musgrave's, as Blender 4.1 merged them): Perlin fBm, Multifractal, Ridged, Hybrid, Hetero Terrain,
+  with Lacunarity, Offset and Gain; "Smooth (as before)" keeps old textures as they were.
+- **Voronoi > Feature** (F1, F2, Smooth F1, Distance to Edge, N-Sphere Radius) and **Distance** (Euclidean,
+  Manhattan, Chebyshev, Minkowski with its Exponent); "Cells" keeps the old look.
+- **Wave > Type** Bands or Rings, **Profile** Sine, Saw or Triangle, Phase and Detail.
+- **Magic**, **White Noise** and **Gabor** generators.
+
+**The review's fixes (Opus code-reviewer on rounds 327-328, changes needed)**
+- The themed New menu wrote through a reference to a finished frame (a submenu's body runs after its popup's): the
+  preset is made, and the search cleared, inside the submenu.
+- Voronoi's Smooth F1 collapsed to one flat value at low Smoothness: a log-sum-exp from F1 now (0.05..0.80 at the
+  default, F1 itself at 0). Distance to Edge measured Euclidean bisectors of a point picked by another metric (9% of
+  texels clamped dark): it is Euclidean throughout, as Blender's; the metrics' help says they are for F1, F2, Smooth F1
+  and N-Sphere Radius, and the lesson's answer no longer suggests them for edges.
+- Hybrid and Hetero Terrain sat in 0.7..1 and Ridged went white at a low Offset: rescaled. Octaves stop before a
+  lattice finer than a float's place on the tile (no int overflow at Detail 16).
+- A preset field the layer hasn't is counted and warned (none now); Marble's Distortion was clamped (now 1.6);
+  Brushed Metal is made from Gabor.
+- Mapping isn't offered on Fill, Mesh Map, Face Shadow or Toon Ramp; its fields are named Map Offset / Map Rotation /
+  Map Scale / Map Seamless, so `settex L0Scale` never lands on them by prefix. Gabor's kernels are a function of their
+  own (no three-deep loops).
+
+**Checked:** `tests_round328` - Perlin is 0 on its lattice, within -1..1 and the same one period over; every new type
+and option equals itself one tile over (20 cases) and varies; F2 >= F1 at 4000 points, the distance to an edge >= 0 and
+down to 0.0001; the four metrics give F1 different pictures; Smooth F1 is F1 at no smoothness and within k ln 25 of it;
+no preset misses a field; Mapping is the same through live shading as through the planes (Seamless off, 30 degrees);
+the lesson's six Try-it commands make Marble and Clouds2 as they say; each type's 1024 px time printed (2-19 ms). The
+Textures window's Add Layer test scrolls its settings back up (the Noise layer is longer now).
+
+## 2026-10-30 (round 327): the texture presets by theme, and Blender's Mapping on every generator
+
+**Asked:** the user (2026-10-29): "For the Texture tab and options, recommend other options to make it similar to shader
+graph in blender while maintaining the style that is already established. Organize all texture presets according to
+their theming..." Their choices: extend the layer stack (no node canvas), all four groups of Blender's nodes, presets by
+subject. This is the first of rounds 327-333 (the plan: richer textures with Perlin Noise, converters, Blender's mix
+modes and the Principled extras, a Volume (fog) material, the windows' HCI pass).
+
+**Added (task 0307)**
+- **Presets by theme:** the Textures window's New menu has a list per theme - Basics, Architecture, Floors & Wood,
+  Nature, Sky & Weather, Metal & Fabric, Stone - 35 presets, 20 of them new (36 with round 328's Perlin Noise) (Gradient, Stripes, Plaster, Roof Tiles,
+  Windows, Planks, Grass, Leaves, Rock, Water, Sand, Moss, Snow, Sky, Clouds, Brushed Metal, Rust, Fabric Weave,
+  Marble, Granite), the anime ones with their subject. Old names still work (`newtex`, `texture new`).
+- **Mapping** (Blender's Mapping node) on every pattern generator, folded after its own fields: Map Offset U / V, Map
+  Rotation, Map Scale U / V and Map Seamless (whole repeats, quarter turns). Old textures load unmapped.
+
+**Checked:** `tests_round327` - every preset builds (29 different average colours of 35); scale 2 doubles a Checker's
+cells, an offset moves it exactly a quarter tile, a quarter turn turns it, Seamless rounds 1.5 to 2, the rows still close
+across the seam; the mapping saved and read back; New > Nature > Sand by clicks. The Textures window's field tests
+found the folded group before a layer's fields shifted their edits - it sits after them.
+
 ## 2026-10-29 (rounds 325-326): papers on the boards, boards exported; spring kinds, the animation toolbar, puppet handles
 
 **Asked:** the user (2026-10-29):

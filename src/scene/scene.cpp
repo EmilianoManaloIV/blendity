@@ -58,6 +58,67 @@ template<class T> static void reg(const char *category, const char *help, const 
   register_component({T::kName, category, help, blender, [] { return std::make_unique<T>(); }});
 }
 
+/* ---- round 329: ramps and curves as text (the shortest text that reads back exactly: append_float) ---- */
+
+namespace {
+constexpr size_t kRampMax = 32;  // (the stops or points a ramp or curve keeps; the widgets add no more)
+size_t next_item(const std::string &s, size_t at) {
+  const size_t a = s.find(';', at), b = s.find(',', at);
+  return std::min(a == std::string::npos ? s.size() : a, b == std::string::npos ? s.size() : b);
+}
+}  // namespace
+
+std::string ramp_to_text(const std::vector<RampStop> &stops) {
+  std::string s;
+  for (const RampStop &r : stops) {
+    if (!s.empty()) s += "; ";
+    for (float v : {r.pos, r.color.x, r.color.y, r.color.z}) append_float(s, v), s += ' ';
+    s.pop_back();
+  }
+  return s;
+}
+
+bool ramp_from_text(const std::string &s, std::vector<RampStop> &stops) {
+  std::vector<RampStop> out;
+  size_t at = 0;
+  while (at < s.size()) {
+    const size_t end = next_item(s, at);
+    RampStop r;
+    float p, x, y, z;
+    if (std::sscanf(s.substr(at, end - at).c_str(), "%f %f %f %f", &p, &x, &y, &z) == 4 && std::isfinite(p + x + y + z))
+      r.pos = std::max(0.0f, std::min(1.0f, p)), r.color = {std::max(0.0f, x), std::max(0.0f, y), std::max(0.0f, z)}, out.push_back(r);
+    at = end + 1;
+  }
+  if (out.size() > kRampMax) out.resize(kRampMax);
+  std::stable_sort(out.begin(), out.end(), [](const RampStop &a, const RampStop &b) { return a.pos < b.pos; });
+  stops = out;
+  return true;
+}
+
+std::string curve_to_text(const std::vector<Vec2> &pts) {
+  std::string s;
+  for (const Vec2 &p : pts) {
+    if (!s.empty()) s += "; ";
+    append_float(s, p.x), s += ' ', append_float(s, p.y);
+  }
+  return s;
+}
+
+bool curve_from_text(const std::string &s, std::vector<Vec2> &pts) {
+  std::vector<Vec2> out;
+  size_t at = 0;
+  while (at < s.size()) {
+    const size_t end = next_item(s, at);
+    float x, y;
+    if (std::sscanf(s.substr(at, end - at).c_str(), "%f %f", &x, &y) == 2 && std::isfinite(x + y)) out.push_back({std::max(0.0f, std::min(1.0f, x)), std::max(0.0f, std::min(1.0f, y))});
+    at = end + 1;
+  }
+  if (out.size() > kRampMax) out.resize(kRampMax);
+  std::stable_sort(out.begin(), out.end(), [](const Vec2 &a, const Vec2 &b) { return a.x < b.x; });
+  pts = out;
+  return true;
+}
+
 /* Component names may have spaces, but no word of a name may start with a digit: scene files
  * write "component <name> <flags...>" and the loader takes words up to the first number. */
 void register_builtin_components() {

@@ -604,7 +604,57 @@ struct InspectorReflector : Reflector {
     }
     if (mixed && (mixed->count(n) || mixed->count(alpha_name))) dash_if_mixed(mixed->count(n) ? n : alpha_name, field_rect(row));
   }
+  int last_interp = 1;  // (round 329: a ramp's Interpolation, read just before it, for its preview)
+  /* Round 329: Blender's ColorRamp - the bar, then the picked stop's position and colour. */
+  void ramp(const char *n, std::vector<RampStop> &stops) override {
+    if (skip()) return;
+    static std::unordered_map<ui::Id, int> picked;
+    int &sel = picked[fid(n)];
+    std::vector<RampStop> st = stops;
+    Recti row = lay.row(u.row_h() + u.px(12));
+    u.label(label_rect(row), n);
+    const Recti bar = field_rect(row);
+    (edited_texture ? ed.texture_ui_rects_ : ed.inspector_menu_rects_)["ramp:" + record_prefix + n] = bar;
+    if (u.record_buttons) u.button_rects["ramp:" + record_prefix + n] = bar;
+    bool ch = u.color_ramp(fid(n), bar, st, last_interp, sel);
+    sel = std::max(0, std::min((int)st.size() - 1, sel));
+    Recti row2 = lay.row();
+    u.label(label_rect(row2), strprintf("Stop %d of %zu", sel + 1, st.size()), u.theme.text_dim);
+    const Recti f = field_rect(row2);
+    const int pw = f.w / 3;
+    float pos = st[(size_t)sel].pos;
+    (edited_texture ? ed.texture_ui_rects_ : ed.inspector_menu_rects_)["ramppos:" + record_prefix + n] = {f.x, f.y, pw - u.px(4), f.h};  // (tests type into it)
+    if (u.float_field(u.id(std::string(n) + "#pos"), {f.x, f.y, pw - u.px(4), f.h}, pos, 0.005f, 0.0f, 1.0f)) {
+      st[(size_t)sel].pos = pos, ch = true;
+      /* in order, the edited stop still the picked one past a neighbour (review 329: the neighbour took the drag) */
+      while (sel > 0 && st[(size_t)sel].pos < st[(size_t)sel - 1].pos) std::swap(st[(size_t)sel], st[(size_t)sel - 1]), sel--;
+      while (sel + 1 < (int)st.size() && st[(size_t)sel].pos > st[(size_t)sel + 1].pos) std::swap(st[(size_t)sel], st[(size_t)sel + 1]), sel++;
+    }
+    u.tooltip("The picked stop's place along the ramp (0-1).");
+    if (u.color_field(u.id(std::string(n) + "#col"), {f.x + pw, f.y, f.w - pw, f.h}, st[(size_t)sel].color)) ch = true;
+    if (!ch) return;
+    stops = st;
+    record(FieldEdit::Text, n).s_new = ramp_to_text(st);
+    changed = true;
+  }
+  /* Round 329: a curve in a square box. */
+  void curve(const char *n, std::vector<Vec2> &pts) override {
+    if (skip()) return;
+    static std::unordered_map<ui::Id, int> picked;
+    std::vector<Vec2> p = pts;
+    Recti row = lay.row(u.row_h() * 5);
+    u.label(label_rect(row), n);
+    const Recti f = field_rect(row);
+    const Recti box{f.x, f.y + u.px(2), std::min(f.w, row.h - u.px(4)), row.h - u.px(4)};
+    (edited_texture ? ed.texture_ui_rects_ : ed.inspector_menu_rects_)["curve:" + record_prefix + n] = box;
+    if (u.record_buttons) u.button_rects["curve:" + record_prefix + n] = box;
+    if (!u.curve_field(fid(n), box, p, picked[fid(n)])) return;
+    pts = p;
+    record(FieldEdit::Text, n).s_new = curve_to_text(p);
+    changed = true;
+  }
   void enumeration(const char *n, int &v, const char *const *opts, int count) override {
+    if (std::string(n) == "Interpolation") last_interp = v;
     if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
@@ -1088,6 +1138,7 @@ struct InspectorReflector : Reflector {
         layer_outer = i;
         l.reflect_common(*this, false);
         l.reflect(*this);
+        l.reflect_mapping(*this);
         layer_depth--;
         layer_outer = outer;
         record_prefix = outer_prefix;
