@@ -4,6 +4,9 @@ trained model, as the archive Blendity's `ai install` and the AI dialog unpack i
 .sha256. Publishing them to the libraries release is the maintainer's call.
 
     python -I package.py <run folder (inbetween.onnx, inbetween.onnx.offsets.json)> <folder of ONNX Runtime releases> <out folder>
+                         [--prior <tools/posemodel run folder (posemodel.onnx, posemodel.json)>]
+
+--prior adds Puppet Posing's pose prior (task 0280) to every archive.
 
 The ONNX Runtime folder holds the release archives, unpacked: onnxruntime-win-x64-1.31.0/, onnxruntime-linux-x64-1.31.0/,
 onnxruntime-osx-arm64-1.31.0/ (each platform present is packaged).
@@ -32,10 +35,14 @@ inbetween.onnx   the inbetweening network (Blendity's, GPL-2.0-or-later like Ble
 inbetween.json   its skeleton and styles
 ONNX Runtime %s  Microsoft's (MIT): LICENSE-onnxruntime.txt, ThirdPartyNotices-onnxruntime.txt
 """ % (TAG, ORT)
+README_PRIOR = """posemodel.onnx   Puppet Posing's pose prior (Blendity's, GPL-2.0-or-later), trained on the same CMU data
+posemodel.json   its skeleton and the goals' order
+"""
 
 
-def main(run, ort_dir, out):
+def main(run, ort_dir, out, prior=None):
     os.makedirs(out, exist_ok=True)
+    readme = README + (README_PRIOR if prior else "")
     model = os.path.join(run, "inbetween.onnx")
     info = model + ".offsets.json"
     for archive, folder, libs in PLATFORMS:
@@ -48,17 +55,20 @@ def main(run, ort_dir, out):
                  "ThirdPartyNotices-onnxruntime.txt": os.path.join(rel, "ThirdPartyNotices.txt")}
         for src, dst in libs.items():
             files[dst] = os.path.join(rel, "lib", src)
+        if prior:
+            files["posemodel.onnx"] = os.path.join(prior, "posemodel.onnx")
+            files["posemodel.json"] = os.path.join(prior, "posemodel.json")
         path = os.path.join(out, archive)
         if archive.endswith(".zip"):
             with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
                 for name, src in files.items():
                     z.write(src, name)
-                z.writestr("README.txt", README)
+                z.writestr("README.txt", readme)
         else:
             with tarfile.open(path, "w:gz") as t:
                 for name, src in files.items():
                     t.add(src, name, recursive=False)
-                data = README.encode()
+                data = readme.encode()
                 ti = tarfile.TarInfo("README.txt")
                 ti.size = len(data)
                 t.addfile(ti, io.BytesIO(data))
@@ -69,4 +79,6 @@ def main(run, ort_dir, out):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], sys.argv[3])
+    args = sys.argv[1:]
+    prior = args[args.index("--prior") + 1] if "--prior" in args else None
+    main(args[0], args[1], args[2], prior)

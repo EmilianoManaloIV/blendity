@@ -11,6 +11,16 @@
 
 namespace bl {
 
+/* The scene's skeletons (task 0259): the objects carrying an Armature - what a Skin modifier names, wherever they sit
+ * (inside a "<mesh> Rig" group or at the scene's root). */
+std::vector<GameObject *> Editor::skeleton_roots() const {
+  std::vector<GameObject *> roots;
+  scene_->for_each([&](GameObject &g) {
+    if (g.get<Armature>()) roots.push_back(&g);
+  });
+  return roots;
+}
+
 using ui::Icon;
 
 /* The skeleton the window works on: a selected bone's or armature's (the active one first), else the skin's of the
@@ -143,9 +153,9 @@ void Editor::draw_rigging_window(const Recti &r) {
           {"Anime Face Normals", "A sphere proxy fitted to the head and a Normal Transfer modifier reading it, so the face shades like a ball\n"
                                  "(anime's flat face; task 0149). Console: facenormals.",
            mf != nullptr, [this, mesh_obj] { add_face_normals(mesh_obj); }},
-          {"Rig Hair from Mesh", "The mesh's loose parts (hair cards, up to 64), or one shell cut into eight locks, each a chain of three bones\n"
-                                 "from the scalp with Spring Bones, the mesh skinned to them (task 0153). Console: hair rig [locks] [bones].",
-           mf != nullptr, [this, mesh_obj] { rig_hair_from_mesh(mesh_obj, 0, 3); }}},
+          {"Rig Hair from Mesh...", "The mesh's loose parts (hair cards, up to 64), or one shell cut into locks, each a chain of bones from the\n"
+                                 "scalp with Spring Bones, the mesh skinned to them (task 0153); the locks and bones are asked first.",
+           mf != nullptr, [this] { dialog_ = Dialog::HairRig; }}},
          2);
     if (root)
       if (Armature *arm = root->get<Armature>()) {
@@ -159,16 +169,34 @@ void Editor::draw_rigging_window(const Recti &r) {
     SkinModifier *sk = mf ? mesh_obj->get<SkinModifier>() : nullptr;
     if (!mf) u.label(lay.row(), "Select a mesh to bind it to a skeleton.", u.theme.text_dim);
     else if (!sk) {
+      /* Task 0259: a skeleton chosen from a dropdown when none is in the selection (the Ctrl+click way still wins). */
+      std::vector<GameObject *> roots = skeleton_roots();
+      if (skin_pick_for_ != mesh_obj->id) skin_pick_root_ = 0, skin_pick_for_ = mesh_obj->id;  // (a pick belongs to one mesh)
+      GameObject *use = root;
+      if (!use && !roots.empty()) {
+        std::vector<const char *> names = {"(choose a skeleton)"};
+        int cur = 0;
+        for (size_t i = 0; i < roots.size(); i++) {
+          names.push_back(roots[i]->name.c_str());
+          if (roots[i]->id == skin_pick_root_) cur = (int)i + 1, use = roots[i];
+        }
+        Recti row = lay.row(u.row_h() + u.px(4));
+        u.label({row.x + u.px(4), row.y, u.px(90), row.h}, "Skeleton");
+        if (u.record_buttons) u.button_rects["skin:Skeleton"] = row;
+        if (u.combo(u.id("skin_root"), {row.x + u.px(96), row.y + u.px(2), row.w - u.px(104), row.h - u.px(4)}, cur, names.data(), (int)names.size()))
+          skin_pick_root_ = cur > 0 ? roots[(size_t)cur - 1]->id : 0;
+        u.tooltip("The skeleton this mesh will follow: every Armature in the scene (or Ctrl+click a bone in the Hierarchy).");
+      }
       grid({{"Add Armature (Skin)", "The mesh follows the skeleton's bones by the vertex groups named after them (Blender: Armature modifier).\n"
-                                    "Select the mesh and a bone (or the armature) of the skeleton, Ctrl+click in the Hierarchy.",
-             root != nullptr, [this, mesh_obj, root] {
-               mesh_obj->add<SkinModifier>()->object = root->name;
-               nest_armature(root, mesh_obj);
+                                    "Pick the skeleton above, or select the mesh and a bone (or the armature) of it with Ctrl+click in the Hierarchy.",
+             use != nullptr, [this, mesh_obj, use] {
+               mesh_obj->add<SkinModifier>()->object = use->name;
+               nest_armature(use, mesh_obj);
                mark_changed("Add Armature (Skin)");  // (a large mesh's bind lands later, as a step of its own)
                skin_bind(mesh_obj);
              }}},
            1);
-      if (!root) u.label(lay.row(), "Ctrl+click a bone or the armature in the Hierarchy too (or make one above).", u.theme.text_dim);
+      if (!use) u.label(lay.row(), roots.empty() ? "Make a skeleton above first (or Ctrl+click one in the Hierarchy)." : "Pick a skeleton above, or Ctrl+click a bone in the Hierarchy.", u.theme.text_dim);
     }
     else {
       draw_skin_bind_buttons(mesh_obj, lay);

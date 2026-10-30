@@ -21,10 +21,10 @@ const Guide kGuides[] = {
     {"Modeling & Topology", "Shape the mesh in Edit Mode: extrude, inset, bevel, loop cuts.", {"Create Cube", "Subdivide", "Modeling Tools Window"}},
     {"UV Unwrapping", "Lay the surface flat for textures: seams, unwrap, pack.", {"Smart UV Project", "Part Unwrap", "Pack Islands"}},
     {"Texturing & Materials", "Give surfaces their look: materials, procedural textures.", {"Materials Window", "Textures Window", "New Material Asset"}},
-    {"Texturing", "Paint and layer a surface: smart materials, masks from the mesh maps, the brush.", {"Textures Window", "Modeling Tools Window", "Paint Mode On / Off"}},
+    {"Texturing", "Paint and layer a surface: smart materials, masks from the mesh maps, the brush.", {"New Surface", "Bake Mesh Maps...", "Paint Mode On / Off"}},  // (task 0273: the first two steps by name)
     {"Stylized", "Build a painted world: strokes as geometry, scattered props, a stylized sky and fog.", {"Modeling Tools Window", "Lighting Window", "Scene Window"}},
     {"Lighting & Rendering", "Light the scene and render it.", {"Create Area Light", "Generate Lighting", "Render Preview"}},
-    {"Editing", "Develop a render or an image: exposure, colour, crop, masks.", {"Develop the Last Render", "Editing Window", "Use as Camera Look"}},
+    {"Editing", "Develop a render or an image: exposure, color, crop, masks.", {"Develop the Last Render", "Editing Window", "Use as Camera Look"}},
     {"Rigging", "Give a character bones: a rig, IK, hair chains.", {"Humanoid Rig", "Auto IK on Selected Skeleton", "Rig Hair from Mesh"}},
     {"Skinning & Weight Painting", "Bind a mesh to its bones and paint the weights.", {"Rigging Window", "Humanoid Rig", "Inspector Window"}},
     {"Animation", "Pose and key over time: clips, curves, the Sequencer.", {"Animation Window", "Sequencer Window", "Play / Stop"}},
@@ -58,7 +58,7 @@ Recti Editor::draw_layout_guide(const Recti &area) {
     const int bw = u.font.text_width(step) + u.px(20);
     if (x + bw > strip.right() - u.px(90)) break;
     if (u.button({x, strip.y + u.px(4), bw, h - u.px(8)}, step)) palette_run(*e);
-    if (!e->help.empty()) u.tooltip(e->help);
+    u.tooltip(e->help.empty() ? std::string("Opens ") + step + "." : e->help);  // (task 0293: a window's step says so too)
     x += bw + u.px(6);
   }
   if (u.button({strip.right() - u.px(80), strip.y + u.px(4), u.px(74), h - u.px(8)}, "Got it")) {

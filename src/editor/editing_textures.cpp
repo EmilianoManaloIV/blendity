@@ -111,7 +111,7 @@ bool Editor::edit_open_texture(const std::string &name) {
 bool Editor::edit_apply_to_texture() {
   ProceduralTexturePtr pt = edit_texture_asset_.empty() ? nullptr : texture_asset(edit_texture_asset_);
   if (!pt || !edit_doc_.is_open()) {
-    Log::warn("Editing: open a texture first (Textures window > Edit, or develop open texture <name>)");
+    refuse("Editing: open a texture first (Textures window > Edit)", "window Textures", "Open Textures");
     return false;
   }
   const edit::Image &result = edit_doc_.result();
@@ -177,6 +177,7 @@ bool Editor::edit_use_as_camera_look() {
   mark_changed("Use as Camera Look");
   Log::info("Editing: %s's Camera Filters now carry the look%s%s", owner->name.c_str(), look.skipped.empty() ? "" : "; left out (no camera filter does them): ",
             look.skipped.c_str());
+  if (!look.skipped.empty()) toast(LogLevel::Info, "Camera Look: left out (no camera filter does them): " + look.skipped);  // (task 0271: said where it is seen)
   return true;
 }
 

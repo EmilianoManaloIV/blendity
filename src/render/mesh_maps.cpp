@@ -324,10 +324,12 @@ bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings 
         r.ao[idx] = grey8((float)open / (float)samples);
         r.thickness[idx] = grey8(depth / (float)samples);
       }
+      /* Each row as it ends, not each block: with few cores the blocks are large and end together, so the tray's bar
+       * went from 0 to done in one step (CI's two-core runners). */
+      const int64_t done = rows_done.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (progress) progress->store((float)done / (float)S, std::memory_order_relaxed);
     }
     rays.fetch_add(my_rays, std::memory_order_relaxed);
-    const int64_t done = rows_done.fetch_add(yb - ya, std::memory_order_relaxed) + (yb - ya);
-    if (progress) progress->store((float)done / (float)S, std::memory_order_relaxed);
   });
   if (stop.load()) return fail("cancelled");
   for (size_t i = 0; i < N; i++) r.texels += r.covered[i];
