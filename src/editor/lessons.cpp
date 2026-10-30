@@ -1520,6 +1520,20 @@ The Game view, F12 and Camera Preview show the flattened shape; the Scene view k
 ? With Amount at 1 the lighting still looks round. Why isn't it flat too? | Only where things are drawn changes: the shading reads the true shape's normals, so the light and the toon bands stay as modelled - that is what keeps the 2D look from looking like a cardboard cut-out.
 ? The face and the body are one skinned mesh and you want the face flatter than the body. Can you? | Not with one mesh: a Camera Flatten reaches whole meshes. Split the face into its own mesh object below the root and give it its own Camera Flatten with a higher Amount - a child's own one wins.
 )"},
+    {"Animating Any Property", "Insert Keyframe on any field, materials and visibility, Record and Add Property", R"(
+Almost everything in the Inspector can be animated: the Transform, a light's intensity and colour, a camera's focus, a modifier's amount, a material slot's Base Color, Roughness or Emission, shape keys, and whether the object is shown (Active).
+# Keying a field
+With a clip on the object's root (the Animation window's clip menu makes one), right-click a field's name and pick Insert Keyframe - or press I over it, as in Blender. A diamond after the name marks a field that is animated; it is filled on a frame that has a key.
+! cmd:select Sphere; anim new SphereLook | A clip on the Sphere
+! cmd:anim key . "Material 0.Roughness" 0 0 0.2; anim key . "Material 0.Roughness" 0 30 0.9 | Its material goes from glossy at frame 0 to rough at frame 30
+# Record
+With Record on, whatever you change in the Inspector is keyed at the playhead - not only what is already animated. Each change is one undo step.
+# Add Property
+The Animation window's Add Property lists everything by group - Object, Transform, each component, each material slot - with a search at the top: type "rough" or "color".
+? You want a lamp to flicker: its Intensity going up and down over two seconds. How? | Select the lamp (or its root), make a clip in the Animation window, then at a few frames right-click Intensity in the Light component and Insert Keyframe after setting a value - or turn Record on and just drag Intensity at each frame.
+? A door should vanish at frame 40 and come back at 80. Which property? | Active (Add Property > Object > Active, on the door - not on the clip's root itself): key it on (1) before, off (0) at 40 and on at 80; its keys are Constant, so it switches rather than fades.
+? You animated the roughness of a material and another object changed too. Why? | The two share the material asset: an animated material is the material itself. Give the object its own (the slot's New Material) before animating it.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

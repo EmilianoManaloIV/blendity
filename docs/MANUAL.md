@@ -454,6 +454,13 @@ layer's option or a material field, in the order they are stacked.
 | Mix Shader, Add Shader | Not yet (an axis material mixes three materials by slope) |
 | Light Path, Attribute, Object Info, Geometry, Combine RGB | Not yet |
 
+**Animating any property** (round 335): with a clip on the object's root (Animation window > the clip menu), right-click
+any field's name in the Inspector > **Insert Keyframe** (or press I over it) - a light's intensity, a camera's focus, a
+material slot's Base Color or Roughness, a modifier's amount; the object's Active through Add Property > Object. A
+diamond after the name marks an animated field. Switches, lists and Active key as Constant (they switch, not fade).
+A second component of a type (two Array modifiers) isn't keyable: a track names the first. **Record** keys whatever you change at the playhead. **Add Property** searches all of them. A material
+shared by other objects changes on them too: give the object its own first (the slot's New Material).
+
 **The 2D look - Camera Flatten** (round 334): Add Component > Rendering > Camera Flatten squashes the object's depth
 toward the camera about a pivot, as Guilty Gear Xrd does: the near parts no longer swell, so the picture is the drawn
 shape, and the shading stays as modelled (piloting a camera and the Draw tab's camera picture show it too, being

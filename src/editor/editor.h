@@ -1324,6 +1324,9 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   std::string volume_mesh_note_for_test(const MaterialPtr &m) { return volume_mesh_note(m); }  // (round 331)
+  int anim_property_state_for_test(GameObject *g, const std::string &property) { return anim_property_state(g, property); }  // (round 335: the diamond)
+  void anim_key_property_for_test(GameObject *g, const std::string &property, int axes) { anim_key_property(g, property, axes); }
+  void anim_unkey_property_for_test(GameObject *g, const std::string &property, int axes) { anim_unkey_property(g, property, axes); }
   /* Round 334: the items the Game view would draw from this camera (flattened where a Camera Flatten says), or the
    * Scene view's (game false: never flattened). */
   std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye) {
@@ -2275,6 +2278,27 @@ class Editor {
   void anim_copy();
   void anim_paste();
   void anim_add_property(GameObject *g, const std::string &property, int axes);
+  /* Round 335: any field of an object keyed from the Inspector (right-click its name > Insert Keyframe, or I over it):
+   * whether g can be keyed now (a clip on a root above it), a key of the property's axes at the playhead, and the
+   * property's state for its marker (0 none, 1 animated, 2 a key on this frame). */
+  bool anim_keyable(const GameObject *g);
+  void anim_key_property(GameObject *g, const std::string &property, int axes);
+  void anim_unkey_property(GameObject *g, const std::string &property, int axes);
+  int anim_property_state(GameObject *g, const std::string &property);
+  /* The root, clip and each animated property's state once a clip version and frame (the Inspector asks for every
+   * field it draws, every frame). */
+  struct AnimFieldCache {
+    GameObject *root = nullptr;
+    const AnimationClip *clip = nullptr;
+    uint64_t version = 0, ui_frame = ~0ull;
+    float frame = -1.0f;
+    std::unordered_map<std::string, int> state;  // "path|property" -> 1 animated, 2 a key on this frame
+  } anim_field_cache_;
+  void anim_field_cache_refresh();
+  /* Record (round 335): the Inspector's edits of g's fields ("Light." + "Intensity") keyed at the playhead, one undo step
+   * - any field, not only those already animated. */
+  void anim_record_fields(GameObject *g, const std::string &prefix, const std::vector<FieldEdit> &edits);
+  std::string anim_prop_search_;  // (the Add Property menu's search)
   std::vector<float> anim_key_frames();
   void anim_step_key(int dir);
   void anim_key_all();  // (task 0258: a key at the playhead on every track)

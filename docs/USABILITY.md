@@ -386,6 +386,7 @@ screens themselves.
 | A layer at Opacity 0 or with no targets looked broken: on, and doing nothing. | Its row says why: "Opacity 0", "Writes nothing" (round 332). |
 | The Materials window couldn't make a material of a type (Glass, Toon, a fog); the slot's list was one flat list of 12. | Of Type... beside New Material Asset, and both lists grouped: Basic, Glass, Metal, Stylized, Volume (round 332). |
 | A 3D character close to the camera looked like a 3D model, not a drawing: perspective swelled the nose and a hand reaching forward. | Camera Flatten: the depth squashed toward the camera about the body or the head, shaded as modelled, in the Game view and renders - the Scene view keeps the true shape (round 334). |
+| Only the Transform and components' numbers could be animated, keyed from the Animation window; a material's colour or an object's visibility couldn't, and the Inspector's fields had no key. | Material slots' fields and Active are tracks; right-click a field's name > Insert Keyframe (or I) from the Inspector, a diamond marks animated fields, Record keys any field changed, Add Property searches them all (round 335). |
 
 ## Still worth doing
 

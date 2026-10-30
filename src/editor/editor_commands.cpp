@@ -582,6 +582,27 @@ static bool flatten_set(CameraFlatten &cf, const GameObject &g, const std::vecto
   return true;
 }
 
+/* The words of a line, a "quoted phrase" one word (its quotes dropped); unquoted, as split_ws. */
+static std::vector<std::string> split_quoted(const std::string &line) {
+  std::vector<std::string> out;
+  std::string w;
+  bool quoted = false, any = false;
+  for (char ch : line) {
+    if (ch == '"') {
+      quoted = !quoted, any = true;
+      continue;
+    }
+    if (!quoted && std::isspace((unsigned char)ch)) {
+      if (!w.empty() || any) out.push_back(w);
+      w.clear(), any = false;
+      continue;
+    }
+    w += ch;
+  }
+  if (!w.empty() || any) out.push_back(w);
+  return out;
+}
+
 void Editor::flatten_command(const std::vector<std::string> &t) {
   std::vector<GameObject *> sel = selected_objects(true);
   if (sel.empty()) return Log::warn("flatten: select the objects to flatten (a character's root reaches its meshes)");
@@ -964,7 +985,7 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (c == "anim") {
-    anim_command(t);
+    anim_command(split_quoted(line));  // (round 335: a property with spaces quoted - "Material 0.Roughness", "Cast Shadows")
     return;
   }
   if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|keyed1k (task 0202)

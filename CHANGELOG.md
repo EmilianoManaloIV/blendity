@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 335): animate almost any property
+
+**Asked:** "In the animator I should be able to animate almost all properties of an object."
+
+**Added (task 0315)**
+- **More tracks:** a material slot's fields - Base Color, Roughness, Metallic, Emission, a fog's Density...
+  ("Material 0.Roughness") - and the object's Active, shown or hidden; a list's choice is keyable too. With what was
+  there (the Transform, every component's numbers, switches and colours, shape keys), almost everything in the
+  Inspector animates.
+- **Keying from the Inspector,** as in Blender: right-click a field's name > Insert Keyframe or Delete Keyframe, or
+  press I over it; a diamond after the name marks an animated field, filled on a key's frame.
+- **Record keys any field you change** in the Inspector - a light's colour, a camera's focus, a material's roughness -
+  not only the ones already animated; one undo step an edit.
+- **Add Property** has a search and lists the properties by group: Object, Transform, each component, each material
+  slot (by its name).
+- **The console:** `anim key` takes a quoted property (`anim key . "Material 0.Roughness" 0 30 0.9`).
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- A track made while Preview was on (by Record or Insert Keyframe) wasn't put back when Preview turned off - the last
+  previewed value stayed, saved with the scene: Preview keeps every property's value and puts back the ones animated
+  by then (an edit not keyed stays).
+- A second component of a type (two Array modifiers) keyed and played the first one's field: it offers no keys.
+- A held material key touched the material every frame of Play (a new picture every frame, a path-traced view never
+  settling): touched only when the value changes.
+- Switches, lists and Active keyed as curves (a switch flipping halfway): Constant.
+- I took Shift+I and Ctrl+I over a field's name: only a plain I; in Play, Insert Keyframe says why it doesn't.
+- The Inspector looked the clip up for every field it drew: once a frame and clip version.
+- The root's own Active isn't offered (off, its Animation would stop and never turn it on); an empty property, a slot
+  that isn't a number, Delete Keyframe's last key (the track goes too); the docs on Active.
+
+**Checked:** `tests_round335` - a material's Roughness 0.1 -> 0.7 over 10 frames plays 0.4 at frame 5, Active off
+from frame 10; by clicks Insert Keyframe on Roughness, I over Cast Shadows, Record keying Receive Shadows at frame 12,
+Add Property's "rough" listing the material's Roughness and hiding Position; Preview off restoring a track made while
+previewing (0.4 -> 0.5) and keeping an unkeyed edit; Constant switches; the diamond's states; a second Array's Count
+without keys; Ctrl+I and an empty property keying nothing; Esc closing Add Property; the lesson's Try-its.
+
 ## 2026-10-30 (round 334): Camera Flatten - the 2D look
 
 **Asked:** "I've heard a method in getting that 2D look at 3D. You simply flatten the object relative to the camera

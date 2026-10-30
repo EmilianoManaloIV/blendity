@@ -422,6 +422,15 @@ struct ApplyEditReflector : Reflector {
 
 /* Draws any component through the Reflector interface (Unity's default
  * inspector / Blender's RNA-driven property panels). */
+/* Round 335's review: the first component of its type on g (a track "Type.Field" names the first). */
+static bool first_of_its_type(const GameObject &g, const Component *c) {
+  for (const auto &o : g.components) {
+    if (o.get() == c) return true;
+    if (!std::strcmp(o->type_name(), c->type_name())) return false;
+  }
+  return true;
+}
+
 /* Round 332: the default value of each field of a thing - a texture layer of its type, a mask effect, a material - for
  * Reset to Default (Blender: Backspace over a field). Read once by a reflector over a new one. */
 struct FieldDefaults {
@@ -510,23 +519,55 @@ struct InspectorReflector : Reflector {
   }
   /* Round 332: a right-click on a field's name offers Reset to Default when the thing edited has a default for it; the
    * reset lands when the field is drawn next (the menu's body runs after this frame's fields), recorded as any edit. */
-  template<class T> bool reset_field(const char *n, const Recti &label, const std::unordered_map<std::string, T> *defs, T &v) {
-    if (!defs) return false;
-    const auto it = defs->find(n);
-    if (it == defs->end()) return false;
+  /* Round 335: keying from the Inspector - the object whose fields these are and the property's start ("Light.",
+   * "Material 0."); unset where a field isn't one track (a texture layer's, a filter effect's). */
+  GameObject *anim_obj = nullptr;
+  std::string anim_prefix;
+  /* A field's menu, on a right-click of its name: Reset to Default when the thing edited has a default for it (round
+   * 332; the reset lands when the field is drawn next, recorded as any edit), and Insert / Delete Keyframe when the
+   * object is under an animated root (round 335: I over the name inserts too). A diamond after the name marks an
+   * animated field - filled on a key's frame. */
+  template<class T> bool field_menu(const char *n, const Recti &label, const std::unordered_map<std::string, T> *defs, T &v, int axes = 1) {
+    const T *def = nullptr;
+    if (defs) {
+      const auto it = defs->find(n);
+      if (it != defs->end()) def = &it->second;
+    }
+    const bool keyable = anim_obj && record_prefix.empty() && ed.anim_keyable(anim_obj);
+    if (!def && !keyable) return false;
     const ui::Id rid = fid(n) ^ 0x2E5E7ull;
     if (u.record_buttons) u.button_rects["label:" + record_prefix + n] = label;
+    const std::string prop = anim_prefix + n;
+    const int state = keyable ? ed.anim_property_state(anim_obj, prop) : 0;
+    if (state) draw_key_marker(label, state == 2);
+    if (keyable && u.hovered(label) && u.in.key_pressed[platform::KEY_I] && u.in.mods == 0 && !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
+      u.in.key_pressed[platform::KEY_I] = false;
+      ed.anim_key_property(anim_obj, prop, axes);
+    }
     if (u.hovered(label) && u.in.pressed[1]) u.open_popup(rid, {u.in.mx, u.in.my, 0, 0});
-    const bool differs = !(it->second == v) || (mixed && mixed->count(n));  // (the others selected may differ)
+    const bool differs = def && (!(*def == v) || (mixed && mixed->count(n)));  // (the others selected may differ)
     Editor *edp = &ed;
-    u.popup(rid, u.px(170), [edp, rid, differs] {
-      if (edp->ui_.menu_item("Reset to Default", nullptr, false, differs)) edp->field_reset_ = rid, edp->field_reset_frame_ = edp->ui_.frame_number();
-      edp->ui_.tooltip("The value a new one starts with (Blender: Backspace over a field). Toon Style's reset picks Classic, with its settings.");
+    GameObject *obj = keyable ? anim_obj : nullptr;
+    const bool has_def = def != nullptr, on_key = state == 2;
+    u.popup(rid, u.px(170), [edp, rid, differs, has_def, obj, prop, axes, on_key] {
+      if (has_def && edp->ui_.menu_item("Reset to Default", nullptr, false, differs)) edp->field_reset_ = rid, edp->field_reset_frame_ = edp->ui_.frame_number();
+      if (has_def) edp->ui_.tooltip("The value a new one starts with (Blender: Backspace over a field). Toon Style's reset picks Classic, with its settings.");
+      if (!obj) return;
+      if (edp->ui_.menu_item("Insert Keyframe", "I")) edp->anim_key_property(obj, prop, axes);
+      edp->ui_.tooltip("A key of this field at the playhead in the open clip (Blender: I over a field).");
+      if (edp->ui_.menu_item("Delete Keyframe", nullptr, false, on_key)) edp->anim_unkey_property(obj, prop, axes);
     });
-    if (ed.field_reset_ != rid) return false;
+    if (!def || ed.field_reset_ != rid) return false;
     ed.field_reset_ = 0;
-    v = it->second;
+    v = *def;
     return true;
+  }
+  /* A small diamond at the end of a field's name: an animated field (filled: a key on this frame). */
+  void draw_key_marker(const Recti &label, bool on_key) {
+    const float s = (float)u.px(4), cx = (float)label.right() - s - (float)u.px(2), cy = (float)label.y + label.h * 0.5f;
+    const uint32_t c = on_key ? u.theme.accent : u.theme.text_dim;
+    u.canvas.fill_triangle({cx - s, cy}, {cx, cy - s}, {cx + s, cy}, c);
+    u.canvas.fill_triangle({cx - s, cy}, {cx + s, cy}, {cx, cy + s}, c);
   }
   /* A number typed into a mixed field that the active material already holds: no change on it, but the others take
    * it (and an expression at the clamp still reaches them), so the edit is recorded anyway. */
@@ -555,7 +596,7 @@ struct InspectorReflector : Reflector {
       u.number_committed(fid(n), &e.expr);
     }
     else ch = mixed_commit(n, FieldEdit::Float, v);
-    if (reset_field(n, label_rect(row), defaults ? &defaults->f : nullptr, v)) {
+    if (field_menu(n, label_rect(row), defaults ? &defaults->f : nullptr, v)) {
       FieldEdit &e = record(FieldEdit::Float, n);
       e.f_old = old;
       e.f_new = v;
@@ -579,7 +620,7 @@ struct InspectorReflector : Reflector {
       u.number_committed(fid(n), &e.expr);
     }
     else ch = mixed_commit(n, FieldEdit::Int, (float)v);
-    if (reset_field(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
+    if (field_menu(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
       FieldEdit &e = record(FieldEdit::Int, n);
       e.f_old = (float)old;
       e.i_new = v;
@@ -632,7 +673,7 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
     u.label(label_rect(row), n);
-    if (u.checkbox(field_rect(row), v) || reset_field(n, label_rect(row), defaults ? &defaults->b : nullptr, v)) {
+    if (u.checkbox(field_rect(row), v) || field_menu(n, label_rect(row), defaults ? &defaults->b : nullptr, v)) {
       record(FieldEdit::Bool, n).b_new = v;
       changed = true;
     }
@@ -655,7 +696,7 @@ struct InspectorReflector : Reflector {
       u.number_committed(fid(n), &e.expr, &e.component);
       changed = true;
     }
-    if (reset_field(n, label_rect(row), defaults ? &defaults->v : nullptr, v)) {
+    if (field_menu(n, label_rect(row), defaults ? &defaults->v : nullptr, v, 3)) {
       FieldEdit &e = record(FieldEdit::Vec, n);
       e.v_old = old;
       e.v_new = v;
@@ -667,7 +708,7 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
     u.label(label_rect(row), n);
-    if (u.color_field(fid(n), field_rect(row), v) || reset_field(n, label_rect(row), defaults ? &defaults->c : nullptr, v)) {
+    if (u.color_field(fid(n), field_rect(row), v) || field_menu(n, label_rect(row), defaults ? &defaults->c : nullptr, v, 3)) {
       record(FieldEdit::Color, n).v_new = v;
       changed = true;
     }
@@ -680,7 +721,7 @@ struct InspectorReflector : Reflector {
     const Vec3 old_rgb = v;
     const float old_a = a;
     bool ch = u.color_field(fid(n), field_rect(row), v, &a);
-    if (reset_field(n, label_rect(row), defaults ? &defaults->c : nullptr, v)) {  // (the colour and its alpha, as a new one has them)
+    if (field_menu(n, label_rect(row), defaults ? &defaults->c : nullptr, v, 3)) {  // (the colour and its alpha, as a new one has them)
       const auto da = defaults->f.find(alpha_name);
       if (da != defaults->f.end()) a = da->second;
       ch = true;
@@ -751,7 +792,7 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    if (u.combo(fid(n), field_rect(row), v, opts, count) || reset_field(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
+    if (u.combo(fid(n), field_rect(row), v, opts, count) || field_menu(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
       record(FieldEdit::Enum, n).i_new = v;
       if (material && std::strcmp(n, "Toon Style") == 0) apply_toon_style(*material, v);  // (task 0148: the preset's fields, picked again too)
       changed = true;
@@ -1108,12 +1149,14 @@ struct InspectorReflector : Reflector {
       sub.label_w = label_w;
       sub.material = m.get();
       sub.defaults = &material_defaults();  // (round 332's review: Reset to Default here too, where most materials are edited)
+      sub.anim_obj = anim_obj, sub.anim_prefix = strprintf("Material %zu.", slot);  // (round 335: a slot's fields keyable)
       if (others.size() > 1) sub.mixed = &mixed;
       m->reflect(sub);
       u.pop_id();
       if (sub.changed) {
         m->touch();
         if (others.size() > 1) ed.apply_material_edits(sub.edits, m.get(), others);
+        if (anim_obj) ed.anim_record_fields(anim_obj, sub.anim_prefix, sub.edits);  // (round 335: Record keys a slot's field too)
         changed = true;
       }
     }
@@ -1711,9 +1754,13 @@ void Editor::draw_inspector(const Recti &r) {
     if (open) {
       InspectorReflector ir(*this, u, lay);
       ir.limit = essentials_limit(c->type_name());
+      ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - a second of a type isn't: a track names the first)
       c->reflect(ir);
       draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
-      if (ir.changed) mark_changed(std::string("Edit ") + c->type_name());
+      if (ir.changed) {
+        mark_changed(std::string("Edit ") + c->type_name());
+        if (ir.anim_obj) anim_record_fields(g, ir.anim_prefix, ir.edits);
+      }
       /* Multi-object editing: the same field of the same component (the nth
        * of its type) on every other selected object. */
       if (ir.changed && multi.size() > 1) {
@@ -1977,9 +2024,13 @@ void Editor::draw_inspector(const Recti &r) {
           lay.indent += u.px(10);
           InspectorReflector ir(*this, u, lay);
           ir.limit = essentials_limit(c->type_name());
+          ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - not a second of a type)
           c->reflect(ir);
           draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
-          if (ir.changed) mark_changed(std::string("Edit ") + c->type_name());
+          if (ir.changed) {
+            mark_changed(std::string("Edit ") + c->type_name());
+            if (ir.anim_obj) anim_record_fields(g, ir.anim_prefix, ir.edits);
+          }
           lay.indent -= u.px(10);
           if (auto *bm = dynamic_cast<BooleanModifier *>(c); bm && !bm->last_error.empty()) {
             Recti er = lay.row();
@@ -3103,6 +3154,25 @@ void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const s
     const size_t n = many ? apply_material_edits(ir.edits, m.get(), *others) : 0;
     mark_changed(n ? strprintf("Edit %zu Materials", n + 1) : "Edit Material " + m->name);  // an asset is written back when the edit finishes
   }
+}
+
+/* Record (round 335): the Inspector's edits of g's fields keyed at the playhead, one undo step - any field, not only
+ * those already animated (FieldEdit is this file's). */
+void Editor::anim_record_fields(GameObject *g, const std::string &prefix, const std::vector<FieldEdit> &edits) {
+  if (!anim_.record || !anim_.preview || playing_ || edits.empty() || !anim_keyable(g)) return;
+  const std::string path = anim_path(*anim_root(), *g);
+  const float frame = std::round(anim_.frame);
+  anim_edit_keys("Record", [&](AnimationClip &c) {
+    for (const FieldEdit &fe : edits) {
+      const std::string prop = prefix + fe.name;
+      const int axes = fe.kind == FieldEdit::Vec || fe.kind == FieldEdit::Color ? 3 : 1;
+      const int interp = anim_value_stepped(*g, prop) ? AnimConstant : AnimAuto;  // (a switch, a list: no blend between)
+      for (int a = 0; a < axes; a++) {
+        float v = 0.0f;
+        if (read_anim_value(*g, prop, a, v)) c.track(path, prop, a).set_key(frame, v, interp);  // (a field that is no track of its own reads nothing)
+      }
+    }
+  });
 }
 
 std::string Editor::volume_mesh_note(const MaterialPtr &m) {
