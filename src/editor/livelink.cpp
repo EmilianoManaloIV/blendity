@@ -585,6 +585,20 @@ void Link::stop() {
 bool Link::running() const { return d_->server.running(); }
 int Link::port() const { return d_->server.port(); }
 int Link::clients() const { return d_->server.client_count(); }
+
+/* A hello's "app" (and "bridge" version): {"t":"client","app":"Unity 6000.0","bridge":"1.1"}; read, never acted on. */
+std::vector<std::string> Link::client_names() const {
+  std::vector<std::string> out;
+  for (const std::string &h : d_->server.client_hellos()) {
+    JsonParser p{h.data(), h.data() + h.size()};
+    const Json j = h.empty() ? Json{} : p.value();
+    std::string app = j["t"].str == "client" ? j["app"].str : std::string();
+    if (app.size() > 80) app.resize(80);
+    const std::string bridge = j["bridge"].str.substr(0, 20);
+    out.push_back(app.empty() ? std::string("a client") : bridge.empty() ? app : app + " (bridge " + bridge + ")");
+  }
+  return out;
+}
 const Stats &Link::stats() const {
   d_->sync_stats();
   return d_->stats;

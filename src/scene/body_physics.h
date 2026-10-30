@@ -70,6 +70,27 @@ const GameObject *find_armature(const GameObject &g);
  * was). `frames` frames from `first` to `last` inclusive. */
 std::vector<Vec3> com_trajectory(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body, float first, float last,
                                  int frames);
+/* The scene's transforms and the clip's animated values (blend shapes, lights...) as they are now, put back when the
+ * guard goes: whatever applies the clip to look at other frames (trails, the Zoetrope, Lock in Place: task 0284). */
+class PoseGuard {
+ public:
+  PoseGuard(Scene &scene, GameObject &anim_root, const AnimationClip &clip);
+  ~PoseGuard();
+  PoseGuard(const PoseGuard &) = delete;
+  PoseGuard &operator=(const PoseGuard &) = delete;
+
+ private:
+  Scene &scene_;
+  std::vector<std::pair<uint64_t, Transform>> saved_;  // (by id: an object deleted meanwhile is skipped)
+  struct Value {
+    uint64_t id;
+    std::string property;
+    int axis;
+    float v;
+  };
+  std::vector<Value> values_;
+};
+
 /* Each frame from `first` to `last` (whole frames) posed with IK solved and handed to `fn`; the scene put back after. */
 void for_each_frame(Scene &scene, GameObject &anim_root, const AnimationClip &clip, int first, int last, const std::function<void(int)> &fn);
 

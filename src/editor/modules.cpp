@@ -41,6 +41,7 @@ const Module kModules[] = {
     {WindowKind::Draw, "Draw", Icon::Paper, "Views", kDrawing, false, false, nullptr},
     {WindowKind::Layers, "Layers", Icon::Menu, "Scene", kDrawing, false, false, nullptr},
     {WindowKind::History, "History", Icon::Step, "Scene", kAlways, false, false, "window.history"},  // (task 0254)
+    {WindowKind::Board, "Board", Icon::Grid, "Views", kDrawing, false, false, nullptr},  // (task 0299: the reference board)
 };
 static_assert(sizeof(kModules) / sizeof(kModules[0]) == (size_t)WindowKind::Count, "a module per window kind");
 

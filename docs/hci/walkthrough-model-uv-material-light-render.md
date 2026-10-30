@@ -23,3 +23,21 @@ right effect; **Notice** - will they notice the control; **Associate** - will th
 **Baseline score** (a failing step has an N in Try, Notice, Associate or Progress; a ? is a doubt, not a fail): 12
 steps, **8 failing** (1, 4, 5, 6, 7, 8, 9, 10). The step a newcomer is most likely to abandon: 7 (UV), where the label,
 the focus rule and the toolbar all mislead at once.
+
+## After (round 282)
+
+Walked again on the round-281 build with the same profile, by reading each step against what landed; a step is fixed when every column it failed now reads Y. Partly: one of its problems is gone, another is not.
+
+| # | Baseline | After | What changed | What is left |
+|---|---|---|---|---|
+| 1 | fail | fail | - | "3D Object" still shows only in the Create, Draw, Edit and Rig layouts (Show All Tools reaches it); the Hierarchy's Create still needs a right-click |
+| 4 | fail | fixed | The edge extrude is "Extrude Edges"; menu labels come from the keymap (0254, 0255) | - |
+| 5 | fail | partly | `]` and `[` set the segments while Bevel runs (0255) | a pen with no keyboard still has no way: no on-screen field |
+| 6 | fail | fail | - | Adjust Last (F9) still covers Edit Mode's operators only |
+| 7 | fail | partly | Labels from the keymap; the UV toolbar folds into a More menu; W/E/R/Y follow the preset (0254, 0255) | panning is middle-drag only |
+| 8 | fail | fixed | Assign to Selection is a Materials toolbar button (0257) | - |
+| 9 | fail | fixed | The Rendering components are in Add Component in every layout (0256) | - |
+| 10 | fail | fixed | One Environment, in the Lighting window; the Render window points at it (0256) | - |
+| 2, 11, 12 | doubts (?) | Y | The gizmo drag's hint (0254), the tray's time left (0253), disabled buttons with reasons (0252) | - |
+
+**After:** 12 steps, **4 not fully fixed** (1 and 6 failing, 5 and 7 partly), against 8 failing at the baseline.

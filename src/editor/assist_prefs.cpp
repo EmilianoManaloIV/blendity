@@ -31,7 +31,7 @@ bool Editor::assist_on(Assist a) const { return a < Assist::Count && assist_[(in
 bool Editor::assist_require(Assist a) {
   if (assist_on(a)) return true;
   const AssistInfo &i = kAssists[(int)a];
-  Log::warn("%s is switched off: Preferences > Animation Assistants, or the console's `assist on %s`", i.name, i.key);
+  refuse(strprintf("%s is switched off (Preferences > Animation Assistants)", i.name), strprintf("assist on %s", i.key), "Switch it on");
   return false;
 }
 
