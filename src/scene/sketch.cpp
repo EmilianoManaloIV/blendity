@@ -548,6 +548,18 @@ int nearest_vanishing(Vec2 from, Vec2 to, const Vec2 *vps, int n, float max_deg)
   return best;
 }
 
+std::vector<std::pair<size_t, size_t>> runs_outside(const std::vector<Vec2> &pts, Vec2 c, float r) {
+  std::vector<std::pair<size_t, size_t>> out;
+  size_t i = 0;
+  while (i < pts.size()) {
+    while (i < pts.size() && length(pts[i] - c) <= r) i++;
+    const size_t a = i;
+    while (i < pts.size() && length(pts[i] - c) > r) i++;
+    if (i - a >= 2) out.push_back({a, i});
+  }
+  return out;
+}
+
 float distance_to_polyline(Vec2 p, const std::vector<Vec2> &pts) {
   if (pts.empty()) return 1e30f;
   return length(p - snap_to_polyline(p, pts));
@@ -572,4 +584,20 @@ std::vector<Vec2> french_curve(int which) {
 }
 
 }  // namespace sketch
+
+const std::vector<SketchBrush> &sketch_brush_presets() {
+  /* name, kind, width, opacity, soft, pressure_to, min_size, steady, color (SketchBook's own set, its usual settings) */
+  static const std::vector<SketchBrush> presets = {
+      {"Pencil", 0, 2.0f, 0.85f, 0.2f, 3, 0.3f, 10.0f, 0xFF3A3A3A},
+      {"Pen", 0, 2.0f, 1.0f, 0.0f, 1, 0.0f, 0.0f, 0xFF202020},
+      {"Inker", 0, 4.0f, 1.0f, 0.0f, 1, 0.1f, 25.0f, 0xFF101010},
+      {"Felt Pen", 0, 6.0f, 0.9f, 0.0f, 0, 1.0f, 0.0f, 0xFF2A4C8C},
+      {"Marker", 0, 18.0f, 0.5f, 0.1f, 2, 1.0f, 0.0f, 0xFF7A8C9A},
+      {"Airbrush", 0, 40.0f, 0.15f, 1.0f, 2, 1.0f, 0.0f, 0xFF505050},
+      {"Eraser", 1, 20.0f, 1.0f, 0.0f, 0, 1.0f, 0.0f, 0xFFFFFFFF},
+      {"Stroke Eraser", 2, 8.0f, 1.0f, 0.0f, 0, 1.0f, 0.0f, 0xFFFFFFFF},
+  };
+  return presets;
+}
+
 }  // namespace bl

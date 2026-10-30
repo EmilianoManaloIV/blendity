@@ -8,6 +8,7 @@ action when a test names its id or runs the console command run_action maps it t
 
     python tools/test_coverage_map.py            # the table on stdout (Markdown), empty entries first
     python tools/test_coverage_map.py --check    # exit 1 when an entry is empty (CI can run it)
+    python tools/test_coverage_map.py --check --widgets   # also when a button, field or section is driven by no test (task 0251)
 """
 import os, re, sys, collections
 
@@ -56,6 +57,27 @@ def window_titles():
     rows = re.findall(r'\{WindowKind::(\w+), "([^"]+)"', t)
     return {k: title for k, title in rows}
 
+def widgets():
+    """Task 0251 (ADR 0085): the controls a test can drive by label through record_buttons - u.button(rect, "Label"),
+    InspectorReflector fields br.field("Name" ...) / br.color / br.enumeration / br.text. A test covers one when it names the
+    label (click_until(ed, "Label"), button_rect_for_test("Label"), "field:Name"). Listed under kind `widget`; counted toward
+    --check only with --widgets (the baseline is mostly empty). Not scanned yet: button_grid labels and section headers (the
+    headers are not in button_rects)."""
+    out = set()
+    for n in sorted(os.listdir(SRC)):
+        if not n.endswith(".cpp"): continue
+        t = read(os.path.join(SRC, n))
+        for m in re.finditer(r'\bu\.button(?:_enabled)?\(\{[^}]*\},\s*"([^"\\%]{1,40})"', t): out.add(("button", m.group(1)))  # (the label as the second argument, not a format string)
+        for m in re.finditer(r'\bbr\.(?:field|color|enumeration|text)\("([^"\\%]{1,40})"', t): out.add(("field", m.group(1)))
+    return sorted(out)  # (the Tools window's section headers are labels with a hover press, not in button_rects: no row for them yet)
+
+def reach_rows():
+    """Task 0290: the console-reach table in tests/test_editor.cpp - a verb and the control that reaches it."""
+    t = read(os.path.join(TESTS, "test_editor.cpp"))
+    m = re.search(r"kConsoleReach\[\] = \{(.*?)\n\};", t, re.S)
+    if not m: return []
+    return re.findall(r'\{"([^"]+)", "[^"]*", "([^"]+)"\}', m.group(1))
+
 def test_index():
     """test name -> its text, over every tests/test_*.cpp."""
     tests = {}
@@ -92,7 +114,17 @@ def main():
         if w in titles: pats.append(r'"window ' + re.escape(titles[w]) + '"')
         rows.append(("window", w, users(pats)))
     rows = [(k, n, ts if n not in EXTERNAL else ["(" + EXTERNAL[n] + ")"]) for k, n, ts in rows]
+    reach = reach_rows()  # (task 0290: a verb's control, by the table test)
+    for verb, path in reach:
+        rows.append(("reach", verb + " -> " + path.split(">")[-1], users([r"kConsoleReach"])))
+    widget_rows = []
+    for kind, label in widgets():
+        pats = [r'click_until\([^,]+,\s*"' + re.escape(label) + r'"', r'button_rect_for_test\("' + re.escape(label) + r'"', r'"field:' + re.escape(label) + r'"', r'"menu:' + re.escape(label) + r'"']
+        widget_rows.append(("widget:" + kind, label, users(pats)))
+    widgets_count = "--widgets" in sys.argv
     empty = [r for r in rows if not r[2]]
+    widget_empty = [r for r in widget_rows if not r[2]]
+    rows = rows + widget_rows
     print("| kind | name | tests | first test |")
     print("|---|---|---|---|")
     for kind, name, ts in sorted(rows, key=lambda r: (len(r[2]) > 0, r[0], r[1])):
@@ -100,8 +132,8 @@ def main():
         if len(first) > 70: first = first[:67] + "..."
         print(f"| {kind} | `{name}` | {len(ts)} | {first} |")
     print()
-    print(f"{len(rows)} entries, {len(empty)} empty; {len(tests)} tests read")
-    if check and empty: sys.exit(1)
+    print(f"{len(rows) - len(widget_rows)} entries, {len(empty)} empty; {len(widget_rows)} widgets, {len(widget_empty)} not driven by label; {len(tests)} tests read")
+    if check and (empty or (widgets_count and widget_empty)): sys.exit(1)
 
 if __name__ == "__main__":
     main()

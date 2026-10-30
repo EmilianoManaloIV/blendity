@@ -117,7 +117,7 @@ bool Editor::set_paint(bool on) {
   if (on && paint_ && active_ == paint_obj_ && scene_.get() == paint_scene_) return true;
   if (paint_) {
     paint_abort_stroke();
-    paint_ = false, paint_obj_ = 0, paint_scene_ = nullptr, paint_layer_ = -1;
+    paint_ = false, paint_obj_ = 0, paint_scene_ = nullptr, paint_layer_ = -1, paint_bucket_ = 0;  // (the bucket off too: back in Paint a drag paints)
     paint_surface_.reset();
     if (!on) Log::info("Paint off");
   }
@@ -129,22 +129,22 @@ bool Editor::set_paint(bool on) {
     return false;
   }
   if (playing_) {
-    Log::warn("Paint: stop Play first");
+    refuse("Paint: stop Play first", "stop", "stop Play");
     return false;
   }
   std::string why;
   ProceduralTexturePtr pt = surface_of(g, &why);
   if (!pt) {
-    Log::warn("Paint: %s", why.c_str());
+    refuse("Paint: " + why, "surface new", "make a surface");
     return false;
   }
   if (mf->mesh->uvs.size() != mf->mesh->corner_verts.size()) {
-    Log::warn("Paint: %s has no UVs (surface new lays them out)", g->name.c_str());
+    refuse("Paint: " + g->name + " has no UVs (UV Editor > Unwrap lays them out)", "uv unwrap", "unwrap");
     return false;
   }
   const Mesh *ev = g->evaluated_mesh();
   if (ev && ev != mf->mesh.get() && (ev->vert_count() != mf->mesh->vert_count() || ev->face_count() != mf->mesh->face_count())) {
-    Log::warn("Paint: %s's modifiers add or remove geometry; apply them first (the brush projects onto the base mesh)", g->name.c_str());
+    refuse("Paint: " + g->name + "'s modifiers add or remove geometry; apply them first (the brush projects onto the base mesh)", "applymods", "apply the modifiers");
     return false;
   }
   if (edit_mode_) exit_edit_mode();
@@ -711,6 +711,7 @@ void Editor::paint_end_stroke() {
   s.bytes = bytes;
   paint_last_step_bytes_ = bytes;
   undo_.push_back(std::move(s));
+  undo_serial_++;
   trim_undo();
   redo_.clear();
   scene_dirty_ = true;
@@ -1006,6 +1007,16 @@ bool Editor::paint_update(const Recti &view) {
       return true;
     }
     if (!(scene_hovered_ && in.pressed[0] && !ui_.any_active() && !qm_.open)) return false;
+    if (paint_bucket_ > 0 && !in.eraser) {  // (task 0272: the Bucket Fill - a click fills the part under it)
+      static const char *const kParts[] = {"group", "group", "island", "material", "object"};
+      ensure_scene_planes();
+      if (paint_face_under(x, y) == UINT32_MAX) return false;  // (a miss: the click is the view's, in every mode)
+      paint_gradient_ = paint_bucket_gradient_;
+      paint_fill(kParts[std::min(4, paint_bucket_)], x, y);
+      paint_gradient_ = false;
+      ui_.consume_click();
+      return true;
+    }
     if (!paint_begin_stroke(view, x, y)) return false;  // (over nothing: the click is the view's)
     ui_.consume_click();
     paint_stroke_to(view, x, y, true);
@@ -1016,6 +1027,21 @@ bool Editor::paint_update(const Recti &view) {
   return true;
 }
 
+/* Task 0269: a brush's ring. Erasing, it is dashed with an E beside it - the state by shape and letter, not the colour
+ * alone (WCAG 1.4.1): the warning colour still says it to those who see it. */
+void Editor::draw_brush_ring(float x, float y, float r, bool erasing, uint32_t color) {
+  auto &u = ui_;
+  brush_ring_erasing_ = erasing;
+  if (!erasing) return u.canvas.circle(x, y, r, color, 1.5f);
+  const int n = std::max(8, std::min(96, (int)(r * 0.35f))) * 2;
+  for (int i = 0; i < n; i += 2) {
+    const float a0 = 6.2831853f * (float)i / (float)n, a1 = 6.2831853f * (float)(i + 1) / (float)n;
+    u.canvas.line(x + r * std::cos(a0), y + r * std::sin(a0), x + r * std::cos(a1), y + r * std::sin(a1), u.theme.warning, 2.0f);
+  }
+  const int s = u.px(16);
+  u.label({(int)(x + r * 0.72f) + u.px(2), (int)(y - r * 0.72f) - s, s, s}, "E", u.theme.warning);
+}
+
 void Editor::paint_draw(const Recti &view) {
   paint_stencil_draw(view);
   if (!paint_ || !scene_hovered_) return;
@@ -1023,7 +1049,7 @@ void Editor::paint_draw(const Recti &view) {
   const float r = paint_brush_.radius * u.scale;
   const Vec2 c((float)u.in.mx, (float)u.in.my);
   if (c.x < view.x || c.y < view.y || c.x > view.right() || c.y > view.bottom()) return;
-  u.canvas.circle(c.x, c.y, r, paint_erase_ || u.in.eraser ? u.theme.warning : u.theme.accent);
+  draw_brush_ring(c.x, c.y, r, paint_brush_.erase || paint_erase_ || u.in.eraser, u.theme.accent);  // (the brush's own Erase too: paint_erase_ is set when a stroke begins)
   u.canvas.circle(c.x, c.y, std::max(1.0f, r * std::max(0.0f, std::min(0.99f, paint_brush_.hardness))), u.theme.text_dim);
 }
 
@@ -1083,16 +1109,16 @@ void Editor::paint_command(const std::vector<std::string> &t) {
     }
   }
   else if (v == "alpha") {
-    if (arg(2, "off") == "off") paint_alpha_ = Bitmap();
+    if (arg(2, "off") == "off") paint_alpha_ = Bitmap(), paint_alpha_path_.clear();
     else {
       std::string err;
-      paint_load_brush_image(t[2], paint_alpha_, "paint alpha");
+      if (paint_load_brush_image(t[2], paint_alpha_, "paint alpha")) paint_alpha_path_ = t[2];  // (task 0272: the picker shows it)
     }
   }
   else if (v == "layer") paint_layer_ = (int)num(2, -1.0f);
   else if (v == "gradient") {  // paint gradient r g b r g b [island|group|material|object] [x|y|z] [px py] (task 0247)
     if (!paint_surface_ || !paint_surface_->maps || paint_surface_->maps->empty()) {
-      Log::warn("paint gradient: the surface needs its mesh maps (meshmaps, then surface maps): the gradient runs along the position they hold");
+      refuse_no_mesh_maps("The gradient runs along the position the mesh maps hold");
       return;
     }
     paint_gradient_from_ = Vec3(num(2, 0.2f), num(3, 0.2f), num(4, 0.2f)), paint_gradient_to_ = Vec3(num(5, 0.9f), num(6, 0.9f), num(7, 0.9f));
@@ -1155,9 +1181,9 @@ void Editor::paint_command(const std::vector<std::string> &t) {
   else if (v == "wet") b.wet = std::max(0.0f, std::min(1.0f, num(2, 0.0f)));
   else if (v == "jitter") b.jitter_h = std::max(0.0f, std::min(1.0f, num(2, 0.0f))), b.jitter_s = std::max(0.0f, std::min(1.0f, num(3, 0.0f))), b.jitter_v = std::max(0.0f, std::min(1.0f, num(4, 0.0f)));
   else if (v == "grain") {  // paint grain <image>|off [scale]
-    if (arg(2, "off") == "off") paint_grain_ = Bitmap();
+    if (arg(2, "off") == "off") paint_grain_ = Bitmap(), paint_grain_path_.clear();
     else {
-      paint_load_brush_image(t[2], paint_grain_, "paint grain");
+      if (paint_load_brush_image(t[2], paint_grain_, "paint grain")) paint_grain_path_ = t[2];
       if (t.size() > 3) b.grain_scale = std::max(0.05f, num(3, 1.0f));
     }
   }
@@ -1171,13 +1197,13 @@ void Editor::paint_command(const std::vector<std::string> &t) {
   else if (v == "stencil") {  // paint stencil <image>|off | offset x y | scale s (task 0246)
     const std::string w = arg(2, "off");
     auto finite = [&](float f, float d) { return std::isfinite(f) ? f : d; };
-    if (w == "off") paint_stencil_ = Bitmap();
+    if (w == "off") paint_stencil_ = Bitmap(), paint_stencil_path_.clear();
     else if (w == "offset") paint_stencil_offset_ = Vec2(std::max(-1e5f, std::min(1e5f, finite(num(3, 0.0f), 0.0f))), std::max(-1e5f, std::min(1e5f, finite(num(4, 0.0f), 0.0f))));
     else if (w == "scale") paint_stencil_scale_ = std::max(0.05f, std::min(20.0f, finite(num(3, 1.0f), 1.0f)));
     else {
       std::string path;
       for (size_t k = 2; k < t.size(); k++) path += (k > 2 ? " " : "") + t[k];
-      if (paint_load_brush_image(path, paint_stencil_, "paint stencil")) paint_stencil_offset_ = Vec2(), paint_stencil_scale_ = 1.0f;
+      if (paint_load_brush_image(path, paint_stencil_, "paint stencil")) paint_stencil_offset_ = Vec2(), paint_stencil_scale_ = 1.0f, paint_stencil_path_ = path;
     }
   }
   else if (v == "dab") {
@@ -1213,6 +1239,14 @@ void Editor::paint_command(const std::vector<std::string> &t) {
  * given) - or the top-down value gradient between two colours by the maps' position. Written under
  * Assets/Textures/Baked/<surface>_light.png (or _gradient.png); one undo step. Computed on the main thread: a texel of
  * the maps is a dot product (the mesh maps' rays were the bake's cost). */
+/* The surface has no mesh maps: loaded when the object has them baked, baked otherwise - the Fix says which. */
+void Editor::refuse_no_mesh_maps(const std::string &what) {
+  const GameObject *g = active_object();
+  const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+  if (mr && !mr->mesh_maps.empty()) return refuse(what + ": load the object's mesh maps into its surface", "surface maps", "Load Mesh Maps");
+  refuse(what + ": bake the object's mesh maps first", "bakedialog maps", "Bake Mesh Maps...");
+}
+
 bool Editor::paint_bake_light(const std::vector<std::string> &t, bool gradient) {
   auto num = [&](size_t i, float d) { return t.size() > i ? (float)std::atof(t[i].c_str()) : d; };
   GameObject *g = active_object();
@@ -1223,7 +1257,7 @@ bool Editor::paint_bake_light(const std::vector<std::string> &t, bool gradient) 
     return false;
   }
   if (!pt->maps || pt->maps->empty()) {
-    Log::warn("paint %s: the surface needs its mesh maps (meshmaps, then surface maps)", gradient ? "bakegradient" : "bakelight");
+    refuse_no_mesh_maps(gradient ? "Bake Gradient reads the mesh maps' position" : "Bake Light reads the mesh maps' normals and occlusion");
     return false;
   }
   const SurfaceMaps &m = *pt->maps;
@@ -1270,6 +1304,12 @@ bool Editor::paint_bake_light(const std::vector<std::string> &t, bool gradient) 
     const SurfaceMaps &mm = *maps;
     std::vector<uint32_t> px((size_t)mm.w * mm.h);
     for (size_t i = 0; i < px.size(); i++) {
+      if ((i & 4095) == 0) raw->progress.store((float)i / (float)px.size(), std::memory_order_relaxed);
+      if ((i & 4095) == 0 && raw->cancel.load(std::memory_order_relaxed)) {  // (the tray's Cancel: task 0253)
+        raw->why = "cancelled";
+        raw->done.store(true, std::memory_order_release);
+        return;
+      }
       Vec3 c;
       if (mm.cover[i] <= 0.0f) c = Vec3(1.0f);
       else if (gradient) c = bottom + (top - bottom) * clamp01(mm.position[i].y);
@@ -1294,6 +1334,11 @@ void Editor::bakelight_poll() {
   std::unique_ptr<BakeLightJob> job = std::move(bakelight_);
   if (job->thread.joinable()) job->thread.join();
   const bool gradient = job->gradient;
+  if (job->cancel.load(std::memory_order_relaxed)) {
+    fs::remove_file(job->abs);  // (a cancel after the write: the file goes too)
+    Log::info("paint %s: cancelled", gradient ? "bakegradient" : "bakelight");
+    return;
+  }
   if (!job->ok) {
     Log::warn("paint %s: %s", gradient ? "bakegradient" : "bakelight", job->why.c_str());
     return;
@@ -1450,7 +1495,7 @@ bool Editor::smat_apply(const std::string &name_or_path, ProceduralTexturePtr on
   pt->layers.push_back(std::move(grp));
   pt->touch();
   mark_changed("Apply Smart Material");
-  Log::info("Surface %s: %s applied on top (%zu layers)%s", pt->name.c_str(), pt->layers.back()->name.c_str(), pt->layers.size(), pt->maps ? "" : " - no mesh maps: its generators read flat grey (surface maps)");
+  Log::info("Surface %s: %s applied on top (%zu layers)%s", pt->name.c_str(), pt->layers.back()->name.c_str(), pt->layers.size(), pt->maps ? "" : " - no mesh maps: its generators read flat grey (Textures > Load Mesh Maps)");
   return true;
 }
 
@@ -1508,29 +1553,52 @@ void Editor::smat_command(const std::vector<std::string> &t) {
       grp = pt->layers[(size_t)i]->clone();
       if (name.empty()) name = grp->name.empty() ? "Smart Material" : grp->name;
     }
-    std::string file = name;
-    for (char &ch : file)
-      if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|' || ch == '#' || (unsigned char)ch < 32) ch = '_';
-    while (!file.empty() && (file.back() == ' ' || file.back() == '.')) file.pop_back();
-    static const char *reserved[] = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"};
-    for (const char *r : reserved)
-      if (to_lower(file) == to_lower(r)) file += "_";
-    if (file.empty()) {
-      Log::warn("smat: a name is needed");
-      return;
-    }
-    grp->name = file;
-    const std::string rel = "Assets/Materials/Smart/" + file + ".smat";
-    fs::make_dirs(resolve_asset_path("Assets/Materials/Smart"));
-    if (!fs::write_file(resolve_asset_path(rel), save_smart_material_text(*grp))) {
-      Log::warn("smat: could not write %s", rel.c_str());
-      return;
-    }
-    project_listed_ = -100;
-    Log::info("Smart material %s written (smat apply %s)", rel.c_str(), file.c_str());
+    smat_write(std::move(grp), name);
     return;
   }
   Log::warn("smat save <layer> <name> | apply <name> | list | builtin <name>");
+}
+
+/* A group of layers written as Assets/Materials/Smart/<name>.smat (task 0273: the console's save and the layer menu's). */
+/* A name as a file name: separators and reserved names made safe, "" when nothing is left. */
+std::string Editor::smat_file_name(const std::string &name) {
+  std::string file = name;
+  for (char &ch : file)
+    if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|' || ch == '#' || (unsigned char)ch < 32) ch = '_';
+  while (!file.empty() && (file.back() == ' ' || file.back() == '.')) file.pop_back();
+  static const char *reserved[] = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"};
+  for (const char *r : reserved)
+    if (to_lower(file) == to_lower(r)) file += "_";
+  return file;
+}
+
+/* `base`, or `base 2`, `base 3`... - the first no saved smart material has. */
+std::string Editor::smat_unique_name(const std::string &base) {
+  auto taken = [&](const std::string &n) { return fs::exists(resolve_asset_path("Assets/Materials/Smart/" + smat_file_name(n) + ".smat")); };
+  if (!taken(base)) return base;
+  for (int n = 2; n < 1000; n++)
+    if (!taken(base + " " + std::to_string(n))) return base + " " + std::to_string(n);
+  return base;
+}
+
+bool Editor::smat_write(std::unique_ptr<TextureLayer> grp, const std::string &name) {
+  const std::string file = smat_file_name(name);
+  if (file.empty()) {
+    Log::warn("smat: a name is needed");
+    return false;
+  }
+  grp->name = file;
+  const std::string rel = "Assets/Materials/Smart/" + file + ".smat";
+  fs::make_dirs(resolve_asset_path("Assets/Materials/Smart"));
+  if (!fs::write_file(resolve_asset_path(rel), save_smart_material_text(*grp))) {
+    Log::warn("smat: could not write %s", rel.c_str());
+    return false;
+  }
+  project_listed_ = -100;
+  smat_saved_listed_ = false;
+  toast(LogLevel::Info, "Smart material " + file + " saved: the Textures window's shelf lists it");
+  Log::info("Smart material %s written", rel.c_str());
+  return true;
 }
 
 /* export textures <packing> <dir> [--assign]: the active object's surface as a texture set. */

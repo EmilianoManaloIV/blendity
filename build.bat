@@ -144,10 +144,10 @@ set SRCRSP=%OBJ%\sources.rsp
   if "%USE_QUADRIFLOW%"=="1" echo extern\quadriflow\3rd\lemon-1.3.1\lemon\bits\windows.cc
 )
 set LIBSRC=@%SRCRSP%
-set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib ws2_32.lib %LIBLINK%
+set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%BLENDITY_NO_LTCG%"=="1" set FLAGS=!FLAGS:/GL=!
 if "%BLENDITY_NO_LTCG%"=="1" set LINKFLAGS=!LINKFLAGS:/LTCG=!
-if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib ws2_32.lib %LIBLINK%
+if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto app

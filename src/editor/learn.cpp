@@ -291,7 +291,7 @@ void Editor::draw_learn(const Recti &r) {
   if (is_done) {
     if (u.button(cb, lesson_ + 1 < n ? "Completed - Next lesson >" : "Completed!", true, Icon::Check) && lesson_ + 1 < n) lesson_++;
   }
-  else if (u.button(cb, "Mark complete & continue", false, Icon::Check)) {
+  else if (u.button(cb, "Mark Complete & Continue", false, Icon::Check)) {
     lessons_done_.insert(lesson_);
     if (lesson_ + 1 < n) lesson_++;
     save_prefs();

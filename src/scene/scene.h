@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include "../core/math.h"
+#include "../core/ramp.h"
 #include "material.h"
 #include "sketch.h"
 #include "mesh.h"
@@ -41,10 +42,18 @@ using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
 struct TextureLayer;  // texture/procedural_texture.h
 using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
 
+/* Round 329: a colour ramp's stops and a curve's points as text (RampStop, ramp_eval, curve_eval: core/ramp.h); ';' or
+ * ',' between items (',' lets a Try-it's ';'-separated commands carry one). */
+std::string ramp_to_text(const std::vector<RampStop> &stops);
+bool ramp_from_text(const std::string &s, std::vector<RampStop> &stops);
+std::string curve_to_text(const std::vector<Vec2> &pts);
+bool curve_from_text(const std::string &s, std::vector<Vec2> &pts);
+
 /* ------------------------------------------------------------ Reflection */
 /* One description of a component's fields drives the Inspector, the scene
  * file format, undo and change detection - the same trick as Unity's
  * SerializedProperty and Blender's RNA (blender/source/blender/makesrna). */
+
 struct Reflector {
   virtual ~Reflector() = default;
   virtual void field(const char *name, float &v, float speed = 0.05f, float min = -FLT_MAX, float max = FLT_MAX) = 0;
@@ -77,6 +86,20 @@ struct Reflector {
     text(name, path);
   }
   virtual void mesh(const char *name, MeshPtr &m) = 0;
+  /* Round 329: a colour ramp's stops and a curve's points - text to files, undo, hashing and edits ("pos r g b; ..."
+   * and "x y; ..."); the Inspector draws Blender's ColorRamp and RGB Curves widgets. */
+  virtual void ramp(const char *name, std::vector<RampStop> &stops) {
+    std::string s = ramp_to_text(stops);
+    const std::string before = s;
+    text(name, s);
+    if (s != before) ramp_from_text(s, stops);
+  }
+  virtual void curve(const char *name, std::vector<Vec2> &pts) {
+    std::string s = curve_to_text(pts);
+    const std::string before = s;
+    text(name, s);
+    if (s != before) curve_from_text(s, pts);
+  }
   /* Help text for the previous field (shown as an Inspector tooltip). */
   virtual void help(const char *) {}
   /* A collapsible group of fields (task 0145): the Inspector draws a foldout row and skips the fields while it is
@@ -167,7 +190,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten };
   // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
@@ -598,6 +621,20 @@ struct Outline : ComponentBase<Outline> {
   mutable ShellCache shells_[kShellSlots];
   mutable std::vector<MaterialPtr> mats_;
   mutable Vec3 mats_color_{-1.0f, -1.0f, -1.0f};
+};
+
+/* Round 334 (task 0314, ADR 0093): the "2D in 3D" look - the object's depth squashed along the camera's view about a
+ * pivot, in the Game view and renders only (the Scene view keeps the true shape for modelling), its shading the true
+ * shape's. On a parent it reaches the meshes below it; a child's own Camera Flatten wins for its subtree. */
+struct CameraFlatten : ComponentBase<CameraFlatten> {
+  static constexpr const char *kName = "CameraFlatten";
+  float amount = 0.6f;   // 0: as modelled, 1: flat (2 % of the depth kept)
+  int pivot = 0;         // Bounds Center (of this object and the meshes below), Object Origin, Bone
+  std::string bone;      // (Pivot Bone) a bone below this object, by name
+  int direction = 0;     // Toward the Camera (the line from the eye to the pivot), View Axis
+  bool children = true;  // the meshes below this object flatten with it
+  RenderRole render_role() const override { return RenderRole::CameraFlatten; }  // (the views' hash; found without a cast)
+  void reflect(Reflector &r) override;
 };
 
 struct Rotator : ComponentBase<Rotator> {
@@ -1075,6 +1112,9 @@ struct Armature : ComponentBase<Armature> {
   bool rest_position = false;  // skins show the mesh unposed
   bool in_front = true;        // bones drawn over the meshes
   float body_mass = 75.0f;     // kg: the whole body, shared among the bones by the volume each moves (task 0115)
+  /* Puppet Posing's handles set by hand (round 324): "Left Hand=Bone.003; Head=head" - a handle the rig's analysis
+   * finds wrongly is put on the bone named; the others stay found. */
+  std::string puppet_bones;
   static inline bool show_body_mass = true;  // (the Inspector shows it while the physics tools are switched on: task 0124)
   void reflect(Reflector &r) override;
 };
@@ -1191,6 +1231,8 @@ int add_humanoid_ik(Scene &scene, GameObject *root);
 /* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L"): side 0 left,
  * 1 right; limb 0 upper leg, 1 lower leg, 2 upper arm, 3 lower arm (ik.cpp; the walking rig reads it too, task 0124). */
 bool limb_of(const std::string &name, int &side, int &limb);
+std::vector<std::string> name_words(const std::string &name);  // (task 0279: lower-case words, camel case split)
+int name_side(const std::vector<std::string> &words);          // 0 left, 1 right, -1 none
 /* IK on a bone and its parent with a new target at its tip and a pole off its bend (the Rigging window's Add IK). */
 IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
 /* The object the IK constraint on `bone` aims at, looked for in its own character first (two copies share names). */
@@ -1573,6 +1615,9 @@ std::string save_scene_text(const Scene &scene);
 /* Shortest exact text form of a float (std::to_chars where available). */
 void append_float(std::string &s, float v);
 bool load_scene_text(const std::string &text, Scene &scene, std::string &error);
+/* A paper (round 324): its own sketch in a file of its own, its aspect and its colour. */
+std::string save_paper_text(const Sketch &sk, float aspect, uint32_t color);
+bool load_paper_text(const std::string &text, Sketch &sk, float &aspect, uint32_t &color);
 bool save_scene(const Scene &scene, const std::string &path);
 bool load_scene(const std::string &path, Scene &scene, std::string &error);
 /* Zstandard scene compression is compiled in (Blender's zstd library). */

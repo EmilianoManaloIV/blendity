@@ -680,6 +680,10 @@ static bool decode_tga(const uint8_t *d, size_t n, Bitmap &out, std::string &err
     return false;
   }
   size_t pos = 18 + idlen;
+  if (pos > n) {  // (the id field runs past the data: not a TGA - before the palette is read from beyond it)
+    err = "not a TGA";
+    return false;
+  }
   std::vector<uint8_t> pal;
   if (cmap) {
     int eb = (cmbits + 7) / 8;
@@ -687,6 +691,13 @@ static bool decode_tga(const uint8_t *d, size_t n, Bitmap &out, std::string &err
     pos += (size_t)cmlen * eb;
   }
   int bytes = (bpp + 7) / 8;
+  /* Bounded (review 322: any data of 18 bytes reaches this decoder last - a ZIP's header read as a 23k x 65k "TGA"): the
+   * header inside the data, a pixel size of 1-4 bytes, a sane pixel count, and an unpacked picture's pixels all there. */
+  const uint64_t count = (uint64_t)w * (uint64_t)h;
+  if (pos > n || bytes < 1 || bytes > 4 || count > (1ull << 28) || (!rle && pos + count * (uint64_t)bytes > n)) {
+    err = "not a TGA";
+    return false;
+  }
   out.width = w;
   out.height = h;
   out.rgba8.assign((size_t)w * h * 4, 255);
@@ -1205,6 +1216,11 @@ struct JpegCodes {
 }  // namespace
 
 bool write_jpeg(const std::string &path, const uint32_t *pixels, int w, int h, int stride, int quality) {
+  return fs::write_file(path, encode_jpeg(pixels, w, h, stride, quality));
+}
+
+/* Baseline JPEG, 4:4:4, in memory (task 0306: a PDF embeds it as it is). */
+std::string encode_jpeg(const uint32_t *pixels, int w, int h, int stride, int quality) {
   quality = std::max(1, std::min(100, quality));
   static const uint8_t base_l[64] = {16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
                                      14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
@@ -1351,7 +1367,33 @@ bool write_jpeg(const std::string &path, const uint32_t *pixels, int w, int h, i
     }
   if (nb > 0) put(0x7F, 7);  // pad with 1-bits
   u16(0xFFD9);
-  return fs::write_file(path, s);
+  return s;
+}
+
+/* A one-page PDF 1.4 holding the picture (task 0306): the catalog, the pages, the page and the picture as a JPEG image
+ * (DCTDecode) drawn over the whole page, the page `long_mm` on its long side in the picture's aspect. */
+std::string encode_pdf_image(const uint32_t *pixels, int w, int h, int stride, float long_mm, int quality) {
+  const std::string jpg = encode_jpeg(pixels, w, h, stride, quality);
+  const float pt = long_mm / 25.4f * 72.0f;  // (points)
+  const float pw = w >= h ? pt : pt * w / (float)h, ph = h >= w ? pt : pt * h / (float)w;
+  std::string out = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+  std::vector<size_t> at;
+  auto obj = [&](const std::string &body) {
+    at.push_back(out.size());
+    out += strprintf("%zu 0 obj\n", at.size()) + body + "\nendobj\n";
+  };
+  obj("<< /Type /Catalog /Pages 2 0 R >>");
+  obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  obj(strprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>", pw, ph));
+  obj(strprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length %zu >>\nstream\n", w, h,
+                jpg.size()) + jpg + "\nendstream");
+  const std::string draw = strprintf("q %.2f 0 0 %.2f 0 0 cm /Im0 Do Q", pw, ph);
+  obj(strprintf("<< /Length %zu >>\nstream\n", draw.size()) + draw + "\nendstream");
+  const size_t xref = out.size();
+  out += strprintf("xref\n0 %zu\n0000000000 65535 f \n", at.size() + 1);
+  for (size_t o : at) out += strprintf("%010zu 00000 n \n", o);
+  out += strprintf("trailer\n<< /Size %zu /Root 1 0 R >>\nstartxref\n%zu\n%%%%EOF\n", at.size() + 1, xref);
+  return out;
 }
 
 /* ===================================================================== */

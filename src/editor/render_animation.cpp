@@ -60,13 +60,17 @@ static std::string render_folder_name(const std::string &scene_name) {
 /* Starts rendering frames `first` to `last` (-1: the source's whole length) at `fps` (0: the source's). */
 bool Editor::start_render_animation(int first, int last, float fps) {
   if (playing_) {
-    Log::warn("Render Animation: Stop Play first (it poses the scene frame by frame)");
+    refuse("Render Animation: Stop Play first (it poses the scene frame by frame)", "stop", "Stop Play");
     return false;
   }
   int source = 0, src_last = 0;
   float src_fps = 30.0f;
   if (!render_animation_source(source, src_last, src_fps)) {
     Log::warn("Render Animation: the scene has no sequence and the selection no clip (Window > Sequencer or Animation)");
+    return false;
+  }
+  if (first > src_last) {  // (no frames: said, and no empty folder made - task 0288)
+    Log::warn("Render Animation: frame %d is past the end (%d)", first, src_last);
     return false;
   }
   stop_render_animation();
@@ -261,6 +265,30 @@ void Editor::set_ffmpeg_path(const std::string &path) {
   else Log::info("FFmpeg: %s", found.c_str());
 }
 
+/* Render Animation as the Render window's fields say (task 0288): its button, the Render menu and Ctrl+F12 alike. */
+bool Editor::start_render_animation_from_fields() {
+  if (ranim_last_ > 0 && ranim_first_ > ranim_last_) {
+    refuse("Render Animation: First Frame is after Last Frame (the Render window)", "window Render", "Open Render");
+    return false;
+  }
+  return start_render_animation(ranim_first_ > 0 ? ranim_first_ : -1, ranim_last_ > 0 ? ranim_last_ : -1, ranim_fps_ >= 1.0f ? ranim_fps_ : 0.0f);
+}
+
+/* Preferences' FFmpeg row (task 0288: what `renderanim ffmpeg <path>` set; empty looks on the PATH). */
+void Editor::draw_ffmpeg_settings() {
+  auto &u = ui_;
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  u.label({r.x + u.px(12), r.y, u.px(140), r.h}, "FFmpeg");
+  std::string &text = picker_text_["pref:ffmpeg"];
+  if (!u.editing(u.id("pref_ffmpeg"))) text = ffmpeg_path_;
+  const std::vector<platform::FileFilter> filters = {{"ffmpeg", {".exe", ""}}};
+  if (path_picker_field({r.x + u.px(160), r.y + u.px(2), r.w - u.px(172), r.h - u.px(4)}, u.id("pref_ffmpeg"), "pref:ffmpeg", text, PickKind::Open, filters,
+                        [this](const std::string &p) { set_ffmpeg_path(p); }) &&
+      text != ffmpeg_path_)
+    set_ffmpeg_path(text);
+  u.tooltip("The ffmpeg program Render Animation makes its MP4 with when this build has no FFmpeg of its own; empty: the one on the PATH.");
+}
+
 /* The Render window's Render Animation button (Stop while it runs); its tooltip says what makes the video. */
 void Editor::draw_render_animation_button(ui::Layout &lay) {
   auto &u = ui_;
@@ -270,7 +298,10 @@ void Editor::draw_render_animation_button(ui::Layout &lay) {
     if (u.button(r, strprintf("Stop Render Animation (%d / %d)", k, n), true, ui::Icon::Pause)) stop_render_animation();
     return;
   }
-  if (u.button(r, "Render Animation (Ctrl+F12)", false, ui::Icon::Camera)) start_render_animation();
+  const bool backwards = ranim_last_ > 0 && ranim_first_ > ranim_last_;
+  if (u.button_enabled(r, with_key("Render Animation", "render.animation"), !backwards, "First Frame is after Last Frame: change one below.", false, ui::Icon::Camera))
+    start_render_animation_from_fields();  // (task 0288: the range below)
+  draw_render_range(lay);
   if (!u.hovered(r)) return;  // (the PATH is searched only for the tooltip)
   const std::string ffmpeg = ffmpeg_program();
   u.tooltip("Every frame of the scene's sequence (or the selected object's clip) through this render, as\n"

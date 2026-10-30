@@ -154,7 +154,7 @@ void Editor::draw_my_tools_window(const Recti &r) {
   }
   const Recti plus{x, r.y + u.px(3), u.px(26), th - u.px(6)};
   if (u.button(plus, "+")) panel_naming_ = !panel_naming_;
-  u.tooltip("A new panel: type its name, then Enter. Put commands on it with a right-click on any menu row > Add to My Tools,\nor the console's panel add <name> <command>.");
+  u.tooltip("A new panel: type its name, then Enter. Put commands on it with a right-click on any menu row > Add to My Tools,\nor with a palette row's right-click.");
   int top = r.y + th;
   if (panel_naming_) {
     const Recti nr{r.x + u.px(6), top + u.px(2), r.w - u.px(12), u.row_h()};

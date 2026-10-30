@@ -4,6 +4,7 @@
 // there, per layout - Blender's Q menu) and the status bar's hints for what the mouse and keys do where it is
 // (Blender 2.8's status bar). The commands are the keymap's actions and the console's lines: nothing new to wire.
 #include "editor.h"
+#include "learn.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -20,7 +21,7 @@ struct Curated {
   const char *name, *category, *help, *command;
 };
 const Curated kCurated[] = {
-    {"Rig Hair from Mesh", "Rigging", "Chains of spring bones from the selected hair mesh, the mesh skinned to them.", "hair rig"},
+    {"Rig Hair from Mesh", "Rigging", "Chains of spring bones from the selected hair mesh, the mesh skinned to them (its locks and bones asked first).", "hair dialog"},
     {"Humanoid Rig", "Rigging", "A person's skeleton with IK on the hands and feet.", "rig humanoid"},
     {"Quadruped Rig", "Rigging", "A four-legged skeleton with IK on each foot.", "rig quadruped"},
     {"Auto IK on Selected Skeleton", "Rigging", "Two-bone IK on an imported skeleton's arms and legs.", "rig autoik"},
@@ -28,22 +29,26 @@ const Curated kCurated[] = {
     {"Smart UV Project", "UV", "Group faces by normal, project and pack: no seams needed.", "uv smart"},
     {"Part Unwrap", "UV", "PartUV's charts by parts under a stretch bound.", "uv parts"},
     {"Pack Islands", "UV", "Pack the UV islands into the 0-1 square.", "uv pack"},
-    {"UV Report", "UV", "Charts, seam length and stretch of the selected mesh's UVs (in the Console).", "uv report"},
+    {"UV Report", "UV", "Charts, seam length and stretch of the selected mesh's UVs, in a report.", "report uv report"},
     {"Render Preview", "Render", "A quick render at the preview settings.", "preview"},
     {"Save Render", "Render", "Save the last render to Renders/.", "saverender"},
     {"Generate Lighting", "Lighting", "Bake the scene's lightmaps.", "bake start"},
     {"Develop the Last Render", "Editing", "Open the last render in the Editing tab.", "develop open render"},
     {"Use as Camera Look", "Editing", "Give the Main Camera the Editing tab's look.", "develop look"},
     {"Start Live Link", "Live Link", "Send the scene to Blender, Unity, Godot or Unreal live.", "livelink start"},
+    {"Install a Bridge...", "Live Link", "Put the Live Link bridge into Blender, or a Unity, Godot or Unreal project (Window > Live Link).", "window Live Link"},
     {"Subdivide", "Mesh", "Split every face of the selected mesh.", "subdivide"},
     {"Smooth", "Mesh", "Relax the selected mesh's vertices.", "smooth"},
     {"Separate Loose Parts", "Mesh", "One object per loose part of the selected mesh.", "separate loose"},
     {"Apply Modifiers", "Mesh", "Bake the selected object's modifiers into its mesh.", "applymods"},
     {"New Material Asset", "Materials", "A material asset from the selection's first material.", "newmat"},
+    {"New Surface", "Texturing", "A layered surface on the selected object's material (Paint and smart materials work on it).", "surface new"},
+    {"Bake Mesh Maps...", "Texturing", "The object's normal, curvature, occlusion and thickness in its UVs: what the masks read.", "bakedialog maps"},
+    {"Bake Textures...", "Texturing", "The object's look baked into plain images.", "bakedialog textures"},
     {"Preferences", "Edit", "Preferences.", "preferences"},
     {"Manual", "Help", "The user manual.", "manual"},
     {"References", "Help", "The papers behind Blendity's features (Learn).", "references"},
-    {"Scene Statistics", "Help", "Objects, vertices and faces (in the Console).", "stats"},
+    {"Scene Statistics", "Help", "Objects, vertices and faces, in a report.", "report stats"},
     {"Bring Windows Back", "Windows", "Every window's tabs back into the main window.", "dock bringback"},
 };
 
@@ -132,7 +137,11 @@ void Editor::palette_run(const PaletteEntry &e) {
   palette_recent_.insert(palette_recent_.begin(), e.name);
   if (palette_recent_.size() > 10) palette_recent_.resize(10);
   last_palette_command_ = e.action.empty() ? e.command : "action " + e.action;
-  if (!e.action.empty()) run_action(e.action);
+  if (!e.action.empty()) {
+    action_asked_for_ = true;  // (task 0260: an action named here is meant, whatever window has the keyboard)
+    run_action(e.action);
+    action_asked_for_ = false;
+  }
   else run_console_command(e.command);
 }
 
@@ -182,7 +191,7 @@ void Editor::command_ctx_run(int item, const std::string &panel) {
   const PaletteEntry *e = palette_find(command_ctx_);
   if (!e) return;
   if (item == 0) toggle_favorite(e->name);
-  else if (item == 1) wheel_add(command_ctx_mode_, e->name, "", "");
+  else if (item == 1) wheel_add(command_ctx_mode_, e->name, "", panel);  // (task 0291: `panel` is the ring here)
   else if (item == 2) panel_add(panel.empty() ? panel_free_name() : panel, e->name);  // (task 0231)
   else if (item == 3) capture_shortcut_for(std::string(e->name));  // (a copy: the capture may rebuild the palette)
   ui_.close_popups();
@@ -213,7 +222,13 @@ void Editor::draw_command_palette() {
     u.menu_label(e->name);
     const bool fav = std::find(favorites().begin(), favorites().end(), e->name) != favorites().end();
     if (u.menu_item(fav ? "Remove from Quick Favorites" : "Add to Quick Favorites")) command_ctx_run(0);
-    if (u.menu_item("Add to the Wheel (" + command_ctx_mode_ + ")")) command_ctx_run(1);
+    const std::vector<std::string> rings = wheel_ring_choices(command_ctx_mode_);
+    if (rings.size() < 2 && u.menu_item("Add to the Wheel (" + command_ctx_mode_ + ")")) command_ctx_run(1);
+    if (rings.size() >= 2)  // (task 0291: into one of the set's rings too)
+      u.submenu("Add to the Wheel (" + command_ctx_mode_ + ")", u.px(220), [this, rings] {
+        for (size_t i = 0; i < rings.size(); i++)
+          if (ui_.menu_item(rings[i])) command_ctx_run(1, i == 0 ? std::string() : rings[i]);
+      });
     u.submenu("Add to My Tools", u.px(220), [this] {  // (task 0231)
       auto &u = ui_;
       for (const CustomPanel &p : std::vector<CustomPanel>(panels_))
@@ -226,7 +241,7 @@ void Editor::draw_command_palette() {
   u.popup(u.id("quick_favorites"), u.px(300), [this] {
     auto &u = ui_;
     u.menu_label("Quick Favorites (" + workspace_ + ")");
-    if (favorites().empty()) u.menu_label("Right-click a command in the palette (Ctrl+K) or a menu row");
+    if (favorites().empty()) u.menu_label("Right-click a command in the palette (" + key("edit.palette") + ") or a menu row");
     for (const std::string &n : std::vector<std::string>(favorites())) {
       const PaletteEntry *e = palette_find(n);
       if (!e) continue;
@@ -306,57 +321,7 @@ void Editor::palette_command(const std::vector<std::string> &t, const std::strin
 
 /* ---- the status bar's hints ---- */
 
-/* What the mouse and the keys do where the mouse is (the Scene view's tool and mode, the feel's navigation). */
-std::string Editor::statusbar_hint() const {
-  if (qm_.open) return "The Wheel: tap or flick a slice  |  1-8, or its first letters  |  Shift: keep it open  |  Esc: back, close";  // (task 0230)
-  /* Task 0235: a tool with steps names the next one. */
-  if (knife_.active) return knife_.has_first ? "Knife: click the second point to cut  |  Esc / Enter: done" : "Knife: click the first point of the cut  |  Esc / Enter: done";
-  if (xf_.active) {
-    static const char *const kModal[] = {"Move", "Rotate", "Scale"};
-    return std::string(kModal[std::max(0, std::min(2, xf_.mode))]) + ": move the mouse  |  X Y Z: lock an axis  |  type a value  |  Enter: apply  |  Esc: cancel";
-  }
-  if (modal_.active) {
-    std::string op = modal_.op;
-    if (!op.empty()) op[0] = (char)std::toupper((unsigned char)op[0]);
-    return op + ": move the mouse away from the centre for more  |  Shift: finer  |  type a value  |  Enter: apply  |  Esc: cancel";
-  }
-  if (pp_.active) return "Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel";
-  if (sketch_.active && !tablet_) return "Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop";
-  if (sculpt_remesh_) return "Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode) or `sculpt remesh cancel`: stop it at its next stage";  // (task 0241)
-  if (sculpt_)
-    return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, sculpt_brush_.kind))] + "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate group  |  Esc: leave" +
-           (sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", sculpt_subdiv_levels()) : std::string()) +
-           (sculpt_dyntopo_ ? strprintf("  |  Dyntopo %.2f", sculpt_dyntopo_detail_) : std::string());  // (tasks 0236, 0238, 0239, 0242)
-  if (meshmaps_job_) return "Mesh Maps: baking on a worker...  |  Esc in the Scene view or `meshmaps cancel`: stop it at the next row";  // (task 0243; after the modes' hints)
-  if (paint_) return "Paint: drag over the model (the pen's eraser end erases)  |  Esc: leave  |  paint color|size|fill ...";  // (task 0245)
-  if (surface_job_) return "Surface: evaluating the stack on a worker (the views show the last result until it lands)";  // (task 0244)
-  if (const size_t hidden = hidden_face_count(active_object()))  // (task 0238: hidden faces stay hidden in every mode and in renders - said so)
-    return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All, or `sculpt show all`)", hidden, hidden == 1 ? "" : "s", active_object()->name.c_str());
-  /* Task 0221: in Tablet Mode the fingers' and the pen's hints instead of the mouse's. */
-  if (tablet_ && scene_hovered_)
-    return "One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button, or a hold: the Wheel";
-  if (tablet_) return "Tablet Mode: a finger scrolls lists  |  Pen side button, or a pen or finger held still: the Wheel";
-  if (!scene_hovered_) return "Ctrl+K: find any command  |  Shift+Q: Quick Favorites";
-  std::string nav;
-  switch (nav_style_) {
-    case NavStyle::Unity: nav = "RMB: fly  |  MMB: pan  |  Alt+LMB: orbit  |  Wheel: zoom"; break;
-    case NavStyle::Unreal: nav = "RMB: fly  |  MMB: pan  |  Alt+LMB: orbit  |  Wheel: zoom"; break;
-    case NavStyle::Blender: nav = "MMB: orbit  |  Shift+MMB: pan  |  Wheel: zoom"; break;
-    case NavStyle::Maya: nav = "Alt+LMB: orbit  |  Alt+MMB: pan  |  Alt+RMB: zoom"; break;
-  }
-  if (edit_mode_) {
-    static const char *const kEls[] = {"vertices", "edges", "faces"};
-    static const char *const kTools[] = {"drag: pan", "the gizmo moves them", "the gizmo turns them", "the gizmo scales them", "the gizmo moves, turns, scales them"};
-    return std::string("Edit Mode (") + kEls[(int)elem_] + "): LMB: select  |  Shift or Ctrl+LMB: toggle  |  " + kTools[(int)tool_] + "  |  " + nav;
-  }
-  switch (tool_) {
-    case Tool::View: return "View tool: LMB drag: pan  |  " + nav;
-    case Tool::Move: return "Move: LMB: select  |  drag an arrow or plane: move along it  |  " + nav;
-    case Tool::Rotate: return "Rotate: LMB: select  |  drag a ring: turn about its axis  |  " + nav;
-    case Tool::Scale: return "Scale: LMB: select  |  drag a handle: scale along it, the centre: all axes  |  " + nav;
-    default: return "Transform: LMB: select  |  arrows move, rings turn, the centre box scales  |  " + nav;
-  }
-}
+/* statusbar_hint(): the hint table in hints.cpp (task 0254). */
 
 /* The hint in the status bar's middle, and the last action with Undo beside it (Nielsen: system status, undo). */
 void Editor::draw_statusbar_hint(const Recti &r) {
@@ -365,14 +330,54 @@ void Editor::draw_statusbar_hint(const Recti &r) {
   if (!undo_.empty() && r.w > u.px(140)) {
     const Recti undo_r{x, r.y + u.px(1), u.px(50), r.h - u.px(2)};
     if (u.button(undo_r, "Undo")) undo();
-    u.tooltip("Undo " + undo_.back().label + " (Ctrl+Z).");
+    u.tooltip("Undo " + undo_.back().label + " (" + key("edit.undo") + ").");
     const std::string last = "Last: " + undo_.back().label;
     const int lw = std::min(u.font.text_width(last), r.w / 4);
-    u.canvas.text_ellipsis(u.font, undo_r.right() + u.px(6), r.y + (r.h - u.font.line_height()) / 2, lw, last, u.theme.text_dim);
+    const Recti last_r{undo_r.right() + u.px(6), r.y, lw, r.h};
+    u.canvas.text_ellipsis(u.font, last_r.x, r.y + (r.h - u.font.line_height()) / 2, lw, last, u.theme.text_dim);
+    u.mark_widget(last_r);
+    if (u.record_buttons) u.button_rects["status:Last"] = last_r;
+    u.tooltip("The History window: every step, a click goes back to it.");
+    if (u.hovered(last_r) && u.in.pressed[0]) dock_open(WindowKind::History);  // (task 0254)
     x = undo_r.right() + u.px(18) + lw;
+  }
+  /* Task 0270: ? beside the hint opens the Learn lesson for what is under way (the hint row's topic). */
+  if (r.right() - x > u.px(80)) {
+    const int qs = r.h - u.px(2);
+    const Recti qr{x, r.y + u.px(1), qs, qs};
+    if (u.record_buttons) u.button_rects["status:?"] = qr;
+    if (u.button(qr, "?")) open_hint_lesson();
+    u.tooltip("The Learn lesson for this: " + std::string(lesson(hint_lesson()).title) + " (" + key("window.learn") + " opens Learn).");
+    x = qr.right() + u.px(6);
   }
   const int w = r.right() - x;
   if (w > u.px(40)) u.canvas.text_ellipsis(u.font, x, r.y + (r.h - u.font.line_height()) / 2, w, statusbar_hint(), u.theme.text_dim);
+}
+
+/* Task 0270: the lesson a hint row belongs to, by a word of its title; the shortcut sheet when nothing fits. */
+int Editor::hint_lesson() const {
+  static const std::pair<const char *, const char *> kTopics[] = {
+      {"sculpt", "Sculpting"}, {"remesh job", "Sculpting"}, {"hidden faces", "Sculpting"}, {"paint", "Painting the Surface"},
+      {"mesh maps job", "Painting the Surface"}, {"surface job", "Painting the Surface"}, {"strokes", "Stylized Environments"},
+      {"scatter", "Stylized Environments"}, {"weight paint", "Modifiers vs Components"}, {"edit mode", "Edit Mode"},
+      {"knife", "Advanced Modeling Tools"}, {"push/pull", "Points, Lines, N-gons"}, {"operator modal", "Bevel, Bridge"},
+      {"transform modal", "Move, Rotate, Scale"}, {"gizmo drag", "Move, Rotate, Scale"}, {"uv editor", "UV Mapping"},
+      {"draw", "Points, Lines, N-gons"}, {"sketch", "Drawing in Perspective"}, {"wheel", "Customizing the Editor"},
+      {"record", "Modifiers vs Components"}, {"baking", "Baked and Realtime Lighting"}, {"rendering", "Render Engines"},
+      {"pilot", "Cameras and Projection"}, {"edit origin", "Move, Rotate, Scale"}, {"object tools", "Navigating the Scene View"}};
+  const std::string row = hint_row_now().name;
+  const char *want = "Navigating the Scene View";
+  for (const auto &t : kTopics)
+    if (row == t.first) want = t.second;
+  for (int i = 0; i < lesson_count(); i++)
+    if (std::string(lesson(i).title).find(want) != std::string::npos) return i;
+  return 2;  // (the shortcut sheet)
+}
+
+void Editor::open_hint_lesson() {
+  lesson_ = hint_lesson();
+  dock_open(WindowKind::Learn);
+  hci_log("hint help: " + std::string(lesson(lesson_).title));
 }
 
 std::string Editor::favorites_prefs_text() const {

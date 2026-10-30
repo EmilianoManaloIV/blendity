@@ -58,7 +58,7 @@ void Editor::draw_tools_window(const Recti &r) {
       Recti row = lay.row(u.row_h() + u.px(2));
       if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, strprintf("%d more for other stages: Show All Tools", hidden)))
         show_all_tools_ = true;
-      u.tooltip("The '" + workspace_ + "' layout shows this stage's tools (Window > Layouts). Keys and the console reach every tool.");
+      u.tooltip("The '" + workspace_ + "' layout shows this stage's tools (Window > Layouts). Keys and the menus reach every tool; Show All Tools shows them here.");
     }
     else if (show_all_tools_ && focus_ != FocusAll) {  // and back
       Recti row = lay.row(u.row_h() + u.px(2));
@@ -148,7 +148,10 @@ void Editor::draw_tools_window(const Recti &r) {
       if (u.button({rr.x + u.px(4), rr.y, gw, rr.h}, "Guides from Edges")) guides_from_selected_edges();
       u.tooltip("Edit Mode: a construction line along each selected edge.");
       if (u.button({rr.x + u.px(6) + gw, rr.y, gw, rr.h}, show_guides_ ? "Hide Guides" : "Show Guides", show_guides_)) show_guides_ = !show_guides_;
-      if (u.button({rr.x + u.px(8) + 2 * gw, rr.y, gw, rr.h}, strprintf("Clear (%zu)", scene_->guides.size()))) {
+      u.tooltip("The construction lines drawn or hidden (they stay, and still snap, when hidden).");
+      const bool clear = u.button({rr.x + u.px(8) + 2 * gw, rr.y, gw, rr.h}, strprintf("Clear (%zu)", scene_->guides.size()));
+      u.tooltip("Every construction line removed (Undo brings them back).");
+      if (clear) {
         scene_->guides.clear();
         mark_changed("Clear Guides");
       }
@@ -171,19 +174,22 @@ void Editor::draw_tools_window(const Recti &r) {
            if (edit_mode_) exit_edit_mode();
            else enter_edit_mode();
          }},
-        {"Join", "Combine the selected meshes into the active one (Ctrl+J).", two && !edit_mode_, [this] { join_selected(); }},
+        {"Join", "Combine the selected meshes into the active one (the Mesh menu shows the key).", two && !edit_mode_, [this] { join_selected(); }},
         {"Separate Parts", "Every loose piece becomes its own object.", mesh, [this] { separate("loose"); }},
         {"Union", "Boolean: merge the selected solids into the active one.", two && !edit_mode_, [this] { boolean_selected(1, true); }},
         {"Difference", "Boolean: cut the other selected objects out of the active one.", two && !edit_mode_, [this] { boolean_selected(0, true); }},
         {"Intersect", "Boolean: keep only the overlap.", two && !edit_mode_, [this] { boolean_selected(2, true); }},
         {"Reset XForm", "Bake rotation and scale into the mesh (UModeler: Reset XForm; Blender: Ctrl+A).", has_sel, [this] { mesh_op("apply_transform"); }},
         {"Mirror X", "Add the mirrored half for good.", has_sel, [this] { mesh_op("mirror_x"); }},
+        {"Mirror Y", "Add the mirrored half for good (top and bottom).", has_sel, [this] { mesh_op("mirror_y"); }},  // (task 0287)
         {"Mirror Z", "Add the mirrored half for good.", has_sel, [this] { mesh_op("mirror_z"); }},
         {"Apply Modifiers", "Bake the modifier stack into the mesh.", has_sel, [this] { mesh_op("apply_modifiers"); }},
         {"Shade Smooth", "Smooth shading.", has_sel, [this] { mesh_op("shade_smooth"); }},
         {"Shade Flat", "Flat shading.", has_sel, [this] { mesh_op("shade_flat"); }},
         {"Shade Auto Smooth", "Smooth, but hard where faces meet at more than 30 degrees (Blender: Shade Auto Smooth).", has_sel,
          [this] { mesh_op("shade_auto_smooth"); }},
+        {"Clear Custom Normals", "Forget the imported or edited shading normals: the mesh shades from its faces and its smooth angle again\n"
+         "(Blender: Clear Custom Split Normals Data).", has_sel, [this] { customnormals_command("clear"); }},  // (task 0287)
         {"Subdivide", "Catmull-Clark, one level.", has_sel, [this] { mesh_op("subdivide"); }},
         {"Merge by Distance", "Weld close vertices.", has_sel, [this] { mesh_op("merge"); }},
         {"Delete Loose", "Remove vertices and wire edges no face uses (Blender: Clean Up > Delete Loose).", has_sel && !edit_mode_,
@@ -215,7 +221,7 @@ void Editor::draw_tools_window(const Recti &r) {
   if (section("Check: Overlapping Vertices & Edges", FocusCheck)) draw_overlap_panel(lay);
   if (section("UV", FocusUV)) {
     std::vector<GridButton> bs = {
-        {"Unwrap", "Unwrap along the seams (U).", mesh, [this] { uv_op("unwrap"); }},
+        {"Unwrap", "Unwrap along the seams.", mesh, [this] { uv_op("unwrap"); }},
         {"Smart UV", "Smart UV Project: no seams needed.", mesh, [this] { uv_op("smart"); }},
         {"Part Unwrap", "Unwrap by parts: few charts, each under the stretch bound.", mesh, [this] { uv_op("parts"); }},
         {"Cube Project", "Each face projected along its main axis.", mesh, [this] { uv_op("cube"); }},
