@@ -635,7 +635,7 @@ void Canvas::line(float x0, float y0, float x1, float y1, uint32_t color, float 
     Vec2 p{px, py};
     float t = len2 > 0 ? clampf(dot(p - a, d) / len2, 0.0f, 1.0f) : 0.0f;
     Vec2 q = a + d * t;
-    return saturate(hw + 0.5f - length(p - q));
+    return edge(hw - length(p - q));
   };
   /* Walk the major axis; only touch pixels within the stroke band. */
   bool steep = std::fabs(d.y) > std::fabs(d.x);
@@ -672,7 +672,7 @@ void Canvas::fill_circle(float cx, float cy, float r, uint32_t color) {
   for (int y = y0; y <= y1; y++)
     for (int x = x0; x <= x1; x++) {
       float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
-      blend_px_a(x, y, color, saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy)));
+      blend_px_a(x, y, color, edge(r - std::sqrt(dx * dx + dy * dy)));
     }
 }
 

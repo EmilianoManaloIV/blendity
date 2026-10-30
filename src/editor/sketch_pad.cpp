@@ -114,6 +114,17 @@ bool Editor::pad_takes_space() const {
   return pad_hovered_ && active_window_ == pad_window_ && ui_.frame_number() <= draw_last_frame_ + 2;  // (the window the pad is in: review 319)
 }
 
+/* The pen held still on the pad opens the Wheel (SketchBook's marking menu, round 321): a stroke begun but not yet
+ * moved, or no stroke at all - not an erase, a handle, the puck or a stroke that has gone somewhere. */
+bool Editor::pad_hold_opens_wheel() const {
+  if (sketch_.erasing || sketch_.drag_handle >= 0 || draw_puck_drag_ || pad_nav_) return false;
+  if (!sketch_.stroking) return true;
+  const float reach = ui_.px(4) * std::max(1.0f, pad_.zoom);
+  for (const Vec2 &p : sketch_.pen)
+    if (length(p - sketch_.pen.front()) > reach) return false;
+  return true;
+}
+
 /* A stroke, an erase or a guide's handle under way: the view stays put (the stroke's points are the picture's pixels as
  * they were when it began). */
 bool Editor::pad_busy() const {
@@ -378,7 +389,6 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
   u.tooltip("Everything else: the picture's source and the paper, the pen, the guides, Build, Place in 3D, the pad's view\n"
             "(fit, turn, flip) and hiding the tools.");
   u.canvas.pop_clip();
-  u.popup(u.id("draw_brush_menu"), u.px(200), [this] { draw_sketch_pen_menu(); });
   u.popup(u.id("draw_more_menu"), u.px(250), [this] { draw_pad_more_menu(); });
 }
 
@@ -399,14 +409,15 @@ void Editor::draw_pad_set_correct(int correct) {
 /* The brush, its color (the puck: a round swatch, the Color window with alpha) and its size. */
 void Editor::draw_pad_brush_group(const Recti &brush, const Recti &color, const Recti &size) {
   auto &u = ui_;
-  if (u.button(brush, "Brush", false, ui::Icon::Menu)) u.open_popup(u.id("draw_brush_menu"), {brush.x, brush.bottom(), 0, 0});
-  u.tooltip("The pen: its color, Steadiness, the Canvas the strokes land on, Lift the Sketch to 3D, Clear the Sketch.");
+  if (u.button(brush, "Brush", draw_palette_shown_ && !pad_ui_hidden_)) draw_palette_shown_ = !draw_palette_shown_;  // (round 320)
+  u.tooltip("The brush palette: SketchBook's brushes, the puck for their size and opacity, Brush Properties. B and E over\n"
+            "the pad pick the last brush and the Eraser; More > Pen has the pen's color, Steadiness and Canvas.");
   Vec3 c = Color::to_vec(sketch_.color);
   float a = ((sketch_.color >> 24) & 255) / 255.0f;
   if (u.color_field(u.id("draw_color"), color, c, &a)) sketch_.color = (Color::from(c) & 0xFFFFFF) | ((uint32_t)std::lround(saturate(a) * 255.0f) << 24);
   u.tooltip("The pen's color and opacity: click for any color (the Color window).");
   u.label({size.x, size.y, u.px(38), size.h}, "Size");
-  u.float_field(u.id("draw_width"), {size.x + u.px(40), size.y, size.w - u.px(40), size.h}, sketch_.width, 0.1f, 0.5f, 40.0f, "%.1f");
+  u.float_field(u.id("draw_width"), {size.x + u.px(40), size.y, size.w - u.px(40), size.h}, sketch_.width, 0.1f, 0.5f, 200.0f, "%.1f");
   u.tooltip("The pen's width, in the picture's pixels at 100% (zoomed in, a stroke is wider on screen).");
 }
 
@@ -529,14 +540,17 @@ void Editor::draw_draw_window(const Recti &r) {
     v = cam_.view(), p = cam_.proj(aspect);
   }
   pad_center_ = {fit.x + fit.w * 0.5f, fit.y + fit.h * 0.5f};
-  const bool hovered = u.hovered(view) && !u.any_popup_open();
-  pad_hovered_ = hovered;
+  sketch_brush_store();  // (the toolbar's Size, color and Steady into the brush they belong to)
+  const bool hovered = u.hovered(view) && !u.any_popup_open() && !draw_palette_over(view);  // (the palette over the pad is its own)
+  pad_hovered_ = u.hovered(view) && !u.any_popup_open();
   if (pad_ui_hidden_ && hovered && u.in.key_pressed[KEY_ESCAPE]) {  // (Esc brings the tools back before it ends the pen)
     pad_ui_hidden_ = false;
     u.in.key_pressed[KEY_ESCAPE] = false;
   }
   pad_space_release();
-  const bool navigating = pad_navigate(hovered);
+  if (hovered && u.in.key_down[KEY_B] && u.in.pressed[0] && !pad_busy()) draw_puck_begin(true);  // (B held and dragged: the puck at the pen)
+  if (draw_puck_at_pen_) draw_puck_update();
+  const bool navigating = draw_puck_drag_ || pad_navigate(hovered);
   const Recti pic = pad_picture_rect(fit);
   const auto draw3d = [&](RenderTarget &t) {
     render_camera(draw_r3d_, t, draw_ft_, v, p, eye, fwd, owner, gcam, aspect, gcam != nullptr, true, false);
@@ -555,6 +569,14 @@ void Editor::draw_draw_window(const Recti &r) {
   }
   sketch_bind(2, pic, scam, v, p, hovered && !navigating);  // (kind 2: the pad, in the tool's pixels)
   draw_pad_sketch(navigating);
+  draw_pad_cursor(hovered && !navigating);
+  if (draw_puck_drag_ && draw_puck_at_pen_) {  // (the brush's size and opacity where the pen is)
+    const float r = std::max(1.5f, sketch_.width * u.px(1.0f) * sketch_zoom() * 0.5f);
+    const uint32_t a = (uint32_t)std::lround(220.0f * saturate(sketch_brush_cur().opacity));
+    u.canvas.fill_circle(draw_puck_from_.x, draw_puck_from_.y, r, (sketch_.color & 0xFFFFFF) | (a << 24));
+    u.canvas.circle(draw_puck_from_.x, draw_puck_from_.y, r, u.theme.accent, 1.5f);
+  }
+  draw_pad_palette(view);
   draw_pad_hint(view, gcam != nullptr, hovered);
 }
 
@@ -589,7 +611,7 @@ void Editor::draw_pad_hint(const Recti &view, bool game, bool hovered) {
   if (!sketch_.active || !hovered || pad_ui_hidden_) return;
   const char *hint = game || draw_source_ == 2  // (the keys move only the Scene camera)
                          ? "Wheel: zoom   Middle-drag / Space+drag: pan   Shift: turn   Home: fit   Tab: hide the tools   Esc: stop drawing"
-                         : "Wheel: zoom   Middle-drag / Space+drag: pan   Shift: turn   Home: fit   Arrows / A D: orbit   W S: dolly   Tab: hide the tools";
+                         : "Wheel: zoom   Middle/Space-drag: pan   Shift: turn   Home: fit   Arrows, A D: orbit   W S: dolly   B / E: brush / eraser   Tab: tools";
   u.label(foot, hint, col);
 }
 

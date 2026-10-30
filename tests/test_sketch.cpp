@@ -1660,7 +1660,7 @@ static void tests_round318() {
     CHECK(on_ruler);
     ed.command("sketch off");
   });
-  test("the Draw tab's toolbar has the pen and the guides by clicks: a color field, Brush > Pen Color / Steadiness / Canvas, More > Guides > Perspective Follows the Camera, More > Build > Build from Sketch; narrow, its groups fold into More and every control stays inside the tab", [] {
+  test("the Draw tab's toolbar has the pen and the guides by clicks: a color field, More > Pen > Pen Color / Steadiness / Canvas, More > Guides > Perspective Follows the Camera, More > Build > Build from Sketch; narrow, its groups fold into More and every control stays inside the tab", [] {
     using platform::EventType;
     auto mouse_ev = [](EventType t, int x, int y, int key = 0) {
       platform::Event e;
@@ -1700,15 +1700,15 @@ static void tests_round318() {
     step();
     step();
     /* Pen > Pen Color > Red. */
-    const bool pen = click("draw:Brush") && ed.popup_count_for_test() == 1;  // (round 319: the toolbar's Brush)
+    const bool pen = click("draw:More") && hover("submenu:Pen");  // (round 320: More > Pen; the Brush button is the palette)
     const bool red = hover("submenu:Pen Color") && click("menu:Red");
     std::printf("    Pen opened %d; Red picked %d: the pen %08X\n", (int)pen, (int)red, (unsigned)ed.sketch_color_for_test());
     CHECK(pen && red && (ed.sketch_color_for_test() & 0xFFFFFF) == 0xD03030u);
     /* Pen > Steadiness > Medium (25 px). */
-    CHECK(click("draw:Brush") && hover("submenu:Steadiness") && click("menu:Medium"));
+    CHECK(click("draw:More") && hover("submenu:Pen") && hover("submenu:Steadiness") && click("menu:Medium"));
     CHECK(std::fabs(ed.sketch_tether_for_test() - 25.0f) < 1e-3f);
     /* Pen > Canvas > The Ground: the next strokes land on a ground canvas. */
-    CHECK(click("draw:Brush") && hover("submenu:Canvas") && click("menu:The Ground"));
+    CHECK(click("draw:More") && hover("submenu:Pen") && hover("submenu:Canvas") && click("menu:The Ground"));
     CHECK(ed.sketch_for_test().active_canvas != 0);
     /* Guides > Perspective Follows the Camera toggles; Build shows Build from Sketch's shapes. */
     const bool follow = ed.sketch_for_test().follow_camera;
@@ -2041,6 +2041,398 @@ void tests_round319() {
   });
 }
 
+/* Round 320 (task 0297, ADR 0088): SketchBook's brushes on the Draw tab - the palette and its puck, the brushes' keys,
+ * the Eraser that cuts. */
+void tests_round320() {
+  test("the brush palette: a tile's click picks the brush and the next stroke carries its opacity, edge and pressure; the puck dragged sideways sets the size, up the opacity; Brush hides the palette", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    CHECK(r.ed.draw_palette_shown_for_test());
+    CHECK(r.click("brush:Pencil") && r.ed.sketch_brush_for_test() == 0);
+    /* The toolbar's color shows the picked brush's color. */
+    Recti sw;
+    CHECK(r.ed.button_rect_for_test("draw:color", sw));
+    const Image &fb0 = r.ed.main_fb_for_test();
+    const uint32_t shown = fb0.pixels[(size_t)(sw.y + sw.h / 3) * fb0.width + (size_t)(sw.x + sw.w / 2)];
+    std::printf("    the Pencil picked: the pen %08X, the toolbar's swatch %08X\n", (unsigned)r.ed.sketch_color_for_test(), (unsigned)shown);
+    CHECK(r.ed.sketch_color_for_test() == 0xFF3A3A3Au && (shown & 0xFFFFFF) == 0x3A3A3Au);
+    CHECK(r.click("brush:Marker") && r.ed.sketch_brush_for_test() == 4);
+    const Vec2 c = r.mid();
+    r.stroke({{c.x + 100, c.y}, {c.x + 160, c.y + 10}, {c.x + 220, c.y}});
+    const Sketch &s = r.ed.sketch_for_test();
+    CHECK(!s.strokes.empty());
+    if (s.strokes.empty()) return;
+    const SketchStroke &st = s.strokes.back();
+    std::printf("    a Marker stroke: brush %d, opacity %.2f, edge %.2f, pressure %d, width %.1f\n", st.brush, st.opacity, st.soft, st.pressure_to, st.width);
+    CHECK(st.brush == 4 && std::fabs(st.opacity - 0.5f) < 1e-4f && std::fabs(st.soft - 0.1f) < 1e-4f && st.pressure_to == 2 && std::fabs(st.width - 18.0f) < 1e-3f);
+    /* The puck: 40 px right and 30 px up. */
+    Recti puck;
+    CHECK(r.ed.button_rect_for_test("draw:puck", puck));
+    const float w0 = r.ed.sketch_width_for_test(), o0 = r.ed.sketch_brush_opacity_for_test();
+    using platform::EventType;
+    const int px = puck.x + puck.w / 2, py = puck.y + puck.h / 3;
+    r.step({PadRig::ev(EventType::MouseMove, px, py)});
+    r.step({PadRig::ev(EventType::MouseDown, px, py)});
+    for (int i = 1; i <= 4; i++) r.step({PadRig::ev(EventType::MouseMove, px + i * 10, py - i * 7)});
+    r.step({PadRig::ev(EventType::MouseMove, px + 40, py - 30)});
+    r.step({PadRig::ev(EventType::MouseUp, px + 40, py - 30)});
+    const float w1 = r.ed.sketch_width_for_test(), o1 = r.ed.sketch_brush_opacity_for_test();
+    std::printf("    the puck: size %.1f -> %.1f, opacity %.2f -> %.2f; strokes %zu\n", w0, w1, o0, o1, s.strokes.size());
+    CHECK(std::fabs(w1 - w0 * std::pow(1.02f, 40.0f)) < 0.05f && std::fabs(o1 - (o0 + 0.2f)) < 0.01f && s.strokes.size() == 1);
+    CHECK(r.click("draw:Brush") && !r.ed.draw_palette_shown_for_test());
+    CHECK(r.click("draw:Brush") && r.ed.draw_palette_shown_for_test());
+    r.ed.command("sketch off");
+  });
+  test("the Draw tab's brush keys over the pad: [ and ] size, Shift+[ and Shift+] opacity, E the Eraser, B back to the last drawing brush", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 150, y = (int)c.y;
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    auto key = [&](int k, int mods = 0) {
+      platform::Event d = PadRig::ev(EventType::KeyDown, x, y, k), u = PadRig::ev(EventType::KeyUp, x, y, k);
+      d.mods = u.mods = mods;
+      r.step({d});
+      r.step({u});
+    };
+    CHECK(r.click("brush:Pencil"));
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    const float w0 = r.ed.sketch_width_for_test(), o0 = r.ed.sketch_brush_opacity_for_test();
+    key(platform::KEY_RBRACKET);
+    const float w1 = r.ed.sketch_width_for_test();
+    key(platform::KEY_LBRACKET);
+    key(platform::KEY_LBRACKET);
+    const float w2 = r.ed.sketch_width_for_test();
+    key(platform::KEY_RBRACKET, platform::MOD_SHIFT);
+    const float o1 = r.ed.sketch_brush_opacity_for_test();
+    std::printf("    ] %.2f -> %.2f, [ [ -> %.2f; Shift+] opacity %.2f -> %.2f\n", w0, w1, w2, o0, o1);
+    CHECK(std::fabs(w1 - w0 * 1.25f) < 1e-3f && std::fabs(w2 - w0 * 1.25f * 0.64f) < 1e-3f && std::fabs(o1 - std::min(1.0f, o0 + 0.1f)) < 1e-4f);
+    key('E');
+    CHECK(r.ed.sketch_brush_for_test() == 6);
+    key('B');
+    CHECK(r.ed.sketch_brush_for_test() == 0);  // (the Pencil: the last brush that draws)
+    for (const char *id : {"draw.brush", "draw.eraser", "draw.smaller", "draw.larger", "draw.fainter", "draw.stronger"}) CHECK(r.ed.run_action_for_test(id));
+    r.ed.command("sketch off");
+  });
+  test("the Eraser through a line's middle leaves its two ends as two strokes; the Stroke Eraser takes a stroke whole; the pen's eraser end cuts too", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    const Vec2 c = r.mid();
+    auto line = [&](float y) {
+      std::vector<Vec2> pts;
+      for (int i = 0; i <= 20; i++) pts.push_back({c.x - 50.0f + i * 15.0f, y});
+      r.stroke(pts);
+    };
+    auto across = [&](float x, bool eraser_end) {
+      using platform::EventType;
+      std::vector<platform::Event> evs;
+      r.step({pen_ev(EventType::MouseMove, (int)x, (int)c.y - 120, 1.0f, eraser_end)});
+      r.step({pen_ev(EventType::MouseDown, (int)x, (int)c.y - 120, 1.0f, eraser_end)});
+      for (int i = 1; i <= 12; i++) r.step({pen_ev(EventType::MouseMove, (int)x, (int)c.y - 120 + i * 20, 1.0f, eraser_end)});
+      r.step({pen_ev(EventType::MouseUp, (int)x, (int)c.y + 120, 1.0f, eraser_end)});
+      r.step();
+    };
+    const Sketch &s = r.ed.sketch_for_test();
+    line(c.y);
+    CHECK(s.strokes.size() == 1);
+    CHECK(r.click("brush:Eraser"));
+    across(c.x + 100.0f, false);
+    std::printf("    the Eraser across a line: %zu strokes", s.strokes.size());
+    bool apart = s.strokes.size() == 2;
+    if (apart) {  // (the two pieces end either side of the cut, about the Eraser's radius from it)
+      const float h = (float)r.ed.pad_rect_for_test().h;
+      const float gap = (s.strokes[1].pts.front().x - s.strokes[0].pts.back().x) * h;
+      std::printf(", the gap between them %.1f px", gap);
+      apart = gap > 10.0f && gap < 40.0f;
+    }
+    std::printf("\n");
+    CHECK(apart);
+    CHECK(r.click("brush:Stroke Eraser"));
+    across(c.x + 30.0f, false);
+    across(c.x + 180.0f, false);
+    std::printf("    the Stroke Eraser across both: %zu strokes\n", s.strokes.size());
+    CHECK(s.strokes.empty());
+    CHECK(r.click("brush:Pen"));
+    line(c.y);
+    across(c.x + 100.0f, true);
+    std::printf("    the pen's eraser end across a line: %zu strokes\n", s.strokes.size());
+    CHECK(s.strokes.size() == 2);
+    r.ed.command("undo");
+    const size_t after_undo = r.ed.sketch_for_test().strokes.size();  // (undo puts back another scene: read it afresh)
+    std::printf("    after an undo: %zu strokes\n", after_undo);
+    CHECK(after_undo == 1);  // (one undo step: the cut)
+    r.ed.command("sketch off");
+  });
+  test("a stroke's brush is saved with the scene and read back; a stroke line from before brushes loads as the Pen", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const SketchBrush &air = sketch_brush_presets()[5];
+    SketchStroke made;  // (an Airbrush stroke as the Draw tab makes it: the brush is the pad's)
+    made.color = air.color, made.width = air.width, made.brush = 5, made.opacity = air.opacity, made.soft = air.soft, made.pressure_to = air.pressure_to;
+    made.pts = {{0.2f, 0.3f, 0.7f}, {0.3f, 0.32f, 0.7f}, {0.4f, 0.3f, 0.7f}};
+    ed.add_sketch_stroke_for_test(made);
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    const std::string text = save_scene_text(ed.scene());
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err) && back.sketch.strokes.size() == 1);
+    if (back.sketch.strokes.size() == 1) {
+      const SketchStroke &st = back.sketch.strokes[0];
+      std::printf("    read back: brush %d, opacity %.2f, edge %.2f, pressure %d\n", st.brush, st.opacity, st.soft, st.pressure_to);
+      CHECK(st.brush == 5 && std::fabs(st.opacity - 0.15f) < 1e-4f && std::fabs(st.soft - 1.0f) < 1e-4f && st.pressure_to == 2);
+    }
+    /* The line as round 319 wrote it: no brush fields after the raw points. */
+    const std::string old_line = "sketch_stroke 0 0 0 4280295456 2 0 0 0 0 0 0 0 0 2 0.1 0.1 1 0.2 0.1 1 0\n";
+    const size_t at = text.find("sketch_stroke ");
+    const size_t end = at == std::string::npos ? at : text.find('\n', at);
+    CHECK(at != std::string::npos);
+    if (at == std::string::npos) return;
+    Scene old;
+    CHECK(load_scene_text(text.substr(0, at) + old_line + text.substr(end + 1), old, err) && old.sketch.strokes.size() == 1);
+    if (old.sketch.strokes.size() == 1) {
+      const SketchStroke &st = old.sketch.strokes[0];
+      CHECK(st.brush == 1 && st.opacity == 1.0f && st.soft == 0.0f && st.pressure_to == 1 && st.min_size == 0.0f);
+    }
+  });
+  test("a see-through stroke crossing itself has one tone where it overlaps (composited once); 500 Airbrush strokes drawn (time printed)", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    r.ed.command("draw source paper");
+    r.ed.command("sketch brush Felt Pen");
+    r.ed.command("sketch brush opacity 0.5");
+    r.ed.command("sketch brush pressure none");
+    const Vec2 c = r.mid();
+    /* There and back along the same row (overlapping itself all along), and a single pass below it. */
+    std::vector<Vec2> back_and_forth, once;
+    for (int i = 0; i <= 10; i++) back_and_forth.push_back({c.x + 60.0f + i * 15.0f, c.y - 40.0f});
+    for (int i = 10; i >= 0; i--) back_and_forth.push_back({c.x + 60.0f + i * 15.0f, c.y - 40.0f});
+    for (int i = 0; i <= 10; i++) once.push_back({c.x + 60.0f + i * 15.0f, c.y + 40.0f});
+    r.stroke(back_and_forth);
+    r.stroke(once);
+    r.step();
+    const Image &fb = r.ed.main_fb_for_test();
+    auto px = [&](float x, float y) { return fb.pixels[(size_t)y * fb.width + (size_t)x]; };
+    const uint32_t a = px(c.x + 135.0f, c.y - 40.0f), b = px(c.x + 135.0f, c.y + 40.0f), paper = px(c.x + 135.0f, c.y);
+    std::printf("    there and back %08X, once %08X, the paper %08X\n", (unsigned)a, (unsigned)b, (unsigned)paper);
+    CHECK(a == b && a != paper);
+    /* 500 Airbrush strokes on the picture plane, and 300 long diagonal Pencil lines, each timed over one pad frame
+     * (always drawn: review 320's measurement drew nothing). */
+    r.ed.command("sketch clear");
+    r.ed.command("redraw always");
+    const Recti pad = r.ed.pad_rect_for_test();
+    const float aspect = pad.w / (float)pad.h;
+    auto frame_ms = [&] {
+      const double t0 = now_seconds();
+      r.step();
+      return (now_seconds() - t0) * 1000.0;
+    };
+    const double empty_ms = frame_ms();
+    for (int pass = 0; pass < 2; pass++) {
+      const bool airbrush = pass == 0;
+      const SketchBrush &b = sketch_brush_presets()[airbrush ? 5 : 0];
+      r.ed.command("sketch clear");
+      const int n = airbrush ? 500 : 300;
+      for (int k = 0; k < n; k++) {
+        SketchStroke st;
+        st.color = b.color, st.width = b.width, st.brush = airbrush ? 5 : 0;
+        st.opacity = b.opacity, st.soft = b.soft, st.pressure_to = b.pressure_to, st.min_size = b.min_size;
+        const float x = 0.08f + (k / 50) * 0.11f * aspect / 1.2f, y = 0.1f + (k % 50) * 0.016f;
+        if (airbrush) st.pts = {{x, y, 0.8f}, {x + 0.05f, y + 0.015f, 1.0f}, {x + 0.1f, y, 0.8f}};
+        else st.pts = {{0.05f + k * 0.002f, 0.05f, 0.7f}, {0.05f + k * 0.002f + 0.8f, 0.95f, 0.9f}};
+        r.ed.add_sketch_stroke_for_test(st);
+      }
+      const double ms = frame_ms();
+      const Image &fb = r.ed.main_fb_for_test();
+      const Vec2 under = airbrush ? Vec2{pad.x + (0.08f + 0.05f) * pad.h, pad.y + (0.1f + 0.0075f) * pad.h}
+                                  : Vec2{pad.x + (0.05f + 0.4f) * pad.h, pad.y + 0.5f * pad.h};
+      const uint32_t px = fb.pixels[(size_t)under.y * fb.width + (size_t)under.x];
+      std::printf("    %d %s strokes: one pad frame %.1f ms (empty %.1f ms); a pixel under one %08X\n", n, airbrush ? "Airbrush" : "diagonal Pencil", ms,
+                  empty_ms, (unsigned)px);
+      CHECK(r.ed.sketch_for_test().strokes.size() == (size_t)n && (px & 0xFFFFFF) != 0xFFFFFFu);
+    }
+    r.ed.command("redraw changes");
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+}
+
+/* Round 321 (task 0298): the Wheel on the Draw tab - its own set, and the pen held still opening it (SketchBook's
+ * marking menu). */
+void tests_round321() {
+  test("the Wheel over the Draw tab opens its own set (brushes, the Ruler, Fit, Hide Tools); a slice picks the Inker", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 150, y = (int)c.y;
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    r.step({PadRig::ev(EventType::KeyDown, x, y, ' ')});
+    r.step({PadRig::ev(EventType::KeyUp, x, y, ' ')});
+    r.step();
+    std::printf("    Space over the pad: the Wheel open %d, its set \"%s\"\n", (int)r.ed.quick_menu_open_for_test(), r.ed.wheel_mode_for_test().c_str());
+    CHECK(r.ed.quick_menu_open_for_test() && r.ed.wheel_mode_for_test() == "draw");
+    /* The Inker is the second slice: its number key picks it (the Wheel's keys 1-8, task 0230). */
+    r.step({PadRig::ev(EventType::KeyDown, x, y, '2')});
+    r.step({PadRig::ev(EventType::KeyUp, x, y, '2')});
+    r.step();
+    std::printf("    2 on the Wheel: the brush %d, the Wheel open %d\n", r.ed.sketch_brush_for_test(), (int)r.ed.quick_menu_open_for_test());
+    CHECK(r.ed.sketch_brush_for_test() == 2 && !r.ed.quick_menu_open_for_test());
+    r.ed.command("sketch off");
+  });
+  test("the pen held still half a second on the pad opens the Wheel and draws nothing; a pen that moves draws its stroke and opens nothing", [] {
+    PadRig r;
+    using platform::EventType;
+    r.ed.command("sketch place flat");
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 150, y = (int)c.y;
+    r.step({pen_ev(EventType::MouseMove, x, y)});
+    r.step({pen_ev(EventType::MouseDown, x, y)});
+    for (int i = 0; i < 40; i++) r.step({pen_ev(EventType::MouseMove, x + (i & 1), y)});  // (0.8 s, a hand's tremble)
+    const bool open = r.ed.quick_menu_open_for_test();
+    r.step({pen_ev(EventType::MouseUp, x, y)});
+    r.step();
+    std::printf("    held still: the Wheel open %d (\"%s\"), strokes %zu\n", (int)open, r.ed.wheel_mode_for_test().c_str(), r.ed.sketch_for_test().strokes.size());
+    CHECK(open && r.ed.wheel_mode_for_test() == "draw" && r.ed.sketch_for_test().strokes.empty());
+    r.step({PadRig::ev(EventType::KeyDown, x, y, platform::KEY_ESCAPE)});
+    r.step();
+    std::vector<Vec2> pts;
+    for (int i = 0; i <= 40; i++) pts.push_back({(float)x + i * 3.0f, (float)y + 20.0f});
+    r.stroke(pts);
+    std::printf("    moving: the Wheel open %d, strokes %zu\n", (int)r.ed.quick_menu_open_for_test(), r.ed.sketch_for_test().strokes.size());
+    CHECK(!r.ed.quick_menu_open_for_test() && r.ed.sketch_for_test().strokes.size() == 1);
+    r.ed.command("sketch off");
+  });
+}
+
+/* Round 320's review: the brushes' preferences, the console's brush verbs, the brush kept to the Draw tab, the Eraser on
+ * a scene canvas and a locked layer. */
+void tests_round320_review() {
+  test("the brushes are kept in the preferences: each brush's size, color and opacity, the one picked, the palette's place, the user's own brushes (at most eight) - read back as they were", [] {
+    PadRig r;
+    r.ed.command("sketch brush Pen");
+    r.ed.command("sketch brush size 8");
+    r.ed.command("sketch color ff0000");
+    r.ed.command("sketch brush Marker");
+    r.ed.command("sketch brush opacity 0.3");
+    r.ed.command("sketch brush duplicate");
+    const std::string text = r.ed.brush_prefs_text_for_test();
+    std::printf("    the preferences' brush lines:\n%s", text.c_str());
+    Editor back;
+    back.init_headless(1600, 900);
+    std::istringstream is(text);
+    for (std::string line; std::getline(is, line);) {
+      const size_t eq = line.find('=');
+      if (eq != std::string::npos) back.brush_pref_for_test(line.substr(0, eq), line.substr(eq + 1));
+    }
+    back.command("sketch brush Pen");
+    const float pen_w = back.sketch_width_for_test();
+    const uint32_t pen_c = back.sketch_color_for_test();
+    back.command("sketch brush Marker 2");
+    std::printf("    read back: the Pen %.1f px %08X; %d brushes, the picked one's opacity %.2f\n", pen_w, (unsigned)pen_c, back.sketch_brush_count_for_test(),
+                back.sketch_brush_opacity_for_test());
+    CHECK(std::fabs(pen_w - 8.0f) < 1e-4f && (pen_c & 0xFFFFFF) == 0xFF0000u && back.sketch_brush_count_for_test() == 9);
+    CHECK(back.sketch_brush_for_test() == 8 && std::fabs(back.sketch_brush_opacity_for_test() - 0.3f) < 1e-4f);
+    /* The palette's place is kept. */
+    CHECK(back.brush_pref_for_test("draw_palette", "300 200 1"));
+    back.command("layout Drawing");
+    back.step_frame_headless();
+    back.command("window Draw");
+    for (int i = 0; i < 3; i++) back.step_frame_headless();
+    const Recti pr = back.draw_palette_rect_for_test();
+    std::printf("    the palette at (%d, %d)\n", pr.x, pr.y);
+    CHECK(pr.x == 300 && pr.y == 200);
+    /* Eight of the user's own at most; Delete takes one (a preset can't go). */
+    for (int i = 0; i < 9; i++) r.ed.command("sketch brush duplicate");
+    std::printf("    after nine more duplicates: %d brushes\n", r.ed.sketch_brush_count_for_test());
+    CHECK(r.ed.sketch_brush_count_for_test() == 16);
+    r.ed.command("sketch brush delete");
+    CHECK(r.ed.sketch_brush_count_for_test() == 15 && r.ed.sketch_brush_for_test() == 1);
+    r.ed.command("sketch brush delete");  // (the Pen: a preset stays)
+    CHECK(r.ed.sketch_brush_count_for_test() == 15);
+    /* A NaN in a brush line is skipped. */
+    CHECK(back.brush_pref_for_test("sketch_brush", "Pen|0|nan|1|0|1|0|nan|4278190080|-1"));
+    back.command("sketch brush Pen");
+    CHECK(std::isfinite(back.sketch_width_for_test()));
+    r.ed.command("sketch off");
+  });
+  test("the console's brush verbs: list, size, edge, min, pressure, smaller / larger, fainter / stronger, reset", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("sketch brush list");
+    ed.command("sketch brush Inker");
+    ed.command("sketch brush size 12");
+    CHECK(std::fabs(ed.sketch_width_for_test() - 12.0f) < 1e-4f);
+    ed.command("sketch brush edge 0.4");
+    ed.command("sketch brush min 0.25");
+    ed.command("sketch brush pressure both");
+    ed.command("sketch on");
+    ed.command("sketchstroke 300 300 400 320");
+    ed.command("sketch off");
+    const Sketch &s = ed.sketch_for_test();
+    CHECK(!s.strokes.empty());
+    /* A stroke made in the Scene view is a plain pen's (the brush is the Draw tab's: review 320), at the pen's width. */
+    if (!s.strokes.empty()) CHECK(s.strokes.back().soft == 0.0f && s.strokes.back().pressure_to == 1 && std::fabs(s.strokes.back().width - 12.0f) < 1e-4f);
+    ed.command("sketch brush reset");
+    CHECK(std::fabs(ed.sketch_width_for_test() - 4.0f) < 1e-4f);
+    ed.command("sketch brush larger");
+    ed.command("sketch brush smaller");
+    CHECK(std::fabs(ed.sketch_width_for_test() - 4.0f) < 1e-3f);
+    const float o = ed.sketch_brush_opacity_for_test();
+    ed.command("sketch brush fainter");
+    CHECK(std::fabs(ed.sketch_brush_opacity_for_test() - (o - 0.1f)) < 1e-4f);
+    ed.command("sketch brush stronger");
+    CHECK(std::fabs(ed.sketch_brush_opacity_for_test() - o) < 1e-4f);
+    ed.command("sketch brush nothing-by-that-name");
+    CHECK(ed.sketch_brush_for_test() == 2);
+  });
+  test("the Draw tab's Eraser picked: the Scene view's pen still draws there; on a ground canvas the Eraser cuts where it crosses in perspective; a locked layer's strokes stay", [] {
+    PadRig r;
+    r.ed.command("sketch brush Eraser");
+    r.ed.command("sketch on");
+    r.ed.command("sketchstroke 300 300 400 320");  // (the Scene view's pixels: a stroke, not an erase)
+    CHECK(r.ed.sketch_for_test().strokes.size() == 1);
+    r.ed.command("sketch clear");
+    /* A ground line from near to far, cut at its middle on screen. */
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    r.ed.command("sketchcanvas ground");
+    const Vec2 c = r.mid();
+    r.ed.command("sketch brush Pen");
+    std::vector<Vec2> pts;
+    for (int i = 0; i <= 20; i++) pts.push_back({c.x - 150.0f + i * 15.0f, c.y + 120.0f - i * 9.0f});
+    r.stroke(pts);
+    const size_t before = r.ed.sketch_for_test().strokes.size();
+    CHECK(before == 1);
+    CHECK(r.click("brush:Eraser"));
+    const Vec2 mid = pts[10];
+    using platform::EventType;
+    r.step({pen_ev(EventType::MouseMove, (int)mid.x - 40, (int)mid.y)});
+    r.step({pen_ev(EventType::MouseDown, (int)mid.x - 40, (int)mid.y)});
+    for (int i = 1; i <= 8; i++) r.step({pen_ev(EventType::MouseMove, (int)mid.x - 40 + i * 10, (int)mid.y)});
+    r.step({pen_ev(EventType::MouseUp, (int)mid.x + 40, (int)mid.y)});
+    r.step();
+    const Sketch &s = r.ed.sketch_for_test();
+    std::printf("    the ground line cut at its middle on screen: %zu pieces\n", s.strokes.size());
+    bool where = s.strokes.size() == 2;
+    for (const SketchStroke &st : s.strokes) {  // (no piece ends within the Eraser's reach of the cut's middle, both run out to their ends)
+      Vec2 a, b;
+      where = where && r.ed.sketch_stroke_px_for_pad_test(st, st.pts.front(), a) && r.ed.sketch_stroke_px_for_pad_test(st, st.pts.back(), b);
+      where = where && std::min(length(a - mid), length(b - mid)) > 6.0f && std::min(length(a - mid), length(b - mid)) < 40.0f;
+    }
+    CHECK(where);
+    /* A locked layer's strokes stay. */
+    r.ed.command("sketch layer lock");
+    const size_t locked = s.strokes.size();
+    r.step({pen_ev(EventType::MouseMove, (int)pts[3].x, (int)pts[3].y - 30)});
+    r.step({pen_ev(EventType::MouseDown, (int)pts[3].x, (int)pts[3].y - 30)});
+    for (int i = 1; i <= 6; i++) r.step({pen_ev(EventType::MouseMove, (int)pts[3].x, (int)pts[3].y - 30 + i * 10)});
+    r.step({pen_ev(EventType::MouseUp, (int)pts[3].x, (int)pts[3].y + 30)});
+    CHECK(r.ed.sketch_for_test().strokes.size() == locked);
+    r.ed.command("sketch off");
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
@@ -2052,4 +2444,7 @@ void run_sketch_tests() {
   tests_round254();
   tests_round318();
   tests_round319();
+  tests_round320();
+  tests_round320_review();
+  tests_round321();
 }

@@ -83,6 +83,23 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
           {"Redo", "Redo", {}},
           {"Palette", "Command Palette", {}}}},
         {"Stop Sketching", "Sketch (pen)", {}}}},
+      {"draw",  // (round 321: the Draw tab's own - SketchBook's marking menu: brushes, guides, the pad's view)
+       {{"Pencil", "sketch brush Pencil", {}},
+        {"Inker", "sketch brush Inker", {}},
+        {"Marker", "sketch brush Marker", {}},
+        {"Eraser", "sketch brush Eraser", {}},
+        {"Ruler", "sketchguide ruler", {}},
+        {"Fit", "draw view fit", {}},
+        {"Hide Tools", "draw tools toggle", {}},
+        {"More", "",
+         {{"Pen", "sketch brush Pen", {}},
+          {"Felt Pen", "sketch brush Felt Pen", {}},
+          {"Airbrush", "sketch brush Airbrush", {}},
+          {"Stroke Eraser", "sketch brush Stroke Eraser", {}},
+          {"Ellipse", "sketchguide ellipse", {}},
+          {"No Guide", "sketchguide off", {}},
+          {"Flip Canvas", "draw view flip", {}},
+          {"Undo", "Undo", {}}}}}},
       {"layers",  // (task 0234: a pen held on a row - the press picked the layer)
        {{"New", "sketch layer add", {}},
         {"Duplicate", "sketch layer duplicate", {}},
@@ -581,7 +598,8 @@ bool Editor::wheel_hold_busy() {
   const auto &in = ui_.in;
   if (ui_.any_active() || modal_.active || xf_.active || pp_.active || sculpt_stroking_ || sculpt_gesture_) return true;  // (task 0236: a stroke under way; 0238: a Ctrl gesture)
   const WindowKind under = wheel_window_at(hold_x_, hold_y_);
-  if (sketch_.active && (under == WindowKind::Draw || under == WindowKind::Game)) return true;  // (task 0233: the pen draws there too)
+  if (sketch_.active && under == WindowKind::Game) return true;  // (task 0233: the pen draws there too)
+  if (sketch_.active && under == WindowKind::Draw) return !pad_hold_opens_wheel();  // (round 321: a pen held still on the pad)
   if (under != WindowKind::Scene) return false;
   if (sketch_.active) return true;
   const bool finger_still = in.touch && drag_button_ == 0 && (drag_ == Drag::Orbit || drag_ == Drag::Pan || finger_orbit_);
@@ -618,6 +636,10 @@ void Editor::wheel_take_press() {
   finger_orbit_ = false;
   hier_drag_ = 0, hier_dragging_ = false, hier_pending_select_ = 0;
   wp_abort_stroke();
+  if (sketch_.stroking && sketch_.view_kind == 2) {  // (round 321: the pad's dot under the held pen isn't drawn)
+    sketch_.stroking = false;
+    sketch_.pen.clear(), sketch_.pressure.clear();
+  }
   edit_brush_stroke_ = false;
   uv_drag_ = UvDrag::None;
   bone_drag_ = BoneDrag{};

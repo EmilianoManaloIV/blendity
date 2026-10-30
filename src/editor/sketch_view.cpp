@@ -145,7 +145,9 @@ bool Editor::sketch_keyboard_nav() {
   const bool arrow_l = in.key_down[KEY_LEFT], arrow_r = in.key_down[KEY_RIGHT], up = in.key_down[KEY_UP], down = in.key_down[KEY_DOWN];
   const bool letters = !in.shift();  // (Shift+letter chords - Shift+D, Shift+Q, Shift+A - are the shortcuts'; Shift+arrows pan)
   const bool left = arrow_l || (letters && in.key_down[KEY_A]), right = arrow_r || (letters && in.key_down[KEY_D]);
-  const bool in_ = letters && in.key_down[KEY_W], out = letters && in.key_down[KEY_S], pan_up = letters && in.key_down[KEY_E], pan_down = letters && in.key_down[KEY_Q];
+  /* Q / E pan in the Scene view; over the Draw tab's pad E is SketchBook's Eraser (round 320), so there Shift+arrows pan. */
+  const bool qe = letters && sketch_view_.kind != 2;
+  const bool in_ = letters && in.key_down[KEY_W], out = letters && in.key_down[KEY_S], pan_up = qe && in.key_down[KEY_E], pan_down = qe && in.key_down[KEY_Q];
   const bool any = left || right || up || down || in_ || out || pan_up || pan_down;
   sketch_keynav_ = any;
   if (!any) return false;
@@ -169,7 +171,7 @@ bool Editor::sketch_keyboard_nav() {
   if (out) cam_.distance = std::min(1e6f, cam_.distance * std::exp(kNavDollyPerSecond * dt));
   cam_.animating = false;
   for (int k : {KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN, KEY_A, KEY_D, KEY_W, KEY_S, KEY_Q, KEY_E})
-    if (in.key_down[k]) in.key_pressed[k] = false;  // (a key the view took: not the shortcuts')
+    if (in.key_down[k] && (qe || (k != KEY_Q && k != KEY_E))) in.key_pressed[k] = false;  // (a key the view took: not the shortcuts')
   ui_.redraw = true;
   return true;
 }

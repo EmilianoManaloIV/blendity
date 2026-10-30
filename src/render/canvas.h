@@ -138,6 +138,13 @@ class Canvas {
     if (x) xf_ = *x;
   }
   bool has_xform() const { return xf_on_; }
+  Vec2 map(Vec2 p) const { return xf_on_ ? xf_.map(p) : p; }  // (a point as the drawing calls would place it)
+  /* While on, a pixel keeps the stronger of its alpha and the new one instead of compositing over it: a stroke drawn
+   * into its own transparent picture this way has one alpha where it crosses itself (task 0297, ADR 0088). */
+  void set_blend_max(bool on) { blend_max_ = on; }
+  /* While above 1, line and fill_circle fade to nothing over this many pixels inside their edge instead of over one (a
+   * soft brush in one pass: task 0297). */
+  void set_feather(float px) { feather_ = px; }
 
   /* Text: y is the top of the line box. Returns the advance in pixels. */
   int text(Font &f, int x, int y, const std::string &s, uint32_t color);
@@ -154,13 +161,19 @@ class Canvas {
     if (a <= 0.0f || !clip_.contains(x, y)) return;
     uint32_t ca = (uint32_t)((color >> 24) * saturate(a));
     uint32_t &d = img_->pixels[(size_t)y * img_->width + x];
+    if (blend_max_) {
+      if (ca > (d >> 24)) d = (color & 0xFFFFFF) | (ca << 24);
+      return;
+    }
     d = Color::over(d, (color & 0xFFFFFF) | (ca << 24));
   }
 
  private:
   Image *img_ = nullptr;
   Xform xf_;
-  bool xf_on_ = false;
+  bool xf_on_ = false, blend_max_ = false;
+  float feather_ = 0.0f;
+  float edge(float inside) const { return feather_ > 1.0f ? saturate(inside / feather_) : saturate(inside + 0.5f); }  // (coverage at a distance inside the edge)
   Recti clip_;
   std::vector<Recti> clip_stack_;
 };

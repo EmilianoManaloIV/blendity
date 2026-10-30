@@ -49,7 +49,10 @@
    {"id": "E5", "task": "Three-point perspective guide", "steps": "Mesh > Draw > Guides > 3-Point Perspective; draw lines", "expect": "Lines snap to the vanishing points", "target": 6, "source": "estimate", "ui": []},
    {"id": "E6", "task": "Lift a corner's three lines to 3D", "steps": "Draw three lines toward the axes; Mesh > Draw > Lift the Sketch to 3D", "expect": "A Scaffold wire object", "target": 4.85, "source": "klm", "ui": ["Lift the Sketch to 3D"]},
    {"id": "E7", "task": "Clear the sketch", "steps": "Mesh > Draw > Clear the Sketch; Ctrl+Z", "expect": "Strokes gone, then back", "target": 3, "source": "reach", "ui": ["Clear the Sketch"]},
-   {"id": "E8", "task": "Build a box from three lines", "steps": "Mesh > Draw > Build from Sketch > Box", "expect": "A box mesh from the sketched corner", "target": 5, "source": "estimate", "ui": []}
+   {"id": "E8", "task": "Build a box from three lines", "steps": "Mesh > Draw > Build from Sketch > Box", "expect": "A box mesh from the sketched corner", "target": 5, "source": "estimate", "ui": []},
+   {"id": "E9", "task": "Zoom in on the Draw tab to draw a detail, turn the canvas, then fit", "steps": "Drawing layout; wheel over the detail; Shift+middle-drag to turn; draw; Home", "expect": "The canvas zooms about the pointer and turns; the stroke lands where drawn; Home fits", "target": 8, "source": "estimate", "ui": ["More"]},
+   {"id": "E10", "task": "Switch to the Marker and make it bigger and fainter with the puck", "steps": "Draw tab > Brush; the Marker tile; drag the puck right and down", "expect": "A wider, fainter Marker; its stroke has one tone where it crosses itself", "target": 6, "source": "estimate", "ui": ["Brush", "Duplicate"]},
+   {"id": "E11", "task": "Erase the middle of a line, then pick the last brush back", "steps": "Over the pad: E; drag across the line; B", "expect": "Two pieces either side of the cut; the brush you were drawing with again", "target": 5, "source": "estimate", "ui": []}
   ]},
   {"id": "F", "name": "UV", "items": [
    {"id": "F1", "task": "Smart UV project", "steps": "UV Unwrapping layout > Smart UV", "expect": "Islands packed in 0-1, no overlaps", "target": 3, "source": "estimate", "ui": ["Smart UV"]},
