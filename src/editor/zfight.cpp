@@ -466,7 +466,7 @@ void Editor::draw_overlap_panel(ui::Layout &lay) {
   auto &u = ui_;
   overlap_current();  // (during a drag the panel shows what was found before it)
   if (!edit_mode_ || !edit_object()) {
-    u.label(lay.row(), "Edit a mesh (Tab) to see overlapping vertices and edges.", u.theme.text_dim);
+    u.label(lay.row(), "Edit a mesh (" + key("mode.edit_toggle") + ") to see overlapping vertices and edges.", u.theme.text_dim);
     return;
   }
   Recti r = lay.row();

@@ -20,6 +20,11 @@ void Editor::toast(LogLevel level, const std::string &text, const std::string &f
       if (t.fix_cmd.empty()) t.fix_cmd = fix_cmd, t.fix_label = fix_label;
       return;
     }
+  if (level == LogLevel::Info && toasts_.size() >= 3) {  // (an Info toast never pushes out a warning or an error: the oldest Info goes, or none)
+    const auto victim = std::find_if(toasts_.rbegin(), toasts_.rend(), [](const Toast &o) { return o.level == LogLevel::Info; });
+    if (victim == toasts_.rend()) return;
+    toasts_.erase(std::next(victim).base());
+  }
   Toast t;
   t.text = text, t.fix_cmd = fix_cmd, t.fix_label = fix_label, t.level = level, t.born = clock_now();
   toasts_.insert(toasts_.begin(), t);
@@ -97,11 +102,12 @@ void Editor::draw_toasts(const Recti &view) {
     if (t.count > 1) text += strprintf("  x%d", t.count);
     const int bw = t.fix_cmd.empty() ? 0 : u.font.text_width("Fix: " + t.fix_label) + u.px(28);
     const int w = std::min(view.w - u.px(40), u.font.text_width(text) + 2 * pad + lh + (bw ? bw + gap : 0));
-    const Recti r{view.x + (view.w - w) / 2, y, w, lh + 2 * pad};
-    const uint32_t accent = t.level == LogLevel::Error ? u.theme.error : u.theme.warning;
+    const Recti r{view.x + (view.w - w) / 2, y, w, tablet_ ? std::max(lh + 2 * pad, u.px(34)) : lh + 2 * pad};  // (task 0270: 7 mm in Tablet Mode)
+    const uint32_t accent = t.level == LogLevel::Error ? u.theme.error : t.level == LogLevel::Warning ? u.theme.warning : u.theme.accent;
     u.frame(r, u.theme.button, accent, u.px(4));
     const int a = lh - u.px(4);
-    u.draw_icon(t.level == LogLevel::Error ? ui::Icon::Error : ui::Icon::Warning, {r.x + pad, r.y + (r.h - a) / 2, a, a}, accent);
+    const ui::Icon icon = t.level == LogLevel::Error ? ui::Icon::Error : t.level == LogLevel::Warning ? ui::Icon::Warning : ui::Icon::Info;
+    u.draw_icon(icon, {r.x + pad, r.y + (r.h - a) / 2, a, a}, accent);
     const Recti tr{r.x + pad + lh, r.y, std::max(0, w - 2 * pad - lh - (bw ? bw + gap : 0)), r.h};
     u.canvas.text_ellipsis(u.font, tr.x, tr.y + (tr.h - lh) / 2, tr.w, text, u.theme.text_bright);
     ToastRects rects;

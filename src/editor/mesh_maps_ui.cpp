@@ -39,11 +39,11 @@ const Mesh *bake_source(const GameObject *g, const MeshFilter *mf, std::string *
  * writes the layout onto the mesh and is a step on the object). */
 bool Editor::bake_mesh_maps_start(const MeshMapsSettings &s) {
   if (meshmaps_job_) {
-    Log::warn("Mesh Maps: a bake is running (meshmaps cancel stops it)");
+    refuse("Mesh Maps: a bake is running - the tray's Cancel stops it", "meshmaps cancel", "Cancel the bake");
     return false;
   }
   if (playing_) {
-    Log::warn("Mesh Maps: stop Play first");
+    refuse("Mesh Maps: stop Play first", "stop", "Stop Play");
     return false;
   }
   GameObject *g = active_object();
@@ -78,13 +78,13 @@ bool Editor::bake_mesh_maps_start(const MeshMapsSettings &s) {
   MeshMapsJob *raw = job.get();
   job->thread = std::thread([raw] {
     JobSystem::global().run_background([raw] {  // (the bake's parallel rows in an arena of their own, the main thread's loops untouched)
-      raw->ok = bake_mesh_maps(*raw->input, raw->model, raw->settings, raw->result, &raw->why, &raw->cancel);
+      raw->ok = bake_mesh_maps(*raw->input, raw->model, raw->settings, raw->result, &raw->why, &raw->cancel, &raw->progress);
       if (raw->ok && !raw->cancel.load(std::memory_order_relaxed)) raw->ok = write_mesh_maps(raw->result, raw->base, &raw->why);
     });
     raw->done.store(true, std::memory_order_release);
   });
   meshmaps_job_ = std::move(job);
-  Log::info("Mesh Maps: baking %d x %d with %d samples on a worker (Esc in the Scene view or `meshmaps cancel` stops it)", s.size, s.size, s.samples);
+  Log::info("Mesh Maps: baking %d x %d with %d samples on a worker (Esc in the Scene view or the tray's Cancel stops it)", s.size, s.size, s.samples);
   ui_.redraw = true;
   return true;
 }
@@ -109,7 +109,8 @@ void Editor::meshmaps_poll() {
     else if (!job->result.own_uvs && job->result.uvs.size() != mf->mesh->corner_verts.size()) drop = "the layout no longer fits the mesh";
   }
   if (!drop.empty()) {  // (the job's destructor removes the files of a bake that did not land)
-    Log::warn("Mesh Maps: %s - nothing kept", drop.c_str());
+    if (drop == "cancelled") Log::info("Mesh Maps: cancelled - nothing kept");  // (the user's own doing: not a warning)
+    else Log::warn("Mesh Maps: %s - nothing kept", drop.c_str());
     ui_.redraw = true;
     return;
   }

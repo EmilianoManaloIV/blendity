@@ -31,7 +31,7 @@ void Editor::set_scatter(bool on) {
     if (sculpt_) set_sculpt(false);
     if (strokeobj_) set_strokeobj(false);
     if (scatter_brush_.source.empty() || !scene_->find_by_name(scatter_brush_.source)) {
-      Log::warn("Scatter: name the object to scatter first (scatter <object>)");
+      refuse("Scatter: pick a Source first (Modeling Tools > Scatter)", "window Modeling Tools", "Open Scatter");
       return;
     }
   }
@@ -269,7 +269,7 @@ void Editor::scatter_draw(const Recti &view) {
   auto &u = ui_;
   const Vec2 c((float)u.in.mx, (float)u.in.my);
   if (c.x < view.x || c.y < view.y || c.x > view.right() || c.y > view.bottom()) return;
-  u.canvas.circle(c.x, c.y, std::max(4.0f, scatter_brush_.radius * 40.0f * u.scale), u.in.eraser ? u.theme.warning : u.theme.accent);
+  draw_brush_ring(c.x, c.y, std::max(4.0f, scatter_brush_.radius * 40.0f * u.scale), u.in.eraser || u.in.alt(), u.theme.accent);  // (task 0269)
 }
 
 /* scatter <object> | density n | radius r | scale a b | rotate deg | align normal|up | tint [r g b]|off | seed n | mask <layer>|off |
@@ -289,7 +289,7 @@ void Editor::scatter_command(const std::vector<std::string> &t) {
     b.tint = arg(2, "off") != "off";
     if (b.tint && t.size() >= 5) b.tint_color = Vec3(num(2, 1.0f), num(3, 1.0f), num(4, 1.0f));
   }
-  else if (v == "seed") b.seed = (uint32_t)std::max(0.0f, num(2, 1.0f));
+  else if (v == "seed") b.seed = (uint32_t)clampf(num(2, 1.0f), 0.0f, 1e6f);  // (the panel's Seed field's range: task 0286)
   else if (v == "mask") b.mask_layer = arg(2, "off") == "off" ? -1 : (int)num(2, -1.0f);
   else if (v == "dab" || v == "erase") {
     if (!scatter_) set_scatter(true);

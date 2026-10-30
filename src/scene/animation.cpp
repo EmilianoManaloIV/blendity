@@ -404,6 +404,7 @@ struct FieldAccess : Reflector {
   int axis = 0;
   bool write = false, found = false;
   float value = 0.0f;
+  bool stepped = false;  // (round 335: a switch, a whole number or a list - keyed Constant)
   bool hit(const char *n) { return !found && want == n; }
   template<class T> void take(T &v) {
     if (write) v = (T)value;
@@ -417,14 +418,14 @@ struct FieldAccess : Reflector {
     if (hit(n)) {
       if (write) v = (int)std::lround(value);
       else value = (float)v;
-      found = true;
+      found = stepped = true;
     }
   }
   void field(const char *n, bool &v) override {
     if (!hit(n)) return;
     if (write) v = value >= 0.5f;
     else value = v ? 1.0f : 0.0f;
-    found = true;
+    found = stepped = true;
   }
   void field(const char *n, Vec3 &v) override {
     if (hit(n)) take(v[std::max(0, std::min(2, axis))]);
@@ -434,13 +435,13 @@ struct FieldAccess : Reflector {
     if (!hit(n)) return;
     if (write) v = std::max(0, std::min(count - 1, (int)std::lround(value)));
     else value = (float)v;
-    found = true;
+    found = stepped = true;
   }
   void text(const char *, std::string &) override {}
   void mesh(const char *, MeshPtr &) override {}
 };
 
-bool component_value(GameObject &g, const std::string &property, int axis, bool write, float &value) {
+bool component_value(GameObject &g, const std::string &property, int axis, bool write, float &value, bool *stepped = nullptr) {
   const size_t dot = property.find('.');
   if (dot == std::string::npos) return false;
   const std::string type = property.substr(0, dot), field = property.substr(dot + 1);
@@ -451,12 +452,69 @@ bool component_value(GameObject &g, const std::string &property, int axis, bool 
     c->reflect(fa);
     if (!fa.found) return false;
     value = fa.value;
+    if (stepped) *stepped = fa.stepped;
     return true;
   }
   return false;
 }
 
+/* Round 335: "Material <slot>.<Field>" - a field of the material in that slot of the object's MeshRenderer (Base
+ * Color, Roughness, Emission Strength, a fog's density...). The slot's material itself: one shared by other objects
+ * changes on them too, as editing it in the Inspector does. */
+constexpr size_t kMaterialPrefix = 9;  // "Material "
+
+/* The material a "Material <slot>." property names on g (its slot a whole number, in range), and the field's name. */
+Material *material_of(GameObject &g, const std::string &property, std::string &field) {
+  if (property.compare(0, kMaterialPrefix, "Material ") != 0) return nullptr;
+  const size_t dot = property.find('.', kMaterialPrefix);
+  if (dot == std::string::npos || dot == kMaterialPrefix) return nullptr;
+  const std::string digits = property.substr(kMaterialPrefix, dot - kMaterialPrefix);
+  if (digits.find_first_not_of("0123456789") != std::string::npos || digits.size() > 6) return nullptr;
+  const size_t slot = (size_t)std::atoi(digits.c_str());
+  MeshRenderer *mr = g.mesh_renderer();
+  if (!mr || slot >= mr->materials.size() || !mr->materials[slot]) return nullptr;
+  field = property.substr(dot + 1);
+  return mr->materials[slot].get();
+}
+
+/* One field of a reflected thing, read or written (the stepped flag: a switch, whole number or list). */
+template<class T> bool access_field(T &thing, const std::string &field, int axis, bool write, float &value, bool *stepped = nullptr) {
+  FieldAccess fa;
+  fa.want = field, fa.axis = axis, fa.write = write, fa.value = value;
+  thing.reflect(fa);
+  if (!fa.found) return false;
+  value = fa.value;
+  if (stepped) *stepped = fa.stepped;
+  return true;
+}
+
+/* Round 335: "Material <slot>.<Field>" - a field of the material in that slot of the object's MeshRenderer (Base
+ * Color, Roughness, Emission Strength, a fog's density...). The slot's material itself: one shared by other objects
+ * changes on them too, as editing it in the Inspector does. Touched only when the value changes (a held key every
+ * frame of Play would otherwise be a new picture every frame). */
+bool material_value(GameObject &g, const std::string &property, int axis, bool write, float &value) {
+  std::string field;
+  Material *m = material_of(g, property, field);
+  if (!m) return false;
+  if (!write) return access_field(*m, field, axis, false, value);
+  float before = 0.0f, after = value;
+  if (!access_field(*m, field, axis, false, before) || !access_field(*m, field, axis, true, after)) return false;
+  float now = 0.0f;
+  access_field(*m, field, axis, false, now);
+  if (now != before) m->touch();  // (the views and the path tracer see a new version)
+  return true;
+}
+
 }  // namespace
+
+bool anim_value_stepped(GameObject &g, const std::string &property) {
+  if (property == "Active") return true;
+  float v = 0.0f;
+  bool stepped = false;
+  std::string field;
+  if (Material *m = material_of(g, property, field)) return access_field(*m, field, 0, false, v, &stepped) && stepped;
+  return component_value(g, property, 0, false, v, &stepped) && stepped;
+}
 
 bool read_anim_value(GameObject &g, const std::string &property, int axis, float &out) {
   const Transform &t = g.local();
@@ -464,6 +522,8 @@ bool read_anim_value(GameObject &g, const std::string &property, int axis, float
   if (property == "Position") return out = t.position[a], true;
   if (property == "Rotation") return out = t.euler_hint[a], true;
   if (property == "Scale") return out = t.scale[a], true;
+  if (property == "Active") return out = g.active ? 1.0f : 0.0f, true;  // (round 335: shown or hidden)
+  if (material_value(g, property, axis, false, out)) return true;
   return component_value(g, property, axis, false, out);
 }
 
@@ -477,6 +537,8 @@ bool write_anim_value(GameObject &g, const std::string &property, int axis, floa
     t.euler_hint[a] = value;
     t.rotation = Quat::euler(t.euler_hint);
   }
+  else if (property == "Active") return g.active = value >= 0.5f, true;
+  else if (property.compare(0, kMaterialPrefix, "Material ") == 0) return material_value(g, property, axis, true, value);
   else return component_value(g, property, axis, true, value);
   g.set_local(t);
   return true;

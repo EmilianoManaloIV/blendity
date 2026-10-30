@@ -7,6 +7,7 @@
 #include "../core/jobs.h"
 #include "../render/mesh_maps.h"
 #include "../texture/surface.h"
+#include "../texture/smart_material.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -23,7 +24,7 @@ bool is_int(const std::string &a) { return !a.empty() && a.size() <= 9 && std::a
 ProceduralTexturePtr Editor::surface_of(GameObject *g, std::string *why) const {
   const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
   if (!mr || mr->materials.empty() || !mr->materials[0]) {
-    if (why) *why = g ? g->name + " has no material (surface new makes one with a surface)" : "select a mesh object first";
+    if (why) *why = g ? g->name + " has no material (Textures window > New > Surface on the Selected Object makes one)" : "select a mesh object first";
     return nullptr;
   }
   std::string asset;
@@ -32,7 +33,7 @@ ProceduralTexturePtr Editor::surface_of(GameObject *g, std::string *why) const {
     if (split_texture_ref(map->path, asset, output))
       if (ProceduralTexturePtr pt = texture_asset(asset))
         if (pt->surface) return pt;
-  if (why) *why = g->name + "'s material has no surface (surface new makes one)";
+  if (why) *why = g->name + "'s material has no surface (Textures window > New > Surface on the Selected Object makes one)";
   return nullptr;
 }
 
@@ -40,7 +41,7 @@ ProceduralTexturePtr Editor::surface_of(GameObject *g, std::string *why) const {
 bool Editor::surface_load_maps(GameObject *g, ProceduralTexture &pt, std::string *why, bool step) {
   const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
   if (!mr || mr->mesh_maps.empty()) {
-    if (why) *why = (g ? g->name : std::string("the object")) + " has no mesh maps baked (Object > Bake Mesh Maps, or `meshmaps`)";
+    if (why) *why = (g ? g->name : std::string("the object")) + " has no mesh maps baked (Object > Bake Mesh Maps)";
     return false;
   }
   auto maps = std::make_shared<SurfaceMaps>();
@@ -117,8 +118,40 @@ bool Editor::surface_new(const std::string &name_in) {
   texture_paths_listed_ = -100;
   project_listed_ = -100;
   mark_changed("New Surface " + pt->name);
-  Log::info("Surface %s on %s: %d x %d, a Fill layer; `surface add <layer>`, `surface mask add <layer> <effect>`, `surface mask preset <layer> edgewear|dirt|dust|...`", pt->name.c_str(), g->name.c_str(),
+  Log::info("Surface %s on %s: %d x %d, a Fill layer; add layers, effects and masks in the Textures window", pt->name.c_str(), g->name.c_str(),
             pt->width, pt->height);
+  return true;
+}
+
+/* Task 0273: the Textures window's layer menu - a mask preset, the mask cleared, the layer grouped with the one below,
+ * the layer saved as a smart material - on the texture it edits. */
+bool Editor::texture_layer_op(const std::string &asset, const std::string &op, int layer, const std::string &arg) {
+  ProceduralTexturePtr pt = texture_asset(asset);
+  if (!pt || layer < 0 || layer >= (int)pt->layers.size()) return false;
+  TextureLayer &l = *pt->layers[(size_t)layer];
+  if (op == "smat") {  // (no name: the dialog asks for one, a free one offered)
+    const std::string refusal = smart_material_refusal(l);
+    if (!refusal.empty()) return refuse("Save as Smart Material: " + refusal, "", ""), false;
+    if (!arg.empty()) return smat_write(l.clone(), arg);
+    smat_asset_ = asset, smat_layer_ = layer;
+    dialog_text_ = smat_unique_name(l.name.empty() ? std::string("Smart Material") : l.name);
+    dialog_ = Dialog::SaveSmat;
+    return true;
+  }
+  if (op != "preset" && op != "clearmask" && op != "group") return false;
+  if (op == "group" && layer + 1 >= (int)pt->layers.size()) return false;
+  note_texture_edit(*pt);
+  if (op == "preset") apply_surface_mask_preset(l, arg), mark_changed("Mask Preset " + arg);
+  else if (op == "clearmask") l.mask_layers.clear(), mark_changed("Clear Mask");
+  else {  // (group: checked above)
+    auto grp = create_texture_layer("Group");
+    TextureLayerList *children = grp->children();
+    for (int k = layer; k <= layer + 1; k++) children->push_back(std::move(pt->layers[(size_t)k]));
+    pt->layers.erase(pt->layers.begin() + layer, pt->layers.begin() + layer + 2);
+    pt->layers.insert(pt->layers.begin() + layer, std::move(grp));
+    mark_changed("Group Layers");
+  }
+  pt->touch();
   return true;
 }
 
@@ -299,7 +332,7 @@ void Editor::surface_poll() {
       if (load_surface_maps(resolve_asset_path(t->maps_from), std::max(t->width, t->height), *maps, &err)) t->maps = maps;
       else {
         surface_maps_failed_.insert(t->asset_path);
-        Log::warn("Surface %s: %s (Mesh Map layers read flat grey; `surface maps` after a new bake)", t->name.c_str(), err.c_str());
+        Log::warn("Surface %s: %s (Mesh Map layers read flat grey; Textures > Load Mesh Maps after a new bake)", t->name.c_str(), err.c_str());
       }
     }
     const uint64_t h = procedural_texture_cache_hash(*t);

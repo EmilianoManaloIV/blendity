@@ -106,6 +106,25 @@ void Editor::spring_apply() {
   Log::info("Spring Bones on %d chain(s)", added);
 }
 
+/* A kind picked from a chain's list: None sets it aside; another kind takes a set-aside chain back, then labels it
+ * (an added chain's settings follow at once, a found one's when it is applied). */
+void Editor::spring_pick_label(GameObject &first, SpringView::Row &r, int kind) {
+  if (kind >= 5) return spring_set_label(first, 5);
+  if (r.ignored) spring_unignore(first);
+  if (r.added) return spring_set_label(first, kind);
+  r.label = kind;
+}
+
+bool Editor::spring_row_for_test(const std::string &first, int &label, bool &ignored) {
+  for (const SpringView::Row &r : spring_.found) {
+    const GameObject *g = scene_->find(r.id);
+    if (!g || g->name != first) continue;
+    label = r.label, ignored = r.ignored;
+    return true;
+  }
+  return false;
+}
+
 void Editor::spring_unignore(GameObject &first) {
   if (Bone *b = first.get<Bone>()) b->spring_ignored = false;
   if (SpringView::Row *r = spring_row(first)) r->ignored = false;
@@ -143,7 +162,7 @@ void Editor::spring_remove(GameObject &bone) {
   for (GameObject *g : off)
     if (SpringView::Row *r = spring_row(*g)) r->added = false, r->ignored = true, r->tick = false;
   mark_changed("Remove Spring Bones");
-  Log::info("Spring Bones taken off %zu chain(s) (remembered as not spring chains: spring unignore <bone> brings one back)", off.size());
+  Log::info("Spring Bones taken off %zu chain(s) (remembered as not spring chains: Show Ignored > Unignore brings one back)", off.size());
 }
 
 /* Bake: the clip simulated frame by frame, each chain's rotations keyed; the chains' live simulation turned off (their
@@ -152,7 +171,7 @@ void Editor::spring_bake() {
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (!root || !clip) return Log::warn("Spring Bones: select an animated character with a clip");
-  if (playing_) return Log::warn("Spring Bones: stop Play first");
+  if (playing_) return refuse("Spring Bones: stop Play first", "stop", "Stop Play");
   AnimationClip baked;
   const size_t keys = spring::bake(*scene_, *root, *clip, baked);
   if (!keys) return Log::warn("Spring Bones: none under %s (Rigging > Spring Bones > Find Spring Chains)", root->name.c_str());
@@ -222,11 +241,12 @@ void Editor::draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *
     const std::string name = first->name + strprintf("  (%zu)", r.bones) + (r.added ? "  added" : r.ignored ? "  ignored" : r.named ? "" : "  unnamed");
     u.label({cb.right() + u.px(6), row.y, row.w - box - lw - act - u.px(24), row.h}, name, r.ignored ? u.theme.text_dim : u.theme.text);
     const Recti lb{row.right() - lw - act - u.px(8), row.y, lw, row.h}, ab{row.right() - act - u.px(4), row.y, act, row.h};
-    if (!r.ignored && u.button(lb, label_name(r.label))) {  // (Hair -> Ear -> Tail -> Cloth -> Soft -> None)
-      const int next = r.label + 1;
-      if (r.added || next >= 5) spring_set_label(*first, next >= 5 ? 5 : next);
-      else r.label = next;
-    }
+    /* Every kind in one list (round 324: a button that stepped Hair -> ... -> Soft -> None hid itself on None, so the
+     * kinds before Soft couldn't be picked again). A kind picked on a chain set to None takes it back. */
+    static const char *const kKinds[6] = {"Hair", "Ear", "Tail", "Cloth", "Soft", "None"};
+    int kind = r.ignored ? 5 : std::max(0, std::min(4, r.label));
+    if (u.record_buttons) u.button_rects["spring:label:" + first->name] = lb;
+    if (u.combo(u.id("spring_label"), lb, kind, kKinds, 6)) spring_pick_label(*first, r, kind);
     u.tooltip("What the chain is: its settings follow. None: not a spring chain (remembered on its first bone).");
     if (r.ignored && u.button(ab, "Unignore")) spring_unignore(*first);
     if (r.added && u.button(ab, "Remove")) spring_remove(*first);

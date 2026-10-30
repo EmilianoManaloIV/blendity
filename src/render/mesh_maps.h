@@ -49,9 +49,10 @@ uint64_t mesh_maps_key(const Mesh &m, const Mat4 &model);
 std::string mesh_maps_key_text(const Mesh &m, const Mat4 &model);
 
 /* The five maps of `mesh` placed by `model`. `cancel`, when given, is read between rows: set, the bake returns false
- * with why = "cancelled". False, with `why`, for a mesh with no surface. */
+ * with why = "cancelled". False, with `why`, for a mesh with no surface. `progress`, when given, receives the rows done
+ * over the size as the bake goes (task 0253). */
 bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings &settings, MeshMapsResult &out, std::string *why = nullptr,
-                    const std::atomic<bool> *cancel = nullptr);
+                    const std::atomic<bool> *cancel = nullptr, std::atomic<float> *progress = nullptr);
 
 /* The images as PNGs: <base>_normal.png, _position.png, _curvature.png, _ao.png, _thickness.png. */
 bool write_mesh_maps(const MeshMapsResult &r, const std::string &base, std::string *error = nullptr);

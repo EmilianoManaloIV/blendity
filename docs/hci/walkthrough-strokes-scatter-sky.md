@@ -17,3 +17,20 @@ Same conditions and columns. The user: an environment artist from Unreal (foliag
 
 **Baseline score** (an N in any of the four columns): 10 steps, **3 failing** (3, 4, 6); five more carry a ? . The step
 most likely abandoned: 3 / 4 (console-only foliage features), fixed by surfacing them in the Strokes section.
+
+## After (round 282)
+
+Walked again on the round-281 build with the same profile, by reading each step against what landed; a step is fixed when every column it failed now reads Y. Partly: one of its problems is gone, another is not.
+
+| # | Baseline | After | What changed | What is left |
+|---|---|---|---|---|
+| 2 | Y (no hint) | Y | Strokes has a hint row naming its keys, `[ ]` among them (0254, 0261) | - |
+| 3 | fail | fail | - | the leaf alpha is still `strokeobj alpha <image>` |
+| 4 | fail | fail | - | `strokeobj canopyfill` has no button |
+| 5 | ? | ? | Scatter has a hint row (0254) | the source is still named by text |
+| 6 | fail | fail | - | the mask is still a layer index typed into a field |
+| 8, 9 | ? | Y | One Environment, in the Lighting window (0256) | - |
+| 10 | ? | ? | - | the GPU view's CPU fallback still has no badge |
+
+**After:** 10 steps, **3 failing** (3, 4, 6) as at the baseline: the stylized round's console-only features were not
+surfaced in this pass. They are the first thing the next round should take.

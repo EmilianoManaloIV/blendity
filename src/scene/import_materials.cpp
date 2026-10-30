@@ -119,7 +119,7 @@ const std::vector<std::string> &texture_files(ImportResult &r) {
  * "Hair_Normal_OpenGL", "T_Body_N"), a trailing "map" / "tex" or a size ("_2k", "_4096", ".1001") dropped first.
  * `letter`: the word was a single letter (_d, _n, _r, _m, _e), which ordinary names end in too ("Hand_R"). */
 enum Kind { None, Base, Normal, Rough, Gloss, Metal, MetalSmooth, Orm, MetalRough, Emit, Ao, Opacity, Height, KindCount };
-const char *const kKindNames[KindCount] = {"", "base colour", "normal", "roughness", "gloss", "metallic", "metallic-smoothness", "ORM", "metallic-roughness", "emission", "occlusion", "opacity", "height"};
+const char *const kKindNames[KindCount] = {"", "base color", "normal", "roughness", "gloss", "metallic", "metallic-smoothness", "ORM", "metallic-roughness", "emission", "occlusion", "opacity", "height"};
 constexpr Kind kLastSlotKind = Emit;  // (the kinds Blendity has a slot for; AO, opacity and height are only reported)
 
 std::vector<std::string> name_words(const std::string &stem) {

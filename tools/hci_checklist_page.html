@@ -1,0 +1,298 @@
+<title>Blendity Test Checklist</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* A QA run sheet for a 3D editor: one ruled table per area, the timing column the reason it exists. */
+:root {
+  --bg: #F6F5F3; --surface: #FFFFFF; --ink: #1E1D1B; --muted: #5E5A55; --rule: #E2DED8;
+  --accent: #C4610A; --accent-ink: #FFFFFF; --pass: #2F7D4F; --fail: #B3261E; --slow: #9A6400; --chip: #EFEBE5;
+  --sans: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #17171A; --surface: #1F1F23; --ink: #ECEAE6; --muted: #A7A29B; --rule: #34343A;
+  --accent: #F08A2C; --accent-ink: #17171A; --pass: #5BC08A; --fail: #F2706A; --slow: #E3B04F; --chip: #2A2A30; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #17171A; --surface: #1F1F23; --ink: #ECEAE6; --muted: #A7A29B; --rule: #34343A;
+  --accent: #F08A2C; --accent-ink: #17171A; --pass: #5BC08A; --fail: #F2706A; --slow: #E3B04F; --chip: #2A2A30; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.45; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 20px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -0.01em; text-wrap: balance; }
+.about { color: var(--muted); max-width: 70ch; margin: 0 0 16px; }
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); padding-block: 10px; border-bottom: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.stat { display: flex; flex-direction: column; min-width: 64px; }
+.stat b { font-family: var(--mono); font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.stat.pass b { color: var(--pass); } .stat.fail b { color: var(--fail); } .stat.slow b { color: var(--slow); }
+.spacer { flex: 1; }
+button, select, input { font: inherit; color: inherit; }
+.btn { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; }
+.chip { background: var(--chip); border: 1px solid transparent; border-radius: 999px; padding: 3px 11px; cursor: pointer; font-size: 0.85rem; }
+.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.note-store { font-size: 0.8rem; color: var(--muted); margin: 0 0 8px; }
+section.area { margin-top: 26px; }
+.area-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; border-bottom: 2px solid var(--ink); padding-bottom: 4px; }
+.area-head h2 { font-size: 1.1rem; margin: 0; }
+.area-head .meta { font-size: 0.82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rows { display: flex; flex-direction: column; }
+.row { display: grid; grid-template-columns: 26px 44px minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+.row input[type="checkbox"] { width: 18px; height: 18px; margin-top: 3px; accent-color: var(--accent); }
+.rid { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); padding-top: 2px; }
+.task { min-width: 0; }
+.task .t { font-weight: 600; }
+.row.done .task .t { color: var(--muted); }
+details { margin-top: 2px; font-size: 0.88rem; color: var(--muted); }
+details summary { cursor: pointer; width: fit-content; }
+details p { margin: 4px 0; }
+details p b { color: var(--ink); font-weight: 600; }
+.ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
+.time { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 0.9rem; min-width: 9.5ch; text-align: right; }
+.time small { color: var(--muted); }
+.time.slow { color: var(--slow); font-weight: 600; }
+.sw { min-width: 64px; }
+.sw.running { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.verdict { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.verdict button { border: 0; background: var(--surface); padding: 5px 10px; cursor: pointer; }
+.verdict button[aria-pressed="true"].p { background: var(--pass); color: var(--surface); }
+.verdict button[aria-pressed="true"].f { background: var(--fail); color: var(--surface); }
+.badge { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 7px; border-radius: 4px; }
+.badge.slow { background: color-mix(in srgb, var(--slow) 18%, transparent); color: var(--slow); }
+.note { grid-column: 3 / -1; }
+.note input { width: 100%; box-sizing: border-box; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 5px 8px; font-size: 0.88rem; }
+.empty { color: var(--muted); padding: 14px 0; }
+@media (max-width: 720px) {
+  .row { grid-template-columns: 26px minmax(0, 1fr); }
+  .rid { display: none; }
+  .ctl { grid-column: 2; justify-content: flex-start; }
+  .note { grid-column: 2; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <h1 id="title">Blendity Test Checklist</h1>
+  <p class="about" id="about"></p>
+  <div class="bar" role="region" aria-label="Progress">
+    <div class="stat"><b id="s-done">0</b><span>done</span></div>
+    <div class="stat pass"><b id="s-pass">0</b><span>pass</span></div>
+    <div class="stat fail"><b id="s-fail">0</b><span>fail</span></div>
+    <div class="stat slow"><b id="s-slow">0</b><span>slow</span></div>
+    <div class="stat"><b id="s-total">0</b><span>tasks</span></div>
+    <div class="spacer"></div>
+    <button class="btn" id="exp-csv" type="button">Export CSV</button>
+    <button class="btn primary" id="exp-json" type="button">Export JSON</button>
+  </div>
+  <div class="filters" id="filters" role="toolbar" aria-label="Show"></div>
+  <p class="note-store" id="store-note">Results are kept with this page.</p>
+  <div id="areas"></div>
+</div>
+
+<script>
+const DATA = /*CHECKLIST_DATA*/null;
+const SLOW = 1.5;  // over 1.5x the target time is slow
+const results = {};  // id -> {done, ms, verdict, note, at}
+let db = null, downloads = null, running = null, filter = "all";
+
+const $ = (s, el = document) => el.querySelector(s);
+const items = () => DATA.areas.flatMap(a => a.items.map(it => ({...it, area: a})));
+const fmt = ms => ms == null ? "--" : (ms / 1000).toFixed(1) + " s";
+const isSlow = it => { const r = results[it.id]; return !!(r && r.ms != null && r.ms > it.target * 1000 * SLOW); };
+
+function local(op, value) {  // (a fallback when the page's store isn't available: this browser only)
+  try {
+    if (op === "get") return JSON.parse(localStorage.getItem("blendity-checklist") || "{}");
+    localStorage.setItem("blendity-checklist", JSON.stringify(value));
+  } catch (e) { return {}; }
+}
+
+async function save(id) {
+  const r = results[id] || {};
+  r.at = new Date().toISOString();
+  results[id] = r;
+  if (db) {
+    try { await db.collection("results").doc(id).set(r); return; } catch (e) { /* falls through to local */ }
+  }
+  local("set", results);
+}
+
+function stats() {
+  const all = items();
+  let done = 0, pass = 0, fail = 0, slow = 0;
+  for (const it of all) {
+    const r = results[it.id] || {};
+    if (r.done) done++;
+    if (r.verdict === "pass") pass++;
+    if (r.verdict === "fail") fail++;
+    if (isSlow(it)) slow++;
+  }
+  $("#s-done").textContent = done; $("#s-pass").textContent = pass; $("#s-fail").textContent = fail;
+  $("#s-slow").textContent = slow; $("#s-total").textContent = all.length;
+}
+
+function visible(it) {
+  const r = results[it.id] || {};
+  if (filter === "open") return !r.done;
+  if (filter === "slow") return isSlow(it);
+  if (filter === "fail") return r.verdict === "fail";
+  if (filter.startsWith("area:")) return it.area.id === filter.slice(5);
+  return true;
+}
+
+function renderFilters() {
+  const f = $("#filters");
+  f.textContent = "";
+  const opts = [["all", "All"], ["open", "Not done"], ["slow", "Slow"], ["fail", "Failed"]].concat(DATA.areas.map(a => ["area:" + a.id, a.id + ". " + a.name]));
+  for (const [key, label] of opts) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "chip"; b.textContent = label;
+    b.setAttribute("aria-pressed", String(filter === key));
+    b.addEventListener("click", () => { filter = key; renderFilters(); render(); });
+    f.appendChild(b);
+  }
+}
+
+function row(it) {
+  const r = results[it.id] || {};
+  const el = document.createElement("div");
+  el.className = "row" + (r.done ? " done" : "");
+  const cb = document.createElement("input");
+  cb.type = "checkbox"; cb.id = "done-" + it.id; cb.checked = !!r.done;
+  cb.setAttribute("aria-label", "Done: " + it.task);
+  cb.addEventListener("change", () => { results[it.id] = {...results[it.id], done: cb.checked}; save(it.id); render(); });
+  const rid = document.createElement("div"); rid.className = "rid"; rid.textContent = it.id;
+  const task = document.createElement("div"); task.className = "task";
+  const t = document.createElement("div"); t.className = "t"; t.textContent = it.task;
+  const d = document.createElement("details");
+  const s = document.createElement("summary"); s.textContent = "Steps and expected result";
+  const p1 = document.createElement("p"); p1.innerHTML = "<b>Steps.</b> "; p1.append(it.steps);
+  const p2 = document.createElement("p"); p2.innerHTML = "<b>Expected.</b> "; p2.append(it.expect);
+  const p3 = document.createElement("p"); p3.textContent = "Target from: " + ({klm: "the keystroke-level model", walkthrough: "a cognitive walkthrough", reach: "the console-reach table", sweep: "the live sweep", estimate: "an estimate on the model's rules"}[it.source] || it.source);
+  d.append(s, p1, p2, p3);
+  task.append(t, d);
+  const ctl = document.createElement("div"); ctl.className = "ctl";
+  const time = document.createElement("span");
+  time.className = "time" + (isSlow(it) ? " slow" : "");
+  time.id = "time-" + it.id;
+  time.innerHTML = "";
+  time.append(fmt(r.ms));
+  const small = document.createElement("small"); small.textContent = " / " + it.target + " s"; time.append(small);
+  const sw = document.createElement("button");
+  sw.type = "button"; sw.className = "btn sw" + (running && running.id === it.id ? " running" : "");
+  sw.textContent = running && running.id === it.id ? "Stop" : "Start";
+  sw.setAttribute("aria-label", (running && running.id === it.id ? "Stop timing " : "Start timing ") + it.task);
+  sw.addEventListener("click", () => toggle(it));
+  const v = document.createElement("span"); v.className = "verdict";
+  for (const [key, label, cls] of [["pass", "Pass", "p"], ["fail", "Fail", "f"]]) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = cls; b.textContent = label;
+    b.setAttribute("aria-pressed", String(r.verdict === key));
+    b.addEventListener("click", () => {
+      const cur = results[it.id] || {};
+      results[it.id] = {...cur, verdict: cur.verdict === key ? null : key, done: true};
+      save(it.id); render();
+    });
+    v.append(b);
+  }
+  ctl.append(time, sw, v);
+  if (isSlow(it)) { const bd = document.createElement("span"); bd.className = "badge slow"; bd.textContent = "slow"; ctl.append(bd); }
+  const note = document.createElement("div"); note.className = "note";
+  const ni = document.createElement("input");
+  ni.id = "note-" + it.id; ni.placeholder = "Note (what was slow or wrong)"; ni.value = r.note || "";
+  ni.setAttribute("aria-label", "Note for " + it.task);
+  ni.addEventListener("change", () => { results[it.id] = {...results[it.id], note: ni.value}; save(it.id); });
+  note.append(ni);
+  el.append(cb, rid, task, ctl, note);
+  return el;
+}
+
+function render() {
+  stats();
+  const host = $("#areas");
+  host.textContent = "";
+  let shown = 0;
+  for (const a of DATA.areas) {
+    const list = a.items.map(it => ({...it, area: a})).filter(visible);
+    if (!list.length) continue;
+    shown += list.length;
+    const sec = document.createElement("section"); sec.className = "area";
+    const head = document.createElement("div"); head.className = "area-head";
+    const h = document.createElement("h2"); h.textContent = a.id + ". " + a.name;
+    const done = a.items.filter(it => (results[it.id] || {}).done).length;
+    const slowest = a.items.filter(it => (results[it.id] || {}).ms != null).sort((x, y) => results[y.id].ms / y.target - results[x.id].ms / x.target)[0];
+    const meta = document.createElement("span"); meta.className = "meta";
+    meta.textContent = done + " / " + a.items.length + " done" + (slowest ? " | slowest: " + slowest.id + " at " + (results[slowest.id].ms / 1000 / slowest.target).toFixed(1) + "x its target" : "");
+    head.append(h, meta);
+    const rows = document.createElement("div"); rows.className = "rows";
+    for (const it of list) rows.append(row(it));
+    sec.append(head, rows);
+    host.append(sec);
+  }
+  if (!shown) { const p = document.createElement("p"); p.className = "empty"; p.textContent = "Nothing here yet for this view."; host.append(p); }
+}
+
+let tick = null;
+function toggle(it) {
+  if (running && running.id === it.id) {  // Stop: the time kept
+    const ms = performance.now() - running.t0;
+    results[it.id] = {...results[it.id], ms: Math.round(ms), done: true};
+    running = null; clearInterval(tick); tick = null;
+    save(it.id); render();
+    return;
+  }
+  running = {id: it.id, t0: performance.now()};
+  clearInterval(tick);
+  tick = setInterval(() => {
+    const el = document.getElementById("time-" + it.id);
+    if (!el || !running) return;
+    el.firstChild.textContent = ((performance.now() - running.t0) / 1000).toFixed(1) + " s";
+  }, 100);
+  render();
+}
+
+function csv() {
+  const head = ["id", "area", "task", "target_s", "measured_s", "slow", "verdict", "done", "note", "at"];
+  const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+  const lines = [head.join(",")];
+  for (const it of items()) {
+    const r = results[it.id] || {};
+    lines.push([it.id, it.area.name, it.task, it.target, r.ms != null ? (r.ms / 1000).toFixed(1) : "", isSlow(it) ? "yes" : "", r.verdict || "", r.done ? "yes" : "", r.note || "", r.at || ""].map(q).join(","));
+  }
+  return lines.join("\n");
+}
+
+async function exportAs(kind) {
+  const data = kind === "csv" ? csv() : JSON.stringify({exported: new Date().toISOString(), results}, null, 1);
+  const filename = "blendity-checklist." + kind;
+  if (downloads) {
+    try { await downloads.save({filename, data}); return; } catch (e) { if (e && e.code === "declined") return; }
+  }
+  try { await navigator.clipboard.writeText(data); $("#store-note").textContent = "Copied the " + kind.toUpperCase() + " to the clipboard (saving files isn't available here)."; }
+  catch (e) { $("#store-note").textContent = "Couldn't save or copy the export here."; }
+}
+
+$("#title").textContent = DATA.title;
+$("#about").textContent = DATA.about;
+$("#exp-csv").addEventListener("click", () => exportAs("csv"));
+$("#exp-json").addEventListener("click", () => exportAs("json"));
+Object.assign(results, local("get"));
+renderFilters();
+render();
+
+(async () => {
+  if (!window.claude) { $("#store-note").textContent = "Results are kept in this browser only."; return; }
+  downloads = await claude.use("downloads");
+  db = await claude.use("db");
+  if (!db) { $("#store-note").textContent = "Results are kept in this browser only."; return; }
+  $("#store-note").textContent = "Results are kept with this page, so Claude can read them back.";
+  db.collection("results").onSnapshot(snap => {
+    for (const d of snap.docs) if (d.exists) results[d.id] = d.data();
+    if (!running) render(); else stats();
+  }, () => { $("#store-note").textContent = "Couldn't reach the page's store: results are kept in this browser for now."; });
+})();
+</script>
