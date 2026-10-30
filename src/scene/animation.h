@@ -95,6 +95,9 @@ std::string anim_path(const GameObject &root, const GameObject &g);
 /* Reading and writing one animated number. */
 bool read_anim_value(GameObject &g, const std::string &property, int axis, float &out);
 bool write_anim_value(GameObject &g, const std::string &property, int axis, float value);
+/* Round 335: a property that switches rather than blends - a switch, a whole number, a list's choice, Active: its keys
+ * are made Constant (Blender does so for booleans and enums). */
+bool anim_value_stepped(GameObject &g, const std::string &property);
 /* The whole clip at `frame` onto the hierarchy under `root`. */
 void apply_clip(const AnimationClip &clip, GameObject &root, float frame);
 /* The Euler angles (degrees, Unity's order) for q nearest `near`: each angle by whole turns, and the second solution

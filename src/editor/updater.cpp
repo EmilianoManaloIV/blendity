@@ -225,7 +225,7 @@ void Editor::draw_history_dialog(const std::function<void()> &close) {
   if (draw_update_progress()) return;
   Recti b = u.popup_row(u.row_h() + u.px(10));
   const bool mine = sel && sel->tag == releases::build_tag();
-  if (sel && !mine && u.button({b.right() - u.px(260), b.y + u.px(4), u.px(160), b.h - u.px(8)}, "Install this version")) install_release(sel->tag);
+  if (sel && !mine && u.button({b.right() - u.px(260), b.y + u.px(4), u.px(160), b.h - u.px(8)}, "Install This Version")) install_release(sel->tag);
   u.tooltip("Older builds install the same way (before a PR: pick the build just below it). Your scenes stay as they are.");
   if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
 }
@@ -459,7 +459,7 @@ void Editor::draw_libraries_settings() {
   if (!st.full && use_libs_ && st.why != launch::Status::Chosen && u.button({r.right() - u.px(130), r.y + u.px(2), u.px(118), r.h - u.px(4)}, "Download..."))
     update_command({"update", "libs"});
   Recti s = u.popup_row();
-  const std::string now = st.full ? "Running with Blender's libraries." : "Running without them: " + st.reason + ".";
+  const std::string now = st.full ? "Running with Blender's libraries." : st.reason.empty() ? std::string("Running without them.") : "Running without them: " + st.reason + ".";
   u.label({s.x + u.px(160), s.y, s.w - u.px(170), s.h}, now, u.theme.text_dim);
 }
 

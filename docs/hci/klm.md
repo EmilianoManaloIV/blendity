@@ -34,6 +34,13 @@ baseline wrote, and its total of 77.0 s left out row 20: the *Before* column bel
 | 18 | Find out why Generate Lighting did nothing in Play | M, P, BB, M (read the status bar), M (recall Play) | 5.35 | M, P (hover the disabled button) | 2.45 | 0252 |
 | 19 | Open a clip from the Project window | M, P, BBBB (opens a text editor), M, P, BB (Window), P, BB (Animation) | 6.8 | M, P, BBBB (opens the Animation window) | 2.85 | 0260 |
 | 20 | Open a new scene without losing work | M, H, 2K (Ctrl+S), M, 2K (Ctrl+N) | 3.9 | M, H, 2K, M, 2K | 3.9 | unchanged for the expert; 0254's prompt catches the forgotten save |
+| 21 | Pose a reach: a hand to a point, the feet planted | M, P, BB, P, B, P, B, M, P, BB, P, B, P, B, M, P, BB, P, B, P, B, M, P, BB, P, B, P, B (four bones selected and turned in turn) | 20.2 | M, P, B, P, B (the hand's handle dragged) | 3.75 | 0281: Puppet Posing's handles |
+| 22 | Find and fix a planted foot's slide | M, P, B, P, B (scrub to the slide), M, P, BB (select the foot), 20P, 20B (move it back on ten frames) | 30.4 | M, P, B (Puppet), P, B (Motion Check), M (read the row), P, B (Fix) | 6.3 | 0284: Motion Check |
+| 23 | Mark a contact on the selected foot at the playhead | M, P, B (the Console's line), M, 43K (`body contacts add mixamorig:LeftFoot 12 21`, Enter) | 12.5 | M, P, B (Puppet), P (Contacts), P, B (Add One Here) | 4.85 | 0289: Puppet > Contacts |
+| 24 | Keep the walk style as a file | M, P, B (the Console's line), M, 21K (`walk save Gaits/walk`, Enter) | 8.1 | M, P, B (Save Style) | 2.55 | 0289: Walk Cycle's Save Style |
+| 25 | Draw in red | M, P, B (the Console's line), M, 20K (`sketch color D03030`, Enter) | 7.9 | M, P, B (Mesh), P (Draw), P (Pen Colour), P, B (Red) | 5.95 | 0286: Draw > Pen Colour |
+| 26 | Limit a modifier to a vertex group | M, P, B (the field), M, 7K (the group's name, Enter; recalled exactly) | 5.3 | M, P, B (the dropdown), P, B (the group) | 3.75 | 0289: the group dropdown |
+| 27 | Lift the sketch's scaffold to 3D | M, P, B (the Console's line), M, 11K (`sketchlift`, Enter) | 6.1 | M, P, B (Mesh), P (Draw), P, B (Lift the Sketch to 3D) | 4.85 | 0286: Draw > Lift |
 
 **Totals** (19 timed rows, printed by the tool): before **80.9 s**, after **54.65 s** in the Unity preset, about a
 third less; with the Adobe preset rows 4 and 5 fall to 1.95 s each, **50.6 s**. These are model estimates for an

@@ -100,6 +100,7 @@ bool Editor::path_picker_row(ui::Layout &lay, const char *label, const char *key
 /* ---------------------------------------------------------------- the Report dialog */
 
 void Editor::show_report(const std::string &title, const std::vector<std::string> &lines) {
+  report_actions_.clear();  // (a caller with actions sets them after: task 0284)
   report_title_ = title;
   report_lines_ = lines;
   if (report_lines_.empty()) report_lines_.push_back("(nothing to report)");
@@ -127,6 +128,14 @@ void Editor::draw_report_dialog(const std::function<void()> &close) {
   const size_t shown = std::min<size_t>(report_lines_.size(), 30);
   for (size_t i = 0; i < shown; i++) {
     const Recti r = u.popup_row();
+    if (i < report_actions_.size()) {  // (task 0284: the row goes to its frame; Fix applies its remedy)
+      const Recti go{r.x + u.px(8), r.y, r.w - u.px(84), r.h}, fix{r.right() - u.px(70), r.y + u.px(1), u.px(60), r.h - u.px(2)};
+      if (u.record_buttons) u.button_rects["report:row " + std::to_string(i)] = go, u.button_rects["report:fix " + std::to_string(i)] = fix;
+      if (u.button(go, report_lines_[i], false)) command(report_actions_[i].first);
+      u.tooltip(report_lines_[i]);
+      if (u.button(fix, "Fix")) defer([this, cmd = report_actions_[i].second] { command(cmd); });
+      continue;
+    }
     u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, report_lines_[i]);
     u.tooltip(report_lines_[i]);
   }

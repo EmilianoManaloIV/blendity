@@ -45,6 +45,8 @@ struct Window {
   int img_w = 0, img_h = 0;
   XIM im = nullptr;
   XIC ic = nullptr;
+  Atom png_target = None;   // (task 0299: image/png, asked for by get_clipboard_image)
+  bool png_waiting = false;  // (an answer for it is taken only while it waits)
   Atom wm_delete, clipboard, utf8, targets, prop, xdnd_aware, xdnd_enter, xdnd_position, xdnd_status, xdnd_drop,
       xdnd_finished, xdnd_selection, xdnd_action_copy, uri_list;
   ::Window xdnd_source = 0;
@@ -524,7 +526,9 @@ static void handle_event(Window *w, XEvent &xe) {
         XSendEvent(dpy, w->xdnd_source, False, NoEventMask, (XEvent *)&m);
       }
       else if (data && xe.xselection.selection == w->clipboard) {
-        w->clipboard_text.assign((const char *)data, count);
+        const bool png = w->png_target != None && xe.xselection.target == w->png_target;
+        if (png && type == XInternAtom(dpy, "INCR", False)) fprintf(stderr, "[blendity] the clipboard's image is too large to read here (X11 INCR)\n");
+        if (!png || w->png_waiting) w->clipboard_text.assign((const char *)data, count);  // (a late image answer isn't text)
       }
       if (data) XFree(data);
       break;
@@ -733,6 +737,7 @@ void set_cursor(Window *w, Cursor c) {
 }
 
 std::string get_clipboard(Window *w) {
+  if (!w) return {};  // (headless: no window, no clipboard - round 322's board pastes from tests)
   ::Window owner = XGetSelectionOwner(w->dpy, w->clipboard);
   if (owner == None) return {};
   for (Window *o : our_windows())
@@ -751,7 +756,37 @@ std::string get_clipboard(Window *w) {
   return {};
 }
 
+/* The clipboard's image/png target (a large image sent in pieces - INCR - isn't read). */
+std::string get_clipboard_image(Window *w) {
+  if (!w) return {};
+  ::Window owner = XGetSelectionOwner(w->dpy, w->clipboard);
+  if (owner == None) return {};
+  for (Window *o : our_windows())
+    if (o->win == owner) return {};  // (ours holds text only)
+  const std::string text = w->clipboard_text;
+  w->png_target = XInternAtom(w->dpy, "image/png", False);
+  w->png_waiting = true;
+  XConvertSelection(w->dpy, w->clipboard, w->png_target, w->prop, w->win, CurrentTime);
+  std::string bytes;
+  for (int i = 0; i < 100; i++) {
+    XEvent xe;
+    if (XCheckTypedWindowEvent(w->dpy, w->win, SelectionNotify, &xe)) {
+      handle_event(w, xe);
+      bytes.swap(w->clipboard_text);
+      break;
+    }
+    timeval tv{0, 2000};
+    select(0, nullptr, nullptr, nullptr, &tv);
+  }
+  w->png_waiting = false;
+  w->clipboard_text = text;
+  return bytes.size() > 8 && bytes.compare(1, 3, "PNG") == 0 ? bytes : std::string();
+}
+
+std::string get_clipboard_file(Window *) { return {}; }  // (a copied file arrives as text: its path - pasted as such)
+
 void set_clipboard(Window *w, const std::string &utf8) {
+  if (!w) return;
   w->clipboard_text = utf8;
   XSetSelectionOwner(w->dpy, w->clipboard, w->win, CurrentTime);
 }

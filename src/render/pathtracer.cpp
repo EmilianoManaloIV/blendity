@@ -161,10 +161,12 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   build_count_++;
   objects_ = objects;
   see_through_ = false;
+  has_volume_ = false;
   for (const PTObject &o : objects_)
     if (o.materials)
       for (const MaterialPtr &mp : *o.materials) {
         see_through_ = see_through_ || (mp && (!mp->opaque() || mp->outline_hull));  // a hull: shadow rays step through it
+        has_volume_ = has_volume_ || (mp && mp->volume());  // (round 331)
         if (mp) mp->textures();  // resolved here, not by the tracing threads (Material::textures)
       }
   lights_ = lights;
@@ -172,17 +174,31 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   env_ = env;
   normal_mats_.clear();
   local_keys_.clear();
+  inv_models_.clear();
   for (const PTObject &ob : objects_) {
     const Mat4 inv = ob.model.inverse();
-    normal_mats_.push_back(inv.transposed());
-    const Vec3 lk = inv.dir(toon_key_L_);
+    inv_models_.push_back(inv);
+    const Mat4 shade_inv = ob.flattened ? ob.shade_model.inverse() : inv;  // (round 334: Camera Flatten shades the true shape)
+    normal_mats_.push_back(shade_inv.transposed());
+    const Vec3 lk = shade_inv.dir(toon_key_L_);
     const float len = length(lk);
     local_keys_.push_back(finite_bits(len) && len > 1e-12f ? lk / len : Vec3(0, 1, 0));
   }
   /* GPU devices first: one without ray tracing hardware traverses Blendity's
    * own BVH, so that is built even when the CPU uses Embree. */
   gpu_error_.clear();
-  if (!settings_.gpus.empty() && gpu::available()) sync_gpus();
+  /* Round 331: the GPU kernel has no volumes yet - a scene with fog is traced on the CPU, and says so. */
+  if (has_volume_ && !settings_.gpus.empty()) gpu_note_ = "a Volume (fog) material: traced on the CPU (the GPU kernel has no volumes yet)";
+  else gpu_note_.clear();
+  if (!settings_.gpus.empty() && gpu::available() && !has_volume_) sync_gpus();
+  else if (has_volume_ && !settings_.gpus.empty()) {  // (set aside, open, for the scene without fog: not torn down on every toggle)
+    stop_all_workers();
+    for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
+    gpus_.clear();
+    gpu_starting_ = false;
+    gpu_pending_.clear();
+    Log::info("Path tracer: %s", gpu_note_.c_str());
+  }
   else {
     stop_all_workers();  // (task 0161: a slot's worker ends before the slot goes)
     gpus_.clear();
@@ -505,8 +521,9 @@ bool PathTracer::occluded(const Ray &r, float tmax) const {
   return intersect(r, h);  // any hit closer than tmax
 }
 
-Vec3 PathTracer::transmittance(const Ray &r, float tmax) const {
+Vec3 PathTracer::transmittance(const Ray &r, float tmax, const Media *in) const {
   if (!see_through_) return occluded(r, tmax) ? Vec3(0.0f) : Vec3(1.0f);
+  if (has_volume_) return transmittance_volumes(r, tmax, in);
   /* Step through see-through surfaces (Cycles: transparent shadows). Glass
    * blocks, as in Cycles without caustics: its light arrives through paths. */
   Vec3 T(1.0f);
@@ -537,6 +554,203 @@ Vec3 PathTracer::transmittance(const Ray &r, float tmax) const {
     left -= step;
   }
   return T;
+}
+
+/* Round 331: transmittance with fog - each Volume mesh the ray is in dims it by its density along the part inside: the
+ * fogs it starts in (`in`; else one it leaves without having entered), each fog it enters until it leaves; see-through
+ * surfaces as transmittance() steps them. */
+Vec3 PathTracer::transmittance_volumes(const Ray &r, float tmax, const Media *in) const {
+  struct Open {
+    Medium md;
+    float from;
+  };
+  Open open[8];
+  int n = 0;
+  for (int i = 0; in && i < in->n; i++) open[n++] = {in->m[i], 0.0f};
+  Vec3 T(1.0f);
+  auto close = [&](int i, float to) {
+    T = T * volume_transmittance(open[i].md, {r.origin + r.dir * open[i].from, r.dir}, std::max(0.0f, to - open[i].from));
+    open[i] = open[--n];
+  };
+  auto find = [&](uint32_t object) {
+    for (int i = 0; i < n; i++)
+      if (open[i].md.object == object) return i;
+    return -1;
+  };
+  Ray ray = r;
+  float travelled = 0.0f;
+  for (int i = 0; i < 64 && travelled < tmax; i++) {
+    Hit h;
+    h.t = tmax - travelled;
+    if (!intersect(ray, h)) break;
+    SurfacePoint sp;
+    const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+    const float at = travelled + h.t, step = h.t + 1e-4f * (1.0f + h.t);
+    if (mat->volume()) {
+      const int k = find(h.object);
+      const bool exiting = dot(ray.dir, sp.geo_normal) > 0.0f;
+      if (exiting && k >= 0) close(k, at);
+      else if (exiting && !in) T = T * volume_transmittance({mat, h.object}, r, at);  // (it began in this fog, as far as anyone knew)
+      else if (!exiting && k < 0 && n < 8) open[n++] = {{mat, h.object}, at};
+    }
+    else if (!mat->outline_hull) {
+      if (mat->opaque() || mat->surface == (int)MaterialSurface::Glass) return Vec3(0.0f);
+      if (settings_.retro.active() && settings_.retro.tex.active()) sp.tex = &settings_.retro.tex;
+      const float a = evaluate_material(*mat, sp).alpha;
+      if (mat->surface == (int)MaterialSurface::Cutout && a >= mat->alpha_clip) return Vec3(0.0f);
+      if (mat->surface != (int)MaterialSurface::Cutout) T = T * (1.0f - a);
+    }
+    if (std::max({T.x, T.y, T.z}) < 1e-4f) return Vec3(0.0f);
+    ray.origin = r.origin + r.dir * (travelled + step);
+    travelled += step;
+  }
+  while (n > 0) close(n - 1, tmax);  // (it ends inside them: a light in the fog)
+  return T;
+}
+
+/* The fog's transmittance along a segment: exp(-density x length), the noise's density marched in 16 steps. */
+Vec3 PathTracer::volume_transmittance(const Medium &md, const Ray &r, float len) const {
+  if (!(len > 0.0f)) return Vec3(1.0f);
+  const float d = md.mat->volume_density;
+  if (!(md.mat->volume_noise > 0.0f)) return Vec3(finite_bits(d) ? std::exp(-std::max(0.0f, d) * len) : 1.0f);
+  float tau = 0.0f;
+  const int n = 16;
+  for (int k = 0; k < n; k++) tau += volume_density(md, r.origin + r.dir * ((k + 0.5f) * len / n)) * (len / n);
+  return Vec3(std::exp(-tau));
+}
+
+float PathTracer::volume_density(const Medium &md, Vec3 p) const {
+  return md.mat->volume_density_at(md.object < inv_models_.size() ? inv_models_[md.object].point(p) : p);
+}
+
+/* The fogs p is in: along a ray from it, a fog whose first face met is a back face (its way out) - other surfaces are
+ * stepped over (a wall in a foggy room). The nearest way out is the innermost fog. */
+PathTracer::Media PathTracer::media_at(Vec3 p) const {
+  Medium found[16];
+  uint32_t seen[16];
+  int nf = 0, ns = 0;
+  Ray ray{p, normalize(Vec3(0.3f, 1.0f, 0.2f))};
+  for (int i = 0; i < 64 && ns < 16; i++) {
+    Hit h;
+    h.t = 1e30f;
+    if (!intersect(ray, h)) break;
+    SurfacePoint sp;
+    const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+    ray.origin = ray.origin + ray.dir * (h.t + 1e-4f * (1.0f + h.t));
+    if (!mat->volume() || std::find(seen, seen + ns, h.object) != seen + ns) continue;
+    seen[ns++] = h.object;
+    if (dot(ray.dir, sp.geo_normal) > 0.0f) found[nf++] = {mat, h.object};
+  }
+  Media out;
+  for (int i = nf - 1; i >= 0; i--) out.enter(found[i]);  // (outermost first: the innermost on top)
+  return out;
+}
+
+namespace {
+/* Henyey-Greenstein: the phase function for cos theta between the ray's way and the light's, and a direction from it. */
+float hg_phase(float cos_t, float g) {
+  const float d = 1.0f + g * g - 2.0f * g * cos_t;
+  return (1.0f - g * g) / (4.0f * kPi * d * std::sqrt(std::max(1e-6f, d)));
+}
+Vec3 hg_sample(Vec3 dir, float g, float u1, float u2) {
+  float c;
+  if (std::fabs(g) < 1e-3f) c = 1.0f - 2.0f * u1;
+  else {
+    const float s = (1.0f - g * g) / (1.0f - g + 2.0f * g * u1);
+    c = (1.0f + g * g - s * s) / (2.0f * g);
+  }
+  c = std::max(-1.0f, std::min(1.0f, c));
+  const float st = std::sqrt(std::max(0.0f, 1.0f - c * c)), ph = 2.0f * kPi * u2;
+  Vec3 t, b;
+  onb(dir, t, b);
+  return normalize(t * (st * std::cos(ph)) + b * (st * std::sin(ph)) + dir * c);
+}
+}  // namespace
+
+/* One light's sample for next-event estimation from `from` (shading `at`): a direction in the sun's disc, a point on
+ * an area light or a point light's sphere (soft shadows), and the power arriving - Range, the spot cone, an area
+ * light's facing and size. False when the point is on the light. Surfaces and fog alike. */
+bool PathTracer::sample_light(const RenderLight &l, Vec3 from, Vec3 at, uint32_t &rng, Vec3 &dir, float &dist, float &power) const {
+  dist = 1e30f;
+  power = l.intensity * kPi;
+  if (l.type == RenderLight::Directional) {
+    Vec3 c = -l.direction, ct3, cb3;
+    onb(c, ct3, cb3);
+    float cos_max = std::cos(settings_.sun_angle_deg * 0.5f * kDeg2Rad);
+    float ct = 1.0f - rnd(rng) * (1.0f - cos_max), st = std::sqrt(std::max(0.0f, 1.0f - ct * ct)), ph = 2 * kPi * rnd(rng);
+    dir = normalize(ct3 * (st * std::cos(ph)) + cb3 * (st * std::sin(ph)) + c * ct);
+    return true;
+  }
+  /* Two random numbers for every light type, as in the GPU kernel. */
+  const float r1 = rnd(rng), r2 = rnd(rng);
+  Vec3 p;
+  if (l.type == RenderLight::Area) {
+    /* A point on the rectangle (or ellipse): soft shadows. */
+    float x = r1 - 0.5f, y = r2 - 0.5f;
+    if (l.disk) {
+      const float rr = 0.5f * std::sqrt(r1), ph = 2 * kPi * r2;
+      x = rr * std::cos(ph);
+      y = rr * std::sin(ph);
+    }
+    const Vec3 up = cross(l.direction, l.right);
+    p = l.position + l.right * (x * l.width) + up * (y * l.height);
+  }
+  else {
+    const float z = 1 - 2 * r1, ph = 2 * kPi * r2, rr = std::sqrt(std::max(0.0f, 1 - z * z));
+    p = l.position + Vec3(rr * std::cos(ph), rr * std::sin(ph), z) * settings_.point_radius;
+  }
+  const Vec3 d = p - from;
+  dist = length(d);
+  if (dist < 1e-5f) return false;
+  dir = d / dist;
+  /* Range and the spot cone; an area light's point as an emissive plane's (task 0155): its facing, the inverse
+   * square from it, the Range window, times the panel's area (the point was drawn uniformly over it). */
+  power *= l.type == RenderLight::Area ? area_light_area(l) * area_light_falloff(l, p, at) : light_falloff(l, at, dir);
+  return true;
+}
+
+/* A free flight through the fogs the ray is in (delta tracking against the sum of their majorants - twice the density
+ * where one has noise): no collision before tmax -> false, the ray going on as it was. A collision is with one fog, by
+ * its share of the density there: its glow, then each light seen through the fogs (and whatever is in the way) by its
+ * phase function, then a new direction from it; beta takes its colour. */
+bool PathTracer::volume_scatter(const Media &media, Ray &ray, float tmax, Vec3 &beta, Vec3 &L, uint32_t &rng, uint64_t &rays) const {
+  float majors[4] = {}, major = 0.0f;
+  for (int i = 0; i < media.n; i++) {
+    const Material &mi = *media.m[i].mat;
+    const float base = finite_bits(mi.volume_density) ? std::max(0.0f, mi.volume_density) : 0.0f;
+    majors[i] = mi.volume_noise > 0.0f ? 2.0f * base : base;
+    major += majors[i];
+  }
+  if (!(major > 0.0f)) return false;
+  float t = 0.0f;
+  int hit = -1;
+  for (int k = 0; k < 256 && hit < 0; k++) {
+    t += -std::log(std::max(1e-7f, 1.0f - rnd(rng))) / major;
+    if (t >= tmax) return false;
+    const Vec3 q = ray.origin + ray.dir * t;
+    float pick = rnd(rng) * major;  // (a real collision with fog i where it falls in that fog's density, else a null one)
+    for (int i = 0; i < media.n && hit < 0; i++) {
+      const float d = media.m[i].mat->volume_noise > 0.0f ? volume_density(media.m[i], q) : majors[i];
+      if (pick < d) hit = i;
+      pick -= majors[i];
+    }
+  }
+  if (hit < 0) return false;  // (256 null collisions: the ray goes on rather than scattering where the fog isn't)
+  const Material &m = *media.m[hit].mat;
+  const Vec3 p = ray.origin + ray.dir * t;
+  const float g = std::max(-0.95f, std::min(0.95f, finite_bits(m.volume_anisotropy) ? m.volume_anisotropy : 0.0f));
+  if (m.volume_emission_strength > 0.0f) L += beta * m.volume_emission * m.volume_emission_strength;
+  beta = beta * vmax(Vec3(0.0f), vmin(Vec3(1.0f), m.volume_color));
+  for (const RenderLight &l : lights_) {
+    Vec3 dir;
+    float dist = 0.0f, power = 0.0f;
+    if (!sample_light(l, p, p, rng, dir, dist, power) || !(power > 0.0f)) continue;
+    rays++;
+    const Vec3 Tr = transmittance({p, dir}, dist, &media);
+    L += beta * l.color * Tr * (power * hg_phase(dot(ray.dir, dir), g));
+  }
+  ray = {p, hg_sample(ray.dir, g, rnd(rng), rnd(rng))};
+  return true;
 }
 
 /* ===================================================================== */
@@ -758,6 +972,8 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
   float last_pdf = first_pdf;  // solid-angle pdf of the direction that led here (0 = camera ray; a bake's gather gives its cosine pdf)
   float since_scatter = 0.0f;  // the distance travelled since that direction was chosen: see-through passes add to it (the emitter's pdf is by that distance, task 0157)
   int see_through_hits = 0, glass_hits = 0;  // these get their own budgets (Cycles: transparent / transmission bounces)
+  Media media = camera ? camera_media_ : Media{};  // (round 331: the fogs the path is in - a camera may start in some)
+  int volume_hits = 0;
   bool camera_path = camera;  // still the camera ray (see-through passes keep it; glass and BSDF bounces end it)
 #ifdef BL_WITH_OPENPGL
   /* Training records each vertex with local (not throughput-weighted) values;
@@ -770,7 +986,21 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
   for (int bounce = 0; bounce <= settings_.max_bounces; bounce++) {
     Hit h;
     rays++;
-    if (!intersect(ray, h)) {
+    const bool hit_any = intersect(ray, h);
+    const Ray before_scatter = ray;
+    if (media.n && volume_scatter(media, ray, hit_any ? h.t : 1e30f, beta, L, rng, rays)) {  // (round 331: a scatter in the fog)
+      if (bounce == 0 && camera_path && albedo_out) {  // (the denoiser's guides, as Cycles writes a volume's: its colour, no normal, the depth)
+        *albedo_out = vmax(Vec3(0.0f), vmin(Vec3(1.0f), media.top()->mat->volume_color));
+        *normal_out = Vec3(0.0f);
+        *depth_out = length(ray.origin - before_scatter.origin);
+        if (id_out) *id_out = 0;
+      }
+      camera_path = false;
+      last_pdf = 0.0f;  // (a surface's light found next counts in full: the fog samples no mesh lights)
+      since_scatter = 0.0f;
+      continue;
+    }
+    if (!hit_any) {
       const Vec3 Le = env_.radiance(ray.dir);
 #ifdef BL_WITH_OPENPGL
       if (record) {
@@ -804,6 +1034,16 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     SurfacePoint sp;
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
     sp.position = ray.origin + ray.dir * h.t;  // more precise than re-interpolating
+    /* A Volume material's surface (round 331): not drawn - going in, the path is in its fog; coming out, not. */
+    if (mat->volume()) {
+      if (++volume_hits > 64) break;  // (a fog face is never shaded as a surface: past the budget the path ends)
+      if (dot(sp.geo_normal, ray.dir) < 0.0f) media.enter({mat, h.object});
+      else media.leave(h.object);
+      ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      since_scatter += h.t;
+      bounce--;
+      continue;
+    }
     /* An outline's inverted hull (ADR 0020): camera rays see its front faces only (the rasterizer culls the back
      * ones); bounces, shadows and its back faces pass through. */
     if (mat->outline_hull && !(bounce == 0 && camera_path && dot(sp.geo_normal, ray.dir) < 0.0f) && see_through_hits < 64) {
@@ -988,6 +1228,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
     }
 #endif
+    /* Round 330's review: a coat is sampled as a lobe of its own (half the time at Coat 1), else its sharp highlight
+     * would only be met by chance - fireflies, and the sky's reflection missing. */
+    const float p_coat = s.extras && !s.toon ? 0.5f * s.coat : 0.0f;
+    GGX gc{std::max(s.coat_roughness * s.coat_roughness, 0.002f), 0};
+    gc.a2 = gc.a * gc.a;
     /* Solid-angle pdf with which this vertex samples `dir` (BSDF lobes and guiding). */
     auto sampling_pdf = [&](Vec3 dir) {
       float nl = dot(n, dir);
@@ -995,6 +1240,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       Vec3 hh = normalize(V + dir);
       float pdf_spec = g.D(std::max(dot(n, hh), 0.0f)) * g.G1(nv) / (4.0f * nv);
       float pdf = p_spec * pdf_spec + (1.0f - p_spec) * (nl / kPi);
+      if (p_coat > 0.0f) pdf = p_coat * gc.D(std::max(dot(n, hh), 0.0f)) * gc.G1(nv) / (4.0f * nv) + (1.0f - p_coat) * pdf;
 #ifdef BL_WITH_OPENPGL
       if (pg > 0.0f) pdf = (1.0f - pg) * pdf + pg * guide->ssd.PDF(pgl_v(dir));
 #endif
@@ -1011,41 +1257,8 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     /* Next-event estimation for sun and point lights (Cycles: NEE). */
     for (const RenderLight &l : lights_) {
       Vec3 dir;
-      float dist = 1e30f, power = l.intensity * kPi;
-      if (l.type == RenderLight::Directional) {
-        Vec3 c = -l.direction, ct3, cb3;
-        onb(c, ct3, cb3);
-        float cos_max = std::cos(settings_.sun_angle_deg * 0.5f * kDeg2Rad);
-        float ct = 1.0f - rnd(rng) * (1.0f - cos_max), st = std::sqrt(std::max(0.0f, 1.0f - ct * ct)), ph = 2 * kPi * rnd(rng);
-        dir = normalize(ct3 * (st * std::cos(ph)) + cb3 * (st * std::sin(ph)) + c * ct);
-      }
-      else {
-        /* Two random numbers for every light type, as in the GPU kernel. */
-        const float r1 = rnd(rng), r2 = rnd(rng);
-        Vec3 p;
-        if (l.type == RenderLight::Area) {
-          /* A point on the rectangle (or ellipse): soft shadows. */
-          float x = r1 - 0.5f, y = r2 - 0.5f;
-          if (l.disk) {
-            const float rr = 0.5f * std::sqrt(r1), ph = 2 * kPi * r2;
-            x = rr * std::cos(ph);
-            y = rr * std::sin(ph);
-          }
-          const Vec3 up = cross(l.direction, l.right);
-          p = l.position + l.right * (x * l.width) + up * (y * l.height);
-        }
-        else {
-          const float z = 1 - 2 * r1, ph = 2 * kPi * r2, rr = std::sqrt(std::max(0.0f, 1 - z * z));
-          p = l.position + Vec3(rr * std::cos(ph), rr * std::sin(ph), z) * settings_.point_radius;
-        }
-        Vec3 d = p - origin;
-        dist = length(d);
-        if (dist < 1e-5f) continue;
-        dir = d / dist;
-        /* Range and the spot cone; an area light's point as an emissive plane's (task 0155): its facing, the inverse
-         * square from it, the Range window, times the panel's area (the point was drawn uniformly over it). */
-        power *= l.type == RenderLight::Area ? area_light_area(l) * area_light_falloff(l, p, sp.position) : light_falloff(l, sp.position, dir);
-      }
+      float dist = 0.0f, power = 0.0f;
+      if (!sample_light(l, origin, sp.position, rng, dir, dist, power)) continue;
       if (toon_here) {
         /* Toon: N.L x visibility x the falloff in tones; the dark side takes the shadow colour (no shadow ray). */
         if (power <= 0 || !(l.intensity > 0.0f)) continue;
@@ -1055,7 +1268,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         Vec3 Tr(0.0f);
         if (ndl > 0 && dot(sp.geo_normal, dir) > 0) {
           rays++;
-          Tr = transmittance({origin, dir}, dist);
+          Tr = transmittance({origin, dir}, dist, &media);
         }
         const int li_idx = (int)(&l - &lights_[0]);
         const float face = li_idx == toon_key_ && h.object < local_keys_.size() ? toon_face_lit(*s.toon, s, local_keys_[h.object]) : -1.0f;  // (task 0149)
@@ -1068,7 +1281,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
       if (power <= 0 || dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) continue;
       rays++;
-      const Vec3 Tr = transmittance({origin, dir}, dist);
+      const Vec3 Tr = transmittance({origin, dir}, dist, &media);
       if (std::max({Tr.x, Tr.y, Tr.z}) <= 0.0f) continue;
       const Vec3 Lo = bsdf(dir) * l.color * Tr * power;  // scattered toward V, before throughput (a toon bounce: Lambert)
       add(beta * Lo);
@@ -1097,7 +1310,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         float pl = mesh_light_pdf(li, dist, cos_l);
         if (pl > 0.0f && dot(n, dir) > 0 && dot(sp.geo_normal, dir) > 0) {
           rays++;
-          const Vec3 Tr = transmittance({origin, dir}, dist * (1.0f - 1e-4f));
+          const Vec3 Tr = transmittance({origin, dir}, dist * (1.0f - 1e-4f), &media);
           if (std::max({Tr.x, Tr.y, Tr.z}) > 0.0f) {
             const SurfaceSample ls = evaluate_material(*lmat, lp);
             const bool hole = lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip;  // (as sample_mesh_light: a cutout's hole emits nothing)
@@ -1120,6 +1333,12 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       pgl_vec3f d = guide->ssd.Sample({rnd(rng), rnd(rng)});
       dir = normalize(Vec3(d.x, d.y, d.z));
 #endif
+    }
+    else if (p_coat > 0.0f && rnd(rng) < p_coat) {
+      Vec3 vl{dot(V, tt), dot(V, bb), dot(V, n)};
+      Vec3 hl = gc.sample_vndf(vl, rnd(rng), rnd(rng));
+      Vec3 hw = normalize(tt * hl.x + bb * hl.y + n * hl.z);
+      dir = hw * (2.0f * dot(V, hw)) - V;
     }
     else if (rnd(rng) < p_spec) {
       Vec3 vl{dot(V, tt), dot(V, bb), dot(V, n)};
@@ -1239,7 +1458,7 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
             r.dir = normalize(focus - r.origin);
           }
           Vec3 alb, nrm;
-          float dep;
+          float dep = 0.0f;
           uint32_t hit_id = 0;
 #ifdef BL_WITH_OPENPGL
           if (guide && guide->train) guide->segments.Clear();
@@ -2029,6 +2248,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     return id;
   };
   std::vector<std::pair<uint32_t, const Material *>> axis_parents;  // patched once every object's slots are in
+  std::vector<gpu::GMaterial> extras;  // (round 330: one a material, after them all)
   auto material = [&](const Material &m, bool as_part) {
     gpu::GMaterial g{};
     for (int k = 0; k < 4; k++) g.axis_i[k] = -1;
@@ -2099,7 +2319,22 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     std::memcpy(&g.tex3[3], &packed3, 4);
     const float t3[4] = {m.toon_specular_color.x, m.toon_specular_color.y, m.toon_specular_color.z, clampf(m.toon_wrap, 0.0f, 1.0f)};
     std::memcpy(g.toon3, t3, 16);
+    /* Round 330: the Principled extras in a record of their own after every material (the kernel's Material can't grow:
+     * SPIR-V's id bound), read at a hit when flags[3] bit 4096 says so. */
+    gpu::GMaterial x{};
+    if (m.principled_extras() && m.shading_model == 0) {
+      SurfaceSample ex;
+      apply_principled_extras(m, ex, Vec3(1.0f, 0.0f, 0.0f), true);
+      g.flags[3] |= 4096;
+      const float b[4] = {ex.subsurface, ex.sheen, ex.coat, finite_bits(m.anisotropic) ? clampf(m.anisotropic, 0.0f, 1.0f) : 0.0f};
+      const float e[4] = {ex.subsurface_color.x, ex.subsurface_color.y, ex.subsurface_color.z, ex.subsurface_scale};
+      const float p[4] = {ex.sheen_tint.x, ex.sheen_tint.y, ex.sheen_tint.z, ex.sheen_roughness};
+      const float t[4] = {ex.coat_tint.x, ex.coat_tint.y, ex.coat_tint.z, ex.coat_f0};
+      const float o[4] = {finite_bits(m.anisotropic_rotation) ? clampf(m.anisotropic_rotation, 0.0f, 1.0f) : 0.0f, ex.coat_roughness, 0.0f, 0.0f};
+      std::memcpy(x.base_color, b, 16), std::memcpy(x.emission, e, 16), std::memcpy(x.params, p, 16), std::memcpy(x.tiling, t, 16), std::memcpy(x.offset, o, 16);
+    }
     s.materials.push_back(g);
+    extras.push_back(x);
   };
   material(*default_material(), false);  // index 0
   struct MeshRec { uint32_t node_off, tri_off, vtx_off, idx_off, blas; };
@@ -2219,6 +2454,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
   p.key_light[0] = toon_key_L_.x, p.key_light[1] = toon_key_L_.y, p.key_light[2] = toon_key_L_.z, p.key_light[3] = (float)toon_key_;  // (task 0148)
   p.misc[0] = 8.0f, p.misc[1] = p.misc[2] = p.misc[3] = 0.0f;  // (task 0149: the kernel's toon map reads)
+  p.misc[2] = (float)s.materials.size();  // (round 330: the extras' records follow the materials)
+  s.materials.insert(s.materials.end(), extras.begin(), extras.end());
   p.env_f[0] = env_.strength;
   p.env_f[1] = env_.rotation;
   auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };
@@ -2265,7 +2502,7 @@ void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint
             if (!intersect(r, h)) break;
             SurfacePoint sp;
             const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
-            bool through = mat->surface == (int)MaterialSurface::Transparent || mat->surface == (int)MaterialSurface::Glass;
+            bool through = mat->surface == (int)MaterialSurface::Transparent || mat->surface == (int)MaterialSurface::Glass || mat->volume();  // (a fog: what is in it is picked)
             through = through || (mat->outline_hull && dot(sp.geo_normal, r.dir) >= 0.0f);  // a hull's back faces
             if (!through && mat->surface == (int)MaterialSurface::Cutout) {
               sp.position = r.origin + r.dir * h.t;
@@ -2544,10 +2781,12 @@ std::string PathTracer::device_summary() const {
   if (gpus_.empty() && gpu_starting_) s += ", GPU starting...";
   for (const auto &g : gpus_)
     s += (s.empty() ? "" : " + ") + g->r->info().name + (g->optix ? " (OptiX)" : g->hw_rt ? " (RT hardware)" : " (GPU compute)");
+  if (!gpu_note_.empty()) s += " - " + gpu_note_;  // (round 331: why, where the render's status shows the device)
   return s;
 }
 
 int PathTracer::render(double budget_ms, int max_samples) {
+  camera_media_ = has_volume_ ? media_at(cam_pos_) : Media{};  // (round 331: after build() and set_camera(), whichever came last)
   /* A material edited between calls resolves its textures here, not in the tracing threads. */
   for (const PTObject &o : objects_)
     if (o.materials)
