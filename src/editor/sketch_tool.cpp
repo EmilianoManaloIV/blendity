@@ -348,7 +348,7 @@ static void draw_stroke(ui::Context &u, const std::vector<Vec2> &pts, const std:
 void Editor::sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint32_t color) {
   auto &u = ui_;
   const Sketch &s = scene_->sketch;
-  const float px1 = (float)u.px(1.0f);
+  const float px1 = (float)u.px(1.0f) * sketch_zoom();  // (round 319: a stroke's width is the picture's)
   if (st.canvas && s.canvas_at(st.canvas)) {
     std::vector<Vec2> sa, sb;
     sketch_stroke_segments(view, st, sa, sb);
@@ -476,7 +476,7 @@ void Editor::sketch_draw(const Recti &view) {
   auto &u = ui_;
   const Sketch &s = scene_->sketch;
   if (s.strokes.empty() && !sketch_.active) return;
-  u.canvas.push_clip(view);
+  u.canvas.push_clip(sketch_screen_rect(view));  // (round 319: the pad zoomed or turned - its rect on screen)
   const float px1 = (float)u.px(1.0f);
   sketch_draw_layers(view);  // (task 0234: bottom to top, each with its opacity and blend)
   const auto &g = sketch_;
@@ -486,7 +486,7 @@ void Editor::sketch_draw(const Recti &view) {
   }
   sketch_draw_canvas(view);
   sketch_draw_overlay(view);
-  if (g.stroking) draw_stroke(u, g.pen, g.pressure, g.color, g.width * px1);
+  if (g.stroking) draw_stroke(u, g.pen, g.pressure, g.color, g.width * px1 * sketch_zoom());
   /* The guides. */
   const uint32_t guide_col = Color::hex(0x40C0FF, 170), handle_col = Color::hex(0xFFD040);
   auto handle = [&](Vec2 c) {

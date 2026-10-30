@@ -94,6 +94,11 @@ uint32_t utf8_next(const char *&p, const char *end);
 
 class Canvas {
  public:
+  /* A 2D map: p' = (a x + b y + tx, c x + d y + ty). */
+  struct Xform {
+    float a = 1, b = 0, c = 0, d = 1, tx = 0, ty = 0;
+    Vec2 map(Vec2 p) const { return {a * p.x + b * p.y + tx, c * p.x + d * p.y + ty}; }
+  };
   void begin(Image *target);
   Image *target() const { return img_; }
   /* Another image of the same size as the target, the clip kept (a layer's picture composited later: task 0234). */
@@ -123,6 +128,16 @@ class Canvas {
   void fill_polygon(const Vec2 *pts, int n, uint32_t color);
   void vgradient(const Recti &r, uint32_t top, uint32_t bottom);
   void blit(const Image &src, int dx, int dy);
+  /* src drawn into dst, each pixel's centre taken through `to_src` to src's pixels and sampled bilinearly; a pixel
+   * whose sample falls outside src is left alone (the Draw tab's picture zoomed, turned or flipped: round 319). */
+  void blit_affine(const Image &src, const Recti &dst, const Xform &to_src);
+  /* While set, line / fill_circle / circle / fill_polygon map their points by it first. It must keep lengths - a
+   * rotation, maybe mirrored, and a move - as widths and radii aren't scaled (the Draw tab's pad turned, round 319). */
+  void set_xform(const Xform *x) {
+    xf_on_ = x != nullptr;
+    if (x) xf_ = *x;
+  }
+  bool has_xform() const { return xf_on_; }
 
   /* Text: y is the top of the line box. Returns the advance in pixels. */
   int text(Font &f, int x, int y, const std::string &s, uint32_t color);
@@ -144,6 +159,8 @@ class Canvas {
 
  private:
   Image *img_ = nullptr;
+  Xform xf_;
+  bool xf_on_ = false;
   Recti clip_;
   std::vector<Recti> clip_stack_;
 };

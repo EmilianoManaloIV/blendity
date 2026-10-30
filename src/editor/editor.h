@@ -676,7 +676,22 @@ class Editor {
   const Sketch &sketch_for_test() const { return scene_->sketch; }
   uint32_t sketch_color_for_test() const { return sketch_.color; }  // (task 0286: the Draw menu's pen)
   float sketch_tether_for_test() const { return sketch_.tether; }
-  int draw_bar_rows_for_test() const { return draw_bar_rows_; }  // (round 318)
+  /* Round 319: the Draw tab's pad - zoom, turn (degrees, clockwise on screen), pan and flip (editor/sketch_pad.cpp). */
+  struct PadView {
+    float zoom = 1.0f, angle = 0.0f, pan_x = 0.0f, pan_y = 0.0f;
+    bool flip = false;
+  };
+  const PadView &pad_view_for_test() const { return pad_; }
+  int pad_pic_renders_for_test() const { return pad_pic_renders_; }
+  uint32_t draw_paper_for_test() const { return draw_paper_; }
+  int pad_bar_folded_for_test() const { return pad_bar_folded_; }  // (round 319: the toolbar's groups folded into More)
+  bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
+  int draw_source_for_test() const { return draw_source_; }
+  Recti pad_rect_for_test() const { return pad_rect_; }
+  Vec2 pad_from_screen_for_test(Vec2 s) const { return pad_from_screen().map(s); }
+  Vec2 pad_to_screen_for_test(Vec2 q) const { return pad_to_screen().map(q); }
+  double pad_render_ms_for_test() const { return pad_render_ms_; }
+  double pad_blit_ms_for_test() const { return pad_blit_ms_; }
   int sketch_french_for_test() const { return sketch_.french; }
   int sketch_radial_for_test() const { return sketch_.radial; }
   int sketch_symmetry_for_test() const { return sketch_.symmetry; }
@@ -3965,8 +3980,61 @@ class Editor {
   double sketch_keynav_last_ = 0.0;
   int sketch_depth_canvas(const Recti &view);
   /* The Draw tab (task 0233): its picture's source, targets and cache. */
-  int draw_source_ = 0;  // 0 the Scene view's camera, 1 the Game camera
-  int draw_bar_rows_ = 1;  // (round 318: the bar wraps in a narrow window)
+  int draw_source_ = 0;  // 0 the Scene view's camera, 1 the Game camera, 2 Paper (round 319)
+  uint32_t draw_paper_ = 0xFFFFFFFF;
+  /* Round 319 (editor/sketch_pad.cpp): the pad as SketchBook's canvas - zoomed, panned, turned and flipped in 2D. The
+   * tool works in the picture's pixels (the fit rect scaled by the zoom about its centre); pad_to_screen maps them to
+   * the screen. */
+  PadView pad_;
+  Recti pad_rect_;          // the pad on screen (its last frame)
+  Vec2 pad_center_;         // the fit rect's centre: what the zoom, turn and flip are about
+  bool pad_hovered_ = false;
+  bool pad_ui_hidden_ = false;  // Tab: only the drawing
+  double pad_hint_until_ = 0.0;
+  int pad_bar_folded_ = 0;  // the toolbar's groups folded into More (a narrow tab)
+  int pad_nav_ = 0, pad_nav_button_ = 2;  // a navigation drag: 0 none, 1 pan, 2 turn; the button holding it
+  Vec2 pad_nav_last_;
+  float pad_nav_raw_ = 0.0f;  // (a turn's angle before Ctrl's 15 degree steps)
+  int pad_space_ = 0, pad_space_x_ = 0, pad_space_y_ = 0;  // Space over the pad: 1 held, 2 held and dragged
+  Image pad_pic_;  // the camera's picture drawn off screen while the pad isn't at Fit
+  RenderTarget pad_rt_;
+  uint64_t pad_pic_key_ = 0;
+  int pad_pic_renders_ = 0;  // (the off-screen picture's renders: a pan or a zoom within a step makes none)
+  int pad_window_ = 0;       // (the OS window the pad last drew in: its keys are that window's)
+  bool pad_busy() const;
+  void draw_pad_zoom_button(const Recti &zoom);
+  void draw_pad_set_correct(int correct);
+  double pad_render_ms_ = 0.0, pad_blit_ms_ = 0.0;
+  bool pad_at_fit() const;
+  Recti pad_picture_rect(const Recti &fit) const;
+  Canvas::Xform pad_to_screen() const;
+  Canvas::Xform pad_from_screen() const;
+  void pad_keep(Vec2 q, Vec2 at);
+  void pad_zoom_at(float factor, Vec2 at);
+  void pad_set_angle(float degrees, Vec2 at);
+  void pad_flip();
+  void pad_fit();
+  bool pad_takes_space() const;
+  void pad_space_begin();
+  void pad_space_release();
+  void pad_touch(Vec2 at);
+  bool pad_nav_drag();
+  bool pad_navigate(bool hovered);
+  void draw_pad_paper(const Recti &view, const Recti &pic);
+  void draw_pad_render(const Recti &view, const Recti &fit, const Recti &pic, uint64_t key, const std::function<void(RenderTarget &)> &draw,
+                       const Mat4 &v, const Mat4 &p, const GameObject *owner);
+  Recti sketch_screen_rect(const Recti &view) const;
+  float sketch_zoom() const;
+  void draw_pad_toolbar(const Recti &bar);
+  void draw_pad_brush_group(const Recti &brush, const Recti &color, const Recti &size);
+  void draw_pad_more_menu();
+  uint32_t draw_paper_named(const std::string &name) const;
+  void draw_pad_sketch(bool navigating);
+  void draw_pad_hint(const Recti &view, bool game, bool hovered);
+  bool draw_source_command(const std::string &w);
+  bool draw_paper_command(const std::string &w);
+  bool draw_view_command(const std::vector<std::string> &t);
+  bool draw_tools_command(const std::string &w);
   /* Round 318: each view's last binding (kind 0 the Scene view, 1 the Game view, 2 the Draw tab) and the frame it was
    * made, and the view the pointer was last over - where Mesh > Draw's and the Draw tab's commands act. */
   SketchView sketch_views_[3];
@@ -3978,7 +4046,6 @@ class Editor {
   Renderer3D draw_r3d_;
   FilterTarget draw_ft_, draw_vs_;
   void draw_draw_window(const Recti &r);
-  void draw_draw_bar(const Recti &bar);
   bool draw_tab_command(const std::vector<std::string> &t);
   /* The Layers panel (task 0234, editor/sketch_layers.cpp): the sketch's layers composited in order with their opacity
    * and blend, the window that edits them, the console's verbs. */

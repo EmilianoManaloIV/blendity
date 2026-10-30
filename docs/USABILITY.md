@@ -371,6 +371,8 @@ screens themselves.
 | Preferences didn't say which windows the card showed, and switching Viewport Device left the other device's picture on screen until something changed. | Each window's line says where its views draw and who shows it; a switch draws the views again; with no card, the fall back to the CPU is said once (task 0199). |
 | With the perspective guide on, a freehand stroke - Ctrl held, or a layer set to Freehand - was still pulled onto a vanishing line as the pen moved. | Freehand goes where the pen goes; the ruler, ellipse and French curve, chosen for the stroke, still hold it (round 318). |
 | The Draw tab's bar had no pen color, steadiness or canvas, nor the French curve's shape, radial copies, Perspective Follows the Camera or Build from Sketch: they were only in Mesh > Draw. | A color field and Pen, Guides and Build menus on the bar, Mesh > Draw's own items; in a narrow window the bar wraps to a second row (round 318). |
+| The Draw tab couldn't be zoomed in to draw a detail, panned, turned to suit the hand, or flipped to check a drawing; its bar of combos took two rows in a narrow window and read as a 3D tool's, not a sketchbook's. | SketchBook Pro's canvas: one toolbar in SketchBook's order, groups folding into More when narrow; the wheel zooms about the pointer, a middle-drag or Space+drag pans, Shift turns, two fingers pinch and twist, Home fits, Flip Canvas mirrors; Tab hides the tools; Paper draws on blank paper (round 319). |
+| A Drawing layout open from launch showed the Draw tab with its pen off: it only started when the tab was shown again. | The pen starts the first time the tab is drawn too (round 319). |
 
 ## Still worth doing
 

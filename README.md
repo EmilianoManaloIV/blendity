@@ -200,7 +200,9 @@ takes a key of your own (right-click it > Assign Shortcut...), and one `.blendit
 drawing tablet beside the screen, a second Scene view and a pinned Inspector in a window of their own (*Duplicate into New
 Window*), and tabs dock into whichever window they are dropped on. The **Draw tab** is the pad: the scene from the Scene or the Game camera, the
 pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn;
-its bar has the pen's color, Steadiness, Canvas, the guides and Build from Sketch. The **Layers window** composites the sketch's layers as Photoshop does - opacity,
+it works like SketchBook Pro's canvas - one slim toolbar (the brush, its color and size, the Ruler, Ellipse and Curve,
+symmetry, perspective, Steady and Predictive Stroke, Layers, More), the pad zoomed, panned, turned and flipped with the
+wheel, a middle-drag or Space+drag and two fingers, Tab to hide the tools, and blank Paper as a source. The **Layers window** composites the sketch's layers as Photoshop does - opacity,
 blend modes, groups, locks - with rows a pen can work and the Wheel's layers set a hold away. Tabs never clip (icons, then an overflow), related tabs
 fold into one, and a stage layout shows its own tabs; the Scene view's bar reads Layout > Mode > Tool. **Sculpt Mode** (Modeling Tools > Sculpt) pushes, smooths and grabs a dense mesh with
 brushes that touch only what is under them, each stroke one light undo step - ten brushes, symmetry, a lazy mouse, image alphas
@@ -287,7 +289,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13491 unit checks in 1179 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13535 unit checks in 1185 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

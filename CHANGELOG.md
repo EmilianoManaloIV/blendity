@@ -2,6 +2,101 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 319): the Draw tab as SketchBook Pro's canvas - one toolbar, the pad zoomed, panned, turned and flipped, Tab hides the tools, Paper
+
+**Asked:** the user (2026-10-29): "For the drawing page, make it similar to how SketchBook Pro operates", then "Add the
+ability to zoom in on the drawing page". Their choices: a canvas-first page with a brush palette and puck, strokes kept
+as lines (Lift and Build keep working), SketchBook's toolbar replacing the bar (Mesh > Draw unchanged). The plan has three
+rounds (task 0296 now, the brushes and puck in 0297, the Wheel and Learn in 0298); a reference board tab follows (0299-0302).
+
+**Changed: the Draw tab (task 0296, `editor/sketch_pad.cpp`)**
+- **One slim toolbar** in SketchBook's order:
+  - Undo and Redo;
+  - Brush (the pen's menu), the color (now with opacity) and the Size;
+  - the Ruler, Ellipse and Curve toggles;
+  - Symmetry and Perspective;
+  - Steady Stroke and Predictive Stroke;
+  - Layers;
+  - at the right, the zoom (a click fits) and More.
+- **More** holds what isn't drawing:
+  - Source (Scene Camera, Game Camera, Paper) and Paper Color;
+  - Pen, Guides and Build (Mesh > Draw's items);
+  - Place in 3D;
+  - Fit, Zoom, Turn, Flip Canvas;
+  - Hide the Tools;
+  - Layers;
+  - Draw Tool.
+- **A narrow tab** folds groups into More instead of wrapping onto more rows.
+- **Zoom, pan, turn and flip, in 2D:** the strokes and the camera don't change.
+  - The wheel zooms about the pointer, from 10% to 1600%.
+  - A middle-drag or Space+drag pans, and Shift turns (Ctrl gives 15 degree steps).
+  - Two fingers pinch, pan and twist.
+  - Home, a double middle-click or the zoom button fits.
+  - A tap of Space still opens the Wheel.
+- **Stroke widths are the picture's,** so a stroke is wider zoomed in, as on paper.
+- **Tab over the pad hides the tools,** and Tab or Esc brings them back. A new Draw Tab keymap context (`draw.hide_ui`,
+  `draw.fit`, `draw.flip`) wins over the Scene's keys there, so Tab doesn't toggle Edit Mode under the Blender keys.
+- **A Paper source:** blank paper in White, Cream, Gray, Dark or a hex color.
+
+**Fixed**
+- The Draw tab's pen didn't start when a Drawing layout was open from launch, only when the tab was shown again.
+
+**How:**
+- **Picture pixels:** the sketch tool works in "picture pixels" (the fit rect scaled by the zoom). `Canvas::Xform` maps
+  them to the screen while the sketch draws, and the pointer is mapped back, so the guides, handles and corrections run
+  unchanged.
+- **The picture away from Fit:** it is drawn off screen once (up to twice the fit size), then resampled with
+  `Canvas::blit_affine` while the view moves.
+
+**Console:**
+- `draw source scene|game|paper`
+- `draw paper <name|hex>`
+- `draw view fit|zoom|turn|flip|pan`
+- `draw tools hide|show|toggle`
+
+**Checked**
+- `tests_round319` (6 tests by real events):
+  - the wheel zooms about the pointer (the spot under it moved 0.3 px);
+  - a stroke drawn zoomed 1.6x, turned and flipped lands on the same picture spot as at Fit (within 0.0024 view heights,
+    the pointer's whole pixels rounded twice);
+  - middle-drag and Space+drag pan, a Space tap opens the Wheel, Shift+Ctrl turns in steps, and a pinch zooms;
+  - Tab and Esc;
+  - the toolbar's controls in order, and Paper;
+  - the cost: the picture drawn off screen in 13 ms at 1274x569, a pan resampled in 2 ms.
+- Round 318's bar test, rewritten for the toolbar and its folding.
+- The coverage map, consistency audit and console audit, all at their baselines.
+- The dependency-free suite: 12,927 checks, 0 failed.
+- Main: Windows with libraries 13,535 checks (1185 tests) and Linux 13,087, all 0 failed.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- **The off-screen picture's size cap only applied to a fit rect over 4096 px.** A 4K tab zoomed in rendered 7680x3800.
+  The picture is now at most 4096 px on its longest side.
+- **Zooming between 100% and 200% re-rendered the scene at every notch.** The picture is now drawn at the fit size or
+  twice it, and a zoom within a step only resamples. The test counts the renders: one, then none for a pan, a turn and
+  zooms from 120% to 1600%.
+- **The wheel, a pinch, Home or Flip in the middle of a stroke moved the stroke's first half.** The view now stays put
+  while a stroke, an erase or a handle drag is under way.
+- **NaN or huge numbers from `draw view` broke the mapping.** They are now refused, and the pan is clamped.
+- **More was missing two of the folded groups:** it now has Undo, Redo and Predictive Stroke. The toolbar's widths come
+  from one table, and a tab too narrow for even the brush group cuts it off instead of drawing over the zoom and More,
+  which goes first.
+- **The pad's keys are tied to the OS window it is drawn in,** so Tab or Space in another window's Scene view isn't
+  taken by the pad.
+- **Space:** a drag of either button while Space is held means no Wheel on letting go. Space let go while the tab was
+  away is forgotten.
+- **Hide the Tools:** coming back to a tab whose tools are hidden shows the "Tab: show the tools" hint again.
+- **The Paper hint** no longer offers the orbit keys.
+- **New tests:**
+  - Cream paper is checked;
+  - Paper turned is still paper at the middle;
+  - a double middle-click fits;
+  - the narrow toolbar's controls don't overlap;
+  - the resampled picture lines up after a flip.
+- **Left as they are, and noted in the spec:**
+  - Build's pixel tolerances are in the picture's pixels, so they follow the pad's zoom.
+  - Under the SketchUp keys, the Wheel is Shift+Space and Space is the View tool, so there a middle-drag pans the pad.
+
+
 ## 2026-10-29 (round 318): freehand strokes aren't pulled onto the perspective guide; the Draw tab's pen and guides; every bridge followed a live Blendity
 
 **Asked:** the user (2026-10-29): "When in freehand draw mode, the pen still snaps to the perspective grids", then "For
