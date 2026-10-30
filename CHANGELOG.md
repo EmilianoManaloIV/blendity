@@ -2,6 +2,890 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 335): animate almost any property
+
+**Asked:** "In the animator I should be able to animate almost all properties of an object."
+
+**Added (task 0315)**
+- **More tracks:** a material slot's fields - Base Color, Roughness, Metallic, Emission, a fog's Density...
+  ("Material 0.Roughness") - and the object's Active, shown or hidden; a list's choice is keyable too. With what was
+  there (the Transform, every component's numbers, switches and colours, shape keys), almost everything in the
+  Inspector animates.
+- **Keying from the Inspector,** as in Blender: right-click a field's name > Insert Keyframe or Delete Keyframe, or
+  press I over it; a diamond after the name marks an animated field, filled on a key's frame.
+- **Record keys any field you change** in the Inspector - a light's colour, a camera's focus, a material's roughness -
+  not only the ones already animated; one undo step an edit.
+- **Add Property** has a search and lists the properties by group: Object, Transform, each component, each material
+  slot (by its name).
+- **The console:** `anim key` takes a quoted property (`anim key . "Material 0.Roughness" 0 30 0.9`).
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- A track made while Preview was on (by Record or Insert Keyframe) wasn't put back when Preview turned off - the last
+  previewed value stayed, saved with the scene: Preview keeps every property's value and puts back the ones animated
+  by then (an edit not keyed stays).
+- A second component of a type (two Array modifiers) keyed and played the first one's field: it offers no keys.
+- A held material key touched the material every frame of Play (a new picture every frame, a path-traced view never
+  settling): touched only when the value changes.
+- Switches, lists and Active keyed as curves (a switch flipping halfway): Constant.
+- I took Shift+I and Ctrl+I over a field's name: only a plain I; in Play, Insert Keyframe says why it doesn't.
+- The Inspector looked the clip up for every field it drew: once a frame and clip version.
+- The root's own Active isn't offered (off, its Animation would stop and never turn it on); an empty property, a slot
+  that isn't a number, Delete Keyframe's last key (the track goes too); the docs on Active.
+
+**Checked:** `tests_round335` - a material's Roughness 0.1 -> 0.7 over 10 frames plays 0.4 at frame 5, Active off
+from frame 10; by clicks Insert Keyframe on Roughness, I over Cast Shadows, Record keying Receive Shadows at frame 12,
+Add Property's "rough" listing the material's Roughness and hiding Position; Preview off restoring a track made while
+previewing (0.4 -> 0.5) and keeping an unkeyed edit; Constant switches; the diamond's states; a second Array's Count
+without keys; Ctrl+I and an empty property keying nothing; Esc closing Add Property; the lesson's Try-its.
+
+## 2026-10-30 (round 334): Camera Flatten - the 2D look
+
+**Asked:** "I've heard a method in getting that 2D look at 3D. You simply flatten the object relative to the camera
+(face, body, etc.) Is that a feature we can implement to make things look further 2D in 3D?" The user chose to keep
+the original shading, the Game view and renders only, and a component with per-part overrides.
+
+**Added (task 0314, ADR 0093)**
+- **Camera Flatten** (Add Component > Rendering): the object's depth squashed along the camera's view about a pivot -
+  Guilty Gear Xrd's trick, so perspective no longer swells what is near the camera and the picture is the drawn shape.
+  Amount (1: flat as a card, 2 % kept), Pivot (Bounds Center, Object Origin, or a Bone below it by name - the head),
+  Direction (toward the camera, or the view axis), Children (a parent's reaches the meshes below; a child's own wins).
+- **Shaded as modelled:** the normals and the toon face map read the true placement - only where things are drawn
+  changes.
+- **Where:** the Game view, F12 (raster and path tracing) and Camera Preview's traced picture; the Scene view keeps
+  the true shape for modelling, and bakes, exports and MoonRay too. The GPU views draw a flattened object on the CPU
+  and say why.
+- **Console:** `flatten 0.6`, `flatten pivot bone head`, `flatten direction axis`, `flatten preset anime` (0.6 about
+  the head bone if there is one), `flatten remove`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The Game view, Camera Preview and the live preview kept their old picture when a Camera Flatten was added, edited or
+  removed: the component is in the views' hash now (with a render role, found without a cast, and no hierarchy walk
+  when the scene has none).
+- An outlined flattened object had a line 1.25x as thick and its shell rebuilt at every camera move: the shell is
+  built for the true size - the same one from any camera.
+- The GPU and OptiX path tracers read a toon face map's key light in the flattened space: the true one, as the CPU.
+- `flatten pivot` (no word after it), `flatten preset toon` and other unknown words set the Amount to 0: refused with
+  the usage now; `flatten remove` with nothing to remove makes no undo step; an unknown Pivot Bone is warned of.
+- Realtime lightmaps followed the camera (laid out again at every move): laid out and lit by the true placement.
+- The docs say where else the flattened shape shows (piloting a camera, the Draw tab's camera picture) and its limits
+  (World-mapped axis materials, Realtime GI's voxels).
+
+**Checked:** `tests_round334` - the matrix; the Game view flattened, the Scene view not; the views' hash with every
+edit; one outline shell from two cameras; the console's refusals; Children and overrides; through
+an orthographic camera a flattened sphere draws as the true one - the CPU raster 4 pixels of 4096 differ (1494 with
+the flattened normals), the path tracer 0.6 % (34.9 %); the lesson's Try-its.
+
+## 2026-10-30 (round 333): the shader-graph work written up
+
+**Asked:** the shader-graph request (round 327) - its write-up, as planned.
+
+**Added (task 0312):** the MANUAL's table of Blender's shader nodes and where each is in Blendity (a layer, a layer's
+option or a material field) - and the ones not there yet (Mix / Add Shader, Light Path, Attribute, Object Info,
+Geometry, Combine RGB); the Materials paragraph names Volume (Fog). The Learn lessons of rounds 327-332 ("Blender's
+Shader Nodes in the Textures Window", "Fog with a Volume Material", "Working Faster with Textures and Materials") are
+the Try-it side.
+
+## 2026-10-30 (round 332): the Textures and Materials windows, easier
+
+**Asked:** "Look into improving HCI experience in texture and material tab."
+
+**Found** by a cognitive walkthrough of five tasks and Nielsen's heuristics (`docs/hci/walkthrough-textures-materials.md`).
+
+**Changed (task 0313)**
+- **Reset to Default:** right-click any field's name in a texture layer or a material - the value a new one starts
+  with (Blender: Backspace over a field).
+- **Add Layer** has a search field first and Blender's node groups: Texture, Pattern, Toon, Input, Color, Converter,
+  Filter, Mask & Wear, Layout (the 48 layers were under Generators and Filters).
+- **Alt+click a layer's name:** the preview shows the stack up to it (Substance's solo), and says so; again for all.
+- **A layer that changes nothing says why** at its row's end: "Opacity 0", "Writes nothing".
+- **"not used"** on a texture tile no material uses.
+- **Materials:** Of Type... beside New Material Asset (Basic, Glass, Metal, Stylized, Volume - fog among them); a
+  slot's New Material of Type by the same groups.
+
+**Fixed on the way:** after picking from Add Layer's search the search field stayed in its edit.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- Reset to Default was missing from the object Inspector's material, where most materials are edited: there too now.
+- Esc no longer closed Add Layer (its search kept the keyboard): it does, as the Wheel picker's; Enter takes the first
+  match; "No layer matches" when none does.
+- A mask effect's reset took a plain layer's defaults (Writes Albedo on), and its row said "Writes nothing" though it
+  shapes the mask: a new effect's defaults, and no such line on mask effects.
+- Reset to Default reaches Base Color with its Alpha and the vectors (Tiling, Offset); a field whose materials differ
+  can be reset though the active one is at its default; a pending reset is dropped if its field isn't drawn again.
+- "not used" read a texture's path to its first '#' (a file named "Wall #2" was never in use) and claimed more than it
+  knew: it says this scene and the materials opened.
+- The preview's cut followed an index: a stack edit now drops it. The layer's menu has Preview Up to Here, for a pen.
+- The Materials toolbar ran past its edge when narrow: Of Type... shows when it fits, the search fits what is left.
+
+**Checked:** `tests_round332` - all by clicks: Reset to Default puts Scale 9 back to 4 (Ctrl+Z gives 9 again), Use Mask
+off, Fog Density 3 back to 1 and the Sphere's Roughness in the Inspector 0.95 back to 0.5; Esc closes Add Layer, Enter
+on "gabor" adds Gabor; the layer menu's Preview Up to Here; a texture assigned to the Cube loses its "not used";
+"perl" lists Perlin Noise and hides Checker; Alt+click shows the preview up to the layer and again for all; the next
+click after Add Layer folds a row; "not used" on a new texture; every layer in a group, every material preset in one.
+
+## 2026-10-30 (round 331): a Volume (fog) material
+
+**Asked:** "For material types there should be a volume like material that adds 'fog'." (round 327); the user chose a
+true volume in the path tracer, with approximations in the views.
+
+**Added (task 0311, ADR 0092)**
+- **Surface Type > Volume (Fog)**, after Glass: the mesh's surface is invisible and its inside is fog, with Blender's
+  Principled Volume's fields in a "Volume (Fog)" group: Fog Density (per metre), Fog Color (the light it scatters), Fog
+  Anisotropy (Henyey-Greenstein: above 0 bright toward the sun), Fog Emission and its Strength, Fog Density Noise and
+  Fog Noise Scale (wisps, in the object's own space).
+- **Presets:** Fog (a grey haze), Smoke (dark and wispy) and Mist (thin, forward-scattering), in the material presets.
+- **The path tracer (true):** a ray entering a fog's mesh is in its medium; free flights by delta tracking (against
+  twice the density where it has noise), scattering by the phase function, each light seen through the fog (and
+  whatever is in the way) at every scatter, the fog's own glow; shadow rays dim by the fog they cross, so fog casts
+  soft shadows. A camera inside a fog (a fog-filled room) starts in it.
+- **The CPU views (approximate):** what the view crosses of the mesh's bounds (exact for a box), cut where something is
+  drawn behind, dims it by exp(-density x length) toward the fog's colour lit by the sky and each sun (the phase
+  function toward it); from inside the fog, its far side draws it. No shadows or shafts in the views.
+- **Not yet:** the GPU path kernel, OptiX and the GPU views have no volumes: a scene with fog is traced on the CPU and
+  the views go to the CPU, each saying why. MoonRay leaves the fog's mesh out (presence 0) and says so.
+- **An open mesh warns:** a fog on a mesh with holes says "This mesh is open (N open edges): fog needs a closed mesh"
+  above its fields (`meshops::open_edge_count`).
+
+**Fixed on the way:** the fog's fields first had names the material already used (Noise Scale, the axis material's):
+a scene saved with a fog loaded the other field. They are "Fog ..." now, and a round-trip test keeps them apart.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- A lamp inside a foggy room lit the floor as if there were no fog on its way (its shadow rays never crossed a fog
+  face): shadow rays start with the fogs the path is in - 0.373 of clear now, exp(-0.2 x 4.9) being 0.375.
+- Fogs inside fogs lost the outer one (a cloud in a foggy room left a clear tunnel; a cloud where the camera's probe
+  looked hid the room's fog from the whole picture): the path keeps up to four fogs and their densities add.
+- A camera ray that scattered in fog before meeting anything gave the denoiser no albedo, normal or depth (the depth
+  uninitialised): it gets the fog's colour and the distance, as Cycles does.
+- Why the GPUs sat out was only in the code: the Render settings and the device line say it. The GPUs are set aside
+  open, not torn down, when fog comes and goes.
+- A fog is clicked and outlined in the CPU views where it is thick enough (not from inside); the render view's picking
+  looks through it.
+- Past 64 fog faces a path shaded the next one as a grey surface: it ends. A free flight that met only null collisions
+  scattered anyway: it goes on.
+- Fog's lights were sampled at their centres (hard shadows): through the surfaces' own `sample_light`.
+- The camera's fogs are found once a render() call, each object's inverse once a build; the open-edge count is kept
+  until the mesh's faces change, not every vertex move; an infinite density, a ray along a slab, NaN.
+
+**Checked:** `tests_round331` - 1 m of black fog at density 1 dims a ball to 0.371 of clear in the path tracer (exp(-1)
+is 0.368); a lamp in a foggy room 0.373 (0.375); a ball through a room's fog and a cloud in it 0.281 (0.295); a
+denoised fog render finite; density 0 changes nothing; forward scattering toward the sun brightens the fog 0.36 -> 0.55; from inside a
+fog room 0.501 (exp(-0.7) 0.497, from the near plane); the CPU view dims the Cube's middle 168.8 -> 52.1 and fogs the
+view from inside; the GPU path and views fall back and say why; the fields round-trip; the open-mesh note; MoonRay's
+presence 0.
+
+## 2026-10-30 (round 330): Blender's Mix modes, and the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic
+
+**Asked:** the shader-graph request (round 327); the user chose all four groups, Principled's extras among them.
+
+**Added (task 0310)**
+- **Blender's Mix modes as layer blends**, after the seven there were (old textures unchanged): Darken, Lighten,
+  Difference, Exclusion, Subtract, Divide, Color Dodge, Color Burn, Soft Light, Linear Light, and Hue, Saturation,
+  Color and Value in HSV - Blender's formulas.
+- **The material's "Principled: Subsurface, Sheen, Coat" group** (folded, PBR materials):
+  - Subsurface, its Color and Scale: a softer terminator, tinted - brighter where the light grazes, dimmer facing it
+    (an energy-conserving wrap, not Blender's random walk);
+  - Sheen, its Tint and Roughness: the grazing glow of cloth (Disney's);
+  - Coat, its Roughness, IOR and Tint: a clear layer with its own highlight over the base, which it dims and tints;
+  - Anisotropic and its Rotation: the highlight stretched along the mesh's tangent (needs UVs).
+- **Where:** the CPU raster (the per-pixel shader: its 8-wide one leaves such materials to it) and the CPU path tracer
+  (one BRDF), and the GPU path tracer and the OptiX device (the extras in a record of their own after the materials:
+  the kernel's material struct can't grow past SPIR-V's id bound; the PTX regenerated). Both path tracers sample the
+  coat as a lobe of its own. The GPU views don't draw them yet - their g-buffer has no room - so a view with such a
+  material goes to the CPU and says why.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The OptiX kernel's PTX was stale (its hash test failed; OptiX ignored the extras): regenerated.
+- The CPU raster's 8-wide shader ignored the extras (a coat only near triangle edges): such materials use the
+  per-pixel shader.
+- Subsurface darkened the lit side and its "past the terminator" light was never reached by any light loop: an
+  energy-conserving wrap on the lit side.
+- Coat's sharp highlight was only met by chance (fireflies, the sky's reflection missing): sampled as a lobe in both
+  path tracers.
+- An Image layer's Hue / Saturation / Color did nothing and Value replaced the colour: blended as a colour, clamped.
+  Color Dodge keeps black black, as Blender's. An area light's diffuse had a seam as its direction crossed the horizon.
+- The lesson's Mix-mode Try-it changed round 328's demo texture (its test then failed): it has its own; a Try-it lacquers
+  the sphere.
+
+**Fixed (round 329's Linux crash):** a click that added a stop to a ColorRamp, or a point to a curve, could crash the
+editor on Linux. The new stop's index was worked out as `insert(...) - begin()`, and GCC read `begin()` from the
+vector's old storage before the insert moved it, so the picked stop was a wild index (MSVC happened to read it after).
+The index is now taken before the insert. Found by tracing the intermittent segfault in the assets group with a
+backtrace on SIGSEGV; checked by a test that adds to a full ramp and curve, and by the click test passing 8 runs of 8.
+
+**Checked:** `tests_round330`, `tests_round330_blends` - all extras at 0 give exactly the old BRDF; Sheen adds at
+grazing, Coat a highlight of its own, Anisotropic a different highlight along the tangent than across it (the isotropic
+one the same both ways), Subsurface brighter at a grazing light and dimmer facing it; a white material with everything
+on reflects at most 0.70 of a white furnace; a coated sphere's middle changes in all 169 pixels in the CPU view; the GPU path tracer against the CPU on a coated, sheened, subsurface ball and an anisotropic
+one (run on main, which has the GPU); the views' fallback and its reason; ten Mix modes and the four HSV ones against
+Blender's results.
+
+## 2026-10-30 (round 329): Blender's converters - ColorRamp, Map Range, Clamp, Math, RGB Curves, Separate Color
+
+**Asked:** the shader-graph request (round 327); the user chose all four groups of Blender's additions.
+
+**Added (task 0309, ADR 0091)**
+- **The Color Ramp is Blender's ColorRamp:** a gradient bar in the Textures window - click it to add a stop, drag a
+  stop's handle to move it, drag it well below to remove it - with the picked stop's position and colour under it;
+  Interpolation Constant, Linear, Ease or Cardinal; Input the height, the mask or the albedo's luminance. A ramp of
+  two stops at its ends is the old Low and High Colors (old textures unchanged).
+- **Map Range** (From / To, Linear, Stepped, Smooth Step, Smoother Step, Clamp), **Clamp** and **Math** (Add,
+  Subtract, Multiply, Divide, Power, Minimum, Maximum, Absolute, Floor, Fraction, Modulo, Sine, Smooth Minimum, Smooth
+  Maximum, Snap - with a value or another plane) on one plane: the height, roughness, metallic, mask or the albedo.
+- **RGB Curves:** a curve box each for Combined, Red, Green and Blue - drag a point, click to add one, drag it out to
+  remove it; a monotone cubic through the points (no overshoot).
+- **Separate Channel:** the albedo's red, green, blue, hue, saturation or value into the mask (a later layer's Use Mask
+  follows it) or the height.
+- `Reflector::ramp` / `curve`: text to files, undo and edits ("pos r g b; ..." and "x y; ..."); `core/ramp.h`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The first stop added to a ramp was often taken away again on release: the Low and High Color rows vanished under
+  the click and moved the bar. They stay (the first and last stops' colours, editable either way).
+- Dragging the picked stop's Position past a neighbour edited the neighbour: the picked stop follows its value.
+- Blender's formulas: Snap down to a multiple, smooth min / max less h^3 k / 6, stepped Map Range reaching To Max,
+  RGB Curves' Combined before the channels, Clamp's Min above Max giving Max; "B-Spline" is Cardinal (what it is).
+- The converters kept the albedo within 0..1 in the planes but not in live shading: both now. No list built per
+  live-shading point. A press picks a stop or point without moving it; a finger scrolls the Textures window unless
+  it taps or goes sideways; 32 stops or points at most, the text written exactly.
+- The lesson's "Constant" Try-it turned the clouds one flat grey: it sets three stops first (`settex ... L1Stops` takes
+  ',' between stops).
+
+**Checked:** `tests_round329` - the ramp's stops exact under every interpolation, Constant steps, Linear halfway, Ease
+between; an old two-colour ramp gives 0.300 at 0.25 as before; stops saved and read back; Map Range, Clamp, all fifteen
+Math operations and Separate Channel against their formulas; an identity curve changes nothing and one through (0.5,
+0.8) gives 0.800; by clicks in the Textures window a stop added, moved to 0.76 and dragged off, and a curve point added;
+a click at a fresh ramp's foot keeps its stop; a Position typed past the neighbour moves the right stop; every converter
+the same in the planes and live shading; an old ramp file loads as two stops and draws 0.300 at 0.25; the stops in the
+hash; hue, saturation, stepped Map Range, Clamp reversed and Math on the albedo against Blender's results; the lesson's
+Try-its leave Turbulence on, three stops and Constant.
+
+## 2026-10-30 (round 328): Perlin Noise, and Blender's Noise, Voronoi, Wave, Magic, White Noise and Gabor
+
+**Asked:** the user (2026-10-29): "Make sure to add perlin noise!" - with the shader-graph request (round 327).
+
+**Added (task 0308)** - every one periodic in the tile, so a texture still repeats without a seam:
+- **Perlin Noise**, a generator of its own: Ken Perlin's improved gradient noise (0 at every lattice point), fractal
+  (Detail 1-16, Roughness, a whole-number Lacunarity), Distortion, Offset, Turbulence (Perlin's |noise|, for veins and
+  fire), Seed, two colours. A "Perlin Noise" preset in Basics.
+- **Noise > Type** (Musgrave's, as Blender 4.1 merged them): Perlin fBm, Multifractal, Ridged, Hybrid, Hetero Terrain,
+  with Lacunarity, Offset and Gain; "Smooth (as before)" keeps old textures as they were.
+- **Voronoi > Feature** (F1, F2, Smooth F1, Distance to Edge, N-Sphere Radius) and **Distance** (Euclidean,
+  Manhattan, Chebyshev, Minkowski with its Exponent); "Cells" keeps the old look.
+- **Wave > Type** Bands or Rings, **Profile** Sine, Saw or Triangle, Phase and Detail.
+- **Magic**, **White Noise** and **Gabor** generators.
+
+**The review's fixes (Opus code-reviewer on rounds 327-328, changes needed)**
+- The themed New menu wrote through a reference to a finished frame (a submenu's body runs after its popup's): the
+  preset is made, and the search cleared, inside the submenu.
+- Voronoi's Smooth F1 collapsed to one flat value at low Smoothness: a log-sum-exp from F1 now (0.05..0.80 at the
+  default, F1 itself at 0). Distance to Edge measured Euclidean bisectors of a point picked by another metric (9% of
+  texels clamped dark): it is Euclidean throughout, as Blender's; the metrics' help says they are for F1, F2, Smooth F1
+  and N-Sphere Radius, and the lesson's answer no longer suggests them for edges.
+- Hybrid and Hetero Terrain sat in 0.7..1 and Ridged went white at a low Offset: rescaled. Octaves stop before a
+  lattice finer than a float's place on the tile (no int overflow at Detail 16).
+- A preset field the layer hasn't is counted and warned (none now); Marble's Distortion was clamped (now 1.6);
+  Brushed Metal is made from Gabor.
+- Mapping isn't offered on Fill, Mesh Map, Face Shadow or Toon Ramp; its fields are named Map Offset / Map Rotation /
+  Map Scale / Map Seamless, so `settex L0Scale` never lands on them by prefix. Gabor's kernels are a function of their
+  own (no three-deep loops).
+
+**Checked:** `tests_round328` - Perlin is 0 on its lattice, within -1..1 and the same one period over; every new type
+and option equals itself one tile over (20 cases) and varies; F2 >= F1 at 4000 points, the distance to an edge >= 0 and
+down to 0.0001; the four metrics give F1 different pictures; Smooth F1 is F1 at no smoothness and within k ln 25 of it;
+no preset misses a field; Mapping is the same through live shading as through the planes (Seamless off, 30 degrees);
+the lesson's six Try-it commands make Marble and Clouds2 as they say; each type's 1024 px time printed (2-19 ms). The
+Textures window's Add Layer test scrolls its settings back up (the Noise layer is longer now).
+
+## 2026-10-30 (round 327): the texture presets by theme, and Blender's Mapping on every generator
+
+**Asked:** the user (2026-10-29): "For the Texture tab and options, recommend other options to make it similar to shader
+graph in blender while maintaining the style that is already established. Organize all texture presets according to
+their theming..." Their choices: extend the layer stack (no node canvas), all four groups of Blender's nodes, presets by
+subject. This is the first of rounds 327-333 (the plan: richer textures with Perlin Noise, converters, Blender's mix
+modes and the Principled extras, a Volume (fog) material, the windows' HCI pass).
+
+**Added (task 0307)**
+- **Presets by theme:** the Textures window's New menu has a list per theme - Basics, Architecture, Floors & Wood,
+  Nature, Sky & Weather, Metal & Fabric, Stone - 35 presets, 20 of them new (36 with round 328's Perlin Noise) (Gradient, Stripes, Plaster, Roof Tiles,
+  Windows, Planks, Grass, Leaves, Rock, Water, Sand, Moss, Snow, Sky, Clouds, Brushed Metal, Rust, Fabric Weave,
+  Marble, Granite), the anime ones with their subject. Old names still work (`newtex`, `texture new`).
+- **Mapping** (Blender's Mapping node) on every pattern generator, folded after its own fields: Map Offset U / V, Map
+  Rotation, Map Scale U / V and Map Seamless (whole repeats, quarter turns). Old textures load unmapped.
+
+**Checked:** `tests_round327` - every preset builds (29 different average colours of 35); scale 2 doubles a Checker's
+cells, an offset moves it exactly a quarter tile, a quarter turn turns it, Seamless rounds 1.5 to 2, the rows still close
+across the seam; the mapping saved and read back; New > Nature > Sand by clicks. The Textures window's field tests
+found the folded group before a layer's fields shifted their edits - it sits after them.
+
+## 2026-10-29 (rounds 325-326): papers on the boards, boards exported; spring kinds, the animation toolbar, puppet handles
+
+**Asked:** the user (2026-10-29):
+- "...incorporate the two so I can put all my references in one place along with my paper sketches." Their choices: a
+  paper is a board item (a live picture of it; double-click to draw), a linked file any board can show.
+- "Make it so I can export the board as pdf or photo format."
+- "Bug when I select passed 'soft' in spring bones I can't access the other spring bone types."
+- "Another HCI issue appear for the Rigging and animation tab; there is too much buttons that it gets cut off."
+- "...for the Animatica Marionette features you can set the handles to a specific bone. Just in case it gets it
+  automatically wrong."
+
+**Added (task 0305: papers on the board)**
+- **A paper is a board item:** Boards > New Paper Here, Boards > Add Paper, a `.paper` dragged from the Project window,
+  or the Draw tab's More > Paper > Pin to the Board. It shows the paper's drawing, kept up to date as it is drawn (at
+  most four times a second), and moves, scales, turns and undoes like an image. Double-click it to draw on it in the
+  Draw tab (the source becomes Paper).
+- **One paper on many boards:** renaming a paper relinks every board that shows it (their files, and this board's undo
+  steps). A missing paper shows "Missing paper:".
+- **Boards:** Duplicate Board and Delete Board (to the system's trash) in the Boards menu; `board rename|copy|trash`,
+  `board addpaper <name>|newpaper|openpaper`.
+
+**Added (task 0306: export)**
+- **Boards > Export...:** a panel - What (the whole board, the selection, the view as seen), Format (PNG, JPEG, PDF),
+  Size (1024-8192 px on the long side) and Background (the board's, white, transparent for PNG) - then where to save
+  (Assets/Exports by default; a typed .png, .jpg or .pdf decides the format).
+- **Sharp at any size:** an image the picture shows larger than the board's 2048 px copy is read again at full size,
+  and each paper is drawn at the size it has in the picture.
+- **The editor isn't stopped:** the pictures load and the file is encoded and written on threads of their own; the
+  board says "exporting..." meanwhile.
+- **The PDF** is one page, A4 on its long side, the picture inside as a JPEG (`encode_pdf_image`; `encode_jpeg` split
+  from `write_jpeg`). No new dependency.
+- `board export <path> [png|jpg|pdf] [size <px>] [selection|view] [bg board|white|none]`.
+
+**Fixed**
+- **Spring bones:** a chain's kind was a button stepping Hair, Ear, Tail, Cloth, Soft, then None - which set the chain
+  aside and hid the button, so the other kinds couldn't be picked again. It is one list of all six; a kind picked on a
+  chain set to None takes it back.
+- **The Rigging & Animation tab's toolbar** ran off the window: its groups (the transport, the clip, the views, Walk
+  Cycle, AI, the physics tools) now wrap onto another row when they don't fit.
+- **Puppet Posing's handles can be put on a bone by hand:** Animation > Puppet > Handle Bones > a handle > Use the
+  Selected Bone (or Found Automatically), kept with the armature (Inspector: Armature > Puppet Handles);
+  `autopose handle lhand|rhand|lfoot|rfoot|head|hips <bone>|auto`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- An 8192 px PNG stopped the editor for 12 s (2.2 s at 4096): now loaded, encoded and written in the background.
+- Exports above 2048 px were upscaled from the board's copies (papers from 720 px pictures): full size now.
+- Double-clicking the open paper, and New Paper Here, wiped its undo history; the export settings closed after each
+  choice (now a panel of lists); a rename didn't reach the board's undo steps or a differently-cased path; a paper's
+  stroke widths on the board depended on the pad's last size; a size past the memory budget could crash; this
+  CHANGELOG's round 322 heading was lost in round 324's entry (restored).
+
+**Checked:** `tests_round325`, `tests_round326` (`test_board.cpp`), the spring kinds and the toolbar
+(`test_physics.cpp`), the puppet handles (`test_animation.cpp`) - real events and clicks.
+
+## 2026-10-29 (round 324): papers of their own - the Draw tab's Paper isn't in the world
+
+**Asked:** the user (2026-10-29):
+- "Make it when its source is paper it doesn't have any overlays in the scene view. So I can use the drawing tablet as
+  reference, rather than use it to actually draw in the world."
+- "Make it so you can save multiple paper, same with the board system. In-fact, incorporate the two so I can put all my
+  references in one place along with my paper sketches." (the papers here; papers on boards are task 0305)
+- "Also make sure that when in paper mode it doesn't move perspective guides in the scene or game view."
+
+Their choices: a paper is a linked file; strokes already drawn stay with the scene.
+
+**Added (task 0304, ADR 0090, `editor/paper.cpp`)**
+- **Paper is a page of its own:** `Assets/Papers/<name>.paper`, the scene file's own sketch lines (now shared:
+  `write_sketch_lines` / `read_sketch_line`). Nothing drawn on it is in the world.
+- **While the pad is on Paper,** the Scene and Game views show no sketch, take no pen and keep their own mode, hint and
+  Wheel.
+- **A paper's perspective guide is its own:** it never follows or turns the Scene camera, and the scene's guide never
+  moves. Place in 3D, Build, Lift, Project, Trace, scene canvases and world strokes are greyed or refused on Paper.
+- **Many papers:** More > Paper > New Paper, Open Paper, Duplicate Paper, Delete Paper (to the system's trash); the pad
+  shows the paper's name (`*` until saved); Paper opens the paper used last. The page is A-series landscape,
+  letterboxed in the tab.
+- **Each paper's own undo** (Ctrl+Z / Ctrl+Y over the pad or the Layers window, the toolbar's and More's Undo / Redo:
+  100 steps, at most 64 MB) and autosave a second after a change and on closing. Its color is kept in its file.
+- **Console:** `paper new [name]|open <name>|rename <name>|duplicate|delete|list|save|undo|redo`.
+
+**Fixed on the way:** a vanishing point set while the Scene view was a hidden tab made the scene's guide NaN (an empty
+view rect); the guide and the camera now stay finite.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The letterbox bands beside the page kept the last picture: they are painted.
+- With the Draw tab hidden, `sketchguide`, `sketch clear` and `sketchstroke` fell back to the scene's sketch: on Paper
+  they always act on the paper.
+- Picking the open paper again reloaded its file and lost the last second's stroke; a failed delete dropped unsaved
+  edits; a paper opened by an outside path would have overwritten the project's paper of its name (now copied in under
+  a free name); a rename to nothing made a paper named "Board".
+- Ctrl+Z over the Layers window on Paper undid a scene step; Trace, Lift, Sweep and Face (scene edits) keep the scene's
+  undo; a layer solo carried over between the scene's sketch and the paper; a stroke begun beside the page was kept
+  unseen.
+- The history is capped by memory; a paper of 500 Airbrush strokes saves in 7.4 ms (printed), so the save stays on the
+  main thread.
+- The tests clear the scratch project's papers.
+
+**Checked:** `tests_round324`, `tests_round324_papers` (real events and clicks).
+
+## 2026-10-29 (round 322): the reference board - PureRef's endless canvas as a tab
+
+**Asked:** the user (2026-10-29): "Have an additional tab for making mood/reference boards. Utilize good HCI and other
+art applications for reference and usability." Their choices: PureRef's canvas, an eyedropper to the pen, side by side
+with Draw with a reference floating over the pad, and sending an image to the scene. The window, its file and getting
+images in are task 0299; the tools, the links and the HCI pass follow (tasks 0300-0302).
+
+**Added (task 0299, ADR 0089, `editor/board_window.cpp`, `scene/board.h`)**
+- **The Board window.**
+  - A tab beside the Draw tab in the Drawing layout. A new **Drawing with References** layout shows the two side by
+    side.
+  - A board is `Assets/Boards/<name>.board`. It saves itself a second after each change, whether shown or not, and on
+    closing. The board used last opens again in the next session.
+  - The Boards menu makes a new board or opens another.
+- **Images in:**
+  - dropped from the system (in a row at the drop point, one undo step);
+  - dragged from the Project window;
+  - Add Image...;
+  - Ctrl+V: the clipboard's image through a new `platform::get_clipboard_image`.
+    - Windows: PNG, else the screenshot's DIB, else a file copied in Explorer.
+    - X11: image/png.
+    - macOS: PNG or TIFF.
+- **Images from outside the project** are copied into `Assets/Textures/References`. A different file of the same name
+  gets the next free name ("image 2.png"); the Reference Image shares this.
+- **Pictures load on a thread of their own** into the board's cache: at most 2048 px on their long side, with mips. HDR
+  and EXR are tone-mapped. An unreadable file is taken off the board, with the copy the board made of it.
+- **Moving around:** the wheel zooms about the pointer, a middle-drag pans, two fingers pinch, Home fits, F frames the
+  selection.
+- **Handles:** a click picks (Shift adds), a marquee picks what it meets, a drag moves, a corner scales about the
+  opposite corner, and the turn handle turns (Ctrl: 15 degrees). The arrows nudge.
+- **Its own keys over it:** Delete, Ctrl+D, Ctrl+A, Ctrl+V, Ctrl+] / Ctrl+[, and Ctrl+Z / Ctrl+Y for its own undo
+  (100 steps, a drag one step).
+- **Console:** `board ...`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- **Saving:** changes in the last second, or made while the board was hidden, were lost on closing.
+- **Files of the same name:** a second file of the same name showed the first's picture.
+- **Large photos:** they stalled the editor, and a board of many made the texture cache reload every frame.
+- **HDR and EXR** showed as Missing.
+- **The last board** wasn't opened again.
+- **Mid-drag keys:** Ctrl+Z, Delete or Ctrl+D in the middle of a drag broke the history.
+- **Clicks:** a press that didn't move shifted things; an item of no size caught every click; the empty corner of a
+  turned image caught a click.
+- **Platforms:** the macOS paste leaked, and X11 stored a late image answer as text.
+- **Pressed mid-stroke or mid-drag,** a Draw tab or board key is held, so it never reaches the scene behind.
+- **Tests:** they now clean up References first, so a copy is really made.
+
+**The second review's fixes (Opus code-reviewer, changes needed)**
+- **"Loading" for good:** a picture that landed while a press or a drag held the items, or between two undo steps, left
+  its image "Loading" for the session. Sizes are now filled from the cache every frame and after undo, redo, a drag and
+  opening a board.
+- **A file copied in Explorer:** Ctrl+V read it whole, and a ZIP's bytes decoded as a 23,000 x 65,000 TGA (gigabytes).
+  Now:
+  - such a file is added by its path, and only when it is an image;
+  - the TGA decoder is bounded. It had also read a palette past the end of its data: a crash on any data whose second
+    byte is non-zero.
+- **The picture cache** only grew. Pictures no item, undo step or drag names now go when a board is opened or made.
+- **Loading:** at most three pictures load at a time, and a loader's failure becomes the picture's error, not a crash.
+- **Pasting:** a pasted screenshot is kept as it came (PNG or BMP) and read on the loader thread.
+- **Reused file names:** a reused name, or an unreadable file replaced, reads the picture afresh.
+- **Smaller fixes:**
+  - copying reads a same-named file only when the sizes match;
+  - a row laid out late keeps an image the user moved;
+  - an unreadable file leaves the undo history too;
+  - the brush keys wait while the puck is dragged.
+
+**Checked**
+- `tests/test_board.cpp` (`--group board`), 13 tests by real events:
+  - drops, pastes (PNG and BMP), a Project drag;
+  - the handles, undo, and the keys;
+  - saving on close and reopening;
+  - same-name files, HDR, an unreadable file;
+  - undo mid-drag and the 100-step cap;
+  - a turned image's corner;
+  - every `board` verb.
+- The dependency-free suite: 13,102 checks, 0 failed.
+- Main (rounds 322-323):
+  - Windows with libraries: 13,710 checks (1210 tests), 0 failed;
+  - Linux: 13,262, 0 failed. That run found a crash: X11's clipboard calls had no guard for a headless editor's missing
+    window, and they now do.
+
+## 2026-10-29 (round 323): a pen display's dial and express keys - XPPen's Artist 13.3 Pro V2
+
+**Asked:** the user (2026-10-29): "I have the artist 13.3 Pro V2 drawing tablet, make it so that the scroll wheel can be
+used; buttons are compatible."
+
+**Added (task 0303)**
+- **Photoshop's view keys over the Draw tab's pad.** The tablet's express keys send Photoshop's shortcuts, and its dial
+  sends Ctrl- / Ctrl+ by default:
+  - Ctrl+= or Ctrl+Shift+= and Ctrl+- zoom about the pen;
+  - Ctrl+1 is 100% and Ctrl+0 fits;
+  - 4 and 6 turn the canvas, and 5 sets it upright.
+
+  The zoom keys and Ctrl+0 work over the reference board too.
+- **More > Wheel / Dial** chooses what the wheel (or the dial set to scroll) does over the pad: zoom, brush size, turn
+  the canvas, or brush opacity.
+  - Ctrl with it always zooms, and a sideways wheel turns the canvas.
+  - The choice is kept with the preferences; `draw wheel zoom|size|turn|opacity`.
+- **Driver settings:** the MANUAL has a table of what to set in XPPen's driver for each dial and key.
+
+**Checked**
+- `tests_round323`:
+  - the keys by real key events, the zoom about the pen within 1 px;
+  - the four wheel modes, chosen by clicks, and Ctrl with the wheel;
+  - a sideways wheel;
+  - the preferences.
+- The board's zoom keys.
+- The keymap presets have no clash.
+
+## 2026-10-29 (round 321): the Wheel on the Draw tab, the pen held still opening it, the lesson "Drawing like SketchBook"
+
+**Asked:** the last part of the SketchBook Pro request (tasks 0296-0298).
+
+**Added (task 0298)**
+- **The Wheel's own "draw" set over the Draw tab:**
+  - Pencil, Inker, Marker, Eraser;
+  - Ruler, Fit, Hide Tools;
+  - More: Pen, Felt Pen, Airbrush, Stroke Eraser, Ellipse, No Guide, Flip Canvas, Undo.
+
+  Before this, the pad got the "other" set. Its slices can be changed in Preferences > Wheel.
+- **The pen held still on the pad opens the Wheel,** as SketchBook's marking menu does: half a second within 4 px. The
+  dot under the pen isn't drawn. A moving stroke, an erase, a handle, the puck or a navigation drag never opens it.
+- **Learn:** the lesson "Drawing like SketchBook" covers the canvas, the brushes and the puck, and the Wheel on the pad,
+  with Try-it steps and questions.
+- **The checklist** has three new timed items in Drawing (E9-E11): zoom, turn and fit; the Marker with the puck; erase a
+  line's middle, then B.
+
+**Checked**
+- `tests_round321`:
+  - Space over the pad opens the "draw" set, and its key 2 picks the Inker;
+  - the pen held 0.8 s opens it and draws nothing, while a pen that moves draws and opens nothing.
+- `hci_checklist.py --check`: 121 items, 0 names missing.
+- Rounds 320-321 together:
+  - dependency-free suite: 12,997 checks, 0 failed;
+  - main, Windows with libraries: 13,605 checks (1195 tests), 0 failed;
+  - main, Linux: 13,157, 0 failed.
+
+## 2026-10-29 (round 320): SketchBook's brushes on the Draw tab - the palette and its puck, B / E / [ ], an Eraser that cuts
+
+**Asked:** the second half of the SketchBook Pro request (round 319): the brush palette and puck, which the user picked
+as one of the two parts that matter most.
+
+**Added (task 0297, ADR 0088, `editor/sketch_brushes.cpp`)**
+- **Brushes on the strokes:** each stroke carries its brush, so it stays a line and correction, canvases, Lift and Build
+  are unchanged. The fields are:
+  - opacity, composited once, so a stroke doesn't darken where it crosses itself;
+  - edge, hard to soft;
+  - what the pen's pressure drives: size, opacity, both or neither;
+  - the smallest width.
+
+  They are saved at the end of a stroke's line, and a stroke from before brushes loads as the Pen.
+- **SketchBook's set:** Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser and Stroke Eraser. Each keeps its own
+  size, opacity, color and steadiness, and the preferences keep them.
+- **Erasing:**
+  - The **Eraser** cuts what it crosses, so a line erased in its middle becomes two lines. On the Draw tab the pen's
+    eraser end does the same.
+  - The **Stroke Eraser** takes strokes whole, as before.
+- **The brush palette** floats over the pad, dragged by its title, and the toolbar's Brush button shows and hides it.
+  - **The puck:** drag sideways for the size and up or down for the opacity.
+  - **Tiles:** a tile a brush, each with a preview stroke on paper.
+  - **Brush Properties** (double-click a tile): Size, Opacity, Edge, Pressure, Min Size, Steadiness.
+  - **Duplicate** makes a brush of your own, and **Reset** puts a brush back.
+  - The pen's menu moved to More > Pen.
+- **Keys over the pad:**
+  - B: the last drawing brush.
+  - E: the Eraser.
+  - `[` / `]`: the size.
+  - Shift+`[` / Shift+`]`: the opacity.
+  - B held and dragged: the puck at the pen.
+
+  The brush's ring follows the pointer, dashed for an eraser. Over the pad, Q and E no longer pan the camera; Shift+arrows
+  still do.
+- **Console:** `sketch brush <name>|list|last|size|opacity|edge|pressure|min|smaller|larger|fainter|stronger|duplicate|reset|delete`.
+- **The brush is the Draw tab's.** In the Scene and Game views the pen stays a plain pen.
+
+**Checked**
+- `tests_round320` (5 tests by real events):
+  - a tile's click picks the brush, and the toolbar's swatch shows its color;
+  - a Marker stroke carries opacity 0.5, edge 0.1 and pressure to opacity;
+  - the puck's drag gives the size times 1.02 per pixel and the opacity plus 0.2;
+  - Brush hides and shows the palette;
+  - the keys work;
+  - the Eraser cuts a line with a 20 px gap, the Stroke Eraser takes both pieces, and the pen's end cuts with one undo
+    step;
+  - the brush fields survive a save, and an older line loads as the Pen;
+  - a 0.5-opacity stroke drawn there and back has the same pixel as one drawn once;
+  - one pad frame of 500 heavily overlapping Airbrush strokes takes 52 ms, and of 300 diagonal Pencil lines 13 ms (14 ms
+    before brushes).
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- **The preferences:** loading them overwrote the Pen with the default pen, and threw away the palette's place. Both
+  now read back as they were, with a test round-tripping them.
+- **Cost:** see-through brushes took 246.9 ms for 500 Airbrush strokes and 101.5 ms for 300 diagonal Pencil lines. The
+  first measurement drew nothing. Now:
+  - the soft edge is one feathered pass (`Canvas::set_feather`);
+  - the see-through path has no joint discs;
+  - a stroke's picture is cleared and composited along its rows.
+- **On a ground or wall canvas, the Eraser cut in the wrong place under perspective.** It now fills in the stroke in
+  its own space.
+- **The Draw tab's brush leaked into the Scene and Game views.** There the pen is a plain pen again, and its eraser end
+  takes whole strokes.
+- **The palette overflowed** with the user's own brushes. Now:
+  - at most eight;
+  - three columns past eight brushes;
+  - numbered names;
+  - Delete.
+- **Brush keys in the middle of a stroke** wait for it to end.
+- **New tests:** the preferences round trip, the console's brush verbs, the brush kept to the Draw tab, the Eraser on a
+  ground canvas and on a locked layer.
+
+## 2026-10-29 (round 319): the Draw tab as SketchBook Pro's canvas - one toolbar, the pad zoomed, panned, turned and flipped, Tab hides the tools, Paper
+
+**Asked:** the user (2026-10-29): "For the drawing page, make it similar to how SketchBook Pro operates", then "Add the
+ability to zoom in on the drawing page". Their choices: a canvas-first page with a brush palette and puck, strokes kept
+as lines (Lift and Build keep working), SketchBook's toolbar replacing the bar (Mesh > Draw unchanged). The plan has three
+rounds (task 0296 now, the brushes and puck in 0297, the Wheel and Learn in 0298); a reference board tab follows (0299-0302).
+
+**Changed: the Draw tab (task 0296, `editor/sketch_pad.cpp`)**
+- **One slim toolbar** in SketchBook's order:
+  - Undo and Redo;
+  - Brush (the pen's menu), the color (now with opacity) and the Size;
+  - the Ruler, Ellipse and Curve toggles;
+  - Symmetry and Perspective;
+  - Steady Stroke and Predictive Stroke;
+  - Layers;
+  - at the right, the zoom (a click fits) and More.
+- **More** holds what isn't drawing:
+  - Source (Scene Camera, Game Camera, Paper) and Paper Color;
+  - Pen, Guides and Build (Mesh > Draw's items);
+  - Place in 3D;
+  - Fit, Zoom, Turn, Flip Canvas;
+  - Hide the Tools;
+  - Layers;
+  - Draw Tool.
+- **A narrow tab** folds groups into More instead of wrapping onto more rows.
+- **Zoom, pan, turn and flip, in 2D:** the strokes and the camera don't change.
+  - The wheel zooms about the pointer, from 10% to 1600%.
+  - A middle-drag or Space+drag pans, and Shift turns (Ctrl gives 15 degree steps).
+  - Two fingers pinch, pan and twist.
+  - Home, a double middle-click or the zoom button fits.
+  - A tap of Space still opens the Wheel.
+- **Stroke widths are the picture's,** so a stroke is wider zoomed in, as on paper.
+- **Tab over the pad hides the tools,** and Tab or Esc brings them back. A new Draw Tab keymap context (`draw.hide_ui`,
+  `draw.fit`, `draw.flip`) wins over the Scene's keys there, so Tab doesn't toggle Edit Mode under the Blender keys.
+- **A Paper source:** blank paper in White, Cream, Gray, Dark or a hex color.
+
+**Fixed**
+- The Draw tab's pen didn't start when a Drawing layout was open from launch, only when the tab was shown again.
+
+**How:**
+- **Picture pixels:** the sketch tool works in "picture pixels" (the fit rect scaled by the zoom). `Canvas::Xform` maps
+  them to the screen while the sketch draws, and the pointer is mapped back, so the guides, handles and corrections run
+  unchanged.
+- **The picture away from Fit:** it is drawn off screen once (up to twice the fit size), then resampled with
+  `Canvas::blit_affine` while the view moves.
+
+**Console:**
+- `draw source scene|game|paper`
+- `draw paper <name|hex>`
+- `draw view fit|zoom|turn|flip|pan`
+- `draw tools hide|show|toggle`
+
+**Checked**
+- `tests_round319` (6 tests by real events):
+  - the wheel zooms about the pointer (the spot under it moved 0.3 px);
+  - a stroke drawn zoomed 1.6x, turned and flipped lands on the same picture spot as at Fit (within 0.0024 view heights,
+    the pointer's whole pixels rounded twice);
+  - middle-drag and Space+drag pan, a Space tap opens the Wheel, Shift+Ctrl turns in steps, and a pinch zooms;
+  - Tab and Esc;
+  - the toolbar's controls in order, and Paper;
+  - the cost: the picture drawn off screen in 13 ms at 1274x569, a pan resampled in 2 ms.
+- Round 318's bar test, rewritten for the toolbar and its folding.
+- The coverage map, consistency audit and console audit, all at their baselines.
+- The dependency-free suite: 12,927 checks, 0 failed.
+- Main: Windows with libraries 13,535 checks (1185 tests) and Linux 13,087, all 0 failed.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- **The off-screen picture's size cap only applied to a fit rect over 4096 px.** A 4K tab zoomed in rendered 7680x3800.
+  The picture is now at most 4096 px on its longest side.
+- **Zooming between 100% and 200% re-rendered the scene at every notch.** The picture is now drawn at the fit size or
+  twice it, and a zoom within a step only resamples. The test counts the renders: one, then none for a pan, a turn and
+  zooms from 120% to 1600%.
+- **The wheel, a pinch, Home or Flip in the middle of a stroke moved the stroke's first half.** The view now stays put
+  while a stroke, an erase or a handle drag is under way.
+- **NaN or huge numbers from `draw view` broke the mapping.** They are now refused, and the pan is clamped.
+- **More was missing two of the folded groups:** it now has Undo, Redo and Predictive Stroke. The toolbar's widths come
+  from one table, and a tab too narrow for even the brush group cuts it off instead of drawing over the zoom and More,
+  which goes first.
+- **The pad's keys are tied to the OS window it is drawn in,** so Tab or Space in another window's Scene view isn't
+  taken by the pad.
+- **Space:** a drag of either button while Space is held means no Wheel on letting go. Space let go while the tab was
+  away is forgotten.
+- **Hide the Tools:** coming back to a tab whose tools are hidden shows the "Tab: show the tools" hint again.
+- **The Paper hint** no longer offers the orbit keys.
+- **New tests:**
+  - Cream paper is checked;
+  - Paper turned is still paper at the middle;
+  - a double middle-click fits;
+  - the narrow toolbar's controls don't overlap;
+  - the resampled picture lines up after a flip.
+- **Left as they are, and noted in the spec:**
+  - Build's pixel tolerances are in the picture's pixels, so they follow the pad's zoom.
+  - Under the SketchUp keys, the Wheel is Shift+Space and Space is the View tool, so there a middle-drag pans the pad.
+
+
+## 2026-10-29 (round 318): freehand strokes aren't pulled onto the perspective guide; the Draw tab's pen and guides; every bridge followed a live Blendity
+
+**Asked:** the user (2026-10-29): "When in freehand draw mode, the pen still snaps to the perspective grids", then "For
+the draw tab, shouldn't it also have away to UI to drive Pen Color, Canvas etc.", and "lets finish up all 'What's
+Left'": the bridges against a real Blendity with live edits, Install a Bridge then the engine, Unreal's deform cost,
+and cleaning up the Unreal scratch folder.
+
+**The bridges, live (docs/LIVELINK.md "Testing a bridge live")**
+- **A new Blendity test** (`tests_round318` in test_livelink.cpp) runs an engine's live-session test, named by
+  `BLENDITY_TEST_BRIDGE`.
+  - The engine connects by itself, then follows the Box moved, recolored and deformed, a bone turned, the Sphere
+    deleted, "Late" made, and a 32,514-vertex sphere deformed ten times.
+  - When Live Link stops, the engine writes its report.
+  - The discovery file is in the test's own folder, and a hung engine is reported, not waited on.
+- **New per-engine tests:** `bridges/blender/live_session_test.py`, `bridges/godot/live_session_test.gd`, Unity's
+  `LiveSessionTests.FollowsALiveBlendity`, Unreal's `Blendity.LiveLink.LiveSession`.
+- **All four LIVE OK.** The longest frame or tick while the dense sphere deformed: Blender 4.3 ms, Godot 42.6 ms,
+  Unity 33.3 ms, Unreal 145 ms.
+- **Unreal: the link dropped whenever Blendity was quiet.**
+  - A non-blocking peek with nothing to read also succeeds with 0 bytes, and the plugin took that for a closed
+    connection.
+  - It reconnected and re-synced every 2 seconds (98 objects sent for 12), and deforms were lost.
+  - It now asks whether the socket is readable with nothing pending.
+- **Unreal: a deform of the dense sphere took 259 ms a frame,** which was measured:
+  - filling the mesh description: 88 ms;
+  - Unreal's build: 75 ms;
+  - CPU data and collision: the rest.
+- **The fix:** each mesh keeps its description and a deform changes only its positions and normals. The description
+  is filled with indexing suspended. A deforming mesh is built without CPU data or collision; half a second after the
+  deforms stop it is built once more with them, and its collision comes back. Now 145 ms. Unreal's static-mesh build is
+  most of what is left; a dynamic mesh component would be the next step.
+- **Install a Bridge, then the engine:** a fresh project each, set up by Blendity's installer, opened with no error.
+  - Godot: the add-on enabled.
+  - Unity: the package compiled.
+  - Unreal: the plugin built for the project, opened, and its replay test passed.
+  - Blender: the suite's install test.
+- **Unreal needs a short test folder.** It stops when its shared data cache's path is over 119 characters, and the
+  suite points children's homes at the test folder.
+
+**Checked (the whole suite)**
+- Windows with Blender's libraries: 13,491 checks in 1,179 tests, 0 failed.
+- Windows dependency-free: 12,883, 0 failed.
+- Linux with libraries: 13,043, 0 failed.
+- The audits are at their baselines: consistency 0, console 1, labels 0, coverage map, Unity .meta.
+
+**The review's fixes (Opus)**
+- **The Draw tab's Guides, Canvas, Lift and Build acted on the Scene view's rect and camera,** not the pad's.
+  - Each view now keeps its last binding.
+  - The commands act in the view the pointer was last over, the pad's bar included (`sketch_bind_work_view`).
+  - A test runs Build > Sketch over the Model > Ruler along the Edge under the Middle from the tab: in the pad's view,
+    the ruler set.
+  - Scripted strokes (`sketchstroke`, `sketchline`, `sketchcircle`) stay in the Scene view's pixels.
+- **The new bridge test could have written the discovery file in the artist's `~/.blendity`.** It now uses its own
+  folder, and the suite's `BLENDITY_PREFS_DIR` comes back after it.
+- **Smaller fixes:**
+  - The bar asks for a redraw when its rows change.
+  - Its dropdowns use the menus' words (No Guide, Symmetry X, 1-Point).
+  - Pen, Guides and Build have their own test keys (the Game view has a Guides button too).
+  - The Guides tooltip says freehand strokes aren't pulled.
+
+**Added (the Draw tab's bar)**
+- **A color field for the pen:** any color, through the Color window.
+- **Pen menu:** Pen Color, Steadiness, Canvas, Lift the Sketch to 3D and Clear the Sketch.
+- **Guides menu:** the French curve's shape, Radial Copies, Snap to Guides, Perspective Follows the Camera, and a ruler
+  or an ellipse from the model.
+- **Build menu:** Build from Sketch and Sketch over the Model.
+- **One set of controls:** the menus are Mesh > Draw's own items (`draw_sketch_pen_menu`, `draw_sketch_guides_items`,
+  `draw_sketch_build_items`), so the two places can't drift apart.
+- **Narrow windows:** in a narrow window the bar wraps to a second row instead of running past the tab's edge. At 900
+  px it is two rows, every control inside.
+- **Checked:** a real-click test picks Red, Medium steadiness and the Ground canvas, toggles Perspective Follows the
+  Camera, opens Build from Sketch and the Color window, and checks the narrow bar. Screenshots of the bar at 1600 and
+  900 px, and with the Pen menu open, were looked at.
+
+**Fixed**
+- With a perspective guide on, the pen was pulled onto the line toward the nearest vanishing point as it moved, even
+  for a freehand stroke. That covered both Ctrl held and a layer whose corrections are Freehand (the Draw bar's
+  dropdown, `sketch correct none`). Only the correction applied after the pen lifts was skipped.
+- Freehand now goes where the pen goes. A corrected stroke is still pulled onto its vanishing line.
+- The ruler, ellipse and French curve still hold a freehand stroke: they are chosen for the stroke and turned off
+  with Guides > None.
+- Learn's answer and USABILITY say so.
+
+**Checked**
+- New test (`tests_round318` in test_sketch.cpp): a stroke bowed 25 px near a vanishing line.
+  - It keeps its bow on a Freehand layer and with Ctrl held (24.7 px off the line each).
+  - The same line on a corrected layer lies on the vanishing line (0.75 px).
+  - The ruler still holds a freehand stroke.
+- The guide test of task 0223 draws its perspective stroke on a corrected layer, as a Freehand layer is no longer
+  pulled. Its stroke is now 13 degrees from level: the correction makes lines within 4 degrees level, and that wins
+  over a vanishing line.
+- The sketch group: 294 checks, 0 failed.
+
+## 2026-10-29 (round 317): the Unreal bridge built and run in Unreal 5.8 (task 0295)
+
+**Asked:** the user (2026-10-29): "Check .NET now." (after installing the .NET Framework 4.8.1 SDK and targeting pack).
+
+**Fixed**
+- **The plugin didn't compile in Unreal 5.8:**
+  - `B[0]` on the protocol's `Json` was ambiguous to MSVC, since a literal 0 is also a null `const char *`;
+  - an `int` index overload settles it.
+  - Blendity's suite compiles only the protocol layer, not the applier that uses the index, so it never saw this.
+- **Unreal warned about physics on every linked mesh:** the meshes were built without CPU-side data, yet their actors
+  keep collision. They now keep it, so traces and clicks in Play work on them, and the transient meshes no longer
+  mark a package dirty.
+- **The replay test's world had no world context,** so deleting the Sphere warned. It now has one, as an editor world
+  does.
+
+**Checked**
+- Unreal 5.8.4:
+  - BuildPlugin succeeds;
+  - `Blendity.LiveLink.Replay` passes with no warning;
+  - the editor, run headless on a scratch project, connected by itself to `tools/livelink_fake_server.py` within
+    12 s and introduced itself as "Unreal 5.8.4".
+- Blendity's `livelink` group: 153 checks, 0 failed.
+- The Blender Install a Bridge test, which skips without a Blender, was run against Blender 5.2 in a scratch user
+  folder: 2 checks, 0 failed.
+- Every engine bridge has now run in its engine: Blender 5.2, Unity 6000.6, Godot 4.7.2 and Unreal 5.8.
+
+**The review's fixes (Opus, rounds 316-317)**
+- **The keymap dropdown test still raced MoonRay's search,** which runs on a thread (seconds on Windows, where it
+  asks WSL). The field could settle before the search ended and then move. The test now waits for the search,
+  checks the field settled, and re-reads where the field is before each click. On this machine the field then sits
+  24 px lower (858, not 834), so the earlier pass was luck.
+- **A second integer overload made `int64` or `uint32` indexes ambiguous instead.** Indexing is now one template over
+  integer types, with negatives past the end. A suite test pins it with literals, a negative, `size_t`, `int64_t`,
+  `uint32_t` and `long`. GCC with `-Wall -Wextra` compiles it clean, and Unreal 5.8 builds and passes again.
+- **The Godot auto-connect test** also guards an applier without a root.
+- **The task spec** (docs/tasks/0295) has the rounds' results and is marked done.
+- **Noted, not changed:** a deform message rebuilds the whole mesh in Unreal. With CPU access, each rebuild also keeps a
+  CPU copy and cooks collision, which may slow the editor on a large deforming mesh. Measuring that is the follow-up.
+- The `livelink` group: 157 checks, 0 failed.
+- **The same race in three more Preferences tests:** the hci Wheel picker test failed once on Windows CI in #233.
+  It and both `pref_reach` helpers in test_editor.cpp now wait for MoonRay's search and for the control to stay
+  put. The hci group: 24 checks, 0 failed; the editor group: 1296 checks, 0 failed.
+
+## 2026-10-29 (round 316): the Godot and Blender bridges run live (task 0295)
+
+**Asked:** the user (2026-10-29): "Godot and .NET should be installed, go check", then "How about the blender bridge?"
+
+**Added**
+- **Godot 4.7.2:**
+  - `smoke_test.gd` and `auto_connect_test.gd` pass headless;
+  - the editor loads the enabled add-on with no error;
+  - the add-on connected by itself to a running Blendity (its sample scene: the camera, the light, the plane, the
+    teapot).
+- **Blender 5.2.2:** both tests pass again, and the add-on connected live to a running Blendity the same way.
+- **Fixed (tests only):**
+  - the smoke test read the camera's global transform before the scene was in the tree, so it now builds it from
+    the parents;
+  - the auto-connect test stopped with a script error when no stand-in started, and now fails with its checks.
+- Godot's `.uid` files are kept in the repository and the package; `.godot/` (its cache) is ignored.
+- The keymap dropdown test in Preferences waits for the preset field to stay put before clicking it. It failed once on
+  macOS in #232's CI: MoonRay's row appeared and moved the rows below, the same cause as round 315's fix.
+- **Unreal 5.8:** still waits for the .NET Framework SDK (4.6 or newer) on this machine; the build stops at
+  "Could not find NetFxSDK install dir".
+
+**Checked**
+- Godot:
+  - smoke: 32 messages, every check ok;
+  - auto-connect: two sessions, 9 objects adopted, not duplicated, and the hello names Godot 4.7.2;
+  - the stub-Python case: 7 failed checks and exit 1, no script error.
+- Blender: `SMOKE OK: 32 messages, 9 objects` and `AUTO-CONNECT OK`.
+- Live: Blendity's windowed check with scratch preferences, and each bridge connected to it with no port typed
+  (13 messages, 4 objects).
+- No C++ changed this round.
+
 ## 2026-10-29 (round 315): the bridges in the engines (task 0295)
 
 **Asked:** the user (2026-10-29, /plan): "Finish all open tasks and maintain HCI consistency. Provide also a write-up

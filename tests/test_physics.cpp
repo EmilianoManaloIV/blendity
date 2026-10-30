@@ -1095,6 +1095,65 @@ static void tests_round139_to_round172() {
     std::printf("    Remove on the hair root: %d strands left with springs; after one undo: %d\n", strands, back);
     CHECK(strands == 0 && back == 5);
   });
+  test("the Rigging & Animation tab's toolbar (round 324): at 1600 x 900 and at 1100 x 800 every button - the physics tools, Walk Cycle, AI - is inside the window, the toolbar wrapping its groups onto more rows", [&] {
+    for (const int w : {1600, 1100}) {
+      Editor ed;
+      ed.init_headless(w, w == 1600 ? 900 : 800);
+      ed.record_buttons_for_test(true);
+      ed.command("layout Animation");
+      ed.command("create Armature");
+      ed.command("anim new");
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+      const Recti win = ed.window_rect_for_test(WindowKind::Animation);
+      int seen = 0, outside = 0;
+      for (const char *k : {"Preview", "Add Property", "Puppet", "Dopesheet", "Curves", "Walk Cycle", "Center of Mass", "Contacts", "Flight", "AutoPhysics", "AutoPosing"}) {
+        Recti b;
+        if (!ed.button_rect_for_test(k, b)) continue;
+        seen++;
+        const bool in = b.x >= win.x && b.right() <= win.right() && b.y >= win.y && b.bottom() <= win.bottom();
+        if (!in) std::printf("    %s at %d..%d, the window %d..%d\n", k, b.x, b.right(), win.x, win.right());
+        outside += !in;
+      }
+      std::printf("    %d px: the window %d px wide, the toolbar in %d row(s); %d buttons seen, %d outside\n", w, win.w, ed.anim_bar_rows_for_test(), seen, outside);
+      CHECK(seen >= 8 && outside == 0 && ed.anim_bar_rows_for_test() >= 2);
+    }
+  });
+  test("spring bones by clicks (round 324): a chain's kind is one list - Soft, then None, then back to Ear and Hair; a chain set to None keeps the list, and a kind picked there takes it back", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    r139_rig(ed.scene());
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("window Rigging");
+    ed.command("select mixamorig:Hips");
+    ed.command("spring find");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto pick = [&](const char *kind) {
+      Recti b;
+      if (!ed.button_rect_for_test("spring:label:Ear_Right_1", b)) {
+        std::printf("    no kind list for Ear_Right_1\n");
+        return false;
+      }
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      Recti m;
+      if (!ed.button_rect_for_test(std::string("menu:") + kind, m)) {
+        std::printf("    no '%s' in the list\n", kind);
+        return false;
+      }
+      r34_click(ed, m.x + m.w / 2, m.y + m.h / 2);
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      return true;
+    };
+    int label = -1;
+    bool ignored = false;
+    auto row = [&] { return ed.spring_row_for_test("Ear_Right_1", label, ignored); };
+    CHECK(pick("Soft") && row() && label == 4 && !ignored);
+    CHECK(pick("None") && row() && ignored);
+    CHECK(pick("Ear") && row() && !ignored && label == 1);
+    CHECK(pick("Hair") && row() && label == 0);
+    std::printf("    Soft, None, Ear, Hair by clicks: the chain %s, its kind %d\n", ignored ? "set aside" : "kept", label);
+  });
   test("spring bones in Play: stepped by the editor after IK; a disabled one (baked) stays as posed; Find's list survives Play and Stop", [&] {
     for (bool enabled : {true, false}) {
       Editor ed;

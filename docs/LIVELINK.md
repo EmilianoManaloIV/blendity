@@ -145,6 +145,38 @@ thing, so a client that falls behind skips to the latest state instead of replay
 a key (`object`, `mesh`, `delete`, `sync`, `play`) are never replaced, and nothing queued after one of them replaces anything
 before it. A client whose queue grows past 256 MB is closed.
 
+## Testing a bridge live (round 318)
+
+Each bridge has a live-session test that follows a running Blendity, not a recording. Blendity's own suite drives it:
+`tests_round318` in `tests/test_livelink.cpp` runs the command `BLENDITY_TEST_BRIDGE` names (skipped without it).
+
+1. Blendity starts Live Link with its discovery file in the test's own folder, never `~/.blendity`, and runs the command.
+2. The bridge connects by itself. Once it has the Box, it writes `$BLENDITY_BRIDGE_DUMP.ready`.
+3. Blendity then makes its edits as changes, not as a first sync:
+   - it moves, recolors and deforms the Box;
+   - it turns a bone and deletes the Sphere;
+   - it makes "Late" at (0, 5, 0);
+   - it deforms "Dense", a sphere of 32,514 vertices, ten times, the last to radius 1.2.
+4. It stops Live Link. When the discovery file goes, the bridge checks its scene, writes its report to
+   `$BLENDITY_BRIDGE_DUMP` ("LIVE OK" or "LIVE FAILED") and exits.
+
+| Bridge | The command | Run (2026-10-29) | The longest frame or tick while Dense deformed |
+|---|---|---|---|
+| Blender 5.2.2 | `blender -b --factory-startup --python-exit-code 1 -P bridges/blender/live_session_test.py` | LIVE OK | 4.3 ms |
+| Godot 4.7.2 | `godot --headless --path bridges/godot --script res://live_session_test.gd` | LIVE OK | 42.6 ms |
+| Unity 6000.6.7f1 | `Unity -batchmode -projectPath <project> -runTests -testPlatform EditMode -testFilter Blendity.LiveLink.Tests.LiveSessionTests` | LIVE OK | 33.3 ms |
+| Unreal 5.8.4 | `UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests Blendity.LiveLink.LiveSession; Quit" -unattended -nullrhi` | LIVE OK | 145 ms (259 before round 318) |
+
+**Unreal needs a short test folder.** The suite points each child's home at its test folder. Unreal stops when its
+shared data cache's path is over 119 characters, so run it with a short `BLENDITY_TEST_DIR` (`C:\uebl\t`).
+
+**Install a Bridge, then open (round 318).** Each engine opened a fresh project that Blendity's Install a Bridge had
+set up, with no error:
+- Godot: the add-on was enabled.
+- Unity: the package compiled.
+- Unreal: the plugin was built for the project and its replay test passed.
+- Blender: covered by the suite's install test.
+
 ## A minimal client
 
 `tools/livelink_dump.py` connects and prints every message (Python 3, no packages):

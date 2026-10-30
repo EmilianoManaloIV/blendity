@@ -402,6 +402,50 @@ Sample evaluate_material(Material m, SurfacePoint sp) {
 }
 
 /* ----------------------------------------------------------------- BRDF */
+/* Round 330: the hit's Principled extras (set at each hit from the material's extras record; file-scope, not in Sample:
+ * the kernel is at SPIR-V's id bound). x0: subsurface, sheen, coat, anisotropic; x1: subsurface colour, scale; x2: sheen
+ * tint, roughness; x3: coat tint, coat F0; x4: rotation, coat roughness; g_xt: the tangent. */
+bool g_x = false;
+vec4 g_x0 = vec4(0.0);
+vec4 g_x1 = vec4(0.0);
+vec4 g_x2 = vec4(0.0);
+vec4 g_x3 = vec4(0.0);
+vec4 g_x4 = vec4(0.0);
+vec3 g_xt = vec3(0.0);
+/* As shading.cpp's principled_extras: the extras' share of a light; base: the coat's pass on the base; D: an
+ * anisotropic distribution (< 0: none). */
+vec3 extras_eval(Sample s, vec3 n, vec3 v, vec3 l, float nl, float nv, vec3 h, float a, out float base, out vec3 tint, out float D) {
+  vec3 add = vec3(0.0);
+  base = 1.0; tint = vec3(1.0); D = -1.0;
+  float vh = max(dot(v, h), 0.0), lh = max(dot(l, h), 0.0);
+  if (nl <= 0.0) return add;
+  if (g_x0.x > 0.0) {
+    float w = max(0.05, g_x1.w);
+    add += s.albedo * g_x1.xyz * (g_x0.x * (1.0 - s.metallic) / PI * (nl + w) / ((1.0 + w) * (1.0 + w)));
+  }
+  if (g_x0.y > 0.0) {
+    float f = pow(1.0 - lh, 5.0);
+    add += g_x2.xyz * (g_x0.y * f * (1.0 - 0.5 * g_x2.w) * (1.0 - s.metallic) * nl);
+  }
+  if (g_x0.z > 0.0) {
+    float ac = max(g_x4.y * g_x4.y, 0.002), a2 = ac * ac, nh = max(dot(n, h), 0.0);
+    float d = nh * nh * (a2 - 1.0) + 1.0, Dc = a2 / (PI * d * d);
+    float vis = 0.5 / (nl * sqrt(nv * nv * (1.0 - a2) + a2) + nv * sqrt(nl * nl * (1.0 - a2) + a2));
+    float F = g_x3.w + (1.0 - g_x3.w) * pow(1.0 - vh, 5.0);
+    add += vec3(g_x0.z * F * Dc * vis * nl);
+    base = 1.0 - g_x0.z * (g_x3.w + (1.0 - g_x3.w) * pow(1.0 - nv, 5.0));
+    tint = mix(vec3(1.0), g_x3.xyz, g_x0.z);
+  }
+  if (g_x0.w > 0.0 && dot(g_xt, g_xt) > 1e-8) {
+    vec3 t0 = normalize(g_xt - n * dot(n, g_xt)), b0 = cross(n, t0);
+    float ang = g_x4.x * 2.0 * PI;
+    vec3 t = t0 * cos(ang) + b0 * sin(ang), b = cross(n, t);
+    float aspect = sqrt(1.0 - 0.9 * g_x0.w), ax = max(0.002, a / aspect), ay = max(0.002, a * aspect);
+    float th = dot(t, h) / ax, bh = dot(b, h) / ay, nh = dot(n, h), k = th * th + bh * bh + nh * nh;
+    D = 1.0 / (PI * ax * ay * k * k);
+  }
+  return add;
+}
 vec3 fresnel_f0(Sample s) { return mix(vec3(0.08 * s.specular), s.albedo, s.metallic); }
 vec3 brdf_eval(Sample s, vec3 n, vec3 v, vec3 l) {
   float nl = dot(n, l);
@@ -417,12 +461,22 @@ vec3 brdf_eval(Sample s, vec3 n, vec3 v, vec3 l) {
   float fw = (1.0 - vh) * (1.0 - vh);
   fw = fw * fw * (1.0 - vh);
   vec3 F = f0 + (vec3(1.0) - f0) * fw;
-  vec3 spec = F * (D * vis);
-  vec3 diff = s.albedo * ((1.0 - s.metallic) / PI);
-  return (diff * (vec3(1.0) - F) + spec) * nl;
+  if (!g_x) return (s.albedo * ((1.0 - s.metallic) / PI) * (vec3(1.0) - F) + F * (D * vis)) * nl;
+  float eb; vec3 et; float eD;
+  vec3 add = extras_eval(s, n, v, l, nl, nv, h, a, eb, et, eD);
+  vec3 spec = F * ((eD >= 0.0 ? eD : D) * vis);
+  vec3 diff = s.albedo * ((1.0 - s.metallic) * (1.0 - g_x0.x) / PI);
+  return (diff * (vec3(1.0) - F) + spec) * nl * eb * et + add;
 }
 float ggx_D(float a2, float nh) { float d = nh * nh * (a2 - 1.0) + 1.0; return a2 / (PI * d * d); }
 float ggx_G1(float a2, float nv) { return 2.0 * nv / (nv + sqrt(a2 + (1.0 - a2) * nv * nv)); }
+/* Round 330's review: the coat sampled as a lobe of its own (half the time at Coat 1): the pdf with it. */
+float coat_pdf(float base_pdf, vec3 n, vec3 V, vec3 dir, float nv) {
+  if (!g_x || g_x0.z <= 0.0) return base_pdf;
+  float pc = 0.5 * g_x0.z, a = max(g_x4.y * g_x4.y, 0.002), a2 = a * a;
+  vec3 hh = normalize(V + dir);
+  return pc * ggx_D(a2, max(dot(n, hh), 0.0)) * ggx_G1(a2, nv) / (4.0 * nv) + (1.0 - pc) * base_pdf;
+}
 vec3 sample_vndf(float a, vec3 v, float u1, float u2) {
   vec3 vh = normalize(vec3(a * v.x, a * v.y, v.z));
   float lensq = vh.x * vh.x + vh.y * vh.y;
@@ -691,8 +745,15 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       break;
     }
     SurfacePoint sp;
-    Material m = mats[surface_at(h.obj, h.prim, h.u, h.v, sp)];
+    int mi = surface_at(h.obj, h.prim, h.u, h.v, sp);
+    Material m = mats[mi];
     sp.position = ro + rd * h.t;
+    g_x = (m.flags.w & 4096) != 0;  // (round 330: this hit's Principled extras)
+    if (g_x) {
+      int xi = int(P.misc.z) + mi;
+      g_x0 = mats[xi].base_color, g_x1 = mats[xi].emission, g_x2 = mats[xi].params, g_x3 = mats[xi].tiling, g_x4 = mats[xi].offset;
+      g_xt = sp.has_tangent ? sp.tangent.xyz : vec3(0.0);
+    }
     /* An outline's hull: camera rays see its front faces only (as on the CPU). */
     if ((m.flags.w & 2) != 0 && !(bounce == 0 && camera_path && dot(sp.geo_normal, rd) < 0.0) && see_through_hits < 64) {
       see_through_hits++;
@@ -782,7 +843,9 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     int toon_key = int(P.key_light.w);
     ToonIn tin = ToonIn(vec3(0.0), false, 0.5, 1.0, 1.0, vec3(0.0), false, vec3(1.0), vec3(1.0), -1.0);
     if (toon_here) {
-      toon_maps(m, sp, (insts[h.obj].to_local * vec4(toon_keyL, 0.0)).xyz, tin);  // (task 0149: the key light in the object's space, for the face shadow map)
+      const mat4 nmk = insts[h.obj].normal_mat;  // (round 334: the true placement's inverse, transposed - its columns dotted with the light: the true inverse's direction, a flattened object's too)
+      const vec3 key_local = vec3(dot((nmk * vec4(1, 0, 0, 0)).xyz, toon_keyL), dot((nmk * vec4(0, 1, 0, 0)).xyz, toon_keyL), dot((nmk * vec4(0, 0, 1, 0)).xyz, toon_keyL));
+      toon_maps(m, sp, key_local, tin);  // (task 0149: the key light in the object's space, for the face shadow map)
       s.albedo *= tin.line;  // (the line map into the colour; only in shadow it went into shadow_mul)
       vec3 c = beta * toon_rim(m, tin, n, V, toon_keyL);
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
@@ -895,7 +958,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
             vec3 Le = evaluate_material(lmat, lp).emission * Tr;
             float nl = dot(n, dir);
             vec3 hh = normalize(V + dir);
-            float pb = p_spec * ggx_D(ga2, max(dot(n, hh), 0.0)) * ggx_G1(ga2, nv) / (4.0 * nv) + (1.0 - p_spec) * (nl / PI);
+            float pb = coat_pdf(p_spec * ggx_D(ga2, max(dot(n, hh), 0.0)) * ggx_G1(ga2, nv) / (4.0 * nv) + (1.0 - p_spec) * (nl / PI), n, V, dir, nv);
             float w = pl * pl / (pl * pl + pb * pb);
             vec3 c = beta * bsdf_any(toon, s, n, V, dir) * Le * (w / pl);
             if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
@@ -906,7 +969,13 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     }
     if (bounce == P.size.z) break;
     vec3 dir;
-    if (rnd(rng) < p_spec) {
+    if (g_x && g_x0.z > 0.0 && rnd(rng) < 0.5 * g_x0.z) {
+      vec3 vl = vec3(dot(V, tt), dot(V, bb), dot(V, n));
+      vec3 hl = sample_vndf(max(g_x4.y * g_x4.y, 0.002), vl, rnd(rng), rnd(rng));
+      vec3 hw = normalize(tt * hl.x + bb * hl.y + n * hl.z);
+      dir = hw * (2.0 * dot(V, hw)) - V;
+    }
+    else if (rnd(rng) < p_spec) {
       vec3 vl = vec3(dot(V, tt), dot(V, bb), dot(V, n));
       vec3 hl = sample_vndf(ga, vl, rnd(rng), rnd(rng));
       vec3 hw = normalize(tt * hl.x + bb * hl.y + n * hl.z);
@@ -920,7 +989,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if (dot(n, dir) <= 0.0 || dot(sp.geo_normal, dir) <= 0.0) break;
     float nl = dot(n, dir);
     vec3 hh = normalize(V + dir);
-    float pdf = p_spec * ggx_D(ga2, max(dot(n, hh), 0.0)) * ggx_G1(ga2, nv) / (4.0 * nv) + (1.0 - p_spec) * (nl / PI);
+    float pdf = coat_pdf(p_spec * ggx_D(ga2, max(dot(n, hh), 0.0)) * ggx_G1(ga2, nv) / (4.0 * nv) + (1.0 - p_spec) * (nl / PI), n, V, dir, nv);
     if (pdf < 1e-8) break;
     beta *= bsdf_any(toon, s, n, V, dir) / pdf;
     last_pdf = pdf;

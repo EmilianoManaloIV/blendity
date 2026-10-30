@@ -393,16 +393,31 @@ void run_hci_tests() {
       if (set.size() >= 8) ed.command("wheel remove object " + set.back().label);  // (room on the set for the one Enter adds)
       ed.command("preferences");
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      /* MoonRay's search runs on a thread and its row, when it ends, moves the rows below: wait for it, then take the
+       * button only once it stays put (round 317: it failed once on Windows CI). */
+      for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
       auto pick = [&]() {
+        Recti last{-1, -1, 0, 0};
         for (int i = 0; i < 80; i++) {
           Recti a;
           const Recti dlg = ed.top_popup_rect_for_test();
           if (!ed.button_rect_for_test("wheel:pick", a)) return Recti{};
-          if (a.y >= dlg.y && a.bottom() <= dlg.bottom()) return a;
+          const bool still = a.x == last.x && a.y == last.y;
+          last = a;
+          const bool inside = a.y >= dlg.y && a.bottom() <= dlg.bottom();
+          if (inside && still) return a;
+          if (inside) {
+            ed.step_frame_headless();
+            continue;
+          }
           ed.step_frame_headless({ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
           platform::Event w = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
           w.wheel_y = a.bottom() > dlg.bottom() ? -1.0f : 1.0f;
           ed.step_frame_headless({w});
+          ed.step_frame_headless();  // (the controls drawn where the scroll put them)
         }
         return Recti{};
       };

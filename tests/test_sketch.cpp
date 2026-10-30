@@ -239,11 +239,13 @@ static void tests_round243() {
     ed.command("sketchguide perspective 2");
     ed.command("sketchguide follow off");  // (a flat guide: task 0224 ties it to the camera)
     ed.command(strprintf("sketchguide vp 0 %g %g", -400.0f / h, 300.0f / h));
-    ed.command(strprintf("sketchguide vp 1 %g %g", 1600.0f / h, 300.0f / h));
-    pen_stroke(ed, wobbled(line_pts({300, 380}, {600, 340}, 20), 4.0f, 7));
+    ed.command(strprintf("sketchguide vp 1 %g %g", 1600.0f / h, 100.0f / h));
+    ed.command("sketch correct light");  // (a freehand layer isn't pulled to the vanishing lines: round 318)
+    pen_stroke(ed, wobbled(line_pts({300, 400}, {600, 331}, 20), 4.0f, 7));  // (13 degrees: the correction levels lines within 4)
+    ed.command("sketch correct none");
     CHECK(s.strokes.size() == 5);
     if (s.strokes.size() == 5) {
-      const Vec2 vp{1600, 300}, a{s.strokes[4].pts[0].x * h, s.strokes[4].pts[0].y * h};  // (the line through the stroke's own start)
+      const Vec2 vp{1600, 100}, a{s.strokes[4].pts[0].x * h, s.strokes[4].pts[0].y * h};  // (the line through the stroke's own start)
       bool on_line = true;
       for (const SketchPoint &p : s.strokes[4].pts) {
         const Vec2 q{p.x * h, p.y * h};
@@ -1602,6 +1604,1201 @@ static void tests_round254() {
   });
 }
 
+/* ---------------------------------------------------------------- round 318: freehand isn't snapped to perspective */
+static void tests_round318() {
+  test("freehand drawing goes where the pen goes with a perspective guide on: a layer set to Freehand, and Ctrl held on a corrected layer; a corrected stroke still lies on the vanishing line, and the ruler still holds a freehand stroke", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("sketch on");
+    ed.step_frame_headless();
+    const float h = (float)ed.scene_rect_for_test().h;
+    ed.command("sketchguide perspective 2");
+    ed.command("sketchguide follow off");
+    ed.command(strprintf("sketchguide vp 0 %g %g", -400.0f / h, 300.0f / h));
+    ed.command(strprintf("sketchguide vp 1 %g %g", 1600.0f / h, 100.0f / h));
+    const Sketch &s = ed.sketch_for_test();
+    const Vec2 vp{1600, 100};
+    /* How far the stroke's points stray from the line through its start to the right point, at most. */
+    auto off_line = [&](const SketchStroke &st) {
+      const Vec2 a{st.pts[0].x * h, st.pts[0].y * h};
+      float worst = 0.0f;
+      for (const SketchPoint &p : st.pts) {
+        const Vec2 q{p.x * h, p.y * h};
+        worst = std::max(worst, length(q - sketch::snap_to_line(q, a, vp)));
+      }
+      return worst;
+    };
+    /* A stroke heading right and a little up, bowed 25 px in the middle: near the vanishing line, not on it. */
+    std::vector<Vec2> bowed;
+    for (int i = 0; i <= 20; i++) bowed.push_back({300.0f + i * 15.0f, 400.0f - i * 3.46f - 25.0f * std::sin(i * 3.14159265f / 20.0f)});
+    ed.command("sketch correct none");  // (the Draw bar's Freehand)
+    pen_stroke(ed, bowed);
+    CHECK(s.strokes.size() == 1);
+    const float free_layer = s.strokes.size() == 1 ? off_line(s.strokes[0]) : 0.0f;
+    ed.command("sketch correct full");
+    pen_stroke(ed, bowed, 1.0f, false, platform::MOD_CTRL);
+    CHECK(s.strokes.size() == 2);
+    const float ctrl_held = s.strokes.size() == 2 ? off_line(s.strokes[1]) : 0.0f;
+    pen_stroke(ed, wobbled(line_pts({300, 400}, {600, 331}, 20), 4.0f, 7));  // (13 degrees: the correction levels lines within 4)
+    CHECK(s.strokes.size() == 3);
+    const float corrected = s.strokes.size() == 3 ? off_line(s.strokes[2]) : 99.0f;
+    std::printf("    off the vanishing line: a Freehand layer %.1f px, Ctrl held %.1f px, corrected %.2f px\n", free_layer, ctrl_held, corrected);
+    CHECK(free_layer > 15.0f && ctrl_held > 15.0f);  // (the bow kept: 25 px drawn)
+    CHECK(corrected < 1.5f);
+    /* The ruler is chosen for the stroke: it still holds a freehand one. */
+    ed.command("sketch correct none");
+    ed.command("sketchguide ruler");
+    ed.step_frame_headless();
+    ed.sketch_set_ruler_for_test({100.0f / h, 200.0f / h}, {900.0f / h, 200.0f / h});
+    std::vector<Vec2> wavy;
+    for (int i = 0; i <= 20; i++) wavy.push_back({150.0f + i * 15.0f, 200.0f + 30.0f * std::sin(i * 0.7f)});
+    pen_stroke(ed, wavy);
+    bool on_ruler = s.strokes.size() == 4;
+    for (const SketchPoint &p : s.strokes.size() == 4 ? s.strokes[3].pts : std::vector<SketchPoint>{}) on_ruler = on_ruler && std::fabs(p.y * h - 200.0f) < 1.0f;
+    std::printf("    the ruler: %zu strokes, the last on it %d\n", s.strokes.size(), (int)on_ruler);
+    CHECK(on_ruler);
+    ed.command("sketch off");
+  });
+  test("the Draw tab's toolbar has the pen and the guides by clicks: a color field, More > Pen > Pen Color / Steadiness / Canvas, More > Guides > Perspective Follows the Camera, More > Build > Build from Sketch; narrow, its groups fold into More and every control stays inside the tab", [] {
+    using platform::EventType;
+    auto mouse_ev = [](EventType t, int x, int y, int key = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key;
+      return e;
+    };
+    Editor ed;
+    ed.init_headless(1600, 900);
+    ed.record_buttons_for_test(true);
+    auto step = [&](std::vector<platform::Event> events = {}) {
+      ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+      ed.step_frame_headless(events);
+    };
+    auto rect = [&](const std::string &key) {
+      Recti r;
+      return ed.button_rect_for_test(key, r) ? r : Recti{};
+    };
+    auto click = [&](const std::string &key) {
+      const Recti r = rect(key);
+      if (r.w <= 0) return false;
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      step({mouse_ev(EventType::MouseMove, x, y)});
+      step({mouse_ev(EventType::MouseDown, x, y)});
+      step({mouse_ev(EventType::MouseUp, x, y)});
+      step();
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      const Recti r = rect(key);
+      if (r.w <= 0) return false;
+      for (int i = 0; i < 4; i++) step({mouse_ev(EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      return true;
+    };
+    ed.command("layout Drawing");
+    step();
+    ed.command("window Draw");
+    step();
+    step();
+    /* Pen > Pen Color > Red. */
+    const bool pen = click("draw:More") && hover("submenu:Pen");  // (round 320: More > Pen; the Brush button is the palette)
+    const bool red = hover("submenu:Pen Color") && click("menu:Red");
+    std::printf("    Pen opened %d; Red picked %d: the pen %08X\n", (int)pen, (int)red, (unsigned)ed.sketch_color_for_test());
+    CHECK(pen && red && (ed.sketch_color_for_test() & 0xFFFFFF) == 0xD03030u);
+    /* Pen > Steadiness > Medium (25 px). */
+    CHECK(click("draw:More") && hover("submenu:Pen") && hover("submenu:Steadiness") && click("menu:Medium"));
+    CHECK(std::fabs(ed.sketch_tether_for_test() - 25.0f) < 1e-3f);
+    /* Pen > Canvas > The Ground: the next strokes land on a ground canvas. */
+    CHECK(click("draw:More") && hover("submenu:Pen") && hover("submenu:Canvas") && click("menu:The Ground"));
+    CHECK(ed.sketch_for_test().active_canvas != 0);
+    /* Guides > Perspective Follows the Camera toggles; Build shows Build from Sketch's shapes. */
+    const bool follow = ed.sketch_for_test().follow_camera;
+    CHECK(click("draw:More") && hover("submenu:Guides") && click("menu:Perspective Follows the Camera") && ed.sketch_for_test().follow_camera != follow);
+    CHECK(click("draw:More") && hover("submenu:Build") && hover("submenu:Build from Sketch") && rect("menu:Box (three lines at a corner)").w > 0);
+    step({mouse_ev(EventType::KeyDown, 0, 0, platform::KEY_ESCAPE)});
+    step();
+    /* A guide from the model is taken in the pad, with its camera - not the Scene view the tab hides (the review of
+     * round 318): the ruler along the cube's edge under the pad's middle. */
+    ed.command("sketchguide off");
+    const bool picked = click("draw:More") && hover("submenu:Build") && hover("submenu:Sketch over the Model") && click("menu:Ruler along the Edge under the Middle");
+    std::printf("    the ruler from the model: picked %d, in view kind %d, guide %d\n", (int)picked, ed.sketch_view_kind_for_test(), ed.sketch_guide_kind_for_test());
+    CHECK(picked && ed.sketch_view_kind_for_test() == 2 && ed.sketch_guide_kind_for_test() == 1);
+    /* The color field opens the Color window. */
+    CHECK(click("draw:color") && ed.popup_count_for_test() >= 1);
+    step({mouse_ev(EventType::KeyDown, 0, 0, platform::KEY_ESCAPE)});
+    step();
+    ed.command("sketch off");
+    /* A narrow window: the toolbar's groups fold into More (round 319), and every control left stays inside the tab. */
+    Editor nw;
+    nw.init_headless(900, 700);
+    nw.record_buttons_for_test(true);
+    nw.command("layout Drawing");
+    nw.step_frame_headless();
+    nw.command("window Draw");
+    for (int i = 0; i < 4; i++) nw.step_frame_headless();
+    const Recti d = nw.window_rect_for_test(WindowKind::Draw);
+    bool inside = d.w > 0;
+    int last_right = d.x;
+    for (const char *key : {"draw:Brush", "draw:color", "draw:size", "draw:zoom", "draw:More"}) {  // (left to right, none overlapping)
+      Recti r;
+      inside = inside && nw.button_rect_for_test(key, r) && r.x >= last_right && r.right() <= d.right() && r.y >= d.y;
+      last_right = r.right();
+    }
+    std::printf("    a %dx%d tab: %d groups folded into More, every control inside %d\n", d.w, d.h, nw.pad_bar_folded_for_test(), (int)inside);
+    CHECK(nw.pad_bar_folded_for_test() >= 1 && inside);
+    nw.command("sketch off");
+  });
+}
+
+/* Round 319 (task 0296): the Draw tab as SketchBook Pro's canvas - one toolbar, the pad zoomed, panned, turned and
+ * flipped in 2D, Tab hiding the tools, a Paper source. */
+struct PadRig {
+  Editor ed;
+  explicit PadRig(int w = 1600, int h = 900) {
+    ed.init_headless(w, h);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Drawing");
+    step();
+    ed.command("window Draw");
+    for (int i = 0; i < 3; i++) step();
+  }
+  void step(std::vector<platform::Event> events = {}) {
+    ed.set_clock_for_test(ed.clock_for_test() + 0.02);
+    ed.step_frame_headless(events);
+  }
+  static platform::Event ev(platform::EventType t, int x, int y, int key = 0, int button = 0) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y, e.key = key, e.button = button;
+    return e;
+  }
+  Vec2 mid() const {
+    const Recti p = ed.pad_rect_for_test();
+    return {p.x + p.w * 0.5f, p.y + p.h * 0.5f};
+  }
+  bool click(const std::string &key) {
+    Recti r;
+    if (!ed.button_rect_for_test(key, r)) return false;
+    const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+    step({ev(platform::EventType::MouseMove, x, y)});
+    step({ev(platform::EventType::MouseDown, x, y)});
+    step({ev(platform::EventType::MouseUp, x, y)});
+    step();
+    return true;
+  }
+  bool hover(const std::string &key) {
+    Recti r;
+    if (!ed.button_rect_for_test(key, r)) return false;
+    for (int i = 0; i < 4; i++) step({ev(platform::EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+    return true;
+  }
+  /* A pen stroke through screen points. */
+  void stroke(const std::vector<Vec2> &pts) {
+    using platform::EventType;
+    step({pen_ev(EventType::MouseMove, (int)pts[0].x, (int)pts[0].y)});
+    step({pen_ev(EventType::MouseDown, (int)pts[0].x, (int)pts[0].y)});
+    for (size_t i = 1; i < pts.size(); i++) step({pen_ev(EventType::MouseMove, (int)std::lround(pts[i].x), (int)std::lround(pts[i].y))});
+    step({pen_ev(EventType::MouseUp, (int)pts.back().x, (int)pts.back().y)});
+    step();
+  }
+};
+
+void tests_round319() {
+  test("the Draw tab's pad zooms about the pointer with the wheel: the picture under the pointer stays under it; Home and the zoom button fit", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid(), at{c.x + 200.0f, c.y - 120.0f};
+    const Vec2 q0 = r.ed.pad_from_screen_for_test(at);
+    r.step({PadRig::ev(EventType::MouseMove, (int)at.x, (int)at.y)});
+    platform::Event w = PadRig::ev(EventType::Wheel, (int)at.x, (int)at.y);
+    w.wheel_y = 3.0f;
+    r.step({w});
+    r.step();
+    const float z = r.ed.pad_view_for_test().zoom;
+    /* The same spot of the picture: the tool's point scaled by the zoom about the fit rect's centre (the pad's middle). */
+    const Vec2 q1 = c + (q0 - c) * z;
+    const Vec2 s1 = r.ed.pad_to_screen_for_test(q1);
+    std::printf("    3 wheel notches: zoom %.3f; the spot under the pointer now at (%.1f, %.1f), was (%.1f, %.1f)\n", z, s1.x, s1.y, at.x, at.y);
+    CHECK(z > 1.4f && length(s1 - at) < 1.0f);
+    r.step({PadRig::ev(EventType::KeyDown, (int)at.x, (int)at.y, platform::KEY_HOME)});
+    r.step({PadRig::ev(EventType::KeyUp, (int)at.x, (int)at.y, platform::KEY_HOME)});
+    CHECK(r.ed.pad_view_for_test().zoom == 1.0f && r.ed.pad_view_for_test().pan_x == 0.0f);
+    r.ed.command("draw view zoom 2");
+    r.step();
+    CHECK(r.ed.pad_view_for_test().zoom == 2.0f);
+    CHECK(r.click("draw:zoom") && r.ed.pad_view_for_test().zoom == 1.0f);
+    r.ed.command("sketch off");
+  });
+  test("a stroke drawn on the pad zoomed 1.6x, turned and flipped lands on the same spot of the picture as one drawn at Fit", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    const Vec2 c = r.mid();
+    std::vector<Vec2> pts;
+    for (int i = 0; i <= 10; i++) pts.push_back({c.x - 100.0f + i * 20.0f, c.y + 30.0f + 20.0f * std::sin(i * 0.6f)});
+    r.stroke(pts);
+    std::printf("    at Fit: %zu strokes, the pen on %d, the pad %d %d %d %d\n", r.ed.sketch_for_test().strokes.size(), (int)r.ed.sketch_active_for_test(), r.ed.pad_rect_for_test().x, r.ed.pad_rect_for_test().y, r.ed.pad_rect_for_test().w, r.ed.pad_rect_for_test().h);
+    const Sketch &s = r.ed.sketch_for_test();
+    CHECK(s.strokes.size() == 1);
+    if (s.strokes.size() != 1) return;
+    const SketchPoint a = s.strokes[0].pts.front(), b = s.strokes[0].pts.back();
+    /* The same screen points' picture spots, now through the pad zoomed 1.6x, turned 30 degrees and flipped. */
+    const Vec2 q0 = r.ed.pad_from_screen_for_test(pts.front());  // (at Fit: the screen point itself)
+    r.ed.command("draw view zoom 1.6");
+    r.ed.command("draw view turn 30");
+    r.ed.command("draw view flip");
+    r.step();
+    const float z = r.ed.pad_view_for_test().zoom;
+    std::vector<Vec2> moved;
+    for (const Vec2 &p : pts) moved.push_back(r.ed.pad_to_screen_for_test(c + (p - c) * z));
+    r.stroke(moved);
+    CHECK(s.strokes.size() == 2);
+    if (s.strokes.size() != 2) return;
+    const SketchPoint a2 = s.strokes[1].pts.front(), b2 = s.strokes[1].pts.back();
+    const float da = std::hypot(a2.x - a.x, a2.y - a.y), db = std::hypot(b2.x - b.x, b2.y - b.y);
+    std::printf("    first point (%.4f, %.4f) vs (%.4f, %.4f), last off by %.4f view heights (q0 %.0f %.0f)\n", a.x, a.y, a2.x, a2.y, db, q0.x, q0.y);
+    CHECK(da < 0.004f && db < 0.004f);  // (about a screen pixel at Fit on a 900-high window, after rounding to whole pixels)
+    r.ed.command("sketch off");
+  });
+  test("the pad pans with a middle-drag and with Space+drag (no Wheel then), turns with Shift+middle-drag in 15 degree steps with Ctrl; a tap of Space over it opens the Wheel; two fingers pinch it", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid();
+    const int x = (int)c.x, y = (int)c.y;
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    r.step({PadRig::ev(EventType::MouseDown, x, y, 0, 2)});
+    for (int i = 1; i <= 5; i++) r.step({PadRig::ev(EventType::MouseMove, x + i * 20, y + i * 10)});
+    r.step({PadRig::ev(EventType::MouseUp, x + 100, y + 50, 0, 2)});
+    const auto &v = r.ed.pad_view_for_test();
+    std::printf("    middle-drag: pan (%.0f, %.0f)\n", v.pan_x, v.pan_y);
+    CHECK(std::fabs(v.pan_x - 100.0f) < 1.0f && std::fabs(v.pan_y - 50.0f) < 1.0f);
+    CHECK(r.ed.sketch_for_test().strokes.empty());  // (navigation draws nothing)
+    r.ed.command("draw view fit");
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    r.step({PadRig::ev(EventType::KeyDown, x, y, ' ')});
+    r.step({PadRig::ev(EventType::MouseDown, x, y)});
+    for (int i = 1; i <= 4; i++) r.step({PadRig::ev(EventType::MouseMove, x - i * 15, y)});
+    r.step({PadRig::ev(EventType::MouseUp, x - 60, y)});
+    r.step({PadRig::ev(EventType::KeyUp, x - 60, y, ' ')});
+    r.step();
+    std::printf("    Space+drag: pan (%.0f, %.0f), the Wheel open %d, strokes %zu\n", v.pan_x, v.pan_y, (int)r.ed.quick_menu_open_for_test(), r.ed.sketch_for_test().strokes.size());
+    CHECK(std::fabs(v.pan_x + 60.0f) < 1.0f && !r.ed.quick_menu_open_for_test() && r.ed.sketch_for_test().strokes.empty());
+    r.step({PadRig::ev(EventType::KeyDown, x, y, ' ')});
+    r.step({PadRig::ev(EventType::KeyUp, x, y, ' ')});
+    r.step();
+    std::printf("    Space tapped: the Wheel open %d\n", (int)r.ed.quick_menu_open_for_test());
+    CHECK(r.ed.quick_menu_open_for_test());
+    r.step({PadRig::ev(EventType::KeyDown, x, y, platform::KEY_ESCAPE)});
+    r.step();
+    r.ed.command("draw view fit");
+    /* Shift+middle-drag a quarter turn round the pad's middle, Ctrl held: whole 15 degree steps. */
+    const int sx = x + 200, sy = y;
+    platform::Event d = PadRig::ev(EventType::MouseDown, sx, sy, 0, 2);
+    d.mods = platform::MOD_SHIFT;
+    r.step({PadRig::ev(EventType::MouseMove, sx, sy)});
+    r.step({d});
+    for (int i = 1; i <= 6; i++) {
+      const float a = (float)i / 6.0f * 0.7f;  // (to 40 degrees)
+      platform::Event m = PadRig::ev(EventType::MouseMove, x + (int)std::lround(200 * std::cos(a)), y + (int)std::lround(200 * std::sin(a)));
+      m.mods = platform::MOD_SHIFT | platform::MOD_CTRL;
+      r.step({m});
+    }
+    r.step({PadRig::ev(EventType::MouseUp, x, y + 200, 0, 2)});
+    std::printf("    Shift+Ctrl+middle-drag about 40 degrees: turned %.2f\n", v.angle);
+    CHECK(std::fabs(v.angle - 45.0f) < 0.01f || std::fabs(v.angle - 30.0f) < 0.01f);
+    /* A double middle-click fits. */
+    platform::Event dc = PadRig::ev(EventType::MouseDown, x, y, 0, 2);
+    r.step({dc});
+    r.step({PadRig::ev(EventType::MouseUp, x, y, 0, 2)});
+    r.step({dc});
+    r.step({PadRig::ev(EventType::MouseUp, x, y, 0, 2)});
+    std::printf("    a double middle-click: turned %.2f, zoom %.2f\n", v.angle, v.zoom);
+    CHECK(v.angle == 0.0f && v.zoom == 1.0f);
+    /* The wheel or Home in the middle of a stroke leaves the view (the stroke's points are its picture's: review 319). */
+    r.step({pen_ev(EventType::MouseMove, x - 50, y)});
+    r.step({pen_ev(EventType::MouseDown, x - 50, y)});
+    r.step({pen_ev(EventType::MouseMove, x - 30, y + 5)});
+    platform::Event mid_wheel = PadRig::ev(EventType::Wheel, x - 30, y + 5);
+    mid_wheel.wheel_y = 2.0f;
+    r.step({mid_wheel});
+    const bool kept = v.zoom == 1.0f && r.ed.run_action_for_test("draw.flip") && !v.flip;  // (taken and held: the view kept)
+    r.step({pen_ev(EventType::MouseMove, x, y + 10)});
+    r.step({pen_ev(EventType::MouseUp, x, y + 10)});
+    std::printf("    the wheel and Flip mid-stroke: the view kept %d\n", (int)kept);
+    CHECK(kept);
+    r.ed.command("sketch clear");
+    r.ed.command("draw view fit");
+    platform::Event g = PadRig::ev(EventType::Gesture, x, y);
+    g.zoom = 1.5f;
+    r.step({PadRig::ev(EventType::MouseMove, x, y), g});
+    std::printf("    a pinch of 1.5: zoom %.3f\n", v.zoom);
+    CHECK(std::fabs(v.zoom - 1.5f) < 1e-3f);
+    r.ed.command("sketch off");
+  });
+  test("Tab over the pad hides the toolbar and shows it again (Esc too), without entering Edit Mode; the keymap's Draw Tab actions run", [] {
+    PadRig r;
+    using platform::EventType;
+    r.ed.command("keymap Blender");  // (Tab is Edit Mode there: over the pad, the pad's)
+    r.step();
+    const Vec2 c = r.mid();
+    const int x = (int)c.x, y = (int)c.y;
+    const int h0 = r.ed.pad_rect_for_test().h;
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    r.step({PadRig::ev(EventType::KeyDown, x, y, platform::KEY_TAB)});
+    r.step({PadRig::ev(EventType::KeyUp, x, y, platform::KEY_TAB)});
+    const int h1 = r.ed.pad_rect_for_test().h;
+    std::printf("    Tab: hidden %d, the pad %d -> %d high, Edit Mode %d\n", (int)r.ed.pad_ui_hidden_for_test(), h0, h1, (int)r.ed.in_edit_mode());
+    CHECK(r.ed.pad_ui_hidden_for_test() && h1 > h0 && !r.ed.in_edit_mode());
+    r.step({PadRig::ev(EventType::KeyDown, x, y, platform::KEY_ESCAPE)});
+    r.step();
+    std::printf("    Esc: hidden %d, the pen on %d\n", (int)r.ed.pad_ui_hidden_for_test(), (int)r.ed.sketch_active_for_test());
+    CHECK(!r.ed.pad_ui_hidden_for_test() && r.ed.sketch_active_for_test());  // (Esc brought the tools back, the pen still on)
+    CHECK(r.ed.run_action_for_test("draw.hide_ui") && r.ed.pad_ui_hidden_for_test());
+    CHECK(r.ed.run_action_for_test("draw.hide_ui") && !r.ed.pad_ui_hidden_for_test());
+    CHECK(r.ed.run_action_for_test("draw.flip") && r.ed.pad_view_for_test().flip);
+    CHECK(r.ed.run_action_for_test("draw.fit") && !r.ed.pad_view_for_test().flip);
+    r.ed.command("sketch off");
+  });
+  test("the Draw tab's toolbar by clicks: Ruler, Ellipse and Curve toggle their guide, Steady and Predictive Stroke set the pen and the layer, More > Source > Paper draws on paper, More > Flip Canvas and Hide the Tools", [] {
+    PadRig r;
+    /* SketchBook's order, left to right (the brush group's rects were once placed in argument order: reversed by MSVC). */
+    Recti brush, color, size, ruler, more;
+    const bool all = r.ed.button_rect_for_test("draw:Brush", brush) && r.ed.button_rect_for_test("draw:color", color) &&
+                     r.ed.button_rect_for_test("draw:size", size) && r.ed.button_rect_for_test("draw:Ruler", ruler) &&
+                     r.ed.button_rect_for_test("draw:More", more);
+    std::printf("    the toolbar: Brush %d, color %d, Size %d, Ruler %d, More %d\n", brush.x, color.x, size.x, ruler.x, more.x);
+    CHECK(all && brush.x < color.x && color.x < size.x && size.x < ruler.x && ruler.x < more.x);
+    CHECK(r.click("draw:Ruler") && r.ed.sketch_guide_kind_for_test() == 1);
+    CHECK(r.click("draw:Ellipse") && r.ed.sketch_guide_kind_for_test() == 2);
+    CHECK(r.click("draw:Ellipse") && r.ed.sketch_guide_kind_for_test() == 0);
+    CHECK(r.click("draw:Curve") && r.ed.sketch_guide_kind_for_test() == 3);
+    r.ed.command("sketchguide off");
+    CHECK(r.click("draw:steady") && r.ed.popup_count_for_test() == 1);
+    CHECK(r.click("menu:Steady: Strong") && std::fabs(r.ed.sketch_tether_for_test() - 50.0f) < 1e-3f);
+    CHECK(r.click("draw:predictive") && r.click("menu:Freehand"));
+    const Sketch &s = r.ed.sketch_for_test();
+    CHECK(!s.layers.empty() && s.layers[(size_t)std::max(0, s.active_layer)].correct == 0);
+    CHECK(r.click("draw:More") && r.hover("submenu:Source") && r.click("menu:Paper"));
+    r.step();
+    const Vec2 c = r.mid();
+    const uint32_t px = r.ed.main_fb_for_test().pixels[(size_t)c.y * r.ed.main_fb_for_test().width + (size_t)c.x];
+    std::printf("    Paper: the source %d, the pad's middle %08X\n", r.ed.draw_source_for_test(), (unsigned)px);
+    CHECK(r.ed.draw_source_for_test() == 2 && (px & 0xFFFFFF) == 0xFFFFFF);
+    CHECK(r.click("draw:More") && r.hover("submenu:Paper Color") && r.click("menu:Cream") && r.ed.draw_paper_for_test() == 0xFFF7F1E3u);
+    /* Paper turned: still paper at the pad's middle (the polygon through the Xform: review 319). */
+    r.ed.command("draw view turn 30");
+    r.step();
+    const uint32_t turned = r.ed.main_fb_for_test().pixels[(size_t)c.y * r.ed.main_fb_for_test().width + (size_t)c.x];
+    std::printf("    Paper turned 30: the pad's middle %08X\n", (unsigned)turned);
+    CHECK((turned & 0xFFFFFF) == 0xF7F1E3u);
+    r.ed.command("draw view fit");
+    /* More has what a narrow tab folds away: Undo, Redo, Predictive Stroke. */
+    CHECK(r.click("draw:More") && r.hover("submenu:Predictive Stroke") && r.click("menu:Predictive: Light"));
+    const Sketch &ps = r.ed.paper_for_test();  // (round 324: on Paper, the paper's layer)
+    CHECK(ps.layers[(size_t)std::max(0, ps.active_layer)].correct == 1);
+    CHECK(r.click("draw:More") && r.click("menu:Flip Canvas") && r.ed.pad_view_for_test().flip);
+    CHECK(r.click("draw:More") && r.click("menu:Hide the Tools") && r.ed.pad_ui_hidden_for_test());
+    r.ed.command("draw tools show");
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+  test("the pad zoomed in and turned draws the camera's picture off screen once, then only samples it while the view moves (times printed)", [] {
+    PadRig r;
+    r.ed.command("draw view zoom 1.2");
+    r.ed.command("draw view turn 20");
+    r.step();
+    const double render_ms = r.ed.pad_render_ms_for_test();
+    const int renders = r.ed.pad_pic_renders_for_test();
+    /* A pan, a turn and zooms from 120% to 1600% and back to 110%: the same picture, resampled (review 319). */
+    for (const char *cmd : {"draw view pan 40 0", "draw view turn 5", "draw view zoom 1.5", "draw view zoom 9", "draw view zoom 0.08"}) {
+      r.ed.command(cmd);
+      r.step();
+    }
+    std::printf("    the picture drawn off screen in %.2f ms (%d render); pans, turns and zooms after it: %d more renders, a resample %.2f ms\n",
+                render_ms, renders, r.ed.pad_pic_renders_for_test() - renders, r.ed.pad_blit_ms_for_test());
+    CHECK(renders == 1 && r.ed.pad_pic_renders_for_test() == renders && r.ed.pad_blit_ms_for_test() > 0.0);
+    /* A NaN from the console is refused: the view stays as it was. */
+    const float before = r.ed.pad_view_for_test().angle;
+    r.ed.command("draw view turn nan");
+    r.ed.command("draw view pan nan 0");
+    CHECK(r.ed.pad_view_for_test().angle == before && std::isfinite(r.ed.pad_view_for_test().pan_x));
+    /* The resampled picture lines up with the screen-space mapping: at Fit and after a flip about the middle the pad's
+     * middle pixel shows the same spot of the picture. */
+    r.ed.command("draw view fit");
+    r.step();
+    const Vec2 c = r.mid();
+    const Image &fb = r.ed.main_fb_for_test();
+    auto px = [&](Vec2 p) { return fb.pixels[(size_t)p.y * fb.width + (size_t)p.x]; };
+    const uint32_t at_fit = px(c);
+    r.ed.command("draw view flip");
+    r.step();
+    const uint32_t flipped = px(c);
+    auto near = [](uint32_t a, uint32_t b) {
+      for (int sh = 0; sh < 24; sh += 8)
+        if (std::abs((int)((a >> sh) & 255) - (int)((b >> sh) & 255)) > 24) return false;
+      return true;
+    };
+    std::printf("    the pad's middle at Fit %08X, flipped %08X\n", (unsigned)at_fit, (unsigned)flipped);
+    CHECK(near(at_fit, flipped));
+    r.ed.command("sketch off");
+  });
+}
+
+/* Round 320 (task 0297, ADR 0088): SketchBook's brushes on the Draw tab - the palette and its puck, the brushes' keys,
+ * the Eraser that cuts. */
+void tests_round320() {
+  test("the brush palette: a tile's click picks the brush and the next stroke carries its opacity, edge and pressure; the puck dragged sideways sets the size, up the opacity; Brush hides the palette", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    CHECK(r.ed.draw_palette_shown_for_test());
+    CHECK(r.click("brush:Pencil") && r.ed.sketch_brush_for_test() == 0);
+    /* The toolbar's color shows the picked brush's color. */
+    Recti sw;
+    CHECK(r.ed.button_rect_for_test("draw:color", sw));
+    const Image &fb0 = r.ed.main_fb_for_test();
+    const uint32_t shown = fb0.pixels[(size_t)(sw.y + sw.h / 3) * fb0.width + (size_t)(sw.x + sw.w / 2)];
+    std::printf("    the Pencil picked: the pen %08X, the toolbar's swatch %08X\n", (unsigned)r.ed.sketch_color_for_test(), (unsigned)shown);
+    CHECK(r.ed.sketch_color_for_test() == 0xFF3A3A3Au && (shown & 0xFFFFFF) == 0x3A3A3Au);
+    CHECK(r.click("brush:Marker") && r.ed.sketch_brush_for_test() == 4);
+    const Vec2 c = r.mid();
+    r.stroke({{c.x + 100, c.y}, {c.x + 160, c.y + 10}, {c.x + 220, c.y}});
+    const Sketch &s = r.ed.sketch_for_test();
+    CHECK(!s.strokes.empty());
+    if (s.strokes.empty()) return;
+    const SketchStroke &st = s.strokes.back();
+    std::printf("    a Marker stroke: brush %d, opacity %.2f, edge %.2f, pressure %d, width %.1f\n", st.brush, st.opacity, st.soft, st.pressure_to, st.width);
+    CHECK(st.brush == 4 && std::fabs(st.opacity - 0.5f) < 1e-4f && std::fabs(st.soft - 0.1f) < 1e-4f && st.pressure_to == 2 && std::fabs(st.width - 18.0f) < 1e-3f);
+    /* The puck: 40 px right and 30 px up. */
+    Recti puck;
+    CHECK(r.ed.button_rect_for_test("draw:puck", puck));
+    const float w0 = r.ed.sketch_width_for_test(), o0 = r.ed.sketch_brush_opacity_for_test();
+    using platform::EventType;
+    const int px = puck.x + puck.w / 2, py = puck.y + puck.h / 3;
+    r.step({PadRig::ev(EventType::MouseMove, px, py)});
+    r.step({PadRig::ev(EventType::MouseDown, px, py)});
+    for (int i = 1; i <= 4; i++) r.step({PadRig::ev(EventType::MouseMove, px + i * 10, py - i * 7)});
+    r.step({PadRig::ev(EventType::MouseMove, px + 40, py - 30)});
+    r.step({PadRig::ev(EventType::MouseUp, px + 40, py - 30)});
+    const float w1 = r.ed.sketch_width_for_test(), o1 = r.ed.sketch_brush_opacity_for_test();
+    std::printf("    the puck: size %.1f -> %.1f, opacity %.2f -> %.2f; strokes %zu\n", w0, w1, o0, o1, s.strokes.size());
+    CHECK(std::fabs(w1 - w0 * std::pow(1.02f, 40.0f)) < 0.05f && std::fabs(o1 - (o0 + 0.2f)) < 0.01f && s.strokes.size() == 1);
+    CHECK(r.click("draw:Brush") && !r.ed.draw_palette_shown_for_test());
+    CHECK(r.click("draw:Brush") && r.ed.draw_palette_shown_for_test());
+    r.ed.command("sketch off");
+  });
+  test("the Draw tab's brush keys over the pad: [ and ] size, Shift+[ and Shift+] opacity, E the Eraser, B back to the last drawing brush", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 150, y = (int)c.y;
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    auto key = [&](int k, int mods = 0) {
+      platform::Event d = PadRig::ev(EventType::KeyDown, x, y, k), u = PadRig::ev(EventType::KeyUp, x, y, k);
+      d.mods = u.mods = mods;
+      r.step({d});
+      r.step({u});
+    };
+    CHECK(r.click("brush:Pencil"));
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    const float w0 = r.ed.sketch_width_for_test(), o0 = r.ed.sketch_brush_opacity_for_test();
+    key(platform::KEY_RBRACKET);
+    const float w1 = r.ed.sketch_width_for_test();
+    key(platform::KEY_LBRACKET);
+    key(platform::KEY_LBRACKET);
+    const float w2 = r.ed.sketch_width_for_test();
+    key(platform::KEY_RBRACKET, platform::MOD_SHIFT);
+    const float o1 = r.ed.sketch_brush_opacity_for_test();
+    std::printf("    ] %.2f -> %.2f, [ [ -> %.2f; Shift+] opacity %.2f -> %.2f\n", w0, w1, w2, o0, o1);
+    CHECK(std::fabs(w1 - w0 * 1.25f) < 1e-3f && std::fabs(w2 - w0 * 1.25f * 0.64f) < 1e-3f && std::fabs(o1 - std::min(1.0f, o0 + 0.1f)) < 1e-4f);
+    key('E');
+    CHECK(r.ed.sketch_brush_for_test() == 6);
+    key('B');
+    CHECK(r.ed.sketch_brush_for_test() == 0);  // (the Pencil: the last brush that draws)
+    for (const char *id : {"draw.brush", "draw.eraser", "draw.smaller", "draw.larger", "draw.fainter", "draw.stronger"}) CHECK(r.ed.run_action_for_test(id));
+    r.ed.command("sketch off");
+  });
+  test("the Eraser through a line's middle leaves its two ends as two strokes; the Stroke Eraser takes a stroke whole; the pen's eraser end cuts too", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    const Vec2 c = r.mid();
+    auto line = [&](float y) {
+      std::vector<Vec2> pts;
+      for (int i = 0; i <= 20; i++) pts.push_back({c.x - 50.0f + i * 15.0f, y});
+      r.stroke(pts);
+    };
+    auto across = [&](float x, bool eraser_end) {
+      using platform::EventType;
+      std::vector<platform::Event> evs;
+      r.step({pen_ev(EventType::MouseMove, (int)x, (int)c.y - 120, 1.0f, eraser_end)});
+      r.step({pen_ev(EventType::MouseDown, (int)x, (int)c.y - 120, 1.0f, eraser_end)});
+      for (int i = 1; i <= 12; i++) r.step({pen_ev(EventType::MouseMove, (int)x, (int)c.y - 120 + i * 20, 1.0f, eraser_end)});
+      r.step({pen_ev(EventType::MouseUp, (int)x, (int)c.y + 120, 1.0f, eraser_end)});
+      r.step();
+    };
+    const Sketch &s = r.ed.sketch_for_test();
+    line(c.y);
+    CHECK(s.strokes.size() == 1);
+    CHECK(r.click("brush:Eraser"));
+    across(c.x + 100.0f, false);
+    std::printf("    the Eraser across a line: %zu strokes", s.strokes.size());
+    bool apart = s.strokes.size() == 2;
+    if (apart) {  // (the two pieces end either side of the cut, about the Eraser's radius from it)
+      const float h = (float)r.ed.pad_rect_for_test().h;
+      const float gap = (s.strokes[1].pts.front().x - s.strokes[0].pts.back().x) * h;
+      std::printf(", the gap between them %.1f px", gap);
+      apart = gap > 10.0f && gap < 40.0f;
+    }
+    std::printf("\n");
+    CHECK(apart);
+    CHECK(r.click("brush:Stroke Eraser"));
+    across(c.x + 30.0f, false);
+    across(c.x + 180.0f, false);
+    std::printf("    the Stroke Eraser across both: %zu strokes\n", s.strokes.size());
+    CHECK(s.strokes.empty());
+    CHECK(r.click("brush:Pen"));
+    line(c.y);
+    across(c.x + 100.0f, true);
+    std::printf("    the pen's eraser end across a line: %zu strokes\n", s.strokes.size());
+    CHECK(s.strokes.size() == 2);
+    r.ed.command("undo");
+    const size_t after_undo = r.ed.sketch_for_test().strokes.size();  // (undo puts back another scene: read it afresh)
+    std::printf("    after an undo: %zu strokes\n", after_undo);
+    CHECK(after_undo == 1);  // (one undo step: the cut)
+    r.ed.command("sketch off");
+  });
+  test("a stroke's brush is saved with the scene and read back; a stroke line from before brushes loads as the Pen", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const SketchBrush &air = sketch_brush_presets()[5];
+    SketchStroke made;  // (an Airbrush stroke as the Draw tab makes it: the brush is the pad's)
+    made.color = air.color, made.width = air.width, made.brush = 5, made.opacity = air.opacity, made.soft = air.soft, made.pressure_to = air.pressure_to;
+    made.pts = {{0.2f, 0.3f, 0.7f}, {0.3f, 0.32f, 0.7f}, {0.4f, 0.3f, 0.7f}};
+    ed.add_sketch_stroke_for_test(made);
+    CHECK(ed.sketch_for_test().strokes.size() == 1);
+    const std::string text = save_scene_text(ed.scene());
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err) && back.sketch.strokes.size() == 1);
+    if (back.sketch.strokes.size() == 1) {
+      const SketchStroke &st = back.sketch.strokes[0];
+      std::printf("    read back: brush %d, opacity %.2f, edge %.2f, pressure %d\n", st.brush, st.opacity, st.soft, st.pressure_to);
+      CHECK(st.brush == 5 && std::fabs(st.opacity - 0.15f) < 1e-4f && std::fabs(st.soft - 1.0f) < 1e-4f && st.pressure_to == 2);
+    }
+    /* The line as round 319 wrote it: no brush fields after the raw points. */
+    const std::string old_line = "sketch_stroke 0 0 0 4280295456 2 0 0 0 0 0 0 0 0 2 0.1 0.1 1 0.2 0.1 1 0\n";
+    const size_t at = text.find("sketch_stroke ");
+    const size_t end = at == std::string::npos ? at : text.find('\n', at);
+    CHECK(at != std::string::npos);
+    if (at == std::string::npos) return;
+    Scene old;
+    CHECK(load_scene_text(text.substr(0, at) + old_line + text.substr(end + 1), old, err) && old.sketch.strokes.size() == 1);
+    if (old.sketch.strokes.size() == 1) {
+      const SketchStroke &st = old.sketch.strokes[0];
+      CHECK(st.brush == 1 && st.opacity == 1.0f && st.soft == 0.0f && st.pressure_to == 1 && st.min_size == 0.0f);
+    }
+  });
+  test("a see-through stroke crossing itself has one tone where it overlaps (composited once); 500 Airbrush strokes drawn (time printed)", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    r.ed.command("draw source paper");
+    r.ed.command("paper new");  // (round 324: a fresh page - another test's paper may be the last one)
+    r.step();
+    r.step({PadRig::ev(platform::EventType::MouseMove, (int)r.mid().x, (int)r.mid().y)});
+    r.ed.command("sketch correct none");  // (the paper's layer: the pointer over the pad)
+    r.ed.command("sketch brush Felt Pen");
+    r.ed.command("sketch brush opacity 0.5");
+    r.ed.command("sketch brush pressure none");
+    const Vec2 c = r.mid();
+    /* There and back along the same row (overlapping itself all along), and a single pass below it. */
+    std::vector<Vec2> back_and_forth, once;
+    for (int i = 0; i <= 10; i++) back_and_forth.push_back({c.x + 60.0f + i * 15.0f, c.y - 40.0f});
+    for (int i = 10; i >= 0; i--) back_and_forth.push_back({c.x + 60.0f + i * 15.0f, c.y - 40.0f});
+    for (int i = 0; i <= 10; i++) once.push_back({c.x + 60.0f + i * 15.0f, c.y + 40.0f});
+    r.stroke(back_and_forth);
+    r.stroke(once);
+    r.step();
+    const Image &fb = r.ed.main_fb_for_test();
+    auto px = [&](float x, float y) { return fb.pixels[(size_t)y * fb.width + (size_t)x]; };
+    const uint32_t a = px(c.x + 135.0f, c.y - 40.0f), b = px(c.x + 135.0f, c.y + 40.0f), paper = px(c.x + 135.0f, c.y);
+    std::printf("    there and back %08X, once %08X, the paper %08X\n", (unsigned)a, (unsigned)b, (unsigned)paper);
+    CHECK(a == b && a != paper);
+    /* 500 Airbrush strokes on the picture plane, and 300 long diagonal Pencil lines, each timed over one pad frame
+     * (always drawn: review 320's measurement drew nothing). */
+    r.ed.command("sketch clear");
+    r.ed.command("redraw always");
+    const Recti pad = r.ed.sketch_view_rect_for_test();  // (round 324: the paper's page in the tab)
+    const float aspect = pad.w / (float)pad.h;
+    auto frame_ms = [&] {
+      const double t0 = now_seconds();
+      r.step();
+      return (now_seconds() - t0) * 1000.0;
+    };
+    const double empty_ms = frame_ms();
+    for (int pass = 0; pass < 2; pass++) {
+      const bool airbrush = pass == 0;
+      const SketchBrush &b = sketch_brush_presets()[airbrush ? 5 : 0];
+      r.ed.command("sketch clear");
+      const int n = airbrush ? 500 : 300;
+      for (int k = 0; k < n; k++) {
+        SketchStroke st;
+        st.color = b.color, st.width = b.width, st.brush = airbrush ? 5 : 0;
+        st.opacity = b.opacity, st.soft = b.soft, st.pressure_to = b.pressure_to, st.min_size = b.min_size;
+        const float x = 0.08f + (k / 50) * 0.11f * aspect / 1.2f, y = 0.1f + (k % 50) * 0.016f;
+        if (airbrush) st.pts = {{x, y, 0.8f}, {x + 0.05f, y + 0.015f, 1.0f}, {x + 0.1f, y, 0.8f}};
+        else st.pts = {{0.05f + k * 0.002f, 0.05f, 0.7f}, {0.05f + k * 0.002f + 0.8f, 0.95f, 0.9f}};
+        r.ed.add_sketch_stroke_for_test(st);
+      }
+      const double ms = frame_ms();
+      const Image &fb = r.ed.main_fb_for_test();
+      const Vec2 under = airbrush ? Vec2{pad.x + (0.08f + 0.05f) * pad.h, pad.y + (0.1f + 0.0075f) * pad.h}
+                                  : Vec2{pad.x + (0.05f + 0.4f) * pad.h, pad.y + 0.5f * pad.h};
+      const uint32_t px = fb.pixels[(size_t)under.y * fb.width + (size_t)under.x];
+      std::printf("    %d %s strokes: one pad frame %.1f ms (empty %.1f ms); a pixel under one %08X\n", n, airbrush ? "Airbrush" : "diagonal Pencil", ms,
+                  empty_ms, (unsigned)px);
+      CHECK(r.ed.paper_for_test().strokes.size() == (size_t)n && (px & 0xFFFFFF) != 0xFFFFFFu);
+    }
+    r.ed.command("redraw changes");
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+}
+
+/* Round 321 (task 0298): the Wheel on the Draw tab - its own set, and the pen held still opening it (SketchBook's
+ * marking menu). */
+void tests_round321() {
+  test("the Wheel over the Draw tab opens its own set (brushes, the Ruler, Fit, Hide Tools); a slice picks the Inker", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 150, y = (int)c.y;
+    r.step({PadRig::ev(EventType::MouseMove, x, y)});
+    r.step({PadRig::ev(EventType::KeyDown, x, y, ' ')});
+    r.step({PadRig::ev(EventType::KeyUp, x, y, ' ')});
+    r.step();
+    std::printf("    Space over the pad: the Wheel open %d, its set \"%s\"\n", (int)r.ed.quick_menu_open_for_test(), r.ed.wheel_mode_for_test().c_str());
+    CHECK(r.ed.quick_menu_open_for_test() && r.ed.wheel_mode_for_test() == "draw");
+    /* The Inker is the second slice: its number key picks it (the Wheel's keys 1-8, task 0230). */
+    r.step({PadRig::ev(EventType::KeyDown, x, y, '2')});
+    r.step({PadRig::ev(EventType::KeyUp, x, y, '2')});
+    r.step();
+    std::printf("    2 on the Wheel: the brush %d, the Wheel open %d\n", r.ed.sketch_brush_for_test(), (int)r.ed.quick_menu_open_for_test());
+    CHECK(r.ed.sketch_brush_for_test() == 2 && !r.ed.quick_menu_open_for_test());
+    r.ed.command("sketch off");
+  });
+  test("the pen held still half a second on the pad opens the Wheel and draws nothing; a pen that moves draws its stroke and opens nothing", [] {
+    PadRig r;
+    using platform::EventType;
+    r.ed.command("sketch place flat");
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 150, y = (int)c.y;
+    r.step({pen_ev(EventType::MouseMove, x, y)});
+    r.step({pen_ev(EventType::MouseDown, x, y)});
+    for (int i = 0; i < 40; i++) r.step({pen_ev(EventType::MouseMove, x + (i & 1), y)});  // (0.8 s, a hand's tremble)
+    const bool open = r.ed.quick_menu_open_for_test();
+    r.step({pen_ev(EventType::MouseUp, x, y)});
+    r.step();
+    std::printf("    held still: the Wheel open %d (\"%s\"), strokes %zu\n", (int)open, r.ed.wheel_mode_for_test().c_str(), r.ed.sketch_for_test().strokes.size());
+    CHECK(open && r.ed.wheel_mode_for_test() == "draw" && r.ed.sketch_for_test().strokes.empty());
+    r.step({PadRig::ev(EventType::KeyDown, x, y, platform::KEY_ESCAPE)});
+    r.step();
+    std::vector<Vec2> pts;
+    for (int i = 0; i <= 40; i++) pts.push_back({(float)x + i * 3.0f, (float)y + 20.0f});
+    r.stroke(pts);
+    std::printf("    moving: the Wheel open %d, strokes %zu\n", (int)r.ed.quick_menu_open_for_test(), r.ed.sketch_for_test().strokes.size());
+    CHECK(!r.ed.quick_menu_open_for_test() && r.ed.sketch_for_test().strokes.size() == 1);
+    r.ed.command("sketch off");
+  });
+}
+
+/* Round 320's review: the brushes' preferences, the console's brush verbs, the brush kept to the Draw tab, the Eraser on
+ * a scene canvas and a locked layer. */
+void tests_round320_review() {
+  test("the brushes are kept in the preferences: each brush's size, color and opacity, the one picked, the palette's place, the user's own brushes (at most eight) - read back as they were", [] {
+    PadRig r;
+    r.ed.command("sketch brush Pen");
+    r.ed.command("sketch brush size 8");
+    r.ed.command("sketch color ff0000");
+    r.ed.command("sketch brush Marker");
+    r.ed.command("sketch brush opacity 0.3");
+    r.ed.command("sketch brush duplicate");
+    const std::string text = r.ed.brush_prefs_text_for_test();
+    std::printf("    the preferences' brush lines:\n%s", text.c_str());
+    Editor back;
+    back.init_headless(1600, 900);
+    std::istringstream is(text);
+    for (std::string line; std::getline(is, line);) {
+      const size_t eq = line.find('=');
+      if (eq != std::string::npos) back.brush_pref_for_test(line.substr(0, eq), line.substr(eq + 1));
+    }
+    back.command("sketch brush Pen");
+    const float pen_w = back.sketch_width_for_test();
+    const uint32_t pen_c = back.sketch_color_for_test();
+    back.command("sketch brush Marker 2");
+    std::printf("    read back: the Pen %.1f px %08X; %d brushes, the picked one's opacity %.2f\n", pen_w, (unsigned)pen_c, back.sketch_brush_count_for_test(),
+                back.sketch_brush_opacity_for_test());
+    CHECK(std::fabs(pen_w - 8.0f) < 1e-4f && (pen_c & 0xFFFFFF) == 0xFF0000u && back.sketch_brush_count_for_test() == 9);
+    CHECK(back.sketch_brush_for_test() == 8 && std::fabs(back.sketch_brush_opacity_for_test() - 0.3f) < 1e-4f);
+    /* The palette's place is kept. */
+    CHECK(back.brush_pref_for_test("draw_palette", "300 200 1"));
+    back.command("layout Drawing");
+    back.step_frame_headless();
+    back.command("window Draw");
+    for (int i = 0; i < 3; i++) back.step_frame_headless();
+    const Recti pr = back.draw_palette_rect_for_test();
+    std::printf("    the palette at (%d, %d)\n", pr.x, pr.y);
+    CHECK(pr.x == 300 && pr.y == 200);
+    /* Eight of the user's own at most; Delete takes one (a preset can't go). */
+    for (int i = 0; i < 9; i++) r.ed.command("sketch brush duplicate");
+    std::printf("    after nine more duplicates: %d brushes\n", r.ed.sketch_brush_count_for_test());
+    CHECK(r.ed.sketch_brush_count_for_test() == 16);
+    r.ed.command("sketch brush delete");
+    CHECK(r.ed.sketch_brush_count_for_test() == 15 && r.ed.sketch_brush_for_test() == 1);
+    r.ed.command("sketch brush delete");  // (the Pen: a preset stays)
+    CHECK(r.ed.sketch_brush_count_for_test() == 15);
+    /* A NaN in a brush line is skipped. */
+    CHECK(back.brush_pref_for_test("sketch_brush", "Pen|0|nan|1|0|1|0|nan|4278190080|-1"));
+    back.command("sketch brush Pen");
+    CHECK(std::isfinite(back.sketch_width_for_test()));
+    r.ed.command("sketch off");
+  });
+  test("the console's brush verbs: list, size, edge, min, pressure, smaller / larger, fainter / stronger, reset", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("sketch brush list");
+    ed.command("sketch brush Inker");
+    ed.command("sketch brush size 12");
+    CHECK(std::fabs(ed.sketch_width_for_test() - 12.0f) < 1e-4f);
+    ed.command("sketch brush edge 0.4");
+    ed.command("sketch brush min 0.25");
+    ed.command("sketch brush pressure both");
+    ed.command("sketch on");
+    ed.command("sketchstroke 300 300 400 320");
+    ed.command("sketch off");
+    const Sketch &s = ed.sketch_for_test();
+    CHECK(!s.strokes.empty());
+    /* A stroke made in the Scene view is a plain pen's (the brush is the Draw tab's: review 320), at the pen's width. */
+    if (!s.strokes.empty()) CHECK(s.strokes.back().soft == 0.0f && s.strokes.back().pressure_to == 1 && std::fabs(s.strokes.back().width - 12.0f) < 1e-4f);
+    ed.command("sketch brush reset");
+    CHECK(std::fabs(ed.sketch_width_for_test() - 4.0f) < 1e-4f);
+    ed.command("sketch brush larger");
+    ed.command("sketch brush smaller");
+    CHECK(std::fabs(ed.sketch_width_for_test() - 4.0f) < 1e-3f);
+    const float o = ed.sketch_brush_opacity_for_test();
+    ed.command("sketch brush fainter");
+    CHECK(std::fabs(ed.sketch_brush_opacity_for_test() - (o - 0.1f)) < 1e-4f);
+    ed.command("sketch brush stronger");
+    CHECK(std::fabs(ed.sketch_brush_opacity_for_test() - o) < 1e-4f);
+    ed.command("sketch brush nothing-by-that-name");
+    CHECK(ed.sketch_brush_for_test() == 2);
+  });
+  test("the Draw tab's Eraser picked: the Scene view's pen still draws there; on a ground canvas the Eraser cuts where it crosses in perspective; a locked layer's strokes stay", [] {
+    PadRig r;
+    r.ed.command("sketch brush Eraser");
+    r.ed.command("sketch on");
+    r.ed.command("sketchstroke 300 300 400 320");  // (the Scene view's pixels: a stroke, not an erase)
+    CHECK(r.ed.sketch_for_test().strokes.size() == 1);
+    r.ed.command("sketch clear");
+    /* A ground line from near to far, cut at its middle on screen. */
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    r.ed.command("sketchcanvas ground");
+    const Vec2 c = r.mid();
+    r.ed.command("sketch brush Pen");
+    std::vector<Vec2> pts;
+    for (int i = 0; i <= 20; i++) pts.push_back({c.x - 150.0f + i * 15.0f, c.y + 120.0f - i * 9.0f});
+    r.stroke(pts);
+    const size_t before = r.ed.sketch_for_test().strokes.size();
+    CHECK(before == 1);
+    CHECK(r.click("brush:Eraser"));
+    const Vec2 mid = pts[10];
+    using platform::EventType;
+    r.step({pen_ev(EventType::MouseMove, (int)mid.x - 40, (int)mid.y)});
+    r.step({pen_ev(EventType::MouseDown, (int)mid.x - 40, (int)mid.y)});
+    for (int i = 1; i <= 8; i++) r.step({pen_ev(EventType::MouseMove, (int)mid.x - 40 + i * 10, (int)mid.y)});
+    r.step({pen_ev(EventType::MouseUp, (int)mid.x + 40, (int)mid.y)});
+    r.step();
+    const Sketch &s = r.ed.sketch_for_test();
+    std::printf("    the ground line cut at its middle on screen: %zu pieces\n", s.strokes.size());
+    bool where = s.strokes.size() == 2;
+    for (const SketchStroke &st : s.strokes) {  // (no piece ends within the Eraser's reach of the cut's middle, both run out to their ends)
+      Vec2 a, b;
+      where = where && r.ed.sketch_stroke_px_for_pad_test(st, st.pts.front(), a) && r.ed.sketch_stroke_px_for_pad_test(st, st.pts.back(), b);
+      where = where && std::min(length(a - mid), length(b - mid)) > 6.0f && std::min(length(a - mid), length(b - mid)) < 40.0f;
+    }
+    CHECK(where);
+    /* A locked layer's strokes stay. */
+    r.ed.command("sketch layer lock");
+    const size_t locked = s.strokes.size();
+    r.step({pen_ev(EventType::MouseMove, (int)pts[3].x, (int)pts[3].y - 30)});
+    r.step({pen_ev(EventType::MouseDown, (int)pts[3].x, (int)pts[3].y - 30)});
+    for (int i = 1; i <= 6; i++) r.step({pen_ev(EventType::MouseMove, (int)pts[3].x, (int)pts[3].y - 30 + i * 10)});
+    r.step({pen_ev(EventType::MouseUp, (int)pts[3].x, (int)pts[3].y + 30)});
+    CHECK(r.ed.sketch_for_test().strokes.size() == locked);
+    r.ed.command("sketch off");
+  });
+}
+
+/* Round 323 (task 0303): a pen display's dial and express keys (XPPen's Artist 13.3 Pro V2: its keys send Photoshop's
+ * shortcuts, its dial a key pair or the scroll wheel). */
+/* Round 324: Paper is a page of its own - the Scene view shows no sketch and takes no pen while it is the source. */
+void tests_round324_papers();
+
+void tests_round324() {
+  tests_round324_papers();
+  test("with the Draw tab's source Paper, the Scene view neither shows the sketch nor draws with the pen; a camera source shows the same strokes again", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("sketch on");
+    ed.command("sketch correct none");
+    pen_stroke(ed, line_pts({250, 260}, {450, 260}, 20));
+    const Sketch &s = ed.sketch_for_test();
+    CHECK(s.strokes.size() == 1 && ed.mode_name_for_test() == "Sketch");
+    /* The pixels of a band round the stroke. */
+    auto band = [&] {
+      ed.step_frame_headless();
+      const Image *img = ed.ui_for_test().canvas.target();
+      const Recti r = ed.scene_rect_for_test();
+      std::vector<uint32_t> out;
+      for (int y = r.y + 250; y < r.y + 270; y++)
+        for (int x = r.x + 270; x < r.x + 430; x++) out.push_back(img->pixels[(size_t)y * img->width + x]);
+      return out;
+    };
+    const std::vector<uint32_t> shown = band();
+    ed.command("draw source paper");
+    const std::vector<uint32_t> paper = band();
+    size_t differ = 0;
+    for (size_t i = 0; i < shown.size(); i++) differ += shown[i] != paper[i];
+    std::printf("    %zu of %zu pixels round the stroke change when the source is Paper\n", differ, shown.size());
+    CHECK(differ > 100);
+    CHECK(ed.mode_name_for_test() != "Sketch");
+    ed.command("draw source scene");
+    const std::vector<uint32_t> back = band();
+    size_t back_differ = 0;
+    for (size_t i = 0; i < shown.size(); i++) back_differ += shown[i] != back[i];
+    std::printf("    back on the Scene camera: %zu pixels differ, mode %s\n", back_differ, ed.mode_name_for_test().c_str());
+    CHECK(back_differ < 20 && ed.mode_name_for_test() == "Sketch");
+    /* On Paper, a pen stroke over the Scene view draws nothing (the view takes it as a click of its own). */
+    ed.command("draw source paper");
+    pen_stroke(ed, line_pts({250, 400}, {450, 420}, 20));
+    CHECK(s.strokes.size() == 1);
+    ed.command("draw source scene");
+    pen_stroke(ed, line_pts({250, 400}, {450, 420}, 20));
+    CHECK(s.strokes.size() == 2);
+    ed.command("sketch off");
+  });
+}
+
+/* The scratch project's papers removed: earlier tests' papers would fill the Open Paper list (review 324). */
+static void clear_papers(Editor &ed) {
+  const std::string dir = fs::join(ed.assets_dir_for_test(), "Papers");
+  for (const DirEntry &e : fs::list(dir))
+    if (!e.is_dir) fs::remove_file(fs::join(dir, e.name));
+}
+
+/* Papers of their own (round 324): strokes on the pad's Paper go to the open paper, not the scene. */
+void tests_round324_papers() {
+  {
+    Editor ed;
+    ed.init_headless(400, 300);
+    clear_papers(ed);
+  }
+  test("papers: a stroke on Paper lands in the open paper, not the scene's sketch; a second paper keeps its own strokes; each is saved and opens again; More > Paper lists them", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    CHECK(r.click("draw:More") && r.hover("submenu:Source") && r.click("menu:Paper"));
+    r.ed.command("paper new Round324 A");
+    r.step();
+    const std::string a = r.ed.paper_name_for_test();
+    const Vec2 c = r.mid();
+    const size_t scene_before = r.ed.sketch_for_test().strokes.size();
+    r.stroke(line_pts({c.x - 100, c.y}, {c.x + 100, c.y + 10}, 20));
+    CHECK(r.ed.paper_for_test().strokes.size() == 1 && r.ed.sketch_for_test().strokes.size() == scene_before);
+    CHECK(r.click("draw:More") && r.hover("submenu:Paper") && r.click("menu:New Paper"));
+    const std::string b = r.ed.paper_name_for_test();
+    std::printf("    papers %s and %s\n", a.c_str(), b.c_str());
+    CHECK(b != a && r.ed.paper_for_test().strokes.empty());
+    r.stroke(line_pts({c.x - 100, c.y - 60}, {c.x + 100, c.y - 50}, 20));
+    r.stroke(line_pts({c.x - 100, c.y + 60}, {c.x + 100, c.y + 70}, 20));
+    CHECK(r.ed.paper_for_test().strokes.size() == 2);
+    /* Open the first again from the menu: its one stroke, from its file. */
+    CHECK(r.click("draw:More") && r.hover("submenu:Paper") && r.hover("submenu:Open Paper") && r.click("menu:" + a));
+    CHECK(r.ed.paper_name_for_test() == a && r.ed.paper_for_test().strokes.size() == 1);
+    /* The second, in a new editor (its file only). */
+    r.ed.command("paper save");
+    {
+      PadRig r2;
+      r2.ed.command("draw source paper");
+      r2.ed.command("paper open " + b);
+      CHECK(r2.ed.paper_name_for_test() == b && r2.ed.paper_for_test().strokes.size() == 2);
+      if (r2.ed.paper_for_test().strokes.size() == 2) CHECK(r2.ed.paper_for_test().strokes[0].brush == r.ed.paper_for_test().strokes[0].brush);
+      r2.ed.command("paper delete");  // (the test's papers go to the scratch trash)
+      r2.ed.command("paper open " + a);
+      r2.ed.command("paper delete");
+      r2.ed.command("sketch off");
+    }
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+  test("papers: Ctrl+Z over the pad takes the paper's stroke back, not a scene edit; the paper saves itself a second after a change", [] {
+    PadRig r;
+    using platform::EventType;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    r.ed.command("draw source paper");
+    r.ed.command("paper new Round324 Undo");
+    r.step();
+    r.ed.command("create Cube");  // (a scene edit before the stroke)
+    const size_t objects = r.ed.scene().object_count();
+    const Vec2 c = r.mid();
+    r.stroke(line_pts({c.x - 80, c.y}, {c.x + 80, c.y}, 16));
+    CHECK(r.ed.paper_for_test().strokes.size() == 1 && r.ed.paper_undo_depth_for_test() >= 1 && r.ed.paper_dirty_for_test());
+    platform::Event d = PadRig::ev(EventType::KeyDown, (int)c.x, (int)c.y, platform::KEY_Z), u = PadRig::ev(EventType::KeyUp, (int)c.x, (int)c.y, platform::KEY_Z);
+    d.mods = u.mods = platform::MOD_CTRL;
+    r.step({PadRig::ev(EventType::MouseMove, (int)c.x, (int)c.y)});
+    r.step({d});
+    r.step({u});
+    CHECK(r.ed.paper_for_test().strokes.empty() && r.ed.scene().object_count() == objects);
+    CHECK(r.click("draw:More") && r.click("menu:Redo") && r.ed.paper_for_test().strokes.size() == 1);
+    r.ed.set_clock_for_test(r.ed.clock_for_test() + 1.5);
+    r.step();
+    CHECK(!r.ed.paper_dirty_for_test());
+    r.ed.command("paper delete");
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+  test("papers: a perspective guide on Paper is the paper's - its vanishing point dragged moves neither the scene's guide nor the Scene camera; Build and Lift are refused", [] {
+    PadRig r;
+    using platform::EventType;
+    r.ed.command("sketch correct none");
+    r.ed.command("sketchguide perspective 2");  // (the scene's guide first, in the Scene view)
+    r.step();
+    const Sketch &scene = r.ed.sketch_for_test();
+    const Vec2 scene_vp = scene.vp[0];
+    const SceneCamera cam0 = r.ed.scene_camera_for_test();
+    r.ed.command("draw source paper");
+    r.ed.command("paper new Round324 Guide");
+    r.step();
+    r.step({PadRig::ev(EventType::MouseMove, (int)r.mid().x, (int)r.mid().y)});  // (the commands act in the view under the pointer)
+    r.ed.command("sketchguide perspective 2");
+    r.ed.command("sketchguide vp 0 0.3 0.4");
+    r.step();
+    const Sketch &paper = r.ed.paper_for_test();
+    std::printf("    paper's point (%.2f, %.2f), the scene's (%.2f, %.2f) as before (%.2f, %.2f)\n", paper.vp[0].x, paper.vp[0].y, scene.vp[0].x, scene.vp[0].y, scene_vp.x, scene_vp.y);
+    CHECK(paper.perspective == 2 && std::fabs(paper.vp[0].x - 0.3f) < 1e-4f && !paper.follow_camera);
+    CHECK(scene.vp[0].x == scene_vp.x && scene.vp[0].y == scene_vp.y);
+    const SceneCamera cam1 = r.ed.scene_camera_for_test();
+    CHECK(cam1.yaw == cam0.yaw && cam1.pitch == cam0.pitch && cam1.pivot.x == cam0.pivot.x && cam1.distance == cam0.distance);
+    r.ed.command("sketchguide follow on");
+    CHECK(!paper.follow_camera);
+    const size_t objects = r.ed.scene().object_count();
+    r.ed.command("sketchbuild box");
+    r.ed.command("sketchlift");
+    CHECK(r.ed.scene().object_count() == objects);
+    r.ed.command("paper delete");
+    r.ed.command("draw source scene");
+    r.ed.command("sketchguide perspective off");
+    r.ed.command("sketch off");
+  });
+  test("papers (review 324): with the Draw tab hidden behind the Board, sketchguide, sketch clear and sketchstroke still act on the paper, never the scene's sketch; the bands round the page are painted", [] {
+    PadRig r;
+    r.ed.command("sketch correct none");
+    r.ed.command("draw source paper");
+    r.ed.command("paper new Round324 Hidden");
+    r.step();
+    /* The bands: the paper is narrower than the tab, so its sides are the surround, not an old picture. */
+    const Recti pic = r.ed.sketch_view_rect_for_test(), pad = r.ed.pad_rect_for_test();
+    const Image &fb = r.ed.main_fb_for_test();
+    const uint32_t band = fb.pixels[(size_t)(pad.y + pad.h / 2) * fb.width + (size_t)(pad.x + 2)];
+    std::printf("    the page %dx%d in a pad %dx%d; the band %08X\n", pic.w, pic.h, pad.w, pad.h, (unsigned)band);
+    CHECK(pic.w < pad.w && band == 0xFF2E2E30u);
+    const Vec2 c = r.mid();
+    r.stroke(line_pts({c.x - 50, c.y}, {c.x + 50, c.y}, 10));
+    CHECK(r.ed.paper_for_test().strokes.size() == 1);
+    const Sketch &scene = r.ed.sketch_for_test();
+    const size_t scene_strokes = scene.strokes.size();
+    const Vec2 scene_vp = scene.vp[0];
+    const int scene_persp = scene.perspective;
+    r.ed.command("window Board");  // (the Draw tab now behind the Board: not drawn)
+    for (int i = 0; i < 4; i++) r.step();
+    r.ed.command("sketchguide perspective 2");
+    r.ed.command("sketchguide vp 0 0.25 0.45");
+    r.ed.command("sketchstroke 10 10 60 20 110 30");
+    CHECK(r.ed.paper_for_test().perspective == 2 && std::fabs(r.ed.paper_for_test().vp[0].x - 0.25f) < 1e-4f && r.ed.paper_for_test().strokes.size() == 2);
+    r.ed.command("sketch clear");
+    CHECK(r.ed.paper_for_test().strokes.empty());
+    CHECK(scene.strokes.size() == scene_strokes && scene.perspective == scene_persp && scene.vp[0].x == scene_vp.x);
+    r.ed.command("window Draw");
+    r.step();
+    /* A stroke begun in the band beside the page draws nothing. */
+    r.stroke(line_pts({(float)pad.x + 4, c.y}, {(float)pad.x + 30, c.y + 5}, 8));
+    CHECK(r.ed.paper_for_test().strokes.empty());
+    r.ed.command("paper delete");
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+  test("papers (review 324): the open paper picked again keeps its unsaved stroke; a paper from outside the project is copied in under a free name; a rename to nothing is refused; the Game view takes no pen on Paper", [] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch correct none");
+    r.ed.command("draw source paper");
+    r.ed.command("paper new Round324 Keep");
+    r.step();
+    r.step({PadRig::ev(platform::EventType::MouseMove, (int)r.mid().x, (int)r.mid().y)});
+    const Vec2 c = r.mid();
+    r.stroke(line_pts({c.x - 50, c.y}, {c.x + 50, c.y}, 10));
+    CHECK(r.ed.paper_dirty_for_test());
+    r.ed.command("paper open Round324 Keep");  // (within the second: before the autosave)
+    CHECK(r.ed.paper_for_test().strokes.size() == 1 && r.ed.paper_undo_depth_for_test() >= 1);
+    r.ed.command("paper rename ...");
+    CHECK(r.ed.paper_name_for_test() == "Round324 Keep");
+    /* Outside the project: a copy in Assets/Papers, the outside file left alone. */
+    r.ed.command("paper save");
+    const std::string outside = fs::join(fs::temp_dir(), "blendity_round324_outside");
+    fs::make_dirs(outside);
+    const std::string out_file = fs::join(outside, "Round324 Keep.paper");
+    CHECK(fs::copy_file(fs::join(fs::join(r.ed.assets_dir_for_test(), "Papers"), "Round324 Keep.paper"), out_file) || fs::exists(out_file));
+    r.ed.command("paper open " + out_file);
+    std::printf("    opened from outside as %s\n", r.ed.paper_name_for_test().c_str());
+    CHECK(r.ed.paper_name_for_test() == "Round324 Keep 2" && r.ed.paper_for_test().strokes.size() == 1);
+    fs::remove_file(out_file);
+    r.ed.command("paper delete");
+    r.ed.command("paper open Round324 Keep");
+    r.ed.command("paper delete");
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+  test("papers (review 324): on Paper a pen stroke over the Game view draws nothing in the scene; a paper of 500 Airbrush strokes saves (time printed)", [] {
+    Editor ed;
+    using platform::EventType;
+    ed.init_headless(1600, 1000);
+    ed.set_clock_for_test(100.0);
+    ed.command("layout 2 by 3");
+    ed.step_frame_headless();
+    ed.command("sketch on");
+    ed.command("draw source paper");
+    ed.command("paper new Round324 Game");
+    const size_t before = ed.sketch_for_test().strokes.size();
+    const Recti g = ed.game_rect_for_test();
+    const int x0 = g.x + g.w / 3, y0 = g.y + g.h / 2;
+    ed.step_frame_headless({pen_ev(EventType::MouseMove, x0, y0)});
+    ed.step_frame_headless({pen_ev(EventType::MouseDown, x0, y0)});
+    for (int i = 1; i <= 10; i++) ed.step_frame_headless({pen_ev(EventType::MouseMove, x0 + 20 * i, y0 + 3 * i)});
+    ed.step_frame_headless({pen_ev(EventType::MouseUp, x0 + 200, y0 + 30)});
+    CHECK(ed.sketch_for_test().strokes.size() == before && ed.paper_for_test().strokes.empty());
+    /* The autosave's cost: 500 Airbrush strokes, as round 320's timing. */
+    const SketchBrush &b = sketch_brush_presets()[5];
+    for (int k = 0; k < 500; k++) {
+      SketchStroke st;
+      st.color = b.color, st.width = b.width, st.brush = 5, st.opacity = b.opacity, st.soft = b.soft;
+      const float x = 0.1f + (k / 50) * 0.1f, y = 0.1f + (k % 50) * 0.016f;
+      for (int i = 0; i < 40; i++) st.pts.push_back({x + i * 0.003f, y + 0.01f * std::sin(i * 0.3f), 0.8f}), st.raw.push_back(st.pts.back());
+      ed.add_sketch_stroke_for_test(st);
+    }
+    const double t0 = now_seconds();
+    ed.command("paper save");
+    const double t1 = now_seconds();
+    std::printf("    a paper of 500 Airbrush strokes (40 points each): saved in %.1f ms\n", (t1 - t0) * 1000.0);
+    ed.command("paper delete");
+    ed.command("draw source scene");
+    ed.command("sketch off");
+  });
+  test("a vanishing point set from the console while the Scene view is a hidden tab (an empty rect) leaves the guide and the camera finite", [] {
+    PadRig r;  // (the Drawing layout: the Scene view a tab behind the Draw tab)
+    r.ed.command("draw source scene");
+    r.ed.command("sketchguide perspective 2");
+    r.ed.command("sketchguide vp 0 0.3 0.4");
+    r.step();
+    const Sketch &s = r.ed.sketch_for_test();
+    const SceneCamera &cam = r.ed.scene_camera_for_test();
+    std::printf("    the scene's point (%.2f, %.2f), the camera yaw %.1f pitch %.1f\n", s.vp[0].x, s.vp[0].y, cam.yaw, cam.pitch);
+    CHECK(std::isfinite(s.vp[0].x) && std::isfinite(s.vp[0].y) && std::isfinite(s.vp[1].x) && std::isfinite(cam.yaw) && std::isfinite(cam.pitch));
+    r.ed.command("sketchguide perspective off");
+    r.ed.command("sketch off");
+  });
+}
+
+void tests_round323() {
+  test("a pen display's keys over the pad: Ctrl+= / Ctrl+Shift+= and Ctrl+- zoom about the pen, Ctrl+1 is 100%, Ctrl+0 fits, 4 and 6 turn the canvas 15 degrees, 5 sets it upright", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid(), at{c.x + 120.0f, c.y + 40.0f};
+    auto key = [&](int k, int mods = 0) {
+      platform::Event d = PadRig::ev(EventType::KeyDown, (int)at.x, (int)at.y, k), u = PadRig::ev(EventType::KeyUp, (int)at.x, (int)at.y, k);
+      d.mods = u.mods = mods;
+      r.step({PadRig::ev(EventType::MouseMove, (int)at.x, (int)at.y)});
+      r.step({d});
+      r.step({u});
+    };
+    const auto &v = r.ed.pad_view_for_test();
+    const Vec2 q0 = r.ed.pad_from_screen_for_test(at);
+    key(platform::KEY_EQUALS, platform::MOD_CTRL);
+    const Vec2 s1 = r.ed.pad_to_screen_for_test(c + (q0 - c) * v.zoom);
+    std::printf("    Ctrl+=: zoom %.3f, the spot under the pen at (%.1f, %.1f)\n", v.zoom, s1.x, s1.y);
+    CHECK(std::fabs(v.zoom - 1.25f) < 1e-3f && length(s1 - at) < 1.0f);
+    key(platform::KEY_EQUALS, platform::MOD_CTRL | platform::MOD_SHIFT);
+    CHECK(std::fabs(v.zoom - 1.5625f) < 1e-3f);
+    key(platform::KEY_MINUS, platform::MOD_CTRL);
+    CHECK(std::fabs(v.zoom - 1.25f) < 1e-3f);
+    key('1', platform::MOD_CTRL);
+    CHECK(std::fabs(v.zoom - 1.0f) < 1e-4f);
+    key('6');
+    CHECK(std::fabs(v.angle - 15.0f) < 1e-3f);
+    key('4');
+    key('4');
+    CHECK(std::fabs(v.angle + 15.0f) < 1e-3f);
+    key('5');
+    CHECK(v.angle == 0.0f);
+    r.ed.command("draw view zoom 3");
+    key('0', platform::MOD_CTRL);
+    CHECK(v.zoom == 1.0f && v.pan_x == 0.0f);
+    for (const char *id : {"draw.zoom_in", "draw.zoom_out", "draw.zoom_actual", "draw.turn_left", "draw.turn_right", "draw.turn_reset"}) CHECK(r.ed.run_action_for_test(id));
+    r.ed.command("sketch off");
+  });
+  test("the wheel over the pad (a dial set to scroll) does what More > Wheel / Dial says: zoom, the brush's size, the canvas's turn or its opacity; Ctrl with it always zooms; a sideways wheel turns the canvas", [] {
+    PadRig r;
+    using platform::EventType;
+    const Vec2 c = r.mid();
+    const int x = (int)c.x + 100, y = (int)c.y;
+    auto wheel = [&](float dy, float dx = 0.0f, int mods = 0) {
+      platform::Event w = PadRig::ev(EventType::Wheel, x, y);
+      w.wheel_y = dy, w.wheel_x = dx, w.mods = mods;
+      r.step({PadRig::ev(EventType::MouseMove, x, y)});
+      r.step({w});
+    };
+    const auto &v = r.ed.pad_view_for_test();
+    CHECK(r.click("draw:More") && r.hover("submenu:Wheel / Dial") && r.click("menu:Brush Size") && r.ed.pad_wheel_mode_for_test() == 1);
+    const float w0 = r.ed.sketch_width_for_test();
+    wheel(2.0f);
+    std::printf("    size: %.2f -> %.2f, zoom %.2f\n", w0, r.ed.sketch_width_for_test(), v.zoom);
+    CHECK(std::fabs(r.ed.sketch_width_for_test() - w0 * 1.21f) < 1e-3f && v.zoom == 1.0f);
+    wheel(1.0f, 0.0f, platform::MOD_CTRL);
+    CHECK(std::fabs(v.zoom - 1.15f) < 1e-3f);
+    r.ed.command("draw view fit");
+    r.ed.command("draw wheel turn");
+    wheel(-2.0f);
+    CHECK(std::fabs(v.angle + 10.0f) < 1e-3f);
+    r.ed.command("draw wheel opacity");
+    const float o0 = r.ed.sketch_brush_opacity_for_test();
+    wheel(-2.0f);
+    CHECK(std::fabs(r.ed.sketch_brush_opacity_for_test() - std::max(0.02f, o0 - 0.1f)) < 1e-4f);
+    r.ed.command("draw view fit");
+    r.ed.command("draw wheel zoom");
+    wheel(0.0f, 3.0f);
+    CHECK(std::fabs(v.angle - 15.0f) < 1e-3f && v.zoom == 1.0f);
+    /* Kept in the preferences. */
+    r.ed.command("draw wheel size");
+    const std::string text = r.ed.brush_prefs_text_for_test();
+    Editor back;
+    back.init_headless(800, 600);
+    CHECK(text.find("draw_wheel=1") != std::string::npos && back.brush_pref_for_test("draw_wheel", "1") && back.pad_wheel_mode_for_test() == 1);
+    r.ed.command("draw wheel nothing");  // (the usage: nothing changes)
+    CHECK(r.ed.pad_wheel_mode_for_test() == 1);
+    r.ed.command("sketch off");
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
@@ -1611,4 +2808,11 @@ void run_sketch_tests() {
   tests_round248();
   tests_round253();
   tests_round254();
+  tests_round318();
+  tests_round319();
+  tests_round320();
+  tests_round320_review();
+  tests_round321();
+  tests_round323();
+  tests_round324();
 }

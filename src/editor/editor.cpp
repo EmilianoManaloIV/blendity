@@ -388,6 +388,8 @@ int Editor::run() {
 }
 
 void Editor::request_close() {
+  if (board_dirty_) board_save();  // (task 0299: a change in the last second is kept)
+  if (paper_dirty_) paper_save();  // (round 324)
   if (playing_) exit_play();  // (task 0254: first, so the auto-save runs on the scene Play restores - the edits made before Play - not on Play's discarded state)
   if (scene_dirty_) {
     std::string path = scene_->path.empty() ? fs::join(assets_dir_, "Scenes/" + scene_->name + ".scene") : scene_->path;
@@ -687,6 +689,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (pointer_window_ == active_window_) update_asset_drag();  // (a drag belongs to the window it started in: task 0187)
   handle_drop();
   handle_shortcuts();
+  board_frame_tick();  // (task 0299: pictures landed, and the board saved a second after a change, shown or not)
+  paper_frame_tick();  // (round 324: the paper saved a second after a change)
 
   update_tab_drag();
 
@@ -1122,55 +1126,11 @@ void Editor::draw_menubar(const Recti &r) {
       ui_.tooltip("Draw with the pen over the Scene view: its pressure is the width, its eraser erases, Ctrl keeps a stroke\n"
                   "freehand. Strokes are corrected to lines, arcs, ellipses and curves as the pen lifts (SketchBook's predictive stroke).");
       draw_sketch_pen_menu();  // (task 0286: the pen's colour, steadiness, the canvases, Clear, Lift to 3D)
-      ui_.submenu("Guides", ui_.px(220), [this] {
-        static const char *const kGuides[] = {"None", "Ruler", "Ellipse", "French Curve"};
-        for (int k = 0; k < 4; k++)
-          if (ui_.menu_item(kGuides[k], nullptr, sketch_.guide == k)) sketch_.guide = k;
-        ui_.submenu("French Curve Shape", ui_.px(180), [this] {  // (task 0286)
-          static const char *const kFrench[] = {"Gentle S", "Long C", "Spiral"};
-          for (int k = 0; k < 3; k++)
-            if (ui_.menu_item(kFrench[k], nullptr, sketch_.guide == 3 && sketch_.french == k)) sketch_command({"sketchguide", "french", std::to_string(k)}, "");
-        });
-        ui_.menu_separator();
-        static const char *const kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
-        for (int k = 0; k < 5; k++)
-          if (ui_.menu_item(kSym[k], nullptr, sketch_.symmetry == k)) sketch_.symmetry = k;
-        ui_.submenu("Radial Copies", ui_.px(160), [this] {  // (task 0286)
-          for (int n : {3, 4, 5, 6, 8, 12, 16})
-            if (ui_.menu_item(strprintf("%d copies", n), nullptr, sketch_.symmetry == 4 && sketch_.radial == n))
-              sketch_command({"sketchguide", "symmetry", "radial", std::to_string(n)}, "");
-        });
-        ui_.menu_separator();
-        static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
-        for (int k = 0; k < 4; k++)
-          if (ui_.menu_item(kPersp[k], nullptr, scene_->sketch.perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
-        ui_.menu_separator();
-        if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
-        if (ui_.menu_item("Perspective Follows the Camera", nullptr, scene_->sketch.follow_camera))  // (task 0286)
-          sketch_command({"sketchguide", "follow", scene_->sketch.follow_camera ? "off" : "on"}, "");
-        ui_.tooltip("The perspective guide and the camera as one: turning the view moves the vanishing points, dragging a point turns the view.");
-      });
+      ui_.submenu("Guides", ui_.px(240), [this] { draw_sketch_guides_items(); });  // (round 318: the Draw tab's Guides too)
       ui_.tooltip("SketchBook's rulers and guides: a stroke follows the ruler, the ellipse or the French curve; symmetry mirrors\n"
-                  "it; perspective snaps it to the lines through the nearest vanishing point (drag the points and the horizon).");
-      ui_.submenu("Build from Sketch", ui_.px(220), [this] {  // (task 0225)
-        static const char *const kBuild[][2] = {{"Box (three lines at a corner)", "box"}, {"Cylinder (two circles)", "cylinder"}, {"Cone (a circle and a line)", "cone"},
-                                                {"Sweep (two circles and a path)", "sweep"}, {"Face (a closed outline)", "face"}, {"Pull the Face (a line along its normal)", "pull"}};
-        for (const auto &b : kBuild)
-          if (ui_.menu_item(b[0])) sketch_build_command({"sketchbuild", b[1]});
-      });
-      ui_.submenu("Sketch over the Model", ui_.px(240), [this] {  // (task 0226)
-        if (ui_.menu_item("Project the Stroke onto the Face")) sketch_refine_command({"sketchproject"});
-        ui_.tooltip("The last stroke on the picture plane pushed onto the face under it, along the view: a line on the surface.");
-        if (ui_.menu_item("Trace into a Cut")) sketch_refine_command({"sketchtrace", "edge"});
-        ui_.tooltip("The last stroke on a face: a line cuts across the face (the Knife), a closed outline is imprinted as a face.");
-        if (ui_.menu_item("Trace into a Curve")) sketch_refine_command({"sketchtrace", "curve"});
-        ui_.menu_separator();
-        if (ui_.menu_item("Back to the Layer's View")) sketch_layer_view();
-        ui_.tooltip("The camera the layer's first stroke was drawn in: a picture-plane drawing fades as the view turns away from it.");
-        if (ui_.menu_item("Model Edges Overlay", nullptr, sketch_.overlay)) sketch_.overlay = !sketch_.overlay;
-        if (ui_.menu_item("Ruler along the Edge under the Middle")) sketch_command({"sketchguide", "ruler", "edge"}, "");
-        if (ui_.menu_item("Ellipse on the Face under the Middle")) sketch_command({"sketchguide", "ellipse", "face"}, "");
-      });
+                  "it; perspective snaps it to the lines through the nearest vanishing point (drag the points and the horizon) -\n"
+                  "not a freehand stroke (Ctrl held, or a layer set to Freehand).");
+      draw_sketch_build_items();  // (tasks 0225, 0226; round 318: the Draw tab's Build too)
     });
     u.tooltip("Draw a polyline, rectangle, circle, arc or polygon onto the mesh (or the ground) with snapping.\n"
               "With nothing selected it starts a new mesh. UModeler / SketchUp drawing tools.");
@@ -1462,6 +1422,10 @@ void Editor::draw_statusbar_log(const Recti &r) {
 
 void Editor::handle_drop() {
   if (ui_.in.dropped.empty()) return;
+  if (board_has_point(ui_.in.drop_x, ui_.in.drop_y)) {  // (task 0299: dropped on the board - its images placed there, in a row; the rest named)
+    board_add_images(ui_.in.dropped, board_from_screen({(float)ui_.in.drop_x, (float)ui_.in.drop_y}));
+    return;
+  }
   for (const std::string &path : ui_.in.dropped) {
     std::string ext = fs::extension(path);
     std::string name = fs::filename(path);
@@ -1655,7 +1619,8 @@ void Editor::dock_draw(DockNode *n) {
   if (u.hovered(content) && (u.in.pressed[0] || u.in.pressed[1] || u.in.pressed[2])) focused_ = n->tabs[n->active];
   window_rects_[n->tabs[n->active]] = content;
   /* The Scene and Game views paint every pixel of their content themselves. */
-  if (n->tabs[n->active] != WindowKind::Scene && n->tabs[n->active] != WindowKind::Game && n->tabs[n->active] != WindowKind::Draw)
+  if (n->tabs[n->active] != WindowKind::Scene && n->tabs[n->active] != WindowKind::Game && n->tabs[n->active] != WindowKind::Draw &&
+      n->tabs[n->active] != WindowKind::Board)
     u.canvas.fill_rect(content, u.theme.panel);
   u.canvas.push_clip(content);
   dock_draw_window(n->tabs[n->active], content);
@@ -1686,6 +1651,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Draw: draw_draw_window(r); break;  // (task 0233)
     case WindowKind::Layers: draw_layers_window(r); break;  // (task 0234)
     case WindowKind::History: draw_history_window(r); break;  // (task 0254)
+    case WindowKind::Board: draw_board_window(r); break;  // (task 0299)
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -2432,6 +2398,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
 }
 
 bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name, int outer, const std::string &which) {
+  if (op != "reset" && texture_upto_.first == asset) texture_upto_ = {"", -1};  // (round 332's review: the layers moved under the preview's cut)
   ProceduralTexturePtr pt = texture_asset(asset);
   if (!pt) return false;
   /* The list worked: the stack, or a layer's mask stack / group children (task 0244). */
@@ -3179,7 +3146,7 @@ void Editor::draw_sketch_pen_menu() {
   });
   u.tooltip("Steadiness (a lazy rope): the line trails the pen by this much, so a shaky hand draws a smooth line.");
   u.submenu("Canvas", u.px(240), [this] {
-    Sketch &s = scene_->sketch;
+    Sketch &s = sketch_doc();
     if (ui_.menu_item("The View (the picture plane)", nullptr, s.active_canvas == 0)) sketch_canvas_command({"sketchcanvas", "view"}, "");
     if (ui_.menu_item("The Ground")) sketch_canvas_command({"sketchcanvas", "ground"}, "");
     for (const char *ax : {"X", "Y", "Z"})
@@ -3195,6 +3162,59 @@ void Editor::draw_sketch_pen_menu() {
   u.tooltip("The strokes drawn on the picture placed in the scene: each on the face under it, or at the depth it was drawn at.");
   if (u.menu_item("Clear the Sketch")) sketch_command({"sketch", "clear"}, "");
   u.tooltip("Every stroke removed (Undo brings them back).");
+}
+
+/* Mesh > Draw > Guides, and the Draw tab's Guides menu (round 318). */
+void Editor::draw_sketch_guides_items() {
+  static const char *const kGuides[] = {"None", "Ruler", "Ellipse", "French Curve"};
+  for (int k = 0; k < 4; k++)
+    if (ui_.menu_item(kGuides[k], nullptr, sketch_.guide == k)) sketch_.guide = k;
+  ui_.submenu("French Curve Shape", ui_.px(180), [this] {  // (task 0286)
+    static const char *const kFrench[] = {"Gentle S", "Long C", "Spiral"};
+    for (int k = 0; k < 3; k++)
+      if (ui_.menu_item(kFrench[k], nullptr, sketch_.guide == 3 && sketch_.french == k)) sketch_command({"sketchguide", "french", std::to_string(k)}, "");
+  });
+  ui_.menu_separator();
+  static const char *const kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
+  for (int k = 0; k < 5; k++)
+    if (ui_.menu_item(kSym[k], nullptr, sketch_.symmetry == k)) sketch_.symmetry = k;
+  ui_.submenu("Radial Copies", ui_.px(160), [this] {  // (task 0286)
+    for (int n : {3, 4, 5, 6, 8, 12, 16})
+      if (ui_.menu_item(strprintf("%d copies", n), nullptr, sketch_.symmetry == 4 && sketch_.radial == n))
+        sketch_command({"sketchguide", "symmetry", "radial", std::to_string(n)}, "");
+  });
+  ui_.menu_separator();
+  static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
+  for (int k = 0; k < 4; k++)
+    if (ui_.menu_item(kPersp[k], nullptr, sketch_doc().perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
+  ui_.menu_separator();
+  if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
+  if (ui_.menu_item("Perspective Follows the Camera", nullptr, sketch_doc().follow_camera))  // (task 0286)
+    sketch_command({"sketchguide", "follow", sketch_doc().follow_camera ? "off" : "on"}, "");
+  ui_.tooltip("The perspective guide and the camera as one: turning the view moves the vanishing points, dragging a point turns the view.");
+}
+
+/* Build from Sketch and Sketch over the Model: Mesh > Draw's, and the Draw tab's Build menu (round 318). */
+void Editor::draw_sketch_build_items() {
+  ui_.submenu("Build from Sketch", ui_.px(220), [this] {  // (task 0225)
+    static const char *const kBuild[][2] = {{"Box (three lines at a corner)", "box"}, {"Cylinder (two circles)", "cylinder"}, {"Cone (a circle and a line)", "cone"},
+                                            {"Sweep (two circles and a path)", "sweep"}, {"Face (a closed outline)", "face"}, {"Pull the Face (a line along its normal)", "pull"}};
+    for (const auto &b : kBuild)
+      if (ui_.menu_item(b[0])) sketch_build_command({"sketchbuild", b[1]});
+  });
+  ui_.submenu("Sketch over the Model", ui_.px(240), [this] {  // (task 0226)
+    if (ui_.menu_item("Project the Stroke onto the Face")) sketch_refine_command({"sketchproject"});
+    ui_.tooltip("The last stroke on the picture plane pushed onto the face under it, along the view: a line on the surface.");
+    if (ui_.menu_item("Trace into a Cut")) sketch_refine_command({"sketchtrace", "edge"});
+    ui_.tooltip("The last stroke on a face: a line cuts across the face (the Knife), a closed outline is imprinted as a face.");
+    if (ui_.menu_item("Trace into a Curve")) sketch_refine_command({"sketchtrace", "curve"});
+    ui_.menu_separator();
+    if (ui_.menu_item("Back to the Layer's View")) sketch_layer_view();
+    ui_.tooltip("The camera the layer's first stroke was drawn in: a picture-plane drawing fades as the view turns away from it.");
+    if (ui_.menu_item("Model Edges Overlay", nullptr, sketch_.overlay)) sketch_.overlay = !sketch_.overlay;
+    if (ui_.menu_item("Ruler along the Edge under the Middle")) sketch_command({"sketchguide", "ruler", "edge"}, "");
+    if (ui_.menu_item("Ellipse on the Face under the Middle")) sketch_command({"sketchguide", "ellipse", "face"}, "");
+  });
 }
 
 /* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
@@ -4214,6 +4234,7 @@ void Editor::load_prefs() {
     if (assist_pref(k, v)) continue;
     if (ai_pref(k, v)) continue;
     if (livelink_pref(k, v)) continue;
+    if (sketch_brush_pref(k, v)) continue;  // (task 0297)
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
@@ -4368,6 +4389,7 @@ void Editor::save_prefs() {
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += hci_prefs_text();  // (task 0235)
+  s += sketch_brush_prefs_text();  // (task 0297)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();

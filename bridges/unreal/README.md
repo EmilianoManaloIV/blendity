@@ -3,10 +3,11 @@
 An Unreal Engine 5.3+ editor plugin (C++) that keeps actors in the open level in step with the scene open in Blendity,
 as you work (task 0277; the protocol is [docs/LIVELINK.md](../../docs/LIVELINK.md)). One way: Blendity is the source.
 
-**Status:** written; its protocol layer is compiled and tested in Blendity's own suite on every build. Unreal 5.8's
-BuildPlugin (2026-10-29) reached the plugin's rules and stopped on the machine: Unreal's build tool needs the .NET
-Framework SDK 4.6 or newer, which that Visual Studio Build Tools install lacked. It also showed that 5.8 refuses C++17,
-so the plugin now takes the engine's own standard. The build and the automation test below run once that SDK is in.
+**Status:** tested in Unreal 5.8.4 (2026-10-29). BuildPlugin builds it, `Blendity.LiveLink.Replay` passes with no
+warning, and in the editor it connected by itself, through the discovery file, to a stand-in Live Link. Its protocol
+layer is also compiled and tested in Blendity's own suite on every build. Building it needs the .NET Framework SDK 4.6
+or newer (Visual Studio Installer > Individual components > .NET Framework 4.8.1 SDK), and a short package path: Unreal
+refuses paths over 260 characters (`-Package=C:\uebl\pkg` works).
 
 ## Install
 
@@ -44,3 +45,15 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
   `BlendityLinkProtocol.cpp`, checks every mesh, the deform, the axes and the discovery file.
 - In Unreal: Session Frontend > Automation > `Blendity.LiveLink.Replay`, or
   `UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests Blendity.LiveLink.Replay; Quit" -unattended -nullrhi`.
+- **Live:** `Blendity.LiveLink.LiveSession` checks what the plugin's own connection made in the editor's level from a
+  running Blendity. Blendity's suite runs it with `BLENDITY_TEST_BRIDGE`, with a short `BLENDITY_TEST_DIR` (see
+  [LIVELINK.md](../../docs/LIVELINK.md#testing-a-bridge-live-round-318)). Run on 2026-10-29: LIVE OK.
+- **What the live run found:**
+  - The link dropped whenever Blendity was quiet. A non-blocking peek with nothing to read also succeeds with 0 bytes,
+    so the plugin took it for a closed connection, and reconnected and re-synced every 2 seconds. It now asks the
+    socket whether it is readable with nothing pending.
+  - A deform of a 32,514-vertex mesh took 259 ms a frame. It now changes the kept mesh description's positions in
+    place, builds without CPU data or collision, and builds once more with them half a second after the deforms
+    stop: 145 ms. Unreal's own static-mesh build (about 75 ms) is most of what is left.
+- **Install a Bridge:** a content-only project with the plugin from Install a Bridge builds
+  (`Build.bat UnrealEditor Win64 Development -Project=<project>`), opens, and its replay test passes.
