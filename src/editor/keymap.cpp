@@ -770,6 +770,11 @@ int Editor::window_action(const std::string &id) {
     id == "edit.undo" ? board_undo() : board_redo();
     return 1;
   }
+  const WindowKind under = (id == "edit.undo" || id == "edit.redo") ? wheel_window_at(ui_.in.mx, ui_.in.my) : WindowKind::Count;
+  if (draw_source_ == 2 && (under == WindowKind::Draw || under == WindowKind::Layers)) {  // (round 324: over a paper or its layers, the paper's own)
+    paper_step(id == "edit.undo");
+    return 1;
+  }
   const auto it = kCommands.find(id);
   if (it == kCommands.end()) return -1;
   const bool board = id.compare(0, 6, "board.") == 0;

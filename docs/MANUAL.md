@@ -889,6 +889,33 @@ tab's pad and the reference board.
 | Express keys | `B`, `E`, `Ctrl Z`, `Ctrl Y`, `Space` (held), `[`, `]`, `Ctrl 0` | brush, Eraser, undo, redo, pan while the pen drags, size, fit |
 | Pen side button | Right click or "Mouse button" | the Wheel at the pen |
 
+## Papers (round 324)
+The Draw tab's More > Source > Paper draws on a paper: a page of its own in `Assets/Papers`, not in the scene. While
+the pad is on Paper the Scene and Game views show no sketch and take no pen, and a paper's perspective guide never
+moves a camera.
+
+| To | Do |
+|---|---|
+| Start another paper | More > Paper > New Paper (or `paper new <name>`) |
+| Go back to one | More > Paper > Open Paper (`paper open <name>`) |
+| Copy or remove it | More > Paper > Duplicate Paper / Delete Paper (to the system's trash) |
+| Undo on the paper | Ctrl+Z / Ctrl+Y over the pad or the Layers window, or the toolbar's Undo / Redo |
+| Draw in the scene again | More > Source > Scene Camera: the scene's own sketch, as it was |
+
+A paper saves itself a second after each change and on closing; the paper used last opens again. Place in 3D, Build
+and Lift need a camera source.
+
+**Papers on the board (round 325):** Boards > New Paper Here or Add Paper, a `.paper` dragged from the Project window,
+or More > Paper > Pin to the Board. The board shows the drawing and keeps it up to date; double-click it to draw on it.
+One paper can be on many boards; a rename keeps them linked.
+
+**Export a board (round 326):** Boards > Export... - What, Format (PNG, JPEG, PDF), Size, Background - then Export...
+It is written in the background, at full sharpness. `board export <path> [png|jpg|pdf] [size <px>] [selection|view]
+[bg board|white|none]`.
+
+**Puppet handles on the right bones:** if a Puppet Posing handle sits on the wrong bone, select the right bone, then
+Animation > Puppet > Handle Bones > that handle > Use the Selected Bone (`autopose handle <part> <bone>|auto`).
+
 ## The reference board (round 322)
 Window > Board (a tab beside the Draw tab in the Drawing layout; beside it in Drawing with References).
 

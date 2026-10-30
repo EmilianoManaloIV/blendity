@@ -4776,6 +4776,46 @@ static void tests_round141() {
     CHECK(r.error < 0.01f && length(lf->world_position() - lf0) < 0.005f && length(rf->world_position() - rf0) < 0.005f && foot_turn < 1.0f);
     CHECK(dk.z > 0.03f && std::fabs(dk.x) < 0.5f * dk.z);  // (forward, the way the knee already bends - the rig faces +Z)
   });
+  test("puppet handles set by hand (round 324): Animation > Puppet > Handle Bones > Left Hand > Use the Selected Bone puts the left-hand handle on the bone picked; kept with the armature; Found Automatically and `autopose handle lhand auto` put it back", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("window Animation");
+    ed.command("select LeftLowerArm");
+    ed.command("anim new Pose");
+    ed.command("autopose on");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto click = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      return true;
+    };
+    auto hover = [&](const std::string &key) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) return std::printf("    no '%s'\n", key.c_str()), false;
+      for (int i = 0; i < 4; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, b.x + b.w / 2, b.y + b.h / 2)});
+      return true;
+    };
+    Recti h;
+    CHECK(ed.button_rect_for_test("puppet:LeftHand", h));  // (found: the hand)
+    CHECK(click("Puppet") && hover("submenu:Handle Bones") && hover("submenu:Left Hand: LeftHand") && click("menu:Use the Selected Bone (LeftLowerArm)"));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Armature *a = ed.scene().find_by_name(rig->name) ? ed.scene().find_by_name(rig->name)->get<Armature>() : nullptr;
+    std::printf("    the armature's Puppet Handles: \"%s\"\n", a ? a->puppet_bones.c_str() : "(none)");
+    CHECK(a && a->puppet_bones == "Left Hand=LeftLowerArm");
+    CHECK(ed.button_rect_for_test("puppet:LeftLowerArm", h));
+    ed.record_buttons_for_test(false), ed.record_buttons_for_test(true);
+    ed.command("autopose handle lhand auto");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("puppet:LeftHand", h) && !ed.button_rect_for_test("puppet:LeftLowerArm", h) && a && a->puppet_bones.empty());
+    ed.command("autopose handle lhand NoSuchBone");
+    CHECK(a && a->puppet_bones.empty());
+    ed.command("autopose off");
+  });
   test("autopose in the editor: a drag poses the body, keys it at the playhead (one undo step); IK targets follow; a locked hand stays", [&] {
     Editor ed;
     r34_open(ed);

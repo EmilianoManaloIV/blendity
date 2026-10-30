@@ -62,7 +62,7 @@ void add_sides(Mesh &m, const std::vector<uint32_t> &lo, const std::vector<uint3
  * fit: the points were sampled evenly on the view, so the near side has more of them and a mean would lean toward
  * the camera), the seam point once, if the points lie within 8 % of that circle. */
 bool Editor::sketch_circle_of(const SketchStroke &st, SketchCircle &out) const {
-  const SketchCanvas *c = st.canvas ? scene_->sketch.canvas_at(st.canvas) : nullptr;
+  const SketchCanvas *c = st.canvas ? sketch_doc().canvas_at(st.canvas) : nullptr;
   if (!c || c->kind < 1 || !st.closed || st.pts.size() < 8) return false;
   std::vector<Vec2> pts;
   for (const SketchPoint &p : st.pts) pts.push_back({p.x, p.y});
@@ -114,7 +114,7 @@ bool Editor::sketch_stroke_shown(const SketchStroke &st) const { return sketch_l
 /* The sketch's line strokes on scene canvases as world segments, the most recent first. */
 std::vector<Editor::SketchSeg> Editor::sketch_segments() const {
   std::vector<Seg> out;
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   for (size_t i = s.strokes.size(); i-- > 0;) {
     const SketchStroke &st = s.strokes[i];
     const SketchCanvas *c = st.canvas ? s.canvas_at(st.canvas) : nullptr;
@@ -127,7 +127,7 @@ std::vector<Editor::SketchSeg> Editor::sketch_segments() const {
 /* The sketch's circles on scene canvases, the most recent first. */
 std::vector<Editor::SketchCircle> Editor::sketch_circles() const {
   std::vector<Circle> out;
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   for (size_t i = s.strokes.size(); i-- > 0;) {
     Circle c;
     if (sketch_stroke_shown(s.strokes[i]) && sketch_circle_of(s.strokes[i], c)) c.stroke = i, out.push_back(c);
@@ -287,7 +287,7 @@ void Editor::sketch_build_mesh(const std::string &op, Mesh &m, Vec3 size, int se
  * from the one circle's to the other's. Not an F9 operator (a path is not a few numbers). */
 bool Editor::sketch_build_sweep() {
   const std::vector<Circle> circles = sketch_circles();
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   if (circles.size() < 2) {
     Log::warn("sketchbuild sweep: draw two circles and a stroke from the one's centre to the other's");
     return false;
@@ -374,7 +374,7 @@ void Editor::sketch_sweep_mesh(const std::vector<Vec3> &path, const SketchCircle
  * the chain of strokes on its canvas from it back to itself (the pieces of one stroke share their corners exactly,
  * other strokes' ends within a millimetre), their points in order with the seam point once. */
 bool Editor::sketch_outline_from(size_t index, std::vector<SketchPoint> &chain) const {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const SketchStroke &st = s.strokes[index];
   chain.clear();
   if (st.closed && st.pts.size() >= 3) {
@@ -407,7 +407,7 @@ bool Editor::sketch_outline_from(size_t index, std::vector<SketchPoint> &chain) 
 
 /* The last closed outline on a scene canvas - a closed stroke, or line strokes chained end to end - as a face. */
 bool Editor::sketch_build_face() {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   std::vector<Vec3> loop;
   const SketchCanvas *canvas = nullptr;
   for (size_t i = s.strokes.size(); i-- > 0 && loop.empty();) {
@@ -497,6 +497,7 @@ bool Editor::sketch_build_pull() {
 bool Editor::sketch_build_command(const std::vector<std::string> &t) {
   if (!t.empty() && t[0] == "sketchbuild") sketch_bind_work_view();  // (task 0233; round 318: the view being drawn in)
   if (t.empty() || to_lower(t[0]) != "sketchbuild") return false;
+  if (sketch_refuse_on_paper("sketchbuild")) return true;  // (round 324: a paper isn't in the scene)
   const std::string v = t.size() > 1 ? to_lower(t[1]) : "";
   if (playing_) return true;
   if (v == "box") sketch_build_box();

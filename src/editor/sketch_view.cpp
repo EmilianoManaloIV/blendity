@@ -33,6 +33,12 @@ void Editor::sketch_bind(int kind, const Recti &view, const SceneCamera &cam, co
  * too), the Game view or the Scene view - while it is still drawn, else the Scene view. Mesh > Draw's and the Draw tab's
  * Guides, Canvas, Lift and Build then work on the picture the artist draws in, with its camera. */
 Recti Editor::sketch_bind_work_view() {
+  if (draw_source_ == 2) {  // (round 324: on Paper the pad's, shown or not - never the Scene view's sketch)
+    sketch_view_ = sketch_views_[2];
+    sketch_view_.kind = 2;
+    sketch_view_.hovered = true;
+    return sketch_view_.view;
+  }
   const int k = sketch_work_view_;
   const bool shown = k > 0 && ui_.frame_number() <= sketch_view_frame_[k] + 2;
   if (!shown) {
@@ -201,7 +207,7 @@ int Editor::sketch_depth_canvas(const Recti &view) {
 /* Depth canvases no stroke sits on go (a stroke erased, the sketch cleared, a stroke that missed its plane): they are
  * a stroke's place, not the user's construction. */
 void Editor::sketch_prune_depth_canvases() {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   std::vector<SketchCanvas> kept;
   for (const SketchCanvas &c : s.canvases) {
     bool used = c.kind != 2;

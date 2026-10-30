@@ -62,7 +62,7 @@ BoardPicture::Level half_level(const BoardPicture::Level &l) {
 
 /* A picture for the board, on a loader thread: decoded, an HDR or EXR tone-mapped (clamped, to sRGB), made at most
  * kBoardPictureMax on its long side, its mips made. */
-std::shared_ptr<BoardPicture> load_board_picture_unguarded(const std::string &path) {
+std::shared_ptr<BoardPicture> load_board_picture_unguarded(const std::string &path, int max_side = kBoardPictureMax, bool mips = true) {
   auto out = std::make_shared<BoardPicture>();
   Bitmap bmp;
   std::string err;
@@ -83,16 +83,16 @@ std::shared_ptr<BoardPicture> load_board_picture_unguarded(const std::string &pa
     const uint8_t *p = &bmp.rgba8[i * 4];
     l.argb[i] = ((uint32_t)p[3] << 24) | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
   }
-  while (std::max(l.w, l.h) > kBoardPictureMax) l = half_level(l);
+  while (std::max(l.w, l.h) > max_side) l = half_level(l);
   out->levels.push_back(l);
-  while (out->levels.back().w > 1 || out->levels.back().h > 1) out->levels.push_back(half_level(out->levels.back()));
+  while (mips && (out->levels.back().w > 1 || out->levels.back().h > 1)) out->levels.push_back(half_level(out->levels.back()));
   return out;
 }
 
 /* A failure on the loader thread (out of memory on a huge picture) becomes the picture's error, never the editor's. */
-std::shared_ptr<BoardPicture> load_board_picture(const std::string &path) {
+std::shared_ptr<BoardPicture> load_board_picture(const std::string &path, int max_side = kBoardPictureMax, bool mips = true) {
   try {
-    return load_board_picture_unguarded(path);
+    return load_board_picture_unguarded(path, max_side, mips);
   }
   catch (const std::exception &e) {
     auto out = std::make_shared<BoardPicture>();
@@ -167,7 +167,7 @@ void Editor::board_start_loads() {
   while (board_loading_.size() < kBoardLoadsAtOnce && !board_queue_.empty()) {
     const std::string abs = board_queue_.front();
     board_queue_.pop_front();
-    if (!board_loading_.count(abs) && !board_pics_.count(abs)) board_loading_[abs] = std::async(std::launch::async, load_board_picture, abs);
+    if (!board_loading_.count(abs) && !board_pics_.count(abs)) board_loading_[abs] = std::async(std::launch::async, [abs] { return load_board_picture(abs); });
   }
 }
 
@@ -176,6 +176,12 @@ void Editor::board_start_loads() {
  * stayed "Loading" for the session). */
 void Editor::board_fill_sizes(std::vector<BoardItem> &items) {
   for (BoardItem &it : items) {
+    if (it.kind == BoardItem::Paper && it.w <= 0.0f) {  // (a paper: 1000 units high, its page's aspect - task 0305)
+      float aspect = 1.41421356f;
+      board_paper_picture(it.path, &aspect);
+      it.w = 1000.0f * aspect, it.h = 1000.0f;
+      continue;
+    }
     if (it.kind != BoardItem::Image || it.w > 0.0f) continue;
     const auto p = board_pics_.find(resolve_asset_path(it.path));
     if (p == board_pics_.end() || !p->second->error.empty()) continue;
@@ -194,6 +200,383 @@ void Editor::board_trim_pictures() {
   for (const auto &step : board_undo_) note(step);
   for (const auto &step : board_redo_) note(step);
   for (auto it = board_pics_.begin(); it != board_pics_.end();) it = used.count(it->first) ? std::next(it) : board_pics_.erase(it);
+  std::set<std::string> papers;  // (and the papers' thumbnails: task 0305)
+  for (const BoardItem &it : board_.items)
+    if (it.kind == BoardItem::Paper) papers.insert(fs::normalize(resolve_asset_path(it.path)));
+  for (auto it = paper_thumbs_.begin(); it != paper_thumbs_.end();) it = papers.count(it->first) ? std::next(it) : paper_thumbs_.erase(it);
+}
+
+/* ---- papers on the board (task 0305) ---- */
+
+namespace {
+constexpr int kPaperThumbHeight = 720;     // (a paper's picture on the board: its strokes as wide as on a pad this tall)
+constexpr double kPaperThumbEvery = 0.25;  // (the open paper being drawn on: its picture at most this often)
+}  // namespace
+
+/* A paper's drawing as a board picture: the open paper from memory (made again when it changes, at most four times a
+ * second), another from its file (made again when it is saved). Null when the file can't be read. */
+std::shared_ptr<BoardPicture> Editor::board_paper_picture(const std::string &path, float *aspect) {
+  const std::string abs = fs::normalize(resolve_asset_path(path));
+  const bool open = !paper_name_.empty() && abs == fs::normalize(paper_path(paper_name_));
+  const uint64_t key = open ? (1ull << 63) | paper_version_ : paper_saves_[to_lower(abs)];
+  PaperThumb &t = paper_thumbs_[abs];
+  const bool stale = t.key != key && !(open && t.pic && clock_now() - t.made_at < kPaperThumbEvery);
+  if (open && t.key != key && !stale) {  // (made on a frame soon: woken for it, not every frame - review 326)
+    const double wake = ui_.time + (kPaperThumbEvery - (clock_now() - t.made_at)) + 0.01;
+    ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, wake) : wake;
+  }
+  if (stale) {
+    t.key = key;
+    t.made_at = clock_now();
+    t.pic.reset();
+    if (open) board_render_paper(paper_, paper_aspect_, draw_paper_, t);
+    else {
+      std::string text;
+      Sketch sk;
+      float a = 1.41421356f;
+      uint32_t color = 0xFFFFFFFF;
+      if (fs::read_file(abs, text) && load_paper_text(text, sk, a, color)) board_render_paper(sk, a, color | 0xFF000000u, t);
+    }
+  }
+  if (aspect) *aspect = t.aspect;
+  return t.pic;
+}
+
+/* The sketch drawn into a picture of its own, through the sketch's own layer drawing, as the pad draws it at Fit. */
+void Editor::board_render_paper(const Sketch &sk, float aspect, uint32_t color, PaperThumb &out, int height) {
+  const int h = std::max(16, height > 0 ? height : kPaperThumbHeight), w = std::max(16, std::min(4 * h, (int)std::lround(h * aspect)));
+  Image img;
+  img.resize(w, h);
+  std::fill(img.pixels.begin(), img.pixels.end(), color);
+  Canvas cv;
+  cv.begin(&img);
+  std::swap(ui_.canvas, cv);
+  const SketchView saved = sketch_view_;
+  const int solo = sketch_solo_;
+  Sketch copy = sk;  // (the layer drawing reads it through sketch_doc)
+  sketch_doc_override_ = &copy;
+  sketch_view_ = SketchView{};
+  sketch_view_.kind = 3;  // (no pad, no Scene view: widths unzoomed, the rect as given)
+  sketch_view_.view = {0, 0, w, h};
+  sketch_solo_ = -1;
+  sketch_thumb_scale_ = (float)h / (float)kPaperThumbHeight;  // (the page alone: the same widths whatever the pad last showed - review 326)
+  sketch_draw_layers({0, 0, w, h});
+  sketch_thumb_scale_ = 1.0f;
+  sketch_solo_ = solo;
+  sketch_view_ = saved;
+  sketch_doc_override_ = nullptr;
+  std::swap(ui_.canvas, cv);
+  auto pic = std::make_shared<BoardPicture>();
+  pic->w = w, pic->h = h;
+  BoardPicture::Level l;
+  l.w = w, l.h = h, l.argb = std::move(img.pixels);
+  pic->levels.push_back(std::move(l));
+  while (pic->levels.back().w > 1 || pic->levels.back().h > 1) pic->levels.push_back(half_level(pic->levels.back()));
+  out.pic = pic;
+  out.aspect = aspect;
+}
+
+/* A paper's file onto the board at `at` (a file from outside the project's papers is copied in first). */
+bool Editor::board_add_paper(const std::string &path_or_name, Vec2 at) {
+  std::string abs = fs::extension(path_or_name) == ".paper" ? resolve_asset_path(path_or_name) : paper_path(path_or_name);
+  if (!fs::exists(abs)) {
+    Log::warn("Board: no paper %s", path_or_name.c_str());
+    return false;
+  }
+  abs = paper_take_in(abs);
+  if (abs.empty()) return false;
+  if (paper_dirty_) paper_save();  // (its picture from what is drawn now)
+  board_begin_change();
+  BoardItem it;
+  it.kind = BoardItem::Paper, it.id = board_.next_id++, it.path = make_asset_relative(abs), it.pos = at;
+  board_.items.push_back(it);
+  board_fill_sizes(board_.items);
+  board_sel_ = {it.id};
+  board_changed();
+  return true;
+}
+
+/* A new paper, put on the board in the middle of the view (the Draw tab keeps drawing on the paper it had). */
+void Editor::board_new_paper_here() {
+  fs::make_dirs(paper_dir());
+  const std::string made = paper_path(paper_free_name("Paper"));  // (written here: the paper being drawn on stays open, its history kept)
+  Sketch blank;
+  blank.follow_camera = false;
+  if (!fs::write_file(made, save_paper_text(blank, 1.41421356f, 0xFFFFFFFFu))) return Log::warn("Board: can't write %s", made.c_str());
+  project_listed_ = -100;
+  board_add_paper(made, board_from_screen(board_middle()));
+}
+
+/* A paper double-clicked on the board: drawn on in the Draw tab, its source Paper. */
+void Editor::board_open_paper_item(const BoardItem &it) {
+  const std::string abs = resolve_asset_path(it.path);
+  if (!fs::exists(abs)) {
+    Log::warn("Board: the paper %s is missing", it.path.c_str());
+    return;
+  }
+  run_console_command("draw source paper");
+  paper_open(abs);
+  dock_open(WindowKind::Draw);
+}
+
+void Editor::draw_board_paper_menu() {
+  auto &u = ui_;
+  const std::vector<std::string> names = paper_names();
+  if (names.empty()) u.menu_item("(no papers yet)", nullptr, false, false);
+  for (const std::string &n : names)
+    if (u.menu_item(n)) run_console_command("board addpaper " + n);
+}
+
+/* ---- export (task 0306) ---- */
+
+namespace {
+constexpr int kExportMaxSide = 8192;  // (a picture's long side; its area at most this squared: 256 MB - review 326)
+}  // namespace
+
+/* The board's part from `lo` to `hi` (board units) drawn into a picture `long_side` pixels on its long side, through
+ * the window's own item drawing (turns, flips, crops, gray and opacity as shown). False when it can't be made. */
+bool Editor::board_render_area(Vec2 lo, Vec2 hi, int long_side, uint32_t background, Image &out) {
+  const Vec2 size = hi - lo;
+  long_side = std::min(long_side, kExportMaxSide);
+  if (!(size.x > 0.0f) || !(size.y > 0.0f) || long_side < 16) return false;
+  const float scale = (float)long_side / std::max(size.x, size.y);
+  const int w = std::max(1, (int)std::lround(size.x * scale)), h = std::max(1, (int)std::lround(size.y * scale));
+  try {
+    out.resize(w, h);
+  }
+  catch (const std::bad_alloc &) {
+    return false;
+  }
+  std::fill(out.pixels.begin(), out.pixels.end(), background);
+  const Recti rect = board_rect_;
+  const float zoom = board_.zoom;
+  const Vec2 pan = board_.pan;
+  board_rect_ = {0, 0, w, h};
+  board_.zoom = scale;
+  board_.pan = (lo + size * 0.5f) * -scale;  // (the area's middle at the picture's)
+  Canvas cv;
+  cv.begin(&out);
+  std::swap(ui_.canvas, cv);
+  for (const BoardItem &it : board_.items)
+    if (it.kind == BoardItem::Image || it.kind == BoardItem::Paper) draw_board_image(it);
+  std::swap(ui_.canvas, cv);
+  board_rect_ = rect, board_.zoom = zoom, board_.pan = pan;
+  return true;
+}
+
+/* Where an export starts: its area, and the pictures it needs larger than the board keeps them, loading on their own
+ * threads at full size (review 326: an export from the 2048 px copies was blurry). The picture is drawn when they have
+ * landed and written on a thread of its own, so the editor never waits (board_export_poll). */
+bool Editor::board_export_to(const std::string &path, const BoardExport &opt) {
+  if (board_job_.phase) return Log::warn("Board: an export is under way"), false;
+  if (!board_loading_.empty() || !board_queue_.empty()) return Log::warn("Board: %zu pictures are still loading - export once they show", board_loading_.size() + board_queue_.size()), false;
+  Vec2 lo, hi;
+  if (opt.what == 2) lo = board_from_screen({(float)board_rect_.x, (float)board_rect_.y}), hi = board_from_screen({(float)board_rect_.right(), (float)board_rect_.bottom()});
+  else {
+    std::vector<uint64_t> ids;
+    if (opt.what == 1) ids = board_sel_;
+    else
+      for (const BoardItem &it : board_.items) ids.push_back(it.id);
+    if (ids.empty() || !board_.bounds(ids, lo, hi)) return Log::warn("Board: nothing to export%s", opt.what == 1 ? " (nothing is selected)" : ""), false;
+    const float m = std::max(hi.x - lo.x, hi.y - lo.y) * std::max(0.0f, opt.margin);
+    lo = lo - Vec2{m, m}, hi = hi + Vec2{m, m};
+  }
+  if (!(hi.x > lo.x) || !(hi.y > lo.y)) return Log::warn("Board: the view isn't shown - export the whole board or the selection"), false;
+  const float scale = (float)std::min(opt.long_side, kExportMaxSide) / std::max(hi.x - lo.x, hi.y - lo.y);
+  board_job_ = BoardExportJob{};
+  board_job_.phase = 1, board_job_.path = path, board_job_.opt = opt, board_job_.lo = lo, board_job_.hi = hi, board_job_.t0 = clock_now();
+  for (const BoardItem &it : board_.items) {
+    if (it.kind != BoardItem::Image) continue;
+    const std::string abs = resolve_asset_path(it.path);
+    const auto cached = board_pics_.find(abs);
+    const int have = cached == board_pics_.end() || cached->second->levels.empty() ? 0 : std::max(cached->second->levels[0].w, cached->second->levels[0].h);
+    const Vec2 shown = it.size() * scale;
+    const int want = std::min(kExportMaxSide, (int)std::ceil(std::max(shown.x, shown.y) / std::max(1e-3f, std::max(it.crop[2] - it.crop[0], it.crop[3] - it.crop[1]))));
+    if (want <= have || board_job_.full.count(fs::normalize(abs))) continue;
+    board_job_.full[fs::normalize(abs)] = std::async(std::launch::async, [abs, want] { return load_board_picture(abs, want, false); });
+  }
+  ui_.redraw = true;
+  return true;
+}
+
+/* Every frame while an export is under way: its full-size pictures landed, then the picture drawn (papers at its size)
+ * and handed to a thread that encodes and writes it; when that is done, said. */
+void Editor::board_export_poll(bool wait) {
+  BoardExportJob &j = board_job_;
+  if (j.phase == 1) {
+    for (auto &f : j.full)
+      if (!wait && f.second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return void(ui_.next_wakeup = ui_.time + 0.05);
+    board_export_draw();
+  }
+  if (j.phase != 2) return;
+  if (!wait && j.written.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return void(ui_.next_wakeup = ui_.time + 0.05);
+  const std::string err = j.written.get();
+  j.phase = 0;
+  project_listed_ = -100;
+  ui_.redraw = true;
+  if (!err.empty()) return Log::warn("Board: %s", err.c_str());
+  Log::info("Board: exported %s (%d x %d, %.0f ms)", j.path.c_str(), j.w, j.h, (clock_now() - j.t0) * 1000.0);
+}
+
+/* The picture drawn on the main thread (the items' own drawing), with the full-size pictures and each paper drawn at the
+ * size it has in the picture; then encoded and written on a thread of its own. */
+void Editor::board_export_draw() {
+  BoardExportJob &j = board_job_;
+  board_export_pics_.clear();
+  for (auto &f : j.full) {
+    std::shared_ptr<BoardPicture> p = f.second.get();
+    if (p && p->error.empty() && !p->levels.empty()) board_export_pics_[f.first] = p;
+  }
+  j.full.clear();
+  const float scale = (float)std::min(j.opt.long_side, kExportMaxSide) / std::max(j.hi.x - j.lo.x, j.hi.y - j.lo.y);
+  for (const BoardItem &it : board_.items) {
+    if (it.kind != BoardItem::Paper) continue;
+    const std::string abs = fs::normalize(resolve_asset_path(it.path));
+    const bool open = !paper_name_.empty() && abs == fs::normalize(paper_path(paper_name_));
+    Sketch sk;
+    float aspect = paper_aspect_;
+    uint32_t color = draw_paper_;
+    std::string text;
+    if (!open && !(fs::read_file(abs, text) && load_paper_text(text, sk, aspect, color))) continue;
+    PaperThumb t;
+    board_render_paper(open ? paper_ : sk, open ? paper_aspect_ : aspect, (open ? draw_paper_ : color) | 0xFF000000u, t,
+                       std::min(kExportMaxSide, (int)std::ceil(it.size().y * scale)));
+    if (t.pic) board_export_pics_[abs] = t.pic;
+  }
+  const bool png = j.opt.format == 0;
+  const uint32_t bg = j.opt.background == 1 ? 0xFFFFFFFFu : j.opt.background == 2 && png ? 0x00000000u : kBoardBack;
+  auto img = std::make_shared<Image>();
+  const bool drawn = board_render_area(j.lo, j.hi, j.opt.long_side, bg, *img);
+  board_export_pics_.clear();
+  if (!drawn) {
+    j.phase = 0;
+    return Log::warn("Board: can't make a picture %d px on its long side", j.opt.long_side);
+  }
+  j.w = img->width, j.h = img->height;
+  const BoardExport opt = j.opt;
+  const std::string path = j.path;
+  j.written = std::async(std::launch::async, [img, opt, path]() -> std::string {
+    try {
+      if (opt.format != 0) for (uint32_t &p : img->pixels) p |= 0xFF000000u;  // (JPEG and PDF have no transparency)
+      const std::string data = opt.format == 0 ? encode_png(img->pixels.data(), img->width, img->height, img->width, opt.background == 2)
+                               : opt.format == 1 ? encode_jpeg(img->pixels.data(), img->width, img->height, img->width, opt.quality)
+                                                 : encode_pdf_image(img->pixels.data(), img->width, img->height, img->width, 297.0f, opt.quality);
+      fs::make_dirs(fs::parent(path));
+      return fs::write_file(path, data) ? std::string() : "can't write " + path;
+    }
+    catch (const std::exception &e) {
+      return std::string("the export failed: ") + e.what();
+    }
+  });
+  j.phase = 2;
+}
+
+void Editor::board_export_wait_for_test() {
+  while (board_job_.phase) board_export_poll(true);
+}
+
+/* Export...'s settings in a panel over the board (review 326: in a menu each choice closed it), then where to save. */
+void Editor::draw_board_export_dialog() {
+  if (!board_export_open_) return;
+  auto &u = ui_;
+  if (board_export_rect_.w <= 0) board_export_rect_ = {board_rect_.x + u.px(12), board_rect_.y + u.px(12), u.px(300), u.px(10) + (u.row_h() + u.px(6)) * 6 + u.row_h()};
+  bool close = false;
+  const Recti body = u.floating_panel(u.id("board_export"), board_export_rect_, board_rect_, "Export the Board", &close);
+  if (close) {
+    board_export_open_ = false;
+    return;
+  }
+  BoardExport &e = board_export_;
+  static const char *const kWhat[] = {"Whole Board", "Selection", "View as Seen"};
+  static const char *const kFormat[] = {"PNG", "JPEG", "PDF"};
+  static const char *const kSizes[] = {"1024 px", "2048 px", "4096 px", "8192 px"};
+  static const int kSizePx[] = {1024, 2048, 4096, 8192};
+  static const char *const kBg[] = {"Board's Color", "White", "Transparent (PNG)"};
+  const int lw = u.px(96), rh = u.row_h(), gap = u.px(6);
+  int y = body.y + u.px(6);
+  auto row = [&](const char *label, const char *key, int &v, const char *const *opts, int n, const char *tip) {
+    u.label({body.x + u.px(8), y, lw, rh}, label, u.theme.text_dim);
+    const Recti f{body.x + u.px(8) + lw, y, body.w - lw - u.px(16), rh};
+    if (u.record_buttons) u.button_rects[key] = f;
+    u.combo(u.id(key), f, v, opts, n);
+    u.tooltip(tip);
+    y += rh + gap;
+  };
+  row("What", "export:What", e.what, kWhat, 3, "The whole board, the selected items, or the board as the window shows it now.");
+  row("Format", "export:Format", e.format, kFormat, 3, "PNG keeps every pixel (and can be transparent); JPEG is small; PDF is one A4-long page to print or send.");
+  int size = 0;
+  for (int k = 0; k < 4; k++) size = e.long_side == kSizePx[k] ? k : size;
+  row("Size", "export:Size", size, kSizes, 4, "The picture's long side. Images are read again at full size when the picture shows them larger than the board does.");
+  e.long_side = kSizePx[size];
+  row("Background", "export:Background", e.background, kBg, 3, "Behind the items: the board's color, white, or nothing (PNG only; JPEG and PDF use the board's color).");
+  const Recti go{body.x + u.px(8), y + u.px(4), body.w - u.px(16), rh + u.px(4)};
+  if (u.record_buttons) u.button_rects["export:Export"] = go;
+  if (u.button(go, board_job_.phase ? "Exporting..." : "Export...") && !board_job_.phase) defer([this] { board_export_pick(); });
+  u.tooltip("Where to save it (Assets/Exports by default); written in the background.");
+}
+
+void Editor::board_export_pick() {
+  static const char *const kExt[] = {".png", ".jpg", ".pdf"};
+  const std::string dir = fs::join(assets_dir_, "Exports");
+  std::string path = fs::join(dir, board_.name + kExt[board_export_.format]);
+  const std::vector<platform::FileFilter> filters = {{board_export_.format == 0 ? "PNG" : board_export_.format == 1 ? "JPEG" : "PDF", {kExt[board_export_.format]}}};
+  if (pick_save_path("Export the Board", path, filters, path) != PathPick::Chosen) return;
+  BoardExport opt = board_export_;
+  const std::string ext = to_lower(fs::extension(path));  // (a typed extension decides the format: review 326)
+  if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".pdf") opt.format = ext == ".png" ? 0 : ext == ".pdf" ? 2 : 1;
+  else path += kExt[opt.format];
+  board_export_to(path, opt);
+}
+
+/* ---- the boards ---- */
+
+bool Editor::board_rename(const std::string &to) {
+  const std::string name = board_clean_name(to);
+  if (to.find_first_not_of(" .") == std::string::npos || (name == "Board" && to != "Board")) return Log::warn("Board: \"%s\" isn't a name a file can have", to.c_str()), false;
+  if (name == board_.name) return true;
+  const std::string dest = fs::join(board_dir(), name + ".board");
+  if (fs::exists(dest) && to_lower(name) != to_lower(board_.name)) {  // (a change of case alone is the same file on Windows)
+    Log::warn("Board: a board named %s exists", name.c_str());
+    return false;
+  }
+  board_save();
+  if (!board_file_.empty() && !fs::move(board_file_, dest)) {
+    Log::warn("Board: can't rename %s", board_file_.c_str());
+    return false;
+  }
+  board_.name = name, board_file_ = dest;
+  board_last_ = name;
+  save_prefs();
+  project_listed_ = -100;
+  return true;
+}
+
+/* A copy of this board, opened (the original kept as it is). */
+void Editor::board_copy() {
+  board_save();
+  Board b = board_;
+  std::string name = board_.name + " copy";
+  for (int k = 2; fs::exists(fs::join(board_dir(), name + ".board")); k++) name = strprintf("%s copy %d", board_.name.c_str(), k);
+  b.name = name;
+  if (!fs::write_file(fs::join(board_dir(), name + ".board"), board_to_json(b))) return Log::warn("Board: can't write the copy %s", name.c_str());
+  board_open(name);
+}
+
+/* This board to the system's trash; another one opened, or a new one. */
+void Editor::board_trash() {
+  const std::string file = board_file_;
+  std::string err;
+  if (!file.empty() && fs::exists(file) && !fs::move_to_trash(file, &err)) {
+    Log::warn("Board: can't delete %s (%s)", file.c_str(), err.c_str());
+    return;
+  }
+  board_dirty_ = false;
+  board_file_.clear();
+  board_last_.clear();
+  project_listed_ = -100;
+  const std::vector<std::string> left = board_names();
+  if (!left.empty()) board_open(left.front());
+  else board_new("Board");
 }
 
 /* Loads that have landed go into the cache: each item still waiting for its size takes it, a row dropped together is
@@ -325,6 +708,7 @@ std::string Editor::board_dir() const { return fs::join(assets_dir_, "Boards"); 
  * the board written (the editor woken for it). */
 void Editor::board_frame_tick() {
   board_poll_pictures(false);
+  if (board_job_.phase) board_export_poll();  // (round 326: an export's pictures, then its file)
   if (!board_dirty_) return;
   if (clock_now() - board_changed_at_ >= kBoardSaveAfter) {
     board_save();
@@ -670,10 +1054,15 @@ void Editor::draw_board_image(const BoardItem &it) {
   x0 = std::max(x0, (float)clip.x), y0 = std::max(y0, (float)clip.y), x1 = std::min(x1, (float)clip.right()), y1 = std::min(y1, (float)clip.bottom());
   if (x1 <= x0 || y1 <= y0) return;
   const Recti box{(int)std::floor(x0), (int)std::floor(y0), (int)std::ceil(x1 - x0) + 1, (int)std::ceil(y1 - y0) + 1};
-  std::shared_ptr<BoardPicture> pic = board_picture(it.path);
+  const bool paper = it.kind == BoardItem::Paper;  // (task 0305: a paper's drawing)
+  std::shared_ptr<BoardPicture> pic;
+  const auto own = board_export_pics_.find(fs::normalize(resolve_asset_path(it.path)));  // (an export's full-size pictures: review 326)
+  if (own != board_export_pics_.end()) pic = own->second;
+  else pic = paper ? board_paper_picture(it.path) : board_picture(it.path);
   if (!pic || !pic->error.empty() || pic->levels.empty() || it.w <= 0.0f) {
     if (it.w > 0.0f) cv.fill_polygon(c, 4, 0xFF404044);
-    ui_.label(box, (pic && !pic->error.empty() ? "Missing or unreadable: " : "Loading ") + fs::filename(it.path), ui_.theme.text_dim, ui::Align::Center);
+    const char *why = paper ? "Missing paper: " : pic && !pic->error.empty() ? "Missing or unreadable: " : "Loading ";
+    ui_.label(box, why + fs::filename(it.path), ui_.theme.text_dim, ui::Align::Center);
     return;
   }
   const Vec2 s = it.size();
@@ -778,6 +1167,11 @@ void Editor::board_input(bool hovered) {
 void Editor::board_press_item(Vec2 m) {
   auto &in = ui_.in;
   const uint64_t hit = board_.item_at(board_from_screen(m));
+  const BoardItem *hit_item = hit ? board_.find(hit) : nullptr;
+  if (hit_item && hit_item->kind == BoardItem::Paper && in.double_clicked[0] && !in.shift()) {  // (task 0305: draw on it)
+    board_open_paper_item(*hit_item);
+    return;
+  }
   if (!hit) {
     if (!in.shift()) board_sel_.clear();
     board_drag_begin(4, m);
@@ -925,7 +1319,7 @@ void Editor::draw_board_window(const Recti &r) {
   u.canvas.fill_rect(board_rect_, kBoardBack);
   u.canvas.push_clip(board_rect_);
   for (const BoardItem &it : board_.items)
-    if (it.kind == BoardItem::Image) draw_board_image(it);
+    if (it.kind == BoardItem::Image || it.kind == BoardItem::Paper) draw_board_image(it);
   draw_board_selection();
   if (board_.items.empty()) {
     const Vec2 m = board_middle();
@@ -955,10 +1349,11 @@ void Editor::draw_board_toolbar(const Recti &bar) {
   u.tooltip("The image on the clipboard onto the board (Ctrl+V over the board): a screenshot, a picture copied from a browser.");
   const Recti zoom{bar.right() - gap * 2 - u.px(64), y, u.px(64), h};
   const bool room = zoom.x >= x + gap;  // (a narrow board: the zoom button goes first - Home still fits)
-  const std::string state = board_.name + (board_dirty_ ? "  (unsaved)" : board_file_.empty() ? "" : "  (saved)");
+  const std::string state = board_.name + (board_job_.phase ? "  (exporting...)" : board_dirty_ ? "  (unsaved)" : board_file_.empty() ? "" : "  (saved)");
   const int lw = (room ? zoom.x : bar.right()) - x - gap * 2;
   if (lw > u.px(24)) u.label({x + gap * 2, y, lw, h}, state, u.theme.text_dim);
   u.popup(u.id("board_menu"), u.px(220), [this] { draw_board_menu(); });
+  draw_board_export_dialog();
   if (!room) return;
   if (u.button(zoom, strprintf("%d%%", (int)std::lround(board_.zoom * 100.0f)))) run_console_command("board fit");
   if (u.record_buttons) u.button_rects["board:zoom"] = zoom;
@@ -968,9 +1363,25 @@ void Editor::draw_board_toolbar(const Recti &bar) {
 
 void Editor::draw_board_menu() {
   auto &u = ui_;
+  if (u.menu_item("Export...")) {  // (task 0306)
+    board_export_open_ = true;
+    u.redraw = true;
+  }
+  u.tooltip("The board - or the selection, or the view - as a PNG, a JPEG or a PDF.");
+  u.menu_separator();
+  if (u.menu_item("New Paper Here")) run_console_command("board newpaper");
+  u.tooltip("A new paper to draw on, put on the board: double-click it to draw on it in the Draw tab (task 0305).");
+  u.submenu("Add Paper", u.px(200), [this] { draw_board_paper_menu(); });
+  u.tooltip("One of your papers (Assets/Papers) onto the board, its drawing shown and kept up to date.");
+  u.menu_separator();
   if (u.menu_item("New Board")) run_console_command("board new");
   u.tooltip("An empty board (this one is saved first).");
+  if (u.menu_item("Duplicate Board")) run_console_command("board copy");
+  u.tooltip("A copy of this board, opened; the original is kept.");
+  if (u.menu_item("Delete Board")) run_console_command("board trash");
+  u.tooltip("This board to the system's trash (it can be restored from there); its images and papers stay in the project.");
   u.menu_separator();
+  u.menu_label("Open a Board");
   for (const std::string &n : board_names())
     if (u.menu_item(n, nullptr, n == board_.name)) run_console_command("board open " + n);
 }
@@ -983,7 +1394,8 @@ void Editor::board_add_image_dialog() {
 
 /* A Project window image being dragged over the board (it lands there when let go). */
 bool Editor::board_asset_drag_over() const {
-  return asset_drag_.dragging && !asset_drag_.mat && image_extension_supported(fs::extension(asset_drag_.path)) && board_has_mouse();
+  const std::string ext = fs::extension(asset_drag_.path);
+  return asset_drag_.dragging && !asset_drag_.mat && (image_extension_supported(ext) || ext == ".paper") && board_has_mouse();
 }
 
 /* ---- the console ---- */
@@ -1027,7 +1439,31 @@ bool Editor::board_command(const std::vector<std::string> &t) {
   else if (v == "in" || v == "out") board_zoom_at(v == "in" ? kBoardKeyZoom : 1.0f / kBoardKeyZoom, board_has_mouse() ? Vec2{(float)ui_.in.mx, (float)ui_.in.my} : board_middle());  // (task 0303: Ctrl+= / Ctrl+-)
   else if (v == "undo") board_undo();
   else if (v == "redo") board_redo();
-  else Log::info("usage: board new [name]|open <name>|save|list|add <path> [x y]|paste|select <i>|all|none|move <dx> <dy>|scale <f>|turn <deg>|delete|duplicate|front|back|fit|frame|zoom <f>|in|out|undo|redo");
+  else if (v == "addpaper" && t.size() > 2) board_add_paper(join_words(t, 2), board_from_screen(board_middle()));  // (task 0305)
+  else if (v == "newpaper") board_new_paper_here();
+  else if (v == "openpaper" && has_sel && board_.find(board_sel_.front()) && board_.find(board_sel_.front())->kind == BoardItem::Paper)
+    board_open_paper_item(*board_.find(board_sel_.front()));
+  else if (v == "rename" && t.size() > 2) board_rename(join_words(t, 2));
+  else if (v == "copy") board_copy();
+  else if (v == "export" && t.size() > 2) {  // board export <path> [png|jpg|pdf] [size <px>] [selection|view] [bg board|white|none]
+    BoardExport opt = board_export_;
+    const std::string path = t[2];
+    const std::string ext = to_lower(fs::extension(path));
+    opt.format = ext == ".jpg" || ext == ".jpeg" ? 1 : ext == ".pdf" ? 2 : 0;
+    for (size_t i = 3; i < t.size(); i++) {
+      const std::string a = to_lower(t[i]);
+      if (a == "png" || a == "jpg" || a == "jpeg" || a == "pdf") opt.format = a == "png" ? 0 : a == "pdf" ? 2 : 1;
+      else if (a == "size" && i + 1 < t.size()) opt.long_side = std::max(16, std::min(16384, std::atoi(t[++i].c_str())));
+      else if (a == "selection" || a == "view" || a == "all") opt.what = a == "selection" ? 1 : a == "view" ? 2 : 0;
+      else if (a == "bg" && i + 1 < t.size()) {
+        const std::string b = to_lower(t[++i]);
+        opt.background = b == "white" ? 1 : b == "none" ? 2 : 0;
+      }
+    }
+    board_export_to(resolve_asset_path(path), opt);
+  }
+  else if (v == "trash") board_trash();
+  else Log::info("usage: board new [name]|open <name>|save|list|rename <name>|copy|trash|addpaper <name>|newpaper|openpaper|add <path> [x y]|paste|select <i>|all|none|move <dx> <dy>|scale <f>|turn <deg>|delete|duplicate|front|back|fit|frame|zoom <f>|in|out|undo|redo");
   ui_.redraw = true;
   return true;
 }

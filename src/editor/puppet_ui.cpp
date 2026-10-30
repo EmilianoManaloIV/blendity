@@ -16,6 +16,51 @@ GameObject *rig_above(GameObject *g) {
   return nullptr;
 }
 constexpr humanoid::Part kHandleParts[] = {humanoid::LHand, humanoid::RHand, humanoid::LFoot, humanoid::RFoot, humanoid::Head, humanoid::Hips};
+constexpr const char *kHandleNames[] = {"Left Hand", "Right Hand", "Left Foot", "Right Foot", "Head", "Hips"};
+constexpr const char *kHandleWords[] = {"lhand", "rhand", "lfoot", "rfoot", "head", "hips"};
+constexpr int kHandles = 6;
+
+std::string trimmed(std::string s) {
+  while (!s.empty() && (s.back() == ' ' || s.back() == ';')) s.pop_back();
+  while (!s.empty() && s.front() == ' ') s.erase(0, 1);
+  return s;
+}
+
+/* The bone named for handle `k` in an Armature's Puppet Handles, or "". */
+std::string handle_bone_named(const std::string &list, int k) {
+  const std::string key = std::string(kHandleNames[k]) + "=";
+  size_t at = 0;
+  while (at < list.size()) {
+    size_t end = list.find(';', at);
+    if (end == std::string::npos) end = list.size();
+    const std::string item = trimmed(list.substr(at, end - at));
+    if (item.compare(0, key.size(), key) == 0) return trimmed(item.substr(key.size()));
+    at = end + 1;
+  }
+  return "";
+}
+
+/* The list with handle `k` set to `bone` ("" takes it out). */
+std::string with_handle_bone(const std::string &list, int k, const std::string &bone) {
+  std::string out;
+  for (int i = 0; i < kHandles; i++) {
+    const std::string b = i == k ? bone : handle_bone_named(list, i);
+    if (!b.empty()) out += (out.empty() ? "" : "; ") + std::string(kHandleNames[i]) + "=" + b;
+  }
+  return out;
+}
+
+GameObject *bone_in_rig(GameObject &arm, const std::string &name) {
+  if (name.empty()) return nullptr;
+  std::vector<GameObject *> todo{&arm};
+  while (!todo.empty()) {
+    GameObject *g = todo.back();
+    todo.pop_back();
+    if (g != &arm && g->name == name && g->get<Bone>()) return g;
+    for (GameObject *c : g->children) todo.push_back(c);
+  }
+  return nullptr;
+}
 }  // namespace
 
 /* The handles: the rig's ends while AutoPosing is on. */
@@ -32,14 +77,67 @@ const std::vector<uint64_t> &Editor::rig_ends() {
     puppet_.handles.clear(), puppet_.arm = 0;
     return puppet_.handles;
   }
-  const uint64_t key = scene_->serial;  // (the rig's bones change with the scene's structure, not with its pose)
+  const Armature *a = arm->get<Armature>();
+  const std::string set = a ? a->puppet_bones : std::string();
+  /* (the rig's bones change with the scene's structure, not with its pose; the handles set by hand with their list) */
+  const uint64_t key = scene_->serial ^ (std::hash<std::string>()(set) * 0x9E3779B97F4A7C15ull);
   if (arm->id == puppet_.arm && key == puppet_.key) return puppet_.handles;
   puppet_.arm = arm->id, puppet_.key = key;
   puppet_.handles.clear();
   const humanoid::Map m = humanoid::map(*scene_, *arm);
-  for (humanoid::Part p : kHandleParts)
-    if (m.part[p]) puppet_.handles.push_back(m.part[p]->id);
+  for (int k = 0; k < kHandles; k++) {
+    puppet_.found[k] = m.part[kHandleParts[k]] ? m.part[kHandleParts[k]]->id : 0;
+    GameObject *own = bone_in_rig(*arm, handle_bone_named(set, k));  // (set by hand: round 324)
+    const uint64_t id = own ? own->id : puppet_.found[k];
+    puppet_.part[k] = id;
+    if (id && std::find(puppet_.handles.begin(), puppet_.handles.end(), id) == puppet_.handles.end()) puppet_.handles.push_back(id);
+  }
   return puppet_.handles;
+}
+
+/* autopose handle <part> <bone>|auto: a handle put on a bone by hand, or found again (round 324). Part: lhand rhand
+ * lfoot rfoot head hips, or the handle's name. */
+void Editor::puppet_set_handle(int k, const std::string &bone) {
+  GameObject *arm = rig_above(active_object());
+  Armature *a = arm ? arm->get<Armature>() : nullptr;
+  if (!a) return Log::warn("autopose handle: select a bone of the rig (or its armature) first");
+  if (!bone.empty() && to_lower(bone) != "auto" && !bone_in_rig(*arm, bone)) return Log::warn("autopose handle: %s has no bone named '%s'", arm->name.c_str(), bone.c_str());
+  a->puppet_bones = with_handle_bone(a->puppet_bones, k, to_lower(bone) == "auto" ? std::string() : bone);
+  mark_changed("Puppet Handle Bone");
+  rig_ends();
+  GameObject *now = scene_->find(puppet_.part[k]);
+  Log::info("Puppet Posing: the %s handle is on %s%s", kHandleNames[k], now ? now->name.c_str() : "nothing", to_lower(bone) == "auto" || bone.empty() ? " (found)" : "");
+}
+
+int Editor::puppet_handle_index(const std::string &w) {
+  for (int k = 0; k < kHandles; k++)
+    if (to_lower(w) == kHandleWords[k] || to_lower(w) == to_lower(kHandleNames[k])) return k;
+  return -1;
+}
+
+/* Animation > Puppet > Handle Bones: each handle's bone - the selected one, or the one the analysis finds. */
+void Editor::draw_puppet_handle_items() {
+  GameObject *arm = rig_above(active_object());
+  if (!arm) {
+    ui_.menu_item("(select a rig's bone)", nullptr, false, false);
+    return;
+  }
+  rig_ends();
+  GameObject *sel = selected_bone();
+  const Armature *a = arm->get<Armature>();
+  for (int k = 0; k < kHandles; k++) {
+    GameObject *now = scene_->find(puppet_.part[k]), *found = scene_->find(puppet_.found[k]);
+    const bool by_hand = a && !handle_bone_named(a->puppet_bones, k).empty();
+    const std::string label = strprintf("%s: %s%s", kHandleNames[k], now ? now->name.c_str() : "(none)", by_hand ? " (set)" : "");
+    ui_.submenu(label, ui_.px(260), [this, k, sel, found, by_hand] {
+      const std::string use = sel ? "Use the Selected Bone (" + sel->name + ")" : std::string("Use the Selected Bone (select one)");
+      if (ui_.menu_item(use, nullptr, false, sel != nullptr)) puppet_set_handle(k, sel->name);
+      ui_.tooltip("This handle drags the bone selected in the Scene view or the Hierarchy, whatever the rig's analysis found.");
+      const std::string automatic = std::string("Found Automatically (") + (found ? found->name : "none") + ")";
+      if (ui_.menu_item(automatic, nullptr, !by_hand)) puppet_set_handle(k, "auto");
+      ui_.tooltip("The bone the rig's analysis finds for it (by the hierarchy's shape and the bones' names).");
+    });
+  }
 }
 
 /* Pinned: locked by the artist, or held by AutoPose's own rule (the feet, the contacts at the playhead). */

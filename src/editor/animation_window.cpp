@@ -483,10 +483,17 @@ const std::vector<std::string> &Editor::anim_clip_paths() {
   return anim_clip_paths_;
 }
 
+/* The toolbar wraps a whole group onto the next row when it doesn't fit (round 324: in a narrow Rigging & Animation
+ * tab the physics and AI tools ran off the window's edge). The rows used are kept for the window's next frame. */
 void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   auto &u = ui_;
-  int x = bar.x + u.px(4);
-  const int bh = bar.h - u.px(6), y = bar.y + u.px(3);
+  const int step = u.row_h() + u.px(6), left = bar.x + u.px(4), right = bar.right() - u.px(4);
+  int x = left, y = bar.y + u.px(3), rows = 1;
+  const int bh = step - u.px(6);
+  auto group = [&](int w) {  // (the next group's width: on a new row unless it fits, or the row is empty)
+    if (x + w <= right || x == left) return;
+    x = left, y += step, rows++;
+  };
   auto button = [&](int w, const char *label, bool on, const char *tip) {
     const Recti b{x, y, w, bh};
     x += w + u.px(3);
@@ -494,6 +501,7 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     u.tooltip(tip);
     return hit;
   };
+  group(u.px(64 + 28 + 26 * 4 + 30 + 56 + 60) + u.px(3) * 7);  // (Preview, Record, the transport and the frame)
   if (button(u.px(64), "Preview", anim_.preview, "Shows the clip at the playhead on the scene; turning it off puts the scene back.")) anim_set_preview(!anim_.preview);
   const Recti rec{x, y, u.px(28), bh};
   if (button(u.px(28), "", anim_.record, "Record (Unity's red button): changes to the animated objects become keys at the playhead.")) anim_toggle_record();
@@ -509,7 +517,8 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   draw_puppet_menu();
   x += u.px(60);
   /* The clip menu: the clip assets, then Create New Clip. */
-  if (!root) return;
+  if (!root) return finish_anim_toolbar(rows);
+  group(u.px(154 + 99 + 39));  // (the clip, Add Property, Fit)
   std::vector<std::string> names{"(no clip)"};
   const std::vector<std::string> &paths = anim_clip_paths();
   int cur = 0;
@@ -524,18 +533,19 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   if (u.combo(u.id("anim_clip"), {x, y, u.px(150), bh}, pick, cn.data(), (int)cn.size()) && pick != cur) anim_pick_clip(root, pick == (int)names.size() - 1 ? "" : pick ? paths[(size_t)pick - 1] : "-");
   x += u.px(154);
   if (button(u.px(96), "Add Property", false, "Animate a number of the selected object (or the root): Position, Rotation, Scale or a component's.") && clip)
-    u.open_popup(u.id("anim_add_prop"), {x - u.px(99), bar.bottom(), 0, 0});
+    u.open_popup(u.id("anim_add_prop"), {x - u.px(99), y + bh, 0, 0});
   {
     const Recti fb{x, y, u.px(36), bh};
     if (u.record_buttons) u.button_rects["anim:Fit"] = fb;
     if (button(u.px(36), "Fit", false, "The whole clip in view (Home). Ctrl+wheel or a pinch zooms the time, Shift+wheel, two fingers or the middle button pans it.")) anim_view_fit();
   }
+  group(u.px(73 + 79 + 67));  // (Puppet, Dopesheet, Curves)
   {  // (tasks 0281-0284: Puppet Posing's tools in one menu - the toolbar is already wider than most windows)
     const Recti pb{x, y, u.px(70), bh};
     const bool any = trails_.show || trails_.onion > 0 || zoe_.on || anim_.smooth;
     if (button(u.px(70), "Puppet", any, "Puppet Posing's tools: motion trails, onion skin, the Zoetrope, Motion Check, the smooth brush,\n"
                                         "Lock in Place, and how far a pose edit reaches."))
-      u.open_popup(u.id("anim_puppet"), {pb.x, bar.bottom(), 0, 0});
+      u.open_popup(u.id("anim_puppet"), {pb.x, y + bh, 0, 0});
   }
   if (button(u.px(76), "Dopesheet", !anim_.curves, "The keys as diamonds along the time line (Unity's Dopesheet).")) anim_.curves = false;
   if (button(u.px(64), "Curves", anim_.curves,
@@ -544,13 +554,15 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     anim_.curves = true;
     anim_.v_framed.clear();
   }
+  if (assist_on(Assist::Walk)) group(u.px(83));
   if (assist_on(Assist::Walk) &&
       button(u.px(80), "Walk Cycle", false,
              "A walking or running cycle made from the rig with the Rigging window's Walk Cycle settings (a preset and its numbers):\n"
              "keys on the hips, the feet's IK targets, spine and arms, feet never sliding. Ordinary keys, one undo step."))
     walk_generate();
-  if (assist_on(Assist::Ai)) draw_ai_toolbar(x, y, bh);
-  if (!assist_on(Assist::Physics)) return;  // (Preferences > Animation Assistants: the physics tools off)
+  if (assist_on(Assist::Ai)) group(u.px(380)), draw_ai_toolbar(x, y, bh);  // (AI Inbetween, its span, the style, Fit to Clips)
+  if (!assist_on(Assist::Physics)) return finish_anim_toolbar(rows);  // (Preferences > Animation Assistants: the physics tools off)
+  group(u.px(121 + 79 + 63 + 89 + 89) + (ragdoll::available() ? u.px(73) : 0) + (body_.ghost ? u.px(57) : 0));
   if (button(u.px(118), "Center of Mass", body_.show_com,
              "Physics (Cascadeur's center of mass): the body's center of mass over the whole clip in the Scene view, where it is\n"
              "at the playhead and straight below it. Each bone weighs what its share of the skinned mesh does (Armature > Body Mass)."))
@@ -585,6 +597,14 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   }
   if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
     body_flight_command({"body", "flight", "apply"});
+  finish_anim_toolbar(rows);
+}
+
+/* The rows the toolbar needed: the window is laid out by them on its next frame (another frame now when they changed). */
+void Editor::finish_anim_toolbar(int rows) {
+  if (rows == anim_bar_rows_) return;
+  anim_bar_rows_ = rows;
+  ui_.redraw = true;
 }
 
 /* The clip menu's choice: a clip asset for the root's Animation, none ("-"), or a new clip (""). */
@@ -939,7 +959,7 @@ void Editor::draw_animation_window(const Recti &r) {
   auto &in = u.in;
   if (u.hovered(r) && in.pressed[0]) focused_ = WindowKind::Animation;
   GameObject *root = anim_root();
-  const int bh = u.row_h() + u.px(6);
+  const int bh = (u.row_h() + u.px(6)) * std::max(1, anim_bar_rows_);  // (round 324: as many rows as the toolbar wrapped to)
   const Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.header);
   draw_anim_toolbar(bar, root);
@@ -1094,6 +1114,10 @@ void Editor::draw_puppet_menu() {
           autopose_command({"autopose", "reach", std::to_string(r)});
     });
     draw_puppet_body_items();  // (task 0289)
+    u.menu_separator();
+    u.submenu("Handle Bones", u.px(280), [this] { draw_puppet_handle_items(); });
+    u.tooltip("Which bone each Puppet Posing handle drags - the hands, the feet, the head, the hips. Found from the rig; when it\n"
+              "picks the wrong bone, select the right one and choose Use the Selected Bone (kept with the armature).");
   });
 }
 

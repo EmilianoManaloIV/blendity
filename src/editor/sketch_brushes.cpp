@@ -207,7 +207,7 @@ SketchStroke Editor::sketch_brush_look(const SketchBrush &b) const {
 /* The Eraser's cut: every stroke it crosses keeps the pieces outside its circle (each a freehand stroke; the stroke's
  * points first filled in so a long straight line is cut where the circle is, not at its far ends). True when any changed. */
 bool Editor::sketch_erase_cut(const Recti &view, Vec2 px, float r) {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   bool any = false;
   std::vector<SketchStroke> out;
   out.reserve(s.strokes.size());
@@ -562,6 +562,7 @@ std::string Editor::sketch_brush_prefs_text() {
   s += strprintf("sketch_brush_pick=%d\ndraw_palette=%d %d %d\ndraw_wheel=%d\n", sketch_brush_, draw_palette_rect_.x, draw_palette_rect_.y,
                  draw_palette_shown_ ? 1 : 0, pad_wheel_mode_);
   if (!board_last_.empty()) s += "board_last=" + board_last_ + "\n";
+  if (!paper_last_.empty()) s += "paper_last=" + paper_last_ + "\n";
   return s;
 }
 
@@ -572,6 +573,10 @@ bool Editor::sketch_brush_pref(const std::string &k, const std::string &v) {
   }
   if (k == "board_last") {  // (task 0299: opened again the first time the board is used)
     board_last_ = v;
+    return true;
+  }
+  if (k == "paper_last") {  // (round 324: opened again when Paper is chosen)
+    paper_last_ = v;
     return true;
   }
   if (k == "draw_wheel") {  // (task 0303)

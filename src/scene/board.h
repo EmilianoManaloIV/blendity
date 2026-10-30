@@ -13,10 +13,10 @@
 namespace bl {
 
 struct BoardItem {
-  enum Kind { Image = 0, Note = 1, Swatch = 2 };
+  enum Kind { Image = 0, Note = 1, Swatch = 2, Paper = 3 };  // (Paper: a paper's file, its drawing shown - task 0305)
   int kind = Image;
   uint64_t id = 0;
-  std::string path;   // an image: asset-relative (or absolute when outside the project)
+  std::string path;   // an image's or a paper's: asset-relative (or absolute when outside the project)
   std::string text;   // a note's words
   uint32_t color = 0xFFFFFFFF;  // a swatch's colour, a note's paper
   Vec2 pos;           // the centre, in board units

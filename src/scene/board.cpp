@@ -113,7 +113,7 @@ bool board_from_json(const std::string &text, Board &b, std::string &err) {
   for (size_t i = 0; i < items.size(); i++) {
     const Json &j = items[i];
     BoardItem it;
-    it.kind = std::max(0, std::min(2, j["kind"].integer(0)));
+    it.kind = std::max(0, std::min(3, j["kind"].integer(0)));
     it.id = out.next_id++;
     it.path = j["path"].str, it.text = j["text"].str;
     it.color = (uint32_t)j["color"].number(0xFFFFFFFF);

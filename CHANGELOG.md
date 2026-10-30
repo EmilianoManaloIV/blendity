@@ -2,6 +2,104 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (rounds 325-326): papers on the boards, boards exported; spring kinds, the animation toolbar, puppet handles
+
+**Asked:** the user (2026-10-29):
+- "...incorporate the two so I can put all my references in one place along with my paper sketches." Their choices: a
+  paper is a board item (a live picture of it; double-click to draw), a linked file any board can show.
+- "Make it so I can export the board as pdf or photo format."
+- "Bug when I select passed 'soft' in spring bones I can't access the other spring bone types."
+- "Another HCI issue appear for the Rigging and animation tab; there is too much buttons that it gets cut off."
+- "...for the Animatica Marionette features you can set the handles to a specific bone. Just in case it gets it
+  automatically wrong."
+
+**Added (task 0305: papers on the board)**
+- **A paper is a board item:** Boards > New Paper Here, Boards > Add Paper, a `.paper` dragged from the Project window,
+  or the Draw tab's More > Paper > Pin to the Board. It shows the paper's drawing, kept up to date as it is drawn (at
+  most four times a second), and moves, scales, turns and undoes like an image. Double-click it to draw on it in the
+  Draw tab (the source becomes Paper).
+- **One paper on many boards:** renaming a paper relinks every board that shows it (their files, and this board's undo
+  steps). A missing paper shows "Missing paper:".
+- **Boards:** Duplicate Board and Delete Board (to the system's trash) in the Boards menu; `board rename|copy|trash`,
+  `board addpaper <name>|newpaper|openpaper`.
+
+**Added (task 0306: export)**
+- **Boards > Export...:** a panel - What (the whole board, the selection, the view as seen), Format (PNG, JPEG, PDF),
+  Size (1024-8192 px on the long side) and Background (the board's, white, transparent for PNG) - then where to save
+  (Assets/Exports by default; a typed .png, .jpg or .pdf decides the format).
+- **Sharp at any size:** an image the picture shows larger than the board's 2048 px copy is read again at full size,
+  and each paper is drawn at the size it has in the picture.
+- **The editor isn't stopped:** the pictures load and the file is encoded and written on threads of their own; the
+  board says "exporting..." meanwhile.
+- **The PDF** is one page, A4 on its long side, the picture inside as a JPEG (`encode_pdf_image`; `encode_jpeg` split
+  from `write_jpeg`). No new dependency.
+- `board export <path> [png|jpg|pdf] [size <px>] [selection|view] [bg board|white|none]`.
+
+**Fixed**
+- **Spring bones:** a chain's kind was a button stepping Hair, Ear, Tail, Cloth, Soft, then None - which set the chain
+  aside and hid the button, so the other kinds couldn't be picked again. It is one list of all six; a kind picked on a
+  chain set to None takes it back.
+- **The Rigging & Animation tab's toolbar** ran off the window: its groups (the transport, the clip, the views, Walk
+  Cycle, AI, the physics tools) now wrap onto another row when they don't fit.
+- **Puppet Posing's handles can be put on a bone by hand:** Animation > Puppet > Handle Bones > a handle > Use the
+  Selected Bone (or Found Automatically), kept with the armature (Inspector: Armature > Puppet Handles);
+  `autopose handle lhand|rhand|lfoot|rfoot|head|hips <bone>|auto`.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- An 8192 px PNG stopped the editor for 12 s (2.2 s at 4096): now loaded, encoded and written in the background.
+- Exports above 2048 px were upscaled from the board's copies (papers from 720 px pictures): full size now.
+- Double-clicking the open paper, and New Paper Here, wiped its undo history; the export settings closed after each
+  choice (now a panel of lists); a rename didn't reach the board's undo steps or a differently-cased path; a paper's
+  stroke widths on the board depended on the pad's last size; a size past the memory budget could crash; this
+  CHANGELOG's round 322 heading was lost in round 324's entry (restored).
+
+**Checked:** `tests_round325`, `tests_round326` (`test_board.cpp`), the spring kinds and the toolbar
+(`test_physics.cpp`), the puppet handles (`test_animation.cpp`) - real events and clicks.
+
+## 2026-10-29 (round 324): papers of their own - the Draw tab's Paper isn't in the world
+
+**Asked:** the user (2026-10-29):
+- "Make it when its source is paper it doesn't have any overlays in the scene view. So I can use the drawing tablet as
+  reference, rather than use it to actually draw in the world."
+- "Make it so you can save multiple paper, same with the board system. In-fact, incorporate the two so I can put all my
+  references in one place along with my paper sketches." (the papers here; papers on boards are task 0305)
+- "Also make sure that when in paper mode it doesn't move perspective guides in the scene or game view."
+
+Their choices: a paper is a linked file; strokes already drawn stay with the scene.
+
+**Added (task 0304, ADR 0090, `editor/paper.cpp`)**
+- **Paper is a page of its own:** `Assets/Papers/<name>.paper`, the scene file's own sketch lines (now shared:
+  `write_sketch_lines` / `read_sketch_line`). Nothing drawn on it is in the world.
+- **While the pad is on Paper,** the Scene and Game views show no sketch, take no pen and keep their own mode, hint and
+  Wheel.
+- **A paper's perspective guide is its own:** it never follows or turns the Scene camera, and the scene's guide never
+  moves. Place in 3D, Build, Lift, Project, Trace, scene canvases and world strokes are greyed or refused on Paper.
+- **Many papers:** More > Paper > New Paper, Open Paper, Duplicate Paper, Delete Paper (to the system's trash); the pad
+  shows the paper's name (`*` until saved); Paper opens the paper used last. The page is A-series landscape,
+  letterboxed in the tab.
+- **Each paper's own undo** (Ctrl+Z / Ctrl+Y over the pad or the Layers window, the toolbar's and More's Undo / Redo:
+  100 steps, at most 64 MB) and autosave a second after a change and on closing. Its color is kept in its file.
+- **Console:** `paper new [name]|open <name>|rename <name>|duplicate|delete|list|save|undo|redo`.
+
+**Fixed on the way:** a vanishing point set while the Scene view was a hidden tab made the scene's guide NaN (an empty
+view rect); the guide and the camera now stay finite.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- The letterbox bands beside the page kept the last picture: they are painted.
+- With the Draw tab hidden, `sketchguide`, `sketch clear` and `sketchstroke` fell back to the scene's sketch: on Paper
+  they always act on the paper.
+- Picking the open paper again reloaded its file and lost the last second's stroke; a failed delete dropped unsaved
+  edits; a paper opened by an outside path would have overwritten the project's paper of its name (now copied in under
+  a free name); a rename to nothing made a paper named "Board".
+- Ctrl+Z over the Layers window on Paper undid a scene step; Trace, Lift, Sweep and Face (scene edits) keep the scene's
+  undo; a layer solo carried over between the scene's sketch and the paper; a stroke begun beside the page was kept
+  unseen.
+- The history is capped by memory; a paper of 500 Airbrush strokes saves in 7.4 ms (printed), so the save stays on the
+  main thread.
+- The tests clear the scratch project's papers.
+
+**Checked:** `tests_round324`, `tests_round324_papers` (real events and clicks).
+
 ## 2026-10-29 (round 322): the reference board - PureRef's endless canvas as a tab
 
 **Asked:** the user (2026-10-29): "Have an additional tab for making mood/reference boards. Utilize good HCI and other

@@ -389,6 +389,7 @@ int Editor::run() {
 
 void Editor::request_close() {
   if (board_dirty_) board_save();  // (task 0299: a change in the last second is kept)
+  if (paper_dirty_) paper_save();  // (round 324)
   if (playing_) exit_play();  // (task 0254: first, so the auto-save runs on the scene Play restores - the edits made before Play - not on Play's discarded state)
   if (scene_dirty_) {
     std::string path = scene_->path.empty() ? fs::join(assets_dir_, "Scenes/" + scene_->name + ".scene") : scene_->path;
@@ -689,6 +690,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   handle_drop();
   handle_shortcuts();
   board_frame_tick();  // (task 0299: pictures landed, and the board saved a second after a change, shown or not)
+  paper_frame_tick();  // (round 324: the paper saved a second after a change)
 
   update_tab_drag();
 
@@ -3143,7 +3145,7 @@ void Editor::draw_sketch_pen_menu() {
   });
   u.tooltip("Steadiness (a lazy rope): the line trails the pen by this much, so a shaky hand draws a smooth line.");
   u.submenu("Canvas", u.px(240), [this] {
-    Sketch &s = scene_->sketch;
+    Sketch &s = sketch_doc();
     if (ui_.menu_item("The View (the picture plane)", nullptr, s.active_canvas == 0)) sketch_canvas_command({"sketchcanvas", "view"}, "");
     if (ui_.menu_item("The Ground")) sketch_canvas_command({"sketchcanvas", "ground"}, "");
     for (const char *ax : {"X", "Y", "Z"})
@@ -3183,11 +3185,11 @@ void Editor::draw_sketch_guides_items() {
   ui_.menu_separator();
   static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
   for (int k = 0; k < 4; k++)
-    if (ui_.menu_item(kPersp[k], nullptr, scene_->sketch.perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
+    if (ui_.menu_item(kPersp[k], nullptr, sketch_doc().perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
   ui_.menu_separator();
   if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
-  if (ui_.menu_item("Perspective Follows the Camera", nullptr, scene_->sketch.follow_camera))  // (task 0286)
-    sketch_command({"sketchguide", "follow", scene_->sketch.follow_camera ? "off" : "on"}, "");
+  if (ui_.menu_item("Perspective Follows the Camera", nullptr, sketch_doc().follow_camera))  // (task 0286)
+    sketch_command({"sketchguide", "follow", sketch_doc().follow_camera ? "off" : "on"}, "");
   ui_.tooltip("The perspective guide and the camera as one: turning the view moves the vanishing points, dragging a point turns the view.");
 }
 

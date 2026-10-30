@@ -1436,6 +1436,23 @@ Space tapped over the pad, or the pen held still on it for half a second, opens 
 ? Your pen display has a dial. How do you make it zoom the canvas - or change the brush's size instead? | Leave the dial on its default key pair (Ctrl- / Ctrl+): over the pad it zooms about the pen. Or set it to the mouse wheel in the tablet's driver and pick More > Wheel / Dial > Brush Size (or Turn the Canvas, or Brush Opacity); Ctrl with it still zooms. The express keys' Photoshop shortcuts work too: B, E, [ ], Ctrl+0 to fit, Space held to pan.
 ? With the pen in hand and no keyboard, how do you switch to the Eraser and back? | Hold the pen still on the pad for half a second: the Wheel opens with the Eraser on it; flick toward it and lift. Do the same for the brush you were drawing with.
 )"},
+    {"Papers", "Drawing on pages of your own, not in the scene", R"(
+The Draw tab's Paper source is a page of its own: a paper, kept in Assets/Papers. What you draw there isn't in the scene - the Scene and Game views show nothing of it and take no pen while the pad is on Paper, and a paper's perspective guide never turns a camera. Keep as many papers as you like; each has its own undo and saves itself a second after a change.
+# Papers
+More > Source > Paper opens the paper you used last (or a new one). More > Paper makes a New Paper, opens another, duplicates or deletes one (to the system's trash). The pad shows the paper's name, with * until it is saved. Ctrl+Z over the pad or the Layers window undoes on the paper, not in the scene.
+! cmd:layout Drawing; window Draw; draw source paper | The pad on Paper
+! cmd:paper new Practice | A new paper named Practice
+! cmd:paper list | Your papers, in the Console
+! cmd:draw source scene | Back to the scene's own sketch
+? You sketch a character on Paper, then switch the source to the Scene Camera. Where did the sketch go, and what happens to the strokes you had drawn over the scene before? | The sketch is still on its paper (Assets/Papers), shown again when the source is Paper and that paper is open; the scene's own sketch, drawn on the camera before, is back as it was - a paper never changes it.
+? You turn on a 2-point perspective guide on a paper and drag its vanishing points. Does the Scene view's camera move? | No: a paper has no camera. Its guide is its own and stays where you put it; the scene's guide and the Scene camera are left alone. On a camera source the guide follows the camera, as before.
+? Why are Place in 3D, Build and Lift greyed out on Paper? | A paper isn't in the scene - there is no camera or depth for its strokes. Switch the source to a camera to draw in the scene and build from the strokes.
+# Papers on the board, and the board exported
+A reference board can hold your papers beside your images: Boards > New Paper Here or Add Paper, or More > Paper > Pin to the Board. The board shows the drawing and keeps it up to date; double-click it to draw on it again. Boards > Export... writes the board, the selection or the view as a PNG, a JPEG or a one-page PDF, in the background and at full sharpness.
+! cmd:layout Drawing with References | The pad and the board side by side
+! cmd:board newpaper | A new paper on the board
+? You keep a character's references and three sketches of it. How do you get them in one place, and send the whole sheet to a friend? | Put the images and the papers on one board (Boards > Add Paper, or New Paper Here, or drag a .paper from the Project window); each paper shows its drawing. Then Boards > Export... > Format: PDF (or PNG) > Export...: one picture of the whole board, written in the background.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

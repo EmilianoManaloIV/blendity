@@ -1075,6 +1075,9 @@ struct Armature : ComponentBase<Armature> {
   bool rest_position = false;  // skins show the mesh unposed
   bool in_front = true;        // bones drawn over the meshes
   float body_mass = 75.0f;     // kg: the whole body, shared among the bones by the volume each moves (task 0115)
+  /* Puppet Posing's handles set by hand (round 324): "Left Hand=Bone.003; Head=head" - a handle the rig's analysis
+   * finds wrongly is put on the bone named; the others stay found. */
+  std::string puppet_bones;
   static inline bool show_body_mass = true;  // (the Inspector shows it while the physics tools are switched on: task 0124)
   void reflect(Reflector &r) override;
 };
@@ -1575,6 +1578,9 @@ std::string save_scene_text(const Scene &scene);
 /* Shortest exact text form of a float (std::to_chars where available). */
 void append_float(std::string &s, float v);
 bool load_scene_text(const std::string &text, Scene &scene, std::string &error);
+/* A paper (round 324): its own sketch in a file of its own, its aspect and its colour. */
+std::string save_paper_text(const Sketch &sk, float aspect, uint32_t color);
+bool load_paper_text(const std::string &text, Sketch &sk, float &aspect, uint32_t &color);
 bool save_scene(const Scene &scene, const std::string &path);
 bool load_scene(const std::string &path, Scene &scene, std::string &error);
 /* Zstandard scene compression is compiled in (Blender's zstd library). */

@@ -17,7 +17,8 @@ namespace bl {
  * layer has none left (erased, cleared, undone). Drawing on it from far away - where its strokes have faded out -
  * says so: the stroke is kept and shows from the layer's view. */
 void Editor::sketch_record_layer_view(SketchLayer &layer) {
-  const Sketch &s = scene_->sketch;
+  if (sketch_on_paper()) return;  // (round 324: a paper has no camera to remember)
+  const Sketch &s = sketch_doc();
   bool any = false;
   for (const SketchStroke &st : s.strokes) any = any || (st.canvas == 0 && st.layer >= 0 && st.layer < (int)s.layers.size() && &s.layers[(size_t)st.layer] == &layer);
   if (layer.has_view && any) {
@@ -32,7 +33,7 @@ void Editor::sketch_record_layer_view(SketchLayer &layer) {
 /* How much of a layer shows from the camera as it is: all of it within 5 degrees of the view it was drawn in, none
  * past 30 (a construction drawing is true from its view); a layer with no view shows everywhere. */
 float Editor::sketch_layer_fade(const SketchLayer &layer) const {
-  if (!layer.has_view) return 1.0f;
+  if (!layer.has_view || sketch_on_paper()) return 1.0f;
   SceneCamera then = sketch_view_.cam;
   then.yaw = layer.view_yaw, then.pitch = layer.view_pitch;
   const float c = std::max(-1.0f, std::min(1.0f, dot(then.forward(), sketch_view_.cam.forward())));
@@ -42,7 +43,7 @@ float Editor::sketch_layer_fade(const SketchLayer &layer) const {
 
 /* Back to the active layer's view (sketch view): the camera as it was when the layer was begun. */
 bool Editor::sketch_layer_view() {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   if (s.layers.empty()) return false;
   const SketchLayer &layer = s.layer_at(s.active_layer);
   if (!layer.has_view) {
@@ -77,7 +78,7 @@ float Editor::sketch_px_per_metre(const SketchCanvas &c, Vec2 uv) const {
  * construction line lies on it. The symmetry guide is the view's and does not apply here. */
 void Editor::sketch_stroke_end_on_plane(const Recti &view, const SketchCanvas &canvas, int level, float mean_w, const SketchStroke &base) {
   auto &g = sketch_;
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   /* The pen's points on the plane, with their place along the pen's path. */
   std::vector<Vec2> uv;
   std::vector<float> along, pressure;
@@ -198,7 +199,7 @@ void Editor::sketch_stroke_end_on_plane(const Recti &view, const SketchCanvas &c
     sketch_snap_to_plane_guides(canvas, made, reach);
   }
   for (SketchStroke &st : made) s.strokes.push_back(std::move(st));
-  mark_changed(made.size() > 1 ? "Sketch Strokes" : "Sketch Stroke");
+  sketch_changed(made.size() > 1 ? "Sketch Strokes" : "Sketch Stroke");
   ui_.redraw = true;
 }
 
@@ -207,7 +208,7 @@ void Editor::sketch_stroke_end_on_plane(const Recti &view, const SketchCanvas &c
 /* The last picture-plane stroke that shows pushed onto the face under its middle, along the view: it becomes a stroke
  * on that face's canvas (a line drawn on the surface). The canvas the pen draws on stays as it was. */
 bool Editor::sketch_project() {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   const Recti view = sketch_view_.view;
   for (size_t i = s.strokes.size(); i-- > 0;) {
     SketchStroke &st = s.strokes[i];
@@ -238,7 +239,7 @@ bool Editor::sketch_project() {
     st.raw.clear();
     st.center = {}, st.rx = st.ry = 0.0f;
     if (st.kind == StrokeKind::Arc || st.kind == StrokeKind::Ellipse) st.kind = StrokeKind::Curve;
-    mark_changed("Project Stroke");
+    sketch_changed("Project Stroke");
     Log::info("Stroke projected onto %s", s.canvas_at(id)->name.c_str());
     return true;
   }
@@ -278,7 +279,7 @@ long Editor::sketch_face_on_canvas(const Mesh &m, const Mat4 &w, const SketchCan
  * imprinted as a face inside the face; a line across the face, split where it meets the face's edges), or as a Curve
  * object through its points. */
 bool Editor::sketch_trace(bool as_curve) {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   for (size_t i = s.strokes.size(); i-- > 0;) {
     SketchStroke &st = s.strokes[i];
     const SketchCanvas *c = st.canvas ? s.canvas_at(st.canvas) : nullptr;
@@ -414,7 +415,7 @@ bool Editor::sketch_trace_cut(GameObject &g, size_t face, const std::vector<Vec3
 
 /* The selected mesh objects' edges over the view, thin, to draw against (outside Edit Mode, which draws its own). */
 void Editor::sketch_draw_overlay(const Recti &view) {
-  if (!sketch_.active || !sketch_.overlay || edit_mode_) return;
+  if (!sketch_.active || !sketch_.overlay || edit_mode_ || sketch_on_paper()) return;  // (round 324: no model under a paper)
   auto &u = ui_;
   const uint32_t col = Color::hex(0xFFFFFF, 90);
   const float px1 = (float)u.px(1.0f);
@@ -517,7 +518,7 @@ bool Editor::sketch_ellipse_from_face(const Recti &view, int mx, int my) {
  * 8 px share a point, and the junction nearest the view's middle sits at the camera's pivot distance. The result is a
  * "Scaffold" wire object - construction lines to build from (the Draw tools snap to its edges), never a mesh. */
 bool Editor::sketch_lift() {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const Recti view = sketch_view_.view;
   if (sketch_view_.cam.ortho) {
     Log::warn("sketchlift: a perspective view is needed (the axes' vanishing points)");
@@ -605,6 +606,7 @@ bool Editor::sketch_refine_command(const std::vector<std::string> &t) {
   if (t.empty()) return false;
   const std::string c = to_lower(t[0]);
   if (c != "sketchproject" && c != "sketchtrace" && c != "sketchlift") return false;
+  if (sketch_refuse_on_paper(c.c_str())) return true;  // (round 324: a paper isn't in the scene)
   if (playing_) return true;
   if (c == "sketchlift") sketch_lift();
   else if (c == "sketchproject") sketch_project();

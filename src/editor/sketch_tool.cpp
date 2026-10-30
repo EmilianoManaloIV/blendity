@@ -23,7 +23,7 @@ void Editor::sketch_begin() {
   sketch_.active = true;
   sketch_.stroking = sketch_.erasing = false;
   sketch_.drag_handle = -1;
-  if (scene_->sketch.layers.empty()) scene_->sketch.layers.push_back(SketchLayer{});
+  if (sketch_doc().layers.empty()) sketch_doc().layers.push_back(SketchLayer{});
   Log::info("Sketch: draw with the pen or the mouse (the pen's pressure is the width, its eraser erases; Ctrl keeps a stroke "
             "freehand). Draw > Guides for a ruler, an ellipse, a French curve, symmetry or perspective. Esc ends.");
 }
@@ -46,7 +46,7 @@ void Editor::sketch_guide_defaults(const Recti &view) {
     g.sym_c = {a * 0.5f, 0.5f};
     g.placed = true;
   }
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   if (!s.vp_placed) {
     s.vp[0] = {a * 0.1f, 0.5f}, s.vp[1] = {a * 0.9f, 0.5f}, s.vp[2] = {a * 0.5f, 2.5f};
     s.vp_placed = true;
@@ -58,7 +58,7 @@ void Editor::sketch_guide_defaults(const Recti &view) {
 std::vector<Vec2> Editor::sketch_handles() const {
   std::vector<Vec2> h;
   const auto &g = sketch_;
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   if (g.guide == 1) h.push_back(g.ruler[0]), h.push_back(g.ruler[1]);
   if (g.guide == 2) {
     const float c = std::cos(g.ell_angle), sn = std::sin(g.ell_angle);
@@ -78,7 +78,7 @@ std::vector<Vec2> Editor::sketch_handles() const {
 /* A handle moved to `to` (the canvas's frame). */
 void Editor::sketch_move_handle(int index, Vec2 to) {
   auto &g = sketch_;
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   int i = index;
   if (g.guide == 1) {
     if (i < 2) {
@@ -135,11 +135,11 @@ Vec2 Editor::sketch_snap(const Recti &view, Vec2 p) {
   if (g.guide == 1) return sketch::snap_to_line(p, sketch_to_px(view, g.ruler[0]), sketch_to_px(view, g.ruler[1]));
   if (g.guide == 2) return sketch::snap_to_ellipse(p, sketch_to_px(view, g.ell_c), g.ell_rx * view.h, g.ell_ry * view.h, g.ell_angle);
   if (g.guide == 3) return sketch::snap_to_polyline(p, sketch_french_px(view));
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   /* A freehand stroke - Ctrl held, or a layer whose corrections are Freehand - goes where the pen goes: the
    * perspective guide is always on, unlike the ruler, ellipse and French curve chosen for the stroke (round 318: the
    * user's freehand lines still bent onto the vanishing lines). */
-  const bool freehand = g.freehand || scene_->sketch.layer_at(s.active_layer).correct == 0;
+  const bool freehand = g.freehand || sketch_doc().layer_at(s.active_layer).correct == 0;
   if (s.perspective > 0 && !g.pen.empty() && !freehand) {
     Vec2 vps[3];
     for (int i = 0; i < s.perspective; i++) vps[i] = sketch_to_px(view, s.vp[i]);
@@ -184,7 +184,7 @@ void Editor::sketch_snap_fit(const Recti &view, sketch::Fit &f, int join_start, 
   if (deg < 4.0f || deg > 176.0f) d = {d.x < 0 ? -1.0f : 1.0f, 0.0f};
   else if (std::fabs(deg - 90.0f) < 4.0f) d = {0.0f, d.y < 0 ? -1.0f : 1.0f};
   else {
-    const Sketch &s = scene_->sketch;
+    const Sketch &s = sketch_doc();
     Vec2 vps[3];
     for (int i = 0; i < s.perspective; i++) vps[i] = sketch_to_px(view, s.vp[i]);
     const int vp = s.perspective > 0 ? sketch::nearest_vanishing(a, b, vps, s.perspective, 4.0f) : -1;
@@ -198,7 +198,7 @@ void Editor::sketch_snap_fit(const Recti &view, sketch::Fit &f, int join_start, 
   sketch_snap_to_guides(view, a, b);  // (task 0224: onto a construction line it runs along)
   /* The ends onto other strokes' ends. */
   const float reach = (float)ui_.px(8);
-  for (const SketchStroke &st : scene_->sketch.strokes) {
+  for (const SketchStroke &st : sketch_doc().strokes) {
     if (st.pts.empty()) continue;
     for (const SketchPoint &e : {st.pts.front(), st.pts.back()}) {
       Vec2 q;
@@ -215,7 +215,7 @@ void Editor::sketch_stroke_end(const Recti &view) {
   g.stroking = false;
   if (g.pen.empty()) return;
   if (g.pen.size() == 1) g.pen.push_back(g.pen[0] + Vec2{0.5f, 0.0f}), g.pressure.push_back(g.pressure[0]);
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   if (!sketch_layer_takes_strokes(s.active_layer, true)) return;  // (task 0234: a script's stroke on a locked layer)
   const SketchLayer &layer = s.layer_at(s.active_layer);
   const int level = g.freehand ? 0 : layer.correct;
@@ -237,7 +237,7 @@ void Editor::sketch_stroke_end(const Recti &view) {
     sketch_stroke_end_on_plane(view, *scene_canvas, level, mean_w, base());
     return;
   }
-  if (g.place3d) {  // (task 0233: in the scene where it was drawn, at the depth under the pen's first point)
+  if (g.place3d && !sketch_on_paper()) {  // (task 0233: in the scene where it was drawn, at the depth under the pen's first point; never a paper's)
     const int depth_id = sketch_depth_canvas(view);
     const size_t before = s.strokes.size();
     if (const SketchCanvas *dc = depth_id ? s.canvas_at(depth_id) : nullptr) sketch_stroke_end_on_plane(view, *dc, level, mean_w, base());
@@ -316,13 +316,13 @@ void Editor::sketch_stroke_end(const Recti &view) {
       }
   }
   for (SketchStroke &st : made) s.strokes.push_back(std::move(st));
-  mark_changed(made.size() > 1 ? "Sketch Strokes" : "Sketch Stroke");
+  sketch_changed(made.size() > 1 ? "Sketch Strokes" : "Sketch Stroke");
   ui_.redraw = true;
 }
 
 /* The strokes within reach of the eraser are gone. True when any went. */
 bool Editor::sketch_erase_at(const Recti &view, Vec2 px) {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   const float reach = (float)ui_.px(8);
   bool any = false;
   for (size_t i = 0; i < s.strokes.size();) {
@@ -346,7 +346,7 @@ bool Editor::sketch_erase_at(const Recti &view, Vec2 px) {
  * one through its points. `color` carries the alpha to draw with. */
 void Editor::sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint32_t color) {
   auto &u = ui_;
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const float px1 = (float)u.px(1.0f) * sketch_zoom();  // (round 319: a stroke's width is the picture's)
   if (st.canvas && s.canvas_at(st.canvas)) {
     std::vector<Vec2> sa, sb;
@@ -396,7 +396,7 @@ bool Editor::sketch_update(const Recti &view) {
    * (undo, another scene, a resize or a change of point count all move them), but not while a point is dragged, nor
    * while points no camera could match are kept until the camera moves. */
   {
-    const Sketch &s = scene_->sketch;
+    const Sketch &s = sketch_doc();
     const bool moved = sketch_view_.cam.yaw != cam_yaw_before_[sketch_view_.kind] || sketch_view_.cam.pitch != cam_pitch_before_[sketch_view_.kind] || sketch_view_.cam.fov != cam_fov_before_[sketch_view_.kind];
     if (moved) g.flat = false;
     if (sketch_view_.hovered) sketch_guide_view_ = sketch_view_.kind;  // (task 0233: the guide follows the view under the pointer)
@@ -409,11 +409,11 @@ bool Editor::sketch_update(const Recti &view) {
   /* A guide's handle dragged (a vanishing point is the scene's: its move is an undo step). */
   if (g.drag_handle >= 0) {
     if (!in.down[0]) {
-      const bool vp = g.drag_handle >= (int)sketch_handles().size() - scene_->sketch.perspective;
+      const bool vp = g.drag_handle >= (int)sketch_handles().size() - sketch_doc().perspective;
       g.drag_handle = -1;
       if (vp) {
-        mark_changed("Move Vanishing Point");
-        if (scene_->sketch.follow_camera && !sketch_camera_from_guide(view))
+        sketch_changed("Move Vanishing Point");
+        if (sketch_doc().follow_camera && !sketch_camera_from_guide(view))
           Log::warn("Sketch: no camera looks that way (the points stay a flat guide; sketchguide follow off keeps them so)");
       }
     }
@@ -447,13 +447,13 @@ bool Editor::sketch_update(const Recti &view) {
     if (!in.down[0]) {
       g.erasing = false;
       if (g.erased) sketch_prune_depth_canvases();  // (task 0233)
-      if (g.erased) mark_changed("Erase Strokes");
+      if (g.erased) sketch_changed("Erase Strokes");
     }
     u.cursor = Cursor::Hand;
     return true;
   }
   if (!g.stroking && in.pressed[0] && sketch_view_.hovered && !in.alt()) {
-    if (!sketch_layer_takes_strokes(scene_->sketch.active_layer, true)) {  // (task 0234: a locked or hidden layer)
+    if (!sketch_layer_takes_strokes(sketch_doc().active_layer, true)) {  // (task 0234: a locked or hidden layer)
       u.consume_click();
       return true;
     }
@@ -475,7 +475,7 @@ bool Editor::sketch_update(const Recti &view) {
 
 void Editor::sketch_draw(const Recti &view) {
   auto &u = ui_;
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   if (s.strokes.empty() && !sketch_.active) return;
   u.canvas.push_clip(sketch_screen_rect(view));  // (round 319: the pad zoomed or turned - its rect on screen)
   const float px1 = (float)u.px(1.0f);
@@ -557,7 +557,8 @@ void Editor::sketch_draw(const Recti &view) {
 /* sketch ... and sketchguide ...: the console (task 0223). */
 bool Editor::sketch_command(const std::vector<std::string> &t, const std::string &line) {
   const std::string c0 = t.empty() ? std::string() : to_lower(t[0]);
-  if (c0 == "sketchstroke") sketch_bind_scene(scene_rect_, true);  // (task 0233: a scripted stroke is in the Scene view's pixels)
+  if (c0 == "sketchstroke" && draw_source_ == 2) sketch_bind_work_view();  // (round 324: on Paper, the paper's pixels)
+  else if (c0 == "sketchstroke") sketch_bind_scene(scene_rect_, true);  // (task 0233: a scripted stroke is in the Scene view's pixels)
   else if (c0 == "sketch" || c0 == "sketchguide") sketch_bind_work_view();  // (round 318: the view being drawn in)
   if (c0 == "sketch" && t.size() > 2 && to_lower(t[1]) == "place") {  // sketch place 3d|flat (task 0233)
     sketch_.place3d = to_lower(t[2]) == "3d";
@@ -566,7 +567,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
   }
   const std::string c = t.empty() ? "" : to_lower(t[0]);
   auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? t[i] : d; };
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   auto &g = sketch_;
   if (c == "sketch") {
     const std::string v = to_lower(arg(1, "on"));
@@ -576,7 +577,7 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
       s.strokes.clear();
       sketch_prune_depth_canvases();  // (task 0233)
       for (SketchLayer &l : s.layers) l.has_view = false;  // (task 0226: the next stroke's camera is the layer's)
-      mark_changed("Clear Sketch");
+      sketch_changed("Clear Sketch");
     }
     else if (v == "color") g.color = Color::hex((uint32_t)std::strtoul(arg(2, "202020").c_str(), nullptr, 16));
     else if (v == "width") g.width = std::max(0.5f, std::min(200.0f, (float)std::atof(arg(2, "2").c_str())));
@@ -585,16 +586,16 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "correct") {
       const std::string l = to_lower(arg(2, "full"));
       s.layer_at(s.active_layer).correct = l == "none" ? 0 : l == "light" ? 1 : 2;
-      mark_changed("Sketch Correction");
+      sketch_changed("Sketch Correction");
     }
     else if (v == "layer") sketch_layer_command(t, line);  // (task 0234)
     else if (v == "opacity") {
       s.layer_at(s.active_layer).opacity = std::max(0.0f, std::min(1.0f, (float)std::atof(arg(2, "1").c_str())));
-      mark_changed("Sketch Layer Opacity");
+      sketch_changed("Sketch Layer Opacity");
     }
     else if (v == "hide" || v == "show") {
       s.layer_at(s.active_layer).visible = v == "show";
-      mark_changed(v == "show" ? "Show Sketch Layer" : "Hide Sketch Layer");
+      sketch_changed(v == "show" ? "Show Sketch Layer" : "Hide Sketch Layer");
     }
     else if (v == "count") Log::info("Sketch: %zu strokes on %zu layers", s.strokes.size(), s.layers.size());
     else if (v == "view") sketch_layer_view();  // (task 0226)
@@ -625,20 +626,21 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "perspective") {
       const std::string w = to_lower(arg(2, "2"));
       s.perspective = w == "off" ? 0 : std::max(1, std::min(3, std::atoi(w.c_str())));
-      if (s.perspective) mark_changed("Perspective Guide");
+      if (s.perspective) sketch_changed("Perspective Guide");
     }
     else if (v == "snap") g.snap = to_lower(arg(2, "on")) != "off";
+    else if (v == "follow" && sketch_on_paper()) Log::info("sketchguide follow: a paper's guide has no camera to follow");  // (round 324)
     else if (v == "follow") {  // (task 0224: the guide and the camera as one)
       s.follow_camera = to_lower(arg(2, "on")) != "off";
       if (s.follow_camera && sketch_view_.cam.ortho) Log::info("sketchguide follow: the guide follows a perspective camera (the view is orthographic now)");
       if (s.follow_camera && s.perspective > 0 && !sketch_view_.cam.ortho) sketch_guide_from_camera(sketch_view_.view);
-      mark_changed("Perspective Guide");
+      sketch_changed("Perspective Guide");
     }
     else if (v == "vp" && t.size() >= 5) {
       const int i = std::max(0, std::min(2, std::atoi(arg(2, "0").c_str())));
       s.vp[i] = {(float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str())};
       s.vp_placed = true;
-      mark_changed("Move Vanishing Point");
+      sketch_changed("Move Vanishing Point");
       if (s.follow_camera && s.perspective > 0 && !sketch_camera_from_guide(sketch_view_.view)) Log::warn("sketchguide vp: no camera looks that way");
     }
     else Log::info("usage: sketchguide ruler|ellipse|french [0-2]|off|symmetry x|y|xy|radial <n>|off|perspective 1|2|3|off|snap on|off|follow on|off|vp <i> <x> <y>");

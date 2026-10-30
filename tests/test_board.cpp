@@ -39,6 +39,9 @@ struct BoardRig {
       if (!e.is_dir) fs::remove_file(fs::join(refs, e.name));
     const std::string n = name.empty() ? strprintf("Test Board %u", (unsigned)(std::rand() % 1000000)) : name;
     for (const char *ext : {".board"}) fs::remove_file(fs::join(fs::join(ed.assets_dir_for_test(), "Boards"), n + ext));
+    const std::string papers = fs::join(ed.assets_dir_for_test(), "Papers");  // (earlier tests' papers: review 326)
+    for (const DirEntry &e : fs::list(papers))
+      if (!e.is_dir) fs::remove_file(fs::join(papers, e.name));
     ed.command("board new " + n);
   }
   void step(std::vector<platform::Event> events = {}) {
@@ -72,6 +75,17 @@ struct BoardRig {
     step({ev(platform::EventType::KeyUp, (int)m.x, (int)m.y, k, 0, mods)});
   }
   std::string assets() const { return ed.assets_dir_for_test(); }
+  /* A recorded button or menu item clicked by its key (task 0305). */
+  bool click(const std::string &key) {
+    Recti b;
+    if (!ed.button_rect_for_test(key, b)) return false;
+    const int x = b.x + b.w / 2, y = b.y + b.h / 2;
+    step({ev(platform::EventType::MouseMove, x, y)});
+    step({ev(platform::EventType::MouseDown, x, y)});
+    step({ev(platform::EventType::MouseUp, x, y)});
+    step();
+    return true;
+  }
   /* The pictures loading on their thread landed, then a frame. */
   void settle() {
     ed.board_wait_for_test();
@@ -469,10 +483,235 @@ void tests_round322_review2() {
   });
 }
 
+/* The sum of a picture's pixels' colour (a change in it: a drawing changed). */
+uint64_t picture_sum(const std::shared_ptr<BoardPicture> &p) {
+  uint64_t s = 0;
+  if (!p || p->levels.empty()) return 0;
+  for (uint32_t v : p->levels[0].argb) s += ((v >> 16) & 255) + ((v >> 8) & 255) + (v & 255);
+  return s;
+}
+
+const BoardItem *first_paper(const Board &b) {
+  for (const BoardItem &it : b.items)
+    if (it.kind == BoardItem::Paper) return &it;
+  return nullptr;
+}
+
+/* Round 325 (task 0305): papers on the board - one place for the references and the sketches. */
+void tests_round325() {
+  test("papers on the board: Boards > New Paper Here puts a paper on it; double-click opens it on the Draw tab with the source Paper; a stroke drawn there shows on the board's picture of it", [] {
+    BoardRig r;
+    using platform::EventType;
+    CHECK(r.click("board:Boards") && r.click("menu:New Paper Here"));
+    const BoardItem *it = first_paper(r.ed.board_for_test());
+    CHECK(it != nullptr);
+    if (!it) return;
+    const std::string rel = it->path;
+    std::printf("    the paper item %s, %.0f x %.0f\n", rel.c_str(), it->w, it->h);
+    CHECK(std::fabs(it->w / it->h - 1.41421356f) < 0.01f);
+    auto pic = r.ed.paper_thumb_for_test(rel);
+    CHECK(pic && !pic->levels.empty());
+    const uint64_t blank = picture_sum(pic);
+    /* Double-click it: the Draw tab, on that paper. */
+    r.ed.command("board fit");
+    r.step();
+    const Vec2 at = r.ed.board_to_screen_for_test(r.ed.board_for_test().items.back().pos);
+    for (int k = 0; k < 2; k++) {
+      r.step({BoardRig::ev(EventType::MouseMove, (int)at.x, (int)at.y)});
+      r.step({BoardRig::ev(EventType::MouseDown, (int)at.x, (int)at.y)});
+      r.step({BoardRig::ev(EventType::MouseUp, (int)at.x, (int)at.y)});
+    }
+    for (int i = 0; i < 3; i++) r.step();
+    std::printf("    after the double-click: source %d, paper %s\n", r.ed.draw_source_for_test(), r.ed.paper_name_for_test().c_str());
+    CHECK(r.ed.draw_source_for_test() == 2 && r.ed.paper_rel_for_test(r.ed.paper_name_for_test()) == rel);
+    /* A stroke on the pad. */
+    r.ed.command("sketch correct none");
+    const Recti pad = r.ed.pad_rect_for_test();
+    const Vec2 c{pad.x + pad.w * 0.5f, pad.y + pad.h * 0.5f};
+    r.step({BoardRig::ev(EventType::MouseMove, (int)c.x - 80, (int)c.y)});
+    r.step({BoardRig::ev(EventType::MouseDown, (int)c.x - 80, (int)c.y)});
+    for (int i = 1; i <= 12; i++) r.step({BoardRig::ev(EventType::MouseMove, (int)c.x - 80 + i * 14, (int)c.y + i * 3)});
+    r.step({BoardRig::ev(EventType::MouseUp, (int)c.x + 88, (int)c.y + 36)});
+    CHECK(r.ed.paper_for_test().strokes.size() == 1);
+    r.ed.set_clock_for_test(r.ed.clock_for_test() + 0.5);  // (past the thumbnail's quarter second)
+    r.step();
+    pic = r.ed.paper_thumb_for_test(rel);
+    const uint64_t drawn = picture_sum(pic);
+    std::printf("    the board's picture of it: %llu -> %llu\n", (unsigned long long)blank, (unsigned long long)drawn);
+    CHECK(drawn < blank);  // (a dark stroke on white paper)
+    /* Double-clicking the open paper again, and New Paper Here, keep its history (review 326). */
+    const int depth = r.ed.paper_undo_depth_for_test();
+    r.ed.command("window Board");
+    for (int i = 0; i < 3; i++) r.step();
+    r.ed.command("board select all");
+    r.ed.command("board openpaper");
+    r.ed.command("window Board");
+    r.ed.command("board newpaper");
+    std::printf("    the paper's undo steps: %d, after opening it again and New Paper Here %d (paper %s)\n", depth, r.ed.paper_undo_depth_for_test(), r.ed.paper_name_for_test().c_str());
+    CHECK(depth >= 1 && r.ed.paper_undo_depth_for_test() == depth && r.ed.paper_rel_for_test(r.ed.paper_name_for_test()) == rel);
+    r.ed.command("paper delete");
+    r.ed.command("draw source scene");
+    r.ed.command("sketch off");
+  });
+  test("papers on the board: the same paper on two boards is one drawing; renaming it keeps both boards linked; Duplicate Board and Delete Board; a board with a paper saves and opens again", [] {
+    BoardRig r;
+    r.ed.command("paper new Round325 Shared");
+    const std::string name = r.ed.paper_name_for_test();
+    const std::string one = strprintf("Round325 One %u", (unsigned)(std::rand() % 100000)), two = strprintf("Round325 Two %u", (unsigned)(std::rand() % 100000));
+    r.ed.command("board rename " + one);
+    r.ed.command("board addpaper " + name);
+    r.ed.command("board save");
+    r.ed.command("board new " + two);
+    r.ed.command("board addpaper " + name);
+    r.ed.command("board save");
+    const BoardItem *second = first_paper(r.ed.board_for_test());
+    CHECK(second && second->path == r.ed.paper_rel_for_test(name));
+    CHECK(r.ed.paper_thumb_for_test(r.ed.paper_rel_for_test(name)) != nullptr);
+    /* Rename: this board in memory, the other in its file. */
+    r.ed.command("paper rename Round325 Renamed");
+    const std::string rel = r.ed.paper_rel_for_test("Round325 Renamed");
+    CHECK(first_paper(r.ed.board_for_test()) && first_paper(r.ed.board_for_test())->path == rel);
+    r.ed.command("board open " + one);
+    const BoardItem *first = first_paper(r.ed.board_for_test());
+    std::printf("    board One names %s\n", first ? first->path.c_str() : "nothing");
+    CHECK(first && first->path == rel && first->kind == BoardItem::Paper);
+    /* Duplicate and delete the board. */
+    r.ed.command("board copy");
+    CHECK(r.ed.board_for_test().name == one + " copy" && first_paper(r.ed.board_for_test()));
+    r.ed.command("board trash");
+    CHECK(r.ed.board_for_test().name != one + " copy");
+    for (const std::string &n : std::vector<std::string>{one, two}) {
+      r.ed.command("board open " + n);
+      r.ed.command("board trash");
+    }
+    r.ed.command("paper open Round325 Renamed");
+    r.ed.command("paper delete");
+  });
+}
+
+/* Round 326 (task 0306): a board exported as a PNG, a JPEG or a PDF. */
+void tests_round326() {
+  test("board export: two images as a PNG of the asked size with each image's colour in its place; the selection only; a transparent PNG; a JPEG that decodes; a one-page PDF whose xref points at its objects and whose picture decodes; Export... in the Boards menu (time printed)", [] {
+    BoardRig r;
+    const std::string dir = fs::join(r.assets(), "Textures/Round326");
+    const std::string red = write_test_png(dir, "red.png", 64, 32, 0xFFFF0000, 0xFFFF0000);
+    const std::string blue = write_test_png(dir, "blue.png", 64, 32, 0xFF0000FF, 0xFF0000FF);
+    r.ed.command("board add " + red + " 0 0");
+    r.ed.command("board add " + blue + " 200 0");
+    r.settle();
+    const std::string out = fs::join(fs::temp_dir(), "blendity_round326");
+    fs::make_dirs(out);
+    /* PNG, the whole board, 1000 px wide, no margin. */
+    const std::string png = fs::join(out, "board.png");
+    fs::remove_file(png);
+    const double t0 = now_seconds();
+    r.ed.command("board export " + png + " size 1000 bg white");
+    r.ed.board_export_wait_for_test();
+    const double t1 = now_seconds();
+    Bitmap b;
+    std::string err;
+    CHECK(load_image(png, b, err));
+    std::printf("    the PNG %d x %d in %.1f ms\n", b.width, b.height, (t1 - t0) * 1000.0);
+    CHECK(b.width == 1000 && b.height > 100 && b.height < 300);
+    auto px = [&](const Bitmap &bm, float fx, float fy) {
+      const int x = (int)(fx * bm.width), y = (int)(fy * bm.height);
+      const uint8_t *p = &bm.rgba8[((size_t)y * bm.width + x) * 4];
+      return std::array<int, 4>{p[0], p[1], p[2], p[3]};
+    };
+    /* The red image's middle is on the left, the blue one's on the right. */
+    const auto l = px(b, 0.12f, 0.5f), rr = px(b, 0.88f, 0.5f);
+    std::printf("    left %d %d %d, right %d %d %d\n", l[0], l[1], l[2], rr[0], rr[1], rr[2]);
+    CHECK(l[0] > 200 && l[2] < 60 && rr[2] > 200 && rr[0] < 60);
+    /* The selection only (the blue one), transparent around it. */
+    r.ed.command("board select none");
+    r.ed.command("board select 1");
+    const std::string sel = fs::join(out, "sel.png");
+    r.ed.command("board export " + sel + " size 256 selection bg none");
+    r.ed.board_export_wait_for_test();
+    Bitmap s;
+    CHECK(load_image(sel, s, err) && s.width == 256);
+    const auto mid = px(s, 0.5f, 0.5f), corner = px(s, 0.01f, 0.02f);
+    std::printf("    the selection: middle %d %d %d %d, corner alpha %d\n", mid[0], mid[1], mid[2], mid[3], corner[3]);
+    CHECK(mid[2] > 200 && mid[0] < 60 && corner[3] == 0);
+    /* JPEG. */
+    const std::string jpg = fs::join(out, "board.jpg");
+    r.ed.command("board export " + jpg + " size 512");
+    r.ed.board_export_wait_for_test();
+    Bitmap j;
+    CHECK(load_image(jpg, j, err) && j.width == 512);
+    const auto jl = px(j, 0.12f, 0.5f);
+    CHECK(jl[0] > 180 && jl[2] < 80);
+    /* PDF: the header, an xref whose offsets start objects, and the picture's JPEG decoding. */
+    const std::string pdf = fs::join(out, "board.pdf");
+    r.ed.command("board export " + pdf + " size 512");
+    r.ed.board_export_wait_for_test();
+    std::string text;
+    CHECK(fs::read_file(pdf, text) && text.compare(0, 8, "%PDF-1.4") == 0);
+    const size_t sx = text.rfind("startxref\n");
+    const size_t xref = sx == std::string::npos ? 0 : (size_t)std::atoll(text.c_str() + sx + 10);
+    CHECK(xref > 0 && text.compare(xref, 4, "xref") == 0);
+    int objects_ok = 0;
+    for (int k = 1; k <= 5; k++) {
+      const size_t e = xref + 5 + 4 + 20 * (size_t)k;  // ("xref\n" "0 6\n" then 20-byte entries, the 0th the free one)
+      const size_t at = e + 1 < text.size() ? (size_t)std::atoll(text.c_str() + e) : 0;
+      objects_ok += at > 0 && text.compare(at, std::to_string(k).size() + 6, std::to_string(k) + " 0 obj") == 0;
+    }
+    const size_t js = text.find("\xFF\xD8"), je = text.find("\xFF\xD9", js);
+    Bitmap pj;
+    const bool jpeg_ok = js != std::string::npos && je != std::string::npos && decode_image(text.substr(js, je + 2 - js), pj, err) && pj.width == 512;
+    std::printf("    the PDF: %zu bytes, %d of 5 objects where the xref says, its picture %s\n", text.size(), objects_ok, jpeg_ok ? "decodes" : "DOESN'T decode");
+    CHECK(objects_ok == 5 && jpeg_ok);
+    /* Export... is in the Boards menu and opens its settings. */
+    /* Export... in the Boards menu: a panel whose settings stay open while chosen (review 326). */
+    CHECK(r.click("board:Boards") && r.click("menu:Export..."));
+    r.step();
+    CHECK(r.click("export:Format") && r.click("menu:PDF"));
+    Recti still;
+    CHECK(r.ed.button_rect_for_test("export:Size", still) && r.click("export:Size") && r.click("menu:2048 px"));
+    r.step();
+    CHECK(r.ed.button_rect_for_test("export:Export", still));
+    for (const char *f : {"board.png", "sel.png", "board.jpg", "board.pdf"}) fs::remove_file(fs::join(out, f));
+    for (const char *f : {"red.png", "blue.png"}) fs::remove_file(fs::join(dir, f));
+  });
+  test("board export (review 326): an image larger than the board's 2048 px copy is read again at full size - 1 px stripes stay red and blue, not the copy's purple - and the editor isn't stopped while it is written", [] {
+    BoardRig r;
+    const std::string dir = fs::join(r.assets(), "Textures/Round326");
+    fs::make_dirs(dir);
+    const int w = 3000, h = 60;
+    std::vector<uint32_t> px((size_t)w * h);
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) px[(size_t)y * w + x] = (x / 2) % 2 ? 0xFF0000FFu : 0xFFFF0000u;  // (2 px stripes)
+    const std::string stripes = fs::join(dir, "stripes.png");
+    fs::write_file(stripes, encode_png(px.data(), w, h, w, false));
+    r.ed.command("board add " + stripes + " 0 0");
+    r.settle();
+    const std::string out = fs::join(fs::join(fs::temp_dir(), "blendity_round326"), "stripes.png");
+    r.ed.command("board export " + out + " size 3240");  // (the image ~3000 px across: past its 2048 px copy)
+    const bool started = r.ed.board_for_test().items.size() == 1;
+    r.step();  // (a frame while it loads and writes: the editor goes on)
+    r.ed.board_export_wait_for_test();
+    Bitmap b;
+    std::string err;
+    CHECK(started && load_image(out, b, err));
+    int pure = 0, n = 0;
+    const int y = b.height / 2;
+    for (int x = b.width / 4; x < b.width * 3 / 4; x++, n++) {
+      const uint8_t *p = &b.rgba8[((size_t)y * b.width + x) * 4];
+      pure += (p[0] > 200 && p[2] < 60) || (p[2] > 200 && p[0] < 60);
+    }
+    std::printf("    %d x %d: %d of %d pixels across the middle pure red or blue\n", b.width, b.height, pure, n);
+    CHECK(b.width == 3240 && pure * 2 > n);
+    fs::remove_file(out);
+    fs::remove_file(stripes);
+  });
+}
+
 }  // namespace
 
 void run_board_tests() {
   tests_round322();
   tests_round322_review();
   tests_round322_review2();
+  tests_round325();
+  tests_round326();
 }

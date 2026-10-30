@@ -57,7 +57,7 @@ int blend_index(const std::string &name) {
 /* Whether the layer shows: visible, its group visible, and - with a layer solo'd - that layer, its group, or a
  * child of it. */
 bool Editor::sketch_layer_shown(int i) const {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   if (!s.layer_shown(i)) return false;
   if (i < 0 || (size_t)i >= s.layers.size()) return true;
   if (sketch_solo_ < 0 || (size_t)sketch_solo_ >= s.layers.size() || sketch_solo_ == i) return true;
@@ -68,7 +68,7 @@ bool Editor::sketch_layer_shown(int i) const {
 /* A locked, hidden or solo'd-out layer (or a group) takes no stroke and keeps the ones it has from the eraser; `say`
  * logs why. */
 bool Editor::sketch_layer_takes_strokes(int i, bool say) {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   if (i < 0 || (size_t)i >= s.layers.size()) return true;
   const SketchLayer &l = s.layers[(size_t)i];
   const bool ok = !l.locked && !l.is_group && sketch_layer_shown(i);
@@ -78,7 +78,7 @@ bool Editor::sketch_layer_takes_strokes(int i, bool say) {
 
 /* The layers bottom to top, each with its own strokes (bucketed once); a stroke whose layer is gone draws as it is. */
 void Editor::sketch_draw_layers(const Recti &view) {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   std::vector<std::vector<size_t>> by_layer(s.layers.size());
   for (size_t k = 0; k < s.strokes.size(); k++) {
     const int l = s.strokes[k].layer;
@@ -97,7 +97,7 @@ void Editor::sketch_draw_layers(const Recti &view) {
 /* One layer's strokes: straight to the frame when simple and not in a group, else into a transparent picture put
  * over the target by the layer's opacity and blend. The picture-plane fade (task 0226) is each stroke's alpha. */
 void Editor::sketch_draw_layer(int i, const std::vector<size_t> &strokes, const Recti &view, bool in_group) {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const SketchLayer &l = s.layers[(size_t)i];
   if (strokes.empty() || l.opacity <= 0.0f) return;
   const bool direct = !in_group && layer_simple(l);
@@ -120,7 +120,7 @@ void Editor::sketch_draw_layer(int i, const std::vector<size_t> &strokes, const 
 /* A group: its children composited into the group's transparent picture, then that picture put over the frame by
  * the group's opacity and blend. */
 void Editor::sketch_draw_group(int i, const std::vector<std::vector<size_t>> &by_layer, const Recti &view) {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const SketchLayer &g = s.layers[(size_t)i];
   Image &gc = sketch_comp_[1];
   sketch_composite_clear(gc, view);
@@ -178,7 +178,7 @@ void Editor::draw_layers_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
   if (u.hovered(r) && in.pressed[0]) focused_ = WindowKind::Layers;
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   if (s.layers.empty()) s.layers.push_back(SketchLayer{});
   const int rh = u.row_h() + u.px(10), bh = u.row_h() + u.px(6);
   const Recti footer{r.x, r.bottom() - 2 * bh - u.px(4), r.w, 2 * bh + u.px(4)};
@@ -223,7 +223,7 @@ void Editor::draw_layers_window(const Recti &r) {
 /* A row dragged from display slot `from` to display slot `to` (the slots as drawn, top first; `to` already counts the
  * row taken out): the layer lands right above the row now under it, at the bottom when none; its group stays. */
 void Editor::layers_drop(int from, int to) {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   if (from < 0 || (size_t)from >= layers_shown_.size()) return;
   std::vector<int> order = layers_shown_;
   const int layer = order[(size_t)from];
@@ -237,7 +237,7 @@ void Editor::layers_drop(int from, int to) {
   if (target == layer) return;  // (dropped where it was: no step; move_layer's `to` is the index after the removal)
   s.move_layer(layer, target);
   sketch_solo_ = -1;
-  mark_changed("Move Sketch Layer");
+  sketch_changed("Move Sketch Layer");
 }
 
 /* One row: the eye (Alt-click solos; an accent when solo'd), the lock, the thumbnail or a group's folder, the name
@@ -245,7 +245,7 @@ void Editor::layers_drop(int from, int to) {
 void Editor::draw_layer_row(int i, const Recti &row, bool child) {
   auto &u = ui_;
   auto &in = u.in;
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   SketchLayer &l = s.layers[(size_t)i];
   const bool active = i == s.active_layer;
   if (active) u.canvas.fill_rect(row, u.theme.selection);
@@ -277,10 +277,10 @@ void Editor::draw_layer_row(int i, const Recti &row, bool child) {
     u.tooltip("Opacity: the layer's strokes mixed in by this much, together (two overlapping strokes stay one tone).");
     x += slider_w + u.px(4);
   }
-  if (layers_opacity_dirty_ && !in.down[0]) layers_opacity_dirty_ = false, mark_changed("Sketch Layer Opacity");  // (once the slider is let go)
+  if (layers_opacity_dirty_ && !in.down[0]) layers_opacity_dirty_ = false, sketch_changed("Sketch Layer Opacity");  // (once the slider is let go)
   if (!wide) return;
   int blend = std::max(0, std::min(3, l.blend));
-  if (u.combo(u.id(("layer_blend" + std::to_string(i)).c_str()), {x, top, combo_w, a}, blend, kBlendNames, 4)) l.blend = blend, mark_changed("Sketch Layer Blend");
+  if (u.combo(u.id(("layer_blend" + std::to_string(i)).c_str()), {x, top, combo_w, a}, blend, kBlendNames, 4)) l.blend = blend, sketch_changed("Sketch Layer Blend");
   u.tooltip("How the layer's color meets what is under it: Multiply darkens, Screen lightens, Overlay does both.");
 }
 
@@ -289,7 +289,7 @@ void Editor::draw_layer_row(int i, const Recti &row, bool child) {
 void Editor::draw_layer_name(int i, const Recti &name, const Recti &thumb, int top, int a) {
   auto &u = ui_;
   auto &in = u.in;
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   SketchLayer &l = s.layers[(size_t)i];
   const bool active = i == s.active_layer;
   if (layers_rename_ == i) {
@@ -297,7 +297,7 @@ void Editor::draw_layer_name(int i, const Recti &name, const Recti &thumb, int t
     u.text_field(u.id(("layer_name" + std::to_string(i)).c_str()), {name.x, top, name.w, a}, layers_rename_text_, &committed);
     if (in.key_pressed[platform::KEY_ESCAPE]) layers_rename_ = -1, in.key_pressed[platform::KEY_ESCAPE] = false;
     if (!committed) return;
-    if (!layers_rename_text_.empty() && layers_rename_text_ != l.name) l.name = layers_rename_text_, mark_changed("Rename Sketch Layer");
+    if (!layers_rename_text_.empty() && layers_rename_text_ != l.name) l.name = layers_rename_text_, sketch_changed("Rename Sketch Layer");
     layers_rename_ = -1;
     return;
   }
@@ -311,7 +311,7 @@ void Editor::draw_layer_name(int i, const Recti &name, const Recti &thumb, int t
   if (u.hovered(name) && in.pressed[1]) s.active_layer = i, u.open_popup(menu, {in.mx, in.my, 1, 1});
   u.popup(menu, u.px(170), [this, i] {  // (the body runs at the frame's end: the stack may have changed by then)
     auto &uu = ui_;
-    const Sketch &sk = scene_->sketch;
+    const Sketch &sk = sketch_doc();
     if (i < 0 || (size_t)i >= sk.layers.size()) return;
     const bool is_group = sk.layers[(size_t)i].is_group, locked = sk.layers[(size_t)i].locked;  // (copied: an item below may reshape the stack)
     if (uu.menu_item("Rename")) layers_rename_ = i, layers_rename_text_ = sk.layers[(size_t)i].name;
@@ -327,7 +327,7 @@ void Editor::draw_layer_name(int i, const Recti &name, const Recti &thumb, int t
 /* The layer's picture-plane strokes small (a scene canvas stroke has no picture here). */
 void Editor::draw_layer_thumb(int i, const Recti &box) {
   auto &u = ui_;
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   u.canvas.fill_rect(box, u.theme.strip);
   u.canvas.rect_outline(box, u.theme.border);
   u.canvas.push_clip(box);
@@ -350,7 +350,7 @@ void Editor::draw_layer_thumb(int i, const Recti &box) {
 /* sketch layer add|group [name] | duplicate | merge | flatten | delete | move <from> <to> | rename <name> |
  * lock|unlock|lock toggle | toggle | solo|unsolo | blend normal|multiply|screen|overlay | <n> */
 void Editor::sketch_layer_command(const std::vector<std::string> &t, const std::string &line) {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   if (s.layers.empty()) s.layers.push_back(SketchLayer{});
   const std::string w = t.size() > 2 ? to_lower(t[2]) : "";
   auto rest = [&](const char *verb) {  // (the words after the verb: a name may hold spaces)
@@ -364,23 +364,23 @@ void Editor::sketch_layer_command(const std::vector<std::string> &t, const std::
     l.group = s.layer_at(s.active_layer).group;  // (beside the active one)
     s.layers.push_back(l);
     s.active_layer = (int)s.layers.size() - 1;
-    mark_changed("Add Sketch Layer");
+    sketch_changed("Add Sketch Layer");
   }
   else if (w == "group") {
     s.add_group(rest("group "), s.active_layer);
     sketch_solo_ = -1;
-    mark_changed("Group Sketch Layer");
+    sketch_changed("Group Sketch Layer");
   }
   else if (w == "move" && t.size() > 4) {
     const int from = std::atoi(t[3].c_str()), to = std::atoi(t[4].c_str());
     if (from == to) return;
     s.move_layer(from, to);
     sketch_solo_ = -1;
-    mark_changed("Move Sketch Layer");
+    sketch_changed("Move Sketch Layer");
   }
   else if (w == "rename") {
     const std::string name = rest("rename ");
-    if (!name.empty()) s.layer_at(s.active_layer).name = name, mark_changed("Rename Sketch Layer");
+    if (!name.empty()) s.layer_at(s.active_layer).name = name, sketch_changed("Rename Sketch Layer");
   }
   else if (w == "blend") {
     const int b = blend_index(t.size() > 3 ? t[3] : "normal");
@@ -389,7 +389,7 @@ void Editor::sketch_layer_command(const std::vector<std::string> &t, const std::
       return;
     }
     s.layer_at(s.active_layer).blend = b;
-    mark_changed("Sketch Layer Blend");
+    sketch_changed("Sketch Layer Blend");
   }
   else if (w == "lock" || w == "unlock" || w == "toggle" || w == "solo" || w == "unsolo" || w == "duplicate" || w == "merge" || w == "flatten" || w == "delete")
     sketch_layer_op(w == "lock" && t.size() > 3 && to_lower(t[3]) == "toggle" ? "lock toggle" : w, s.active_layer);
@@ -401,7 +401,7 @@ void Editor::sketch_layer_command(const std::vector<std::string> &t, const std::
 /* One operation on layer i (the panel's buttons and menu, the Wheel, the console), each an undo step; one that
  * reshapes the stack drops the solo (an index into the old stack). */
 void Editor::sketch_layer_op(const std::string &op, int i) {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   if (i < 0 || (size_t)i >= s.layers.size()) return;
   SketchLayer &l = s.layers[(size_t)i];
   if (op == "add") {
@@ -411,7 +411,7 @@ void Editor::sketch_layer_op(const std::string &op, int i) {
   if (op == "group") {
     s.add_group("", i);
     sketch_solo_ = -1;
-    mark_changed("Group Sketch Layer");
+    sketch_changed("Group Sketch Layer");
   }
   else if (op == "duplicate") {
     if (s.duplicate_layer(i) < 0) {
@@ -419,7 +419,7 @@ void Editor::sketch_layer_op(const std::string &op, int i) {
       return;
     }
     sketch_solo_ = -1;
-    mark_changed("Duplicate Sketch Layer");
+    sketch_changed("Duplicate Sketch Layer");
   }
   else if (op == "merge") {
     if (!s.merge_down(i)) {
@@ -427,25 +427,25 @@ void Editor::sketch_layer_op(const std::string &op, int i) {
       return;
     }
     sketch_solo_ = -1;
-    mark_changed("Merge Sketch Layer Down");
+    sketch_changed("Merge Sketch Layer Down");
   }
   else if (op == "flatten") {
     s.flatten();
     sketch_solo_ = -1;
-    mark_changed("Flatten Sketch");
+    sketch_changed("Flatten Sketch");
   }
   else if (op == "delete") {
     s.remove_layer(i);
     sketch_solo_ = -1;
-    mark_changed("Delete Sketch Layer");
+    sketch_changed("Delete Sketch Layer");
   }
   else if (op == "lock" || op == "unlock" || op == "lock toggle") {
     l.locked = op == "lock toggle" ? !l.locked : op == "lock";
-    mark_changed(l.locked ? "Lock Sketch Layer" : "Unlock Sketch Layer");
+    sketch_changed(l.locked ? "Lock Sketch Layer" : "Unlock Sketch Layer");
   }
   else if (op == "toggle") {
     l.visible = !l.visible;
-    mark_changed(l.visible ? "Show Sketch Layer" : "Hide Sketch Layer");
+    sketch_changed(l.visible ? "Show Sketch Layer" : "Hide Sketch Layer");
   }
   else if (op == "solo") sketch_solo_ = i;
   else if (op == "unsolo") sketch_solo_ = -1;
