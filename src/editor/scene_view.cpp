@@ -149,8 +149,10 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
-  sketch_bind_scene(view, scene_hovered_);  // (task 0233: the camera may have moved since the update)
-  sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
+  if (sketch_in_world()) {  // (round 324: not while the Draw tab draws on Paper)
+    sketch_bind_scene(view, scene_hovered_);  // (task 0233: the camera may have moved since the update)
+    sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
+  }
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
   sculpt_draw(view);  // (task 0236)
@@ -242,8 +244,8 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
  * Push/Pull, the modal and transform operators, the focus pick, the auto-rig, the Knife, the Draw tools). True when one
  * of them owns the mouse this frame. */
 bool Editor::scene_tool_updates(const Recti &view, bool busy) {
-  sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
-  if (sketch_update(view)) busy = true;
+  if (sketch_in_world()) sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
+  if (sketch_in_world() && sketch_update(view)) busy = true;
   if (bone_handles_update(view)) busy = true;
   if (trail_update(view)) busy = true;           // (task 0282: a trail's key dot, before the handles it hands over to)
   if (puppet_handles_update(view)) busy = true;  // (task 0281: before the gizmo - a handle is the puppet's string)
@@ -2697,7 +2699,7 @@ void Editor::draw_game_view(const Recti &r) {
   }
   /* Task 0233: the sketch tool in the Game view - the pen draws in the game camera's perspective (Play stopped or
    * paused: a running game takes the keys and the clicks). */
-  if (sketch_.active && !playing_) {
+  if (sketch_.active && !playing_ && sketch_in_world()) {
     sketch_bind_game(img, *cam, *owner, v, p, u.hovered(img) && !u.any_popup_open());
     sketch_update(img);
     sketch_draw(img);

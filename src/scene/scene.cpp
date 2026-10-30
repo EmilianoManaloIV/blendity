@@ -58,6 +58,67 @@ template<class T> static void reg(const char *category, const char *help, const 
   register_component({T::kName, category, help, blender, [] { return std::make_unique<T>(); }});
 }
 
+/* ---- round 329: ramps and curves as text (the shortest text that reads back exactly: append_float) ---- */
+
+namespace {
+constexpr size_t kRampMax = 32;  // (the stops or points a ramp or curve keeps; the widgets add no more)
+size_t next_item(const std::string &s, size_t at) {
+  const size_t a = s.find(';', at), b = s.find(',', at);
+  return std::min(a == std::string::npos ? s.size() : a, b == std::string::npos ? s.size() : b);
+}
+}  // namespace
+
+std::string ramp_to_text(const std::vector<RampStop> &stops) {
+  std::string s;
+  for (const RampStop &r : stops) {
+    if (!s.empty()) s += "; ";
+    for (float v : {r.pos, r.color.x, r.color.y, r.color.z}) append_float(s, v), s += ' ';
+    s.pop_back();
+  }
+  return s;
+}
+
+bool ramp_from_text(const std::string &s, std::vector<RampStop> &stops) {
+  std::vector<RampStop> out;
+  size_t at = 0;
+  while (at < s.size()) {
+    const size_t end = next_item(s, at);
+    RampStop r;
+    float p, x, y, z;
+    if (std::sscanf(s.substr(at, end - at).c_str(), "%f %f %f %f", &p, &x, &y, &z) == 4 && std::isfinite(p + x + y + z))
+      r.pos = std::max(0.0f, std::min(1.0f, p)), r.color = {std::max(0.0f, x), std::max(0.0f, y), std::max(0.0f, z)}, out.push_back(r);
+    at = end + 1;
+  }
+  if (out.size() > kRampMax) out.resize(kRampMax);
+  std::stable_sort(out.begin(), out.end(), [](const RampStop &a, const RampStop &b) { return a.pos < b.pos; });
+  stops = out;
+  return true;
+}
+
+std::string curve_to_text(const std::vector<Vec2> &pts) {
+  std::string s;
+  for (const Vec2 &p : pts) {
+    if (!s.empty()) s += "; ";
+    append_float(s, p.x), s += ' ', append_float(s, p.y);
+  }
+  return s;
+}
+
+bool curve_from_text(const std::string &s, std::vector<Vec2> &pts) {
+  std::vector<Vec2> out;
+  size_t at = 0;
+  while (at < s.size()) {
+    const size_t end = next_item(s, at);
+    float x, y;
+    if (std::sscanf(s.substr(at, end - at).c_str(), "%f %f", &x, &y) == 2 && std::isfinite(x + y)) out.push_back({std::max(0.0f, std::min(1.0f, x)), std::max(0.0f, std::min(1.0f, y))});
+    at = end + 1;
+  }
+  if (out.size() > kRampMax) out.resize(kRampMax);
+  std::stable_sort(out.begin(), out.end(), [](const Vec2 &a, const Vec2 &b) { return a.x < b.x; });
+  pts = out;
+  return true;
+}
+
 /* Component names may have spaces, but no word of a name may start with a digit: scene files
  * write "component <name> <flags...>" and the loader takes words up to the first number. */
 void register_builtin_components() {
@@ -142,6 +203,10 @@ void register_builtin_components() {
                "Toon outlines: a shell around the object in one color, so it has a line round its silhouette (the inverted "
                "hull). Pair it with a Toon material.",
                "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
+  reg<CameraFlatten>("Rendering",
+                     "The 2D look: the object's depth squashed toward the camera about a pivot (the body, the head), so it "
+                     "draws as its shape seen head-on - in the Game view and renders; its shading stays as modelled.",
+                     "Guilty Gear Xrd's flattened models (a mesh scaled along the view by a driver)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Wind>("Scripts", "A wind along this object's forward (or away from it): spring chains - hair, cloth, tails - move in it (task 0153).", "Blender's Wind force field");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
@@ -1293,6 +1358,24 @@ void MangaEffect::contribute(FilterStack &s) const {
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }
+
+void CameraFlatten::reflect(Reflector &r) {
+  r.field("Amount", amount, 0.01f, 0.0f, 1.0f);
+  r.help("How much of the depth along the view goes: 0 as modelled, 1 flat as a card (2 % kept). The Scene view shows\n"
+         "the true shape; the Game view and renders the flattened one, shaded as the true one.");
+  static const char *kPivots[] = {"Bounds Center", "Object Origin", "Bone"};
+  r.enumeration("Pivot", pivot, kPivots, 3);
+  r.help("What stays put while the depth squashes: the middle of this object and the meshes below it, its origin, or a\n"
+         "bone (the head, so the face keeps its place).");
+  r.text("Pivot Bone", bone);
+  r.help("With Pivot Bone: the bone's name, below this object (Head, head...).");
+  static const char *kDirs[] = {"Toward the Camera", "View Axis"};
+  r.enumeration("Direction", direction, kDirs, 2);
+  r.help("Toward the Camera: along the line from the camera to the pivot. View Axis: along the view's forward (an\n"
+         "orthographic camera uses it always).");
+  r.field("Children", children);
+  r.help("The meshes below this object flatten too; one with a Camera Flatten of its own uses that instead.");
+}
 
 void Outline::reflect(Reflector &r) {
   r.field("Thickness", thickness, 0.001f, 0.0f, 10.0f);

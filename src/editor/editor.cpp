@@ -388,6 +388,8 @@ int Editor::run() {
 }
 
 void Editor::request_close() {
+  if (board_dirty_) board_save();  // (task 0299: a change in the last second is kept)
+  if (paper_dirty_) paper_save();  // (round 324)
   if (playing_) exit_play();  // (task 0254: first, so the auto-save runs on the scene Play restores - the edits made before Play - not on Play's discarded state)
   if (scene_dirty_) {
     std::string path = scene_->path.empty() ? fs::join(assets_dir_, "Scenes/" + scene_->name + ".scene") : scene_->path;
@@ -687,6 +689,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (pointer_window_ == active_window_) update_asset_drag();  // (a drag belongs to the window it started in: task 0187)
   handle_drop();
   handle_shortcuts();
+  board_frame_tick();  // (task 0299: pictures landed, and the board saved a second after a change, shown or not)
+  paper_frame_tick();  // (round 324: the paper saved a second after a change)
 
   update_tab_drag();
 
@@ -1418,6 +1422,10 @@ void Editor::draw_statusbar_log(const Recti &r) {
 
 void Editor::handle_drop() {
   if (ui_.in.dropped.empty()) return;
+  if (board_has_point(ui_.in.drop_x, ui_.in.drop_y)) {  // (task 0299: dropped on the board - its images placed there, in a row; the rest named)
+    board_add_images(ui_.in.dropped, board_from_screen({(float)ui_.in.drop_x, (float)ui_.in.drop_y}));
+    return;
+  }
   for (const std::string &path : ui_.in.dropped) {
     std::string ext = fs::extension(path);
     std::string name = fs::filename(path);
@@ -1611,7 +1619,8 @@ void Editor::dock_draw(DockNode *n) {
   if (u.hovered(content) && (u.in.pressed[0] || u.in.pressed[1] || u.in.pressed[2])) focused_ = n->tabs[n->active];
   window_rects_[n->tabs[n->active]] = content;
   /* The Scene and Game views paint every pixel of their content themselves. */
-  if (n->tabs[n->active] != WindowKind::Scene && n->tabs[n->active] != WindowKind::Game && n->tabs[n->active] != WindowKind::Draw)
+  if (n->tabs[n->active] != WindowKind::Scene && n->tabs[n->active] != WindowKind::Game && n->tabs[n->active] != WindowKind::Draw &&
+      n->tabs[n->active] != WindowKind::Board)
     u.canvas.fill_rect(content, u.theme.panel);
   u.canvas.push_clip(content);
   dock_draw_window(n->tabs[n->active], content);
@@ -1642,6 +1651,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Draw: draw_draw_window(r); break;  // (task 0233)
     case WindowKind::Layers: draw_layers_window(r); break;  // (task 0234)
     case WindowKind::History: draw_history_window(r); break;  // (task 0254)
+    case WindowKind::Board: draw_board_window(r); break;  // (task 0299)
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -2388,6 +2398,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
 }
 
 bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name, int outer, const std::string &which) {
+  if (op != "reset" && texture_upto_.first == asset) texture_upto_ = {"", -1};  // (round 332's review: the layers moved under the preview's cut)
   ProceduralTexturePtr pt = texture_asset(asset);
   if (!pt) return false;
   /* The list worked: the stack, or a layer's mask stack / group children (task 0244). */
@@ -3135,7 +3146,7 @@ void Editor::draw_sketch_pen_menu() {
   });
   u.tooltip("Steadiness (a lazy rope): the line trails the pen by this much, so a shaky hand draws a smooth line.");
   u.submenu("Canvas", u.px(240), [this] {
-    Sketch &s = scene_->sketch;
+    Sketch &s = sketch_doc();
     if (ui_.menu_item("The View (the picture plane)", nullptr, s.active_canvas == 0)) sketch_canvas_command({"sketchcanvas", "view"}, "");
     if (ui_.menu_item("The Ground")) sketch_canvas_command({"sketchcanvas", "ground"}, "");
     for (const char *ax : {"X", "Y", "Z"})
@@ -3175,11 +3186,11 @@ void Editor::draw_sketch_guides_items() {
   ui_.menu_separator();
   static const char *const kPersp[] = {"No Perspective", "1-Point Perspective", "2-Point Perspective", "3-Point Perspective"};
   for (int k = 0; k < 4; k++)
-    if (ui_.menu_item(kPersp[k], nullptr, scene_->sketch.perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
+    if (ui_.menu_item(kPersp[k], nullptr, sketch_doc().perspective == k)) sketch_command({"sketchguide", "perspective", k ? std::to_string(k) : "off"}, "");
   ui_.menu_separator();
   if (ui_.menu_item("Snap to Guides", nullptr, sketch_.snap)) sketch_.snap = !sketch_.snap;
-  if (ui_.menu_item("Perspective Follows the Camera", nullptr, scene_->sketch.follow_camera))  // (task 0286)
-    sketch_command({"sketchguide", "follow", scene_->sketch.follow_camera ? "off" : "on"}, "");
+  if (ui_.menu_item("Perspective Follows the Camera", nullptr, sketch_doc().follow_camera))  // (task 0286)
+    sketch_command({"sketchguide", "follow", sketch_doc().follow_camera ? "off" : "on"}, "");
   ui_.tooltip("The perspective guide and the camera as one: turning the view moves the vanishing points, dragging a point turns the view.");
 }
 

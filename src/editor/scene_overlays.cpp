@@ -98,7 +98,7 @@ const char *const kToolNames[] = {"View", "Move", "Rotate", "Scale", "Transform"
 /* The mode the Scene view is in, as the breadcrumb and the hints name it. */
 std::string Editor::mode_name() const {
   if (sculpt_) return "Sculpt";  // (task 0236)
-  if (sketch_.active) return "Sketch";
+  if (sketch_.active && sketch_in_world()) return "Sketch";
   if (weight_paint_) return "Weight Paint";
   if (edit_mode_) return "Edit";
   return "Object";

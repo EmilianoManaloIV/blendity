@@ -33,9 +33,67 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
   return false;
 }
 
+/* Round 334: the camera a view flattens toward - its eye and forward, and whether it is orthographic. */
+void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye) {
+  flatten_view_.on = true;
+  flatten_view_.eye = eye;
+  const Vec3 f = view.inverse().dir({0, 0, 1});
+  const float len = length(f);
+  flatten_view_.forward = finite_bits(len) && len > 1e-6f ? f / len : Vec3(0, 0, 1);
+  flatten_view_.ortho = proj.m[15] == 1.0f;
+}
+
+/* The pivot of a Camera Flatten: the middle of its object's and the meshes' below it bounds, its origin, or a bone
+ * below it by name (else the bounds' middle). */
+Vec3 Editor::camera_flatten_pivot(const GameObject &owner, const CameraFlatten &cf) {
+  const auto it = flatten_pivots_.find(owner.id);
+  if (it != flatten_pivots_.end()) return it->second;
+  Vec3 p = owner.world_position();
+  const GameObject *bone = nullptr;
+  AABB b;
+  std::function<void(const GameObject &)> walk = [&](const GameObject &o) {
+    if (o.get<MeshFilter>()) b.add(o.world_bounds());
+    if (!bone && o.get<Bone>() && o.name == cf.bone) bone = &o;
+    for (const GameObject *c : o.children) walk(*c);
+  };
+  walk(owner);
+  if (cf.pivot == 2 && bone) p = bone->world_position();
+  else if (cf.pivot != 1 && b.valid()) p = b.center();
+  flatten_pivots_[owner.id] = p;
+  return p;
+}
+
+/* Round 334: the nearest Camera Flatten on the object or above it (one above only with Children on), applied to the
+ * item's placement - T(p) . S_d(keep) . T(-p) . model - the true one kept for shading. */
+void Editor::apply_camera_flatten(const GameObject &g, DrawItem &it) {
+  const GameObject *owner = nullptr;
+  const CameraFlatten *cf = nullptr;
+  if (!flatten_any_) return;  // (none in the scene: no walk up for each item)
+  for (const GameObject *o = &g; o && !cf; o = o->parent) {
+    const CameraFlatten *c = static_cast<const CameraFlatten *>(o->find_role(Component::RenderRole::CameraFlatten));
+    if (c && c->enabled && (o == &g || c->children)) cf = c, owner = o;
+  }
+  if (!cf) return;
+  const float amount = finite_bits(cf->amount) ? std::max(0.0f, std::min(1.0f, cf->amount)) : 0.0f;
+  const float keep = std::max(0.02f, 1.0f - amount);
+  if (keep >= 1.0f) return;
+  const Vec3 p = camera_flatten_pivot(*owner, *cf);
+  Vec3 d = cf->direction == 0 && !flatten_view_.ortho ? flatten_view_.eye - p : -flatten_view_.forward;
+  const float len = length(d);
+  if (!(len > 1e-6f)) d = -flatten_view_.forward;
+  else d = d / len;
+  it.shade_model = it.model;
+  it.flattened = true;
+  it.model = flatten_matrix(p, d, keep) * it.model;
+}
+
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   ProfileScope prof{prof_.ms_collect, {}};
   std::vector<DrawItem> items;
+  flatten_pivots_.clear();
+  flatten_any_ = false;
+  if (flatten_view_.on)
+    scene_->for_each([&](GameObject &g) { flatten_any_ = flatten_any_ || g.find_role(Component::RenderRole::CameraFlatten); });
   /* (Of what is shown: the preview's own staleness while there is one.) */
   lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
                    (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
@@ -51,6 +109,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
     DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
+    if (flatten_view_.on && !editing) apply_camera_flatten(g, it);  // (round 334: the Game view and renders only)
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
     if (!editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
     it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
@@ -62,7 +121,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const Component *oc = g.find_role(Component::RenderRole::Outline);
     if (!oc || !oc->enabled) return;
     const Outline &ol = *static_cast<const Outline *>(oc);
-    const float scale = world_scale_of(it.model);
+    const float scale = world_scale_of(it.flattened ? it.shade_model : it.model);  // (a flattened object's true size: the line's width)
     const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
     const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale, game ? 1 : 0) : 1.0f;
     DrawItem o;
@@ -94,7 +153,7 @@ bool Editor::outline_draw_item(const GameObject &g, const Mesh &m, const DrawIte
   const Component *oc = g.find_role(Component::RenderRole::Outline);
   if (!oc || !oc->enabled) return false;
   const Outline &ol = *static_cast<const Outline *>(oc);
-  const Mesh *shell = ol.shell(m, world_scale_of(it.model), slot, thickness_scale);
+  const Mesh *shell = ol.shell(m, world_scale_of(it.flattened ? it.shade_model : it.model), slot, thickness_scale);  // (a flattened object's true size: the same shell from any camera)
   if (!shell) return false;
   o = DrawItem();
   o.mesh = &shell->render_mesh();
@@ -227,10 +286,11 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   MeshRenderer *mr = nullptr;
   Light *l = nullptr;
   ProbeVolume *pv = nullptr;
-  Component *outline = nullptr;
+  Component *outline = nullptr, *flatten = nullptr;
   bool bone = false;
   for (auto &c : g.components) switch (c->render_role()) {
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
+      case Component::RenderRole::CameraFlatten: if (!flatten) flatten = c.get(); break;
       case Component::RenderRole::Bone: bone = true; break;
       case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
       case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
@@ -239,8 +299,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     }
   /* The hierarchy: a selected object's children get an outline of their own. */
   const uint64_t parent = g.parent ? g.parent->id : 0;
+  /* Camera Flatten (round 334): what the Game view and the previews draw - its fields and its tick; on a root without
+   * a mesh too, so the scene's hash moves for its children. */
+  const uint64_t flat_key = flatten ? hash_component(*flatten) ^ (uint64_t)flatten->enabled << 63 : 0;
   if (!mr && !l && !pv) {
     mix(&parent, 8);
+    mix(&flat_key, 8);
     if (bone) {  // (the Scene view draws bones: a pose that moves only them - no skin - is a new picture: task 0281)
       const Mat4 w = g.world_matrix();
       mix(w.m, sizeof(w.m));
@@ -303,6 +367,7 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     const uint64_t oh = hash_component(*outline) ^ (uint64_t)outline->enabled << 63;
     mix(&oh, 8);
   }
+  if (flatten) mix(&flat_key, 8);
   if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
     const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
     mix(&ph, 8);
@@ -518,8 +583,10 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
+  if (game) set_flatten_view(v, p, eye);  // (round 334: Camera Flatten in the Game view and renders, not the Scene view)
   std::vector<DrawItem> items = collect_items(game, true);
   outline_view_.on = false;
+  flatten_view_.on = false;
   /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
   const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
   const bool shadows = scene_lights && scene_->render.shadows;
@@ -849,7 +916,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
 static void build_pt(PathTracer &pt, Editor &, const std::vector<DrawItem> &items, const LightingEnv &env,
                      const Environment &world) {
   std::vector<PTObject> objs;
-  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials, it.id});
+  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model});
   pt.build(objs, env.lights, world);
 }
 
@@ -1144,7 +1211,9 @@ void Editor::start_final_render(bool preview, bool open_window) {
     return;
   }
   LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
+  set_flatten_view(v, p, eye);  // (round 334: Camera Flatten toward the render's camera)
   std::vector<DrawItem> items = collect_items(true, true);
+  flatten_view_.on = false;
   PTSettings ps = make_pt_settings(rs);
   if (cam) ps.exposure += cam->exposure_stops();
   pt_solid_background(ps, cam);
@@ -1571,7 +1640,8 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
       if (!it.realtime_lm || !it.mesh) continue;
       mix(lkey, &it.id, sizeof(it.id));
       mix(lkey, &it.mesh->serial, 8);
-      mix(lkey, it.model.m, sizeof(it.model.m));
+      const Mat4 &placed = it.flattened ? it.shade_model : it.model;  // (round 334: the true placement - the layout doesn't follow the camera)
+      mix(lkey, placed.m, sizeof(placed.m));
     }
     if (lkey != vgi.rtlm.layout_key) {
       std::vector<BakeObject> objs;
@@ -1584,7 +1654,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
         BakeObject o;
         o.id = it.id;
         o.mesh = std::shared_ptr<const Mesh>(std::shared_ptr<const Mesh>(), m);  // not owned: laid out now
-        o.model = it.model;
+        o.model = it.flattened ? it.shade_model : it.model;
         o.scale = mr->scale_in_lightmap;
         o.generate_uvs = mr->generate_lightmap_uvs;
         o.hash = scene_ident_;  // Entry::hash: which scene the chart belongs to
@@ -1795,7 +1865,9 @@ void Editor::draw_camera_preview(const Recti &view) {
     if (hash != cam_preview_pt_hash_) {
       cam_preview_pt_hash_ = hash;
       LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
+      set_flatten_view(v, p, eye);  // (round 334: Camera Flatten toward this camera)
       std::vector<DrawItem> items = collect_items(true, true);
+      flatten_view_.on = false;
       PTSettings ps = make_pt_settings(rs);
       ps.exposure += cam->exposure_stops();
       pt_solid_background(ps, cam);

@@ -276,6 +276,40 @@ struct ReadReflector : Reflector {
 
 }  // namespace
 
+/* A sketch's lines (task 0223), shared by the scene file and a paper's (round 324): its layers, the perspective guide,
+ * and each stroke's corrected points then the pen's own. */
+static void write_sketch_lines(Out &os, const Sketch &sk) {
+  for (const SketchLayer &l : sk.layers) {
+    os << "sketch_layer " << fmt(l.opacity) << " " << (l.visible ? 1 : 0) << " " << l.correct << " " << (l.name.empty() ? "Layer" : l.name) << "\n";  // (the name last: it may hold spaces)
+    if (l.has_view)
+      os << "sketch_layer_view " << fmt(l.view_yaw) << " " << fmt(l.view_pitch) << " " << fmt(l.view_fov) << " " << fmt(l.view_pivot.x) << " " << fmt(l.view_pivot.y) << " "
+         << fmt(l.view_pivot.z) << " " << fmt(l.view_dist) << "\n";
+    if (l.locked || l.blend != 0 || l.group >= 0 || l.is_group)  // (task 0234; an older build skips the line)
+      os << "sketch_layer_ext " << (l.locked ? 1 : 0) << " " << l.blend << " " << l.group << " " << (l.is_group ? 1 : 0) << "\n";
+  }
+  os << "sketch_active " << sk.active_layer << " " << sk.active_canvas << " " << (sk.follow_camera ? 1 : 0) << "\n";
+  if (sk.perspective > 0) {
+    os << "sketch_perspective " << sk.perspective;
+    for (int i = 0; i < 3; i++) os << " " << fmt(sk.vp[i].x) << " " << fmt(sk.vp[i].y);
+    os << " " << (sk.follow_camera ? 1 : 0) << "\n";
+  }
+  for (const SketchCanvas &c : sk.canvases)
+    os << "sketch_canvas " << c.id << " " << c.kind << " " << fmt(c.origin.x) << " " << fmt(c.origin.y) << " " << fmt(c.origin.z) << " " << fmt(c.u.x) << " "
+       << fmt(c.u.y) << " " << fmt(c.u.z) << " " << fmt(c.v.x) << " " << fmt(c.v.y) << " " << fmt(c.v.z) << " " << (c.name.empty() ? "Canvas" : c.name) << "\n";
+  for (const SketchCanvas &c : sk.canvases)
+    if (c.object) os << "sketch_canvas_face " << c.id << " " << c.object << " " << c.face << "\n";  // (task 0226: a face canvas's face)
+  for (const SketchStroke &st : sk.strokes) {
+    os << "sketch_stroke " << st.layer << " " << st.canvas << " " << (int)st.kind << " " << st.color << " " << fmt(st.width) << " " << (st.closed ? 1 : 0) << " "
+       << fmt(st.center.x) << " " << fmt(st.center.y) << " " << fmt(st.rx) << " " << fmt(st.ry) << " " << fmt(st.angle) << " " << fmt(st.start)
+       << " " << fmt(st.sweep) << " " << st.pts.size();
+    for (const SketchPoint &p : st.pts) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
+    os << " " << st.raw.size();
+    for (const SketchPoint &p : st.raw) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
+    os << " " << st.brush << " " << fmt(st.opacity) << " " << fmt(st.soft) << " " << st.pressure_to << " " << fmt(st.min_size);  // (task 0297)
+    os << "\n";
+  }
+}
+
 std::string save_scene_text(const Scene &scene) {
   Out os;
   os.s.reserve(1 << 16);
@@ -303,38 +337,7 @@ std::string save_scene_text(const Scene &scene) {
     os << "guide " << fmt(gl.p.x) << " " << fmt(gl.p.y) << " " << fmt(gl.p.z) << " " << fmt(gl.d.x) << " " << fmt(gl.d.y) << " " << fmt(gl.d.z)
        << "\n";
   /* The sketch (task 0223): its layers, the perspective guide, and each stroke's corrected points then the pen's own. */
-  const Sketch &sk = scene.sketch;
-  if (!sk.empty()) {
-    for (const SketchLayer &l : sk.layers) {
-      os << "sketch_layer " << fmt(l.opacity) << " " << (l.visible ? 1 : 0) << " " << l.correct << " " << (l.name.empty() ? "Layer" : l.name) << "\n";  // (the name last: it may hold spaces)
-      if (l.has_view)
-        os << "sketch_layer_view " << fmt(l.view_yaw) << " " << fmt(l.view_pitch) << " " << fmt(l.view_fov) << " " << fmt(l.view_pivot.x) << " " << fmt(l.view_pivot.y) << " "
-           << fmt(l.view_pivot.z) << " " << fmt(l.view_dist) << "\n";
-      if (l.locked || l.blend != 0 || l.group >= 0 || l.is_group)  // (task 0234; an older build skips the line)
-        os << "sketch_layer_ext " << (l.locked ? 1 : 0) << " " << l.blend << " " << l.group << " " << (l.is_group ? 1 : 0) << "\n";
-    }
-    os << "sketch_active " << sk.active_layer << " " << sk.active_canvas << " " << (sk.follow_camera ? 1 : 0) << "\n";
-    if (sk.perspective > 0) {
-      os << "sketch_perspective " << sk.perspective;
-      for (int i = 0; i < 3; i++) os << " " << fmt(sk.vp[i].x) << " " << fmt(sk.vp[i].y);
-      os << " " << (sk.follow_camera ? 1 : 0) << "\n";
-    }
-    for (const SketchCanvas &c : sk.canvases)
-      os << "sketch_canvas " << c.id << " " << c.kind << " " << fmt(c.origin.x) << " " << fmt(c.origin.y) << " " << fmt(c.origin.z) << " " << fmt(c.u.x) << " "
-         << fmt(c.u.y) << " " << fmt(c.u.z) << " " << fmt(c.v.x) << " " << fmt(c.v.y) << " " << fmt(c.v.z) << " " << (c.name.empty() ? "Canvas" : c.name) << "\n";
-    for (const SketchCanvas &c : sk.canvases)
-      if (c.object) os << "sketch_canvas_face " << c.id << " " << c.object << " " << c.face << "\n";  // (task 0226: a face canvas's face)
-    for (const SketchStroke &st : sk.strokes) {
-      os << "sketch_stroke " << st.layer << " " << st.canvas << " " << (int)st.kind << " " << st.color << " " << fmt(st.width) << " " << (st.closed ? 1 : 0) << " "
-         << fmt(st.center.x) << " " << fmt(st.center.y) << " " << fmt(st.rx) << " " << fmt(st.ry) << " " << fmt(st.angle) << " " << fmt(st.start)
-         << " " << fmt(st.sweep) << " " << st.pts.size();
-      for (const SketchPoint &p : st.pts) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
-      os << " " << st.raw.size();
-      for (const SketchPoint &p : st.raw) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
-      os << " " << st.brush << " " << fmt(st.opacity) << " " << fmt(st.soft) << " " << st.pressure_to << " " << fmt(st.min_size);  // (task 0297)
-      os << "\n";
-    }
-  }
+  if (!scene.sketch.empty()) write_sketch_lines(os, scene.sketch);
   /* Meshes first (shared between objects, like Blender's ID datablocks). */
   std::unordered_map<const Mesh *, int> mesh_ids;
   std::vector<const Mesh *> order;
@@ -513,6 +516,121 @@ const char *parse_uint(const char *p, const char *end, uint64_t &out) {
 
 }  // namespace
 
+/* One line of a sketch (round 324: the scene's and a paper's); false when it isn't a sketch line. */
+static bool read_sketch_line(const std::vector<std::string> &t, std::string_view line, Sketch &sk) {
+  const std::string &k = t[0];
+  if (k == "sketch_layer" && t.size() >= 5) {
+    SketchLayer l;
+    l.opacity = std::strtof(t[1].c_str(), nullptr), l.visible = t[2] != "0", l.correct = std::max(0, std::min(2, std::atoi(t[3].c_str())));
+    /* The name: the rest of the line after the fourth field, spaces kept as written. */
+    size_t at = 0;
+    for (int field = 0; field < 4 && at < line.size(); field++) {
+      while (at < line.size() && line[at] == ' ') at++;
+      while (at < line.size() && line[at] != ' ') at++;
+    }
+    while (at < line.size() && line[at] == ' ') at++;
+    l.name = at < line.size() ? line.substr(at) : "";
+    while (!l.name.empty() && (l.name.back() == '\r' || l.name.back() == ' ')) l.name.pop_back();
+    if (l.name.empty()) l.name = "Layer";
+    sk.layers.push_back(l);
+  }
+  else if (k == "sketch_layer_view" && t.size() >= 8 && !sk.layers.empty()) {  // (the layer before it)
+    SketchLayer &l = sk.layers.back();
+    auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
+    l.has_view = true;
+    l.view_yaw = f(1), l.view_pitch = f(2), l.view_fov = f(3), l.view_pivot = {f(4), f(5), f(6)}, l.view_dist = f(7);
+  }
+  else if (k == "sketch_layer_ext" && t.size() >= 5 && !sk.layers.empty()) {  // (task 0234: the layer before it)
+    SketchLayer &l = sk.layers.back();
+    l.locked = t[1] != "0", l.blend = std::max(0, std::min(3, std::atoi(t[2].c_str()))), l.group = std::atoi(t[3].c_str()), l.is_group = t[4] != "0";
+  }
+  else if (k == "sketch_active" && t.size() >= 2) {
+    sk.active_layer = std::atoi(t[1].c_str());
+    if (t.size() >= 3) sk.active_canvas = std::atoi(t[2].c_str());
+    if (t.size() >= 4) sk.follow_camera = t[3] != "0";
+  }
+  else if (k == "sketch_perspective" && t.size() >= 8) {
+    sk.perspective = std::max(0, std::min(3, std::atoi(t[1].c_str())));
+    for (int i = 0; i < 3; i++) sk.vp[i] = {std::strtof(t[(size_t)(2 + 2 * i)].c_str(), nullptr), std::strtof(t[(size_t)(3 + 2 * i)].c_str(), nullptr)};
+    sk.vp_placed = true;
+    if (t.size() >= 9) sk.follow_camera = t[8] != "0";
+  }
+  else if (k == "sketch_canvas_face" && t.size() >= 4) {
+    if (SketchCanvas *c = sk.canvas_at(std::atoi(t[1].c_str()))) c->object = std::strtoull(t[2].c_str(), nullptr, 10), c->face = std::atoi(t[3].c_str());
+  }
+  else if (k == "sketch_canvas" && t.size() >= 12) {
+    auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
+    SketchCanvas c;
+    c.id = std::atoi(t[1].c_str()), c.kind = std::atoi(t[2].c_str());
+    c.origin = {f(3), f(4), f(5)}, c.u = {f(6), f(7), f(8)}, c.v = {f(9), f(10), f(11)};
+    c.name.clear();
+    for (size_t i = 12; i < t.size(); i++) c.name += (i > 12 ? " " : "") + t[i];
+    if (c.name.empty()) c.name = "Canvas";
+    if (c.id > 0 && length(c.u) > 1e-6f && length(c.v) > 1e-6f) sk.canvases.push_back(c);
+  }
+  else if (k == "sketch_stroke" && t.size() >= 15) {
+    auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
+    SketchStroke st;
+    st.layer = std::atoi(t[1].c_str());
+    st.canvas = std::atoi(t[2].c_str());
+    st.kind = (StrokeKind)std::max(0, std::min(4, std::atoi(t[3].c_str())));
+    st.color = (uint32_t)std::strtoul(t[4].c_str(), nullptr, 10);
+    st.width = f(5), st.closed = t[6] != "0";
+    st.center = {f(7), f(8)}, st.rx = f(9), st.ry = f(10), st.angle = f(11), st.start = f(12), st.sweep = f(13);
+    size_t at = 14;
+    for (int part = 0; part < 2 && at < t.size(); part++) {
+      const size_t n = (size_t)std::max(0, std::atoi(t[at].c_str()));
+      at++;
+      std::vector<SketchPoint> &dst = part == 0 ? st.pts : st.raw;
+      for (size_t i = 0; i < n && at + 2 < t.size() + 0; i++, at += 3) {
+        if (at + 2 >= t.size()) break;
+        dst.push_back({f(at), f(at + 1), f(at + 2)});
+      }
+    }
+    if (at + 4 < t.size()) {  // (task 0297: the brush's fields; an older line has none - the Pen's)
+      st.brush = std::atoi(t[at].c_str());
+      st.opacity = std::max(0.0f, std::min(1.0f, f(at + 1)));
+      st.soft = std::max(0.0f, std::min(1.0f, f(at + 2)));
+      st.pressure_to = std::max(0, std::min(3, std::atoi(t[at + 3].c_str())));
+      st.min_size = std::max(0.0f, std::min(1.0f, f(at + 4)));
+    }
+    if (!st.pts.empty()) sk.strokes.push_back(std::move(st));
+  }
+  else return false;
+  return true;
+}
+
+/* A paper's file (round 324): "blendity_paper 1", "paper <aspect> <colour>", then its sketch's lines. */
+std::string save_paper_text(const Sketch &sk, float aspect, uint32_t color) {
+  Out os;
+  os << "blendity_paper 1\n";
+  os << "paper " << fmt(aspect) << " " << color << "\n";
+  write_sketch_lines(os, sk);
+  return os.s;
+}
+
+bool load_paper_text(const std::string &text, Sketch &sk, float &aspect, uint32_t &color) {
+  LineReader is{text.data(), text.data() + text.size()};
+  std::string_view line;
+  if (!is.next(line) || tokenize(line).empty() || tokenize(line)[0] != "blendity_paper") return false;
+  Sketch fresh;
+  fresh.follow_camera = false;  // (a paper has no camera)
+  while (is.next(line)) {
+    const auto t = tokenize(line);
+    if (t.empty()) continue;
+    if (t[0] == "paper" && t.size() >= 3) {
+      const float a = std::strtof(t[1].c_str(), nullptr);
+      if (std::isfinite(a) && a > 0.05f && a < 20.0f) aspect = a;
+      color = (uint32_t)std::strtoul(t[2].c_str(), nullptr, 10);
+      continue;
+    }
+    read_sketch_line(t, line, fresh);
+  }
+  fresh.follow_camera = false;
+  sk = std::move(fresh);
+  return true;
+}
+
 bool load_scene_text(const std::string &text, Scene &scene, std::string &error) {
   register_builtin_components();
   LineReader is{text.data(), text.data() + text.size()};
@@ -580,83 +698,7 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
       fresh.sequence = v;
     }
-    else if (k == "sketch_layer" && t.size() >= 5) {
-      SketchLayer l;
-      l.opacity = std::strtof(t[1].c_str(), nullptr), l.visible = t[2] != "0", l.correct = std::max(0, std::min(2, std::atoi(t[3].c_str())));
-      /* The name: the rest of the line after the fourth field, spaces kept as written. */
-      size_t at = 0;
-      for (int field = 0; field < 4 && at < line.size(); field++) {
-        while (at < line.size() && line[at] == ' ') at++;
-        while (at < line.size() && line[at] != ' ') at++;
-      }
-      while (at < line.size() && line[at] == ' ') at++;
-      l.name = at < line.size() ? line.substr(at) : "";
-      while (!l.name.empty() && (l.name.back() == '\r' || l.name.back() == ' ')) l.name.pop_back();
-      if (l.name.empty()) l.name = "Layer";
-      fresh.sketch.layers.push_back(l);
-    }
-    else if (k == "sketch_layer_view" && t.size() >= 8 && !fresh.sketch.layers.empty()) {  // (the layer before it)
-      SketchLayer &l = fresh.sketch.layers.back();
-      auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
-      l.has_view = true;
-      l.view_yaw = f(1), l.view_pitch = f(2), l.view_fov = f(3), l.view_pivot = {f(4), f(5), f(6)}, l.view_dist = f(7);
-    }
-    else if (k == "sketch_layer_ext" && t.size() >= 5 && !fresh.sketch.layers.empty()) {  // (task 0234: the layer before it)
-      SketchLayer &l = fresh.sketch.layers.back();
-      l.locked = t[1] != "0", l.blend = std::max(0, std::min(3, std::atoi(t[2].c_str()))), l.group = std::atoi(t[3].c_str()), l.is_group = t[4] != "0";
-    }
-    else if (k == "sketch_active" && t.size() >= 2) {
-      fresh.sketch.active_layer = std::atoi(t[1].c_str());
-      if (t.size() >= 3) fresh.sketch.active_canvas = std::atoi(t[2].c_str());
-      if (t.size() >= 4) fresh.sketch.follow_camera = t[3] != "0";
-    }
-    else if (k == "sketch_perspective" && t.size() >= 8) {
-      fresh.sketch.perspective = std::max(0, std::min(3, std::atoi(t[1].c_str())));
-      for (int i = 0; i < 3; i++) fresh.sketch.vp[i] = {std::strtof(t[(size_t)(2 + 2 * i)].c_str(), nullptr), std::strtof(t[(size_t)(3 + 2 * i)].c_str(), nullptr)};
-      fresh.sketch.vp_placed = true;
-      if (t.size() >= 9) fresh.sketch.follow_camera = t[8] != "0";
-    }
-    else if (k == "sketch_canvas_face" && t.size() >= 4) {
-      if (SketchCanvas *c = fresh.sketch.canvas_at(std::atoi(t[1].c_str()))) c->object = std::strtoull(t[2].c_str(), nullptr, 10), c->face = std::atoi(t[3].c_str());
-    }
-    else if (k == "sketch_canvas" && t.size() >= 12) {
-      auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
-      SketchCanvas c;
-      c.id = std::atoi(t[1].c_str()), c.kind = std::atoi(t[2].c_str());
-      c.origin = {f(3), f(4), f(5)}, c.u = {f(6), f(7), f(8)}, c.v = {f(9), f(10), f(11)};
-      c.name.clear();
-      for (size_t i = 12; i < t.size(); i++) c.name += (i > 12 ? " " : "") + t[i];
-      if (c.name.empty()) c.name = "Canvas";
-      if (c.id > 0 && length(c.u) > 1e-6f && length(c.v) > 1e-6f) fresh.sketch.canvases.push_back(c);
-    }
-    else if (k == "sketch_stroke" && t.size() >= 15) {
-      auto f = [&](size_t i) { return std::strtof(t[i].c_str(), nullptr); };
-      SketchStroke st;
-      st.layer = std::atoi(t[1].c_str());
-      st.canvas = std::atoi(t[2].c_str());
-      st.kind = (StrokeKind)std::max(0, std::min(4, std::atoi(t[3].c_str())));
-      st.color = (uint32_t)std::strtoul(t[4].c_str(), nullptr, 10);
-      st.width = f(5), st.closed = t[6] != "0";
-      st.center = {f(7), f(8)}, st.rx = f(9), st.ry = f(10), st.angle = f(11), st.start = f(12), st.sweep = f(13);
-      size_t at = 14;
-      for (int part = 0; part < 2 && at < t.size(); part++) {
-        const size_t n = (size_t)std::max(0, std::atoi(t[at].c_str()));
-        at++;
-        std::vector<SketchPoint> &dst = part == 0 ? st.pts : st.raw;
-        for (size_t i = 0; i < n && at + 2 < t.size() + 0; i++, at += 3) {
-          if (at + 2 >= t.size()) break;
-          dst.push_back({f(at), f(at + 1), f(at + 2)});
-        }
-      }
-      if (at + 4 < t.size()) {  // (task 0297: the brush's fields; an older line has none - the Pen's)
-        st.brush = std::atoi(t[at].c_str());
-        st.opacity = std::max(0.0f, std::min(1.0f, f(at + 1)));
-        st.soft = std::max(0.0f, std::min(1.0f, f(at + 2)));
-        st.pressure_to = std::max(0, std::min(3, std::atoi(t[at + 3].c_str())));
-        st.min_size = std::max(0.0f, std::min(1.0f, f(at + 4)));
-      }
-      if (!st.pts.empty()) fresh.sketch.strokes.push_back(std::move(st));
-    }
+    else if (read_sketch_line(t, line, fresh.sketch)) {}
     else if (k == "guide" && t.size() >= 7) {
       auto f = [&](int i) { return std::strtof(t[i].c_str(), nullptr); };
       GuideLine gl{{f(1), f(2), f(3)}, {f(4), f(5), f(6)}};

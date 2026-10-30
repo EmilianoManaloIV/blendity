@@ -101,7 +101,7 @@ KeyChord parse_chord(const std::string &text_in) {
 
 /* ------------------------------------------------------------ actions */
 
-enum ActCtx { CTX_GLOBAL = 0, CTX_EDIT = 1, CTX_SCENE = 2, CTX_SCENE_EDIT = 3, CTX_DRAW = 4 };  // (CTX_DRAW: the pointer over the Draw tab's pad, round 319)
+enum ActCtx { CTX_GLOBAL = 0, CTX_EDIT = 1, CTX_SCENE = 2, CTX_SCENE_EDIT = 3, CTX_DRAW = 4, CTX_BOARD = 5 };  // (CTX_BOARD: the pointer over the reference board, task 0299)  // (CTX_DRAW: the pointer over the Draw tab's pad, round 319)
 
 const std::vector<ShortcutAction> &shortcut_actions() {
   static const std::vector<ShortcutAction> acts = {
@@ -210,6 +210,22 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"draw.larger", "Draw Tab: Brush Larger", "Draw", CTX_DRAW},
       {"draw.fainter", "Draw Tab: Brush Fainter", "Draw", CTX_DRAW},
       {"draw.stronger", "Draw Tab: Brush Stronger", "Draw", CTX_DRAW},
+      {"draw.zoom_in", "Draw Tab: Zoom In", "Draw", CTX_DRAW},  // (task 0303: a pen display's dial and keys - Photoshop's view keys)
+      {"draw.zoom_out", "Draw Tab: Zoom Out", "Draw", CTX_DRAW},
+      {"draw.zoom_actual", "Draw Tab: Zoom 100%", "Draw", CTX_DRAW},
+      {"draw.turn_left", "Draw Tab: Turn Left", "Draw", CTX_DRAW},
+      {"draw.turn_right", "Draw Tab: Turn Right", "Draw", CTX_DRAW},
+      {"draw.turn_reset", "Draw Tab: Upright", "Draw", CTX_DRAW},
+      {"board.zoom_in", "Board: Zoom In", "Board", CTX_BOARD},
+      {"board.zoom_out", "Board: Zoom Out", "Board", CTX_BOARD},
+      {"board.delete", "Board: Delete", "Board", CTX_BOARD},  // (task 0299: PureRef's keys over the board)
+      {"board.duplicate", "Board: Duplicate", "Board", CTX_BOARD},
+      {"board.select_all", "Board: Select All", "Board", CTX_BOARD},
+      {"board.paste", "Board: Paste Image", "Board", CTX_BOARD},
+      {"board.fit", "Board: Fit All", "Board", CTX_BOARD},
+      {"board.frame", "Board: Frame Selected", "Board", CTX_BOARD},
+      {"board.front", "Board: Bring to Front", "Board", CTX_BOARD},
+      {"board.back", "Board: Send to Back", "Board", CTX_BOARD},
       /* Windows and rendering */
       {"render.image", "Render Image", "Render", CTX_GLOBAL},
       {"render.screenshot", "Screenshot", "Render", CTX_GLOBAL},
@@ -269,7 +285,23 @@ static void common_bindings(Keymap &k) {
   b("object.move_to_view", {"Ctrl+Alt+F"});
   b("edit.rename", {"F2"});
   b("draw.hide_ui", {"Tab"});  // (round 319: over the Draw tab's pad only - its context comes first there)
-  b("draw.fit", {"Home"});
+  b("draw.fit", {"Home", "Ctrl+0"});  // (Ctrl+0: Photoshop's Fit on Screen)
+  b("board.delete", {"Delete", "Backspace"});  // (over the reference board only: its context comes first there)
+  b("board.duplicate", {"Ctrl+D"});
+  b("board.select_all", {"Ctrl+A"});
+  b("board.paste", {"Ctrl+V"});
+  b("board.fit", {"Home", "Ctrl+0"});
+  b("board.frame", {"F"});
+  b("board.front", {"Ctrl+]"});
+  b("board.back", {"Ctrl+["});
+  b("draw.zoom_in", {"Ctrl+=", "Ctrl+Shift+="});  // (task 0303: Ctrl++ on a US keyboard is Ctrl+Shift+=; the dial's default pair)
+  b("draw.zoom_out", {"Ctrl+-"});
+  b("draw.zoom_actual", {"Ctrl+1"});
+  b("draw.turn_left", {"4"});  // (Krita's canvas keys: a dial or an express key can send them)
+  b("draw.turn_right", {"6"});
+  b("draw.turn_reset", {"5"});
+  b("board.zoom_in", {"Ctrl+=", "Ctrl+Shift+="});
+  b("board.zoom_out", {"Ctrl+-"});
   b("draw.brush", {"B"});
   b("draw.eraser", {"E"});
   b("draw.smaller", {"["});
@@ -524,6 +556,9 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
 
 /* Two actions clash when a chord is bound to both and their contexts can be active together. */
 static bool contexts_overlap(int a, int b) {
+  /* A window's own keys (the Draw tab's pad, the reference board) are looked at first while the pointer is over it:
+   * they shadow the rest there by design, and clash only among themselves. */
+  if (a == CTX_DRAW || b == CTX_DRAW || a == CTX_BOARD || b == CTX_BOARD) return a == b;
   if (a == CTX_GLOBAL || b == CTX_GLOBAL) return true;
   if (a == b) return true;
   /* Edit (anywhere in Edit Mode) overlaps Scene-Edit; Scene overlaps Scene-Edit. */
@@ -718,9 +753,41 @@ void Editor::parse_keymap_overrides(const std::string &text) {
   rebuild_keymap();
 }
 
+/* The Draw tab's and the reference board's own actions (rounds 319-323): -1 when `id` isn't one of theirs, else whether
+ * it was taken (a stroke or a drag under way takes it and does nothing, so it never reaches the views behind). Undo and Redo over the
+ * board are the board's own. */
+int Editor::window_action(const std::string &id) {
+  static const std::map<std::string, std::string> kCommands = {
+      {"draw.hide_ui", "draw tools toggle"}, {"draw.fit", "draw view fit"}, {"draw.flip", "draw view flip"},
+      {"draw.zoom_in", "draw view in"}, {"draw.zoom_out", "draw view out"}, {"draw.zoom_actual", "draw view actual"},
+      {"draw.turn_left", "draw view turn -15"}, {"draw.turn_right", "draw view turn 15"}, {"draw.turn_reset", "draw view upright"},
+      {"draw.brush", "sketch brush last"}, {"draw.eraser", "sketch brush Eraser"}, {"draw.smaller", "sketch brush smaller"},
+      {"draw.larger", "sketch brush larger"}, {"draw.fainter", "sketch brush fainter"}, {"draw.stronger", "sketch brush stronger"},
+      {"board.delete", "board delete"}, {"board.duplicate", "board duplicate"}, {"board.select_all", "board select all"},
+      {"board.paste", "board paste"}, {"board.fit", "board fit"}, {"board.frame", "board frame"}, {"board.front", "board front"},
+      {"board.back", "board back"}, {"board.zoom_in", "board in"}, {"board.zoom_out", "board out"}};
+  if ((id == "edit.undo" || id == "edit.redo") && board_has_mouse()) {  // (the board's own stack, as the Editing window's)
+    id == "edit.undo" ? board_undo() : board_redo();
+    return 1;
+  }
+  const WindowKind under = (id == "edit.undo" || id == "edit.redo") ? wheel_window_at(ui_.in.mx, ui_.in.my) : WindowKind::Count;
+  if (draw_source_ == 2 && (under == WindowKind::Draw || under == WindowKind::Layers)) {  // (round 324: over a paper or its layers, the paper's own)
+    paper_step(id == "edit.undo");
+    return 1;
+  }
+  const auto it = kCommands.find(id);
+  if (it == kCommands.end()) return -1;
+  const bool board = id.compare(0, 6, "board.") == 0;
+  if (board && board_drag_) return 1;  // (a drag holds the items: the key is held, doing nothing - review 322)
+  if (!board && id != "draw.hide_ui" && pad_busy()) return 1;  // (a stroke under way: its view and brush stay; the key is held)
+  run_console_command(it->second);
+  return 1;
+}
+
 bool Editor::run_action(const std::string &id) {
   auto &in = ui_.in;
   if (id.rfind("user.", 0) == 0) return run_user_action(id);  // (a console line with a key of its own, task 0231)
+  if (const int w = window_action(id); w >= 0) return w != 0;
   const WindowKind wins[] = {WindowKind::Scene,   WindowKind::Game,     WindowKind::Inspector, WindowKind::Hierarchy, WindowKind::Project,
                              WindowKind::Console, WindowKind::Profiler, WindowKind::Research,  WindowKind::UVEditor};  // (Research: Learn > References)
   const char *win_ids[] = {"window.scene", "window.game", "window.inspector", "window.hierarchy", "window.project",
@@ -742,17 +809,6 @@ bool Editor::run_action(const std::string &id) {
     return false;  // (flying, or a game taking Space)
   else if (id == "menu.wheel" && qm_.open) qm_.open = false;
   else if (id == "menu.wheel" && pad_takes_space()) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel)
-  else if (id == "draw.hide_ui") run_console_command("draw tools toggle");
-  else if (pad_busy() && (id == "draw.fit" || id == "draw.flip" || id == "draw.brush" || id == "draw.eraser" || id == "draw.smaller" || id == "draw.larger" || id == "draw.fainter" || id == "draw.stronger"))
-    return false;  // (a stroke under way: its view and brush stay)
-  else if (id == "draw.fit") run_console_command("draw view fit");
-  else if (id == "draw.flip") run_console_command("draw view flip");
-  else if (id == "draw.brush") run_console_command("sketch brush last");
-  else if (id == "draw.eraser") run_console_command("sketch brush Eraser");
-  else if (id == "draw.smaller") run_console_command("sketch brush smaller");
-  else if (id == "draw.larger") run_console_command("sketch brush larger");
-  else if (id == "draw.fainter") run_console_command("sketch brush fainter");
-  else if (id == "draw.stronger") run_console_command("sketch brush stronger");
   else if (id == "menu.wheel") quick_menu_open(in.mx, in.my, false);  // (task 0230)
   else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
   else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();
@@ -916,10 +972,12 @@ void Editor::handle_shortcuts() {
   const bool scene_ctx = focused_ == WindowKind::Scene || focused_ == WindowKind::Hierarchy || scene_hovered_;
   const bool scene_ok = scene_ctx && drag_ != Drag::Fly && !in.down[1];
   const bool draw_ok = pad_takes_space();  // (the pointer over the Draw tab's pad, drawn just now)
+  const bool board_ok = board_has_mouse();
   auto active = [&](int ctx) {
     switch (ctx) {
       case CTX_GLOBAL: return true;
       case CTX_DRAW: return draw_ok;
+      case CTX_BOARD: return board_ok;
       case CTX_EDIT: return edit_mode_;
       case CTX_SCENE: return scene_ok;
       default: return scene_ok && edit_mode_;
@@ -942,7 +1000,7 @@ void Editor::handle_shortcuts() {
         }
       }
     if (done) continue;
-    for (int ctx : {CTX_DRAW, CTX_SCENE_EDIT, CTX_EDIT, CTX_SCENE, CTX_GLOBAL}) {
+    for (int ctx : {CTX_BOARD, CTX_DRAW, CTX_SCENE_EDIT, CTX_EDIT, CTX_SCENE, CTX_GLOBAL}) {
       if (!active(ctx)) continue;
       for (const ShortcutAction &a : shortcut_actions()) {
         if (a.context != ctx) continue;

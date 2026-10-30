@@ -8,6 +8,7 @@
 
 #include "../platform/platform.h"
 #include "../render/canvas.h"
+#include "../core/ramp.h"
 
 #include <functional>
 #include <string>
@@ -220,6 +221,16 @@ class Context {
   bool slider(Id i, const Recti &r, float &v, float mn, float mx);
   bool combo(Id i, const Recti &r, int &v, const char *const *options, int count);
   bool color_field(Id i, const Recti &r, Vec3 &c, float *alpha = nullptr);  // Unity's colour field + Color window
+  /* Round 329: Blender's ColorRamp - the gradient bar with a handle a stop below it: click the bar to add a stop, drag a
+   * handle to move it, drag it well below to remove it (two always stay). `sel` the stop picked. Linear colours. */
+  bool color_ramp(Id i, const Recti &r, std::vector<RampStop> &stops, int interp, int &sel);
+  /* Round 329: Blender's curve - points in a square box, a monotone cubic through them: drag a point, click to add one,
+   * drag one out of the box to remove it (two always stay). */
+  bool curve_field(Id i, const Recti &r, std::vector<Vec2> &pts, int &sel);
+  bool ramp_add_stop(std::vector<RampStop> &st, float t, int interp, int &sel);
+  bool curve_add_point(std::vector<Vec2> &pts, Vec2 p, int &sel);
+  Vec2 widget_grab_;      // (round 329: where a ramp's stop or a curve's point was taken, from the pointer)
+  Id widget_tap_ = 0;     // (a finger's press on a ramp or curve: a tap adds there on release, unless it scrolled)
   bool foldout(const Recti &r, const std::string &label, bool &open, Icon icon = Icon::None);
   void tooltip(const std::string &text);  // for the most recent hovered widget
   void separator(const Recti &r);
@@ -269,6 +280,12 @@ class Context {
    * title and kept inside `bounds`; `r` is its place, kept by the caller. With `close`, a Close button in the title sets
    * it. Returns the rect under the title for the panel's body. */
   Recti floating_panel(Id i, Recti &r, const Recti &bounds, const std::string &title, bool *close = nullptr);
+  /* Words over several lines (a board's note, task 0300): wrapped to the rect's width on `paper` in `ink`. A
+   * double-click edits it - the keys type, Enter starts a line, the arrows move the caret (up and down by lines), Home
+   * and End go to the line's ends; a click away or Ctrl+Enter keeps the text, Esc gives it back. True when kept. */
+  bool text_area(Id i, const Recti &r, std::string &s, uint32_t paper, uint32_t ink);
+  /* The lines `s` wraps to in `width` pixels: each line's first byte and one past its last (a line break ends one). */
+  std::vector<std::pair<size_t, size_t>> wrap_lines(const std::string &s, int width);
   std::string tooltip_text_for_test() const { return tooltip_text_; }  // (the tooltip the last frame showed)
   /* A widget drawn by hand (frames and labels): the next tooltip() belongs to it. */
   void mark_widget(const Recti &r) {

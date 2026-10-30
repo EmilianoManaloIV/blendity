@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ui.h"
+#include "../render/display.h"
 
 #include "../core/core.h"
 
@@ -561,6 +562,111 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   return changed;
 }
 
+std::vector<std::pair<size_t, size_t>> Context::wrap_lines(const std::string &s, int width) {
+  std::vector<std::pair<size_t, size_t>> out;
+  size_t a = 0;
+  while (a <= s.size()) {
+    const size_t nl = s.find('\n', a);
+    const size_t end = nl == std::string::npos ? s.size() : nl;
+    size_t b = a;
+    while (b < end) {  // (the longest run of words from a that fits; a word wider than the line is cut)
+      size_t fit = b, sp = std::string::npos;
+      while (fit < end && font.text_width(s.c_str() + b, utf8_after(s, fit) - b) <= width) {
+        if (s[fit] == ' ') sp = fit;
+        fit = utf8_after(s, fit);
+      }
+      if (fit < end && sp != std::string::npos && sp > b) fit = sp + 1;
+      if (fit == b) fit = utf8_after(s, b);
+      out.push_back({b, fit});
+      b = fit;
+    }
+    if (b == a) out.push_back({a, a});  // (an empty line)
+    if (nl == std::string::npos) break;
+    a = nl + 1;
+  }
+  return out;
+}
+
+bool Context::text_area(Id i, const Recti &r, std::string &s, uint32_t paper, uint32_t ink) {
+  const bool hot = hovered(r);
+  last_widget_ = r;
+  last_hovered_ = hot;
+  const int pad = px(6), lh = font.line_height();
+  canvas.fill_rect(r, paper);
+  if (edit_id_ != i) {
+    canvas.push_clip(r.intersect(canvas.clip()));
+    int y = r.y + pad;
+    for (const auto &l : wrap_lines(s, r.w - 2 * pad)) {
+      canvas.text(font, r.x + pad, y, s.c_str() + l.first, l.second - l.first, ink);
+      y += lh;
+    }
+    canvas.pop_clip();
+    if (hot && in.double_clicked[0]) begin_edit(i, s, false);
+    return false;
+  }
+  edit_seen_ = true;
+  std::string &buf = edit_buf_;
+  const auto lines = wrap_lines(buf, r.w - 2 * pad);
+  size_t line = 0;
+  for (size_t k = 0; k < lines.size(); k++)
+    if (edit_cursor_ >= lines[k].first) line = k;
+  auto caret_x = [&](size_t k, size_t at) { return font.text_width(buf.c_str() + lines[k].first, std::min(at, lines[k].second) - lines[k].first); };
+  auto at_x = [&](size_t k, int x) { return lines[k].first + font.hit_index(buf.substr(lines[k].first, lines[k].second - lines[k].first), x); };
+  if (in.pressed[0] && !r.contains(in.mx, in.my)) {  // (a click away keeps it)
+    s = buf;
+    edit_id_ = 0;
+    return true;
+  }
+  if (in.pressed[0]) {
+    const size_t k = std::min(lines.size() - 1, (size_t)std::max(0, (in.my - r.y - pad) / std::max(1, lh)));
+    edit_cursor_ = at_x(k, in.mx - r.x - pad);
+  }
+  if (in.key_pressed[KEY_ESCAPE]) {
+    edit_id_ = 0;
+    in.key_pressed[KEY_ESCAPE] = false;
+    return false;
+  }
+  if (in.key_pressed[KEY_ENTER] && in.ctrl()) {
+    s = buf;
+    edit_id_ = 0;
+    return true;
+  }
+  if (!in.text.empty()) buf.insert(edit_cursor_, in.text), edit_cursor_ += in.text.size();
+  if (in.key_pressed[KEY_ENTER]) buf.insert(edit_cursor_, "\n"), edit_cursor_++;
+  if (in.key_pressed[KEY_BACKSPACE] && edit_cursor_ > 0) {
+    const size_t p = utf8_prev(buf, edit_cursor_);
+    buf.erase(p, edit_cursor_ - p);
+    edit_cursor_ = p;
+  }
+  if (in.key_pressed[KEY_DELETE] && edit_cursor_ < buf.size()) buf.erase(edit_cursor_, utf8_after(buf, edit_cursor_) - edit_cursor_);
+  if (in.key_pressed[KEY_LEFT]) edit_cursor_ = utf8_prev(buf, edit_cursor_);
+  if (in.key_pressed[KEY_RIGHT]) edit_cursor_ = utf8_after(buf, edit_cursor_);
+  if (in.key_pressed[KEY_UP] && line > 0) edit_cursor_ = at_x(line - 1, caret_x(line, edit_cursor_));
+  if (in.key_pressed[KEY_DOWN] && line + 1 < lines.size()) edit_cursor_ = at_x(line + 1, caret_x(line, edit_cursor_));
+  if (in.key_pressed[KEY_HOME]) edit_cursor_ = lines[line].first;
+  if (in.key_pressed[KEY_END]) edit_cursor_ = lines[line].second;
+  if (in.ctrl() && in.key_pressed[KEY_V] && clipboard_get) {
+    const std::string clip = clipboard_get();
+    buf.insert(edit_cursor_, clip), edit_cursor_ += clip.size();
+  }
+  edit_cursor_ = std::min(edit_cursor_, buf.size());
+  /* Drawn again with the edit, the caret on its line. */
+  const auto drawn = wrap_lines(buf, r.w - 2 * pad);
+  canvas.push_clip(r.intersect(canvas.clip()));
+  int y = r.y + pad, cx = r.x + pad, cy = y;
+  for (size_t k = 0; k < drawn.size(); k++, y += lh) {
+    canvas.text(font, r.x + pad, y, buf.c_str() + drawn[k].first, drawn[k].second - drawn[k].first, ink);
+    if (edit_cursor_ >= drawn[k].first && (edit_cursor_ <= drawn[k].second || k + 1 == drawn.size()))
+      cx = r.x + pad + font.text_width(buf.c_str() + drawn[k].first, std::min(edit_cursor_, drawn[k].second) - drawn[k].first), cy = y;
+  }
+  if (std::fmod(time, 1.0) < 0.5) canvas.fill_rect({cx, cy, std::max(1, px(1)), lh}, ink);
+  canvas.rect_outline(r, theme.focus, std::max(1, px(1)));
+  canvas.pop_clip();
+  cursor = Cursor::IBeam;
+  redraw = true;
+  return false;
+}
+
 /* Tab moves to the next number or text field, Shift+Tab to the previous one
  * (Unity). The key is consumed so the next field doesn't commit at once. */
 void Context::tab_to(Id previous) {
@@ -977,11 +1083,153 @@ static void checker(Canvas &c, const Recti &r, int cell) {
   c.pop_clip();
 }
 
-/* Unity's colour field: the colour, with the alpha as a white bar along the
- * bottom (black for the transparent part). Clicking opens a Color window: a
- * saturation / value square with a hue strip, RGB 0-255 / RGB 0-1 / HSV
- * sliders, Alpha, Hex (RRGGBB or RRGGBBAA), and a palette of presets and
- * recently used colours. alpha may be null (no alpha channel). */
+namespace {
+uint32_t display(Vec3 c) {  // (a linear colour as the screen shows it)
+  return 0xFF000000u | (uint32_t)display::linear_to_srgb8(c.x) << 16 | (uint32_t)display::linear_to_srgb8(c.y) << 8 | display::linear_to_srgb8(c.z);
+}
+constexpr size_t kWidgetPointsMax = 32;  // (as a ramp's or curve's text keeps)
+}  // namespace
+
+bool Context::color_ramp(Id i, const Recti &r, std::vector<RampStop> &st, int interp, int &sel) {
+  if (st.size() < 2) st = {{0.0f, Vec3(0.0f)}, {1.0f, Vec3(1.0f)}};
+  const int hh = px(10);
+  const Recti bar{r.x, r.y, std::max(8, r.w), std::max(6, r.h - hh)};
+  auto pos_x = [&](float p) { return (float)bar.x + p * (float)(bar.w - 1); };
+  auto at_x = [&](int x) { return std::max(0.0f, std::min(1.0f, (x - bar.x) / (float)std::max(1, bar.w - 1))); };
+  for (int x = bar.x; x < bar.right(); x++) canvas.vline(x, bar.y, bar.bottom() - 1, display(ramp_eval(st, at_x(x), interp)));
+  canvas.rect_outline(bar, theme.border);
+  bool changed = false;
+  sel = std::max(0, std::min((int)st.size() - 1, sel));
+  const bool remove = is_active(i) && in.my > r.bottom() + px(24) && st.size() > 2;
+  for (size_t k = 0; k < st.size(); k++) {
+    const float x = pos_x(st[k].pos);
+    const Vec2 a{x, (float)bar.bottom()}, b{x - px(5), (float)bar.bottom() + hh}, c{x + px(5), (float)bar.bottom() + hh};
+    const bool picked = (int)k == sel;
+    canvas.fill_triangle(a, b, c, picked ? (remove ? theme.text_dim : theme.accent) : theme.text);
+    canvas.fill_rect({(int)x - px(3), bar.bottom() + hh - px(3), px(6), px(3)}, display(st[k].color));
+  }
+  if (is_active(i)) {
+    const bool finger = touch_scroll && in.touch;
+    if (finger && !finger_widget_drag_ && in.down[0] && finger_sideways((int)(widget_grab_.x + pos_x(st[(size_t)sel].pos)))) finger_widget_drag_ = true;
+    if (in.down[0] && !remove && (!finger || finger_widget_drag_)) {
+      const float moved = at_x(in.mx - (int)widget_grab_.x);  // (from where it was taken: a click to pick doesn't move it - review 329)
+      if (moved != st[(size_t)sel].pos) st[(size_t)sel].pos = moved, changed = true;
+      /* kept in order: the dragged stop follows its colour past a neighbour */
+      while (sel > 0 && st[(size_t)sel].pos < st[(size_t)sel - 1].pos) std::swap(st[(size_t)sel], st[(size_t)sel - 1]), sel--;
+      while (sel + 1 < (int)st.size() && st[(size_t)sel].pos > st[(size_t)sel + 1].pos) std::swap(st[(size_t)sel], st[(size_t)sel + 1]), sel++;
+    }
+    if (!in.down[0]) {
+      if (remove) st.erase(st.begin() + sel), sel = std::max(0, sel - 1), changed = true;
+      clear_active();
+    }
+    redraw = true;
+    return changed;
+  }
+  const Recti grab{r.x - px(6), r.y, r.w + px(12), r.h + px(2)};
+  const bool finger = touch_scroll && in.touch;
+  if (widget_tap_ == i && in.released[0]) {  // (a finger's tap on the bar, not a scroll: the stop now)
+    widget_tap_ = 0;
+    if (!touch_scrolled_ && hovered(bar)) return ramp_add_stop(st, at_x(in.mx), interp, sel);
+  }
+  if (!hovered(grab) || !in.pressed[0]) return false;
+  int near = -1;
+  float best = (float)px(7);
+  for (size_t k = 0; k < st.size(); k++) {
+    const float d = std::fabs(pos_x(st[k].pos) - in.mx);
+    if (d < best) best = d, near = (int)k;
+  }
+  if (near < 0 && in.my >= bar.bottom()) return false;
+  if (near < 0 && finger) return widget_tap_ = i, false;  // (a finger may be scrolling: it adds on release)
+  if (near < 0) {  // (a click on the bar: a stop there, of the colour the ramp has there)
+    changed = ramp_add_stop(st, at_x(in.mx), interp, sel);
+    near = sel;
+  }
+  sel = near;
+  widget_grab_ = {in.mx - pos_x(st[(size_t)sel].pos), 0.0f};
+  set_active(i);
+  if (!finger) consume_click();
+  return changed;
+}
+
+/* A stop at t of the colour the ramp has there (no more than kWidgetPointsMax). */
+bool Context::ramp_add_stop(std::vector<RampStop> &st, float t, int interp, int &sel) {
+  if (st.size() >= kWidgetPointsMax) return false;
+  RampStop s{t, ramp_eval(st, t, interp)};
+  const auto it = std::upper_bound(st.begin(), st.end(), s, [](const RampStop &x, const RampStop &y) { return x.pos < y.pos; });
+  sel = (int)(it - st.begin());  // (before the insert: `insert(...) - begin()` may read begin() first, from the old storage - GCC did)
+  st.insert(it, s);
+  return true;
+}
+
+bool Context::curve_field(Id i, const Recti &r, std::vector<Vec2> &pts, int &sel) {
+  if (pts.size() < 2) pts = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+  canvas.fill_rect(r, theme.field);
+  for (int k = 1; k < 4; k++) {
+    canvas.vline(r.x + r.w * k / 4, r.y, r.bottom() - 1, theme.border);
+    canvas.hline(r.x, r.right() - 1, r.y + r.h * k / 4, theme.border);
+  }
+  canvas.rect_outline(r, theme.border);
+  auto to_px = [&](Vec2 p) { return Vec2{r.x + p.x * (r.w - 1), r.bottom() - 1 - p.y * (r.h - 1)}; };
+  auto from_px = [&](int x, int y) { return Vec2{std::max(0.0f, std::min(1.0f, (x - r.x) / (float)std::max(1, r.w - 1))), std::max(0.0f, std::min(1.0f, (r.bottom() - 1 - y) / (float)std::max(1, r.h - 1)))}; };
+  Vec2 prev = to_px({0.0f, curve_eval(pts, 0.0f)});
+  for (int x = 1; x < r.w; x++) {
+    const float fx = x / (float)std::max(1, r.w - 1);
+    const Vec2 p = to_px({fx, curve_eval(pts, fx)});
+    canvas.line(prev.x, prev.y, p.x, p.y, theme.text, 1.5f);
+    prev = p;
+  }
+  sel = std::max(0, std::min((int)pts.size() - 1, sel));
+  const bool remove = is_active(i) && pts.size() > 2 && (in.mx < r.x - px(20) || in.mx > r.right() + px(20) || in.my < r.y - px(20) || in.my > r.bottom() + px(20));
+  for (size_t k = 0; k < pts.size(); k++) {
+    const Vec2 p = to_px(pts[k]);
+    canvas.fill_circle(p.x, p.y, (float)px(4), (int)k == sel ? (remove ? theme.text_dim : theme.accent) : theme.text);
+  }
+  bool changed = false;
+  if (is_active(i)) {
+    const bool finger = touch_scroll && in.touch;
+    if (finger && !finger_widget_drag_ && in.down[0] && finger_sideways((int)(widget_grab_.x + to_px(pts[(size_t)sel]).x))) finger_widget_drag_ = true;
+    if (in.down[0] && !remove && (!finger || finger_widget_drag_)) {
+      const Vec2 to = from_px(in.mx - (int)widget_grab_.x, in.my - (int)widget_grab_.y);
+      if (to.x != pts[(size_t)sel].x || to.y != pts[(size_t)sel].y) pts[(size_t)sel] = to, changed = true;
+      while (sel > 0 && pts[(size_t)sel].x < pts[(size_t)sel - 1].x) std::swap(pts[(size_t)sel], pts[(size_t)sel - 1]), sel--;
+      while (sel + 1 < (int)pts.size() && pts[(size_t)sel].x > pts[(size_t)sel + 1].x) std::swap(pts[(size_t)sel], pts[(size_t)sel + 1]), sel++;
+    }
+    if (!in.down[0]) {
+      if (remove) pts.erase(pts.begin() + sel), sel = std::max(0, sel - 1), changed = true;
+      clear_active();
+    }
+    redraw = true;
+    return changed;
+  }
+  const bool finger = touch_scroll && in.touch;
+  if (widget_tap_ == i && in.released[0]) {  // (a finger's tap in the box: the point now)
+    widget_tap_ = 0;
+    if (!touch_scrolled_ && hovered(r)) return curve_add_point(pts, from_px(in.mx, in.my), sel);
+  }
+  if (!hovered(r) || !in.pressed[0]) return false;
+  int near = -1;
+  float best = (float)px(8);
+  for (size_t k = 0; k < pts.size(); k++) {
+    const float d = length(to_px(pts[k]) - Vec2{(float)in.mx, (float)in.my});
+    if (d < best) best = d, near = (int)k;
+  }
+  if (near < 0 && finger) return widget_tap_ = i, false;
+  if (near < 0) changed = curve_add_point(pts, from_px(in.mx, in.my), sel), near = sel;
+  sel = near;
+  widget_grab_ = Vec2{(float)in.mx, (float)in.my} - to_px(pts[(size_t)sel]);
+  set_active(i);
+  if (!finger) consume_click();
+  return changed;
+}
+
+bool Context::curve_add_point(std::vector<Vec2> &pts, Vec2 p, int &sel) {
+  if (pts.size() >= kWidgetPointsMax) return false;
+  const auto it = std::upper_bound(pts.begin(), pts.end(), p, [](const Vec2 &a, const Vec2 &b) { return a.x < b.x; });
+  sel = (int)(it - pts.begin());  // (before the insert, as in ramp_add_stop)
+  pts.insert(it, p);
+  return true;
+}
+
 bool Context::color_field(Id i, const Recti &r, Vec3 &c, float *alpha) {
   bool changed = false;
   auto it = color_results_.find(i);

@@ -82,7 +82,7 @@ works:
 | One finger drags a list or panel | scrolls it (sideways still moves sliders and numbers) | as the mouse |
 | The pen | selects, moves, draws, paints, as the mouse | the same |
 | The pen's side button held while dragging | orbits; Shift pans, Ctrl zooms | the same |
-| The pen in the **Draw tab** (Window > Draw) or over the Game view | draws in that view's perspective; the arrows, A / D, W / S orbit and dolly the Scene camera and Shift+arrows pan while the pen is up (Q / E too in the Scene view; over the pad E is the Eraser, round 320); Place in 3D puts each stroke in the scene at the depth under the pen (task 0233). Its toolbar (round 319, SketchBook Pro's order): Undo, Redo, Brush (Pen Color, Steadiness, Canvas, Lift, Clear), the color with its opacity, Size, Ruler, Ellipse, Curve, Symmetry, Perspective, Steady Stroke, Predictive Stroke, Layers, the zoom (click: fit) and More (Source: Scene Camera / Game Camera / Paper, Paper Color, Pen, Guides, Build, Place in 3D, Fit, Zoom, Turn, Flip Canvas, Hide the Tools). The wheel zooms about the pointer, a middle-drag or Space+drag pans, Shift with either turns (Ctrl: 15 degree steps), two fingers pinch and twist, Home or a double middle-click fits, a tap of Space opens the Wheel; Tab hides the tools (Tab or Esc brings them back). The brush palette (round 320; the toolbar's Brush shows and hides it): the puck - drag sideways for the size, up and down for the opacity - and a tile a brush (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser; double-click for Brush Properties: Size, Opacity, Edge, Pressure, Min Size, Steadiness; Duplicate, Reset). Over the pad: B the last brush, E the Eraser (it cuts what it crosses; the pen's eraser end too), [ ] the size, Shift+[ ] the opacity, B held and dragged the puck at the pen. Space tapped over the pad, or the pen held still on it half a second, opens the Wheel's draw set (Pencil, Inker, Marker, Eraser, Ruler, Fit, Hide Tools, More; round 321) | the same |
+| The pen in the **Draw tab** (Window > Draw) or over the Game view | draws in that view's perspective; the arrows, A / D, W / S orbit and dolly the Scene camera and Shift+arrows pan while the pen is up (Q / E too in the Scene view; over the pad E is the Eraser, round 320); Place in 3D puts each stroke in the scene at the depth under the pen (task 0233). Its toolbar (round 319, SketchBook Pro's order): Undo, Redo, Brush (Pen Color, Steadiness, Canvas, Lift, Clear), the color with its opacity, Size, Ruler, Ellipse, Curve, Symmetry, Perspective, Steady Stroke, Predictive Stroke, Layers, the zoom (click: fit) and More (Source: Scene Camera / Game Camera / Paper, Paper Color, Pen, Guides, Build, Place in 3D, Fit, Zoom, Turn, Flip Canvas, Hide the Tools). The wheel zooms about the pointer, a middle-drag or Space+drag pans, Shift with either turns (Ctrl: 15 degree steps), two fingers pinch and twist, Home or a double middle-click fits, a tap of Space opens the Wheel; Tab hides the tools (Tab or Esc brings them back). The brush palette (round 320; the toolbar's Brush shows and hides it): the puck - drag sideways for the size, up and down for the opacity - and a tile a brush (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser; double-click for Brush Properties: Size, Opacity, Edge, Pressure, Min Size, Steadiness; Duplicate, Reset). Over the pad: B the last brush, E the Eraser (it cuts what it crosses; the pen's eraser end too), [ ] the size, Shift+[ ] the opacity, B held and dragged the puck at the pen. Space tapped over the pad, or the pen held still on it half a second, opens the Wheel's draw set (Pencil, Inker, Marker, Eraser, Ruler, Fit, Hide Tools, More; round 321). Over the pad, Photoshop's view keys: Ctrl+= / Ctrl+- zoom about the pen, Ctrl+1 is 100%, Ctrl+0 fits; 4 / 6 turn the canvas, 5 sets it upright; More > Wheel / Dial makes the wheel zoom, size the brush, turn the canvas or fade the brush (Ctrl+wheel always zooms; round 323) | the same |
 | The pen in **Sculpt Mode** (Modeling Tools > Sculpt; `sculpt on`) | drags a brush over the mesh: Draw raises along the normal (Alt carves), Shift smooths keeping the volume, Grab pulls what is under the first dab; the pen's pressure drives the strength or the size (Pressure); only the vertices in the circle move; a stroke is one undo step (task 0236) | the same with the mouse |
 | The pen with the **brush set** (the Sculpt section; the Wheel's Brushes and Symmetry rings; `sculpt brush|symmetry|lazy|alpha|stroke`) | ten brushes (Clay Buildup, Inflate, Flatten, Scrape, Pinch, Crease, Snake Hook join Draw, Smooth, Grab); Mirror X / Y / Z and Radial apply each dab at its instances, summed where they overlap; Lazy Mouse steadies the stroke; an image alpha shapes the dab, turned to the stroke; Dots, Drag Dot, Drag Rect, Freehand and Spray lay the dabs down (task 0237) | the same with the mouse |
 | The pen with **Ctrl in Sculpt Mode** (the Sculpt section's mask and group rows; the Wheel's Masks ring; `sculpt mask|group|hide|show`) | paints the mask that holds the surface (Ctrl+Alt takes it away; off the model a click inverts, a drag masks a rectangle); Ctrl+Shift on a face shows its polygroup alone, off the model shows all; hidden faces leave the picture, the id plane and the brush (task 0238) | the same with the mouse |
@@ -384,7 +384,7 @@ size, the samples and Keep UVs. In Paint, **Bucket Fill** fills the group, islan
 or a gradient; Brush Alpha, Grain and Stencil pick from the project's images; Save Palette writes the palette.
 
 **Materials** are Unity-style, evaluating Blender's **Principled BSDF**: base colour, metallic, roughness, specular,
-normal and emission, with tiling and offset, and surface types Opaque, Cutout, Transparent and Glass. The
+normal and emission, with tiling and offset, and surface types Opaque, Cutout, Transparent, Glass and Volume (Fog). The
 **Materials** window shows every material as a sphere: drag one onto an object (the face under the mouse picks the
 slot) or onto a face in Edit Mode. **Material assets** (`Assets/Materials/<name>.mat`) are shared by every object
 that uses them, as in Unity.
@@ -394,6 +394,79 @@ generators (Brick, Wood Floor, Tiles, Voronoi, Noise...) and filters (Blur, Leve
 blend mode. The **Textures** window makes and edits them; one texture gives albedo, normal, roughness and height
 maps, and stays sharp at any distance with Live Shading. Its **Physical Size** is the metres one tile covers:
 changing it re-tiles every material using the texture (Tiling = 1 / size), except one tiled by hand.
+
+**New** lists the presets by theme (round 327): Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal &
+Fabric and Stone - the anime ones with their subject. Every pattern generator has a folded **Mapping** group, as Blender's
+Mapping node: Map Offset U / V, Map Rotation and Map Scale U / V move, turn and repeat the pattern across the tile;
+**Map Seamless** (on) keeps whole repeats and quarter turns so the tile still meets itself.
+
+Blender's texture nodes as layers (round 328): **Perlin Noise** (Ken Perlin's gradient noise, with Turbulence), **Noise**
+with Musgrave's types (fBm, Multifractal, Ridged, Hybrid, Hetero Terrain), **Voronoi**'s features (F1, F2, Smooth F1,
+Distance to Edge, N-Sphere Radius) and distances (Euclidean, Manhattan, Chebyshev, Minkowski), **Wave** rings and
+profiles, **Magic**, **White Noise** and **Gabor** - all repeating without a seam.
+
+Blender's converters as filters (round 329): the **Color Ramp** is a gradient bar - click to add a stop, drag one to
+move it, drag it off to remove it; Constant, Linear, Ease or B-Spline; from the height, the mask or the luminance.
+**Map Range**, **Clamp** and **Math** (15 operations, with a value or another plane) work on one plane; **RGB Curves**
+has a curve box per channel; **Separate Channel** puts the albedo's R, G, B, H, S or V into the mask. A layer's
+**Blend** has Blender's Mix modes too (Darken... Linear Light, and Hue, Saturation, Color, Value in HSV).
+
+A PBR material's folded **Principled: Subsurface, Sheen, Coat** group (round 330): Subsurface for skin, wax and leaves;
+Sheen for cloth; Coat for lacquer and car paint; Anisotropic for brushed metal and hair (needs UVs). The CPU views, the
+path tracers (CPU, GPU and OptiX) draw them; a GPU view with such a material is drawn on the CPU and says so.
+
+**Working faster** (round 332): right-click a field's name > **Reset to Default**; Add Layer's search (type part of a
+name: "noi", "ramp"); **Alt+click** a layer's name to see the stack up to it; a row says why a layer does nothing; a
+texture tile says "not used" until a material uses it; the Materials window's **Of Type...** makes a material of a kind.
+
+**Fog** (round 331): Surface Type **Volume (Fog)** makes a mesh's inside fog and hides its surface - a box around a
+room, a sphere for a cloud. Its **Volume (Fog)** group has Blender's Principled Volume fields: Fog Density (1 dims what
+is 1 m behind to about a third), Fog Color, Fog Anisotropy (0.5-0.8 for light shafts toward the sun), Fog Emission
+(fire, a magic cloud) and Fog Density Noise for wisps. The presets Fog, Smoke and Mist start you off. The mesh must be
+closed: an open one says so above the fields. F12 with Path Tracing draws it truly - scattered light, soft shadows,
+shafts; the views show the fog's thickness only. GPU path tracing and the GPU views don't have it yet: such scenes go
+to the CPU and say so.
+
+**Blender's shader nodes in Blendity** (rounds 327-333). Blendity has no node canvas: each node is a texture layer, a
+layer's option or a material field, in the order they are stacked.
+
+| Blender node | In Blendity |
+|---|---|
+| Texture Coordinate (UV, Generated) | The material's Mapping: UV, Box (Triplanar), Generated (Object Bounds) |
+| Mapping | Every pattern layer's folded Mapping group: Map Offset, Map Rotation, Map Scale, Seamless |
+| Noise Texture (with 4.1's Musgrave types) | The Noise layer and its Type: Perlin fBm, Multifractal, Ridged, Hybrid Multifractal, Hetero Terrain |
+| (Ken Perlin's noise) | The Perlin Noise layer: Detail, Roughness, Lacunarity, Distortion, Turbulence |
+| Voronoi, Wave, Magic, White Noise, Gabor, Checker, Brick, Gradient Texture | The layers of those names (Voronoi's Feature and Distance, Wave's Bands / Rings and profiles) |
+| Image Texture | The Image layer, or a material's Base Map |
+| Sky Texture, Environment Texture | The Lighting window's Environment; the Sky Gradient layer for a texture |
+| Mix Color | A layer's Blend: Normal, Multiply, Add, Screen, Overlay, Darken ... Linear Light, Hue, Saturation, Color, Value |
+| RGB Curves, Invert, Hue / Saturation / Value, Bright / Contrast | The RGB Curves, Invert, Hue / Saturation and Levels layers |
+| Color Ramp | The Color Ramp layer: stops on a bar, Constant / Linear / Ease / Cardinal |
+| Map Range, Clamp, Math | The layers of those names, on a plane (height, roughness, metallic, mask, albedo) |
+| Separate RGB / HSV | The Separate Channel layer, into the mask |
+| Bump | A texture's Height, given as its normal (the Normal Map switch) |
+| Normal Map | The material's Normal Map |
+| Displacement | The Displace modifier on the mesh |
+| Principled BSDF | The material: base, metallic, roughness, specular, emission, and the folded Subsurface, Sheen, Coat, Anisotropic |
+| Glass BSDF, Transparent BSDF | Surface Type Glass, Transparent |
+| Principled Volume, Volume Scatter / Absorption | Surface Type Volume (Fog) |
+| Toon BSDF, Shader to RGB | Shading Model Toon |
+| Mix Shader, Add Shader | Not yet (an axis material mixes three materials by slope) |
+| Light Path, Attribute, Object Info, Geometry, Combine RGB | Not yet |
+
+**Animating any property** (round 335): with a clip on the object's root (Animation window > the clip menu), right-click
+any field's name in the Inspector > **Insert Keyframe** (or press I over it) - a light's intensity, a camera's focus, a
+material slot's Base Color or Roughness, a modifier's amount; the object's Active through Add Property > Object. A
+diamond after the name marks an animated field. Switches, lists and Active key as Constant (they switch, not fade).
+A second component of a type (two Array modifiers) isn't keyable: a track names the first. **Record** keys whatever you change at the playhead. **Add Property** searches all of them. A material
+shared by other objects changes on them too: give the object its own first (the slot's New Material).
+
+**The 2D look - Camera Flatten** (round 334): Add Component > Rendering > Camera Flatten squashes the object's depth
+toward the camera about a pivot, as Guilty Gear Xrd does: the near parts no longer swell, so the picture is the drawn
+shape, and the shading stays as modelled (piloting a camera and the Draw tab's camera picture show it too, being
+through a camera). Put it on a character's root with Pivot Bone and the head bone's exact name
+(`flatten preset anime` does that); Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
+view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that.
 
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.
@@ -874,3 +947,57 @@ the editor. None needs it any more: since round 310 every verb an artist uses ha
 *This manual condenses the README's feature list, the lighting guide and the Learn lessons. Developer documents -
 how it's built and why - are in [`ARCHITECTURE.md`](ARCHITECTURE.md), [`decisions/`](decisions/),
 [`tasks/`](tasks/), [`PERFORMANCE.md`](PERFORMANCE.md) and the [`CHANGELOG`](../CHANGELOG.md).*
+
+## A pen display's dial and express keys (round 323)
+Pen displays such as XPPen's Artist 13.3 Pro V2 send their express keys as keyboard shortcuts (Photoshop's, by
+default) and their dial as a key pair or the scroll wheel. Blendity answers them where the pen draws, over the Draw
+tab's pad and the reference board.
+
+| Control | Set in the tablet's driver | What it does in Blendity |
+|---|---|---|
+| Dial (key mode) | KL `Ctrl -`, KR `Ctrl =` (the default zoom pair) | zoom about the pen |
+| Dial (key mode) | KL `[`, KR `]` | the brush's size |
+| Dial (key mode) | KL `4`, KR `6` | turn the canvas (`5` sets it upright) |
+| Dial | Mouse wheel scroll | whatever More > Wheel / Dial says: zoom, brush size, turn, opacity (Ctrl+wheel zooms) |
+| Express keys | `B`, `E`, `Ctrl Z`, `Ctrl Y`, `Space` (held), `[`, `]`, `Ctrl 0` | brush, Eraser, undo, redo, pan while the pen drags, size, fit |
+| Pen side button | Right click or "Mouse button" | the Wheel at the pen |
+
+## Papers (round 324)
+The Draw tab's More > Source > Paper draws on a paper: a page of its own in `Assets/Papers`, not in the scene. While
+the pad is on Paper the Scene and Game views show no sketch and take no pen, and a paper's perspective guide never
+moves a camera.
+
+| To | Do |
+|---|---|
+| Start another paper | More > Paper > New Paper (or `paper new <name>`) |
+| Go back to one | More > Paper > Open Paper (`paper open <name>`) |
+| Copy or remove it | More > Paper > Duplicate Paper / Delete Paper (to the system's trash) |
+| Undo on the paper | Ctrl+Z / Ctrl+Y over the pad or the Layers window, or the toolbar's Undo / Redo |
+| Draw in the scene again | More > Source > Scene Camera: the scene's own sketch, as it was |
+
+A paper saves itself a second after each change and on closing; the paper used last opens again. Place in 3D, Build
+and Lift need a camera source.
+
+**Papers on the board (round 325):** Boards > New Paper Here or Add Paper, a `.paper` dragged from the Project window,
+or More > Paper > Pin to the Board. The board shows the drawing and keeps it up to date; double-click it to draw on it.
+One paper can be on many boards; a rename keeps them linked.
+
+**Export a board (round 326):** Boards > Export... - What, Format (PNG, JPEG, PDF), Size, Background - then Export...
+It is written in the background, at full sharpness. `board export <path> [png|jpg|pdf] [size <px>] [selection|view]
+[bg board|white|none]`.
+
+**Puppet handles on the right bones:** if a Puppet Posing handle sits on the wrong bone, select the right bone, then
+Animation > Puppet > Handle Bones > that handle > Use the Selected Bone (`autopose handle <part> <bone>|auto`).
+
+## The reference board (round 322)
+Window > Board (a tab beside the Draw tab in the Drawing layout; beside it in Drawing with References).
+
+| To | Do |
+|---|---|
+| Put images on it | Drop files from the system, drag from the Project window, Add Image..., or Ctrl+V (a screenshot, a copied picture or file) |
+| Move around | Wheel: zoom about the pointer; middle-drag: pan; two fingers: pinch and pan; Home or Ctrl+0: fit everything; F: frame the selection; Ctrl+= / Ctrl+-: zoom |
+| Pick | Click an image (Shift: add or take away), drag on empty board for a marquee, Ctrl+A for all |
+| Change | Drag to move, a corner to scale (about the opposite corner), the round handle to turn (Ctrl: 15 degree steps); arrows nudge (Shift: 10 px) |
+| Arrange | Ctrl+] to the front, Ctrl+[ to the back; Ctrl+D duplicates; Delete removes |
+| Undo | Ctrl+Z / Ctrl+Y over the board (its own history, 100 steps) |
+| Keep it | Nothing to do: it saves itself to Assets/Boards a second after a change and on closing, and opens again next time; Boards > New Board or another to switch |

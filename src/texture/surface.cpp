@@ -286,6 +286,7 @@ inline float clamp01(float v) { return std::isfinite(v) ? std::max(0.0f, std::mi
 
 /* Substance's fill layer: one value per channel. */
 struct FillLayer : TextureLayerBase<FillLayer> {
+  bool mappable() const override { return false; }  // (round 328's review: no Mapping)
   static constexpr const char *kName = "Fill";
   Vec3 color{0.5f, 0.5f, 0.5f}, emission{0.0f, 0.0f, 0.0f};
   float height = 0.5f, roughness = 0.5f, metallic = 0.0f;
@@ -309,6 +310,7 @@ struct FillLayer : TextureLayerBase<FillLayer> {
 /* One of the surface's mesh maps through levels: a generator (its height is the value), so it serves as a mask
  * effect and as a layer. */
 struct MeshMapLayer : TextureLayerBase<MeshMapLayer> {
+  bool mappable() const override { return false; }  // (round 328's review: no Mapping)
   static constexpr const char *kName = "Mesh Map";
   int map = 1;  // 0 ambient occlusion, 1 curvature, 2 thickness, 3-5 position x y z, 6-8 world normal x y z
   float low = 0.0f, high = 1.0f, softness = 0.0f;

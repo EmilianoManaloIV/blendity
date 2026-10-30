@@ -20,6 +20,10 @@ using namespace platform;
 namespace {
 constexpr float kPadZoomMin = 0.1f, kPadZoomMax = 16.0f;
 constexpr float kPadWheelStep = 1.15f;  // (one wheel notch's zoom)
+constexpr float kPadKeyZoom = 1.25f;    // (Ctrl+= / Ctrl+-: a pen display's dial in its default key mode, Photoshop's zoom keys)
+constexpr float kPadDialTurn = 5.0f;    // (degrees a notch, when the wheel turns the canvas)
+constexpr float kPadDialSize = 1.1f, kPadDialOpacity = 0.05f;  // (a notch: the brush's size times this, its opacity plus this)
+constexpr float kSketchWidthMin = 0.5f, kSketchWidthMax = 200.0f;  // (sketch_brushes.cpp's brush widths)
 constexpr float kPadPanMax = 1e6f;      // (pixels: a pan past this is clamped - a console typo can't overflow the mapping)
 constexpr int kPadPictureMax = 4096;    // (the off-screen picture's longest side)
 const uint32_t kPadSurround = 0xFF2E2E30;
@@ -106,10 +110,36 @@ void Editor::pad_fit() {
   ui_.redraw = true;
 }
 
+/* ---- the wheel and the dial (task 0303) ---- */
+
+/* A notch of the wheel - a mouse's, or a pen display's dial set to scroll - does what the Draw tab's Wheel / Dial
+ * setting says: zoom (about the pointer), the brush's size, the canvas's turn, or the brush's opacity. Ctrl with it
+ * always zooms. */
+void Editor::pad_wheel(float notches, Vec2 at, bool ctrl) {
+  const int mode = ctrl ? 0 : pad_wheel_mode_;
+  if (mode == 0) pad_zoom_at(std::pow(kPadWheelStep, notches), at);
+  if (mode == 1) sketch_.width = clampf(sketch_.width * std::pow(kPadDialSize, notches), kSketchWidthMin, kSketchWidthMax), sketch_brush_store();
+  if (mode == 2) pad_set_angle(pad_.angle + notches * kPadDialTurn, at);
+  if (mode == 3) {
+    sketch_brushes_init();
+    SketchBrush &b = sketch_brushes_[(size_t)sketch_brush_];
+    b.opacity = clampf(b.opacity + kPadDialOpacity * notches, 0.02f, 1.0f);
+  }
+  ui_.redraw = true;
+}
+
+const char *const kPadWheelModes[] = {"zoom", "size", "turn", "opacity"};
+
 /* ---- navigation ---- */
 
 /* Space over the pad (the keymap's Wheel key): held, a drag navigates; let go without one, the Wheel opens where it was
  * pressed (SketchBook's Space is its navigation, Blendity's the Wheel: both). */
+/* Where a key's zoom or turn is about: the pointer when it is over the pad, else the pad's middle. */
+Vec2 Editor::pad_keys_point() const {
+  if (pad_rect_.contains(ui_.in.mx, ui_.in.my)) return {(float)ui_.in.mx, (float)ui_.in.my};
+  return {pad_rect_.x + pad_rect_.w * 0.5f, pad_rect_.y + pad_rect_.h * 0.5f};
+}
+
 bool Editor::pad_takes_space() const {
   return pad_hovered_ && active_window_ == pad_window_ && ui_.frame_number() <= draw_last_frame_ + 2;  // (the window the pad is in: review 319)
 }
@@ -128,7 +158,7 @@ bool Editor::pad_hold_opens_wheel() const {
 /* A stroke, an erase or a guide's handle under way: the view stays put (the stroke's points are the picture's pixels as
  * they were when it began). */
 bool Editor::pad_busy() const {
-  return sketch_.stroking || sketch_.erasing || sketch_.drag_handle >= 0;
+  return sketch_.stroking || sketch_.erasing || sketch_.drag_handle >= 0 || draw_puck_drag_;  // (the puck: its drag sets the size)
 }
 
 void Editor::pad_space_begin() {
@@ -192,9 +222,13 @@ bool Editor::pad_navigate(bool hovered) {
   if (pad_nav_) return pad_nav_drag();
   if (!hovered || pad_busy()) return false;
   const Vec2 m{(float)in.mx, (float)in.my};
-  if (in.wheel_y != 0.0f) {
-    pad_zoom_at(std::pow(kPadWheelStep, in.wheel_y), m);
+  if (in.wheel_y != 0.0f) {  // (a mouse wheel, or a pen display's dial sending one: task 0303)
+    pad_wheel(in.wheel_y, m, in.ctrl());
     in.wheel_y = 0.0f;
+  }
+  if (in.wheel_x != 0.0f) {  // (a sideways wheel or a dial sending one: turns the canvas)
+    pad_set_angle(pad_.angle + in.wheel_x * kPadDialTurn, m);
+    in.wheel_x = 0.0f;
   }
   pad_touch(m);
   if (in.double_clicked[2]) {
@@ -220,6 +254,7 @@ bool Editor::pad_navigate(bool hovered) {
 void Editor::draw_pad_paper(const Recti &view, const Recti &pic) {
   auto &u = ui_;
   if (pad_at_fit()) {
+    u.canvas.fill_rect(view, kPadSurround);  // (the letterbox's bands: review 324 - else the last picture stays there)
     u.canvas.fill_rect(pic, draw_paper_);
     return;
   }
@@ -274,7 +309,7 @@ Recti Editor::sketch_screen_rect(const Recti &view) const {
 }
 
 /* Stroke widths are the picture's: zoomed in, a stroke is wider on screen, as on paper. */
-float Editor::sketch_zoom() const { return sketch_view_.kind == 2 ? pad_.zoom : 1.0f; }
+float Editor::sketch_zoom() const { return (sketch_view_.kind == 2 ? pad_.zoom : 1.0f) * sketch_thumb_scale_; }  // (task 0305: a board's thumbnail)
 
 /* ---- the toolbar ---- */
 
@@ -333,9 +368,9 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
   };
   auto end_group = [&] { x += sep - gap; };
   if (show[0]) {
-    if (u.button(put(W[0][0], "draw:Undo"), "Undo")) run_console_command("undo");
+    if (u.button(put(W[0][0], "draw:Undo"), "Undo")) run_console_command(draw_source_ == 2 ? "paper undo" : "undo");  // (round 324: a paper's own)
     u.tooltip("Undo the last stroke or change (Ctrl+Z).");
-    if (u.button(put(W[0][1], "draw:Redo"), "Redo")) run_console_command("redo");
+    if (u.button(put(W[0][1], "draw:Redo"), "Redo")) run_console_command(draw_source_ == 2 ? "paper redo" : "redo");
     u.tooltip("Redo (Ctrl+Y).");
     end_group();
   }
@@ -359,10 +394,11 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
   if (show[3]) {
     u.combo(u.id("draw_sym"), put(W[3][0], "draw:symmetry"), sketch_.symmetry, kSymNames, 5);
     u.tooltip("Symmetry: each stroke mirrored across the axis (drag its centre), or copied round it.");
-    int persp = std::max(0, std::min(3, scene_->sketch.perspective));
+    int persp = std::max(0, std::min(3, sketch_doc().perspective));
     if (u.combo(u.id("draw_persp"), put(W[3][1], "draw:perspective"), persp, kPerspNames, 4))
       run_console_command(persp == 0 ? std::string("sketchguide perspective off") : strprintf("sketchguide perspective %d", persp));
-    u.tooltip("The perspective guide: its vanishing points are this view's camera's, and follow it.");
+    u.tooltip(draw_source_ == 2 ? "The perspective guide: the paper's own vanishing points - drag them where you want them (no camera moves)."
+                                : "The perspective guide: its vanishing points are this view's camera's, and follow it.");
     end_group();
   }
   if (show[4]) {
@@ -370,7 +406,7 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
     if (u.combo(u.id("draw_steady"), put(W[4][0], "draw:steady"), steady, kSteadyNames, 5))
       sketch_command({"sketch", "steady", std::to_string(kSteadyPx[steady])}, "");
     u.tooltip("Steady Stroke: the line trails the pen on a lazy rope, so a shaky hand draws a smooth line.");
-    int correct = scene_->sketch.layer_at(scene_->sketch.active_layer).correct;
+    int correct = sketch_doc().layer_at(sketch_doc().active_layer).correct;
     if (u.combo(u.id("draw_correct"), put(W[4][1], "draw:predictive"), correct, kPredictive, 3)) draw_pad_set_correct(correct);
     u.tooltip("Predictive Stroke: when the pen lifts, a wobbly line is made straight, an arch an arc (the active layer's).\n"
               "Freehand leaves it as drawn, and the perspective guide doesn't pull it.");
@@ -402,8 +438,8 @@ void Editor::draw_pad_zoom_button(const Recti &zoom) {
 
 /* Predictive Stroke: the active layer's correction (0 Freehand, 1 Light, 2 Full). */
 void Editor::draw_pad_set_correct(int correct) {
-  scene_->sketch.layer_at(scene_->sketch.active_layer).correct = correct;
-  mark_changed("Sketch Correction");
+  sketch_doc().layer_at(sketch_doc().active_layer).correct = correct;
+  sketch_changed("Sketch Correction");
 }
 
 /* The brush, its color (the puck: a round swatch, the Color window with alpha) and its size. */
@@ -424,10 +460,10 @@ void Editor::draw_pad_brush_group(const Recti &brush, const Recti &color, const 
 /* More: what isn't drawing - the source and paper, the pen, the guides, Build, Place in 3D, the pad's view, the tools. */
 void Editor::draw_pad_more_menu() {
   auto &u = ui_;
-  if (u.menu_item("Undo", "Ctrl+Z")) run_console_command("undo");  // (the toolbar's groups, folded in a narrow tab, are here too)
-  if (u.menu_item("Redo", "Ctrl+Y")) run_console_command("redo");
+  if (u.menu_item("Undo", "Ctrl+Z")) run_console_command(draw_source_ == 2 ? "paper undo" : "undo");  // (the toolbar's groups, folded in a narrow tab, are here too)
+  if (u.menu_item("Redo", "Ctrl+Y")) run_console_command(draw_source_ == 2 ? "paper redo" : "redo");
   u.submenu("Predictive Stroke", u.px(200), [this] {
-    const int correct = scene_->sketch.layer_at(scene_->sketch.active_layer).correct;
+    const int correct = sketch_doc().layer_at(sketch_doc().active_layer).correct;
     for (int k = 0; k < 3; k++)
       if (ui_.menu_item(kPredictive[k], nullptr, correct == k)) draw_pad_set_correct(k);
   });
@@ -439,7 +475,10 @@ void Editor::draw_pad_more_menu() {
     for (int k = 0; k < 3; k++)
       if (ui_.menu_item(kS[k], nullptr, draw_source_ == k)) run_console_command(std::string("draw source ") + kW[k]);
   });
-  u.tooltip("Whose picture the pad shows: the Scene view's camera (the keyboard moves it), the Game camera, or blank paper.");
+  u.tooltip("Whose picture the pad shows: the Scene view's camera (the keyboard moves it), the Game camera, or a paper -\n"
+            "a page of its own, saved in Assets/Papers, that nothing in the scene shows.");
+  u.submenu("Paper", u.px(200), [this] { draw_paper_menu(); });
+  u.tooltip("Your papers: a new one, another to open, a copy, or this one deleted.");
   u.submenu("Paper Color", u.px(160), [this] {
     static const char *const kP[] = {"White", "Cream", "Gray", "Dark"};
     static const char *const kW[] = {"white", "cream", "gray", "dark"};
@@ -449,10 +488,13 @@ void Editor::draw_pad_more_menu() {
   u.tooltip("The paper's color when the source is Paper.");
   u.submenu("Pen", u.px(200), [this] { draw_sketch_pen_menu(); });
   u.submenu("Guides", u.px(240), [this] { draw_sketch_guides_items(); });
-  u.submenu("Build", u.px(240), [this] { draw_sketch_build_items(); });
-  if (u.menu_item("Place in 3D", nullptr, sketch_.place3d)) sketch_.place3d = !sketch_.place3d;
-  u.tooltip("A stroke lands in the scene where it was drawn - on the face under the pen, else at the camera's pivot depth -\n"
-            "and stays in perspective as the camera turns; off, it stays on the picture plane.");
+  const bool scene_pic = draw_source_ != 2;  // (round 324: a paper isn't in the scene - Build and Place in 3D are the scene's)
+  if (scene_pic) u.submenu("Build", u.px(240), [this] { draw_sketch_build_items(); });
+  else u.menu_item("Build", nullptr, false, false);
+  if (u.menu_item("Place in 3D", nullptr, sketch_.place3d && scene_pic, scene_pic)) sketch_.place3d = !sketch_.place3d;
+  u.tooltip(scene_pic ? "A stroke lands in the scene where it was drawn - on the face under the pen, else at the camera's pivot depth -\n"
+                        "and stays in perspective as the camera turns; off, it stays on the picture plane."
+                      : "Paper isn't in the scene: switch the source to a camera to place strokes in 3D or build from them.");
   u.menu_separator();
   if (u.menu_item("Fit to the Tab", "Home", pad_at_fit())) run_console_command("draw view fit");
   if (u.menu_item("Zoom In")) run_console_command("draw view zoom 1.25");
@@ -462,6 +504,12 @@ void Editor::draw_pad_more_menu() {
   if (u.menu_item("Turn Right")) run_console_command("draw view turn 15");
   if (u.menu_item("Flip Canvas", nullptr, pad_.flip)) run_console_command("draw view flip");
   u.tooltip("The pad mirrored left to right, to see the drawing fresh (the strokes don't change).");
+  u.submenu("Wheel / Dial", u.px(200), [this] {  // (task 0303)
+    static const char *const kNames[] = {"Zoom", "Brush Size", "Turn the Canvas", "Brush Opacity"};
+    for (int k = 0; k < 4; k++)
+      if (ui_.menu_item(kNames[k], nullptr, pad_wheel_mode_ == k)) run_console_command(std::string("draw wheel ") + kPadWheelModes[k]);
+  });
+  u.tooltip("What the mouse wheel - or a pen display's dial set to scroll - does over the pad (Ctrl with it always zooms).");
   u.menu_separator();
   if (u.menu_item("Hide the Tools", "Tab", pad_ui_hidden_)) run_console_command("draw tools toggle");
   u.tooltip("Only the drawing: Tab (or Esc) over the pad brings the tools back.");
@@ -539,6 +587,12 @@ void Editor::draw_draw_window(const Recti &r) {
     eye = cam_.position(), fwd = cam_.forward();
     v = cam_.view(), p = cam_.proj(aspect);
   }
+  if (draw_source_ == 2) {  // (round 324: a paper's own page, its aspect, letterboxed in the tab)
+    paper_ensure_open();
+    if (view.w / (float)view.h > paper_aspect_) fit.w = std::max(8, (int)std::lround(view.h * paper_aspect_));
+    else fit.h = std::max(8, (int)std::lround(view.w / paper_aspect_));
+    fit.x = view.x + (view.w - fit.w) / 2, fit.y = view.y + (view.h - fit.h) / 2;
+  }
   pad_center_ = {fit.x + fit.w * 0.5f, fit.y + fit.h * 0.5f};
   sketch_brush_store();  // (the toolbar's Size, color and Steady into the brush they belong to)
   const bool hovered = u.hovered(view) && !u.any_popup_open() && !draw_palette_over(view);  // (the palette over the pad is its own)
@@ -567,7 +621,10 @@ void Editor::draw_draw_window(const Recti &r) {
       view_cache_store(draw_cache_, key, fit);
     }
   }
-  sketch_bind(2, pic, scam, v, p, hovered && !navigating);  // (kind 2: the pad, in the tool's pixels)
+  /* On Paper a stroke starts only on the page (review 324: one begun in the band was kept but never seen). */
+  const Vec2 at = pad_at_fit() ? Vec2{(float)u.in.mx, (float)u.in.my} : pad_from_screen().map({(float)u.in.mx, (float)u.in.my});
+  const bool on_page = draw_source_ != 2 || sketch_.stroking || pic.contains((int)std::floor(at.x), (int)std::floor(at.y));
+  sketch_bind(2, pic, scam, v, p, hovered && !navigating && on_page);  // (kind 2: the pad, in the tool's pixels)
   draw_pad_sketch(navigating);
   draw_pad_cursor(hovered && !navigating);
   if (draw_puck_drag_ && draw_puck_at_pen_) {  // (the brush's size and opacity where the pen is)
@@ -575,6 +632,10 @@ void Editor::draw_draw_window(const Recti &r) {
     const uint32_t a = (uint32_t)std::lround(220.0f * saturate(sketch_brush_cur().opacity));
     u.canvas.fill_circle(draw_puck_from_.x, draw_puck_from_.y, r, (sketch_.color & 0xFFFFFF) | (a << 24));
     u.canvas.circle(draw_puck_from_.x, draw_puck_from_.y, r, u.theme.accent, 1.5f);
+  }
+  if (draw_source_ == 2 && !pad_ui_hidden_) {  // (round 324: which paper this is)
+    const uint32_t col = draw_paper_ != draw_paper_named("dark") ? Color::hex(0x000000, 120) : Color::hex(0xFFFFFF, 130);
+    u.label({view.x + u.px(8), view.y + u.px(4), view.w - u.px(16), u.row_h()}, paper_name_ + (paper_dirty_ ? " *" : ""), col, ui::Align::Right);
   }
   draw_pad_palette(view);
   draw_pad_hint(view, gcam != nullptr, hovered);
@@ -625,8 +686,14 @@ bool Editor::draw_tab_command(const std::vector<std::string> &t) {
   if (verb == "paper") return draw_paper_command(w);
   if (verb == "view") return draw_view_command(t);
   if (verb == "tools") return draw_tools_command(w);
+  if (verb == "wheel") return draw_wheel_command(w);
   return false;
 }
+
+/* Paper is a page of its own (round 324): while it is the Draw tab's source, the Scene and Game views neither show the
+ * sketch nor take the pen - the pad is a drawing beside the world, not on it. The strokes keep their place in the Scene
+ * camera's picture, so a camera source shows them again. */
+bool Editor::sketch_in_world() const { return draw_source_ != 2; }
 
 bool Editor::draw_source_command(const std::string &w) {
   if (w != "scene" && w != "game" && w != "paper") {
@@ -634,6 +701,8 @@ bool Editor::draw_source_command(const std::string &w) {
     return true;
   }
   draw_source_ = w == "game" ? 1 : w == "paper" ? 2 : 0;
+  sketch_solo_ = -1;  // (another sketch, or the scene's again: review 324)
+  if (draw_source_ == 2) paper_ensure_open();  // (round 324: the paper used last, or a new one)
   draw_cache_.key = 0;
   pad_pic_key_ = 0;
   ui_.redraw = true;
@@ -648,6 +717,7 @@ bool Editor::draw_paper_command(const std::string &w) {
     return true;
   }
   draw_paper_ = c;
+  if (!paper_name_.empty()) paper_dirty_ = true, paper_changed_at_ = clock_now(), paper_version_++;  // (round 324: kept in the paper's file)
   ui_.redraw = true;
   return true;
 }
@@ -663,6 +733,9 @@ bool Editor::draw_view_command(const std::vector<std::string> &t) {
   const Vec2 mid{pad_rect_.x + pad_rect_.w * 0.5f, pad_rect_.y + pad_rect_.h * 0.5f};
   if (w == "fit") pad_fit();
   else if (w == "zoom") pad_zoom_at(num(3, 1.0f), t.size() > 5 ? Vec2{num(4, 0), num(5, 0)} : mid);
+  else if (w == "in" || w == "out") pad_zoom_at(w == "in" ? kPadKeyZoom : 1.0f / kPadKeyZoom, pad_keys_point());
+  else if (w == "actual") pad_zoom_at(1.0f / pad_.zoom, pad_keys_point());
+  else if (w == "upright") pad_set_angle(0.0f, mid);
   else if (w == "turn") pad_set_angle(pad_.angle + num(3, 0.0f), mid);
   else if (w == "flip") pad_flip();
   else if (w == "pan") {
@@ -673,6 +746,18 @@ bool Editor::draw_view_command(const std::vector<std::string> &t) {
   else if (w.empty()) Log::info("draw view: zoom %.0f%%, turned %.1f, %s, panned %.0f %.0f", pad_.zoom * 100.0f, pad_.angle,
                                 pad_.flip ? "flipped" : "not flipped", pad_.pan_x, pad_.pan_y);
   else Log::info("usage: draw view fit|zoom <factor> [x y]|turn <degrees>|flip|pan <dx> <dy>");
+  return true;
+}
+
+/* draw wheel zoom|size|turn|opacity (task 0303) */
+bool Editor::draw_wheel_command(const std::string &w) {
+  for (int k = 0; k < 4; k++)
+    if (w == kPadWheelModes[k]) {
+      pad_wheel_mode_ = k;
+      save_prefs();
+      return true;
+    }
+  Log::info("usage: draw wheel zoom|size|turn|opacity (now %s)", kPadWheelModes[pad_wheel_mode_]);
   return true;
 }
 

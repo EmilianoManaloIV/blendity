@@ -365,7 +365,7 @@ std::string Editor::wheel_mode_at(int x, int y) {
     return wheel_has_own_set(kind) ? kind : "other";
   }
   if (edit_mode_) return "edit";
-  if (sketch_.active) return "sketch";
+  if (sketch_.active && sketch_in_world()) return "sketch";
   if (sculpt_) return "sculpt";  // (task 0236)
   if (weight_paint_) return "weight paint";
   return "object";
@@ -598,10 +598,10 @@ bool Editor::wheel_hold_busy() {
   const auto &in = ui_.in;
   if (ui_.any_active() || modal_.active || xf_.active || pp_.active || sculpt_stroking_ || sculpt_gesture_) return true;  // (task 0236: a stroke under way; 0238: a Ctrl gesture)
   const WindowKind under = wheel_window_at(hold_x_, hold_y_);
-  if (sketch_.active && under == WindowKind::Game) return true;  // (task 0233: the pen draws there too)
+  if (sketch_.active && sketch_in_world() && under == WindowKind::Game) return true;  // (task 0233: the pen draws there too)
   if (sketch_.active && under == WindowKind::Draw) return !pad_hold_opens_wheel();  // (round 321: a pen held still on the pad)
   if (under != WindowKind::Scene) return false;
-  if (sketch_.active) return true;
+  if (sketch_.active && sketch_in_world()) return true;
   const bool finger_still = in.touch && drag_button_ == 0 && (drag_ == Drag::Orbit || drag_ == Drag::Pan || finger_orbit_);
   return !(drag_ == Drag::None || drag_ == Drag::Box || finger_still);
 }

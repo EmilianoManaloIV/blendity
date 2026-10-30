@@ -71,7 +71,7 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
          return std::string("Draw ") + kDrawShapes[std::max(0, std::min(kDrawShapeCount - 1, e.draw_.shape))] +
                 ": click the points on the surface or the grid  |  type a length  |  Enter or right-click: finish  |  Esc: cancel";
        }},
-      {"sketch", [](const Editor &e) { return e.sketch_.active && !e.tablet_; },
+      {"sketch", [](const Editor &e) { return e.sketch_.active && !e.tablet_ && e.sketch_in_world(); },
        [](const Editor &) { return std::string("Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop"); }},
       {"gizmo drag", [](const Editor &e) { return e.drag_ == Drag::Gizmo; },
        [](const Editor &) { return std::string("Dragging: type a number for an exact amount  |  V: snap to a vertex  |  Ctrl+Shift: drop onto a surface  |  Esc: cancel"); }},

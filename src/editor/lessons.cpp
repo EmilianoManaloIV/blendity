@@ -1432,7 +1432,107 @@ The toolbar's Brush shows the palette: Pencil, Pen, Inker, Felt Pen, Marker, Air
 ? You shade with the Marker and the overlapping parts of one stroke come out darker in other apps. Here? And how do you rub out only the middle of a line? | A Marker stroke is drawn into its own picture and composited once, so it has one tone where it crosses itself (two strokes do build up, as markers do). The Eraser cuts: drag it across the middle and the two ends stay as two strokes; the pen's eraser end does the same.
 # The Wheel on the pad
 Space tapped over the pad, or the pen held still on it for half a second, opens the Wheel's draw set - the Pencil, Inker, Marker and Eraser, the Ruler, Fit and Hide Tools, and More - SketchBook's marking menu in Blendity's Wheel. Its slices are yours to change (Preferences > Wheel).
+? You want your references beside the drawing while you draw. How, and where do they live? | The Board (Window > Board, or the Drawing with References layout, which puts it beside the pad): drop images from the system, paste a screenshot with Ctrl+V or drag them from the Project window; move, scale and turn them by their handles. It keeps itself in Assets/Boards a second after each change and opens again next time; images from outside the project are copied into Assets/Textures/References.
+? Your pen display has a dial. How do you make it zoom the canvas - or change the brush's size instead? | Leave the dial on its default key pair (Ctrl- / Ctrl+): over the pad it zooms about the pen. Or set it to the mouse wheel in the tablet's driver and pick More > Wheel / Dial > Brush Size (or Turn the Canvas, or Brush Opacity); Ctrl with it still zooms. The express keys' Photoshop shortcuts work too: B, E, [ ], Ctrl+0 to fit, Space held to pan.
 ? With the pen in hand and no keyboard, how do you switch to the Eraser and back? | Hold the pen still on the pad for half a second: the Wheel opens with the Eraser on it; flick toward it and lift. Do the same for the brush you were drawing with.
+)"},
+    {"Papers", "Drawing on pages of your own, not in the scene", R"(
+The Draw tab's Paper source is a page of its own: a paper, kept in Assets/Papers. What you draw there isn't in the scene - the Scene and Game views show nothing of it and take no pen while the pad is on Paper, and a paper's perspective guide never turns a camera. Keep as many papers as you like; each has its own undo and saves itself a second after a change.
+# Papers
+More > Source > Paper opens the paper you used last (or a new one). More > Paper makes a New Paper, opens another, duplicates or deletes one (to the system's trash). The pad shows the paper's name, with * until it is saved. Ctrl+Z over the pad or the Layers window undoes on the paper, not in the scene.
+! cmd:layout Drawing; window Draw; draw source paper | The pad on Paper
+! cmd:paper new Practice | A new paper named Practice
+! cmd:paper list | Your papers, in the Console
+! cmd:draw source scene | Back to the scene's own sketch
+? You sketch a character on Paper, then switch the source to the Scene Camera. Where did the sketch go, and what happens to the strokes you had drawn over the scene before? | The sketch is still on its paper (Assets/Papers), shown again when the source is Paper and that paper is open; the scene's own sketch, drawn on the camera before, is back as it was - a paper never changes it.
+? You turn on a 2-point perspective guide on a paper and drag its vanishing points. Does the Scene view's camera move? | No: a paper has no camera. Its guide is its own and stays where you put it; the scene's guide and the Scene camera are left alone. On a camera source the guide follows the camera, as before.
+? Why are Place in 3D, Build and Lift greyed out on Paper? | A paper isn't in the scene - there is no camera or depth for its strokes. Switch the source to a camera to draw in the scene and build from the strokes.
+# Papers on the board, and the board exported
+A reference board can hold your papers beside your images: Boards > New Paper Here or Add Paper, or More > Paper > Pin to the Board. The board shows the drawing and keeps it up to date; double-click it to draw on it again. Boards > Export... writes the board, the selection or the view as a PNG, a JPEG or a one-page PDF, in the background and at full sharpness.
+! cmd:layout Drawing with References | The pad and the board side by side
+! cmd:board newpaper | A new paper on the board
+? You keep a character's references and three sketches of it. How do you get them in one place, and send the whole sheet to a friend? | Put the images and the papers on one board (Boards > Add Paper, or New Paper Here, or drag a .paper from the Project window); each paper shows its drawing. Then Boards > Export... > Format: PDF (or PNG) > Export...: one picture of the whole board, written in the background.
+)"},
+    {"Blender's Shader Nodes in the Textures Window", "The texture stack with Blender's node ideas: presets by theme, Mapping", R"(
+A Blendity texture is a stack of layers, not a node graph: each layer is what one or a few of Blender's shader nodes do, in the order they are stacked. A generator is a texture node (Noise, Voronoi, Wave, Checker, Brick, Gradient), a filter a converter (Color Ramp, Levels, Hue / Saturation, Invert), and a layer's Blend is a Mix node's mode.
+# Presets by theme
+New lists the presets by theme: Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal & Fabric and Stone. The anime ones sit with their subject.
+! cmd:window Textures | The Textures window
+! cmd:newtex Marble Marble | A Marble texture, from the Stone theme
+# Mapping
+Every pattern generator has Blender's Mapping node folded after its fields: Map Offset moves the pattern, Map Rotation turns it, Map Scale repeats it across the tile. Seamless keeps whole repeats and quarter turns, so the tile still meets itself when it repeats on a wall.
+! cmd:settex Marble L0MapScaleU 2; settex Marble L0MapScaleV 2 | The marble's pattern twice across the tile, both ways
+# Perlin Noise and Blender's other texture nodes
+Perlin Noise is a layer of its own: Ken Perlin's gradient noise, with Detail for finer octaves and Turbulence for sharp creases (veins, fire). Noise has Blender's Musgrave types under Type, Voronoi its features (F1, F2, Distance to Edge...) and distances, Wave rings and saw or triangle profiles; Magic, White Noise and Gabor are generators too. All of them repeat without a seam.
+! cmd:newtex Clouds2 Perlin Noise | A Perlin Noise texture
+! cmd:settex Clouds2 L0Turbulence 1 | Turbulence: the noise folded into creases
+# Converters: ColorRamp, Map Range, Math, RGB Curves
+Blender's converter nodes are filters here. The Color Ramp is a gradient bar: click it to add a stop, drag a stop to move it, drag it off the bar to remove it; Constant gives hard bands. Map Range, Clamp and Math work on one plane - the height, roughness, metallic, mask or the albedo - Math with a value or another plane. RGB Curves bends each colour channel; Separate Channel puts one into the mask for the layers above.
+! cmd:texlayer Clouds2 add Color Ramp | A Color Ramp on Clouds2's noise
+! cmd:settex Clouds2 L1Stops 0 0.1 0.1 0.1, 0.45 0.45 0.45 0.5, 0.6 0.85 0.85 0.9 | Three stops: dark, middle, light
+! cmd:settex Clouds2 L1Interpolation Constant | Constant: hard bands, a toon look
+# Mix modes and the Principled extras
+A layer's Blend has Blender's Mix modes - Darken, Lighten, Difference, Soft Light, Linear Light, and Hue, Saturation, Color and Value in HSV. A PBR material's folded Principled group adds Subsurface (skin, wax, leaves), Sheen (cloth), Coat (lacquer, car paint) and Anisotropic (brushed metal, hair).
+! cmd:newtex MixDemo Noise; texlayer MixDemo add Checker; settex MixDemo L1Blend Soft Light | A Checker over a noise in Soft Light
+! cmd:select Sphere; matset Coat 1; matset CoatRoughness 0.03 | The sphere's material lacquered: Coat 1, a sharp highlight on top
+? A red car needs its glossy clear-coat highlight over a softer paint, and a velvet chair a soft glow at its edges. Which fields? | The car's material: Coat 1, Coat Roughness low (0.03), over a base with Roughness 0.4 - the coat's sharp highlight sits on the paint's soft one. The chair's: Sheen 1 (Sheen Tint a lighter colour of the fabric) - the glow at grazing angles.
+? In Blender you would run a Noise Texture into a ColorRamp set to Constant to get three hard tones. Here? | Add a Color Ramp layer above the noise; click the bar where you want a third tone (a stop of the ramp's colour there), pick each stop's colour under the bar, and set Interpolation to Constant. Input: Height reads the noise below.
+? You want cracked dry mud: dark lines where cells meet, lighter in the middle of each. Which layer and settings? | A Voronoi layer with Feature: Distance to Edge - 0 on the borders between cells (Edge Color there), rising toward each cell's middle (Color); Cells sets how many. For tiles with straighter sides use F1 with Distance: Manhattan (diamonds) or Chebyshev (squares) - Distance to Edge always measures straight, as Blender's does.
+? In Blender you would put a Mapping node between Texture Coordinate and a Noise Texture to make the noise twice as fine and turned. Where is that here, and why might Scale 1.5 come out as 2? | In the Noise layer's Mapping group: Map Scale U and V 2, Map Rotation as you like. With Seamless on, the scale is a whole number of repeats (and the turn a quarter turn), so the tile's edges still meet - 1.5 would leave a seam where the tile repeats. Turn Seamless off for a one-off picture.
+)"},
+    {"Fog with a Volume Material", "Surface Type Volume (Fog): a mesh's inside as fog, Blender's Principled Volume", R"(
+In Blender, fog is a Principled Volume plugged into a material's Volume output: the mesh bounds a medium that light scatters in. In Blendity it is a Surface Type: **Volume (Fog)** hides the mesh's surface and fills its inside. A box around a room is a foggy room; a sphere is a cloud. The mesh must be closed - a fog on a mesh with holes says so above its fields.
+# The fields
+Fog Density is how thick it is per metre: 1 dims what is 1 m behind it to about a third, 0.1 is a light haze. Fog Color is the light it scatters (white mist, brown smoke). Fog Anisotropy above 0 sends light forward, so the fog glows toward the sun and shows shafts; Fog Emission makes it glow by itself; Fog Density Noise breaks it into wisps.
+! cmd:select Cube; material Fog | The Cube made fog with the Fog preset: its surface gone, its inside a haze
+! cmd:matset FogDensity 1.5; matset FogAnisotropy 0.6 | Thicker, and scattering forward: brighter toward the sun
+# Which renderer shows what
+F12 with Path Tracing draws the fog truly: light scattered inside it, its soft shadows, shafts through a window. The views show its thickness only - how much it hides of what is behind. GPU path tracing and the GPU views don't have volumes yet; a scene with fog is drawn on the CPU and the status says why. The presets Fog, Smoke and Mist are a quick start.
+? You want light shafts from a window into a dusty room. What do you make, and how do you see the shafts? | A box filling the room with a Volume (Fog) material: a low Fog Density (0.05-0.2), Fog Anisotropy around 0.6 so the light scatters forward, and a sun through the window. The shafts are lighting, so render with Path Tracing (F12) - the views show only the haze.
+? Above your fog's fields: "This mesh is open", with 4 open edges. What went wrong and what do you do? | The fog is on an open mesh - a Plane, or a box with a face deleted - so a ray that enters never meets the far side. Use a closed mesh: Make Faces (Close Holes) in the Tools window fills the holes, and Select Non-Manifold finds them.
+? Blender lets one material have both a glass surface and smoke inside. How do you do that here? | With two meshes: the glass shell with a Glass material, and a slightly smaller copy inside it with a Volume (Fog) material such as the Smoke preset. A material here is either a surface or a fog.
+)"},
+    {"Working Faster with Textures and Materials", "Reset to Default, Add Layer's search, the preview up to a layer", R"(
+The Textures and Materials windows have a few habits from Blender and Substance that save time.
+# Reset to Default
+Right-click a field's name (Scale, Roughness, Fog Density...) and pick Reset to Default: it goes back to the value a new layer of that type, or a new material, starts with - Blender's Backspace over a field.
+! cmd:window Textures | The Textures window
+! cmd:newtex Practice Noise; settex Practice L0Scale 12 | A noise texture with its Scale pushed to 12: right-click Scale's name to reset it
+# Finding a layer
+Add Layer starts with a search: type part of a name ("noi", "ramp", "curve") and only those stay. Without a search the layers sit under Blender's node groups - Texture, Pattern, Color, Converter, Filter, Mask & Wear.
+# Seeing one layer's part
+Alt+click a layer's name - or its menu's Preview Up to Here - and the preview shows the stack only up to that layer, with a line over it saying so; Alt+click it again for all. A layer that changes nothing says why at the end of its row - Opacity 0, or no Writes switch on.
+# Materials of a kind
+The Materials window's Of Type... makes a material from a preset, grouped: Basic, Glass, Metal, Stylized and Volume (fog, smoke, mist). A texture tile that no material uses yet says "not used".
+? You pushed a Voronoi's Randomness to 1 and its Cells to 40 and don't remember what they were. How do you get them back without undoing everything since? | Right-click each field's name and choose Reset to Default: each goes back to a new Voronoi's value, the other edits stay.
+? A stack of six layers looks wrong and you suspect the third. How do you see what the stack looks like up to it? | Alt+click the third layer's name: the preview shows the first three only (a line over it says "Up to ..."). Alt+click it again to see all six.
+? A Levels layer is on but nothing changes, and its row says "Writes nothing". What now? | Every Writes switch of it is off, so it changes no output: open the layer and tick Writes Albedo, Writes Roughness or whichever it should change.
+)"},
+    {"Flatten to the Camera (the 2D Look)", "Camera Flatten: depth squashed toward the camera, shaded as modelled", R"(
+Anime games such as Guilty Gear Xrd look drawn partly because their characters are flattened toward the camera: the depth along the view is squashed about a point in the body or the head, so perspective no longer swells the nose or a hand reaching toward you. The picture is the shape an artist would draw, and the lighting stays as modelled.
+# Camera Flatten
+Add Component > Rendering > Camera Flatten. Amount is how much of the depth goes (0.5-0.7 is usual; 1 is a flat card). Pivot is what stays put: the middle of the object (and the meshes below it), its origin, or a bone by name - the head, so the face keeps its place. Direction toward the camera follows the line from the eye to the pivot; View Axis uses the view's forward.
+! cmd:select Sphere; flatten 0.6 | The Sphere flattened toward the camera: look at it in the Game view
+! cmd:flatten pivot origin | About its origin instead of its bounds' middle
+# Where it shows
+The Game view, F12 and Camera Preview show the flattened shape; the Scene view keeps the true one, so you model as usual. On a character's root it reaches every mesh below; a child with its own Camera Flatten (a separate face mesh) uses that. `flatten preset anime` puts 0.6 about the head bone on the selected root.
+? Your character's nose looks too long when the camera is close, as a wide lens would draw it. What do you add, and where? | Camera Flatten on the character's root, Pivot Bone with the head bone's name, Amount about 0.6: the depth toward the camera is squashed about the head, so the near parts no longer swell. The Scene view still shows the true model.
+? With Amount at 1 the lighting still looks round. Why isn't it flat too? | Only where things are drawn changes: the shading reads the true shape's normals, so the light and the toon bands stay as modelled - that is what keeps the 2D look from looking like a cardboard cut-out.
+? The face and the body are one skinned mesh and you want the face flatter than the body. Can you? | Not with one mesh: a Camera Flatten reaches whole meshes. Split the face into its own mesh object below the root and give it its own Camera Flatten with a higher Amount - a child's own one wins.
+)"},
+    {"Animating Any Property", "Insert Keyframe on any field, materials and visibility, Record and Add Property", R"(
+Almost everything in the Inspector can be animated: the Transform, a light's intensity and colour, a camera's focus, a modifier's amount, a material slot's Base Color, Roughness or Emission, shape keys, and whether the object is shown (Active).
+# Keying a field
+With a clip on the object's root (the Animation window's clip menu makes one), right-click a field's name and pick Insert Keyframe - or press I over it, as in Blender. A diamond after the name marks a field that is animated; it is filled on a frame that has a key.
+! cmd:select Sphere; anim new SphereLook | A clip on the Sphere
+! cmd:anim key . "Material 0.Roughness" 0 0 0.2; anim key . "Material 0.Roughness" 0 30 0.9 | Its material goes from glossy at frame 0 to rough at frame 30
+# Record
+With Record on, whatever you change in the Inspector is keyed at the playhead - not only what is already animated. Each change is one undo step.
+# Add Property
+The Animation window's Add Property lists everything by group - Object, Transform, each component, each material slot - with a search at the top: type "rough" or "color".
+? You want a lamp to flicker: its Intensity going up and down over two seconds. How? | Select the lamp (or its root), make a clip in the Animation window, then at a few frames right-click Intensity in the Light component and Insert Keyframe after setting a value - or turn Record on and just drag Intensity at each frame.
+? A door should vanish at frame 40 and come back at 80. Which property? | Active (Add Property > Object > Active, on the door - not on the clip's root itself): key it on (1) before, off (0) at 40 and on at 80; its keys are Constant, so it switches rather than fades.
+? You animated the roughness of a material and another object changed too. Why? | The two share the material asset: an animated material is the material itself. Give the object its own (the slot's New Material) before animating it.
 )"},
 };
 

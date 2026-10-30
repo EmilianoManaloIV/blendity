@@ -34,6 +34,7 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/board.h"
 #include "../scene/quad_remesh.h"
 #include "../scene/dyntopo.h"
 #include "../render/mesh_maps.h"
@@ -70,6 +71,7 @@
 #include <memory>
 #include <set>
 #include <future>
+#include <deque>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -149,7 +151,7 @@ extern const char *const kSculptStrokes[5];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Board, Count };
 const char *window_title(WindowKind k);
 /* The Hierarchy's drop zones (task 0255): 1 before, 2 after, 0 into - the outer thirds and the middle of a row. */
 int hier_drop_mode(int ry, int rh);
@@ -674,6 +676,11 @@ class Editor {
   int gizmo_hot_for_test() const { return gizmo_hot_; }
   bool sketch_active_for_test() const { return sketch_.active; }
   const Sketch &sketch_for_test() const { return scene_->sketch; }
+  const Sketch &paper_for_test() const { return paper_; }  // (round 324: the open paper)
+  Recti sketch_view_rect_for_test() const { return sketch_view_.view; }  // (the picture the tool draws in, as last bound)
+  const std::string &paper_name_for_test() const { return paper_name_; }
+  int paper_undo_depth_for_test() const { return (int)paper_undo_.size(); }
+  bool paper_dirty_for_test() const { return paper_dirty_; }
   uint32_t sketch_color_for_test() const { return sketch_.color; }  // (task 0286: the Draw menu's pen)
   float sketch_tether_for_test() const { return sketch_.tether; }
   /* Round 319: the Draw tab's pad - zoom, turn (degrees, clockwise on screen), pan and flip (editor/sketch_pad.cpp). */
@@ -683,12 +690,13 @@ class Editor {
   };
   const PadView &pad_view_for_test() const { return pad_; }
   int pad_pic_renders_for_test() const { return pad_pic_renders_; }
+  int pad_wheel_mode_for_test() const { return pad_wheel_mode_; }
   int sketch_brush_for_test() const { return sketch_brush_; }  // (round 320)
   std::string brush_prefs_text_for_test() { return sketch_brush_prefs_text(); }
   bool brush_pref_for_test(const std::string &k, const std::string &v) { return sketch_brush_pref(k, v); }
   int sketch_brush_count_for_test() const { return (int)sketch_brushes_.size(); }
   void add_sketch_stroke_for_test(const SketchStroke &st) {
-    scene_->sketch.strokes.push_back(st);
+    sketch_doc().strokes.push_back(st);  // (round 324: on Paper, the paper's)
     ui_.redraw = true;
   }
   Recti draw_palette_rect_for_test() const { return draw_palette_rect_; }
@@ -697,8 +705,25 @@ class Editor {
   bool draw_palette_shown_for_test() const { return draw_palette_shown_; }
   uint32_t draw_paper_for_test() const { return draw_paper_; }
   int pad_bar_folded_for_test() const { return pad_bar_folded_; }  // (round 319: the toolbar's groups folded into More)
+  const Board &board_for_test() const { return board_; }  // (task 0299)
+  const std::vector<uint64_t> &board_sel_for_test() const { return board_sel_; }
+  const std::string &board_file_for_test() const { return board_file_; }
+  Recti board_rect_for_test() const { return board_rect_; }
+  Vec2 board_to_screen_for_test(Vec2 p) const { return board_to_screen(p); }
+  void board_paste_bytes_for_test(const std::string &b) { board_paste_for_test_ = b; }
+  void board_wait_for_test();
+  void board_export_wait_for_test();  // (round 326: an export's threads done)
+  size_t board_pictures_for_test() const { return board_pics_.size(); }
+  int board_undo_depth_for_test() const { return (int)board_undo_.size(); }
+  bool board_dirty_for_test() const { return board_dirty_; }
+  std::shared_ptr<BoardPicture> paper_thumb_for_test(const std::string &path) { return board_paper_picture(path); }
+  std::string paper_rel_for_test(const std::string &name) const { return paper_rel(name); }
+  void start_asset_drag_for_test(const std::string &path) { asset_drag_ = {true, false, path, nullptr, ui_.in.mx, ui_.in.my}; }  // (a Project window file pressed)
   bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
   int draw_source_for_test() const { return draw_source_; }
+  int anim_bar_rows_for_test() const { return anim_bar_rows_; }  // (round 324)
+  bool spring_row_for_test(const std::string &first, int &label, bool &ignored);  // (round 324: a found chain's kind)
+  std::string mode_name_for_test() const { return mode_name(); }
   Recti pad_rect_for_test() const { return pad_rect_; }
   Vec2 pad_from_screen_for_test(Vec2 s) const { return pad_from_screen().map(s); }
   Vec2 pad_to_screen_for_test(Vec2 q) const { return pad_to_screen().map(q); }
@@ -1298,6 +1323,21 @@ class Editor {
     return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   const ui::Context &ui_for_test() const { return ui_; }
+  std::string volume_mesh_note_for_test(const MaterialPtr &m) { return volume_mesh_note(m); }  // (round 331)
+  int anim_property_state_for_test(GameObject *g, const std::string &property) { return anim_property_state(g, property); }  // (round 335: the diamond)
+  void anim_key_property_for_test(GameObject *g, const std::string &property, int axes) { anim_key_property(g, property, axes); }
+  void anim_unkey_property_for_test(GameObject *g, const std::string &property, int axes) { anim_unkey_property(g, property, axes); }
+  /* Round 334: the items the Game view would draw from this camera (flattened where a Camera Flatten says), or the
+   * Scene view's (game false: never flattened). */
+  std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye) {
+    if (game) set_flatten_view(view, proj, eye);
+    std::vector<DrawItem> items = collect_items(game, false);
+    flatten_view_.on = false;
+    return items;
+  }
+  /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
+   * asset path and the layer, or -1. */
+  std::pair<std::string, int> texture_upto_for_test() const { return texture_upto_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
   bool prefs_open_for_test() const { return dialog_ == Dialog::Preferences; }
   bool hair_dialog_for_test() const { return dialog_ == Dialog::HairRig; }  // (task 0291)
@@ -1669,6 +1709,19 @@ class Editor {
     float px_per_m = 0.0f;
     bool ortho = false;  // an orthographic view: the width on screen doesn't depend on the distance
   } outline_view_;
+  /* Round 334: the camera the Game view or a render flattens toward (Camera Flatten); off for the Scene view, bakes,
+   * exports and MoonRay, which keep the true shape. */
+  struct FlattenView {
+    bool on = false;
+    Vec3 eye{0.0f}, forward{0.0f, 0.0f, 1.0f};
+    bool ortho = false;
+  } flatten_view_;
+  std::unordered_map<uint64_t, Vec3> flatten_pivots_;  // (each Camera Flatten's pivot, once a collect)
+  bool flatten_any_ = false;                            // (a Camera Flatten in the scene, this collect)
+  void apply_camera_flatten(const GameObject &g, DrawItem &it);
+  Vec3 camera_flatten_pivot(const GameObject &owner, const CameraFlatten &cf);
+  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye);
+  void flatten_command(const std::vector<std::string> &t);
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
@@ -1808,6 +1861,9 @@ class Editor {
   void spring_find(bool with_ignored);
   SpringView::Row *spring_row(const GameObject &first);
   void spring_unignore(GameObject &first);
+  void spring_pick_label(GameObject &first, SpringView::Row &r, int kind);
+  void finish_anim_toolbar(int rows);
+  int anim_bar_rows_ = 1;  // (round 324: the Animation toolbar's rows, wrapped when narrow)
   void spring_set_label(GameObject &first, int label);
   void spring_apply();
   void spring_add(GameObject &bone, int label);
@@ -1960,6 +2016,7 @@ class Editor {
   struct PuppetView {
     uint64_t arm = 0, key = 0;     // the rig mapped, and as what (body::body_key)
     std::vector<uint64_t> handles; // the hands, the feet, the head, the hips
+    uint64_t part[6] = {}, found[6] = {};  // (each handle's bone, and the one the analysis found: round 324)
     uint64_t dragging = 0, hover = 0;
     Vec3 start, normal;
     Vec2 press;
@@ -1967,6 +2024,9 @@ class Editor {
   } puppet_;
   const std::vector<uint64_t> &puppet_handles();
   const std::vector<uint64_t> &rig_ends();
+  void puppet_set_handle(int k, const std::string &bone);
+  int puppet_handle_index(const std::string &w);
+  void draw_puppet_handle_items();
   bool puppet_pinned(GameObject &arm, uint64_t id);
   void draw_puppet_handles();
   bool puppet_handles_update(const Recti &view);
@@ -2218,6 +2278,27 @@ class Editor {
   void anim_copy();
   void anim_paste();
   void anim_add_property(GameObject *g, const std::string &property, int axes);
+  /* Round 335: any field of an object keyed from the Inspector (right-click its name > Insert Keyframe, or I over it):
+   * whether g can be keyed now (a clip on a root above it), a key of the property's axes at the playhead, and the
+   * property's state for its marker (0 none, 1 animated, 2 a key on this frame). */
+  bool anim_keyable(const GameObject *g);
+  void anim_key_property(GameObject *g, const std::string &property, int axes);
+  void anim_unkey_property(GameObject *g, const std::string &property, int axes);
+  int anim_property_state(GameObject *g, const std::string &property);
+  /* The root, clip and each animated property's state once a clip version and frame (the Inspector asks for every
+   * field it draws, every frame). */
+  struct AnimFieldCache {
+    GameObject *root = nullptr;
+    const AnimationClip *clip = nullptr;
+    uint64_t version = 0, ui_frame = ~0ull;
+    float frame = -1.0f;
+    std::unordered_map<std::string, int> state;  // "path|property" -> 1 animated, 2 a key on this frame
+  } anim_field_cache_;
+  void anim_field_cache_refresh();
+  /* Record (round 335): the Inspector's edits of g's fields ("Light." + "Intensity") keyed at the playhead, one undo step
+   * - any field, not only those already animated. */
+  void anim_record_fields(GameObject *g, const std::string &prefix, const std::vector<FieldEdit> &edits);
+  std::string anim_prop_search_;  // (the Add Property menu's search)
   std::vector<float> anim_key_frames();
   void anim_step_key(int dir);
   void anim_key_all();  // (task 0258: a key at the playhead on every track)
@@ -2404,6 +2485,8 @@ class Editor {
   size_t slots_using(const std::function<bool(const MaterialPtr &)> &match);
   void select_objects_using(const MaterialPtr &m);  // the Materials window's "Select Objects Using It"
   size_t materials_using_texture(const ProceduralTexturePtr &t);  // scene and asset materials whose maps name it
+  std::unordered_set<std::string> used_texture_assets();          // (round 332: the texture assets some material's maps name)
+  void draw_texture_upto(ProceduralTexture &t, int upto, int which, const Recti &pane);  // (round 332: the preview up to a layer)
   void request_material_delete(const MaterialPtr &one);  // one, or the multi-selection when it holds more
   void request_texture_delete();
   void request_project_delete(const std::string &one);
@@ -2770,6 +2853,21 @@ class Editor {
   /* A material's fields; with `others` (several selected, task 0147) an edit reaches every one of them that shows the
    * field, and fields whose values differ draw a dash. */
   void draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const std::vector<MaterialPtr> *others = nullptr);
+  /* Round 331: "" or why a Volume material on the inspected object's mesh can't hold fog (an open mesh: the rays
+   * that leave by a hole never meet its far side). The count is kept per mesh and its topology. */
+  std::string volume_mesh_note(const MaterialPtr &m);
+  ui::Id field_reset_ = 0;                    // (round 332: a field's Reset to Default, landing when it draws next)
+  uint64_t field_reset_frame_ = 0;            // (dropped two frames on if that field isn't drawn again)
+  void expire_field_reset() {
+    if (field_reset_ && ui_.frame_number() > field_reset_frame_ + 2) field_reset_ = 0;
+  }
+  std::string material_preset_menu();         // (round 332: the presets by group as menu items; the one picked, or "")
+  void draw_material_of_type(const Recti &b);
+  std::string add_layer_search_;              // (round 332: the Add Layer menu's search)
+  std::pair<std::string, int> texture_upto_{"", -1};  // (round 332: Alt+click a layer - the preview up to it)
+  const Mesh *volume_note_mesh_ = nullptr;
+  uint64_t volume_note_version_ = 0;  // (the faces' and corners' counts: its topology)
+  size_t volume_note_open_ = 0;
   size_t apply_material_edits(const std::vector<FieldEdit> &edits, const Material *source, const std::vector<MaterialPtr> &targets);
   void matset_command(const std::vector<std::string> &t, const std::string &line);  // matset <Field> <value>: the selected materials
   void toonstyle_command(const std::string &name);  // toonstyle <style>: the selected materials' toon preset (task 0148)
@@ -4032,6 +4130,7 @@ class Editor {
   int sketch_brush_find(const std::string &name);
   void sketch_brush_onto(SketchStroke &st);
   bool sketch_brush_here() const;
+  bool sketch_in_world() const;
   void sketch_paint_stroke(const std::vector<Vec2> &pts, const std::vector<float> &w, uint32_t color, float width, const SketchStroke &look);
   SketchStroke sketch_brush_look(const SketchBrush &b) const;
   bool sketch_erase_cut(const Recti &view, Vec2 px, float r);
@@ -4058,9 +4157,185 @@ class Editor {
   std::string sketch_brush_prefs_text();
   bool sketch_brush_pref(const std::string &k, const std::string &v);
   int pad_pic_renders_ = 0;  // (the off-screen picture's renders: a pan or a zoom within a step makes none)
+  /* Task 0299 (editor/board_window.cpp, ADR 0089): the reference board - PureRef's endless canvas, its file, its own undo. */
+  Board board_;
+  std::string board_file_;  // (absolute; empty until first saved)
+  bool board_dirty_ = false;
+  double board_changed_at_ = 0.0;
+  std::vector<std::vector<BoardItem>> board_undo_, board_redo_;
+  std::vector<uint64_t> board_sel_;
+  Recti board_rect_;
+  uint64_t board_frame_ = 0;
+  int board_window_ = 0;
+  int board_drag_ = 0, board_drag_corner_ = 0;  // (a drag: 1 move, 2 scale, 3 turn, 4 marquee, 5 pan)
+  bool board_drag_moved_ = false;
+  Vec2 board_drag_from_, board_drag_last_, board_drag_pivot_;
+  std::vector<BoardItem> board_drag_start_;
+  std::string board_paste_for_test_;
+  Vec2 board_to_screen(Vec2 p) const;
+  Vec2 board_from_screen(Vec2 s) const;
+  void board_zoom_at(float factor, Vec2 at);
+  void board_frame(bool selection);
+  bool board_has_point(int x, int y) const;
+  bool board_has_mouse() const;
+  void board_begin_change();
+  void board_changed();
+  void board_undo();
+  void board_redo();
+  void board_select_existing();
+  std::string board_dir() const;
+  void board_frame_tick();
+  Vec2 board_middle() const;
+  std::shared_ptr<BoardPicture> board_picture(const std::string &rel);
+  void board_poll_pictures(bool wait);
+  void board_picture_landed(const std::string &abs, const BoardPicture &pic);
+  void board_drop_unreadable(const std::string &abs, const std::string &error, const std::vector<uint64_t> &ids);
+  void board_layout_rows();
+  void board_open_last();
+  std::string keep_in_references(const std::string &abs, bool *copied = nullptr);
+  bool board_paste_path(Vec2 at);
+  float board_handle_radius() const;
+  Vec2 board_turn_handle(Vec2 lo, Vec2 hi) const;
+  void board_press_item(Vec2 m);
+  void board_drag_item(BoardItem &it, Vec2 a, Vec2 b);
+  void board_marquee_end();
+  bool board_marquee_meets(const BoardItem &it, Vec2 lo, Vec2 hi) const;
+  void board_select_command(const std::string &w);
+  void board_start_loads();
+  void board_fill_sizes(std::vector<BoardItem> &items);
+  void board_trim_pictures();
+  bool board_paste_file(Vec2 at);
+  std::deque<std::string> board_queue_;  // (pictures waiting to load: at most three decode at a time)
+  std::map<std::string, std::shared_ptr<BoardPicture>> board_pics_;   // (by absolute path)
+  std::map<std::string, std::future<std::shared_ptr<BoardPicture>>> board_loading_;
+  std::vector<std::pair<Vec2, std::vector<uint64_t>>> board_rows_;   // (images dropped together, laid out when sized)
+  std::set<std::string> board_copied_;  // (files the board copied into References: deleted again if unreadable)
+  std::string board_last_;              // (the board opened again in the next session: a preference)
+  /* Papers (round 324, ADR 0090): the Draw tab's Paper source draws on a sketch of its own, in a file of its own. */
+  Sketch paper_, paper_kept_;           // (the open paper; as it was after its last change - the undo step's start)
+  std::vector<Sketch> paper_undo_, paper_redo_;
+  std::string paper_name_, paper_last_; // (none open yet; the paper opened again in the next session: a preference)
+  float paper_aspect_ = 1.41421356f;    // (A-series, landscape)
+  bool paper_dirty_ = false;
+  double paper_changed_at_ = 0.0;
+  uint64_t paper_version_ = 0;          // (counts changes: a board's thumbnail of it is drawn again)
+  bool sketch_on_paper() const;
+  /* Papers on the reference board (task 0305): each paper's drawing as a picture, made again when it changes. */
+  struct PaperThumb {
+    uint64_t key = ~0ull;
+    double made_at = -10.0;
+    float aspect = 1.41421356f;
+    std::shared_ptr<BoardPicture> pic;
+  };
+  std::map<std::string, PaperThumb> paper_thumbs_;  // (by the paper's absolute path)
+  std::map<std::string, uint64_t> paper_saves_;     // (each paper file's saves this session: a thumbnail's key)
+  Sketch *sketch_doc_override_ = nullptr;           // (a paper being drawn into its thumbnail)
+  float sketch_thumb_scale_ = 1.0f;                 // (its strokes' widths, for the thumbnail's size)
+  std::shared_ptr<BoardPicture> board_paper_picture(const std::string &path, float *aspect = nullptr);
+  void board_render_paper(const Sketch &sk, float aspect, uint32_t color, PaperThumb &out, int height = 0);
+  bool board_add_paper(const std::string &path, Vec2 at);
+  void board_new_paper_here();
+  void board_open_paper_item(const BoardItem &it);
+  void draw_board_paper_menu();
+  bool board_rename(const std::string &to);
+  void board_copy();
+  void board_trash();
+  /* Export (task 0306): the board, the selection or the view as a PNG, a JPEG or a PDF. */
+  struct BoardExport {
+    int what = 0;        // 0 the whole board, 1 the selection, 2 the view as seen
+    int format = 0;      // 0 PNG, 1 JPEG, 2 PDF
+    int long_side = 4096;
+    int background = 0;  // 0 the board's, 1 white, 2 none (a PNG's transparency)
+    int quality = 92;
+    float margin = 0.04f;  // (of the long side)
+  };
+  BoardExport board_export_;
+  bool board_export_open_ = false;
+  Recti board_export_rect_;
+  struct BoardExportJob {  // (review 326: an export loads, draws and writes without stopping the editor)
+    int phase = 0;  // 0 none, 1 its full-size pictures loading, 2 encoding and writing
+    std::string path;
+    BoardExport opt;
+    Vec2 lo, hi;
+    std::map<std::string, std::future<std::shared_ptr<BoardPicture>>> full;
+    std::future<std::string> written;  // ("" written, else why not)
+    int w = 0, h = 0;
+    double t0 = 0.0;
+  } board_job_;
+  std::map<std::string, std::shared_ptr<BoardPicture>> board_export_pics_;  // (while an export draws: its own pictures)
+  void board_export_poll(bool wait = false);
+  void board_export_draw();
+  bool board_render_area(Vec2 lo, Vec2 hi, int long_side, uint32_t background, Image &out);
+  bool board_export_to(const std::string &path, const BoardExport &opt);
+  void draw_board_export_dialog();
+  void board_export_pick();
+  void paper_relink_boards(const std::string &from_rel, const std::string &to_rel);
+  std::string paper_rel(const std::string &name) const;
+  Sketch &sketch_doc();
+  const Sketch &sketch_doc() const;
+  void sketch_changed(const std::string &label);
+  bool sketch_refuse_on_paper(const char *what) const;
+  void paper_changed(const std::string &label);
+  void paper_step(bool undo);
+  void paper_trim_undo();
+  std::string paper_take_in(const std::string &path);
+  std::string paper_dir() const;
+  std::string paper_path(const std::string &name) const;
+  void paper_frame_tick();
+  bool paper_save();
+  void paper_reset(const std::string &name);
+  std::string paper_free_name(const std::string &base) const;
+  void paper_new(const std::string &name);
+  bool paper_open(const std::string &name);
+  void paper_ensure_open();
+  bool paper_rename(const std::string &to);
+  void paper_duplicate();
+  void paper_delete();
+  std::vector<std::string> paper_names() const;
+  bool paper_command(const std::vector<std::string> &t);
+  void draw_paper_menu();
+  void draw_texture_preset_items(const std::string &theme);
+  bool board_opened_once_ = false;
+  double board_nudge_at_ = -10.0;
+  bool board_save();
+  std::string board_clean_name(std::string name) const;
+  void board_new(const std::string &name);
+  bool board_open(const std::string &name);
+  std::vector<std::string> board_names() const;
+  std::string board_keep_image(const std::string &path);
+  uint64_t board_add_image(const std::string &path, Vec2 at, bool undo_step);
+  int board_add_images(const std::vector<std::string> &paths, Vec2 at);
+  bool board_paste();
+  bool board_selected(uint64_t id) const;
+  bool board_sel_box(Vec2 &lo, Vec2 &hi) const;
+  int board_handle_at(Vec2 m) const;
+  void board_move(Vec2 d);
+  void board_scale(float f, Vec2 pivot);
+  void board_turn(float degrees, Vec2 pivot);
+  void board_delete();
+  void board_duplicate();
+  void board_restack(bool front);
+  void draw_board_image(const BoardItem &it);
+  void draw_board_selection();
+  void board_input(bool hovered);
+  void board_nudge_keys();
+  void board_drag_begin(int kind, Vec2 m);
+  void board_drag_update(Vec2 m);
+  void board_drag_end();
+  void draw_board_window(const Recti &r);
+  void draw_board_toolbar(const Recti &bar);
+  void draw_board_menu();
+  void board_add_image_dialog();
+  bool board_asset_drag_over() const;
+  bool board_command(const std::vector<std::string> &t);
+  int window_action(const std::string &id);
   int pad_window_ = 0;       // (the OS window the pad last drew in: its keys are that window's)
   bool pad_busy() const;
   bool pad_hold_opens_wheel() const;
+  int pad_wheel_mode_ = 0;  // (task 0303: what the wheel - a pen display's dial - does over the pad: 0 zoom, 1 size, 2 turn, 3 opacity)
+  void pad_wheel(float notches, Vec2 at, bool ctrl);
+  bool draw_wheel_command(const std::string &w);
+  Vec2 pad_keys_point() const;
   void draw_pad_zoom_button(const Recti &zoom);
   void draw_pad_set_correct(int correct);
   double pad_render_ms_ = 0.0, pad_blit_ms_ = 0.0;

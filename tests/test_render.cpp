@@ -11037,6 +11037,608 @@ static void tests_round268() {
   });
 }
 
+static float grade_lum(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+
+/* Round 330 (task 0310): the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic in every renderer. */
+static void tests_round330() {
+  test("Principled extras on the CPU: all at 0 the BRDF is exactly the old one; Sheen glows at grazing, Coat adds a highlight of its own, Anisotropic stretches the highlight along the tangent, Subsurface softens the terminator; a white coated, sheened surface reflects no more than it receives (white furnace)", [] {
+    Material plain, m;
+    plain.base_color = m.base_color = Vec3(0.6f);
+    plain.roughness = m.roughness = 0.4f;
+    SurfaceSample a, b;
+    a.albedo = b.albedo = Vec3(0.6f), a.roughness = b.roughness = 0.4f;
+    a.normal = b.normal = {0, 1, 0};
+    apply_principled_extras(plain, b, {1, 0, 0}, true);
+    const Vec3 n{0, 1, 0}, v = normalize(Vec3(0.3f, 1.0f, 0.2f)), l = normalize(Vec3(-0.5f, 0.8f, 0.1f));
+    CHECK(!b.extras && brdf_eval(a, n, v, l) == brdf_eval(b, n, v, l));
+    auto with = [&](void (*set)(Material &)) {
+      Material x = plain;
+      set(x);
+      SurfaceSample s = a;
+      apply_principled_extras(x, s, {1, 0, 0}, true);
+      return s;
+    };
+    const Vec3 vg = normalize(Vec3(0.0f, 0.15f, 1.0f)), lg = normalize(Vec3(0.0f, 0.2f, -1.0f));  // (grazing, from behind)
+    const SurfaceSample sheen = with([](Material &x) { x.sheen = 1.0f; });
+    const float s0 = grade_lum(brdf_eval(a, n, vg, lg)), s1 = grade_lum(brdf_eval(sheen, n, vg, lg));
+    const Vec3 lm = Vec3(-v.x, v.y, -v.z);  // (the mirror direction)
+    const SurfaceSample coat = with([](Material &x) { x.coat = 1.0f; });
+    const float c0 = grade_lum(brdf_eval(a, n, v, lm)), c1 = grade_lum(brdf_eval(coat, n, v, lm));
+    const SurfaceSample aniso = with([](Material &x) { x.anisotropic = 1.0f; });
+    /* (the half vector tilted along the tangent, then across it) */
+    const Vec3 vt = normalize(Vec3(0.6f, 1.0f, 0.0f)), lt = normalize(Vec3(0.2f, 1.0f, 0.0f)), vb = normalize(Vec3(0.0f, 1.0f, 0.6f)), lb = normalize(Vec3(0.0f, 1.0f, 0.2f));
+    const float along = grade_lum(brdf_eval(aniso, n, vt, lt)), across = grade_lum(brdf_eval(aniso, n, vb, lb)), iso_t = grade_lum(brdf_eval(a, n, vt, lt)),
+                iso_b = grade_lum(brdf_eval(a, n, vb, lb));
+    /* Subsurface (review 330): a softer terminator - brighter where the light grazes, dimmer facing it (energy kept). */
+    const SurfaceSample ss = with([](Material &x) { x.subsurface = 1.0f; x.roughness = 1.0f; });
+    SurfaceSample plain_rough = a;
+    plain_rough.roughness = 1.0f;
+    const Vec3 vtop{0, 1, 0}, graze = normalize(Vec3(1.0f, 0.1f, 0.0f));
+    const float g0 = grade_lum(brdf_eval(plain_rough, n, vtop, graze)), g1 = grade_lum(brdf_eval(ss, n, vtop, graze));
+    const float f0 = grade_lum(brdf_eval(plain_rough, n, vtop, vtop)), f1 = grade_lum(brdf_eval(ss, n, vtop, vtop));
+    std::printf("    sheen at grazing %.4f -> %.4f; coat at the mirror %.4f -> %.4f; anisotropic along %.4f / across %.4f (isotropic %.4f / %.4f); subsurface at a grazing light %.4f -> %.4f, facing it %.4f -> %.4f\n",
+                s0, s1, c0, c1, along, across, iso_t, iso_b, g0, g1, f0, f1);
+    CHECK(s1 > s0 + 0.05f && c1 > c0 * 1.2f && std::fabs(along - across) > 0.2f * std::max(along, across) && std::fabs(iso_t - iso_b) < 1e-4f && g1 > g0 * 1.15f && f1 < f0);  // (the specular is the same both ways: the diffuse alone gains more)
+    /* The white furnace: a white material with every extra on reflects at most what comes in, at three view angles. */
+    Material white;
+    white.base_color = Vec3(1.0f), white.roughness = 0.5f, white.coat = 1.0f, white.sheen = 1.0f, white.subsurface = 0.5f;
+    SurfaceSample w;
+    w.albedo = Vec3(1.0f), w.roughness = 0.5f, w.normal = n;
+    apply_principled_extras(white, w, {1, 0, 0}, true);
+    float worst = 0.0f;
+    for (float vy : {0.95f, 0.6f, 0.25f}) {
+      const Vec3 vv = normalize(Vec3(std::sqrt(1.0f - vy * vy), vy, 0.0f));
+      double sum = 0.0;
+      const int N = 40000;
+      for (int k = 0; k < N; k++) {  // (cosine-free uniform hemisphere: brdf_eval carries N.L, the pdf is 1 / 2 pi)
+        const float u1 = texture_rand((uint32_t)k, 1u, 3u), u2 = texture_rand((uint32_t)k, 2u, 3u);
+        const float z = u1, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = 2.0f * kPi * u2;
+        sum += grade_lum(brdf_eval(w, n, vv, {r * std::cos(phi), z, r * std::sin(phi)})) * 2.0 * kPi;
+      }
+      worst = std::max(worst, (float)(sum / N));
+    }
+    std::printf("    the white furnace: at most %.3f of the light reflected\n", worst);
+    CHECK(worst < 1.05f);
+  });
+  test("Principled extras in the CPU views (review 330): a coated sphere's middle changes everywhere, not only near its triangles' edges (the 8-wide shader leaves such a material to the per-pixel one)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("shading shaded");
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    CHECK(ball && ball->get<MeshRenderer>());
+    if (!ball || !ball->get<MeshRenderer>()) return;
+    MaterialPtr plain = make_material("Plain Red", {0.7f, 0.15f, 0.1f});
+    plain->roughness = 0.6f;
+    ball->get<MeshRenderer>()->materials = {plain};
+    ed.mark_changed_for_test("Plain");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(ball->world_position(), cx, cy));
+    auto block = [&] {
+      std::vector<uint32_t> out;
+      const Image &fb = ed.main_fb_for_test();
+      for (int y = cy - 6; y <= cy + 6; y++)
+        for (int x = cx - 6; x <= cx + 6; x++) out.push_back(fb.pixels[(size_t)y * fb.width + x]);
+      return out;
+    };
+    const std::vector<uint32_t> before = block();
+    MaterialPtr coated = make_material("Coated Red", {0.7f, 0.15f, 0.1f});
+    coated->roughness = 0.6f, coated->coat = 1.0f, coated->coat_tint = {0.6f, 0.8f, 1.0f};
+    ball->get<MeshRenderer>()->materials = {coated};
+    ed.mark_changed_for_test("Coat");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::vector<uint32_t> after = block();
+    int changed = 0;
+    for (size_t i = 0; i < before.size(); i++) changed += before[i] != after[i];
+    std::printf("    %d of %zu pixels in the sphere's middle changed with the coat\n", changed, before.size());
+    CHECK(changed * 10 >= (int)before.size() * 9);
+  });
+  test("Principled extras on the GPU path tracer: a coated, sheened, subsurface ball with an anisotropic one beside it renders as on the CPU; the GPU views send such a material to the CPU and say why (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    auto plane = primitives::plane(6.0f, 1);
+    auto sphere = primitives::uv_sphere(0.5f, 32, 16);
+    MaterialPtr ball = make_material("lacquer", {0.7f, 0.2f, 0.15f}), brushed = make_material("brushed", {0.8f, 0.8f, 0.8f});
+    ball->coat = 1.0f, ball->coat_roughness = 0.05f, ball->sheen = 0.6f, ball->subsurface = 0.5f, ball->roughness = 0.6f;
+    brushed->metallic = 1.0f, brushed->roughness = 0.35f, brushed->anisotropic = 0.9f, brushed->anisotropic_rotation = 0.25f;
+    std::vector<MaterialPtr> mp = {make_material("floor", {0.8f, 0.8f, 0.8f})}, mb = {ball}, mm = {brushed};
+    std::vector<PTObject> objs = {{&plane->render_mesh_tangents(), Mat4::identity(), &mp},
+                                  {&sphere->render_mesh_tangents(), Mat4::translate({-0.6f, 0.5f, 0.2f}), &mb},
+                                  {&sphere->render_mesh_tangents(), Mat4::translate({0.6f, 0.5f, 0.0f}), &mm}};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.4f, -1, 0.3f));
+    Environment env;
+    const int W = 48, H = 32, SPP = 128;
+    auto render = [&](bool cpu) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = cpu;
+      if (!cpu) st.gpus = {gpu::devices()[0].index};
+      st.denoise = false;
+      st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 1.5f, -3.5f}, {0, 0.4f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 50), W, H);
+      CHECK(pt.render(1e9, SPP) == SPP);
+      if (!cpu) {
+        if (!pt.gpu_error().empty()) std::printf("    GPU error: %s\n", pt.gpu_error().c_str());
+        CHECK(pt.gpu_error().empty() && pt.stats().cpu_samples == 0);
+      }
+      return pt.linear_rgb(false);
+    };
+    const std::vector<float> cpu = render(true), gpu_img = render(false);
+    double mc = 0, mg = 0, err = 0;
+    for (size_t i = 0; i < cpu.size(); i++) mc += cpu[i], mg += gpu_img[i], err += std::fabs(cpu[i] - gpu_img[i]);
+    mc /= cpu.size(), mg /= cpu.size(), err /= cpu.size();
+    std::printf("    CPU mean %.4f, GPU mean %.4f, mean |difference| %.4f\n", mc, mg, err);
+    CHECK(std::fabs(mc - mg) < 0.03 * mc && err < 0.06 * mc);
+    /* The GPU views: such a material goes to the CPU, with the reason. */
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    MaterialPtr coat = make_material("Coated", {0.5f, 0.5f, 0.6f});
+    coat->coat = 1.0f;
+    cube->get<MeshRenderer>()->materials = {coat};
+    ed.mark_changed_for_test("Coat the cube");
+    ed.viewport_device_for_test(2);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    std::printf("    the views: %s\n", ed.gpu_view_status().c_str());
+    CHECK(ed.gpu_view_reason().find("Subsurface, Sheen, Coat or Anisotropic") != std::string::npos);
+    ed.viewport_device_for_test(1);
+  });
+}
+
+/* Round 331 (task 0311): the Volume (fog) material. */
+static void tests_round331() {
+  test("Volume (fog) in the path tracer: a white ball seen through 1 m of absorbing fog (density 1) is exp(-1) as bright; density 0 hides nothing; forward scattering (anisotropy 0.8) brightens the fog toward the sun; the presets are volumes; with GPUs asked for, the scene is traced on the CPU and says why", [] {
+    auto ball = primitives::uv_sphere(0.5f, 32, 16);
+    auto box = primitives::cube(1.0f);  // (1 m a side)
+    MaterialPtr white = make_material("white", {0.9f, 0.9f, 0.9f}), fog = make_material_preset("Fog");
+    CHECK(fog->volume() && make_material_preset("Smoke")->volume() && make_material_preset("Mist")->volume());
+    white->unlit = true;  // (the ball's own colour: what reaches the eye is only the fog's doing)
+    std::vector<MaterialPtr> mb = {white}, mf = {fog};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(0.0f, -0.3f, 1.0f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const int W = 32, H = 32;
+    auto render = [&](float density, Vec3 color, float g, bool with_box, const std::vector<int> &gpus = {}) {
+      fog->volume_density = density, fog->volume_color = color, fog->volume_anisotropy = g;
+      std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4::translate({0, 0, 2.0f}), &mb}};
+      if (with_box) objs.push_back({&box->render_mesh_tangents(), Mat4::translate({0, 0, 0.8f}), &mf});
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false, st.use_cpu = gpus.empty(), st.gpus = gpus;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 0, -2.0f}, {0, 0, 2.0f}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      std::vector<float> img = pt.linear_rgb(false);
+      double centre = 0.0;
+      for (int y = 12; y < 20; y++)
+        for (int x = 12; x < 20; x++) centre += img[((size_t)y * W + x) * 3 + 1];
+      return std::make_pair(centre / 64.0, pt.gpu_note());
+    };
+    const double clear = render(0.0f, Vec3(0.0f), 0.0f, false).first, none = render(0.0f, Vec3(0.0f), 0.0f, true).first;
+    const double absorbed = render(1.0f, Vec3(0.0f), 0.0f, true).first;
+    std::printf("    the ball %.4f clear, %.4f behind density-0 fog, %.4f behind 1 m of black fog (ratio %.3f, exp(-1) %.3f)\n", clear, none, absorbed, absorbed / clear, std::exp(-1.0));
+    CHECK(std::fabs(none - clear) < 0.01 * clear && std::fabs(absorbed / clear - std::exp(-1.0)) < 0.04);
+    /* Looking toward the sun through white fog: forward scattering brightens it. */
+    sun.direction = normalize(Vec3(0.0f, 0.0f, -1.0f));
+    const double iso = render(1.0f, Vec3(0.9f), 0.0f, true).first, fwd = render(1.0f, Vec3(0.9f), 0.8f, true).first;
+    std::printf("    toward the sun: isotropic fog %.4f, anisotropy 0.8 %.4f\n", iso, fwd);
+    CHECK(fwd > iso * 1.5);
+    if (gpu::available()) {
+      const auto r = render(1.0f, Vec3(0.0f), 0.0f, true, {gpu::devices()[0].index});
+      std::printf("    with a GPU asked for: %.4f, \"%s\"\n", r.first, r.second.c_str());
+      CHECK(r.second.find("Volume") != std::string::npos && std::fabs(r.first / clear - std::exp(-1.0)) < 0.04);
+    }
+  });
+  test("Volume (fog) in the CPU views: the Cube made a fog dims what is behind it by exp(-density x the length through it) - about exp(-1) to exp(-1.7) through its middle; density 0 changes nothing; the GPU views send it to the CPU and say why", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("shading shaded");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    MaterialPtr fog = make_material_preset("Fog");
+    fog->volume_density = 0.0f, fog->volume_color = Vec3(0.0f);
+    cube->get<MeshRenderer>()->materials = {fog};
+    ed.mark_changed_for_test("Fog");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(cube->world_position(), cx, cy));
+    auto lum = [&] {
+      const Image &fb = ed.main_fb_for_test();
+      const uint32_t p = fb.pixels[(size_t)cy * fb.width + cx];
+      return 0.2126 * ((p >> 16) & 255) + 0.7152 * ((p >> 8) & 255) + 0.0722 * (p & 255);
+    };
+    const double behind = lum();
+    fog->volume_density = 1.0f;
+    fog->touch();
+    ed.mark_changed_for_test("Thicker");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const double through = lum();
+    std::printf("    the cube's middle: %.1f with density 0, %.1f with density 1 (ratio %.3f, in display values)\n", behind, through, through / std::max(1.0, behind));
+    CHECK(behind > 20.0 && through < behind * 0.8 && through > behind * 0.05);
+    if (gpu::available()) {
+      ed.viewport_device_for_test(2);
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+      std::printf("    the views: %s\n", ed.gpu_view_status().c_str());
+      CHECK(ed.gpu_view_reason().find("Volume") != std::string::npos);
+      ed.viewport_device_for_test(1);
+    }
+  });
+  test("Volume (fog) around the camera (a fog-filled room): the path tracer dims a ball 1.5 m away by exp(-0.5 x 1.4) (from the near plane); the CPU view fogs what it sees from inside a huge fog cube", [] {
+    auto ball = primitives::uv_sphere(0.5f, 32, 16);
+    auto room = primitives::cube(8.0f);
+    MaterialPtr white = make_material("white", {0.9f, 0.9f, 0.9f}), fog = make_material_preset("Fog");
+    white->unlit = true;
+    fog->volume_density = 0.5f, fog->volume_color = Vec3(0.0f), fog->volume_noise = 0.0f;
+    std::vector<MaterialPtr> mb = {white}, mf = {fog};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const int W = 32, H = 32;
+    auto render = [&](bool with_room) {
+      std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4::translate({0, 0, 2.0f}), &mb}};
+      if (with_room) objs.push_back({&room->render_mesh_tangents(), Mat4::identity(), &mf});
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 2.0f}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      std::vector<float> img = pt.linear_rgb(false);
+      double centre = 0.0;
+      for (int y = 13; y < 19; y++)
+        for (int x = 13; x < 19; x++) centre += img[((size_t)y * W + x) * 3 + 1];
+      return centre / 36.0;
+    };
+    const double clear = render(false), inside = render(true);
+    /* (the camera rays start at the near plane, 0.1 m out: 1.4 m of fog) */
+    std::printf("    from inside the fog: %.4f clear, %.4f in it (ratio %.3f, exp(-0.7) %.3f)\n", clear, inside, inside / clear, std::exp(-0.7));
+    CHECK(clear > 0.5 && std::fabs(inside / clear - std::exp(-0.7)) < 0.03);
+    /* The CPU view: the Cube grown around everything, a fog of white - what the view sees whitens. */
+    Editor ed;
+    r34_open(ed);
+    ed.command("shading shaded");
+    GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(cube && sphere && cube->get<MeshRenderer>());
+    if (!cube || !sphere || !cube->get<MeshRenderer>()) return;
+    MaterialPtr haze = make_material_preset("Fog");
+    haze->volume_density = 0.0f, haze->volume_color = Vec3(1.0f), haze->volume_noise = 0.0f;
+    cube->get<MeshRenderer>()->materials = {haze};
+    cube->set_local_scale(Vec3(40.0f));  // (its faces inside the far clip)
+    ed.mark_changed_for_test("Room");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(sphere->world_position(), cx, cy));
+    auto px = [&] { return ed.main_fb_for_test().pixels[(size_t)cy * ed.main_fb_for_test().width + cx]; };
+    const uint32_t before = px();
+    haze->volume_density = 0.5f;
+    haze->touch();
+    ed.mark_changed_for_test("Thicker");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const uint32_t after = px();
+    std::printf("    the sphere's middle from inside the fog cube: %06X -> %06X\n", before & 0xFFFFFF, after & 0xFFFFFF);
+    CHECK(after != before);
+  });
+  test("the lesson \"Fog with a Volume Material\": its Try-its make the Cube a fog of density 1.5 scattering forward, and nothing else", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Cube", "material Fog", "matset FogDensity 1.5", "matset FogAnisotropy 0.6"}) ed.command(c);  // (the Try-its, a part at a time as Learn runs them)
+    GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(cube && sphere && cube->get<MeshRenderer>() && sphere->get<MeshRenderer>());
+    if (!cube || !sphere || !cube->get<MeshRenderer>() || !sphere->get<MeshRenderer>()) return;
+    const MaterialPtr m = cube->get<MeshRenderer>()->materials.empty() ? nullptr : cube->get<MeshRenderer>()->materials[0];
+    if (m) std::printf("    the Cube's material: surface %d, density %.2f, anisotropy %.2f\n", m->surface, m->volume_density, m->volume_anisotropy);
+    CHECK(m && m->volume() && std::fabs(m->volume_density - 1.5f) < 1e-5f && std::fabs(m->volume_anisotropy - 0.6f) < 1e-5f);
+    for (const MaterialPtr &sm : sphere->get<MeshRenderer>()->materials) CHECK(sm && !sm->volume());
+  });
+  test("Volume (fog), review 331: a lamp inside a foggy room is dimmed by the fog on its way to the floor and on to the eye; fogs inside a fog both dim (a cloud along the camera's probe doesn't hide the room); a denoised fog render stays finite; GPUs asked for say why they sit out", [] {
+    auto floor = primitives::plane(4.0f, 1);
+    auto room = primitives::cube(20.0f), cloud = primitives::cube(1.0f);
+    auto ball = primitives::uv_sphere(0.5f, 32, 16);
+    MaterialPtr white = make_material("white", {0.8f, 0.8f, 0.8f}), lit_white = make_material("ball", {0.9f, 0.9f, 0.9f});
+    lit_white->unlit = true;
+    MaterialPtr fog = make_material_preset("Fog"), thick = make_material_preset("Fog"), decoy = make_material_preset("Fog");
+    for (MaterialPtr *m : {&fog, &thick, &decoy}) (*m)->volume_color = Vec3(0.0f), (*m)->volume_noise = 0.0f;  // (black: only what passes through)
+    std::vector<MaterialPtr> mw = {white}, mb = {lit_white}, mf = {fog}, mt = {thick}, md = {decoy};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const int W = 32, H = 32;
+    auto centre_of = [&](PathTracer &pt) {
+      std::vector<float> img = pt.linear_rgb(false);
+      double c = 0.0;
+      for (int y = 14; y < 18; y++)
+        for (int x = 14; x < 18; x++) c += img[((size_t)y * W + x) * 3 + 1];
+      return c / 16.0;
+    };
+    /* A lamp 2 m above the floor, the camera 3 m above it, all inside the room's fog. */
+    RenderLight lamp;
+    lamp.type = RenderLight::Point;
+    lamp.position = {0.0f, 2.0f, 0.0f};
+    lamp.intensity = 4.0f;
+    lamp.range = 100.0f;
+    auto lamp_scene = [&](float density) {
+      fog->volume_density = density;
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false;
+      pt.set_settings(st);
+      pt.build({{&floor->render_mesh_tangents(), Mat4::identity(), &mw}, {&room->render_mesh_tangents(), Mat4::identity(), &mf}}, {lamp}, env);
+      pt.set_camera(Mat4::look_at({0, 3.0f, 0}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(20 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      return centre_of(pt);
+    };
+    const double clear = lamp_scene(0.0f), foggy = lamp_scene(0.2f), want = std::exp(-0.2 * (2.0 + 2.9));
+    std::printf("    the floor under a lamp in the fog: %.4f clear, %.4f in fog 0.2 (ratio %.3f; exp(-0.2 x (2 + 2.9)) %.3f, the eye's part alone %.3f)\n", clear, foggy,
+                foggy / clear, want, std::exp(-0.2 * 2.9));
+    CHECK(clear > 0.05 && std::fabs(foggy / clear - want) < 0.04);
+    /* Fogs inside a fog: the room (0.3) and a cloud (0.5, 1 m) on the view ray, a decoy cloud where the camera's probe
+     * looks first. */
+    fog->volume_density = 0.3f, thick->volume_density = 0.5f, decoy->volume_density = 0.5f;
+    auto nested = [&](bool fogs, bool denoise) {
+      std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4::translate({0, 0, 3.0f}), &mb}};
+      if (fogs) {
+        objs.push_back({&room->render_mesh_tangents(), Mat4::identity(), &mf});
+        objs.push_back({&cloud->render_mesh_tangents(), Mat4::translate({0, 0, 1.2f}), &mt});
+        objs.push_back({&cloud->render_mesh_tangents(), Mat4::translate(normalize(Vec3(0.3f, 1.0f, 0.2f)) * 3.0f), &md});
+      }
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = denoise, st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 3.0f}, {0, 1, 0}), Mat4::perspective(20 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      if (denoise) {
+        bool finite = true;
+        for (float v : pt.linear_rgb(true)) finite = finite && std::isfinite(v);
+        CHECK(finite);
+      }
+      return centre_of(pt);
+    };
+    const double bare = nested(false, false), both = nested(true, false), want2 = std::exp(-(0.3 * 2.4 + 0.5 * 1.0));
+    std::printf("    a ball through the room's fog and a cloud in it: %.4f clear, %.4f (ratio %.3f; exp(-(0.3 x 2.4 + 0.5 x 1)) %.3f)\n", bare, both, both / bare, want2);
+    CHECK(bare > 0.5 && std::fabs(both / bare - want2) < 0.03);
+    const double denoised = nested(true, true);
+    std::printf("    denoised: %.4f\n", denoised);
+    CHECK(denoised > 0.0 && std::isfinite(denoised));
+    /* GPUs asked for: the note says why they sit out, and the device line carries it. */
+    PathTracer pt;
+    PTSettings st;
+    st.denoise = false, st.use_embree = false, st.gpus = {0};
+    pt.set_settings(st);
+    pt.build({{&room->render_mesh_tangents(), Mat4::identity(), &mf}}, {}, env);
+    std::printf("    with GPUs asked for: \"%s\"\n", pt.device_summary().c_str());
+    CHECK(pt.gpu_note().find("Volume") != std::string::npos && pt.device_summary().find("Volume") != std::string::npos);
+  });
+  test("Volume (fog) saves and loads: every fog field round-trips, under names of its own (its Noise Scale once loaded as the axis material's)", [] {
+    Scene s;
+    build_default_scene(s);
+    GameObject *cube = s.find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    MaterialPtr fog = make_material_preset("Smoke");
+    fog->volume_noise_scale = 3.5f, fog->volume_anisotropy = -0.4f, fog->volume_emission_strength = 2.0f;
+    cube->get<MeshRenderer>()->materials = {fog};
+    const std::string a = save_scene_text(s);
+    Scene l;
+    std::string err;
+    CHECK(load_scene_text(a, l, err) && save_scene_text(l) == a);
+    CHECK(a.find("Fog_Noise_Scale 3.5") != std::string::npos && a.find("Fog_Anisotropy -0.4") != std::string::npos);
+  });
+  test("Volume (fog) on an open mesh warns in the Inspector (a Plane: 4 open edges), a closed Cube doesn't; MoonRay hides a fog's mesh and says so", [] {
+    CHECK(meshops::open_edge_count(*primitives::cube(1.0f)) == 0 && meshops::open_edge_count(*primitives::plane(2.0f, 1)) == 4);
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>() && cube->get<MeshFilter>());
+    if (!cube || !cube->get<MeshRenderer>() || !cube->get<MeshFilter>()) return;
+    MaterialPtr fog = make_material_preset("Fog");
+    cube->get<MeshRenderer>()->materials = {fog};
+    CHECK(ed.volume_mesh_note_for_test(fog).empty());
+    CHECK(ed.volume_mesh_note_for_test(make_material("Plain", Vec3(0.5f))).empty());
+    cube->get<MeshFilter>()->mesh = primitives::plane(2.0f, 1);
+    const std::string note = ed.volume_mesh_note_for_test(fog);
+    std::printf("    on a plane: \"%s\"\n", note.c_str());
+    CHECK(note.find("4 open edges") != std::string::npos);
+    /* MoonRay: presence 0 and a note. */
+    std::vector<MaterialPtr> mats = {fog};
+    auto box = primitives::cube(1.0f);
+    moonray::ExportScene sc;
+    Environment env;
+    env.mode = Environment::Color;
+    sc.objects.push_back({&box->render_mesh(false), Mat4::identity(), &mats});
+    sc.world = &env;
+    sc.world_map_width = 16;
+    sc.view = Mat4::trs({0, 1, -5}, Quat::euler({0, 0, 0}), {1, 1, 1}).inverse();
+    sc.proj = Mat4::perspective(60.0f * kDeg2Rad, 16.0f / 9.0f, 0.1f, 100.0f);
+    sc.width = 16, sc.height = 9, sc.samples = 1;
+    moonray::ExportReport rep;
+    std::string error, text, notes;
+    CHECK(moonray::export_scene(sc, fs::join(fs::temp_dir(), "blendity-test-r331-moonray"), [](const std::string &p) { return p; }, rep, error));
+    fs::read_file(rep.scene_path, text);
+    for (const std::string &n : rep.notes) notes += n + "\n";
+    CHECK(text.find("[\"presence\"] = 0") != std::string::npos && notes.find("Volume (fog)") != std::string::npos);
+    fs::remove_file(rep.scene_path);
+  });
+}
+
+/* Round 334 (task 0314): Camera Flatten - the 2D look. */
+static void tests_round334() {
+  test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
+    const Vec3 p{1, 2, 3}, d = normalize(Vec3(0, 0.6f, -0.8f)), across = normalize(cross(d, Vec3(1, 0, 0)));
+    const Mat4 m = flatten_matrix(p, d, 0.25f);
+    CHECK(length(m.point(p) - p) < 1e-5f);
+    CHECK(length(m.point(p + d) - (p + d * 0.25f)) < 1e-5f);
+    CHECK(length(m.point(p + across) - (p + across)) < 1e-5f);
+    const Mat4 flat = flatten_matrix(p, d, 0.02f);
+    bool finite = true;
+    for (float v : flat.inverse().m) finite = finite && std::isfinite(v);
+    CHECK(finite);
+  });
+  test("Camera Flatten in the editor: the Game view's Cube is flattened toward its camera, the Scene view's isn't; a child flattens with its parent unless Children is off, and its own Camera Flatten wins; flatten remove takes it off", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(cube && sphere);
+    if (!cube || !sphere) return;
+    ed.command("select Cube");
+    ed.command("flatten 0.5");
+    CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf && cf->amount == 0.5f);
+    const Vec3 eye{0, 1, -6};
+    const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto item_of = [&](const std::vector<DrawItem> &items, const GameObject *g) -> const DrawItem * {
+      for (const DrawItem &it : items)
+        if (it.id == (uint32_t)g->id && !it.always_cull) return &it;
+      return nullptr;
+    };
+    std::vector<DrawItem> game = ed.collect_items_for_test(true, v, p, eye), scene = ed.collect_items_for_test(false, v, p, eye);
+    const DrawItem *g = item_of(game, cube), *s = item_of(scene, cube);
+    CHECK(g && s && g->flattened && !s->flattened);
+    if (!g || !s) return;
+    /* The Cube's corner nearest the camera comes halfway to the pivot along the line to the eye. */
+    const Vec3 c = cube->world_bounds().center(), dir = normalize(eye - c);
+    const Vec3 near_pt = s->model.inverse().point(c + dir * 0.4f);  // (a point inside the cube toward the camera, in its own space)
+    const float before = dot(s->model.point(near_pt) - c, dir), after = dot(g->model.point(near_pt) - c, dir);
+    std::printf("    toward the camera from the pivot: %.3f m as modelled, %.3f m in the Game view\n", before, after);
+    CHECK(std::fabs(after - before * 0.5f) < 1e-3f);
+    CHECK(length(g->shade_model.point(near_pt) - s->model.point(near_pt)) < 1e-5f);
+    /* A child: with the parent's (Children on), not with it off, and its own wins. */
+    ed.scene().set_parent(sphere, cube);
+    CHECK(item_of(ed.collect_items_for_test(true, v, p, eye), sphere) && item_of(ed.collect_items_for_test(true, v, p, eye), sphere)->flattened);
+    cf->children = false;
+    CHECK(!item_of(ed.collect_items_for_test(true, v, p, eye), sphere)->flattened);
+    ed.command("select Sphere");
+    ed.command("flatten 1");  // (all of it: 2 % kept, the matrix still finite)
+    const DrawItem *own = item_of(ed.collect_items_for_test(true, v, p, eye), sphere);
+    CHECK(own && own->flattened && std::isfinite(own->model.inverse().m[0]));
+    ed.command("select Cube");
+    ed.command("flatten remove");
+    CHECK(!cube->get<CameraFlatten>());
+  });
+  test("Camera Flatten keeps the shading: through an orthographic camera a sphere flattened along the view draws as the true one (the CPU raster and the path tracer), while the flattened normals alone would change it", [] {
+    auto ball = primitives::uv_sphere(0.5f, 48, 24);
+    MaterialPtr m = make_material("ball", {0.8f, 0.5f, 0.3f});
+    m->roughness = 0.6f;
+    const Mat4 model = Mat4::translate({0, 0, 3});
+    const Vec3 fwd{0, 0, 1};
+    const Mat4 flat = flatten_matrix({0, 0, 3}, -fwd, 0.3f) * model;
+    const Mat4 v = Mat4::look_at({0, 0, 0}, {0, 0, 3}, {0, 1, 0}), p = Mat4::ortho(0.7f, 1.0f, 0.1f, 20.0f);
+    const int W = 64, H = 64;
+    /* The CPU raster. */
+    auto raster = [&](const Mat4 &placed, bool flattened) {
+      CfScene sc;
+      sc.add(ball, placed, 1, m);
+      sc.seal();
+      sc.items[0].flattened = flattened, sc.items[0].shade_model = model;
+      Image img;
+      RenderTarget rt;
+      cf_render(img, rt, W, H, v, p, RasterOptions(), sc);
+      return img.pixels;
+    };
+    const std::vector<uint32_t> truth = raster(model, false), kept = raster(flat, true), bent = raster(flat, false);
+    auto differ = [&](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      int n = 0;
+      for (size_t i = 0; i < a.size(); i++) {
+        const int dr = std::abs((int)(a[i] >> 16 & 255) - (int)(b[i] >> 16 & 255)), dg = std::abs((int)(a[i] >> 8 & 255) - (int)(b[i] >> 8 & 255));
+        n += std::max(dr, dg) > 3;
+      }
+      return n;
+    };
+    const int d_kept = differ(truth, kept), d_bent = differ(truth, bent);
+    std::printf("    the raster: %d pixels differ from the true sphere with the shading kept, %d with the flattened normals\n", d_kept, d_bent);
+    CHECK(d_kept * 20 < d_bent && d_bent > 100);
+    /* The path tracer. */
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-1.0f, -0.3f, 0.6f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    std::vector<MaterialPtr> mats = {m};
+    auto trace = [&](const Mat4 &placed, bool flattened) {
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false;
+      pt.set_settings(st);
+      PTObject o{&ball->render_mesh_tangents(), placed, &mats, 1};
+      o.flattened = flattened, o.shade_model = model;
+      pt.build({o}, {sun}, env);
+      pt.set_camera(v, p, W, H);
+      pt.render(1e9, 16);
+      return pt.linear_rgb(false);
+    };
+    const std::vector<float> t_true = trace(model, false), t_kept = trace(flat, true), t_bent = trace(flat, false);
+    double e_kept = 0, e_bent = 0, sum = 0;
+    for (size_t i = 0; i < t_true.size(); i++) e_kept += std::fabs(t_kept[i] - t_true[i]), e_bent += std::fabs(t_bent[i] - t_true[i]), sum += t_true[i];
+    std::printf("    the path tracer: off by %.1f%% with the shading kept, %.1f%% with the flattened normals\n", 100 * e_kept / sum, 100 * e_bent / sum);
+    CHECK(sum > 0 && e_kept < 0.05 * sum && e_bent > 2 * e_kept);
+  });
+  test("Camera Flatten, review 334: the views' hash moves when one is added, edited, switched off or removed (the Game view draws again); an outlined flattened object keeps one shell, of its true size, from any camera; the console refuses words it doesn't know and leaves the Amount alone", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube);
+    if (!cube) return;
+    ed.command("select Cube");
+    const uint64_t h0 = ed.render_hash_uncached_for_test();
+    ed.command("flatten 0.5");
+    const uint64_t h1 = ed.render_hash_uncached_for_test();
+    ed.command("flatten 0.7");
+    const uint64_t h2 = ed.render_hash_uncached_for_test();
+    cube->get<CameraFlatten>()->enabled = false;
+    const uint64_t h3 = ed.render_hash_uncached_for_test();
+    cube->get<CameraFlatten>()->enabled = true;
+    ed.command("flatten remove");
+    const uint64_t h4 = ed.render_hash_uncached_for_test();
+    CHECK(h1 != h0 && h2 != h1 && h3 != h2 && h4 == h0);
+    /* The console: unknown or incomplete words change nothing. */
+    ed.command("flatten 0.5");
+    for (const char *bad : {"flatten pivot", "flatten direction", "flatten preset toon", "flatten pivto bone head", "flatten pivot bone"}) ed.command(bad);
+    const CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf && cf->amount == 0.5f && cf->pivot == 0 && cf->direction == 0);
+    ed.command("flatten direction axis");
+    ed.command("flatten pivot origin");
+    CHECK(cf->direction == 1 && cf->pivot == 1 && cf->amount == 0.5f);
+    /* An outline: the same shell from two cameras, as thick as on the true shape. */
+    Outline *ol = cube->add<Outline>();
+    (void)ol;
+    ed.command("flatten direction camera");
+    auto shell_of = [&](Vec3 eye) -> const RenderMesh * {
+      const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+      for (const DrawItem &it : ed.collect_items_for_test(true, v, p, eye))
+        if (it.id == (uint32_t)cube->id && it.always_cull) return it.mesh;
+      return nullptr;
+    };
+    const RenderMesh *a = shell_of({0, 1, -6}), *b = shell_of({4, 2, -5});
+    CHECK(a && b && a == b);
+    const RenderMesh *plain = nullptr;
+    ed.command("flatten remove");
+    plain = shell_of({0, 1, -6});
+    std::printf("    the outline's shell: %s from two cameras, %s as without the flatten\n", a == b ? "the same" : "rebuilt", a == plain ? "the same" : "not the same");
+    CHECK(plain && plain->positions.size() == a->positions.size());
+  });
+  test("the lesson \"Flatten to the Camera (the 2D Look)\": its Try-its put Camera Flatten on the Sphere at 0.6 toward the camera, then about its origin", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Sphere", "flatten 0.6", "flatten pivot origin"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const CameraFlatten *cf = s ? s->get<CameraFlatten>() : nullptr;
+    CHECK(cf && cf->amount == 0.6f && cf->pivot == 1 && cf->direction == 0);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -11082,4 +11684,7 @@ void run_render_tests() {
   tests_round266();
   tests_round267();
   tests_round268();
+  tests_round330();
+  tests_round331();
+  tests_round334();
 }
