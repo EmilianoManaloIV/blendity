@@ -134,8 +134,11 @@ everything):
   edited with the same keys.
 - **UV Unwrapping** - a UV Editor with LSCM unwrap, Smart UV Project, Part Unwrap (PartUV's charts by parts, ABF++),
   projections and island packing.
-- **Texturing & Materials** - Principled materials and material assets, layered **procedural textures**, axis
-  materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
+- **Texturing & Materials** - Principled materials (with Subsurface, Sheen, Coat and Anisotropic) and material
+  assets, **Volume (fog)** materials - fog, smoke and mist inside a mesh, scattered truly by the path tracer - layered
+  **procedural textures** with Blender's shader nodes as layers (Add Layer's search, Reset to Default on any field,
+  the preview up to a layer), **Camera Flatten** for the anime 2D look (depth squashed toward the camera, shaded as
+  modelled), axis materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
   map, inner lines and hatching, custom normals from a head proxy, hold frames on 2s / 3s), anime background
   generators (leaves, grass, walls, windows, roofs, sky, clouds, rocks, water; cards cut out by their cover), an
   import preview with the shading switchable before anything lands in the project, hair that keeps its curl, parts into
@@ -153,7 +156,8 @@ everything):
   weights and weight transfer by inpainting** (Epic, 2023); a **Mixamo-style marker auto-rig** for people and
   four-legged animals; rigged FBX / glTF import with bind poses.
 - **Animation** - a **Unity-style dopesheet** and **Curves view** (key tangents: Clamped Auto, Free Smooth, Flat,
-  Broken) with Record and Preview, the Animation component for Play, and a **Premiere-style Sequencer**: clips laid out
+  Broken) with Record and Preview, **any Inspector field keyed** (right-click > Insert Keyframe, or I - a material
+  slot's fields too; visibility through Add Property), the Animation component for Play, and a **Premiere-style Sequencer**: clips laid out
   on tracks crossfade where they overlap, and keys jump between them in Play. **Physics for animation**, as in
   Cascadeur: each bone weighed from the skinned mesh, the center of mass followed through a clip, contacts found from
   the motion and pinned, a jump corrected to a true parabola with its angular momentum kept, and **AutoPhysics**: the
@@ -199,7 +203,14 @@ rest without a keyboard ([the manual](docs/MANUAL.md), chapter 1). **My Tools** 
 takes a key of your own (right-click it > Assign Shortcut...), and one `.blendity-ui` file carries the whole arrangement. On a
 drawing tablet beside the screen, a second Scene view and a pinned Inspector in a window of their own (*Duplicate into New
 Window*), and tabs dock into whichever window they are dropped on. The **Draw tab** is the pad: the scene from the Scene or the Game camera, the
-pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn. The **Layers window** composites the sketch's layers as Photoshop does - opacity,
+pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn;
+it works like SketchBook Pro's canvas - one slim toolbar (the brush, its color and size, the Ruler, Ellipse and Curve,
+symmetry, perspective, Steady and Predictive Stroke, Layers, More), the pad zoomed, panned, turned and flipped with the
+wheel, a middle-drag or Space+drag and two fingers, Tab to hide the tools, and blank Paper as a source - and SketchBook's
+brushes (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, an Eraser that cuts) in a floating palette with the puck for size
+and opacity, B / E / [ ] over the pad. The **Board** is a reference board in PureRef's way: images dropped, pasted or
+dragged from the Project window onto an endless canvas, moved, scaled and turned by their handles, kept in
+Assets/Boards and opened again next time (Drawing with References shows it beside the pad). The **Layers window** composites the sketch's layers as Photoshop does - opacity,
 blend modes, groups, locks - with rows a pen can work and the Wheel's layers set a hold away. Tabs never clip (icons, then an overflow), related tabs
 fold into one, and a stage layout shows its own tabs; the Scene view's bar reads Layout > Mode > Tool. **Sculpt Mode** (Modeling Tools > Sculpt) pushes, smooths and grabs a dense mesh with
 brushes that touch only what is under them, each stroke one light undo step - ten brushes, symmetry, a lazy mouse, image alphas
@@ -236,7 +247,26 @@ Record and Play Clip. Round 281: the welcome asks where you come from (Unity, Un
 sets the keys and the feel; an Adobe keymap preset (B brush, E eraser, V move, [ ] size); [ ] step every brush; a High
 Contrast theme measured against WCAG's 4.5:1; `keymap table`. Round 282: the HCI pass measured - the KLM estimate for 19
 frequent actions 80.9 s -> 54.65 s, 0 wrong shortcut labels, every tool mode hinted, 24 failing walkthrough steps -> 7;
-the think-aloud study is written but not yet run (`docs/hci/`).
+the think-aloud study is written but not yet run (`docs/hci/`). Round 283: the tests that failed only on CI (the dependency-free build, two
+cores, sanitizers) or without LTCG pass there too. Rounds 284-290: Scatter's and Strokes' settings as dropdowns and buttons, a
+pen-tappable step bar for the modal tools, Pan in the UV editor, Adjust Last for primitives, UV operators and Draw shapes, 3D Object
+in every layout, time zoom in the Animation window, glTF export of a rig with its weights and clip, Okabe-Ito polygroups, the
+eraser by shape, a CPU badge, 7 mm pen targets in Tablet Mode (asserted), and a ? beside the hint that opens the lesson.
+Rounds 291-293: what only the Console could do in Sculpt, Paint and texturing has buttons, pickers and dialogs (New Surface, a
+layer's Mask Preset and Save as Smart Material, a Bake dialog, Bucket Fill, palettes); refusals carry a Fix; results show in a
+Report dialog.
+Rounds 294-298: Live Link starts with Blendity and writes where it listens, and bridges for Blender, Unity, Godot and Unreal
+connect by themselves (the Godot and Unreal ones written, their in-engine runs pending); the bridges as installable packages,
+and Window > Live Link > Install a Bridge.
+Rounds 299-305, Puppet Posing: drag a hand, a foot, the head or the hips and a pose prior trained on motion capture bends the
+body, exact IK making the goals and the planted feet hold; any humanoid rig (Mixamo, UE5, Character Creator, Daz, VRoid, Biped,
+Rigify; T or A pose); motion trails, onion skin, a Zoetrope, Reach, Motion Check with Fixes, a smooth brush, Lock in Place.
+Rounds 306-310: the rest of the console-only verbs in menus, panels and Preferences - the sketch pen and canvases, Anime Look,
+grass, reference images from the side and top, UV material lists, the render range, MoonRay and AI checks, contacts and
+ragdoll events, gait files, vertex group and shape key pickers - and a test that every one stays reachable.
+Rounds 311-315: the last console-only items in the interface; five interface conventions checked; a live sweep of every
+screen with the fixes it found (labels that don't fit, narrow panes, contrast); a 118-task checklist with target times
+(docs/hci/checklist.md); the Unity bridge run in Unity 6000.6.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -267,7 +297,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13230 unit checks in 1138 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (14028 unit checks in 1261 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

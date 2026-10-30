@@ -526,6 +526,16 @@ Vec3 Mesh::face_weighted(size_t f) const {
   return w;
 }
 
+/* Every corner normal - the full build's and the in-place pass's - is normalized here, out of line: under /fp:fast without
+ * whole-program optimization MSVC inlined normalize differently into the two and they disagreed in the last bit (the
+ * Edit Mode drag test, in a BLENDITY_NO_LTCG build). One copy of the instructions gives one answer. */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static Vec3 corner_normalize(Vec3 s) { return normalize(s); }
+
 /* Which of sides_ touch each vertex, once per topology: a vertex's smooth fans only join across those. */
 void Mesh::build_vertex_sides() const {
   build_edge_sides();
@@ -626,7 +636,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
         for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) sum[root(c)] += fweighted[f];
       for (size_t f = 0; f < nf; f++)
         for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++)
-          cnormal[c] = smooth_of(f) ? normalize(sum[root(c)]) : fnormal[f];
+          cnormal[c] = smooth_of(f) ? corner_normalize(sum[root(c)]) : fnormal[f];
     }
     else if (smooth_angle >= 179.9f) {
       /* Each vertex adds its corners' faces in corner order - the face loop's order, so the same sum to the bit - on
@@ -640,7 +650,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
         for (int64_t v = a; v < b; v++) {
           Vec3 n(0.0f);
           for (uint32_t k = share_.cv_off[(size_t)v]; k < share_.cv_off[(size_t)v + 1]; k++) n += fweighted[corner_face[share_.cv_by[k]]];
-          vn[(size_t)v] = normalize(n);
+          vn[(size_t)v] = corner_normalize(n);
         }
       });
       js.parallel_for((int64_t)corner_verts.size(), 16384, [&](int64_t a, int64_t b) {
@@ -662,7 +672,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
           Vec3 sum(0.0f);
           for (uint32_t k = off[v]; k < off[v + 1]; k++)
             if (dot(fnormal[adj[k]], fnormal[f]) >= cos_limit) sum += fweighted[adj[k]];
-          cnormal[c] = normalize(sum);
+          cnormal[c] = corner_normalize(sum);
         }
     }
   }
@@ -723,7 +733,7 @@ void Mesh::smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, fl
   for (size_t i = 0; i < n; i++) sum[root((uint32_t)i)] += st.fweighted[at[i].second];
   for (size_t i = 0; i < n; i++) {
     const uint32_t c = at[i].first, f = at[i].second;
-    st.cnormal[c] = smooth_of(f) ? normalize(sum[root((uint32_t)i)]) : st.fnormal[f];
+    st.cnormal[c] = smooth_of(f) ? corner_normalize(sum[root((uint32_t)i)]) : st.fnormal[f];
   }
 }
 
@@ -731,7 +741,7 @@ void Mesh::smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, fl
 void Mesh::smooth_vertex_at(NormalState &st, const CornerFaces &at) const {
   Vec3 sum(0.0f);
   for (const auto &cf : at) sum += st.fweighted[cf.second];
-  const Vec3 n = normalize(sum);
+  const Vec3 n = corner_normalize(sum);
   for (const auto &cf : at) st.cnormal[cf.first] = n;
 }
 
@@ -742,7 +752,7 @@ void Mesh::smooth_by_angle_at(NormalState &st, const VertexFaces &vf, uint32_t v
     Vec3 sum(0.0f);
     for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++)
       if (dot(st.fnormal[vf.faces[k]], st.fnormal[cf.second]) >= cos_limit) sum += st.fweighted[vf.faces[k]];
-    st.cnormal[cf.first] = normalize(sum);
+    st.cnormal[cf.first] = corner_normalize(sum);
   }
 }
 

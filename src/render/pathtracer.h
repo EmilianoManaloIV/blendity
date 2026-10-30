@@ -44,6 +44,8 @@ struct PTObject {
   Mat4 model;
   const std::vector<MaterialPtr> *materials = nullptr;
   uint32_t id = 0;  // the object's id, for the first-hit id plane (camera filters outline by it)
+  bool flattened = false;  // (round 334: Camera Flatten - placed by model, shaded by shade_model, the true placement)
+  Mat4 shade_model;
 };
 
 /* A thin lens for depth of field (Cycles: kernel/camera/camera.h). */
@@ -207,9 +209,32 @@ class PathTracer {
    * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
                   std::vector<float> *hit, std::string *error, bool mis_first_hit = false) const;
+  /* Round 331: the fogs a path is in - a Volume material's object, entered by a front face, left by a back face. Fogs
+   * inside fogs add up (their densities sum where they overlap), up to four deep. */
+  struct Medium {
+    const Material *mat = nullptr;
+    uint32_t object = UINT32_MAX;
+  };
+  struct Media {
+    Medium m[4];
+    int n = 0;
+    const Medium *top() const { return n ? &m[n - 1] : nullptr; }
+    void enter(Medium md) {
+      leave(md.object);
+      if (n < 4) m[n++] = md;
+    }
+    void leave(uint32_t object) {
+      int i = 0;
+      while (i < n && m[i].object != object) i++;
+      if (i == n) return;
+      for (int k = i; k + 1 < n; k++) m[k] = m[k + 1];
+      n--;
+    }
+  };
   /* Light passing along a shadow ray: 0 when blocked, partial through
-   * transparent surfaces, full through cutout holes. */
-  Vec3 transmittance(const Ray &r, float tmax) const;
+   * transparent surfaces, full through cutout holes; dimmed by the fogs it crosses - `in`, the fogs its origin is in
+   * (round 331: a lamp in a foggy room), else the ones it is found to start in. */
+  Vec3 transmittance(const Ray &r, float tmax, const Media *in = nullptr) const;
   const PTStats &stats() const { return stats_; }
 
   static bool embree_available();
@@ -243,8 +268,21 @@ class PathTracer {
   static bool gpu_available();
   /* Errors from GPU devices that had to drop out (empty if none). */
   const std::string &gpu_error() const { return gpu_error_; }
+  const std::string &gpu_note() const { return gpu_note_; }  // (round 331: why the GPUs sit a scene out)
 
  private:
+  /* Round 331: a free flight through the fogs the ray is in, up to tmax - true when it scatters (the ray turned by the
+   * phase function, beta weighted, the lights' and the fog's own light added to L). */
+  bool volume_scatter(const Media &media, Ray &ray, float tmax, Vec3 &beta, Vec3 &L, uint32_t &rng, uint64_t &rays) const;
+  float volume_density(const Medium &md, Vec3 p) const;
+  Media media_at(Vec3 p) const;  // the fogs a point is in (a camera in a fog-filled room)
+  bool sample_light(const RenderLight &l, Vec3 from, Vec3 at, uint32_t &rng, Vec3 &dir, float &dist, float &power) const;
+  Vec3 transmittance_volumes(const Ray &r, float tmax, const Media *in) const;
+  Vec3 volume_transmittance(const Medium &md, const Ray &r, float len) const;
+  bool has_volume_ = false;
+  std::string gpu_note_;     // (why the GPUs sit this scene out: a Volume material)
+  std::vector<Mat4> inv_models_;  // each object's world to its own space (the fog's noise)
+  Media camera_media_;       // the fogs the camera is in (each render() call)
   void build_embree(double &ms);
   bool use_embree_ = false;  // decided at build()
   std::shared_ptr<PTEmbreeData> embree_;

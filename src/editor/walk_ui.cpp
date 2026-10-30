@@ -53,7 +53,7 @@ void Editor::walk_preset(const std::string &name) {
 /* Generate: the gait keyed into the character's clip (a new one when it has none), one undo step. */
 void Editor::walk_generate() {
   if (!assist_require(Assist::Walk)) return;
-  if (playing_) return Log::warn("Walk Cycle: stop Play first");
+  if (playing_) return refuse("Walk Cycle: stop Play first", "stop", "Stop Play");
   GameObject *root = anim_root();
   const gait::Rig r = walk_rig();
   if (!root || !r.valid()) return Log::warn("Walk Cycle: %s", root ? r.problem.c_str() : "select a character with a skeleton");
@@ -103,7 +103,56 @@ void Editor::draw_walk_section(ui::Layout &lay) {
   Recti row = lay.row(u.row_h() + u.px(2));
   if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Generate into the Clip")) walk_generate();
   u.tooltip("Keys the hips, the feet's IK targets, the feet, spine, head and arms for the whole cycle (and the planted frames as contacts):\n"
-            "ordinary keys, one undo step. Console: walk cycle [preset] [speed] [cycles] [inplace|travel].");
+            "ordinary keys, one undo step.");
+  draw_walk_style_files(lay);  // (task 0289)
+}
+
+/* The project's .gait files (Assets and below), sorted. */
+std::vector<std::string> Editor::gait_files() {
+  if (ui_.time - gait_files_time_ < 3.0) return gait_files_;  // (cached as image_assets is: the popup redraws every frame)
+  gait_files_time_ = ui_.time;
+  std::vector<std::string> &out = gait_files_;
+  out.clear();
+  std::function<void(const std::string &, int)> scan = [&](const std::string &dir, int depth) {
+    if (depth > 4) return;
+    for (const auto &e : fs::list(dir)) {
+      const std::string p = fs::join(dir, e.name);
+      if (e.is_dir) scan(p, depth + 1);
+      else if (fs::extension(e.name) == ".gait") out.push_back(p.substr(assets_dir_.size() + 1));
+    }
+  };
+  scan(assets_dir_, 0);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+/* Task 0289: the style kept as a file (Assets/Gaits/<name>.gait) and one loaded - what `walk save` and `walk load` did. */
+void Editor::draw_walk_style_files(ui::Layout &lay) {
+  auto &u = ui_;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  const int hw = (row.w - u.px(12)) / 2;
+  const Recti save{row.x + u.px(4), row.y, hw, row.h}, load{row.x + u.px(8) + hw, row.y, hw, row.h};
+  if (u.record_buttons) u.button_rects["walk:Save Style"] = save, u.button_rects["walk:Load Style"] = load;
+  if (u.button(save, "Save Style")) {
+    std::string base = walk_.settings.style.name.empty() ? std::string("Style") : walk_.settings.style.name;
+    for (char &c : base)
+      if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' || c == '.') c = '_';
+    std::string name = base;
+    for (int k = 2; fs::exists(fs::join(assets_dir_, "Gaits/" + name + ".gait")); k++) name = strprintf("%s %d", base.c_str(), k);
+    fs::make_dirs(fs::join(assets_dir_, "Gaits"));
+    walk_command({"walk", "save", "Gaits/" + name});
+    gait_files_time_ = -100;  // (listed at once)
+  }
+  u.tooltip("This style's numbers kept as Assets/Gaits/<name>.gait, for another character or project.");
+  const ui::Id id = u.id("walk_load");
+  if (u.button(load, "Load Style...")) u.open_popup(id, load);
+  u.tooltip("A style kept before: the project's .gait files.");
+  u.popup(id, u.px(260), [this] {
+    const std::vector<std::string> files = gait_files();
+    if (files.empty()) ui_.menu_label("No .gait files in the project yet (Save Style)");
+    for (const std::string &f : files)
+      if (ui_.menu_item(f)) walk_command({"walk", "load", f});
+  });
 }
 
 /* walk cycle [preset] [speed] [cycles] [inplace|travel] | set <number> <value> | save <file> | load <file> | presets */

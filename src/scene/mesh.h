@@ -576,6 +576,7 @@ size_t edge_split(Mesh &m, std::vector<uint8_t> &vert_sel);                     
 void select_linked(const Mesh &m, std::vector<uint8_t> &vert_sel);                     // Ctrl+L
 void grow_selection(const Mesh &m, std::vector<uint8_t> &vert_sel, bool grow);         // Ctrl+Numpad +/-
 void select_non_manifold(const Mesh &m, std::vector<uint8_t> &vert_sel);
+size_t open_edge_count(const Mesh &m);  // edges with one face (round 331: a Volume material needs a closed mesh)
 /* Blender's Select Similar > Coplanar: adds every face lying in the plane of a selected face (normals within
  * angle_deg, plane distance within dist, or a scale-relative tolerance when dist < 0). Returns the faces added. */
 size_t select_coplanar(const Mesh &m, std::vector<uint8_t> &face_sel, float angle_deg = 1.0f, float dist = -1.0f);

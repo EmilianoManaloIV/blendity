@@ -102,7 +102,7 @@ void Editor::draw_toasts(const Recti &view) {
     if (t.count > 1) text += strprintf("  x%d", t.count);
     const int bw = t.fix_cmd.empty() ? 0 : u.font.text_width("Fix: " + t.fix_label) + u.px(28);
     const int w = std::min(view.w - u.px(40), u.font.text_width(text) + 2 * pad + lh + (bw ? bw + gap : 0));
-    const Recti r{view.x + (view.w - w) / 2, y, w, lh + 2 * pad};
+    const Recti r{view.x + (view.w - w) / 2, y, w, tablet_ ? std::max(lh + 2 * pad, u.px(34)) : lh + 2 * pad};  // (task 0270: 7 mm in Tablet Mode)
     const uint32_t accent = t.level == LogLevel::Error ? u.theme.error : t.level == LogLevel::Warning ? u.theme.warning : u.theme.accent;
     u.frame(r, u.theme.button, accent, u.px(4));
     const int a = lh - u.px(4);
