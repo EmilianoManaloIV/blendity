@@ -172,6 +172,7 @@ void Editor::update_asset_drag() {
       if (!image && !ptex && s.r.contains(in.mx, in.my)) target = s.r;
     for (auto &t : drop_textures_)
       if (image && t.r.contains(in.mx, in.my)) target = t.r;
+    if ((image || fs::extension(d.path) == ".paper") && board_has_mouse()) target = board_rect_;  // (task 0299: onto the reference board; 0305: a paper)
     for (auto &r : drop_rows_)
       if (!image && r.first.contains(in.mx, in.my)) target = r.first;
     if (fs::extension(d.path) == ".anim")
@@ -199,6 +200,10 @@ void Editor::update_asset_drag() {
           if (fs::normalize(fs::parent(src)) != fs::normalize(folder->second)) move_project_entry(src, folder->second);
         }
       }
+      else if (image_extension_supported(fs::extension(d.path)) && !d.mat && board_has_mouse())
+        board_add_image(d.path, board_from_screen({(float)in.mx, (float)in.my}), true);  // (task 0299)
+      else if (fs::extension(d.path) == ".paper" && board_has_mouse())
+        board_add_paper(d.path, board_from_screen({(float)in.mx, (float)in.my}));  // (task 0305)
       else if (fs::extension(d.path) == ".ptex") drop_texture_asset(d.path, in.mx, in.my);
       else if (fs::extension(d.path) == ".anim") seq_drop_clip(d.path, in.mx, in.my);
       else if (d.mat || fs::extension(d.path) == ".mat" || image_extension_supported(fs::extension(d.path)))

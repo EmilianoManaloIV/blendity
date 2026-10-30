@@ -169,13 +169,31 @@ void Editor::draw_moonray_settings() {
     else state = "MoonRay isn't installed (optional: DreamWorks' production renderer)";
   }
   u.label({r.x + u.px(160), r.y, r.w - u.px(300), r.h}, state, mr_.ready() ? u.theme.text : u.theme.text_dim);
-  u.tooltip(std::string("MoonRay is a separate program Blendity downloads on request and runs for ") + key("render.image") + " renders (on Windows inside WSL).\n"
-            "Console: moonray status | install | remove | folder <your own MoonRay> | check");
+  u.tooltip(std::string("MoonRay is a separate program Blendity downloads on request and runs for ") + key("render.image") + " renders (on Windows inside WSL).");
   if (!mr_located_) return;
   const Recti btn{r.right() - u.px(130), r.y + u.px(2), u.px(118), r.h - u.px(4)};
   if (mr_task_) return;  // (busy: its result is logged)
+  draw_moonray_own_row();
   if (mr_.ready() && !mr_.own_build && u.button(btn, "Remove")) return moonray_command({"moonray", "remove"});
   if (!mr_.ready() && mr_.installable() && u.button(btn, "Install...")) moonray_command({"moonray", "install"});
+}
+
+/* Task 0288: your own MoonRay (a folder you built) and a test render - what `moonray folder` and `moonray check` did. */
+void Editor::draw_moonray_own_row() {
+  auto &u = ui_;
+  Recti r = u.popup_row(u.row_h() + u.px(4));
+  std::string &text = picker_text_["pref:moonray"];
+  if (!u.editing(u.id("pref_mr_folder"))) text = mr_folder_;
+  u.label({r.x + u.px(160), r.y, u.px(120), r.h}, "Your own MoonRay", u.theme.text_dim);
+  if (path_picker_field({r.x + u.px(284), r.y + u.px(2), r.w - u.px(430), r.h - u.px(4)}, u.id("pref_mr_folder"), "pref:moonray", text, PickKind::Folder, {},
+                        [this](const std::string &p) { moonray_command({"moonray", "folder", p}); }) &&
+      text != mr_folder_)
+    moonray_command({"moonray", "folder", text});
+  u.tooltip("A MoonRay you built yourself (its folder, with bin/moonray); empty: the one Blendity installs.");
+  const Recti check{r.right() - u.px(130), r.y + u.px(2), u.px(118), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["pref:MoonRay Check"] = check;
+  if (u.button_enabled(check, "Check", mr_.ready(), "MoonRay isn't installed: Install... first.")) moonray_command({"moonray", "check"});
+  u.tooltip("Render MoonRay's test scene now: says whether it works here, and how long it took.");
 }
 
 /* moonray status | install [archive] | remove | folder [path] | check | locate: the console's MoonRay. */
@@ -244,7 +262,7 @@ bool Editor::begin_moonray_render(const moonray::ExportScene &sc, const MoonRayF
       if (j->cancel.load()) return j->state.store(MoonRayJob::Cancelled);
       std::string e;
       if (!moonray::convert_texture(tj, e) && j->complaints.size() < 20)
-        j->complaints.push_back("the texture " + tj.source + " couldn't be read (" + e + "): its material's colour is used");
+        j->complaints.push_back("the texture " + tj.source + " couldn't be read (" + e + "): its material's color is used");
     }
     std::string tail, line;
     /* MoonRay's checkpoints, watched twice a second while it renders (it prints nothing meanwhile): each new one read

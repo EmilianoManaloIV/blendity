@@ -171,6 +171,10 @@ std::string material(const Material &m, const std::string &name, const PathMap &
   }
   if (m.surface == (int)MaterialSurface::Transparent) attr("presence", lua_number(std::max(0.0f, std::min(1.0f, m.alpha))));
   if (m.surface == (int)MaterialSurface::Cutout) rep.notes.push_back("'" + m.name + "': alpha clipping isn't sent (the surface is opaque)");
+  if (m.volume()) {  // (round 331: MoonRay's volume shaders aren't wired: the fog's mesh is left out rather than drawn solid)
+    attr("presence", "0");
+    rep.notes.push_back("'" + m.name + "': a Volume (fog) material isn't sent - its mesh is hidden in MoonRay");
+  }
   const Vec3 e = m.emission * m.emission_strength;
   if (m.emission_strength > 0.0f && (e.x > 0 || e.y > 0 || e.z > 0)) {
     attr("show_emission", "true");
