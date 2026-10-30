@@ -2,6 +2,16 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 336): every open pull request merged, and the 0.12.0 pre-release
+
+**Asked:** "Merge all current standing pull requests on GitHub this one time." and "We can also for 0.12.0 pre-release".
+
+**Changed**
+- Every open PR merged into main with merge commits, from the top of the stack down (#236, which reopened the
+  auto-closed #235, then #233 ... #216, and #102); #176-#215 closed as merged with them.
+- Version 0.12.0: VERSION, the README's pre-release note, the manual, the installer script's example and the version
+  a build without VERSION reports, ahead of the v0.12.0 tag (the app reads its version from VERSION).
+
 ## 2026-10-30 (round 335): animate almost any property
 
 **Asked:** "In the animator I should be able to animate almost all properties of an object."
