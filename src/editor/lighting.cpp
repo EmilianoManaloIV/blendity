@@ -263,7 +263,7 @@ void Editor::bake_start() {
   }
   const LightingSettings &ls = scene_->lighting;
   if (!ls.baked_gi) {
-    Log::warn("Generate Lighting: Baked Global Illumination is off (Lighting window).");
+    refuse("Generate Lighting: Baked Global Illumination is off (Lighting window).", "window Lighting", "Open Lighting");
     return;
   }
   std::vector<BakeObject> objects;
@@ -634,7 +634,7 @@ void Editor::auto_generate_step() {
  * probes - and freezes again when they have all caught up (a frame on a GPU, a few on the CPU). */
 void Editor::lighting_update() {
   if (!scene_->lighting.realtime_gi) {
-    Log::warn("Update Lighting: Realtime GI is off (Lighting window); Generate Lighting bakes.");
+    refuse("Update Lighting: Realtime GI is off (Lighting window); Generate Lighting bakes.", "set Lighting.RealtimeGI true", "Turn Realtime GI on");
     return;
   }
   lighting_update_requested_ = true;

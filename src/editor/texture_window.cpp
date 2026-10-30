@@ -153,15 +153,68 @@ size_t Editor::materials_using_texture(const ProceduralTexturePtr &t) {
   return users.size();
 }
 
+/* Round 332: every texture asset a scene or asset material names in one of its maps, in one pass (the grid tags the
+ * others "not used"). */
+std::unordered_set<std::string> Editor::used_texture_assets() {
+  std::unordered_set<std::string> used;
+  auto check = [&](const Material *m) {
+    if (!m) return;
+    for (const TextureRef *map : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
+                                  &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map, &m->face_shadow_map, &m->line_map, &m->hatch_map}) {
+      const size_t hash = map->path.rfind('#');  // (as split_texture_ref: a texture's own path may hold one)
+      if (hash != std::string::npos) used.insert(map->path.substr(0, hash));
+    }
+  };
+  slots_using([&](const MaterialPtr &m) {
+    check(m.get());
+    return false;
+  });
+  for (const auto &kv : loaded_material_assets()) check(kv.second.get());
+  return used;
+}
+
+/* Round 332: the preview showing the stack up to one layer (Alt+click its name; Substance's solo): a copy cut there,
+ * under a name of its own in the thumbnails' cache, with a line saying so over the pane. */
+void Editor::draw_texture_upto(ProceduralTexture &t, int upto, int which, const Recti &pane) {
+  auto &u = ui_;
+  ProceduralTexture part = t;
+  part.layers.resize((size_t)upto + 1);
+  part.asset_path += "#upto";
+  const int ps = std::min(256, std::max(64, std::max(t.width, t.height)));
+  const TexThumb &th = texture_thumb(part, which, ps);
+  draw_pixels(u, th.px, th.size, th.size, pane, texture_preview_tiled_ ? 2 : 1);
+  texture_preview_size_ = th.size;
+  const TextureLayer &l = *t.layers[(size_t)upto];
+  const std::string name = l.name.empty() ? std::string(l.type_name()) : l.name;
+  const Recti band{pane.x, pane.y, pane.w, u.row_h()};
+  texture_ui_rects_["upto"] = band;
+  u.canvas.fill_rect(band, u.theme.bar);
+  u.label({band.x + u.px(4), band.y, band.w - u.px(8), band.h}, "Up to " + name + " - Alt+click it again for all", u.theme.accent);
+}
+
 void Editor::request_texture_delete() {
   if (texture_multi_.items.size() > 1) texture_delete_many_ = texture_multi_.items, texture_delete_ = nullptr;
   else texture_delete_ = texture_selected_, texture_delete_many_.clear();
+}
+
+/* One theme's presets (round 327): the one picked made, and shown - a search left from earlier would hide it. */
+void Editor::draw_texture_preset_items(const std::string &theme) {
+  for (const TexturePreset &p : texture_presets()) {
+    if (theme != p.theme) continue;
+    if (ui_.menu_item(p.name)) {
+      new_texture_asset(p.name);
+      texture_search_.clear();
+      ui_.redraw = true;
+    }
+    if (p.anime) ui_.tooltip("Cel-toned, for an anime background: flat tones, no normal map.");
+  }
 }
 
 void Editor::draw_textures_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
   texture_ui_rects_.clear();
+  expire_field_reset();
   if (u.hovered(r) && in.pressed[0]) focused_ = WindowKind::Textures;
   /* The list: every .ptex under Assets (loaded on first sight), filtered by the search. */
   std::vector<ProceduralTexturePtr> list;
@@ -182,13 +235,17 @@ void Editor::draw_textures_window(const Recti &r) {
   Recti nb{bar.x + u.px(6), bar.y + u.px(3), u.px(90), bh - u.px(6)};
   texture_ui_rects_["new"] = nb;
   if (u.button(nb, "New", false, ui::Icon::Plus)) u.open_popup(u.id("tex_new"), nb);
-  u.tooltip("A new texture asset in Assets/Textures from a preset (Bricks, Wood Floor, Tatami...).");
-  u.popup(u.id("tex_new"), u.px(180), [this] {
+  u.tooltip("A new texture asset in Assets/Textures from a preset, by theme: Basics, Architecture, Floors & Wood, Nature,\n"
+            "Sky & Weather, Metal & Fabric, Stone (the anime ones with their subject).");
+  u.popup(u.id("tex_new"), u.px(200), [this] {
     bool made = false;
-    for (const std::string &p : texture_preset_names())
-      if (ui_.menu_item(p.c_str())) new_texture_asset(p), made = true;
+    for (const std::string &theme : texture_preset_themes())  // (round 327: by theme; review 328: a submenu's body runs later - nothing by reference)
+      ui_.submenu(theme, ui_.px(190), [this, theme] { draw_texture_preset_items(theme); });
     ui_.menu_separator();
     if (ui_.menu_item("Empty")) new_texture_asset(""), made = true;
+    ui_.menu_separator();
+    if (ui_.menu_item("Surface on the Selected Object", nullptr, false, active_object() != nullptr)) surface_new(""), made = true;  // (task 0273)
+    ui_.tooltip("A layered surface on the selected object's material: Paint, the smart materials and the masks work on it.");
     if (made) {  // the new one in view (a search left from earlier would hide it)
       texture_search_.clear();
       ui_.redraw = true;
@@ -230,7 +287,7 @@ void Editor::draw_textures_window(const Recti &r) {
       dock_open(WindowKind::Editing);
       edit_open_texture(texture_selected_->asset_path);
     }
-    u.tooltip("Open this texture's colour in the Editing tab; Apply to Texture puts the result back as a layer on top.");
+    u.tooltip("Open this texture's color in the Editing tab; Apply to Texture puts the result back as a layer on top.");
     x = eb.right() + u.px(6);
     const Recti db{x, bar.y + u.px(3), u.px(80), bh - u.px(6)};
     texture_ui_rects_["delete"] = db;
@@ -251,6 +308,7 @@ void Editor::draw_textures_window(const Recti &r) {
   const int cols = std::max(1, (grid.w - pad) / (tile + pad));
   const int rows = ((int)list.size() + cols - 1) / cols;
   const int off = u.begin_scroll(u.id("tex_grid"), grid, rows * (tile + u.row_h() + pad) + pad);
+  const std::unordered_set<std::string> used = used_texture_assets();
   for (size_t i = 0; i < list.size(); i++) {
     const int cx = grid.x + pad + (int)(i % (size_t)cols) * (tile + pad);
     const int cy = grid.y + pad + (int)(i / (size_t)cols) * (tile + u.row_h() + pad) - off;
@@ -264,8 +322,16 @@ void Editor::draw_textures_window(const Recti &r) {
     const TexThumb &th = texture_thumb(*t, 0, 64);
     draw_pixels(u, th.px, th.size, th.size, {cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)});
     u.label({cx, cy + tile, tile, u.row_h()}, t->name, u.theme.text, ui::Align::Center);
+    const bool unused = !used.count(t->asset_path);
+    if (unused) {  // (round 332: visibility of what nothing uses yet)
+      const Recti tag{cx + u.px(4), cy + tile - u.px(4) - u.row_h() * 3 / 4, tile - u.px(8), u.row_h() * 3 / 4};
+      texture_ui_rects_["unused:" + t->name] = tag;
+      u.canvas.fill_rect(tag, u.theme.bar);
+      u.label(tag, "not used", u.theme.text_dim, ui::Align::Center);  // (in this scene or the materials loaded)
+    }
     u.tooltip(t->name + "  (" + t->asset_path + strprintf(")\n%d x %d, %zu layer(s). Click to edit; drag onto an object or a Hierarchy row to use it.", t->width, t->height,
-                                                          t->layers.size()));
+                                                          t->layers.size()) +
+              (unused ? "\nNo material in this scene (or among the material assets opened) uses it: Assign to Selection, or drag it onto an object." : ""));
     if (hot && in.pressed[0] && !asking) {
       /* Ctrl toggles, Shift selects the range from the last click (task 0053); a plain click selects it and may drag. */
       texture_multi_.click(list, i, in.ctrl(), in.shift());
@@ -343,7 +409,9 @@ void Editor::draw_textures_window(const Recti &r) {
     u.tooltip("Show the texture tiled 2 x 2: its edges meet in the middle.");
     ProceduralTexture &t = *texture_selected_;
     const int which = std::max(0, std::min(5, texture_preview_output_));
-    if (texture_dragging_) {
+    const int upto = texture_upto_.first == t.asset_path && texture_upto_.second < (int)t.layers.size() ? texture_upto_.second : -1;
+    if (upto >= 0) draw_texture_upto(t, upto, which, pane);
+    else if (texture_dragging_) {
       const int ps = std::min(256, std::max(64, std::max(t.width, t.height)));
       const TexThumb &th = texture_thumb(t, which, ps);
       draw_pixels(u, th.px, th.size, th.size, pane, texture_preview_tiled_ ? 2 : 1);
@@ -386,13 +454,21 @@ void Editor::draw_textures_window(const Recti &r) {
   if (texture_selected_->surface) {  // (task 0246: the shelf - a built-in smart material applied on top)
     Recti sh = lay.row(u.row_h() + u.px(4));
     std::vector<const char *> names;
+    if (!smat_saved_listed_ || project_listed_ < 0) {  // (task 0273: the project's own after the built-in ones, listed once and on a save)
+      smat_saved_listed_ = true;
+      smat_saved_.clear();
+      for (const DirEntry &e : fs::list(resolve_asset_path("Assets/Materials/Smart")))
+        if (!e.is_dir && fs::extension(e.name) == ".smat") smat_saved_.push_back(fs::stem(e.name));
+    }
     for (const std::string &n : smart_material_builtins()) names.push_back(n.c_str());
+    for (const std::string &n : smat_saved_) names.push_back(n.c_str());
     const Recti cb{sh.x + u.px(4), sh.y, u.px(150), sh.h};
     u.combo(u.id("smat_pick"), cb, texture_smat_pick_, names.data(), (int)names.size());
     const Recti ab{cb.right() + u.px(6), sh.y, u.px(90), sh.h};
     texture_ui_rects_["smat_apply"] = ab;
     if (u.button(ab, "Apply", false)) smat_apply(names[(size_t)std::max(0, std::min((int)names.size() - 1, texture_smat_pick_))], texture_selected_);
-    u.tooltip("A smart material - a group of layers with masks reading the mesh maps - added on top of this surface (smat apply <name>; smat save keeps one of your own).");
+    u.tooltip("A smart material - a group of layers with masks reading the mesh maps - added on top of this surface. Save your own from a\n"
+              "layer's menu (Save as Smart Material): it joins this list.");
   }
   if (texture_selected_->surface) {  // (task 0244: a surface's maps and its evaluation's state)
     Recti sr = lay.row(u.row_h() + u.px(4));
@@ -401,7 +477,8 @@ void Editor::draw_textures_window(const Recti &r) {
     if (u.button(lb, "Load Mesh Maps", false)) {
       std::string why;
       GameObject *g = active_object();
-      if (!g || !surface_load_maps(g, *texture_selected_, &why)) Log::warn("Surface: %s", why.empty() ? "select the object first" : why.c_str());
+      if (!g || !surface_load_maps(g, *texture_selected_, &why))  // (task 0271: no maps yet - the Fix bakes them)
+        refuse("Surface: " + (why.empty() ? std::string("select the object first") : why), why.find("mesh maps") != std::string::npos ? "bakedialog maps" : "", "Bake Mesh Maps...");
     }
     u.tooltip("Read the active object's baked mesh maps (Object > Bake Mesh Maps) into this surface: what its Mesh Map layers and\nmask presets read.");
     u.label({lb.right() + u.px(8), sr.y, sr.w - lb.w - u.px(16), sr.h},

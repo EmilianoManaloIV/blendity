@@ -69,7 +69,7 @@ bool Editor::set_weight_paint(bool on) {
     return false;
   }
   if (playing_) {
-    Log::warn("Weight Paint: stop Play first");
+    refuse("Weight Paint: stop Play first", "stop", "Stop Play");
     return false;
   }
   if (edit_mode_) exit_edit_mode();
@@ -371,7 +371,7 @@ void Editor::weight_paint_command(const std::vector<std::string> &t) {
   GameObject *g = weight_paint_ ? (wp_mesh() ? scene_->find(wp_obj_) : nullptr) : active_object();
   Mesh *mp = g && g->mesh_filter() && g->mesh_filter()->mesh ? mesh_make_mutable(g->mesh_filter()->mesh).get() : nullptr;
   if (!mp || mp->vertex_groups.empty()) {
-    Log::warn("%s: a mesh with vertex groups first", c.c_str());
+    Log::warn("Weight Paint: a mesh with vertex groups first (the Rigging window's Add Group)");
     return;
   }
   Mesh &m = *mp;

@@ -100,7 +100,9 @@ struct LayerAux {
   float sample_plane(const std::vector<float> &pl, float u, float v) const;
 };
 
-enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin };
+enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin,
+                        /* round 330: Blender's Mix node's modes */ Darken, Lighten, Difference, Exclusion, Subtract, Divide, ColorDodge, ColorBurn,
+                        SoftLight, LinearLight, Hue, Saturation, Color, Value, Count };
 enum LayerTarget { TargetAlbedo = 1, TargetHeight = 2, TargetRoughness = 4, TargetMask = 8, TargetAlpha = 16, TargetMetallic = 32, TargetEmission = 64 };  // (Alpha: a card's cover into the cover plane, task 0150; Metallic / Emission: task 0244)
 
 struct TextureLayer;
@@ -117,6 +119,14 @@ struct TextureLayer {
    * whose height is the mask (a generator's values, Levels, Blur, Mesh Map, Anchor), multiplying the layer's weight. */
   std::string name;
   TextureLayerList mask_layers;
+  /* Round 327: Blender's Mapping node on a generator - its pattern moved, turned and scaled across the tile before it
+   * is sampled. Seamless keeps the scale to whole numbers and the turn to quarter turns, so the tile still repeats. */
+  float map_offset[2] = {0.0f, 0.0f}, map_rotation = 0.0f, map_scale[2] = {1.0f, 1.0f};
+  bool map_seamless = true;
+  /* A layer whose pattern can be moved across the tile (a Fill, a Mesh Map, Face Shadow and Toon Ramp can't). */
+  virtual bool mappable() const { return is_generator(); }
+  bool mapped() const { return mappable() && (map_offset[0] != 0.0f || map_offset[1] != 0.0f || map_rotation != 0.0f || map_scale[0] != 1.0f || map_scale[1] != 1.0f); }
+  void map_uv(float &u, float &v) const;
   virtual ~TextureLayer();
   TextureLayer() = default;
   TextureLayer(const TextureLayer &o);
@@ -146,6 +156,7 @@ struct TextureLayer {
   virtual bool remap(float &, float &, const LayerContext &) const { return false; }
   /* The blend, opacity, targets and mask fields (reflected first by every layer). */
   void reflect_common(Reflector &r, bool with_enabled = true);
+  void reflect_mapping(Reflector &r);  // (round 327: after the layer's own fields)
 };
 template<class T> struct TextureLayerBase : TextureLayer {
   const char *type_name() const override { return T::kName; }
@@ -163,8 +174,18 @@ Vec3 texture_blend_color(int mode, Vec3 below, Vec3 v);
 std::unique_ptr<TextureLayer> create_missing_texture_layer(const std::string &name);
 /* Every layer type, in menu order (Generators, then Filters). */
 const std::vector<TextureLayerInfo> &texture_layer_infos();
+/* Round 332: the Add Layer menu's groups, by Blender's node categories (Texture, Color, Converter...), in menu order;
+ * a layer's group ("Other" for one not listed). */
+const std::vector<std::string> &texture_layer_groups();
+const std::string &texture_layer_group(const std::string &layer_name);
+/* Round 332: why an enabled layer changes nothing ("Opacity 0", "Writes nothing"), or "" - its row in the stack says so. */
+std::string texture_layer_no_effect(const TextureLayer &l);
 const TextureLayerInfo *find_texture_layer_info(const std::string &name);
 std::unique_ptr<TextureLayer> create_texture_layer(const std::string &name);
+/* Round 328: the periodic Perlin noise (0 at the lattice points), and a Voronoi layer's features at a point (F1, F2,
+ * Smooth F1, the distance to the edge, the N-sphere radius) - for tests and the docs' numbers. */
+float texture_perlin(float x, float y, int period, uint32_t seed);
+bool texture_voronoi_features(const TextureLayer &l, float u, float v, uint32_t seed, float out[5]);
 
 /* A texture asset (Assets/Textures/<name>.ptex). */
 struct ProceduralTexture {
@@ -276,7 +297,15 @@ std::shared_ptr<TextureOutputsHandle> procedural_texture_cache_build(const Proce
 void procedural_texture_cache_store(const std::string &asset_path, const std::shared_ptr<TextureOutputsHandle> &built);
 
 /* Presets the Textures window and `newtex` start from: "Bricks", "Wood Floor", "Tatami", "Tiles", "Noise". */
+/* The presets by theme (round 327): Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal & Fabric, Stone. */
+struct TexturePreset {
+  const char *name, *theme;
+  bool anime;  // (a cel-toned one, task 0150: tagged in the menu)
+};
+const std::vector<TexturePreset> &texture_presets();
+const std::vector<std::string> &texture_preset_themes();
 const std::vector<std::string> &texture_preset_names();
+int texture_preset_field_misses();  // (presets naming a field their layer hasn't, since start: tests want 0)
 bool apply_texture_preset(ProceduralTexture &t, const std::string &preset);
 
 /* Hashing helpers shared by the generators (deterministic per texel / cell). */

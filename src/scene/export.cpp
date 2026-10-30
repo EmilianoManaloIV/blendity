@@ -80,7 +80,7 @@ void ExportOptions::reflect(Reflector &r) {
   if (f != ExportFormat::STL && f != ExportFormat::PLY) {
     r.field("Materials", materials);
     r.help(f == ExportFormat::GLB || f == ExportFormat::GLTF ? "Write materials (PBR metallic-roughness) and their textures."
-                                                              : "Write materials (colour, metallic, roughness, emission, alpha) and their textures.");
+                                                              : "Write materials (color, metallic, roughness, emission, alpha) and their textures.");
   }
   if (materials && (f == ExportFormat::OBJ || f == ExportFormat::FBX || f == ExportFormat::GLB || f == ExportFormat::GLTF)) {
     r.field("Bake Textures", bake_textures);

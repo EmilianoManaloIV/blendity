@@ -1,0 +1,13 @@
+; A tiny Godot 4 project that holds the add-on, so its tests run headless:
+;   godot --headless --path bridges/godot --script res://smoke_test.gd
+;   godot --headless --path bridges/godot --script res://auto_connect_test.gd -- <python>
+config_version=5
+
+[application]
+
+config/name="Blendity Live Link (tests)"
+config/features=PackedStringArray("4.2")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/blendity_livelink/plugin.cfg")

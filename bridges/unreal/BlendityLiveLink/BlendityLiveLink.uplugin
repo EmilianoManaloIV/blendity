@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 2,
+	"VersionName": "1.1.0",
+	"FriendlyName": "Blendity Live Link",
+	"Description": "Follow the scene open in Blendity live in the Unreal Editor (blendity-livelink/1): objects, meshes, moving vertices, materials, lights, cameras, poses. Connects by itself while Blendity's Live Link runs. One way: Blendity is the source.",
+	"Category": "Editor",
+	"CreatedBy": "Blendity",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "BlendityLiveLink",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	]
+}

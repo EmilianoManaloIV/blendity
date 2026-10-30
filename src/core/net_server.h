@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Live Link's transport (task 0172, ADR 0055): a TCP server on 127.0.0.1 that sends lines of JSON, each one optionally
 // followed by a binary attachment, to every connected client - on threads of its own, so the editor's frame never
-// waits for a socket. One way: what a client sends is read and dropped. LineClient is the other end (the tests, tools).
+// waits for a socket. One way: what a client sends is read and dropped, except its first line (a bridge's hello). LineClient is the other end (the tests, tools).
 #pragma once
 
 #include <cstdint>
@@ -31,6 +31,8 @@ class Server {
   void ready(int client);
   std::vector<int> ready_clients() const;
   int client_count() const;  // connected now (a closed one leaves when its thread notices: within 100 ms)
+  /* Each connected client's first line, "" until it sent one (a bridge's hello: task 0274). Read, never acted on. */
+  std::vector<std::string> client_hellos() const;
 
   /* Queues `line` (one JSON object, no newline) and its attachment `bin`: the server adds ,"bin":<bytes> to the
    * line's object when there is one, and sends the bytes right after the line's newline. A nonzero `coalesce` key
@@ -77,6 +79,7 @@ class LineClient {
   LineClient &operator=(const LineClient &) = delete;
   bool connect(int port, int timeout_ms = 2000);
   bool read(std::string &line, std::string &bin, int timeout_ms = 2000);
+  bool send(const std::string &line);  // (task 0274: a hello)
   void close();
   bool connected() const { return sock_ != -1; }
 
