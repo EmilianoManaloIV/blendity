@@ -176,7 +176,9 @@ void Editor::draw_livelink_window(const Recti &r) {
   u.tooltip("The TCP port on 127.0.0.1 the bridges connect to (0: any free one). Only this computer can connect.");
   const Recti sb{row.x + u.px(142), row.y, u.px(90), row.h};
   if (u.record_buttons) u.button_rects["livelink:start"] = sb;
-  if (u.button(sb, on ? "Stop" : "Start")) {
+  const bool hit = u.button(sb, on ? "Stop" : "Start");
+  u.tooltip(on ? "Stop listening: the bridges lose the link (they wait and connect again when it starts)." : "Listen on the port: the bridges in Blender, Unity, Godot and Unreal connect by themselves.");
+  if (hit) {
     if (on) livelink_stop();
     else livelink_start(livelink_port_);
   }

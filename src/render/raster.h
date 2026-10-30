@@ -215,7 +215,15 @@ struct DrawItem {
   Vec3 local_key{0, 1, 0};   // the key light's direction in the item's own space (task 0149: the face shadow map), set by the renderer
   /* Gouraud mode: a colour per render vertex instead of albedo (Weight Paint's weight colours, task 0046). */
   const std::vector<Vec3> *vertex_colors = nullptr;
+  /* Camera Flatten (round 334): `model` places the flattened shape; the normals, the face shadow map's key and the
+   * object's own space for shading come from `shade_model`, the true placement. */
+  bool flattened = false;
+  Mat4 shade_model;
 };
+
+/* Round 334: a placement squashed along the unit direction d about the pivot p, keeping `keep` (0..1] of the depth:
+ * T(p) . (I + (keep - 1) d d^T) . T(-p). */
+Mat4 flatten_matrix(Vec3 p, Vec3 d, float keep);
 
 enum class ShadeMode { Gouraud = 0, Deferred = 1, DepthOnly = 2 };
 
@@ -390,6 +398,7 @@ class Renderer3D {
   void draw_see_through(const std::vector<uint8_t> &see_through);
   /* Lights + image-based lighting for one shaded point (deferred and forward). */
   Vec3 light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const;
+  float draw_volume_pixel(const DrawItem &it, const Mat4 &inv, const Material &mat, Vec3 eye, Vec3 front, bool from_eye, int x, int y, float behind_z, const Environment &env);  // (its cover, 0..1)
   /* light_surface after its lights' loop (`lo`): reflections, ambient, emission (the 8-wide shader's per-pixel end). */
   Vec3 light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const;
   /* 8 pixels of a row on one plain-material triangle, lit at once (task 0091; x86 with AVX2): appended in order. */

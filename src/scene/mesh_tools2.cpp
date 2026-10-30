@@ -620,6 +620,15 @@ void select_non_manifold(const Mesh &m, std::vector<uint8_t> &vert_sel) {
     if (c != 2) vert_sel[(uint32_t)(k >> 32)] = vert_sel[(uint32_t)(k & 0xFFFFFFFF)] = 1;
 }
 
+size_t open_edge_count(const Mesh &m) {
+  std::unordered_map<uint64_t, int> count;
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (uint32_t i = 0; i < m.face_size(f); i++) count[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])]++;
+  size_t open = 0;
+  for (const auto &kc : count) open += kc.second == 1;
+  return open;
+}
+
 std::vector<std::pair<uint32_t, uint32_t>> edge_ring_edges(const Mesh &m, uint32_t a, uint32_t b) {
   /* From each face beside the edge, across quads to the opposite side, until
    * a face that isn't a quad, an open edge or the start again. */
