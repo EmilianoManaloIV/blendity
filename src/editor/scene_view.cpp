@@ -42,6 +42,7 @@ void Editor::draw_scene_view(const Recti &r) {
     return;
   }
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
+                   !(obj_last_valid() && obj_last_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
   const bool quick_menu_took = wheel_took_;  // (task 0230: the Wheel's frame step took the press or release)
   /* Task 0232: an interaction begun in another window's Scene view (a drag, a stroke, a gizmo, G / R / S, a brush) is
@@ -148,14 +149,17 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
-  sketch_bind_scene(view, scene_hovered_);  // (task 0233: the camera may have moved since the update)
-  sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
+  if (sketch_in_world()) {  // (round 324: not while the Draw tab draws on Paper)
+    sketch_bind_scene(view, scene_hovered_);  // (task 0233: the camera may have moved since the update)
+    sketch_draw(view);  // (task 0223: the sketch over the picture, under the gizmos)
+  }
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
   sculpt_draw(view);  // (task 0236)
   paint_draw(view);   // (task 0245)
   strokeobj_draw(view);  // (task 0248)
   scatter_draw(view);
+  if (anim_.record) ui_.canvas.rect_outline(view, Color::hex(0xB03030), ui_.px(3));  // (task 0258: the Record frame round the view)
   draw_toasts(view);  // (task 0252: over the picture, under the handles)
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
@@ -195,8 +199,11 @@ void Editor::draw_scene_view(const Recti &r) {
   }
   if (show_gizmos_ && !playing_) draw_camera_preview(view);
   else cam_preview_rect_ = Recti{};
-  if (edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
+  const bool obj_last = obj_last_valid();  // (task 0266: the newest step's panel; Edit Mode's gives way to it)
+  if (!obj_last && edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
   else last_op_rect_ = Recti{};
+  if (obj_last && !last_op_hidden_) draw_obj_last_panel(view);
+  else obj_last_rect_ = Recti{};
   if (playing_) u.canvas.rect_outline(view, Color::hex(0x3A79BB, 120), u.px(2));
 }
 
@@ -237,9 +244,11 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
  * Push/Pull, the modal and transform operators, the focus pick, the auto-rig, the Knife, the Draw tools). True when one
  * of them owns the mouse this frame. */
 bool Editor::scene_tool_updates(const Recti &view, bool busy) {
-  sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
-  if (sketch_update(view)) busy = true;
+  if (sketch_in_world()) sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
+  if (sketch_in_world() && sketch_update(view)) busy = true;
   if (bone_handles_update(view)) busy = true;
+  if (trail_update(view)) busy = true;           // (task 0282: a trail's key dot, before the handles it hands over to)
+  if (puppet_handles_update(view)) busy = true;  // (task 0281: before the gizmo - a handle is the puppet's string)
   if (gizmo_update(view)) busy = true;
   if (wp_update(view)) busy = true;
   if (sculpt_update(view)) busy = true;  // (task 0236)
@@ -1774,7 +1783,7 @@ void Editor::select_sharp_op(const Mesh &m) {
   return;
 }
 
-/* Select Z-Fighting: the faces the check finds on top of each other. */
+/* Select Overlapping Faces: the faces the z-fighting check finds on top of each other. */
 void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
   /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
   const size_t n = zfight_scan(false);
@@ -1786,7 +1795,7 @@ void Editor::select_overlapping_op(GameObject &g, const Mesh &m) {
     if (z.obj_b == g.id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
   }
   sync_vert_face_selection(true);
-  Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
+  Log::info(n ? "Select Overlapping Faces: %zu pair(s) of faces on top of each other selected" : "Select Overlapping Faces: none found", n);
   return;
 }
 
@@ -2258,7 +2267,7 @@ const std::vector<EditOpPair> &edit_op_pairs() {
 const std::vector<EditOpInfo> &edit_op_table() {
   enum { V = 1, E = 2, F = 4, ALL = 7 };
   static const std::vector<EditOpInfo> ops = {
-      {"extrude_edges", "Extrude", "", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
+      {"extrude_edges", "Extrude Edges", "", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
        "a new edge (start a shape from one vertex). Blender: E in vertex / edge mode.", V | E},
       {"merge_center", "Merge at Center", "mesh.merge_center", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
       {"connect", "Connect Vertex Path", "mesh.connect", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
@@ -2318,7 +2327,7 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"delete", "Delete", "edit.delete", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
       {"merge_distance", "Merge by Distance", "", "Weld the selected vertices that are closer than the Merge Distance (all of them if nothing\n"
        "is selected). Adjust Last Operation: the distance, and Unselected to weld onto unselected vertices too. Blender: Merge > By Distance.", ALL},
-      {"select_overlapping", "Select Z-Fighting", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
+      {"select_overlapping", "Select Overlapping Faces", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
        "Modeling Tools > Check: Z-Fighting lists them and removes the ones that can go.", ALL},
       {"grid", "Grid", "", "Cut each selected quad into a grid of Grid Columns x Grid Rows (neighbours are split to match).\n"
        "Click it for the helper: the wheel sets columns, Shift+wheel rows (Adjust Last Operation afterwards).", F},
@@ -2330,7 +2339,7 @@ const std::vector<EditOpInfo> &edit_op_table() {
        "Helper: the mouse sets the distance, the wheel the end's scale.", F},
       {"recess", "Recess / Plate", "", "Inset the selection as one panel by Recess Border, then push its middle in by Recess Depth\n"
        "(negative: a raised plate). Helper: the mouse sets the depth, the wheel the border.", F},
-      {"select_overlaps", "Select Overlapping", "", "Select vertices lying on top of each other and edges running along each other\n"
+      {"select_overlaps", "Select Doubled Vertices", "", "Select vertices lying on top of each other and edges running along each other\n"
        "(shown live as yellow rings and magenta lines; Modeling Tools > Check: Overlapping Vertices & Edges).", ALL},
       {"merge_overlaps", "Merge Overlapping", "", "Weld vertices lying on top of each other (doubled edges on them become one).", ALL},
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
@@ -2690,7 +2699,7 @@ void Editor::draw_game_view(const Recti &r) {
   }
   /* Task 0233: the sketch tool in the Game view - the pen draws in the game camera's perspective (Play stopped or
    * paused: a running game takes the keys and the clicks). */
-  if (sketch_.active && !playing_) {
+  if (sketch_.active && !playing_ && sketch_in_world()) {
     sketch_bind_game(img, *cam, *owner, v, p, u.hovered(img) && !u.any_popup_open());
     sketch_update(img);
     sketch_draw(img);
@@ -3256,6 +3265,28 @@ void Editor::modal_finish(bool keep) {
   Log::info("%s cancelled", modal_.op.c_str());
 }
 
+/* Task 0265: the step bar of a modal operator whose value the wheel steps (Bevel's segments, Array's count, Grid's rows,
+ * Pipe's sides, Taper's and Recess's second amount): centred at the bottom of the view, its - and + buttons 36 px
+ * (UI scale 1) - a pen's target - so the value is reachable without a wheel or a keyboard. Empty for the others. */
+Editor::ModalStepBar Editor::modal_step_bar(const Recti &view) const {
+  ModalStepBar b;
+  const LastOp &L = last_op_;
+  const std::string &op = modal_.op;
+  if (op == "bevel") b.name = "Segments", b.value = std::to_string(L.segments);
+  else if (op == "array") b.name = "Count", b.value = std::to_string(L.count);
+  else if (op == "grid") b.name = "Rows", b.value = std::to_string(L.segments);
+  else if (op == "pipe") b.name = "Sides", b.value = std::to_string(L.segments);
+  else if (op == "taper") b.name = "Taper", b.value = strprintf("%.2f", L.amount2);
+  else if (op == "recess") b.name = "Depth", b.value = strprintf("%.3g", L.amount2);
+  else return b;
+  const auto &u = ui_;
+  const int s = u.px(36), w = u.px(150) + 2 * s;
+  b.bar = {view.x + (view.w - w) / 2, view.bottom() - s - u.px(40), w, s};
+  b.minus = {b.bar.x, b.bar.y, s, s};
+  b.plus = {b.bar.right() - s, b.bar.y, s, s};
+  return b;
+}
+
 bool Editor::modal_update(const Recti &view) {
   if (!modal_.active) return false;
   auto &u = ui_;
@@ -3276,7 +3307,19 @@ bool Editor::modal_update(const Recti &view) {
   float amount;
   double typed = 0;
   const float d = length(Vec2((float)in.mx, (float)in.my) - modal_.center);
+  /* Task 0265: the step bar. While the pointer is on it the amount holds (a pen travelling to it would change the
+   * width); leaving it, the drag goes on from there. A tap on - or + is the wheel's step, not a confirm. */
+  const ModalStepBar sb = modal_step_bar(view);
+  const bool over_bar = sb.name && sb.bar.contains(in.mx, in.my);
+  if (over_bar && in.pressed[0]) {
+    in.wheel_y = sb.plus.contains(in.mx, in.my) ? 1.0f : sb.minus.contains(in.mx, in.my) ? -1.0f : 0.0f;
+    in.pressed[0] = false;
+    u.consume_click();
+  }
+  if (modal_over_bar_ && !over_bar) modal_.start_amount = modal_.amount, modal_.start_len = d, modal_.precise = false;
+  modal_over_bar_ = over_bar;
   if (!modal_.typed.empty() && ui::eval_number(modal_.typed, typed)) amount = (float)typed;
+  else if (over_bar) amount = modal_.amount;
   else {
     /* Shift: a tenth of the speed from where it was pressed (Blender). */
     if (in.shift() && !modal_.precise) {
@@ -3308,6 +3351,11 @@ bool Editor::modal_update(const Recti &view) {
     last_op_.profile = clampf(std::round((last_op_.profile + (in.wheel_y > 0 ? 0.05f : -0.05f)) * 20.0f) / 20.0f, 0.0f, 1.0f);
     in.wheel_y = 0;
     changed = true;
+  }
+  if (!u.wants_keyboard()) {  // (task 0255: ] and [ set what the wheel sets - segments, count, sides - for a pen or a finger; + and - are typed values)
+    const bool up = in.key_pressed[platform::KEY_RBRACKET], down = in.key_pressed[platform::KEY_LBRACKET];
+    if (up || down) in.wheel_y = up ? 1.0f : -1.0f;
+    if (up || down) in.key_pressed[platform::KEY_RBRACKET] = in.key_pressed[platform::KEY_LBRACKET] = false;
   }
   if (in.wheel_y != 0 && modal_.op != "bevel" && modal_.op != "inset") {
     const int dir = in.wheel_y > 0 ? 1 : -1;
@@ -3352,6 +3400,14 @@ void Editor::draw_modal(const Recti &view) {
   if (!modal_.active) return;
   auto &u = ui_;
   u.canvas.push_clip(view);
+  if (const ModalStepBar sb = modal_step_bar(view); sb.name) {  // (task 0265)
+    u.frame(sb.bar, u.theme.popup, u.theme.border, u.px(4));
+    for (const Recti &r : {sb.minus, sb.plus}) u.frame(r, r.contains(u.in.mx, u.in.my) ? u.theme.button_hover : u.theme.button, u.theme.border, u.px(4));
+    u.label(sb.minus, "-", u.theme.text_bright, ui::Align::Center);
+    u.label(sb.plus, "+", u.theme.text_bright, ui::Align::Center);
+    u.label({sb.minus.right(), sb.bar.y, sb.plus.x - sb.minus.right(), sb.bar.h}, std::string(sb.name) + "  " + sb.value, u.theme.text_bright, ui::Align::Center);
+    if (u.record_buttons) u.button_rects["modal:-"] = sb.minus, u.button_rects["modal:+"] = sb.plus;
+  }
   /* A dashed line from the centre to the cursor, as Blender draws it. */
   const Vec2 m((float)u.in.mx, (float)u.in.my);
   const Vec2 d = m - modal_.center;
@@ -3452,7 +3508,7 @@ void Editor::pushpull_begin() {
   pp_.start = closest_on_line_to_ray(pp_.origin, pp_.axis,
                                      scene_r3d_.screen_ray((float)(in.mx - scene_rect_.x), (float)(in.my - scene_rect_.y)));
   pp_.lim = meshops::push_pull_limits(m, pp_.fsel);
-  pp_.keep = in.ctrl();
+  pp_.keep = in.ctrl();  // (Ctrl keeps the original face: Alt is the orbit modifier - task 0223, kept by task 0255)
   pp_.active = true;
   ui_.redraw = true;
 }

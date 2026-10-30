@@ -64,6 +64,9 @@ void Editor::uv_op(const std::string &op) {
     Log::warn("UV tools need an object with a MeshFilter (select one, or Tab into Edit Mode)");
     return;
   }
+  /* Task 0266: Adjust Last runs an operator with numbers again from this - a detached copy, not a share of the live mesh
+   * (a share would make the operator copy it, and whatever holds the mesh would see the old one). */
+  const MeshPtr uv_before = op == "unwrap" || op == "smart" || op == "pack" ? mesh_copy_bare(**mp) : nullptr;
   Mesh &m = *mesh_make_mutable(*mp);
   /* Operate on the selected faces in Edit Mode (Blender behaviour), else on everything; only the UV Editor's
    * material slots (task 0186). */
@@ -134,6 +137,7 @@ void Editor::uv_op(const std::string &op) {
   }
   m.touch();
   mark_changed("UV: " + op);
+  if (g && uv_before) record_uv_last(g->id, op, uv_before, pm);  // (task 0266: Unwrap's and Pack's margin, Smart UV's angle)
   if (islands >= 0) Log::info("UV %s: %d island(s) in %.1f ms", op.c_str(), islands, t.ms());
   else Log::info("UV %s done in %.1f ms", op.c_str(), t.ms());
 }
@@ -148,10 +152,10 @@ void Editor::draw_uv_editor(const Recti &r) {
   u.canvas.fill_rect(bar, u.theme.bar);
   int x = bar.x + u.px(6), y = bar.y + u.px(3), h = bh - u.px(6);
   struct B { const char *label, *op, *tip; };
-  const B buttons[] = {
+  static const B buttons[] = {  // (static: the More menu's popup reads it after this frame's draw - task 0255)
       {"Unwrap", "unwrap", "Unwrap: Least Squares Conformal Maps per seam-bounded island, then pack.\nBlender: UV > Unwrap (Conformal)."},
       {"Smart UV", "smart", "Smart UV Project: group faces by normal, project and pack. No seams needed."},
-      {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (console:\nuv parts [bound] [multi]); ABF++ then LSCM; each part's charts packed together. No seams needed."},
+      {"Part Unwrap", "parts", "Unwrap by parts (PartUV): as few charts as keep each chart's stretch under the bound (the Parts\nbutton sets the bound and the tiles); ABF++ then LSCM; each part's charts packed together. No seams needed."},
       {"Cube", "cube", "Cube Projection: each face projected along its main axis."},
       {"Cylinder", "cylinder", "Cylinder Projection around the object's Y axis."},
       {"Sphere", "sphere", "Sphere Projection (latitude / longitude)."},
@@ -163,23 +167,64 @@ void Editor::draw_uv_editor(const Recti &r) {
       {"Clear Seam", "clear_seam", "Clear seams between selected vertices."},
       {"Seams from Sharp", "seams_from_sharp_unwrap", "Mark a seam on every sharp edge (faces meeting at more than the Seam Angle, or marked sharp),\n"
        "then unwrap. Blender: Select Sharp Edges, Mark Seam, Unwrap."}};
+  std::vector<const B *> more;  // (task 0255: a narrow window folds the rest into a menu instead of dropping them)
+  /* Task 0293: narrower than the bar's two halves, the right-hand half (Parts, materials, background, Stretch) gets a row
+   * of its own below, and the tools fold into More only for More's own room. */
+  const bool narrow = r.w < u.px(780);
+  const int fold = narrow ? bar.right() - u.font.text_width("More") - u.px(20) : bar.right() - u.px(470) - u.px(48);
   for (const B &b : buttons) {
     int w = u.font.text_width(b.label) + u.px(14);
-    if (x + w > bar.right() - u.px(410)) break;
+    if (x + w > fold) {  // (task 0287: room for More left of the Parts button)
+      more.push_back(&b);
+      continue;
+    }
     if (u.button({x, y, w, h}, b.label)) uv_op(b.op);
     u.tooltip(b.tip);
     x += w + u.px(3);
   }
-  draw_uv_material_filter({bar.right() - u.px(400), y, u.px(144), h});
-  static const char *bgs[] = {"Material Texture", "UV Grid", "Color Grid", "None"};
-  if (u.combo(u.id("uv_bg"), {bar.right() - u.px(250), y, u.px(150), h}, uv_bg_, bgs, 4)) {
+  if (!more.empty()) {
+    const int mw = u.font.text_width("More") + u.px(14);
+    const ui::Id more_id = u.id("uv_more");
+    if (u.button({x, y, mw, h}, "More")) u.open_popup(more_id, {x, y, mw, h});
+    u.tooltip(strprintf("%zu more tool%s the bar has no room for.", more.size(), more.size() == 1 ? "" : "s"));
+    u.popup(more_id, u.px(220), [this, more] {
+      for (const B *b : more)
+        if (ui_.menu_item(b->label)) uv_op(b->op);
+    });
   }
-  if (u.button({bar.right() - u.px(94), y, u.px(88), h}, "Stretch", uv_stretch_)) uv_stretch_ = !uv_stretch_;
+  int rows = 1;
+  Recti side = bar;  // (where the right-hand half goes: this bar's right, or a row of its own when narrow)
+  int sx = bar.right() - u.px(466);
+  if (narrow) {
+    side = {r.x, r.y + bh, r.w, bh};
+    u.canvas.fill_rect(side, u.theme.bar);
+    sx = side.x + u.px(6);
+    rows = 2;
+  }
+  /* A control's place on the side row; in a narrow window one that doesn't fit starts another row. */
+  auto place = [&](int w, int gap) {
+    if (narrow && sx + w > side.right() - u.px(4)) {
+      side = {r.x, side.bottom(), r.w, bh};
+      u.canvas.fill_rect(side, u.theme.bar);
+      sx = side.x + u.px(6);
+      rows++;
+    }
+    const Recti at{sx, side.y + u.px(3), w, h};
+    sx += w + gap;
+    return at;
+  };
+  draw_uv_parts_options(place(u.px(62), u.px(4)));  // (task 0287)
+  draw_uv_material_filter(place(u.px(144), narrow ? u.px(4) : u.px(6)));
+  static const char *bgs[] = {"Material Texture", "UV Grid", "Color Grid", "None"};
+  if (u.combo(u.id("uv_bg"), place(u.px(150), narrow ? u.px(4) : u.px(6)), uv_bg_, bgs, 4)) {
+  }
+  u.tooltip("What the UV square shows behind the faces: the material's texture, or a grid to judge stretching by.");
+  if (u.button(place(u.px(88), 0), "Stretch", uv_stretch_)) uv_stretch_ = !uv_stretch_;
   u.tooltip("Color faces by area distortion: blue = compressed, green = even, red = stretched.");
 
-  Recti bar2{r.x, r.y + bh, r.w, bh};
-  draw_uv_tool_row(bar2);
-  Recti view{r.x, r.y + 2 * bh, r.w, r.h - 2 * bh};
+  Recti bar2{r.x, r.y + rows * bh, r.w, bh};
+  rows += draw_uv_tool_row(bar2);
+  Recti view{r.x, r.y + rows * bh, r.w, r.h - rows * bh};
   u.canvas.fill_rect(view, Color::hex(0x262626));
   u.canvas.push_clip(view);
   GameObject *g = nullptr;
@@ -411,8 +456,10 @@ void Editor::draw_uv_editor(const Recti &r) {
     for (size_t k = 0; k < m.corner_count(); k++)
       if (m.corner_verts[k] == v && std::fabs(m.uvs[k].x - t.x) + std::fabs(m.uvs[k].y - t.y) < 1e-5f) uv_sel_[k] = value;
   };
+  if (hot && (in.touch_pan_x != 0.0f || in.touch_pan_y != 0.0f) && std::isfinite(in.touch_pan_x) && std::isfinite(in.touch_pan_y))
+    uv_pan_ += Vec2(in.touch_pan_x, in.touch_pan_y);  // (task 0265: two fingers pan, as in the Scene view)
   if (uv_drag_ == UvDrag::None && hot) {
-    if (in.pressed[2]) uv_drag_ = UvDrag::Pan;
+    if (in.pressed[2] || (in.pressed[0] && uv_hand_)) uv_drag_ = UvDrag::Pan, uv_pan_button_ = in.pressed[2] ? 2 : 0;
     else if (in.pressed[0] && gizmo_hit(Vec2((float)in.mx, (float)in.my)).mode != UvDrag::None) {
       /* A gizmo handle: that transform, along its axis, about the gizmo's centre. */
       const GizmoHit gh = gizmo_hit(Vec2((float)in.mx, (float)in.my));
@@ -470,7 +517,7 @@ void Editor::draw_uv_editor(const Recti &r) {
     case UvDrag::Pan:
       uv_pan_ += Vec2((float)in.dx(), (float)in.dy());
       u.cursor = platform::Cursor::Hand;
-      if (!in.down[2]) uv_drag_ = UvDrag::None;
+      if (!in.down[uv_pan_button_]) uv_drag_ = UvDrag::None;  // (the button that began it: the middle, or the left with Pan on - task 0265)
       break;
     case UvDrag::Box: {
       Recti box{std::min(uv_press_x_, in.mx), std::min(uv_press_y_, in.my), std::abs(in.mx - uv_press_x_), std::abs(in.my - uv_press_y_)};
@@ -604,13 +651,11 @@ void Editor::draw_uv_editor(const Recti &r) {
     if (in.key_pressed[platform::KEY_UP]) uv_transform("move", 0, step);
     if (in.key_pressed[platform::KEY_DOWN]) uv_transform("move", 0, -step);
     if (in.ctrl() && in.key_pressed[platform::KEY_I]) uv_select("invert");
-    /* The gizmo's tools, as in the Scene view: W move, E rotate, R scale, Y all three. */
-    if (!in.ctrl() && !in.alt()) {
-      if (in.key_pressed[platform::KEY_W]) tool_ = Tool::Move;
-      if (in.key_pressed[platform::KEY_E]) tool_ = Tool::Rotate;
-      if (in.key_pressed[platform::KEY_R]) tool_ = Tool::Scale;
-      if (in.key_pressed[platform::KEY_Y]) tool_ = Tool::Transform;
-    }
+    /* The gizmo's tools, as in the Scene view: the keymap's tool actions (task 0255; Unity's W E R Y). */
+    if (action_pressed("tool.move")) tool_ = Tool::Move;
+    if (action_pressed("tool.rotate")) tool_ = Tool::Rotate;
+    if (action_pressed("tool.scale")) tool_ = Tool::Scale;
+    if (action_pressed("tool.transform")) tool_ = Tool::Transform;
     if (in.key_pressed[platform::KEY_1] && !in.ctrl()) uv_select_mode_ = 0;
     if (in.key_pressed[platform::KEY_2] && !in.ctrl()) uv_select_mode_ = 1;
     if (in.key_pressed[platform::KEY_3] && !in.ctrl()) uv_select_mode_ = 2;
@@ -798,30 +843,67 @@ void Editor::draw_uv_material_filter(const Recti &r) {
   std::vector<std::string> names{"All materials"};
   if (mr)
     for (size_t s = 0; s < mr->materials.size(); s++) names.push_back(strprintf("%zu: %s", s, mr->materials[s] ? mr->materials[s]->name.c_str() : "(none)"));
-  std::vector<const char *> opts;
-  for (const std::string &n : names) opts.push_back(n.c_str());
-  int pick = uv_slots_.empty() ? 0 : uv_slots_[0] + 1;
-  if (pick >= (int)opts.size()) pick = 0;
-  if (u.combo(u.id("uv_mat"), r, pick, opts.data(), (int)opts.size())) {
-    uv_slots_.clear();
-    if (pick > 0) uv_slots_.push_back(pick - 1);
-  }
-  u.tooltip("Edit one material's UVs: the other faces are dimmed and out of reach (unwrap, pack, select, move).\n"
-            "Console: uv material <name> | +<name> (add) | all; uv others dim | hide.");
+  /* Task 0287: a list with a check per slot (several at once, as `uv material +<name>`) and how the others look. */
+  const std::string label = uv_slots_.empty() ? std::string("All materials") : uv_slots_.size() == 1 && uv_slots_[0] + 1 < (int)names.size() ? names[(size_t)uv_slots_[0] + 1]
+                                                                                                                                                : strprintf("%zu material%s", uv_slots_.size(), uv_slots_.size() == 1 ? "" : "s");
+  const ui::Id id = u.id("uv_mat");
+  if (u.record_buttons) u.button_rects["uv:materials"] = r;
+  if (u.button(r, label)) u.open_popup(id, r);
+  u.tooltip("Edit some materials' UVs only: the other faces are dimmed or hidden and out of reach (unwrap, pack, select, move).");
+  u.popup(id, u.px(220), [this, names] {
+    if (ui_.menu_item(names[0], nullptr, uv_slots_.empty())) uv_slots_.clear();
+    for (size_t s = 1; s < names.size(); s++) {
+      const int slot = (int)s - 1;
+      const auto it = std::find(uv_slots_.begin(), uv_slots_.end(), slot);
+      if (!ui_.menu_item(names[s], nullptr, it != uv_slots_.end())) continue;
+      if (it != uv_slots_.end()) uv_slots_.erase(it);
+      else uv_slots_.push_back(slot);
+    }
+    ui_.menu_separator();
+    if (ui_.menu_item("Others Dimmed", nullptr, !uv_hide_others_)) uv_hide_others_ = false;
+    if (ui_.menu_item("Others Hidden", nullptr, uv_hide_others_)) uv_hide_others_ = true;
+  });
+}
+
+/* Part Unwrap's options (task 0287): what `uv parts <bound> multi|single` and `uv parts semantic on|off` set. */
+void Editor::draw_uv_parts_options(const Recti &r) {
+  auto &u = ui_;
+  const ui::Id id = u.id("uv_parts_opts");
+  if (u.record_buttons) u.button_rects["uv:Parts"] = r;
+  if (u.button(r, "Parts")) u.open_popup(id, r);
+  u.tooltip(strprintf("Part Unwrap's options for its next unwrap: the stretch bound (%.2f), one tile or several, the part tree.", part_tau_));
+  u.popup(id, u.px(260), [this] {
+    ui_.menu_label("Stretch bound (lower: more charts)");
+    for (const char *b : {"1.1", "1.25", "1.5", "2"})
+      if (ui_.menu_item(std::string(b) + (std::string(b) == "1.25" ? " (PartUV's)" : ""), nullptr, std::fabs(part_tau_ - std::strtof(b, nullptr)) < 1e-3f))
+        uv_parts_settings({"uv", "parts", b});
+    ui_.menu_separator();
+    if (ui_.menu_item("Several Tiles (UDIM)", nullptr, part_multi_tile_)) uv_parts_settings({"uv", "parts", part_multi_tile_ ? "single" : "multi"});
+    if (ui_.menu_item("Part Tree from PartField", nullptr, part_semantic_)) uv_parts_settings({"uv", "parts", "semantic", part_semantic_ ? "off" : "on"});
+  });
 }
 
 /* The second toolbar row: selection mode and sync, selection, quick transforms. */
-void Editor::draw_uv_tool_row(const Recti &bar) {
+int Editor::draw_uv_tool_row(const Recti &bar) {
   auto &u = ui_;
   u.canvas.fill_rect(bar, u.theme.strip);
   int x = bar.x + u.px(6);
-  const int y = bar.y + u.px(3), h = bar.h - u.px(6);
+  int y = bar.y + u.px(3);
+  const int h = bar.h - u.px(6);
   static const char *kModes[] = {"Vertex", "Face", "Island"};
   for (int k = 0; k < 3; k++) {
     const int w = u.font.text_width(kModes[k]) + u.px(14);
     if (u.button({x, y, w, h}, kModes[k], uv_select_mode_ == k)) uv_select_mode_ = k;
     u.tooltip(k == 0 ? "Pick UV vertices (1)." : k == 1 ? "Pick whole faces: click inside one, box by centre (2)." : "Pick whole islands: click any face of one; drag to move it (3).");
     x += w + u.px(2);
+  }
+  {
+    const int pw = u.font.text_width("Pan") + u.px(14);  // (task 0265: a pen has no middle button)
+    const Recti pr{x + u.px(4), y, pw, h};
+    if (u.record_buttons) u.button_rects["uv:Pan"] = pr;
+    if (u.button(pr, "Pan", uv_hand_)) uv_hand_ = !uv_hand_;
+    u.tooltip("Pan: while on, a left drag (a pen, a finger) moves the view; the middle button and two fingers always do.");
+    x += pw + u.px(6);
   }
   {
     const int w = u.font.text_width("Sync") + u.px(14);
@@ -846,37 +928,60 @@ void Editor::draw_uv_tool_row(const Recti &bar) {
       {"Fit", [this] { uv_transform("fit"); }, "Scale the selection to fill the 0-1 square (keeps its proportions)."},
       {"Center", [this] { uv_transform("center"); }, "Move the selection to the middle of the 0-1 square."},
   };
+  /* Task 0293: narrower than the row's two halves, the exact values (rotate, scale, move by) get a row of their own. */
+  const bool narrow = bar.w < u.px(760);
+  const int limit = narrow ? bar.right() - u.px(4) : bar.right() - u.px(330);
   for (const B &b : buttons) {
     const int w = u.font.text_width(b.label) + u.px(12);
-    if (x + w > bar.right() - u.px(330)) break;
+    if (x + w > limit) break;
     if (u.button({x, y, w, h}, b.label)) b.fn();
     u.tooltip(b.tip);
     x += w + u.px(2);
   }
   /* Align: one dropdown instead of six buttons. */
-  if (x + u.px(84) <= bar.right() - u.px(330)) {
+  if (x + u.px(84) <= limit) {
     static const char *kAlign[] = {"Align...", "Left", "Right", "Top", "Bottom", "Straight U", "Straight V"};
     static const char *kOps[] = {"", "align_left", "align_right", "align_top", "align_bottom", "align_u", "align_v"};
     int pick = 0;
     if (u.combo(u.id("uv_align"), {x, y, u.px(80), h}, pick, kAlign, 7) && pick > 0) uv_transform(kOps[pick]);
     u.tooltip("Line the selected UVs up on an edge of their bounds, or straighten them into one vertical / horizontal line.");
   }
-  /* Exact values: rotate by, scale by, move by. */
-  int rx = bar.right() - u.px(326);
+  /* Exact values: rotate by, scale by, move by. Narrow, they start a row of their own and wrap again if it runs out. */
+  int rx = bar.right() - u.px(326), rows = 1;
+  Recti row = bar;
+  auto new_row = [&] {
+    row = {bar.x, row.bottom(), bar.w, bar.h};
+    u.canvas.fill_rect(row, u.theme.strip);
+    rx = row.x + u.px(6), y = row.y + u.px(3);
+    rows++;
+  };
+  if (narrow) new_row();
+  auto at = [&](int w) {  // (a control's place; a new row when it would run past the window)
+    if (narrow && rx + w > bar.right() - u.px(4)) new_row();
+    const Recti r{rx, y, w, h};
+    return r;
+  };
   auto num = [&](const char *id, float &v, float speed, const char *tip) {
-    u.float_field(u.id(id), {rx, y, u.px(46), h}, v, speed, -10000.0f, 10000.0f, "%.3g");
+    u.float_field(u.id(id), at(u.px(46)), v, speed, -10000.0f, 10000.0f, "%.3g");
     u.tooltip(tip);
     rx += u.px(48);
   };
   num("uv_rot", uv_rot_field_, 1.0f, "Angle (degrees) for Rotate.");
-  if (u.button({rx, y, u.px(50), h}, "Rotate")) uv_transform("rotate", uv_rot_field_);
+  const bool rot = u.button(at(u.px(50)), "Rotate");
+  u.tooltip("Turn the selected UVs by the angle beside it, around their middle.");
+  if (rot) uv_transform("rotate", uv_rot_field_);
   rx += u.px(54);
   num("uv_scl", uv_scale_field_, 0.01f, "Factor for Scale.");
-  if (u.button({rx, y, u.px(44), h}, "Scale")) uv_transform("scale", uv_scale_field_);
+  const bool scl = u.button(at(u.px(44)), "Scale");
+  u.tooltip("Scale the selected UVs by the factor beside it, around their middle.");
+  if (scl) uv_transform("scale", uv_scale_field_);
   rx += u.px(48);
   num("uv_mu", uv_move_u_, 0.005f, "U offset for Move.");
   num("uv_mv", uv_move_v_, 0.005f, "V offset for Move.");
-  if (u.button({rx, y, u.px(40), h}, "Move")) uv_transform("move", uv_move_u_, uv_move_v_);
+  const bool mov = u.button(at(u.px(40)), "Move");
+  u.tooltip("Move the selected UVs by the U and V offsets beside it.");
+  if (mov) uv_transform("move", uv_move_u_, uv_move_v_);
+  return rows;
 }
 
 }  // namespace bl

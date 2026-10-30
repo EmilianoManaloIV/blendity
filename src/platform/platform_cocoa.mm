@@ -472,6 +472,27 @@ std::string get_clipboard(Window *) {
   return s ? std::string([s UTF8String]) : std::string();
 }
 
+std::string get_clipboard_image(Window *) {
+  @autoreleasepool {  // (the pasteboard's data and the PNG made from a TIFF go with the pool: review 322)
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    NSData *d = [pb dataForType:NSPasteboardTypePNG];
+    if (!d) {  // (a screenshot: TIFF, made a PNG)
+      NSData *tiff = [pb dataForType:NSPasteboardTypeTIFF];
+      NSBitmapImageRep *rep = tiff ? [NSBitmapImageRep imageRepWithData:tiff] : nil;
+      d = rep ? [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] : nil;
+    }
+    return d ? std::string((const char *)d.bytes, d.length) : std::string();
+  }
+}
+
+std::string get_clipboard_file(Window *) {
+  @autoreleasepool {  // (Finder's copied file: its URL)
+    NSArray *urls = [[NSPasteboard generalPasteboard] readObjectsForClasses:@[ [NSURL class] ] options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+    NSURL *u = urls.count ? urls[0] : nil;
+    return u && u.path ? std::string(u.path.UTF8String) : std::string();
+  }
+}
+
 void set_clipboard(Window *, const std::string &utf8) {
   NSPasteboard *pb = [NSPasteboard generalPasteboard];
   [pb clearContents];
@@ -518,6 +539,22 @@ bool save_file_dialog(Window *, const std::string &title, const std::string &ini
     if ([panel runModal] != NSModalResponseOK) return false;
     out_path = [[panel.URL path] UTF8String];
     if (filter_index) *filter_index = k;
+    return true;
+  }
+}
+
+/* A folder (task 0271): NSOpenPanel choosing directories. */
+bool folder_dialog(Window *, const std::string &title, const std::string &initial_dir, std::string &out_path) {
+  @autoreleasepool {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = [NSString stringWithUTF8String:title.c_str()];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.canCreateDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    if (!initial_dir.empty()) panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:initial_dir.c_str()]];
+    if ([panel runModal] != NSModalResponseOK) return false;
+    out_path = [[panel.URL path] UTF8String];
     return true;
   }
 }

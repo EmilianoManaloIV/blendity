@@ -18,6 +18,8 @@
 #include "material.h"
 #include "mesh.h"
 
+#include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -25,11 +27,38 @@ namespace bl {
 
 struct Reflector;
 
+/* Task 0268: a skinned mesh's skeleton, weights and clip, for glTF (the other formats write the mesh as posed). Joints
+ * are listed parents first, each local to its parent joint, the first ones to `base`; Blendity's space (the writer
+ * mirrors and scales them as it does the vertices). */
+struct ExportSkin {
+  struct Joint {
+    std::string name;
+    int parent = -1;
+    Vec3 t;
+    Quat r;
+    Vec3 s{1, 1, 1};
+  };
+  std::string base_name = "Skeleton";
+  Mat4 base;  // the skeleton's parent's world matrix
+  std::vector<Joint> joints;
+  std::vector<std::array<uint16_t, 4>> vjoints;  // per mesh vertex: its four strongest joints
+  std::vector<std::array<float, 4>> vweights;     // ...their weights, summing to 1 (all 0: no joint)
+  struct Anim {
+    std::string name;
+    float fps = 30.0f;
+    int frames = 0;
+    std::vector<std::vector<Vec3>> t, s;  // [joint][frame], local
+    std::vector<std::vector<Quat>> r;
+  };
+  std::vector<Anim> anims;
+};
+
 struct ExportItem {
   std::string name;
   const Mesh *mesh = nullptr;
   Mat4 world;                         // baked into the vertices
   std::vector<MaterialPtr> materials; // slot i -> material
+  std::shared_ptr<const ExportSkin> skin;  // (task 0268: glTF writes the skeleton, the weights and the clip; the mesh at rest)
 };
 
 enum class ExportFormat { OBJ = 0, FBX, GLB, GLTF, STL, PLY, USD, Count };
@@ -45,6 +74,7 @@ struct ExportOptions {
   bool normals = true;          // Blender: Normals
   bool uvs = true;              // Blender: UV Coordinates
   bool materials = true;        // Blender: Materials (glTF: with their base colour textures)
+  bool skins = true;            // glTF: skinned meshes with their armature, weights and clip (task 0268; Blender: Armature, Skinning, Animation)
   bool ascii = false;           // STL / PLY: ASCII instead of binary
   /* Bake Textures (task 0036, OBJ / FBX / glTF): each object's look baked on a copy into one set of images beside
    * the file (albedo, roughness, metallic, normal) on new UVs; the copies' materials name them. */

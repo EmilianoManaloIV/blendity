@@ -9,12 +9,14 @@ these files or from a test that prints it.
 | `walkthrough-sculpt-paint.md` | Cognitive walkthrough: sculpt > remesh > unwrap > bake mesh maps > paint > smart material > export | same |
 | `walkthrough-rig-animate-sequence-export.md` | Cognitive walkthrough: rig > skin > key > sequence > export | same |
 | `walkthrough-strokes-scatter-sky.md` | Cognitive walkthrough: a stylized scene | same |
-| `klm.md` | The keystroke-level model table: twenty frequent actions, operators, seconds before and after, with the counting rules stated at its top | Counted by hand from the keymap and the windows; a replay test is not written yet (0251's *Not done*) |
+| `klm.md` | The keystroke-level model table: twenty frequent actions, operators, seconds before and after, with the counting rules stated at its top | Counted by hand from the keymap and the windows; `py tools/hci_klm.py --check` recounts every row's operators and prints the totals (round 282) |
 | `fitts-<round>.md` | The Fitts target audit's report for that round | `blendity_tests --group editor` with `BLENDITY_TEST_FILTER="Fitts dump"` and `BLENDITY_HCI_DUMP_DIR=<empty folder>` writes `fitts-<scale>.json` there (a fresh `BLENDITY_PROJECT` too, so the Project and Materials tiles are the sample's); then `py tools/hci_fitts_audit.py <that folder> > docs/hci/fitts-<round>.md` |
 | `labels-<round>.md` | The static audit of hard-coded shortcut labels | `py tools/hci_label_audit.py > docs/hci/labels-<round>.md` |
 | `hints-<round>.md` | The status-hint completeness table (mode x state) | `BLENDITY_TEST_FILTER="hci:"` prints it (the hint test's rows); copy them under a `\|---\|` header row |
 | `study-protocol.md` | The think-aloud study with SUS: who, the tasks, the script, what is logged | - |
 | `study-<date>/p1..p6.md`, `summary.md` | One study run | per the protocol |
+| `study-282.md` | Round 282's status: the study not run, what is ready, the predictions it should test | - |
+| `contrast` (in the editor tests) | WCAG 2 contrast of every theme: text, dim text, warning, error, accent and focus against the panel | `BLENDITY_TEST_FILTER="task 0261"` prints the ratios (round 281) |
 
 ## The methods, in one line each
 - **Nielsen's heuristics (H1-H10):** visibility of system status, match between system and the real world, user control

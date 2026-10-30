@@ -3941,6 +3941,36 @@ static void round17_tests() {
     ed.command("preferences");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
+    /* Preferences scrolled until the preset field is inside it and stays put: it is taller than 900 px where MoonRay is
+     * found, and MoonRay's row can appear a moment after it opens and move the rows below (round 316: macOS). */
+    /* The search for MoonRay runs on a thread (seconds on Windows, where it asks WSL): its row appears when it ends, so
+     * wait for it before reading where the field is (round 317's review). */
+    for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    std::printf("    the MoonRay search: %s\n", ed.moonray_busy_for_test() ? "still running after 30 s" : "done");
+    Recti last{-1, -1, 0, 0};
+    bool settled = false;
+    for (int i = 0; i < 80; i++) {
+      const Recti c = ed.combo_rect_for_test("km_preset"), dlg = ed.top_popup_rect_for_test();
+      if (c.w <= 0) break;
+      const bool still = c.x == last.x && c.y == last.y;
+      last = c;
+      const bool inside = c.y >= dlg.y && c.bottom() <= dlg.bottom();
+      settled = inside && still;
+      if (settled) break;
+      if (inside) {
+        ed.step_frame_headless();
+        continue;
+      }
+      ed.step_frame_headless({ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+      platform::Event w = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+      w.wheel_y = c.bottom() > dlg.bottom() ? -1.0f : 1.0f;
+      ed.step_frame_headless({w});
+      ed.step_frame_headless();  // (the controls drawn where the scroll put them)
+    }
+    CHECK(settled);  // (inside Preferences and not moving: else the clicks below would miss for that reason)
     const Recti r = ed.combo_rect_for_test("km_preset");
     std::printf("    preset combo at %d,%d %dx%d\n", r.x, r.y, r.w, r.h);
     CHECK(r.w > 0 && r.h > 0);
@@ -3951,15 +3981,19 @@ static void round17_tests() {
       ed.step_frame_headless({ev(ET::MouseUp, x, y)});
       ed.step_frame_headless();
     };
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    auto click_field = [&] {  // (where the field is now, not where it was)
+      const Recti f = ed.combo_rect_for_test("km_preset");
+      click(f.x + f.w / 2, f.y + f.h / 2);
+    };
+    click_field();
     std::printf("    after clicking it: dialog %d, popups %zu\n", (int)ed.dialog_open_for_test(), ed.popup_count_for_test());
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 2);
     /* Clicking it again closes only the list. */
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    click_field();
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
     /* Open it and pick "Unreal", the list's second row (Unity, Unreal, Blender, ...: task 0063). The list drops below
      * the field, or opens above it when the field is near the window's bottom (task 0199's lines moved it there). */
-    click(r.x + r.w / 2, r.y + r.h / 2);
+    click_field();
     CHECK(ed.popup_count_for_test() == 2);
     const Recti list = ed.top_popup_rect_for_test();
     const int row = r.h + 4;
@@ -6718,7 +6752,8 @@ static void tests_round112() {
     for (size_t k = 0; k < a.indices.size(); k++) {
       const uint32_t i = a.indices[k], j = b.indices[k];
       if (std::memcmp(&a.positions[i], &b.positions[j], sizeof(Vec3)) != 0) return fail(strprintf("position at triangle corner %zu", k));
-      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0) return fail(strprintf("normal at triangle corner %zu", k));
+      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0)
+        return fail(strprintf("normal at triangle corner %zu: (%a %a %a) in place, (%a %a %a) rebuilt", k, a.normals[i].x, a.normals[i].y, a.normals[i].z, b.normals[j].x, b.normals[j].y, b.normals[j].z));
       if (uv && std::memcmp(&a.uvs[i], &b.uvs[j], sizeof(Vec2)) != 0) return fail(strprintf("UV at triangle corner %zu", k));
     }
     return true;
@@ -6874,7 +6909,15 @@ static void tests_round112() {
     GameObject *cube = ed.scene().find_by_name("Cube");
     CHECK(cube != nullptr);
     if (!cube) return;
-    cube->get<MeshRenderer>()->material(0)->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    /* The cube's own copy of its material (no asset path): the shared Default-Material was saved with this missing map
+     * and every later test in the project warned "cannot read none.png" (the toast test's leftover warning). */
+    auto own = std::make_shared<Material>(*cube->get<MeshRenderer>()->material(0));
+    own->asset_path.clear();
+    own->name = "R34 Normal Mapped";
+    own->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    auto &slots = cube->get<MeshRenderer>()->materials;
+    if (slots.empty()) slots.push_back(own);
+    else slots[0] = own;
     ed.command("select Cube");
     ed.command("edit vertex");
     ed.command("vsel 0 1 2 3 4 5 6 7");

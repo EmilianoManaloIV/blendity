@@ -54,10 +54,12 @@ static Vec3 guide_axis(const SceneCamera &cam, int perspective, int i) {
 }
 
 void Editor::sketch_guide_from_camera(const Recti &view) {
-  Sketch &s = scene_->sketch;
+  if (sketch_on_paper()) return;  // (round 324: a paper's guide is its own, no camera's)
+  Sketch &s = sketch_doc();
   for (int i = 0; i < s.perspective; i++) {
     Vec2 v;
-    if (sketch_vanishing_point_bound(guide_axis(sketch_view_.cam, s.perspective, i), v)) s.vp[i] = v;  // (task 0233: the view's own matrices)
+    if (sketch_vanishing_point_bound(guide_axis(sketch_view_.cam, s.perspective, i), v) && std::isfinite(v.x) && std::isfinite(v.y))
+      s.vp[i] = v;  // (task 0233: the view's own matrices; round 324: a hidden view's empty rect gave NaN points)
   }
   s.vp_placed = true;
   sketch_.flat = false;
@@ -68,7 +70,7 @@ void Editor::sketch_guide_from_camera(const Recti &view) {
  * differences: the camera that best puts the axes' vanishing points on the guide's, and the worst point's distance
  * from where it was put (view heights). */
 bool Editor::sketch_solve_camera(const Recti &view, const SceneCamera &start, SceneCamera &best, float &worst) const {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const int n = s.perspective, unknowns = n == 1 ? 2 : 3;
   SceneCamera cam = start;
   /* A point left far out (an axis that vanished at infinity in a front, side or top view) is no constraint: the
@@ -159,8 +161,9 @@ bool Editor::sketch_solve_camera(const Recti &view, const SceneCamera &start, Sc
  * within a tenth of the view's height of where it was dragged; the guide's points then become that camera's. False,
  * the camera untouched, when the points are no camera's. */
 bool Editor::sketch_camera_from_guide(const Recti &view) {
-  Sketch &s = scene_->sketch;
-  if (s.perspective <= 0 || sketch_view_.cam.ortho) return false;
+  if (sketch_on_paper()) return false;  // (round 324: a paper's guide never turns a camera)
+  Sketch &s = sketch_doc();
+  if (s.perspective <= 0 || sketch_view_.cam.ortho || view.w <= 0 || view.h <= 0) return false;  // (round 324: a hidden view solves nothing)
   SceneCamera best = sketch_view_.cam;
   float best_worst = 1e30f;
   for (int k = 0; k < 4; k++) {
@@ -181,6 +184,7 @@ bool Editor::sketch_camera_from_guide(const Recti &view) {
     cam_yaw_before_[sketch_view_.kind] = sketch_view_.cam.yaw, cam_pitch_before_[sketch_view_.kind] = sketch_view_.cam.pitch, cam_fov_before_[sketch_view_.kind] = sketch_view_.cam.fov;
     return false;
   }
+  if (!std::isfinite(best.yaw) || !std::isfinite(best.pitch) || !std::isfinite(best.fov)) return false;
   while (best.yaw > 180.0f) best.yaw -= 360.0f;
   while (best.yaw < -180.0f) best.yaw += 360.0f;
   if (!sketch_keynav_view()) {  // (task 0233: a game camera isn't turned by a drawing - a flat guide)
@@ -197,7 +201,7 @@ bool Editor::sketch_camera_from_guide(const Recti &view) {
 
 /* A stroke's point on the view: the picture plane's by its frame, a scene canvas's by projecting the plane's point. */
 bool Editor::sketch_stroke_px(const Recti &view, const SketchStroke &st, const SketchPoint &p, Vec2 &px) const {
-  const SketchCanvas *c = st.canvas ? scene_->sketch.canvas_at(st.canvas) : nullptr;
+  const SketchCanvas *c = st.canvas ? sketch_doc().canvas_at(st.canvas) : nullptr;
   if (!c || c->kind == 0) {
     px = sketch_to_px(view, {p.x, p.y});
     return true;
@@ -228,7 +232,7 @@ bool Editor::sketch_segment_px(const Recti &view, Vec3 a, Vec3 b, Vec2 &pa, Vec2
 
 /* A scene canvas stroke's segments on the view, each clipped at the camera. */
 void Editor::sketch_stroke_segments(const Recti &view, const SketchStroke &st, std::vector<Vec2> &a, std::vector<Vec2> &b) const {
-  const SketchCanvas *c = scene_->sketch.canvas_at(st.canvas);
+  const SketchCanvas *c = sketch_doc().canvas_at(st.canvas);
   a.clear(), b.clear();
   if (!c) return;
   const size_t n = st.pts.size() + (st.closed && st.pts.size() > 2 ? 1 : 0);
@@ -253,7 +257,7 @@ bool Editor::sketch_plane_hit(const Recti &view, const SketchCanvas &c, Vec2 px,
 
 /* A canvas added, or the one already there with that plane and frame made active. */
 int Editor::sketch_add_canvas(SketchCanvas c, bool activate) {
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   for (const SketchCanvas &o : s.canvases) {
     const bool same = length(o.origin - c.origin) < 1e-5f && length(o.u - c.u) < 1e-5f && length(o.v - c.v) < 1e-5f;
     if (!same) continue;
@@ -267,7 +271,7 @@ int Editor::sketch_add_canvas(SketchCanvas c, bool activate) {
   if (c.kind == 0) c.kind = 1;  // (task 0233: a depth canvas keeps its kind 2)
   s.canvases.push_back(c);
   if (activate) s.active_canvas = id;
-  mark_changed("Sketch Canvas");
+  sketch_changed("Sketch Canvas");
   return id;
 }
 
@@ -283,7 +287,7 @@ static bool guide_in_plane(const GuideLine &g, const SketchCanvas &c) {
 void Editor::sketch_construction_lines(std::vector<SketchStroke> &made, float reach) {
   for (size_t si = 0; si < made.size(); si++) {
     SketchStroke &st = made[si];
-    const SketchCanvas *c = st.canvas ? scene_->sketch.canvas_at(st.canvas) : nullptr;
+    const SketchCanvas *c = st.canvas ? sketch_doc().canvas_at(st.canvas) : nullptr;
     if (!c || c->kind != 1 || st.kind != StrokeKind::Line || st.pts.size() != 2) continue;
     const Vec2 a{st.pts[0].x, st.pts[0].y}, b{st.pts[1].x, st.pts[1].y};
     Vec2 d = b - a;
@@ -374,7 +378,7 @@ bool Editor::sketch_snap_to_guides(const Recti &view, Vec2 &a, Vec2 &b) const {
   if (l < 1e-6f) return false;
   const Vec2 mid = (a + b) * 0.5f;
   const float reach = (float)ui_.px(8);
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const SketchCanvas *c = s.active_canvas ? s.canvas_at(s.active_canvas) : nullptr;
   for (const GuideLine &g : scene_->guides) {
     if (c && c->kind == 1 && !guide_in_plane(g, *c)) continue;
@@ -402,7 +406,7 @@ bool Editor::sketch_snap_to_guides(const Recti &view, Vec2 &a, Vec2 &b) const {
 
 /* The active scene canvas: its axes through the origin and a faint grid round it. */
 void Editor::sketch_draw_canvas(const Recti &view) {
-  const Sketch &s = scene_->sketch;
+  const Sketch &s = sketch_doc();
   const SketchCanvas *c = s.active_canvas ? s.canvas_at(s.active_canvas) : nullptr;
   if (!c || c->kind != 1 || !sketch_.active) return;
   auto &u = ui_;
@@ -471,7 +475,8 @@ bool Editor::sketch_world_stroke_command(const std::vector<std::string> &t) {
   if (t.empty()) return false;
   const std::string c = to_lower(t[0]);
   if (c != "sketchline" && c != "sketchcircle") return false;
-  Sketch &s = scene_->sketch;
+  if (sketch_refuse_on_paper(c.c_str())) return true;  // (round 324: a stroke in the scene's metres)
+  Sketch &s = sketch_doc();
   const SketchCanvas *canvas = s.active_canvas ? s.canvas_at(s.active_canvas) : nullptr;
   if (!canvas || canvas->kind != 1) {
     Log::warn("%s: choose a scene canvas first (sketchcanvas ground, plane or face)", c.c_str());
@@ -515,20 +520,21 @@ bool Editor::sketch_world_stroke_command(const std::vector<std::string> &t) {
     return true;
   }
   for (SketchStroke &m : made) s.strokes.push_back(std::move(m));
-  mark_changed("Sketch Stroke");
+  sketch_changed("Sketch Stroke");
   ui_.redraw = true;
   return true;
 }
 
 /* sketchcanvas view|ground|face [x y]|plane x|y|z [px py pz]|list|<id>: the canvas the next strokes go on. */
 bool Editor::sketch_canvas_command(const std::vector<std::string> &t, const std::string &line) {
-  if (!t.empty() && t[0] == "sketchcanvas") sketch_bind_scene(scene_rect_, true);  // (task 0233)
+  if (!t.empty() && t[0] == "sketchcanvas") sketch_bind_work_view();  // (task 0233; round 318: the view being drawn in)
   (void)line;
   if (t.empty() || to_lower(t[0]) != "sketchcanvas") return false;
+  if (sketch_refuse_on_paper("sketchcanvas")) return true;  // (round 324: a paper has only its own page)
   auto arg = [&](size_t i, const std::string &d) { return t.size() > i ? t[i] : d; };
-  Sketch &s = scene_->sketch;
+  Sketch &s = sketch_doc();
   const std::string v = to_lower(arg(1, "list"));
-  const Recti view = scene_rect_;
+  const Recti view = sketch_view_.view;
   if (v == "view") s.active_canvas = 0;
   else if (v == "ground") {
     SketchCanvas c;

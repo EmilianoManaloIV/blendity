@@ -56,9 +56,9 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
          return std::string(kModal[std::max(0, std::min(2, e.xf_.mode))]) + ": move the mouse  |  X Y Z: lock an axis  |  type a value  |  Enter: apply  |  Esc: cancel";
        }},
       {"operator modal", [](const Editor &e) { return e.modal_.active; },
-       [](const Editor &e) { return capitalised(e.modal_.op) + ": move the mouse away from the centre for more  |  Shift: finer  |  type a value  |  Enter: apply  |  Esc: cancel"; }},
+       [](const Editor &e) { return capitalised(e.modal_.op) + ": move the mouse away from the centre for more  |  Shift: finer  |  ] / [: segments or count  |  type a value  |  Enter: apply  |  Esc: cancel"; }},
       {"push/pull", [](const Editor &e) { return e.pp_.active; },
-       [](const Editor &) { return std::string("Push/Pull: move the mouse to push or pull the face  |  type a distance  |  click or Enter: done  |  Esc or right-click: cancel"); }},
+       [](const Editor &) { return std::string("Push/Pull: move the mouse to push or pull the face  |  type a distance  |  Ctrl: keep the original face  |  click or Enter: done  |  Esc or right-click: cancel"); }},
       {"edit origin", [](const Editor &e) { return e.origin_edit_; },
        [](const Editor &) { return std::string("Edit Origin: drag the gizmo to move the object's pivot (the mesh stays)  |  Done, or Esc: finish"); }},
       {"pilot", [](const Editor &e) { return e.pilot_cam_ != 0; },
@@ -71,42 +71,47 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
          return std::string("Draw ") + kDrawShapes[std::max(0, std::min(kDrawShapeCount - 1, e.draw_.shape))] +
                 ": click the points on the surface or the grid  |  type a length  |  Enter or right-click: finish  |  Esc: cancel";
        }},
-      {"sketch", [](const Editor &e) { return e.sketch_.active && !e.tablet_; },
+      {"sketch", [](const Editor &e) { return e.sketch_.active && !e.tablet_ && e.sketch_in_world(); },
        [](const Editor &) { return std::string("Sketch: the pen draws, its eraser erases  |  Ctrl: freehand  |  arrows, W S: move the view  |  Esc: stop"); }},
       {"gizmo drag", [](const Editor &e) { return e.drag_ == Drag::Gizmo; },
        [](const Editor &) { return std::string("Dragging: type a number for an exact amount  |  V: snap to a vertex  |  Ctrl+Shift: drop onto a surface  |  Esc: cancel"); }},
       {"uv editor", [](const Editor &e) { return e.uv_rect_.w > 0 && e.uv_rect_.contains(e.ui_.in.mx, e.ui_.in.my); },
        [](const Editor &e) {
-         return std::string("UV Editor: LMB: select  |  W E R: move, turn, scale the islands (the editor's own keys)  |  MMB drag, or Space+drag: pan  |  Wheel: zoom  |  Unwrap: the toolbar");
+         std::string keys;  // (the preset's chords for the three tools; a preset without them: the toolbar)
+         for (const char *id : {"tool.move", "tool.rotate", "tool.scale"}) {
+           const std::string k = e.key(id);
+           if (!k.empty()) keys += (keys.empty() ? "" : " ") + k;
+         }
+         return "UV Editor: LMB: select  |  " + (keys.empty() ? std::string("the toolbar") : keys) + ": move, turn, scale the islands  |  MMB drag: pan  |  Wheel: zoom  |  Unwrap: the toolbar";
        }},
       {"remesh job", [](const Editor &e) { return e.sculpt_remesh_ != nullptr; },
-       [](const Editor &) { return std::string("Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode), the tray's Cancel or `sculpt remesh cancel`: stop it at its next stage"); }},
+       [](const Editor &) { return std::string("Quad Remesh: working on a worker...  |  Esc in the Scene view (Sculpt Mode) or the tray's Cancel: stop it at its next stage"); }},
       {"sculpt", [](const Editor &e) { return e.sculpt_; },
        [](const Editor &e) {
          return std::string("Sculpt (") + kSculptBrushes[std::max(0, std::min(10, e.sculpt_brush_.kind))] +
-                "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate the group  |  [ ]: size  |  Esc: leave" +
+                "): drag over the mesh  |  Shift: smooth  |  Alt: carve (Draw, Clay, Inflate)  |  Ctrl: mask  |  Ctrl+Shift: isolate the group  |  " + e.brush_keys() + ": size  |  Esc: leave" +
                 (e.sculpt_subdiv_levels() ? strprintf("  |  Dynamic Subdivision %d (the mask shows on the cage only)", e.sculpt_subdiv_levels()) : std::string()) +
                 (e.sculpt_dyntopo_ ? strprintf("  |  Dyntopo %.2f", e.sculpt_dyntopo_detail_) : std::string());
        }},
       {"mesh maps job", [](const Editor &e) { return e.meshmaps_job_ != nullptr; },
-       [](const Editor &) { return std::string("Mesh Maps: baking on a worker...  |  Esc in the Scene view, the tray's Cancel or `meshmaps cancel`: stop it at the next row"); }},
+       [](const Editor &) { return std::string("Mesh Maps: baking on a worker...  |  Esc in the Scene view or the tray's Cancel: stop it at the next row"); }},
       {"paint", [](const Editor &e) { return e.paint_; },
-       [](const Editor &) { return std::string("Paint: drag over the model (the pen's eraser end erases)  |  [ ]: size  |  Esc: leave  |  paint color|size|fill ..."); }},
+       [](const Editor &e) { return "Paint: drag over the model (the pen's eraser end erases)  |  " + e.brush_keys() + ": size  |  Esc: leave  |  settings: Modeling Tools > Paint"; }},
       {"strokes", [](const Editor &e) { return e.strokeobj_; },
        [](const Editor &e) {
          return std::string("Strokes (") + (e.strokeobj_kind_ == 1 ? "ribbon" : "card") +
-                "): tap the surface for a card, drag for a ribbon  |  Shift: erase  |  Esc: leave  |  strokeobj kind|size|normals ...";
+                "): tap the surface for a card, drag for a ribbon  |  Shift: erase  |  " + e.brush_keys() + ": size  |  Esc: leave  |  settings: Modeling Tools > Strokes";
        }},
       {"scatter", [](const Editor &e) { return e.scatter_; },
-       [](const Editor &) { return std::string("Scatter: drag over the surface to drop instances of the source object  |  Alt, or the pen's eraser: remove  |  Esc: leave  |  scatter <object>"); }},
+       [](const Editor &e) { return "Scatter: drag over the surface to drop instances of the source object  |  Alt, or the pen's eraser: remove  |  " + e.brush_keys() + ": radius  |  Esc: leave  |  Source: Modeling Tools > Scatter"; }},
       {"weight paint", [](const Editor &e) { return e.weight_paint_; },
-       [](const Editor &) { return std::string("Weight Paint: drag to add weight to the active bone's group  |  Ctrl: subtract  |  the pen's eraser erases  |  Esc: leave"); }},
+       [](const Editor &e) { return "Weight Paint: drag to add weight to the active bone's group  |  Ctrl: subtract  |  the pen's eraser erases  |  " + e.brush_keys() + ": radius  |  Esc: leave"; }},
       {"surface job", [](const Editor &e) { return e.surface_job_ != nullptr; },
        [](const Editor &) { return std::string("Surface: evaluating the stack on a worker (the views show the last result until it lands)"); }},
       {"hidden faces", [](const Editor &e) { return e.hidden_face_count(e.active_object()) != 0; },
        [](const Editor &e) {
          const size_t hidden = e.hidden_face_count(e.active_object());
-         return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All, or `sculpt show all`)", hidden, hidden == 1 ? "" : "s", e.active_object()->name.c_str());
+         return strprintf("%zu face%s of '%s' hidden (Sculpt > Show All)", hidden, hidden == 1 ? "" : "s", e.active_object()->name.c_str());
        }},
       {"tablet scene", [](const Editor &e) { return e.tablet_ && e.scene_hovered_; },
        [](const Editor &) { return std::string("One finger: orbit, tap: select, double tap: frame  |  Two fingers: zoom, pan, twist  |  Pen side button, or a hold: the Wheel"); }},

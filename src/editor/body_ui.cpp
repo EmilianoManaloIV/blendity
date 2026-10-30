@@ -85,7 +85,8 @@ void Editor::draw_body_strip(const Recti &ruler, float end) {
   for (const AnimationClip::Contact &k : clip->contacts) {
     if (std::find(bones.begin(), bones.end(), k.bone) == bones.end()) bones.push_back(k.bone);
     const int row = (int)(std::find(bones.begin(), bones.end(), k.bone) - bones.begin());
-    const int x0 = anim_x_of(ruler, k.from, end), x1 = anim_x_of(ruler, k.to + 1.0f, end), y = ruler.bottom() - bar * (row + 1);
+    const int x0 = std::max(ruler.x, anim_x_of(ruler, k.from, end)), x1 = std::min(ruler.right(), anim_x_of(ruler, k.to + 1.0f, end)), y = ruler.bottom() - bar * (row + 1);  // (task 0267: within the ruler)
+    if (x1 <= x0) continue;
     if (y < ruler.y) break;
     u.canvas.fill_rect({x0, y, std::max(1, x1 - x0), bar - 1}, k.manual ? Color::hex(0xE08A2E) : Color::hex(0x9C6A3A));
   }
@@ -94,7 +95,8 @@ void Editor::draw_body_strip(const Recti &ruler, float end) {
   for (size_t f = 0; f < body_.flight.marks.size(); f++) {
     const uint8_t m = body_.flight.marks[f];
     if (!m) continue;
-    const int x0 = anim_x_of(ruler, (float)f, end), x1 = anim_x_of(ruler, (float)f + 1.0f, end);
+    const int x0 = std::max(ruler.x, anim_x_of(ruler, (float)f, end)), x1 = std::min(ruler.right(), anim_x_of(ruler, (float)f + 1.0f, end));  // (task 0267)
+    if (x1 <= x0) continue;
     u.canvas.fill_rect({x0, ruler.y, std::max(1, x1 - x0), bar}, Color::hex(kMark[m]));
   }
 }
@@ -106,7 +108,7 @@ void Editor::body_contacts_command(const std::vector<std::string> &t) {
   GameObject *arm = root ? const_cast<GameObject *>(body::find_armature(*root)) : nullptr;
   if (!root || !clip || !arm) return Log::warn("body contacts: select an animated character with a clip");
   const std::string sub = t.size() > 2 ? to_lower(t[2]) : "list";
-  if (playing_ && sub != "list") return Log::warn("body contacts: stop Play first (a clip isn't edited in Play)");
+  if (playing_ && sub != "list") return refuse("body contacts: stop Play first (a clip isn't edited in Play)", "stop", "Stop Play");
   const std::vector<body::Effector> eff = body::effectors(*scene_, *root, *arm);
   if (sub == "find") {
     const std::vector<AnimationClip::Contact> found = body::find_contacts(*scene_, *root, *clip, eff, body::ContactSettings());
@@ -155,7 +157,7 @@ void Editor::body_flight_command(const std::vector<std::string> &t) {
   AnimationClipPtr clip = anim_clip();
   if (!root || !clip || !body_refresh()) return Log::warn("body flight: select an animated character with a clip");
   if (sub == "apply") {
-    if (playing_) return Log::warn("body flight: stop Play first (a clip isn't edited in Play)");
+    if (playing_) return refuse("body flight: stop Play first (a clip isn't edited in Play)", "stop", "Stop Play");
     if (!flight_current(clip.get())) return Log::warn("body flight: show it first (for this character's clip, as it is now)");
     if (!body_.flight.keys) return Log::warn("%s: nothing to apply (impossible: red frames)", body_.kind.c_str());
     const AnimationClip corrected = body_.flight.corrected;
@@ -211,7 +213,7 @@ void Editor::body_physics_command(const std::vector<std::string> &t) {
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (!root || !clip || !body_refresh()) return Log::warn("body physics: select an animated character with a clip");
-  if (playing_) return Log::warn("body physics: stop Play first (a clip isn't solved while it plays)");
+  if (playing_) return refuse("body physics: stop Play first (a clip isn't solved while it plays)", "stop", "Stop Play");
   std::string error;
   std::shared_ptr<body::AutoPhysicsPrep> prep = body::autophysics_prepare(*scene_, *root, *clip, body_.body, body::AutoPhysicsSettings(), error);
   if (!prep) return Log::warn("AutoPhysics: %s", error.c_str());
@@ -251,7 +253,7 @@ void Editor::body_ragdoll_command(const std::vector<std::string> &t) {
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (!root || !clip || !body_refresh()) return Log::warn("body ragdoll: select an animated character with a clip");
-  if (playing_) return Log::warn("body ragdoll: stop Play first");
+  if (playing_) return refuse("body ragdoll: stop Play first", "stop", "Stop Play");
   using E = AnimationClip::RagdollEvent;
   if (sub == "hit" && t.size() > 6) {
     E e;
@@ -348,7 +350,7 @@ void Editor::body_command(const std::vector<std::string> &t) {
     return;
   }
   if (sub == "com") {
-    if (!body_refresh()) return Log::warn("body: the character has no clip (Animation window: Create New Clip)");
+    if (!body_refresh()) return refuse("body: the character has no clip (Animation window: Create New Clip)", "window Animation", "Open Animation");
     const float f = t.size() > 2 ? (float)std::atof(t[2].c_str()) : anim_.frame;
     const float span = std::max(1e-6f, body_.last - body_.first), u = (f - body_.first) / span;  // (the path's samples spread over the clip)
     const size_t i = (size_t)std::max(0, std::min((int)body_.path.size() - 1, (int)std::lround(u * (float)(body_.path.size() - 1))));
