@@ -1480,6 +1480,18 @@ A layer's Blend has Blender's Mix modes - Darken, Lighten, Difference, Soft Ligh
 ? You want cracked dry mud: dark lines where cells meet, lighter in the middle of each. Which layer and settings? | A Voronoi layer with Feature: Distance to Edge - 0 on the borders between cells (Edge Color there), rising toward each cell's middle (Color); Cells sets how many. For tiles with straighter sides use F1 with Distance: Manhattan (diamonds) or Chebyshev (squares) - Distance to Edge always measures straight, as Blender's does.
 ? In Blender you would put a Mapping node between Texture Coordinate and a Noise Texture to make the noise twice as fine and turned. Where is that here, and why might Scale 1.5 come out as 2? | In the Noise layer's Mapping group: Map Scale U and V 2, Map Rotation as you like. With Seamless on, the scale is a whole number of repeats (and the turn a quarter turn), so the tile's edges still meet - 1.5 would leave a seam where the tile repeats. Turn Seamless off for a one-off picture.
 )"},
+    {"Fog with a Volume Material", "Surface Type Volume (Fog): a mesh's inside as fog, Blender's Principled Volume", R"(
+In Blender, fog is a Principled Volume plugged into a material's Volume output: the mesh bounds a medium that light scatters in. In Blendity it is a Surface Type: **Volume (Fog)** hides the mesh's surface and fills its inside. A box around a room is a foggy room; a sphere is a cloud. The mesh must be closed - a fog on a mesh with holes says so above its fields.
+# The fields
+Fog Density is how thick it is per metre: 1 dims what is 1 m behind it to about a third, 0.1 is a light haze. Fog Color is the light it scatters (white mist, brown smoke). Fog Anisotropy above 0 sends light forward, so the fog glows toward the sun and shows shafts; Fog Emission makes it glow by itself; Fog Density Noise breaks it into wisps.
+! cmd:select Cube; material Fog | The Cube made fog with the Fog preset: its surface gone, its inside a haze
+! cmd:matset FogDensity 1.5; matset FogAnisotropy 0.6 | Thicker, and scattering forward: brighter toward the sun
+# Which renderer shows what
+F12 with Path Tracing draws the fog truly: light scattered inside it, its soft shadows, shafts through a window. The views show its thickness only - how much it hides of what is behind. GPU path tracing and the GPU views don't have volumes yet; a scene with fog is drawn on the CPU and the status says why. The presets Fog, Smoke and Mist are a quick start.
+? You want light shafts from a window into a dusty room. What do you make, and how do you see the shafts? | A box filling the room with a Volume (Fog) material: a low Fog Density (0.05-0.2), Fog Anisotropy around 0.6 so the light scatters forward, and a sun through the window. The shafts are lighting, so render with Path Tracing (F12) - the views show only the haze.
+? Above your fog's fields: "This mesh is open", with 4 open edges. What went wrong and what do you do? | The fog is on an open mesh - a Plane, or a box with a face deleted - so a ray that enters never meets the far side. Use a closed mesh: Make Faces (Close Holes) in the Tools window fills the holes, and Select Non-Manifold finds them.
+? Blender lets one material have both a glass surface and smoke inside. How do you do that here? | With two meshes: the glass shell with a Glass material, and a slightly smaller copy inside it with a Volume (Fog) material such as the Smoke preset. A material here is either a surface or a fog.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

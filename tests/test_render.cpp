@@ -11191,6 +11191,289 @@ static void tests_round330() {
   });
 }
 
+/* Round 331 (task 0311): the Volume (fog) material. */
+static void tests_round331() {
+  test("Volume (fog) in the path tracer: a white ball seen through 1 m of absorbing fog (density 1) is exp(-1) as bright; density 0 hides nothing; forward scattering (anisotropy 0.8) brightens the fog toward the sun; the presets are volumes; with GPUs asked for, the scene is traced on the CPU and says why", [] {
+    auto ball = primitives::uv_sphere(0.5f, 32, 16);
+    auto box = primitives::cube(1.0f);  // (1 m a side)
+    MaterialPtr white = make_material("white", {0.9f, 0.9f, 0.9f}), fog = make_material_preset("Fog");
+    CHECK(fog->volume() && make_material_preset("Smoke")->volume() && make_material_preset("Mist")->volume());
+    white->unlit = true;  // (the ball's own colour: what reaches the eye is only the fog's doing)
+    std::vector<MaterialPtr> mb = {white}, mf = {fog};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(0.0f, -0.3f, 1.0f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const int W = 32, H = 32;
+    auto render = [&](float density, Vec3 color, float g, bool with_box, const std::vector<int> &gpus = {}) {
+      fog->volume_density = density, fog->volume_color = color, fog->volume_anisotropy = g;
+      std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4::translate({0, 0, 2.0f}), &mb}};
+      if (with_box) objs.push_back({&box->render_mesh_tangents(), Mat4::translate({0, 0, 0.8f}), &mf});
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false, st.use_cpu = gpus.empty(), st.gpus = gpus;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 0, -2.0f}, {0, 0, 2.0f}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      std::vector<float> img = pt.linear_rgb(false);
+      double centre = 0.0;
+      for (int y = 12; y < 20; y++)
+        for (int x = 12; x < 20; x++) centre += img[((size_t)y * W + x) * 3 + 1];
+      return std::make_pair(centre / 64.0, pt.gpu_note());
+    };
+    const double clear = render(0.0f, Vec3(0.0f), 0.0f, false).first, none = render(0.0f, Vec3(0.0f), 0.0f, true).first;
+    const double absorbed = render(1.0f, Vec3(0.0f), 0.0f, true).first;
+    std::printf("    the ball %.4f clear, %.4f behind density-0 fog, %.4f behind 1 m of black fog (ratio %.3f, exp(-1) %.3f)\n", clear, none, absorbed, absorbed / clear, std::exp(-1.0));
+    CHECK(std::fabs(none - clear) < 0.01 * clear && std::fabs(absorbed / clear - std::exp(-1.0)) < 0.04);
+    /* Looking toward the sun through white fog: forward scattering brightens it. */
+    sun.direction = normalize(Vec3(0.0f, 0.0f, -1.0f));
+    const double iso = render(1.0f, Vec3(0.9f), 0.0f, true).first, fwd = render(1.0f, Vec3(0.9f), 0.8f, true).first;
+    std::printf("    toward the sun: isotropic fog %.4f, anisotropy 0.8 %.4f\n", iso, fwd);
+    CHECK(fwd > iso * 1.5);
+    if (gpu::available()) {
+      const auto r = render(1.0f, Vec3(0.0f), 0.0f, true, {gpu::devices()[0].index});
+      std::printf("    with a GPU asked for: %.4f, \"%s\"\n", r.first, r.second.c_str());
+      CHECK(r.second.find("Volume") != std::string::npos && std::fabs(r.first / clear - std::exp(-1.0)) < 0.04);
+    }
+  });
+  test("Volume (fog) in the CPU views: the Cube made a fog dims what is behind it by exp(-density x the length through it) - about exp(-1) to exp(-1.7) through its middle; density 0 changes nothing; the GPU views send it to the CPU and say why", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("shading shaded");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    MaterialPtr fog = make_material_preset("Fog");
+    fog->volume_density = 0.0f, fog->volume_color = Vec3(0.0f);
+    cube->get<MeshRenderer>()->materials = {fog};
+    ed.mark_changed_for_test("Fog");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(cube->world_position(), cx, cy));
+    auto lum = [&] {
+      const Image &fb = ed.main_fb_for_test();
+      const uint32_t p = fb.pixels[(size_t)cy * fb.width + cx];
+      return 0.2126 * ((p >> 16) & 255) + 0.7152 * ((p >> 8) & 255) + 0.0722 * (p & 255);
+    };
+    const double behind = lum();
+    fog->volume_density = 1.0f;
+    fog->touch();
+    ed.mark_changed_for_test("Thicker");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const double through = lum();
+    std::printf("    the cube's middle: %.1f with density 0, %.1f with density 1 (ratio %.3f, in display values)\n", behind, through, through / std::max(1.0, behind));
+    CHECK(behind > 20.0 && through < behind * 0.8 && through > behind * 0.05);
+    if (gpu::available()) {
+      ed.viewport_device_for_test(2);
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+      std::printf("    the views: %s\n", ed.gpu_view_status().c_str());
+      CHECK(ed.gpu_view_reason().find("Volume") != std::string::npos);
+      ed.viewport_device_for_test(1);
+    }
+  });
+  test("Volume (fog) around the camera (a fog-filled room): the path tracer dims a ball 1.5 m away by exp(-0.5 x 1.4) (from the near plane); the CPU view fogs what it sees from inside a huge fog cube", [] {
+    auto ball = primitives::uv_sphere(0.5f, 32, 16);
+    auto room = primitives::cube(8.0f);
+    MaterialPtr white = make_material("white", {0.9f, 0.9f, 0.9f}), fog = make_material_preset("Fog");
+    white->unlit = true;
+    fog->volume_density = 0.5f, fog->volume_color = Vec3(0.0f), fog->volume_noise = 0.0f;
+    std::vector<MaterialPtr> mb = {white}, mf = {fog};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const int W = 32, H = 32;
+    auto render = [&](bool with_room) {
+      std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4::translate({0, 0, 2.0f}), &mb}};
+      if (with_room) objs.push_back({&room->render_mesh_tangents(), Mat4::identity(), &mf});
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 2.0f}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      std::vector<float> img = pt.linear_rgb(false);
+      double centre = 0.0;
+      for (int y = 13; y < 19; y++)
+        for (int x = 13; x < 19; x++) centre += img[((size_t)y * W + x) * 3 + 1];
+      return centre / 36.0;
+    };
+    const double clear = render(false), inside = render(true);
+    /* (the camera rays start at the near plane, 0.1 m out: 1.4 m of fog) */
+    std::printf("    from inside the fog: %.4f clear, %.4f in it (ratio %.3f, exp(-0.7) %.3f)\n", clear, inside, inside / clear, std::exp(-0.7));
+    CHECK(clear > 0.5 && std::fabs(inside / clear - std::exp(-0.7)) < 0.03);
+    /* The CPU view: the Cube grown around everything, a fog of white - what the view sees whitens. */
+    Editor ed;
+    r34_open(ed);
+    ed.command("shading shaded");
+    GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(cube && sphere && cube->get<MeshRenderer>());
+    if (!cube || !sphere || !cube->get<MeshRenderer>()) return;
+    MaterialPtr haze = make_material_preset("Fog");
+    haze->volume_density = 0.0f, haze->volume_color = Vec3(1.0f), haze->volume_noise = 0.0f;
+    cube->get<MeshRenderer>()->materials = {haze};
+    cube->set_local_scale(Vec3(40.0f));  // (its faces inside the far clip)
+    ed.mark_changed_for_test("Room");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(sphere->world_position(), cx, cy));
+    auto px = [&] { return ed.main_fb_for_test().pixels[(size_t)cy * ed.main_fb_for_test().width + cx]; };
+    const uint32_t before = px();
+    haze->volume_density = 0.5f;
+    haze->touch();
+    ed.mark_changed_for_test("Thicker");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const uint32_t after = px();
+    std::printf("    the sphere's middle from inside the fog cube: %06X -> %06X\n", before & 0xFFFFFF, after & 0xFFFFFF);
+    CHECK(after != before);
+  });
+  test("the lesson \"Fog with a Volume Material\": its Try-its make the Cube a fog of density 1.5 scattering forward, and nothing else", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Cube", "material Fog", "matset FogDensity 1.5", "matset FogAnisotropy 0.6"}) ed.command(c);  // (the Try-its, a part at a time as Learn runs them)
+    GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(cube && sphere && cube->get<MeshRenderer>() && sphere->get<MeshRenderer>());
+    if (!cube || !sphere || !cube->get<MeshRenderer>() || !sphere->get<MeshRenderer>()) return;
+    const MaterialPtr m = cube->get<MeshRenderer>()->materials.empty() ? nullptr : cube->get<MeshRenderer>()->materials[0];
+    if (m) std::printf("    the Cube's material: surface %d, density %.2f, anisotropy %.2f\n", m->surface, m->volume_density, m->volume_anisotropy);
+    CHECK(m && m->volume() && std::fabs(m->volume_density - 1.5f) < 1e-5f && std::fabs(m->volume_anisotropy - 0.6f) < 1e-5f);
+    for (const MaterialPtr &sm : sphere->get<MeshRenderer>()->materials) CHECK(sm && !sm->volume());
+  });
+  test("Volume (fog), review 331: a lamp inside a foggy room is dimmed by the fog on its way to the floor and on to the eye; fogs inside a fog both dim (a cloud along the camera's probe doesn't hide the room); a denoised fog render stays finite; GPUs asked for say why they sit out", [] {
+    auto floor = primitives::plane(4.0f, 1);
+    auto room = primitives::cube(20.0f), cloud = primitives::cube(1.0f);
+    auto ball = primitives::uv_sphere(0.5f, 32, 16);
+    MaterialPtr white = make_material("white", {0.8f, 0.8f, 0.8f}), lit_white = make_material("ball", {0.9f, 0.9f, 0.9f});
+    lit_white->unlit = true;
+    MaterialPtr fog = make_material_preset("Fog"), thick = make_material_preset("Fog"), decoy = make_material_preset("Fog");
+    for (MaterialPtr *m : {&fog, &thick, &decoy}) (*m)->volume_color = Vec3(0.0f), (*m)->volume_noise = 0.0f;  // (black: only what passes through)
+    std::vector<MaterialPtr> mw = {white}, mb = {lit_white}, mf = {fog}, mt = {thick}, md = {decoy};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const int W = 32, H = 32;
+    auto centre_of = [&](PathTracer &pt) {
+      std::vector<float> img = pt.linear_rgb(false);
+      double c = 0.0;
+      for (int y = 14; y < 18; y++)
+        for (int x = 14; x < 18; x++) c += img[((size_t)y * W + x) * 3 + 1];
+      return c / 16.0;
+    };
+    /* A lamp 2 m above the floor, the camera 3 m above it, all inside the room's fog. */
+    RenderLight lamp;
+    lamp.type = RenderLight::Point;
+    lamp.position = {0.0f, 2.0f, 0.0f};
+    lamp.intensity = 4.0f;
+    lamp.range = 100.0f;
+    auto lamp_scene = [&](float density) {
+      fog->volume_density = density;
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false, st.use_embree = false;
+      pt.set_settings(st);
+      pt.build({{&floor->render_mesh_tangents(), Mat4::identity(), &mw}, {&room->render_mesh_tangents(), Mat4::identity(), &mf}}, {lamp}, env);
+      pt.set_camera(Mat4::look_at({0, 3.0f, 0}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(20 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      return centre_of(pt);
+    };
+    const double clear = lamp_scene(0.0f), foggy = lamp_scene(0.2f), want = std::exp(-0.2 * (2.0 + 2.9));
+    std::printf("    the floor under a lamp in the fog: %.4f clear, %.4f in fog 0.2 (ratio %.3f; exp(-0.2 x (2 + 2.9)) %.3f, the eye's part alone %.3f)\n", clear, foggy,
+                foggy / clear, want, std::exp(-0.2 * 2.9));
+    CHECK(clear > 0.05 && std::fabs(foggy / clear - want) < 0.04);
+    /* Fogs inside a fog: the room (0.3) and a cloud (0.5, 1 m) on the view ray, a decoy cloud where the camera's probe
+     * looks first. */
+    fog->volume_density = 0.3f, thick->volume_density = 0.5f, decoy->volume_density = 0.5f;
+    auto nested = [&](bool fogs, bool denoise) {
+      std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4::translate({0, 0, 3.0f}), &mb}};
+      if (fogs) {
+        objs.push_back({&room->render_mesh_tangents(), Mat4::identity(), &mf});
+        objs.push_back({&cloud->render_mesh_tangents(), Mat4::translate({0, 0, 1.2f}), &mt});
+        objs.push_back({&cloud->render_mesh_tangents(), Mat4::translate(normalize(Vec3(0.3f, 1.0f, 0.2f)) * 3.0f), &md});
+      }
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = denoise, st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 3.0f}, {0, 1, 0}), Mat4::perspective(20 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, 64);
+      if (denoise) {
+        bool finite = true;
+        for (float v : pt.linear_rgb(true)) finite = finite && std::isfinite(v);
+        CHECK(finite);
+      }
+      return centre_of(pt);
+    };
+    const double bare = nested(false, false), both = nested(true, false), want2 = std::exp(-(0.3 * 2.4 + 0.5 * 1.0));
+    std::printf("    a ball through the room's fog and a cloud in it: %.4f clear, %.4f (ratio %.3f; exp(-(0.3 x 2.4 + 0.5 x 1)) %.3f)\n", bare, both, both / bare, want2);
+    CHECK(bare > 0.5 && std::fabs(both / bare - want2) < 0.03);
+    const double denoised = nested(true, true);
+    std::printf("    denoised: %.4f\n", denoised);
+    CHECK(denoised > 0.0 && std::isfinite(denoised));
+    /* GPUs asked for: the note says why they sit out, and the device line carries it. */
+    PathTracer pt;
+    PTSettings st;
+    st.denoise = false, st.use_embree = false, st.gpus = {0};
+    pt.set_settings(st);
+    pt.build({{&room->render_mesh_tangents(), Mat4::identity(), &mf}}, {}, env);
+    std::printf("    with GPUs asked for: \"%s\"\n", pt.device_summary().c_str());
+    CHECK(pt.gpu_note().find("Volume") != std::string::npos && pt.device_summary().find("Volume") != std::string::npos);
+  });
+  test("Volume (fog) saves and loads: every fog field round-trips, under names of its own (its Noise Scale once loaded as the axis material's)", [] {
+    Scene s;
+    build_default_scene(s);
+    GameObject *cube = s.find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    MaterialPtr fog = make_material_preset("Smoke");
+    fog->volume_noise_scale = 3.5f, fog->volume_anisotropy = -0.4f, fog->volume_emission_strength = 2.0f;
+    cube->get<MeshRenderer>()->materials = {fog};
+    const std::string a = save_scene_text(s);
+    Scene l;
+    std::string err;
+    CHECK(load_scene_text(a, l, err) && save_scene_text(l) == a);
+    CHECK(a.find("Fog_Noise_Scale 3.5") != std::string::npos && a.find("Fog_Anisotropy -0.4") != std::string::npos);
+  });
+  test("Volume (fog) on an open mesh warns in the Inspector (a Plane: 4 open edges), a closed Cube doesn't; MoonRay hides a fog's mesh and says so", [] {
+    CHECK(meshops::open_edge_count(*primitives::cube(1.0f)) == 0 && meshops::open_edge_count(*primitives::plane(2.0f, 1)) == 4);
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>() && cube->get<MeshFilter>());
+    if (!cube || !cube->get<MeshRenderer>() || !cube->get<MeshFilter>()) return;
+    MaterialPtr fog = make_material_preset("Fog");
+    cube->get<MeshRenderer>()->materials = {fog};
+    CHECK(ed.volume_mesh_note_for_test(fog).empty());
+    CHECK(ed.volume_mesh_note_for_test(make_material("Plain", Vec3(0.5f))).empty());
+    cube->get<MeshFilter>()->mesh = primitives::plane(2.0f, 1);
+    const std::string note = ed.volume_mesh_note_for_test(fog);
+    std::printf("    on a plane: \"%s\"\n", note.c_str());
+    CHECK(note.find("4 open edges") != std::string::npos);
+    /* MoonRay: presence 0 and a note. */
+    std::vector<MaterialPtr> mats = {fog};
+    auto box = primitives::cube(1.0f);
+    moonray::ExportScene sc;
+    Environment env;
+    env.mode = Environment::Color;
+    sc.objects.push_back({&box->render_mesh(false), Mat4::identity(), &mats});
+    sc.world = &env;
+    sc.world_map_width = 16;
+    sc.view = Mat4::trs({0, 1, -5}, Quat::euler({0, 0, 0}), {1, 1, 1}).inverse();
+    sc.proj = Mat4::perspective(60.0f * kDeg2Rad, 16.0f / 9.0f, 0.1f, 100.0f);
+    sc.width = 16, sc.height = 9, sc.samples = 1;
+    moonray::ExportReport rep;
+    std::string error, text, notes;
+    CHECK(moonray::export_scene(sc, fs::join(fs::temp_dir(), "blendity-test-r331-moonray"), [](const std::string &p) { return p; }, rep, error));
+    fs::read_file(rep.scene_path, text);
+    for (const std::string &n : rep.notes) notes += n + "\n";
+    CHECK(text.find("[\"presence\"] = 0") != std::string::npos && notes.find("Volume (fog)") != std::string::npos);
+    fs::remove_file(rep.scene_path);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -11237,4 +11520,5 @@ void run_render_tests() {
   tests_round267();
   tests_round268();
   tests_round330();
+  tests_round331();
 }

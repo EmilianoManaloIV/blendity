@@ -66,11 +66,12 @@ void Material::reflect(Reflector &r) {
   static const char *procs[] = {"None (use Base Map)", "Checker", "Noise", "UV Grid", "Color Grid"};
   static const char *wraps[] = {"Repeat", "Extend", "Clip", "Mirror"};
   static const char *filters[] = {"Closest", "Linear", "Trilinear (Mipmaps)"};
-  static const char *surfaces[] = {"Opaque (Solid)", "Cutout (Alpha Clip)", "Transparent (Alpha Blend)", "Glass (Refraction)"};
+  static const char *surfaces[] = {"Opaque (Solid)", "Cutout (Alpha Clip)", "Transparent (Alpha Blend)", "Glass (Refraction)", "Volume (Fog)"};
   r.text("Name", name);
-  r.enumeration("Surface Type", surface, surfaces, 4);
+  r.enumeration("Surface Type", surface, surfaces, 5);
   r.help("Opaque: solid. Cutout: holes where Alpha (or the Base Map's alpha) is below the threshold.\n"
          "Transparent: see-through by Alpha. Glass: clear refracting material tinted by Base Color.\n"
+         "Volume (Fog): the surface is invisible and the closed mesh's inside is fog (Blender's Principled Volume).\n"
          "Unity: Surface Type + Alpha Clipping. Blender: Blend Mode / Glass BSDF.");
   if (r.all_fields() || surface == (int)MaterialSurface::Cutout) r.field("Alpha Clip Threshold", alpha_clip, 0.01f, 0.0f, 1.0f);
   if (r.all_fields() || surface == (int)MaterialSurface::Glass) {
@@ -234,6 +235,37 @@ void Material::reflect(Reflector &r) {
     r.group_end();
   }
   reflect_principled_extras(r);
+  reflect_volume(r);
+}
+
+/* Round 331: the Volume (fog) settings, shown with the Volume surface (appended: edits match by order). */
+void Material::reflect_volume(Reflector &r) {
+  if (!r.all_fields() && !volume()) return;
+  if (r.group("Volume (Fog)", true)) {
+    r.field("Fog Density", volume_density, 0.01f, 0.0f, 100.0f);
+    r.help("How thick the fog is, per metre: 1 dims what is 1 m behind it to about a third.");
+    r.color("Fog Color", volume_color);
+    r.help("The light the fog scatters (Blender's Principled Volume Color): white mist, a blue haze, brown smoke.");
+    r.field("Fog Anisotropy", volume_anisotropy, 0.01f, -0.95f, 0.95f);
+    r.help("Above 0 the fog scatters light forward - bright toward the sun, light shafts; below 0 back toward the light.");
+    r.color("Fog Emission", volume_emission);
+    r.field("Fog Emission Strength", volume_emission_strength, 0.05f, 0.0f, 100.0f);
+    r.help("The fog's own glow (fire, a magic cloud).");
+    r.field("Fog Density Noise", volume_noise, 0.01f, 0.0f, 1.0f);
+    r.help("Wisps: the density varied by a noise, from 0 to twice the Fog Density where it is 1.");
+    r.field("Fog Noise Scale", volume_noise_scale, 0.01f, 0.01f, 100.0f);
+    r.help("The wisps' size, in metres of the object's own space.");
+  }
+  r.group_end();
+}
+
+float Material::volume_density_at(Vec3 local) const {
+  const float d = finite_bits(volume_density) ? std::max(0.0f, volume_density) : 0.0f;
+  const float k = finite_bits(volume_noise) ? std::max(0.0f, std::min(1.0f, volume_noise)) : 0.0f;
+  if (k <= 0.0f) return d;
+  const float s = finite_bits(volume_noise_scale) && volume_noise_scale > 0.01f ? volume_noise_scale : 1.0f;
+  const float n = fbm_noise(local / s, 4, 0.5f) * 0.5f + 0.5f;  // (about 0..1)
+  return d * std::max(0.0f, std::min(2.0f, 1.0f + k * (2.0f * n - 1.0f) * 1.5f));
 }
 
 /* Round 330: the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic, folded (appended: the Inspector matches a
@@ -363,12 +395,25 @@ MaterialPtr make_material(const std::string &name, Vec3 color) {
 }
 
 const std::vector<std::string> &material_presets() {
-  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit", "Toon"};
+  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit", "Toon", "Fog", "Smoke", "Mist"};
   return names;
+}
+
+/* Round 331: the Volume presets - Fog (a grey haze), Smoke (dark, wispy), Mist (thin, forward-scattering). */
+static bool volume_preset(Material &m, const std::string &preset) {
+  if (preset != "Fog" && preset != "Smoke" && preset != "Mist") return false;
+  m.surface = (int)MaterialSurface::Volume;
+  m.volume_density = preset == "Fog" ? 0.6f : preset == "Smoke" ? 2.0f : 0.15f;
+  m.volume_color = preset == "Smoke" ? Vec3(0.25f, 0.24f, 0.22f) : Vec3(0.9f, 0.92f, 0.95f);
+  m.volume_anisotropy = preset == "Mist" ? 0.6f : 0.2f;
+  m.volume_noise = preset == "Smoke" ? 0.8f : 0.0f;
+  m.volume_noise_scale = 0.5f;
+  return true;
 }
 
 MaterialPtr make_material_preset(const std::string &preset) {
   auto m = make_material(preset, Vec3(0.8f));
+  if (volume_preset(*m, preset)) return m;
   if (preset == "Transparent") {
     m->surface = (int)MaterialSurface::Transparent;
     m->base_color = {0.2f, 0.5f, 0.9f};

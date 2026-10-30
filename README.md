@@ -134,8 +134,9 @@ everything):
   edited with the same keys.
 - **UV Unwrapping** - a UV Editor with LSCM unwrap, Smart UV Project, Part Unwrap (PartUV's charts by parts, ABF++),
   projections and island packing.
-- **Texturing & Materials** - Principled materials and material assets, layered **procedural textures**, axis
-  materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
+- **Texturing & Materials** - Principled materials (with Subsurface, Sheen, Coat and Anisotropic) and material
+  assets, **Volume (fog)** materials - fog, smoke and mist inside a mesh, scattered truly by the path tracer - layered
+  **procedural textures** with Blender's shader nodes as layers, axis materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
   map, inner lines and hatching, custom normals from a head proxy, hold frames on 2s / 3s), anime background
   generators (leaves, grass, walls, windows, roofs, sky, clouds, rocks, water; cards cut out by their cover), an
   import preview with the shading switchable before anything lands in the project, hair that keeps its curl, parts into
@@ -293,7 +294,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (13890 unit checks in 1240 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (13920 unit checks in 1247 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

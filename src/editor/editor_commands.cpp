@@ -1463,7 +1463,7 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "ngon") ngon_mode_ = to_lower(arg(1, ngon_mode_ ? "off" : "on")) == "on";  // ngon [on|off]: SketchUp-style faces
   else if (c == "material") {
-    /* material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>: new material on the selection. */
+    /* material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit|Toon|Fog|Smoke|Mist>: new material on the selection. */
     std::string preset = line.size() > 9 ? line.substr(9) : "Solid";
     int n = 0;
     for (GameObject *g : selected_objects(false))

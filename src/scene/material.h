@@ -40,7 +40,7 @@ enum class Procedural { None = 0, Checker = 1, Noise = 2, UVGrid = 3, ColorGrid 
  *   Alpha Clipping      Alpha Clip (cutout: holes where alpha < threshold)
  *   Transparent         Alpha Blend (see-through by alpha)
  *   (HDRP refraction)   Glass BSDF / Principled Transmission (refracts by IOR) */
-enum class MaterialSurface { Opaque = 0, Cutout = 1, Transparent = 2, Glass = 3 };
+enum class MaterialSurface { Opaque = 0, Cutout = 1, Transparent = 2, Glass = 3, Volume = 4 };  // (Volume: fog inside the mesh, round 331)
 
 struct Material {
   std::string name = "Material";
@@ -58,6 +58,15 @@ struct Material {
   float coat = 0.0f, coat_roughness = 0.03f, coat_ior = 1.5f;
   Vec3 coat_tint{1.0f, 1.0f, 1.0f};
   float anisotropic = 0.0f, anisotropic_rotation = 0.0f;
+  /* Round 331: a Volume (fog) material - Blender's Principled Volume: the mesh's inside is a medium, its surface
+   * invisible. Density per metre, the light it scatters (Color), how much forward (Anisotropy, Henyey-Greenstein),
+   * its glow, and a noise that makes it wisps. */
+  float volume_density = 1.0f, volume_anisotropy = 0.0f, volume_emission_strength = 0.0f;
+  Vec3 volume_color{0.9f, 0.9f, 0.9f}, volume_emission{1.0f, 1.0f, 1.0f};
+  float volume_noise = 0.0f, volume_noise_scale = 1.0f;
+  bool volume() const { return surface == (int)MaterialSurface::Volume; }
+  /* The density at a point in the object's own space (round 331: the noise in 0..2 times Density). */
+  float volume_density_at(Vec3 local) const;
   bool principled_extras() const { return subsurface > 0.0f || sheen > 0.0f || coat > 0.0f || anisotropic > 0.0f; }
   float alpha = 1.0f;
   int surface = 0;          // MaterialSurface
@@ -139,6 +148,7 @@ struct Material {
 
   void reflect(Reflector &r);
   void reflect_principled_extras(Reflector &r);
+  void reflect_volume(Reflector &r);
   void touch() { version++; }
 
   /* Resolved textures (cached; reloaded when the path or file changes). */

@@ -1323,6 +1323,7 @@ class Editor {
     return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   const ui::Context &ui_for_test() const { return ui_; }
+  std::string volume_mesh_note_for_test(const MaterialPtr &m) { return volume_mesh_note(m); }  // (round 331)
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
   bool prefs_open_for_test() const { return dialog_ == Dialog::Preferences; }
   bool hair_dialog_for_test() const { return dialog_ == Dialog::HairRig; }  // (task 0291)
@@ -2802,6 +2803,12 @@ class Editor {
   /* A material's fields; with `others` (several selected, task 0147) an edit reaches every one of them that shows the
    * field, and fields whose values differ draw a dash. */
   void draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const std::vector<MaterialPtr> *others = nullptr);
+  /* Round 331: "" or why a Volume material on the inspected object's mesh can't hold fog (an open mesh: the rays
+   * that leave by a hole never meet its far side). The count is kept per mesh and its topology. */
+  std::string volume_mesh_note(const MaterialPtr &m);
+  const Mesh *volume_note_mesh_ = nullptr;
+  uint64_t volume_note_version_ = 0;  // (the faces' and corners' counts: its topology)
+  size_t volume_note_open_ = 0;
   size_t apply_material_edits(const std::vector<FieldEdit> &edits, const Material *source, const std::vector<MaterialPtr> &targets);
   void matset_command(const std::vector<std::string> &t, const std::string &line);  // matset <Field> <value>: the selected materials
   void toonstyle_command(const std::string &name);  // toonstyle <style>: the selected materials' toon preset (task 0148)

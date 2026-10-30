@@ -2527,6 +2527,7 @@ void Editor::draw_render_window(const Recti &r) {
     if (devs.empty()) u.label(lay.row(), gpu::compiled_in() ? "No Vulkan GPU found - rendering on the CPU" : "This build has no GPU rendering", u.theme.text_dim);
     else if (!gpu_mode) u.label(lay.row(), "Device is CPU: set it to GPU Compute above to use these", u.theme.text_dim);
     if (!final_pt_.gpu_error().empty()) u.label(lay.row(), final_pt_.gpu_error(), u.theme.warning);
+    if (!final_pt_.gpu_note().empty()) u.label(lay.row(), "On the CPU: " + final_pt_.gpu_note(), u.theme.warning);  // (round 331: a fog)
   }
   lay.space(u.px(6));
   header("Environment");
@@ -2950,6 +2951,12 @@ void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const s
               "axis field the axis ones, Shading Model all of them. A dash: their values differ; what you type lands on all.\n"
               "+=0.1 or *=2 changes each from its own value. Console: matset <Field> <value>.");
   }
+  const std::string note = volume_mesh_note(m);
+  if (!note.empty()) {
+    u.label(lay.row(), note, u.theme.warning);
+    u.tooltip("Fog fills the inside of a closed mesh: a ray that enters stays in it until it leaves by the far side.\n"
+              "Close the holes with Make Faces (Close Holes) in the Tools window, or find them with Select Non-Manifold.");
+  }
   InspectorReflector ir(*this, ui_, lay);
   ir.material = m.get();
   if (many) ir.mixed = &mixed;
@@ -2959,6 +2966,22 @@ void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const s
     const size_t n = many ? apply_material_edits(ir.edits, m.get(), *others) : 0;
     mark_changed(n ? strprintf("Edit %zu Materials", n + 1) : "Edit Material " + m->name);  // an asset is written back when the edit finishes
   }
+}
+
+std::string Editor::volume_mesh_note(const MaterialPtr &m) {
+  if (!m || !m->volume()) return "";
+  GameObject *g = inspector_object();
+  const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+  const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  if (!mr || !mf || !mf->mesh || std::find(mr->materials.begin(), mr->materials.end(), m) == mr->materials.end()) return "";
+  /* Counted again when the faces change, not when vertices move (an Edit Mode drag on a big mesh). */
+  const uint64_t topology = (uint64_t)mf->mesh->face_count() * 1000003ull ^ (uint64_t)mf->mesh->corner_verts.size();
+  if (volume_note_mesh_ != mf->mesh.get() || volume_note_version_ != topology) {
+    volume_note_mesh_ = mf->mesh.get(), volume_note_version_ = topology;
+    volume_note_open_ = meshops::open_edge_count(*mf->mesh);
+  }
+  if (volume_note_open_ == 0) return "";
+  return strprintf("This mesh is open (%zu open edges): fog needs a closed mesh", volume_note_open_);
 }
 
 /* The edits made on `source`, applied to every other target that shows the field: Material::reflect's own

@@ -390,6 +390,7 @@ class Renderer3D {
   void draw_see_through(const std::vector<uint8_t> &see_through);
   /* Lights + image-based lighting for one shaded point (deferred and forward). */
   Vec3 light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const;
+  float draw_volume_pixel(const DrawItem &it, const Mat4 &inv, const Material &mat, Vec3 eye, Vec3 front, bool from_eye, int x, int y, float behind_z, const Environment &env);  // (its cover, 0..1)
   /* light_surface after its lights' loop (`lo`): reflections, ambient, emission (the 8-wide shader's per-pixel end). */
   Vec3 light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const;
   /* 8 pixels of a row on one plain-material triangle, lit at once (task 0091; x86 with AVX2): appended in order. */

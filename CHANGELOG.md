@@ -2,6 +2,56 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-30 (round 331): a Volume (fog) material
+
+**Asked:** "For material types there should be a volume like material that adds 'fog'." (round 327); the user chose a
+true volume in the path tracer, with approximations in the views.
+
+**Added (task 0311, ADR 0092)**
+- **Surface Type > Volume (Fog)**, after Glass: the mesh's surface is invisible and its inside is fog, with Blender's
+  Principled Volume's fields in a "Volume (Fog)" group: Fog Density (per metre), Fog Color (the light it scatters), Fog
+  Anisotropy (Henyey-Greenstein: above 0 bright toward the sun), Fog Emission and its Strength, Fog Density Noise and
+  Fog Noise Scale (wisps, in the object's own space).
+- **Presets:** Fog (a grey haze), Smoke (dark and wispy) and Mist (thin, forward-scattering), in the material presets.
+- **The path tracer (true):** a ray entering a fog's mesh is in its medium; free flights by delta tracking (against
+  twice the density where it has noise), scattering by the phase function, each light seen through the fog (and
+  whatever is in the way) at every scatter, the fog's own glow; shadow rays dim by the fog they cross, so fog casts
+  soft shadows. A camera inside a fog (a fog-filled room) starts in it.
+- **The CPU views (approximate):** what the view crosses of the mesh's bounds (exact for a box), cut where something is
+  drawn behind, dims it by exp(-density x length) toward the fog's colour lit by the sky and each sun (the phase
+  function toward it); from inside the fog, its far side draws it. No shadows or shafts in the views.
+- **Not yet:** the GPU path kernel, OptiX and the GPU views have no volumes: a scene with fog is traced on the CPU and
+  the views go to the CPU, each saying why. MoonRay leaves the fog's mesh out (presence 0) and says so.
+- **An open mesh warns:** a fog on a mesh with holes says "This mesh is open (N open edges): fog needs a closed mesh"
+  above its fields (`meshops::open_edge_count`).
+
+**Fixed on the way:** the fog's fields first had names the material already used (Noise Scale, the axis material's):
+a scene saved with a fog loaded the other field. They are "Fog ..." now, and a round-trip test keeps them apart.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- A lamp inside a foggy room lit the floor as if there were no fog on its way (its shadow rays never crossed a fog
+  face): shadow rays start with the fogs the path is in - 0.373 of clear now, exp(-0.2 x 4.9) being 0.375.
+- Fogs inside fogs lost the outer one (a cloud in a foggy room left a clear tunnel; a cloud where the camera's probe
+  looked hid the room's fog from the whole picture): the path keeps up to four fogs and their densities add.
+- A camera ray that scattered in fog before meeting anything gave the denoiser no albedo, normal or depth (the depth
+  uninitialised): it gets the fog's colour and the distance, as Cycles does.
+- Why the GPUs sat out was only in the code: the Render settings and the device line say it. The GPUs are set aside
+  open, not torn down, when fog comes and goes.
+- A fog is clicked and outlined in the CPU views where it is thick enough (not from inside); the render view's picking
+  looks through it.
+- Past 64 fog faces a path shaded the next one as a grey surface: it ends. A free flight that met only null collisions
+  scattered anyway: it goes on.
+- Fog's lights were sampled at their centres (hard shadows): through the surfaces' own `sample_light`.
+- The camera's fogs are found once a render() call, each object's inverse once a build; the open-edge count is kept
+  until the mesh's faces change, not every vertex move; an infinite density, a ray along a slab, NaN.
+
+**Checked:** `tests_round331` - 1 m of black fog at density 1 dims a ball to 0.371 of clear in the path tracer (exp(-1)
+is 0.368); a lamp in a foggy room 0.373 (0.375); a ball through a room's fog and a cloud in it 0.281 (0.295); a
+denoised fog render finite; density 0 changes nothing; forward scattering toward the sun brightens the fog 0.36 -> 0.55; from inside a
+fog room 0.501 (exp(-0.7) 0.497, from the near plane); the CPU view dims the Cube's middle 168.8 -> 52.1 and fogs the
+view from inside; the GPU path and views fall back and say why; the fields round-trip; the open-mesh note; MoonRay's
+presence 0.
+
 ## 2026-10-30 (round 330): Blender's Mix modes, and the Principled BSDF's Subsurface, Sheen, Coat and Anisotropic
 
 **Asked:** the shader-graph request (round 327); the user chose all four groups, Principled's extras among them.
