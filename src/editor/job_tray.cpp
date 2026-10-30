@@ -112,10 +112,10 @@ int Editor::draw_job_tray(int right_x, int y, int h, const std::vector<JobView> 
   const Recti bar{right_x - w + u.px(6), y + u.px(3), tw, h - u.px(6)};
   u.frame(bar, u.theme.well, u.theme.border, u.px(3));
   const Recti inner{bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 2};
-  if (j.progress >= 0.0f) u.canvas.fill_rect({inner.x, inner.y, (int)((float)inner.w * clamp01(j.progress)), inner.h}, u.theme.accent);
+  if (j.progress >= 0.0f) u.canvas.fill_rect({inner.x, inner.y, (int)((float)inner.w * clamp01(j.progress)), inner.h}, u.theme.progress);  // (task 0261: the theme's, under text_bright)
   else {
     const int sw = std::max(1, inner.w / 4), sx = (int)(std::fmod(now * 0.5, 1.0) * (double)(inner.w - sw));
-    u.canvas.fill_rect({inner.x + sx, inner.y, sw, inner.h}, u.theme.accent);
+    u.canvas.fill_rect({inner.x + sx, inner.y, sw, inner.h}, u.theme.progress);
   }
   u.label(bar, text, u.theme.text_bright, ui::Align::Center);
   u.mark_widget(bar);

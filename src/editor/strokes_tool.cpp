@@ -24,15 +24,15 @@ void Editor::set_strokeobj(bool on) {
   strokeobj_ = on;
   strokeobj_stroking_ = false;
   ui_.redraw = true;
-  Log::info("Strokes: %s", on ? "on - a click paints a card, a drag a ribbon (strokeobj card|ribbon; Esc leaves)" : "off");
+  Log::info("Strokes: %s", on ? "on - a click paints a card, a drag a ribbon (Kind: Modeling Tools > Strokes; Esc leaves)" : "off");
 }
 
 /* The Stroke object edited: the one chosen (or the active object when it has a Strokes component), else a new one at the
  * origin when `make`. */
-GameObject *Editor::strokeobj_object(bool make) {
-  GameObject *g = strokeobj_id_ ? scene_->find(strokeobj_id_) : nullptr;
+GameObject *Editor::strokeobj_object(bool make, bool fresh) {
+  GameObject *g = strokeobj_id_ && !fresh ? scene_->find(strokeobj_id_) : nullptr;
   if (g && g->get<Strokes>()) return g;
-  GameObject *a = active_object();
+  GameObject *a = fresh ? nullptr : active_object();
   if (a && a->get<Strokes>()) {
     strokeobj_id_ = a->id;
     return a;
@@ -249,7 +249,7 @@ void Editor::strokeobj_command(const std::vector<std::string> &t) {
   if (v == "on" || v == "off") set_strokeobj(v == "on");
   else if (v == "new") {
     strokeobj_id_ = 0;
-    select(strokeobj_object(true)->id);
+    select(strokeobj_object(true, true)->id);
     mark_changed("New Stroke Object");
   }
   else if (v == "card") strokeobj_kind_ = 0;
@@ -325,6 +325,13 @@ void Editor::strokeobj_command(const std::vector<std::string> &t) {
     Log::info("Strokes: %zu card(s), %zu ribbon(s)%s", s ? s->cards.size() : (size_t)0, s ? s->ribbons.size() : (size_t)0, s ? "" : " (no Stroke object yet)");
   }
   else Log::warn("strokeobj on|off | new | card | ribbon | size s | width w | normals own|surface|canopy | canopy [x y z] | canopyfill [r] [n] [x y z] | grass [density] [height] [radius] [x y] | alpha <image>|off | dab x y | stroke x0 y0 x1 y1 [n] | count");
+}
+
+/* Task 0264: the cards of the scene's Stroke object, for the tests. */
+size_t Editor::strokeobj_cards_for_test() {
+  GameObject *g = strokeobj_object(false);
+  const Strokes *s = g ? g->get<Strokes>() : nullptr;
+  return s ? s->cards.size() : 0;
 }
 
 }  // namespace bl

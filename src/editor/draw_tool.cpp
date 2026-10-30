@@ -960,7 +960,12 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     draw_.pts.pop_back();
     const std::vector<Vec3> outline = draw_outline(last, true, closed);
     draw_.pts.push_back(last);
+    GameObject *dg = edit_object();
+    MeshPtr *dmp = edit_mesh_ptr();
+    const MeshPtr draw_before = dmp && *dmp && draw_.shape >= 1 && draw_.shape <= 4 ? mesh_copy_bare(**dmp) : nullptr;  // (task 0266: a detached copy - the shape again with other segments, sides or fillet)
+    const Mat4 draw_xf = dg ? dg->world_matrix() : Mat4::identity();
     draw_commit(outline, closed);
+    if (dg && draw_before) record_draw_last(dg->id, draw_before, draw_xf);
     reset();
   }
 }

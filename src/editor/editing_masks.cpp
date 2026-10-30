@@ -219,7 +219,7 @@ void Editor::draw_edit_mask(ui::Layout &lay, int step) {
     edit_doc_.set_mask(step, parts);
     edit_mask_select(step, (int)parts.size() - 1);
   }
-  u.tooltip("Limit this adjustment to part of the picture: a gradient, a range of tones or colours, or a brush.");
+  u.tooltip("Limit this adjustment to part of the picture: a gradient, a range of tones or colors, or a brush.");
   const bool showing = edit_mask_show_ && edit_mask_step_ == step;
   if (u.button({row.x + row.w * 2 / 3 + u.px(4), row.y, row.w / 3 - u.px(4), row.h}, "Show", showing)) {
     edit_mask_show_ = !showing;

@@ -50,7 +50,7 @@ bool Editor::body_midpoint(GameObject *g, const Ray &ray, Vec3 &out) {
 
 bool Editor::autorig_start(GameObject *mesh, RigKind kind) {
   if (playing_) {
-    Log::warn("Auto-Rig: stop Play first (a rig made in Play is gone on Stop)");
+    refuse("Auto-Rig: stop Play first (a rig made in Play is gone on Stop)", "stop", "Stop Play");
     return false;
   }
   if (!mesh || !mesh->mesh_filter() || !mesh->mesh_filter()->mesh || mesh->get<Bone>()) {
@@ -278,7 +278,7 @@ void Editor::draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj) {
               "the limbs, and the mesh bound with inpainted weights. Console: autorig humanoid.");
     if (u.button(b, "Quadruped")) autorig_start(mesh_obj, RigKind::Quadruped);
     u.tooltip("Markers on a four-legged animal seen from its left side (nose, skull, withers, hips, tail, paws, knees and\n"
-              "hocks). Console: autorig quadruped.");
+              "hocks).");
     if (!mesh_obj) u.label(lay.row(), "Select the character's mesh first.", u.theme.text_dim);
     return;
   }
@@ -355,7 +355,7 @@ void Editor::draw_autorig_diagram(ui::Layout &lay) {
     u.canvas.fill_circle(p.x, p.y, (float)u.px(is_next ? 6 : 4), c);
   }
   u.label({fig.x + u.px(4), fig.y + u.px(2), fig.w, u.row_h()}, autorig_.view + " view", u.theme.text);
-  u.tooltip("The markers to place, coloured by body part: left blue, right red, the middle yellow, a tail purple; the ringed\n"
+  u.tooltip("The markers to place, colored by body part: left blue, right red, the middle yellow, a tail purple; the ringed\n"
             "one is next, dark ones aren't placed yet. A humanoid starts from the front (its left on your right), a quadruped\n"
             "from its left side.");
 }

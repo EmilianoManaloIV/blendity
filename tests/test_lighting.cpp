@@ -1708,6 +1708,7 @@ static void round36_tests() {
     r36_cmd(ed, "set Lighting.AutoGenerate true");  // before the bake: every Lighting setting is part of its key
     r36_cmd(ed, "set Lighting.SpecularOcclusion 0");  // (the occlusion of lightmapped specular light is its own finding)
     r35_bake(ed);
+    ed.set_clock_for_test(1000.0);  // (the settle second on the editor's clock: a sanitizer build's frames took longer than it)
     r34_steps(ed, 3);
     CHECK(!ed.baking_for_test() && !ed.lighting_out_of_date_for_test());  // nothing changed: no bake
     box->set_local_position({-3.0f, 0.5f, -1.5f});
@@ -1716,7 +1717,7 @@ static void round36_tests() {
     CHECK(ed.lighting_out_of_date_for_test());
     CHECK(!ed.baking_for_test());  // it waits for the change to settle
     const std::vector<uint32_t> waiting = r35_game(ed);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1150));
+    ed.set_clock_for_test(1001.15);  // (1.15 s later)
     r34_steps(ed, 3);  // the settle time is over: the bake starts (a tiny scene may also finish within these frames)
     for (int i = 0; i < 200 && ed.baking_for_test(); i++) ed.step_frame_headless();
     CHECK(!ed.baking_for_test());
@@ -1776,14 +1777,15 @@ static void round36_tests() {
     r35_sun_mode(ed, 2);
     r35_bake(ed);
     CHECK(!ed.lighting_out_of_date_for_test());
+    ed.set_clock_for_test(2000.0);  // (the editor's clock: the wake-up is measured against it, not the wall)
     ed.scene().find_by_name("Directional Light")->set_local_euler({40, 60, 0});
     ed.commit_change("turn the sun");
     r34_steps(ed, 2);
     CHECK(ed.lighting_out_of_date_for_test());
     /* The run loop sleeps until next_wakeup when no event comes: it must point about a second ahead. */
     const double wake = ed.ui_for_test().next_wakeup;
-    std::printf("    wake-up in %.2f s\n", wake - now_seconds());
-    CHECK(wake > now_seconds() && wake < now_seconds() + 1.5);
+    std::printf("    wake-up in %.2f s\n", wake - 2000.0);
+    CHECK(wake > 2000.0 && wake < 2001.5);
   });
 
   test("voxel GI: changing the Realtime GI settings does not make the baked lighting out of date", [] {
@@ -5062,10 +5064,10 @@ static void round58_tests() {
     const Recti menu = r50_popup(ed);
     CHECK(menu.w > 0 && ed.selected_object() && ed.selected_object()->name == "Cube");
     if (menu.w <= 0) return;
-    /* Rows: Rename, Duplicate, Delete, Frame Selected, Select Children, Clear Parent, Join, Boolean, Separate By Loose
+    /* Rows: Rename, Duplicate, Delete, Frame Selected, Move into... (task 0255), Select Children, Clear Parent, Join, Boolean, Separate By Loose
      * Parts, Export Selection..., Bake Textures. Hovering it opens its sizes. */
     const int row = ed.ui_for_test().row_h();
-    const int by = menu.y + ed.ui_for_test().px(4) + row * 10 + row / 2;
+    const int by = menu.y + ed.ui_for_test().px(4) + row * 11 + row / 2;
     ed.step_frame_headless({r34_mouse(R34ET::MouseMove, menu.x + menu.w / 2, by)});
     r34_steps(ed, 2);
     const Recti sizes = r50_popup(ed);
