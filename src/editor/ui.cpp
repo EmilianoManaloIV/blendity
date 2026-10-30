@@ -1360,6 +1360,27 @@ void Context::popup(Id i, int width, std::function<void()> body) {
     }
 }
 
+Recti Context::floating_panel(Id i, Recti &r, const Recti &bounds, const std::string &title, bool *close) {
+  const int th = row_h();
+  r.w = std::min(r.w, bounds.w), r.h = std::min(r.h, bounds.h);
+  const Recti x_btn{r.right() - th, r.y, th, th};
+  const bool on_close = close && x_btn.contains(in.mx, in.my);
+  if (hovered({r.x, r.y, r.w, th}) && in.pressed[0] && !on_close) active_ = i, float_grab_x_ = in.mx - r.x, float_grab_y_ = in.my - r.y;
+  if (active_ == i && in.down[0]) r.x = in.mx - float_grab_x_, r.y = in.my - float_grab_y_, redraw = true;
+  else if (active_ == i) active_ = 0;
+  r.x = std::max(bounds.x, std::min(bounds.right() - r.w, r.x));
+  r.y = std::max(bounds.y, std::min(bounds.bottom() - r.h, r.y));
+  canvas.fill_round_rect(r, px(6), theme.panel);
+  canvas.round_rect_outline(r, px(6), theme.border);
+  const Recti bar{r.x, r.y, r.w, th};
+  canvas.fill_round_rect(bar, px(6), theme.bar);
+  label({bar.x + px(8), bar.y, bar.w - th - px(8), th}, title, theme.text_bright);
+  mark_widget(bar);
+  tooltip("Drag the title to move this panel.");
+  if (close && icon_button({r.right() - th, r.y, th, th}, Icon::Close, false, "Hide this panel.")) *close = true;
+  return {r.x, r.y + th, r.w, r.h - th};
+}
+
 Recti Context::popup_row(int h) {
   if (h < 0) h = row_h();
   Recti r{popup_area_.x, popup_cursor_y_, popup_area_.w, h};

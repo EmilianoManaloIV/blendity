@@ -2,6 +2,202 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-29 (round 321): the Wheel on the Draw tab, the pen held still opening it, the lesson "Drawing like SketchBook"
+
+**Asked:** the last part of the SketchBook Pro request (tasks 0296-0298).
+
+**Added (task 0298)**
+- **The Wheel's own "draw" set over the Draw tab:**
+  - Pencil, Inker, Marker, Eraser;
+  - Ruler, Fit, Hide Tools;
+  - More: Pen, Felt Pen, Airbrush, Stroke Eraser, Ellipse, No Guide, Flip Canvas, Undo.
+
+  Before this, the pad got the "other" set. Its slices can be changed in Preferences > Wheel.
+- **The pen held still on the pad opens the Wheel,** as SketchBook's marking menu does: half a second within 4 px. The
+  dot under the pen isn't drawn. A moving stroke, an erase, a handle, the puck or a navigation drag never opens it.
+- **Learn:** the lesson "Drawing like SketchBook" covers the canvas, the brushes and the puck, and the Wheel on the pad,
+  with Try-it steps and questions.
+- **The checklist** has three new timed items in Drawing (E9-E11): zoom, turn and fit; the Marker with the puck; erase a
+  line's middle, then B.
+
+**Checked**
+- `tests_round321`:
+  - Space over the pad opens the "draw" set, and its key 2 picks the Inker;
+  - the pen held 0.8 s opens it and draws nothing, while a pen that moves draws and opens nothing.
+- `hci_checklist.py --check`: 121 items, 0 names missing.
+- Rounds 320-321 together:
+  - dependency-free suite: 12,997 checks, 0 failed;
+  - main, Windows with libraries: 13,605 checks (1195 tests), 0 failed;
+  - main, Linux: 13,157, 0 failed.
+
+## 2026-10-29 (round 320): SketchBook's brushes on the Draw tab - the palette and its puck, B / E / [ ], an Eraser that cuts
+
+**Asked:** the second half of the SketchBook Pro request (round 319): the brush palette and puck, which the user picked
+as one of the two parts that matter most.
+
+**Added (task 0297, ADR 0088, `editor/sketch_brushes.cpp`)**
+- **Brushes on the strokes:** each stroke carries its brush, so it stays a line and correction, canvases, Lift and Build
+  are unchanged. The fields are:
+  - opacity, composited once, so a stroke doesn't darken where it crosses itself;
+  - edge, hard to soft;
+  - what the pen's pressure drives: size, opacity, both or neither;
+  - the smallest width.
+
+  They are saved at the end of a stroke's line, and a stroke from before brushes loads as the Pen.
+- **SketchBook's set:** Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser and Stroke Eraser. Each keeps its own
+  size, opacity, color and steadiness, and the preferences keep them.
+- **Erasing:**
+  - The **Eraser** cuts what it crosses, so a line erased in its middle becomes two lines. On the Draw tab the pen's
+    eraser end does the same.
+  - The **Stroke Eraser** takes strokes whole, as before.
+- **The brush palette** floats over the pad, dragged by its title, and the toolbar's Brush button shows and hides it.
+  - **The puck:** drag sideways for the size and up or down for the opacity.
+  - **Tiles:** a tile a brush, each with a preview stroke on paper.
+  - **Brush Properties** (double-click a tile): Size, Opacity, Edge, Pressure, Min Size, Steadiness.
+  - **Duplicate** makes a brush of your own, and **Reset** puts a brush back.
+  - The pen's menu moved to More > Pen.
+- **Keys over the pad:**
+  - B: the last drawing brush.
+  - E: the Eraser.
+  - `[` / `]`: the size.
+  - Shift+`[` / Shift+`]`: the opacity.
+  - B held and dragged: the puck at the pen.
+
+  The brush's ring follows the pointer, dashed for an eraser. Over the pad, Q and E no longer pan the camera; Shift+arrows
+  still do.
+- **Console:** `sketch brush <name>|list|last|size|opacity|edge|pressure|min|smaller|larger|fainter|stronger|duplicate|reset|delete`.
+- **The brush is the Draw tab's.** In the Scene and Game views the pen stays a plain pen.
+
+**Checked**
+- `tests_round320` (5 tests by real events):
+  - a tile's click picks the brush, and the toolbar's swatch shows its color;
+  - a Marker stroke carries opacity 0.5, edge 0.1 and pressure to opacity;
+  - the puck's drag gives the size times 1.02 per pixel and the opacity plus 0.2;
+  - Brush hides and shows the palette;
+  - the keys work;
+  - the Eraser cuts a line with a 20 px gap, the Stroke Eraser takes both pieces, and the pen's end cuts with one undo
+    step;
+  - the brush fields survive a save, and an older line loads as the Pen;
+  - a 0.5-opacity stroke drawn there and back has the same pixel as one drawn once;
+  - one pad frame of 500 heavily overlapping Airbrush strokes takes 52 ms, and of 300 diagonal Pencil lines 13 ms (14 ms
+    before brushes).
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- **The preferences:** loading them overwrote the Pen with the default pen, and threw away the palette's place. Both
+  now read back as they were, with a test round-tripping them.
+- **Cost:** see-through brushes took 246.9 ms for 500 Airbrush strokes and 101.5 ms for 300 diagonal Pencil lines. The
+  first measurement drew nothing. Now:
+  - the soft edge is one feathered pass (`Canvas::set_feather`);
+  - the see-through path has no joint discs;
+  - a stroke's picture is cleared and composited along its rows.
+- **On a ground or wall canvas, the Eraser cut in the wrong place under perspective.** It now fills in the stroke in
+  its own space.
+- **The Draw tab's brush leaked into the Scene and Game views.** There the pen is a plain pen again, and its eraser end
+  takes whole strokes.
+- **The palette overflowed** with the user's own brushes. Now:
+  - at most eight;
+  - three columns past eight brushes;
+  - numbered names;
+  - Delete.
+- **Brush keys in the middle of a stroke** wait for it to end.
+- **New tests:** the preferences round trip, the console's brush verbs, the brush kept to the Draw tab, the Eraser on a
+  ground canvas and on a locked layer.
+
+## 2026-10-29 (round 319): the Draw tab as SketchBook Pro's canvas - one toolbar, the pad zoomed, panned, turned and flipped, Tab hides the tools, Paper
+
+**Asked:** the user (2026-10-29): "For the drawing page, make it similar to how SketchBook Pro operates", then "Add the
+ability to zoom in on the drawing page". Their choices: a canvas-first page with a brush palette and puck, strokes kept
+as lines (Lift and Build keep working), SketchBook's toolbar replacing the bar (Mesh > Draw unchanged). The plan has three
+rounds (task 0296 now, the brushes and puck in 0297, the Wheel and Learn in 0298); a reference board tab follows (0299-0302).
+
+**Changed: the Draw tab (task 0296, `editor/sketch_pad.cpp`)**
+- **One slim toolbar** in SketchBook's order:
+  - Undo and Redo;
+  - Brush (the pen's menu), the color (now with opacity) and the Size;
+  - the Ruler, Ellipse and Curve toggles;
+  - Symmetry and Perspective;
+  - Steady Stroke and Predictive Stroke;
+  - Layers;
+  - at the right, the zoom (a click fits) and More.
+- **More** holds what isn't drawing:
+  - Source (Scene Camera, Game Camera, Paper) and Paper Color;
+  - Pen, Guides and Build (Mesh > Draw's items);
+  - Place in 3D;
+  - Fit, Zoom, Turn, Flip Canvas;
+  - Hide the Tools;
+  - Layers;
+  - Draw Tool.
+- **A narrow tab** folds groups into More instead of wrapping onto more rows.
+- **Zoom, pan, turn and flip, in 2D:** the strokes and the camera don't change.
+  - The wheel zooms about the pointer, from 10% to 1600%.
+  - A middle-drag or Space+drag pans, and Shift turns (Ctrl gives 15 degree steps).
+  - Two fingers pinch, pan and twist.
+  - Home, a double middle-click or the zoom button fits.
+  - A tap of Space still opens the Wheel.
+- **Stroke widths are the picture's,** so a stroke is wider zoomed in, as on paper.
+- **Tab over the pad hides the tools,** and Tab or Esc brings them back. A new Draw Tab keymap context (`draw.hide_ui`,
+  `draw.fit`, `draw.flip`) wins over the Scene's keys there, so Tab doesn't toggle Edit Mode under the Blender keys.
+- **A Paper source:** blank paper in White, Cream, Gray, Dark or a hex color.
+
+**Fixed**
+- The Draw tab's pen didn't start when a Drawing layout was open from launch, only when the tab was shown again.
+
+**How:**
+- **Picture pixels:** the sketch tool works in "picture pixels" (the fit rect scaled by the zoom). `Canvas::Xform` maps
+  them to the screen while the sketch draws, and the pointer is mapped back, so the guides, handles and corrections run
+  unchanged.
+- **The picture away from Fit:** it is drawn off screen once (up to twice the fit size), then resampled with
+  `Canvas::blit_affine` while the view moves.
+
+**Console:**
+- `draw source scene|game|paper`
+- `draw paper <name|hex>`
+- `draw view fit|zoom|turn|flip|pan`
+- `draw tools hide|show|toggle`
+
+**Checked**
+- `tests_round319` (6 tests by real events):
+  - the wheel zooms about the pointer (the spot under it moved 0.3 px);
+  - a stroke drawn zoomed 1.6x, turned and flipped lands on the same picture spot as at Fit (within 0.0024 view heights,
+    the pointer's whole pixels rounded twice);
+  - middle-drag and Space+drag pan, a Space tap opens the Wheel, Shift+Ctrl turns in steps, and a pinch zooms;
+  - Tab and Esc;
+  - the toolbar's controls in order, and Paper;
+  - the cost: the picture drawn off screen in 13 ms at 1274x569, a pan resampled in 2 ms.
+- Round 318's bar test, rewritten for the toolbar and its folding.
+- The coverage map, consistency audit and console audit, all at their baselines.
+- The dependency-free suite: 12,927 checks, 0 failed.
+- Main: Windows with libraries 13,535 checks (1185 tests) and Linux 13,087, all 0 failed.
+
+**The review's fixes (Opus code-reviewer, changes needed)**
+- **The off-screen picture's size cap only applied to a fit rect over 4096 px.** A 4K tab zoomed in rendered 7680x3800.
+  The picture is now at most 4096 px on its longest side.
+- **Zooming between 100% and 200% re-rendered the scene at every notch.** The picture is now drawn at the fit size or
+  twice it, and a zoom within a step only resamples. The test counts the renders: one, then none for a pan, a turn and
+  zooms from 120% to 1600%.
+- **The wheel, a pinch, Home or Flip in the middle of a stroke moved the stroke's first half.** The view now stays put
+  while a stroke, an erase or a handle drag is under way.
+- **NaN or huge numbers from `draw view` broke the mapping.** They are now refused, and the pan is clamped.
+- **More was missing two of the folded groups:** it now has Undo, Redo and Predictive Stroke. The toolbar's widths come
+  from one table, and a tab too narrow for even the brush group cuts it off instead of drawing over the zoom and More,
+  which goes first.
+- **The pad's keys are tied to the OS window it is drawn in,** so Tab or Space in another window's Scene view isn't
+  taken by the pad.
+- **Space:** a drag of either button while Space is held means no Wheel on letting go. Space let go while the tab was
+  away is forgotten.
+- **Hide the Tools:** coming back to a tab whose tools are hidden shows the "Tab: show the tools" hint again.
+- **The Paper hint** no longer offers the orbit keys.
+- **New tests:**
+  - Cream paper is checked;
+  - Paper turned is still paper at the middle;
+  - a double middle-click fits;
+  - the narrow toolbar's controls don't overlap;
+  - the resampled picture lines up after a flip.
+- **Left as they are, and noted in the spec:**
+  - Build's pixel tolerances are in the picture's pixels, so they follow the pad's zoom.
+  - Under the SketchUp keys, the Wheel is Shift+Space and Space is the View tool, so there a middle-drag pans the pad.
+
+
 ## 2026-10-29 (round 318): freehand strokes aren't pulled onto the perspective guide; the Draw tab's pen and guides; every bridge followed a live Blendity
 
 **Asked:** the user (2026-10-29): "When in freehand draw mode, the pen still snaps to the perspective grids", then "For

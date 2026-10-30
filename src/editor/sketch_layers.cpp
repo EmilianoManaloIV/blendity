@@ -132,7 +132,8 @@ void Editor::sketch_draw_group(int i, const std::vector<std::vector<size_t>> &by
 }
 
 /* The picture sized as the target and transparent over the view. */
-void Editor::sketch_composite_clear(Image &c, const Recti &view) {
+void Editor::sketch_composite_clear(Image &c, const Recti &view_) {
+  const Recti view = sketch_screen_rect(view_);  // (round 319: the pad zoomed or turned draws over its rect on screen)
   const Image *frame = ui_.canvas.target();
   if (c.width != frame->width || c.height != frame->height) c.resize(frame->width, frame->height);
   const int x0 = std::max(0, view.x), x1 = std::min(frame->width, view.right());
@@ -143,7 +144,8 @@ void Editor::sketch_composite_clear(Image &c, const Recti &view) {
 /* The picture over the target where it drew: its coverage times the opacity is the alpha (Porter-Duff over, so a
  * view the card presents keeps its hole), its colour blended with the target's by the mode where the target is
  * opaque (over a transparent target - a group's picture, a hole - the colour goes as it is). */
-void Editor::sketch_composite_over(const Image &c, const Recti &view, float opacity, int blend) {
+void Editor::sketch_composite_over(const Image &c, const Recti &view_, float opacity, int blend) {
+  const Recti view = sketch_screen_rect(view_);
   Image *frame = ui_.canvas.target();
   const float op = saturate(opacity);
   const int x0 = std::max(0, view.x), x1 = std::min(frame->width, view.right());

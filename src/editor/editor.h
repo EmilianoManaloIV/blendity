@@ -676,7 +676,34 @@ class Editor {
   const Sketch &sketch_for_test() const { return scene_->sketch; }
   uint32_t sketch_color_for_test() const { return sketch_.color; }  // (task 0286: the Draw menu's pen)
   float sketch_tether_for_test() const { return sketch_.tether; }
-  int draw_bar_rows_for_test() const { return draw_bar_rows_; }  // (round 318)
+  /* Round 319: the Draw tab's pad - zoom, turn (degrees, clockwise on screen), pan and flip (editor/sketch_pad.cpp). */
+  struct PadView {
+    float zoom = 1.0f, angle = 0.0f, pan_x = 0.0f, pan_y = 0.0f;
+    bool flip = false;
+  };
+  const PadView &pad_view_for_test() const { return pad_; }
+  int pad_pic_renders_for_test() const { return pad_pic_renders_; }
+  int sketch_brush_for_test() const { return sketch_brush_; }  // (round 320)
+  std::string brush_prefs_text_for_test() { return sketch_brush_prefs_text(); }
+  bool brush_pref_for_test(const std::string &k, const std::string &v) { return sketch_brush_pref(k, v); }
+  int sketch_brush_count_for_test() const { return (int)sketch_brushes_.size(); }
+  void add_sketch_stroke_for_test(const SketchStroke &st) {
+    scene_->sketch.strokes.push_back(st);
+    ui_.redraw = true;
+  }
+  Recti draw_palette_rect_for_test() const { return draw_palette_rect_; }
+  float sketch_width_for_test() const { return sketch_.width; }
+  float sketch_brush_opacity_for_test() const { return sketch_brush_ >= 0 && sketch_brush_ < (int)sketch_brushes_.size() ? sketch_brushes_[(size_t)sketch_brush_].opacity : 1.0f; }
+  bool draw_palette_shown_for_test() const { return draw_palette_shown_; }
+  uint32_t draw_paper_for_test() const { return draw_paper_; }
+  int pad_bar_folded_for_test() const { return pad_bar_folded_; }  // (round 319: the toolbar's groups folded into More)
+  bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
+  int draw_source_for_test() const { return draw_source_; }
+  Recti pad_rect_for_test() const { return pad_rect_; }
+  Vec2 pad_from_screen_for_test(Vec2 s) const { return pad_from_screen().map(s); }
+  Vec2 pad_to_screen_for_test(Vec2 q) const { return pad_to_screen().map(q); }
+  double pad_render_ms_for_test() const { return pad_render_ms_; }
+  double pad_blit_ms_for_test() const { return pad_blit_ms_; }
   int sketch_french_for_test() const { return sketch_.french; }
   int sketch_radial_for_test() const { return sketch_.radial; }
   int sketch_symmetry_for_test() const { return sketch_.symmetry; }
@@ -861,6 +888,10 @@ class Editor {
   bool sketch_stroke_px_for_test(const SketchStroke &st, const SketchPoint &p, Vec2 &px) {
     sketch_bind_scene(scene_rect_, true);
     return sketch_stroke_px(scene_rect_, st, p, px);
+  }
+  bool sketch_stroke_px_for_pad_test(const SketchStroke &st, const SketchPoint &p, Vec2 &px) {  // (the Draw tab's pad, at Fit: its pixels are the screen's)
+    sketch_view_ = sketch_views_[2];
+    return sketch_stroke_px(sketch_view_.view, st, p, px);
   }
   bool sketch_place3d_for_test() const { return sketch_.place3d; }
   int sketch_solo_for_test() const { return sketch_solo_; }  // (task 0234)
@@ -3938,6 +3969,7 @@ class Editor {
     bool overlay = true;  // (task 0226: the selected meshes' edges drawn to draw against)
     bool place3d = false;  // (task 0233: a picture-plane stroke lands on a depth canvas in the scene)
     int view_kind = -1;    // (task 0233: the view a stroke, an erase or a handle drag began in: 0 Scene, 1 Game, 2 the Draw tab)
+    bool erase_cut = false;  // (task 0297: this erase is the Eraser's - it cuts - not the Stroke Eraser's)
   } sketch_;
   /* The view the sketch tool works in this frame (task 0233, ADR 0071: sketch_view.cpp): bound by the Scene view, the
    * Game view or the Draw tab before the tool runs, so strokes are drawn and corrected in that view's perspective. */
@@ -3965,8 +3997,103 @@ class Editor {
   double sketch_keynav_last_ = 0.0;
   int sketch_depth_canvas(const Recti &view);
   /* The Draw tab (task 0233): its picture's source, targets and cache. */
-  int draw_source_ = 0;  // 0 the Scene view's camera, 1 the Game camera
-  int draw_bar_rows_ = 1;  // (round 318: the bar wraps in a narrow window)
+  int draw_source_ = 0;  // 0 the Scene view's camera, 1 the Game camera, 2 Paper (round 319)
+  uint32_t draw_paper_ = 0xFFFFFFFF;
+  /* Round 319 (editor/sketch_pad.cpp): the pad as SketchBook's canvas - zoomed, panned, turned and flipped in 2D. The
+   * tool works in the picture's pixels (the fit rect scaled by the zoom about its centre); pad_to_screen maps them to
+   * the screen. */
+  PadView pad_;
+  Recti pad_rect_;          // the pad on screen (its last frame)
+  Vec2 pad_center_;         // the fit rect's centre: what the zoom, turn and flip are about
+  bool pad_hovered_ = false;
+  bool pad_ui_hidden_ = false;  // Tab: only the drawing
+  double pad_hint_until_ = 0.0;
+  int pad_bar_folded_ = 0;  // the toolbar's groups folded into More (a narrow tab)
+  int pad_nav_ = 0, pad_nav_button_ = 2;  // a navigation drag: 0 none, 1 pan, 2 turn; the button holding it
+  Vec2 pad_nav_last_;
+  float pad_nav_raw_ = 0.0f;  // (a turn's angle before Ctrl's 15 degree steps)
+  int pad_space_ = 0, pad_space_x_ = 0, pad_space_y_ = 0;  // Space over the pad: 1 held, 2 held and dragged
+  Image pad_pic_;  // the camera's picture drawn off screen while the pad isn't at Fit
+  RenderTarget pad_rt_;
+  uint64_t pad_pic_key_ = 0;
+  /* Round 320 (editor/sketch_brushes.cpp, ADR 0088): SketchBook's brushes - the presets then the user's own - the one
+   * drawing, the palette floating over the pad and its puck. */
+  std::vector<SketchBrush> sketch_brushes_;
+  int sketch_brush_ = 1, sketch_brush_last_draw_ = 1;  // (the Pen)
+  bool draw_palette_shown_ = true;
+  Recti draw_palette_rect_;
+  bool draw_puck_drag_ = false, draw_puck_at_pen_ = false;
+  Vec2 draw_puck_from_;
+  float draw_puck_w0_ = 2.0f, draw_puck_o0_ = 1.0f;
+  void sketch_brushes_init();
+  const SketchBrush &sketch_brush_cur();
+  void sketch_brush_store();
+  void sketch_brush_pick(int i, bool store_first = true);
+  int sketch_brush_find(const std::string &name);
+  void sketch_brush_onto(SketchStroke &st);
+  bool sketch_brush_here() const;
+  void sketch_paint_stroke(const std::vector<Vec2> &pts, const std::vector<float> &w, uint32_t color, float width, const SketchStroke &look);
+  SketchStroke sketch_brush_look(const SketchBrush &b) const;
+  bool sketch_erase_cut(const Recti &view, Vec2 px, float r);
+  bool sketch_cut_stroke(const Recti &view, const SketchStroke &st, Vec2 c, float r, std::vector<SketchStroke> &out);
+  float sketch_eraser_radius(bool cut);
+  Recti draw_palette_place(const Recti &view);
+  bool draw_palette_over(const Recti &view);
+  void draw_pad_palette(const Recti &view);
+  void draw_brush_puck(const Recti &r);
+  void draw_puck_begin(bool at_pen);
+  void draw_puck_update();
+  void draw_brush_tile(const Recti &t, int i);
+  void draw_brush_properties();
+  void draw_pad_cursor(bool hovered);
+  void sketch_brush_command(const std::vector<std::string> &t);
+  static std::string join_words(const std::vector<std::string> &t, size_t from);
+  void sketch_brush_duplicate(const std::string &name);
+  void sketch_brush_reset();
+  void sketch_brush_delete();
+  int own_brush_count() const;
+  int draw_palette_cols() const;
+  bool draw_palette_placed_ = false;  // (the palette has a place: its default, or the preferences')
+
+  std::string sketch_brush_prefs_text();
+  bool sketch_brush_pref(const std::string &k, const std::string &v);
+  int pad_pic_renders_ = 0;  // (the off-screen picture's renders: a pan or a zoom within a step makes none)
+  int pad_window_ = 0;       // (the OS window the pad last drew in: its keys are that window's)
+  bool pad_busy() const;
+  bool pad_hold_opens_wheel() const;
+  void draw_pad_zoom_button(const Recti &zoom);
+  void draw_pad_set_correct(int correct);
+  double pad_render_ms_ = 0.0, pad_blit_ms_ = 0.0;
+  bool pad_at_fit() const;
+  Recti pad_picture_rect(const Recti &fit) const;
+  Canvas::Xform pad_to_screen() const;
+  Canvas::Xform pad_from_screen() const;
+  void pad_keep(Vec2 q, Vec2 at);
+  void pad_zoom_at(float factor, Vec2 at);
+  void pad_set_angle(float degrees, Vec2 at);
+  void pad_flip();
+  void pad_fit();
+  bool pad_takes_space() const;
+  void pad_space_begin();
+  void pad_space_release();
+  void pad_touch(Vec2 at);
+  bool pad_nav_drag();
+  bool pad_navigate(bool hovered);
+  void draw_pad_paper(const Recti &view, const Recti &pic);
+  void draw_pad_render(const Recti &view, const Recti &fit, const Recti &pic, uint64_t key, const std::function<void(RenderTarget &)> &draw,
+                       const Mat4 &v, const Mat4 &p, const GameObject *owner);
+  Recti sketch_screen_rect(const Recti &view) const;
+  float sketch_zoom() const;
+  void draw_pad_toolbar(const Recti &bar);
+  void draw_pad_brush_group(const Recti &brush, const Recti &color, const Recti &size);
+  void draw_pad_more_menu();
+  uint32_t draw_paper_named(const std::string &name) const;
+  void draw_pad_sketch(bool navigating);
+  void draw_pad_hint(const Recti &view, bool game, bool hovered);
+  bool draw_source_command(const std::string &w);
+  bool draw_paper_command(const std::string &w);
+  bool draw_view_command(const std::vector<std::string> &t);
+  bool draw_tools_command(const std::string &w);
   /* Round 318: each view's last binding (kind 0 the Scene view, 1 the Game view, 2 the Draw tab) and the frame it was
    * made, and the view the pointer was last over - where Mesh > Draw's and the Draw tab's commands act. */
   SketchView sketch_views_[3];
@@ -3978,11 +4105,10 @@ class Editor {
   Renderer3D draw_r3d_;
   FilterTarget draw_ft_, draw_vs_;
   void draw_draw_window(const Recti &r);
-  void draw_draw_bar(const Recti &bar);
   bool draw_tab_command(const std::vector<std::string> &t);
   /* The Layers panel (task 0234, editor/sketch_layers.cpp): the sketch's layers composited in order with their opacity
    * and blend, the window that edits them, the console's verbs. */
-  Image sketch_comp_[2];  // (a layer's picture, transparent where it didn't draw; a group's, its children composited into it)
+  Image sketch_comp_[3];  // (task 0297: [2] a see-through stroke's own picture)  // (a layer's picture, transparent where it didn't draw; a group's, its children composited into it)
   int sketch_solo_ = -1;  // (one layer shown alone; -1 none - the editor's, not the scene's; dropped by the stack's operations)
   int layers_rename_ = -1;
   std::string layers_rename_text_;

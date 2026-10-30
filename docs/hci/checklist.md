@@ -67,6 +67,9 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 | E6 | Lift a corner's three lines to 3D | Draw three lines toward the axes; Mesh > Draw > Lift the Sketch to 3D | A Scaffold wire object | 4.85 s | [ ] | |
 | E7 | Clear the sketch | Mesh > Draw > Clear the Sketch; Ctrl+Z | Strokes gone, then back | 3 s | [ ] | |
 | E8 | Build a box from three lines | Mesh > Draw > Build from Sketch > Box | A box mesh from the sketched corner | 5 s | [ ] | |
+| E9 | Zoom in on the Draw tab to draw a detail, turn the canvas, then fit | Drawing layout; wheel over the detail; Shift+middle-drag to turn; draw; Home | The canvas zooms about the pointer and turns; the stroke lands where drawn; Home fits | 8 s | [ ] | |
+| E10 | Switch to the Marker and make it bigger and fainter with the puck | Draw tab > Brush; the Marker tile; drag the puck right and down | A wider, fainter Marker; its stroke has one tone where it crosses itself | 6 s | [ ] | |
+| E11 | Erase the middle of a line, then pick the last brush back | Over the pad: E; drag across the line; B | Two pieces either side of the cut; the brush you were drawing with again | 5 s | [ ] | |
 
 ## F. UV
 

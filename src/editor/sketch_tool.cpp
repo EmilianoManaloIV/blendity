@@ -228,6 +228,7 @@ void Editor::sketch_stroke_end(const Recti &view) {
     st.layer = s.active_layer;
     st.color = g.color;
     st.width = g.width;
+    sketch_brush_onto(st);  // (task 0297: the brush's opacity, edge and pressure)
     return st;
   };
   /* On a scene canvas (tasks 0224, 0226) the stroke is corrected in the plane's own metres. */
@@ -341,27 +342,35 @@ bool Editor::sketch_erase_at(const Recti &view, Vec2 px) {
   return any;
 }
 
-static void draw_stroke(ui::Context &u, const std::vector<Vec2> &pts, const std::vector<float> &w, uint32_t color, float width);
-
 /* One stroke as the view shows it: a scene canvas stroke segment by segment, clipped at the camera; a picture-plane
  * one through its points. `color` carries the alpha to draw with. */
 void Editor::sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint32_t color) {
   auto &u = ui_;
   const Sketch &s = scene_->sketch;
-  const float px1 = (float)u.px(1.0f);
+  const float px1 = (float)u.px(1.0f) * sketch_zoom();  // (round 319: a stroke's width is the picture's)
   if (st.canvas && s.canvas_at(st.canvas)) {
     std::vector<Vec2> sa, sb;
     sketch_stroke_segments(view, st, sa, sb);
     float mean_w = 0.0f;
     for (const SketchPoint &p : st.pts) mean_w += p.w;
     mean_w /= (float)std::max<size_t>(1, st.pts.size());
-    for (size_t i = 0; i < sa.size(); i++) draw_stroke(u, {sa[i], sb[i]}, {mean_w, mean_w}, color, st.width * px1);
+    /* The segments joined back into polylines where they meet (a see-through stroke is composited once a run). */
+    std::vector<Vec2> run;
+    for (size_t i = 0; i < sa.size(); i++) {
+      if (!run.empty() && length(run.back() - sa[i]) > 0.5f) {
+        sketch_paint_stroke(run, std::vector<float>(run.size(), mean_w), color, st.width * px1, st);
+        run.clear();
+      }
+      if (run.empty()) run.push_back(sa[i]);
+      run.push_back(sb[i]);
+    }
+    if (!run.empty()) sketch_paint_stroke(run, std::vector<float>(run.size(), mean_w), color, st.width * px1, st);
     return;
   }
   std::vector<Vec2> pts;
   std::vector<float> w;
   for (const SketchPoint &p : st.pts) pts.push_back(sketch_to_px(view, {p.x, p.y})), w.push_back(p.w);
-  draw_stroke(u, pts, w, color, st.width * px1);
+  sketch_paint_stroke(pts, w, color, st.width * px1, st);  // (task 0297: with its brush)
 }
 
 /* The tool's frame: true when it took the pointer. */
@@ -422,15 +431,19 @@ bool Editor::sketch_update(const Recti &view) {
         return true;
       }
   }
-  /* The eraser end: the strokes it crosses go. */
-  if (!g.stroking && !g.erasing && in.pressed[0] && sketch_view_.hovered && in.eraser) {
+  /* The eraser end, or the Eraser or Stroke Eraser brush (task 0297): the Eraser cuts the strokes it crosses (the pen's
+   * end too, on the Draw tab), the Stroke Eraser takes them whole. */
+  const int brush_kind = sketch_brush_here() ? sketch_brush_cur().kind : 0;
+  if (!g.stroking && !g.erasing && in.pressed[0] && sketch_view_.hovered && (in.eraser || brush_kind != 0)) {
     g.erasing = true;
     g.erased = false;
+    g.erase_cut = (in.eraser && sketch_brush_here()) || brush_kind == 1;  // (the pen's end cuts on the Draw tab; elsewhere it takes whole strokes, as before)
     g.view_kind = sketch_view_.kind;
     u.consume_click();
   }
   if (g.erasing) {
-    g.erased = sketch_erase_at(view, px) || g.erased;
+    const bool hit = g.erase_cut ? sketch_erase_cut(view, px, sketch_eraser_radius(true)) : sketch_erase_at(view, px);
+    g.erased = hit || g.erased;
     if (!in.down[0]) {
       g.erasing = false;
       if (g.erased) sketch_prune_depth_canvases();  // (task 0233)
@@ -459,24 +472,12 @@ bool Editor::sketch_update(const Recti &view) {
   return false;
 }
 
-/* A stroke's polyline on the view, with its width (the pen's pressure along it). */
-static void draw_stroke(ui::Context &u, const std::vector<Vec2> &pts, const std::vector<float> &w, uint32_t color, float width) {
-  if (pts.size() == 1) {
-    u.canvas.fill_circle(pts[0].x, pts[0].y, width * w[0] * 0.5f, color);
-    return;
-  }
-  for (size_t i = 1; i < pts.size(); i++) {
-    const float t = width * 0.5f * (w[i - 1] + w[i]);
-    u.canvas.line(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, color, std::max(1.0f, t));
-    if (t > 2.5f) u.canvas.fill_circle(pts[i].x, pts[i].y, t * 0.5f, color);  // (round joints)
-  }
-}
 
 void Editor::sketch_draw(const Recti &view) {
   auto &u = ui_;
   const Sketch &s = scene_->sketch;
   if (s.strokes.empty() && !sketch_.active) return;
-  u.canvas.push_clip(view);
+  u.canvas.push_clip(sketch_screen_rect(view));  // (round 319: the pad zoomed or turned - its rect on screen)
   const float px1 = (float)u.px(1.0f);
   sketch_draw_layers(view);  // (task 0234: bottom to top, each with its opacity and blend)
   const auto &g = sketch_;
@@ -486,7 +487,7 @@ void Editor::sketch_draw(const Recti &view) {
   }
   sketch_draw_canvas(view);
   sketch_draw_overlay(view);
-  if (g.stroking) draw_stroke(u, g.pen, g.pressure, g.color, g.width * px1);
+  if (g.stroking) sketch_paint_stroke(g.pen, g.pressure, g.color, g.width * px1 * sketch_zoom(), sketch_brush_here() ? sketch_brush_look(sketch_brush_cur()) : SketchStroke{});
   /* The guides. */
   const uint32_t guide_col = Color::hex(0x40C0FF, 170), handle_col = Color::hex(0xFFD040);
   auto handle = [&](Vec2 c) {
@@ -578,7 +579,8 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
       mark_changed("Clear Sketch");
     }
     else if (v == "color") g.color = Color::hex((uint32_t)std::strtoul(arg(2, "202020").c_str(), nullptr, 16));
-    else if (v == "width") g.width = std::max(0.5f, std::min(40.0f, (float)std::atof(arg(2, "2").c_str())));
+    else if (v == "width") g.width = std::max(0.5f, std::min(200.0f, (float)std::atof(arg(2, "2").c_str())));
+    else if (v == "brush") sketch_brush_command(t);  // (task 0297)
     else if (v == "steady") g.tether = std::max(0.0f, std::min(200.0f, (float)std::atof(arg(2, "0").c_str())));
     else if (v == "correct") {
       const std::string l = to_lower(arg(2, "full"));

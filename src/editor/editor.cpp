@@ -4223,6 +4223,7 @@ void Editor::load_prefs() {
     if (assist_pref(k, v)) continue;
     if (ai_pref(k, v)) continue;
     if (livelink_pref(k, v)) continue;
+    if (sketch_brush_pref(k, v)) continue;  // (task 0297)
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "rig_control_scale") rig_control_scale_ = std::max(0.1f, std::min(5.0f, (float)std::atof(v.c_str())));
     else if (k == "theme") set_theme(v, false);
@@ -4377,6 +4378,7 @@ void Editor::save_prefs() {
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += hci_prefs_text();  // (task 0235)
+  s += sketch_brush_prefs_text();  // (task 0297)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
   s += ai_prefs_text();

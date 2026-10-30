@@ -101,7 +101,7 @@ KeyChord parse_chord(const std::string &text_in) {
 
 /* ------------------------------------------------------------ actions */
 
-enum ActCtx { CTX_GLOBAL = 0, CTX_EDIT = 1, CTX_SCENE = 2, CTX_SCENE_EDIT = 3 };
+enum ActCtx { CTX_GLOBAL = 0, CTX_EDIT = 1, CTX_SCENE = 2, CTX_SCENE_EDIT = 3, CTX_DRAW = 4 };  // (CTX_DRAW: the pointer over the Draw tab's pad, round 319)
 
 const std::vector<ShortcutAction> &shortcut_actions() {
   static const std::vector<ShortcutAction> acts = {
@@ -201,6 +201,15 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"draw.arc", "Draw Arc", "Draw", CTX_SCENE},
       {"draw.polygon", "Draw Polygon", "Draw", CTX_SCENE},
       {"draw.sketch", "Sketch (pen)", "Draw", CTX_SCENE},
+      {"draw.hide_ui", "Draw Tab: Hide the Tools", "Draw", CTX_DRAW},  // (round 319: SketchBook's Tab)
+      {"draw.fit", "Draw Tab: Fit to the Tab", "Draw", CTX_DRAW},
+      {"draw.flip", "Draw Tab: Flip Canvas", "Draw", CTX_DRAW},
+      {"draw.brush", "Draw Tab: the Last Brush", "Draw", CTX_DRAW},  // (round 320: SketchBook's B, E, [ ])
+      {"draw.eraser", "Draw Tab: Eraser", "Draw", CTX_DRAW},
+      {"draw.smaller", "Draw Tab: Brush Smaller", "Draw", CTX_DRAW},
+      {"draw.larger", "Draw Tab: Brush Larger", "Draw", CTX_DRAW},
+      {"draw.fainter", "Draw Tab: Brush Fainter", "Draw", CTX_DRAW},
+      {"draw.stronger", "Draw Tab: Brush Stronger", "Draw", CTX_DRAW},
       /* Windows and rendering */
       {"render.image", "Render Image", "Render", CTX_GLOBAL},
       {"render.screenshot", "Screenshot", "Render", CTX_GLOBAL},
@@ -259,6 +268,14 @@ static void common_bindings(Keymap &k) {
   b("object.create_empty_child", {"Alt+Shift+N"});
   b("object.move_to_view", {"Ctrl+Alt+F"});
   b("edit.rename", {"F2"});
+  b("draw.hide_ui", {"Tab"});  // (round 319: over the Draw tab's pad only - its context comes first there)
+  b("draw.fit", {"Home"});
+  b("draw.brush", {"B"});
+  b("draw.eraser", {"E"});
+  b("draw.smaller", {"["});
+  b("draw.larger", {"]"});
+  b("draw.fainter", {"Shift+["});
+  b("draw.stronger", {"Shift+]"});
   b("brush.smaller", {"["});  // (task 0261: Photoshop's, Substance's and Blender's size keys, in every preset)
   b("brush.larger", {"]"});
   const char *wins[] = {"window.scene", "window.game", "window.inspector", "window.hierarchy", "window.project",
@@ -724,6 +741,18 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "menu.wheel" && (drag_ == Drag::Fly || in.down[1] || (playing_ && !paused_ && focused_ == WindowKind::Game)))
     return false;  // (flying, or a game taking Space)
   else if (id == "menu.wheel" && qm_.open) qm_.open = false;
+  else if (id == "menu.wheel" && pad_takes_space()) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel)
+  else if (id == "draw.hide_ui") run_console_command("draw tools toggle");
+  else if (pad_busy() && (id == "draw.fit" || id == "draw.flip" || id == "draw.brush" || id == "draw.eraser" || id == "draw.smaller" || id == "draw.larger" || id == "draw.fainter" || id == "draw.stronger"))
+    return false;  // (a stroke under way: its view and brush stay)
+  else if (id == "draw.fit") run_console_command("draw view fit");
+  else if (id == "draw.flip") run_console_command("draw view flip");
+  else if (id == "draw.brush") run_console_command("sketch brush last");
+  else if (id == "draw.eraser") run_console_command("sketch brush Eraser");
+  else if (id == "draw.smaller") run_console_command("sketch brush smaller");
+  else if (id == "draw.larger") run_console_command("sketch brush larger");
+  else if (id == "draw.fainter") run_console_command("sketch brush fainter");
+  else if (id == "draw.stronger") run_console_command("sketch brush stronger");
   else if (id == "menu.wheel") quick_menu_open(in.mx, in.my, false);  // (task 0230)
   else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
   else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();
@@ -886,9 +915,11 @@ void Editor::handle_shortcuts() {
   if (in.alt()) mods |= platform::MOD_ALT;
   const bool scene_ctx = focused_ == WindowKind::Scene || focused_ == WindowKind::Hierarchy || scene_hovered_;
   const bool scene_ok = scene_ctx && drag_ != Drag::Fly && !in.down[1];
+  const bool draw_ok = pad_takes_space();  // (the pointer over the Draw tab's pad, drawn just now)
   auto active = [&](int ctx) {
     switch (ctx) {
       case CTX_GLOBAL: return true;
+      case CTX_DRAW: return draw_ok;
       case CTX_EDIT: return edit_mode_;
       case CTX_SCENE: return scene_ok;
       default: return scene_ok && edit_mode_;
@@ -911,7 +942,7 @@ void Editor::handle_shortcuts() {
         }
       }
     if (done) continue;
-    for (int ctx : {CTX_SCENE_EDIT, CTX_EDIT, CTX_SCENE, CTX_GLOBAL}) {
+    for (int ctx : {CTX_DRAW, CTX_SCENE_EDIT, CTX_EDIT, CTX_SCENE, CTX_GLOBAL}) {
       if (!active(ctx)) continue;
       for (const ShortcutAction &a : shortcut_actions()) {
         if (a.context != ctx) continue;

@@ -331,6 +331,7 @@ std::string save_scene_text(const Scene &scene) {
       for (const SketchPoint &p : st.pts) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
       os << " " << st.raw.size();
       for (const SketchPoint &p : st.raw) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
+      os << " " << st.brush << " " << fmt(st.opacity) << " " << fmt(st.soft) << " " << st.pressure_to << " " << fmt(st.min_size);  // (task 0297)
       os << "\n";
     }
   }
@@ -646,6 +647,13 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
           if (at + 2 >= t.size()) break;
           dst.push_back({f(at), f(at + 1), f(at + 2)});
         }
+      }
+      if (at + 4 < t.size()) {  // (task 0297: the brush's fields; an older line has none - the Pen's)
+        st.brush = std::atoi(t[at].c_str());
+        st.opacity = std::max(0.0f, std::min(1.0f, f(at + 1)));
+        st.soft = std::max(0.0f, std::min(1.0f, f(at + 2)));
+        st.pressure_to = std::max(0, std::min(3, std::atoi(t[at + 3].c_str())));
+        st.min_size = std::max(0.0f, std::min(1.0f, f(at + 4)));
       }
       if (!st.pts.empty()) fresh.sketch.strokes.push_back(std::move(st));
     }

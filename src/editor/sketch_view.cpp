@@ -145,7 +145,9 @@ bool Editor::sketch_keyboard_nav() {
   const bool arrow_l = in.key_down[KEY_LEFT], arrow_r = in.key_down[KEY_RIGHT], up = in.key_down[KEY_UP], down = in.key_down[KEY_DOWN];
   const bool letters = !in.shift();  // (Shift+letter chords - Shift+D, Shift+Q, Shift+A - are the shortcuts'; Shift+arrows pan)
   const bool left = arrow_l || (letters && in.key_down[KEY_A]), right = arrow_r || (letters && in.key_down[KEY_D]);
-  const bool in_ = letters && in.key_down[KEY_W], out = letters && in.key_down[KEY_S], pan_up = letters && in.key_down[KEY_E], pan_down = letters && in.key_down[KEY_Q];
+  /* Q / E pan in the Scene view; over the Draw tab's pad E is SketchBook's Eraser (round 320), so there Shift+arrows pan. */
+  const bool qe = letters && sketch_view_.kind != 2;
+  const bool in_ = letters && in.key_down[KEY_W], out = letters && in.key_down[KEY_S], pan_up = qe && in.key_down[KEY_E], pan_down = qe && in.key_down[KEY_Q];
   const bool any = left || right || up || down || in_ || out || pan_up || pan_down;
   sketch_keynav_ = any;
   if (!any) return false;
@@ -169,7 +171,7 @@ bool Editor::sketch_keyboard_nav() {
   if (out) cam_.distance = std::min(1e6f, cam_.distance * std::exp(kNavDollyPerSecond * dt));
   cam_.animating = false;
   for (int k : {KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN, KEY_A, KEY_D, KEY_W, KEY_S, KEY_Q, KEY_E})
-    if (in.key_down[k]) in.key_pressed[k] = false;  // (a key the view took: not the shortcuts')
+    if (in.key_down[k] && (qe || (k != KEY_Q && k != KEY_E))) in.key_pressed[k] = false;  // (a key the view took: not the shortcuts')
   ui_.redraw = true;
   return true;
 }
@@ -208,176 +210,6 @@ void Editor::sketch_prune_depth_canvases() {
     else if (s.active_canvas == c.id) s.active_canvas = 0;
   }
   s.canvases.swap(kept);
-}
-
-/* ---- the Draw tab ---- */
-
-/* The Draw tab's bar: the source (the Scene view's camera or the Game camera), the tool, the pen's color and its menu
- * (Pen Color, Steadiness, Canvas, Lift, Clear - Mesh > Draw's own items), its width and corrections, the guides and their
- * menu, Place in 3D, Build, Layers. Narrower than its controls it wraps to more rows (draw_bar_rows_, round 318). */
-void Editor::draw_draw_bar(const Recti &bar) {
-  auto &u = ui_;
-  const int h = u.row_h(), gap = u.px(6);
-  int x = bar.x + gap, y = bar.y + u.px(3), rows = 1;
-  auto at = [&](int w) {  // (the next control's rect: on this row, else the next)
-    if (x + w > bar.right() - gap && x > bar.x + gap) x = bar.x + gap, y += h + u.px(6), rows++;
-    const Recti r{x, y, w, h};
-    x += w + gap;
-    return r;
-  };
-  static const char *kSources[] = {"Scene camera", "Game camera"};
-  if (u.combo(u.id("draw_source"), at(u.px(130)), draw_source_, kSources, 2)) draw_cache_.key = 0;
-  u.tooltip("Whose picture the pad shows: the Scene view's camera (the keyboard moves it) or the Game camera.");
-  if (u.button(at(u.px(70)), sketch_.active ? "Drawing" : "Draw", sketch_.active)) sketch_.active ? sketch_end() : sketch_begin();
-  u.tooltip("The Sketch tool: the pen's pressure is the width, its eraser end erases, Ctrl keeps a stroke freehand. Esc ends.");
-  {
-    const Recti cr = at(u.px(40));
-    Vec3 c = Color::to_vec(sketch_.color);
-    if (u.color_field(u.id("draw_color"), cr, c)) sketch_.color = Color::from(c);
-    if (u.record_buttons) u.button_rects["draw:color"] = cr;
-    u.tooltip("The pen's color: click for any color (the Color window), or Pen > Pen Color for the usual inks.");
-  }
-  {
-    const Recti pr = at(u.px(64));
-    if (u.button(pr, "Pen", false, ui::Icon::Menu)) u.open_popup(u.id("draw_pen_menu"), {pr.x, pr.bottom(), 0, 0});
-    if (u.record_buttons) u.button_rects["draw:Pen"] = pr;
-    u.tooltip("The pen: its color, Steadiness, the Canvas the strokes land on, Lift the Sketch to 3D, Clear the Sketch.");
-  }
-  {
-    const Recti wr = at(u.px(98));
-    u.label({wr.x, wr.y, u.px(42), wr.h}, "Width");
-    u.float_field(u.id("draw_width"), {wr.x + u.px(44), wr.y, u.px(54), wr.h}, sketch_.width, 0.1f, 0.5f, 40.0f, "%.1f");
-  }
-  static const char *kCorrect[] = {"Freehand", "Light", "Full"};
-  int correct = scene_->sketch.layer_at(scene_->sketch.active_layer).correct;
-  if (u.combo(u.id("draw_correct"), at(u.px(90)), correct, kCorrect, 3)) {
-    scene_->sketch.layer_at(scene_->sketch.active_layer).correct = correct;
-    mark_changed("Sketch Correction");
-  }
-  u.tooltip("How much a stroke is corrected when the pen lifts: a wobbly line made straight, an arch two lines and an arc.\n"
-            "Freehand leaves it as drawn, and the perspective guide doesn't pull it.");
-  static const char *kGuides[] = {"No Guide", "Ruler", "Ellipse", "French Curve"};  // (the Guides menu's words)
-  u.combo(u.id("draw_guide"), at(u.px(110)), sketch_.guide, kGuides, 4);
-  u.tooltip("Draw > Guides: strokes run along the ruler, follow the ellipse or the French curve.");
-  static const char *kPersp[] = {"No Perspective", "1-Point", "2-Point", "3-Point"};
-  int persp = std::max(0, std::min(3, scene_->sketch.perspective));
-  if (u.combo(u.id("draw_persp"), at(u.px(120)), persp, kPersp, 4))
-    run_console_command(persp == 0 ? std::string("sketchguide perspective off") : strprintf("sketchguide perspective %d", persp));
-  u.tooltip("The perspective guide: its vanishing points are this view's camera's, and follow it.");
-  static const char *kSym[] = {"No Symmetry", "Symmetry X", "Symmetry Y", "Symmetry XY", "Radial Symmetry"};
-  u.combo(u.id("draw_sym"), at(u.px(110)), sketch_.symmetry, kSym, 5);
-  {
-    const Recti gr = at(u.px(78));
-    if (u.button(gr, "Guides", false, ui::Icon::Menu)) u.open_popup(u.id("draw_guides_menu"), {gr.x, gr.bottom(), 0, 0});
-    if (u.record_buttons) u.button_rects["draw:Guides"] = gr;  // (the Game view has a Guides button too)
-    u.tooltip("Every guide: the French curve's shape, radial copies, Snap to Guides, Perspective Follows the Camera, and a ruler\n"
-              "or an ellipse from the model.");
-  }
-  {
-    const Recti pl = at(u.px(96));
-    u.checkbox({pl.x, pl.y + u.px(2), h - u.px(4), h - u.px(4)}, sketch_.place3d);
-    u.label({pl.x + h, pl.y, pl.w - h, pl.h}, "Place in 3D");
-    u.tooltip("A stroke lands in the scene where it was drawn - on the face under the pen, else at the camera's pivot depth -\nand stays in perspective as the camera turns; off, it stays on the picture plane.");
-  }
-  {
-    const Recti br = at(u.px(70));
-    if (u.button(br, "Build", false, ui::Icon::Menu)) u.open_popup(u.id("draw_build_menu"), {br.x, br.bottom(), 0, 0});
-    if (u.record_buttons) u.button_rects["draw:Build"] = br;
-    u.tooltip("Make the model from the sketch: a box, a cylinder, a cone, a sweep or a face from the strokes, or a stroke\n"
-              "projected onto the model, traced into a cut or a curve.");
-  }
-  if (u.button(at(u.px(64)), "Layers", false, ui::Icon::Menu)) run_console_command("window Layers");  // (task 0234)
-  u.tooltip("The Layers panel: the sketch's layers with their opacity and blend, reordered by dragging.");
-  if (rows != draw_bar_rows_) u.redraw = true;  // (the tab's height for the bar changes: drawn again at once)
-  draw_bar_rows_ = rows;
-  u.popup(u.id("draw_pen_menu"), u.px(200), [this] { draw_sketch_pen_menu(); });
-  u.popup(u.id("draw_guides_menu"), u.px(240), [this] { draw_sketch_guides_items(); });
-  u.popup(u.id("draw_build_menu"), u.px(240), [this] { draw_sketch_build_items(); });
-}
-
-/* The Draw tab: the scene's picture from the source camera (its own targets and cache, no gizmos, icons or stats), the
- * sketch tool over it in that camera's perspective. Opening it starts the tool and Place in 3D. */
-void Editor::draw_draw_window(const Recti &r) {
-  auto &u = ui_;
-  const int bh = draw_bar_rows_ * (u.row_h() + u.px(6));  // (last frame's rows: the bar wraps when narrow)
-  const Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, u.theme.bar);
-  const bool over_tab = u.in.mx >= r.x && u.in.mx < r.x + r.w && u.in.my >= r.y && u.in.my < r.y + r.h;
-  if (over_tab && !u.any_popup_open()) sketch_work_view_ = 2;  // (round 318: its bar's menus act on the pad)
-  draw_draw_bar(bar);
-  const Recti view{r.x, r.y + bh, r.w, r.h - bh};
-  if (view.w < 8 || view.h < 8) {
-    u.canvas.fill_rect(view, u.theme.panel);
-    return;
-  }
-  const bool reopened = u.frame_number() > draw_last_frame_ + 2;  // (the tab shown again after being hidden or closed)
-  draw_last_frame_ = u.frame_number();
-  if (reopened && !playing_) {  // (the pen draws, in 3D)
-    sketch_.place3d = true;
-    if (!sketch_.active) sketch_begin();
-  }
-  GameObject *owner = nullptr;
-  Camera *gcam = draw_source_ == 1 ? main_camera(*scene_, &owner) : nullptr;
-  if (draw_source_ == 1 && !gcam) {
-    u.canvas.fill_rect(view, 0xFF000000);
-    u.label(view, "No cameras rendering", u.theme.text, ui::Align::Center);
-    return;
-  }
-  Recti img = view;
-  Mat4 v, p;
-  Vec3 eye, fwd;
-  SceneCamera scam;
-  float aspect = view.w / (float)view.h;
-  if (gcam) {
-    aspect = gcam->image_aspect(view.w / (float)view.h);
-    if (gcam->aspect_mode != 0) {  // (letterboxed as the Game view is)
-      if (view.w / (float)view.h > aspect) img.w = std::max(8, (int)std::lround(view.h * aspect));
-      else img.h = std::max(8, (int)std::lround(view.w / aspect));
-      img.x = view.x + (view.w - img.w) / 2, img.y = view.y + (view.h - img.h) / 2;
-      u.canvas.fill_rect(view, 0xFF000000);
-    }
-    const Quat q = owner->world_rotation();
-    eye = owner->world_position(), fwd = q.rotate({0, 0, 1});
-    v = Mat4::look_at(eye, eye + fwd, q.rotate({0, 1, 0}));
-    p = gcam->projection(aspect);
-    scam = game_scene_camera(*gcam, *owner, aspect);
-  }
-  else {
-    scam = cam_;
-    eye = cam_.position(), fwd = cam_.forward();
-    v = cam_.view(), p = cam_.proj(aspect);
-  }
-  draw_rt_.attach(fb_, img);
-  const uint64_t key = (gcam ? camera_render_hash(owner, gcam) : scene_view_key(img)) ^ raster_opt_key() ^ ((uint64_t)img.w << 48) ^ ((uint64_t)img.h << 32) ^
-                       ((uint64_t)img.x << 16) ^ (uint64_t)img.y ^ 0xD4A77E5ull;
-  if (!view_cache_hit(draw_cache_, key, img)) {
-    render_scaled(draw_r3d_, draw_rt_, draw_vs_, v, p, [&](RenderTarget &t) {
-      render_camera(draw_r3d_, t, draw_ft_, v, p, eye, fwd, owner, gcam, aspect, gcam != nullptr, true, false);
-    }, owner, false, false);
-    prof_.view_renders++;
-    view_cache_store(draw_cache_, key, img);
-  }
-  const bool hovered = u.hovered(img) && !u.any_popup_open();
-  sketch_bind(2, img, scam, v, p, hovered);  // (kind 2: the pad; the Scene camera's view when the source is the Scene)
-  if (!playing_) sketch_update(img);  // (a running or paused game: its edits would be dropped on Stop, as the Game view's)
-  sketch_draw(img);
-  if (!sketch_.active || !hovered) return;
-  const char *hint = gcam ? "The Game camera's view: the pen draws in its perspective   Esc: stop drawing"
-                          : "Arrows / A D: orbit   W S: dolly   Shift+arrows, Q E: pan   Esc: stop drawing";
-  u.label({img.x + u.px(8), img.bottom() - u.row_h() - u.px(4), img.w - u.px(16), u.row_h()}, hint, Color::hex(0xFFFFFF, 150));
-}
-
-/* draw source scene|game  (the Draw tab's picture; the other `draw` verbs are the Draw tools') */
-bool Editor::draw_tab_command(const std::vector<std::string> &t) {
-  if (t.size() < 2 || to_lower(t[0]) != "draw" || to_lower(t[1]) != "source") return false;
-  const std::string w = t.size() > 2 ? to_lower(t[2]) : "";
-  if (w != "scene" && w != "game") {
-    Log::info("usage: draw source scene|game");
-    return true;
-  }
-  draw_source_ = w == "game" ? 1 : 0;
-  draw_cache_.key = 0;
-  return true;
 }
 
 }  // namespace bl

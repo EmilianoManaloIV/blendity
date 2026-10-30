@@ -265,6 +265,10 @@ class Context {
   void menu_label(const std::string &text);
   Recti popup_row(int h = -1);  // reserve a row in the current popup
   Recti last_widget() const { return last_widget_; }  // where the last widget (or menu row) was drawn
+  /* A panel floating over a window (the Draw tab's brush palette, round 320): its frame and title bar, dragged by the
+   * title and kept inside `bounds`; `r` is its place, kept by the caller. With `close`, a Close button in the title sets
+   * it. Returns the rect under the title for the panel's body. */
+  Recti floating_panel(Id i, Recti &r, const Recti &bounds, const std::string &title, bool *close = nullptr);
   std::string tooltip_text_for_test() const { return tooltip_text_; }  // (the tooltip the last frame showed)
   /* A widget drawn by hand (frames and labels): the next tooltip() belongs to it. */
   void mark_widget(const Recti &r) {
@@ -323,6 +327,7 @@ class Context {
 
   std::vector<Id> id_stack_;
   Id active_ = 0;
+  int float_grab_x_ = 0, float_grab_y_ = 0;  // (floating_panel: where its title was taken)
   Id edit_id_ = 0;
   std::string edit_buf_, edit_original_;
   size_t edit_cursor_ = 0;
