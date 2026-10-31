@@ -369,15 +369,16 @@ void Editor::draw_puppet_controls_extras(GameObject &arm, ui::Layout &lay) {
   problems.clear();
   if (!r.valid()) problems.push_back("Puppet Posing: " + r.problem);
   for (const std::string &p : r.part_problems) problems.push_back(p);
+  /* The sides by the shoulders and the hips (round 349: a hand posed across the body is not a swapped rig). */
   const Vec3 right = cross(Vec3(0.0f, 1.0f, 0.0f), r.forward);
   auto x_of = [&](const GameObject *g) { return g ? dot(g->world_position(), right) : 0.0f; };
   for (const gait::Arm &a : r.arms)
     for (const gait::Arm &b : r.arms)
-      if (a.side == 0 && b.side == 1 && a.hand && b.hand && x_of(a.hand) > x_of(b.hand))
+      if (a.side == 0 && b.side == 1 && a.hand && b.hand && a.upper && b.upper && x_of(a.upper) > x_of(b.upper))
         problems.push_back("The left hand (" + a.hand->name + ") is on the right: set each arm's Hand (and its Upper and Lower Arm) below");
   for (const gait::Leg &a : r.legs)
     for (const gait::Leg &b : r.legs)
-      if (!r.quadruped && a.side == 0 && b.side == 1 && x_of(a.foot) > x_of(b.foot))
+      if (!r.quadruped && a.side == 0 && b.side == 1 && a.foot && dot(a.rest_hip, right) > dot(b.rest_hip, right))  // (the hips as the rig stood)
         problems.push_back("The left foot (" + a.foot->name + ") is on the right: set each leg's Foot (and its Thigh and Shin) below");
   if (r.head && r.hips && r.head->world_position().y < r.hips->world_position().y)
     problems.push_back("The head (" + r.head->name + ") is below the hips: set Head below");
