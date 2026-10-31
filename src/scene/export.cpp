@@ -4,6 +4,7 @@
 #include "../core/core.h"
 #include "../image/image.h"
 #include "../render/canvas.h"
+#include "../render/lightmapper.h"
 #include "scene.h"
 
 #include <algorithm>
@@ -59,6 +60,9 @@ void ExportOptions::reflect(Reflector &r) {
   }
   r.help("Export the meshes as the modifier stack makes them (Blender: Apply Modifiers).");
   if (f == ExportFormat::GLB || f == ExportFormat::GLTF || f == ExportFormat::FBX) {
+    r.field("Lightmap UVs", lightmap_uvs);
+    r.help("A second UV set laid out for lightmaps (no overlaps, a margin between islands), as Unity's Generate Lightmap\n"
+           "UVs and Godot's UV2 import make: the engine bakes its own lighting onto it (round 353).");
     r.field("Shape Keys", shape_keys);
     r.help("Each shape key as a morph target (glTF) or blend shape (FBX), by name with its weight, so visemes, blinks and\n"
            "expressions reach Unity, VRChat and Unreal (Blender: Shape Keys). Off: the mesh as the weights shape it now.");
@@ -144,6 +148,7 @@ struct Prepared {
   std::string name;
   std::shared_ptr<const ExportSkin> skin;  // (task 0268)
   std::vector<float> shape_weights;  // (round 351) per mesh.shape_keys
+  std::vector<Vec2> uv2;             // (round 353) per corner of `mesh`: the lightmap UVs, when asked for
   Mesh mesh;                  // output space and scale, winding reversed (its shape keys' offsets turned likewise)
   std::vector<Vec3> normals;  // per corner, output space
   std::vector<MaterialPtr> materials;
@@ -259,6 +264,10 @@ void prepare_shape_keys(const Mesh &src, const ExportItem &it, const ExportOptio
   }
 }
 
+/* Round 353: the lightmap UVs' layout - a 1024-texel page with 4 texels between islands (Unity's Generate Lightmap UVs
+ * pack margin at that size), so a bake at up to that resolution doesn't bleed between charts. */
+constexpr int kLightmapRes = 1024, kLightmapPadding = 4;
+
 std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const ExportOptions &o, int up) {
   std::vector<Prepared> out;
   for (const ExportItem &it : items) {
@@ -310,6 +319,9 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
         if (uv) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
       }
     p.normals = split_normals(m);
+    if (o.lightmap_uvs && !it.outline) p.uv2 = lightmap_uvs(m, true, kLightmapRes, kLightmapPadding);  // (round 353: on the mesh as written, its corners)
+    if (!p.uv2.empty() && !(o.uvs && m.has_uvs()))
+      Log::info("Export: %s has no UVs - its lightmap UVs go as its first set (UV0), so its textures follow them", p.name.c_str());
     out.push_back(std::move(p));
   }
   return out;
@@ -345,7 +357,7 @@ const MaterialPtr &slot_material(const Prepared &p, int slot) {
  * distinct (position, normal, UV) combination. */
 struct SplitKey {
   uint32_t v;
-  float n[3], t[2];
+  float n[3], t[2], t2[2];  // (t2: round 353's lightmap UVs)
   bool operator==(const SplitKey &o) const { return std::memcmp(this, &o, sizeof(SplitKey)) == 0; }
 };
 struct SplitKeyHash {
@@ -356,7 +368,7 @@ struct SplitKeyHash {
 
 struct SplitVerts {
   std::vector<Vec3> pos, nrm;
-  std::vector<Vec2> uv;
+  std::vector<Vec2> uv, uv2;
   std::vector<float> vid;  // each vertex's index in the mesh, when `ids` (glTF's _VERT, task 0172)
   std::vector<uint32_t> src;  // each vertex's index in the mesh (task 0268: its joints and weights)
   bool ids = false;
@@ -373,12 +385,15 @@ struct SplitVerts {
       const Vec2 t = p.mesh.uvs[corner];
       k.t[0] = t.x, k.t[1] = t.y;
     }
+    const bool second = p.uv2.size() == p.mesh.corner_verts.size();
+    if (second) k.t2[0] = p.uv2[corner].x, k.t2[1] = p.uv2[corner].y;
     auto it = index.find(k);
     if (it != index.end()) return it->second;
     const uint32_t id = (uint32_t)pos.size();
     pos.push_back(p.mesh.positions[k.v]);
     if (normals) nrm.push_back(p.normals[corner]);
     if (uvs) uv.push_back(p.mesh.uvs[corner]);
+    if (second) uv2.push_back(p.uv2[corner]);
     if (ids) vid.push_back((float)k.v);
     src.push_back(k.v);
     index.emplace(k, id);
@@ -393,7 +408,7 @@ template<class T> void put(std::string &b, T v) { b.append(reinterpret_cast<cons
 struct GltfMaterialUse {
   bool emissive_strength = false, toon = false, unlit = false;
 };
-std::string material_json(const Material &m, const std::string &name, int base, int metal_rough, int normal, GltfMaterialUse &use) {
+std::string material_json(const Material &m, const std::string &name, int base, int metal_rough, int normal, GltfMaterialUse &use, int emissive = -1) {
   std::string j = "{\"name\":\"" + json_escape(name) + "\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[" + num(m.base_color.x) + "," +
                   num(m.base_color.y) + "," + num(m.base_color.z) + "," + num(m.alpha) + "],\"metallicFactor\":" + num(m.metallic) +
                   ",\"roughnessFactor\":" + num(m.roughness);
@@ -405,6 +420,7 @@ std::string material_json(const Material &m, const std::string &name, int base, 
     if (std::fabs(m.normal_strength - 1.0f) > 1e-4f) j += ",\"scale\":" + num(m.normal_strength);
     j += "}";
   }
+  if (emissive >= 0) j += strprintf(",\"emissiveTexture\":{\"index\":%d}", emissive);  // (round 353: the emission map too)
   std::string ext;
   const Vec3 e = m.emission * m.emission_strength;
   const float emax = std::max(e.x, std::max(e.y, e.z));
@@ -1140,13 +1156,33 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
       lm.add("ReferenceInformationType").S("IndexToDirect");
       lm.add("Materials").ia(std::move(matidx));
     }
+    const bool uv2 = p.uv2.size() == m.corner_verts.size();
+    if (uv2) {  // (round 353: the lightmap UVs, a second UV map)
+      std::vector<double> lv;
+      std::vector<int32_t> li;
+      for (size_t c = 0; c < p.uv2.size(); c++) lv.insert(lv.end(), {(double)p.uv2[c].x, (double)p.uv2[c].y}), li.push_back((int32_t)c);
+      FbxNode &l2 = geo.add("LayerElementUV").I(uv ? 1 : 0);
+      l2.add("Version").I(101);
+      l2.add("Name").S("Lightmap");
+      l2.add("MappingInformationType").S("ByPolygonVertex");
+      l2.add("ReferenceInformationType").S("IndexToDirect");
+      l2.add("UV").da(std::move(lv));
+      l2.add("UVIndex").ia(std::move(li));
+    }
     FbxNode &layer = geo.add("Layer").I(0);
     layer.add("Version").I(100);
     for (const char *type : {"LayerElementNormal", "LayerElementUV", "LayerElementMaterial"}) {
-      if ((type[12] == 'N' && !o.normals) || (type[12] == 'U' && !uv)) continue;
+      if ((type[12] == 'N' && !o.normals) || (type[12] == 'U' && !uv && !uv2)) continue;
       FbxNode &e = layer.add("LayerElement");
       e.add("Type").S(type);
       e.add("TypedIndex").I(0);
+    }
+    if (uv && uv2) {
+      FbxNode &layer1 = geo.add("Layer").I(1);
+      layer1.add("Version").I(100);
+      FbxNode &e = layer1.add("LayerElement");
+      e.add("Type").S("LayerElementUV");
+      e.add("TypedIndex").I(1);
     }
     FbxNode &model = objects.add("Model").L(mid).S(fbx_name(p.name, "Model")).S("Mesh");
     model.add("Version").I(232);
@@ -1583,7 +1619,8 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     const int tex = texture_of(m.base_map);
     const int mr = metal_rough_of(m);
     const int nt = texture_of(m.normal_map);
-    materials.push_back(material_json(m, mp ? m.name : "Default", tex, mr, nt, use));
+    const int et = texture_of(m.emission_map);
+    materials.push_back(material_json(m, mp ? m.name : "Default", tex, mr, nt, use, et));
     mat_index[mp.get()] = (int)materials.size() - 1;
     return (int)materials.size() - 1;
   };
@@ -1612,6 +1649,13 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         const int view = add_view(t.data(), t.size() * sizeof(Vec2), 34962);
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC2\"}", view, t.size()));
         attrs += strprintf(",\"TEXCOORD_0\":%zu", accessors.size() - 1);
+      }
+      if (!sv.uv2.empty()) {  // (round 353: the lightmap UVs)
+        std::vector<Vec2> t = sv.uv2;
+        for (Vec2 &q : t) q.y = 1.0f - q.y;
+        const int view = add_view(t.data(), t.size() * sizeof(Vec2), 34962);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC2\"}", view, t.size()));
+        attrs += strprintf(",\"TEXCOORD_%d\":%zu", uv ? 1 : 0, accessors.size() - 1);
       }
       const bool skinned = o.skins && p.skin && p.skin->vjoints.size() == m.positions.size() && p.skin->vweights.size() == m.positions.size();
       if (skinned) {  // (task 0268) each vertex's four joints and weights, from its mesh vertex

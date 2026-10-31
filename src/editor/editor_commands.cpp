@@ -1279,7 +1279,8 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("pickfocus: select a Camera or a Light first");
   }
   else if (c == "export") {
-    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [path]: the selection (or the whole scene) */
+    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [ascii] [lightmap] [path]: the selection (or the whole scene); lightmap:
+     * the second UV set (round 353) */
     std::string fmt = to_lower(arg(1, "obj"));
     if (fmt.empty() || fmt[0] != '.') fmt = "." + fmt;
     const int fi = export_format_from_extension(fmt);
@@ -1290,6 +1291,7 @@ void Editor::run_console_command(const std::string &line) {
       o.selection_only = !(t.size() > at && to_lower(t[at]) == "all");
       if (!o.selection_only) at++;
       if (t.size() > at && to_lower(t[at]) == "ascii") o.ascii = true, at++;
+      if (t.size() > at && to_lower(t[at]) == "lightmap") o.lightmap_uvs = true, at++;
       std::string path;
       for (size_t k = at; k < t.size(); k++) path += (path.empty() ? "" : " ") + t[k];
       export_model(o, path);

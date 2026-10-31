@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 353): textures and lightmap UVs in exports
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 2: the
+avatar's .glb held none of its painted texture set).
+
+**Fixed and added (task 0330)**
+- An export into a folder that didn't exist wrote its texture PNGs before the folder was made - they failed and the
+  material kept its procedural reference: the folder is made first (with round 351's project-relative paths, the cause).
+- FBX gets the baked procedural and painted maps too; generated images (UV Grid, Color Grid) go as PNGs; glTF writes
+  the emission map.
+- **Lightmap UVs** in the export options: a second UV set (glTF TEXCOORD_1, FBX a Lightmap UV map) for the engines'
+  lightmaps.
+
+**Checked:** `tests_round353` - the .glb's 3 embedded images, the FBX's 3 PNGs, TEXCOORD_1 in 0..1, the FBX's second UV
+map, the Try-it; Blender 5.2 imports both with all images and both UV maps.
+
+**The review (Opus code-reviewer: approved; its minors fixed):** the tests start from new folders and check the FBX's own
+references and the written pixels; generated images named Blendity_UV_Grid / Blendity_Color_Grid (a user's file of the
+same name never overwritten); failed writes said; no lightmap UVs on Outline shells; a mesh without UVs gets the
+lightmap set as UV0, said; `export ... lightmap` from the console; the lesson's question.
+
 ## 2026-10-31 (round 352): FBX carries the rig and its clip
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (an avatar for Unity's Humanoid

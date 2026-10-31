@@ -2338,10 +2338,43 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
   return true;
 }
 
+/* Round 353: a generated image (UV Grid, Color Grid) written once as a PNG beside the exported file and the slot
+ * pointed at it (other programs have no "generated:" images). False when the slot isn't one. */
+static bool write_generated_png(TextureRef &t, const std::string &path, std::unordered_map<std::string, std::string> &written) {
+  static const std::string kGenerated = "generated:";
+  if (!starts_with(t.path, kGenerated)) return false;
+  const auto wi = written.find(t.path);
+  if (wi != written.end()) {
+    t.path = wi->second;
+    return true;
+  }
+  const TexturePtr tex = resolve_texture_ref(t);
+  if (!tex || tex->levels.empty() || tex->levels[0].px8.empty()) {
+    Log::warn("Export: the generated image %s isn't one Blendity makes - left out", t.path.c_str());
+    return true;
+  }
+  const Texture::Level &l = tex->levels[0];
+  std::vector<uint32_t> px(l.px8.size());
+  for (size_t i = 0; i < px.size(); i++) {  // (RGBA in memory, ARGB to the writer)
+    const uint32_t c = l.px8[i];
+    px[i] = (c & 0xFF000000u) | (c & 0xFFu) << 16 | (c & 0xFF00u) | (c >> 16 & 0xFFu);
+  }
+  std::string stem = t.path.substr(kGenerated.size());
+  for (char &ch : stem) ch = ch == ' ' ? '_' : ch;
+  /* "Blendity_" first: a picture of the user's own named UV_Grid.png beside the file is never overwritten. */
+  const std::string png = fs::join(fs::parent(path), "Blendity_" + stem + ".png");
+  if (!write_png(png, px.data(), l.w, l.h, l.w)) {
+    Log::warn("Export: could not write %s - the map is left out", png.c_str());
+    return true;
+  }
+  t.path = written.emplace(t.path, png).first->second;
+  return true;
+}
+
 void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o) {
-  /* Only the formats whose writers reference textures (OBJ / MTL, glTF), and only with materials. */
+  /* Only the formats whose writers reference textures (OBJ / MTL, glTF, FBX - round 353), and only with materials. */
   const ExportFormat f = (ExportFormat)o.format;
-  if (!o.materials || (f != ExportFormat::OBJ && f != ExportFormat::GLB && f != ExportFormat::GLTF)) return;
+  if (!o.materials || (f != ExportFormat::OBJ && f != ExportFormat::GLB && f != ExportFormat::GLTF && f != ExportFormat::FBX)) return;
   std::unordered_map<std::string, std::string> written;  // "X.ptex#albedo" -> the PNG's absolute path
   std::unordered_map<std::string, std::string> stem_of;  // asset path -> the PNGs' stem (unique beside the file)
   std::unordered_map<std::string, int> stems_used;
@@ -2354,7 +2387,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
       for (const TextureRef *t : {&mp->base_map, &mp->metallic_map, &mp->roughness_map, &mp->normal_map, &mp->emission_map}) {
         std::string asset;
         int out = 0;
-        if (split_texture_ref(t->path, asset, out)) any = true;
+        if (split_texture_ref(t->path, asset, out) || t->path.rfind("generated:", 0) == 0) any = true;  // (generated: round 353)
       }
       if (!any) continue;
       auto ci = copies.find(mp.get());
@@ -2363,6 +2396,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
         for (TextureRef *t : {&copy->base_map, &copy->metallic_map, &copy->roughness_map, &copy->normal_map, &copy->emission_map}) {
           std::string asset;
           int out = 0;
+          if (write_generated_png(*t, path, written)) continue;  // (round 353: UV Grid, Color Grid)
           if (!split_texture_ref(t->path, asset, out)) continue;
           auto wi = written.find(t->path);
           if (wi == written.end()) {
@@ -2394,7 +2428,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
       }
       mp = ci->second;
     }
-  if (!written.empty()) Log::info("Export: %zu procedural texture image(s) written beside the file", written.size());
+  if (!written.empty()) Log::info("Export: %zu generated or procedural texture image(s) written beside the file", written.size());
 }
 
 bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name, int outer, const std::string &which) {
@@ -2776,6 +2810,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
         oi.name = g.name + " Outline";
         oi.mesh = shell;
         oi.shape_weights = it.shape_weights;
+        oi.outline = true;  // (review 353: no lightmap of its own)
         if (shell->vert_count() == m->vert_count()) oi.skin = it.skin;  // (review 352: the line follows the bones, as the body does)
         oi.world = it.world;
         oi.materials = ol.materials();
@@ -2808,6 +2843,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
     path = fs::join(dir, base + export_format_extension(o.format));
   }
   path = resolve_asset_path(path);  // (round 351: a relative path is the project's, not the working folder's)
+  fs::make_dirs(fs::parent(path));  // (round 353: the images beside the file need its folder before the file is written)
   std::string err;
   project_listed_ = -100;
   std::vector<std::shared_ptr<Mesh>> baked_meshes;
