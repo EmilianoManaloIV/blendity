@@ -112,6 +112,9 @@ void Armature::reflect(Reflector &r) {
   r.help("Shows every skin bound to this armature unposed (Blender: Rest Position).");
   r.field("In Front", in_front);
   if (!show_body_mass && !r.all_fields()) return;  // (the physics tools switched off: not shown; files and undo keep it)
+  r.field("Puppet Control Size", control_size, 0.05f, 0.1f, 10.0f);
+  r.help("Puppet Posing's controls (rings at the hands, the head and the hips, boxes under the feet), times their usual size\n"
+         "- a twelfth of the rig's height.");
   r.text("Puppet Handles", puppet_bones);
   r.help("The Puppet Posing handles put on bones by hand (Animation > Puppet > Handle Bones, or autopose handle <part>\n"
          "<bone>): \"Left Hand=Bone.003; Head=head\". A handle not named here is found by the rig's analysis.");

@@ -1167,6 +1167,7 @@ struct Armature : ComponentBase<Armature> {
   /* Puppet Posing's handles set by hand (round 324): "Left Hand=Bone.003; Head=head" - a handle the rig's analysis
    * finds wrongly is put on the bone named; the others stay found. */
   std::string puppet_bones;
+  float control_size = 1.0f;  // (round 346) Puppet Posing's controls, times a twelfth of the rig's height
   static inline bool show_body_mass = true;  // (the Inspector shows it while the physics tools are switched on: task 0124)
   void reflect(Reflector &r) override;
 };
