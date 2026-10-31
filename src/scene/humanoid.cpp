@@ -50,10 +50,10 @@ float arm_drop(const gait::Arm &a) {
 
 }  // namespace
 
-Map map(const Scene &scene, GameObject &armature) {
+Map map(const Scene &scene, GameObject &armature, bool with_parts) {
   Map m;
   m.armature = &armature;
-  const gait::Rig r = gait::analyse(scene, armature);
+  const gait::Rig r = gait::analyse(scene, armature, with_parts);
   if (!r.valid()) return m.problem = r.problem, m;
   if (r.quadruped || r.legs.size() != 2) return m.problem = "not a humanoid: " + std::to_string(r.legs.size()) + " legs", m;
   m.part[Hips] = r.hips;

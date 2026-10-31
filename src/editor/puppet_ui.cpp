@@ -34,29 +34,8 @@ std::string trimmed(std::string s) {
   return s;
 }
 
-/* The bone named for handle `k` in an Armature's Puppet Handles, or "". */
-std::string handle_bone_named(const std::string &list, int k) {
-  const std::string key = std::string(kHandleNames[k]) + "=";
-  size_t at = 0;
-  while (at < list.size()) {
-    size_t end = list.find(';', at);
-    if (end == std::string::npos) end = list.size();
-    const std::string item = trimmed(list.substr(at, end - at));
-    if (item.compare(0, key.size(), key) == 0) return trimmed(item.substr(key.size()));
-    at = end + 1;
-  }
-  return "";
-}
-
-/* The list with handle `k` set to `bone` ("" takes it out). */
-std::string with_handle_bone(const std::string &list, int k, const std::string &bone) {
-  std::string out;
-  for (int i = 0; i < kHandles; i++) {
-    const std::string b = i == k ? bone : handle_bone_named(list, i);
-    if (!b.empty()) out += (out.empty() ? "" : "; ") + std::string(kHandleNames[i]) + "=" + b;
-  }
-  return out;
-}
+/* The bone named for handle `k` in an Armature's Puppet Handles, or "" (round 347: the Armature's own reading). */
+std::string handle_bone_named(const Armature *a, int k) { return a ? a->puppet_bone(kHandleNames[k]) : std::string(); }
 
 GameObject *bone_in_rig(GameObject &arm, const std::string &name) {
   if (name.empty()) return nullptr;
@@ -93,13 +72,25 @@ const std::vector<uint64_t> &Editor::rig_ends() {
   if (puppet_.arm != arm->id) puppet_.selected = 0;  // (review 346: another rig - its control isn't this one's)
   puppet_.arm = arm->id, puppet_.key = key;
   puppet_.handles.clear();
-  const humanoid::Map m = humanoid::map(*scene_, *arm);
+  const humanoid::Map m = humanoid::map(*scene_, *arm, false);  // (the analysis' own: Found Automatically; the parts set by hand below)
   for (int k = 0; k < kHandles; k++) {
     puppet_.found[k] = m.part[kHandleParts[k]] ? m.part[kHandleParts[k]]->id : 0;
-    GameObject *own = bone_in_rig(*arm, handle_bone_named(set, k));  // (set by hand: round 324)
+    GameObject *own = bone_in_rig(*arm, handle_bone_named(a, k));  // (set by hand: round 324)
     const uint64_t id = own ? own->id : puppet_.found[k];
     puppet_.part[k] = id;
     if (id && std::find(puppet_.handles.begin(), puppet_.handles.end(), id) == puppet_.handles.end()) puppet_.handles.push_back(id);
+  }
+  /* Round 347: the Armature's Extra Controls - a tail's tip, a sword - a ring each, after the six ends. */
+  puppet_.extra.clear();
+  const std::string extra = a ? a->puppet_bone("Extra Controls") : std::string();
+  for (size_t at = 0; at < extra.size();) {
+    size_t end = extra.find(',', at);
+    if (end == std::string::npos) end = extra.size();
+    GameObject *b = bone_in_rig(*arm, trimmed(extra.substr(at, end - at)));
+    at = end + 1;
+    if (!b || std::find(puppet_.handles.begin(), puppet_.handles.end(), b->id) != puppet_.handles.end()) continue;
+    puppet_.extra.push_back(b->id);
+    puppet_.handles.push_back(b->id);
   }
   return puppet_.handles;
 }
@@ -111,7 +102,7 @@ void Editor::puppet_set_handle(int k, const std::string &bone) {
   Armature *a = arm ? arm->get<Armature>() : nullptr;
   if (!a) return Log::warn("autopose handle: select a bone of the rig (or its armature) first");
   if (!bone.empty() && to_lower(bone) != "auto" && !bone_in_rig(*arm, bone)) return Log::warn("autopose handle: %s has no bone named '%s'", arm->name.c_str(), bone.c_str());
-  a->puppet_bones = with_handle_bone(a->puppet_bones, k, to_lower(bone) == "auto" ? std::string() : bone);
+  a->set_puppet_bone(kHandleNames[k], to_lower(bone) == "auto" ? std::string() : bone);  // (round 347: the other parts kept)
   mark_changed("Puppet Handle Bone");
   rig_ends();
   GameObject *now = scene_->find(puppet_.part[k]);
@@ -136,7 +127,7 @@ void Editor::draw_puppet_handle_items() {
   const Armature *a = arm->get<Armature>();
   for (int k = 0; k < kHandles; k++) {
     GameObject *now = scene_->find(puppet_.part[k]), *found = scene_->find(puppet_.found[k]);
-    const bool by_hand = a && !handle_bone_named(a->puppet_bones, k).empty();
+    const bool by_hand = a && !handle_bone_named(a, k).empty();
     const std::string label = strprintf("%s: %s%s", kHandleNames[k], now ? now->name.c_str() : "(none)", by_hand ? " (set)" : "");
     ui_.submenu(label, ui_.px(260), [this, k, sel, found, by_hand] {
       const std::string use = sel ? "Use the Selected Bone (" + sel->name + ")" : std::string("Use the Selected Bone (select one)");
@@ -167,7 +158,9 @@ Editor::PuppetControl Editor::puppet_control(int k, const GameObject &bone, floa
   if (k == 2 || k == 3) c.kind = 1, c.at = at - Vec3(0.0f, size * 0.6f, 0.0f);  // (a foot: a box under the sole)
   if (k == 4) c.at = at + Vec3(0.0f, size * 1.6f, 0.0f), c.r = size * 0.8f;     // (the head: a ring above it)
   if (k == 5) c.r = size * 1.8f;                                                // (the hips: a large ring round them)
-  c.color = k == 0 || k == 2 ? Color::hex(0x4A90FF, 255) : k == 1 || k == 3 ? Color::hex(0xFF5A5A, 255) : Color::hex(0xFFD24A, 255);
+  if (k == 6) c.r = size * 0.7f;                                                // (an Extra Control: a smaller ring, purple)
+  c.color = k == 0 || k == 2 ? Color::hex(0x4A90FF, 255) : k == 1 || k == 3 ? Color::hex(0xFF5A5A, 255)
+          : k == 6           ? Color::hex(0xB070FF, 255) : Color::hex(0xFFD24A, 255);
   return c;
 }
 
@@ -205,8 +198,8 @@ void Editor::draw_puppet_handles() {
   if (handles.empty()) return;
   const std::vector<GameObject *> pins = autopose_pins(*arm, *arm);  // (once a frame, not once a handle)
   const float size = puppet_control_size(*arm);
-  for (int k = 0; k < kHandles; k++) {
-    GameObject *g = scene_->find(puppet_.part[k]);
+  for (const auto &[k, gid] : puppet_control_list()) {
+    GameObject *g = scene_->find(gid);
     if (!g) continue;
     const uint64_t id = g->id;
     const bool locked = std::find(autopose_.locks.begin(), autopose_.locks.end(), id) != autopose_.locks.end();
@@ -242,8 +235,8 @@ bool Editor::puppet_handles_update(const Recti &view) {
   const float size = puppet_control_size(*arm);
   puppet_.hover = 0;
   float best = 1e9f;  // (the nearest control's distance from what it draws, in pixels)
-  for (int k = 0; k < kHandles; k++) {
-    GameObject *g = scene_->find(puppet_.part[k]);
+  for (const auto &[k, gid] : puppet_control_list()) {
+    GameObject *g = scene_->find(gid);
     Vec2 sp, se;
     float depth = 0.0f, d2 = 0.0f;
     if (!g) continue;
@@ -293,8 +286,9 @@ bool Editor::puppet_handles_update(const Recti &view) {
   if (puppet_.dragging) return puppet_drag(view, x, y);
   if (!(scene_hovered_ && in.pressed[0] && puppet_.hover && !in.alt() && !ui_.any_active())) return false;
   GameObject *g = scene_->find(puppet_.hover);
-  int k = 0;
-  while (k < kHandles - 1 && puppet_.part[k] != g->id) k++;
+  int k = 6;  // (an Extra Control unless one of the six ends)
+  for (int i = 0; i < kHandles; i++)
+    if (puppet_.part[i] == g->id) k = i;
   puppet_.dragging = puppet_.hover;
   puppet_.start = puppet_control(k, *g, size).at;  // (the control's point: the drag moves it, the bone by as much)
   puppet_.bone_start = g->world_position();
@@ -334,6 +328,64 @@ bool Editor::puppet_drag(const Recti &, float x, float y) {
   if (arm && !locked && puppet_pinned(*arm, id)) return Log::info("AutoPose: %s is held by AutoPose (a foot, or a contact here)", g->name.c_str()), true;
   autopose_command({"autopose", locked ? "unlock" : "lock", g->name});
   return true;
+}
+
+/* The controls in order: the six ends (k 0-5) and the Extra Controls (k 6). */
+std::vector<std::pair<int, uint64_t>> Editor::puppet_control_list() const {
+  std::vector<std::pair<int, uint64_t>> out;
+  for (int k = 0; k < kHandles; k++)
+    if (puppet_.part[k]) out.push_back({k, puppet_.part[k]});
+  for (uint64_t id : puppet_.extra) out.push_back({6, id});
+  return out;
+}
+
+/* Round 347: the Armature's Puppet Controls - a line when the analysis looks wrong (left and right swapped, the head below
+ * the hips), so a part to set by hand is plain to see. */
+void Editor::draw_puppet_controls_extras(GameObject &arm, ui::Layout &lay) {
+  auto &u = ui_;
+  const Armature *am = arm.get<Armature>();
+  if (!autopose_.on && (!am || am->puppet_bones.empty())) return;  // (review 347: an armature that isn't posed - a crane, a rope - says nothing)
+  /* The key: the rig's bones (names, parents, places), so renaming or reparenting one looks again (review 347). */
+  uint64_t key = arm.id ^ std::hash<std::string>()(am ? am->puppet_bones : std::string()) * 0x9E3779B97F4A7C15ull;
+  std::function<void(const GameObject &)> walk = [&](const GameObject &o) {
+    key = (key ^ std::hash<std::string>()(o.name)) * 1099511628211ull;
+    key = (key ^ (o.parent ? o.parent->id : 0)) * 1099511628211ull;
+    const Vec3 p = o.world_position();
+    key = mix_bytes(key, &p, sizeof(p));
+    for (const GameObject *c : o.children) walk(*c);
+  };
+  walk(arm);
+  if (key == puppet_problems_key_) {  // (the analysis once per rig, structure and parts set, not every frame)
+    for (const std::string &p : puppet_problems_) {
+      Recti row = lay.row(u.row_h() + u.px(2));
+      u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "? " + p, u.theme.warning);
+      if (u.record_buttons) u.button_rects["shown:? " + p] = row;
+    }
+    return;
+  }
+  puppet_problems_key_ = key;
+  const gait::Rig r = gait::analyse(*scene_, arm);
+  std::vector<std::string> &problems = puppet_problems_;
+  problems.clear();
+  if (!r.valid()) problems.push_back("Puppet Posing: " + r.problem);
+  for (const std::string &p : r.part_problems) problems.push_back(p);
+  const Vec3 right = cross(Vec3(0.0f, 1.0f, 0.0f), r.forward);
+  auto x_of = [&](const GameObject *g) { return g ? dot(g->world_position(), right) : 0.0f; };
+  for (const gait::Arm &a : r.arms)
+    for (const gait::Arm &b : r.arms)
+      if (a.side == 0 && b.side == 1 && a.hand && b.hand && x_of(a.hand) > x_of(b.hand))
+        problems.push_back("The left hand (" + a.hand->name + ") is on the right: set each arm's Hand (and its Upper and Lower Arm) below");
+  for (const gait::Leg &a : r.legs)
+    for (const gait::Leg &b : r.legs)
+      if (!r.quadruped && a.side == 0 && b.side == 1 && x_of(a.foot) > x_of(b.foot))
+        problems.push_back("The left foot (" + a.foot->name + ") is on the right: set each leg's Foot (and its Thigh and Shin) below");
+  if (r.head && r.hips && r.head->world_position().y < r.hips->world_position().y)
+    problems.push_back("The head (" + r.head->name + ") is below the hips: set Head below");
+  for (const std::string &p : problems) {
+    Recti row = lay.row(u.row_h() + u.px(2));
+    u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "? " + p, u.theme.warning);
+    if (u.record_buttons) u.button_rects["shown:? " + p] = row;  // (tests read the line)
+  }
 }
 
 /* Round 346: the rig a click on a bone belongs to (for the AutoPosing click rule in click_select). */

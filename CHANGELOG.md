@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 347): Puppet Posing's control points you choose
+
+**Asked:** "For the auto posing system, where can we specify control point bones so that we can adjust certain points
+of the bone is incorrect." - "Yes add that to the plan."
+
+**Added (task 0324)**
+- **The Armature's Puppet Controls** (an Inspector fold): a bone field for each part - Hips, Head, the hands, the feet,
+  the upper and lower arms, the thighs, the shins - dropped from the Hierarchy, picked (the rig's bones first) or typed;
+  `set Armature.<Part> <bone>` from the console.
+- **The rig's analysis takes them**, so AutoPose and its prior, the walk, footsteps and the controls all agree.
+- **Extra Controls:** a tail's tip or a sword by name gets a purple ring to drag, the bones above bending.
+- **The Inspector says when the analysis looks wrong** (the left hand on the right, the head below the hips).
+- The file keeps round 324's one text; setting one part keeps the others (it had rebuilt the text from the six ends).
+
+**Checked:** `tests_round347` - a left hand and a left thigh set by hand being the analysis', the console's field, the
+other entries kept, save and load; an Extra Control on the Chest drawn and dragging it 17 cm; swapped hands warned; the
+lesson's Try-it; the Puppet, walk, footsteps, gait and humanoid tests.
+
+**The review's fixes (Opus code-reviewer, changes needed):** parts set on a side the analysis found no limb on did
+nothing (an imported rig named Bone.001: no arms by name) - the arms, and the legs when none are found, are made from
+the parts (tested on a renamed rig); each part had been set alone, unchecked - a hand set pulls its forearm and upper
+arm unless they are set too, every limb must be a chain and not another limb's, else the analysis' bones are kept and
+the Inspector says why (tested: a shin as the thigh, the left foot as the right); Found Automatically shows the
+analysis' own bone; the Inspector's line looks again when bones change, and says nothing on an armature never posed;
+names cleaned of the list's separators; one parser.
+
 ## 2026-10-31 (round 341): Anime Face Normals from an ellipsoid
 
 **Asked:** the 2D-look methods ("Add those components onto the plan."): face normals from a head-shaped proxy - task

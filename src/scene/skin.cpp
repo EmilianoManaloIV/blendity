@@ -102,6 +102,55 @@ void Bone::reflect(Reflector &r) {
          "Armature > Apply as Rest copies the current pose here.");
 }
 
+namespace {
+std::string trimmed_entry(std::string s) {
+  while (!s.empty() && (s.back() == ' ' || s.back() == ';')) s.pop_back();
+  while (!s.empty() && s.front() == ' ') s.erase(0, 1);
+  return s;
+}
+/* Puppet Posing's controls set by hand (round 347): the ends (round 324's handles), the chain starts and the middles,
+ * and the bones that get a control of their own. */
+const char *const kPuppetKeys[] = {"Hips", "Head", "Left Hand", "Right Hand", "Left Foot", "Right Foot", "Left Upper Arm", "Right Upper Arm",
+                                   "Left Lower Arm", "Right Lower Arm", "Left Thigh", "Right Thigh", "Left Shin", "Right Shin"};
+}  // namespace
+
+std::string Armature::puppet_bone(const std::string &key) const {
+  const std::string k = key + "=";
+  size_t at = 0;
+  while (at < puppet_bones.size()) {
+    size_t end = puppet_bones.find(';', at);
+    if (end == std::string::npos) end = puppet_bones.size();
+    const std::string item = trimmed_entry(puppet_bones.substr(at, end - at));
+    if (item.compare(0, k.size(), k) == 0) return trimmed_entry(item.substr(k.size()));
+    at = end + 1;
+  }
+  return "";
+}
+
+void Armature::set_puppet_bone(const std::string &key, const std::string &bone_in) {
+  /* (Review 347: a ';' or '=' in a name would split the list - the Extra Controls' ';' read as their ','.) */
+  std::string bone;
+  for (char ch : bone_in) bone += ch == ';' ? ',' : ch;
+  bone.erase(std::remove(bone.begin(), bone.end(), '='), bone.end());
+  bone = trimmed_entry(bone);
+  std::string out;
+  size_t at = 0;
+  bool done = false;
+  while (at <= puppet_bones.size()) {
+    size_t end = puppet_bones.find(';', at);
+    if (end == std::string::npos) end = puppet_bones.size();
+    const std::string item = trimmed_entry(puppet_bones.substr(at, end - at));
+    at = end + 1;
+    if (item.empty()) continue;
+    const bool same = item.compare(0, key.size() + 1, key + "=") == 0;
+    const std::string keep = same ? (bone.empty() ? std::string() : key + "=" + bone) : item;
+    done = done || same;
+    if (!keep.empty()) out += (out.empty() ? "" : "; ") + keep;
+  }
+  if (!done && !bone.empty()) out += (out.empty() ? "" : "; ") + key + "=" + bone;
+  puppet_bones = out;
+}
+
 void Armature::reflect(Reflector &r) {
   static const char *kDeform[] = {"Linear", "Dual Quaternion"};
   r.enumeration("Deform", deform, kDeform, 2);
@@ -115,9 +164,27 @@ void Armature::reflect(Reflector &r) {
   r.field("Puppet Control Size", control_size, 0.05f, 0.1f, 10.0f);
   r.help("Puppet Posing's controls (rings at the hands, the head and the hips, boxes under the feet), times their usual size\n"
          "- a twelfth of the rig's height.");
-  r.text("Puppet Handles", puppet_bones);
-  r.help("The Puppet Posing handles put on bones by hand (Animation > Puppet > Handle Bones, or autopose handle <part>\n"
-         "<bone>): \"Left Hand=Bone.003; Head=head\". A handle not named here is found by the rig's analysis.");
+  /* Round 347: files keep the one list; the Inspector (and `set`) a field each - a bone dropped from the Hierarchy or
+   * picked (the rig's own first), the analysis taking it everywhere (AutoPose, the walk, footsteps, the controls). */
+  if (r.serializing()) r.text("Puppet Handles", puppet_bones);
+  if (!r.serializing() && r.group("Puppet Controls", false)) {
+    for (const char *key : kPuppetKeys) {
+      std::string bone = puppet_bone(key);
+      const std::string before = bone;
+      r.object(key, bone, "Bone");
+      if (bone != before) set_puppet_bone(key, bone);
+    }
+    r.help("A part the rig's analysis finds wrongly put on its bone: empty, the analysis decides. A hand or a foot set takes the\n"
+           "two bones above it unless they are set too; a limb that isn't a chain is kept as found (said below). Ignored on a\n"
+           "four-legged rig. Animation > Puppet > Handle Bones and `autopose handle <part> <bone>|auto` set them too.");
+    std::string extra = puppet_bone("Extra Controls");
+    const std::string before = extra;
+    r.text("Extra Controls", extra);
+    r.help("Bones with a control of their own - a tail's tip, a sword, a cape's corner - by name, comma separated: a ring at each\n"
+           "to drag, the bones above it bending (AutoPose).");
+    if (extra != before) set_puppet_bone("Extra Controls", extra);
+  }
+  if (!r.serializing()) r.group_end();
   r.field("Body Mass", body_mass, 0.5f, 0.01f, 100000.0f);
   r.help("The whole body in kilograms, shared among the bones by the volume of mesh each moves (Animation > Physics:\n"
          "the center of mass, ballistic jumps). Cascadeur: the character's mass.");

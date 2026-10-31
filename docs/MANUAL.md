@@ -1015,7 +1015,11 @@ It is written in the background, at full sharpness. `board export <path> [png|jp
 [bg board|white|none]`.
 
 **Puppet handles on the right bones:** if a Puppet Posing handle sits on the wrong bone, select the right bone, then
-Animation > Puppet > Handle Bones > that handle > Use the Selected Bone (`autopose handle <part> <bone>|auto`).
+Animation > Puppet > Handle Bones > that handle > Use the Selected Bone (`autopose handle <part> <bone>|auto`). Since
+round 347 the Armature's **Puppet Controls** fold has a bone field for each part - the ends and the upper and lower
+arms, the thighs and the shins - (drag the bone from the Hierarchy, or `set Armature.LeftThigh <bone>`), and every
+tool that reads the rig (AutoPose, the walk, footsteps) takes them; **Extra Controls** (bone names, commas) give a tail
+or a sword a ring to drag; a line under the fields says when the analysis has the left hand on the right.
 
 ## The reference board (round 322)
 Window > Board (a tab beside the Draw tab in the Drawing layout; beside it in Drawing with References).
