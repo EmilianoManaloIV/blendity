@@ -811,10 +811,12 @@ bridge in: Window > Live Link > Install a Bridge > Blender (found and enabled fo
 Project... and pick the project's folder. The window lists who is connected. `tools/package_bridges.py` makes the
 packages to install by hand (docs/LIVELINK.md, bridges/*/README.md).
 
-**glTF (.glb / .gltf) carries a rig**: a mesh with a Skin modifier exports at rest with its armature as joints, four
-weights a vertex and its rig's clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and
-Blender import a character that still moves. The other formats, and glTF with Armatures and Animation off, write the
-mesh as posed. **Shape keys** (round 351) go out as glTF morph targets and FBX blend shapes, by name with their weights -
+**glTF (.glb / .gltf) and FBX carry a rig** (FBX since round 352): a mesh with a Skin modifier exports at rest with
+its armature as joints (FBX: LimbNodes, a Skin with a Cluster a bone, the bind pose), four weights a vertex and its rig's
+clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and Blender import a character that
+still moves - in FBX every mesh on one armature (a body, its hair, its clothes) sharing its skeleton, an Outline's line
+skinned with it, the modifiers but the Skin applied. The other formats, and these with Armatures and Animation off, write
+the mesh as posed. **Shape keys** (round 351) go out as glTF morph targets and FBX blend shapes, by name with their weights -
 visemes, blinks and expressions reach Unity, VRChat and Unreal - with the mesh at rest when its rig goes too; a
 modifier that changes the mesh's shape (a Subdivision Surface, or a Skin whose rig isn't exported) leaves them out and
 the log says why. Normal-only modifiers (Anime Face Normals' transfer, Smooth Normals) keep them, and an Outline's

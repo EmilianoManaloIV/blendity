@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 352): FBX carries the rig and its clip
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (an avatar for Unity's Humanoid
+import and VRChat, which expect FBX).
+
+**Added (task 0329)**
+- **FBX export of a skinned mesh** at rest with its skeleton - LimbNode bones under a Null, a Skin deformer with a
+  Cluster a weighted bone, the bind pose - and its rig's clip as an animation stack: every bone's translation, rotation
+  (Euler XYZ, continuous) and scale a frame, the shape keys' weights on their channels. **Armatures and Animation** is
+  offered for FBX (on by default).
+
+**Checked:** `tests_round352` - an FBX and a glTF of the same rigged, keyed mesh import with the same bones, weights,
+clip turn and shape-key weight; the editor's rigged Cube to FBX with its skin and clip; the option offered. Blender 5.2
+imports the FBX with its armature, vertex groups, Armature modifier, shape keys and actions.
+
+**The review's fixes (Opus code-reviewer, changes needed):** an Outline's shell goes skinned with the body; the rig's
+mesh goes through its modifiers but the Skin (a Mirror'd half-body had gone as half); one skeleton and one clip for every
+mesh on an armature (each had its own copy); key times rounded; the nearer Euler solution (no swing past 90 degrees);
+InheritType RSrs; mirrored bases; a cluster for every bone; standard frame rates. Tested against ufbx's own skinning of
+the exported rig at a keyed frame: every vertex where Blendity's Skin puts it.
+
 ## 2026-10-31 (round 351): shape keys in glTF and FBX exports
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 1: the

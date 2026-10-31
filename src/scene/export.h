@@ -27,7 +27,7 @@ namespace bl {
 
 struct Reflector;
 
-/* Task 0268: a skinned mesh's skeleton, weights and clip, for glTF (the other formats write the mesh as posed). Joints
+/* Task 0268: a skinned mesh's skeleton, weights and clip, for glTF and (round 352) FBX (the others write the mesh as posed). Joints
  * are listed parents first, each local to its parent joint, the first ones to `base`; Blendity's space (the writer
  * mirrors and scales them as it does the vertices). */
 struct ExportSkin {
@@ -39,6 +39,7 @@ struct ExportSkin {
     Vec3 s{1, 1, 1};
   };
   std::string base_name = "Skeleton";
+  uint64_t rig = 0;  // (review 352) the armature's id: meshes on one rig share its skeleton in FBX (0: their own)
   Mat4 base;  // the skeleton's parent's world matrix
   std::vector<Joint> joints;
   std::vector<std::array<uint16_t, 4>> vjoints;  // per mesh vertex: its four strongest joints
