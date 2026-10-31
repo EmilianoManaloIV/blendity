@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 340): animating on 2s and 3s - held in the preview, the camera smooth
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): animating on 2s and 3s with the camera kept
+smooth.
+
+**Changed (task 0319)**
+- **The Animation window's Preview holds as Play does:** on 2s, scrubbing to frame 5 shows frame 4's pose.
+- **A camera the clip animates moves every frame** while the characters hold (anime's pan over held drawings); **Hold
+  the Camera** on the Animation component holds it with them.
+- **The ruler marks the frames a new pose is drawn on** when the clip's root holds 2s, 3s or 4s.
+- `apply_clip` takes the hold (Play and the Preview through it).
+- Not done: a scene-wide Hold default (each Animation has its own; two places would leave which wins unclear).
+
+**Checked:** `tests_round340` - the Preview at frame 5 on 2s showing frame 4's pose while the camera shows frame 5's
+(Hold the Camera holding it); frame 6 moving on; the ruler's marks at every second frame; Hold the Camera saved.
+
+**The review's fixes (Opus code-reviewer, changes needed):** Render Animation held twice - the camera stood still in
+the video and a range starting between drawn frames posed a frame early: the render passes the raw frame, held once
+from its first frame (tested: 3-6 on 2s poses 3, 3, 5, 5, the camera moving every frame); Set Key, Add Key and Record
+between drawn frames wrote the held pose there and bent the curve: they key the drawn frame (tested); a camera on an
+animated rig's empty was held: the rig moves every frame too; the curve drag and the Zoetrope hold as the Preview; the
+ruler walks only the frames in view; Play tested through the component; the lesson says a Sequencer holds everything.
+
 ## 2026-10-31 (round 339): View Angle Shapes - shape keys by the camera's angle
 
 **Asked:** "Is there any other method we can use the flattice to make 3D look 2D?" - then "Add those components onto

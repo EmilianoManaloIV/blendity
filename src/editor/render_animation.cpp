@@ -103,9 +103,17 @@ bool Editor::start_render_animation(int first, int last, float fps) {
 
 /* Stopped (Stop, a new one, something that ended the preview it poses through) or finished: the pose shown goes back;
  * the frames written stay. */
+/* Round 340: the raw frame, the hold counted from the range's first (its first frame a drawn pose) - held once, in
+ * apply_clip, so the camera and its rig still move every frame. */
+void Editor::render_animation_pose(int first, int frame) {
+  anim_.hold_from = (float)first;
+  anim_set_frame((float)frame);
+}
+
 void Editor::stop_render_animation() {
   if (!ranim_.active) return;
   ranim_.active = false;
+  anim_.hold_from = 0.0f;
   if (rendering_) rendering_ = false;
   final_pt_.pause();  // (task 0161: the cards stop too)
   if (ranim_.source == 1) seq_set_preview(false);
@@ -134,11 +142,7 @@ void Editor::step_render_animation() {
       });
       seq_set_frame(hold_frame_from((float)ranim_.first, (float)ranim_.frame, hold));
     }
-    else {
-      GameObject *root = anim_root();
-      const Animation *an = root ? root->get<Animation>() : nullptr;
-      anim_set_frame(hold_frame_from((float)ranim_.first, (float)ranim_.frame, an ? an->hold : 1));
-    }
+    else render_animation_pose(ranim_.first, ranim_.frame);
     start_final_render(false, false);
     ranim_.started = true;
   }

@@ -390,6 +390,7 @@ screens themselves.
 | A cube with a procedural texture turned black in the GPU views when its Physical Size went down (0.15), or always with Live Shading off. | The card re-sends a mesh that gained tangents, and a zero tangent keeps the plain normal; Box mapping's z follows the size too (round 337). |
 | Camera Flatten's pivot bone had to be typed by its exact name, and only a bone below the object worked. | Pivot Object takes a bone or any object dragged from the Hierarchy or picked (the character's own bones first); the Pivot follows the drop (round 338). |
 | A 3D character looked like a 3D model from the side and from below: a drawn character's mouth slides to the face's edge in profile, and nothing let a shape key follow the view. | View Angle Shapes: shape keys that come in by the camera's angle (a range and a smooth falloff, mirrored for the other side), measured from the head bone, in the Game view and renders (round 339). |
+| On 2s, the Animation window's Preview still showed every frame, and a camera animated in the same clip was held with the characters. | Preview holds as Play does; the camera moves every frame unless Hold the Camera; the ruler marks the drawn frames (round 340). |
 
 ## Still worth doing
 
