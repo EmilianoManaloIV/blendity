@@ -70,7 +70,88 @@ Vec3 flat(Vec3 v) { return Vec3(v.x, 0.0f, v.z); }
 
 }  // namespace
 
-Rig analyse(const Scene &scene, GameObject &armature) {
+namespace {
+/* Round 347: a part set by hand on the Armature (Puppet Controls), a bone of that name below it - or null. */
+GameObject *part_set(GameObject &armature, const std::string &key) {
+  const Armature *a = armature.get<Armature>();
+  const std::string name = a ? a->puppet_bone(key) : std::string();
+  if (name.empty()) return nullptr;
+  std::vector<GameObject *> todo{&armature};
+  while (!todo.empty()) {
+    GameObject *g = todo.back();
+    todo.pop_back();
+    if (g != &armature && g->name == name && g->get<Bone>()) return g;
+    for (GameObject *c : g->children) todo.push_back(c);
+  }
+  return nullptr;
+}
+/* Whether `upper` -> `lower` -> `end` is a chain of three different bones, each below the one before. */
+bool chain_ok(const Scene &scene, GameObject *upper, GameObject *lower, GameObject *end) {
+  if (!upper || !lower || !end || upper == lower || lower == end || upper == end) return false;
+  return is_bone(upper) && is_bone(lower) && is_bone(end) && scene.is_ancestor(upper, lower) && scene.is_ancestor(lower, end);
+}
+const char *side_word(int side) { return side == 0 ? "Left" : "Right"; }
+/* A limb's three bones from the parts set by hand: an end set pulls its chain from its parents unless they are set too;
+ * the analysis' bones otherwise. False (and why, in `rig.part_problems`) when they don't make a chain - the analysis'
+ * kept. */
+bool limb_parts(const Scene &scene, GameObject &armature, Rig &rig, int side, const char *upper_key, const char *lower_key, const char *end_key,
+                GameObject *&upper, GameObject *&lower, GameObject *&end, const std::vector<GameObject *> &taken = {}) {
+  const std::string sw = side_word(side);
+  const std::string limb = sw + (std::string(end_key) == "Foot" ? " leg" : " arm");
+  GameObject *e = part_set(armature, sw + " " + end_key), *l = part_set(armature, sw + " " + lower_key), *u = part_set(armature, sw + " " + upper_key);
+  if (!e && !l && !u) return false;
+  GameObject *ne = e ? e : end;
+  GameObject *nl = l ? l : e && ne && is_bone(ne->parent) ? ne->parent : lower;
+  GameObject *nu = u ? u : (e || l) && nl && is_bone(nl->parent) ? nl->parent : upper;
+  for (GameObject *b : {nu, nl, ne})  // (another limb's bone - the left foot set as the right one pulls the left leg)
+    if (b && std::find(taken.begin(), taken.end(), b) != taken.end()) {
+      rig.part_problems.push_back(limb + ": " + b->name + " is another limb's - the analysis' bones kept");
+      return false;
+    }
+  if (!chain_ok(scene, nu, nl, ne)) {
+    rig.part_problems.push_back(limb + ": " + (nu ? nu->name : "?") + " > " + (nl ? nl->name : "?") + " > " + (ne ? ne->name : "?") +
+                                " isn't a chain (each bone below the one before) - the analysis' bones kept");
+    return false;
+  }
+  upper = nu, lower = nl, end = ne;
+  return true;
+}
+/* The limbs' bones set by hand (round 347; quadrupeds keep the analysis'), each limb checked as a chain; a side the
+ * analysis found no arm on is made from the parts set (an imported rig named Bone.001...). */
+void apply_limb_parts(const Scene &scene, GameObject &armature, Rig &rig) {
+  if (rig.quadruped) return;
+  /* (Each limb's bones not another's: the others' as they stand when it is set.) */
+  auto others = [&](const GameObject *self_upper) {
+    std::vector<GameObject *> out;
+    for (const Leg &l : rig.legs)
+      if (l.upper != self_upper) out.insert(out.end(), {l.upper, l.lower, l.foot});
+    for (const Arm &a : rig.arms)
+      if (a.upper != self_upper) out.insert(out.end(), {a.upper, a.lower, a.hand});
+    return out;
+  };
+  for (Leg &l : rig.legs) limb_parts(scene, armature, rig, l.side, "Thigh", "Shin", "Foot", l.upper, l.lower, l.foot, others(l.upper));
+  for (Arm &a : rig.arms) limb_parts(scene, armature, rig, a.side, "Upper Arm", "Lower Arm", "Hand", a.upper, a.lower, a.hand, others(a.upper));
+  for (int side = 0; side < 2; side++) {
+    if (std::any_of(rig.arms.begin(), rig.arms.end(), [&](const Arm &a) { return a.side == side; })) continue;
+    Arm arm;
+    arm.side = side;
+    if (limb_parts(scene, armature, rig, side, "Upper Arm", "Lower Arm", "Hand", arm.upper, arm.lower, arm.hand, others(nullptr))) rig.arms.push_back(arm);
+  }
+}
+/* Two legs from the parts set by hand, for a rig the analysis found no legs on: each side's foot (its shin and thigh set,
+ * else its parents). */
+std::vector<Leg> legs_from_parts(const Scene &scene, GameObject &armature, Rig &rig) {
+  std::vector<Leg> out;
+  for (int side = 0; side < 2; side++) {
+    Leg l;
+    l.side = side;
+    if (limb_parts(scene, armature, rig, side, "Thigh", "Shin", "Foot", l.upper, l.lower, l.foot)) out.push_back(l);
+  }
+  return out.size() == 2 ? out : std::vector<Leg>();
+}
+}  // namespace
+
+Rig analyse(const Scene &scene, GameObject &armature, bool with_parts) {
   Rig rig;
   rig.armature = &armature;
   std::vector<GameObject *> bones;
@@ -146,6 +227,7 @@ Rig analyse(const Scene &scene, GameObject &armature) {
       if (g.second.size() == 2) pairs.insert(pairs.end(), g.second.begin(), g.second.end());
     rig.legs = pairs.size() == 4 ? pairs : legs;
   }
+  if (rig.legs.size() < 2 && with_parts) rig.legs = legs_from_parts(scene, armature, rig);  // (round 347: the feet set by hand)
   if (rig.legs.size() < 2) return rig.problem = "no legs found (two-bone chains, named as legs or ending at the bottom of the rig)", rig;
   if (rig.legs.size() != 2 && rig.legs.size() != 4)
     return rig.problem = strprintf("%zu legs found: walking takes two (a person) or four (an animal)", rig.legs.size()), rig;
@@ -176,6 +258,7 @@ Rig analyse(const Scene &scene, GameObject &armature) {
     std::stable_sort(rig.legs.begin(), rig.legs.end(), [](const Leg &a, const Leg &b) { return a.side < b.side; });
     if (rig.legs[0].side == rig.legs[1].side) return rig.problem = "both legs are on the same side", rig;
   }
+  if (with_parts) apply_limb_parts(scene, armature, rig);  // (round 347: the parts set by hand, each limb checked as a chain)
   for (Leg &l : rig.legs) {
     l.length = length(l.lower->world_position() - l.upper->world_position()) + length(l.foot->world_position() - l.lower->world_position());
     rig.leg_length = std::max(rig.leg_length, l.length);
@@ -195,7 +278,13 @@ Rig analyse(const Scene &scene, GameObject &armature) {
       rig.hips = a;
       break;
     }
+  if (GameObject *h = with_parts ? part_set(armature, "Hips") : nullptr) rig.hips = h;  // (round 347)
   if (!rig.hips) return rig.problem = "no hips: the legs don't hang from a common bone", rig;
+  rig.head = with_parts ? part_set(armature, "Head") : nullptr;
+  if (rig.head && !scene.is_ancestor(rig.hips, rig.head)) {
+    rig.part_problems.push_back("Head: " + rig.head->name + " isn't below the hips - the analysis' head kept");
+    rig.head = nullptr;
+  }
   /* The head: a bone named so, else the highest bone; the spine is the bones between it and the hips. */
   for (GameObject *b : bones)
     if (!rig.head && has_word(b->name, "head") && !has_word(b->name, "end") && !has_word(b->name, "top")) rig.head = b;

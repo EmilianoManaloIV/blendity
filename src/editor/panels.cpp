@@ -1786,6 +1786,7 @@ void Editor::draw_inspector(const Recti &r) {
           }
       }
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
+      if (dynamic_cast<Armature *>(c)) draw_puppet_controls_extras(*g, lay);  // (round 347: the analysis' problems)
       /* Camera: an eyedropper for the focus distance (Blender: the Focus Distance
        * eyedropper; Unity HDRP: Focus Distance). */
       if (dynamic_cast<Camera *>(c)) {

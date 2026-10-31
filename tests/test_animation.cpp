@@ -2,6 +2,7 @@
 // blendity_tests: the animation tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/scene/puppet.h"
+#include "../src/scene/humanoid.h"
 #include "../src/scene/motion_check.h"
 #include "../src/scene/ragdoll.h"
 
@@ -5827,6 +5828,144 @@ static void tests_round346() {
   });
 }
 
+/* ---------------------------------------------------------------- round 347: control points you choose */
+static bool scene_parent_is(const GameObject *child, const GameObject *parent) { return child && child->parent == parent; }
+
+static void tests_round347() {
+  test("Puppet Controls (review 347): an imported rig named Bone.001... - no limbs found by name or shape - is read from the parts set by hand: both feet and both hands give two legs and two arms", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    /* Every bone renamed Bone.NNN: the legs are still found by their shape, the arms (found by name only) not at all. */
+    std::map<std::string, std::string> renamed;
+    int n = 0;
+    std::function<void(GameObject &)> walk = [&](GameObject &g) {
+      if (g.get<Bone>()) renamed[g.name] = strprintf("Bone.%03d", n++), g.name = renamed[g.name];
+      for (GameObject *c : g.children) walk(*c);
+    };
+    walk(*rig);
+    const gait::Rig before = gait::analyse(s, *rig);
+    Armature *a = rig->get<Armature>();
+    for (const char *side : {"Left", "Right"}) {
+      a->set_puppet_bone(std::string(side) + " Foot", renamed[std::string(side) + "Foot"]);
+      a->set_puppet_bone(std::string(side) + " Hand", renamed[std::string(side) + "Hand"]);
+    }
+    const gait::Rig after = gait::analyse(s, *rig);
+    std::printf("    named Bone.NNN: %zu legs, %zu arms (%s); with the feet and hands set: %zu legs, %zu arms (%s)\n", before.legs.size(), before.arms.size(),
+                before.valid() ? "valid" : before.problem.c_str(), after.legs.size(), after.arms.size(), after.valid() ? "valid" : after.problem.c_str());
+    CHECK(after.valid() && after.legs.size() == 2 && after.arms.size() == 2);
+  });
+  test("Puppet Controls (round 347): a part set on the Armature takes the analysis' place - the left hand on another bone, the left thigh on another - for every tool that reads the rig; set from the console's field names; other entries kept; round 324's text loads", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    Armature *a = rig ? rig->get<Armature>() : nullptr;
+    CHECK(a != nullptr);
+    if (!a) return;
+    a->puppet_bones = "Head=Neck";  // (round 324's text)
+    a->set_puppet_bone("Left Hand", "LeftLowerArm");
+    a->set_puppet_bone("Left Thigh", "Hips");
+    CHECK(a->puppet_bone("Head") == "Neck" && a->puppet_bone("Left Hand") == "LeftLowerArm" && a->puppet_bone("Left Thigh") == "Hips");
+    a->set_puppet_bone("Left Thigh", "");
+    CHECK(a->puppet_bone("Left Thigh").empty() && a->puppet_bone("Head") == "Neck");
+    a->set_puppet_bone("Left Thigh", "LeftLowerLeg");  // (the shin as the thigh: not a chain - refused, said)
+    a->set_puppet_bone("Right Foot", "LeftFoot");       // (the left foot on the right leg: not a chain either)
+    const gait::Rig r = gait::analyse(s, *rig);
+    const gait::Arm *left_arm = nullptr;
+    const gait::Leg *left_leg = nullptr, *right_leg = nullptr;
+    for (const gait::Arm &arm : r.arms) left_arm = arm.side == 0 ? &arm : left_arm;
+    for (const gait::Leg &leg : r.legs) (leg.side == 0 ? left_leg : right_leg) = &leg;
+    std::printf("    the analysis: the left hand %s (its forearm %s, upper arm %s), the left thigh %s, the right foot %s, the head %s; %zu problems\n",
+                left_arm && left_arm->hand ? left_arm->hand->name.c_str() : "-", left_arm && left_arm->lower ? left_arm->lower->name.c_str() : "-",
+                left_arm && left_arm->upper ? left_arm->upper->name.c_str() : "-", left_leg && left_leg->upper ? left_leg->upper->name.c_str() : "-",
+                right_leg && right_leg->foot ? right_leg->foot->name.c_str() : "-", r.head ? r.head->name.c_str() : "-", r.part_problems.size());
+    for (const std::string &p : r.part_problems) std::printf("      %s\n", p.c_str());
+    /* A hand set pulls its chain: the forearm is the hand's parent, the upper arm its parent. */
+    CHECK(left_arm && left_arm->hand && left_arm->hand->name == "LeftLowerArm" && left_arm->lower && left_arm->lower->name == "LeftUpperArm" &&
+          left_arm->upper && scene_parent_is(left_arm->lower, left_arm->upper));
+    CHECK(left_leg && left_leg->upper && left_leg->upper->name == "LeftUpperLeg");  // (the analysis' kept)
+    CHECK(right_leg && right_leg->foot && right_leg->foot->name == "RightFoot");    // (likewise)
+    CHECK(r.part_problems.size() == 2);
+    CHECK(r.head && r.head->name == "Neck");
+    /* Found Automatically is the analysis' own, whatever is set. */
+    const humanoid::Map own = humanoid::map(s, *rig, false);
+    CHECK(own.part[humanoid::LHand] && own.part[humanoid::LHand]->name == "LeftHand");
+    /* A name with the list's own separators is cleaned. */
+    a->set_puppet_bone("Extra Controls", "Chest;Tail=");
+    CHECK(a->puppet_bone("Extra Controls") == "Chest,Tail" && a->puppet_bone("Head") == "Neck");
+    /* The console's `set` reaches each part's field (the Inspector's Puppet Controls). */
+    Editor ed;
+    ed.init_headless(1200, 900);
+    GameObject *rig2 = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("R347");
+    ed.command("select " + rig2->name);
+    ed.command("set Armature.RightFoot RightLowerLeg");
+    CHECK(rig2->get<Armature>()->puppet_bone("Right Foot") == "RightLowerLeg");
+    /* Saved and loaded: the one text. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    GameObject *rb = back.find_by_name(rig2->name);
+    CHECK(rb && rb->get<Armature>() && rb->get<Armature>()->puppet_bone("Right Foot") == "RightLowerLeg");
+  });
+  test("Puppet Controls (round 347): Extra Controls give a tail or a sword a ring of its own (dragged, the bones above bend); the Inspector says when a part set by hand was refused (the right hand set as the left)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(1000.0);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("R347b");
+    ed.command("select " + rig->name);
+    ed.command("anim new R347");
+    ed.command("autopose on");
+    ed.frame_selected_for_test();
+    rig->get<Armature>()->set_puppet_bone("Extra Controls", "Chest, NoSuchBone");
+    ed.mark_changed_for_test("R347 extra");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti chest;
+    const bool ring = ed.button_rect_for_test("puppet:Chest", chest);
+    std::printf("    the Extra Control on the Chest: %s\n", ring ? "drawn" : "NOT drawn");
+    CHECK(ring);
+    /* Dragged: the chest moves (AutoPose bends the spine). */
+    GameObject *c = ed.scene().find_by_name("Chest");
+    const Vec3 c0 = c ? c->world_position() : Vec3(0.0f);
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    const int x0 = chest.x + chest.w / 2, y0 = chest.y + chest.h / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, x0, y0)});
+    ed.step_frame_headless({ev(ET::MouseDown, x0, y0)});
+    for (int i = 1; i <= 6; i++) ed.step_frame_headless({ev(ET::MouseMove, x0 + i * 6, y0)});
+    ed.step_frame_headless({ev(ET::MouseUp, x0 + 36, y0)});
+    ed.step_frame_headless();
+    std::printf("    the chest dragged 36 px: it moved %.1f cm\n", c ? length(c->world_position() - c0) * 100.0f : -1.0f);
+    CHECK(c && length(c->world_position() - c0) > 0.01f);
+    /* The hands set the wrong way round: the Inspector says so. */
+    ed.command("autopose off");
+    Armature *a = rig->get<Armature>();
+    a->set_puppet_bone("Left Hand", "RightHand"), a->set_puppet_bone("Right Hand", "LeftHand");
+    ed.mark_changed_for_test("R347 swapped");
+    ed.command("select " + rig->name);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    bool warned = false;
+    for (const std::string &l : ed.button_labels_for_test()) warned = warned || l.rfind("shown:? Left arm: ", 0) == 0 && l.find("another limb") != std::string::npos;  // (the right hand set as the left: refused, and said)
+    std::printf("    the refused part said in the Inspector: %d\n", (int)warned);
+    CHECK(warned);
+  });
+  test("the lesson's Try-it (round 347): rig humanoid, then set Armature.ExtraControls Chest gives the Chest a control", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    for (const char *c : {"rig humanoid", "set Armature.ExtraControls Chest"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    GameObject *root = ed.active_object_for_test();
+    const Armature *a = root ? root->get<Armature>() : nullptr;
+    CHECK(a && a->puppet_bone("Extra Controls") == "Chest");
+  });
+}
+
 static void tests_round302() {
   test("motion trails and onion skin (task 0282): the frames around the playhead are sampled a few at a time and kept; the trail's point at frame 10 is where the hand is at frame 10; an Alt-drag of the hand's key dot at 10 moves its keys to 13 (not past their neighbours); onion skin draws, the scene put back as it was", [] {
     Editor ed;
@@ -6607,6 +6746,7 @@ void run_animation_tests() {
   tests_round335();
   tests_round340();
   tests_round346();
+  tests_round347();
   round64_tests();
   round69_tests();
   tests_round81();

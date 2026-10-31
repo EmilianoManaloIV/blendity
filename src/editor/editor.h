@@ -2064,6 +2064,7 @@ class Editor {
     std::vector<uint64_t> handles; // the hands, the feet, the head, the hips
     uint64_t part[6] = {}, found[6] = {};  // (each handle's bone, and the one the analysis found: round 324)
     uint64_t dragging = 0, hover = 0, selected = 0;  // (round 346: a control clicked - selected; double-clicked - pinned)
+    std::vector<uint64_t> extra;  // (round 347: the Armature's Extra Controls' bones)
     Vec3 start, normal, bone_start;
     Vec2 press;
     bool moved = false, double_press = false;
@@ -2077,6 +2078,10 @@ class Editor {
   PuppetControl puppet_control(int k, const GameObject &bone, float size) const;
   float puppet_control_size(const GameObject &arm);
   GameObject *puppet_rig_of(GameObject *g);
+  std::vector<std::pair<int, uint64_t>> puppet_control_list() const;
+  void draw_puppet_controls_extras(GameObject &arm, ui::Layout &lay);
+  std::vector<std::string> puppet_problems_;  // (round 347: the analysis' problems shown, and what they were found for)
+  uint64_t puppet_problems_key_ = 0;
   /* A bone selected by its control while AutoPosing (round 346): posed by the control, no gizmo drawn over it. */
   bool puppet_control_selected() const { return autopose_.on && puppet_.selected && puppet_.selected == active_ && selection_.size() == 1; }
   const std::vector<uint64_t> &puppet_handles();
