@@ -2361,6 +2361,8 @@ void Editor::draw_profiler(const Recti &r) {
   }
   plot(frame_history_, Color::hex(0x5AA0E6));
   plot(raster_history_, u.theme.accent);
+  lay.space(u.px(8));
+  draw_budget(lay);  // (round 355: what the scene or the selection costs against a target; below the graph - review 355)
 
   const RasterStats &s = scene_stats_;
   lay.space(u.px(6));

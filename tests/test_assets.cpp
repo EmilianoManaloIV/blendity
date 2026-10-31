@@ -6,6 +6,7 @@
 #include <filesystem>
 #include "fixtures/synthetic_mmd.h"
 #include "../src/core/json.h"
+#include "../src/scene/budget.h"
 #include "../extern/ufbx/ufbx.h"
 
 static void image_tests() {
@@ -5883,6 +5884,160 @@ static void tests_round354() {
   });
 }
 
+/* ---------------------------------------------------------------- round 355: the performance budget */
+static void tests_round355() {
+  test("Budget (round 355): VRChat's ranks - the first rank each row fits, the worst row the avatar's rank, past Poor Very Poor", [] {
+    const std::vector<BudgetTarget> &t = budget_targets();
+    const int pc = budget_target_index("VRChat PC"), quest = budget_target_index("vrchat quest");
+    CHECK(pc >= 0 && quest >= 0);
+    if (pc < 0 || quest < 0) return;
+    BudgetCounts c;
+    c.value[(int)BudgetRow::Triangles] = 50000, c.value[(int)BudgetRow::SkinnedMeshes] = 1, c.value[(int)BudgetRow::Bones] = 80;
+    BudgetResult r = budget_rank(t[(size_t)pc], c);
+    std::printf("    PC, 50k triangles, 80 bones: %s (triangles %s, bones %s)\n", budget_rank_name(t[(size_t)pc], r.rank).c_str(),
+                budget_rank_name(t[(size_t)pc], r.row_rank[(int)BudgetRow::Triangles]).c_str(), budget_rank_name(t[(size_t)pc], r.row_rank[(int)BudgetRow::Bones]).c_str());
+    CHECK(budget_rank_name(t[(size_t)pc], r.rank) == "Good");
+    c.value[(int)BudgetRow::Triangles] = 80000;
+    CHECK(budget_rank_name(t[(size_t)pc], budget_rank(t[(size_t)pc], c).rank) == "Very Poor");
+    c.value[(int)BudgetRow::Triangles] = 9000;
+    r = budget_rank(t[(size_t)quest], c);
+    CHECK(budget_rank_name(t[(size_t)quest], r.rank) == "Good" && budget_rank_name(t[(size_t)quest], r.row_rank[(int)BudgetRow::Triangles]) == "Good");
+    c.value[(int)BudgetRow::Lights] = 1;  // (a light: Poor on PC, past Poor on Quest)
+    CHECK(budget_rank_name(t[(size_t)pc], budget_rank(t[(size_t)pc], c).rank) == "Poor");  // (PC's Poor allows one light)
+    CHECK(budget_rank_name(t[(size_t)quest], budget_rank(t[(size_t)quest], c).rank) == "Very Poor");
+  });
+  test("Budget (round 355): the counts of what's selected - a cube's 12 triangles, one mesh, one slot; an Outline doubles them; a spring chain and its bones; the scene's light", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    BudgetCounts c = budget_count({g});
+    std::printf("    a cube: %.0f triangles, %.0f mesh, %.0f slot\n", c.value[(int)BudgetRow::Triangles], c.value[(int)BudgetRow::Meshes], c.value[(int)BudgetRow::MaterialSlots]);
+    CHECK(c.value[(int)BudgetRow::Triangles] == 12 && c.value[(int)BudgetRow::Meshes] == 1 && c.value[(int)BudgetRow::MaterialSlots] == 1);
+    ed.command("component Outline");
+    c = budget_count({g});
+    CHECK(c.value[(int)BudgetRow::Triangles] == 24 && c.value[(int)BudgetRow::MaterialSlots] == 2);
+    std::vector<GameObject *> all;
+    ed.scene().for_each([&](GameObject &o) { all.push_back(&o); });
+    CHECK(budget_count(all).value[(int)BudgetRow::Lights] >= 1);
+    ed.command("rig humanoid");
+    ed.command("select Head");
+    ed.command("bone add Head 0.1");
+    ed.command("spring add Bone hair");
+    all.clear();
+    ed.scene().for_each([&](GameObject &o) { all.push_back(&o); });
+    c = budget_count(all);
+    std::printf("    the humanoid with a hair chain: %.0f bones, %.0f chain(s), %.0f spring bone(s)\n", c.value[(int)BudgetRow::Bones], c.value[(int)BudgetRow::SpringChains],
+                c.value[(int)BudgetRow::SpringBones]);
+    CHECK(c.value[(int)BudgetRow::SpringChains] >= 1 && c.value[(int)BudgetRow::SpringBones] >= 1 && c.value[(int)BudgetRow::Bones] >= 10);
+  });
+  test("Budget (round 355): no target, no ranking - exports quiet; `budget quest` chooses one; the Profiler shows the rank; an export's line counts what the file holds (no lights), and only for glTF and FBX", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("create Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    const std::string dir = fs::join(test_dir(), "r355");
+    fs::make_dirs(dir);
+    std::vector<LogEntry> log;
+    auto said = [&](size_t since, const char *text) {
+      log.clear();
+      Log::fetch(since, log);
+      for (const LogEntry &e : log)
+        if (e.text.find(text) != std::string::npos) return true;
+      return false;
+    };
+    size_t since = Log::fetch(0, log);
+    ed.command("export glb " + fs::join(dir, "quiet.glb"));
+    CHECK(!said(since, "Budget ("));
+    ed.command("budget quest");
+    ed.command("window Profiler");
+    r34_steps(ed, 3);
+    bool shown = false;
+    for (const std::string &l : ed.button_labels_for_test()) shown = shown || l.rfind("shown:budget ", 0) == 0;
+    CHECK(shown);
+    since = Log::fetch(0, log);
+    ExportOptions all = export_defaults((int)ExportFormat::GLB);
+    all.selection_only = false;  // (the whole scene: its Sun not in the file, so not counted)
+    ed.export_model_for_test(all, fs::join(dir, "scene.glb"));
+    const bool line = said(since, "Budget (VRChat Quest): the file is");
+    bool lights = false;
+    for (const LogEntry &e : log) lights = lights || (e.text.find("Budget (") != std::string::npos && e.text.find("Lights") != std::string::npos);
+    std::printf("    the scene's glb: the line %d, held by its lights %d\n", (int)line, (int)lights);
+    CHECK(line && !lights);
+    since = Log::fetch(0, log);
+    ed.command("export stl " + fs::join(dir, "print.stl"));
+    CHECK(!said(since, "Budget ("));
+  });
+  test("Budget (round 355): Decimate to Good lands near the limit, multiplies an existing Decimate, leaves small meshes whole, keeps a skinned, keyed mesh's weights and keys, and Undo takes it back", [] {
+    if (!meshops::decimate_available()) return;  // (meshoptimizer: the libraries' build)
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("select Cube");
+    ed.command("create Armature");  // (the Cube skinned)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("create Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    ed.command("subdivide 2");
+    ed.command("shape add Puff");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.select_for_test(g->id, false);
+    ed.command("budget quest");
+    const double limit = budget_targets()[(size_t)budget_target_index("VRChat Quest")].ranks[1].limit[(int)BudgetRow::Triangles];
+    const double before = budget_count({g}).value[(int)BudgetRow::Triangles];
+    ed.command("budget fix good");
+    r34_steps(ed, 2);
+    const double after = budget_count({g}).value[(int)BudgetRow::Triangles];
+    const DecimateModifier *d = g->get<DecimateModifier>();
+    size_t at = 0, skin_at = 0;
+    for (size_t i = 0; i < g->components.size(); i++) at = g->components[i].get() == d ? i : at, skin_at = std::strcmp(g->components[i]->type_name(), SkinModifier::kName) == 0 ? i : skin_at;
+    const Mesh *em = g->evaluated_mesh();
+    std::printf("    Quest's Good (%.0f): %.0f triangles before, %.0f after (ratio %.3f); the Decimate at %zu, the Skin at %zu; groups %zu\n", limit, before, after, d ? d->ratio : -1.0f,
+                at, skin_at, em ? em->vertex_groups.size() : (size_t)0);
+    CHECK(before > limit && after <= limit && after > 0.85 * limit && d && at < skin_at);
+    /* Exported: its weights and its key still there. */
+    const std::string path = fs::join(fs::join(test_dir(), "r355"), "decimated.glb");
+    fs::make_dirs(fs::parent(path));
+    ed.export_model_for_test(export_defaults((int)ExportFormat::GLB), path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    CHECK(j["skins"].size() == 1 && j["meshes"][0]["extras"]["targetNames"][0].str == "Puff");
+    /* An existing Decimate is multiplied: from a ratio twice too high, one fix lands under the limit again. */
+    const_cast<DecimateModifier *>(d)->ratio = std::min(1.0f, d->ratio * 2.0f);
+    ed.mark_changed_for_test("raise the ratio");
+    r34_steps(ed, 2);  // (its own undo step)
+    ed.command("budget fix good");
+    r34_steps(ed, 2);
+    CHECK(budget_count({g}).value[(int)BudgetRow::Triangles] <= limit);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *back = ed.scene().find(g->id);
+    CHECK(back && back->get<DecimateModifier>() && budget_count({back}).value[(int)BudgetRow::Triangles] > limit);
+  });
+  test("the lesson's Try-it (round 355): create Cube, then budget quest ranks it", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    for (const char *c : {"create Cube", "budget quest"}) ed.command(c);
+    log.clear();
+    Log::fetch(since, log);
+    bool ranked = false;
+    for (const LogEntry &e : log) ranked = ranked || e.text.find("Budget (VRChat Quest)") != std::string::npos;
+    CHECK(ranked);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -6251,4 +6406,5 @@ void run_assets_tests() {
   tests_round352();
   tests_round353();
   tests_round354();
+  tests_round355();
 }

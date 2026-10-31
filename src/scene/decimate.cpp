@@ -77,6 +77,20 @@ bool decimate(Mesh &m, float ratio) {
       out.add_face(fv, 3, has_uv ? ft : nullptr, mat);
     }
   }
+  /* Review 355: the kept vertices' vertex groups (a skin's weights) and shape keys (visemes) go along - meshopt keeps
+   * original vertices only, so each is the same vertex's. */
+  for (const VertexGroup &vg : m.vertex_groups) {
+    VertexGroup g{vg.name, std::vector<float>(out.vert_count(), 0.0f)};
+    for (size_t v = 0; v < new_vert.size() && v < vg.weights.size(); v++)
+      if (new_vert[v] != UINT32_MAX) g.weights[new_vert[v]] = vg.weights[v];
+    out.vertex_groups.push_back(std::move(g));
+  }
+  for (const ShapeKey &k : m.shape_keys) {
+    ShapeKey s{k.name, std::vector<Vec3>(out.vert_count(), Vec3(0.0f))};
+    for (size_t v = 0; v < new_vert.size() && v < k.delta.size(); v++)
+      if (new_vert[v] != UINT32_MAX) s.delta[new_vert[v]] = k.delta[v];
+    out.shape_keys.push_back(std::move(s));
+  }
   m = std::move(out);
   m.touch();
   return true;

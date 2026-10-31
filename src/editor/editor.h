@@ -31,6 +31,7 @@
 #include "../render/realtime_lightmap.h"
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
+#include "../scene/budget.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -2892,6 +2893,18 @@ class Editor {
   std::vector<GameObject *> export_candidates(const ExportOptions &o);
   std::string export_path_for(const ExportOptions &o, const std::string &path_in);
   std::string export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path);
+  /* Round 355: the performance budget - the target (VRChat PC, Quest), what it counts (the selection and what's under
+   * it, else the scene), the Profiler's Budget section, the console's `budget`, the export's line, Decimate to fit. */
+  int budget_target_ = -1;  // (-1: none - no ranking, exports quiet; review 355)
+  struct BudgetCache {
+    BudgetCounts counts;
+    double at = -1.0;
+  } budget_cache_;
+  std::vector<GameObject *> budget_objects();
+  void draw_budget(ui::Layout &lay);
+  void budget_command(const std::vector<std::string> &t);
+  bool budget_fix_triangles(int rank);
+  void budget_report(const BudgetCounts &counts, const char *what);
   void export_wait_poll();
   void export_waits_drop(const char *why);
   std::shared_ptr<ExportSkin> export_skin_of(GameObject &armature, const Mesh &m, const GameObject &owner, const SkinModifier &skin);  // (task 0268)

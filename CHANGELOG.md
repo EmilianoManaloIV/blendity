@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 355): a performance budget - VRChat's ranks in the Profiler
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 3: no
+check against VRChat's Performance Ranks; the avatar went out Very Poor without a word).
+
+**Added (task 0332)**
+- **The Profiler's Budget section:** the selection (or the scene) ranked against VRChat PC or Quest's Avatar Performance
+  Ranks - triangles, skinned and basic meshes, material slots, bones, spring chains and their bones, texture memory,
+  lights; shape keys shown - each row coloured by its rank; **Decimate to Good** for the triangles.
+- **`budget [pc|quest]`** and **`budget fix [good|medium|poor]`** in the Console; **every export says the file's rank**
+  (a warning past Poor).
+
+**The Opus review's fixes:** Decimate to Good lands just under the limit (small meshes left whole, an existing Decimate
+multiplied); Decimate keeps vertex groups and shape keys and goes before the Skin; the export's line counts what the
+file holds, for glTF and FBX, with a target chosen (None by default); keyed meshes count as skinned; the counts cached.
+
+**Checked:** `tests_round355` - the ranks (exactly Poor), the counts (an Outline doubling, spring chains, lights), the
+Profiler's line, the Console's rows, an export quiet without a target and its line without the scene's lights, Decimate
+to Good between 85 % of Quest's 10,000 and it on a skinned, keyed sphere that still exports its skin and key, an
+existing Decimate multiplied, Undo, the Try-it.
+
 ## 2026-10-31 (round 354): an export never takes a stale mesh; one glTF skeleton a rig
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 5: the

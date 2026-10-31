@@ -2898,6 +2898,8 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
   }
   export_dir_ = fs::parent(path);
   Log::info("Exported %zu mesh(es) as %s to %s", items.size(), export_format_name(o.format), path.c_str());
+  if (o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF || o.format == (int)ExportFormat::FBX)
+    budget_report(budget_count_items(items), "the file is");  // (round 355: what the file holds against the Budget's target, when one is chosen)
   return path;
 }
 

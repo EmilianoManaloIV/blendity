@@ -862,6 +862,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 ## 11. Performance and the minimum machine
 
+**A performance budget** (round 355): the Profiler's Budget section ranks the selection (or the scene) against VRChat PC or Quest's Avatar Performance Ranks - triangles, meshes, material slots, bones, spring chains, texture memory, lights - each row coloured by its rank, with Decimate to Good for the triangles; `budget pc|quest` lists them, and every export says the file's rank.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

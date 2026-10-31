@@ -731,6 +731,8 @@ Each test compares a naive version with the optimised one, so you can see what e
 > [FoCG] 12.3 Spatial Data Structures
 ! window:Profiler | Open the Profiler
 ! spawn:1000 | Spawn 1,000 spheres and watch the frame time
+! cmd:create Cube; budget quest | Rank the scene against VRChat Quest's limits (the Profiler's Budget section shows the same, row by row)
+? Your avatar is Very Poor on VRChat PC. How do you find out why, and fix the triangles? | The Profiler's Budget section (or `budget pc`) colours each row by the rank it reaches - the red ones hold the avatar back. Decimate to Good adds a Decimate modifier to every mesh so the triangles fit Good's 70,000; materials and textures are reduced by hand.
 # Quality tiers: a small machine
 Blendity's views are drawn by the CPU, so their cost follows the cores and the pixels. Preferences > Performance > Quality tier picks a set of limits for the editor's views (never for F12 renders): Low draws the Scene and Game views' 3D at 67 % and scales it up (lines, gizmos and text stay sharp, and clicks still pick exactly), with a 1024 shadow map, lighter Realtime GI and 60 fps; Medium is 85 %; High has no limits. A first run on a machine with 8 threads or fewer, or about 8 GB, starts on Low. CPU Threads sets how many threads Blendity works on, which also lets a big machine feel like a small one.
 | Tier | Views | Shadow map | Realtime GI | Frame cap
