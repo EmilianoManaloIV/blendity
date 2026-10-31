@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 343): forced perspective - a lens per object
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): forced perspective and a lens per object.
+
+**Added (task 0321, ADR 0093 amended)**
+- **Camera Flatten below 0:** Amount down to -1 stretches the depth toward the camera instead (twice at -1) - a punch
+  or a sword swelling at the lens.
+- **Mode > Focal Length:** the object drawn as if through its own lens (85 mm before a 24 mm camera: flatter; 12 mm:
+  swelling) - the depth kept at the camera's focal length over the object's, the pivot keeping its size; an
+  orthographic camera leaves it as modelled.
+- **Console:** `flatten <amount -1..1>`, `flatten lens <mm>|off`; the lesson's Try-its and a question.
+
+**Checked:** `tests_round343` - Amount -0.5 drawing 0.4 m at 0.6 m; 85 mm through a 24 mm camera keeping 24/85, 12 mm
+twice; an orthographic camera unchanged; `lens off` and a refused word; the Camera Flatten tests (62 checks).
+
+**The review's fixes (Opus code-reviewer, changes needed):** the camera's lens came from the projection's horizontal
+term, so the window's shape, a portrait render or a non-36 mm sensor changed the drawn shape - it is the camera's own
+now (a physical camera's Focal Length, else its vertical field of view on a 36 x 24 frame; tested at 16:9 and 0.9:1 and
+with a physical Super 35 camera in portrait); an amount typed and the anime preset go back to Amount; the Inspector
+shows only the field the Mode uses; a lens equal to the camera's leaves the object as modelled.
+
 ## 2026-10-31 (round 342): a lattice turned to face the camera
 
 **Asked:** the 2D-look methods ("Add those components onto the plan."): a camera-aligned lattice.

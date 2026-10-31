@@ -392,6 +392,7 @@ screens themselves.
 | A 3D character looked like a 3D model from the side and from below: a drawn character's mouth slides to the face's edge in profile, and nothing let a shape key follow the view. | View Angle Shapes: shape keys that come in by the camera's angle (a range and a smooth falloff, mirrored for the other side), measured from the head bone, in the Game view and renders (round 339). |
 | On 2s, the Animation window's Preview still showed every frame, and a camera animated in the same clip was held with the characters. | Preview holds as Play does; the camera moves every frame unless Hold the Camera; the ruler marks the drawn frames (round 340). |
 | A one-shot silhouette correction had to be modelled into the mesh or a shape key, though only one camera angle needed it. | Lattice > Align to Camera: the box faces the camera in the camera views, so its points move the silhouette on screen; the Scene view keeps the model (round 342). |
+| Camera Flatten only flattened: an action shot's fist couldn't swell toward the camera, nor a character be drawn with a longer lens than the background. | Amount below 0 (forced perspective) and Mode Focal Length, an object's own lens (round 343). |
 
 ## Still worth doing
 

@@ -44,6 +44,14 @@ squashed normals would turn every surface toward the camera and flatten the ligh
 - A Pivot Bone name is exact: the console warns when none below matches (the Inspector has no line for it yet); the
   bounds' middle is used meanwhile.
 
+## Amendment (round 343, task 0321)
+- Amount goes to -1: the depth kept up to twice (forced perspective). Mode Focal Length keeps the camera's focal length
+  over the object's (0.02 to 4) - an object drawn through its own lens is that squash seen through the real one, the
+  pivot keeping its size; an orthographic camera has no focal length and leaves the object as modelled. The camera's
+  lens is its own (review 343): a physical camera's Focal Length, else its vertical field of view on a 36 x 24 frame -
+  never the projection's horizontal term, which changed with the window's shape. With the depth stretched, what comes
+  nearer the eye than the near plane is cut, as through a real wide lens.
+
 ## Amendment (round 338, task 0317)
 - The pivot is any object, not only a bone: **Pivot Object**, an object field (a Hierarchy drop, the picker, a typed
   name). The name is looked up as a bone below the component's object first (round 334's files and a face mesh named

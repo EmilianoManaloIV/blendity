@@ -1518,10 +1518,13 @@ Add Component > Rendering > Camera Flatten. Amount is how much of the depth goes
 ! cmd:select Sphere; flatten 0.6 | The Sphere flattened toward the camera: look at it in the Game view
 ! cmd:flatten pivot origin | About its origin instead of its bounds' middle
 ! cmd:flatten pivot object Cube | About another object (the Cube): what you'd drop on Pivot Object
+! cmd:flatten lens 85 | The Sphere drawn through an 85 mm lens of its own while the camera keeps its own (Mode: Focal Length)
+! cmd:flatten lens off; flatten -0.5 | Below 0 the depth is stretched instead: forced perspective, a punch swelling at the camera
 # Where it shows
 The Game view, F12 and Camera Preview show the flattened shape; the Scene view keeps the true one, so you model as usual. On a character's root it reaches every mesh below; a child with its own Camera Flatten (a separate face mesh) uses that. `flatten preset anime` puts 0.6 about the head bone on the selected root.
 ? Your character's nose looks too long when the camera is close, as a wide lens would draw it. What do you add, and where? | Camera Flatten on the character's root, the head bone dragged onto Pivot Object, Amount about 0.6: the depth toward the camera is squashed about the head, so the near parts no longer swell. The Scene view still shows the true model.
 ? With Amount at 1 the lighting still looks round. Why isn't it flat too? | Only where things are drawn changes: the shading reads the true shape's normals, so the light and the toon bands stay as modelled - that is what keeps the 2D look from looking like a cardboard cut-out.
+? A character punches at the camera and the fist should swell as in a drawn action shot. What do you set? | A Camera Flatten on the arm (or the fist's mesh) with Amount below 0 - -0.5 keeps half again the depth toward the camera - or Mode Focal Length with a short lens such as 14 mm; the Scene view keeps the true arm.
 ? The face and the body are one skinned mesh and you want the face flatter than the body. Can you? | Not with one mesh: a Camera Flatten reaches whole meshes. Split the face into its own mesh object below the root and give it its own Camera Flatten with a higher Amount - a child's own one wins.
 )"},
     {"Shapes by the Camera's Angle", "View Angle Shapes: shape keys that come in as the camera turns, as a 2D artist corrects each view", R"(

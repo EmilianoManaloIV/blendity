@@ -1170,6 +1170,7 @@ class Editor {
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
   uint64_t render_hash_for_test() { return scene_render_hash(); }
+  Camera *main_camera_for_test(GameObject **owner = nullptr) { return main_camera(*scene_, owner); }  // (round 343)
   void render_animation_pose_for_test(int first, int frame) { render_animation_pose(first, frame); }  // (round 340)
   void set_key_for_test() { anim_key_all(); }
   Vec3 camera_flatten_pivot_for_test(const GameObject &owner) {
@@ -1725,6 +1726,7 @@ class Editor {
     bool ortho = false;
     int role = 0;
     Vec3 up{0.0f, 1.0f, 0.0f};  // (round 342: the camera's up - a lattice facing it takes the screen's right from it)
+    float focal = 0.0f;  // (round 343: the camera's lens in mm - its Focal Length when physical, else its vertical field of view on a 36 x 24 frame; 0 orthographic)
   } flatten_view_;
   std::unordered_map<uint64_t, uint64_t> view_refs_;  // (round 339: each View Angle Shapes' reference's id, found once a collect - ids, never pointers: a deleted object isn't found)
   std::unordered_map<uint64_t, Vec3> flatten_pivots_;  // (each Camera Flatten's pivot, once a collect)
@@ -1749,7 +1751,7 @@ class Editor {
   void draw_view_shapes_extras(GameObject &g, ViewAngleShapes &vs, ui::Layout &lay);
   /* `role` (round 339): which camera view collects - 0 the Game view and the raster previews, 1 F12, 2 the traced Camera
    * Preview; each has its own view-shaped meshes and outline shells, so none rewrites what another traces. */
-  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0);
+  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0, const Camera *cam = nullptr);  // (round 343: the camera's own lens; null - the main camera's)
   void flatten_command(const std::vector<std::string> &t);
   void draw_anim_holds(const Recti &ruler, const Recti &sheet, float end, const GameObject &root);  // (round 340)
   /* Round 340: the clip onto the root as the root's Animation holds it (on 2s, 3s; its camera smooth unless held). */

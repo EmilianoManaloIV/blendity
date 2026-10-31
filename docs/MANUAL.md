@@ -467,7 +467,11 @@ shape, and the shading stays as modelled (piloting a camera and the Draw tab's c
 through a camera). Put it on a character's root and drag the head bone from the Hierarchy onto **Pivot Object** (or pick
 it with the circle at the field's right - the character's own bones come first; any object works, an empty you move by
 hand too) - `flatten preset anime` does that; Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
-view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that.
+view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that. Below 0,
+Amount stretches the depth instead - forced perspective, a punch swelling at the camera (round 343) - and Mode **Focal
+Length** draws the object as if through a lens of its own (an 85 mm character before a 24 mm camera's background:
+flatter; 12 mm: swelling) - the camera's lens is its Focal Length when physical, else its field of view on a 36 x 24 mm
+frame; `flatten lens <mm>|off`.
 
 **The 2D look - View Angle Shapes** (round 339): Add Component > Rendering > View Angle Shapes brings shape keys in by
 the camera's angle, as a 2D artist corrects each view (a mouth slid to the side in profile, a chin shortened from

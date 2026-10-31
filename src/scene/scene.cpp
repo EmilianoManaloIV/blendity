@@ -1364,9 +1364,23 @@ void MangaEffect::contribute(FilterStack &s) const {
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }
 
 void CameraFlatten::reflect(Reflector &r) {
-  r.field("Amount", amount, 0.01f, 0.0f, 1.0f);
-  r.help("How much of the depth along the view goes: 0 as modelled, 1 flat as a card (2 % kept). The Scene view shows\n"
-         "the true shape; the Game view and renders the flattened one, shaded as the true one.");
+  static const char *kModes[] = {"Amount", "Focal Length"};
+  r.enumeration("Mode", mode, kModes, 2);
+  r.help("Amount: the depth squashed by a share. Focal Length: drawn as if through a lens of its own - an 85 mm character\n"
+         "before a 24 mm camera's wide background (flatter), or 12 mm for a fist punched at the camera (swelling).");
+  if (mode == 0 || r.all_fields()) {  // (the field the Mode uses only: review 343)
+    r.field("Amount", amount, 0.01f, -1.0f, 1.0f);
+    r.help("How much of the depth along the view goes: 0 as modelled, 1 flat as a card (2 % kept); below 0 it is stretched\n"
+           "instead (-1 twice the depth: forced perspective - a punch swells toward the camera; what comes nearer the\n"
+           "camera than the near plane is cut, as a real wide lens would). The Scene view shows the true shape; the Game\n"
+           "view and renders the changed one, shaded as the true one.");
+  }
+  if (mode == 1 || r.all_fields()) {
+    r.field("Focal Length", focal, 1.0f, 1.0f, 1000.0f);
+    r.help("The lens (mm) the object is drawn through, the camera's own lens unchanged for the rest - a physical camera's\n"
+           "Focal Length, else its field of view on a 36 x 24 mm frame (the depth kept is the camera's lens over this, 0.02\n"
+           "to 4 times; an orthographic camera leaves it as modelled).");
+  }
   static const char *kPivots[] = {"Bounds Center", "Object Origin", "Object or Bone"};
   r.enumeration("Pivot", pivot, kPivots, 3);
   r.help("What stays put while the depth squashes: the middle of this object and the meshes below it, its origin, or an\n"

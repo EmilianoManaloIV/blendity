@@ -11931,6 +11931,80 @@ static void tests_round342() {
   });
 }
 
+/* ---------------------------------------------------------------- round 343: forced perspective - a lens per object */
+static void tests_round343() {
+  test("forced perspective (round 343): Camera Flatten at Amount -0.5 stretches the Cube's depth toward the camera by half again; Focal Length 85 before a 24 mm camera keeps 24/85 of it, 12 mm twice it; an orthographic camera leaves a lens alone; flatten lens / off from the console", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("select Cube");
+    ed.command("flatten -0.5");
+    CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf && cf->amount == -0.5f);
+    if (!cf) return;
+    const Vec3 eye{0, 1, -6};
+    const float aspect = 1.5f, fovy = 2.0f * std::atan(18.0f / 24.0f / aspect);  // (a 24 mm lens on a 36 mm-wide frame: tan of half the width 18 / 24)
+    const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(fovy * 1.0f, aspect, 0.1f, 100);
+    auto toward = [&](const std::vector<DrawItem> &items, bool shaded) {  // (how far a point inside the cube toward the camera sits from the pivot)
+      const Vec3 c = cube->world_bounds().center(), dir = normalize(eye - c);
+      for (const DrawItem &it : items)
+        if (it.id == (uint32_t)cube->id && !it.always_cull && !it.unlit) {
+          const Mat4 true_model = it.flattened ? it.shade_model : it.model;  // (shade_model is set on flattened items only)
+          const Mat4 m = shaded ? true_model : it.model;
+          const Vec3 local = true_model.inverse().point(c + dir * 0.4f);
+          return dot(m.point(local) - c, dir);
+        }
+      return 0.0f;
+    };
+    const std::vector<DrawItem> ex = ed.collect_items_for_test(true, v, p, eye);
+    const float before = toward(ex, true), after = toward(ex, false);
+    std::printf("    Amount -0.5: toward the camera %.3f m as modelled, %.3f m drawn\n", before, after);
+    CHECK(std::fabs(after - before * 1.5f) < 1e-3f);
+    ed.command("flatten lens 85");
+    CHECK(cf->mode == 1 && cf->focal == 85.0f);
+    const std::vector<DrawItem> l85 = ed.collect_items_for_test(true, v, p, eye);
+    const float cam_focal = 12.0f * p.m[5];  // (a field-of-view camera: its vertical angle on a 36 x 24 frame - 24 mm here)
+    std::printf("    the camera's focal length %.1f mm; through an 85 mm lens %.3f m (keep %.3f)\n", cam_focal, toward(l85, false), toward(l85, false) / before);
+    CHECK(std::fabs(cam_focal - 24.0f) < 0.05f && std::fabs(toward(l85, false) - before * cam_focal / 85.0f) < 1e-3f);
+    ed.command("flatten lens 12");
+    CHECK(std::fabs(toward(ed.collect_items_for_test(true, v, p, eye), false) - before * cam_focal / 12.0f) < 1e-3f);
+    const std::vector<DrawItem> ortho = ed.collect_items_for_test(true, v, Mat4::ortho(3.0f, aspect, 0.1f, 100.0f), eye);
+    std::printf("    orthographic: %.3f (as modelled %.3f; the matrix m15 %g)\n", toward(ortho, false), before, Mat4::ortho(3.0f, aspect, 0.1f, 100.0f).m[15]);
+    CHECK(std::fabs(toward(ortho, false) - before) < 1e-4f);  // (no lens on an orthographic camera)
+    ed.command("flatten lens off");
+    CHECK(cf->mode == 0);
+    ed.command("flatten lens x");  // (not a number: refused, the usage shown)
+    CHECK(cf->mode == 0);
+    /* Review 343: the camera's own lens, whatever the view's shape - a field-of-view camera the same at 16:9 and 0.9:1, a
+     * physical one its Focal Length on any sensor; an amount typed or the anime preset go back to Amount. */
+    ed.command("flatten lens 85");
+    auto keep_through = [&](const Mat4 &proj) {
+      const std::vector<DrawItem> items = ed.collect_items_for_test(true, v, proj, eye);
+      return toward(items, false) / before;
+    };
+    const float wide = keep_through(Mat4::perspective(fovy, 16.0f / 9.0f, 0.1f, 100)), narrow = keep_through(Mat4::perspective(fovy, 0.9f, 0.1f, 100));
+    std::printf("    a field-of-view camera through 85 mm: keep %.3f at 16:9, %.3f at 0.9:1\n", wide, narrow);
+    CHECK(std::fabs(wide - narrow) < 1e-4f && std::fabs(wide - 24.0f / 85.0f) < 1e-3f);
+    GameObject *cam_obj = nullptr;
+    Camera *main = ed.main_camera_for_test(&cam_obj);
+    CHECK(main != nullptr);
+    if (main) {
+      main->physical = true, main->focal_length = 50.0f, main->sensor_width = 24.89f, main->sensor_height = 18.66f;  // (Super 35)
+      const float phys = keep_through(main->projection(9.0f / 16.0f));  // (a portrait render)
+      std::printf("    a physical 50 mm camera on Super 35, portrait: keep %.3f (50 / 85 = %.3f)\n", phys, 50.0f / 85.0f);
+      CHECK(std::fabs(phys - 50.0f / 85.0f) < 1e-3f);
+      main->physical = false;
+    }
+    ed.command("flatten 0.5");
+    CHECK(cf->mode == 0 && cf->amount == 0.5f);
+    ed.command("flatten lens 85");
+    ed.command("flatten preset anime");
+    CHECK(cf->mode == 0);
+  });
+}
+
 /* Round 334 (task 0314): Camera Flatten - the 2D look. */
 static void tests_round334() {
   test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
@@ -12096,6 +12170,10 @@ static void tests_round334() {
     CHECK(cf && cf->amount == 0.6f && cf->pivot == 1 && cf->direction == 0);
     ed.command("flatten pivot object Cube");
     CHECK(cf && cf->pivot == 2 && cf->bone == "Cube");
+    ed.command("flatten lens 85");  // (round 343's Try-its)
+    CHECK(cf && cf->mode == 1 && cf->focal == 85.0f);
+    for (const char *c : {"flatten lens off", "flatten -0.5"}) ed.command(c);
+    CHECK(cf && cf->mode == 0 && cf->amount == -0.5f);
   });
 }
 
@@ -12150,4 +12228,5 @@ void run_render_tests() {
   tests_round338();
   tests_round339();
   tests_round342();
+  tests_round343();
 }

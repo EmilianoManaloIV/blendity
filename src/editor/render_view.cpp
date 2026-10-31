@@ -34,7 +34,7 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 }
 
 /* Round 334: the camera a view flattens toward - its eye and forward, and whether it is orthographic. */
-void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role) {
+void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role, const Camera *cam) {
   flatten_view_.on = true;
   flatten_view_.role = std::max(0, std::min(2, role));
   flatten_view_.eye = eye;
@@ -42,6 +42,12 @@ void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int 
   const float len = length(f);
   flatten_view_.forward = finite_bits(len) && len > 1e-6f ? f / len : Vec3(0, 0, 1);
   flatten_view_.ortho = proj.m[15] == 1.0f;
+  /* (Review 343: the camera's own lens, the same in every view whatever its shape - a physical camera's Focal Length,
+   * the one an object's lens is chosen against; else its vertical field of view on a 36 x 24 frame, which doesn't
+   * change with the window's aspect as the horizontal term does.) */
+  const Camera *c = cam ? cam : main_camera(*scene_);
+  const float from_fov = finite_bits(proj.m[5]) ? 12.0f * std::fabs(proj.m[5]) : 0.0f;
+  flatten_view_.focal = flatten_view_.ortho ? 0.0f : c && c->physical && finite_bits(c->focal_length) && c->focal_length > 0.0f ? c->focal_length : from_fov;
   const Vec3 up = view.inverse().dir({0, 1, 0});
   flatten_view_.up = finite_bits(up.x + up.y + up.z) && length(up) > 1e-6f ? normalize(up) : Vec3(0.0f, 1.0f, 0.0f);
 }
@@ -144,9 +150,13 @@ void Editor::apply_camera_flatten(const GameObject &g, DrawItem &it) {
     if (c && c->enabled && (o == &g || c->children)) cf = c, owner = o;
   }
   if (!cf) return;
-  const float amount = finite_bits(cf->amount) ? std::max(0.0f, std::min(1.0f, cf->amount)) : 0.0f;
-  const float keep = std::max(0.02f, 1.0f - amount);
-  if (keep >= 1.0f) return;
+  /* (Round 343: below 0 the depth is stretched - forced perspective; Focal Length mode keeps the camera's focal length
+   * over the object's own, as if seen through that lens from where the pivot keeps its size.) */
+  const float amount = finite_bits(cf->amount) ? std::max(-1.0f, std::min(1.0f, cf->amount)) : 0.0f;
+  const bool lens = cf->mode == 1 && flatten_view_.focal > 0.0f && finite_bits(cf->focal) && cf->focal > 0.0f;
+  if (cf->mode == 1 && !lens) return;  // (Focal Length through an orthographic camera: no lens to match - as modelled)
+  const float keep = lens ? std::max(0.02f, std::min(4.0f, flatten_view_.focal / cf->focal)) : std::max(0.02f, 1.0f - amount);
+  if (std::fabs(keep - 1.0f) < 1e-4f) return;  // (a lens equal to the camera's, give or take float noise: as modelled - the GPU views keep it)
   const Vec3 p = camera_flatten_pivot(*owner, *cf);
   Vec3 d = cf->direction == 0 && !flatten_view_.ortho ? flatten_view_.eye - p : -flatten_view_.forward;
   const float len = length(d);
@@ -680,7 +690,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
-  if (game) set_flatten_view(v, p, eye);  // (round 334: Camera Flatten in the Game view and renders, not the Scene view)
+  if (game) set_flatten_view(v, p, eye, 0, cam);  // (round 334: Camera Flatten in the Game view and renders, not the Scene view)
   std::vector<DrawItem> items = collect_items(game, true);
   outline_view_.on = false;
   flatten_view_.on = false;
@@ -1964,7 +1974,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     if (hash != cam_preview_pt_hash_) {
       cam_preview_pt_hash_ = hash;
       LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
-      set_flatten_view(v, p, eye, 2);  // (round 334: Camera Flatten toward this camera; round 339: the traced preview's own view-shaped meshes)
+      set_flatten_view(v, p, eye, 2, cam);  // (round 334: Camera Flatten toward this camera; round 339: the traced preview's own view-shaped meshes)
       std::vector<DrawItem> items = collect_items(true, true);
       flatten_view_.on = false;
       PTSettings ps = make_pt_settings(rs);
