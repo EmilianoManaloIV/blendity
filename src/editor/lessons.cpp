@@ -1521,6 +1521,20 @@ The Game view, F12 and Camera Preview show the flattened shape; the Scene view k
 ? With Amount at 1 the lighting still looks round. Why isn't it flat too? | Only where things are drawn changes: the shading reads the true shape's normals, so the light and the toon bands stay as modelled - that is what keeps the 2D look from looking like a cardboard cut-out.
 ? The face and the body are one skinned mesh and you want the face flatter than the body. Can you? | Not with one mesh: a Camera Flatten reaches whole meshes. Split the face into its own mesh object below the root and give it its own Camera Flatten with a higher Amount - a child's own one wins.
 )"},
+    {"Shapes by the Camera's Angle", "View Angle Shapes: shape keys that come in as the camera turns, as a 2D artist corrects each view", R"(
+A drawn character is corrected for every view: in profile the mouth slides to the side of the face, from below the chin shortens, the hair's silhouette changes. Guilty Gear Xrd does it in 3D with shape keys that come in by the camera's angle - View Angle Shapes does the same.
+# A row a correction
+Add Component > Rendering > View Angle Shapes on the head mesh (or the character's root). Each row names a shape key and an angle - Yaw 0 is the reference's front, 90 its right, Pitch 90 above - with a Range at full weight and a Falloff to fade out. Mirror also fires it from the other side, on the _L / _R key when the mesh has one.
+! cmd:select Cube; viewshape add Side 90 0 20 25 1 | A row on the Cube: its "Side" key from the right (the Cube needs a shape key of that name to show it)
+! cmd:viewshape list | The rows, in the console
+# The reference
+Reference is the object the angle is measured from: drag the head bone here, so the angle follows the head when it turns. Empty: the object itself. The Inspector's line under the rows says where the Game camera is and what the rows give there; Add Row at the Game Camera's Angle starts a row from the view you are looking through.
+# Where it shows
+The Game view, Camera Preview and F12 show it; the Scene view keeps the model as it is, so you model and sculpt the corrections as plain shape keys. The view's weights add to the key's own, so an animated expression still plays.
+? In profile your character's mouth sits on the cheek as a 3D model would show it, not at the edge as drawn. What do you make? | A shape key sliding the mouth to the face's edge, and a View Angle Shapes row for it at Yaw 90 (Mirror on for the other side), the head bone as the Reference.
+? The correction pops in suddenly as the camera turns. What do you change? | The row's Falloff: the degrees over which it fades out past its Range - larger is smoother.
+? You see the corrected mouth in the Game view but not in the Scene view. Is that a bug? | No: the Scene view keeps the model as it is, so you can edit it; the camera views - the Game view, Camera Preview, F12 - show the corrections.
+)"},
     {"Animating Any Property", "Insert Keyframe on any field, materials and visibility, Record and Add Property", R"(
 Almost everything in the Inspector can be animated: the Transform, a light's intensity and colour, a camera's focus, a modifier's amount, a material slot's Base Color, Roughness or Emission, shape keys, and whether the object is shown (Active).
 # Keying a field

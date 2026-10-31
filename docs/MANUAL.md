@@ -469,6 +469,15 @@ it with the circle at the field's right - the character's own bones come first; 
 hand too) - `flatten preset anime` does that; Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
 view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that.
 
+**The 2D look - View Angle Shapes** (round 339): Add Component > Rendering > View Angle Shapes brings shape keys in by
+the camera's angle, as a 2D artist corrects each view (a mouth slid to the side in profile, a chin shortened from
+below). Each row: a shape key, Yaw (0 the reference's front, 90 its right) and Pitch (90 above), a Range at full
+weight, a Falloff to fade out, a Weight, Mirror (the other side, on the _L / _R key). Drag the head bone onto Reference
+so the angle follows the head. The Inspector's line shows the Game camera's angle and what the rows give there; Add Row
+at the Game Camera's Angle starts a row from it. The Game view, Camera Preview and F12 show it, added to the key's own
+weight; the Scene view keeps the model. `viewshape add <key> <yaw> <pitch> [range] [falloff] [weight] [mirror] |
+remove <row> | ref <object>|none | list`.
+
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.
 

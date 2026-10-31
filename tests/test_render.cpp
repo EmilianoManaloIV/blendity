@@ -11630,6 +11630,199 @@ static void tests_round338() {
   });
 }
 
+/* ---------------------------------------------------------------- round 339: View Angle Shapes - shape keys by the camera's angle */
+static void tests_round339() {
+  test("View Angle Shapes' angles (round 339): the camera on the reference's right is yaw 90, above it pitch 90; a row is full within its range, half the way through its falloff, gone past it; Mirror fires at -yaw on the other side's key", [] {
+    float yaw = 0, pitch = 0;
+    view_angle_of(Mat4(), {10, 0, 0}, {0, 0, 1}, false, yaw, pitch);
+    CHECK(std::fabs(yaw - 90.0f) < 1e-3f && std::fabs(pitch) < 1e-3f);
+    view_angle_of(Mat4(), {0, 10, 0}, {0, 0, 1}, false, yaw, pitch);
+    CHECK(std::fabs(pitch - 90.0f) < 1e-3f);
+    view_angle_of(Mat4::rotate(Quat::axis_angle({0, 1, 0}, 90.0f * kDeg2Rad)), {0, 0, -10}, {0, 0, 1}, false, yaw, pitch);  // (turned: its right is now -Z)
+    std::printf("    a reference turned 90 degrees, the camera on -Z: yaw %.1f\n", yaw);
+    CHECK(std::fabs(std::fabs(yaw) - 90.0f) < 1e-2f);
+    ViewAngleShapes vs;
+    ViewAngleRow r;
+    r.key = "Mouth_R", r.yaw = 90.0f, r.pitch = 0.0f, r.range = 20.0f, r.falloff = 20.0f, r.weight = 1.0f, r.mirror = true;
+    vs.rows.push_back(r);
+    auto weight_at = [&](float y, const char *key) {
+      std::vector<std::pair<std::string, float>> w;
+      view_angle_weights(vs, y, 0.0f, [](const std::string &k) { return k == "Mouth_R" || k == "Mouth_L"; }, w);
+      for (const auto &e : w)
+        if (e.first == key) return e.second;
+      return 0.0f;
+    };
+    std::printf("    Mouth_R at yaw 90 / 60 / 30 / 0: %.2f %.2f %.2f %.2f; Mouth_L at -90: %.2f\n", weight_at(90, "Mouth_R"), weight_at(60, "Mouth_R"),
+                weight_at(30, "Mouth_R"), weight_at(0, "Mouth_R"), weight_at(-90, "Mouth_L"));
+    CHECK(std::fabs(weight_at(90, "Mouth_R") - 1.0f) < 1e-4f && std::fabs(weight_at(60, "Mouth_R") - 0.5f) < 1e-3f && weight_at(0, "Mouth_R") == 0.0f);
+    CHECK(std::fabs(weight_at(-90, "Mouth_L") - 1.0f) < 1e-4f && weight_at(-90, "Mouth_R") == 0.0f);
+  });
+  /* The Cube with a shape key raising it 0.5 and a row bringing it in from its right. */
+  auto shaped_cube = [](Editor &ed) -> GameObject * {
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    MeshFilter *mf = cube ? cube->get<MeshFilter>() : nullptr;
+    if (!mf || !mf->mesh) return nullptr;
+    auto m = std::make_shared<Mesh>(*mf->mesh);
+    m->shape_keys.push_back(ShapeKey{"Side", std::vector<Vec3>(m->positions.size(), Vec3(0.0f, 0.5f, 0.0f))});
+    m->version++;
+    mf->mesh = m;
+    ed.command("select Cube");
+    ed.command("viewshape add Side 90 0 20 20 1");
+    return cube;
+  };
+  auto top_of = [](const std::vector<DrawItem> &items, const GameObject *g) {
+    for (const DrawItem &it : items)
+      if (it.id == (uint32_t)g->id && !it.always_cull && it.mesh) return it.model.point({0, it.mesh->bounds.max.y, 0}).y;
+    return -1e9f;
+  };
+  test("View Angle Shapes in the editor (round 339): a shape key at yaw 90 comes in through a camera on the Cube's right, not one in front, and never in the Scene view; it adds to the renderer's own weight; viewshape list / remove", [&] {
+    Editor ed;
+    GameObject *cube = shaped_cube(ed);
+    CHECK(cube && cube->get<ViewAngleShapes>() && cube->get<ViewAngleShapes>()->rows.size() == 1);
+    if (!cube || !cube->get<ViewAngleShapes>()) return;
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto view_from = [&](Vec3 eye) { return Mat4::look_at(eye, c, {0, 1, 0}); };
+    const Vec3 side = c + Vec3(6, 0, 0), front = c + Vec3(0, 0, 6);
+    const float plain = top_of(ed.collect_items_for_test(false, view_from(side), p, side), cube);
+    const float from_side = top_of(ed.collect_items_for_test(true, view_from(side), p, side), cube);
+    const float from_front = top_of(ed.collect_items_for_test(true, view_from(front), p, front), cube);
+    const float scene_after = top_of(ed.collect_items_for_test(false, view_from(side), p, side), cube);
+    std::printf("    the Cube's top: %.3f in the Scene view, %.3f through a camera on its right, %.3f in front, %.3f in the Scene view again\n", plain,
+                from_side, from_front, scene_after);
+    CHECK(std::fabs(from_side - (plain + 0.5f)) < 1e-3f);
+    CHECK(std::fabs(from_front - plain) < 1e-3f && std::fabs(scene_after - plain) < 1e-3f);
+    /* The renderer's own weight (an animated expression) and the view's add up. */
+    cube->get<MeshRenderer>()->set_shape_weight("Side", 0.5f);
+    const float both = top_of(ed.collect_items_for_test(true, view_from(side), p, side), cube);
+    const float own = top_of(ed.collect_items_for_test(false, view_from(side), p, side), cube);
+    std::printf("    with the renderer's own 0.5: %.3f in the Scene view, %.3f through the side camera\n", own, both);
+    CHECK(std::fabs(own - (plain + 0.25f)) < 1e-3f && std::fabs(both - (plain + 0.75f)) < 1e-3f);
+    ed.command("viewshape remove 1");
+    CHECK(cube->get<ViewAngleShapes>()->rows.empty());
+  });
+  test("View Angle Shapes (round 339): the reference is any object - the angle is measured from it (drop the head bone); the views' hash moves when it turns; the rows save and load; the Inspector's line reads the Game camera's angle and Add Row adds one there", [&] {
+    Editor ed;
+    GameObject *cube = shaped_cube(ed);
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    GameObject *head = ed.scene().create("HeadRef", cube);
+    ed.command("select Cube");
+    ed.command("viewshape ref HeadRef");
+    ViewAngleShapes *vs = cube->get<ViewAngleShapes>();
+    CHECK(vs && vs->reference == "HeadRef");
+    r34_steps(ed, 2);
+    const uint64_t before = ed.render_hash_for_test();
+    head->set_local_rotation(Quat::axis_angle({0, 1, 0}, 1.0f));
+    CHECK(ed.render_hash_for_test() != before);
+    /* Turned 90 degrees to the left, the reference's right is the world's -Z: the camera there brings the key in. */
+    head->set_local_rotation(Quat::axis_angle({0, 1, 0}, 90.0f * kDeg2Rad));
+    const Vec3 c = cube->world_position(), eye = c + Vec3(0, 0, -6);
+    const Mat4 v = Mat4::look_at(eye, c, {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    const float plain = top_of(ed.collect_items_for_test(false, v, p, eye), cube), turned = top_of(ed.collect_items_for_test(true, v, p, eye), cube);
+    std::printf("    the reference turned 90 degrees, the camera on -Z: the top %.3f (plain %.3f)\n", turned, plain);
+    CHECK(std::fabs(turned - (plain + 0.5f)) < 1e-3f);
+    const std::string text = save_scene_text(ed.scene());
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err));
+    const GameObject *c2 = back.find_by_name("Cube");
+    const ViewAngleShapes *v2 = c2 ? c2->get<ViewAngleShapes>() : nullptr;
+    CHECK(v2 && v2->rows.size() == 1 && v2->rows[0].key == "Side" && v2->rows[0].yaw == 90.0f && v2->reference == "HeadRef");
+    /* The Inspector: its line, and Add Row at the Game camera's angle. */
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    bool line = false;
+    for (const std::string &label : ed.button_labels_for_test())
+      line = line || label.rfind("shown:Game camera at yaw", 0) == 0;
+    CHECK(line);
+    Recti add{0, 0, 0, 0};
+    for (int tries = 0; tries < 60; tries++) {  // (scrolled into the Inspector's view: it sits below the component's rows)
+      const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+      if (ed.button_rect_for_test("Add Row at the Game Camera's Angle", add) && add.y >= w.y + ed.ui_for_test().row_h() * 2 && add.bottom() <= w.bottom()) break;
+      platform::Event wheel;
+      wheel.type = platform::EventType::Wheel;
+      wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = add.w > 0 && add.y < w.y + ed.ui_for_test().row_h() * 2 ? 3.0f : -3.0f;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+      ed.step_frame_headless({wheel});
+    }
+    CHECK(add.w > 0);
+    r34_click(ed, add.x + 8, add.y + add.h / 2);
+    r34_steps(ed, 1);
+    CHECK(cube->get<ViewAngleShapes>()->rows.size() == 2);
+  });
+  test("View Angle Shapes (review 339): the traced Camera Preview's shaped mesh and outline stay as it collected them while the Game view collects from another camera; a mirrored key with no side counts once near yaw 0; an eye at the reference gives no weights", [&] {
+    Editor ed;
+    GameObject *cube = shaped_cube(ed);
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("component Outline");
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    /* At yaw 60 the row gives 0.5: the Game view's mesh is shaped too, differently (one shared slot rewrote the preview's). */
+    const Vec3 side = c + Vec3(6, 0, 0), front = c + Vec3(6.0f * std::sin(60.0f * kDeg2Rad), 0, 6.0f * std::cos(60.0f * kDeg2Rad));
+    /* The preview (role 2) from the side; then the Game view (role 0) from yaw 60. */
+    const std::vector<DrawItem> preview = ed.collect_items_for_test(true, Mat4::look_at(side, c, {0, 1, 0}), p, side, 2);
+    const RenderMesh *pm = nullptr, *po = nullptr;
+    for (const DrawItem &it : preview)
+      if (it.id == (uint32_t)cube->id) (it.unlit ? po : pm) = it.mesh;
+    CHECK(pm && po);
+    if (!pm || !po) return;
+    auto top = [](const RenderMesh &rm) {
+      float y = -1e9f;
+      for (const Vec3 &q : rm.positions) y = std::max(y, q.y);
+      return y;
+    };
+    const float before = top(*pm), outline_before = top(*po);
+    const uint64_t serial = pm->serial, outline_serial = po->serial;
+    (void)ed.collect_items_for_test(true, Mat4::look_at(front, c, {0, 1, 0}), p, front, 0);
+    std::printf("    the preview's shaped top %.3f -> %.3f (serial kept: %d), its outline's %.3f -> %.3f (kept: %d)\n", before, top(*pm), (int)(pm->serial == serial),
+                outline_before, top(*po), (int)(po->serial == outline_serial));
+    CHECK(top(*pm) == before && pm->serial == serial && top(*po) == outline_before && po->serial == outline_serial);
+    /* One key for both sides near yaw 0: the nearer, not the two added. */
+    ViewAngleShapes vs;
+    ViewAngleRow r;
+    r.key = "ChinUp", r.yaw = 0.0f, r.range = 20.0f, r.falloff = 20.0f, r.mirror = true;
+    vs.rows.push_back(r);
+    std::vector<std::pair<std::string, float>> w;
+    view_angle_weights(vs, 0.0f, 0.0f, [](const std::string &) { return false; }, w);
+    CHECK(w.size() == 1 && std::fabs(w[0].second - 1.0f) < 1e-5f);
+    float yaw = 1, pitch = 1;
+    CHECK(!view_angle_of(Mat4(), {0, 0, 0}, {0, 0, 1}, false, yaw, pitch) && yaw == 0.0f && pitch == 0.0f);
+  });
+  test("the lesson \"Shapes by the Camera's Angle\": its Try-its add View Angle Shapes with a row on the Cube's right and list it", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Cube", "viewshape add Side 90 0 20 25 1", "viewshape list"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const ViewAngleShapes *vs = cube ? cube->get<ViewAngleShapes>() : nullptr;
+    CHECK(vs && vs->rows.size() == 1 && vs->rows[0].key == "Side" && vs->rows[0].yaw == 90.0f && vs->rows[0].falloff == 25.0f);
+  });
+  test("View Angle Shapes' cost (round 339, printed): a 10k-vertex mesh's camera-view evaluation each frame while the camera orbits", [&] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    MeshFilter *mf = ball ? ball->get<MeshFilter>() : nullptr;
+    if (!mf) return;
+    auto m = std::make_shared<Mesh>(*primitives::uv_sphere(0.5f, 160, 64));
+    m->shape_keys.push_back(ShapeKey{"Side", std::vector<Vec3>(m->positions.size(), Vec3(0.1f, 0.0f, 0.0f))});
+    mf->mesh = m;
+    ed.command("select Sphere");
+    ed.command("viewshape add Side 90 0 30 60 1");
+    const Vec3 c = ball->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    const double t0 = now_seconds();
+    for (int k = 0; k < 20; k++) {
+      const float a = k * 0.05f;
+      const Vec3 eye = c + Vec3(std::sin(a) * 6, 0, std::cos(a) * 6);
+      ed.collect_items_for_test(true, Mat4::look_at(eye, c, {0, 1, 0}), p, eye);
+    }
+    std::printf("    %zu vertices: %.2f ms a frame (collecting the items, the camera view's evaluation included)\n", m->positions.size(), (now_seconds() - t0) * 1000.0 / 20.0);
+  });
+}
+
 /* Round 334 (task 0314): Camera Flatten - the 2D look. */
 static void tests_round334() {
   test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
@@ -11847,4 +12040,5 @@ void run_render_tests() {
   tests_round331();
   tests_round334();
   tests_round338();
+  tests_round339();
 }
