@@ -22,19 +22,13 @@ constexpr int kTrailSpan = 30;     // frames each side of the playhead
 constexpr int kSamplesPerFrame = 6;  // posed frames sampled each editor frame (the rest the next)
 constexpr float kRetimePx = 8.0f;  // pixels for one frame of an Alt-drag
 
-GameObject *rig_of(GameObject *g) {
-  for (GameObject *a = g; a; a = a->parent)
-    if (a->get<Armature>()) return a;
-  return nullptr;
-}
-
 }  // namespace
 
 /* The cache made current for the clip and the rig: a changed clip or rig starts it again; then a few more frames. */
 void Editor::trail_refresh() {
   AnimationClipPtr clip = anim_clip();
   GameObject *root = anim_root();
-  GameObject *arm = rig_of(active_object());
+  GameObject *arm = puppet_rig_of(active_object());  // (review 346: the controls' own lookup - a selected mesh finds its rig)
   TrailCache &c = trails_;
   if (!clip || !root || !arm || !(trails_.show || trails_.onion > 0 || zoe_.on)) return c.frames.clear(), c.todo.clear(), void(c.clip = nullptr);
   const uint64_t h = clip->version ^ (uint64_t)(uintptr_t)clip.get();  // (any key edit bumps the version)
@@ -89,7 +83,7 @@ std::vector<int> Editor::trail_keys(uint64_t bone) {
   std::vector<int> out;
   AnimationClipPtr clip = anim_clip();
   GameObject *root = anim_root(), *g = scene_->find(bone);
-  GameObject *arm = g ? rig_of(g) : nullptr;
+  GameObject *arm = g ? puppet_rig_of(g) : nullptr;
   if (!clip || !root || !arm) return out;
   std::vector<std::string> paths;
   scene_->for_each([&](GameObject &o) {
@@ -192,7 +186,7 @@ bool Editor::trail_drag(float x, float y) {  // (an Alt-drag: the key's new fram
 /* The rig's keys on frame `from` moved to `to`, kept strictly between the keys around them (task 0282: a retime moves
  * keys, it doesn't resample). One undo step. */
 void Editor::trail_retime(uint64_t bone, int from, int to) {
-  GameObject *arm = rig_of(scene_->find(bone));
+  GameObject *arm = puppet_rig_of(scene_->find(bone));
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (!arm || !root || !clip) return;
@@ -227,7 +221,7 @@ void Editor::trail_retime(uint64_t bone, int from, int to) {
 uint64_t Editor::puppet_overlay_key() const {
   uint64_t h = 1469598103934665603ull;
   auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
-  mix((uint64_t)autopose_.on), mix(puppet_.hover), mix(puppet_.dragging), mix(trails_.drag_bone);
+  mix((uint64_t)autopose_.on), mix(puppet_.hover), mix(puppet_.dragging), mix(puppet_.selected), mix(trails_.drag_bone);
   for (uint64_t id : autopose_.locks) mix(id);
   mix((uint64_t)trails_.show), mix((uint64_t)trails_.onion), mix((uint64_t)trails_.onion_step);
   uint32_t f;

@@ -5675,7 +5675,7 @@ static void tests_round301() {
     std::printf("    Reach 0: frame 5 %.4f, 10 %.3f degrees\n", turn_at(5), turn_at(10));
     CHECK(turn_at(10) > 2.0f && turn_at(5) < 1e-4f);
   });
-  test("Puppet Posing's handles (task 0281): with AutoPosing on the selected rig's hands, feet, head and hips are handles; a drag on the left hand's moves it and keys the pose; a click on the right hand's pins it, another frees it - all by real mouse events", [] {
+  test("Puppet Posing's handles (task 0281; round 346: controls): with AutoPosing on the selected rig's hands, feet, head and hips are controls; a drag on the left hand's moves it and keys the pose; a click on the right hand's selects it, a double-click pins it, another frees it - all by real mouse events", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     ed.record_buttons_for_test(true);
@@ -5716,13 +5716,114 @@ static void tests_round301() {
       for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, x, y)});
       ed.step_frame_headless();
     };
+    ed.set_clock_for_test(1000.0);  // (the editor's clock still: a second click at once is a double-click, whatever the build's speed)
     ed.button_rect_for_test("puppet:RightHand", rh);
-    click(rh);
+    click(rh);  // (one click: selected, not pinned)
+    GameObject *rhand = ed.scene().find_by_name("RightHand");
+    const bool selected = rhand && ed.puppet_selected_for_test() == rhand->id && ed.autopose_locks_for_test().empty() &&
+                          ed.active_object_for_test() == rhand && ed.puppet_control_selected_for_test();  // (its bone selected, no gizmo)
+    const Vec3 pivot0 = ed.scene_camera_for_test().pivot;
+    const float dist0 = ed.scene_camera_for_test().distance;
+    ed.button_rect_for_test("puppet:RightHand", rh);
+    click(rh);  // (a second at once: a double-click - pinned)
     const bool pinned = ed.autopose_locks_for_test().size() == 1;
-    ed.button_rect_for_test("puppet:RightHand", rh);
-    click(rh);
-    std::printf("    a click on the right hand's handle: pinned %d; another: %zu pins\n", (int)pinned, ed.autopose_locks_for_test().size());
-    CHECK(pinned && ed.autopose_locks_for_test().empty());
+    const bool still = length(ed.scene_camera_for_test().pivot - pivot0) < 1e-6f && ed.scene_camera_for_test().distance == dist0 && !ed.scene_camera_for_test().animating;  // (a framing would start a camera move)
+    std::printf("    the double-click left the view where it was: %d\n", (int)still);
+    CHECK(still);  // (review 346: the pin's double-click isn't Frame Selected too)
+    for (int i = 0; i < 2; i++) {  // (a double-click again: freed)
+      ed.button_rect_for_test("puppet:RightHand", rh);
+      click(rh);
+    }
+    std::printf("    a click on the right hand's control: selected %d; a double-click: pinned %d; another: %zu pins\n", (int)selected, (int)pinned,
+                ed.autopose_locks_for_test().size());
+    CHECK(selected && pinned && ed.autopose_locks_for_test().empty());
+  });
+}
+
+/* ---------------------------------------------------------------- round 346: Puppet Posing's controls, clickable */
+static void tests_round346() {
+  using ET = platform::EventType;
+  auto ev = [](ET t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    return e;
+  };
+  test("Puppet Posing's controls (round 346): with only the character's mesh selected (its Skin names the rig) the controls show; feet are boxes under the soles, the head's ring above it, each control apart from its joint; while AutoPosing a click on a bone keeps the mesh selected (no gizmo on the bone), Ctrl+click picks it; Control Size scales them", [&] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(1000.0);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    GameObject *body = ed.scene().create("R346Body");
+    body->add<MeshFilter>()->mesh = primitives::cube(0.3f);
+    body->add<MeshRenderer>();
+    body->add<SkinModifier>()->object = rig->name;
+    ed.mark_changed_for_test("R346");
+    ed.command("select R346Body");
+    ed.command("anim new R346");
+    ed.command("autopose on");
+    ed.command("select " + rig->name);
+    ed.frame_selected_for_test();
+    ed.command("select R346Body");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti lf, head;
+    const bool shown = ed.button_rect_for_test("puppet:LeftFoot", lf) && ed.button_rect_for_test("puppet:Head", head);
+    std::printf("    the controls with the mesh selected: %s\n", shown ? "shown" : "NOT shown");
+    CHECK(shown);
+    if (!shown) return;
+    /* The foot's box is below its joint on screen, the head's ring above (Control Size 3: a few pixels each at this zoom otherwise). */
+    rig->get<Armature>()->control_size = 3.0f;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.button_rect_for_test("puppet:LeftFoot", lf), ed.button_rect_for_test("puppet:Head", head);
+    GameObject *foot = ed.scene().find_by_name("LeftFoot"), *hd = ed.scene().find_by_name("Head");
+    int fx = 0, fy = 0, hx = 0, hy = 0;
+    CHECK(foot && hd && ed.project_to_window(foot->world_position(), fx, fy) && ed.project_to_window(hd->world_position(), hx, hy));
+    std::printf("    the foot's control %d px below its joint, the head's %d px above\n", lf.y + lf.h / 2 - fy, hy - (head.y + head.h / 2));
+    CHECK(lf.y + lf.h / 2 > fy + 2 && head.y + head.h / 2 < hy - 2);
+    /* A click on a bone that isn't a control (the left upper arm's middle, away from every control; Control Size back to
+     * 1): the mesh stays selected. */
+    rig->get<Armature>()->control_size = 1.0f;
+    ed.command("select LeftUpperArm");  // (framed close: at the whole rig's framing the arm is a few pixels from the hand)
+    ed.frame_selected_for_test();
+    ed.command("select R346Body");
+    for (int i = 0; i < 8; i++) ed.step_frame_headless();
+    GameObject *upper = ed.scene().find_by_name("LeftUpperArm"), *fore = ed.scene().find_by_name("LeftLowerArm");
+    int ax = 0, ay = 0, bx = 0, by = 0;
+    CHECK(upper && fore && ed.project_to_window(upper->world_position(), ax, ay) && ed.project_to_window(fore->world_position(), bx, by));
+    const int mx = (ax + bx) / 2, my = (ay + by) / 2;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, mx, my)});
+    ed.step_frame_headless();
+    GameObject *after = ed.active_object_for_test();
+    std::printf("    a click on the upper arm while AutoPosing: %s selected (a control: %s)\n", after ? after->name.c_str() : "nothing",
+                ed.puppet_selected_for_test() ? "selected" : "none");
+    CHECK(after && after->name == "R346Body" && ed.puppet_selected_for_test() == 0);
+    /* Ctrl+click: the bone (apart in time from the last click, or the two are a double-click). */
+    ed.set_clock_for_test(ed.clock_for_test() + 1.0);
+    platform::Event down = ev(ET::MouseDown, mx, my), up = ev(ET::MouseUp, mx, my);
+    down.mods = up.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({ev(ET::MouseMove, mx, my)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    ed.step_frame_headless();
+    GameObject *picked = ed.active_object_for_test();
+    std::printf("    Ctrl+click there: %s selected\n", picked ? picked->name.c_str() : "nothing");
+    CHECK(picked && picked->get<Bone>() && ed.selection_size_for_test() == 1);  // (it alone: a toggle had added it to the mesh)
+    /* Control Size 6: the head's ring twice as far above as at 3 (the whole rig framed again, as it was measured). */
+    ed.command("select " + rig->name);
+    ed.frame_selected_for_test();
+    ed.command("select R346Body");
+    for (int i = 0; i < 8; i++) ed.step_frame_headless();
+    CHECK(ed.project_to_window(hd->world_position(), hx, hy));
+    rig->get<Armature>()->control_size = 3.0f;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.button_rect_for_test("puppet:Head", head);
+    rig->get<Armature>()->control_size = 6.0f;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti head2;
+    CHECK(ed.button_rect_for_test("puppet:Head", head2));
+    std::printf("    Control Size 6: the head's control %d px above (at 3: %d)\n", hy - (head2.y + head2.h / 2), hy - (head.y + head.h / 2));
+    CHECK(hy - (head2.y + head2.h / 2) > (hy - (head.y + head.h / 2)) * 3 / 2);
   });
 }
 
@@ -6505,6 +6606,7 @@ void run_animation_tests() {
   tests_round309();
   tests_round335();
   tests_round340();
+  tests_round346();
   round64_tests();
   round69_tests();
   tests_round81();

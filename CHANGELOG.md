@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 346): Puppet Posing's controls you can click
+
+**Asked:** "I'm also having trouble just clicking the control points without clicking or transforming the bones. What
+would you recommend as a suitable approach?"
+
+**Changed (task 0322)**
+- **Controls, apart from the joints:** a ring round each wrist, a box under each foot, a ring above the head, a large
+  ring round the hips - left blue, right red, the middle yellow (the animators' convention), sized by the rig and the
+  Armature's new **Control Size**; hit anywhere inside on screen (16 px at least with a pen or a finger).
+- **They show with the character's mesh selected** (its Skin names the rig): no bone, and no gizmo on it, first.
+- **A click selects a control, a double-click pins it** (a click had pinned it); a drag poses from the control's point.
+- **While AutoPosing a click on the rig's bone keeps the selection** (no gizmo appears on it); Ctrl+click picks it.
+
+**Checked:** `tests_round346` - the controls with only the mesh selected, the foot's below its joint and the head's
+above, Control Size scaling them, a click on the upper arm keeping the mesh, Ctrl+click picking the bone; round 281's
+test - a click selecting the right hand's control, a double-click pinning it, another freeing it, a drag posing.
+
+**The review's fixes (Opus code-reviewer, changes needed):** a double-click to pin also framed the selection (tested:
+the view stays); Ctrl+click added the bone to the mesh's selection, so the gizmo moved both without AutoPose (it selects
+the bone alone, tested); a control's click was only drawn - it selects its bone now, so trails, onion skin, contacts and
+Lock follow it, with no gizmo or bone handles over the control (tested), and the trails find the rig from the mesh; the
+controls are hit on their drawn line, box and centre, not over the disc inside (the gizmo, a finger's orbit and objects
+there keep their presses); the size follows the bones' lengths, not the pose; a blocked bone click leaves the Hierarchy
+as it was; the field is Puppet Control Size (beside the Preferences' Rig Control Size); the tests on the editor's clock.
+
 ## 2026-10-31 (round 343): forced perspective - a lens per object
 
 **Asked:** the 2D-look methods ("Add those components onto the plan."): forced perspective and a lens per object.

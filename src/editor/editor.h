@@ -1170,6 +1170,13 @@ class Editor {
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
   uint64_t render_hash_for_test() { return scene_render_hash(); }
+  uint64_t puppet_selected_for_test() const { return puppet_.selected; }  // (round 346)
+  bool puppet_control_selected_for_test() const { return puppet_control_selected(); }
+  size_t selection_size_for_test() const { return selection_.size(); }
+  void frame_selected_for_test() {  // (Frame Selected, its camera move finished: the console's focus is a camera's depth of field)
+    frame_selected();
+    cam_.update(clock_now() + 10.0);
+  }
   Camera *main_camera_for_test(GameObject **owner = nullptr) { return main_camera(*scene_, owner); }  // (round 343)
   void render_animation_pose_for_test(int first, int frame) { render_animation_pose(first, frame); }  // (round 340)
   void set_key_for_test() { anim_key_all(); }
@@ -2056,11 +2063,22 @@ class Editor {
     uint64_t arm = 0, key = 0;     // the rig mapped, and as what (body::body_key)
     std::vector<uint64_t> handles; // the hands, the feet, the head, the hips
     uint64_t part[6] = {}, found[6] = {};  // (each handle's bone, and the one the analysis found: round 324)
-    uint64_t dragging = 0, hover = 0;
-    Vec3 start, normal;
+    uint64_t dragging = 0, hover = 0, selected = 0;  // (round 346: a control clicked - selected; double-clicked - pinned)
+    Vec3 start, normal, bone_start;
     Vec2 press;
-    bool moved = false;
+    bool moved = false, double_press = false;
   } puppet_;
+  struct PuppetControl {
+    Vec3 at;
+    float r = 0.1f;
+    int kind = 0;  // 0 a ring, 1 a box
+    uint32_t color = 0;
+  };
+  PuppetControl puppet_control(int k, const GameObject &bone, float size) const;
+  float puppet_control_size(const GameObject &arm);
+  GameObject *puppet_rig_of(GameObject *g);
+  /* A bone selected by its control while AutoPosing (round 346): posed by the control, no gizmo drawn over it. */
+  bool puppet_control_selected() const { return autopose_.on && puppet_.selected && puppet_.selected == active_ && selection_.size() == 1; }
   const std::vector<uint64_t> &puppet_handles();
   const std::vector<uint64_t> &rig_ends();
   void puppet_set_handle(int k, const std::string &bone);

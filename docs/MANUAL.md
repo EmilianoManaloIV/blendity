@@ -720,8 +720,11 @@ turbulence, gusts) blows every chain by its own Wind. Bake writes the swing into
 ## 9. Animation
 
 **Puppet Posing.** Turn on AutoPosing (the Animation window) and the selected character's hands, feet, head and hips
-become handles in the Scene view: drag one and the body follows - with the AI download's pose prior, as motion
-capture would put a body there; the planted feet stay. Click a handle to pin it. The **Puppet** menu holds Reach (how
+get controls in the Scene view - rings round the wrists, boxes under the feet, a ring above the head and one round the
+hips (left blue, right red, the middle yellow; the Armature's Puppet Control Size sizes them), shown with just the mesh
+selected: drag one and the body follows - with the AI download's pose prior, as motion capture would put a body there;
+the planted feet stay. A click selects a control's bone (no gizmo over it), a double-click pins it; while AutoPosing a click on a bone keeps the
+selection (no gizmo on it), Ctrl+click picks the bone (round 346). The **Puppet** menu holds Reach (how
 far each side a pose edit fades in), Motion Trails (drag a key dot to pose that frame, Alt-drag it to move the key in
 time), Onion Skin, the Zoetrope (seven frames side by side, each poseable), Motion Check (sliding feet, pops and
 shaking, each with a Fix), the Smooth Brush (drag over the dope sheet) and Lock in Place. Any humanoid rig works -

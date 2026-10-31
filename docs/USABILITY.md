@@ -393,6 +393,7 @@ screens themselves.
 | On 2s, the Animation window's Preview still showed every frame, and a camera animated in the same clip was held with the characters. | Preview holds as Play does; the camera moves every frame unless Hold the Camera; the ruler marks the drawn frames (round 340). |
 | A one-shot silhouette correction had to be modelled into the mesh or a shape key, though only one camera angle needed it. | Lattice > Align to Camera: the box faces the camera in the camera views, so its points move the silhouette on screen; the Scene view keeps the model (round 342). |
 | Camera Flatten only flattened: an action shot's fist couldn't swell toward the camera, nor a character be drawn with a longer lens than the background. | Amount below 0 (forced perspective) and Mode Focal Length, an object's own lens (round 343). |
+| Puppet Posing's control points were hard to click without selecting or moving a bone: dots on the joints, under the bone's own click and its gizmo, shown only after a bone was selected, and a click pinned them. | Controls apart from the joints (rings, foot boxes, coloured by side), shown with the mesh selected; a click selects, a double-click pins; while AutoPosing a click on a bone keeps the selection, Ctrl+click picks it (round 346). |
 
 ## Still worth doing
 
