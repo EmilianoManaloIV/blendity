@@ -97,22 +97,39 @@ bool Editor::budget_fix_triangles(int rank) {
 }
 
 bool Editor::budget_fix_triangles(int rank, const std::vector<GameObject *> &objs, int target) {
-  if (!meshops::decimate_available()) return Log::warn("Decimate to fit: this build has no meshoptimizer (Blender's libraries)"), false;
   const BudgetTarget &t = target_of(target);
   if (rank < 0 || rank >= (int)t.ranks.size()) return Log::warn("Decimate to fit: no such rank"), false;
   const double limit = t.ranks[(size_t)rank].limit[(int)BudgetRow::Triangles];
+  return decimate_to(objs, {}, limit, strprintf("%s's %s", t.name, t.ranks[(size_t)rank].name));
+}
+
+/* The cut itself (round 359: CATS' decimation modes share it): `cut_from`'s meshes of 500 triangles or more cut by one
+ * ratio so all of them and `fixed` (counted, never cut) come to `limit`; an existing Decimate's ratio multiplied.
+ * `drop_keys` (CATS' Full): the cut meshes' shape keys go first - only theirs, and only once a cut is certain (review
+ * 359: a refused cut had dropped every key without a word). */
+bool Editor::decimate_to(const std::vector<GameObject *> &cut_from, const std::vector<GameObject *> &fixed, double limit, const std::string &what, bool drop_keys) {
+  if (!meshops::decimate_available()) return Log::warn("Decimate to fit: this build has no meshoptimizer (Blender's libraries)"), false;
   constexpr double kFloor = 500.0;  // (a mesh this small isn't what holds the rank back)
-  double small = 0.0, big = 0.0;
+  double small = budget_count(fixed).value[(int)BudgetRow::Triangles], big = 0.0;
   std::vector<GameObject *> cut;
-  for (GameObject *g : objs) {
+  for (GameObject *g : cut_from) {
+    if (std::find(fixed.begin(), fixed.end(), g) != fixed.end()) continue;
     const double n = budget_count({g}).value[(int)BudgetRow::Triangles];
     if (n <= 0.0) continue;
     if (n < kFloor) small += n;
     else big += n, cut.push_back(g);
   }
-  if (small + big <= limit) return Log::info("Decimate to fit: the triangles fit already"), false;
-  if (big <= 0.0 || limit <= small) return Log::warn("Decimate to fit: the small meshes alone pass %s's %s - nothing to cut", t.name, t.ranks[(size_t)rank].name), false;
+  if (small + big <= limit) return Log::info("Decimate to fit: the triangles fit already (%.0f of %.0f)", small + big, limit), false;
+  if (big <= 0.0 || limit <= small) return Log::warn("Decimate to fit: the meshes it may not cut pass %s (%.0f of %.0f) - nothing to cut", what.c_str(), small, limit), false;
   const float ratio = (float)std::max(0.01, (limit - small) / big * 0.98);  // (a little under: a decimator lands near, not on, its ratio)
+  size_t dropped = 0;
+  for (GameObject *g : drop_keys ? cut : std::vector<GameObject *>()) {
+    Mesh &m = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+    dropped += m.shape_keys.size();
+    m.shape_keys.clear();
+    m.touch();
+  }
+  if (dropped) Log::info("Decimate to fit: %zu shape key(s) dropped from the meshes cut (Full)", dropped);
   for (GameObject *g : cut) {
     DecimateModifier *d = g->get<DecimateModifier>();
     if (d) {
@@ -125,7 +142,7 @@ bool Editor::budget_fix_triangles(int rank, const std::vector<GameObject *> &obj
     if (skin != g->components.end()) std::rotate(skin, g->components.end() - 1, g->components.end());  // (before the Skin)
   }
   mark_changed("Decimate to Fit");
-  Log::info("Decimate to fit: %zu mesh(es) at %.0f%% of their triangles, for %s's %s (%.0f)", cut.size(), ratio * 100.0f, t.name, t.ranks[(size_t)rank].name, limit);
+  Log::info("Decimate to fit: %zu mesh(es) at %.0f%% of their triangles, for %s (%.0f)", cut.size(), ratio * 100.0f, what.c_str(), limit);
   return !cut.empty();
 }
 

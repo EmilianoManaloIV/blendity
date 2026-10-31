@@ -50,6 +50,10 @@ bool clip_moves(GameObject &armature, const GameObject &g);
 int remove_zero_weight_bones(Scene &scene, GameObject &armature, const FixModelOptions &options, FixModelReport &report);
 int join_avatar_meshes(Scene &scene, GameObject &armature, FixModelReport &report);
 
+/* `bone` moved under `parent`, keeping its place: its rest from there, its clips' keys converted and their tracks on
+ * its new path (round 359: Bone Root). */
+void reparent_keeping(Scene &scene, GameObject &armature, GameObject &bone, GameObject *parent);
+
 /* The whole pass, in CATS' order. The rig is put at rest first (rests are what the skins measure from). */
 FixModelReport fix_model(Scene &scene, GameObject &armature, const FixModelOptions &options = {});
 

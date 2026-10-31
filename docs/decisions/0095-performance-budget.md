@@ -17,6 +17,9 @@
 - **Decimate to a rank** adds or scales one `DecimateModifier` a mesh - before the Skin, meshes under 500 triangles left
   whole, the ratio worked out from the meshes it reduces - and `decimate` carries vertex groups and shape keys through.
 
+- **Amended (round 359, task 0336):** spring chains under one Bone Root (`RootBone_`, `spring::is_bone_root`) count
+  as one PhysBone component, as VRChat counts a PhysBone on their root.
+
 ## Consequences
 - Mobile and custom targets wait for published limits; materials and textures have no Fix yet (the rows say so).
 - A Decimate before the Skin re-evaluates with the mesh's weights; a sculpt under it still works, as with any modifier.

@@ -560,6 +560,15 @@ bool clip_moves(GameObject &armature, const GameObject &g) {
   return false;
 }
 
+void reparent_keeping(Scene &scene, GameObject &armature, GameObject &bone, GameObject *parent) {
+  to_rest(armature);
+  FixModelOptions o;
+  FixModelReport r;
+  Pass p{scene, armature, o, r, note_clip_paths(armature), {}};
+  reparent(p, bone, parent);
+  rewrite_clip_paths(p);
+}
+
 int remove_zero_weight_bones(Scene &scene, GameObject &armature, const FixModelOptions &o, FixModelReport &r) {
   to_rest(armature);
   Pass p{scene, armature, o, r, note_clip_paths(armature), {}};

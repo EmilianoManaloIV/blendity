@@ -9,6 +9,8 @@
 #include "../src/scene/budget.h"
 #include "../src/scene/visemes.h"
 #include "../src/scene/humanoid.h"
+#include "../src/scene/avatar_optimize.h"
+#include "../src/scene/spring_bones.h"
 #include "../src/scene/avatar_tools.h"
 #include "../extern/ufbx/ufbx.h"
 
@@ -6824,6 +6826,187 @@ static void tests_round358() {
   });
 }
 
+/* ---------------------------------------------------------------- round 359: Decimation modes, Bone Root, Bone Merging */
+/* A chain of `n` bones under `parent`, 6 cm apart up its Y, a SpringBone on its first. */
+static GameObject *r359_chain(Scene &s, GameObject *parent, const std::string &name, Vec3 at, int n) {
+  GameObject *first = nullptr, *p = parent;
+  for (int i = 0; i < n; i++) {
+    GameObject *b = r357_bone(p, s, (name + std::to_string(i + 1)).c_str(), i == 0 ? at : Vec3(0, 0.06f, 0));
+    if (!first) first = b;
+    p = b;
+  }
+  first->add<SpringBone>();
+  return first;
+}
+
+static void tests_round359() {
+  test("Decimation (round 359): CATS' modes choose the meshes - Safe only those without keys, Half under 4 keys, Smart and Full all - and Exclude keeps a face whole", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    std::vector<GameObject *> meshes;
+    for (int keys : {0, 2, 5}) {
+      ed.command("create Sphere");
+      GameObject *g = ed.active_object_for_test();
+      if (!g || !rig) return;
+      g->name = keys == 5 ? "Face" : strprintf("Part%d", keys);
+      Mesh &m = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+      for (int k = 0; k < keys; k++) m.shape_keys.push_back({strprintf("K%d", k), std::vector<Vec3>(m.vert_count(), Vec3(0, 0.01f, 0))});
+      m.touch();
+      g->add<SkinModifier>()->object = rig->name;
+      meshes.push_back(g);
+    }
+    auto names = [&](DecimateMode mode, std::vector<std::string> ex) {
+      std::string out;
+      for (GameObject *g : decimate_candidates(ed.scene(), *rig, mode, ex)) out += g->name + ";";
+      return out;
+    };
+    std::printf("    Safe %s  Half %s  Smart %s  Full %s  Smart without Face %s\n", names(DecimateMode::Safe, {}).c_str(), names(DecimateMode::Half, {}).c_str(),
+                names(DecimateMode::Smart, {}).c_str(), names(DecimateMode::Full, {}).c_str(), names(DecimateMode::Smart, {"Face"}).c_str());
+    CHECK(names(DecimateMode::Safe, {}) == "Part0;" && names(DecimateMode::Half, {}) == "Part0;Part2;" && names(DecimateMode::Smart, {}) == "Part0;Part2;Face;");
+    CHECK(names(DecimateMode::Full, {}) == "Part0;Part2;Face;" && names(DecimateMode::Smart, {"Face"}) == "Part0;Part2;");
+    DecimateMode m;
+    CHECK(decimate_mode_named("save", m) && m == DecimateMode::Safe && !decimate_mode_named("nope", m));
+    /* A Full cut that doesn't happen (it fits already; or this build can't cut) leaves every key (review 359). */
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar decimate full 999999999");
+    CHECK(meshes[2]->get<MeshFilter>()->mesh->shape_keys.size() == 5 && meshes[1]->get<MeshFilter>()->mesh->shape_keys.size() == 2);
+    /* An unskinned hat under the head is a mesh the modes may cut, as the checklist's Fix had cut it. */
+    ed.command("create Cube");
+    GameObject *hat = ed.active_object_for_test();
+    if (hat && ed.scene().find_by_name("Head")) ed.scene().set_parent(hat, ed.scene().find_by_name("Head"), -1, true);
+    CHECK(hat && names(DecimateMode::Safe, {}) == "Part0;" + hat->name + ";");
+    if (!meshops::decimate_available()) return;  // (the cut itself: meshoptimizer, the libraries' build)
+    for (GameObject *g : meshes) {
+      ed.select_for_test(g->id, false);
+      ed.command("subdivide 1");
+    }
+    ed.select_for_test(rig->id, false);
+    const double before = budget_count(avatar_objects(ed.scene(), *rig)).value[(int)BudgetRow::Triangles];
+    const double face = budget_count({meshes[2]}).value[(int)BudgetRow::Triangles];
+    ed.command(strprintf("avatar decimate smart %.0f Face", before * 0.6));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const double after = budget_count(avatar_objects(ed.scene(), *rig)).value[(int)BudgetRow::Triangles];
+    std::printf("    Smart to %.0f without Face: %.0f -> %.0f triangles; Face %.0f -> %.0f, its Decimate %d\n", before * 0.6, before, after, face,
+                budget_count({meshes[2]}).value[(int)BudgetRow::Triangles], (int)(meshes[2]->get<DecimateModifier>() != nullptr));
+    CHECK(after <= before * 0.6 && after > before * 0.45 && !meshes[2]->get<DecimateModifier>());
+    ed.command(strprintf("avatar decimate full %.0f", before * 0.3));
+    CHECK(meshes[2]->get<MeshFilter>()->mesh->shape_keys.empty() && meshes[2]->get<DecimateModifier>());
+  });
+  test("Bone Root and Bone Merging (round 359): hair chains with one parent and one name go under RootBone_hair (one PhysBone in the budget); Merge Bones at 50% halves a chain, the weights kept, the body unmoved", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!body || !rig || !head) return;
+    GameObject *l = r359_chain(s, head, "Hair_L", Vec3(-0.08f, 0.15f, 0), 5);
+    GameObject *r = r359_chain(s, head, "Hair_R", Vec3(0.08f, 0.15f, 0), 5);
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const double chains = budget_count(avatar_objects(s, *rig)).value[(int)BudgetRow::SpringChains];
+    const std::vector<Vec3> before = r357_skinned(*body);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar boneroot");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *root = s.find_by_name("RootBone_hair");
+    const double after_chains = budget_count(avatar_objects(s, *rig)).value[(int)BudgetRow::SpringChains];
+    std::printf("    Bone Root: %s, the chains under it %d %d, PhysBones %.0f -> %.0f, the body moved %.6f\n", root ? root->name.c_str() : "-", (int)(root && l->parent == root),
+                (int)(root && r->parent == root), chains, after_chains, r358_worst(before, r357_skinned(*body)));
+    CHECK(root && l->parent == root && r->parent == root && root->parent == head && chains == 2.0 && after_chains == 1.0);
+    CHECK(r358_worst(before, r357_skinned(*body)) < 1e-3f);
+    /* Merge Bones at 50: each chain of 5 keeps its first and loses 2 of the other 4. */
+    const size_t len_before = spring::chain_bones(*l).size();
+    const uint64_t lid = l->id;  // (Undo replaces the objects: the id, not the pointer, finds it after)
+    ed.command("avatar mergebones 50");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const size_t len_after = spring::chain_bones(*l).size();
+    std::printf("    Merge Bones 50%%: a chain of %zu now %zu; the body moved %.6f\n", len_before, len_after, r358_worst(before, r357_skinned(*body)));
+    CHECK(len_before == 5 && len_after == 3 && r358_worst(before, r357_skinned(*body)) < 1e-3f);
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *l2 = ed.scene().find(lid);
+    CHECK(l2 && spring::chain_bones(*l2).size() == 5);
+  });
+  test("Decimation and Bone Root (review 359): the words after `avatar decimate` - names after a comma, a name with a space, a name starting with a digit; the group word skips sides, numbers and namespaces", [] {
+    DecimateMode mode = DecimateMode::Smart;
+    double tris = 70000.0;
+    std::vector<std::string> ex;
+    parse_decimate_args({"smart", "5000", "Face,", "Eyes"}, mode, tris, ex);
+    CHECK(mode == DecimateMode::Smart && tris == 5000.0 && ex.size() == 2 && ex[0] == "Face" && ex[1] == "Eyes");
+    tris = 70000.0;
+    parse_decimate_args({"half", "Body", "Mesh,", "2Hats"}, mode, tris, ex);
+    CHECK(mode == DecimateMode::Half && tris == 70000.0 && ex.size() == 2 && ex[0] == "Body Mesh" && ex[1] == "2Hats");
+    parse_decimate_args({}, mode, tris, ex);
+    CHECK(ex.empty());
+    std::printf("    group words: %s %s %s %s\n", chain_group_word("J_Sec_L_Hair1_01").c_str(), chain_group_word("L_Ear").c_str(), chain_group_word("R_Hair").c_str(), chain_group_word("Hair_L").c_str());
+    CHECK(chain_group_word("J_Sec_L_Hair1_01") == "hair" && chain_group_word("L_Ear") == "ear" && chain_group_word("R_Hair") == "hair" && chain_group_word("Hair_L") == "hair");
+  });
+  test("Bone Root and Bone Merging (review 359): a clip on a grouped chain follows it and Undo takes Bone Root back; Merge Bones at 100% leaves one bone reaching the strand's end; the root is no collider", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!rig || !head) return;
+    GameObject *l = r359_chain(s, head, "L_Hair", Vec3(-0.08f, 0.15f, 0), 5);
+    r359_chain(s, head, "R_Hair", Vec3(0.08f, 0.15f, 0), 5);
+    const uint64_t lid = l->id;
+    std::remove(resolve_asset_path("Assets/Animations/R359Hair.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R359Hair.anim", "R359Hair");
+    if (!clip) return;
+    clip->track(anim_path(*rig, *l), "Rotation", 0).set_key(0, 10.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    ed.mark_changed_for_test("key the hair");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar boneroot");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *root = s.find_by_name("RootBone_hair");
+    GameObject *l1 = s.find(lid);
+    CHECK(root && l1 && l1->parent == root && clip_asset("Assets/Animations/R359Hair.anim")->find(anim_path(*rig, *l1), "Rotation", 0));
+    /* The root isn't a capsule the strands collide with. */
+    CHECK(root && spring::is_bone_root(*root));
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.scene().find_by_name("RootBone_hair") && ed.scene().find(lid) && ed.scene().find(lid)->parent == ed.scene().find_by_name("Head"));
+    /* Merge Bones at 100%: one bone left, its tip where the strand ended. */
+    GameObject *first = ed.scene().find(lid);
+    std::vector<GameObject *> chain = spring::chain_bones(*first);
+    GameObject *last = chain.back();
+    const Vec3 end = last->world_position() + normalize(last->world_matrix().dir(Vec3(0, 1, 0))) * (last->get<Bone>()->length * bone_world_unit(*last));
+    const float reach = length(end - first->world_position());
+    ed.command("avatar mergebones 100");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *f2 = ed.scene().find(lid);
+    const float len = f2 ? f2->get<Bone>()->length * bone_world_unit(*f2) : 0.0f;
+    std::printf("    Merge Bones 100%%: %zu bone(s) left, the first's length %.3f, the strand reached %.3f\n", f2 ? spring::chain_bones(*f2).size() : (size_t)0, len, reach);
+    CHECK(f2 && spring::chain_bones(*f2).size() == 1 && std::fabs(len - reach) < 1e-3f);
+  });
+  test("the lesson's Try-it (round 359): rig humanoid, then avatar boneroot - nothing to group, said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("avatar boneroot");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("nothing to group") != std::string::npos;
+    CHECK(said);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -7196,4 +7379,5 @@ void run_assets_tests() {
   tests_round356();
   tests_round357();
   tests_round358();
+  tests_round359();
 }

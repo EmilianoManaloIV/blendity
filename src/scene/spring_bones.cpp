@@ -335,7 +335,7 @@ std::vector<Collider> body_capsules(GameObject &armature, const std::vector<Game
     stack.pop_back();
     for (GameObject *c : g->children) stack.push_back(c);
     const Bone *b = static_cast<const Bone *>(g->find_role(Component::RenderRole::Bone));
-    if (!b || b->length <= 1e-4f || std::binary_search(chains.begin(), chains.end(), g)) continue;
+    if (!b || b->length <= 1e-4f || std::binary_search(chains.begin(), chains.end(), g) || is_bone_root(*g)) continue;  // (review 359: a root between strands had pushed their tips out)
     const auto it = fitted.radius.find(g->id);
     const float r = it != fitted.radius.end() ? it->second : length(tip_of(*g) - g->world_position()) / 7.0f;  // (in metres: the length is in the bone's units)
     out.push_back({g->world_position(), tip_of(*g), r});
@@ -1139,6 +1139,8 @@ size_t bake(Scene &scene, GameObject &anim_root, const AnimationClip &clip, Anim
   out.touch();
   return keys;
 }
+
+bool is_bone_root(const GameObject &g) { return g.get<Bone>() && to_lower(g.name).rfind(to_lower(kBoneRootPrefix), 0) == 0; }
 
 }  // namespace spring
 

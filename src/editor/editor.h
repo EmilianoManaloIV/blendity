@@ -2915,6 +2915,11 @@ class Editor {
   bool avatar_tool_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
   void draw_model_options_section(ui::Layout &lay, GameObject *root);
   void draw_pose_shape_section(ui::Layout &lay, GameObject *root);
+  /* Round 359: CATS' Decimation, Bone Root and Bone Merging (avatar_optimize_ui.cpp). */
+  bool avatar_optimize_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  void draw_optimize_section(ui::Layout &lay, GameObject *root);
+  int avatar_decimate_mode_ = 0, avatar_decimate_tris_ = 70000, avatar_merge_percent_ = 50;
+  std::string avatar_decimate_exclude_;
   std::string avatar_key_field_ = "Pose";
   void note_avatar_clips(GameObject &root);
   bool avatar_merge_weights(GameObject &root);
@@ -2949,6 +2954,8 @@ class Editor {
   void budget_command(const std::vector<std::string> &t);
   bool budget_fix_triangles(int rank);
   bool budget_fix_triangles(int rank, const std::vector<GameObject *> &objs, int target);  // (review 356: the avatar's own objects)
+  bool decimate_to(const std::vector<GameObject *> &cut_from, const std::vector<GameObject *> &fixed, double limit, const std::string &what, bool drop_keys = false);
+  void avatar_decimate(GameObject &root, const std::vector<std::string> &t);
   void budget_report(const BudgetCounts &counts, const char *what);
   void export_wait_poll();
   void export_waits_drop(const char *why);

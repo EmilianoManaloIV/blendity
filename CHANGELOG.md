@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 359): the VRChat avatar module, part 4 - Decimation, Bone Root, Bone Merging
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0336)**
+- **Decimation** (Window > Avatar, `avatar decimate [smart|safe|half|full] [triangles] [exclude]`), using CATS'
+  modes:
+  - Smart: every mesh, keys kept;
+  - Safe: only meshes without keys;
+  - Half: only meshes with fewer than 4 keys;
+  - Full: every mesh, its keys dropped.
+
+  It cuts to a triangle count, and Exclude keeps named meshes whole. It shares round 355's cut.
+- **Bone Root** (`avatar boneroot`): spring chains that share a parent and a name go under a RootBone_ bone, so
+  VRChat needs one PhysBone for them, and the budget counts them so.
+- **Bone Merging** (`avatar mergebones <percent>`): that share of each chain's bones is merged into their parents.
+
+**The Opus review's fixes:**
+- Full drops keys only from the meshes it cuts, and only when it cuts;
+- Exclude takes every comma-separated name;
+- meshes under the rig are cut too;
+- a bone root is no collider;
+- grouping by a meaningful word;
+- a merged chain keeps its reach;
+- ADR 0095 amended.
+
+**Checked:** `tests_round359`:
+- each mode's meshes and Exclude;
+- a refused Full keeping the keys;
+- the words parsed;
+- a clip through Bone Root, and Undo;
+- a chain merged whole, keeping its reach;
+- Smart to 60 % with the face kept whole;
+- Full dropping keys;
+- two hair chains under RootBone_hair, with the PhysBones going from 2 to 1 and the body unmoved;
+- a chain of 5 merged to 3 at 50 %, with Undo;
+- the Try-it.
+
 ## 2026-10-31 (round 358): the VRChat avatar module, part 3 - Model Options, Pose and Shape tools
 
 **Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).

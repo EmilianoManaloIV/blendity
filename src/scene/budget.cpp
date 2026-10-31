@@ -70,12 +70,14 @@ double texture_mb(const TextureRef &t, std::unordered_set<std::string> &seen) {
 
 /* What one object adds: its mesh (and an Outline's shell, a mesh and a material slot more in an engine), its bone, its
  * spring chain and the bones under it, its light, its materials' textures. */
-void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string> &textures) {
+void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string> &textures, std::unordered_set<const GameObject *> &roots) {
   double *v = c.value;
   if (g.get<Bone>()) v[(int)BudgetRow::Bones] += 1;
   if (const Light *l = g.get<Light>(); l && l->enabled) v[(int)BudgetRow::Lights] += 1;
   if (const SpringBone *sb = g.get<SpringBone>(); sb && sb->enabled) {
-    v[(int)BudgetRow::SpringChains] += 1;
+    /* (Round 359: chains under one RootBone_ are one PhysBone component - Bone Root's point.) */
+    const bool grouped = g.parent && spring::is_bone_root(*g.parent);
+    v[(int)BudgetRow::SpringChains] += !grouped || roots.insert(g.parent).second ? 1 : 0;
     std::vector<GameObject *> under{&g};
     while (!under.empty()) {
       GameObject *b = under.back();
@@ -111,8 +113,9 @@ BudgetCounts budget_count(const std::vector<GameObject *> &objects) {
   BudgetCounts c;
   std::unordered_set<const GameObject *> once;
   std::unordered_set<std::string> textures;
+  std::unordered_set<const GameObject *> roots;
   for (GameObject *g : objects)
-    if (g && g->active_in_hierarchy() && once.insert(g).second) count_object(*g, c, textures);
+    if (g && g->active_in_hierarchy() && once.insert(g).second) count_object(*g, c, textures, roots);
   return c;
 }
 

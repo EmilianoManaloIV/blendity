@@ -404,6 +404,7 @@ screens themselves.
 | The avatar had no visemes, and nothing said what VRChat or Unity's Humanoid would miss. | Window > Avatar: Create Visemes mixes the 15 `vrc.v_*` keys from three sculpted mouths (as CATS does), and a checklist with Fixes says what the avatar lacks (round 356). |
 | An imported character (MMD, Mixamo) needed its bones renamed, extra bones removed and its meshes joined by hand before Unity's Humanoid import took it. | Window > Avatar > Fix Model does it in one Undo step, as the CATS plugin's: Unity's names, nothing between the Humanoid bones, no bones that move nothing or IK, one Body mesh with every shape key (round 357). |
 | Applying a pose as the rest left the meshes and their shape keys behind; there was no T or A pose button, no Pose to Shape Key, no Separate by Material. | The Avatar window's Pose and Shape and Model Options, as the CATS plugin's: the meshes take the pose and their keys follow; T-Pose and A-Pose; Separate by Material, Loose Parts or Shape Keys (round 358). |
+| Decimate to Good cut every mesh alike, the face's visemes too; nothing grouped hair chains into one PhysBone or thinned their bones. | The Avatar window's Decimation (CATS' Smart, Safe, Half and Full modes, a triangle count, meshes excluded), Bone Root (one PhysBone for a group, counted so) and Bone Merging (round 359). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing
