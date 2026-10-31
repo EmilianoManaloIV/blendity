@@ -2,6 +2,23 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 350): Blendity against Blender, Unity, Godot and Unreal - three productions
+
+**Asked:** "Can we do another HCI analysis of the whole program, all tabs, several use cases. Comparing it to ease of
+use with Blender, Unity3D, Godot, and Unreal?" - then a VRChat world, a VRChat avatar "from pre-production, to modeling,
+and doing finishing renders, exporting, and showcasing", and "a basic production pipeline for an animation or
+short-film".
+
+**Done (task 0327, analysis only - no product code):** `docs/hci/compare-2026-10.md`.
+- The three productions made in Blendity through its headless mode in a scratch project (168 commands, a screenshot and
+  a per-command log a stage); the exported avatar measured against VRChat's ranks: 76,796 triangles, 27 bones named
+  as Unity Humanoid's, **no shape keys and no textures in the file**.
+- Each stage against Blender, Unity, Godot and Unreal from their documentation (cited); a five-program KLM table of ten
+  tasks, recounted by `tools/hci_klm.py --compare --check` (new); a verdict per audience.
+- 15 findings ranked by Nielsen severity, audiences hit and cost - led by shape keys and painted textures missing from
+  exports, no VRChat budget check or viseme preset, an export taken while a remesh runs, and video needing FFmpeg; none
+  was on the earlier walkthroughs' lists. One bug found on the way was fixed (round 349).
+
 ## 2026-10-31 (round 349): a hand posed across the body isn't a swapped rig
 
 **Found** making the HCI analysis' short film: after Puppet Posing drew the left hand across the chest, the Armature's

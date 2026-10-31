@@ -268,7 +268,9 @@ grass, reference images from the side and top, UV material lists, the render ran
 ragdoll events, gait files, vertex group and shape key pickers - and a test that every one stays reachable.
 Rounds 311-315: the last console-only items in the interface; five interface conventions checked; a live sweep of every
 screen with the fixes it found (labels that don't fit, narrow panes, contrast); a 118-task checklist with target times
-(docs/hci/checklist.md); the Unity bridge run in Unity 6000.6.
+(docs/hci/checklist.md); the Unity bridge run in Unity 6000.6. Round 350: a VRChat avatar, a VRChat world and a short
+film made in Blendity and compared stage by stage with Blender, Unity, Godot and Unreal (docs/hci/compare-2026-10.md):
+the export's missing shape keys and painted textures lead the 15 ranked findings.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.

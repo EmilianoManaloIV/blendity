@@ -5,6 +5,11 @@ Each timed row's operator list is recounted from the rules at the top of klm.md 
 printed. A row whose seconds disagree with its operators is reported; --check exits 1 if there is one.
 
 Usage: py tools/hci_klm.py [docs/hci/klm.md] [--check]
+       py tools/hci_klm.py docs/hci/compare-2026-10.md --compare [--check]
+
+--compare (round 350) reads a table of one task per row and a pair of cells per program - operators, then seconds -
+for Blendity, Blender, Unity, Godot and Unreal; "-" is a program that doesn't do the task. Each pair is recounted and
+each program's total printed.
 """
 import io
 import os
@@ -40,7 +45,38 @@ def rows(path):
         yield cells
 
 
+PROGRAMS = ["Blendity", "Blender", "Unity", "Godot", "Unreal"]
+
+
+def compare(path, argv):
+    """The five-program table: each (operators, seconds) pair recounted; the totals per program."""
+    bad = 0
+    totals = [0.0] * len(PROGRAMS)
+    counts = [0] * len(PROGRAMS)
+    timed = 0
+    for cells in rows(path):
+        if len(cells) < 2 + 2 * len(PROGRAMS):
+            continue
+        timed += 1
+        for k, name in enumerate(PROGRAMS):
+            ops, written = cells[2 + 2 * k], cells[3 + 2 * k]
+            if written == "-":
+                continue
+            counted = operator_seconds(ops)
+            totals[k] += float(written)
+            counts[k] += 1
+            if counted is None or abs(counted - float(written)) > 0.01:
+                print("row %s (%s), %s: the operators count %s s, the row says %s s" % (cells[0], cells[1], name, counted, written))
+                bad += 1
+    print("%d tasks: " % timed + ", ".join("%s %.2f s over %d" % (n, t, c) for n, t, c in zip(PROGRAMS, totals, counts)))
+    if bad:
+        print("%d cell(s) disagree with their operators" % bad)
+    return 1 if bad and "--check" in argv else 0
+
+
 def main(argv):
+    if "--compare" in argv:
+        return compare(next(a for a in argv if not a.startswith("--")), argv)
     path = next((a for a in argv if not a.startswith("--")), os.path.join(os.path.dirname(__file__), "..", "docs", "hci", "klm.md"))
     bad = 0
     before_total = after_total = 0.0
