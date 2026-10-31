@@ -464,8 +464,9 @@ shared by other objects changes on them too: give the object its own first (the 
 **The 2D look - Camera Flatten** (round 334): Add Component > Rendering > Camera Flatten squashes the object's depth
 toward the camera about a pivot, as Guilty Gear Xrd does: the near parts no longer swell, so the picture is the drawn
 shape, and the shading stays as modelled (piloting a camera and the Draw tab's camera picture show it too, being
-through a camera). Put it on a character's root with Pivot Bone and the head bone's exact name
-(`flatten preset anime` does that); Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
+through a camera). Put it on a character's root and drag the head bone from the Hierarchy onto **Pivot Object** (or pick
+it with the circle at the field's right - the character's own bones come first; any object works, an empty you move by
+hand too) - `flatten preset anime` does that; Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
 view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that.
 
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)

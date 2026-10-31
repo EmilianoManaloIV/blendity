@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 338): drag an object or a bone onto Camera Flatten's pivot
+
+**Asked:** "For the CameraFlatten component, make it so that you can drag and drop objects and bones to the parameter."
+
+**Changed (task 0317)**
+- **Pivot Object** replaces the typed Pivot Bone: an object field - a bone or any object dragged from the Hierarchy
+  (outlined while it is over the field), picked with the circle at its right, or its name typed. A drop or a pick sets
+  the Pivot to the new **Object or Bone** (Bone's place in the list).
+- **The picker lists the object's own children first** (a character's bones), then the scene's - for every object
+  field (IK's Target and Pole too).
+- **Found below the object first, then in the scene:** an empty outside the character can be the pivot, and moving it
+  moves the flattened shape. A missing name falls back to the bounds' middle.
+- **Files** keep the round-334 key (Pivot Bone) beside Pivot Object, so older scenes load and older builds read newer
+  ones.
+- **Console:** `flatten pivot object <name>` (`pivot bone <name>` still works).
+
+**Checked:** `tests_round338` - a drag from the Hierarchy onto the field (one undo takes the field and the Pivot back),
+the picker's order and a pick, the pivot outside the character moving the shape, a missing name finite, the file's two
+keys and a round-334 file, the console words; the lesson's new Try-it.
+
+**The review's fixes (Opus code-reviewer, changes needed):** moving an empty that is the pivot left the Game view and
+the previews stale - a mesh-less, bone-less object is hashed nowhere, so the pivot object's place is now in the views'
+hash (tested by the hash); a face mesh named like the head bone took the pivot from round 334's files - a bone of the
+name below the object wins, then any object below, then the scene's; the lesson's Try-it run by its test; ADR 0093
+amended; the legacy key read first so a newer Pivot Object wins. Not done: Record doesn't key the Pivot a drop
+switches.
+
 ## 2026-10-31 (round 337): a texture's Physical Size at 0.15 turned a cube black
 
 **Asked:** "Physical size parameter at textures on a cube at 0.15 turn the cube black."

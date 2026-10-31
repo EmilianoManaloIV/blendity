@@ -11474,6 +11474,162 @@ static void tests_round331() {
   });
 }
 
+/* ---------------------------------------------------------------- round 338: an object or a bone dropped on Camera Flatten's pivot */
+static void tests_round338() {
+  auto at = [](platform::EventType t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    return e;
+  };
+  using ET = platform::EventType;
+  /* The Cube flattened, an empty "Head" below it (a bone's stand-in: the field takes any object) and the Inspector on the Cube. */
+  auto rig = [](Editor &ed) -> GameObject * {
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("flatten 0.5");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (!cube) return nullptr;
+    GameObject *head = ed.scene().create("Head", cube);
+    head->set_local_position({0.0f, 0.4f, 0.0f});
+    ed.mark_changed_for_test("Head");
+    ed.command("select Head");  // (its row shown: the Hierarchy opens the Cube for it)
+    r34_steps(ed, 2);
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    return cube;
+  };
+  test("Camera Flatten's pivot (round 338): an object dragged from the Hierarchy onto Pivot Object is the pivot - the Pivot switches to Object or Bone, one undo takes both back", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    CHECK(cube->get<CameraFlatten>()->pivot == 0);
+    int hx = 0, hy = 0;
+    Recti f;
+    const bool row = ed.hierarchy_row_for_test("Head", hx, hy), field = ed.button_rect_for_test("field:Pivot Object", f);
+    CHECK(row && field);
+    if (!row || !field) return;
+    const int fx = f.x + f.w / 3, fy = f.y + f.h / 2;
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+    ed.step_frame_headless();
+    const CameraFlatten *cf = cube->get<CameraFlatten>();
+    std::printf("    after the drop: Pivot %d, Pivot Object '%s'; the Inspector still on %s\n", cf->pivot, cf->bone.c_str(),
+                ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "nothing");
+    CHECK(cf->bone == "Head" && cf->pivot == 2);
+    CHECK(ed.active_object_for_test() == cube);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<CameraFlatten>() && cube->get<CameraFlatten>()->bone.empty() && cube->get<CameraFlatten>()->pivot == 0);
+  });
+  test("Camera Flatten's pivot (round 338): the picker lists the object's own children first and a pick sets the pivot; an object outside the character works and moving it moves the flattened placement; a missing name stays finite", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    Recti f;
+    CHECK(ed.button_rect_for_test("field:Pivot Object", f));
+    const int px = f.x + f.w - f.h / 2, py = f.y + f.h / 2;  // (the picker at the field's right)
+    ed.step_frame_headless({at(ET::MouseMove, px, py)});
+    ed.step_frame_headless({at(ET::MouseDown, px, py)});
+    ed.step_frame_headless({at(ET::MouseUp, px, py)});
+    ed.step_frame_headless();
+    Recti head_row, sphere_row;
+    const bool listed = ed.button_rect_for_test("menu:Head", head_row) && ed.button_rect_for_test("menu:Sphere", sphere_row);
+    std::printf("    the picker: Head at y %d, Sphere at y %d\n", head_row.y, sphere_row.y);
+    CHECK(listed && head_row.y < sphere_row.y);
+    if (!listed) return;
+    ed.step_frame_headless({at(ET::MouseMove, sphere_row.x + 8, sphere_row.y + sphere_row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, sphere_row.x + 8, sphere_row.y + sphere_row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, sphere_row.x + 8, sphere_row.y + sphere_row.h / 2)});
+    r34_steps(ed, 2);
+    CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf->bone == "Sphere" && cf->pivot == 2);
+    /* The Sphere is outside the Cube: found in the scene; moving it moves the Cube's flattened placement. */
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(sphere != nullptr);
+    if (!sphere) return;
+    const Vec3 eye{0, 1, -6};
+    const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto model_of = [&] {
+      for (const DrawItem &it : ed.collect_items_for_test(true, v, p, eye))
+        if (it.id == (uint32_t)cube->id && !it.always_cull) return it.model;
+      return Mat4();
+    };
+    const Mat4 a = model_of();
+    sphere->set_local_position(sphere->world_position() + Vec3(0.0f, 0.0f, 2.0f));  // (a root: its local place is its world one)
+    ed.step_frame_headless();
+    const Mat4 b = model_of();
+    const float moved = length(a.point({0, 0, 0}) - b.point({0, 0, 0}));
+    std::printf("    the Cube's flattened centre moved %.3f m with the pivot\n", moved);
+    CHECK(moved > 0.05f);
+    cf->bone = "No Such Object";
+    ed.step_frame_headless();
+    const Mat4 c = model_of();
+    CHECK(std::isfinite(c.m[0]) && std::isfinite(c.m[12]) && std::isfinite(c.m[14]));
+  });
+  test("Camera Flatten's pivot (round 338): a file keeps Pivot Object and the round-334 Pivot Bone; a round-334 line (Pivot Bone only) loads into the field; flatten pivot object / bone set it from the console", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    ed.command("flatten pivot object Head");
+    CHECK(cube->get<CameraFlatten>()->bone == "Head" && cube->get<CameraFlatten>()->pivot == 2);
+    ed.command("flatten pivot center");
+    ed.command("flatten pivot bone Head");  // (round 334's word)
+    CHECK(cube->get<CameraFlatten>()->pivot == 2);
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Pivot_Object") != std::string::npos && text.find("Pivot_Bone") != std::string::npos);  // (keys: spaces as _)
+    /* A round-334 file: no Pivot Object line. */
+    std::string old;
+    size_t start = 0;
+    while (start < text.size()) {
+      size_t end = text.find('\n', start);
+      if (end == std::string::npos) end = text.size();
+      const std::string line = text.substr(start, end - start);
+      if (line.find("Pivot_Object") == std::string::npos) old += line + "\n";
+      start = end + 1;
+    }
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(old, back, err));
+    GameObject *c2 = back.find_by_name("Cube");
+    CHECK(c2 && c2->get<CameraFlatten>() && c2->get<CameraFlatten>()->bone == "Head" && c2->get<CameraFlatten>()->pivot == 2);
+  });
+  test("Camera Flatten's pivot (review 338): moving an empty that is the pivot - no mesh, no bone, hashed nowhere else - redraws the views (their hash changes); a bone below wins over a mesh of the same name", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    GameObject *empty = ed.scene().create("FreePivot", nullptr);
+    empty->set_local_position({2.0f, 0.5f, 0.0f});
+    ed.command("select Cube");
+    ed.command("flatten pivot object FreePivot");
+    CHECK(cube->get<CameraFlatten>()->bone == "FreePivot");
+    r34_steps(ed, 2);
+    const uint64_t before = ed.render_hash_for_test();
+    empty->set_local_position({2.0f, 0.5f, 1.5f});
+    const uint64_t after = ed.render_hash_for_test();
+    std::printf("    the views' hash %s when the empty moved\n", before != after ? "changed" : "did NOT change");
+    CHECK(before != after);
+    /* A face mesh named like the head bone, listed before the armature: the bone is the pivot, as round 334's files meant. */
+    GameObject *face = ed.scene().create("HeadBone", cube);
+    GameObject *arm = ed.scene().create("Armature", cube);
+    GameObject *bone = ed.scene().create("HeadBone", arm);
+    bone->add<Bone>();
+    face->set_local_position({0.0f, -0.4f, 0.0f});
+    bone->set_local_position({0.0f, 0.7f, 0.0f});
+    ed.command("flatten pivot object HeadBone");
+    const Vec3 p = ed.camera_flatten_pivot_for_test(*cube);
+    std::printf("    the pivot: %.2f %.2f %.2f (the bone's %.2f, the mesh's %.2f)\n", p.x, p.y, p.z, bone->world_position().y, face->world_position().y);
+    CHECK(length(p - bone->world_position()) < 1e-4f);
+  });
+}
+
 /* Round 334 (task 0314): Camera Flatten - the 2D look. */
 static void tests_round334() {
   test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
@@ -11630,13 +11786,15 @@ static void tests_round334() {
     std::printf("    the outline's shell: %s from two cameras, %s as without the flatten\n", a == b ? "the same" : "rebuilt", a == plain ? "the same" : "not the same");
     CHECK(plain && plain->positions.size() == a->positions.size());
   });
-  test("the lesson \"Flatten to the Camera (the 2D Look)\": its Try-its put Camera Flatten on the Sphere at 0.6 toward the camera, then about its origin", [] {
+  test("the lesson \"Flatten to the Camera (the 2D Look)\": its Try-its put Camera Flatten on the Sphere at 0.6 toward the camera, then about its origin, then about the Cube (round 338)", [] {
     Editor ed;
     r34_open(ed);
     for (const char *c : {"select Sphere", "flatten 0.6", "flatten pivot origin"}) ed.command(c);  // (a part at a time, as Learn runs them)
     GameObject *s = ed.scene().find_by_name("Sphere");
     const CameraFlatten *cf = s ? s->get<CameraFlatten>() : nullptr;
     CHECK(cf && cf->amount == 0.6f && cf->pivot == 1 && cf->direction == 0);
+    ed.command("flatten pivot object Cube");
+    CHECK(cf && cf->pivot == 2 && cf->bone == "Cube");
   });
 }
 
@@ -11688,4 +11846,5 @@ void run_render_tests() {
   tests_round330();
   tests_round331();
   tests_round334();
+  tests_round338();
 }

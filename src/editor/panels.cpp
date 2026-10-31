@@ -523,6 +523,7 @@ struct InspectorReflector : Reflector {
    * "Material 0."); unset where a field isn't one track (a texture layer's, a filter effect's). */
   GameObject *anim_obj = nullptr;
   std::string anim_prefix;
+  GameObject *owner = nullptr;  // (round 338: the object whose component this is - its own objects first in an object field's picker)
   /* A field's menu, on a right-click of its name: Reset to Default when the thing edited has a default for it (round
    * 332; the reset lands when the field is drawn next, recorded as any edit), and Insert / Delete Keyframe when the
    * object is under an animated root (round 335: I over the name inserts too). A diamond after the name marks an
@@ -882,7 +883,7 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    if (!ed.object_field(n, field_rect(row), v, type)) return;
+    if (!ed.object_field(n, field_rect(row), v, type, owner)) return;
     record(FieldEdit::Text, n).s_new = v;
     changed = true;
   }
@@ -1755,6 +1756,7 @@ void Editor::draw_inspector(const Recti &r) {
       InspectorReflector ir(*this, u, lay);
       ir.limit = essentials_limit(c->type_name());
       ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - a second of a type isn't: a track names the first)
+      ir.owner = g;
       c->reflect(ir);
       draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
       if (ir.changed) {
@@ -3506,7 +3508,7 @@ bool Editor::object_field_picked(ui::Id id, std::string &v) {
 /* An object field (Unity's ObjectField): a name typed in, an object of its kind dropped on it from the Hierarchy (one
  * of another kind is refused: the field turns red), or one chosen with the picker at its right. True when the name
  * changed. `name` keys it among the fields drawn this frame. */
-bool Editor::object_field(const char *name, const Recti &f, std::string &v, const char *type) {
+bool Editor::object_field(const char *name, const Recti &f, std::string &v, const char *type, const GameObject *near) {
   auto &u = ui_;
   const ui::Id id = u.id(name);
   if (u.record_buttons) u.button_rects[std::string("field:") + name] = f;  // (tests drop onto a field by its name)
@@ -3518,11 +3520,20 @@ bool Editor::object_field(const char *name, const Recti &f, std::string &v, cons
   const ui::Id pid = u.id(std::string("pick:") + name);
   if (picker_button(pick)) u.open_popup(pid, {pick.x, pick.bottom(), 0, 0});
   u.tooltip("Select " + label + ": the scene's objects that can go here");
-  u.popup(pid, u.px(220), [this, id, type] {
+  u.popup(pid, u.px(220), [this, id, type, near] {
     if (ui_.menu_item("None")) field_pick_ = {id, ""};
-    scene_->for_each_ordered([&](GameObject &g, int) {
-      if (has_type(g, type) && ui_.menu_item(g.name)) field_pick_ = {id, g.name};
-    });
+    /* Round 338: the object's own first (a character's bones for its Camera Flatten or IK), then the rest. */
+    auto below = [near](const GameObject &g) {
+      for (const GameObject *o = &g; near && o; o = o->parent)
+        if (o == near) return true;
+      return false;
+    };
+    for (int pass = near ? 0 : 1; pass < 2; pass++) {
+      if (pass == 1 && near) ui_.menu_separator();
+      scene_->for_each_ordered([&](GameObject &g, int) {
+        if (has_type(g, type) && below(g) == (pass == 0) && ui_.menu_item(g.name)) field_pick_ = {id, g.name};
+      });
+    }
   });
   changed = object_field_box(id, box, v, v + " (" + label + ")", "None (" + label + ")", !held || !has_type(*held, type), type_icon(type)) || changed;
   u.mark_widget(box);  // (the field's own help tooltip goes on the box)

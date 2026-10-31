@@ -43,3 +43,12 @@ squashed normals would turn every surface toward the camera and flatten the ligh
   moving camera rebuilds them for flattened objects (as their shadow maps).
 - A Pivot Bone name is exact: the console warns when none below matches (the Inspector has no line for it yet); the
   bounds' middle is used meanwhile.
+
+## Amendment (round 338, task 0317)
+- The pivot is any object, not only a bone: **Pivot Object**, an object field (a Hierarchy drop, the picker, a typed
+  name). The name is looked up as a bone below the component's object first (round 334's files and a face mesh named
+  like the head bone keep the bone), then any object below it, then the scene's (`camera_flatten_pivot_object`).
+- The views' hash mixes the pivot object's place into the component's key: an empty moved by hand is hashed nowhere
+  else, and the Game view and the previews must draw again.
+- Files keep the round-334 key "Pivot Bone" beside "Pivot Object" (read first, so the newer one wins): older scenes
+  load, older builds read newer ones.

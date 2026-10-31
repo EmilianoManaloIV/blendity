@@ -1169,6 +1169,11 @@ class Editor {
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
   uint64_t render_hash_for_test() { return scene_render_hash(); }
+  Vec3 camera_flatten_pivot_for_test(const GameObject &owner) {
+    flatten_pivots_.clear();
+    const CameraFlatten *cf = owner.get<CameraFlatten>();
+    return cf ? camera_flatten_pivot(owner, *cf) : owner.world_position();
+  }
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
   const RasterStats &scene_stats_for_test() const { return scene_stats_; }
   /* The Textures window last frame: "new", "size", "assign", "output", "add_layer", "layer<i>", "thumb:<name>". */
@@ -1473,7 +1478,7 @@ class Editor {
   void object_field_took_drop() { hier_field_took_drop_ = true; }
   /* Unity's object field (task 0064, panels.cpp): "Robot (Armature)" / "None (Armature)", a typed name, a Hierarchy
    * drop of the right kind, the picker. `type` a component name, nullptr for any object. */
-  bool object_field(const char *name, const Recti &f, std::string &v, const char *type = nullptr);
+  bool object_field(const char *name, const Recti &f, std::string &v, const char *type = nullptr, const GameObject *near = nullptr);
   bool asset_field(const char *name, const Recti &f, std::string &path, const char *ext, const char *kind);
   bool object_field_box(ui::Id id, const Recti &box, std::string &v, const std::string &shown, const std::string &none, bool bad, ui::Icon icon);
   bool object_field_picked(ui::Id id, std::string &v);  // a picker's choice from last frame, for this field
@@ -1720,6 +1725,7 @@ class Editor {
   bool flatten_any_ = false;                            // (a Camera Flatten in the scene, this collect)
   void apply_camera_flatten(const GameObject &g, DrawItem &it);
   Vec3 camera_flatten_pivot(const GameObject &owner, const CameraFlatten &cf);
+  const GameObject *camera_flatten_pivot_object(const GameObject &owner, const CameraFlatten &cf);
   void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye);
   void flatten_command(const std::vector<std::string> &t);
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
