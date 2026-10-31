@@ -866,6 +866,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **The Avatar window** (round 356, after the CATS Blender plugin): Create Visemes makes the 15 `vrc.v_*` shape keys VRChat's lip sync needs from three you sculpt (AA, OH, CH); the checklist below says whether the avatar has Unity's 15 Humanoid bones under Unity's names, a T or A pose, a height of 0.5-5 m, its root at the origin, faces +Z, has its visemes and eye bones, and its VRChat PC rank - each item with a Fix where one exists. Console: `visemes [AA OH CH]`, `avatar check`, `avatar fix <n>`. Humanoid Rig with a mesh selected fits the skeleton to it.
 
+**Fix Model** (round 357, the Avatar window's first button, as the CATS plugin's): in one Undo step the Humanoid bones get Unity's names (MMD's Japanese translated, Mixamo's prefix dropped), a bone between two of them is merged into the one above with its weights, bones that move nothing, IK and empty vertex groups go, the avatar's meshes become one Body keeping every shape key, and slots of one material become one; clips' tracks follow their bones. Options: Keep Twist Bones, Remove Zero-Weight Bones, Remove Constraints, Join Meshes, Combine Materials. Console: `avatar fixmodel`.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

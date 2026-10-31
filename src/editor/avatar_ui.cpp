@@ -52,6 +52,7 @@ void Editor::avatar_command(const std::vector<std::string> &t) {
   if (!root || !root->get<Armature>()) return Log::warn("avatar check [root] | avatar fix <n> | origin | decimate: select the avatar (its mesh, its root or a bone)");
   avatar_cache_.at = -1.0;
   if (verb == "origin") return avatar_origin(*root);
+  if (verb == "fixmodel") return avatar_fix_model(*root);
   if (verb == "decimate") return (void)budget_fix_triangles(1, avatar_objects(*scene_, *root), 0);  // (VRChat PC's Good; the target left as it is)
   const std::vector<AvatarCheck> list = avatar_check(*scene_, *root);
   if (verb == "fix") {
@@ -72,6 +73,45 @@ void Editor::avatar_origin(GameObject &root) {
   root.set_world_position(Vec3(0.0f));
   mark_changed("Avatar to Origin");
   Log::info("Avatar: %s at the origin", root.name.c_str());
+}
+
+/* avatar fixmodel: CATS' Fix Model on the avatar, one Undo step; what each step did in the Console. */
+void Editor::avatar_fix_model(GameObject &root) {
+  /* The clips it rewrites (their tracks follow the bones), noted for Undo as a key edit notes them. */
+  for (GameObject *p = &root; p; p = p->parent) {
+    const Animation *a = p->get<Animation>();
+    if (AnimationClipPtr c = a && !a->clip.empty() ? clip_asset(a->clip) : nullptr) note_clip_edit(*c);
+  }
+  const FixModelReport r = fix_model(*scene_, root, fix_model_options_);
+  avatar_cache_.at = -1.0;  // (the checklist made again: its Fixes named meshes the join removed - review 357)
+  for (const std::string &l : r.lines) Log::info("%s", l.c_str());
+  select(root.id);
+  mark_changed("Fix Model");
+}
+
+/* The Avatar window's Fix Model: the button and its options (each on by default, as in CATS). */
+void Editor::draw_fix_model_section(ui::Layout &lay, GameObject *root) {
+  auto &u = ui_;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Fix Model", root != nullptr, "Select the avatar"))
+    avatar_fix_model(*root);
+  u.tooltip("In one Undo step, as the CATS plugin's Fix Model: bones renamed to Unity's Humanoid names (MMD's Japanese\n"
+            "translated, Mixamo's prefix dropped), Hips > Spine > Chest > Neck > Head with nothing between, bones that move\n"
+            "nothing removed (their weights to the parent), IK removed, empty vertex groups removed, the meshes joined into\n"
+            "Body, the same material one slot. Clips follow their bones. Console: avatar fixmodel.");
+  const struct { const char *label, *tip; bool *on; } opts[] = {
+      {"Keep Twist Bones", "Bones with \"twist\" in their name stay (they turn a forearm without candy-wrapping it).", &fix_model_options_.keep_twist},
+      {"Remove Zero-Weight Bones", "Bones that move no vertex go, and vertex groups whose weights are all 0.", &fix_model_options_.remove_zero_weight},
+      {"Remove Constraints", "IK and its targets: VRChat doesn't run them (its own IK drives the avatar).", &fix_model_options_.remove_constraints},
+      {"Join Meshes", "The avatar's meshes become one, Body: one skinned mesh is what VRChat's ranks want.", &fix_model_options_.join_meshes},
+      {"Combine Materials", "Slots holding the same material (by its values) become one slot.", &fix_model_options_.combine_materials}};
+  for (const auto &o : opts) {
+    Recti r = lay.row();
+    const int box = r.h - u.px(4);
+    u.checkbox({r.x + u.px(4), r.y + u.px(2), box, box}, *o.on);
+    u.label({r.x + box + u.px(10), r.y, r.w - box - u.px(14), r.h}, o.label);
+    u.tooltip(o.tip);
+  }
 }
 
 /* The checklist for the window: kept half a second, made again at once after a Fix or a change of avatar. */
@@ -124,6 +164,7 @@ void Editor::draw_avatar_window(const Recti &r) {
   lay.row_h = u.row_h();
   GameObject *root = puppet_rig_of(active_object());
   u.label(lay.row(), root ? "Avatar: " + root->name : std::string("Select the avatar (its mesh, root or a bone)"), u.theme.text_bright);
+  draw_fix_model_section(lay, root);  // (round 357: CATS' tab starts with Fix Model)
   draw_avatar_section(lay, root);
   u.pop_id();
   content_h = lay.y + off - r.y + u.px(20);

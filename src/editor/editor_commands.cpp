@@ -1045,7 +1045,7 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
   if (c == "budget") return budget_command(t);      // budget [pc|quest] | budget fix [good|medium|poor] (round 355)
   if (c == "visemes") return (void)visemes_command(t);  // visemes [AA OH CH] (round 356)
-  if (c == "avatar") return avatar_command(t);           // avatar check [root] | fix <n> | origin | decimate (round 356)
+  if (c == "avatar") return avatar_command(t);           // avatar check [root] | fix <n> | origin | decimate (round 356) | fixmodel (357)
   if (c == "shape") return shape_command(t);        // shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135)
   if (c == "walk") return walk_command(t);          // walk cycle | set | save | load | presets (task 0125)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)

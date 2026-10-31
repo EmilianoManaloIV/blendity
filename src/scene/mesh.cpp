@@ -105,6 +105,12 @@ bool Mesh::groups_fit() const {
     if (g.weights.size() != positions.size()) return false;
   return true;
 }
+bool Mesh::keys_fit() const {
+  for (const ShapeKey &k : shape_keys)
+    if (k.delta.size() != vert_count()) return false;
+  return true;
+}
+
 
 void Mesh::copy_vertex_weights(uint32_t from) {
   for (VertexGroup &g : vertex_groups) g.weights.push_back(from < g.weights.size() ? g.weights[from] : 0.0f);

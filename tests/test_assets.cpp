@@ -6247,6 +6247,311 @@ static void tests_round356() {
   });
 }
 
+/* ---------------------------------------------------------------- round 357: Fix Model (the CATS plugin's) */
+/* The body's skinned vertices in the world, as the views show them. */
+static std::vector<Vec3> r357_skinned(GameObject &body) {
+  std::vector<Vec3> out;
+  const Mesh *m = body.evaluated_mesh();
+  if (!m) return out;
+  for (const Vec3 &p : m->positions) out.push_back(body.world_matrix().point(p));
+  return out;
+}
+
+static GameObject *r357_bone(GameObject *parent, Scene &s, const char *name, Vec3 local) {
+  GameObject *b = s.create(name, parent);
+  Bone *bone = b->add<Bone>();
+  bone->length = 0.1f;
+  b->set_local_position(local);
+  bone->set_rest(b->local());
+  return b;
+}
+
+static void tests_round357() {
+  test("Fix Model (round 357): Mixamo and MMD names become Unity's; a Center above the hips merges into Hips; a twist bone stays; bones that move nothing and IK go; the skinned body doesn't move; a clip's track follows its bone", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    CHECK(body != nullptr);
+    if (!body) return;
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *chest = s.find_by_name("Chest"), *neck = s.find_by_name("Neck"), *hips = s.find_by_name("Hips");
+    GameObject *ua = s.find_by_name("LeftUpperArm"), *la = s.find_by_name("LeftLowerArm"), *head = s.find_by_name("Head");
+    CHECK(rig && chest && neck && hips && ua && la && head);
+    if (!rig || !chest || !neck || !hips || !ua || !la || !head) return;
+    /* A bone above the hips (MMD's Center), a twist bone between the arm's two, a bone moving nothing. */
+    GameObject *center = r357_bone(rig, s, "Center", hips->local().position * 0.9f);
+    s.set_parent(hips, center, -1, true);
+    hips->get<Bone>()->set_rest(hips->local());
+    GameObject *twist = r357_bone(ua, s, "LeftArmTwist", la->local().position * 0.5f);
+    s.set_parent(la, twist, -1, true);
+    la->get<Bone>()->set_rest(la->local());
+    r357_bone(hips, s, "Unused", Vec3(0.0f, -0.05f, 0.1f))->get<Bone>()->deform = false;  // (no group: it moves nothing)
+    /* Other programs' names: Mixamo's prefix, MMD's Japanese head. */
+    hips->name = "mixamorig:Hips";
+    head->name = "\xE9\xA0\xAD";  // (頭)
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    /* A clip keying the upper arm, played from the rig. */
+    std::remove(resolve_asset_path("Assets/Animations/R357Arm.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R357Arm.anim", "R357Arm");
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    const std::string arm_path = anim_path(*rig, *ua);
+    clip->track(arm_path, "Rotation", 2).set_key(0, 30.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    ed.mark_changed_for_test("key the arm");  // (an undo step of its own: Undo of Fix Model goes back to here)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* The pose: the upper arm down 30 degrees - the IK off, or its hand target would pull the arm back before the fix
+     * (and not after: Fix Model removes it). */
+    s.for_each([](GameObject &g) {
+      if (IKConstraint *ik = g.get<IKConstraint>()) ik->weight = 0.0f;
+    });
+    const uint64_t ua_id = ua->id, twist_id = twist->id, chest_id = chest->id;
+    ua->set_local_rotation(ua->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 0, 1), 0.52f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> before = r357_skinned(*body);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* The same pose again on the same bone (Fix Model put the rig at rest). */
+    GameObject *ua2 = s.find(ua_id);
+    CHECK(ua2 != nullptr);
+    if (!ua2) return;
+    ua2->set_local_rotation(ua2->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 0, 1), 0.52f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *b2 = s.find(body->id);  // (one mesh: nothing joined, its name kept)
+    const std::vector<Vec3> after = b2 ? r357_skinned(*b2) : std::vector<Vec3>();
+    float worst = after.size() == before.size() ? 0.0f : 1e9f;
+    for (size_t i = 0; i < after.size() && after.size() == before.size(); i++) worst = std::max(worst, length(after[i] - before[i]));
+    const bool names = s.find_by_name("Hips") && s.find_by_name("Head") && !s.find_by_name("mixamorig:Hips");
+    const bool merged = !s.find_by_name("Center") && s.find_by_name("Hips") && s.find_by_name("Hips")->parent == rig && s.find(chest_id);
+    bool iks = false;
+    s.for_each([&](GameObject &g) { iks = iks || g.get<IKConstraint>(); });
+    const MeshFilter *bmf = b2 ? b2->get<MeshFilter>() : nullptr;
+    const bool group = bmf && bmf->mesh && bmf->mesh->find_group("Center") < 0 && bmf->mesh->find_group("Hips") >= 0 && s.find_by_name("LeftHand");
+    const AnimTrack *t = clip->find(anim_path(*rig, *ua2), "Rotation", 2);
+    std::printf("    names %d, merged %d, twist kept %d, Unused gone %d, IK left %d, groups %d, the track at %s; the posed body moved %.6f\n", (int)names, (int)merged,
+                (int)(s.find(twist_id) != nullptr), (int)!s.find_by_name("Unused"), (int)iks, (int)group, t ? t->path.c_str() : "-", worst);
+    CHECK(names && merged && s.find(twist_id) && !s.find_by_name("Unused") && !iks && group && t);
+    CHECK(worst < 1e-3f);
+    /* One Undo step brings the rig back as it was. */
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Center") && ed.scene().find_by_name("mixamorig:Hips"));
+    AnimationClipPtr back = clip_asset("Assets/Animations/R357Arm.anim");
+    CHECK(back && back->find(arm_path, "Rotation", 2));  // (the clip's track back on its old path too)
+  });
+  test("Fix Model (round 357): the avatar's meshes joined into Body with the face's shape keys and both meshes' weights; two slots of one material become one", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *torso = ed.active_object_for_test();
+    ed.command("subdivide 2");
+    ed.command("create Sphere");
+    GameObject *face = ed.active_object_for_test();
+    CHECK(rig && torso && face);
+    if (!rig || !torso || !face) return;
+    ed.command("position 0 1.7 0");
+    {
+      Mesh &fm = *mesh_make_mutable(face->get<MeshFilter>()->mesh);  // (the face's own key, the torso none)
+      fm.shape_keys = {{"Smile", std::vector<Vec3>(fm.vert_count(), Vec3(0.0f, 0.05f, 0.0f))}};
+      fm.touch();
+    }
+    CHECK(torso->get<MeshFilter>()->mesh->shape_keys.empty());
+    for (GameObject *g : {torso, face}) {
+      ed.select_for_test(g->id, false);
+      ed.command("component SkinModifier");
+      ed.command("set SkinModifier.Armature " + rig->name);
+      ed.command("skin bind");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    }
+    /* The same material twice on the torso, as an import often leaves it. */
+    MeshRenderer *tr = torso->get<MeshRenderer>();
+    CHECK(tr != nullptr);
+    if (!tr) return;
+    MaterialPtr skin = std::make_shared<Material>();
+    skin->name = "Skin";
+    MaterialPtr copy = std::make_shared<Material>(*skin);
+    copy->name = "Skin.001";
+    tr->materials = {skin, copy};
+    Mesh &tm = *mesh_make_mutable(torso->get<MeshFilter>()->mesh);
+    tm.face_material.assign(tm.face_count(), 0);
+    for (size_t f = 0; f < tm.face_count(); f += 2) tm.face_material[f] = 1;
+    tm.touch();
+    const size_t tv = torso->get<MeshFilter>()->mesh->vert_count(), fv = face->get<MeshFilter>()->mesh->vert_count();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *body = ed.scene().find_by_name("Body");
+    const MeshFilter *mf = body ? body->get<MeshFilter>() : nullptr;
+    const Mesh *m = mf ? mf->mesh.get() : nullptr;
+    const int smile = m ? m->find_shape("Smile") : -1;
+    /* The face's vertices move with Smile, the torso's don't: as many moving offsets as the face has vertices. */
+    size_t moving = 0;
+    for (size_t i = 0; m && smile >= 0 && i < m->vert_count(); i++) moving += length(m->shape_keys[(size_t)smile].delta[i]) > 0.0f ? 1 : 0;
+    std::printf("    Body: %zu vertices (%zu + %zu), Smile at %d moving %zu of them (the face's %zu), keys fit %d, groups fit %d, %zu slot(s)\n", m ? m->vert_count() : (size_t)0,
+                tv, fv, smile, moving, fv, m ? (int)m->keys_fit() : -1, m ? (int)m->groups_fit() : -1, body && body->get<MeshRenderer>() ? body->get<MeshRenderer>()->materials.size() : (size_t)0);
+    CHECK(m && m->vert_count() == tv + fv && smile >= 0 && moving == fv && m->keys_fit() && m->groups_fit());
+    CHECK(body && body->get<MeshRenderer>() && body->get<MeshRenderer>()->materials.size() == 1);
+    CHECK(!ed.scene().find(face->id) || ed.scene().find(face->id) == body);
+  });
+  test("Fix Model (review 357): MMD's split body - the upper body beside the lower, both under the waist - comes out Hips > Spine; a clip's keys on the moved bones still put the head where they did; an animated Center stays", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *hips = s.find_by_name("Hips"), *spine = s.find_by_name("Spine"), *head = s.find_by_name("Head");
+    CHECK(rig && hips && spine && head);
+    if (!rig || !hips || !spine || !head) return;
+    /* armature > Waist > {LowerBody (the hips, the legs), UpperBody (the spine)}: MMD's 腰 > {下半身, 上半身}. */
+    GameObject *waist = r357_bone(rig, s, "\xE8\x85\xB0", hips->local().position);  // (腰)
+    const uint64_t waist_id = waist->id;
+    s.set_parent(hips, waist, -1, true);
+    hips->get<Bone>()->set_rest(hips->local());
+    s.set_parent(spine, waist, -1, true);
+    spine->get<Bone>()->set_rest(spine->local());
+    hips->name = "\xE4\xB8\x8B\xE5\x8D\x8A\xE8\xBA\xAB";   // (下半身)
+    spine->name = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB";  // (上半身)
+    /* A clip turning the upper body and lifting the lower: keys in the waist's space. */
+    std::remove(resolve_asset_path("Assets/Animations/R357Mmd.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R357Mmd.anim", "R357Mmd");
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    const std::string sp = anim_path(*rig, *spine);
+    clip->track(sp, "Rotation", 0).set_key(10, 20.0f);
+    clip->track(sp, "Rotation", 2).set_key(10, -15.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    ed.mark_changed_for_test("key the body");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* The head where the clip's frame 10 puts it, before and after. */
+    const uint64_t head_id = head->id;
+    auto head_at = [&](AnimationClip &c) {
+      for (const AnimTrack &t : c.tracks)
+        if (GameObject *g = anim_target(*rig, t.path)) write_anim_value(*g, t.property, t.axis, t.sample(10.0f));
+      return s.find(head_id)->world_position();
+    };
+    const Vec3 before = head_at(*clip);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *h2 = s.find_by_name("Hips"), *s2 = s.find_by_name("Spine");
+    const Vec3 after = head_at(*clip);
+    std::printf("    the spine's parent %s, the waist %s; the head at frame 10 (%.3f %.3f %.3f) before, (%.3f %.3f %.3f) after\n", s2 && s2->parent ? s2->parent->name.c_str() : "-",
+                s.find(waist_id) ? "kept" : "merged", before.x, before.y, before.z, after.x, after.y, after.z);
+    CHECK(h2 && s2 && s2->parent == h2 && !s.find(waist_id));
+    CHECK(length(after - before) < 1e-3f);
+    /* A Center the clip moves isn't merged: its root motion would have nowhere to go. */
+    Editor ed2;
+    ed2.init_headless(1200, 900);
+    ed2.command("rig humanoid");
+    GameObject *rig2 = ed2.active_object_for_test();
+    GameObject *hips2 = ed2.scene().find_by_name("Hips");
+    CHECK(rig2 && hips2);
+    if (!rig2 || !hips2) return;
+    GameObject *center = r357_bone(rig2, ed2.scene(), "Center", hips2->local().position * 0.5f);
+    ed2.scene().set_parent(hips2, center, -1, true);
+    hips2->get<Bone>()->set_rest(hips2->local());
+    std::remove(resolve_asset_path("Assets/Animations/R357Center.anim").c_str());
+    AnimationClipPtr dance = create_clip_asset("Assets/Animations/R357Center.anim", "R357Center");
+    if (!dance) return;
+    dance->track(anim_path(*rig2, *center), "Position", 2).set_key(30, 2.0f);
+    rig2->add<Animation>()->clip = dance->asset_path;
+    ed2.select_for_test(rig2->id, false);
+    ed2.command("avatar fixmodel");
+    CHECK(ed2.scene().find(center->id) != nullptr);
+  });
+  test("Fix Model (review 357): the body under a smaller mesh is joined safely; a mesh with a Mirror isn't joined (said); with Remove Constraints off the IK and its targets stay", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *hair = ed.active_object_for_test();
+    ed.command("create Sphere");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("create Cylinder");
+    GameObject *cape = ed.active_object_for_test();
+    CHECK(rig && hair && body && cape);
+    if (!rig || !hair || !body || !cape) return;
+    ed.scene().set_parent(body, hair, -1, true);  // (the bigger mesh below the smaller)
+    for (GameObject *g : {hair, body, cape}) {
+      ed.select_for_test(g->id, false);
+      ed.command("component SkinModifier");
+      ed.command("set SkinModifier.Armature " + rig->name);
+      ed.command("skin bind");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    }
+    ed.select_for_test(cape->id, false);
+    ed.command("component MirrorModifier");
+    const size_t sv = body->get<MeshFilter>()->mesh->vert_count(), hv = hair->get<MeshFilter>()->mesh->vert_count();
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("not joined: its MirrorModifier") != std::string::npos;
+    GameObject *b = ed.scene().find(body->id);
+    std::printf("    Body %zu vertices (%zu + %zu), the cape kept apart %d, said %d\n", b ? b->get<MeshFilter>()->mesh->vert_count() : (size_t)0, sv, hv, (int)(ed.scene().find(cape->id) != nullptr), (int)said);
+    CHECK(b && b->get<MeshFilter>()->mesh->vert_count() == sv + hv && ed.scene().find(cape->id) && said);
+    /* Remove Constraints off: the IK keeps its targets (they move nothing, and stayed). */
+    Editor ed2;
+    ed2.init_headless(1200, 900);
+    ed2.command("rig humanoid");
+    GameObject *rig2 = ed2.active_object_for_test();
+    if (!rig2) return;
+    ed2.fix_model_options_for_test().remove_constraints = false;
+    ed2.command("avatar fixmodel");
+    size_t iks = 0, reached = 0;
+    ed2.scene().for_each([&](GameObject &g) {
+      const IKConstraint *ik = g.get<IKConstraint>();
+      if (!ik) return;
+      iks++;
+      reached += ed2.scene().find_by_name(ik->target) ? 1 : 0;
+    });
+    std::printf("    with the constraints kept: %zu IKs, %zu with their targets\n", iks, reached);
+    CHECK(iks == 4 && reached == 4);
+  });
+  test("the lesson's Try-it (round 357): rig humanoid, then avatar fixmodel - no IK left, the Humanoid bones kept", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    ed.command("avatar fixmodel");
+    bool iks = false;
+    ed.scene().for_each([&](GameObject &g) { iks = iks || g.get<IKConstraint>(); });
+    CHECK(!iks && ed.scene().find_by_name("Hips") && ed.scene().find_by_name("LeftHand") && ed.scene().find_by_name("Head"));
+  });
+  test("Join (round 357): shape keys carried through by name - the joined object's keys moved into the result's space, zero where a mesh has none", [] {
+    Mesh a = *primitives::cube(), b = *primitives::cube();
+    a.shape_keys = {{"Up", std::vector<Vec3>(a.vert_count(), Vec3(0, 0.1f, 0))}};
+    b.shape_keys = {{"Wide", std::vector<Vec3>(b.vert_count(), Vec3(0.1f, 0, 0))}};
+    const size_t na = a.vert_count();
+    Mesh plain = a;
+    meshops::append_mesh(plain, b, Mat4::identity(), {});  // (the Z-fight check's and Scatter's: no keys joined)
+    CHECK(plain.find_shape("Wide") < 0 && plain.shape_keys[0].delta.size() == na);
+    meshops::append_mesh(a, b, Mat4::trs(Vec3(2, 0, 0), Quat::axis_angle(Vec3(0, 1, 0), 1.5707963f), Vec3(1.0f)), {}, true);
+    const int up = a.find_shape("Up"), wide = a.find_shape("Wide");
+    CHECK(up >= 0 && wide >= 0 && a.keys_fit());
+    if (up < 0 || wide < 0 || !a.keys_fit()) return;
+    std::printf("    Up on the joined part %.3f; Wide on the first part %.3f, on the joined part (%.3f %.3f %.3f)\n", length(a.shape_keys[(size_t)up].delta[na]),
+                length(a.shape_keys[(size_t)wide].delta[0]), a.shape_keys[(size_t)wide].delta[na].x, a.shape_keys[(size_t)wide].delta[na].y, a.shape_keys[(size_t)wide].delta[na].z);
+    CHECK(length(a.shape_keys[(size_t)up].delta[na]) == 0.0f && length(a.shape_keys[(size_t)wide].delta[0]) == 0.0f);
+    CHECK(std::fabs(a.shape_keys[(size_t)wide].delta[na].z + 0.1f) < 1e-4f && std::fabs(a.shape_keys[(size_t)wide].delta[na].x) < 1e-4f);  // (X turned 90 degrees about Y: -Z)
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -6617,4 +6922,5 @@ void run_assets_tests() {
   tests_round354();
   tests_round355();
   tests_round356();
+  tests_round357();
 }

@@ -218,6 +218,7 @@ struct Mesh : MeshCaches {
   int find_shape(const std::string &name) const;
   int find_group(const std::string &group) const;
   bool groups_fit() const;               // every group has one weight per vertex
+  bool keys_fit() const;                 // every shape key has one offset per vertex (round 357)
   bool custom_normals_fit() const { return !custom_normals.empty() && custom_normals.size() == positions.size(); }
   void copy_vertex_weights(uint32_t from);  // a weight for a vertex just added as a copy of `from`
   void add_loose_edge(uint32_t a, uint32_t b);
@@ -607,7 +608,9 @@ void solidify(Mesh &m, float thickness, float offset, bool even, bool rim);
 /* Object and extrusion tools (mesh_tools3.cpp). */
 /* Object > Join (Ctrl+J): src appended to dst, through xf (src's space into
  * dst's); slot_remap[i] is dst's material slot for src's slot i. */
-void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap = {});
+/* join_keys (round 357): shape keys joined by name too - Join's and Fix Model's; the Z-fight check and Scatter merge
+ * don't want every key times every vertex (review 357). */
+void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap = {}, bool join_keys = false);
 /* Separate > Selection: a new mesh of the selected faces (the caller deletes them from m). */
 Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel);
 /* Separate > By Loose Parts: a part index per face; returns the number of parts. */

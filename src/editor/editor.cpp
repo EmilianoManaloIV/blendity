@@ -4699,12 +4699,15 @@ void Editor::carry_vertex_groups(const Scene &before) {
   });
 }
 
-/* Shape keys (task 0135) after an edit: no operator carries them, so any edit that renumbered the vertices (even to
- * the same count: a delete and an add) gets them from the mesh before, by position. A move keeps them as they are. */
+/* Shape keys (task 0135) after an edit: most operators don't carry them, so an edit that renumbered the vertices (even
+ * to the same count: a delete and an add) gets them from the mesh before, by position. A move keeps them as they are,
+ * and so does an operator that sized them itself (Join, round 357: each part keeps its own offsets - by position, a
+ * joined torso had taken the face's). */
 void Editor::carry_shape_keys(MeshPtr &mesh, const Mesh *before) {
   if (!before || before->shape_keys.empty()) return;
   /* The same faces on the same vertices: the edit moved vertices or changed the keys themselves (shape add, remove). */
   if (mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before) && meshops::shape_keys_fit(*mesh)) return;
+  if (mesh->vert_count() != before->vert_count() && !mesh->shape_keys.empty() && meshops::shape_keys_fit(*mesh)) return;
   Mesh &m = *mesh_make_mutable(mesh);
   meshops::transfer_shape_keys(*before, m);
   m.touch();

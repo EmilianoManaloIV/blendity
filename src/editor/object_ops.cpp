@@ -66,7 +66,7 @@ void Editor::join_selected() {
   for (GameObject *o : others) {
     const Mesh &src = *o->get<MeshFilter>()->mesh;
     faces += src.face_count();
-    meshops::append_mesh(dst, src, inv * o->world_matrix(), merge_slots(*a, *o, src));
+    meshops::append_mesh(dst, src, inv * o->world_matrix(), merge_slots(*a, *o, src), true);
   }
   /* Children of the joined objects move to the result (Blender keeps them too). */
   for (GameObject *o : others) {

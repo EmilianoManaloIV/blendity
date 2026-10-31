@@ -32,6 +32,7 @@
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
 #include "../scene/budget.h"
+#include "../scene/avatar_fix.h"
 #include "../scene/visemes.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
@@ -2906,6 +2907,13 @@ class Editor {
   void draw_shape_key_problems(ui::Layout &lay, const Mesh &m);
   void run_fix(const std::string &lines);
   void avatar_origin(GameObject &root);
+  /* Round 357: Fix Model (CATS'), its options kept for the window. */
+  void avatar_fix_model(GameObject &root);
+  void draw_fix_model_section(ui::Layout &lay, GameObject *root);
+  FixModelOptions fix_model_options_;
+  public:
+  FixModelOptions &fix_model_options_for_test() { return fix_model_options_; }
+  private:
   const std::vector<AvatarCheck> &avatar_checklist(GameObject &root);
   void run_avatar_fix(const AvatarCheck &c);  // (its object selected by id first)
   /* The checklist kept half a second for the window (review 356: humanoid::map, gait::analyse and the budget every frame). */

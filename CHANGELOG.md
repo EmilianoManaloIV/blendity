@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 357): the VRChat avatar module, part 2 - Fix Model
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0334)**
+- **Fix Model** (Window > Avatar, `avatar fixmodel`), as the CATS plugin's, in one Undo step:
+  - Unity's Humanoid names (MMD's Japanese translated, Mixamo's prefix dropped);
+  - a bone between two Humanoid bones merged into the one above, its weights with it;
+  - bones that move nothing, IK and empty vertex groups removed;
+  - the meshes joined into Body;
+  - slots of one material combined;
+  - clips' tracks following their bones.
+
+  Its options are Keep Twist Bones, Remove Zero-Weight Bones, Remove Constraints, Join Meshes and Combine
+  Materials.
+- **Join keeps shape keys:** they're joined by name, so a face's visemes survive being joined to a body. Before,
+  they were matched by position, and a joined torso took the face's offsets.
+
+**The Opus review's fixes:**
+- a body under a smaller mesh is joined safely;
+- clips' keys are converted when bones move, and a bone a clip moves is kept;
+- joined meshes' tracks and key weights move to Body;
+- Join's keys are opt-in (the Z-fight check and Scatter don't build them);
+- MMD's split upper and lower body: the spine goes under the hips;
+- IK targets are kept when constraints are;
+- a mesh with other modifiers isn't joined, said;
+- rename order, two rigs of one name, the checklist remade.
+
+**Checked:** `tests_round357`:
+- MMD's split body, with the head at the same place at a keyed frame before and after;
+- an animated Center kept;
+- a nested body joined, a Mirror part kept apart, constraints kept;
+- a rig with other programs' names, a Center above the hips, a twist bone and an unweighted bone: after Fix Model
+  the posed body is unchanged and a clip's track follows its bone;
+- Undo of the rig and the clip;
+- a face's key surviving the join, and two slots combined;
+- Join's keys;
+- the Try-it.
+
 ## 2026-10-31 (round 356): the VRChat avatar module, part 1 - visemes, the checklist, the Avatar window
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 4
