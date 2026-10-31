@@ -397,6 +397,7 @@ screens themselves.
 | Anime Face Normals' proxy was a ball: a tall, narrow anime head's shadow line turned too early on its sides. | Rigging > Anime Face Normals (Ellipsoid): the proxy fitted to the head's width, height and depth (round 341). |
 | A rig the analysis read wrongly could have its six handles moved by hand, but not its upper arms, thighs or shins, and AutoPose and the walk kept the wrong bones; a tail or a sword had no control. | The Armature's Puppet Controls: a bone field for each part (drop from the Hierarchy), taken by the analysis for every tool; Extra Controls; a warning when sides look swapped (round 347). |
 | An IK limb couldn't be animated in FK: Weight 0 put it at its rest pose, and turning the Weight down made it snap. | Weight 0 is FK (the bones keep their pose); Switch to FK / IK on the constraint, the Puppet menu and the console, matched so nothing jumps, keyed with Record on (round 348). |
+| An avatar's visemes, blinks and expressions were lost on export: glTF and FBX got the mesh with the keys applied. | Shape keys go out as glTF morph targets and FBX blend shapes, with names and weights; a clip's weights too (round 351). |
 
 ## Still worth doing
 

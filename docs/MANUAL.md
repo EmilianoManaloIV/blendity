@@ -813,7 +813,12 @@ packages to install by hand (docs/LIVELINK.md, bridges/*/README.md).
 
 **glTF (.glb / .gltf) carries a rig**: a mesh with a Skin modifier exports at rest with its armature as joints, four
 weights a vertex and its rig's clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and
-Blender import a character that still moves. The other formats write the mesh as posed.
+Blender import a character that still moves. The other formats, and glTF with Armatures and Animation off, write the
+mesh as posed. **Shape keys** (round 351) go out as glTF morph targets and FBX blend shapes, by name with their weights -
+visemes, blinks and expressions reach Unity, VRChat and Unreal - with the mesh at rest when its rig goes too; a
+modifier that changes the mesh's shape (a Subdivision Surface, or a Skin whose rig isn't exported) leaves them out and
+the log says why. Normal-only modifiers (Anime Face Normals' transfer, Smooth Normals) keep them, and an Outline's
+shell carries them. A relative export path is the project's.
 
 **Import** (File > Import Model, or drop files on the window): OBJ + MTL, FBX, glTF, STL, PLY and USD text; their
 materials and textures come along, and rigged files come with their skeletons and skins. The model is shown first in

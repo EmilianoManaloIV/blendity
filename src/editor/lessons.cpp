@@ -412,6 +412,8 @@ A shape key (Blender's name; Unity says blend shape, glTF morph target, MMD vert
 ! cmd:create Sphere; shape add Puff 0.2; shape set Puff 0.5 | A sphere with a shape key "Puff", half applied (see MeshRenderer > BlendShape/Puff)
 ? Why are shape keys added before the skin rather than after? | So the expression is bent with the bones: a smile keyed on the face turns with the head instead of staying where the face was at rest.
 ? An imported face has 50 keys. Does every frame cost 50 times as much? | Only the keys with a weight above 0 are added.
+! cmd:create Cube; shape add Smile; export glb Exports/Learn Smile.glb | A cube with a shape key exported to the project's Exports/Learn Smile.glb: the file holds it as a morph target named Smile (FBX as a blend shape)
+? You export an avatar for VRChat and its visemes are gone in Unity. What's the first thing to check? | The log: a Subdivision Surface changes the mesh, and a Skin whose rig isn't exported (Armatures and Animation off) poses it, so the keys are left out and the log says which - apply the modifier, or export the rig. Export's Shape Keys option must be on.
 # Importing: preview the look
 A model dropped onto the window (or opened with File > Import) is shown first, in the Import Preview (task 0152): the
 model on a slow turntable (drag to turn it) lit from the preview's own camera, with the import's notes beside it - what the

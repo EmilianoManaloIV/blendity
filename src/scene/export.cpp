@@ -58,6 +58,11 @@ void ExportOptions::reflect(Reflector &r) {
            "import a character that still moves (Blender: Armature, Skinning, Animation). Off: the mesh as posed now.");
   }
   r.help("Export the meshes as the modifier stack makes them (Blender: Apply Modifiers).");
+  if (f == ExportFormat::GLB || f == ExportFormat::GLTF || f == ExportFormat::FBX) {
+    r.field("Shape Keys", shape_keys);
+    r.help("Each shape key as a morph target (glTF) or blend shape (FBX), by name with its weight, so visemes, blinks and\n"
+           "expressions reach Unity, VRChat and Unreal (Blender: Shape Keys). Off: the mesh as the weights shape it now.");
+  }
   r.field("Scale", scale, 0.01f, 0.0001f, 10000.0f);
   r.help("Multiplies every coordinate (Blender: Scale). 1 unit = 1 metre.");
   if (f == ExportFormat::OBJ || f == ExportFormat::STL || f == ExportFormat::PLY || f == ExportFormat::USD) {
@@ -138,7 +143,8 @@ Vec3 to_out(Vec3 v, int up) { return up ? Vec3(-v.x, -v.z, v.y) : Vec3(-v.x, v.y
 struct Prepared {
   std::string name;
   std::shared_ptr<const ExportSkin> skin;  // (task 0268)
-  Mesh mesh;                  // output space and scale, winding reversed
+  std::vector<float> shape_weights;  // (round 351) per mesh.shape_keys
+  Mesh mesh;                  // output space and scale, winding reversed (its shape keys' offsets turned likewise)
   std::vector<Vec3> normals;  // per corner, output space
   std::vector<MaterialPtr> materials;
 };
@@ -239,6 +245,20 @@ std::vector<Vec3> split_normals(const Mesh &m) {
   return out;
 }
 
+/* Round 351: the item's shape keys onto the prepared mesh, their offsets turned into the file's space as the vertices
+ * are (no translation); none when the option is off, a key doesn't fit, or triangulating changed the vertex count. */
+void prepare_shape_keys(const Mesh &src, const ExportItem &it, const ExportOptions &o, int up, Prepared &p) {
+  if (!o.shape_keys || src.shape_keys.empty() || !meshops::shape_keys_fit(src) || p.mesh.positions.size() != src.positions.size()) return;
+  for (size_t k = 0; k < src.shape_keys.size(); k++) {
+    ShapeKey key;
+    key.name = src.shape_keys[k].name;
+    key.delta.reserve(src.shape_keys[k].delta.size());
+    for (const Vec3 &d : src.shape_keys[k].delta) key.delta.push_back(finite_bits(d.x) && finite_bits(d.y) && finite_bits(d.z) ? to_out(it.world.dir(d), up) * o.scale : Vec3(0.0f));  // (a NaN offset from a file: none)
+    p.mesh.shape_keys.push_back(std::move(key));
+    p.shape_weights.push_back(k < it.shape_weights.size() ? it.shape_weights[k] : 0.0f);
+  }
+}
+
 std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const ExportOptions &o, int up) {
   std::vector<Prepared> out;
   for (const ExportItem &it : items) {
@@ -265,6 +285,7 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     m.sync_attributes();
     if (o.triangulate) meshops::triangulate(m);
     for (Vec3 &v : m.positions) v = to_out(it.world.point(v), up) * o.scale;
+    prepare_shape_keys(src, it, o, up, p);
     if (m.custom_normals.size() == m.positions.size()) {  // (task 0149: turned with the positions, by the inverse transpose)
       const Mat4 nm = it.world.inverse().transposed();
       for (Vec3 &n : m.custom_normals) {
@@ -652,6 +673,41 @@ void fbx_write_ascii(std::string &out, const FbxNode &n, int depth) {
 
 }  // namespace
 
+/* Round 351: a mesh's shape keys as Blender's FBX exporter writes them - a BlendShape deformer on the geometry, a
+ * BlendShapeChannel a key (its weight as DeformPercent) and the key's Shape geometry under it: the vertices it moves
+ * (Indexes) and by how much. A key that moves nothing keeps one vertex (an empty shape is dropped on import). */
+static void fbx_blend_shapes(const Prepared &p, int64_t gid, FbxNode &objects, FbxNode &conns, int64_t &next_id) {
+  const Mesh &m = p.mesh;
+  if (m.shape_keys.empty()) return;
+  const int64_t bid = next_id++;
+  objects.add("Deformer").L(bid).S(fbx_name(p.name, "Deformer")).S("BlendShape").add("Version").I(100);
+  conns.add("C").S("OO").L(bid).L(gid);
+  for (size_t k = 0; k < m.shape_keys.size(); k++) {
+    const ShapeKey &key = m.shape_keys[k];
+    std::vector<int32_t> idx;
+    std::vector<double> v, n;
+    for (size_t i = 0; i < key.delta.size(); i++) {
+      const Vec3 d = key.delta[i];
+      if (!(std::fabs(d.x) + std::fabs(d.y) + std::fabs(d.z) > 1e-9f) && !(idx.empty() && i + 1 == key.delta.size())) continue;
+      idx.push_back((int32_t)i);
+      v.insert(v.end(), {(double)d.x, (double)d.y, (double)d.z});
+      n.insert(n.end(), {0.0, 0.0, 0.0});
+    }
+    const int64_t cid = next_id++, sid = next_id++;
+    FbxNode &ch = objects.add("Deformer").L(cid).S(fbx_name(key.name, "SubDeformer")).S("BlendShapeChannel");
+    ch.add("Version").I(100);
+    ch.add("DeformPercent").D(100.0 * (k < p.shape_weights.size() ? p.shape_weights[k] : 0.0f));
+    ch.add("FullWeights").da({100.0});
+    FbxNode &sh = objects.add("Geometry").L(sid).S(fbx_name(key.name, "Geometry")).S("Shape");
+    sh.add("Version").I(100);
+    sh.add("Indexes").ia(std::move(idx));
+    sh.add("Vertices").da(std::move(v));
+    sh.add("Normals").da(std::move(n));
+    conns.add("C").S("OO").L(cid).L(bid);
+    conns.add("C").S("OO").L(sid).L(cid);
+  }
+}
+
 std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions &o) {
   const std::vector<Prepared> prepared = prepare(items, o, 0);  // FBX declares its axes: always Y up
   int64_t next_id = 1000000;
@@ -740,10 +796,13 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
   {
     FbxNode &d = root.add("Definitions");
     d.add("Version").I(100);
-    d.add("Count").I((int64_t)(prepared.size() * 2 + mats.size() + fbx_tex.size() * 2 + 1));
+    size_t shapes = 0, blends = 0;  // (round 351: a Shape geometry and a channel a key, a BlendShape a keyed mesh)
+    for (const Prepared &p : prepared) shapes += p.mesh.shape_keys.size(), blends += p.mesh.shape_keys.empty() ? 0 : 1;
+    d.add("Count").I((int64_t)(prepared.size() * 2 + mats.size() + fbx_tex.size() * 2 + 1 + shapes * 2 + blends));
     d.add("ObjectType").S("GlobalSettings").add("Count").I(1);
     d.add("ObjectType").S("Model").add("Count").I((int64_t)prepared.size());
-    d.add("ObjectType").S("Geometry").add("Count").I((int64_t)prepared.size());
+    d.add("ObjectType").S("Geometry").add("Count").I((int64_t)(prepared.size() + shapes));
+    if (blends) d.add("ObjectType").S("Deformer").add("Count").I((int64_t)(blends + shapes));
     d.add("ObjectType").S("Material").add("Count").I((int64_t)mats.size());
     if (!fbx_tex.empty()) {
       d.add("ObjectType").S("Texture").add("Count").I((int64_t)fbx_tex.size());
@@ -823,6 +882,7 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
     conns.add("C").S("OO").L(mid).L(0);
     conns.add("C").S("OO").L(gid).L(mid);
     for (int64_t m2 : item_mats[i]) conns.add("C").S("OO").L(m2).L(mid);
+    fbx_blend_shapes(p, gid, objects, conns, next_id);
   }
   for (const Mat &mt : mats) {
     const Vec3 c = mt.m ? mt.m->base_color : Vec3(0.8f);
@@ -1097,6 +1157,48 @@ std::string export_usda(const std::vector<ExportItem> &items, const ExportOption
 /* Task 0268: a transform in the file's space - X mirrored on both sides (S M S, as the vertices), translations scaled. */
 static Vec3 gltf_t(Vec3 t, float s) { return Vec3(-t.x, t.y, t.z) * s; }
 static Quat gltf_q(Quat q) { return Quat(q.x, -q.y, -q.z, q.w); }
+/* Round 351: a primitive's morph targets - each shape key's offsets at its split vertices (from their mesh vertex, as
+ * the joints are), a POSITION accessor with its bounds - as `,"targets":[...]`, or "" without keys. */
+template <class VecAccessor>
+static std::string gltf_targets(const Mesh &m, const std::vector<uint32_t> &src, VecAccessor &vec_accessor) {
+  if (m.shape_keys.empty()) return "";
+  std::string out = ",\"targets\":[";
+  std::vector<Vec3> d;
+  for (size_t k = 0; k < m.shape_keys.size(); k++) {
+    d.clear();
+    for (uint32_t v : src) d.push_back(v < m.shape_keys[k].delta.size() ? m.shape_keys[k].delta[v] : Vec3(0.0f));
+    out += strprintf("%s{\"POSITION\":%d}", k ? "," : "", vec_accessor(d, true));
+  }
+  return out + "]";
+}
+
+/* Round 351: the mesh's default weights and its keys' names (`extras.targetNames`, as Blender writes them). */
+static std::string gltf_target_names(const Prepared &p) {
+  if (p.mesh.shape_keys.empty()) return "";
+  std::string w = ",\"weights\":[", names = ",\"extras\":{\"targetNames\":[";
+  for (size_t k = 0; k < p.mesh.shape_keys.size(); k++) {
+    w += (k ? "," : "") + num(k < p.shape_weights.size() ? p.shape_weights[k] : 0.0f);
+    names += std::string(k ? "," : "") + "\"" + json_escape(p.mesh.shape_keys[k].name) + "\"";
+  }
+  return w + "]" + names + "]}";
+}
+
+/* Round 351: a clip's shape key weights as one `weights` channel on the mesh's node (every key at every frame). */
+template <class ChannelValues>
+static void gltf_weights_channel(const ExportSkin::Anim &an, size_t keys, int mesh_node, ChannelValues &channel_values, std::string &samplers,
+                                 std::string &channels, int &si, size_t time_acc) {
+  if (!keys || an.shape_w.size() != keys) return;
+  for (const std::vector<float> &w : an.shape_w)
+    if ((int)w.size() < an.frames) return;
+  std::vector<float> vals;
+  for (int f = 0; f < an.frames; f++)
+    for (size_t k = 0; k < keys; k++) vals.push_back(an.shape_w[k][(size_t)f]);
+  const size_t acc = channel_values(vals, an.frames * (int)keys, "SCALAR");
+  samplers += strprintf("%s{\"input\":%zu,\"output\":%zu,\"interpolation\":\"LINEAR\"}", si ? "," : "", time_acc, acc);
+  channels += strprintf("%s{\"sampler\":%d,\"target\":{\"node\":%d,\"path\":\"weights\"}}", si ? "," : "", si, mesh_node);
+  si++;
+}
+
 static Mat4 gltf_m(const Mat4 &m, float s) {
   Mat4 r = m;
   for (int c = 0; c < 4; c++)
@@ -1248,15 +1350,17 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"SCALAR\"}", view, sv.vid.size()));
         attrs += strprintf(",\"_VERT\":%zu", accessors.size() - 1);
       }
+      const std::string targets = gltf_targets(m, sv.src, vec_accessor);  // (round 351: before the indices, which the primitive names last)
       const int iv = add_view(idx.data(), idx.size() * 4, 34963);
       accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5125,\"count\":%zu,\"type\":\"SCALAR\"}", iv, idx.size()));
-      std::string prim = "{\"attributes\":{" + attrs + strprintf("},\"indices\":%zu,\"mode\":4,\"extras\":{\"slot\":%d}", accessors.size() - 1, slot);
+      std::string prim = "{\"attributes\":{" + attrs + strprintf("},\"indices\":%zu,\"mode\":4,\"extras\":{\"slot\":%d}", accessors.size() - 1, slot) + targets;
       const int mat = material_of(slot_material(p, slot));
       if (mat >= 0) prim += strprintf(",\"material\":%d", mat);
       prims += (prims.empty() ? "" : ",") + prim + "}";
     }
     if (prims.empty()) continue;
-    meshes.push_back("{\"name\":\"" + json_escape(p.name) + "\",\"primitives\":[" + prims + "]}");
+    meshes.push_back("{\"name\":\"" + json_escape(p.name) + "\",\"primitives\":[" + prims + "]" + gltf_target_names(p) + "}");
+    const int mesh_node = (int)nodes.size();  // (round 351: the node an animated weights channel targets)
     const bool with_skin = o.skins && p.skin && !p.skin->joints.empty() && p.skin->vjoints.size() == m.positions.size();
     roots.push_back((int)nodes.size());
     nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu", meshes.size() - 1) +
@@ -1314,6 +1418,11 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
       const size_t time_acc = accessors.size() - 1;
       std::string samplers, channels;
       int si = 0;
+      auto channel_values = [&](const std::vector<float> &vals, int count, const char *type) {  // (round 351: an output accessor)
+        const int vv = add_view(vals.data(), vals.size() * sizeof(float), 0);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"%s\"}", vv, count, type));
+        return accessors.size() - 1;
+      };
       auto channel = [&](const std::vector<float> &vals, const char *type, size_t joint, const char *path) {
         const int vv = add_view(vals.data(), vals.size() * sizeof(float), 0);
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"%s\"}", vv, an.frames, type));
@@ -1336,6 +1445,7 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         channel(rv4, "VEC4", j, "rotation");
         channel(sv3, "VEC3", j, "scale");
       }
+      gltf_weights_channel(an, m.shape_keys.size(), mesh_node, channel_values, samplers, channels, si, time_acc);
       animations.push_back("{\"name\":\"" + json_escape(an.name) + "\",\"samplers\":[" + samplers + "],\"channels\":[" + channels + "]}");
     }
   }
