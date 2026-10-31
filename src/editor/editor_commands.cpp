@@ -1045,7 +1045,7 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
   if (c == "budget") return budget_command(t);      // budget [pc|quest] | budget fix [good|medium|poor] (round 355)
   if (c == "visemes") return (void)visemes_command(t);  // visemes [AA OH CH] (round 356)
-  if (c == "avatar") return avatar_command(t);           // avatar check [root] | fix <n> | origin | decimate (round 356) | fixmodel (357)
+  if (c == "avatar") return avatar_command(t);           // avatar check [root] | fix <n> | origin | decimate (round 356) | fixmodel (357) | the Model Options and Pose and Shape verbs (358)
   if (c == "shape") return shape_command(t);        // shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135)
   if (c == "walk") return walk_command(t);          // walk cycle | set | save | load | presets (task 0125)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
@@ -1517,7 +1517,10 @@ void Editor::run_console_command(const std::string &line) {
     }
     boolean_selected(o == "union" ? 1 : o == "intersect" ? 2 : 0, to_lower(arg(2, "")) != "modifier", kept);
   }
-  else if (c == "separate") separate(to_lower(arg(1, "loose")) == "selection" ? "selection" : "loose");
+  else if (c == "separate") {  // separate [loose|selection|material|shapekeys] (material and shapekeys: round 358)
+    const std::string mode = to_lower(arg(1, "loose"));
+    separate(mode == "selection" || mode == "material" || mode == "shapekeys" ? mode : "loose");
+  }
   else if (c == "esel") {
     /* esel <a> <b> [<c> <d> ...]: select exactly these edges (vertex pairs), edge mode */
     if (!edit_mode_) enter_edit_mode();

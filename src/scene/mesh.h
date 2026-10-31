@@ -611,6 +611,8 @@ void solidify(Mesh &m, float thickness, float offset, bool even, bool rim);
 /* join_keys (round 357): shape keys joined by name too - Join's and Fix Model's; the Z-fight check and Scatter merge
  * don't want every key times every vertex (review 357). */
 void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap = {}, bool join_keys = false);
+/* Shape keys that move none of the mesh's vertices dropped (round 358: Separate by Shape Keys); returns how many. */
+size_t drop_unmoving_keys(Mesh &m);
 /* Separate > Selection: a new mesh of the selected faces (the caller deletes them from m). */
 Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel);
 /* Separate > By Loose Parts: a part index per face; returns the number of parts. */

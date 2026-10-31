@@ -551,6 +551,32 @@ bool merge_bone_into_parent(Scene &scene, GameObject &armature, GameObject &bone
   return true;
 }
 
+void put_at_rest(GameObject &armature) { to_rest(armature); }
+
+bool clip_moves(GameObject &armature, const GameObject &g) {
+  for (const ClipPaths &cp : note_clip_paths(armature))
+    for (const AnimTrack &t : cp.clip->tracks)
+      if (noted_object(cp, t) == g.id) return true;
+  return false;
+}
+
+int remove_zero_weight_bones(Scene &scene, GameObject &armature, const FixModelOptions &o, FixModelReport &r) {
+  to_rest(armature);
+  Pass p{scene, armature, o, r, note_clip_paths(armature), {}};
+  zero_weight_step(p);
+  empty_groups_step(p);
+  rewrite_clip_paths(p);
+  return r.removed + r.groups;
+}
+
+int join_avatar_meshes(Scene &scene, GameObject &armature, FixModelReport &r) {
+  FixModelOptions o;
+  Pass p{scene, armature, o, r, note_clip_paths(armature), {}};
+  join_step(p);
+  rewrite_clip_paths(p);
+  return r.joined;
+}
+
 FixModelReport fix_model(Scene &scene, GameObject &armature, const FixModelOptions &o) {
   FixModelReport r;
   to_rest(armature);

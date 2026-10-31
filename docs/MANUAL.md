@@ -868,6 +868,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Fix Model** (round 357, the Avatar window's first button, as the CATS plugin's): in one Undo step the Humanoid bones get Unity's names (MMD's Japanese translated, Mixamo's prefix dropped), a bone between two of them is merged into the one above with its weights, bones that move nothing, IK and empty vertex groups go, the avatar's meshes become one Body keeping every shape key, and slots of one material become one; clips' tracks follow their bones. Options: Keep Twist Bones, Remove Zero-Weight Bones, Remove Constraints, Join Meshes, Combine Materials. Console: `avatar fixmodel`.
 
+**Model Options and Pose and Shape** (round 358, the Avatar window under Fix Model, as the CATS plugin's): Merge Weights, Delete Zero Weight Bones, Join Meshes, Separate by Material / Loose Parts / Shape Keys, Remove Doubles, Apply Transforms, Recalculate / Flip Normals, Connect Bones; Pose to Shape Key, Apply as Rest Pose (the meshes take the pose, their shape keys carried), Apply Shape Key as Basis (a '- Reverted' key takes it back), Sort Shape Keys (VRChat's order), T-Pose and A-Pose. Console: `avatar mergeweights|zeroweight|join|separate <material|loose|shapekeys>|removedoubles|applytransforms|normals [flip]|connect|posekey <name>|applyrest|basis <key>|sortkeys|tpose|apose`.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

@@ -53,6 +53,7 @@ void Editor::avatar_command(const std::vector<std::string> &t) {
   avatar_cache_.at = -1.0;
   if (verb == "origin") return avatar_origin(*root);
   if (verb == "fixmodel") return avatar_fix_model(*root);
+  if (avatar_tool_command(verb, t, *root)) return;
   if (verb == "decimate") return (void)budget_fix_triangles(1, avatar_objects(*scene_, *root), 0);  // (VRChat PC's Good; the target left as it is)
   const std::vector<AvatarCheck> list = avatar_check(*scene_, *root);
   if (verb == "fix") {
@@ -165,6 +166,8 @@ void Editor::draw_avatar_window(const Recti &r) {
   GameObject *root = puppet_rig_of(active_object());
   u.label(lay.row(), root ? "Avatar: " + root->name : std::string("Select the avatar (its mesh, root or a bone)"), u.theme.text_bright);
   draw_fix_model_section(lay, root);  // (round 357: CATS' tab starts with Fix Model)
+  draw_model_options_section(lay, root);  // (round 358)
+  draw_pose_shape_section(lay, root);
   draw_avatar_section(lay, root);
   u.pop_id();
   content_h = lay.y + off - r.y + u.px(20);

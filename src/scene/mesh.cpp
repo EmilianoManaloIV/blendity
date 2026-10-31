@@ -1998,6 +1998,13 @@ std::vector<uint32_t> remove_loose_verts(Mesh &m) {
       if (remap[i] != UINT32_MAX) w[remap[i]] = g.weights[i];
     g.weights = std::move(w);
   }
+  for (ShapeKey &k : m.shape_keys) {  // (round 358: keys that fitted follow the remap too)
+    if (k.delta.size() != remap.size()) continue;
+    std::vector<Vec3> d(np.size(), Vec3(0.0f));
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX) d[remap[i]] = k.delta[i];
+    k.delta = std::move(d);
+  }
   m.positions = std::move(np);
   remap_seams(m, remap);
   m.touch();

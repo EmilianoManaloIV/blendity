@@ -78,6 +78,13 @@ void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<i
   dst.touch();
 }
 
+size_t drop_unmoving_keys(Mesh &m) {
+  const size_t before = m.shape_keys.size();
+  const auto still = [](const ShapeKey &k) { return std::all_of(k.delta.begin(), k.delta.end(), [](const Vec3 &d) { return length(d) <= 1e-7f; }); };
+  m.shape_keys.erase(std::remove_if(m.shape_keys.begin(), m.shape_keys.end(), still), m.shape_keys.end());
+  return before - m.shape_keys.size();
+}
+
 Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   Mesh out;
   out.name = m.name;
@@ -99,7 +106,16 @@ Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
     }
   }
   if (!m.face_material.empty()) out.face_material.resize(out.face_count(), 0);
-  remove_loose_verts(out);
+  const std::vector<uint32_t> remap = remove_loose_verts(out);
+  /* The shape keys' offsets for the vertices kept (round 358; only their rows: a copy of every key a part had made a
+   * many-part Separate slow - review 358). */
+  for (const ShapeKey &k : m.shape_keys) {
+    if (k.delta.size() != remap.size()) continue;
+    ShapeKey nk{k.name, std::vector<Vec3>(out.vert_count(), Vec3(0.0f))};
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX) nk.delta[remap[i]] = k.delta[i];
+    out.shape_keys.push_back(std::move(nk));
+  }
   out.sync_attributes();
   out.touch();
   return out;

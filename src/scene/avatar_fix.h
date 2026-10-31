@@ -40,6 +40,16 @@ void rename_bone(Scene &scene, GameObject &armature, GameObject &bone, const std
  * the bone deleted. False when its parent isn't a bone (nothing to take its weights). */
 bool merge_bone_into_parent(Scene &scene, GameObject &armature, GameObject &bone);
 
+/* The rig at its rest (every bone's local its rest): what the skins measure from (round 358's pose tools start here). */
+void put_at_rest(GameObject &armature);
+/* A clip over the rig keys `g` (round 358: Connect Bones leaves such a bone as it is). */
+bool clip_moves(GameObject &armature, const GameObject &g);
+
+/* Fix Model's steps one at a time, for the Model Options (round 358): bones that move nothing (and empty groups),
+ * and the meshes joined into Body - clips followed as the whole pass follows them. Each returns what it changed. */
+int remove_zero_weight_bones(Scene &scene, GameObject &armature, const FixModelOptions &options, FixModelReport &report);
+int join_avatar_meshes(Scene &scene, GameObject &armature, FixModelReport &report);
+
 /* The whole pass, in CATS' order. The rig is put at rest first (rests are what the skins measure from). */
 FixModelReport fix_model(Scene &scene, GameObject &armature, const FixModelOptions &options = {});
 

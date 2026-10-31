@@ -2,6 +2,53 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 358): the VRChat avatar module, part 3 - Model Options, Pose and Shape tools
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0335)**
+- **Model Options** (Window > Avatar), each as in the CATS plugin:
+  - Merge Weights;
+  - Delete Zero Weight Bones;
+  - Join Meshes;
+  - Separate by Material, Loose Parts or Shape Keys (`separate material|shapekeys`);
+  - Remove Doubles;
+  - Apply Transforms;
+  - Recalculate and Flip Normals;
+  - Connect Bones.
+- **Pose and Shape:**
+  - Pose to Shape Key;
+  - Apply as Rest Pose, with the meshes taking the pose and their keys carried through;
+  - Apply Shape Key as Basis, with a Reverted key;
+  - Sort Shape Keys in VRChat's order;
+  - T-Pose and A-Pose.
+- `avatar <verb>` for each tool.
+- **Shape keys survive more edits:** they follow Separate and every vertex compaction, and Apply Transform turns
+  their offsets.
+
+**The Opus review's fixes:**
+- Connect Bones starts from the rest and leaves bones a clip moves;
+- Remove Doubles never merges a vertex a key moves;
+- Separate by Shape Keys keeps the keyed faces and the clips with them, with no keys on the rest;
+- key names with spaces work;
+- T and A pose start from the rest in the rig's own frame;
+- the pose tools refuse while Rest Position is on;
+- custom normals are posed;
+- the Skin's limit group is honoured;
+- cheaper copies.
+
+**Checked:** `tests_round358`:
+- the pose's key exact;
+- the body unmoved through Apply as Rest Pose, and Undo;
+- the basis and its Reverted key;
+- the sort order;
+- A and T at 45 and 0 degrees;
+- a connected bone as long as its gap, the body unmoved;
+- Separate by Material and by Shape Keys;
+- Apply Transform's key;
+- Merge Weights' sums;
+- the Try-it.
+
 ## 2026-10-31 (round 357): the VRChat avatar module, part 2 - Fix Model
 
 **Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).

@@ -8,6 +8,8 @@
 #include "../src/core/json.h"
 #include "../src/scene/budget.h"
 #include "../src/scene/visemes.h"
+#include "../src/scene/humanoid.h"
+#include "../src/scene/avatar_tools.h"
 #include "../extern/ufbx/ufbx.h"
 
 static void image_tests() {
@@ -6552,6 +6554,276 @@ static void tests_round357() {
   });
 }
 
+/* ---------------------------------------------------------------- round 358: Model Options, Pose and Shape tools */
+/* A rig with a skinned cylinder for a body; its upper left arm turned 40 degrees down. */
+struct R358Avatar {
+  GameObject *rig = nullptr, *body = nullptr, *arm = nullptr;
+};
+static R358Avatar r358_avatar(Editor &ed, bool pose) {
+  R358Avatar a;
+  ed.command("create Cylinder");
+  a.body = ed.active_object_for_test();
+  ed.command("position 0 1 0");
+  ed.command("rig humanoid");
+  a.rig = ed.active_object_for_test();
+  a.arm = ed.scene().find_by_name("LeftUpperArm");
+  if (!a.body || !a.rig || !a.arm) return a;
+  ed.scene().for_each([](GameObject &g) {
+    if (IKConstraint *ik = g.get<IKConstraint>()) ik->weight = 0.0f;  // (the hand's IK would pull the arm back)
+  });
+  ed.select_for_test(a.body->id, false);
+  ed.command("component SkinModifier");
+  ed.command("set SkinModifier.Armature " + a.rig->name);
+  ed.command("skin bind");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  if (pose) a.arm->set_local_rotation(a.arm->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 0, 1), -0.7f));
+  for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  return a;
+}
+
+static float r358_qdot(Quat a, Quat b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+
+static float r358_worst(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  if (a.size() != b.size()) return 1e9f;
+  float w = 0.0f;
+  for (size_t i = 0; i < a.size(); i++) w = std::max(w, length(a[i] - b[i]));
+  return w;
+}
+
+static void tests_round358() {
+  test("Pose and Shape (round 358): Pose to Shape Key keeps the skinned pose; Apply as Rest Pose leaves the body where the pose had it, a key made at rest still moving it the same", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, true);
+    CHECK(a.rig && a.body && a.arm);
+    if (!a.rig || !a.body || !a.arm) return;
+    /* A key made at rest: the whole body 5 cm up. */
+    {
+      Mesh &m = *mesh_make_mutable(a.body->get<MeshFilter>()->mesh);
+      m.shape_keys.push_back({"Up", std::vector<Vec3>(m.vert_count(), Vec3(0, 0.05f, 0))});
+      m.touch();
+    }
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> posed_plain = r357_skinned(*a.body);  // (the evaluated body, Up at 0)
+    ed.select_for_test(a.body->id, false);
+    ed.command("avatar posekey Wave");
+    a.body->get<MeshRenderer>()->set_shape_weight("Up", 1.0f);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> posed = r357_skinned(*a.body);
+    const Mesh &pm = *a.body->get<MeshFilter>()->mesh;
+    const int wave = pm.find_shape("Wave");
+    float key_err = wave >= 0 && posed_plain.size() == pm.vert_count() ? 0.0f : 1e9f;
+    for (size_t i = 0; key_err == 0.0f && i < pm.vert_count(); i++)
+      key_err = std::max(key_err, length(a.body->world_matrix().point(pm.positions[i] + pm.shape_keys[(size_t)wave].delta[i]) - posed_plain[i]));
+    ed.command("avatar applyrest");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> after = r357_skinned(*a.body);
+    const Quat rest = a.arm->get<Bone>()->rest_rotation, now = a.arm->local().rotation;
+    std::printf("    Wave matches the skinned pose to %.6f; after Apply as Rest the body (Up at 1) moved %.6f; the arm's rest is its pose %d\n", key_err, r358_worst(posed, after),
+                (int)(std::fabs(r358_qdot(rest, now)) > 0.9999f));
+    CHECK(key_err < 1e-4f && r358_worst(posed, after) < 1e-3f && std::fabs(r358_qdot(rest, now)) > 0.9999f);
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.scene().find(a.arm->id) && std::fabs(r358_qdot(ed.scene().find(a.arm->id)->get<Bone>()->rest_rotation, now)) < 0.9999f);
+  });
+  test("Pose and Shape (round 358): Apply Shape Key as Basis with a Reverted key; Sort Shape Keys in VRChat's order", [] {
+    Mesh m = *primitives::cube();
+    const size_t n = m.vert_count();
+    const Vec3 p0 = m.positions[0];
+    m.shape_keys = {{"Smile", std::vector<Vec3>(n, Vec3(0.1f, 0, 0))}, {"vrc.v_ou", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))},
+                    {"vrc.blink_left", std::vector<Vec3>(n, Vec3(0, 0, 0.1f))}, {"vrc.v_aa", std::vector<Vec3>(n, Vec3(0, 0.2f, 0))}};
+    std::string why;
+    CHECK(apply_shape_key_as_basis(m, "Smile", why));
+    const int rev = m.find_shape("Smile - Reverted");
+    CHECK(m.find_shape("Smile") < 0 && rev >= 0 && std::fabs(m.positions[0].x - (p0.x + 0.1f)) < 1e-6f && rev >= 0 && std::fabs(m.shape_keys[(size_t)rev].delta[0].x + 0.1f) < 1e-6f);
+    CHECK(!apply_shape_key_as_basis(m, "Nope", why) && why.find("Nope") != std::string::npos);
+    sort_shape_keys(m);
+    std::string order;
+    for (const ShapeKey &k : m.shape_keys) order += k.name + ";";
+    std::printf("    sorted: %s\n", order.c_str());
+    CHECK(order == "vrc.v_aa;vrc.v_ou;vrc.blink_left;Smile - Reverted;");
+  });
+  test("Pose and Shape (round 358): A-Pose drops the arms 45 degrees and T-Pose levels them, applied as the rest; Connect Bones points a bone at its one child, the body unchanged", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, false);
+    CHECK(a.rig && a.body);
+    if (!a.rig || !a.body) return;
+    const std::vector<Vec3> before = r357_skinned(*a.body);
+    ed.select_for_test(a.rig->id, false);
+    ed.command("avatar apose");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const humanoid::Map am = humanoid::map(ed.scene(), *a.rig);
+    const float followed = r358_worst(before, r357_skinned(*a.body));
+    ed.command("avatar tpose");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const humanoid::Map tm = humanoid::map(ed.scene(), *a.rig);
+    std::printf("    A-Pose: the arms %.1f and %.1f degrees down; T-Pose: %.1f and %.1f\n", am.arm_drop[0], am.arm_drop[1], tm.arm_drop[0], tm.arm_drop[1]);
+    CHECK(std::fabs(am.arm_drop[0] - 45.0f) < 3.0f && std::fabs(am.arm_drop[1] - 45.0f) < 3.0f && followed > 0.01f);
+    CHECK(std::fabs(tm.arm_drop[0]) < 3.0f && std::fabs(tm.arm_drop[1]) < 3.0f);
+    /* Connect Bones: Spine (one child, Chest) as long as the gap to it; the body where it was. */
+    const std::vector<Vec3> rest = r357_skinned(*a.body);
+    GameObject *sp0 = ed.scene().find_by_name("Spine");
+    if (sp0) sp0->set_local_rotation(sp0->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(1, 0, 0), 0.5f));  // (posed: Connect starts from the rest)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("avatar connect");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *spine = ed.scene().find_by_name("Spine"), *chest = ed.scene().find_by_name("Chest");
+    CHECK(spine && chest);
+    if (!spine || !chest) return;
+    const float gap = length(chest->world_position() - spine->world_position());
+    const Vec3 y = normalize(spine->world_matrix().dir(Vec3(0, 1, 0)));
+    std::printf("    Spine: length %.4f, the gap %.4f, pointing at Chest %.4f; the body moved %.6f\n", spine->get<Bone>()->length * bone_world_unit(*spine), gap,
+                dot(y, normalize(chest->world_position() - spine->world_position())), r358_worst(rest, r357_skinned(*a.body)));
+    CHECK(std::fabs(spine->get<Bone>()->length * bone_world_unit(*spine) - gap) < 1e-3f && dot(y, normalize(chest->world_position() - spine->world_position())) > 0.9999f);
+    CHECK(r358_worst(rest, r357_skinned(*a.body)) < 1e-3f);
+  });
+  test("Model Options (round 358): Separate by Material and by Shape Keys (the keyed part keeps its keys); Merge Weights; Apply Transforms turns a key's offsets with the vertices", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    {
+      Mesh &m = *mesh_make_mutable(cube->get<MeshFilter>()->mesh);
+      m.face_material.assign(m.face_count(), 0);
+      m.face_material[0] = 1;
+      std::vector<Vec3> d(m.vert_count(), Vec3(0.0f));
+      for (size_t i = 0; i < m.vert_count(); i++) d[i] = m.positions[i].y > 0.0f ? Vec3(0, 0.1f, 0) : Vec3(0.0f);
+      m.shape_keys = {{"Top", d}};
+      m.touch();
+    }
+    MeshRenderer *mr = cube->get<MeshRenderer>();
+    mr->materials = {std::make_shared<Material>(), std::make_shared<Material>()};
+    mr->materials[1]->base_color = Vec3(1, 0, 0);
+    size_t objects = 0;
+    ed.scene().for_each([&](GameObject &) { objects++; });
+    ed.select_for_test(cube->id, false);
+    ed.command("separate material");
+    size_t after = 0;
+    ed.scene().for_each([&](GameObject &) { after++; });
+    CHECK(after == objects + 1);
+    /* By shape keys: the top's faces (any vertex the key moves) apart; each part's keys fit it. */
+    ed.command("create Cube");
+    GameObject *c2 = ed.active_object_for_test();
+    {
+      Mesh &m = *mesh_make_mutable(c2->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"Lift", std::vector<Vec3>(m.vert_count(), Vec3(0.0f))}};
+      m.shape_keys[0].delta[0] = Vec3(0, 0.1f, 0);
+      m.touch();
+    }
+    const size_t faces = c2->get<MeshFilter>()->mesh->face_count();
+    ed.mark_changed_for_test("key the cube");  // (its own undo step: Undo of Separate comes back to here)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(c2->id, false);
+    ed.command("separate shapekeys");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *part = nullptr;
+    ed.scene().for_each([&](GameObject &g) { part = &g != c2 && g.name.rfind(c2->name, 0) == 0 && g.get<MeshFilter>() ? &g : part; });
+    const Mesh *keyed = c2->get<MeshFilter>()->mesh.get(), *rest = part ? part->get<MeshFilter>()->mesh.get() : nullptr;
+    std::printf("    by shape keys: %zu faces -> %zu keyed (kept, %zu key(s), fitting %d) + %zu without (%zu key(s))\n", faces, keyed->face_count(), keyed->shape_keys.size(),
+                (int)keyed->keys_fit(), rest ? rest->face_count() : (size_t)0, rest ? rest->shape_keys.size() : (size_t)99);
+    CHECK(rest && rest->face_count() + keyed->face_count() == faces && keyed->face_count() == 3 && keyed->keys_fit() && keyed->find_shape("Lift") >= 0 && rest->shape_keys.empty());
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.scene().find(c2->id) && ed.scene().find(c2->id)->get<MeshFilter>()->mesh->face_count() == faces);
+    /* Apply Transforms: a quarter turn about Y goes into the vertices and the key's offsets; the keyed shape in the world unchanged. */
+    ed.command("create Cube");
+    GameObject *c3 = ed.active_object_for_test();
+    {
+      Mesh &m = *mesh_make_mutable(c3->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"Wide", std::vector<Vec3>(m.vert_count(), Vec3(0.1f, 0, 0))}};
+      m.touch();
+    }
+    c3->set_local_rotation(Quat::axis_angle(Vec3(0, 1, 0), 1.5707963f));
+    ed.select_for_test(c3->id, false);
+    ed.command("meshop apply_transform");
+    const Mesh &m3 = *c3->get<MeshFilter>()->mesh;
+    std::printf("    after Apply Transform: Wide's offset (%.3f %.3f %.3f)\n", m3.shape_keys[0].delta[0].x, m3.shape_keys[0].delta[0].y, m3.shape_keys[0].delta[0].z);
+    CHECK(std::fabs(m3.shape_keys[0].delta[0].z + 0.1f) < 1e-4f && std::fabs(m3.shape_keys[0].delta[0].x) < 1e-4f);
+    /* Merge Weights: a bone's group added into its parent's; the bone gone. */
+    Editor e2;
+    e2.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(e2, false);
+    if (!a.rig || !a.body) return;
+    GameObject *neck = e2.scene().find_by_name("Spine");  // (into Hips: both weighted on the body)
+    const uint64_t neck_id = neck ? neck->id : 0;
+    const float sum_before = [&] {
+      float s = 0.0f;
+      const Mesh &bm = *a.body->get<MeshFilter>()->mesh;
+      for (const char *g : {"Spine", "Hips"})
+        if (bm.find_group(g) >= 0)
+          for (float w : bm.vertex_groups[(size_t)bm.find_group(g)].weights) s += w;
+      return s;
+    }();
+    e2.select_for_test(neck_id, false);
+    e2.command("avatar mergeweights");
+    const Mesh &bm = *a.body->get<MeshFilter>()->mesh;
+    float chest = 0.0f;
+    if (bm.find_group("Hips") >= 0)
+      for (float w : bm.vertex_groups[(size_t)bm.find_group("Hips")].weights) chest += w;
+    std::printf("    Merge Weights: Spine %s, Spine + Hips %.3f before, Hips %.3f after\n", e2.scene().find(neck_id) ? "kept" : "merged", sum_before, chest);
+    CHECK(!e2.scene().find(neck_id) && bm.find_group("Spine") < 0 && sum_before > 1.0f && std::fabs(chest - sum_before) < 1e-3f);
+  });
+  test("Model Options (review 358): Remove Doubles leaves coinciding vertices a key pulls apart (a closed mouth); a key named with spaces; the verbs run", [] {
+    Mesh m;
+    m.positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(1, 1, 0), Vec3(0, 2, 0), Vec3(0, 0, 0)};
+    const uint32_t f0[3] = {0, 1, 2}, f1[3] = {3, 4, 5}, f2[3] = {6, 4, 1};
+    m.add_face(f0, 3), m.add_face(f1, 3), m.add_face(f2, 3);
+    m.shape_keys = {{"Open", std::vector<Vec3>(m.positions.size(), Vec3(0.0f))}};
+    m.shape_keys[0].delta[3] = Vec3(0, 0.2f, 0);  // (the lower lip: vertex 3 sits on 2 until Open moves it)
+    const size_t merged = remove_doubles_keeping_keys(m, 0.001f);
+    std::printf("    Remove Doubles: %zu merged, %zu vertices left, the key fits %d\n", merged, m.vert_count(), (int)m.keys_fit());
+    CHECK(merged == 1 && m.vert_count() == 6 && m.keys_fit());  // (6 onto 0 merged; 3 kept apart from 2)
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, true);
+    if (!a.rig || !a.body) return;
+    ed.select_for_test(a.body->id, false);
+    ed.command("avatar posekey Mouth Open");
+    CHECK(a.body->get<MeshFilter>()->mesh->find_shape("Mouth Open") >= 0);
+    ed.command("avatar basis Mouth Open");
+    CHECK(a.body->get<MeshFilter>()->mesh->find_shape("Mouth Open - Reverted") >= 0);
+    for (const char *c : {"avatar zeroweight", "avatar join", "avatar normals", "avatar normals flip", "avatar removedoubles", "avatar sortkeys", "avatar applytransforms"}) {
+      ed.select_for_test(a.body->id, false);
+      ed.command(c);
+    }
+    CHECK(ed.scene().find(a.body->id) != nullptr);
+  });
+  test("Pose and Shape (review 358): with the Armature showing its Rest Position, Apply as Rest Pose and A-Pose refuse; Connect Bones leaves a bone a clip moves", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, true);
+    if (!a.rig || !a.arm) return;
+    a.rig->get<Armature>()->rest_position = true;
+    const Quat rest = a.arm->get<Bone>()->rest_rotation;
+    ed.select_for_test(a.rig->id, false);
+    ed.command("avatar applyrest");
+    ed.command("avatar apose");
+    CHECK(r358_qdot(a.arm->get<Bone>()->rest_rotation, rest) > 0.9999f);
+    a.rig->get<Armature>()->rest_position = false;
+    /* A clip keying the Chest: Connect leaves the Spine (its parent) as it is. */
+    std::remove(resolve_asset_path("Assets/Animations/R358Chest.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R358Chest.anim", "R358Chest");
+    GameObject *spine = ed.scene().find_by_name("Spine"), *chest = ed.scene().find_by_name("Chest");
+    if (!clip || !spine || !chest) return;
+    clip->track(anim_path(*a.rig, *chest), "Rotation", 0).set_key(0, 5.0f);
+    a.rig->add<Animation>()->clip = clip->asset_path;
+    const Quat spine_rest = spine->get<Bone>()->rest_rotation;
+    ed.command("avatar connect");
+    CHECK(r358_qdot(spine->get<Bone>()->rest_rotation, spine_rest) > 0.99999f);
+  });
+  test("the lesson's Try-it (round 358): rig humanoid, then avatar apose - the arms 45 degrees down", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("avatar apose");
+    CHECK(rig && std::fabs(humanoid::map(ed.scene(), *rig).arm_drop[0] - 45.0f) < 3.0f);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -6923,4 +7195,5 @@ void run_assets_tests() {
   tests_round355();
   tests_round356();
   tests_round357();
+  tests_round358();
 }

@@ -3768,6 +3768,8 @@ void Editor::mesh_op(const std::string &op) {
       for (GameObject *c : g->children) kids.push_back({c, c->world_matrix()});
       Mesh &m = *mesh_make_mutable(mf->mesh);
       for (Vec3 &p : m.positions) p = rs.point(p);
+      for (ShapeKey &k : m.shape_keys)  // (round 358: a key's offsets turn and scale with the vertices)
+        for (Vec3 &d : k.delta) d = rs.dir(d);
       if (t.scale.x * t.scale.y * t.scale.z < 0) meshops::flip_normals(m);  // a mirrored scale turns faces inside out
       m.touch();
       t.rotation = Quat();

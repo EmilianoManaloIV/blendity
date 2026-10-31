@@ -33,6 +33,7 @@
 #include "../render/gpu_raster.h"
 #include "../scene/budget.h"
 #include "../scene/avatar_fix.h"
+#include "../scene/avatar_tools.h"
 #include "../scene/visemes.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
@@ -2910,6 +2911,23 @@ class Editor {
   /* Round 357: Fix Model (CATS'), its options kept for the window. */
   void avatar_fix_model(GameObject &root);
   void draw_fix_model_section(ui::Layout &lay, GameObject *root);
+  /* Round 358: CATS' Model Options and Pose and Shape tools (avatar_tools_ui.cpp). */
+  bool avatar_tool_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  void draw_model_options_section(ui::Layout &lay, GameObject *root);
+  void draw_pose_shape_section(ui::Layout &lay, GameObject *root);
+  std::string avatar_key_field_ = "Pose";
+  void note_avatar_clips(GameObject &root);
+  bool avatar_merge_weights(GameObject &root);
+  bool avatar_zero_weight(GameObject &root);
+  bool avatar_join(GameObject &root);
+  bool avatar_remove_doubles(GameObject &root);
+  bool avatar_normals(GameObject &root, bool flip);
+  bool avatar_connect(GameObject &root);
+  bool avatar_pose_key(GameObject &root, const std::string &name);
+  bool avatar_apply_rest(GameObject &root);
+  bool avatar_basis(GameObject &root, const std::string &name);
+  bool avatar_sort_keys(GameObject &root);
+  bool avatar_arms(GameObject &root, bool t_pose);
   FixModelOptions fix_model_options_;
   public:
   FixModelOptions &fix_model_options_for_test() { return fix_model_options_; }
