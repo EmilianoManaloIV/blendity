@@ -2645,12 +2645,15 @@ std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &
   an.name = clip->name, an.fps = clip->frame_rate > 0.0f ? clip->frame_rate : 30.0f;
   an.frames = std::max(1, std::min(100000, (int)std::ceil(std::max(clip->length, clip->end_frame())) + 1));  // (keys past the length too)
   an.t.assign(objs.size(), {}), an.r.assign(objs.size(), {}), an.s.assign(objs.size(), {});
+  const MeshRenderer *smr = owner.get<MeshRenderer>();
+  an.shape_w.assign(smr ? m.shape_keys.size() : 0, {});  // (round 351: the visemes and expressions the clip keys)
   for (int f = 0; f < an.frames; f++) {
     apply_clip(*clip, *root, (float)f);
     for (size_t k = 0; k < objs.size(); k++) {
       const Transform &l = objs[k]->local();
       an.t[k].push_back(l.position), an.r[k].push_back(l.rotation), an.s[k].push_back(l.scale);
     }
+    for (size_t k = 0; k < an.shape_w.size(); k++) an.shape_w[k].push_back(smr->shape_weight(m.shape_keys[k].name));
   }
   for (auto &[g, t] : saved) g->set_local(t);
   for (auto &[g, prop, axis, v] : numbers) write_anim_value(*g, prop, axis, v);
@@ -2658,8 +2661,65 @@ std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &
   return sk;
 }
 
+/* Round 351: a modifier that changes only the normals (Anime Face Normals' transfer, Smooth Normals): the basis'
+ * positions stay, its normals go along. */
+static bool normals_only(const Component &c) {
+  return std::strcmp(c.type_name(), NormalTransferModifier::kName) == 0 || std::strcmp(c.type_name(), SmoothNormalsModifier::kName) == 0;
+}
+
+/* Round 351: the mesh exported with its shape keys - the basis, the keys as morph targets / blend shapes - or null when
+ * it has none, or the format or the option leaves them out, or a modifier changes the mesh's shape: then the posed
+ * mesh goes and the log says why. On the rig's path (`rigged`: the skeleton goes too) the mesh goes at rest whatever
+ * its stack, keys and all. Normal-only modifiers give a copy of the basis with their normals (kept in `keep`). */
+static const Mesh *shape_key_basis(GameObject &g, const ExportOptions &o, bool rigged, std::vector<std::shared_ptr<Mesh>> &keep) {
+  const bool holds = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF || o.format == (int)ExportFormat::FBX;
+  const MeshFilter *mf = g.get<MeshFilter>();
+  const Mesh *base = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  if (!o.shape_keys || !holds || !base || base->shape_keys.empty() || !meshops::shape_keys_fit(*base)) return nullptr;
+  if (rigged || !o.apply_modifiers) return base;
+  bool normals = false;
+  for (const auto &c : g.components) {
+    if (!c->enabled || !c->is_modifier()) continue;
+    if (normals_only(*c)) {
+      normals = true;
+      continue;
+    }
+    if (std::strcmp(c->type_name(), SkinModifier::kName) == 0)
+      Log::warn("Export: %s's shape keys left out - it is posed by its Skin and the rig isn't exported (turn on Armatures and Animation)", g.name.c_str());
+    else Log::warn("Export: %s's shape keys left out - its %s changes the mesh (apply the modifiers first)", g.name.c_str(), c->type_name());
+    return nullptr;
+  }
+  const Mesh *ev = normals ? g.evaluated_mesh() : nullptr;
+  if (!ev || ev->custom_normals.size() != base->vert_count()) return base;
+  auto copy = std::make_shared<Mesh>(*base);
+  copy->custom_normals = ev->custom_normals;
+  keep.push_back(copy);
+  return copy.get();
+}
+
+/* The mesh an object exports: its keyed basis (round 351), else at rest on the rig's path or without the modifiers,
+ * else as the stack makes it. */
+static const Mesh *export_mesh_of(GameObject &g, const ExportOptions &o, const Mesh *keyed, bool rigged) {
+  if (keyed) return keyed;
+  const MeshFilter *mf = g.get<MeshFilter>();
+  const Mesh *base = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  if (rigged || !o.apply_modifiers) return base;
+  return g.evaluated_mesh();
+}
+
+/* Round 351: an outline shell for a keyed mesh carries the same keys (the shell has the mesh's vertices, each pushed
+ * out along its normal), so a smile moves the line with the face. */
+static const Mesh *keyed_shell(const Mesh *shell, const Mesh *keyed, std::vector<std::shared_ptr<Mesh>> &keep) {
+  if (!shell || !keyed || shell->vert_count() != keyed->vert_count()) return shell;
+  auto copy = std::make_shared<Mesh>(*shell);
+  copy->shape_keys = keyed->shape_keys;
+  keep.push_back(copy);
+  return copy.get();
+}
+
 std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
   std::vector<ExportItem> items;
+  std::vector<std::shared_ptr<Mesh>> keep;  // (round 351: copies the items point at, until the file is written)
   auto add = [&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mf = g.get<MeshFilter>();
@@ -2668,11 +2728,15 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
     const SkinModifier *skm = o.skins && gltf ? g.get<SkinModifier>() : nullptr;
     GameObject *arm = skm && !skm->object.empty() ? scene_->find_by_name(skm->object) : nullptr;
     if (arm && !arm->get<Armature>()) arm = nullptr;
-    const Mesh *m = arm && mf && mf->mesh ? mf->mesh.get() : o.apply_modifiers ? g.evaluated_mesh() : (mf && mf->mesh ? mf->mesh.get() : nullptr);
+    const Mesh *keyed = shape_key_basis(g, o, arm != nullptr, keep);  // (round 351: the basis, its keys written as targets)
+    const Mesh *m = export_mesh_of(g, o, keyed, arm != nullptr && mf && mf->mesh);
     if (!m || !m->face_count()) return;
     ExportItem it;
     it.name = g.name;
     it.mesh = m;
+    const MeshRenderer *wmr = g.get<MeshRenderer>();
+    if (keyed)
+      for (const ShapeKey &k : keyed->shape_keys) it.shape_weights.push_back(wmr ? wmr->shape_weight(k.name) : 0.0f);
     it.world = g.world_matrix();
     if (arm) it.skin = export_skin_of(*arm, *m, g, *skm);
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
@@ -2683,10 +2747,11 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
       const Outline &ol = *static_cast<const Outline *>(oc);
       const Mat4 &w = it.world;
       const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
-      if (const Mesh *shell = ol.shell(*m, scale, 3)) {
+      if (const Mesh *shell = keyed_shell(ol.shell(*m, scale, 3), keyed, keep)) {
         ExportItem oi;
         oi.name = g.name + " Outline";
         oi.mesh = shell;
+        oi.shape_weights = it.shape_weights;
         oi.world = it.world;
         oi.materials = ol.materials();
         items.push_back(oi);
@@ -2717,6 +2782,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
     const std::string dir = export_dir_.empty() ? fs::join(assets_dir_, "Exports") : export_dir_;
     path = fs::join(dir, base + export_format_extension(o.format));
   }
+  path = resolve_asset_path(path);  // (round 351: a relative path is the project's, not the working folder's)
   std::string err;
   project_listed_ = -100;
   std::vector<std::shared_ptr<Mesh>> baked_meshes;

@@ -2,6 +2,7 @@
 // blendity_tests: the assets tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "fixtures/synthetic_mmd.h"
+#include "../src/core/json.h"
 
 static void image_tests() {
   test("image: PNG round-trip is exact", [] {
@@ -4983,6 +4984,317 @@ static void tests_round330_blends() {
   });
 }
 
+/* ---------------------------------------------------------------- round 351: shape keys in glTF and FBX exports */
+/* Round 351: a .glb's JSON chunk, parsed (Null when the header is wrong). */
+static Json r351_glb_json(const std::string &glb) {
+  auto u32 = [&](size_t at) {
+    uint32_t v = 0;
+    if (at + 4 <= glb.size()) std::memcpy(&v, glb.data() + at, 4);
+    return v;
+  };
+  if (glb.size() < 20 || u32(0) != 0x46546C67u || u32(16) != 0x4E4F534Au || 20 + (size_t)u32(12) > glb.size()) return Json();
+  JsonParser p{glb.data() + 20, glb.data() + 20 + u32(12)};
+  Json j = p.value();
+  return p.ok ? j : Json();
+}
+
+/* A cube whose top lifts by 0.5 ("Up", weight 0.25) and whose +X side pushes out by 0.2 ("Side", weight 0). */
+static MeshPtr r351_keyed_cube() {
+  MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+  ShapeKey up{"Up", std::vector<Vec3>(m->vert_count(), Vec3(0.0f))}, side{"Side", std::vector<Vec3>(m->vert_count(), Vec3(0.0f))};
+  for (size_t v = 0; v < m->vert_count(); v++) {
+    if (m->positions[v].y > 0.0f) up.delta[v] = Vec3(0, 0.5f, 0);
+    if (m->positions[v].x > 0.0f) side.delta[v] = Vec3(0.2f, 0, 0);
+  }
+  m->shape_keys = {up, side};
+  return m;
+}
+
+static float r351_largest(const ShapeKey &k) {
+  float best = 0.0f;
+  for (const Vec3 &d : k.delta) best = std::max(best, length(d));
+  return best;
+}
+
+/* Round 351: an accessor's floats from a .glb's binary chunk (empty when it isn't there). */
+static std::vector<float> r351_glb_floats(const std::string &glb, const Json &j, size_t accessor) {
+  uint32_t jl = 0;
+  if (glb.size() >= 20) std::memcpy(&jl, glb.data() + 12, 4);
+  const size_t bin = 20 + (size_t)jl + 8;
+  const Json &a = j["accessors"][accessor];
+  const Json &v = j["bufferViews"][(size_t)a["bufferView"].number()];
+  const size_t start = bin + (size_t)v["byteOffset"].number() + (size_t)a["byteOffset"].number();
+  const size_t comps = a["type"].str == "SCALAR" ? 1 : a["type"].str == "VEC2" ? 2 : a["type"].str == "VEC3" ? 3 : 4;
+  const size_t n = (size_t)a["count"].number() * comps;
+  std::vector<float> out(n);
+  if (start + n * 4 > glb.size()) return {};
+  std::memcpy(out.data(), glb.data() + start, n * 4);
+  return out;
+}
+
+/* A warning containing `text` among the log's entries since `since`. */
+static bool r351_warned(size_t since, const char *text) {
+  std::vector<LogEntry> log;
+  Log::fetch(since, log);
+  for (const LogEntry &e : log)
+    if (e.level == LogLevel::Warning && e.text.find(text) != std::string::npos) return true;
+  return false;
+}
+
+static size_t r351_log_now() {
+  std::vector<LogEntry> log;
+  return Log::fetch(0, log);
+}
+
+static void tests_round351() {
+  test("Shape keys in exports (round 351): glTF writes them as morph targets with names and weights, FBX as blend shapes; both import back", [] {
+    MeshPtr cube = r351_keyed_cube();
+    ExportItem it;
+    it.name = "Face", it.mesh = cube.get(), it.world = Mat4::identity(), it.shape_weights = {0.25f, 0.0f};
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    const Json j = r351_glb_json(glb);
+    const Json &mesh = j["meshes"][0];
+    const Json &prim = mesh["primitives"][0];
+    std::printf("    glTF: %zu targets, names %s / %s, weights %g %g\n", prim["targets"].size(), mesh["extras"]["targetNames"][0].str.c_str(),
+                mesh["extras"]["targetNames"][1].str.c_str(), mesh["weights"][0].number(-1), mesh["weights"][1].number(-1));
+    CHECK(prim["targets"].size() == 2 && mesh["extras"]["targetNames"][0].str == "Up" && mesh["extras"]["targetNames"][1].str == "Side");
+    CHECK(std::fabs(mesh["weights"][0].number(-1) - 0.25) < 1e-6 && mesh["weights"][1].number(-1) == 0.0);
+    CHECK(prim["targets"][0]["POSITION"].type == Json::Num && j["accessors"][(size_t)prim["targets"][0]["POSITION"].number()]["max"].size() == 3);
+    /* Back in, from the files. */
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string gp = fs::join(dir, "face.glb"), fp = fs::join(dir, "face.fbx");
+    fs::write_file(gp, glb);
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    for (const std::string &path : {gp, fp}) {
+      ImportResult r;
+      const bool ok = import_model(path, r);
+      const ImportedNode *n = nullptr;
+      for (const ImportedNode &x : r.nodes) n = n ? n : x.mesh ? &x : nullptr;
+      const std::vector<ShapeKey> keys = n ? n->mesh->shape_keys : std::vector<ShapeKey>();
+      std::printf("    %s back: %zu keys%s\n", fs::extension(path).c_str(), keys.size(),
+                  keys.size() == 2 ? strprintf(" (%s %.3f, %s %.3f)", keys[0].name.c_str(), r351_largest(keys[0]), keys[1].name.c_str(), r351_largest(keys[1])).c_str() : "");
+      CHECK(ok && keys.size() == 2);
+      if (keys.size() != 2) continue;
+      CHECK(keys[0].name == "Up" && keys[1].name == "Side");
+      CHECK(std::fabs(r351_largest(keys[0]) - 0.5f) < 1e-3f && std::fabs(r351_largest(keys[1]) - 0.2f) < 1e-3f);
+    }
+  });
+  test("Shape keys in exports (round 351): the Shape Keys option off writes the mesh as its weights shape it; a key that moves nothing still survives FBX; a clip's weights go as a glTF weights channel", [] {
+    MeshPtr cube = r351_keyed_cube();
+    cube->shape_keys[1].delta.assign(cube->vert_count(), Vec3(0.0f));  // (Side moves nothing now)
+    ExportItem it;
+    it.name = "Face", it.mesh = cube.get(), it.world = Mat4::identity(), it.shape_weights = {1.0f, 0.0f};
+    ExportOptions off = export_defaults((int)ExportFormat::GLB);
+    off.shape_keys = false;
+    CHECK(r351_glb_json(export_gltf({it}, off, true, "", nullptr))["meshes"][0]["primitives"][0]["targets"].size() == 0);
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string fp = fs::join(dir, "still.fbx");
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    ImportResult r;
+    import_model(fp, r);
+    size_t keys = 0;
+    for (const ImportedNode &n : r.nodes) keys += n.mesh ? n.mesh->shape_keys.size() : 0;
+    std::printf("    FBX with a key that moves nothing: %zu keys back\n", keys);
+    CHECK(keys == 2);
+    /* A skinned item whose clip keys the weights: one weights channel on the mesh's node, keys x frames values. */
+    auto sk = std::make_shared<ExportSkin>();
+    sk->joints.push_back({"Root", -1, Vec3(0.0f), Quat(), Vec3(1.0f)});
+    sk->vjoints.assign(cube->vert_count(), {0, 0, 0, 0});
+    sk->vweights.assign(cube->vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+    ExportSkin::Anim an;
+    an.name = "Talk", an.fps = 30.0f, an.frames = 3;
+    an.t = {{Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)}}, an.r = {{Quat(), Quat(), Quat()}}, an.s = {{Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}};
+    an.shape_w = {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.5f}};
+    sk->anims.push_back(an);
+    it.skin = sk;
+    const Json j = r351_glb_json(export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr));
+    const Json &chs = j["animations"][0]["channels"];
+    int weights = -1;
+    for (size_t c = 0; c < chs.size(); c++)
+      if (chs[c]["target"]["path"].str == "weights") weights = (int)c;
+    const Json &smp = weights >= 0 ? j["animations"][0]["samplers"][(size_t)chs[(size_t)weights]["sampler"].number()] : Json();
+    const double count = weights >= 0 ? j["accessors"][(size_t)smp["output"].number()]["count"].number() : 0;
+    std::printf("    the clip's weights channel: %s, %g values\n", weights >= 0 ? "on the mesh's node" : "missing", count);
+    CHECK(weights >= 0 && j["nodes"][(size_t)chs[(size_t)weights]["target"]["node"].number()]["mesh"].type == Json::Num && count == 6);
+  });
+  test("Shape keys in exports (round 351): from the editor the basis and its keys go out; a Subdivision Surface on the mesh leaves them out and says why", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->get<MeshFilter>()->mesh = r351_keyed_cube();
+    g->get<MeshRenderer>()->shape_weights = {{"Up", 1.0f}};
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "editor.glb");
+    ed.command("export glb " + path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    const Json &acc = j["accessors"][(size_t)j["meshes"][0]["primitives"][0]["attributes"]["POSITION"].number()];
+    std::printf("    from the editor: %zu targets, the basis' top at y %g, its middle at %g (the weight 1 not baked in)\n", j["meshes"][0]["primitives"][0]["targets"].size(),
+                acc["max"][1].number(), g->world_position().y);
+    CHECK(j["meshes"][0]["primitives"][0]["targets"].size() == 2 && j["meshes"][0]["weights"][0].number(-1) == 1.0);
+    CHECK(acc["max"][1].number() < g->world_position().y + 0.6);  // (the cube's top half a metre above its middle, not lifted another 0.5 by the weight)
+    ed.command("component SubdivisionSurface");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("export glb " + path);
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.level == LogLevel::Warning && e.text.find("shape keys left out") != std::string::npos);
+    glb.clear();
+    fs::read_file(path, glb);
+    CHECK(r351_glb_json(glb)["meshes"][0]["primitives"][0]["targets"].size() == 0 && said);
+  });
+  test("Shape keys in exports (review 351): through a turned, scaled and mirrored object each key's offset lands where the vertex does, signed, in glTF and FBX; a clip's weights go frame by frame", [] {
+    MeshPtr cube = r351_keyed_cube();
+    ExportItem it;
+    it.name = "Turned", it.mesh = cube.get(), it.shape_weights = {0.0f, 0.0f};
+    it.world = Mat4::trs(Vec3(1, 2, 3), Quat::axis_angle(Vec3(0, 1, 0), kPi * 0.5f), Vec3(-2, 1, 1));  // (mirrored in X, stretched, turned)
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string gp = fs::join(dir, "turned.glb"), fp = fs::join(dir, "turned.fbx");
+    fs::write_file(gp, export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr));
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    for (const std::string &path : {gp, fp}) {
+      ImportResult r;
+      import_model(path, r);
+      const ImportedNode *n = nullptr;
+      for (const ImportedNode &x : r.nodes) n = n ? n : x.mesh ? &x : nullptr;
+      CHECK(n && n->mesh->shape_keys.size() == 2);
+      if (!n || n->mesh->shape_keys.size() != 2) continue;
+      const Mat4 nodew = Mat4::trs(n->position, n->rotation, n->scale);  // (the imported node's own placement, if the file has one)
+      float worst = 0.0f;
+      for (size_t v = 0; v < cube->vert_count(); v++) {
+        const Vec3 want_p = it.world.point(cube->positions[v]), want_d = it.world.dir(cube->shape_keys[0].delta[v]);
+        size_t best = 0;
+        float bd = 1e30f;
+        for (size_t u = 0; u < n->mesh->vert_count(); u++) {
+          const float d = length(nodew.point(n->mesh->positions[u]) - want_p);
+          if (d < bd) bd = d, best = u;
+        }
+        worst = std::max(worst, length(nodew.dir(n->mesh->shape_keys[0].delta[best]) - want_d) + bd);
+      }
+      std::printf("    %s: the Up key's offsets against the turned, mirrored object's, worst %.5f\n", fs::extension(path).c_str(), worst);
+      CHECK(worst < 1e-3f);
+    }
+  });
+  test("Shape keys in exports (review 351): the weights channel's values go frame-major (each frame every key)", [] {
+    MeshPtr cube = r351_keyed_cube();
+    ExportItem it;
+    it.name = "Face", it.mesh = cube.get(), it.world = Mat4::identity(), it.shape_weights = {0.0f, 0.0f};
+    auto sk = std::make_shared<ExportSkin>();
+    sk->joints.push_back({"Root", -1, Vec3(0.0f), Quat(), Vec3(1.0f)});
+    sk->vjoints.assign(cube->vert_count(), {0, 0, 0, 0});
+    sk->vweights.assign(cube->vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+    ExportSkin::Anim an;
+    an.name = "Talk", an.fps = 30.0f, an.frames = 3;
+    an.t = {{Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)}}, an.r = {{Quat(), Quat(), Quat()}}, an.s = {{Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}};
+    an.shape_w = {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.5f}};
+    sk->anims.push_back(an);
+    it.skin = sk;
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    const Json j = r351_glb_json(glb);
+    const Json &chs = j["animations"][0]["channels"];
+    std::vector<float> vals;
+    for (size_t c = 0; c < chs.size(); c++)
+      if (chs[c]["target"]["path"].str == "weights") vals = r351_glb_floats(glb, j, (size_t)j["animations"][0]["samplers"][(size_t)chs[c]["sampler"].number()]["output"].number());
+    std::printf("    the weights: %s\n", vals.size() == 6 ? strprintf("%g %g | %g %g | %g %g", vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]).c_str() : "missing");
+    CHECK(vals.size() == 6 && vals[0] == 0.0f && vals[1] == 0.0f && vals[2] == 1.0f && vals[3] == 0.0f && vals[4] == 0.0f && vals[5] == 0.5f);
+  });
+  test("Shape keys in exports (review 351): a rigged cube whose clip keys Smile exports the keys, the weight and the channel, and the Inspector's weight is put back; with Armatures off the posed mesh goes and the log says why", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("shape add Smile");
+    ed.command("create Armature");  // (the Cube in "Cube Rig", a Skin bound)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig"), *cube = ed.scene().find_by_name("Cube");
+    CHECK(rig && cube && cube->get<SkinModifier>());
+    if (!rig || !cube) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R351");
+    ed.command("anim key Cube MeshRenderer.BlendShape/Smile 0 0 0");
+    ed.command("anim key Cube MeshRenderer.BlendShape/Smile 0 10 1");
+    ed.command("anim frame 5");
+    ed.command("anim preview off");
+    cube->get<MeshRenderer>()->shape_weights = {{"Smile", 0.3f}};
+    ed.command("select Cube");
+    const std::string path = fs::join(fs::join(test_dir(), "r351"), "rig.glb");
+    fs::make_dirs(fs::parent(path));
+    const size_t since = r351_log_now();
+    ed.export_model_for_test(export_defaults((int)ExportFormat::GLB), path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    bool channel = false;
+    for (size_t c = 0; c < j["animations"][0]["channels"].size(); c++) channel = channel || j["animations"][0]["channels"][c]["target"]["path"].str == "weights";
+    const float back = cube->get<MeshRenderer>()->shape_weight("Smile");
+    std::printf("    rigged: targets %zu, weight %g, weights channel %d, the Inspector's weight after %g, warned %d\n", j["meshes"][0]["primitives"][0]["targets"].size(),
+                j["meshes"][0]["weights"][0].number(-1), (int)channel, back, (int)r351_warned(since, "shape keys left out"));
+    CHECK(j["meshes"][0]["primitives"][0]["targets"].size() == 1 && std::fabs(j["meshes"][0]["weights"][0].number(-1) - 0.3) < 1e-6 && channel);
+    CHECK(std::fabs(back - 0.3f) < 1e-6f && !r351_warned(since, "shape keys left out"));
+    /* Armatures and Animation off: the mesh as posed now, its keys applied, and the log says why they're not in the file. */
+    ExportOptions off = export_defaults((int)ExportFormat::GLB);
+    off.skins = false;
+    const size_t since2 = r351_log_now();
+    ed.export_model_for_test(off, path);
+    glb.clear();
+    fs::read_file(path, glb);
+    CHECK(r351_glb_json(glb)["meshes"][0]["primitives"][0]["targets"].size() == 0 && r351_warned(since2, "posed by its Skin"));
+  });
+  test("Shape keys in exports (review 351): with Shape Keys off the weights shape the mesh; an outline carries the keys; Smooth Normals keeps them", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->get<MeshFilter>()->mesh = r351_keyed_cube();
+    g->get<MeshRenderer>()->shape_weights = {{"Up", 1.0f}};
+    const std::string path = fs::join(fs::join(test_dir(), "r351"), "opts.glb");
+    fs::make_dirs(fs::parent(path));
+    ExportOptions off = export_defaults((int)ExportFormat::GLB);
+    off.shape_keys = false;
+    ed.export_model_for_test(off, path);
+    std::string glb;
+    fs::read_file(path, glb);
+    Json j = r351_glb_json(glb);
+    const double top = j["accessors"][(size_t)j["meshes"][0]["primitives"][0]["attributes"]["POSITION"].number()]["max"][1].number();
+    std::printf("    Shape Keys off: no targets %d, the top at %g (lifted: the weight applied; the middle at %g)\n", (int)(j["meshes"][0]["primitives"][0]["targets"].size() == 0), top,
+                g->world_position().y);
+    CHECK(j["meshes"][0]["primitives"][0]["targets"].size() == 0 && top > g->world_position().y + 0.9);
+    ed.command("component Outline");
+    ed.command("component SmoothNormalsModifier");
+    const size_t since = r351_log_now();
+    ed.export_model_for_test(export_defaults((int)ExportFormat::GLB), path);
+    glb.clear();
+    fs::read_file(path, glb);
+    j = r351_glb_json(glb);
+    size_t keyed = 0;
+    for (size_t k = 0; k < j["meshes"].size(); k++) keyed += j["meshes"][k]["primitives"][0]["targets"].size() == 2 && j["meshes"][k]["weights"][0].number(-1) == 1.0;
+    std::printf("    with an Outline and Smooth Normals: %zu of %zu meshes keyed, warned %d\n", keyed, j["meshes"].size(), (int)r351_warned(since, "shape keys left out"));
+    CHECK(j["meshes"].size() == 2 && keyed == 2 && !r351_warned(since, "shape keys left out"));
+  });
+  test("the lesson's Try-it (round 351): create Cube, shape add Smile, export glb gives a file with a morph target", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string path = fs::join(fs::join(test_dir(), "r351"), "tryit.glb");
+    fs::make_dirs(fs::parent(path));
+    for (const std::string &c : {std::string("create Cube"), std::string("shape add Smile"), "export glb " + path}) ed.command(c);
+    std::string glb;
+    fs::read_file(path, glb);
+    CHECK(r351_glb_json(glb)["meshes"][0]["extras"]["targetNames"][0].str == "Smile");
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -5347,4 +5659,5 @@ void run_assets_tests() {
   tests_round330_blends();
   tests_round332();
   tests_round337();
+  tests_round351();
 }

@@ -224,6 +224,7 @@ void Link::Impl::worker_loop() {
     ExportOptions o = export_defaults((int)ExportFormat::GLB);
     o.materials = false;  // (the materials go as their own messages; each primitive names its slot)
     o.vertex_ids = true;
+    o.shape_keys = false;  // (round 351: the evaluated mesh has its weights applied; the keys stream as deforms - round 364 sends them as blend shapes)
     o.triangulate = false;
     const std::string glb = export_gltf({ExportItem{job.name, job.mesh.get(), Mat4::identity(), {}}}, o, true, "", nullptr);
     JsonWriter w;

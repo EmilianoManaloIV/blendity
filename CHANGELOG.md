@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 351): shape keys in glTF and FBX exports
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 1: the
+exported VRChat avatar carried none of its visemes).
+
+**Added (task 0328)**
+- **Shape keys export** as glTF morph targets (with `weights` and `extras.targetNames`) and FBX blend shapes (a
+  BlendShape, a channel a key with its weight, the key's Shape) - the mesh's basis with its keys, no longer the weighted
+  mesh; a skinned glTF's clip carries the weights as a `weights` channel.
+- **Shape Keys** in the export options (glTF, FBX; on by default). A modifier other than the Skin that changes the mesh
+  leaves the keys out, said in the log.
+
+**Checked:** `tests_round351` - the .glb's targets, names, weights and bounds; glTF and FBX imported back with both keys;
+the option off; a still key through FBX; a clip's weights channel; the editor's export of the basis; the Subdivision
+Surface's warning; the lesson's Try-it. Blender 5.2 imports both files with the keys' names, offsets and values.
+
+**The review's fixes (Opus code-reviewer, changes needed):** a Skin had let the basis through when the rig wasn't
+exported (FBX, glTF with Armatures off) - a posed character went out at rest without a word: the pose is kept and the
+log says why; on the rig's path the keys go with their weights and no false warning; normal-only modifiers keep the
+keys; an Outline's shell carries them; a relative export path is the project's; NaN offsets dropped; tests for signed
+offsets through a mirrored object, the weights' frame order, a real rig's clip, Armatures off, Shape Keys off, the
+Outline and Smooth Normals.
+
 ## 2026-10-31 (round 350): Blendity against Blender, Unity, Godot and Unreal - three productions
 
 **Asked:** "Can we do another HCI analysis of the whole program, all tabs, several use cases. Comparing it to ease of
