@@ -11823,6 +11823,114 @@ static void tests_round339() {
   });
 }
 
+/* ---------------------------------------------------------------- round 342: a lattice turned to face the camera */
+static void tests_round342() {
+  test("Align to Camera (round 342): a lattice's right-hand points pulled out widen the Cube toward the screen's right - world +X through a camera in front, world -Z through one on its right - and never in the Scene view; off, the box moves the Cube the same from every camera", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    GameObject *box = ed.scene().create("R342Lattice");
+    box->set_local_position(cube->world_position());
+    box->set_local_scale(Vec3(2.0f));
+    Lattice *lt = box->add<Lattice>();
+    for (int i : {1, 3, 5, 7}) lt->offsets[(size_t)i] = Vec3(0.5f, 0.0f, 0.0f);  // (u = 1: the +X side, in the box's own frame)
+    lt->align_to_camera = true;
+    LatticeModifier *lm = cube->add<LatticeModifier>();
+    lm->object = "R342Lattice";
+    ed.mark_changed_for_test("R342");
+    ed.step_frame_headless();
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto extent = [&](bool game, Vec3 eye, Vec3 &lo, Vec3 &hi) {
+      lo = Vec3(1e9f), hi = Vec3(-1e9f);
+      for (const DrawItem &it : ed.collect_items_for_test(game, Mat4::look_at(eye, c, {0, 1, 0}), p, eye))
+        if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+          for (const Vec3 &q : it.mesh->positions) lo = vmin(lo, q), hi = vmax(hi, q);
+    };
+    Vec3 plo, phi, flo, fhi, slo, shi, alo, ahi;
+    extent(false, c + Vec3(0, 0, 6), plo, phi);
+    extent(true, c + Vec3(0, 0, 6), flo, fhi);
+    extent(true, c + Vec3(6, 0, 0), slo, shi);
+    extent(false, c + Vec3(6, 0, 0), alo, ahi);
+    std::printf("    the Cube's x / z extents: Scene view %.2f..%.2f / %.2f..%.2f; camera in front %.2f..%.2f / %.2f..%.2f; camera on the right %.2f..%.2f / %.2f..%.2f\n",
+                plo.x, phi.x, plo.z, phi.z, flo.x, fhi.x, flo.z, fhi.z, slo.x, shi.x, slo.z, shi.z);
+    CHECK(fhi.x > phi.x + 0.3f && std::fabs(flo.z - plo.z) < 1e-3f && std::fabs(fhi.z - phi.z) < 1e-3f);  // (front: wider to +X only)
+    CHECK(slo.z < plo.z - 0.3f && std::fabs(shi.x - phi.x) < 1e-3f);                                       // (right: wider to -Z)
+    CHECK(std::fabs(ahi.x - phi.x) < 1e-6f && std::fabs(alo.z - plo.z) < 1e-6f);                           // (the Scene view: the model)
+    /* Off: a plain lattice - the same widening to +X from both cameras, and in the Scene view. */
+    lt->align_to_camera = false;
+    ed.mark_changed_for_test("R342 off");
+    Vec3 olo, ohi, o2lo, o2hi;
+    extent(true, c + Vec3(6, 0, 0), olo, ohi);
+    extent(false, c + Vec3(0, 0, 6), o2lo, o2hi);
+    CHECK(ohi.x > phi.x + 0.3f && std::fabs(ohi.x - o2hi.x) < 1e-4f);
+  });
+  test("Align to Camera (review 342): a camera's collect leaves the plain meshes and the scene's hash as they were (only the camera view's own evaluation turns the box); a modifier shown in renders only goes the camera way too; a rolled camera's right and an orthographic camera are the screen's; the lesson's Try-it", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    GameObject *box = ed.scene().create("R342Box2");
+    box->set_local_position(cube->world_position());
+    box->set_local_scale(Vec3(2.0f));
+    Lattice *lt = box->add<Lattice>();
+    for (int i : {1, 3, 5, 7}) lt->offsets[(size_t)i] = Vec3(0.5f, 0.0f, 0.0f);
+    lt->align_to_camera = true;
+    LatticeModifier *lm = cube->add<LatticeModifier>();
+    lm->object = "R342Box2";
+    ed.mark_changed_for_test("R342b");
+    ed.step_frame_headless();
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto top_x = [](const Mesh *m) {
+      float x = -1e9f;
+      for (const Vec3 &q : m ? m->positions : std::vector<Vec3>()) x = std::max(x, q.x);
+      return x;
+    };
+    const float plain1 = top_x(cube->evaluated_mesh(1)), plain0 = top_x(cube->evaluated_mesh(0));
+    const uint64_t hash_before = ed.render_hash_for_test();
+    (void)ed.collect_items_for_test(true, Mat4::look_at(c + Vec3(0, 0, 6), c, {0, 1, 0}), p, c + Vec3(0, 0, 6));
+    const float after1 = top_x(cube->evaluated_mesh(1)), after0 = top_x(cube->evaluated_mesh(0));
+    std::printf("    the plain meshes' right edge: render %.2f -> %.2f, viewport %.2f -> %.2f; the scene's hash %s\n", plain1, after1, plain0, after0,
+                ed.render_hash_for_test() == hash_before ? "the same" : "CHANGED");
+    CHECK(after1 == plain1 && after0 == plain0 && std::fabs(plain1 - 0.5f) < 1e-4f && ed.render_hash_for_test() == hash_before);
+    /* Shown in renders only: the camera view still turns it (the kind the Game view evaluates reads Show in Renders). */
+    lm->enabled = false;
+    lm->show_in_render = true;
+    ed.mark_changed_for_test("R342b renders only");
+    float right = -1e9f;
+    for (const DrawItem &it : ed.collect_items_for_test(true, Mat4::look_at(c + Vec3(0, 0, 6), c, {0, 1, 0}), p, c + Vec3(0, 0, 6)))
+      if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+        for (const Vec3 &q : it.mesh->positions) right = std::max(right, q.x);
+    CHECK(right > 0.8f && top_x(cube->evaluated_mesh(1)) == plain1);
+    lm->enabled = true;
+    /* A camera rolled 90 degrees about its view: the screen's right is the world's down - the box's +X points go there. */
+    ed.mark_changed_for_test("R342b rolled");
+    const Vec3 eye = c + Vec3(0, 0, 6);
+    float lowest = 1e9f, widest = -1e9f;
+    for (const DrawItem &it : ed.collect_items_for_test(true, Mat4::look_at(eye, c, {1, 0, 0}), p, eye))
+      if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+        for (const Vec3 &q : it.mesh->positions) lowest = std::min(lowest, q.y), widest = std::max(widest, q.x);
+    std::printf("    rolled 90 degrees: the Cube's lowest point %.2f (as modelled -0.50), its right edge %.2f\n", lowest, widest);
+    CHECK(lowest < -0.8f && std::fabs(widest - 0.5f) < 1e-3f);
+    /* Orthographic, looking along -Z: the same as the perspective camera in front. */
+    float oright = -1e9f;
+    for (const DrawItem &it : ed.collect_items_for_test(true, Mat4::look_at(eye, c, {0, 1, 0}), Mat4::ortho(3.0f, 1.5f, 0.1f, 100.0f), eye))
+      if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+        for (const Vec3 &q : it.mesh->positions) oright = std::max(oright, q.x);
+    CHECK(oright > 0.8f);
+    /* The lesson's Try-it. */
+    Editor ed2;
+    r34_open(ed2);
+    for (const char *k : {"create Lattice", "set Lattice.AlignToCamera 1"}) ed2.command(k);
+    GameObject *made = ed2.active_object_for_test();
+    CHECK(made && made->lattice() && made->lattice()->align_to_camera);
+  });
+}
+
 /* Round 334 (task 0314): Camera Flatten - the 2D look. */
 static void tests_round334() {
   test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
@@ -12041,4 +12149,5 @@ void run_render_tests() {
   tests_round334();
   tests_round338();
   tests_round339();
+  tests_round342();
 }

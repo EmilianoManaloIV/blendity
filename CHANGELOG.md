@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 342): a lattice turned to face the camera
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): a camera-aligned lattice.
+
+**Added (task 0320, ADR 0094)**
+- **Lattice > Align to Camera:** in the camera views the box faces the camera about its centre (X the screen's right,
+  Y its up, Z toward the camera), so its points shape the silhouette as the camera sees it - pull the far eye forward,
+  widen the jaw in profile; out of the camera views it moves nothing. Keyed points make a one-shot correction.
+- Evaluated in the camera views' own slots (round 339), the modifier's dependency hash with the box's turned frame.
+
+**Checked:** `tests_round342` - a lattice's +X points widening a Cube to world +X through a camera in front, to world
+-Z through one on its right, not in the Scene view; with Align to Camera off, the same from every camera.
+
+**The review's fixes (Opus code-reviewer, changes needed):** the camera reached every evaluation of the collect - a
+lightmap lookup, the lighting's out-of-date key, a Boolean reading the deformed object - so plain meshes took the
+camera's shape: lightmaps dropped, the scene rehashed every frame, and a mesh a traced view held could be rewritten.
+The box now faces the camera only while a camera view's own kind is evaluated (a thread-local mark; tested: the plain
+meshes and the scene's hash unchanged by a camera's collect). A modifier shown in renders only goes the camera way; a
+lattice at rest keeps the camera out of the key; a rolled camera's right is the screen's (tested); an orthographic
+camera tested; the help, the lesson (a Try-it) and the MANUAL say the box's rotation doesn't count.
+
 ## 2026-10-31 (round 340): animating on 2s and 3s - held in the preview, the camera smooth
 
 **Asked:** the 2D-look methods ("Add those components onto the plan."): animating on 2s and 3s with the camera kept

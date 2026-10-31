@@ -478,6 +478,12 @@ at the Game Camera's Angle starts a row from it. The Game view, Camera Preview a
 weight; the Scene view keeps the model. `viewshape add <key> <yaw> <pitch> [range] [falloff] [weight] [mirror] |
 remove <row> | ref <object>|none | list`.
 
+**The 2D look - a lattice facing the camera** (round 342): a Lattice with **Align to Camera** turns to face the camera
+in the Game view, Camera Preview and F12 - X the screen's right, Y its up - so its points shape the silhouette as the
+camera sees it (a Lattice modifier on the mesh names it); out of the camera views it moves nothing, and the box's own
+rotation doesn't count (its place and size do) - edit the points watching the Game view. Key its points for one shot's
+correction.
+
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.
 

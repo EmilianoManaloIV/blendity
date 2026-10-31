@@ -42,6 +42,8 @@ void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int 
   const float len = length(f);
   flatten_view_.forward = finite_bits(len) && len > 1e-6f ? f / len : Vec3(0, 0, 1);
   flatten_view_.ortho = proj.m[15] == 1.0f;
+  const Vec3 up = view.inverse().dir({0, 1, 0});
+  flatten_view_.up = finite_bits(up.x + up.y + up.z) && length(up) > 1e-6f ? normalize(up) : Vec3(0.0f, 1.0f, 0.0f);
 }
 
 /* The object a Camera Flatten's Pivot Object names (round 338): a bone of that name below it first (round 334's files
@@ -72,6 +74,28 @@ const GameObject *Editor::view_shapes_reference(const GameObject &owner, const V
   if (!ref) ref = &owner;
   view_refs_[owner.id] = ref->id;
   return ref;
+}
+
+void Editor::set_view_lattices(bool on) {
+  view_lattices_any_ = false;
+  scene_->for_each([&](GameObject &g) {
+    const Lattice *lt = g.lattice();
+    if (!lt || !lt->align_to_camera) return;
+    lt->view_on = on;
+    lt->view_eye = flatten_view_.eye, lt->view_forward = flatten_view_.forward, lt->view_ortho = flatten_view_.ortho, lt->view_up = flatten_view_.up;
+    view_lattices_any_ = view_lattices_any_ || on;
+  });
+}
+
+bool Editor::view_lattice_on(const GameObject &g, bool game) const {
+  if (!view_lattices_any_) return false;
+  for (const auto &c : g.components) {
+    const auto *lm = dynamic_cast<const LatticeModifier *>(c.get());
+    if (!lm || !(game ? lm->show_in_render : lm->enabled) || lm->object.empty() || lm->strength == 0.0f) continue;  // (as the kind evaluates it)
+    const GameObject *t = scene_->find_by_name(lm->object);
+    if (t && t != &g && t->lattice() && t->lattice()->align_to_camera && t->lattice()->moved()) return true;
+  }
+  return false;
 }
 
 bool Editor::set_view_shapes(const GameObject &g, const MeshRenderer &mr, const Mesh &mesh) {
@@ -139,6 +163,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   flatten_pivots_.clear();
   view_refs_.clear();
   flatten_any_ = view_shapes_any_ = false;
+  set_view_lattices(flatten_view_.on);  // (round 342: an aligned lattice faces this view's camera, or moves nothing)
   if (flatten_view_.on)
     scene_->for_each([&](GameObject &g) {
       flatten_any_ = flatten_any_ || g.find_role(Component::RenderRole::CameraFlatten);
@@ -156,7 +181,8 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     bool editing = !game && edit_mode_ && g.id == edit_obj_;
     /* Edit Mode shows the modifiers set to Show in Edit Mode over the cage; renders use Show in Renders. */
     /* (Round 339: through a camera, View Angle Shapes' weights - the camera views' own slots, 3 and 4.) */
-    const bool view_shaped = !editing && set_view_shapes(g, *mr, *mf->mesh);
+    const bool shaped_keys = !editing && set_view_shapes(g, *mr, *mf->mesh);
+    const bool view_shaped = shaped_keys || (!editing && view_lattice_on(g, game));  // (round 342: a camera-aligned lattice too)
     const Mesh *m = g.evaluated_mesh(editing ? 2 : (game ? 1 : 0) + (view_shaped ? 3 + 2 * flatten_view_.role : 0));
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
@@ -183,6 +209,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const int shell_slot = view_shaped && tscale == 1.0f ? 6 + flatten_view_.role : (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0);  // (round 339: a role's own)
     if (outline_draw_item(g, *m, it, shell_slot, tscale, o)) items.push_back(o);
   });
+  set_view_lattices(false);  // (out of this collect: the Scene view, exports and bakes see the model)
   return items;
 }
 

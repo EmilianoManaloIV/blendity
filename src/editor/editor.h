@@ -1724,6 +1724,7 @@ class Editor {
     Vec3 eye{0.0f}, forward{0.0f, 0.0f, 1.0f};
     bool ortho = false;
     int role = 0;
+    Vec3 up{0.0f, 1.0f, 0.0f};  // (round 342: the camera's up - a lattice facing it takes the screen's right from it)
   } flatten_view_;
   std::unordered_map<uint64_t, uint64_t> view_refs_;  // (round 339: each View Angle Shapes' reference's id, found once a collect - ids, never pointers: a deleted object isn't found)
   std::unordered_map<uint64_t, Vec3> flatten_pivots_;  // (each Camera Flatten's pivot, once a collect)
@@ -1738,6 +1739,11 @@ class Editor {
    * the weights reaching g at this camera view put on mr.view_weights - false when none apply. */
   const GameObject *view_shapes_reference(const GameObject &owner, const ViewAngleShapes &vs);
   bool set_view_shapes(const GameObject &g, const MeshRenderer &mr, const Mesh &mesh);
+  /* Round 342: the camera-aligned lattices told where this collect's camera is (or that there's none); and whether g's
+   * mesh goes through one (its camera views' own slots, then). */
+  void set_view_lattices(bool on);
+  bool view_lattice_on(const GameObject &g, bool game) const;
+  bool view_lattices_any_ = false;
   bool view_shapes_any_ = false;  // (a View Angle Shapes in the scene, this collect)
   void viewshape_command(const std::vector<std::string> &t);
   void draw_view_shapes_extras(GameObject &g, ViewAngleShapes &vs, ui::Layout &lay);
