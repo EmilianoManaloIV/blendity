@@ -632,7 +632,9 @@ struct Outline : ComponentBase<Outline> {
  * shape's. On a parent it reaches the meshes below it; a child's own Camera Flatten wins for its subtree. */
 struct CameraFlatten : ComponentBase<CameraFlatten> {
   static constexpr const char *kName = "CameraFlatten";
-  float amount = 0.6f;   // 0: as modelled, 1: flat (2 % of the depth kept)
+  float amount = 0.6f;   // 0: as modelled, 1: flat (2 % of the depth kept); below 0 (round 343): exaggerated, -1 twice the depth
+  int mode = 0;          // (round 343) Amount, or Focal Length: drawn as if through a lens of `focal` mm
+  float focal = 85.0f;   // mm: the object's own lens in Focal Length mode (85 before a 24 mm camera: flatter; 14: swelling)
   int pivot = 0;         // Bounds Center (of this object and the meshes below), Object Origin, Bone
   std::string bone;      // (Pivot Bone) a bone below this object, by name
   int direction = 0;     // Toward the Camera (the line from the eye to the pivot), View Axis

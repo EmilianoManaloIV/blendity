@@ -546,7 +546,7 @@ static const GameObject *find_head_bone(const GameObject &g) {
   return nullptr;
 }
 
-static const char *kFlattenUsage = "flatten [amount 0..1] | pivot center|origin|object <name> | direction camera|axis | preset anime | remove";
+static const char *kFlattenUsage = "flatten [amount -1..1] | lens <mm>|off | pivot center|origin|object <name> | direction camera|axis | preset anime | remove";
 
 /* The object named `name` below g (or g itself), or null - a bone, an empty, a mesh (round 338: any object). */
 static const GameObject *find_named_below(const GameObject &g, const std::string &name) {
@@ -563,7 +563,7 @@ static bool flatten_set(CameraFlatten &cf, const GameObject &g, const Scene &sce
   if (op.empty()) return true;  // (just added: its own defaults)
   if (op == "preset" && a2 == "anime") {
     const GameObject *head = find_head_bone(g);
-    cf.amount = 0.6f, cf.direction = 0, cf.children = true;
+    cf.amount = 0.6f, cf.direction = 0, cf.children = true, cf.mode = 0;  // (round 343: by Amount)
     cf.pivot = head ? 2 : 0;
     cf.bone = head ? head->name : "";
     return true;
@@ -576,10 +576,19 @@ static bool flatten_set(CameraFlatten &cf, const GameObject &g, const Scene &sce
     return true;
   }
   if (op == "direction" && (a2 == "camera" || a2 == "axis")) return cf.direction = a2 == "axis" ? 1 : 0, true;
+  if (op == "lens" && a2 == "off") return cf.mode = 0, true;  // (round 343)
+  if (op == "lens" && t.size() > 2) {
+    char *end = nullptr;
+    const float mm = std::strtof(t[2].c_str(), &end);
+    if (end == t[2].c_str() || *end || !std::isfinite(mm) || mm < 1.0f) return false;
+    cf.mode = 1, cf.focal = std::min(1000.0f, mm);
+    return true;
+  }
   char *end = nullptr;
   const float amount = std::strtof(t[1].c_str(), &end);
   if (end == t[1].c_str() || *end || !std::isfinite(amount)) return false;
-  cf.amount = std::max(0.0f, std::min(1.0f, amount));
+  cf.amount = std::max(-1.0f, std::min(1.0f, amount));  // (round 343: below 0, exaggerated)
+  cf.mode = 0;  // (an amount typed: by Amount, not a lens set before)
   return true;
 }
 
