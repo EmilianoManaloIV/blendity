@@ -11522,7 +11522,8 @@ static void tests_round334() {
     CHECK(!item_of(ed.collect_items_for_test(true, v, p, eye), sphere)->flattened);
     ed.command("select Sphere");
     ed.command("flatten 1");  // (all of it: 2 % kept, the matrix still finite)
-    const DrawItem *own = item_of(ed.collect_items_for_test(true, v, p, eye), sphere);
+    const std::vector<DrawItem> after_own = ed.collect_items_for_test(true, v, p, eye);  // (kept: the item points into it)
+    const DrawItem *own = item_of(after_own, sphere);
     CHECK(own && own->flattened && std::isfinite(own->model.inverse().m[0]));
     ed.command("select Cube");
     ed.command("flatten remove");
