@@ -963,6 +963,8 @@ static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p,
     const void *src = it.mesh;
     mix(&src, sizeof(src));
     mix(&it.mesh->serial, sizeof(it.mesh->serial));
+    const bool tangents = !it.mesh->tangents.empty();  // (round 337: added to the same mesh in place, the serial kept)
+    mix(&tangents, sizeof(tangents));
     mix(it.model.m, sizeof(it.model.m));
     mix(vp.m, sizeof(vp.m));
     mix(&w, sizeof(w));

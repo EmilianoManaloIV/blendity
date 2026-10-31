@@ -2853,6 +2853,65 @@ static void tests_round225() {
   });
 }
 
+/* ---------------------------------------------------------------- round 337: a normal map on a mesh the card already held */
+static void tests_round337() {
+  test("gpu views (round 337, the user's black cube): a cube drawn on the card, then given a procedural texture with a normal map and Physical Size 0.15, draws textured - not black from the zero tangents it first went up with (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(2);
+    ed.command("shading shaded");
+    ed.command("tool view");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    r34_steps(ed, 3);  // (the cube on the card, no normal map: no tangents)
+    std::remove(resolve_asset_path("Assets/Textures/R337Gpu.ptex").c_str());
+    ed.command("newtex R337Gpu Bricks");
+    ed.command("settex Assets/Textures/R337Gpu.ptex LiveShading 0");  // (no live texture: the card draws it close up too)
+    ed.command("select Cube");
+    ed.command("texture Assets/Textures/R337Gpu.ptex");
+    ed.command("settex Assets/Textures/R337Gpu.ptex PhysicalSize 0.15");
+    const FrameProfile before = ed.frame_profile_totals();
+    r34_steps(ed, 3);
+    const FrameProfile after = ed.frame_profile_totals();
+    /* (The card drew it: a CPU fallback - a live close-up, a fog - would pass the picture check without the fix.) */
+    CHECK(after.gpu_views > before.gpu_views && ed.gpu_view_reason().empty());
+    const Material &m = *cube->get<MeshRenderer>()->materials[0];
+    CHECK(!m.normal_map.empty() && std::fabs(m.tiling.z - 1.0f / 0.15f) < 1e-3f);  // (Box mapping's z follows the size too)
+    int cx = 0, cy = 0;
+    const bool seen = ed.project_to_window(cube->world_position(), cx, cy);
+    CHECK(seen);
+    if (!seen) return;
+    auto mean = [&] {
+      const Image &fb = ed.main_fb_for_test();
+      double sum = 0;
+      int n = 0;
+      for (int y = cy - 10; y <= cy + 10; y++)
+        for (int x = cx - 10; x <= cx + 10; x++) {
+          const uint32_t p = fb.pixels[(size_t)y * fb.width + x];
+          sum += ((p >> 16) & 255) + ((p >> 8) & 255) + (p & 255);
+          n++;
+        }
+      return sum / (3.0 * n);
+    };
+    const double on_card = mean();
+    const std::string status = ed.gpu_view_status();
+    ed.viewport_device_for_test(1);
+    cube->set_local_position({0.01f, 0.5f, 0.0f});  // (a change: the view draws again)
+    r34_steps(ed, 2);
+    cube->set_local_position({0.0f, 0.5f, 0.0f});
+    r34_steps(ed, 2);
+    const double on_cpu = mean();
+    std::printf("    the cube's middle: %.1f on the card (%s), %.1f on the CPU\n", on_card, status.c_str(), on_cpu);
+    CHECK(on_card > on_cpu * 0.6 && on_card < on_cpu * 1.4);
+    std::remove(resolve_asset_path("Assets/Textures/R337Gpu.ptex").c_str());
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -2875,4 +2934,5 @@ void run_gpu_tests() {
   tests_round219();
   tests_round224();
   tests_round225();
+  tests_round337();
 }

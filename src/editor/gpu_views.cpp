@@ -667,8 +667,12 @@ bool Editor::gpu_view_may_draw(const RenderTarget &rt, const LightingEnv &env, c
 int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   GpuMesh &e = gpu_meshes_[&rm];
   e.used = gpu_calls_;
-  if (e.id >= 0 && rm.serial != 0 && e.serial == rm.serial) return e.id;
-  if (gpu_mesh_moved(e, rm, err)) return e.id;
+  /* Round 337: a mesh first drawn without a normal map went up with zero tangents; its tangents are added to the same
+   * render mesh (the serial kept) when a normal map comes, so they are part of the key - the card's zero tangents
+   * normalized to NaN and drew the object black (a texture's Physical Size moved a cube from the CPU to the card). */
+  const bool tangents = !rm.tangents.empty();
+  if (e.id >= 0 && rm.serial != 0 && e.serial == rm.serial && e.tangents == tangents) return e.id;
+  if (e.tangents == tangents && gpu_mesh_moved(e, rm, err)) return e.id;
   err.clear();  // (a refused partial update falls back to the whole mesh)
   const std::vector<gpu::RasterVertex> v = raster_vertices(rm);
   const std::vector<uint32_t> indices = card_indices(rm, e.parts);
@@ -676,6 +680,7 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   if (e.id >= 0 && e.vertices == rm.positions.size() && e.indices == rm.indices.size() && gpu_view_->update_mesh(e.id, v, &indices, &err)) {
     prof_.gpu_mesh_updates++;
     e.serial = rm.serial;
+    e.tangents = tangents;
     return e.id;
   }
   if (e.id >= 0) {
@@ -684,6 +689,7 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   }
   e.id = gpu_view_->add_mesh(v, indices, &err);
   e.serial = rm.serial;
+  e.tangents = tangents;
   e.vertices = (uint32_t)rm.positions.size();
   e.indices = (uint32_t)rm.indices.size();
   e.bytes = e.id >= 0 ? (uint64_t)v.size() * sizeof(gpu::RasterVertex) + (uint64_t)rm.indices.size() * 4 : 0;

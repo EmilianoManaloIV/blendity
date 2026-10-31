@@ -2,6 +2,35 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 337): a texture's Physical Size at 0.15 turned a cube black
+
+**Asked:** "Physical size parameter at textures on a cube at 0.15 turn the cube black."
+
+**Fixed (task 0316)**
+- **The GPU views drew a mesh with a normal map black** when the mesh was on the card before it got the normal map
+  (a procedural texture assigned to a cube already drawn). Its tangents are added to the same render mesh in place,
+  and the card re-sent a mesh only when it changed, so it kept zero tangents; the shader normalized a zero tangent to
+  NaN. The card's mesh cache now notices the tangents, and the shader keeps the plain normal where a tangent is zero.
+- **Why Physical Size showed it:** a texture with Live Shading is drawn on the CPU while its texels are magnified; at
+  the Bricks' 2 m a cube's are, at 0.15 m they aren't, and the card drew the cube. (With Live Shading off it was black
+  at any size.)
+- **Assign left Tiling z at 1** while x and y took 1 / Physical Size: Box mapping's sides tiled differently, and z
+  never followed a size change. z follows now.
+- **`texture <file>.ptex`** in the console read the texture as a picture ("unsupported TGA type"); it assigns it as
+  the Textures window does.
+- **The sanitizer job:** round 334's Camera Flatten test read a draw item from a vector already gone (a use after
+  free in the test only, which AddressSanitizer stopped on); it keeps the vector.
+
+**Checked:** `test_gpu` round 337 - the cube's middle 10.3 on the card against 103.5 on the CPU before the fix, 103.5
+against 103.5 after; `test_assets` round 337 - the CPU view and the Tiling on all three axes; the round-98 Physical
+Size test.
+
+**The review's fixes (Opus code-reviewer, approved):** the GPU test checks the card drew the cube (a CPU fallback would
+have passed it without the fix); both tests stop when the cube can't be projected; the retro vertex-snap copies are
+keyed by the tangents too (with a still camera a new normal map showed only after a move). Not done: the GPU path
+kernel's own tangent normalize keeps no guard (its tangents are never zero) until the kernel and the OptiX PTX are next
+rebuilt.
+
 ## 2026-10-30 (round 336): every open pull request merged, and the 0.12.0 pre-release
 
 **Asked:** "Merge all current standing pull requests on GitHub this one time." and "We can also for 0.12.0 pre-release".
