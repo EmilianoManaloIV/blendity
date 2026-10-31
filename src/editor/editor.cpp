@@ -2558,6 +2558,7 @@ std::vector<std::pair<MaterialPtr, bool>> Editor::texture_followers(const std::s
  * component above the armature sampled at every frame (the scene's pose put back after). */
 std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin) {
   auto sk = std::make_shared<ExportSkin>();
+  sk->rig = arm.id;
   sk->base = armature_base(arm);
   sk->base_name = arm.parent ? arm.parent->name + " Skeleton" : std::string("Skeleton");
   std::vector<GameObject *> objs;
@@ -2707,6 +2708,27 @@ static const Mesh *export_mesh_of(GameObject &g, const ExportOptions &o, const M
   return g.evaluated_mesh();
 }
 
+/* Review 352: the mesh a rigged object exports at rest - the basis through its stack without the Skin (a Mirror, a
+ * Subdivision Surface: Blender's exporter applies every modifier but the Armature), the vertex groups carried; the
+ * basis when a modifier loses them (said: its weights would not fit) or none is on. */
+static const Mesh *rest_with_modifiers(GameObject &g, const Mesh &base, std::vector<std::shared_ptr<Mesh>> &keep) {
+  std::vector<const Component *> mods;
+  for (const auto &c : g.components)
+    if (c->enabled && c->is_modifier() && std::strcmp(c->type_name(), SkinModifier::kName) != 0) mods.push_back(c.get());
+  if (mods.empty()) return &base;
+  auto m = std::make_shared<Mesh>(base);
+  for (const Component *c : mods) run_modifier(*c, *m);
+  for (const VertexGroup &vg : m->vertex_groups) {
+    if (vg.weights.size() == m->vert_count()) continue;
+    Log::warn("Export: %s goes as its base mesh - a modifier lost the vertex groups its weights are (apply the modifiers first)", g.name.c_str());
+    return &base;
+  }
+  if (!base.shape_keys.empty() && !meshops::shape_keys_fit(*m))
+    Log::warn("Export: %s's shape keys left out - its modifiers change its vertices (apply them first)", g.name.c_str());
+  keep.push_back(m);
+  return m.get();
+}
+
 /* Round 351: an outline shell for a keyed mesh carries the same keys (the shell has the mesh's vertices, each pushed
  * out along its normal), so a smile moves the line with the face. */
 static const Mesh *keyed_shell(const Mesh *shell, const Mesh *keyed, std::vector<std::shared_ptr<Mesh>> &keep) {
@@ -2725,11 +2747,13 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
     auto *mf = g.get<MeshFilter>();
     /* Task 0268: a skinned mesh in glTF goes at rest with its rig (the skin is the file's to apply). */
     const bool gltf = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF;
-    const SkinModifier *skm = o.skins && gltf ? g.get<SkinModifier>() : nullptr;
+    const bool rigs = gltf || o.format == (int)ExportFormat::FBX;  // (round 352: FBX carries the rig too)
+    const SkinModifier *skm = o.skins && rigs ? g.get<SkinModifier>() : nullptr;
     GameObject *arm = skm && !skm->object.empty() ? scene_->find_by_name(skm->object) : nullptr;
     if (arm && !arm->get<Armature>()) arm = nullptr;
     const Mesh *keyed = shape_key_basis(g, o, arm != nullptr, keep);  // (round 351: the basis, its keys written as targets)
     const Mesh *m = export_mesh_of(g, o, keyed, arm != nullptr && mf && mf->mesh);
+    if (arm && m && o.apply_modifiers) m = rest_with_modifiers(g, *m, keep);  // (review 352: the stack, the Skin left to the file)
     if (!m || !m->face_count()) return;
     ExportItem it;
     it.name = g.name;
@@ -2752,6 +2776,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
         oi.name = g.name + " Outline";
         oi.mesh = shell;
         oi.shape_weights = it.shape_weights;
+        if (shell->vert_count() == m->vert_count()) oi.skin = it.skin;  // (review 352: the line follows the bones, as the body does)
         oi.world = it.world;
         oi.materials = ol.materials();
         items.push_back(oi);

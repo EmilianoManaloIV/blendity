@@ -3,6 +3,7 @@
 #include "test_common.h"
 #include "fixtures/synthetic_mmd.h"
 #include "../src/core/json.h"
+#include "../extern/ufbx/ufbx.h"
 
 static void image_tests() {
   test("image: PNG round-trip is exact", [] {
@@ -5295,6 +5296,300 @@ static void tests_round351() {
   });
 }
 
+/* ---------------------------------------------------------------- round 352: FBX carries the rig and its clip */
+/* A two-bone rig on the keyed cube: Root at the bottom, Child half way up taking the top half, its clip turning Child
+ * 90 degrees about Z over three frames while Up's weight rises. */
+static ExportItem r352_rigged(MeshPtr &cube, const Mat4 &world) {
+  cube = r351_keyed_cube();
+  ExportItem it;
+  it.name = "Body", it.mesh = cube.get(), it.world = world, it.shape_weights = {0.0f, 0.0f};
+  auto sk = std::make_shared<ExportSkin>();
+  sk->base_name = "Rig";
+  sk->base = Mat4::trs(Vec3(0.0f, -0.5f, 0.0f), Quat(), Vec3(1.0f));
+  sk->joints.push_back({"Root", -1, Vec3(0.0f), Quat(), Vec3(1.0f)});
+  sk->joints.push_back({"Child", 0, Vec3(0.0f, 0.5f, 0.0f), Quat(), Vec3(1.0f)});
+  for (size_t v = 0; v < cube->vert_count(); v++) {
+    const bool top = cube->positions[v].y > 0.0f;
+    sk->vjoints.push_back({(uint16_t)(top ? 1 : 0), 0, 0, 0});
+    sk->vweights.push_back({1.0f, 0.0f, 0.0f, 0.0f});
+  }
+  ExportSkin::Anim an;
+  an.name = "Bend", an.fps = 24.0f, an.frames = 3;
+  an.t = {{Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)}, {Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0)}};
+  an.r = {{Quat(), Quat(), Quat()}, {Quat(), Quat::axis_angle(Vec3(0, 0, 1), kPi * 0.25f), Quat::axis_angle(Vec3(0, 0, 1), kPi * 0.5f)}};
+  an.s = {{Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}, {Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}};
+  an.shape_w = {{0.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+  sk->anims.push_back(an);
+  it.skin = sk;
+  return it;
+}
+
+/* What an import made of a rig: each bone's rest world position, the mesh's group weights, Child's Z turn at the clip's
+ * last frame and Up's weight there. */
+struct R352Rig {
+  bool ok = false;
+  std::vector<std::pair<std::string, Vec3>> bones;
+  std::vector<std::pair<std::string, float>> group_sum;
+  float child_turn = -999.0f, up_weight = -1.0f;
+  size_t skins = 0, clips = 0;
+};
+
+static R352Rig r352_read(const std::string &path) {
+  R352Rig r;
+  ImportResult res;
+  r.ok = import_model(path, res);
+  r.skins = res.skins.size(), r.clips = res.clips.size();
+  std::vector<Mat4> world(res.nodes.size());
+  for (size_t i = 0; i < res.nodes.size(); i++) {
+    const ImportedNode &n = res.nodes[i];
+    const Mat4 local = Mat4::trs(n.position, n.rotation, n.scale);
+    world[i] = n.parent >= 0 && n.parent < (int)i ? world[(size_t)n.parent] * local : local;
+    if (n.is_bone) r.bones.push_back({n.name, world[i].translation()});
+    if (!n.mesh) continue;
+    for (const VertexGroup &vg : n.mesh->vertex_groups) {
+      float s = 0.0f;
+      for (float w : vg.weights) s += w;
+      r.group_sum.push_back({vg.name, s});
+    }
+  }
+  for (const AnimationClip &c : res.clips)
+    for (const AnimTrack &t : c.tracks) {
+      const float last = t.keys.empty() ? 0.0f : t.keys.back().frame;
+      if (t.path.size() >= 5 && t.path.compare(t.path.size() - 5, 5, "Child") == 0 && t.property == "Rotation" && t.axis == 2) r.child_turn = t.sample(last);
+      if (t.property.find("BlendShape/Up") != std::string::npos) r.up_weight = t.sample(last);
+    }
+  std::sort(r.bones.begin(), r.bones.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  std::sort(r.group_sum.begin(), r.group_sum.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  return r;
+}
+
+/* Review 352: ufbx's own skinning of an FBX's first mesh at `time` (seconds), in Blendity's space (X mirrored back),
+ * by control point - which is the exported mesh's vertex order. */
+static std::vector<Vec3> r352_skinned(const std::string &path, double time) {
+  ufbx_load_opts opts = {};
+  opts.target_axes = ufbx_axes_right_handed_y_up;
+  opts.target_unit_meters = 1.0f;
+  opts.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
+  ufbx_error err;
+  ufbx_scene *scene = ufbx_load_file(path.c_str(), &opts, &err);
+  std::vector<Vec3> out;
+  if (!scene) return out;
+  ufbx_evaluate_opts eo = {};
+  eo.evaluate_skinning = true;
+  ufbx_scene *ev = scene->anim_stacks.count ? ufbx_evaluate_scene(scene, scene->anim_stacks.data[0]->anim, time, &eo, &err) : nullptr;
+  const ufbx_scene *use = ev ? ev : scene;
+  const ufbx_node *node = nullptr;
+  for (size_t i = 0; i < use->nodes.count && !node; i++) node = use->nodes.data[i]->mesh ? use->nodes.data[i] : nullptr;
+  if (node) {
+    const ufbx_mesh *m = node->mesh;
+    for (size_t v = 0; v < m->num_vertices; v++) {
+      ufbx_vec3 p = m->skinned_position.values.data[v];
+      if (m->skinned_is_local) p = ufbx_transform_position(&node->geometry_to_world, p);
+      out.push_back(Vec3(-(float)p.x, (float)p.y, (float)p.z));
+    }
+  }
+  if (ev) ufbx_free_scene(ev);
+  ufbx_free_scene(scene);
+  return out;
+}
+
+struct R352Names : Reflector {  // (the option labels a dialog shows)
+  std::vector<std::string> names;
+  void field(const char *n, float &, float, float, float) override { names.push_back(n); }
+  void field(const char *n, int &, int, int) override { names.push_back(n); }
+  void field(const char *n, bool &) override { names.push_back(n); }
+  void field(const char *n, Vec3 &) override { names.push_back(n); }
+  void color(const char *n, Vec3 &) override { names.push_back(n); }
+  void enumeration(const char *n, int &, const char *const *, int) override { names.push_back(n); }
+  void text(const char *n, std::string &) override { names.push_back(n); }
+  void mesh(const char *n, MeshPtr &) override { names.push_back(n); }
+};
+
+static void tests_round352() {
+  test("FBX carries the rig (round 352): an FBX of a rigged, keyed mesh imports with the same bones, weights, clip turn and shape-key weight as its glTF", [] {
+    MeshPtr cube;
+    const Mat4 world = Mat4::trs(Vec3(0.5f, 0.0f, -1.0f), Quat::axis_angle(Vec3(0, 1, 0), 0.6f), Vec3(1.0f));
+    const ExportItem it = r352_rigged(cube, world);
+    const std::string dir = fs::join(test_dir(), "r352");
+    fs::make_dirs(dir);
+    const std::string gp = fs::join(dir, "rig.glb"), fp = fs::join(dir, "rig.fbx");
+    fs::write_file(gp, export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr));
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    const R352Rig g = r352_read(gp), f = r352_read(fp);
+    auto bones = [](const R352Rig &r) {
+      std::string s;
+      for (const auto &b : r.bones) s += strprintf("%s (%.2f %.2f %.2f) ", b.first.c_str(), b.second.x, b.second.y, b.second.z);
+      return s;
+    };
+    std::printf("    glTF: %zu skin(s), bones %s, Child's turn %.1f, Up %.2f, %zu clip(s)\n", g.skins, bones(g).c_str(), g.child_turn, g.up_weight, g.clips);
+    std::printf("    FBX:  %zu skin(s), bones %s, Child's turn %.1f, Up %.2f, %zu clip(s)\n", f.skins, bones(f).c_str(), f.child_turn, f.up_weight, f.clips);
+    CHECK(f.ok && f.skins == 1 && f.clips >= 1 && f.bones.size() == 2 && g.bones.size() == 2);
+    if (f.bones.size() != 2 || g.bones.size() != 2) return;
+    for (size_t b = 0; b < 2; b++) CHECK(f.bones[b].first == g.bones[b].first && length(f.bones[b].second - g.bones[b].second) < 1e-3f);
+    CHECK(f.group_sum.size() == g.group_sum.size());
+    for (size_t k = 0; k < f.group_sum.size() && k < g.group_sum.size(); k++)
+      CHECK(f.group_sum[k].first == g.group_sum[k].first && std::fabs(f.group_sum[k].second - g.group_sum[k].second) < 1e-3f);
+    CHECK(std::fabs(f.child_turn - g.child_turn) < 0.5f && std::fabs(std::fabs(f.child_turn) - 90.0f) < 0.5f);
+    CHECK(std::fabs(f.up_weight - 1.0f) < 1e-3f);
+  });
+  test("FBX carries the rig (round 352): from the editor a Cube with an Armature and a clip goes to FBX with its skin and its clip; Armatures and Animation is offered for FBX", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R352");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 45");
+    ed.command("anim preview off");
+    ed.command("select Cube");
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "editor.fbx");
+    fs::make_dirs(fs::parent(path));
+    ed.export_model_for_test(export_defaults((int)ExportFormat::FBX), path);
+    const R352Rig f = r352_read(path);
+    size_t bone = 0;
+    for (const auto &b : f.bones) bone += b.first == "Bone";
+    std::printf("    the editor's FBX: %zu skin(s), the Bone %zu, %zu clip(s)\n", f.skins, bone, f.clips);
+    CHECK(f.ok && f.skins == 1 && bone == 1 && f.clips == 1);
+    bool offered = false;
+    ExportOptions o = export_defaults((int)ExportFormat::FBX);
+    R352Names names;
+    o.reflect(names);
+    for (const std::string &n : names.names) offered = offered || n == "Armatures and Animation";
+    CHECK(offered);
+  });
+  test("FBX carries the rig (review 352): ufbx's own skinning of the editor's exported rig at a keyed frame puts every vertex where Blendity's Skin puts it (the Cluster matrices), in binary and ASCII", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("position 0.5 0.5 -1");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig"), *cube = ed.scene().find_by_name("Cube");
+    CHECK(rig && cube);
+    if (!rig || !cube) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R352C");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 50");
+    ed.command("anim key Bone Rotation 0 30 20");
+    ed.command("anim preview on");
+    ed.command("anim frame 30");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    const Mesh *em = cube->evaluated_mesh();
+    CHECK(clip && em);
+    if (!clip || !em) return;
+    std::vector<Vec3> want;  // (Blendity's own Skin at frame 30, in the world)
+    for (const Vec3 &p : em->positions) want.push_back(cube->world_matrix().point(p));
+    ed.command("select Cube");
+    const std::string dir = fs::join(test_dir(), "r352");
+    fs::make_dirs(dir);
+    const std::string bp = fs::join(dir, "skinned.fbx"), ap = fs::join(dir, "skinned_ascii.fbx");
+    ExportOptions o = export_defaults((int)ExportFormat::FBX);
+    ed.export_model_for_test(o, bp);
+    o.ascii = true;
+    ed.export_model_for_test(o, ap);
+    for (const std::string &path : {bp, ap}) {
+      const std::vector<Vec3> got = r352_skinned(path, 30.0 / clip->frame_rate);
+      float worst = got.size() == want.size() ? 0.0f : 1e9f;
+      for (size_t v = 0; v < got.size() && v < want.size(); v++) worst = std::max(worst, length(got[v] - want[v]));
+      std::printf("    %s: ufbx skins %zu vertices at frame 30, the worst %.5f from Blendity's Skin\n", fs::filename(path).c_str(), got.size(), worst);
+      CHECK(worst < 1e-3f);
+    }
+    const R352Rig back = r352_read(ap);
+    CHECK(back.skins == 1 && back.clips == 1);
+  });
+  test("FBX carries the rig (review 352): a joint that moves no vertex still goes (a cluster with none); a turn about Y past 90 degrees stays one turn between the keys", [] {
+    MeshPtr cube;
+    ExportItem it = r352_rigged(cube, Mat4::identity());
+    auto sk = std::make_shared<ExportSkin>(*it.skin);
+    sk->joints.push_back({"Tip", 1, Vec3(0.0f, 0.5f, 0.0f), Quat(), Vec3(1.0f)});
+    ExportSkin::Anim &an = sk->anims[0];
+    an.t.push_back({Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0)});
+    an.r.push_back({Quat(), Quat(), Quat()});
+    an.s.push_back({Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)});
+    an.r[1] = {Quat(), Quat::axis_angle(Vec3(0, 1, 0), kPi * 60.0f / 180.0f), Quat::axis_angle(Vec3(0, 1, 0), kPi * 120.0f / 180.0f)};
+    it.skin = sk;
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "tip.fbx");
+    fs::make_dirs(fs::parent(path));
+    fs::write_file(path, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    const R352Rig r = r352_read(path);
+    CHECK(r.bones.size() == 3);
+    /* Half way between 60 and 120 degrees: 90, about Y - not a swing through another axis. */
+    ufbx_load_opts opts = {};
+    ufbx_error err;
+    ufbx_scene *scene = ufbx_load_file(path.c_str(), &opts, &err);
+    CHECK(scene != nullptr);
+    if (!scene) return;
+    const ufbx_node *child = ufbx_find_node(scene, "Child");
+    const ufbx_transform t = child && scene->anim_stacks.count ? ufbx_evaluate_transform(scene->anim_stacks.data[0]->anim, child, 1.5 / 24.0) : ufbx_transform{};
+    const double angle = 2.0 * std::acos(std::min(1.0, std::fabs(t.rotation.w))) * 180.0 / kPi;
+    const double off_axis = std::sqrt(t.rotation.x * t.rotation.x + t.rotation.z * t.rotation.z);
+    std::printf("    half way between the 60 and 120 degree keys: %.2f degrees, off the Y axis %.4f\n", angle, off_axis);
+    CHECK(std::fabs(angle - 90.0) < 0.5 && off_axis < 1e-3);
+    ufbx_free_scene(scene);
+  });
+  test("FBX carries the rig (review 352): from the editor an Outline's shell is skinned too, a Mirror on the rig's mesh is applied, and two meshes on one armature share one skeleton and one clip", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("position 2 0.5 0");
+    ed.command("component MirrorModifier");
+    ed.command("component Outline");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("create Sphere");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R352B");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 45");
+    ed.command("anim preview off");
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "editor_many.fbx");
+    fs::make_dirs(fs::parent(path));
+    ExportOptions o = export_defaults((int)ExportFormat::FBX);
+    o.selection_only = false;
+    ed.export_model_for_test(o, path);
+    ImportResult res;
+    CHECK(import_model(path, res));
+    size_t bones = 0, cube_min = 0;
+    float xmin = 1e9f;
+    for (const ImportedNode &n : res.nodes) {
+      bones += n.is_bone && n.name == "Bone";
+      if (!n.mesh || n.name != "Cube") continue;
+      for (const Vec3 &p : n.mesh->positions) xmin = std::min(xmin, p.x);
+      cube_min = n.mesh->vert_count();
+    }
+    std::printf("    the editor's scene: %zu skin(s) (Cube, its Outline, the Sphere), the Bone %zu time(s), %zu clip(s); the Cube's %zu vertices (8 before the Mirror), x from %.2f\n",
+                res.skins.size(), bones, res.clips.size(), cube_min, xmin);
+    CHECK(res.skins.size() == 3 && bones == 1 && res.clips.size() == 1);
+    CHECK(cube_min > 8);  // (the Mirror applied: a centred cube mirrors onto itself, its vertices doubled)
+  });
+  test("the lesson's Try-it (round 352): create Cube, create Armature, export fbx all gives an FBX with a skin", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "tryit.fbx");
+    fs::make_dirs(fs::parent(path));
+    for (const std::string &c : {std::string("create Cube"), std::string("create Armature"), "export fbx all " + path}) ed.command(c);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(r352_read(path).skins == 1);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -5660,4 +5955,5 @@ void run_assets_tests() {
   tests_round332();
   tests_round337();
   tests_round351();
+  tests_round352();
 }
