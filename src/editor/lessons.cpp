@@ -920,7 +920,8 @@ A drawn character has no bumps: its face is one tone with a shadow that sweeps a
 there four ways (task 0149). Custom normals: a mesh can carry its own shading normals (an FBX or glTF whose normals an
 artist edited keeps them; the Smooth Normals modifier averages them over the surface so a nose stops casting its own
 shading; the Normal Transfer modifier reads them off a proxy - a sphere round the head, Blender's Data Transfer
-trick - which Rigging > Anime Face Normals adds, fitted to the Head group). The face shadow map: a Toon material's
+trick - which Rigging > Anime Face Normals adds, fitted to the Head group; its Ellipsoid entry fits the head's width, height
+and depth, for a tall, narrow anime head). The face shadow map: a Toon material's
 Face Shadow Map is read by the key light's angle round the head instead of N.L (HoYo's SDF faces); the Textures
 window's Face Shadow generator makes the plain sweep to paint over. Inner lines and hatching: a Line Map multiplies
 contour lines into the colour (or only into the shadow tones), a Hatch Map tiles strokes into the shadow. The Outline
@@ -932,6 +933,7 @@ hold the same frames, the ruler marks the frames a new pose is drawn on, and a k
 frame.
 ! cmd:select Sphere; component SmoothNormalsModifier | Smooth the Sphere's shading normals
 ! cmd:select Sphere; facenormals | Add a head proxy and a Normal Transfer to the Sphere
+! cmd:select Sphere; facenormals ellipsoid | The proxy fitted to the head's width, height and depth (a tall anime head)
 ! cmd:select Sphere; material Toon; component Outline; set Outline.DistanceFade 0.5 | A toon outline that thins with distance
 ? Why does a drawn face have one tone while a scanned one has many? | Its shading follows a smooth shape (a ball), not its bumps: smoothed or transferred normals give the model the same.
 ? What does Hold 2s do to the camera? | Nothing: the characters change pose every other frame, the camera moves every frame - even when the same clip animates it, unless you tick Hold the Camera.

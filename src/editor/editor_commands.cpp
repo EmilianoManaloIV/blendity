@@ -244,8 +244,11 @@ void Editor::customnormals_command(const std::string &verb) {
 }
 
 /* Anime Face Normals (task 0149): a sphere proxy fitted to the head and a Normal Transfer reading it, placed before a
- * Skin modifier (the transfer runs once in the rest pose and the skin turns the normals with the bones). */
-GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
+ * Skin modifier (the transfer runs once in the rest pose and the skin turns the normals with the bones). Round 341: or an
+ * ellipsoid fitted to the head's width, height and depth - an anime head is taller and narrower than a ball, and a
+ * sphere's normals on its sides turn the shadow line too early (the transfer turns the normals by the inverse
+ * transpose, so the stretched sphere's are the ellipsoid's). */
+GameObject *Editor::add_face_normals(GameObject *mesh_obj, bool ellipsoid) {
   MeshFilter *mf = mesh_obj ? mesh_obj->mesh_filter() : nullptr;
   if (!mf || !mf->mesh || mf->mesh->vert_count() == 0) {
     Log::warn("Anime Face Normals: the object has no mesh");
@@ -268,7 +271,10 @@ GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
     if (in) hb.add(m.positions[i]);
   }
   if (!hb.valid()) hb = all;
-  const Vec3 ext = hb.extent();  // (half the head's size each way)
+  Vec3 ext = hb.extent();  // (half the head's size each way)
+  /* (Round 341: without a Head group the head is the top sixth - as tall as that slice, even when only a cap's vertices
+   * are in it: an ellipsoid would otherwise be flat.) */
+  if (head < 0) ext.y = std::max(ext.y, (all.max.y - all.min.y) / 12.0f);
   const float radius = std::max(1e-3f, std::max(ext.x, std::max(ext.y, ext.z)));
   std::string group = head >= 0 ? m.vertex_groups[(size_t)head].name : std::string();
   /* The proxy: a sphere of that size at the head's centre, in the mesh's own space (its child), with no renderer. */
@@ -277,7 +283,9 @@ GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
   GameObject *proxy = scene_->create(name, mesh_obj);
   proxy->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 16, 12);  // (a few hundred triangles: the transfer's search is brute force)
   proxy->set_local_position(hb.center());
-  proxy->set_local_scale(Vec3(radius));
+  /* (Review 341: no axis under a quarter of the widest - a flat head (a face card) would be a sheet, its two faces flipping
+   * the normals vertex by vertex.) */
+  proxy->set_local_scale(ellipsoid ? vmax(ext, Vec3(std::max(1e-3f, 0.25f * radius))) : Vec3(radius));
   NormalTransferModifier *nt = mesh_obj->add<NormalTransferModifier>();
   nt->object = name;
   nt->vertex_group = group;
@@ -291,7 +299,8 @@ GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
       break;
     }
   mark_changed("Anime Face Normals");
-  Log::info("Anime Face Normals: %s (radius %.3f%s) and a Normal Transfer on %s", name.c_str(), radius, group.empty() ? "" : (", group " + group).c_str(),
+  Log::info("Anime Face Normals: %s (%s %.3f%s) and a Normal Transfer on %s", name.c_str(), ellipsoid ? "an ellipsoid, height" : "radius",
+            ellipsoid ? ext.y : radius, group.empty() ? "" : (", group " + group).c_str(),
             mesh_obj->name.c_str());
   return proxy;
 }
@@ -1101,10 +1110,12 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("hair rig: select a mesh");
     return;
   }
-  if (c == "facenormals") {  // facenormals: a head proxy and a Normal Transfer on the selected mesh (task 0149)
+  if (c == "facenormals") {  // facenormals [sphere|ellipsoid]: a head proxy and a Normal Transfer on the selected mesh (task 0149; round 341: ellipsoid)
     GameObject *mesh_obj = rig_mesh();
+    const std::string shape = t.size() > 1 ? to_lower(t[1]) : "sphere";
+    if (shape != "sphere" && shape != "ellipsoid") return Log::warn("facenormals [sphere|ellipsoid]");
     if (!mesh_obj) Log::warn("facenormals: select a mesh");
-    else add_face_normals(mesh_obj);
+    else add_face_normals(mesh_obj, shape == "ellipsoid");
     return;
   }
   if (c == "toonstyle") {  // toonstyle <Classic|Guilty Gear|Soft Anime|Painterly|Manga>: the selected materials (task 0148)
