@@ -42,6 +42,7 @@ const Module kModules[] = {
     {WindowKind::Layers, "Layers", Icon::Menu, "Scene", kDrawing, false, false, nullptr},
     {WindowKind::History, "History", Icon::Step, "Scene", kAlways, false, false, "window.history"},  // (task 0254)
     {WindowKind::Board, "Board", Icon::Grid, "Views", kDrawing, false, false, nullptr},  // (task 0299: the reference board)
+    {WindowKind::Avatar, "Avatar", Icon::Check, "Rigging & Animation", Editor::FocusRig, false, true, nullptr},  // (round 356: the VRChat avatar module)
 };
 static_assert(sizeof(kModules) / sizeof(kModules[0]) == (size_t)WindowKind::Count, "a module per window kind");
 

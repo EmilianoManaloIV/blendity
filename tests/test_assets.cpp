@@ -7,6 +7,7 @@
 #include "fixtures/synthetic_mmd.h"
 #include "../src/core/json.h"
 #include "../src/scene/budget.h"
+#include "../src/scene/visemes.h"
 #include "../extern/ufbx/ufbx.h"
 
 static void image_tests() {
@@ -6038,6 +6039,214 @@ static void tests_round355() {
   });
 }
 
+/* ---------------------------------------------------------------- round 356: the VRChat avatar kit */
+static MeshPtr r356_mouths() {  // (a cube with three sculpted mouths: AA up, OH out in Z, CH wide in X)
+  MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+  const size_t n = m->vert_count();
+  m->shape_keys = {{"AA", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))}, {"OH", std::vector<Vec3>(n, Vec3(0, 0, 0.1f))}, {"CH", std::vector<Vec3>(n, Vec3(0.1f, 0, 0))}};
+  return m;
+}
+
+static const ShapeKey *r356_key(const Mesh &m, const std::string &name) {
+  for (const ShapeKey &k : m.shape_keys)
+    if (k.name == name) return &k;
+  return nullptr;
+}
+
+static void tests_round356() {
+  test("Visemes (round 356): the 15 vrc.v_* keys mixed from AA, OH and CH - aa all AA, ou all OH, dd 0.3 AA + 0.7 CH, sil a hair - and refused without a base", [] {
+    MeshPtr m = r356_mouths();
+    std::string why;
+    CHECK(make_visemes(*m, "AA", "OH", "CH", why));
+    size_t made = 0;
+    for (const std::string &v : vrchat_viseme_names()) made += r356_key(*m, v) != nullptr;
+    const ShapeKey *aa = r356_key(*m, "vrc.v_aa"), *ou = r356_key(*m, "vrc.v_ou"), *dd = r356_key(*m, "vrc.v_dd"), *sil = r356_key(*m, "vrc.v_sil");
+    std::printf("    %zu of 15 made; aa (%.4f %.4f %.4f), dd (%.3f %.3f %.3f), sil moves %.6f\n", made, aa ? aa->delta[0].x : -1, aa ? aa->delta[0].y : -1,
+                aa ? aa->delta[0].z : -1, dd ? dd->delta[0].x : -1, dd ? dd->delta[0].y : -1, dd ? dd->delta[0].z : -1, sil ? length(sil->delta[0]) : -1);
+    CHECK(made == 15 && aa && ou && dd && sil);
+    if (!aa || !ou || !dd || !sil) return;
+    CHECK(std::fabs(aa->delta[0].y - 0.09998f) < 1e-5f && std::fabs(ou->delta[0].z - 0.09994f) < 1e-5f);
+    CHECK(std::fabs(dd->delta[0].y - 0.03f) < 1e-5f && std::fabs(dd->delta[0].x - 0.07f) < 1e-5f);
+    CHECK(length(sil->delta[0]) > 0.0f && length(sil->delta[0]) < 1e-3f);
+    CHECK(shape_key_problems(*m).empty());
+    MeshPtr bare = std::make_shared<Mesh>(*primitives::cube());
+    CHECK(!make_visemes(*bare, "AA", "OH", "CH", why) && why.find("AA") != std::string::npos);
+  });
+  test("Visemes (round 356): the Inspector's lines - a key that moves nothing, two of one name, visemes missing", [] {
+    MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+    const size_t n = m->vert_count();
+    m->shape_keys = {{"Blink", std::vector<Vec3>(n, Vec3(0.0f))}, {"Smile", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))}, {"Smile", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))},
+                     {"vrc.v_aa", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))}};
+    const std::vector<std::string> p = shape_key_problems(*m);
+    bool still = false, twice = false, missing = false;
+    for (const std::string &l : p) still = still || l.find("'Blink' moves nothing") != std::string::npos, twice = twice || l.find("two shape keys named 'Smile'") != std::string::npos,
+                                    missing = missing || (l.find("visemes missing") != std::string::npos && l.find("sil") != std::string::npos);
+    CHECK(still && twice && missing);
+  });
+  test("Avatar kit (round 356): Humanoid Rig fits a selected mesh; the checklist goes from amber to green through its Fixes; the Rigging window shows it; the Inspector shows a key's problem", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("create Cube");
+    GameObject *twin = ed.active_object_for_test();
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    CHECK(body != nullptr && twin != nullptr);
+    if (!body || !twin) return;
+    twin->name = body->name;  // (found first by name: the Fix must select the body by its id)
+    CHECK(ed.scene().find_by_name(body->name) != body);
+    ed.command("position 0 1.25 0");  // (the cylinder is 2 m tall: from 0.25 to 2.25)
+    const AABB bb = body->world_bounds();
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    GameObject *head = ed.scene().find_by_name("Head");
+    CHECK(rig && head);
+    if (!rig || !head) return;
+    const float top = head->world_position().y + head->get<Bone>()->length;
+    std::printf("    the mesh from y %.2f to %.2f; the rig's feet at %.2f, its head's top at %.2f\n", bb.min.y, bb.max.y, rig->world_position().y, top);
+    CHECK(std::fabs(rig->world_position().y - bb.min.y) < 1e-3f && std::fabs(top - bb.max.y) < 0.02f);
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.select_for_test(body->id, false);
+    for (const char *c : {"shape add AA", "shape add OH", "shape add CH"}) ed.command(c);
+    std::vector<AvatarCheck> list = avatar_check(ed.scene(), *rig);
+    auto get = [&](const char *name) {
+      for (const AvatarCheck &c : list)
+        if (c.item == name) return c;
+      return AvatarCheck();
+    };
+    std::printf("    before: visemes %d (%s), height %d (%s), Unity names %d\n", (int)get("Visemes").ok, get("Visemes").detail.c_str(), (int)get("Height 0.5 to 5 m").ok,
+                get("Height 0.5 to 5 m").detail.c_str(), (int)get("Unity's bone names").ok);
+    CHECK(!get("Visemes").ok && get("Height 0.5 to 5 m").ok && get("Humanoid bones").ok && get("Unity's bone names").ok);
+    size_t visemes = 0;
+    for (size_t i = 0; i < list.size(); i++) visemes = list[i].item == "Visemes" ? i + 1 : visemes;
+    ed.command(strprintf("avatar fix %zu", visemes));
+    list = avatar_check(ed.scene(), *rig);
+    std::printf("    after avatar fix %zu: visemes %d (%s)\n", visemes, (int)get("Visemes").ok, get("Visemes").detail.c_str());
+    CHECK(get("Visemes").ok);
+    const MeshFilter *tmf = twin->get<MeshFilter>();
+    CHECK(tmf && tmf->mesh && tmf->mesh->shape_keys.empty());  // (the twin left alone)
+    /* Undo takes the visemes back; Redo brings them again. */
+    r34_steps(ed, 2);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    list = avatar_check(ed.scene(), *rig);
+    CHECK(!get("Visemes").ok);
+    ed.command("redo");
+    r34_steps(ed, 2);
+    list = avatar_check(ed.scene(), *rig);
+    CHECK(get("Visemes").ok);
+    /* At the origin: under a moved parent, the Fix puts the root at the world's origin (not its local zero). */
+    ed.command("create Empty");
+    GameObject *holder = ed.active_object_for_test();
+    CHECK(holder != nullptr);
+    if (!holder) return;
+    holder->set_local_position(Vec3(1.0f, 0.0f, 2.0f));
+    ed.scene().set_parent(rig, holder, -1, true);
+    rig->set_local_position(Vec3(0.5f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("move the rig");
+    r34_steps(ed, 2);
+    list = avatar_check(ed.scene(), *rig);
+    size_t origin = 0;
+    for (size_t i = 0; i < list.size(); i++) origin = list[i].item == "At the origin" ? i + 1 : origin;
+    CHECK(!get("At the origin").ok);
+    ed.command(strprintf("avatar fix %zu", origin));
+    list = avatar_check(ed.scene(), *rig);
+    std::printf("    under a parent at (1, 0, 2): after its Fix the root at (%.3f, %.3f, %.3f)\n", rig->world_position().x, rig->world_position().y, rig->world_position().z);
+    CHECK(get("At the origin").ok);
+    ed.select_for_test(rig->id, false);
+    ed.command("window Avatar");
+    r34_steps(ed, 3);
+    bool shown = false;
+    for (const std::string &l : ed.button_labels_for_test()) shown = shown || l.rfind("shown:avatar Visemes ok", 0) == 0;
+    CHECK(shown);
+    ed.select_for_test(body->id, false);
+    ed.command("shape add Still");
+    MeshFilter *mf = body->get<MeshFilter>();
+    if (mf && mf->mesh) {
+      Mesh &mm = *mesh_make_mutable(mf->mesh);
+      for (ShapeKey &k : mm.shape_keys)
+        if (k.name == "Still") std::fill(k.delta.begin(), k.delta.end(), Vec3(0.0f));
+      mm.touch();
+    }
+    ed.command("window Inspector");
+    r34_steps(ed, 3);
+    bool said = false;
+    for (const std::string &l : ed.button_labels_for_test()) said = said || l.find("'Still' moves nothing") != std::string::npos;
+    CHECK(said);
+  });
+  test("Humanoid and Quadruped Rig (review 356): the presets' legs as before at no height, and every bone scaled with a fitted figure - the four feet level and mirrored", [] {
+    for (const float height : {0.0f, 1.52f}) {
+      Scene s;
+      GameObject *dog = create_rig(s, true, Vec3(0.0f), height);
+      const float k = height > 0.0f ? height / 0.76f : 1.0f;
+      const char *legs[4] = {"FrontLeftFoot", "FrontRightFoot", "HindLeftFoot", "HindRightFoot"};
+      Vec3 at[4];
+      bool all = dog != nullptr;
+      for (int i = 0; i < 4; i++) {
+        GameObject *f = s.find_by_name(legs[i]);
+        all = all && f;
+        at[i] = f ? f->world_position() : Vec3(0.0f);
+      }
+      std::printf("    a quadruped at %.2f m: feet at y %.3f %.3f %.3f %.3f, x %.3f %.3f\n", height, at[0].y, at[1].y, at[2].y, at[3].y, at[0].x, at[1].x);
+      CHECK(all);
+      for (int i = 0; i < 4; i++) CHECK(std::fabs(at[i].y - 0.04f * k) < 0.01f * k);
+      CHECK(std::fabs(at[0].x + at[1].x) < 1e-3f && std::fabs(at[2].x + at[3].x) < 1e-3f && std::fabs(at[0].x - -0.12f * k) < 1e-3f);
+      CHECK(std::fabs(at[0].z - 0.3f * k) < 0.02f * k && std::fabs(at[2].z + 0.3f * k) < 0.02f * k);
+    }
+  });
+  test("Avatar kit (review 356): the PC rank's Fix cuts the avatar's own meshes (the rig selected, the body a sibling) and leaves the budget's target None", [] {
+    if (!meshops::decimate_available()) return;  // (meshoptimizer: the libraries' build)
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Sphere");
+    GameObject *body = ed.active_object_for_test();
+    CHECK(rig && body);
+    if (!rig || !body) return;
+    ed.command("subdivide 4");  // (about 190,000 triangles: Very Poor on PC)
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const double before = budget_count({body}).value[(int)BudgetRow::Triangles];
+    ed.select_for_test(rig->id, false);
+    std::vector<AvatarCheck> list = avatar_check(ed.scene(), *rig);
+    size_t rank = 0;
+    for (size_t i = 0; i < list.size(); i++) rank = list[i].item == "VRChat PC rank" ? i + 1 : rank;
+    ed.command(strprintf("avatar fix %zu", rank));
+    r34_steps(ed, 2);
+    const double after = budget_count({body}).value[(int)BudgetRow::Triangles];
+    list = avatar_check(ed.scene(), *rig);
+    std::printf("    the body: %.0f triangles before, %.0f after the rank's Fix (PC's Good: 70,000); the rank now %s\n", before, after, list[rank - 1].detail.c_str());
+    CHECK(before > 70000.0 && after <= 70000.0 && list[rank - 1].ok);
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    const std::string dir = fs::join(test_dir(), "r356");
+    fs::make_dirs(dir);
+    ed.command("export glb " + fs::join(dir, "avatar.glb"));
+    log.clear();
+    Log::fetch(since, log);
+    bool ranked = false;
+    for (const LogEntry &e : log) ranked = ranked || e.text.find("Budget (") != std::string::npos;
+    CHECK(!ranked);  // (the target still None: the Fix didn't choose one)
+  });
+  test("the lesson's Try-it (round 356): create Sphere, three mouths, visemes gives the 15 keys", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    for (const char *c : {"create Sphere", "shape add AA", "shape add OH", "shape add CH"}) ed.command(c);
+    ed.command("visemes");
+    GameObject *g = ed.active_object_for_test();
+    const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+    size_t made = 0;
+    for (const std::string &v : vrchat_viseme_names()) made += mf && mf->mesh && r356_key(*mf->mesh, v);
+    CHECK(made == 15);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -6407,4 +6616,5 @@ void run_assets_tests() {
   tests_round353();
   tests_round354();
   tests_round355();
+  tests_round356();
 }

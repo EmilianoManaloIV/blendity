@@ -864,6 +864,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **A performance budget** (round 355): the Profiler's Budget section ranks the selection (or the scene) against VRChat PC or Quest's Avatar Performance Ranks - triangles, meshes, material slots, bones, spring chains, texture memory, lights - each row coloured by its rank, with Decimate to Good for the triangles; `budget pc|quest` lists them, and every export says the file's rank.
 
+**The Avatar window** (round 356, after the CATS Blender plugin): Create Visemes makes the 15 `vrc.v_*` shape keys VRChat's lip sync needs from three you sculpt (AA, OH, CH); the checklist below says whether the avatar has Unity's 15 Humanoid bones under Unity's names, a T or A pose, a height of 0.5-5 m, its root at the origin, faces +Z, has its visemes and eye bones, and its VRChat PC rank - each item with a Fix where one exists. Console: `visemes [AA OH CH]`, `avatar check`, `avatar fix <n>`. Humanoid Rig with a mesh selected fits the skeleton to it.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

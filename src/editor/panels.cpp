@@ -3885,6 +3885,7 @@ void Editor::draw_shape_key_buttons(ui::Layout &lay, GameObject &g) {
   if (u.button_enabled(rem, "Remove...", selected && !mf->mesh->shape_keys.empty(), selected ? "No shape keys yet." : "The Inspector is pinned to another object: select this one first."))
     u.open_popup(id, rem);
   u.tooltip("Pick a shape key to remove (Undo brings it back).");
+  draw_shape_key_problems(lay, *mf->mesh);  // (round 356: a key that moves nothing, a duplicate, the visemes missing)
   u.popup(id, u.px(220), [this, &g] {
     const MeshFilter *f = g.mesh_filter();
     if (!f || !f->mesh) return;

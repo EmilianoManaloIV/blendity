@@ -429,47 +429,49 @@ void add_limb_ik(Scene &s, GameObject *root, GameObject *lower, const std::strin
 
 using namespace rigbuild;
 
-GameObject *create_rig(Scene &s, bool quadruped, Vec3 at) {
+GameObject *create_rig(Scene &s, bool quadruped, Vec3 at, float height) {
   GameObject *root = s.create(unique_name(s, quadruped ? "Quadruped" : "Humanoid"), nullptr);
   root->set_world_position(at);
   root->add<Armature>();
   const Vec3 o = at, up(0, 1, 0), down(0, -1, 0), fwd(0, 0, 1), back(0, 0, -1);
+  /* Round 356: the preset scaled to a figure's height (a selected mesh's), its head's top at 1.78 m (a dog's head at 0.76 m). */
+  const float sc = height > 0.0f ? height / (quadruped ? 0.76f : 1.78f) : 1.0f;
   if (!quadruped) {
     /* A 1.7 m person facing +Z (Unity's forward); left is -X. */
-    GameObject *hips = make_bone(s, "Hips", root, o + Vec3(0, 1.0f, 0), up, 0.1f);
-    GameObject *spine = make_bone(s, "Spine", hips, o + Vec3(0, 1.1f, 0), up, 0.2f);
-    GameObject *chest = make_bone(s, "Chest", spine, o + Vec3(0, 1.3f, 0), up, 0.2f);
-    GameObject *neck = make_bone(s, "Neck", chest, o + Vec3(0, 1.5f, 0), up, 0.08f);
-    make_bone(s, "Head", neck, o + Vec3(0, 1.58f, 0), up, 0.2f);
+    GameObject *hips = make_bone(s, "Hips", root, o + sc * Vec3(0, 1.0f, 0), up, 0.1f * sc);
+    GameObject *spine = make_bone(s, "Spine", hips, o + sc * Vec3(0, 1.1f, 0), up, 0.2f * sc);
+    GameObject *chest = make_bone(s, "Chest", spine, o + sc * Vec3(0, 1.3f, 0), up, 0.2f * sc);
+    GameObject *neck = make_bone(s, "Neck", chest, o + sc * Vec3(0, 1.5f, 0), up, 0.08f * sc);
+    make_bone(s, "Head", neck, o + sc * Vec3(0, 1.58f, 0), up, 0.2f * sc);
     for (int side = 0; side < 2; side++) {
       const float sx = side ? 1.0f : -1.0f;
       const std::string S = side ? "Right" : "Left";
-      GameObject *ul = make_bone(s, S + "UpperLeg", hips, o + Vec3(0.1f * sx, 0.95f, 0), down, 0.45f);
-      GameObject *ll = make_bone(s, S + "LowerLeg", ul, o + Vec3(0.1f * sx, 0.5f, 0.01f), down, 0.43f);
-      make_bone(s, S + "Foot", ll, o + Vec3(0.1f * sx, 0.07f, 0.01f), fwd, 0.15f);
+      GameObject *ul = make_bone(s, S + "UpperLeg", hips, o + sc * Vec3(0.1f * sx, 0.95f, 0), down, 0.45f * sc);
+      GameObject *ll = make_bone(s, S + "LowerLeg", ul, o + sc * Vec3(0.1f * sx, 0.5f, 0.01f), down, 0.43f * sc);
+      make_bone(s, S + "Foot", ll, o + sc * Vec3(0.1f * sx, 0.07f, 0.01f), fwd, 0.15f * sc);
       add_limb_ik(s, root, ll, S + "FootIK", S + "KneePole", fwd);
-      GameObject *ua = make_bone(s, S + "UpperArm", chest, o + Vec3(0.18f * sx, 1.45f, 0), Vec3(sx, 0, 0), 0.28f);
-      GameObject *la = make_bone(s, S + "LowerArm", ua, o + Vec3(0.46f * sx, 1.45f, -0.01f), Vec3(sx, 0, 0), 0.25f);
-      make_bone(s, S + "Hand", la, o + Vec3(0.71f * sx, 1.45f, -0.01f), Vec3(sx, 0, 0), 0.1f);
+      GameObject *ua = make_bone(s, S + "UpperArm", chest, o + sc * Vec3(0.18f * sx, 1.45f, 0), Vec3(sx, 0, 0), 0.28f * sc);
+      GameObject *la = make_bone(s, S + "LowerArm", ua, o + sc * Vec3(0.46f * sx, 1.45f, -0.01f), Vec3(sx, 0, 0), 0.25f * sc);
+      make_bone(s, S + "Hand", la, o + sc * Vec3(0.71f * sx, 1.45f, -0.01f), Vec3(sx, 0, 0), 0.1f * sc);
       add_limb_ik(s, root, la, S + "HandIK", S + "ElbowPole", back);
     }
   }
   else {
     /* A dog-sized animal facing +Z: the spine along Z, four legs down. */
-    GameObject *hips = make_bone(s, "Hips", root, o + Vec3(0, 0.6f, -0.35f), fwd, 0.2f);
-    GameObject *spine = make_bone(s, "Spine", hips, o + Vec3(0, 0.6f, -0.15f), fwd, 0.25f);
-    GameObject *chest = make_bone(s, "Chest", spine, o + Vec3(0, 0.6f, 0.1f), fwd, 0.25f);
-    GameObject *neck = make_bone(s, "Neck", chest, o + Vec3(0, 0.62f, 0.35f), Vec3(0, 0.7f, 0.7f), 0.2f);
-    make_bone(s, "Head", neck, o + Vec3(0, 0.76f, 0.49f), fwd, 0.2f);
-    make_bone(s, "Tail", hips, o + Vec3(0, 0.6f, -0.35f), Vec3(0, 0.3f, -1.0f), 0.3f);
+    GameObject *hips = make_bone(s, "Hips", root, o + sc * Vec3(0, 0.6f, -0.35f), fwd, 0.2f * sc);
+    GameObject *spine = make_bone(s, "Spine", hips, o + sc * Vec3(0, 0.6f, -0.15f), fwd, 0.25f * sc);
+    GameObject *chest = make_bone(s, "Chest", spine, o + sc * Vec3(0, 0.6f, 0.1f), fwd, 0.25f * sc);
+    GameObject *neck = make_bone(s, "Neck", chest, o + sc * Vec3(0, 0.62f, 0.35f), Vec3(0, 0.7f, 0.7f), 0.2f * sc);
+    make_bone(s, "Head", neck, o + sc * Vec3(0, 0.76f, 0.49f), fwd, 0.2f * sc);
+    make_bone(s, "Tail", hips, o + sc * Vec3(0, 0.6f, -0.35f), Vec3(0, 0.3f, -1.0f), 0.3f * sc);
     const char *legs[4] = {"FrontLeft", "FrontRight", "HindLeft", "HindRight"};
     for (int k = 0; k < 4; k++) {
       const float sx = (k % 2) ? 1.0f : -1.0f, z = k < 2 ? 0.3f : -0.3f;
       GameObject *parent = k < 2 ? chest : hips;
       const std::string S = legs[k];
-      GameObject *ul = make_bone(s, S + "UpperLeg", parent, o + Vec3(0.12f * sx, 0.55f, z), down, 0.27f);
-      GameObject *ll = make_bone(s, S + "LowerLeg", ul, o + Vec3(0.12f * sx, 0.28f, z + (k < 2 ? -0.01f : 0.01f)), down, 0.24f);
-      make_bone(s, S + "Foot", ll, o + Vec3(0.12f * sx, 0.04f, z), fwd, 0.06f);
+      GameObject *ul = make_bone(s, S + "UpperLeg", parent, o + sc * Vec3(0.12f * sx, 0.55f, z), down, 0.27f * sc);
+      GameObject *ll = make_bone(s, S + "LowerLeg", ul, o + sc * Vec3(0.12f * sx, 0.28f, z + (k < 2 ? -0.01f : 0.01f)), down, 0.24f * sc);
+      make_bone(s, S + "Foot", ll, o + sc * Vec3(0.12f * sx, 0.04f, z), fwd, 0.06f * sc);
       add_limb_ik(s, root, ll, S + "FootIK", S + "Pole", k < 2 ? back : fwd);  // front knees bend back, hind hocks forward
     }
   }

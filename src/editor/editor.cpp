@@ -1653,6 +1653,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Layers: draw_layers_window(r); break;  // (task 0234)
     case WindowKind::History: draw_history_window(r); break;  // (task 0254)
     case WindowKind::Board: draw_board_window(r); break;  // (task 0299)
+    case WindowKind::Avatar: draw_avatar_window(r); break;  // (round 356)
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -4908,7 +4909,13 @@ void Editor::rig_command(const std::vector<std::string> &t) {
   if (t[0] == "rig") {  // rig humanoid|quadruped: a preset; rig autoik [root]: IK on a skeleton's limbs by bone names
     const std::string kind = to_lower(arg(1, ""));
     if (kind == "humanoid" || kind == "quadruped") {
-      GameObject *root = create_rig(*scene_, kind == "quadruped", Vec3());
+      /* Round 356: a selected mesh's figure - the rig at its feet, as tall as it. */
+      GameObject *sel = active_object();
+      const bool fit = sel && is_selected(sel->id) && sel->get<MeshFilter>() && !sel->get<Bone>();
+      const AABB fb = fit ? rest_bounds(*sel) : AABB();  // (at rest: a pose or a key doesn't change the fit - review 356)
+      const bool sized = fit && fb.valid() && fb.max.y - fb.min.y > 1e-3f;
+      GameObject *root = create_rig(*scene_, kind == "quadruped", sized ? Vec3(fb.center().x, fb.min.y, fb.center().z) : Vec3(), sized ? fb.max.y - fb.min.y : 0.0f);
+      if (sized) Log::info("Rig: fitted to %s, %.2f m", sel->name.c_str(), fb.max.y - fb.min.y);
       expanded_.insert(root->id);
       select(root->id);
       mark_changed(kind == "humanoid" ? "Add Humanoid Rig" : "Add Quadruped Rig");

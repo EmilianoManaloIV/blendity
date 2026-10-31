@@ -16,7 +16,7 @@ namespace {
 
 /* Window ids in dock strings: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 8 Profiler 9 Render
  * 10 UV Editor 11 Materials 12 Modeling Tools 13 Lighting 14 Textures 15 Rigging 16 Animation 17 Sequencer 18 Live Link
- * 19 Editing 20 My Tools 21 Draw 22 Layers 23 History 24 Board. */
+ * 19 Editing 20 My Tools 21 Draw 22 Layers 23 History 24 Board 25 Avatar. */
 const Editor::Workspace kWorkspaces[] = {
     {"Default", "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,8,9:0)),L(3,12:0))", Editor::FocusAll, true},
     {"Reference & Planning", "H(0.8,V(0.72,H(0.2,L(2:0),L(0,21,24,1:0)),L(4,5:0)),V(0.55,L(3:0),L(22:0)))",

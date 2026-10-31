@@ -32,6 +32,7 @@
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
 #include "../scene/budget.h"
+#include "../scene/visemes.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -152,7 +153,7 @@ extern const char *const kSculptStrokes[5];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Board, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Board, Avatar, Count };
 const char *window_title(WindowKind k);
 /* The Hierarchy's drop zones (task 0255): 1 before, 2 after, 0 into - the outer thirds and the middle of a row. */
 int hier_drop_mode(int ry, int rh);
@@ -2896,6 +2897,23 @@ class Editor {
   /* Round 355: the performance budget - the target (VRChat PC, Quest), what it counts (the selection and what's under
    * it, else the scene), the Profiler's Budget section, the console's `budget`, the export's line, Decimate to fit. */
   int budget_target_ = -1;  // (-1: none - no ranking, exports quiet; review 355)
+  /* Round 356: VRChat's visemes from three sculpted keys, the shape keys' problems in the Inspector, the avatar's
+   * checklist in the Rigging window (each item's Fix runs its console line). */
+  bool visemes_command(const std::vector<std::string> &t);
+  void avatar_command(const std::vector<std::string> &t);
+  void draw_avatar_window(const Recti &r);  // (round 356: the module's home, CATS' tab top to bottom)
+  void draw_avatar_section(ui::Layout &lay, GameObject *root);
+  void draw_shape_key_problems(ui::Layout &lay, const Mesh &m);
+  void run_fix(const std::string &lines);
+  void avatar_origin(GameObject &root);
+  const std::vector<AvatarCheck> &avatar_checklist(GameObject &root);
+  void run_avatar_fix(const AvatarCheck &c);  // (its object selected by id first)
+  /* The checklist kept half a second for the window (review 356: humanoid::map, gait::analyse and the budget every frame). */
+  struct AvatarCache {
+    uint64_t root = 0;
+    double at = -1.0;
+    std::vector<AvatarCheck> list;
+  } avatar_cache_;
   struct BudgetCache {
     BudgetCounts counts;
     double at = -1.0;
@@ -2904,6 +2922,7 @@ class Editor {
   void draw_budget(ui::Layout &lay);
   void budget_command(const std::vector<std::string> &t);
   bool budget_fix_triangles(int rank);
+  bool budget_fix_triangles(int rank, const std::vector<GameObject *> &objs, int target);  // (review 356: the avatar's own objects)
   void budget_report(const BudgetCounts &counts, const char *what);
   void export_wait_poll();
   void export_waits_drop(const char *why);

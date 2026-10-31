@@ -1288,7 +1288,7 @@ bool ik_end_driven(const Scene &scene, const GameObject &bone);
 /* Rotate End on, with the offset that keeps the end bone as it is now against the target's rotation (task 0156). */
 bool ik_orient_end(Scene &scene, GameObject &bone);
 /* Rig presets: a skeleton with an Armature, IK on its limbs with target and pole objects. Its root is returned. */
-GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
+GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at, float height = 0.0f);  // (height: the figure's, round 356; 0 the preset's 1.78 m / 0.76 m)
 /* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */
 int add_humanoid_ik(Scene &scene, GameObject *root);
 /* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L"): side 0 left,

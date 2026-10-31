@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 356): the VRChat avatar module, part 1 - visemes, the checklist, the Avatar window
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 4
+and 14: no visemes, nothing to say what an avatar lacks before Unity); "Use CATS blender plugin as a reference for the
+VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0333)**
+- **Create Visemes:** the 15 `vrc.v_*` shape keys VRChat's lip sync finds by name, mixed from three sculpted mouths
+  (AA, OH, CH) by the CATS Blender plugin's table; `visemes [AA OH CH]`.
+- **The Avatar window** (Window > Avatar): the avatar's checklist - Humanoid bones and Unity's names, T or A pose,
+  height, at the origin, upright facing +Z, visemes, eye bones, the VRChat PC rank - green or amber, each with a Fix
+  where one exists; `avatar check`, `avatar fix <n>`. The Rigging window links to it.
+- **The Inspector** names a shape key that moves nothing, two of one name, or visemes missing.
+- **Humanoid Rig fits a selected mesh:** at its feet, as tall as it.
+
+**The Opus review's fixes:**
+- the quadruped preset's legs (the scale hidden by the leg index);
+- the PC rank's Fix cuts the avatar's own meshes and leaves the budget target alone;
+- the checklist cached;
+- height and the fit measured at rest;
+- the origin Fix in world space;
+- a key that doesn't fit the mesh named;
+- every duplicate viseme replaced.
+
+**Checked:** `tests_round356`:
+- the 15 keys and their mixes;
+- the Inspector's lines;
+- the fitted rig and the quadruped's feet with and without a height;
+- the checklist amber, then green through its Fix (with two objects of one name: the Fix selects by id);
+- Undo and Redo;
+- the origin Fix under a parent;
+- the PC rank's Fix with the body a sibling, with the export afterwards quiet;
+- the Avatar window;
+- the Try-it.
+
 ## 2026-10-31 (round 355): a performance budget - VRChat's ranks in the Profiler
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 3: no

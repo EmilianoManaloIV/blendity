@@ -401,6 +401,7 @@ screens themselves.
 | A rigged character went to FBX - the format Unity's Humanoid import and VRChat expect - stiff, as posed. | FBX carries the skeleton, the weights, the bind pose and the clip, as glTF does (round 352). |
 | An exported .glb held none of the avatar's painted textures; FBX had no procedural maps; engines had to make their own lightmap UVs. | The texture set goes with every format (embedded in .glb), generated images and the emission map too; Lightmap UVs adds a UV2 (round 353). |
 | An avatar went out Very Poor for VRChat without a word: nothing counted it against the ranks. | The Profiler's Budget section ranks the selection against VRChat PC / Quest, row by row, with Decimate to Good; every export says the file's rank (round 355). |
+| The avatar had no visemes, and nothing said what VRChat or Unity's Humanoid would miss. | Window > Avatar: Create Visemes mixes the 15 `vrc.v_*` keys from three sculpted mouths (as CATS does), and a checklist with Fixes says what the avatar lacks (round 356). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing

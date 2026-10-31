@@ -92,11 +92,14 @@ void Editor::draw_budget(ui::Layout &lay) {
  * ground plane, a prop) left whole, the cut spread over the rest; an existing Decimate's ratio multiplied, as the counts
  * are its result. */
 bool Editor::budget_fix_triangles(int rank) {
-  if (!meshops::decimate_available()) return Log::warn("Decimate to fit: this build has no meshoptimizer (Blender's libraries)"), false;
   if (budget_target_ < 0) return Log::warn("Decimate to fit: choose a budget target first (budget pc|quest, or the Profiler's Budget)"), false;
-  const BudgetTarget &t = target_of(budget_target_);
+  return budget_fix_triangles(rank, budget_objects(), budget_target_);
+}
+
+bool Editor::budget_fix_triangles(int rank, const std::vector<GameObject *> &objs, int target) {
+  if (!meshops::decimate_available()) return Log::warn("Decimate to fit: this build has no meshoptimizer (Blender's libraries)"), false;
+  const BudgetTarget &t = target_of(target);
   if (rank < 0 || rank >= (int)t.ranks.size()) return Log::warn("Decimate to fit: no such rank"), false;
-  const std::vector<GameObject *> objs = budget_objects();
   const double limit = t.ranks[(size_t)rank].limit[(int)BudgetRow::Triangles];
   constexpr double kFloor = 500.0;  // (a mesh this small isn't what holds the rank back)
   double small = 0.0, big = 0.0;
