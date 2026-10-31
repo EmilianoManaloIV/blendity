@@ -551,6 +551,18 @@ bool camera_rig(const GameObject &g) {
   return false;
 }
 
+/* Round 348 (review): an IK the clip turns off (Weight 0) leaves its bones to their own keys; the ones the clip doesn't
+ * key go to the rest pose - what an IK off shows whatever frame was shown before (MMD's unkeyed knees, a Weight keyed
+ * alone). */
+static void rest_unkeyed_fk(const std::vector<GameObject *> &weighted, const std::unordered_map<GameObject *, Transform> &poses) {
+  for (GameObject *g : weighted) {
+    const IKConstraint *ik = g->get<IKConstraint>();
+    if (!ik || !ik_off(*ik)) continue;
+    for (GameObject *b : ik_turned_bones(*g, *ik))
+      if (!poses.count(b) && b->get<Bone>()) b->set_local_rotation(b->get<Bone>()->rest_rotation);
+  }
+}
+
 void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int hold, bool hold_cameras, float hold_from) {
   /* (Round 340: held from `hold_from` - a render range's first frame is a drawn one; the camera and its rig not held.) */
   const float held = hold_frame_from(hold_from, frame, hold);
@@ -589,6 +601,7 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int ho
     }
   }
   std::unordered_map<GameObject *, Transform> poses;
+  std::vector<GameObject *> weighted;  // (IKs whose Weight the clip sets)
   for (const AnimTrack &t : clip.tracks) {
     if (t.keys.empty()) continue;
     auto it = found.find(t.path);
@@ -599,6 +612,7 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int ho
     if (!std::isfinite(v)) continue;
     if (!is_transform_property(t.property)) {
       write_anim_value(*g, t.property, t.axis, v);
+      if (t.property == "IKConstraint.Weight") weighted.push_back(g);
       continue;
     }
     auto p = poses.find(g);
@@ -612,6 +626,7 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int ho
     pose.rotation = Quat::euler(pose.euler_hint);
     g->set_local(pose);
   }
+  rest_unkeyed_fk(weighted, poses);
 }
 
 float wrap_frame(float frame, float end, int wrap) {

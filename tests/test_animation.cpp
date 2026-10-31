@@ -5831,6 +5831,257 @@ static void tests_round346() {
 /* ---------------------------------------------------------------- round 347: control points you choose */
 static bool scene_parent_is(const GameObject *child, const GameObject *parent) { return child && child->parent == parent; }
 
+static void tests_round348() {
+  /* A humanoid preset's left arm bent by its handle (the IK solved), the root selected. */
+  struct BentArm {
+    Editor ed;
+    GameObject *ua = nullptr, *la = nullptr, *hand = nullptr, *target = nullptr, *pole = nullptr;
+    IKConstraint *ik = nullptr;
+    BentArm() {
+      ed.init_headless(1200, 900);
+      ed.command("rig humanoid");
+      Scene &s = ed.scene();
+      ua = s.find_by_name("LeftUpperArm"), la = s.find_by_name("LeftLowerArm"), hand = s.find_by_name("LeftHand");
+      target = s.find_by_name("LeftHandIK"), pole = s.find_by_name("LeftElbowPole");
+      ik = la ? la->get<IKConstraint>() : nullptr;
+      if (!target) return;
+      target->set_world_position(target->world_position() + Vec3(0.1f, -0.2f, 0.15f));  // (a bent arm)
+      target->set_world_rotation(normalize(Quat::axis_angle(Vec3(0, 0, 1), 0.4f) * target->world_rotation()));
+      ed.mark_changed_for_test("bend the arm");
+      ed.step_frame_headless();
+    }
+    bool ok() const { return ua && la && hand && target && pole && ik; }
+  };
+  auto qdot = [](Quat a, Quat b) { return std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w); };
+  test("FK / IK per limb (round 348): to FK the arm keeps its pose and its bones turn by hand; to IK the handles meet the FK pose", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    const Vec3 h0 = b.hand->world_position(), e0 = b.la->world_position();
+    const Quat r0 = b.hand->world_rotation();
+    ed.command("autopose fk larm");
+    ed.step_frame_headless();
+    std::printf("    to FK: the hand moved %.6f, the elbow %.6f (Weight %g)\n", length(b.hand->world_position() - h0), length(b.la->world_position() - e0), b.ik->weight);
+    CHECK(b.ik->weight == 0.0f && ik_off(*b.ik));
+    CHECK(length(b.hand->world_position() - h0) < 1e-4f && length(b.la->world_position() - e0) < 1e-4f && qdot(b.hand->world_rotation(), r0) > 0.9999f);
+    /* FK: the bones are the user's - the gizmo may turn them, a turn holds, the handle moves nothing. */
+    CHECK(!ik_drives(ed.scene(), *b.ua) && !ik_drives(ed.scene(), *b.la) && !ik_end_driven(ed.scene(), *b.hand));
+    b.ua->set_local_rotation(normalize(Quat::axis_angle(Vec3(0, 0, 1), 0.5f) * b.ua->local().rotation));
+    b.target->set_world_position(b.target->world_position() + Vec3(0, 0.3f, 0));
+    ed.mark_changed_for_test("turn the upper arm");
+    ed.step_frame_headless();
+    const Vec3 h1 = b.hand->world_position(), e1 = b.la->world_position();
+    const Quat r1 = b.hand->world_rotation();
+    const Quat ua1 = b.ua->local().rotation, la1 = b.la->local().rotation;
+    std::printf("    FK: the upper arm's turn moved the hand %.3f\n", length(h1 - h0));
+    CHECK(length(h1 - h0) > 0.05f);
+    /* To IK: the handle and the pole go to the FK pose - nothing jumps. */
+    ed.command("autopose ik larm");
+    ed.step_frame_headless();
+    std::printf("    to IK: the hand moved %.6f, the elbow %.6f, the handle is %.6f from the hand\n", length(b.hand->world_position() - h1), length(b.la->world_position() - e1),
+                length(b.target->world_position() - h1));
+    CHECK(b.ik->weight == 1.0f && !ik_off(*b.ik));
+    CHECK(length(b.hand->world_position() - h1) < 1e-3f && length(b.la->world_position() - e1) < 1e-3f && qdot(b.hand->world_rotation(), r1) > 0.9999f);
+    CHECK(length(b.target->world_position() - h1) < 1e-4f && ik_drives(ed.scene(), *b.ua));
+    CHECK(qdot(b.ua->local().rotation, ua1) > 0.9999f && qdot(b.la->local().rotation, la1) > 0.9999f);  // (the bones' own turns kept, not only the joints)
+    /* Undo goes back to FK. */
+    ed.command("undo");
+    ed.step_frame_headless();
+    const GameObject *la2 = ed.scene().find_by_name("LeftLowerArm");  // (undo rebuilt the objects)
+    CHECK(la2 && la2->get<IKConstraint>() && la2->get<IKConstraint>()->weight == 0.0f);
+  });
+  test("FK / IK (round 348): Match moves only the handles; the Inspector's FK / IK / Match buttons; a limb with no IK is said; the legs", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("autopose fk larm");
+    b.ua->set_local_rotation(normalize(Quat::axis_angle(Vec3(1, 0, 0), 0.4f) * b.ua->local().rotation));
+    ed.mark_changed_for_test("turn");
+    ed.step_frame_headless();
+    const Vec3 h = b.hand->world_position();
+    ed.command("autopose match larm");
+    ed.step_frame_headless();
+    CHECK(b.ik->weight == 0.0f && length(b.target->world_position() - h) < 1e-4f && length(b.hand->world_position() - h) < 1e-4f);
+    /* The Inspector on the forearm: Switch to IK, Switch to FK (clicked). */
+    ed.record_buttons_for_test(true);
+    ed.command("select LeftLowerArm");
+    r34_steps(ed, 3);
+    auto press = [&](const std::string &label) {
+      Recti at{0, 0, 0, 0};
+      for (int tries = 0; tries < 60; tries++) {  // (scrolled into the Inspector's view)
+        const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+        if (ed.button_rect_for_test(label, at) && at.y >= w.y + ed.ui_for_test().row_h() * 2 && at.bottom() <= w.bottom()) break;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = at.w > 0 && at.y < w.y + ed.ui_for_test().row_h() * 2 ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      if (at.w <= 0) return false;
+      r34_click(ed, at.x + at.w / 2, at.y + at.h / 2);
+      r34_steps(ed, 1);
+      return true;
+    };
+    CHECK(press("Switch to IK"));
+    std::printf("    Switch to IK clicked: Weight %g, the hand moved %.6f\n", b.ik->weight, length(b.hand->world_position() - h));
+    CHECK(b.ik->weight == 1.0f && length(b.hand->world_position() - h) < 1e-3f);
+    CHECK(press("Switch to FK"));
+    CHECK(b.ik->weight == 0.0f);
+    /* The legs by name; a word that isn't a limb, or a rig not selected, changes nothing. */
+    ed.command("select LeftUpperArm");
+    ed.command("autopose fk rleg");
+    const IKConstraint *leg = ed.scene().find_by_name("RightLowerLeg") ? ed.scene().find_by_name("RightLowerLeg")->get<IKConstraint>() : nullptr;
+    CHECK(leg && leg->weight == 0.0f);
+    ed.command("autopose ik tail");
+    CHECK(leg && leg->weight == 0.0f);  // (not a limb: nothing changed)
+    ed.command("autopose ik lleg");
+    const IKConstraint *lleg = ed.scene().find_by_name("LeftLowerLeg") ? ed.scene().find_by_name("LeftLowerLeg")->get<IKConstraint>() : nullptr;
+    CHECK(lleg && lleg->weight == 1.0f);
+    ed.command("create cube");  // (selected: no rig)
+    ed.command("autopose fk lleg");
+    CHECK(lleg && lleg->weight == 1.0f);
+  });
+  test("FK / IK (round 348): with Record on the switch is keyed - FK keys the Weight and the bones, IK the Weight and the handles", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("anim new");
+    ed.command("anim frame 12");
+    ed.command("anim record on");
+    ed.step_frame_headless();
+    ed.command("autopose fk larm");
+    AnimationClipPtr c = ed.anim_clip_for_test();
+    auto keyed = [&](const std::string &property, const std::string &name) {
+      if (!c) return false;
+      for (const AnimTrack &t : c->tracks)
+        if (t.property == property && t.path.size() >= name.size() && t.path.compare(t.path.size() - name.size(), name.size(), name) == 0 && t.key_at(12.0f) >= 0) return true;
+      return false;
+    };
+    std::printf("    FK keyed: the Weight %d, the upper arm %d, the hand %d\n", (int)keyed("IKConstraint.Weight", "LeftLowerArm"), (int)keyed("Rotation", "LeftUpperArm"), (int)keyed("Rotation", "LeftHand"));
+    CHECK(keyed("IKConstraint.Weight", "LeftLowerArm") && keyed("Rotation", "LeftUpperArm") && keyed("Rotation", "LeftLowerArm") && keyed("Rotation", "LeftHand"));
+    ed.command("anim frame 20");
+    ed.step_frame_headless();
+    ed.command("autopose ik larm");
+    c = ed.anim_clip_for_test();
+    auto keyed20 = [&](const std::string &property, const std::string &name) {
+      if (!c) return false;
+      for (const AnimTrack &t : c->tracks)
+        if (t.property == property && t.path.size() >= name.size() && t.path.compare(t.path.size() - name.size(), name.size(), name) == 0 && t.key_at(20.0f) >= 0) return true;
+      return false;
+    };
+    CHECK(keyed20("IKConstraint.Weight", "LeftLowerArm") && keyed20("Position", "LeftHandIK") && keyed20("Position", "LeftElbowPole") && keyed20("Rotation", "LeftHandIK"));
+    ed.command("anim record off");
+  });
+  test("FK / IK (review 348): FK, IK, FK again on one clip doesn't jump; the Weight held between switches; the frames before the first switch kept", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("anim new");
+    ed.command("anim record on");
+    ed.command("anim frame 12");
+    ed.step_frame_headless();
+    ed.command("autopose fk larm");
+    b.ua->set_local_rotation(normalize(Quat::axis_angle(Vec3(0, 0, 1), 0.4f) * b.ua->local().rotation));
+    ed.mark_changed_for_test("an FK turn at 12");
+    ed.step_frame_headless();
+    const Vec3 fk12 = b.hand->world_position();
+    ed.command("anim frame 20");
+    ed.step_frame_headless();
+    ed.command("autopose ik larm");
+    ed.step_frame_headless();
+    b.target->set_world_position(b.target->world_position() + Vec3(0, 0.2f, 0));
+    ed.mark_changed_for_test("the handle up at 20");
+    ed.step_frame_headless();
+    ed.command("anim frame 30");
+    ed.step_frame_headless();
+    const Vec3 ik30 = b.hand->world_position();
+    ed.command("autopose fk larm");
+    ed.step_frame_headless();
+    std::printf("    FK again at 30 on a clip that keys the arm at 12: the hand moved %.6f (frame 12's pose is %.3f away)\n", length(b.hand->world_position() - ik30),
+                length(fk12 - ik30));
+    CHECK(length(b.hand->world_position() - ik30) < 1e-3f);
+    /* Between the switches the Weight is held (no blend through the rest pose): frame 16 is frame 12's FK pose. */
+    ed.command("anim frame 16");
+    ed.step_frame_headless();
+    std::printf("    frame 16: Weight %g, the hand %.6f from frame 12's\n", b.ik->weight, length(b.hand->world_position() - fk12));
+    CHECK(b.ik->weight == 0.0f && length(b.hand->world_position() - fk12) < 1e-2f);  // (the bones' curve eases between its keys at 12, 20 and 30: millimetres, not the rest pose's 20 cm)
+    /* Before the first switch, IK as it was. */
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    CHECK(b.ik->weight == 1.0f);
+    ed.command("anim record off");
+  });
+  test("FK / IK (review 348): a clip turning an IK off shows its unkeyed bones at rest whichever frame was shown before; the walk poses an FK leg's bones", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("anim new");
+    ed.command("anim preview on");
+    AnimationClipPtr c = ed.anim_clip_for_test();
+    GameObject *root = ed.active_object_for_test();
+    CHECK(c && root);
+    if (!c || !root) return;
+    AnimTrack &w = c->track(anim_path(*root, *b.la), "IKConstraint.Weight", 0);
+    w.set_key(0.0f, 1.0f, AnimConstant);
+    w.set_key(30.0f, 0.0f, AnimConstant);
+    c->touch();
+    auto at_rest = [&] { return qdot(b.ua->local().rotation, b.ua->get<Bone>()->rest_rotation) > 0.9999f && qdot(b.la->local().rotation, b.la->get<Bone>()->rest_rotation) > 0.9999f; };
+    ed.command("anim frame 0");
+    ed.step_frame_headless();
+    CHECK(!at_rest());  // (frame 0: IK, the arm bent)
+    ed.command("anim frame 30");
+    ed.step_frame_headless();
+    std::printf("    frame 30 straight after frame 0: Weight %g, the arm at rest %d\n", b.ik->weight, (int)at_rest());
+    CHECK(b.ik->weight == 0.0f && at_rest());
+    /* The walk's analysis: an FK leg has no handle (its bones are posed and keyed). */
+    ed.command("autopose fk lleg");
+    GameObject *rig = root;  // (the rig humanoid root, selected)
+    const gait::Rig r = rig ? gait::analyse(ed.scene(), *rig) : gait::Rig();
+    bool fk_leg_handle = false, ik_leg_handle = false;
+    for (const gait::Leg &l : r.legs) (l.side == 0 ? fk_leg_handle : ik_leg_handle) = l.ik_target != nullptr;
+    CHECK(rig && !fk_leg_handle && ik_leg_handle);
+  });
+  test("FK / IK (review 348): to IK with a forearm twisted in FK says the twist changed; a four-legged rig's limbs are said, not switched", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("autopose fk larm");
+    const Vec3 axis = normalize(b.hand->world_position() - b.la->world_position());
+    b.la->set_world_rotation(normalize(Quat::axis_angle(axis, 1.0f) * b.la->world_rotation()));
+    ed.mark_changed_for_test("twist the forearm");
+    ed.step_frame_headless();
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("autopose ik larm");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.level == LogLevel::Warning && e.text.find("twist") != std::string::npos);
+    CHECK(said);
+    Editor q;
+    q.init_headless(1200, 900);
+    q.command("rig quadruped");
+    q.command("autopose fk lleg");
+    bool any_off = false;
+    q.scene().for_each([&](GameObject &g) { any_off = any_off || (g.get<IKConstraint>() && ik_off(*g.get<IKConstraint>())); });
+    CHECK(!any_off);
+  });
+  test("the lesson's Try-it (round 348): rig humanoid, then autopose fk larm turns the left arm's IK off", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    for (const char *c : {"rig humanoid", "autopose fk larm"}) ed.command(c);
+    const GameObject *la = ed.scene().find_by_name("LeftLowerArm");
+    const IKConstraint *ik = la ? la->get<IKConstraint>() : nullptr;
+    CHECK(ik && ik->weight == 0.0f);
+  });
+}
+
 static void tests_round347() {
   test("Puppet Controls (review 347): an imported rig named Bone.001... - no limbs found by name or shape - is read from the parts set by hand: both feet and both hands give two legs and two arms", [] {
     Scene s;
@@ -6747,6 +6998,7 @@ void run_animation_tests() {
   tests_round340();
   tests_round346();
   tests_round347();
+  tests_round348();
   round64_tests();
   round69_tests();
   tests_round81();

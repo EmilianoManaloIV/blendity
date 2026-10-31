@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 348): FK / IK per limb, matched both ways
+
+**Asked:** "If possible, will it be useful to combine the FK/IK system with this as well?"
+
+**Added (task 0325)**
+- **Weight 0 is FK:** an IK constraint at Weight 0 leaves its bones alone - they keep their pose, turn with the gizmo
+  and take their keys (it had put the limb at its rest pose; an MMD motion's IK switches now show its FK keys).
+- **Switch to FK / Switch to IK / Match Handles** on the IK constraint, Animation > Puppet > FK / IK, and
+  `autopose fk|ik|match larm|rarm|lleg|rleg`: to FK the pose stays; to IK the handle goes to the hand or foot (turned
+  with it) and the pole off the elbow or knee, so nothing jumps; with Record on the switch is keyed (the Weight and the
+  bones, or the Weight and the handles).
+- A lesson, "IK and FK on a limb", with two Try-its.
+
+**Checked:** `tests_round348` - the hand and elbow kept both ways, a turned upper arm held in FK, the handles matched,
+undo, the Inspector's buttons clicked, the legs, the refusals, the keys with Record on, the lesson's Try-it; the IK,
+Puppet and MMD tests.
+
+**The review's fixes (Opus code-reviewer, changes needed):** Record keyed one value at a time, each applying the clip
+again - on a clip that already keyed the arm, FK, IK, then FK again jumped to the old pose: now read first and keyed in
+one edit at the drawn frame, one undo step; the Weight keyed as a step (a smooth key swung the arm through its rest pose
+between switches), the state before kept on the frame before; bones and handles keyed at every switch; a clip turning an
+IK off puts the bones it doesn't key at rest, whatever frame was shown before; going to IK says when a twist changed; an
+FK limb's bones are the walk's, FK controls' and AutoPose's; handles found by id; one analysis per menu draw; quadrupeds
+said (tested: FK-IK-FK on one clip, frame 16 between switches, frame 30 straight after 0, the twist said, a quadruped).
+
 ## 2026-10-31 (round 347): Puppet Posing's control points you choose
 
 **Asked:** "For the auto posing system, where can we specify control point bones so that we can adjust certain points
