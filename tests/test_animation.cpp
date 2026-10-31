@@ -6082,6 +6082,38 @@ static void tests_round348() {
   });
 }
 
+static void tests_round349() {
+  test("Puppet Controls (round 349, found making the HCI productions): a left hand posed across the body isn't said to be on the right; a rig built mirrored still is", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("rig humanoid");
+    ed.command("autopose on");
+    ed.command("autopose drag LeftHand 0.3 1.6 0.3");  // (across the chest, past the middle)
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto swapped = [&] {
+      bool said = false;
+      for (const std::string &l : ed.button_labels_for_test()) said = said || l.find("is on the right") != std::string::npos;
+      return said;
+    };
+    const GameObject *lh = ed.scene().find_by_name("LeftHand");
+    std::printf("    the left hand posed at x %.2f: said swapped %d\n", lh ? lh->world_position().x : 0.0f, (int)swapped());
+    CHECK(lh && lh->world_position().x > 0.0f && !swapped());
+    /* A rig whose "Left" bones really stand on its right: the shoulders swapped, said. */
+    GameObject *l = ed.scene().find_by_name("LeftUpperArm"), *r = ed.scene().find_by_name("RightUpperArm");
+    CHECK(l && r);
+    if (!l || !r) return;
+    l->name = "Tmp", r->name = "LeftUpperArm", l->name = "RightUpperArm";
+    for (const char *side : {"LowerArm", "Hand"}) {
+      GameObject *a = ed.scene().find_by_name(std::string("Left") + side), *b = ed.scene().find_by_name(std::string("Right") + side);
+      if (a && b) a->name = "Tmp", b->name = std::string("Left") + side, a->name = std::string("Right") + side;
+    }
+    ed.mark_changed_for_test("mirror the arms' names");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(swapped());
+  });
+}
+
 static void tests_round347() {
   test("Puppet Controls (review 347): an imported rig named Bone.001... - no limbs found by name or shape - is read from the parts set by hand: both feet and both hands give two legs and two arms", [] {
     Scene s;
@@ -6999,6 +7031,7 @@ void run_animation_tests() {
   tests_round346();
   tests_round347();
   tests_round348();
+  tests_round349();
   round64_tests();
   round69_tests();
   tests_round81();

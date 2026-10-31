@@ -2,6 +2,15 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 349): a hand posed across the body isn't a swapped rig
+
+**Found** making the HCI analysis' short film: after Puppet Posing drew the left hand across the chest, the Armature's
+Inspector said "The left hand (LeftHand) is on the right" on Blendity's own humanoid preset.
+
+**Fixed (task 0326):** round 347's line compared where the hands are now; it compares the shoulders, and the hips as
+the rig stood, which a pose doesn't swap. **Checked:** `tests_round349` - the posed hand not said (it was without the
+fix), a rig with its arms' names swapped still said; the Puppet tests.
+
 ## 2026-10-31 (round 348): FK / IK per limb, matched both ways
 
 **Asked:** "If possible, will it be useful to combine the FK/IK system with this as well?"
