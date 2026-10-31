@@ -20,7 +20,7 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 
 Blendity is free. You don't need Blender or anything else: the installer brings everything Blendity uses.
 
-> Blendity is a **pre-release** (0.11.0): it works, but it is still being refined, so expect rough edges. Save
+> Blendity is a **pre-release** (0.12.0): it works, but it is still being refined, so expect rough edges. Save
 > your work often.
 
 ### 1. Download
