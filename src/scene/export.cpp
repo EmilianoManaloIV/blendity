@@ -1531,6 +1531,19 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
   std::vector<Prepared> prepared = prepare(items, o, 0);  // glTF is Y up by definition
   std::string bin;
   std::vector<std::string> views, accessors, meshes, nodes, materials, images, textures, skins, animations;
+  /* Round 354: a clip kept open until the end, so a later mesh on the same rig adds its shape-key weights to it. */
+  struct GltfClip {
+    uint64_t rig = 0;
+    std::string name, samplers, channels;
+    int si = 0;
+    size_t time_acc = 0;
+  };
+  std::vector<GltfClip> clips;
+  struct GltfRig {
+    uint64_t rig = 0;
+    size_t skin = 0, joints = 0;
+  };
+  std::vector<GltfRig> rigs;  // (round 354: the skeletons written, by armature)
   std::vector<int> roots;  // (task 0268: the scene's top nodes - a skeleton's joints hang under its base)
   auto align4 = [&] {
     while (bin.size() % 4) bin += '\0';
@@ -1542,6 +1555,11 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     views.push_back(strprintf("{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu", off, bytes) +
                     (target ? strprintf(",\"target\":%d}", target) : std::string("}")));
     return (int)views.size() - 1;
+  };
+  auto channel_values = [&](const std::vector<float> &vals, int count, const char *type) {  // (round 351: an animation output accessor)
+    const int vv = add_view(vals.data(), vals.size() * sizeof(float), 0);
+    accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"%s\"}", vv, count, type));
+    return accessors.size() - 1;
   };
   auto vec_accessor = [&](const std::vector<Vec3> &v, bool minmax) {
     const int view = add_view(v.data(), v.size() * sizeof(Vec3), 34962);
@@ -1688,10 +1706,20 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     meshes.push_back("{\"name\":\"" + json_escape(p.name) + "\",\"primitives\":[" + prims + "]" + gltf_target_names(p) + "}");
     const int mesh_node = (int)nodes.size();  // (round 351: the node an animated weights channel targets)
     const bool with_skin = o.skins && p.skin && !p.skin->joints.empty() && p.skin->vjoints.size() == m.positions.size();
+    const auto shared = with_skin ? std::find_if(rigs.begin(), rigs.end(), [&](const GltfRig &r) { return p.skin->rig && r.rig == p.skin->rig && r.joints == p.skin->joints.size(); })
+                                  : rigs.end();
     roots.push_back((int)nodes.size());
     nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu", meshes.size() - 1) +
-                    (with_skin ? strprintf(",\"skin\":%zu}", skins.size()) : std::string("}")));
+                    (with_skin ? strprintf(",\"skin\":%zu}", shared != rigs.end() ? shared->skin : skins.size()) : std::string("}")));
     if (!with_skin) continue;
+    if (shared != rigs.end()) {  // (round 354: the rig's skeleton and clip written already: this mesh's weights join the clip)
+      for (const ExportSkin::Anim &an : p.skin->anims) {
+        const auto clip = std::find_if(clips.begin(), clips.end(), [&](const GltfClip &c) { return c.rig == p.skin->rig && c.name == an.name; });
+        if (clip != clips.end()) gltf_weights_channel(an, m.shape_keys.size(), mesh_node, channel_values, clip->samplers, clip->channels, clip->si, clip->time_acc);
+      }
+      continue;
+    }
+    rigs.push_back({p.skin->rig, skins.size(), p.skin->joints.size()});
     /* Task 0268: the base (a node holding the skeleton where it stands), the joints under it at rest, their inverse
      * bind matrices from the rest pose (the vertices are in the file's world: the mesh node has no transform). */
     const ExportSkin &sk = *p.skin;
@@ -1744,11 +1772,6 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
       const size_t time_acc = accessors.size() - 1;
       std::string samplers, channels;
       int si = 0;
-      auto channel_values = [&](const std::vector<float> &vals, int count, const char *type) {  // (round 351: an output accessor)
-        const int vv = add_view(vals.data(), vals.size() * sizeof(float), 0);
-        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"%s\"}", vv, count, type));
-        return accessors.size() - 1;
-      };
       auto channel = [&](const std::vector<float> &vals, const char *type, size_t joint, const char *path) {
         const int vv = add_view(vals.data(), vals.size() * sizeof(float), 0);
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"%s\"}", vv, an.frames, type));
@@ -1772,9 +1795,10 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         channel(sv3, "VEC3", j, "scale");
       }
       gltf_weights_channel(an, m.shape_keys.size(), mesh_node, channel_values, samplers, channels, si, time_acc);
-      animations.push_back("{\"name\":\"" + json_escape(an.name) + "\",\"samplers\":[" + samplers + "],\"channels\":[" + channels + "]}");
+      clips.push_back({sk.rig, an.name, samplers, channels, si, time_acc});
     }
   }
+  for (const GltfClip &c : clips) animations.push_back("{\"name\":\"" + json_escape(c.name) + "\",\"samplers\":[" + c.samplers + "],\"channels\":[" + c.channels + "]}");
   align4();
   auto list = [](const std::vector<std::string> &v) {
     std::string r = "[";

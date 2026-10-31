@@ -782,6 +782,7 @@ class Editor {
     double started = 0.0;
     bool cancellable = false, cancelled = false;  // (cancelled: the job's own flag is set - by the tray, Esc or a console verb)
     std::function<void()> cancel;
+    std::function<void()> now;  // (review 354: a waiting export's Export Now)
   };
   std::vector<JobView> jobs_for_test() { return jobs_running(); }
   /* Task 0254: the History window's rows (the steps taken; the steps undone, the next one first), the unsaved-changes prompt. */
@@ -1418,6 +1419,7 @@ class Editor {
   bool weight_paint_active_for_test() const { return weight_paint_; }
   bool scene_on_gpu_for_test() const { return scene_on_gpu_; }  // (task 0195: the Scene view's last frame drew on the card)
   void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
+  void hold_skin_job_for_test(bool hold) { skin_job_held_ = hold; }  // (round 354: a bind that stays running until released)
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
@@ -2460,6 +2462,7 @@ class Editor {
   void draw_skin_transfer(GameObject *target, ui::Layout &lay);  // the Rigging window's Transfer Weights
   std::unique_ptr<SkinWeightJob> skin_job_;
   size_t skin_async_min_verts_ = 5000;  // smaller meshes solve at once
+  bool skin_job_held_ = false;  // (tests: a finished bind waits to land until released)
   std::string skin_transfer_source_;    // the Rigging window's Transfer From field
   void draw_control_points(const Recti &view, const GameObject &g, const Component &pc);
   bool point_pick(const Recti &view, int mx, int my, int mode);
@@ -2875,6 +2878,22 @@ class Editor {
   void import_obj_file(const std::string &path);
   /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
   std::string export_model(const ExportOptions &o, const std::string &path = "");
+  /* Round 354: an export asked for while a job (a Quad Remesh, a skin bind, mesh maps, a surface) still works on one of
+   * the objects it would write waits for the job, shown in the tray; Cancel there exports at once. */
+  struct ExportWait {
+    ExportOptions options;
+    std::string path, job, label;  // (path resolved when asked for; label: the tray's row, unique per file)
+    std::vector<uint64_t> objects;  // (the objects asked for: written whatever is selected when it goes - review 354)
+    std::vector<std::string> surfaces;  // (the surfaces they paint, found once)
+    bool now = false;  // (Export Now pressed: written at the next poll, unfinished jobs and all)
+  };
+  std::vector<ExportWait> export_waits_;  // (review 354: each export asked for keeps its own place, none replaced)
+  std::string pending_job_on(GameObject &g, const std::vector<std::string> *surfaces = nullptr);
+  std::vector<GameObject *> export_candidates(const ExportOptions &o);
+  std::string export_path_for(const ExportOptions &o, const std::string &path_in);
+  std::string export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path);
+  void export_wait_poll();
+  void export_waits_drop(const char *why);
   std::shared_ptr<ExportSkin> export_skin_of(GameObject &armature, const Mesh &m, const GameObject &owner, const SkinModifier &skin);  // (task 0268)
   std::string export_model(const std::string &format, bool selection_only);  // "obj" "fbx" "glb" "gltf" "stl" "ply" "usda"
   void open_export_dialog(int format);  // the options, then the Save As dialog

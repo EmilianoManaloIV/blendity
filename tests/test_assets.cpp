@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the assets tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include <chrono>
+#include <thread>
 #include <filesystem>
 #include "fixtures/synthetic_mmd.h"
 #include "../src/core/json.h"
@@ -5703,6 +5705,184 @@ static void tests_round353() {
   });
 }
 
+/* ---------------------------------------------------------------- round 354: an export never takes a stale mesh; one glTF skeleton a rig */
+/* Steps the editor's frames until `done` or about 30 seconds (a worker's job landing), sleeping a little between. */
+template <class Done>
+static bool r354_until(Editor &ed, Done done) {
+  for (int i = 0; i < 3000 && !done(); i++) {
+    ed.step_frame_headless();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return done();
+}
+
+static void tests_round354() {
+  test("Export waits (round 354): an export asked for while a skin bind still works on an unbound mesh waits in the tray, then writes it with the bind's weights - the objects asked for, though the selection moved", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.set_skin_async_min_verts_for_test(0);  // (the bind on a worker, as a 5000-vertex mesh's is)
+    ed.command("create Sphere");  // (unbound: no weights until the bind lands)
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    const std::string path = fs::join(fs::join(test_dir(), "r354"), "waited.glb");
+    fs::make_dirs(fs::parent(path));
+    std::remove(path.c_str());
+    ed.command("export glb " + path);
+    bool waits = false;
+    for (const auto &j : ed.jobs_for_test()) waits = waits || j.label.rfind("Export waits for ", 0) == 0;
+    std::printf("    right after the export: written %d, the tray says it waits %d\n", (int)fs::exists(path), (int)waits);
+    CHECK(!fs::exists(path) && waits);
+    ed.command("select Cube");  // (the selection moves while it waits: the Sphere still goes)
+    CHECK(r354_until(ed, [&] { return fs::exists(path); }));
+    ImportResult r;
+    CHECK(import_model(path, r));
+    std::string names;
+    float bone = 0.0f;
+    for (const ImportedNode &n : r.nodes) {
+      if (!n.mesh) continue;
+      names += n.name + " ";
+      for (const VertexGroup &vg : n.mesh->vertex_groups)
+        for (float w : vg.weights) bone += vg.name == "Bone" ? w : 0.0f;
+    }
+    std::printf("    when the bind landed: the file holds %s, the Bone's weights sum %.2f\n", names.c_str(), bone);
+    CHECK(names == "Sphere " && bone > 1.0f);
+  });
+  test("Export waits (review 354): the tray's Export Now writes at once with a warning, Cancel drops the export, two exports both wait, New Scene drops them", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.set_skin_async_min_verts_for_test(0);
+    ed.command("create Sphere");  // (a dense mesh: its bind takes long enough to press the tray's buttons)
+    GameObject *dense = ed.active_object_for_test();  // (by id: the sample scene has a Sphere of its own)
+    ed.command("subdivide 3");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    ed.hold_skin_job_for_test(true);  // (running until released, however fast the machine)
+    const std::string dir = fs::join(test_dir(), "r354");
+    fs::make_dirs(dir);
+    const std::string a = fs::join(dir, "a.glb"), b = fs::join(dir, "b.fbx");
+    std::remove(a.c_str()), std::remove(b.c_str());
+    ed.command("export glb " + a);
+    ed.command("export fbx " + b);
+    size_t waiting = 0;
+    for (const auto &j : ed.jobs_for_test()) waiting += j.label.rfind("Export waits for ", 0) == 0;
+    CHECK(waiting == 2);
+    /* Export Now through the tray's own button: the front row, the first export. */
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.step_frame_headless();
+    Recti now{0, 0, 0, 0};
+    CHECK(ed.button_rect_for_test("job:Export Now", now));
+    r34_click(ed, now.x + now.w / 2, now.y + now.h / 2);
+    r34_steps(ed, 2);
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.level == LogLevel::Warning && e.text.find("without waiting") != std::string::npos);
+    std::printf("    Export Now in the tray: a.glb written %d, warned %d, b.fbx still waiting %d\n", (int)fs::exists(a), (int)said, (int)!fs::exists(b));
+    CHECK(fs::exists(a) && said && !fs::exists(b));
+    /* Cancel through the tray: the second export dropped, nothing written. */
+    Recti cancel{0, 0, 0, 0};
+    CHECK(ed.button_rect_for_test("job:Cancel", cancel));
+    r34_click(ed, cancel.x + cancel.w / 2, cancel.y + cancel.h / 2);
+    r34_steps(ed, 2);
+    bool still = false;
+    for (const auto &j : ed.jobs_for_test()) still = still || j.label.rfind("Export waits for ", 0) == 0;
+    CHECK(!still);
+    ed.hold_skin_job_for_test(false);
+    r354_until(ed, [&] { return ed.jobs_for_test().empty(); });
+    CHECK(!fs::exists(b));
+    /* Waiting, then New Scene: dropped and said. */
+    CHECK(dense != nullptr);
+    if (!dense) return;
+    ed.select_for_test(dense->id, false);
+    ed.command("skin bind");
+    ed.command("export glb " + a);
+    const size_t since2 = Log::fetch(0, log);
+    ed.command("newscene");
+    log.clear();
+    Log::fetch(since2, log);
+    bool dropped = false;
+    for (const LogEntry &e : log) dropped = dropped || e.text.find("dropped: a new scene") != std::string::npos;
+    CHECK(dropped);
+  });
+  test("Export waits (round 354): a Quad Remesh is waited for and the file has the remeshed triangles (the libraries' build: QuadriFlow)", [] {
+    if (!meshops::quad_remesh_available()) return;
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("select Sphere");
+    ed.command("sculpt on");
+    ed.command("sculpt remesh 600");
+    const std::string p = fs::join(fs::join(test_dir(), "r354"), "remeshed.glb");
+    fs::make_dirs(fs::parent(p));
+    std::remove(p.c_str());
+    ed.command("export glb " + p);
+    CHECK(!fs::exists(p));
+    CHECK(r354_until(ed, [&] { return fs::exists(p); }));
+    GameObject *g = ed.scene().find_by_name("Sphere");
+    std::string glb;
+    fs::read_file(p, glb);
+    const Json j = r351_glb_json(glb);
+    size_t tris = 0, now = 0;
+    for (size_t k = 0; k < j["meshes"][0]["primitives"].size(); k++) tris += (size_t)j["accessors"][(size_t)j["meshes"][0]["primitives"][k]["indices"].number()]["count"].number() / 3;
+    for (size_t f = 0; g && f < g->evaluated_mesh()->face_count(); f++) now += g->evaluated_mesh()->face_size(f) - 2;
+    std::printf("    the file: %zu triangles, the remeshed sphere %zu\n", tris, now);
+    CHECK(g && tris == now);
+  });
+  test("glTF shares the rig (round 354): a Cube and a Sphere on one armature export one skeleton and one clip, the Sphere's shape-key weights in it", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("create Sphere");
+    ed.command("shape add Puff");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R354");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 45");
+    ed.command("anim preview off");
+    const std::string path = fs::join(fs::join(test_dir(), "r354"), "shared.glb");
+    fs::make_dirs(fs::parent(path));
+    ExportOptions o = export_defaults((int)ExportFormat::GLB);
+    o.selection_only = false;
+    ed.export_model_for_test(o, path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    size_t bones = 0, skinned = 0, weights = 0;
+    for (size_t n = 0; n < j["nodes"].size(); n++) bones += j["nodes"][n]["name"].str == "Bone", skinned += j["nodes"][n]["skin"].type == Json::Num;
+    for (size_t c = 0; c < j["animations"][0]["channels"].size(); c++) weights += j["animations"][0]["channels"][c]["target"]["path"].str == "weights";
+    std::printf("    the file: %zu skin(s) on %zu mesh node(s), the Bone %zu time(s), %zu clip(s), %zu weights channel(s)\n", j["skins"].size(), skinned, bones,
+                j["animations"].size(), weights);
+    CHECK(j["skins"].size() == 1 && skinned == 2 && bones == 1 && j["animations"].size() == 1 && weights == 1);
+    bool on_sphere = false;  // (the weights channel on the Sphere's own node)
+    for (size_t c = 0; c < j["animations"][0]["channels"].size(); c++) {
+      const Json &ch = j["animations"][0]["channels"][c];
+      if (ch["target"]["path"].str == "weights") on_sphere = j["nodes"][(size_t)ch["target"]["node"].number()]["name"].str == "Sphere";
+    }
+    CHECK(on_sphere);
+    ImportResult r;
+    CHECK(import_model(path, r) && r.clips.size() == 1);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -6070,4 +6250,5 @@ void run_assets_tests() {
   tests_round351();
   tests_round352();
   tests_round353();
+  tests_round354();
 }

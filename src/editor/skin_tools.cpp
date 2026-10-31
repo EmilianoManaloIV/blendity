@@ -163,7 +163,7 @@ bool Editor::run_skin_job(GameObject *g, const char *label, std::vector<std::str
 void Editor::poll_skin_job() {
   if (!skin_job_) return;
   ui_.redraw = true;  // (keep frames coming while it runs, even with the Rigging window closed)
-  if (!skin_job_->done || edit_mode_) return;  // (not under an Edit Mode session: it lands after, if the mesh is the same)
+  if (!skin_job_->done || edit_mode_ || skin_job_held_) return;  // (not under an Edit Mode session: it lands after, if the mesh is the same; held: tests)
   finish_skin_job();
 }
 

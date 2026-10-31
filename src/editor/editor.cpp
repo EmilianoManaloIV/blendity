@@ -619,6 +619,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   Log::fetch(log_.size(), log_);
   uv_rect_ = Recti{};  // (task 0254: the UV editor sets it again when it draws this frame; its hint row reads it)
   toasts_poll();   // (task 0252: new warnings and errors become toasts)
+  export_wait_poll();  // (round 354: an export waiting for a job on its objects - before the tray's poll, so a written one is "done", not "cancelled")
   jobs_poll();     // (task 0253: the jobs seen, their start and their end)
   hci_log_poll();  // (the study's log, when asked for)
 
@@ -2059,6 +2060,7 @@ void Editor::redo() {
 /* ===================================================================== */
 
 void Editor::new_scene() {
+  export_waits_drop("a new scene");  // (review 354: its objects are gone)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   set_sculpt(false);
@@ -2089,6 +2091,7 @@ void Editor::new_scene() {
 }
 
 bool Editor::open_scene(const std::string &path) {
+  export_waits_drop("another scene opened");  // (review 354)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);
   set_sculpt(false);
@@ -2773,7 +2776,63 @@ static const Mesh *keyed_shell(const Mesh *shell, const Mesh *keyed, std::vector
   return copy.get();
 }
 
+/* The objects an export would write: the selection and everything under it, or every object in the scene. */
+std::vector<GameObject *> Editor::export_candidates(const ExportOptions &o) {
+  std::vector<GameObject *> out;
+  if (!o.selection_only) {
+    scene_->for_each([&](GameObject &g) { out.push_back(&g); });
+    return out;
+  }
+  std::vector<GameObject *> stack = selected_objects(true);
+  while (!stack.empty()) {
+    GameObject *g = stack.back();
+    stack.pop_back();
+    out.push_back(g);
+    for (GameObject *c : g->children) stack.push_back(c);
+  }
+  return out;
+}
+
+/* The file an export writes: the path given (a relative one the project's), else the selection's or the scene's name
+ * in the export folder - settled when the export is asked for (review 354: not when a waiting one goes). */
+std::string Editor::export_path_for(const ExportOptions &o, const std::string &path_in) {
+  std::string path = path_in;
+  if (path.empty()) {
+    GameObject *a = active_object();
+    std::string base = o.selection_only && a ? a->name : scene_->name;
+    for (char &c : base)
+      if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+    const std::string dir = export_dir_.empty() ? fs::join(assets_dir_, "Exports") : export_dir_;
+    path = fs::join(dir, base + export_format_extension(o.format));
+  }
+  return resolve_asset_path(path);  // (round 351: a relative path is the project's, not the working folder's)
+}
+
 std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
+  const std::vector<GameObject *> objects = export_candidates(o);
+  const std::string path = export_path_for(o, path_in);
+  /* Round 354: a job still working on one of these meshes - the export waits for it rather than take the old mesh;
+   * each one asked for keeps its own place in the tray. */
+  for (GameObject *g : objects) {
+    const std::string job = pending_job_on(*g);
+    if (job.empty()) continue;
+    ExportWait w;
+    w.options = o, w.path = path, w.job = job, w.label = "Export waits for " + job + " (" + fs::filename(path) + ")";
+    for (GameObject *c : objects) {
+      w.objects.push_back(c->id);
+      if (const ProceduralTexturePtr sf = surface_of(c, nullptr)) w.surfaces.push_back(sf->asset_path);
+    }
+    export_waits_.erase(std::remove_if(export_waits_.begin(), export_waits_.end(), [&](const ExportWait &e) { return e.label == w.label; }), export_waits_.end());
+    export_waits_.push_back(std::move(w));
+    Log::info("Export of %s waits for %s on %s: it goes when that ends (the tray's Export Now writes it at once)", fs::filename(path).c_str(), job.c_str(),
+              g->name.c_str());
+    return "";
+  }
+  return export_objects(objects, o, path);
+}
+
+/* The export itself: `objects` written to `path` as `o` says. */
+std::string Editor::export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path) {
   std::vector<ExportItem> items;
   std::vector<std::shared_ptr<Mesh>> keep;  // (round 351: copies the items point at, until the file is written)
   auto add = [&](GameObject &g) {
@@ -2818,31 +2877,11 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
       }
     }
   };
-  if (o.selection_only) {
-    /* The selected objects and everything under them. */
-    std::vector<GameObject *> stack = selected_objects(true);
-    while (!stack.empty()) {
-      GameObject *g = stack.back();
-      stack.pop_back();
-      add(*g);
-      for (GameObject *c : g->children) stack.push_back(c);
-    }
-  }
-  else scene_->for_each([&](GameObject &g) { add(g); });
+  for (GameObject *g : objects) add(*g);
   if (items.empty()) {
     Log::warn(o.selection_only ? "Export: select objects with meshes first" : "Export: the scene has no meshes");
     return "";
   }
-  std::string path = path_in;
-  if (path.empty()) {
-    GameObject *a = active_object();
-    std::string base = o.selection_only && a ? a->name : scene_->name;
-    for (char &c : base)
-      if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-    const std::string dir = export_dir_.empty() ? fs::join(assets_dir_, "Exports") : export_dir_;
-    path = fs::join(dir, base + export_format_extension(o.format));
-  }
-  path = resolve_asset_path(path);  // (round 351: a relative path is the project's, not the working folder's)
   fs::make_dirs(fs::parent(path));  // (round 353: the images beside the file need its folder before the file is written)
   std::string err;
   project_listed_ = -100;
@@ -3935,6 +3974,7 @@ int Editor::startup_check() {
 }
 
 void Editor::enter_play() {
+  export_waits_drop("Play started (the jobs it waited for are stopped)");  // (review 354)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   sculpt_remesh_cancel();  // (task 0241: Play clones the scene; a result landing in the clone would be thrown away by Stop)
   set_weight_paint(false);

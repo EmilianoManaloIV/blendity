@@ -2,6 +2,26 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 354): an export never takes a stale mesh; one glTF skeleton a rig
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 5: the
+avatar's export took the mesh from before its Quad Remesh, without a word; round 352's review: glTF wrote a skeleton per
+mesh on one armature).
+
+**Fixed (task 0331)**
+- An export asked for while a Quad Remesh, a skin bind, mesh maps or a surface still works on what it would write waits
+  for it - "Export waits for ..." in the tray - and is written the frame the job lands; the tray's Cancel writes it at
+  once, with a warning.
+- glTF writes one skeleton, one skin and one clip for every mesh on an armature, each mesh's shape-key weights in it.
+
+**Checked:** `tests_round354` - the wait during a skin bind on a worker, written when it lands; Cancel; a Quad Remesh
+waited for; a Cube and a Sphere on one armature sharing one skin and one clip.
+
+**The review's fixes (Opus code-reviewer, changes needed):** the tray's Export Now writes a waiting export at once and
+its Cancel drops it (Cancel had stopped the remesh instead); a waiting export writes the objects and file it was asked
+for, not the selection when it goes; a second export waits beside the first instead of replacing it; New Scene, Open
+and Play drop waiting exports, said; tests press the tray's buttons.
+
 ## 2026-10-31 (round 353): textures and lightmap UVs in exports
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 2: the

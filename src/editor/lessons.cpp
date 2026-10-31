@@ -680,6 +680,7 @@ Blendity's .scene format writes each shared mesh once and has objects reference 
 @ blender/source/blender/blenloader/intern/writefile.cc
 @ blender/source/blender/io/wavefront_obj
 ! window:Project | Open the Project window
+? You export a character the moment you start its Quad Remesh. Which mesh goes in the file? | The remeshed one: the export waits for the remesh (the tray says "Export waits for Quad Remesh") and goes when it lands. The tray's Export Now writes it at once (with the old mesh, and a warning); its Cancel drops the export.
 ! cmd:create Cube; newtex LearnBricks Bricks; texture Assets/Textures/LearnBricks.ptex; export glb lightmap Exports/Learn Textured.glb | A cube with a procedural texture exported with lightmap UVs: the .glb in the project's Exports folder carries the texture as an image and a second UV set
 ? You export a level for Unity and its lightmaps smear across the walls. What does Export's Lightmap UVs do about it? | It writes a second UV set laid out for lightmaps - no island overlapping another, a margin between them - which Unity reads as UV2 (and Godot as UV2, Unreal as its lightmap channel), so each texel of light belongs to one place. Procedural, painted and generated maps go as PNGs with the file either way.
 # Many at once
