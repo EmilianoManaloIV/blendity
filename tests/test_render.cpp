@@ -12005,6 +12005,88 @@ static void tests_round343() {
   });
 }
 
+/* ---------------------------------------------------------------- round 341: Anime Face Normals from an ellipsoid */
+static void tests_round341() {
+  test("Anime Face Normals (round 341): facenormals ellipsoid fits the proxy to a tall head's width, height and depth, and its shading normals lean out where a ball's lean up (a top corner of a head three times as tall as wide); facenormals sphere keeps the ball; a word it doesn't know is refused", [] {
+    Editor ed;
+    r34_open(ed);
+    /* Two heads three times as tall as wide (in the meshes' own space: the fit reads the mesh, not the object's scale). */
+    auto tall_head = [&](const char *name) {
+      GameObject *g = ed.scene().create(name);
+      auto m = std::make_shared<Mesh>(*primitives::cube(1.0f));
+      for (Vec3 &q : m->positions) q.y *= 3.0f;
+      m->vertex_groups.push_back(VertexGroup{"Head", std::vector<float>(m->positions.size(), 1.0f)});  // (all of it the head)
+      g->add<MeshFilter>()->mesh = m;
+      g->add<MeshRenderer>();
+      return g;
+    };
+    GameObject *ea = tall_head("R341Ellipsoid"), *ba = tall_head("R341Ball");
+    ed.mark_changed_for_test("R341");
+    ed.command("select R341Ellipsoid");
+    ed.command("facenormals ellipsoid");
+    ed.command("select R341Ball");
+    ed.command("facenormals sphere");
+    ed.step_frame_headless();
+    GameObject *ep = ed.scene().find_by_name("R341Ellipsoid Face Normals"), *bp = ed.scene().find_by_name("R341Ball Face Normals");
+    CHECK(ep && bp);
+    if (!ep || !bp) return;
+    const Vec3 s = ep->local().scale, sb = bp->local().scale;
+    std::printf("    the ellipsoid %.3f x %.3f x %.3f; the ball %.3f x %.3f x %.3f\n", s.x, s.y, s.z, sb.x, sb.y, sb.z);
+    CHECK(s.y > s.x * 2.5f && std::fabs(s.x - s.z) < 1e-4f && std::fabs(sb.x - sb.y) < 1e-5f && std::fabs(sb.y - sb.z) < 1e-5f);
+    /* A top corner: the ellipsoid's normal leans out (its sides are steep that high up), the ball's up. */
+    auto corner_normal = [](const GameObject *g) {
+      const Mesh *em = g->evaluated_mesh();
+      if (!em || !em->custom_normals_fit()) return Vec3(0.0f);
+      size_t top = 0;
+      for (size_t i = 0; i < em->positions.size(); i++)
+        if (em->positions[i].y > em->positions[top].y) top = i;
+      return em->custom_normals[top];
+    };
+    const Vec3 ne = corner_normal(ea), nb = corner_normal(ba);
+    auto up_share = [](Vec3 n) { return std::fabs(n.y) / std::max(1e-6f, std::sqrt(n.x * n.x + n.z * n.z)); };
+    std::printf("    a top corner's normal: the ellipsoid's %.2f %.2f %.2f (up / out %.2f), the ball's %.2f %.2f %.2f (up / out %.2f)\n", ne.x, ne.y, ne.z,
+                up_share(ne), nb.x, nb.y, nb.z, up_share(nb));
+    CHECK(std::fabs(length(ne) - 1.0f) < 1e-3f && std::fabs(length(nb) - 1.0f) < 1e-3f);
+    CHECK(up_share(ne) < 1.0f && up_share(nb) > 1.0f);
+    ed.command("facenormals cube");  // (a shape it doesn't know: refused)
+    CHECK(!ed.scene().find_by_name("R341Ball Face Normals.001"));
+  });
+  test("Anime Face Normals (review 341): without a Head group the head's slice keeps its height (a cap alone had made the proxy flat); a flat head (a face card) gets a proxy a quarter as thick as it is wide, not a sheet whose two faces flip the normals", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *g = ed.scene().create("R341Cap");
+    auto m = std::make_shared<Mesh>(*primitives::cube(1.0f));
+    for (Vec3 &q : m->positions) q.y *= 3.0f;  // (no group: the head is the top sixth - only the top face's corners in it)
+    g->add<MeshFilter>()->mesh = m;
+    g->add<MeshRenderer>();
+    GameObject *card = ed.scene().create("R341Card");
+    auto cm = std::make_shared<Mesh>(*primitives::cube(1.0f));
+    for (Vec3 &q : cm->positions) q.z = 0.0f;  // (flat along z: a face card)
+    cm->vertex_groups.push_back(VertexGroup{"Head", std::vector<float>(cm->positions.size(), 1.0f)});
+    card->add<MeshFilter>()->mesh = cm;
+    card->add<MeshRenderer>();
+    ed.mark_changed_for_test("R341b");
+    ed.command("select R341Cap");
+    ed.command("facenormals ellipsoid");
+    ed.command("select R341Card");
+    ed.command("facenormals ellipsoid");
+    ed.step_frame_headless();
+    GameObject *cp = ed.scene().find_by_name("R341Cap Face Normals"), *kp = ed.scene().find_by_name("R341Card Face Normals");
+    CHECK(cp && kp);
+    if (!cp || !kp) return;
+    std::printf("    the cap's proxy %.3f tall (the slice %.3f); the card's %.3f thick, %.3f wide\n", cp->local().scale.y, 3.0f / 12.0f, kp->local().scale.z,
+                kp->local().scale.x);
+    CHECK(cp->local().scale.y >= 3.0f / 12.0f - 1e-4f);
+    CHECK(kp->local().scale.z >= 0.25f * kp->local().scale.x - 1e-4f);
+  });
+  test("the toon lesson's Try-it: facenormals ellipsoid on the Sphere makes its proxy", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Sphere", "facenormals ellipsoid"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    CHECK(ed.scene().find_by_name("Sphere Face Normals") != nullptr);
+  });
+}
+
 /* Round 334 (task 0314): Camera Flatten - the 2D look. */
 static void tests_round334() {
   test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
@@ -12229,4 +12311,5 @@ void run_render_tests() {
   tests_round339();
   tests_round342();
   tests_round343();
+  tests_round341();
 }

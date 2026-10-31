@@ -153,6 +153,9 @@ void Editor::draw_rigging_window(const Recti &r) {
           {"Anime Face Normals", "A sphere proxy fitted to the head and a Normal Transfer modifier reading it, so the face shades like a ball\n"
                                  "(anime's flat face; task 0149). Console: facenormals.",
            mf != nullptr, [this, mesh_obj] { add_face_normals(mesh_obj); }},
+          {"Anime Face Normals (Ellipsoid)", "As Anime Face Normals, the proxy an ellipsoid fitted to the head's width, height and depth: a tall,\n"
+                                             "narrow anime head keeps its shadow line where it is drawn (round 341). Console: facenormals ellipsoid.",
+           mf != nullptr, [this, mesh_obj] { add_face_normals(mesh_obj, true); }},
           {"Rig Hair from Mesh...", "The mesh's loose parts (hair cards, up to 64), or one shell cut into locks, each a chain of bones from the\n"
                                  "scalp with Spring Bones, the mesh skinned to them (task 0153); the locks and bones are asked first.",
            mf != nullptr, [this] { dialog_ = Dialog::HairRig; }}},

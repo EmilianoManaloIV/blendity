@@ -2930,7 +2930,7 @@ class Editor {
   void toonstyle_command(const std::string &name);  // toonstyle <style>: the selected materials' toon preset (task 0148)
   /* Anime face normals (task 0149): a sphere proxy fitted to the head (the Head vertex group, else the top of the
    * mesh) and a Normal Transfer modifier reading it, so the face shades like a ball. Console: facenormals. */
-  GameObject *add_face_normals(GameObject *mesh_obj);
+  GameObject *add_face_normals(GameObject *mesh_obj, bool ellipsoid = false);  // (round 341: an ellipsoid fitted to the head's three sizes)
   void customnormals_command(const std::string &verb);  // customnormals clear|show: the selected meshes' own normals (task 0149)
   /* Rig Hair from Mesh (task 0153): the mesh's loose parts (hair cards) - or one shell split into `locks` sectors - each
    * a chain of `bones` bones from the scalp to the tip under a new hair armature (under the character's head bone when

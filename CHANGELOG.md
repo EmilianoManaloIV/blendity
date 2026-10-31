@@ -2,6 +2,28 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 341): Anime Face Normals from an ellipsoid
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): face normals from a head-shaped proxy - task
+0149 already made them from a sphere.
+
+**Added (task 0323)**
+- **Rigging > Anime Face Normals (Ellipsoid)** and `facenormals ellipsoid`: the proxy fitted to the head's width,
+  height and depth, so a tall, narrow anime head keeps its shadow line where it is drawn; `facenormals [sphere]` keeps
+  the ball.
+- Without a Head group, the head's slice keeps its height (a cap alone had made the proxy flat).
+- The other two methods of that list were already here: the toon materials' **Shadow Bias** map (task 0148: painted
+  shadow control, Guilty Gear's vertex colour as a texture) and the **Line Map** (task 0149: inner lines in the
+  texture) - not built again.
+
+**Checked:** `tests_round341` - a head three times as tall as wide getting a 0.5 x 1.5 x 0.5 proxy, a top corner's
+normal leaning out where a ball's leans up, `facenormals sphere` keeping the ball, a refused word; the no-group slice;
+a face card's proxy; the lesson's Try-it; the Normal Transfer tests.
+
+**The review's fixes (Opus code-reviewer, changes needed):** the test now checks the normals' direction against a
+ball's (it had checked only their length); a flat head's proxy is never thinner than a quarter of its width (a sheet's
+two faces would flip the normals); the lesson's Try-it and the MANUAL's paragraph.
+
 ## 2026-10-31 (round 346): Puppet Posing's controls you can click
 
 **Asked:** "I'm also having trouble just clicking the control points without clicking or transforming the bones. What

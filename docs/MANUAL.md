@@ -473,6 +473,11 @@ Length** draws the object as if through a lens of its own (an 85 mm character be
 flatter; 12 mm: swelling) - the camera's lens is its Focal Length when physical, else its field of view on a 36 x 24 mm
 frame; `flatten lens <mm>|off`.
 
+**The 2D look - face normals** (task 0149, round 341): Rigging > **Anime Face Normals** gives a head a proxy - a ball
+fitted to its Head group (else the mesh's top sixth) - and a Normal Transfer reading it, so the face shades like the
+proxy and toon shadows fall as drawn shapes; **Anime Face Normals (Ellipsoid)** fits the head's width, height and depth
+instead, for a tall, narrow anime head. `facenormals [sphere|ellipsoid]`.
+
 **The 2D look - View Angle Shapes** (round 339): Add Component > Rendering > View Angle Shapes brings shape keys in by
 the camera's angle, as a 2D artist corrects each view (a mouth slid to the side in profile, a chin shortened from
 below). Each row: a shape key, Yaw (0 the reference's front, 90 its right) and Pitch (90 above), a Range at full
