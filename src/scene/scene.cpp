@@ -1902,6 +1902,11 @@ void Lattice::reflect(Reflector &r) {
   r.enumeration("Interpolation", interpolation, kInterp, 2);
   r.help("Linear follows the points exactly; B-Spline is smoother (Blender's default).");
   interpolation = std::max(0, std::min(interpolation, 1));
+  r.field("Align to Camera", align_to_camera);
+  r.help("The box faces the camera in the Game view, Camera Preview and F12 - X the screen's right, Y its up, Z toward the\n"
+         "camera - so its points shape the silhouette as the camera sees it (pull the far eye forward, widen the jaw in\n"
+         "profile); the Scene view keeps the model, and the box's own rotation doesn't count (its place and size do). Edit\n"
+         "the points watching the Game view. Key them for a correction in one shot only.");
   if (!r.all_fields() && offsets.size() > 64) return;
   for (size_t i = 0; i < offsets.size(); i++) {
     PrefixReflector p(r, "P" + std::to_string(i) + " ");
@@ -2378,10 +2383,23 @@ void run_modifier(const Component &c, Mesh &m) {
   c.modify(m);
 }
 
+namespace {
+thread_local bool g_camera_view_eval = false;
+/* (Round 342: set for a camera view's evaluation, cleared for a plain one nested in it, put back after.) */
+struct CameraViewEval {
+  bool was;
+  explicit CameraViewEval(bool on) : was(g_camera_view_eval) { g_camera_view_eval = on; }
+  ~CameraViewEval() { g_camera_view_eval = was; }
+};
+}  // namespace
+
+bool evaluating_camera_view() { return g_camera_view_eval; }
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 8));
   const int mods = kind >= 3 ? (kind - 3) % 2 : kind;  // (round 339: 3-8 are 0 and 1 through a camera, a pair a camera-view role)
   const bool view = kind >= 3;
+  const CameraViewEval camera_view(view);
   auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return nullptr;
   uint64_t key = kFnvBasis;

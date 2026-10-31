@@ -1537,6 +1537,10 @@ The Game view, Camera Preview and F12 show it; the Scene view keeps the model as
 ? In profile your character's mouth sits on the cheek as a 3D model would show it, not at the edge as drawn. What do you make? | A shape key sliding the mouth to the face's edge, and a View Angle Shapes row for it at Yaw 90 (Mirror on for the other side), the head bone as the Reference.
 ? The correction pops in suddenly as the camera turns. What do you change? | The row's Falloff: the degrees over which it fades out past its Range - larger is smoother.
 ? You see the corrected mouth in the Game view but not in the Scene view. Is that a bug? | No: the Scene view keeps the model as it is, so you can edit it; the camera views - the Game view, Camera Preview, F12 - show the corrections.
+# A lattice facing the camera
+For a correction no shape key covers - a jaw that reads too narrow in one shot - put a Lattice round the head, tick Align to Camera and give the head a Lattice modifier naming it. In the camera views the box turns to face the camera, so its X points move the silhouette left and right on screen and its Y points up and down, whatever way the camera looks; the Scene view keeps the model, and the box's own rotation doesn't count (its place and size do) - edit the points watching the Game view. Key the points to keep the correction to one shot.
+! cmd:create Lattice; set Lattice.AlignToCamera 1 | A Lattice facing the camera in the camera views
+? With Align to Camera on, why doesn't the lattice change anything in the Scene view? | It shapes what the camera sees: out of the camera views it moves nothing, so the model you edit stays true.
 )"},
     {"Animating Any Property", "Insert Keyframe on any field, materials and visibility, Record and Add Property", R"(
 Almost everything in the Inspector can be animated: the Transform, a light's intensity and colour, a camera's focus, a modifier's amount, a material slot's Base Color, Roughness or Emission, shape keys, and whether the object is shown (Active).

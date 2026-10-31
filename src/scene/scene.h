@@ -670,6 +670,10 @@ bool view_angle_of(const Mat4 &ref, Vec3 eye, Vec3 forward, bool ortho, float &y
  * name is used only when it does). */
 void view_angle_weights(const ViewAngleShapes &v, float yaw, float pitch, const std::function<bool(const std::string &)> &has_key,
                         std::vector<std::pair<std::string, float>> &out);
+/* Round 342 (review): true while this thread evaluates a camera view's mesh (evaluated_mesh's kinds 3-8, not a plain kind
+ * nested in one - a Boolean's cutter): only then does a camera-aligned lattice face the camera, so the plain caches,
+ * the lighting's keys and anything reading another object's mesh never see the camera. */
+bool evaluating_camera_view();
 
 struct Rotator : ComponentBase<Rotator> {
   static constexpr const char *kName = "Rotator";
@@ -1044,6 +1048,18 @@ struct Lattice : ComponentBase<Lattice> {
   int points_u = 2, points_v = 2, points_w = 2;
   int interpolation = 1;      // Linear, B-Spline (Blender's default)
   std::vector<Vec3> offsets = std::vector<Vec3>(8, Vec3(0.0f));  // each point from its rest place; u fastest, then v, then w
+  /* Round 342 (task 0320, ADR 0094): the box turned to face the camera in the camera views - X the screen's right, Y its
+   * up, Z toward the eye - so its points shape the silhouette as the camera sees it; elsewhere (the Scene view, exports)
+   * it moves nothing. The views set where the camera is (view_on and the eye) for their collect. */
+  bool align_to_camera = false;
+  mutable bool view_on = false;
+  mutable bool view_ortho = false;
+  mutable Vec3 view_eye{0.0f}, view_forward{0.0f, 0.0f, 1.0f}, view_up{0.0f, 1.0f, 0.0f};
+  /* Whether a point is off its rest (an aligned box at rest moves nothing: no camera in its result's key). */
+  bool moved() const;
+  /* The box's frame in the world: its object's, or (Align to Camera) turned to face the camera; false when an aligned
+   * box has no camera (it moves nothing then). */
+  bool frame(const GameObject &object, Mat4 &out) const;
   int size() const;
   Vec3 rest_point(int i) const;
   /* How far a point of the box at q (lattice space) moves: the offsets round it blended (lattice.cpp). Outside the

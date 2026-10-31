@@ -37,4 +37,10 @@
 - Lightmaps (baked and realtime) of a view-shaped object come from the plain mesh: the shapes don't change its
   topology or its UVs.
 - Exports, bakes and MoonRay never set a camera view: they keep the renderer's own weights (the true model).
-- Rounds 342-343 add their deformations into the same slots.
+- Round 342 adds the camera-aligned lattice into the same slots: `Lattice::frame` turns an aligned box to the camera the
+  views set (`set_view_lattices` before a collect, cleared after), its modifier's dependency hash mixing that frame; out
+  of a camera view an aligned box moves nothing.
+- **Only a camera view's own evaluation sees the camera** (round 342's review): `evaluated_mesh` marks its kinds 3-8 on
+  the thread (`evaluating_camera_view`), a plain kind nested in one clears the mark, and anything the camera changes
+  (an aligned lattice's frame) asks for it - so a plain mesh evaluated during a camera collect (a lightmap lookup, the
+  lighting's keys, a Boolean's cutter) is the plain one, and no plain slot ever holds a camera's shape.
