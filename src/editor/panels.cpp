@@ -1785,6 +1785,7 @@ void Editor::draw_inspector(const Recti &r) {
             oc->reflect(a);
           }
       }
+      if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
       /* Camera: an eyedropper for the focus distance (Blender: the Focus Distance
        * eyedropper; Unity HDRP: Focus Distance). */
       if (dynamic_cast<Camera *>(c)) {
@@ -3503,6 +3504,38 @@ bool Editor::object_field_picked(ui::Id id, std::string &v) {
   if (v == field_pick_.value) return false;
   v = field_pick_.value;
   return true;
+}
+
+/* Round 339: View Angle Shapes' live line - where the Game camera is as its reference sees it and what the rows give
+ * there - and a row added at that angle. */
+void Editor::draw_view_shapes_extras(GameObject &g, ViewAngleShapes &vs, ui::Layout &lay) {
+  auto &u = ui_;
+  GameObject *cam_obj = nullptr;
+  const Camera *cam = main_camera(*scene_, &cam_obj);
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (!cam || !cam_obj) {
+    u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "No camera: the angles are the Game camera's", u.theme.text_dim);
+    return;
+  }
+  float yaw = 0.0f, pitch = 0.0f;
+  view_angle_of(view_shapes_reference(g, vs)->world_matrix(), cam_obj->world_position(), cam_obj->world_rotation().rotate({0, 0, 1}), cam->orthographic, yaw, pitch);
+  std::vector<std::pair<std::string, float>> w;
+  const MeshFilter *mf = g.get<MeshFilter>();  // (the keys the object's mesh has, as the views take them; on a root, any)
+  view_angle_weights(vs, yaw, pitch, [mf](const std::string &k) { return !mf || !mf->mesh || mf->mesh->find_shape(k) >= 0; }, w);
+  std::string line = strprintf("Game camera at yaw %.0f, pitch %.0f", yaw, pitch);
+  for (const auto &[key, v] : w) line += strprintf("%s %s %.2f", &key == &w.front().first ? ":" : ",", key.c_str(), v);
+  if (w.empty()) line += ": no row";
+  u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, line, u.theme.text_dim);
+  if (u.record_buttons) u.button_rects["shown:" + line] = row;  // (tests read the line)
+  row = lay.row(u.row_h() + u.px(2));
+  const bool room = vs.rows.size() < 16;
+  const bool add = u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Add Row at the Game Camera's Angle", room, "16 rows at most");
+  u.tooltip("A row at the angle the Game camera sees the reference from: set its Shape Key, then its Range and Falloff.");
+  if (!add) return;
+  ViewAngleRow r;
+  r.yaw = std::round(yaw), r.pitch = std::round(pitch);
+  vs.rows.push_back(r);
+  mark_changed("Add View Angle Row");
 }
 
 /* An object field (Unity's ObjectField): a name typed in, an object of its kind dropped on it from the Hierarchy (one

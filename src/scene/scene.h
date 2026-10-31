@@ -190,7 +190,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten, ViewShapes };
   // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
@@ -254,6 +254,10 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
   std::vector<std::pair<std::string, float>> shape_weights;
   float shape_weight(const std::string &name) const;
   void set_shape_weight(const std::string &name, float w);
+  /* Round 339 (ADR 0094): a camera view's View Angle Shapes weights, added to shape_weights by evaluated_mesh's kinds 3
+   * and 4 (the camera views' own slots); set by the views before they collect, never saved. */
+  mutable std::vector<std::pair<std::string, float>> view_weights;
+  float view_weight(const std::string &name) const;
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();
@@ -601,7 +605,7 @@ struct Outline : ComponentBase<Outline> {
    * which use (the evaluated mesh's kind 0..2, 3 exports): each keeps its own, so a path tracer still holding one
    * view's shell isn't left with a freed mesh when another view builds its own. thickness_scale: the view's scale
    * for the distance (outline_distance_scale). */
-  static constexpr int kShellSlots = 6;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones)
+  static constexpr int kShellSlots = 9;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones; 6-8: a view-shaped mesh's, one a camera-view role - round 339)
   const Mesh *shell(const Mesh &src, float world_scale, int slot = 0, float thickness_scale = 1.0f) const;
   /* The scale of the thickness for an object `distance` metres from the eye, with `px_per_m` pixels per metre at
    * one metre (half the view's height times the projection's focal term; an orthographic view passes distance 1):
@@ -636,6 +640,36 @@ struct CameraFlatten : ComponentBase<CameraFlatten> {
   RenderRole render_role() const override { return RenderRole::CameraFlatten; }  // (the views' hash; found without a cast)
   void reflect(Reflector &r) override;
 };
+
+/* Round 339 (task 0318, ADR 0094): shape keys set by the camera's angle - Guilty Gear Xrd's per-angle corrections (a
+ * mouth slid to the side in profile, a chin shortened from below). Each row brings its key in when the camera looks at
+ * the reference from within its range of (yaw, pitch), fading over its falloff; in the camera views only (the Game
+ * view, Camera Preview, F12), added to the renderer's own weights. On a parent it reaches the meshes below it; a
+ * child's own wins. */
+struct ViewAngleRow {
+  std::string key;              // the shape key
+  float yaw = 90.0f;            // degrees: 0 the reference's front (+Z), 90 its right (+X), 180 behind
+  float pitch = 0.0f;           // degrees: 90 above, -90 below
+  float range = 20.0f;          // degrees around it at full weight
+  float falloff = 25.0f;        // degrees over which it fades out
+  float weight = 1.0f;          // the key's weight at full
+  bool mirror = false;          // also at -yaw (the key with _L / _R swapped when the mesh has it)
+};
+struct ViewAngleShapes : ComponentBase<ViewAngleShapes> {
+  static constexpr const char *kName = "ViewAngleShapes";
+  std::string reference;  // the object the angles are measured from ("" this one): the head bone on a character
+  bool children = true;   // the meshes below take its weights
+  std::vector<ViewAngleRow> rows;
+  RenderRole render_role() const override { return RenderRole::ViewShapes; }
+  void reflect(Reflector &r) override;
+};
+/* The camera's yaw and pitch in degrees as the reference `ref` (its world matrix) sees it: the direction to the eye, or
+ * against the view's forward for an orthographic camera. */
+bool view_angle_of(const Mat4 &ref, Vec3 eye, Vec3 forward, bool ortho, float &yaw, float &pitch);  // (false: no direction - the eye at the reference, a NaN)
+/* The rows' weights at (yaw, pitch), added per key (`has_key` says which keys the mesh has: a mirrored row's swapped
+ * name is used only when it does). */
+void view_angle_weights(const ViewAngleShapes &v, float yaw, float pitch, const std::function<bool(const std::string &)> &has_key,
+                        std::vector<std::pair<std::string, float>> &out);
 
 struct Rotator : ComponentBase<Rotator> {
   static constexpr const char *kName = "Rotator";
@@ -1348,7 +1382,8 @@ class GameObject {
 
   /* Mesh after the modifier stack; cached by source version + params hash.
    * kind: 0 the viewport (enabled modifiers), 1 renders (Show in Renders),
-   * 2 Edit Mode (enabled and Show in Edit Mode). */
+   * 2 Edit Mode (enabled and Show in Edit Mode); 3 + 2 x role + (0 or 1) are 0 and 1 seen through a camera, the
+   * MeshRenderer's view_weights added to its shape keys - a pair for each camera-view role (round 339, ADR 0094). */
   const Mesh *evaluated_mesh(int kind = 0) const;
   /* What evaluated_mesh(kind) is computed from (the base mesh and version, the modifiers that apply and
    * their settings), without evaluating anything: for caches that only need to know it changed. */
@@ -1375,18 +1410,20 @@ class GameObject {
   Transform local_;
   mutable Mat4 world_;
   mutable bool world_dirty_ = true;
-  mutable std::shared_ptr<Mesh> eval_mesh_[3];
-  mutable uint64_t eval_key_[3] = {0, 0, 0};
+  /* (Round 339: kinds 3-8 are 0 and 1 through a camera - View Angle Shapes' weights - a pair a camera-view role (the Game
+   * view, F12, the traced Camera Preview), so no view evicts or rewrites a mesh another is drawing or tracing.) */
+  mutable std::shared_ptr<Mesh> eval_mesh_[9];
+  mutable uint64_t eval_key_[9] = {};
   /* The stack before its deforming tail (ADR 0022): the result of the modifiers up to the last one that
    * isn't deform-only, its key, and the head key eval_mesh_ was deformed from (0: a full evaluation). */
-  mutable std::shared_ptr<Mesh> eval_head_[3];
-  mutable uint64_t eval_head_key_[3] = {0, 0, 0};
-  mutable uint64_t eval_from_[3] = {0, 0, 0};
+  mutable std::shared_ptr<Mesh> eval_head_[9];
+  mutable uint64_t eval_head_key_[9] = {};
+  mutable uint64_t eval_from_[9] = {};
   /* Dynamic Subdivision (ADR 0075, task 0239): the chain behind eval_head_ when the head is one Subdivision Surface,
    * and that head's key without the base's deform_version (the chain follows positions; anything else rebuilds). */
-  mutable std::shared_ptr<meshops::SubdivChain> eval_chain_[3];
-  mutable uint64_t eval_head_topo_[3] = {0, 0, 0};
-  mutable uint64_t eval_from_topo_[3] = {0, 0, 0};  // (the head topology key eval_mesh_ was deformed from: a chain-followed head deforms its tail again in place)
+  mutable std::shared_ptr<meshops::SubdivChain> eval_chain_[9];
+  mutable uint64_t eval_head_topo_[9] = {};
+  mutable uint64_t eval_from_topo_[9] = {};  // (the head topology key eval_mesh_ was deformed from: a chain-followed head deforms its tail again in place)
   friend class Scene;
 };
 

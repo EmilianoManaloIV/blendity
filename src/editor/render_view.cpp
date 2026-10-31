@@ -34,8 +34,9 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 }
 
 /* Round 334: the camera a view flattens toward - its eye and forward, and whether it is orthographic. */
-void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye) {
+void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role) {
   flatten_view_.on = true;
+  flatten_view_.role = std::max(0, std::min(2, role));
   flatten_view_.eye = eye;
   const Vec3 f = view.inverse().dir({0, 0, 1});
   const float len = length(f);
@@ -48,15 +49,45 @@ void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye) {
  * none is (or the pivot isn't an object). */
 const GameObject *Editor::camera_flatten_pivot_object(const GameObject &owner, const CameraFlatten &cf) {
   if (cf.pivot != 2 || cf.bone.empty()) return nullptr;
+  return named_from(owner, cf.bone);
+}
+
+const GameObject *Editor::named_from(const GameObject &owner, const std::string &name) {
+  if (name.empty()) return nullptr;
   const GameObject *bone = nullptr, *any = nullptr;
   std::function<void(const GameObject &)> walk = [&](const GameObject &o) {
-    if (o.name == cf.bone && !any) any = &o;
-    if (o.name == cf.bone && !bone && o.get<Bone>()) bone = &o;
+    if (o.name == name && !any) any = &o;
+    if (o.name == name && !bone && o.get<Bone>()) bone = &o;
     for (const GameObject *c : o.children) walk(*c);
   };
   walk(owner);
   if (bone) return bone;
-  return any ? any : scene_->find_by_name(cf.bone);
+  return any ? any : scene_->find_by_name(name);
+}
+
+const GameObject *Editor::view_shapes_reference(const GameObject &owner, const ViewAngleShapes &vs) {
+  if (const auto it = view_refs_.find(owner.id); it != view_refs_.end())
+    if (const GameObject *known = scene_->find(it->second)) return known;
+  const GameObject *ref = named_from(owner, vs.reference);
+  if (!ref) ref = &owner;
+  view_refs_[owner.id] = ref->id;
+  return ref;
+}
+
+bool Editor::set_view_shapes(const GameObject &g, const MeshRenderer &mr, const Mesh &mesh) {
+  mr.view_weights.clear();
+  if (!flatten_view_.on || !view_shapes_any_ || mesh.shape_keys.empty()) return false;
+  const GameObject *owner = nullptr;
+  const ViewAngleShapes *vs = nullptr;
+  for (const GameObject *o = &g; o && !vs; o = o->parent) {
+    const auto *c = static_cast<const ViewAngleShapes *>(o->find_role(Component::RenderRole::ViewShapes));
+    if (c && c->enabled && (o == &g || c->children)) vs = c, owner = o;
+  }
+  if (!vs) return false;
+  float yaw = 0.0f, pitch = 0.0f;
+  if (!view_angle_of(view_shapes_reference(*owner, *vs)->world_matrix(), flatten_view_.eye, flatten_view_.forward, flatten_view_.ortho, yaw, pitch)) return false;
+  view_angle_weights(*vs, yaw, pitch, [&](const std::string &k) { return mesh.find_shape(k) >= 0; }, mr.view_weights);
+  return !mr.view_weights.empty();
 }
 
 /* The pivot of a Camera Flatten: the middle of its object's and the meshes' below it bounds, its origin, or the object
@@ -106,9 +137,13 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   ProfileScope prof{prof_.ms_collect, {}};
   std::vector<DrawItem> items;
   flatten_pivots_.clear();
-  flatten_any_ = false;
+  view_refs_.clear();
+  flatten_any_ = view_shapes_any_ = false;
   if (flatten_view_.on)
-    scene_->for_each([&](GameObject &g) { flatten_any_ = flatten_any_ || g.find_role(Component::RenderRole::CameraFlatten); });
+    scene_->for_each([&](GameObject &g) {
+      flatten_any_ = flatten_any_ || g.find_role(Component::RenderRole::CameraFlatten);
+      view_shapes_any_ = view_shapes_any_ || g.find_role(Component::RenderRole::ViewShapes);  // (round 339)
+    });
   /* (Of what is shown: the preview's own staleness while there is one.) */
   lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
                    (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
@@ -120,13 +155,18 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     if (game ? !mr->show_in_renders : mr->display_as != 0) return;  // wire / bounds: drawn as overlays
     bool editing = !game && edit_mode_ && g.id == edit_obj_;
     /* Edit Mode shows the modifiers set to Show in Edit Mode over the cage; renders use Show in Renders. */
-    const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
+    /* (Round 339: through a camera, View Angle Shapes' weights - the camera views' own slots, 3 and 4.) */
+    const bool view_shaped = !editing && set_view_shapes(g, *mr, *mf->mesh);
+    const Mesh *m = g.evaluated_mesh(editing ? 2 : (game ? 1 : 0) + (view_shaped ? 3 + 2 * flatten_view_.role : 0));
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
     DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
+    it.view_shaped = view_shaped;
     if (flatten_view_.on && !editing) apply_camera_flatten(g, it);  // (round 334: the Game view and renders only)
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
-    if (!editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
+    /* (A view-shaped mesh has the plain one's topology and UVs: its lightmap is the plain mesh's - round 339.) */
+    const Mesh *lit = view_shaped ? g.evaluated_mesh(game ? 1 : 0) : m;
+    if (!editing && lit && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_)) attach_lightmap(g, *lit, it);  // not under the headlight
     it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
     it.realtime_lm = !editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_);
     items.push_back(it);
@@ -140,7 +180,8 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
     const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale, game ? 1 : 0) : 1.0f;
     DrawItem o;
-    if (outline_draw_item(g, *m, it, (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0), tscale, o)) items.push_back(o);
+    const int shell_slot = view_shaped && tscale == 1.0f ? 6 + flatten_view_.role : (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0);  // (round 339: a role's own)
+    if (outline_draw_item(g, *m, it, shell_slot, tscale, o)) items.push_back(o);
   });
   return items;
 }
@@ -301,11 +342,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   MeshRenderer *mr = nullptr;
   Light *l = nullptr;
   ProbeVolume *pv = nullptr;
-  Component *outline = nullptr, *flatten = nullptr;
+  Component *outline = nullptr, *flatten = nullptr, *vshapes = nullptr;
   bool bone = false;
   for (auto &c : g.components) switch (c->render_role()) {
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::CameraFlatten: if (!flatten) flatten = c.get(); break;
+      case Component::RenderRole::ViewShapes: if (!vshapes) vshapes = c.get(); break;
       case Component::RenderRole::Bone: bone = true; break;
       case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
       case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
@@ -322,9 +364,16 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     const Vec3 at = po->world_position();
     flat_key = mix_bytes(flat_key, &at, sizeof(at));
   }
+  /* (Round 339: View Angle Shapes' rows and where its reference is - the camera views' weights follow them.) */
+  uint64_t view_key = 0;
+  if (vshapes) {
+    const Mat4 rw = view_shapes_reference(g, *static_cast<const ViewAngleShapes *>(vshapes))->world_matrix();
+    view_key = mix_bytes(hash_component(*vshapes) ^ (uint64_t)vshapes->enabled << 63, rw.m, sizeof(rw.m));
+  }
   if (!mr && !l && !pv) {
     mix(&parent, 8);
     mix(&flat_key, 8);
+    mix(&view_key, 8);
     if (bone) {  // (the Scene view draws bones: a pose that moves only them - no skin - is a new picture: task 0281)
       const Mat4 w = g.world_matrix();
       mix(w.m, sizeof(w.m));
@@ -388,6 +437,7 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     mix(&oh, 8);
   }
   if (flatten) mix(&flat_key, 8);
+  if (vshapes) mix(&view_key, 8);
   if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
     const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
     mix(&ph, 8);
@@ -1233,7 +1283,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
     return;
   }
   LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
-  set_flatten_view(v, p, eye);  // (round 334: Camera Flatten toward the render's camera)
+  set_flatten_view(v, p, eye, 1);  // (round 334: Camera Flatten toward the render's camera; round 339: F12's own view-shaped meshes)
   std::vector<DrawItem> items = collect_items(true, true);
   flatten_view_.on = false;
   PTSettings ps = make_pt_settings(rs);
@@ -1672,7 +1722,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
         GameObject *g = scene_->find(it.id);
         const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
         const Mesh *m = g ? g->evaluated_mesh(game ? 1 : 0) : nullptr;
-        if (!mr || !m || (&m->render_mesh() != it.mesh && &m->render_mesh_tangents() != it.mesh)) continue;
+        if (!mr || !m || (!it.view_shaped && &m->render_mesh() != it.mesh && &m->render_mesh_tangents() != it.mesh)) continue;  // (a view-shaped item: laid out from the plain mesh, its UVs the same)
         BakeObject o;
         o.id = it.id;
         o.mesh = std::shared_ptr<const Mesh>(std::shared_ptr<const Mesh>(), m);  // not owned: laid out now
@@ -1887,7 +1937,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     if (hash != cam_preview_pt_hash_) {
       cam_preview_pt_hash_ = hash;
       LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
-      set_flatten_view(v, p, eye);  // (round 334: Camera Flatten toward this camera)
+      set_flatten_view(v, p, eye, 2);  // (round 334: Camera Flatten toward this camera; round 339: the traced preview's own view-shaped meshes)
       std::vector<DrawItem> items = collect_items(true, true);
       flatten_view_.on = false;
       PTSettings ps = make_pt_settings(rs);

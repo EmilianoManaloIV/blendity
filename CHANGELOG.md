@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 339): View Angle Shapes - shape keys by the camera's angle
+
+**Asked:** "Is there any other method we can use the flattice to make 3D look 2D?" - then "Add those components onto
+the plan." (the second method: Guilty Gear Xrd's per-angle corrections)
+
+**Added (task 0318, ADR 0094)**
+- **View Angle Shapes** (Add Component > Rendering): rows of a shape key, Yaw / Pitch, Range, Falloff, Weight and
+  Mirror; a row's key comes in when the camera sees the Reference (the head bone, dragged on) from within its range,
+  fading out smoothly over its falloff; Mirror fires it from the other side on the _L / _R key.
+- **Camera views only:** the Game view, Camera Preview and F12, added to the key's own weight (an animated
+  expression still plays); the Scene view, exports, bakes and MoonRay keep the model. On a parent it reaches the meshes
+  below; a child's own wins.
+- **Evaluated in slots of their own** (`evaluated_mesh` kinds 3-8, a pair a camera-view role), so the Scene view and the camera views don't
+  evict each other's mesh every frame; before the modifiers, so a corrected mouth is skinned with the head.
+- **The Inspector:** a line with the Game camera's angle and the rows' weights there; Add Row at the Game Camera's
+  Angle.
+- **Console:** `viewshape add <key> <yaw> <pitch> [range] [falloff] [weight] [mirror] | remove <row> | ref
+  <object>|none | list`.
+- The Learn lesson "Shapes by the Camera's Angle".
+
+**Checked:** `tests_round339` - the angle maths (yaw 90 on the right, pitch 90 above, a turned reference; full in
+range, 0.5 halfway through the falloff, 0 past it; Mirror on the _L key); a Cube's key in through a camera on its
+right, not in front, never in the Scene view; the renderer's own weight and the view's adding up; a turned reference
+moving the angle and the views' hash; save and load; the Inspector's line and Add Row by a click; the lesson's
+Try-its; a 10k-vertex sphere's collect while the camera orbits about 1-2 ms a frame (printed).
+
+**The review's fixes (Opus code-reviewer, changes needed):** two camera views shared the view-shaped mesh's slot, so
+the Game view's collect rewrote - or with a topology-changing modifier freed, its Outline shell too - a mesh the traced
+Camera Preview or F12 was still path tracing: each camera-view role has its own pair of slots and shell slot (ADR
+0094; tested by a preview's mesh and outline kept while the Game view collects from another angle); a view-shaped
+object kept its baked lightmap and its realtime-lightmap place (from the plain mesh: the same UVs); a mirrored key with
+no side counted twice near yaw 0 (the nearer side now); the Inspector's line names only keys the mesh has; an eye at
+the reference gives no weights; `viewshape add` refuses words for angles; `.l` / `_l` / Left sides; the reference
+found once a collect.
+
 ## 2026-10-31 (round 338): drag an object or a bone onto Camera Flatten's pivot
 
 **Asked:** "For the CameraFlatten component, make it so that you can drag and drop objects and bones to the parameter."

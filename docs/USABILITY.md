@@ -389,6 +389,7 @@ screens themselves.
 | Only the Transform and components' numbers could be animated, keyed from the Animation window; a material's colour or an object's visibility couldn't, and the Inspector's fields had no key. | Material slots' fields and Active are tracks; right-click a field's name > Insert Keyframe (or I) from the Inspector, a diamond marks animated fields, Record keys any field changed, Add Property searches them all (round 335). |
 | A cube with a procedural texture turned black in the GPU views when its Physical Size went down (0.15), or always with Live Shading off. | The card re-sends a mesh that gained tangents, and a zero tangent keeps the plain normal; Box mapping's z follows the size too (round 337). |
 | Camera Flatten's pivot bone had to be typed by its exact name, and only a bone below the object worked. | Pivot Object takes a bone or any object dragged from the Hierarchy or picked (the character's own bones first); the Pivot follows the drop (round 338). |
+| A 3D character looked like a 3D model from the side and from below: a drawn character's mouth slides to the face's edge in profile, and nothing let a shape key follow the view. | View Angle Shapes: shape keys that come in by the camera's angle (a range and a smooth falloff, mirrored for the other side), measured from the head bone, in the Game view and renders (round 339). |
 
 ## Still worth doing
 

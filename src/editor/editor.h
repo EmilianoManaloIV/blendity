@@ -1334,8 +1334,8 @@ class Editor {
   void anim_unkey_property_for_test(GameObject *g, const std::string &property, int axes) { anim_unkey_property(g, property, axes); }
   /* Round 334: the items the Game view would draw from this camera (flattened where a Camera Flatten says), or the
    * Scene view's (game false: never flattened). */
-  std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye) {
-    if (game) set_flatten_view(view, proj, eye);
+  std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0) {
+    if (game) set_flatten_view(view, proj, eye, role);
     std::vector<DrawItem> items = collect_items(game, false);
     flatten_view_.on = false;
     return items;
@@ -1720,13 +1720,27 @@ class Editor {
     bool on = false;
     Vec3 eye{0.0f}, forward{0.0f, 0.0f, 1.0f};
     bool ortho = false;
+    int role = 0;
   } flatten_view_;
+  std::unordered_map<uint64_t, uint64_t> view_refs_;  // (round 339: each View Angle Shapes' reference's id, found once a collect - ids, never pointers: a deleted object isn't found)
   std::unordered_map<uint64_t, Vec3> flatten_pivots_;  // (each Camera Flatten's pivot, once a collect)
   bool flatten_any_ = false;                            // (a Camera Flatten in the scene, this collect)
   void apply_camera_flatten(const GameObject &g, DrawItem &it);
   Vec3 camera_flatten_pivot(const GameObject &owner, const CameraFlatten &cf);
   const GameObject *camera_flatten_pivot_object(const GameObject &owner, const CameraFlatten &cf);
-  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye);
+  /* Round 339: an object a component names (a pivot, a reference) - a bone of the name below `owner` first, then any
+   * object below it, then the scene's; null when none is. */
+  const GameObject *named_from(const GameObject &owner, const std::string &name);
+  /* Round 339 (View Angle Shapes): the reference a component measures from (its object when unnamed or missing), and
+   * the weights reaching g at this camera view put on mr.view_weights - false when none apply. */
+  const GameObject *view_shapes_reference(const GameObject &owner, const ViewAngleShapes &vs);
+  bool set_view_shapes(const GameObject &g, const MeshRenderer &mr, const Mesh &mesh);
+  bool view_shapes_any_ = false;  // (a View Angle Shapes in the scene, this collect)
+  void viewshape_command(const std::vector<std::string> &t);
+  void draw_view_shapes_extras(GameObject &g, ViewAngleShapes &vs, ui::Layout &lay);
+  /* `role` (round 339): which camera view collects - 0 the Game view and the raster previews, 1 F12, 2 the traced Camera
+   * Preview; each has its own view-shaped meshes and outline shells, so none rewrites what another traces. */
+  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0);
   void flatten_command(const std::vector<std::string> &t);
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */

@@ -36,8 +36,8 @@ struct ShapeKey {
 
 struct MeshRenderer;
 /* The renderer's shape keys on `positions` (the basis's), and a hash of the weights in use (0: none). */
-void apply_shape_keys(const struct Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions);
-uint64_t shape_key_hash(const struct Mesh &m, const MeshRenderer *mr);
+void apply_shape_keys(const struct Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions, bool view = false);
+uint64_t shape_key_hash(const struct Mesh &m, const MeshRenderer *mr, bool view = false);  // (view: the camera view's weights added, round 339)
 
 /* What a Mesh works out about itself and keeps (task 0185 moved them here, unchanged, from Mesh's private part): the
  * render meshes, the edge table, the topology snapshot and the tables built per topology. A plain copy carries them

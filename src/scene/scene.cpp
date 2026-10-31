@@ -207,6 +207,10 @@ void register_builtin_components() {
                      "The 2D look: the object's depth squashed toward the camera about a pivot (the body, the head), so it "
                      "draws as its shape seen head-on - in the Game view and renders; its shading stays as modelled.",
                      "Guilty Gear Xrd's flattened models (a mesh scaled along the view by a driver)");
+  reg<ViewAngleShapes>("Rendering",
+                       "The 2D look: shape keys that come in by the camera's angle - a mouth slid to the side in profile, a "
+                       "chin shortened from below - in the Game view and renders, as an artist corrects each view.",
+                       "Guilty Gear Xrd's per-angle model corrections (shape keys driven by the view)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Wind>("Scripts", "A wind along this object's forward (or away from it): spring chains - hair, cloth, tails - move in it (task 0153).", "Blender's Wind force field");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
@@ -1383,6 +1387,100 @@ void CameraFlatten::reflect(Reflector &r) {
   r.help("The meshes below this object flatten too; one with a Camera Flatten of its own uses that instead.");
 }
 
+void ViewAngleShapes::reflect(Reflector &r) {
+  r.object("Reference", reference);
+  r.help("The object the camera's angle is measured from: its front (+Z) is yaw 0, its right (+X) yaw 90, straight above\n"
+         "pitch 90 - drag the head bone here on a character. Empty: this object.");
+  r.field("Children", children);
+  r.help("The meshes below this object take the weights too; one with View Angle Shapes of its own uses that.");
+  int count = (int)rows.size();
+  r.field("Rows", count, 0, 16);
+  r.help("Each row brings a shape key in when the camera is within its Range of its Yaw and Pitch, fading out over its\n"
+         "Falloff. The Game view, Camera Preview and F12 show it; the Scene view keeps the model as it is.");
+  rows.resize((size_t)std::max(0, std::min(count, 16)));
+  for (size_t i = 0; i < rows.size(); i++) {
+    ViewAngleRow &w = rows[i];
+    const std::string p = "Row " + std::to_string(i + 1);
+    r.group(p.c_str(), true);
+    r.text((p + " Shape Key").c_str(), w.key);
+    r.field((p + " Yaw").c_str(), w.yaw, 1.0f, -180.0f, 180.0f);
+    r.field((p + " Pitch").c_str(), w.pitch, 1.0f, -90.0f, 90.0f);
+    r.field((p + " Range").c_str(), w.range, 1.0f, 0.0f, 180.0f);
+    r.field((p + " Falloff").c_str(), w.falloff, 1.0f, 0.0f, 180.0f);
+    r.field((p + " Weight").c_str(), w.weight, 0.01f, -2.0f, 2.0f);
+    r.field((p + " Mirror").c_str(), w.mirror);
+    r.group_end();
+  }
+}
+
+bool view_angle_of(const Mat4 &ref, Vec3 eye, Vec3 forward, bool ortho, float &yaw, float &pitch) {
+  const Vec3 at = ref.translation();
+  Vec3 d = ortho ? -forward : eye - at;
+  /* Into the reference's frame (its rotation only: a scaled bone measures the same angles). */
+  const Vec3 x = normalize(Vec3(ref.m[0], ref.m[1], ref.m[2])), y = normalize(Vec3(ref.m[4], ref.m[5], ref.m[6])), z = normalize(Vec3(ref.m[8], ref.m[9], ref.m[10]));
+  const Vec3 l{dot(d, x), dot(d, y), dot(d, z)};
+  const float len = length(l);
+  yaw = pitch = 0.0f;
+  if (!(len > 1e-6f) || !std::isfinite(len)) return false;  // (no direction: no row is nearer than another)
+  yaw = std::atan2(l.x, l.z) / kDeg2Rad;
+  pitch = std::asin(std::max(-1.0f, std::min(1.0f, l.y / len))) / kDeg2Rad;
+  return true;
+}
+
+namespace {
+Vec3 angle_dir(float yaw, float pitch) {
+  const float a = yaw * kDeg2Rad, b = pitch * kDeg2Rad;
+  return {std::sin(a) * std::cos(b), std::sin(b), std::cos(a) * std::cos(b)};
+}
+/* A row's weight at the camera's direction: full within its range, a smoothstep down to 0 over its falloff. */
+float row_weight(const ViewAngleRow &w, Vec3 cam, float yaw) {
+  const float c = dot(cam, angle_dir(yaw, w.pitch));
+  const float apart = std::acos(std::max(-1.0f, std::min(1.0f, c))) / kDeg2Rad;
+  const float range = std::max(0.0f, finite_bits(w.range) ? w.range : 0.0f), fall = std::max(0.0f, finite_bits(w.falloff) ? w.falloff : 0.0f);
+  if (apart <= range) return 1.0f;
+  if (apart >= range + fall) return 0.0f;
+  const float t = 1.0f - (apart - range) / fall;
+  return t * t * (3.0f - 2.0f * t);
+}
+std::string swapped_side(const std::string &k) {
+  static const std::pair<const char *, const char *> kSides[] = {{"_L", "_R"}, {"_R", "_L"}, {".L", ".R"}, {".R", ".L"}, {"_l", "_r"}, {"_r", "_l"},
+                                                                 {".l", ".r"}, {".r", ".l"}, {"Left", "Right"}, {"Right", "Left"}};
+  for (const auto &[a, b] : kSides) {
+    const size_t n = std::strlen(a);
+    if (k.size() > n && k.compare(k.size() - n, n, a) == 0) return k.substr(0, k.size() - n) + b;
+  }
+  return k;
+}
+void add_weight(std::vector<std::pair<std::string, float>> &out, const std::string &key, float w) {
+  if (key.empty() || w == 0.0f || !std::isfinite(w)) return;
+  for (auto &e : out)
+    if (e.first == key) return void(e.second += w);
+  out.push_back({key, w});
+}
+}  // namespace
+
+void view_angle_weights(const ViewAngleShapes &v, float yaw, float pitch, const std::function<bool(const std::string &)> &has_key,
+                        std::vector<std::pair<std::string, float>> &out) {
+  out.clear();
+  const Vec3 cam = angle_dir(yaw, pitch);
+  for (const ViewAngleRow &w : v.rows) {
+    const float full = finite_bits(w.weight) ? w.weight : 0.0f;
+    const float here = row_weight(w, cam, w.yaw);
+    if (!w.mirror) {
+      add_weight(out, w.key, full * here);
+      continue;
+    }
+    const std::string other = swapped_side(w.key);
+    const float there = row_weight(w, cam, -w.yaw);
+    if (other != w.key && has_key(other)) {
+      add_weight(out, w.key, full * here);
+      add_weight(out, other, full * there);
+      continue;
+    }
+    add_weight(out, w.key, full * std::max(here, there));  // (one key for both sides: the nearer, not both - near yaw 0 they'd double)
+  }
+}
+
 void Outline::reflect(Reflector &r) {
   r.field("Thickness", thickness, 0.001f, 0.0f, 10.0f);
   r.help("How far the outline shell stands out from the surface.");
@@ -2281,7 +2379,9 @@ void run_modifier(const Component &c, Mesh &m) {
 }
 
 const Mesh *GameObject::evaluated_mesh(int kind) const {
-  kind = std::max(0, std::min(kind, 2));
+  kind = std::max(0, std::min(kind, 8));
+  const int mods = kind >= 3 ? (kind - 3) % 2 : kind;  // (round 339: 3-8 are 0 and 1 through a camera, a pair a camera-view role)
+  const bool view = kind >= 3;
   auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return nullptr;
   uint64_t key = kFnvBasis;
@@ -2294,17 +2394,17 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   mix(mf->mesh->deform_version);  // (ADR 0075: a positions-only change - a sculpt dab - re-evaluates the stack; the views' keys already read it)
   /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
    * Edit Mode's cage (kind 2) shows the basis it edits, as Blender does. */
-  const MeshRenderer *shaping = kind == 2 ? nullptr : get<MeshRenderer>();
-  const uint64_t shape_hash = shape_key_hash(*mf->mesh, shaping);
+  const MeshRenderer *shaping = mods == 2 ? nullptr : get<MeshRenderer>();
+  const uint64_t shape_hash = shape_key_hash(*mf->mesh, shaping, view);
   const bool shaped = shape_hash != 0;
-  auto on = [kind](const Component &c) {
-    return c.is_modifier() && (kind == 1 ? c.show_in_render : c.enabled && (kind == 0 || c.show_in_editmode));
+  auto on = [mods](const Component &c) {
+    return c.is_modifier() && (mods == 1 ? c.show_in_render : c.enabled && (mods == 0 || c.show_in_editmode));
   };
   /* The deforming tail (ADR 0022): the modifiers after the last one that changes topology. Edit Mode's
    * cage (kind 2) keeps the full path. */
   size_t split = 0;
   for (size_t i = 0; i < components.size(); i++)
-    if (on(*components[i]) && (!components[i]->is_deform_only() || kind == 2)) split = i + 1;
+    if (on(*components[i]) && (!components[i]->is_deform_only() || mods == 2)) split = i + 1;
   uint64_t head_key = key, head_topo_key = topo_key;
   bool any_head = false, any_tail = false;
   const SubdivisionSurface *chain_sub = nullptr;  // (ADR 0075: the head is one Subdivision Surface, levels 1-3)
@@ -2341,7 +2441,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   auto chain_follows = [&]() {
     if (!chain_sub || !eval_chain_[kind] || !eval_head_[kind] || eval_head_topo_[kind] != head_topo_key) return false;
     std::vector<Vec3> base = mf->mesh->positions;
-    apply_shape_keys(*mf->mesh, shaping, base);
+    apply_shape_keys(*mf->mesh, shaping, base, view);
     const bool shared_out = eval_mesh_[kind] == eval_head_[kind];
     if (eval_head_[kind].use_count() > (shared_out ? 2 : 1)) {  // (a snapshot holds the head: it is written through a copy)
       auto c = std::make_shared<Mesh>(*eval_head_[kind]);
@@ -2359,7 +2459,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     if (eval_head_[kind] && eval_head_key_[kind] == head_key) return;
     if (chain_follows()) return;
     auto h = std::make_shared<Mesh>(*mf->mesh);
-    apply_shape_keys(*mf->mesh, shaping, h->positions);
+    apply_shape_keys(*mf->mesh, shaping, h->positions, view);
     h->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
     eval_chain_[kind] = nullptr;
     if (chain_sub) {
@@ -2383,7 +2483,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   }
   if (!any_tail) {
     auto m = std::make_shared<Mesh>(*mf->mesh);
-    apply_shape_keys(*mf->mesh, shaping, m->positions);
+    apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
     run(*m, 0, components.size());
     m->touch();
@@ -2415,7 +2515,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     const uint64_t v = m->version;
     m->positions = head->positions;
     m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
-    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions);  // (no head: the basis shaped here)
+    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);  // (no head: the basis shaped here)
     m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
     run(*m, split, components.size());
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
@@ -2426,7 +2526,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   }
   else {
     m = std::make_shared<Mesh>(*head);
-    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions);
+    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();
     run(*m, split, components.size());
     m->touch();
@@ -2665,7 +2765,7 @@ std::unique_ptr<Scene> Scene::clone() const {
     c->local_ = o->local_;
     c->world_ = o->world_;
     c->world_dirty_ = o->world_dirty_;
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 9; k++) {  // (round 339: the camera views' slots too)
       c->eval_mesh_[k] = o->eval_mesh_[k];
       c->eval_key_[k] = o->eval_key_[k];
       c->eval_head_[k] = o->eval_head_[k];
