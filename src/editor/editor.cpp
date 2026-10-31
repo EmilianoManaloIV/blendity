@@ -2502,7 +2502,8 @@ void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) 
     if (pt->surface) surface_sync_emission(*pt);  // (the emission map only when a layer writes emission: an emission map makes the object a light)
     m.base_color = Vec3(1.0f);
     m.procedural = 0;
-    m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
+    const float tile = 1.0f / std::max(0.01f, pt->physical_size);
+    m.tiling = Vec3(tile, tile, tile);  // (round 337: z too - Box mapping tiles two of its projections by z, and it follows the size)
     m.touch();
   }
 }

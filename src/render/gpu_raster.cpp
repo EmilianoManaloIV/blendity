@@ -404,10 +404,14 @@ Surf evaluate_part(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3
   s.emission = I.emission.rgb;
   if (I.tex1.x >= 0) { SAMPLE(I.tex1.x, c); s.emission *= c.rgb; }
   float ns = I.tiling.w;
-  if (I.tex0.w >= 0 && has_tangent && ns > 0.0) {
+  /* (Round 337: a zero or NaN tangent - one parallel to the normal - leaves the normal as it is, as the CPU's normalize
+   * of zero does; normalize(0) here was NaN, a black pixel.) */
+  vec3 tp = tangent.xyz - n * dot(n, tangent.xyz);
+  float tl = length(tp);
+  if (I.tex0.w >= 0 && has_tangent && ns > 0.0 && tl > 1e-6) {
     SAMPLE(I.tex0.w, c);
     vec3 tn = c.xyz * 2.0 - 1.0;
-    vec3 t = normalize(tangent.xyz - n * dot(n, tangent.xyz));
+    vec3 t = tp / tl;
     vec3 b = cross(n, t) * tangent.w;
     vec3 mapped = normalize(t * tn.x + b * tn.y + n * tn.z);
     s.n = normalize(mix(n, mapped, min(ns, 1.0)));

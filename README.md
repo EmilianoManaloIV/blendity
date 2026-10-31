@@ -20,7 +20,7 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 
 Blendity is free. You don't need Blender or anything else: the installer brings everything Blendity uses.
 
-> Blendity is a **pre-release** (0.11.0): it works, but it is still being refined, so expect rough edges. Save
+> Blendity is a **pre-release** (0.12.0): it works, but it is still being refined, so expect rough edges. Save
 > your work often.
 
 ### 1. Download
@@ -297,7 +297,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (14028 unit checks in 1261 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (14038 unit checks in 1263 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

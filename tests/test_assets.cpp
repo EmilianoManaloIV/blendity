@@ -4983,6 +4983,55 @@ static void tests_round330_blends() {
   });
 }
 
+/* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
+static void tests_round337() {
+  test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    std::remove(resolve_asset_path("Assets/Textures/Bricks.ptex").c_str());
+    for (int k = 2; k < 10; k++) std::remove(resolve_asset_path(strprintf("Assets/Textures/Bricks %d.ptex", k)).c_str());
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr);
+    if (!t) return;
+    ed.command("select Cube");  // (the scene's own: a new one would sit inside it)
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    ed.assign_texture_asset_for_test(t->asset_path);
+    ed.command("shading shaded");
+    ed.command("tool view");
+    ed.command("focus");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    const bool seen = ed.project_to_window(cube->world_position(), cx, cy);
+    CHECK(seen);
+    if (!seen) return;
+    const float size0 = t->physical_size;
+    auto mean = [&] {
+      const Image &fb = ed.main_fb_for_test();
+      double sum = 0;
+      int n = 0;
+      for (int y = cy - 12; y <= cy + 12; y++)
+        for (int x = cx - 12; x <= cx + 12; x++) {
+          const uint32_t p = fb.pixels[(size_t)y * fb.width + x];
+          sum += ((p >> 16) & 255) + ((p >> 8) & 255) + (p & 255);
+          n++;
+        }
+      return sum / (3.0 * n);
+    };
+    const double before = mean();
+    ed.command("settex " + t->asset_path + " PhysicalSize 0.15");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const double after = mean();
+    const Vec3 til = cube->get<MeshRenderer>()->materials[0]->tiling;
+    std::printf("    the cube's middle: %.1f at %g m a tile, %.1f at 0.15 m (tiling %.3f %.3f %.3f, mapping %d, wrap %d)\n", before, size0, after,
+                til.x, til.y, til.z, cube->get<MeshRenderer>()->materials[0]->mapping, cube->get<MeshRenderer>()->materials[0]->wrap);
+    CHECK(after > before * 0.5);
+    CHECK(std::fabs(til.x - 1.0f / 0.15f) < 1e-3f && std::fabs(til.y - 1.0f / 0.15f) < 1e-3f && std::fabs(til.z - 1.0f / 0.15f) < 1e-3f);
+    std::remove(resolve_asset_path(t->asset_path).c_str());
+  });
+}
+
 /* Round 332 (task 0313): the Textures and Materials windows' HCI pass. */
 static void tests_round332() {
   test("round 332's data: every layer type sits in one of Blender's node groups (none in Other); every material preset in one group, Volume's Fog / Smoke / Mist among them; a layer at Opacity 0 or with no targets says why it changes nothing", [] {
@@ -5297,4 +5346,5 @@ void run_assets_tests() {
   tests_round329();
   tests_round330_blends();
   tests_round332();
+  tests_round337();
 }

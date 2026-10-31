@@ -686,6 +686,8 @@ size_t Editor::import_material_assets(ImportResult &r, const std::string &model,
 }
 
 void Editor::assign_texture_to_selection(const std::string &asset_path) {
+  /* A procedural texture (round 337): its outputs, as the Textures window's Assign (read as a picture it was "unsupported TGA"). */
+  if (fs::extension(asset_path) == ".ptex") return assign_texture_asset_to_selection(asset_path);
   int n = 0;
   for (GameObject *g : selected_objects(false)) {
     auto *mr = g->get<MeshRenderer>();

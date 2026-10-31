@@ -4811,6 +4811,7 @@ class Editor {
     int id = -1;
     uint64_t serial = 0;
     uint32_t vertices = 0, indices = 0;
+    bool tangents = false;  // (round 337) sent with tangents: Mesh::render_mesh_tangents adds them in place, the serial kept
     uint64_t used = 0;  // the gpu_calls_ count it was last drawn at
     uint64_t bytes = 0;
     float uv_stretch = -1.0f;     // task 0196: its UVs' most stretch (live_close_up_of), -1 not measured
