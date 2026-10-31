@@ -6123,6 +6123,137 @@ static void tests_round304() {
   });
 }
 
+/* ---------------------------------------------------------------- round 340: on 2s and 3s everywhere, the camera smooth */
+static void tests_round340() {
+  /* A root with a Lid and a camera both keyed along x from 0 at frame 0 to 10 at frame 10, its Animation on 2s. */
+  auto rig = [](Editor &ed) -> GameObject * {
+    ed.init_headless(1400, 900);
+    std::remove(resolve_asset_path("Assets/Animations/R340Box.anim").c_str());
+    GameObject *box = ed.scene().create("R340Box");
+    ed.scene().create("Lid", box);
+    GameObject *cam = ed.scene().create("Cam", box);
+    cam->add<Camera>();
+    ed.command("select R340Box");
+    ed.mark_changed_for_test("R340 box");
+    ed.step_frame_headless();
+    ed.command("anim new");
+    for (const char *k : {"anim key Lid Position 0 0 0", "anim key Lid Position 0 10 10", "anim key Cam Position 0 0 0", "anim key Cam Position 0 10 10"}) ed.command(k);
+    Animation *a = box->get<Animation>();
+    if (a) a->hold = 2;
+    ed.step_frame_headless();
+    return box;
+  };
+  test("on 2s (round 340): the Animation window's Preview holds as Play does - frame 5 shows frame 4's pose - while a camera the clip animates moves every frame; Hold the Camera holds it too", [&] {
+    Editor ed;
+    GameObject *box = rig(ed);
+    CHECK(box && box->get<Animation>() && ed.anim_clip_for_test());
+    if (!box || !box->get<Animation>()) return;
+    ed.command("anim preview on");
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    /* (The keys ease - Auto: the clip's own values at frames 4 and 5, not 4 and 5.) */
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *lt = clip ? clip->find("Lid", "Position", 0) : nullptr, *ct = clip ? clip->find("Cam", "Position", 0) : nullptr;
+    CHECK(lt && ct);
+    if (!lt || !ct) return;
+    const float lid = ed.scene().find_by_name("Lid")->local().position.x, cam = ed.scene().find_by_name("Cam")->local().position.x;
+    std::printf("    frame 5 on 2s: the Lid at %.2f (frame 4's %.2f, frame 5's %.2f), the camera at %.2f (frame 5's %.2f)\n", lid, lt->sample(4.0f),
+                lt->sample(5.0f), cam, ct->sample(5.0f));
+    CHECK(std::fabs(lid - lt->sample(4.0f)) < 1e-4f && std::fabs(cam - ct->sample(5.0f)) < 1e-4f && std::fabs(lid - lt->sample(5.0f)) > 0.1f);
+    box->get<Animation>()->hold_camera = true;
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    CHECK(std::fabs(ed.scene().find_by_name("Cam")->local().position.x - ct->sample(4.0f)) < 1e-4f);
+    ed.command("anim preview off");
+  });
+  test("on 2s (round 340): Play holds the Lid on even frames and moves the camera every frame; the ruler marks every second frame; Hold the Camera saves", [&] {
+    Editor ed;
+    GameObject *box = rig(ed);
+    CHECK(box && box->get<Animation>());
+    if (!box || !box->get<Animation>()) return;
+    /* The component's own update, as Play runs it: 5 frames' time at the clip's rate. */
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    Animation &a = *box->get<Animation>();
+    const AnimTrack *lt = clip->find("Lid", "Position", 0), *ct = clip->find("Cam", "Position", 0);
+    CHECK(lt && ct);
+    if (!lt || !ct) return;
+    PlayContext ctx;
+    ctx.scene = &ed.scene();
+    a.start(ctx);
+    ctx.dt = 1.0f / (clip->frame_rate > 0.0f ? clip->frame_rate : 30.0f);
+    a.time = 0.0f;
+    for (int k = 0; k < 5; k++) a.update(ctx);  // (Play's own step: 5 frames' time)
+    const float lid5 = ed.scene().find_by_name("Lid")->local().position.x, cam5 = ed.scene().find_by_name("Cam")->local().position.x;
+    a.update(ctx);
+    const float lid6 = ed.scene().find_by_name("Lid")->local().position.x;
+    std::printf("    Play at frames 5 and 6: the Lid %.2f then %.2f (frames 4 and 6: %.2f, %.2f), the camera %.2f (frame 5: %.2f)\n", lid5, lid6,
+                lt->sample(4.0f), lt->sample(6.0f), cam5, ct->sample(5.0f));
+    CHECK(std::fabs(lid5 - lt->sample(4.0f)) < 1e-3f && std::fabs(cam5 - ct->sample(5.0f)) < 1e-3f && std::fabs(lid6 - lt->sample(6.0f)) < 1e-3f);
+    /* The ruler's marks: with the Animation window open, one at every second frame in view. */
+    ed.record_buttons_for_test(true);
+    ed.command("window Animation");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::string holds;
+    for (const std::string &l : ed.button_labels_for_test())
+      if (l.rfind("anim_holds:", 0) == 0) holds = l;
+    std::printf("    the ruler: %s\n", holds.empty() ? "(no marks)" : holds.c_str());
+    CHECK(holds.rfind("anim_holds:2:", 0) == 0 && std::atoi(holds.c_str() + 13) >= 5);
+    a.hold_camera = true;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const GameObject *b2 = back.find_by_name("R340Box");
+    CHECK(b2 && b2->get<Animation>() && b2->get<Animation>()->hold == 2 && b2->get<Animation>()->hold_camera);
+  });
+  test("on 2s (review 340): Render Animation of frames 3-6 poses 3, 3, 5, 5 (held from its first frame, once) while the camera moves every frame; Set Key at frame 5 keys the drawn frame 4, not 5, so the curve isn't bent; a camera on an animated rig's empty moves every frame too", [&] {
+    Editor ed;
+    GameObject *box = rig(ed);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(box && clip);
+    if (!box || !clip) return;
+    const AnimTrack *lt = clip->find("Lid", "Position", 0), *ct = clip->find("Cam", "Position", 0);
+    CHECK(lt && ct);
+    if (!lt || !ct) return;
+    ed.command("anim preview on");
+    std::vector<float> lids, cams;
+    for (int f = 3; f <= 6; f++) {
+      ed.render_animation_pose_for_test(3, f);
+      lids.push_back(ed.scene().find_by_name("Lid")->local().position.x);
+      cams.push_back(ed.scene().find_by_name("Cam")->local().position.x);
+    }
+    std::printf("    rendered 3-6: the Lid %.2f %.2f %.2f %.2f, the camera %.2f %.2f %.2f %.2f\n", lids[0], lids[1], lids[2], lids[3], cams[0], cams[1], cams[2], cams[3]);
+    CHECK(std::fabs(lids[0] - lt->sample(3.0f)) < 1e-4f && lids[1] == lids[0] && std::fabs(lids[2] - lt->sample(5.0f)) < 1e-4f && lids[3] == lids[2]);
+    CHECK(std::fabs(cams[1] - ct->sample(4.0f)) < 1e-4f && std::fabs(cams[3] - ct->sample(6.0f)) < 1e-4f);
+    ed.render_animation_pose_for_test(0, 0);  // (the hold counted from 0 again, as after a render)
+    /* Set Key at frame 5 on 2s: the key goes on frame 4 (what the playhead shows); the camera's at 5. */
+    const size_t lid_keys = lt->keys.size();
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    ed.set_key_for_test();
+    clip = ed.anim_clip_for_test();
+    lt = clip->find("Lid", "Position", 0), ct = clip->find("Cam", "Position", 0);
+    bool at4 = false, at5 = false, cam_at5 = false;
+    for (const AnimKey &k : lt->keys) at4 = at4 || k.frame == 4.0f, at5 = at5 || k.frame == 5.0f;
+    for (const AnimKey &k : ct->keys) cam_at5 = cam_at5 || k.frame == 5.0f;
+    std::printf("    Set Key at frame 5 on 2s: the Lid's keys %zu -> %zu (at 4: %d, at 5: %d), the camera's at 5: %d\n", lid_keys, lt->keys.size(), (int)at4, (int)at5, (int)cam_at5);
+    CHECK(at4 && !at5 && cam_at5);
+    ed.command("anim preview off");
+    /* A camera rig: the camera under an empty the clip pans - the empty moves every frame with it. */
+    GameObject *rig_empty = ed.scene().create("CamRig", box);
+    GameObject *cam = ed.scene().find_by_name("Cam");
+    ed.scene().set_parent(cam, rig_empty);
+    AnimationClip c2;
+    c2.track("CamRig", "Position", 0).set_key(0.0f, 0.0f, AnimLinear);
+    c2.track("CamRig", "Position", 0).set_key(10.0f, 10.0f, AnimLinear);
+    apply_clip(c2, *box, 5.0f, 2, false);
+    CHECK(std::fabs(rig_empty->local().position.x - 5.0f) < 1e-4f);
+    apply_clip(c2, *box, 5.0f, 2, true);  // (Hold the Camera: the rig holds too)
+    CHECK(std::fabs(rig_empty->local().position.x - 4.0f) < 1e-4f);
+  });
+}
+
 /* Round 335 (task 0315): animate almost any property of an object. */
 static void tests_round335() {
   test("round 335's tracks: a material slot's fields (Roughness, Base Color) and the object's Active are read, written and played by a clip; a slot that isn't there or a field that isn't refuses", [] {
@@ -6373,6 +6504,7 @@ void run_animation_tests() {
   tests_round304();
   tests_round309();
   tests_round335();
+  tests_round340();
   round64_tests();
   round69_tests();
   tests_round81();

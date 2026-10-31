@@ -126,12 +126,46 @@ void Editor::anim_snapshot_shown() {
   }
 }
 
+/* Round 340: on 2s or 3s (the root's Animation's Hold), a mark on the ruler at each frame a new pose is drawn on, so
+ * the frames held between them read as held. */
+void Editor::anim_apply_held(const AnimationClip &clip, GameObject &root, float frame) {
+  const Animation *a = root.get<Animation>();
+  apply_clip(clip, root, frame, a ? a->hold : 1, a && a->hold_camera, anim_.hold_from);
+}
+
+float Editor::anim_key_frame(const GameObject *g) {
+  const float frame = std::round(anim_.frame);
+  GameObject *root = anim_root();
+  const Animation *a = root ? root->get<Animation>() : nullptr;
+  if (!a || a->hold <= 1) return frame;
+  if (g && !a->hold_camera && camera_rig(*g)) return frame;
+  return hold_frame_from(anim_.hold_from, frame, a->hold);
+}
+
+void Editor::draw_anim_holds(const Recti &ruler, const Recti &sheet, float end, const GameObject &root) {
+  const Animation *a = root.get<Animation>();
+  if (!a || a->hold <= 1) return;
+  auto &u = ui_;
+  int marks = 0;
+  /* (The frames in view only: a long clip's marks aren't walked from 0 every redraw.) */
+  const float first_shown = anim_.view_span > 0.0f ? std::max(0.0f, anim_.view_start) : 0.0f;
+  const float last_shown = anim_.view_span > 0.0f ? std::min(end, anim_.view_start + anim_.view_span) : end;
+  const int from = (int)std::floor(first_shown / (float)a->hold) * a->hold;
+  for (int f = from; f <= (int)std::ceil(last_shown) && f - from < 200000; f += a->hold) {
+    const int x = anim_x_of(sheet, (float)f, end);
+    if (x < ruler.x || x > ruler.right()) continue;
+    u.canvas.fill_rect({x - u.px(1), ruler.bottom() - u.px(5), u.px(3), u.px(5)}, u.theme.accent);
+    marks++;
+  }
+  if (u.record_buttons) u.button_rects[strprintf("anim_holds:%d:%d", a->hold, marks)] = ruler;  // (tests: the hold and the marks drawn)
+}
+
 /* The clip at the playhead onto the scene (Preview only), IK after it, and what's shown remembered for Record. */
 void Editor::anim_apply() {
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (anim_.preview && root && clip) {
-    apply_clip(*clip, *root, anim_.frame);
+    anim_apply_held(*clip, *root, anim_.frame);  // (round 340: Preview holds as Play does - on 2s, 3s)
     solve_constraints(*scene_);
     scene_dirty_ = true;
   }
@@ -265,19 +299,18 @@ void Editor::anim_record_changes() {
   if (!anim_.record || !anim_.preview || !root || !clip || playing_) return;
   if (anim_.shown_root != root->id || anim_.shown_clip != clip.get()) return anim_snapshot_shown();
   const std::string before = save_clip_text(*clip);
-  const float frame = std::round(anim_.frame);
   bool keyed = false;
   for (GameObject *g : subtree(root)) {
     if (g->get<Bone>() && ik_drives(*scene_, *g)) continue;
     const std::string path = anim_path(*root, *g);
-    for (const char *prop : {"Position", "Rotation", "Scale"}) keyed = anim_record_vector(*clip, *g, path, prop, frame) || keyed;
+    for (const char *prop : {"Position", "Rotation", "Scale"}) keyed = anim_record_vector(*clip, *g, path, prop, anim_key_frame(g)) || keyed;  // (round 340: on 2s, the drawn frame)
   }
   for (AnimTrack &t : clip->tracks) {  // the components' numbers already animated
     if (is_transform_property(t.property)) continue;
     GameObject *g = anim_target(*root, t.path);
     float v = 0.0f;
     if (!g || !read_anim_value(*g, t.property, t.axis, v) || !anim_changed(g->id, t.property, t.axis, v)) continue;
-    t.set_key(frame, v);
+    t.set_key(anim_key_frame(g), v);
     keyed = true;
   }
   if (keyed) {
@@ -322,12 +355,13 @@ void Editor::anim_key_all() {
   AnimationClipPtr clip = anim_clip();
   if (!clip) return refuse("Set Key: select an animated object (or Create a clip in the Animation window)", "window Animation", "open Animation");
   if (clip->tracks.empty()) return refuse("Set Key: the clip has no tracks yet - turn Record on and move the object", "anim record on", "Record");
-  const float frame = std::round(anim_.frame);
   GameObject *root = anim_root();
   anim_edit_keys("Set Key", [&](AnimationClip &c) {
     for (AnimTrack &t : c.tracks) {
+      GameObject *g = root ? anim_target(*root, t.path) : nullptr;
+      const float frame = anim_key_frame(g);  // (round 340: on 2s, the drawn frame the playhead shows)
       float v = t.sample(frame);
-      if (GameObject *g = root ? anim_target(*root, t.path) : nullptr) read_anim_value(*g, t.property, t.axis, v);
+      if (g) read_anim_value(*g, t.property, t.axis, v);
       t.set_key(frame, v);
     }
   });
@@ -357,9 +391,11 @@ void Editor::anim_add_key(size_t track, float frame) {
   anim_edit_keys("Add Key", [&](AnimationClip &c) {
     if (track >= c.tracks.size()) return;
     AnimTrack &t = c.tracks[track];
-    float v = t.sample(frame);
-    if (GameObject *g = root ? anim_target(*root, t.path) : nullptr) read_anim_value(*g, t.property, t.axis, v);
-    t.set_key(frame, v);
+    GameObject *g = root ? anim_target(*root, t.path) : nullptr;
+    const float at = std::fabs(frame - std::round(anim_.frame)) < 1e-4f ? anim_key_frame(g) : frame;  // (round 340: at the playhead on 2s, the drawn frame)
+    float v = t.sample(at);
+    if (g) read_anim_value(*g, t.property, t.axis, v);
+    t.set_key(at, v);
   });
 }
 
@@ -1101,6 +1137,7 @@ void Editor::draw_animation_window(const Recti &r) {
   if (anim_.view_span > 0.0f) anim_.view_start = std::max(-anim_.view_span, std::min(end * 4.0f, anim_.view_start));  // (always some of the clip in reach)
   u.canvas.fill_rect({body2.x, body2.y, body2.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, sheet, end);
+  draw_anim_holds(ruler, sheet, end, *root);
   draw_body_strip(ruler, end);  // (contacts and the flight's frames under the ruler: tasks 0116, 0117)
   draw_anim_rows(*clip, root, list, body2, sheet, row_h, end);
   anim_.sheet = sheet, anim_.sheet_end = end;

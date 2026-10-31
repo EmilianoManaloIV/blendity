@@ -544,7 +544,23 @@ bool write_anim_value(GameObject &g, const std::string &property, int axis, floa
   return true;
 }
 
-void apply_clip(const AnimationClip &clip, GameObject &root, float frame) {
+bool camera_rig(const GameObject &g) {
+  if (g.camera()) return true;
+  for (const GameObject *c : g.children)
+    if (camera_rig(*c)) return true;
+  return false;
+}
+
+void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int hold, bool hold_cameras, float hold_from) {
+  /* (Round 340: held from `hold_from` - a render range's first frame is a drawn one; the camera and its rig not held.) */
+  const float held = hold_frame_from(hold_from, frame, hold);
+  std::unordered_map<const GameObject *, bool> rigs;  // (each object asked once, not once a track)
+  auto smooth = [&](const GameObject *g) {
+    if (hold <= 1 || hold_cameras) return false;
+    auto r = rigs.find(g);
+    if (r == rigs.end()) r = rigs.emplace(g, camera_rig(*g)).first;
+    return r->second;
+  };
   /* Each object found once and its transform set once, however many of its numbers are animated. Task 0206: with many
    * tracks, the objects found in one walk of the branches the tracks name (searching a parent's children by name for
    * each track was half a million name compares a frame under a thousand children). It follows what anim_target
@@ -579,7 +595,7 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame) {
     if (it == found.end()) it = found.emplace(t.path, anim_target(root, t.path)).first;
     GameObject *g = it->second;
     if (!g) continue;  // (renamed or gone: the window shows the track as missing)
-    const float v = t.sample(frame);
+    const float v = t.sample(smooth(g) ? frame : held);  // (round 340: a camera and its rig move on every frame)
     if (!std::isfinite(v)) continue;
     if (!is_transform_property(t.property)) {
       write_anim_value(*g, t.property, t.axis, v);
@@ -624,8 +640,12 @@ void Animation::reflect(Reflector &r) {
   int h = std::max(0, std::min(3, hold - 1));
   r.enumeration("Hold", h, kHold, 4);
   r.help("Animation on 2s or 3s (task 0149): the pose changes every 2 or 3 frames of the clip, as hand-drawn animation is\n"
-         "shot, while the camera and the rest of the scene move every frame. Renders hold the same frames.");
+         "shot, while the camera and the rest of the scene move every frame. Renders hold the same frames; so do the\n"
+         "Animation window's Preview and its ruler's marks (the frames a new pose is drawn on).");
   hold = h + 1;
+  r.field("Hold the Camera", hold_camera);
+  r.help("A camera this clip animates (or the rig carrying one) is held too. Off (anime's way): the characters move on 2s\n"
+         "or 3s, the camera's pan and push-in every frame.");
 }
 
 void Animation::start(PlayContext &) {
@@ -641,7 +661,7 @@ void Animation::update(PlayContext &ctx) {
   if (!c) return;
   time += ctx.dt * speed;
   const int w = wrap == 0 && !c->loop ? 1 : wrap;  // a clip that doesn't loop holds its end under Loop
-  apply_clip(*c, *owner, hold_frame(wrap_frame(time * c->frame_rate, c->end_frame(), w), hold));
+  apply_clip(*c, *owner, wrap_frame(time * c->frame_rate, c->end_frame(), w), hold, hold_camera);
 }
 
 }  // namespace bl

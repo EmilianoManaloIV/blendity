@@ -427,6 +427,7 @@ struct AnimEditorState {
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
   float view_start = 0.0f, view_span = 0.0f;  // (task 0267: the frames the sheet shows; span 0: the whole clip)
+  float hold_from = 0.0f;  // (round 340: the frame the hold counts from - a render range's first; 0 otherwise)
   int view_pan_x = 0;  // (a middle-button pan's last x)
   const void *view_for = nullptr;  // (the clip the view was set for)
   bool view_panning = false;
@@ -1169,6 +1170,8 @@ class Editor {
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
   uint64_t render_hash_for_test() { return scene_render_hash(); }
+  void render_animation_pose_for_test(int first, int frame) { render_animation_pose(first, frame); }  // (round 340)
+  void set_key_for_test() { anim_key_all(); }
   Vec3 camera_flatten_pivot_for_test(const GameObject &owner) {
     flatten_pivots_.clear();
     const CameraFlatten *cf = owner.get<CameraFlatten>();
@@ -1742,6 +1745,14 @@ class Editor {
    * Preview; each has its own view-shaped meshes and outline shells, so none rewrites what another traces. */
   void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0);
   void flatten_command(const std::vector<std::string> &t);
+  void draw_anim_holds(const Recti &ruler, const Recti &sheet, float end, const GameObject &root);  // (round 340)
+  /* Round 340: the clip onto the root as the root's Animation holds it (on 2s, 3s; its camera smooth unless held). */
+  void anim_apply_held(const AnimationClip &clip, GameObject &root, float frame);
+  /* The frame a key goes on: on 2s or 3s, the drawn frame the playhead shows (a key between them would bend the curve
+   * where no pose is drawn) - the playhead itself for a camera and its rig unless Hold the Camera. */
+  float anim_key_frame(const GameObject *g);
+  /* A render range's frame posed (Render Animation): the raw frame, held from the range's first. */
+  void render_animation_pose(int first, int frame);
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
