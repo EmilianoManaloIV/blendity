@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the assets tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include <filesystem>
 #include "fixtures/synthetic_mmd.h"
 #include "../src/core/json.h"
 #include "../extern/ufbx/ufbx.h"
@@ -5590,6 +5591,118 @@ static void tests_round352() {
   });
 }
 
+/* ---------------------------------------------------------------- round 353: textures and lightmap UVs in exports */
+/* A cube whose material takes a procedural texture's albedo and normal (a .ptex made by `newtex`), and the Color Grid as
+ * its emission. */
+static GameObject *r353_textured(Editor &ed) {
+  ed.command("create Cube");
+  GameObject *g = ed.active_object_for_test();
+  if (!g) return nullptr;
+  ed.command("newtex R353Bricks Bricks");
+  MaterialPtr m = make_material("R353", Vec3(1.0f));
+  m->base_map = TextureRef{"Assets/Textures/R353Bricks.ptex#albedo", false};
+  m->normal_map = TextureRef{"Assets/Textures/R353Bricks.ptex#normal", true};
+  m->emission_map = TextureRef{"generated:Color Grid", false};
+  m->emission = Vec3(1.0f), m->emission_strength = 1.0f;  // (lit, so the map shows - glTF multiplies them)
+  g->get<MeshRenderer>()->materials = {m};
+  return g;
+}
+
+static void tests_round353() {
+  test("Textures in exports (round 353): a relative path lands in the project; the .glb embeds the procedural texture's images and the Color Grid; the FBX references PNGs beside it", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    GameObject *g = r353_textured(ed);
+    CHECK(g != nullptr);
+    if (!g) return;
+    const std::string project = std::getenv("BLENDITY_PROJECT");
+    for (const char *d : {"Exports/R353", "Exports/R353F"}) { std::error_code ec; std::filesystem::remove_all(fs::join(project, d), ec); }  // (a new folder each run: the case that failed)
+    ed.command("export glb Exports/R353/cube.glb");
+    const std::string glb_path = fs::join(project, "Exports/R353/cube.glb");
+    std::string glb;
+    const bool there = fs::read_file(glb_path, glb);
+    const Json j = r351_glb_json(glb);
+    std::printf("    the .glb in the project: %d, %zu image(s) embedded, %zu texture(s)\n", (int)there, j["images"].size(), j["textures"].size());
+    CHECK(there && j["images"].size() >= 3 && j["materials"][0]["emissiveTexture"]["index"].type == Json::Num);  // (albedo, normal, the Color Grid as the emission)
+    bool embedded = true;
+    for (size_t i = 0; i < j["images"].size(); i++) embedded = embedded && j["images"][i]["bufferView"].type == Json::Num;
+    CHECK(embedded);
+    ed.command("export fbx Exports/R353F/cube.fbx");
+    const std::string dir = fs::join(project, "Exports/R353F");
+    ImportResult r;
+    CHECK(import_model(fs::join(dir, "cube.fbx"), r));
+    const MaterialPtr m = r.materials.empty() ? nullptr : r.materials[0];
+    auto found = [](const TextureRef &t) { return !t.empty() && fs::exists(resolve_asset_path(t.path)); };
+    std::printf("    the FBX (its own new folder): base %d, normal %d, emission %d maps found\n", m ? (int)found(m->base_map) : 0, m ? (int)found(m->normal_map) : 0,
+                m ? (int)found(m->emission_map) : 0);
+    CHECK(m && found(m->base_map) && found(m->normal_map) && found(m->emission_map));
+    /* The Color Grid as written: its pixels in the Color Grid's order (red, not blue, where it's red). */
+    Bitmap grid;
+    std::string err;
+    const TexturePtr cg = texture_color_grid();
+    CHECK(load_image(fs::join(dir, "Blendity_Color_Grid.png"), grid, err) && cg && !cg->levels.empty());
+    if (grid.rgba8.empty() || !cg || cg->levels.empty()) return;
+    int wrong = 0;
+    for (size_t i = 0; i < 64 && i * 4 + 2 < grid.rgba8.size(); i++) {
+      const uint32_t c = cg->levels[0].px8[i * 97 % cg->levels[0].px8.size()];
+      const size_t k = (i * 97 % cg->levels[0].px8.size()) * 4;
+      wrong += grid.rgba8[k] != (c & 0xFFu) || grid.rgba8[k + 2] != (c >> 16 & 0xFFu);
+    }
+    CHECK(wrong == 0);
+  });
+  test("Lightmap UVs in exports (round 353): the option writes a second UV set - glTF TEXCOORD_1 inside 0..1, FBX a second UV map - and off writes none", [] {
+    MeshPtr cube = primitives::cube();
+    ExportItem it;
+    it.name = "Box", it.mesh = cube.get(), it.world = Mat4::identity();
+    ExportOptions o = export_defaults((int)ExportFormat::GLB);
+    CHECK(r351_glb_json(export_gltf({it}, o, true, "", nullptr))["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"].type != Json::Num);
+    o.lightmap_uvs = true;
+    const std::string glb = export_gltf({it}, o, true, "", nullptr);
+    const Json j = r351_glb_json(glb);
+    const Json &at = j["meshes"][0]["primitives"][0]["attributes"];
+    const std::vector<float> uv2 = at["TEXCOORD_1"].type == Json::Num ? r351_glb_floats(glb, j, (size_t)at["TEXCOORD_1"].number()) : std::vector<float>();
+    float lo = 1.0f, hi = 0.0f;
+    for (float v : uv2) lo = std::min(lo, v), hi = std::max(hi, v);
+    std::printf("    glTF: TEXCOORD_1 with %zu values in %.3f..%.3f\n", uv2.size(), lo, hi);
+    CHECK(!uv2.empty() && lo >= 0.0f && hi <= 1.0f);
+    ExportOptions f = export_defaults((int)ExportFormat::FBX);
+    f.lightmap_uvs = true, f.ascii = true;
+    const std::string fbx = export_fbx({it}, f);
+    fs::make_dirs(fs::join(test_dir(), "r353"));
+    fs::write_file(fs::join(test_dir(), "r353/uv2.glb"), glb);
+    ExportOptions fb = f;
+    fb.ascii = false;
+    fs::write_file(fs::join(test_dir(), "r353/uv2.fbx"), export_fbx({it}, fb));  // (for a look in Blender)
+    size_t maps = 0;
+    for (size_t at2 = fbx.find("LayerElementUV:"); at2 != std::string::npos; at2 = fbx.find("LayerElementUV:", at2 + 1)) maps++;
+    std::printf("    FBX: %zu UV map(s), Lightmap named %d\n", maps, (int)(fbx.find("\"Lightmap\"") != std::string::npos));
+    CHECK(maps == 2 && fbx.find("\"Lightmap\"") != std::string::npos && fbx.find("Layer: 1") != std::string::npos);
+    /* A mesh without UVs: the lightmap set is its first (TEXCOORD_0), and FBX's off writes one map. */
+    MeshPtr bare = std::make_shared<Mesh>(*cube);
+    bare->uvs.clear();
+    ExportItem bi = it;
+    bi.mesh = bare.get();
+    const Json jb = r351_glb_json(export_gltf({bi}, o, true, "", nullptr));
+    CHECK(jb["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"].type == Json::Num && jb["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"].type != Json::Num);
+    ExportOptions foff = export_defaults((int)ExportFormat::FBX);
+    foff.ascii = true;
+    const std::string plain = export_fbx({it}, foff);
+    size_t plain_maps = 0;
+    for (size_t at3 = plain.find("LayerElementUV:"); at3 != std::string::npos; at3 = plain.find("LayerElementUV:", at3 + 1)) plain_maps++;
+    CHECK(plain_maps == 1);
+  });
+  test("the lesson's Try-it (round 353): create Cube, newtex, texture, export glb gives a .glb with the texture embedded, in the project", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::remove(fs::join(std::getenv("BLENDITY_PROJECT"), "Exports/Learn Textured.glb").c_str());
+    for (const char *c : {"create Cube", "newtex LearnBricks Bricks", "texture Assets/Textures/LearnBricks.ptex", "export glb lightmap Exports/Learn Textured.glb"}) ed.command(c);
+    std::string glb;
+    fs::read_file(fs::join(std::getenv("BLENDITY_PROJECT"), "Exports/Learn Textured.glb"), glb);
+    const Json j = r351_glb_json(glb);
+    CHECK(j["images"].size() >= 1 && j["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"].type == Json::Num);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -5956,4 +6069,5 @@ void run_assets_tests() {
   tests_round337();
   tests_round351();
   tests_round352();
+  tests_round353();
 }

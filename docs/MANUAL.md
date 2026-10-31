@@ -816,7 +816,12 @@ its armature as joints (FBX: LimbNodes, a Skin with a Cluster a bone, the bind p
 clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and Blender import a character that
 still moves - in FBX every mesh on one armature (a body, its hair, its clothes) sharing its skeleton, an Outline's line
 skinned with it, the modifiers but the Skin applied. The other formats, and these with Armatures and Animation off, write
-the mesh as posed. **Shape keys** (round 351) go out as glTF morph targets and FBX blend shapes, by name with their weights -
+the mesh as posed.
+
+**Textures go with the file** (round 353): procedural, painted and generated (UV Grid, Color Grid) maps are written as
+PNGs beside it - embedded in a .glb, referenced by FBX and OBJ - the emission map included. **Lightmap UVs** (glTF,
+FBX; `export glb lightmap <path>`) adds a second UV set laid out for lightmaps, which Unity, Godot and Unreal bake
+onto. Generated images go as Blendity_UV_Grid.png and Blendity_Color_Grid.png. **Shape keys** (round 351) go out as glTF morph targets and FBX blend shapes, by name with their weights -
 visemes, blinks and expressions reach Unity, VRChat and Unreal - with the mesh at rest when its rig goes too; a
 modifier that changes the mesh's shape (a Subdivision Surface, or a Skin whose rig isn't exported) leaves them out and
 the log says why. Normal-only modifiers (Anime Face Normals' transfer, Smooth Normals) keep them, and an Outline's
