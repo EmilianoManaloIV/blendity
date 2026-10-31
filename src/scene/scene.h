@@ -1274,6 +1274,13 @@ bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK ch
 /* The bone below an IK chain's end (the foot, the hand: the child bone whose head sits at the end's tip - a twist
  * bone beside it starts elsewhere), or null (task 0156). */
 GameObject *ik_end_bone(GameObject &end);
+/* Round 348: an IK at Weight 0 is off - FK: the bones keep their own pose (turned by hand or keyed), the solve leaves
+ * them; under 1 it blends from the rest pose. */
+bool ik_off(const IKConstraint &ik);
+/* Round 348: the IK's target to the chain's tip (turned with the end bone when Rotate End is on) and its pole off the
+ * middle joint along the bend, so solving gives the pose the bones have now (FK to IK without a jump). False without
+ * a target. */
+bool ik_match_to_pose(Scene &scene, GameObject &owner);
 /* The bones an enabled IK constraint turns: its chain, and the end bone when Rotate End is on (task 0156). */
 std::vector<GameObject *> ik_turned_bones(GameObject &owner, const IKConstraint &ik);
 /* True when `bone` is the end bone a Rotate End IK turns (the gizmo says to turn the handle, not move it). */
@@ -1293,6 +1300,7 @@ int name_side(const std::vector<std::string> &words);          // 0 left, 1 righ
 IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
 /* The object the IK constraint on `bone` aims at, looked for in its own character first (two copies share names). */
 GameObject *ik_target_of(const Scene &scene, const GameObject &bone);
+GameObject *ik_pole_of(const Scene &scene, const GameObject &bone);  // (its pole, found the same way - round 348)
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {

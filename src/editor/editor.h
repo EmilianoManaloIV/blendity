@@ -2079,6 +2079,16 @@ class Editor {
   float puppet_control_size(const GameObject &arm);
   GameObject *puppet_rig_of(GameObject *g);
   std::vector<std::pair<int, uint64_t>> puppet_control_list() const;
+  /* Round 348: an IK between IK and FK (its Weight 1 or 0) without the pose jumping: to FK the bones keep the solved
+   * pose; to IK (and Match) the target and the pole go where the pose has the tip and the bend. Keyed with Record on.
+   * Mode: 0 FK, 1 IK, 2 Match (the handles only). */
+  bool ik_switch(GameObject &owner, int mode);
+  bool ik_switch_keys(GameObject &owner, IKConstraint &c, int mode, float was, const char *label);
+  void warn_ik_reshaped(GameObject &owner, const IKConstraint &c, const std::vector<Quat> &before);
+  /* The same on a limb of the selected character's rig: 0 left arm, 1 right arm, 2 left leg, 3 right leg. */
+  bool limb_ik(int limb, int mode);
+  GameObject *limb_ik_owner(int limb);
+  void draw_puppet_fkik_items();
   void draw_puppet_controls_extras(GameObject &arm, ui::Layout &lay);
   std::vector<std::string> puppet_problems_;  // (round 347: the analysis' problems shown, and what they were found for)
   uint64_t puppet_problems_key_ = 0;

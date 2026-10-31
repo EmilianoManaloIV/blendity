@@ -69,6 +69,13 @@ GameObject *ik_target_of(const Scene &scene, const GameObject &bone) {
   return resolve(scene, bone, ik->target, id);
 }
 
+GameObject *ik_pole_of(const Scene &scene, const GameObject &bone) {
+  const IKConstraint *ik = bone.get<IKConstraint>();
+  if (!ik || ik->pole.empty()) return nullptr;
+  uint64_t id = ik->pole_id;
+  return resolve(scene, bone, ik->pole, id);
+}
+
 /* The rotation taking unit direction a to unit direction b (the shortest arc). */
 Quat rotation_between(Vec3 a, Vec3 b) {
   a = normalize(a), b = normalize(b);
@@ -114,6 +121,27 @@ GameObject *ik_end_bone(GameObject &end) {
   return best;
 }
 
+bool ik_off(const IKConstraint &ik) { return finite_bits(ik.weight) && ik.weight <= 0.0f; }
+
+bool ik_match_to_pose(Scene &scene, GameObject &owner) {
+  IKConstraint *ik = owner.get<IKConstraint>();
+  GameObject *target = ik && !ik->target.empty() ? resolve(scene, owner, ik->target, ik->target_id) : nullptr;
+  const std::vector<GameObject *> chain = ik ? ik_chain(owner, ik->chain_length) : std::vector<GameObject *>();
+  if (!target || chain.empty()) return false;
+  target->set_world_position(bone_tail(owner));
+  GameObject *end = ik->rotate_end && ik->end_set ? ik_end_bone(owner) : nullptr;
+  if (end) target->set_world_rotation(normalize(end->world_rotation() * ik->end_offset.conjugate()));
+  GameObject *pole = ik->pole.empty() ? nullptr : resolve(scene, owner, ik->pole, ik->pole_id);
+  ik->last_key = 0;
+  if (!pole || chain.size() < 2) return true;
+  /* The pole off the middle joint, away from the line root -> tip (a straight limb: where it was - any side solves it). */
+  const Vec3 a = chain[0]->world_position(), k = chain[chain.size() / 2]->world_position(), e = bone_tail(owner);
+  const Vec3 line = normalize(e - a), bend = (k - a) - line * dot(k - a, line);
+  const float reach = length(e - a);
+  if (length(bend) > 1e-3f * (reach + 1e-6f)) pole->set_world_position(k + normalize(bend) * std::max(0.05f, reach * 0.75f));
+  return true;
+}
+
 std::vector<GameObject *> ik_turned_bones(GameObject &owner, const IKConstraint &ik) {
   std::vector<GameObject *> out = ik_chain(owner, ik.chain_length);
   if (ik.rotate_end)
@@ -124,7 +152,7 @@ std::vector<GameObject *> ik_turned_bones(GameObject &owner, const IKConstraint 
 bool ik_end_driven(const Scene &scene, const GameObject &bone) {
   const GameObject *end = bone.parent;
   const IKConstraint *ik = end ? end->get<IKConstraint>() : nullptr;
-  if (!ik || !ik->enabled || !ik->rotate_end || ik->target.empty()) return false;
+  if (!ik || !ik->enabled || !ik->rotate_end || ik->target.empty() || ik_off(*ik)) return false;  // (Weight 0: FK - round 348)
   uint64_t id = ik->target_id;
   return resolve(scene, *end, ik->target, id) && ik_end_bone(*const_cast<GameObject *>(end)) == &bone;
 }
@@ -159,6 +187,7 @@ static bool solve_one(IKConstraint &ik) {
   GameObject *end = ik.owner;
   Scene *scene = end ? end->scene : nullptr;
   if (!scene || !ik.enabled || ik.target.empty()) return false;
+  if (ik_off(ik)) return false;  // (round 348: FK - the bones keep their pose; the rest pose had replaced it)
   GameObject *target = resolve(*scene, *end, ik.target, ik.target_id);
   GameObject *pole = ik.pole.empty() ? nullptr : resolve(*scene, *end, ik.pole, ik.pole_id);
   std::vector<GameObject *> chain = ik_chain(*end, ik.chain_length);
@@ -251,7 +280,7 @@ static bool solve_one(IKConstraint &ik) {
       if (length(bone_tail(*chain.back()) - T) < 1e-5f * scale) break;
     }
   }
-  /* Weight: between the rest pose and the solution. */
+  /* Weight: between the rest pose and the solution (0 never gets here: FK, the bones' own pose). */
   const float w = finite_bits(ik.weight) ? std::max(0.0f, std::min(ik.weight, 1.0f)) : 1.0f;
   if (w < 1.0f)
     for (size_t i = 0; i < chain.size(); i++) chain[i]->set_local_rotation(slerp(base[i], chain[i]->local().rotation, w));
@@ -302,7 +331,7 @@ static bool solve_fk(Scene &scene) {
   if (IKConstraint::live.load(std::memory_order_relaxed))
     scene.for_each([&](GameObject &g) {
       const IKConstraint *ik = g.get<IKConstraint>();
-      if (ik && ik->enabled && !ik->target.empty())
+      if (ik && ik->enabled && !ik->target.empty() && !ik_off(*ik))  // (Weight 0: FK - round 348)
         for (GameObject *b : ik_turned_bones(g, *ik)) ik_bones.insert(b);
     });
   scene.for_each([&](GameObject &g) {
@@ -337,7 +366,7 @@ bool ik_drives(const Scene &scene, const GameObject &bone) {
     for (auto &c : g.components)
       if (std::strcmp(c->type_name(), IKConstraint::kName) == 0 && c->enabled) {
         IKConstraint &ik = *static_cast<IKConstraint *>(c.get());
-        if (ik.target.empty() || !resolve(scene, g, ik.target, ik.target_id)) continue;  // a lost target turns nothing
+        if (ik.target.empty() || ik_off(ik) || !resolve(scene, g, ik.target, ik.target_id)) continue;  // a lost target turns nothing; Weight 0 is FK
         for (GameObject *b : ik_turned_bones(g, ik)) driven = driven || b == &bone;
       }
   });

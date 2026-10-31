@@ -1021,6 +1021,12 @@ arms, the thighs and the shins - (drag the bone from the Hierarchy, or `set Arma
 tool that reads the rig (AutoPose, the walk, footsteps) takes them; **Extra Controls** (bone names, commas) give a tail
 or a sword a ring to drag; a line under the fields says when the analysis has the left hand on the right.
 
+**IK and FK per limb (round 348):** an IK constraint's Weight 0 is FK - the bones keep their own pose and turn with the
+rotate gizmo. Switch with the constraint's **Switch to FK / Switch to IK** buttons, Animation > Puppet > **FK / IK**, or
+`autopose fk|ik|match larm|rarm|lleg|rleg`: the pose stays (to IK the handle and the pole move to the hand and the
+elbow), and with Record on the switch is keyed at the playhead. IK solves from the rest pose, so a forearm twisted in
+FK loses its twist when switched to IK (the Console says so).
+
 ## The reference board (round 322)
 Window > Board (a tab beside the Draw tab in the Drawing layout; beside it in Drawing with References).
 

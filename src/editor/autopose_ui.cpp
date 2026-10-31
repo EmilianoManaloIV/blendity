@@ -76,7 +76,7 @@ void Editor::autopose_begin(GameObject &bone) {
   };
   scene_->for_each([&](GameObject &g) {
     const IKConstraint *ik = g.get<IKConstraint>();
-    if (!ik || !ik->enabled || !scene_->is_ancestor(arm, &g)) return;
+    if (!ik || !ik->enabled || ik_off(*ik) || !scene_->is_ancestor(arm, &g)) return;  // (an FK limb: its bones are dragged - round 348)
     GameObject *t = named(ik->target_id, ik->target), *p = named(ik->pole_id, ik->pole);
     if (t) autopose_.iks.push_back({g.id, t->id, p ? p->id : 0});
   });
@@ -280,12 +280,148 @@ void Editor::autopose_command(const std::vector<std::string> &t) {
     for (size_t i = 4; i < t.size(); i++) bone += " " + t[i];
     return puppet_set_handle(k, bone);
   }
+  if ((sub == "fk" || sub == "ik" || sub == "match") && t.size() > 2) {  // (round 348: FK / IK per limb, matched)
+    static const char *const kWords[] = {"larm", "rarm", "lleg", "rleg"};
+    const auto w = std::find_if(std::begin(kWords), std::end(kWords), [&](const char *k) { return to_lower(t[2]) == k; });
+    if (w == std::end(kWords)) return Log::warn("autopose fk|ik|match larm|rarm|lleg|rleg");
+    limb_ik((int)(w - std::begin(kWords)), sub == "fk" ? 0 : sub == "ik" ? 1 : 2);
+    return;
+  }
   if (sub == "locks") {
     for (uint64_t id : autopose_.locks)
       if (GameObject *g = scene_->find(id)) Log::info("  %s", g->name.c_str());
     return;
   }
-  Log::warn("autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames> | handle <part> <bone>|auto");
+  Log::warn("autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks | reach <frames> | handle <part> <bone>|auto | fk|ik|match larm|rarm|lleg|rleg");
+}
+
+static const char *const kLimbNames[] = {"the left arm", "the right arm", "the left leg", "the right leg"};
+
+/* The chain's local rotations (a pose to compare). */
+static std::vector<Quat> chain_pose(GameObject &owner, const IKConstraint &c) {
+  std::vector<Quat> out;
+  for (GameObject *b : ik_turned_bones(owner, c)) out.push_back(b->local().rotation);
+  return out;
+}
+
+bool Editor::ik_switch(GameObject &owner, int mode) {
+  IKConstraint *c = owner.get<IKConstraint>();
+  if (!c) return false;
+  const std::vector<Quat> before = chain_pose(owner, *c);
+  if (mode != 0 && !ik_match_to_pose(*scene_, owner)) return Log::warn("IK: %s has no target to match", owner.name.c_str()), false;
+  const float was = c->weight;
+  if (mode != 2) c->weight = mode == 1 ? 1.0f : 0.0f;  // (to FK the bones hold the pose the solve left)
+  c->last_key = 0;
+  solve_constraints(*scene_);
+  warn_ik_reshaped(owner, *c, before);
+  const char *label = mode == 0 ? "Switch to FK" : mode == 1 ? "Switch to IK" : "Match IK to FK";
+  if (anim_.record && ik_switch_keys(owner, *c, mode, was, label)) return true;  // (the keys' edit is the undo step)
+  mark_changed(label);
+  return true;
+}
+
+/* Review 348: IK solves from the rest pose by the shortest turns - a bone's roll about itself (a forearm's twist) and,
+ * past two bones, the middle joints' shape aren't inputs - so going to IK can change them: said, not hidden. */
+void Editor::warn_ik_reshaped(GameObject &owner, const IKConstraint &c, const std::vector<Quat> &before) {
+  const std::vector<Quat> after = chain_pose(owner, c);
+  bool same = after.size() == before.size();
+  for (size_t i = 0; same && i < after.size(); i++)
+    same = std::fabs(after[i].x * before[i].x + after[i].y * before[i].y + after[i].z * before[i].z + after[i].w * before[i].w) > 0.9999f;
+  if (same) return;
+  Log::warn("%s: IK sets the chain from its rest pose - a bone's twist (and past two bones, the middle joints) changed",
+            owner.name.c_str());
+}
+
+/* Review 348: with Record on, the switch keyed at the drawn frame in one edit - the values read first (applying the
+ * clip again would put keyed bones back), the Weight a step (a blend passes through the rest pose), and the state before
+ * it kept on the frame before when nothing keyed it earlier. False when nothing can be keyed. */
+bool Editor::ik_switch_keys(GameObject &owner, IKConstraint &c, int mode, float was, const char *label) {
+  GameObject *root = anim_root();
+  if (!root || !anim_keyable(&owner)) return false;
+  struct Key {
+    std::string path;
+    const char *prop;
+    int axis;
+    float v;
+  };
+  std::vector<Key> keys;
+  auto take = [&](GameObject *g, const char *prop) {
+    if (!g || !anim_keyable(g)) return;
+    for (int a = 0; a < 3; a++) {
+      float v = 0.0f;
+      if (read_anim_value(*g, prop, a, v)) keys.push_back({anim_path(*root, *g), prop, a, v});
+    }
+  };
+  /* Both the bones and the handles, whichever way: the pose at the switch is the same for both, and each side's keys
+   * then pin it (FK keys left to drift toward a later switch's would move the FK stretch - review 348). */
+  for (GameObject *b : ik_turned_bones(owner, c)) take(b, "Rotation");
+  GameObject *target = ik_target_of(*scene_, owner);
+  take(target, "Position");
+  if (c.rotate_end) take(target, "Rotation");
+  take(ik_pole_of(*scene_, owner), "Position");
+  const std::string wpath = anim_path(*root, owner);
+  const float f = anim_key_frame(&owner), now = c.weight;
+  anim_edit_keys(label, [&](AnimationClip &clip) {
+    for (const Key &k : keys) clip.track(k.path, k.prop, k.axis).set_key(f, k.v);
+    if (mode == 2) return;
+    AnimTrack &w = clip.track(wpath, "IKConstraint.Weight", 0);
+    const bool earlier = std::any_of(w.keys.begin(), w.keys.end(), [&](const AnimKey &k) { return k.frame < f - 0.01f; });
+    if (!earlier && f >= 1.0f) w.set_key(f - 1.0f, was, AnimConstant, false);
+    w.set_key(f, now, AnimConstant, false);
+  });
+  return true;
+}
+
+/* The bone carrying a limb's IK (the forearm or the shin, else the hand or the foot) in a rig's analysis. */
+static GameObject *limb_ik_owner(const gait::Rig &r, int limb) {
+  GameObject *lower = nullptr, *end = nullptr;
+  for (const gait::Arm &a : r.arms)
+    if (limb < 2 && a.side == limb % 2) lower = a.lower, end = a.hand;
+  for (const gait::Leg &l : r.legs)
+    if (limb >= 2 && !r.quadruped && l.side == limb % 2) lower = l.lower, end = l.foot;
+  if (lower && lower->get<IKConstraint>()) return lower;
+  return end && end->get<IKConstraint>() ? end : nullptr;
+}
+
+GameObject *Editor::limb_ik_owner(int limb) {
+  GameObject *arm = puppet_rig_of(active_object());
+  if (!arm || limb < 0 || limb > 3) return nullptr;
+  return ::bl::limb_ik_owner(gait::analyse(*scene_, *arm), limb);
+}
+
+bool Editor::limb_ik(int limb, int mode) {
+  if (!puppet_rig_of(active_object())) return Log::warn("FK / IK: select the character (its mesh, its root or a bone)"), false;
+  GameObject *arm = puppet_rig_of(active_object());
+  const gait::Rig r = gait::analyse(*scene_, *arm);
+  if (r.quadruped) return Log::warn("FK / IK: a four-legged rig's limbs aren't named here - select a leg's IK bone and use its Switch to FK / IK"), false;
+  GameObject *owner = ::bl::limb_ik_owner(r, limb);
+  if (!owner) return Log::warn("FK / IK: %s has no IK (Rigging > IK on its forearm or shin)", kLimbNames[limb]), false;
+  if (!ik_switch(*owner, mode)) return false;
+  Log::info("%s: %s", kLimbNames[limb], mode == 0 ? "FK - turn its bones" : mode == 1 ? "IK - move its handle" : "the IK handles moved to the pose");
+  return true;
+}
+
+/* Animation > Puppet > FK / IK: each limb's switch (ticked: IK), and Match. */
+void Editor::draw_puppet_fkik_items() {
+  static const char *const kTitles[] = {"Left Arm", "Right Arm", "Left Leg", "Right Leg"};
+  GameObject *arm = puppet_rig_of(active_object());
+  const gait::Rig r = arm ? gait::analyse(*scene_, *arm) : gait::Rig();  // (once a draw, not once a limb)
+  GameObject *owners[4] = {};
+  for (int limb = 0; limb < 4; limb++) owners[limb] = arm ? ::bl::limb_ik_owner(r, limb) : nullptr;
+  bool any = false;
+  for (int limb = 0; limb < 4; limb++) {
+    GameObject *owner = owners[limb];
+    const IKConstraint *c = owner ? owner->get<IKConstraint>() : nullptr;
+    if (!c) continue;
+    any = true;
+    const bool ik = !ik_off(*c);
+    if (ui_.menu_item(strprintf("%s: IK", kTitles[limb]), nullptr, ik)) limb_ik(limb, ik ? 0 : 1);
+    ui_.tooltip("Ticked: IK - the hand or foot follows its handle. Unticked: FK - turn the bones. The pose stays as it is either way.");
+  }
+  if (!any) return (void)ui_.menu_item("(select a character whose limbs have IK)", nullptr, false, false);
+  ui_.menu_separator();
+  for (int limb = 0; limb < 4; limb++)
+    if (owners[limb] && ui_.menu_item(strprintf("Match %s's Handles to the Pose", kTitles[limb]))) limb_ik(limb, 2);
 }
 
 }  // namespace bl

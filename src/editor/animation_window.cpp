@@ -1263,6 +1263,9 @@ void Editor::draw_puppet_menu() {
     draw_puppet_body_items();  // (task 0289)
     u.menu_separator();
     u.submenu("Handle Bones", u.px(280), [this] { draw_puppet_handle_items(); });
+    u.submenu("FK / IK", u.px(300), [this] { draw_puppet_fkik_items(); });  // (round 348)
+    u.tooltip("Each limb IK (its handle places the hand or foot) or FK (turn its bones for arcs and swings), switched without\n"
+              "the pose jumping; keyed at the playhead with Record on.");
     u.tooltip("Which bone each Puppet Posing handle drags - the hands, the feet, the head, the hips. Found from the rig; when it\n"
               "picks the wrong bone, select the right one and choose Use the Selected Bone (kept with the armature).");
   });

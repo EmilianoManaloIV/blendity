@@ -53,7 +53,7 @@ GameObject *named_under(const Scene &scene, const GameObject &root, const std::s
 void find_ik(const Scene &scene, const GameObject &character, GameObject *lower, GameObject *end, GameObject *&target, GameObject *&pole) {
   for (GameObject *g : {lower, end}) {
     const IKConstraint *ik = g ? g->get<IKConstraint>() : nullptr;
-    if (!ik || !ik->enabled) continue;
+    if (!ik || !ik->enabled || ik_off(*ik)) continue;  // (round 348: an FK limb's bones are posed, not its handle)
     target = named_under(scene, character, ik->target);
     pole = named_under(scene, character, ik->pole);
     if (target) return;

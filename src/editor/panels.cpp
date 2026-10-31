@@ -1787,6 +1787,17 @@ void Editor::draw_inspector(const Recti &r) {
       }
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
       if (dynamic_cast<Armature *>(c)) draw_puppet_controls_extras(*g, lay);  // (round 347: the analysis' problems)
+      if (auto *ikc = dynamic_cast<IKConstraint *>(c)) {  // (round 348: FK / IK without a jump)
+        const Recti row = lay.row(u.row_h() + u.px(2));
+        const int bw = (row.w - u.px(16)) / 3;
+        const bool fk = ik_off(*ikc);
+        if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Switch to FK", fk)) ik_switch(*g, 0);
+        u.tooltip("Weight 0: turn the bones by hand - the pose the IK left stays (keyed with Record on).");
+        if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Switch to IK", !fk)) ik_switch(*g, 1);
+        u.tooltip("Weight 1: the target and the pole move to where the bones are, so the pose stays (keyed with Record on).");
+        if (u.button({row.x + u.px(12) + bw * 2, row.y, bw, row.h}, "Match Handles")) ik_switch(*g, 2);
+        u.tooltip("The target and the pole to the bones' pose, the Weight as it is.");
+      }
       /* Camera: an eyedropper for the focus distance (Blender: the Focus Distance
        * eyedropper; Unity HDRP: Focus Distance). */
       if (dynamic_cast<Camera *>(c)) {
