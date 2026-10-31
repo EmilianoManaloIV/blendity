@@ -43,21 +43,36 @@ void Editor::set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye) {
   flatten_view_.ortho = proj.m[15] == 1.0f;
 }
 
-/* The pivot of a Camera Flatten: the middle of its object's and the meshes' below it bounds, its origin, or a bone
- * below it by name (else the bounds' middle). */
+/* The object a Camera Flatten's Pivot Object names (round 338): a bone of that name below it first (round 334's files
+ * name bones, and a face mesh may share the head bone's name), then any object below it, then the scene's; null when
+ * none is (or the pivot isn't an object). */
+const GameObject *Editor::camera_flatten_pivot_object(const GameObject &owner, const CameraFlatten &cf) {
+  if (cf.pivot != 2 || cf.bone.empty()) return nullptr;
+  const GameObject *bone = nullptr, *any = nullptr;
+  std::function<void(const GameObject &)> walk = [&](const GameObject &o) {
+    if (o.name == cf.bone && !any) any = &o;
+    if (o.name == cf.bone && !bone && o.get<Bone>()) bone = &o;
+    for (const GameObject *c : o.children) walk(*c);
+  };
+  walk(owner);
+  if (bone) return bone;
+  return any ? any : scene_->find_by_name(cf.bone);
+}
+
+/* The pivot of a Camera Flatten: the middle of its object's and the meshes' below it bounds, its origin, or the object
+ * its Pivot Object names (camera_flatten_pivot_object) - else the bounds' middle. */
 Vec3 Editor::camera_flatten_pivot(const GameObject &owner, const CameraFlatten &cf) {
   const auto it = flatten_pivots_.find(owner.id);
   if (it != flatten_pivots_.end()) return it->second;
   Vec3 p = owner.world_position();
-  const GameObject *bone = nullptr;
   AABB b;
   std::function<void(const GameObject &)> walk = [&](const GameObject &o) {
     if (o.get<MeshFilter>()) b.add(o.world_bounds());
-    if (!bone && o.get<Bone>() && o.name == cf.bone) bone = &o;
     for (const GameObject *c : o.children) walk(*c);
   };
   walk(owner);
-  if (cf.pivot == 2 && bone) p = bone->world_position();
+  const GameObject *bone = camera_flatten_pivot_object(owner, cf);
+  if (bone) p = bone->world_position();
   else if (cf.pivot != 1 && b.valid()) p = b.center();
   flatten_pivots_[owner.id] = p;
   return p;
@@ -301,7 +316,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   const uint64_t parent = g.parent ? g.parent->id : 0;
   /* Camera Flatten (round 334): what the Game view and the previews draw - its fields and its tick; on a root without
    * a mesh too, so the scene's hash moves for its children. */
-  const uint64_t flat_key = flatten ? hash_component(*flatten) ^ (uint64_t)flatten->enabled << 63 : 0;
+  uint64_t flat_key = flatten ? hash_component(*flatten) ^ (uint64_t)flatten->enabled << 63 : 0;
+  /* (Round 338: where its pivot object is - an empty moved by hand is hashed nowhere else.) */
+  if (const GameObject *po = flatten ? camera_flatten_pivot_object(g, *static_cast<const CameraFlatten *>(flatten)) : nullptr) {
+    const Vec3 at = po->world_position();
+    flat_key = mix_bytes(flat_key, &at, sizeof(at));
+  }
   if (!mr && !l && !pv) {
     mix(&parent, 8);
     mix(&flat_key, 8);

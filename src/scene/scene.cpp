@@ -1363,12 +1363,18 @@ void CameraFlatten::reflect(Reflector &r) {
   r.field("Amount", amount, 0.01f, 0.0f, 1.0f);
   r.help("How much of the depth along the view goes: 0 as modelled, 1 flat as a card (2 % kept). The Scene view shows\n"
          "the true shape; the Game view and renders the flattened one, shaded as the true one.");
-  static const char *kPivots[] = {"Bounds Center", "Object Origin", "Bone"};
+  static const char *kPivots[] = {"Bounds Center", "Object Origin", "Object or Bone"};
   r.enumeration("Pivot", pivot, kPivots, 3);
-  r.help("What stays put while the depth squashes: the middle of this object and the meshes below it, its origin, or a\n"
-         "bone (the head, so the face keeps its place).");
-  r.text("Pivot Bone", bone);
-  r.help("With Pivot Bone: the bone's name, below this object (Head, head...).");
+  r.help("What stays put while the depth squashes: the middle of this object and the meshes below it, its origin, or an\n"
+         "object or a bone (the head, so the face keeps its place).");
+  /* Round 338: files keep the round-334 key too, so older scenes load and older builds read newer ones - read first,
+   * so a newer Pivot Object wins. */
+  if (r.serializing()) r.text("Pivot Bone", bone);
+  const std::string before = bone;
+  r.object("Pivot Object", bone);
+  r.help("Drag an object or a bone here from the Hierarchy, or pick it: the depth squashes about it (the head bone, so the\n"
+         "face keeps its place). A bone of that name below this object first, then any object below it, then the scene's.");
+  if (!r.serializing() && bone != before && !bone.empty()) pivot = 2;  // (a drop or a pick: the pivot is that object)
   static const char *kDirs[] = {"Toward the Camera", "View Axis"};
   r.enumeration("Direction", direction, kDirs, 2);
   r.help("Toward the Camera: along the line from the camera to the pivot. View Axis: along the view's forward (an\n"

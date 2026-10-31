@@ -546,18 +546,18 @@ static const GameObject *find_head_bone(const GameObject &g) {
   return nullptr;
 }
 
-static const char *kFlattenUsage = "flatten [amount 0..1] | pivot center|origin|bone <name> | direction camera|axis | preset anime | remove";
+static const char *kFlattenUsage = "flatten [amount 0..1] | pivot center|origin|object <name> | direction camera|axis | preset anime | remove";
 
-/* The bone named `name` below g (or g itself), or null. */
-static const GameObject *find_bone_named(const GameObject &g, const std::string &name) {
-  if (g.get<Bone>() && g.name == name) return &g;
+/* The object named `name` below g (or g itself), or null - a bone, an empty, a mesh (round 338: any object). */
+static const GameObject *find_named_below(const GameObject &g, const std::string &name) {
+  if (g.name == name) return &g;
   for (const GameObject *c : g.children)
-    if (const GameObject *b = find_bone_named(*c, name)) return b;
+    if (const GameObject *b = find_named_below(*c, name)) return b;
   return nullptr;
 }
 
 /* One object's Camera Flatten set by the command's words; false (with the usage) when they don't say what to set. */
-static bool flatten_set(CameraFlatten &cf, const GameObject &g, const std::vector<std::string> &t) {
+static bool flatten_set(CameraFlatten &cf, const GameObject &g, const Scene &scene, const std::vector<std::string> &t) {
   const std::string op = t.size() > 1 ? to_lower(t[1]) : "";
   const std::string a2 = t.size() > 2 ? to_lower(t[2]) : "";
   if (op.empty()) return true;  // (just added: its own defaults)
@@ -569,8 +569,9 @@ static bool flatten_set(CameraFlatten &cf, const GameObject &g, const std::vecto
     return true;
   }
   if (op == "pivot" && (a2 == "center" || a2 == "origin")) return cf.pivot = a2 == "origin" ? 1 : 0, true;
-  if (op == "pivot" && a2 == "bone" && t.size() > 3) {
-    if (!find_bone_named(g, t[3])) Log::warn("flatten: no bone '%s' below %s (names are exact: the bounds' middle is used meanwhile)", t[3].c_str(), g.name.c_str());
+  if (op == "pivot" && (a2 == "object" || a2 == "bone") && t.size() > 3) {  // ("bone": round 334's word)
+    if (!find_named_below(g, t[3]) && !scene.find_by_name(t[3]))
+      Log::warn("flatten: no object '%s' below %s or in the scene (names are exact: the bounds' middle is used meanwhile)", t[3].c_str(), g.name.c_str());
     cf.pivot = 2, cf.bone = t[3];
     return true;
   }
@@ -615,11 +616,11 @@ void Editor::flatten_command(const std::vector<std::string> &t) {
     return;
   }
   CameraFlatten probe;  // (the words checked once, before any object is touched)
-  if (!flatten_set(probe, *sel[0], t)) return Log::warn("%s", kFlattenUsage);
+  if (!flatten_set(probe, *sel[0], *scene_, t)) return Log::warn("%s", kFlattenUsage);
   for (GameObject *g : sel) {
     CameraFlatten *cf = g->get<CameraFlatten>();
     if (!cf) cf = g->add<CameraFlatten>();
-    flatten_set(*cf, *g, t);
+    flatten_set(*cf, *g, *scene_, t);
   }
   mark_changed("Camera Flatten");
   Log::info("Camera Flatten on %zu object(s): the Game view and renders show it", sel.size());
