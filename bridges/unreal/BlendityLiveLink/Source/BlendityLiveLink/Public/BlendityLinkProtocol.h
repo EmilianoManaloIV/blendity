@@ -105,6 +105,7 @@ bool apply_deform(GlbMesh &mesh, const uint8_t *data, size_t n);
 struct Endpoint {
   int port = 0;
   std::string scene, app;
+  std::string inbox;  // (round 374: where Send to Blendity writes; "" from an older Blendity)
 };
 /* ~/.blendity/livelink.json (BLENDITY_PREFS_DIR moves it): where Blendity's Live Link listens. */
 std::string discovery_path();
@@ -112,5 +113,29 @@ std::string discovery_path();
 bool read_discovery(const std::string &path, Endpoint &out);
 /* The line a bridge sends first: who it is. */
 std::string hello(const std::string &app);
+
+/* ------------------------------------------------------------------------------------------------ Send to Blendity */
+
+/* Round 374: an actor as Send to Blendity's snapshot.json names it (docs/LIVELINK.md, Send to Blendity), from Unreal's
+ * own values: the level's model (an FBX) carries the meshes; this carries what it can't. */
+struct SnapActor {
+  std::string name, path, cls;  // (path: the attach parents' labels, '/' between; cls: a Blueprint's class path, "" for none)
+  double loc[3] = {0, 0, 0};    // (Unreal's: centimetres, X forward, Y right, Z up)
+  double quat[4] = {0, 0, 0, 1};
+  double scale[3] = {1, 1, 1};
+  int light = 0;  // 0 none, 1 directional, 2 point, 3 spot, 4 rect
+  double color[3] = {1, 1, 1};  // (linear)
+  double intensity = 0;         // (lux for a directional light, candela for the others)
+  double radius_cm = 1000, outer_deg = 44, inner_deg = 0, width_cm = 64, height_cm = 64;
+  bool camera = false, ortho = false;
+  double hfov_deg = 90, aspect = 16.0 / 9.0, near_cm = 10, far_cm = 100000, ortho_width_cm = 512;
+};
+/* snapshot.json's text: each actor's transform in Blendity's axes - Unreal's (x, y, z) cm is (y, z, x) / 100, both
+ * left-handed, a rotation's parts permuted the same way, a light's or camera's +X front Blendity's +Z - its light and
+ * camera in Live Link's fields (the applier's units turned around), its class. */
+std::string snapshot_json(const std::string &source, const std::string &name, const std::string &model, const std::vector<SnapActor> &actors);
+/* Unreal's FBX (Z up, front -Y, unforced front axis) comes into Blendity as (-x, z, y): 90 degrees about Y short of
+ * the snapshot's (y, z, x). snapshot.json's model_rotation, which Blendity turns the model by (review 374). */
+constexpr double kFbxModelRotation[4] = {0.0, 0.70710678118654752, 0.0, 0.70710678118654752};
 
 }  // namespace blendity_link

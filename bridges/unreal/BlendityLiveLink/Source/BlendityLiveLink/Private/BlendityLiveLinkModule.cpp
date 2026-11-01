@@ -2,6 +2,7 @@
 // Blendity Live Link for Unreal 5.3+ (task 0277): an editor module with a dock tab (Window > Blendity Live Link) that
 // shows the state, Auto Connect, a port and Connect / Disconnect; the client is ticked by the core ticker.
 #include "BlendityLinkClient.h"
+#include "BlendityLinkSnapshot.h"
 #include "Containers/Ticker.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
@@ -112,10 +113,35 @@ private:
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(6)[SNew(STextBlock).AutoWrapText(true).Text_Lambda([this] { return FText::FromString(Client.Status); })]
 			+ SVerticalBox::Slot().AutoHeight().Padding(6)[SNew(STextBlock).Text_Lambda([this] { return CountsText(); })]
+			+ SVerticalBox::Slot().AutoHeight().Padding(6)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)
+				[
+					SNew(SButton).Text(LOCTEXT("Send", "Send to Blendity"))
+					.ToolTipText(LOCTEXT("SendTip", "The level to Blendity as a snapshot: its FBX, each actor's transform, lights, cameras and Blueprint class. Blendity imports it as one Undo step."))
+					.OnClicked_Lambda([this] { return Send(false); })
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SButton).Text(LOCTEXT("SendSel", "Send Selected"))
+					.ToolTipText(LOCTEXT("SendSelTip", "Only the selected actors to Blendity."))
+					.OnClicked_Lambda([this] { return Send(true); })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(6)[SNew(STextBlock).AutoWrapText(true).Text_Lambda([this] { return FText::FromString(SendStatus); })]
 		];
 	}
 
+	FReply Send(bool bSelectedOnly)
+	{
+		BlendityWriteSnapshot(bSelectedOnly, SendStatus);
+		UE_LOG(LogTemp, Display, TEXT("%s"), *SendStatus);
+		return FReply::Handled();
+	}
+
 	FBlendityLinkClient Client;
+	FString SendStatus;  // (round 374: the last Send to Blendity's result)
 	FTSTicker::FDelegateHandle TickHandle;
 };
 

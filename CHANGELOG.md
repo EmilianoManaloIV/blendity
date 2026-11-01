@@ -2,6 +2,48 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 374): Blender and Unreal into Blendity
+
+**Asked:** Phase E's sixth round: .blend files through the installed Blender; Send to Blendity in the Unreal and
+Blender bridges.
+
+**Added (task 0351)**
+- **Snapshots** (`scene/snapshot`, docs/LIVELINK.md): a folder `<name>.blendity-snapshot` with the program's own
+  model and snapshot.json (each object's light and camera in Live Link's fields, an engine class, custom properties,
+  a transform for what the model doesn't hold). `import <folder>.blendity-snapshot` (or a drop) brings it in through
+  the usual model import, as one Undo step.
+- **.blend** (`import <file>.blend`, a drop, File > Import Model...): Blender in the background writes the snapshot
+  (`bridges/blender/blend_to_snapshot.py`), then Blendity imports it; `blender path [exe]` names Blender.
+- **The inbox:** Live Link's discovery file names `<project>/Incoming`; a bridge's snapshot there is imported within
+  a second and moved to Done (`livelink inbox` checks now).
+- **Blender's bridge:** Send to Blendity and Selected in its sidebar panel.
+- **Unreal's bridge:** Send to Blendity and Send Selected in its dock tab. The level goes out through Unreal's FBX
+  exporter, and each actor's transform, lights, cameras and Blueprint class are written by `snapshot_json` in the
+  protocol layer.
+- `finish_import` takes a hook run before its Undo step.
+- **The Opus review's fixes:**
+  - Unreal's FBX frame is turned by the snapshot's `model_rotation`, and meshes keep the model's placement (they had
+    come in turned 90 degrees);
+  - a one-object model no longer stacks the transform;
+  - Live Link's own actors stay out of Unreal's FBX;
+  - imports wait out Play;
+  - Blender runs with factory settings and no autoexec;
+  - Unreal's FBX options and light units are set by the plugin;
+  - the camera sensor is kept;
+  - Blender's selection is restored and modifiers are applied when no shape keys would be lost;
+  - failures are said aloud.
+
+**Checked:** `tests_round374`:
+- snapshot.json and its refusals;
+- a snapshot imported as one Undo step;
+- an FBX written as Unreal writes it, turned so a car's nose and its headlight agree;
+- the inbox;
+- a real .blend through Blender 5.2 (BLENDITY_TEST_BRIDGE);
+- the Try-it.
+
+test_livelink adds Unreal's snapshot read by Blendity (place, facing, light units, cone, fov, class, the inbox). The
+Unreal plugin was built with BuildPlugin.
+
 ## 2026-11-01 (round 373): Godot scenes in and back
 
 **Asked:** Phase E's fifth round: a Godot project's scenes brought in for the art and layout, code kept in Godot.

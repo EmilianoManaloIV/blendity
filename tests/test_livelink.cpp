@@ -2,6 +2,7 @@
 // blendity_tests: Live Link (task 0172, ADR 0055) - the server, the protocol, the editor's link - with a real client
 // on 127.0.0.1, as a bridge would connect.
 #include "test_common.h"
+#include "../src/scene/snapshot.h"
 #include "../src/core/json.h"
 #include "../src/core/net_server.h"
 /* The Unreal plugin's protocol layer (task 0277): standard C++ only, compiled here so every build replays it. */
@@ -705,6 +706,38 @@ static void tests_round297() {
     CHECK(b[0].id() == 7 && b[two].number() == 2 && b[one64].number() == 1 && b[zero32].id() == 7 && b[one_l].number() == 1);
     CHECK(b[-1].type == ul::Json::Null && b[-1].number(-7) == -7);  // (a negative index is past the end)
     CHECK(b[3].type == ul::Json::Null && j["bones"][1][0].id() == 8 && j["bones"][2].size() == 0);
+  });
+  test("Send to Blendity from Unreal (round 374): the plugin's snapshot.json read by Blendity - a yawed sun at Unreal's (100, 200, 300) cm lands at (2, 3, 1) m facing Unreal's +Y, its lux turned into Live Link's intensity, a spot's half cone doubled, a camera's horizontal fov made vertical, a Blueprint's class kept; the discovery file's inbox", [] {
+    namespace ul = blendity_link;
+    const double s45 = std::sqrt(0.5);
+    ul::SnapActor sun, spot, cam, door;
+    sun.name = "Sun", sun.light = 1, sun.intensity = 3.14159265358979 * 2.0;
+    sun.loc[0] = 100, sun.loc[1] = 200, sun.loc[2] = 300, sun.quat[2] = s45, sun.quat[3] = s45;
+    spot.name = "Spot \"A\"", spot.light = 3, spot.intensity = 5000, spot.outer_deg = 30, spot.inner_deg = 10, spot.radius_cm = 700;
+    cam.name = "Cam", cam.camera = true, cam.hfov_deg = 90, cam.aspect = 16.0 / 9.0;
+    door.name = "Door", door.path = "Room/Door", door.cls = "/Game/BP_Door.BP_Door_C";
+    const std::string text = ul::snapshot_json("Unreal 5.8", "Yard", "Yard.fbx", {sun, spot, cam, door});
+    Snapshot snap;
+    std::string why;
+    CHECK(read_snapshot(text, snap, why) && snap.objects.size() == 4 && snapshot_engine(snap) == "Unreal" && snap.model == "Yard.fbx");
+    if (snap.objects.size() != 4) return;
+    const SnapshotObject &o = snap.objects[0];
+    const Vec3 fwd = o.transform.rotation.rotate(Vec3(0, 0, 1));
+    std::printf("    the sun at (%g, %g, %g) facing (%g, %g, %g)\n", o.transform.position.x, o.transform.position.y, o.transform.position.z, fwd.x, fwd.y, fwd.z);
+    CHECK(length(o.transform.position - Vec3(2, 3, 1)) < 1e-5f && length(fwd - Vec3(1, 0, 0)) < 1e-5f);  // (Unreal's +Y is Blendity's +X)
+    Light sl, pl;
+    snapshot_light(o.light, sl);
+    snapshot_light(snap.objects[1].light, pl);
+    CHECK(sl.type == 0 && std::fabs(sl.intensity - 2.0f) < 1e-5f && pl.type == 2 && std::fabs(pl.intensity - 5.0f) < 1e-5f && std::fabs(pl.spot_angle - 60.0f) < 1e-4f &&
+          std::fabs(pl.inner_spot_angle - 20.0f) < 1e-4f && std::fabs(pl.range - 7.0f) < 1e-5f && snap.objects[1].name == "Spot \"A\"");
+    Camera c;
+    snapshot_camera(snap.objects[2].camera, c);
+    CHECK(std::fabs(c.fov - 58.7155f) < 1e-3f && snap.objects[3].engine_class == "/Game/BP_Door.BP_Door_C" && snap.objects[3].path == "Room/Door");
+    const std::string dir = test_dir() + "/ue374";
+    fs::make_dirs(dir);
+    ul::Endpoint ep;
+    CHECK(fs::write_file(dir + "/livelink.json", "{\"protocol\":\"blendity-livelink/1\",\"port\":40100,\"inbox\":\"C:/p/Incoming\"}") &&
+          ul::read_discovery(dir + "/livelink.json", ep) && ep.inbox == "C:/p/Incoming");
   });
 }
 

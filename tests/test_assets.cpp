@@ -13,6 +13,7 @@
 #include "../src/scene/lod.h"
 #include "../src/scene/audio.h"
 #include "../src/scene/godot_scene.h"
+#include "../src/scene/snapshot.h"
 #include "../src/scene/unity_package.h"
 #include "../src/scene/unity_scene.h"
 #include "../src/scene/unity_material.h"
@@ -9291,6 +9292,193 @@ static void tests_round373() {
   });
 }
 
+/* How many objects carry a name (round 374: MSVC rejected a counting lambda beside a local Cleanup struct). */
+static int count_named(Scene &sc, const std::string &name) {
+  int n = 0;
+  sc.for_each([&](GameObject &g) { n += g.name == name; });
+  return n;
+}
+
+static void tests_round374() {
+  test("Send to Blendity's snapshots (round 374): snapshot.json read - Live Link's light and camera fields, a class and custom properties, a transform; a model path leaving its folder refused", [] {
+    Snapshot s;
+    std::string why;
+    const std::string json = "{\"snapshot\": 1, \"source\": \"Unreal 5.5\", \"name\": \"Level\", \"model\": \"Level.fbx\", \"objects\": ["
+                             "{\"name\": \"Door\", \"path\": \"Room/Door\", \"class\": \"/Game/BP_Door.BP_Door_C\", \"props\": {\"locked\": true, \"code\": 1234, \"tag\": \"red\"}},"
+                             "{\"name\": \"Sun\", \"light\": {\"type\": \"directional\", \"intensity\": 2.5, \"color\": [1, 0.5, 0.25]}, "
+                             "\"transform\": {\"position\": [1, 2, 3], \"rotation\": [0, 0.70710678, 0, 0.70710678], \"scale\": [1, 1, 1]}}]}";
+    CHECK(read_snapshot(json, s, why) && s.objects.size() == 2 && snapshot_engine(s) == "Unreal" && s.name == "Level" && s.model == "Level.fbx");
+    if (s.objects.size() != 2) return;
+    CHECK(s.objects[0].path == "Room/Door" && s.objects[0].engine_class == "/Game/BP_Door.BP_Door_C" && s.objects[0].props == "locked = true\ncode = 1234\ntag = red\n");
+    CHECK(s.objects[1].has_light && s.objects[1].has_transform && !s.objects[1].has_camera && length(s.objects[1].transform.position - Vec3(1, 2, 3)) < 1e-6f);
+    Light l;
+    snapshot_light(s.objects[1].light, l);
+    CHECK(l.type == 0 && std::fabs(l.intensity - 2.5f) < 1e-6f && std::fabs(l.color.y - 0.5f) < 1e-6f);
+    Snapshot bad;
+    CHECK(!read_snapshot("{\"snapshot\": 1, \"model\": \"../../outside.glb\"}", bad, why) && !why.empty());
+    CHECK(!read_snapshot("{\"snapshot\": 1, \"model\": \"C:/Windows/x.glb\"}", bad, why) && !read_snapshot("{\"model\": \"a.glb\"}", bad, why));
+  });
+  test("a snapshot imported (round 374): its model through the usual import, the snapshot's name on the root, a class and properties as an Engine Component, a light and a camera made where the snapshot puts them, all one Undo step; the inbox imports a bridge's snapshot and moves it to Done", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string project = fs::parent(resolve_asset_path("Assets"));
+    const std::string dir = fs::join(test_dir(), "r374"), snap = fs::join(dir, "Level.blendity-snapshot"), inbox = fs::join(project, "Incoming");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    static const char *const kLeft[] = {"Assets/Meshes/r374kit.obj", "Assets/Materials/r374kit", "Assets/Textures/r374kit", "Assets/Meshes/r374inbox.obj",
+                                        "Assets/Materials/r374inbox"};
+    struct Cleanup {  // (the scratch project left as it was: review 360's lesson)
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(inbox, e2);
+      std::filesystem::remove_all(dir, e2);
+      for (const char *p : kLeft) std::filesystem::remove_all(resolve_asset_path(p), e2);
+    }};
+    fs::make_dirs(snap);
+    const std::string obj = "o Crate\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\no Barrel\nv 0 0 1\nv 1 0 1\nv 0 1 1\nf 4 5 6\n";
+    const std::string json = "{\"snapshot\": 1, \"source\": \"Unreal 5.5\", \"name\": \"Level\", \"model\": \"r374kit.obj\", \"objects\": ["
+                             "{\"name\": \"Crate\", \"class\": \"/Game/BP_Crate.BP_Crate_C\", \"props\": {\"health\": 42}},"
+                             "{\"name\": \"Lamp\", \"light\": {\"type\": \"point\", \"intensity\": 3, \"range\": 7}, \"transform\": {\"position\": [1, 2, 3], \"rotation\": [0, 0, 0, 1]}},"
+                             "{\"name\": \"Cam\", \"camera\": {\"fov\": 50, \"near\": 0.2, \"far\": 300}, \"transform\": {\"position\": [0, 1.5, -6], \"rotation\": [0, 0, 0, 1]}}]}";
+    CHECK(fs::write_file(fs::join(snap, "r374kit.obj"), obj) && fs::write_file(fs::join(snap, "snapshot.json"), json));
+    ed.command("import " + snap);
+    Scene &sc = ed.scene();
+    GameObject *root = sc.find_by_name("Level"), *crate = sc.find_by_name("Crate"), *lamp = sc.find_by_name("Lamp"), *cam = sc.find_by_name("Cam");
+    CHECK(root && crate && lamp && cam && ed.selected_object() == root);
+    if (!root || !crate || !lamp || !cam) return;
+    const EngineComponent *e = crate->get<EngineComponent>();
+    CHECK(e && e->engine == "Unreal" && e->type == "/Game/BP_Crate.BP_Crate_C" && e->data == "health = 42\n" && crate->get<MeshFilter>());
+    CHECK(lamp->light() && lamp->light()->type == 1 && std::fabs(lamp->light()->intensity - 3.0f) < 1e-6f && std::fabs(lamp->light()->range - 7.0f) < 1e-6f &&
+          lamp->parent == root && length(lamp->local().position - Vec3(1, 2, 3)) < 1e-4f);
+    CHECK(cam->camera() && std::fabs(cam->camera()->fov - 50.0f) < 1e-4f && std::fabs(cam->camera()->far_clip - 300.0f) < 1e-3f && length(cam->local().position - Vec3(0, 1.5f, -6)) < 1e-4f);
+    ed.command("undo");
+    CHECK(!ed.scene().find_by_name("Level") && !ed.scene().find_by_name("Lamp"));  // (one step took all of it away)
+    /* The inbox: a bridge's snapshot written into Incoming, then livelink inbox (Live Link's tick does it each second). */
+    const std::string sent = fs::join(inbox, "Sent.blendity-snapshot");
+    fs::make_dirs(sent);
+    CHECK(fs::write_file(fs::join(sent, "r374inbox.obj"), obj) &&
+          fs::write_file(fs::join(sent, "snapshot.json"), "{\"snapshot\": 1, \"source\": \"Blender 5.2\", \"name\": \"Sent\", \"model\": \"r374inbox.obj\"}"));
+    ed.command("livelink inbox");
+    CHECK(ed.scene().find_by_name("Sent") && !fs::exists(sent) && fs::exists(fs::join(inbox, "Done/Sent.blendity-snapshot/snapshot.json")));
+    ed.command("livelink inbox");
+    CHECK(count_named(ed.scene(), "Sent") == 1);  // (moved to Done: not again)
+  });
+  test("an Unreal snapshot's frame (round 374, review): an FBX as Unreal writes it (Z up, front -Y) turned by the snapshot's model_rotation, so a car's nose at Unreal's +50 cm X lies 0.5 m along Blendity's +Z from its pivot, where the snapshot puts the headlight; a lone object keeps its name and the model's place; a refused snapshot is said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = fs::join(test_dir(), "r374 frame"), snap = fs::join(dir, "Yard.blendity-snapshot"), lone = fs::join(dir, "Lone.blendity-snapshot");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    static const char *const kLeft[] = {"Assets/Meshes/r374yard.fbx", "Assets/Materials/r374yard", "Assets/Meshes/r374lone.obj", "Assets/Materials/r374lone"};
+    struct Cleanup {
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(dir, e2);
+      for (const char *p : kLeft) std::filesystem::remove_all(resolve_asset_path(p), e2);
+    }};
+    fs::make_dirs(snap);
+    fs::make_dirs(lone);
+    const std::string fbx = "; FBX 7.4.0 project file\n"
+        "FBXHeaderExtension:  {\n\tFBXHeaderVersion: 1003\n\tFBXVersion: 7400\n}\n"
+        "GlobalSettings:  {\n\tVersion: 1000\n\tProperties70:  {\n"
+        "\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",2\n\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "\t\tP: \"FrontAxis\", \"int\", \"Integer\", \"\",1\n\t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",-1\n"
+        "\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1\n\t}\n}\n"
+        "Objects:  {\n\tGeometry: 100, \"Geometry::Car\", \"Mesh\" {\n\t\tVertices: *9 {\n\t\t\ta: 50,0,0,0,10,0,0,0,10\n\t\t}\n"
+        "\t\tPolygonVertexIndex: *3 {\n\t\t\ta: 0,1,-3\n\t\t}\n\t}\n"
+        "\tGeometry: 101, \"Geometry::Rock\", \"Mesh\" {\n\t\tVertices: *9 {\n\t\t\ta: 0,0,0,10,0,0,0,0,10\n\t\t}\n"
+        "\t\tPolygonVertexIndex: *3 {\n\t\t\ta: 0,1,-3\n\t\t}\n\t}\n"
+        "\tModel: 200, \"Model::Car\", \"Mesh\" {\n\t\tVersion: 232\n\t\tProperties70:  {\n"
+        "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",100,0,0\n\t\t}\n\t}\n"
+        "\tModel: 201, \"Model::Rock\", \"Mesh\" {\n\t\tVersion: 232\n\t\tProperties70:  {\n"
+        "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0\n\t\t}\n\t}\n}\n"
+        "Connections:  {\n\tC: \"OO\",100,200\n\tC: \"OO\",101,201\n\tC: \"OO\",200,0\n\tC: \"OO\",201,0\n}\n";
+    /* What the plugin's snapshot_json writes for the car at Unreal's (100, 0, 0) and a headlight spot there: (0, 0, 1) m. */
+    const std::string json = "{\"snapshot\": 1, \"source\": \"Unreal 5.8\", \"name\": \"Yard\", \"model\": \"r374yard.fbx\", \"model_rotation\": [0, 0.70710678, 0, 0.70710678], \"objects\": ["
+                             "{\"name\": \"Car\", \"transform\": {\"position\": [0, 0, 1], \"rotation\": [0, 0, 0, 1], \"scale\": [1, 1, 1]}},"
+                             "{\"name\": \"Head\", \"transform\": {\"position\": [0, 0, 1], \"rotation\": [0, 0, 0, 1], \"scale\": [1, 1, 1]}, \"light\": {\"type\": \"spot\"}}]}";
+    CHECK(fs::write_file(fs::join(snap, "r374yard.fbx"), fbx) && fs::write_file(fs::join(snap, "snapshot.json"), json));
+    ed.command("import " + snap);
+    GameObject *car = ed.scene().find_by_name("Car"), *head = ed.scene().find_by_name("Head");
+    CHECK(car && head && car->get<MeshFilter>() && head->light());
+    if (!car || !head || !car->get<MeshFilter>()) return;
+    Vec3 nose(-1e9f);
+    for (const Vec3 &p : car->get<MeshFilter>()->mesh->positions) {
+      const Vec3 w = car->world_matrix().point(p);
+      nose = w.z > nose.z ? w : nose;
+    }
+    const Vec3 lamp = head->world_position(), lamp_fwd = head->world_matrix().dir(Vec3(0, 0, 1));
+    std::printf("    the nose at (%g, %g, %g), the headlight at (%g, %g, %g) facing (%g, %g, %g)\n", nose.x, nose.y, nose.z, lamp.x, lamp.y, lamp.z, lamp_fwd.x, lamp_fwd.y, lamp_fwd.z);
+    CHECK(length(nose - (lamp + Vec3(0, 0, 0.5f))) < 1e-3f && length(lamp_fwd - Vec3(0, 0, 1)) < 1e-4f);
+    /* M2: a model of one object - it is the root; the snapshot's transform isn't stacked on it, its name kept. */
+    CHECK(fs::write_file(fs::join(lone, "r374lone.obj"), "o Solo\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n") &&
+          fs::write_file(fs::join(lone, "snapshot.json"), "{\"snapshot\": 1, \"name\": \"Lone\", \"model\": \"r374lone.obj\", \"objects\": ["
+                                                          "{\"name\": \"r374lone\", \"class\": \"/Game/BP_Solo.BP_Solo_C\", \"transform\": {\"position\": [5, 0, 0], \"rotation\": [0, 0, 0, 1], \"scale\": [2, 2, 2]}}]}"));
+    ed.command("import " + lone);
+    GameObject *solo = ed.selected_object();
+    CHECK(solo && solo->name == "r374lone" && solo->get<EngineComponent>() && length(solo->local().scale - Vec3(1.0f)) < 1e-5f &&
+          length(solo->world_position() - ed.scene_view_pivot_for_test()) < 1e-4f);
+    /* A snapshot that isn't one: refused aloud. */
+    CHECK(fs::write_file(fs::join(lone, "snapshot.json"), "{\"model\": \"r374lone.obj\"}"));
+    ed.step_frame_headless();  // (the toasts start: the log so far is history)
+    ed.command("import " + lone);
+    ed.step_frame_headless();
+    CHECK(!ed.toasts_for_test().empty() && ed.toasts_for_test().front().text.find("not a Blendity snapshot") != std::string::npos);
+  });
+  test("a .blend through the installed Blender (round 374): a crate with custom properties, a lamp and a camera come in from Blender's own exporter with their light, camera and properties (BLENDITY_TEST_BRIDGE runs it; skipped without)", [] {
+    if (!std::getenv("BLENDITY_TEST_BRIDGE")) return (void)std::printf("    skipped: set BLENDITY_TEST_BRIDGE to run Blender\n");
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::string version;
+    const std::string blender = ed.find_blender_for_test(version);
+    if (blender.empty()) return (void)std::printf("    skipped: Blender isn't installed\n");
+    const std::string dir = fs::join(test_dir(), "r374 blend"), blend = fs::join(dir, "Room.blend"), make = fs::join(dir, "make.py");
+    fs::make_dirs(dir);
+    static const char *const kLeft[] = {"Assets/Meshes/Room.glb", "Assets/Materials/Room", "Assets/Textures/Room", "Library/Blend"};
+    struct Cleanup {  // (on every way out, a failed CHECK's too: review 374)
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(dir, e2);
+      for (const char *p : kLeft) std::filesystem::remove_all(resolve_asset_path(p), e2);
+    }};
+    CHECK(fs::write_file(make, "import sys, bpy\nout = sys.argv[sys.argv.index('--') + 1]\nfor o in list(bpy.data.objects): bpy.data.objects.remove(o)\n"
+                               "bpy.ops.mesh.primitive_cube_add(size=2.0, location=(1.0, 2.0, 3.0))\nc = bpy.context.active_object\nc.name = 'Crate'\nc['health'] = 42\n"
+                               "l = bpy.data.objects.new('Lamp', bpy.data.lights.new('Lamp', 'POINT'))\nbpy.context.scene.collection.objects.link(l)\nl.location = (0, 0, 4)\n"
+                               "k = bpy.data.objects.new('Cam', bpy.data.cameras.new('Cam'))\nbpy.context.scene.collection.objects.link(k)\nk.location = (0, -6, 1.5)\n"
+                               "bpy.ops.wm.save_as_mainfile(filepath=out)\n"));
+    std::string out;
+    CHECK(sys::run_capture({blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python", make, "--", blend}, out, 300) == 0 && fs::exists(blend));
+    ed.command("import " + blend);
+    GameObject *root = ed.scene().find_by_name("Room"), *crate = ed.scene().find_by_name("Crate"), *lamp = ed.scene().find_by_name("Lamp"), *cam = ed.scene().find_by_name("Cam");
+    std::printf("    Blender %s: root %s, crate %s, lamp %s, camera %s\n", version.c_str(), root ? "yes" : "no", crate ? "yes" : "no", lamp && lamp->light() ? "lit" : "no",
+                cam && cam->camera() ? "yes" : "no");
+    CHECK(root && crate && crate->get<MeshFilter>() && lamp && lamp->light() && cam && cam->camera());
+    if (!crate || !cam) return;
+    CHECK(crate->get<EngineComponent>() && crate->get<EngineComponent>()->data.find("health = 42") != std::string::npos);
+    const Vec3 fwd = cam->world_matrix().dir(Vec3(0, 0, 1));  // (Blender's camera at rest looks down: Blendity's -Y)
+    std::printf("    the camera looks (%g, %g, %g)\n", fwd.x, fwd.y, fwd.z);
+    CHECK(fwd.y < -0.99f);
+  });
+  test("the lesson's Try-it (round 374): blender path says which Blender .blend files are read through; a path that isn't a file is refused and not kept", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("blender path");
+    ed.step_frame_headless();  // (the toasts start: the log so far is history)
+    ed.command("blender path C:/no/such/blender.exe");
+    ed.step_frame_headless();
+    CHECK(!ed.toasts_for_test().empty() && ed.toasts_for_test().front().text.find("no file") != std::string::npos);
+    std::string version;
+    CHECK(ed.find_blender_for_test(version) != "C:/no/such/blender.exe");
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -9677,4 +9865,5 @@ void run_assets_tests() {
   tests_round371();
   tests_round372();
   tests_round373();
+  tests_round374();
 }

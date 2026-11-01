@@ -19,7 +19,7 @@ Live Link starts with Blendity (Preferences > Live Link > Start with Blendity; o
 Blendity writes `~/.blendity/livelink.json` (beside its preferences; `BLENDITY_PREFS_DIR` moves both):
 
 ```
-{"protocol":"blendity-livelink/1","port":40100,"pid":1234,"app":"Blendity","version":"0.11.0","scene":"SampleScene","started":1793000000}
+{"protocol":"blendity-livelink/1","port":40100,"pid":1234,"app":"Blendity","version":"0.11.0","scene":"SampleScene","inbox":"C:/Projects/Game/Incoming","started":1793000000}
 ```
 
 and removes it when Live Link stops or Blendity ends (only its own: another Blendity started since owns the file). A
@@ -144,6 +144,43 @@ Each client has its own queue on its own thread, so a slow client never slows th
 thing, so a client that falls behind skips to the latest state instead of replaying every step; messages without such
 a key (`object`, `mesh`, `delete`, `sync`, `play`) are never replaced, and nothing queued after one of them replaces anything
 before it. A client whose queue grows past 256 MB is closed.
+
+## Send to Blendity: snapshots (round 374)
+
+The stream stays one-way. The other direction is a file: a bridge's **Send to Blendity** writes a snapshot of its scene
+into Blendity's inbox, and Blendity imports it.
+
+- **The inbox:** the discovery file names it, `"inbox": "<project>/Incoming"`. Blendity looks there about once a
+  second while Live Link listens (`livelink inbox` looks now). An imported snapshot moves to `Incoming/Done`.
+- **A snapshot** is a folder `<name>.blendity-snapshot` holding:
+  - the model, by the program's own exporter: `<name>.glb` (Blender's glTF) or `<name>.fbx` (Unreal's level
+    export);
+  - `snapshot.json`, written last, so its presence means the folder is whole.
+
+```
+{"snapshot": 1, "source": "Unreal 5.8", "name": "Yard", "model": "Yard.fbx", "objects": [
+ {"name": "Sun", "path": "Sun", "transform": {"position": [2, 3, 1], "rotation": [0, 0.707, 0, 0.707], "scale": [1, 1, 1]},
+  "light": {"type": "directional", "color": [1, 1, 1], "intensity": 2}},
+ {"name": "Door", "path": "Room/Door", "class": "/Game/BP_Door.BP_Door_C", "props": {"locked": true}}]}
+```
+
+- **Each object** is found in the model by `path` (names from the top, `/` between), else by `name`:
+  - **`light` / `camera`:** Live Link's own fields (the `light` and `camera` messages above), in Blendity's units.
+  - **`class`:** an engine's class (an Unreal Blueprint's path).
+  - **`props`:** custom properties. These two become an Engine Component, kept for the way back.
+  - **`transform`** (optional): world, in Blendity's axes (left-handed, Y up, +Z forward, metres). An object with
+    one is placed by it, and made when the model doesn't hold it (Unreal's lights and cameras). A light or camera
+    with none came in the model looking down -Z (glTF's) and is turned to Blendity's +Z.
+- **`model`** is a file name only: a path leaving the folder is refused.
+- **`model_rotation`** (optional, `[x, y, z, w]`): the turn from the model's import frame to the snapshot's, applied to
+  the whole model about the pivot. Unreal's FBX (Z up, front -Y, front axis not forced) comes in as Unreal's
+  (-x, z, y), a quarter turn about Y short of the transforms' (y, z, x), so its plugin writes `[0, 0.7071, 0, 0.7071]`.
+- **Which objects take a `transform`:** an object the model doesn't hold, and a light or camera. A mesh the model
+  holds keeps the model's placement, because its geometry is in that frame.
+- **Who writes them:**
+  - the Blender bridge's Send to Blendity (and Blendity's own `import <file>.blend`, through Blender in the
+    background: `bridges/blender/blend_to_snapshot.py`);
+  - the Unreal bridge's Send to Blendity (`BlendityLinkSnapshot.cpp`).
 
 ## Testing a bridge live (round 318)
 

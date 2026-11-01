@@ -36,6 +36,13 @@ date (and removes what Blendity deleted meanwhile).
 | cameras | the same vertical field of view, clipping, orthographic size, physical lens |
 | armatures and bones | empties posed as the bones (skinned meshes come across as moving vertices) |
 
+## Send to Blendity (round 374)
+
+The sidebar panel's **Send to Blendity** (or **Selected**) writes this scene as a snapshot into the inbox Blendity's
+Live Link names: the glTF exporter's model plus snapshot.json with the lights, cameras and custom properties.
+Blendity imports it within a second. Blendity's own `import <file>.blend` uses the same writer through
+`blend_to_snapshot.py`. Objects Live Link made from Blendity's scene are never sent back.
+
 ## Test
 
 `auto_connect_test.py` (task 0275) runs the add-on against `tools/livelink_fake_server.py`, a stand-in Live Link:

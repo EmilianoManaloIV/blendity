@@ -789,6 +789,7 @@ class Editor {
   };
   const std::vector<Toast> &toasts_for_test() const { return toasts_; }  // (task 0252)
   void clear_toasts_for_test() { toasts_.clear(); }
+  Vec3 scene_view_pivot_for_test() const { return cam_.pivot; }  // (round 374)
   struct JobView {  // (task 0253: one running job as the tray shows it)
     std::string label;
     float progress = -1.0f;  // (-1: none to show)
@@ -1278,6 +1279,23 @@ class Editor {
   std::map<std::string, std::vector<UnityEdit>> unity_edits(const std::string &folder_rel, int &nested, int &copies);
   void export_package_of_selection();
   bool import_godot_scene(const std::string &path);  // (round 373: a .tscn's nodes)
+  /* Round 374 (snapshot_ui.cpp): Send to Blendity's snapshots, .blend files through Blender, the inbox. */
+  bool import_snapshot(const std::string &folder_or_json);
+  bool import_blend(const std::string &path);
+  void blend_job_poll();
+  void poll_snapshot_inbox(bool now);
+  std::string snapshot_inbox() const;
+  void blender_path_command(const std::string &exe);
+  struct BlendJob {
+    std::string blend, out;  // (set before the thread starts)
+    std::atomic<bool> done{false}, ok{false};
+    std::string message;  // (written before `done`)
+  };
+  std::shared_ptr<BlendJob> blend_job_;
+  static void run_blend_job(BlendJob &job, const std::string &blender, const std::string &script);
+  std::string blender_path_;  // (prefs blender_path=: "" finds it)
+  double inbox_checked_ = -100.0;
+  std::set<std::string> inbox_tried_;
   bool export_godot_scene(const std::string &out = "");  // (round 373: the selection's .tscn with its edits)
   std::vector<GodotEdit> godot_edits(const std::string &file, bool format4, int &copies);
   /* Round 372 (unity_export_ui.cpp): the export on a worker, a file at a time. */
@@ -3377,7 +3395,7 @@ class Editor {
   void draw_ipv_outline_row();
   void import_with_shading(const std::string &path, bool copy_into_assets, int shading);  // the console's import <file> <shading>
   void finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
-                     bool rewrite_materials);
+                     bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit = {});  // (round 374: a snapshot's parts, in the same Undo step)
   /* The draw items a view and the import preview share (task 0152): a mesh's, and its toon outline's hull. */
   DrawItem mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing);
   bool outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &out);

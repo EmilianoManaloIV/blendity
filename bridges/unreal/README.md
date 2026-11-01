@@ -57,3 +57,15 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
     stop: 145 ms. Unreal's own static-mesh build (about 75 ms) is most of what is left.
 - **Install a Bridge:** a content-only project with the plugin from Install a Bridge builds
   (`Build.bat UnrealEditor Win64 Development -Project=<project>`), opens, and its replay test passes.
+
+## Send to Blendity (round 374)
+
+The dock tab's **Send to Blendity** (or **Send Selected**) writes the level as a snapshot (docs/LIVELINK.md):
+- **The model:** Unreal's FBX export, run as an automated task with no options dialog.
+- **snapshot.json:**
+  - each actor's transform in Blendity's axes;
+  - lights and cameras in Live Link's fields;
+  - a Blueprint's class path.
+
+It goes into the inbox Blendity's Live Link names, and Blendity imports it within a second. Without Blendity
+running, it goes to `Saved/Blendity`, to drop on Blendity. Live Link's own actors are never sent back.
