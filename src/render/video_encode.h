@@ -19,10 +19,13 @@ std::string description();
 void init();
 /* `frames` (8-bit PNGs, one size) as an MP4 at `fps`: H.264 in BT.709 yuv420p, an odd size padded by repeating the
  * edge pixel. False with a reason in `error` when it can't, and then no file is left. `cancel`, when set, stops it
- * between frames. Slow (seconds a minute of video): call it off the main thread. */
+ * between frames. Slow (seconds a minute of video): call it off the main thread. `audio` (round 365: interleaved
+ * stereo floats at `audio_rate`, from the first frame) goes in as an AAC stream beside the video. */
 bool encode_png_frames(const std::vector<std::string> &frames, float fps, const std::string &out, std::string *error,
-                       const std::atomic<bool> *cancel = nullptr);
+                       const std::atomic<bool> *cancel = nullptr, const std::vector<float> *audio = nullptr, int audio_rate = 48000);
 /* A video file's frame count and picture size, read back by FFmpeg (tests, the log); -1 when it can't. */
 int probe_frames(const std::string &path, int *width = nullptr, int *height = nullptr);
+/* A video file's audio streams and its first one's sample rate (tests); -1 when it can't be read. */
+int probe_audio(const std::string &path, int *rate = nullptr);
 
 }  // namespace bl::video

@@ -427,11 +427,11 @@ void Editor::draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &l
       const int x0 = seq_x_of(lanes, i.start, end), x1 = seq_x_of(lanes, i.start + i.duration(c.get()), end);
       const Recti b{x0, ly + u.px(3), std::max(u.px(4), x1 - x0), lane_h - u.px(6)};
       const bool card = i.kind != (int)SeqKind::Clip;  // (round 364: a picture or a camera cut)
-      static const uint32_t kCardColour[] = {0, Color::hex(0x3F6E8C), Color::hex(0x6E5A8C), Color::hex(0x3C7A52)};
-      u.canvas.fill_rect(b, card ? kCardColour[std::clamp(i.kind, 1, 3)] : c ? bar_colour(i.clip) : Color::hex(0x7A6A2A));
+      static const uint32_t kCardColour[] = {0, Color::hex(0x3F6E8C), Color::hex(0x6E5A8C), Color::hex(0x3C7A52), Color::hex(0x8C6A3F)};
+      u.canvas.fill_rect(b, card ? kCardColour[std::clamp(i.kind, 1, 4)] : c ? bar_colour(i.clip) : Color::hex(0x7A6A2A));
       if (i.name == seqr_.selected_name) u.canvas.rect_outline(b, u.theme.focus, u.px(2));
-      static const char *const kCardWhat[] = {"", " [image]", " [paper]", " [camera cut]"};
-      const std::string who = card ? std::string(kCardWhat[std::clamp(i.kind, 1, 3)]) : i.target.empty() ? std::string(" -> (no object)") : " -> " + i.target;  // (the clip, then what it plays on)
+      static const char *const kCardWhat[] = {"", " [image]", " [paper]", " [camera cut]", " [sound]"};
+      const std::string who = card ? std::string(kCardWhat[std::clamp(i.kind, 1, 4)]) : i.target.empty() ? std::string(" -> (no object)") : " -> " + i.target;  // (the clip, then what it plays on)
       const bool there = card ? seq_card_there(i) : c != nullptr;  // (review 364: a moved file or a renamed camera said)
       u.label({b.x + u.px(4), b.y, b.w - u.px(6), b.h}, (there ? i.name : i.name + " (missing)") + who, u.theme.text_bright);
       if (u.record_buttons) u.button_rects["seq_bar:" + i.name] = b;  // (tests)
@@ -551,11 +551,20 @@ void Editor::draw_seq_details(Sequence &s, const Recti &r) {
   const bool clip_bar = before.kind == (int)SeqKind::Clip;  // (review 364: a card or a cut has no object or speed)
   float speed = i->speed, tin = i->trim_in, tout = i->clip_out(clip_asset(i->clip).get());
   bool sp = false;
+  float volume = i->volume;
+  bool vol = false;
   if (!clip_bar) {
-    label("Shows", u.px(50));
-    u.label({x, y, u.px(270), h}, before.media, u.theme.text);
-    x += u.px(282);
+    const bool sound = before.kind == (int)SeqKind::Audio;
+    label(sound ? "Plays" : "Shows", u.px(50));
+    u.label({x, y, u.px(sound ? 170 : 276), h}, before.media, u.theme.text);  // (a card's path the whole width - review 365)
+    x += u.px(176);
   }
+  if (before.kind == (int)SeqKind::Audio) {  // (round 365: a sound's volume where a clip's speed is)
+    label("Volume", u.px(50));
+    vol = u.float_field(u.id("seq_volume"), {x, y, u.px(50), h}, volume, 0.05f, 0.0f, 4.0f);
+    x += u.px(56);
+  }
+  if (!clip_bar && before.kind != (int)SeqKind::Audio) x += u.px(106);
   if (clip_bar) {
     label("Object", u.px(50));
     std::string target = i->target;
@@ -576,7 +585,16 @@ void Editor::draw_seq_details(Sequence &s, const Recti &r) {
   x += u.px(62);
   if (sp && std::isfinite(speed)) seq_edit("Clip Speed", [&](Sequence &q) { q.find(before.name)->speed = std::max(0.05f, std::min(10.0f, speed)); });
   if (ti || to) seq_trim(before.name, tin, to ? tout : before.trim_out, before.start);
+  if (vol) seq_set_volume(before.name, volume);
   if (u.button({x, y, u.px(60), h}, "Go To")) seq_set_frame(before.start);
+}
+
+/* A sound bar's volume (round 365): 0 silent to 4; other bars refused. */
+bool Editor::seq_set_volume(const std::string &name, float volume) {
+  SequencePtr s = seq_sequence();
+  const SeqInstance *i = s ? s->find(name) : nullptr;
+  if (!i || i->kind != (int)SeqKind::Audio || !std::isfinite(volume)) return Log::warn("Sequencer: no sound named '%s'", name.c_str()), false;
+  return seq_edit("Sound Volume", [&](Sequence &q) { q.find(name)->volume = std::clamp(volume, 0.0f, 4.0f); });
 }
 
 bool Editor::seq_rename(const std::string &from, const std::string &to) {
@@ -740,9 +758,10 @@ bool Editor::seq_drop_clip(const std::string &abs_path, int mx, int my) {
 bool Editor::seq_drop_card(const std::string &abs_path, int mx, int my) {
   for (const auto &[rect, track] : drop_seq_tracks_) {
     if (!rect.contains(mx, my)) continue;
-    const int kind = fs::extension(abs_path) == ".paper" ? (int)SeqKind::Paper : (int)SeqKind::Image;
+    const std::string ext = fs::extension(abs_path);
+    const int kind = ext == ".paper" ? (int)SeqKind::Paper : ext == ".wav" ? (int)SeqKind::Audio : (int)SeqKind::Image;
     SequencePtr s = seq_sequence();
-    const float frames = s ? std::max(1.0f, std::round(2.0f * s->frame_rate)) : 60.0f;
+    const float frames = kind == (int)SeqKind::Audio ? -1.0f : s ? std::max(1.0f, std::round(2.0f * s->frame_rate)) : 60.0f;  // (a sound: its own length)
     return seq_add_card(kind, make_asset_relative(abs_path), track, seq_frame_at(seqr_.lanes, mx, seqr_.end), frames);
   }
   return false;
@@ -752,7 +771,8 @@ bool Editor::seq_drop_card(const std::string &abs_path, int mx, int my) {
 
 /* seq new [name] | add <clip> <track> <start> | move <clip> <track> <start> | trim <clip> <in> <out> | speed <clip> <s> |
  * rename <clip> <name> | remove <clip> | track | trigger <key> <clip> [blend] | jump <clip> [blend] | frame <n> |
- * preview on|off | play | stop. Clips are named by their instance names. */
+ * preview on|off | play | stop | image|paper|cut <file|camera> <track> <start> [frames] | sound <file.wav> <track>
+ * <start> [frames] | volume <bar> <v>. Clips are named by their instance names. */
 void Editor::seq_command(const std::vector<std::string> &t) {
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
   auto num = [&](size_t i, float def) { return t.size() > i ? (float)std::atof(t[i].c_str()) : def; };
@@ -775,6 +795,8 @@ void Editor::seq_command(const std::vector<std::string> &t) {
   if (!s) return Log::warn("seq %s: the scene has no sequence (seq new)", verb.c_str());
   if (verb == "add" && t.size() >= 5) return (void)seq_add_clip(t[2], index(3), num(4, 0), arg(5, ""));
   /* seq image|paper|cut <file or camera> <track> <start> [frames] (round 364). */
+  if (verb == "sound" && t.size() >= 5) return (void)seq_add_card((int)SeqKind::Audio, t[2], index(3), num(4, 0), num(5, -1.0f));  // (round 365)
+  if (verb == "volume" && t.size() >= 4) return (void)seq_set_volume(t[2], num(3, 1.0f));
   if ((verb == "image" || verb == "paper" || verb == "cut") && t.size() >= 5)
     return (void)seq_add_card(verb == "image" ? (int)SeqKind::Image : verb == "paper" ? (int)SeqKind::Paper : (int)SeqKind::Camera, t[2], index(3), num(4, 0), num(5, 60.0f));
   if (verb == "object" && t.size() >= 4 && s->find(t[2])) {  // seq object <clip> <object>: what it plays on

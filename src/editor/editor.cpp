@@ -700,6 +700,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   poll_skin_job();
   anim_tick();
   seq_tick();
+  seq_audio_tick();  // (round 365)
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();

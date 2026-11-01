@@ -5,6 +5,7 @@
 #include "editor.h"
 
 #include "../image/image.h"
+#include "../scene/audio.h"
 #include "../scene/board.h"
 #include "../scene/material.h"
 #include "../scene/sequence.h"
@@ -116,12 +117,7 @@ void composite_card(Image &dst, const Image &card) {
 float Editor::sequence_frame_now(SequencePtr &seq) {
   seq = nullptr;
   if (playing_) {  // (the first Sequencer playing - review 364)
-    Sequencer *c = scene_->director ? static_cast<Sequencer *>(scene_->director.get()) : nullptr;
-    if (c && !c->playing) c = nullptr;
-    scene_->for_each([&](GameObject &g) {
-      Sequencer *q = g.get<Sequencer>();
-      c = c || !q || !q->playing ? c : q;
-    });
+    Sequencer *c = playing_sequencer();
     seq = c ? sequence_asset(c->sequence) : nullptr;
     return seq && c->playing ? hold_frame(c->frame(), c->hold) : -1.0f;
   }
@@ -184,13 +180,18 @@ bool Editor::seq_add_card(int kind, const std::string &media_in, int track, floa
   if (kind == (int)SeqKind::Camera && (!scene_->find_by_name(media) || !scene_->find_by_name(media)->get<Camera>()))
     return Log::warn("Sequencer: no camera named '%s'", media.c_str()), false;
   if (kind != (int)SeqKind::Camera && !fs::exists(resolve_asset_path(media))) return Log::warn("Sequencer: no file %s", media.c_str()), false;
+  if (kind == (int)SeqKind::Audio && ext != ".wav")
+    return Log::warn("Sequencer: %s isn't a WAV file; sounds go on the timeline as WAV (save MP3 and others as WAV)", media.c_str()), false;
+  const float sound = kind == (int)SeqKind::Audio ? audio_frames(media, s->frame_rate) : 0.0f;  // (round 365: the sound's own length)
+  if (kind == (int)SeqKind::Audio && sound < 1.0f) return Log::warn("Sequencer: the sound %s can't be read", media.c_str()), false;
   if (track < 0 || track > (int)s->tracks.size()) return Log::warn("Sequencer: track %d isn't there (0 to %zu)", track, s->tracks.size()), false;
-  const float len = std::isfinite(frames) && frames >= 1.0f ? std::min(1e6f, std::round(frames)) : 60.0f;
-  static const char *const kWhat[] = {"Add Clip to Sequence", "Add Image to Sequence", "Add Paper to Sequence", "Add Camera Cut to Sequence"};
+  const float len = std::isfinite(frames) && frames >= 1.0f ? std::min(1e6f, std::round(frames)) : sound >= 1.0f ? sound : 60.0f;
+  static const char *const kWhat[] = {"Add Clip to Sequence", "Add Image to Sequence", "Add Paper to Sequence", "Add Camera Cut to Sequence",
+                                      "Add Sound to Sequence"};
   return seq_edit(kWhat[kind], [&](Sequence &q) {
     if (track == (int)q.tracks.size()) {
       q.tracks.emplace_back();
-      q.tracks.back().name = kind == (int)SeqKind::Camera ? "Cameras" : "Cards";
+      q.tracks.back().name = kind == (int)SeqKind::Camera ? "Cameras" : kind == (int)SeqKind::Audio ? "Sound" : "Cards";
     }
     SeqInstance i;
     i.kind = kind, i.media = media, i.start = std::max(0.0f, std::round(start)), i.trim_in = 0.0f, i.trim_out = len;

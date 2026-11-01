@@ -882,6 +882,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Cards and camera cuts** (round 364, the Sequencer): an image or a paper dropped onto a lane is a card - held full-frame over the Game view (letterboxed) and over Render Animation's frames for its bar's length; a camera cut switches the scene's camera for its length, in Play and in Preview (the camera given back when Preview ends); the topmost track's card or cut wins. Console: `seq image|paper <file> <track> <start> [frames]`, `seq cut <camera> <track> <start> [frames]`.
 
+**Sound** (round 365, the Sequencer): a WAV dropped onto a lane is a sound bar as long as the recording, played through the default device in step with the Preview's playhead and Play's Sequencer; trim its ends, set its Volume. Render Animation writes sound.wav beside the frames and puts the sound into the MP4. Console: `seq sound <file.wav> <track> <start> [frames]`, `seq volume <bar> <v>`. Linux plays through PulseAudio (libpulse-simple) when it's installed; macOS doesn't play sound yet (the render still has it).
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

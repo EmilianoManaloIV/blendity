@@ -11,6 +11,8 @@
 #include "../src/scene/humanoid.h"
 #include "../src/scene/colliders.h"
 #include "../src/scene/lod.h"
+#include "../src/scene/audio.h"
+#include "../src/core/audio_out.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/avatar_merge.h"
 #include "../src/scene/avatar_eyes.h"
@@ -7823,6 +7825,231 @@ static void tests_round364() {
   });
 }
 
+/* ---------------------------------------------------------------- round 365: the Sequencer's sound (task 0342) */
+namespace r365 {
+/* A WAV's bytes: `tag` 1 PCM / 3 float / 0xFFFE extensible (of PCM), `bits`, `channels`, the samples as given. */
+std::string wav_bytes(int tag, int bits, int channels, int rate, const std::string &samples) {
+  std::string out;
+  auto u32 = [&](uint32_t v) { for (int k = 0; k < 4; k++) out += (char)(v >> (8 * k) & 255); };
+  auto u16 = [&](uint16_t v) { out += (char)(v & 255), out += (char)(v >> 8); };
+  const int fmt_size = tag == 0xFFFE ? 40 : 16, block = channels * bits / 8;
+  out += "RIFF", u32((uint32_t)(4 + 8 + fmt_size + 8 + samples.size())), out += "WAVEfmt ", u32((uint32_t)fmt_size);
+  u16((uint16_t)tag), u16((uint16_t)channels), u32((uint32_t)rate), u32((uint32_t)(rate * block)), u16((uint16_t)block), u16((uint16_t)bits);
+  if (tag == 0xFFFE) {
+    u16(22), u16((uint16_t)bits), u32(3), u16(1);  // (cbSize, valid bits, channel mask, the sub-format GUID's first two bytes: PCM)
+    for (int k = 0; k < 14; k++) out += (char)0;
+  }
+  out += "data", u32((uint32_t)samples.size());
+  return out + samples;
+}
+std::string s16(std::initializer_list<int> v) {
+  std::string out;
+  for (int x : v) out += (char)(x & 255), out += (char)((x >> 8) & 255);
+  return out;
+}
+/* A mono 16-bit WAV of `seconds` holding `level` throughout, at `rate`. */
+std::string dc_wav(float level, double seconds, int rate) {
+  std::string samples;
+  const int v = (int)std::lround(level * 32768.0f);
+  for (long k = 0; k < (long)(seconds * rate); k++) samples += (char)(v & 255), samples += (char)((v >> 8) & 255);
+  return wav_bytes(1, 16, 1, rate, samples);
+}
+}  // namespace r365
+
+static void tests_round365() {
+  test("Sequencer sound (round 365): WAVs decoded - 16-bit stereo, 8-bit mono, 24-bit, 32-bit float and WAVE_FORMAT_EXTENSIBLE; a compressed one and a non-WAV refused; a 16-bit WAV written and read back", [] {
+    using namespace r365;
+    AudioClip a;
+    std::string why;
+    CHECK(decode_wav(wav_bytes(1, 16, 2, 44100, s16({16384, -16384, 0, 32767})), a, why));
+    CHECK(a.rate == 44100 && a.frames() == 2 && a.stereo[0] == 0.5f && a.stereo[1] == -0.5f && a.stereo[2] == 0.0f);
+    CHECK(decode_wav(wav_bytes(1, 8, 1, 8000, std::string{(char)192, (char)128}), a, why));
+    CHECK(a.frames() == 2 && a.stereo[0] == 0.5f && a.stereo[1] == 0.5f && a.stereo[2] == 0.0f);  // (mono: both sides)
+    CHECK(decode_wav(wav_bytes(1, 24, 1, 48000, std::string{(char)0, (char)0, (char)0xC0}), a, why));
+    CHECK(a.frames() == 1 && a.stereo[0] == -0.5f);
+    float f = 0.25f;
+    std::string fb(4, '\0');
+    std::memcpy(&fb[0], &f, 4);
+    CHECK(decode_wav(wav_bytes(3, 32, 1, 48000, fb), a, why) && a.stereo[0] == 0.25f);
+    CHECK(decode_wav(wav_bytes(0xFFFE, 16, 1, 48000, s16({-16384})), a, why) && a.stereo[0] == -0.5f);
+    CHECK(!decode_wav(wav_bytes(2, 4, 1, 48000, "xx"), a, why));
+    std::printf("    a compressed WAV refused: %s\n", why.c_str());
+    CHECK(why.find("compressed") != std::string::npos);
+    CHECK(!decode_wav("ID3 an mp3", a, why) && why == "not a WAV file");
+    /* Review 365: malformed and unusable ones. */
+    std::string cut = wav_bytes(1, 16, 1, 8000, s16({16384, 16384}));
+    cut[cut.size() - 4 - 4] = (char)100;  // (the data chunk claims 100 bytes; 4 are there)
+    CHECK(decode_wav(cut, a, why) && a.frames() == 2);
+    CHECK(!decode_wav(wav_bytes(1, 16, 0, 8000, s16({1})), a, why));
+    std::printf("    0 channels: %s\n", why.c_str());
+    std::string early = "RIFF____WAVEdata" + std::string("\x02\x00\x00\x00", 4) + s16({1});
+    CHECK(!decode_wav(early, a, why) && why == "data before its format");
+    CHECK(!decode_wav(wav_bytes(3, 16, 1, 8000, s16({1})), a, why) && why.find("float") != std::string::npos);
+    CHECK(!decode_wav(wav_bytes(1, 8, 1, 1000, std::string(3600001, (char)128)), a, why) && why.find("hour") != std::string::npos);
+    const std::vector<float> ramp = {-1.0f, 1.0f, -0.5f, 0.5f, 0.25f, -0.25f};
+    CHECK(decode_wav(encode_wav16(ramp, 48000), a, why) && a.rate == 48000 && a.frames() == 3);
+    bool same = a.stereo.size() == ramp.size();
+    for (size_t k = 0; same && k < ramp.size(); k++) same = std::fabs(a.stereo[k] - ramp[k]) < 1.0f / 16000.0f;
+    CHECK(same);
+  });
+  test("Sequencer sound (round 365): a sound bar mixed where it sits - silent before and after it, its volume, its trim's offset into the sound, a sound at half the rate resampled, Play's Speed; saved with its volume and read back", [] {
+    auto dc = std::make_shared<AudioClip>();
+    dc->rate = 48000;
+    dc->stereo.assign(48000 * 2 * 2, 0.5f);  // (2 s of 0.5)
+    auto ramp = std::make_shared<AudioClip>();
+    ramp->rate = 24000;  // (half the output's rate: each value the time in seconds)
+    for (int k = 0; k < 24000 * 2; k++) ramp->stereo.push_back(k / 24000.0f * 0.25f), ramp->stereo.push_back(k / 24000.0f * 0.25f);
+    Sequence s;
+    s.frame_rate = 60.0f;
+    s.tracks.resize(1);
+    SeqInstance bar;
+    bar.kind = (int)SeqKind::Audio, bar.media = "dc.wav", bar.name = "Hum", bar.start = 30, bar.trim_in = 0, bar.trim_out = 60, bar.volume = 0.5f;
+    s.tracks[0].items = {bar};
+    const SoundSet sounds = {{"dc.wav", dc}, {"ramp.wav", ramp}};
+    std::vector<float> out;
+    mix_sequence_audio(s, sounds, 0.0, 96000, 48000, out);
+    std::printf("    at 0.25 s %g, 0.75 s %g, 1.6 s %g\n", out[12000 * 2], out[36000 * 2], out[76800 * 2]);
+    CHECK(out[12000 * 2] == 0.0f && std::fabs(out[36000 * 2] - 0.25f) < 1e-6f && out[76800 * 2] == 0.0f);  // (the bar: 0.5 s to 1.5 s, at half volume)
+    /* The ramp from half a second in (trim_in 30 frames): 0.5 s at the bar's start, 0.75 s a quarter second on. */
+    SeqInstance r;
+    r.kind = (int)SeqKind::Audio, r.media = "ramp.wav", r.name = "Ramp", r.start = 0, r.trim_in = 30, r.trim_out = 120;
+    s.tracks[0].items = {r};
+    mix_sequence_audio(s, sounds, 0.0, 24000, 48000, out);
+    std::printf("    the ramp trimmed half a second in: %g at 0 s, %g at 0.25 s (0.125, 0.1875)\n", out[0], out[12000 * 2]);
+    CHECK(std::fabs(out[0] - 0.125f) < 1e-4f && std::fabs(out[12000 * 2] - 0.1875f) < 1e-4f && std::fabs(out[12001 * 2] - (0.75f + 1.0f / 48000.0f) * 0.25f) < 1e-4f);
+    mix_sequence_audio(s, sounds, 0.0, 24000, 48000, out, 2.0);  // (twice as fast: a quarter second in, the sound is a half second further)
+    CHECK(std::fabs(out[12000 * 2] - 0.25f) < 1e-4f);
+    s.tracks[0].items = {bar};
+    Sequence back;
+    CHECK(load_sequence_text(save_sequence_text(s), back));
+    const SeqInstance *b = back.tracks.empty() || back.tracks[0].items.empty() ? nullptr : &back.tracks[0].items[0];
+    CHECK(b && b->kind == (int)SeqKind::Audio && b->media == "dc.wav" && b->volume == 0.5f && b->duration(nullptr) == 60.0f);
+    CHECK(sequence_has_audio(back) && !sequence_card_at(back, 40.0f) && sequence_camera_at(back, 40.0f).empty());
+  });
+  test("Sequencer sound (round 365): seq sound puts a WAV on the timeline at its own length; Preview's Play starts the sound at the playhead, a jump moves it, Stop silences it; not a WAV refused; Render Animation writes sound.wav beside the frames (and an AAC stream into the MP4 when built with FFmpeg)", [] {
+    using namespace r365;
+    const std::string dir = fs::join(test_dir(), "r365");
+    fs::make_dirs(dir);
+    const std::string wav = fs::join(dir, "hum.wav"), png = fs::join(dir, "not_a_sound.png");
+    CHECK(fs::write_file(wav, dc_wav(0.5f, 1.0, 44100)));
+    std::vector<uint32_t> px(4, 0xFF808080u);
+    CHECK(write_png(png, px.data(), 2, 2, 2));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("engine raster");
+    ed.scene().render.width = 64, ed.scene().render.height = 36;
+    ed.command("seq new R365 Sound");
+    ed.command("seq sound " + wav + " 0 30");
+    ed.command("seq sound " + png + " 0 200");
+    SequencePtr seq = ed.seq_for_test_sequence();
+    const SeqInstance *hum = seq ? seq->find("hum") : nullptr;
+    std::printf("    the sound bar: %s, %g frames long at %g fps; bars %zu\n", hum ? hum->name.c_str() : "-", hum ? hum->duration(nullptr) : -1.0f,
+                seq ? seq->frame_rate : 0.0f, seq && !seq->tracks.empty() ? seq->tracks[0].items.size() : 0);
+    CHECK(hum && hum->kind == (int)SeqKind::Audio && std::fabs(hum->duration(nullptr) - seq->frame_rate) < 1e-3f);
+    if (!hum) return;
+    size_t bars = 0;
+    for (const SeqTrack &t : seq->tracks) bars += t.items.size();
+    CHECK(bars == 1);  // (the PNG refused)
+    if (!hum) return;
+    ed.command("seq volume hum 0.5");
+    double pos = 0.0;
+    bool active = false;
+    ed.command("seq frame 40");
+    ed.command("seq play");
+    ed.seq_audio_tick_for_test();
+    CHECK(ed.seq_audio_for_test(pos, active) && active && std::fabs(pos - 40.0) < 1.0);
+    std::vector<float> buf(480 * 2);
+    ed.seq_audio_pull_for_test(buf.data(), 480);
+    std::printf("    playing at frame 40: the sound at %g (0.25), the stream at frame %g\n", buf[0], pos);
+    CHECK(std::fabs(buf[0] - 0.25f) < 1e-3f && std::fabs(buf[959] - 0.25f) < 1e-3f);
+    ed.command("seq frame 200");  // (a jump past the sound)
+    ed.seq_audio_tick_for_test();
+    CHECK(ed.seq_audio_for_test(pos, active) && active && std::fabs(pos - 200.0) < 1e-3);
+    ed.seq_audio_pull_for_test(buf.data(), 480);
+    CHECK(buf[0] == 0.0f);
+    /* Review 365: the sound only while the picture moves forward - held (paused) or a step back is silent; a step on
+     * plays again from there. */
+    ed.seq_audio_tick_for_test();
+    const bool held = ed.seq_audio_for_test(pos, active) && !active;
+    ed.command("seq frame 45");
+    ed.seq_audio_tick_for_test();
+    ed.command("seq frame 46");
+    ed.seq_audio_tick_for_test();
+    const bool on_again = ed.seq_audio_for_test(pos, active) && active && std::fabs(pos - 46.0) < 1.5;
+    ed.command("seq frame 40");
+    ed.seq_audio_tick_for_test();
+    const bool back = ed.seq_audio_for_test(pos, active) && !active;
+    std::printf("    held: %s; on again at 46: %s; a step back: %s\n", held ? "silent" : "SOUND", on_again ? "sound" : "SILENT", back ? "silent" : "SOUND");
+    CHECK(held && on_again && back);
+    ed.command("seq stop");
+    ed.seq_audio_tick_for_test();
+    CHECK(ed.seq_audio_for_test(pos, active) && !active);
+    ed.command("seq preview off");
+    /* Render Animation over the sound: frames 30 to 41 (12 frames at the sequence's rate) and their sound. */
+    ed.command("renderanim 30 41");
+    for (int i = 0; i < 200 && ed.render_animation_for_test().active; i++) ed.step_frame_headless();
+    const auto &ra = ed.render_animation_for_test();
+    std::string bytes, why;
+    AudioClip got;
+    const bool read = fs::read_file(fs::join(ra.dir, "sound.wav"), bytes) && decode_wav(bytes, got, why);
+    const size_t want = (size_t)std::llround(ra.written.size() / (double)ra.fps * 48000.0);
+    std::printf("    %zu frame(s) at %g fps; sound.wav %s: %zu samples (%zu), %g\n", ra.written.size(), ra.fps, read ? "read" : why.c_str(),
+                got.frames(), want, got.frames() ? got.stereo[2000] : -1.0f);
+    CHECK(ra.written.size() == 12 && read && got.frames() == want && std::fabs(got.stereo[2000] - 0.25f) < 1e-3f);
+    const std::vector<std::string> args = ffmpeg_png_to_mp4_args("ffmpeg", "R/a", 60.0f, "R/a.mp4", "R/a/sound.wav");
+    CHECK(args.size() == 25 && args[11] == "-i" && args[12] == "R/a/sound.wav" && args[17] == "-shortest" && args.back() == "R/a.mp4");
+    auto clean = [&] {  // (the scratch project's Renders and sequences left as they were)
+      for (const std::string &f : ra.written) std::remove(f.c_str());
+      std::remove(fs::join(ra.dir, "sound.wav").c_str());
+      std::remove(ra.video.c_str());
+      std::error_code ec;
+      std::filesystem::remove(ra.dir, ec);  // (only once empty)
+      std::remove(resolve_asset_path(seq->asset_path).c_str());
+    };
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {  // (an ffmpeg program reads the frames: let it finish)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    if (!video::available()) return clean();
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    int rate = 0;
+    const int streams = video::probe_audio(ra.video, &rate);
+    std::printf("    the MP4: %d audio stream(s) at %d Hz, %d frames\n", streams, rate, video::probe_frames(ra.video));
+    CHECK(streams == 1 && rate == 48000 && video::probe_frames(ra.video) == 12);
+    clean();
+  });
+  test("Sequencer sound (round 365): the default audio device opened and fed (BLENDITY_TEST_AUDIO_OUT=1 only: a quiet 440 Hz tone for a third of a second; CI has no device)", [] {
+    if (!std::getenv("BLENDITY_TEST_AUDIO_OUT")) return;
+    audio_out::Stream out;
+    std::atomic<size_t> fed{0};
+    std::string why;
+    const bool open = out.open(48000, [&](float *o, size_t n) {
+      for (size_t k = 0; k < n; k++) o[k * 2] = o[k * 2 + 1] = 0.05f * std::sin(6.2831853f * 440.0f * (float)(fed + k) / 48000.0f);
+      fed += n;
+    }, &why);
+    std::this_thread::sleep_for(std::chrono::milliseconds(330));
+    out.close();
+    std::printf("    the device: %s; %zu frames fed\n", open ? "open" : why.c_str(), fed.load());
+    CHECK(open && fed.load() >= 9600);
+  });
+  test("the lesson's Try-it (round 365): seq new Film, window Sequencer - a sequence to drop WAV sounds on; seq sound refuses a file that isn't one", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Film");
+    ed.command("window Sequencer");
+    const std::string mp3 = fs::join(test_dir(), "r365_song.mp3");
+    CHECK(fs::write_file(mp3, "ID3 not a wav"));
+    ed.command("seq sound " + mp3 + " 0 0");  // (there, but not a WAV)
+    SequencePtr s = ed.seq_for_test_sequence();
+    CHECK(s && (s->tracks.empty() || s->tracks[0].items.empty()));
+    if (s) std::remove(resolve_asset_path(s->asset_path).c_str());
+    std::remove(mp3.c_str());
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -8201,4 +8428,5 @@ void run_assets_tests() {
   tests_round362();
   tests_round363();
   tests_round364();
+  tests_round365();
 }

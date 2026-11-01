@@ -14,8 +14,9 @@
 namespace bl {
 
 /* What a bar holds (round 364, task 0341): an animation clip, or - for an animatic or a cinematic - a picture held
- * full-frame (an image file, or a paper's drawing) or a camera cut (the scene's camera switched to `media`). */
-enum class SeqKind { Clip = 0, Image = 1, Paper = 2, Camera = 3 };
+ * full-frame (an image file, or a paper's drawing), a camera cut (the scene's camera switched to `media`) or a sound
+ * (a WAV file, round 365, task 0342). */
+enum class SeqKind { Clip = 0, Image = 1, Paper = 2, Camera = 3, Audio = 4 };
 
 /* One clip on the timeline: which clip, where it starts (sequence frames), the part of it used (clip frames; out < 0:
  * to the clip's end), its speed, and the name triggers jump to. A card (an Image, a Paper or a Camera bar) has no
@@ -28,6 +29,7 @@ struct SeqInstance {
   float start = 0.0f;
   float trim_in = 0.0f, trim_out = -1.0f;
   float speed = 1.0f;
+  float volume = 1.0f;  // (a sound's: 0 silent, 1 as recorded, up to 4)
   float clip_out(const AnimationClip *c) const;  // the trimmed end in clip frames (the clip's end when not set)
   float duration(const AnimationClip *c) const;  // on the timeline, in sequence frames
   float clip_frame(float seq_frame) const;       // the clip frame shown at a sequence frame

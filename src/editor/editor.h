@@ -84,7 +84,8 @@
 namespace bl {
 
 /* FFmpeg's arguments to make an MP4 of numbered PNGs (task 0074). */
-std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out);
+std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out,
+                                                const std::string &wav = "");
 
 /* A key with modifiers (platform::Mod bits): one binding of a shortcut. */
 struct KeyChord {
@@ -1058,6 +1059,9 @@ class Editor {
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
   void composite_render_card_for_test(Image &img, float frame) { composite_render_card(img, frame); }  // (round 364)
+  bool seq_audio_for_test(double &pos, bool &active);  // (round 365: false before any sound played)
+  void seq_audio_pull_for_test(float *out, size_t frames);
+  void seq_audio_tick_for_test() { seq_audio_tick(); }
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
   std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
@@ -2205,6 +2209,7 @@ class Editor {
   SeqInstance *seq_selected(Sequence &s, int *track = nullptr, int *index = nullptr);
   bool seq_move(const std::string &name, int track, float start);
   bool seq_trim(const std::string &name, float trim_in, float trim_out, float start);
+  bool seq_set_volume(const std::string &name, float volume);  // (round 365)
   bool seq_rename(const std::string &from, const std::string &to);
   void seq_delete_selected();
   float seq_frame_at(const Recti &lanes, int x, float end) const;
@@ -2638,7 +2643,7 @@ class Editor {
   bool render_animation_source(int &source, int &last, float &fps);
   void step_render_animation();
   void finish_render_animation();
-  void encode_render_video();
+  void encode_render_video(std::vector<float> sound = {});
   void cancel_render_video();
   void poll_render_video();
   void set_ffmpeg_path(const std::string &path);
@@ -2984,6 +2989,13 @@ class Editor {
   /* Round 364: the Sequencer's cards and camera cuts (seq_cards.cpp). */
   const Image *card_picture(const SeqInstance &i, uint64_t *stamp = nullptr);
   void card_trim_pictures(const Sequence &s);
+  /* Round 365 (seq_audio.cpp): the Sequencer's sound, in step with the playhead. */
+  struct SeqAudio;
+  std::shared_ptr<SeqAudio> seq_audio_;
+  Sequencer *playing_sequencer();
+  float seq_audio_frame(SequencePtr &seq, double &step);
+  void seq_audio_tick();
+  bool render_animation_sound(std::vector<float> &out);
   bool seq_card_there(const SeqInstance &i);
   float sequence_frame_now(SequencePtr &seq);
   void draw_sequence_card(const Recti &img);

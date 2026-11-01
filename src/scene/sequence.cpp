@@ -76,7 +76,9 @@ std::string save_sequence_text(const Sequence &s) {
     os << "track " << t.name << "\n";
     for (const SeqInstance &i : t.items) {
       if (i.kind != (int)SeqKind::Clip) {  // (round 364: an older reader skips the line)
-        os << "card " << i.kind << " " << i.start << " " << i.trim_in << " " << i.trim_out << "\t" << i.name << "\t" << i.media << "\n";
+        os << "card " << i.kind << " " << i.start << " " << i.trim_in << " " << i.trim_out;
+        if (i.kind == (int)SeqKind::Audio) os << " " << i.volume;  // (round 365; a round-364 reader skips kind 4)
+        os << "\t" << i.name << "\t" << i.media << "\n";
         continue;
       }
       os << "clip " << i.start << " " << i.trim_in << " " << i.trim_out << " " << i.speed << "\t" << i.name << "\t" << i.clip << (i.target.empty() ? "" : "\t" + i.target) << "\n";
@@ -138,8 +140,10 @@ bool load_sequence_text(const std::string &text, Sequence &s) {
       SeqInstance i;
       std::istringstream nums(f[0].substr(4));
       if (f.size() < 3 || !(nums >> i.kind >> i.start >> i.trim_in >> i.trim_out)) continue;
-      if (!finite_all({i.start, i.trim_in, i.trim_out}) || i.kind < 1 || i.kind > 3 || f[2].empty()) continue;
+      if (!finite_all({i.start, i.trim_in, i.trim_out}) || i.kind < 1 || i.kind > 4 || f[2].empty()) continue;
       i.start = std::max(0.0f, i.start), i.trim_in = std::max(0.0f, i.trim_in);
+      float volume = 1.0f;
+      if (nums >> volume && std::isfinite(volume)) i.volume = std::clamp(volume, 0.0f, 4.0f);
       i.name = f[1], i.media = f[2];
       s.tracks.back().items.push_back(std::move(i));
     }

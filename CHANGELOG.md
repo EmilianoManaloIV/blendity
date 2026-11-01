@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 365): the Sequencer's sound - WAV bars played in step and mixed into the video
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 11:
+the short film had no sound track - round 364 added the cards and cuts, this round the sound).
+
+**Added (task 0342)**
+- **Sound bars:** a WAV file on a Sequencer lane (8, 16, 24 and 32-bit PCM or 32-bit float, mono or stereo, any rate),
+  as long as the recording. Drop one from the Project window, or `seq sound <file.wav> <track> <start> [frames]`;
+  `seq volume <bar> <v>` and the bar's Volume field. Other formats are refused with the reason.
+- **Playback:** through the default device (WASAPI on Windows, PulseAudio loaded at run time on Linux; not yet on
+  macOS), in step with the Preview's playhead and Play's Sequencer, put back in step on a jump or a drift.
+- **Render Animation:** the sound bars mixed over the frames into sound.wav beside them, and an AAC stream in the
+  MP4 (made in-process with Blender's FFmpeg, or by an ffmpeg program).
+- **The Opus review's fixes:**
+  - paused Play repeated a fifth of a second;
+  - backward play chopped (sound now only while the picture moves forward);
+  - edits stuttered;
+  - sounds were loaded under the mixer's lock;
+  - the stream never closed, so Windows wouldn't sleep;
+  - a lost device was never reopened;
+  - decoded sounds were kept forever;
+  - the render's mix walked every sample for every bar;
+  - WAVs over an hour are refused;
+  - a missing AAC encoder no longer fails the MP4;
+  - lanes light up for sounds and cards.
+
+**Checked:** `tests_round365`:
+- the WAV formats decoded, a compressed one refused, a written WAV read back;
+- a bar mixed silent before and after it, at its volume, from its trim, resampled, and at Play's Speed;
+- saved with its volume;
+- `seq sound` at the file's length, a PNG refused;
+- Preview's Play starting the sound at the playhead, a jump moving it, holding or stepping back silencing it, Stop
+  silencing it;
+- malformed WAVs refused;
+- Render Animation's sound.wav, and the MP4's 48 kHz AAC stream in the libraries' build;
+- the real device opened and fed (opt-in, `BLENDITY_TEST_AUDIO_OUT=1`);
+- the Try-it.
+
 ## 2026-10-31 (round 364): the Sequencer for animatics and cinematics - cards and camera cuts
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 11:

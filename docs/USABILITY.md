@@ -410,6 +410,7 @@ screens themselves.
 | A world's walls went to the engine without collision, and Generate Lighting with nothing marked baked "0 objects" without saying why. | The Collider component (Box, Sphere, Capsule, Convex, Mesh; Fit to Mesh) drawn, used in Play and exported as each engine names it; Generate Lighting refuses with Mark Static Meshes as its Fix (round 362). |
 | A world's far objects drew every triangle, and the engines got no LODs. | The LOD Group component: levels by Decimate, switched by screen height in the Game view, exported as <name>_LOD0.._LODn for Unity's import (round 363). |
 | An animatic couldn't be cut in Blendity: the Sequencer held animation clips only - no storyboard pictures, no camera cuts. | Cards (an image or a paper held full-frame over the Game view and the rendered frames) and camera cuts on the Sequencer's lanes (round 364). |
+| The short film had no sound: nothing on the timeline played or rendered a sound. | WAV sound bars on the Sequencer's lanes, played in step with the playhead and mixed into Render Animation's sound.wav and MP4 (round 365). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing

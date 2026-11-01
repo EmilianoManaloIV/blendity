@@ -15,10 +15,14 @@
 namespace bl {
 
 /* FFmpeg's arguments for numbered PNGs (0001.png...) in `dir` to an H.264 MP4 any player opens (yuv420p needs an even
- * size: an odd one is padded by a pixel). */
-std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out) {
-  return {ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-framerate", strprintf("%g", fps), "-start_number", "1", "-i", fs::join(dir, "%04d.png"),
-          "-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", out};
+ * size: an odd one is padded by a pixel); `wav` (round 365), when given, its sound as AAC, cut at the last picture. */
+std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out,
+                                                const std::string &wav) {
+  std::vector<std::string> a = {ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-framerate", strprintf("%g", fps), "-start_number", "1",
+                                "-i", fs::join(dir, "%04d.png")};
+  if (!wav.empty()) a.insert(a.end(), {"-i", wav, "-c:a", "aac", "-b:a", "192k", "-shortest"});
+  a.insert(a.end(), {"-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", out});
+  return a;
 }
 
 /* The FFmpeg to run: Preferences' path when it's there, else one on the PATH; "" for none. Looked for again when a
@@ -178,11 +182,13 @@ const char *Editor::render_animation_broken() {
 /* All frames written: the pose goes back, and FFmpeg (if there is one) makes the video in the background. */
 void Editor::finish_render_animation() {
   const size_t frames = ranim_.written.size();
+  std::vector<float> sound;
+  const bool wav_written = render_animation_sound(sound);  // (round 365: sound.wav beside the frames, and into the video)
   stop_render_animation();
   render_status_ = strprintf("Animation: %zu frame(s) in %s", frames, ranim_.dir.c_str());
   Log::info("%s", render_status_.c_str());
   if (!frames) return;
-  if (video::available()) return encode_render_video();
+  if (video::available()) return encode_render_video(std::move(sound));
   const std::string ffmpeg = ffmpeg_program();
   if (ffmpeg.empty()) {
     Log::info("Render Animation: no FFmpeg, so the frames are the result. For an MP4, install FFmpeg (ffmpeg.org) on the "
@@ -192,14 +198,14 @@ void Editor::finish_render_animation() {
   auto job = std::make_shared<VideoJob>();
   ranim_.encode = job;
   ranim_.encode_video = ranim_.video;
-  const std::vector<std::string> args = ffmpeg_png_to_mp4_args(ffmpeg, ranim_.dir, ranim_.fps, ranim_.video);
+  const std::vector<std::string> args = ffmpeg_png_to_mp4_args(ffmpeg, ranim_.dir, ranim_.fps, ranim_.video, wav_written ? fs::join(ranim_.dir, "sound.wav") : "");
   std::thread([args, job] { job->code.store(sys::run_program(args)); }).detach();
   render_status_ += "  |  making the MP4...";
   Log::info("Render Animation: FFmpeg is making %s", ranim_.video.c_str());
 }
 
 /* Built with FFmpeg's libraries (task 0077): the MP4 is encoded here, on a background thread, as Blender does. */
-void Editor::encode_render_video() {
+void Editor::encode_render_video(std::vector<float> sound) {
   auto job = std::make_shared<VideoJob>();
   ranim_.encode = job;
   ranim_.encode_video = ranim_.video;
@@ -207,9 +213,9 @@ void Editor::encode_render_video() {
   const std::string out = ranim_.video;
   const float fps = ranim_.fps;
   video::init();  // (FFmpeg's log, quieted from this thread)
-  std::thread([frames, out, fps, job] {
+  std::thread([frames, out, fps, job, sound = std::move(sound)] {
     std::string error;
-    const bool ok = video::encode_png_frames(frames, fps, out, &error, &job->cancel);
+    const bool ok = video::encode_png_frames(frames, fps, out, &error, &job->cancel, sound.empty() ? nullptr : &sound, 48000);
     job->error = error;  // (before the code: the main thread reads it once the code is set)
     job->code.store(ok ? 0 : 1);
   }).detach();
