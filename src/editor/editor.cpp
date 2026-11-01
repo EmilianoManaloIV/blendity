@@ -77,6 +77,7 @@ Editor::~Editor() {
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
+  stop_unity_package();    // (round 369: an unpacking stopped at its next file and waited for)
   paint_abort_stroke();    // (task 0245)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
@@ -698,6 +699,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (pointer_window_ == active_window_) finish_hierarchy_drag();
   take_favorite_request();
   poll_skin_job();
+  poll_unity_package();  // (round 369)
   anim_tick();
   seq_tick();
   seq_audio_tick();  // (round 365)
@@ -873,6 +875,8 @@ void Editor::draw_menubar(const Recti &r) {
     u.menu_separator();
     if (u.menu_item("Import Model...")) import_dialog();
     u.tooltip("OBJ, FBX, glTF (.glb / .gltf), STL, PLY or USD (.usda): the formats Blender exports.");
+    if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
+    u.tooltip("A .unitypackage unpacked into Assets/Imported/<package>: models and textures to use, scripts kept as they are.");
     u.submenu("Export", u.px(290), [this] {
       /* Blender's File > Export list (the mesh formats). */
       for (int f = 0; f < (int)ExportFormat::Count; f++)
@@ -928,6 +932,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Assets"), u.px(260), [this] {
     auto &u = ui_;
     if (u.menu_item("Import Model...")) import_dialog();
+    if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
     u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
     if (u.menu_item("Refresh", key("assets.refresh").c_str())) project_listed_ = -100;
@@ -1464,6 +1469,7 @@ void Editor::handle_drop() {
     else if (ext == ".scene") {
       open_scene_asked(path);  // (task 0254)
     }
+    else if (ext == ".unitypackage") import_unity_package(path);  // (round 369)
     else if (ext == ".pdf" || ext == ".txt" || ext == ".md" || ext == ".tex" || ext == ".bib" || ext == ".docx" ||
              ext == ".html" || ext == ".htm" || ext == ".epub" || ext == ".ps" || ext == ".djvu") {
       /* (The Research window that collected papers is retired, task 0034.) */

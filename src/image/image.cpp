@@ -133,7 +133,7 @@ const uint8_t kDistExtra[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 
 
 }  // namespace
 
-bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, bool header) {
+bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, bool header, size_t max_out) {
   if (header) {
     if (size < 2 || (data[0] & 15) != 8 || ((data[0] << 8) | data[1]) % 31 != 0) return false;
     data += 2;
@@ -164,7 +164,9 @@ bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, b
       br.align();
       uint32_t len = br.bits(16), nlen = br.bits(16);
       if ((len ^ 0xFFFF) != nlen) return false;
-      for (uint32_t i = 0; i < len; i++) out.push_back((uint8_t)br.bits(8));
+      const size_t room = max_out - std::min(max_out, out.size());  // (up to the cap, then refused: the caller sees it was the cap)
+      for (uint32_t i = 0; i < std::min<size_t>(len, room); i++) out.push_back((uint8_t)br.bits(8));
+      if (len > room) return false;
       if (br.bad()) return false;
       continue;
     }
@@ -204,6 +206,7 @@ bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, b
     for (;;) {
       int sym = L->decode(br);
       if (sym < 0 || br.bad()) return false;
+      if (out.size() >= max_out && sym != 256) return false;  // (the cap: nothing more is kept)
       if (sym < 256) out.push_back((uint8_t)sym);
       else if (sym == 256) break;
       else {
@@ -215,7 +218,9 @@ bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, b
         size_t d = kDistBase[ds] + br.bits(kDistExtra[ds]);
         if (d > out.size()) return false;
         size_t from = out.size() - d;
-        for (size_t i = 0; i < len; i++) out.push_back(out[from + i]);
+        const size_t room = max_out - std::min(max_out, out.size());
+        for (size_t i = 0; i < std::min(len, room); i++) out.push_back(out[from + i]);
+        if (len > room) return false;
       }
     }
   }

@@ -890,6 +890,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Sculpting with a pen** (round 368): the pen's eraser end inverts the brush (as Alt) and takes a mask away; with Use Tilt on (off at first; `sculpt tilt on|off [strength]`), the pen's lean turns Clay Buildup's, Flatten's and Scrape's plane by its angle times Tilt Strength (at most 60 degrees, mirrored with symmetry) and turns the alpha; the Pressure Curve (Sculpt's and Paint's brush settings, shared, kept in Preferences) maps pressure; E switches Carve in Sculpt under the Adobe keymap.
 
+**Unity packages** (round 369): File > Import Unity Package..., a dropped .unitypackage, or `import <file>.unitypackage` unpacks it into Assets/Imported/<package>/ with Unity's folders, on a worker (the job tray shows it, with Cancel). Models and textures are then project files like any other; scripts, shaders, prefabs, scenes and materials are kept as they are; each asset's GUID is in the folder's .unity-guids. A path in the package that would leave its folder is left out and named in the Console.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

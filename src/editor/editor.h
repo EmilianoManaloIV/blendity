@@ -32,6 +32,7 @@
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
 #include "../scene/budget.h"
+#include "../scene/unity_package.h"
 #include "../scene/avatar_eyes.h"
 #include "../scene/avatar_fix.h"
 #include "../scene/avatar_tools.h"
@@ -1256,6 +1257,22 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
+  /* Round 369 (unity_package_ui.cpp): Import Unity Package, unpacked on a worker (at once in headless runs). */
+  struct PackageJob {
+    std::string path, project_root, into_rel, why;
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{false}, done{false};
+    int counts[5] = {};  // models, textures, scripts and shaders, prefabs / scenes / materials, other
+    int folders = 0;
+    std::vector<std::string> skipped;
+    void run();
+    void unpack();
+    bool write_asset(const UnityAsset &a, const std::string &rel);
+    void finish(const std::string &failure);
+  };
+  bool import_unity_package(const std::string &path);
+  void import_package_dialog();
+  const PackageJob *last_package_for_test() const { return pkg_last_.get(); }
   std::vector<GameObject *> selected_objects_for_test() const { return selected_objects(false); }
   bool scene_planes_deferred_for_test() const { return scene_planes_slot_ >= 0; }
   Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
@@ -1977,6 +1994,9 @@ class Editor {
   Vec3 sculpt_lean_dir_{0.0f, 0.0f, 0.0f};  // (this instance's lean, mirrored with it - review 368)
   float sculpt_lean_angle_ = 0.0f;
   bool pen_curve_dirty_ = false;  // (saved once the drag ends - review 368)
+  std::shared_ptr<PackageJob> pkg_job_, pkg_last_;  // (round 369: the unpacking under way, the last one finished)
+  void poll_unity_package();
+  void stop_unity_package();
   Vec3 sculpt_leaned(Vec3 n) const;
   void sculpt_console_dab(float x, float y, float p);
   void draw_pen_curve(Reflector &br);

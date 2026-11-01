@@ -12,6 +12,7 @@
 #include "../src/scene/colliders.h"
 #include "../src/scene/lod.h"
 #include "../src/scene/audio.h"
+#include "../src/scene/unity_package.h"
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -8288,6 +8289,161 @@ static void tests_round367() {
   });
 }
 
+/* ---------------------------------------------------------------- round 369: Unity packages (task 0346) */
+namespace r369 {
+/* A tar entry: a ustar header (its name split into prefix and name past 100 bytes) and the data in 512-byte blocks. */
+void tar_add(std::string &tar, std::string name, const std::string &data, char type = '0') {
+  std::string h(512, '\0');
+  std::string prefix;
+  if (name.size() > 100) {
+    const size_t cut = name.rfind('/', name.size() - 1 - 0);
+    prefix = name.substr(0, cut), name = name.substr(cut + 1);
+  }
+  std::copy(name.begin(), name.end(), h.begin());
+  const std::string mode = "0000644", size = strprintf("%011llo", (unsigned long long)data.size());
+  std::copy(mode.begin(), mode.end(), h.begin() + 100);
+  std::copy(size.begin(), size.end(), h.begin() + 124);
+  h[156] = type;
+  const std::string magic = "ustar";
+  std::copy(magic.begin(), magic.end(), h.begin() + 257);
+  h[263] = '0', h[264] = '0';
+  std::copy(prefix.begin(), prefix.end(), h.begin() + 345);
+  std::fill(h.begin() + 148, h.begin() + 156, ' ');
+  unsigned sum = 0;
+  for (char c : h) sum += (uint8_t)c;
+  const std::string chk = strprintf("%06o", sum);
+  std::copy(chk.begin(), chk.end(), h.begin() + 148);
+  tar += h + data + std::string((512 - data.size() % 512) % 512, '\0');
+}
+/* gzip with stored deflate blocks (the reader inflates any deflate; tests needn't compress). */
+std::string gzip_stored(const std::string &data, bool with_name) {
+  std::string out = {(char)0x1f, (char)0x8b, 8, (char)(with_name ? 8 : 0), 0, 0, 0, 0, 0, 3};
+  if (with_name) out += std::string("archtemp.tar") + '\0';
+  size_t at = 0;
+  do {
+    const size_t n = std::min<size_t>(65535, data.size() - at);
+    const bool last = at + n == data.size();
+    out += (char)(last ? 1 : 0);
+    out += (char)(n & 255), out += (char)(n >> 8), out += (char)(~n & 255), out += (char)((~n >> 8) & 255);
+    out += data.substr(at, n);
+    at += n;
+  } while (at < data.size());
+  for (int k = 0; k < 4; k++) out += '\0';  // (CRC32: not checked)
+  for (int k = 0; k < 4; k++) out += (char)(data.size() >> (8 * k) & 255);
+  return out;
+}
+void asset(std::string &tar, const std::string &guid, const std::string &pathname, const std::string *data, bool folder = false) {
+  tar_add(tar, guid + "/", "", '5');
+  if (data) tar_add(tar, guid + "/asset", *data);
+  tar_add(tar, guid + "/asset.meta", "fileFormatVersion: 2\nguid: " + guid + "\n" + (folder ? "folderAsset: yes\n" : "") + "DefaultImporter:\n  userData: \n");
+  tar_add(tar, guid + "/pathname", pathname + "\n00");
+}
+}  // namespace r369
+
+static void tests_round369() {
+  test("Unity packages (round 369): gzip with a name field, tar with ustar's prefix and GNU's long name, a .meta's GUID, and package paths kept inside their folder (.., absolute, drives, backslashes refused)", [] {
+    using namespace r369;
+    std::string tar;
+    const std::string deep = "Assets/" + std::string(70, 'a') + "/" + std::string(60, 'b') + "/file.txt";
+    tar_add(tar, deep, "deep");
+    tar_add(tar, "././LongLink", std::string(130, 'c') + std::string("/x.txt") + '\0', 'L');
+    tar_add(tar, "ignored", "long");
+    std::string out, why;
+    CHECK(gunzip(gzip_stored(tar, true), out, why) && out == tar);
+    std::vector<TarEntry> e;
+    CHECK(read_tar(out, e, why) && e.size() == 2);
+    CHECK(e.size() == 2 && e[0].name == deep && e[0].data == "deep" && e[1].name == std::string(130, 'c') + "/x.txt" && e[1].data == "long");
+    std::string bad = gzip_stored(tar, false);
+    bad.resize(bad.size() / 2);
+    CHECK(!gunzip(bad, out, why));
+    std::printf("    a cut gzip refused: %s\n", why.c_str());
+    CHECK(!gunzip("PK\x03\x04 a zip", out, why) && why == "not a gzip file");
+    CHECK(meta_guid("fileFormatVersion: 2\r\nguid: 0123abcd\r\nNativeFormatImporter:\n") == "0123abcd" && meta_guid("nothing") == "");
+    const std::string into = "Assets/Imported/Kit";
+    CHECK(unity_package_target("Assets/Models/box.fbx", into) == "Assets/Imported/Kit/Models/box.fbx");
+    CHECK(unity_package_target("Packages/com.vrchat/Runtime/a.cs", into) == "Assets/Imported/Kit/Packages/com.vrchat/Runtime/a.cs");
+    for (const char *evil : {"Assets/../../evil.txt", "../x", "/etc/passwd", "C:/Windows/x.dll", "Assets\\..\\..\\x", "Assets", ""})
+      CHECK(unity_package_target(evil, into).empty());
+    /* Review 369: not UTF-8, control characters, Windows devices, parts ending in a dot or a space. */
+    for (const char *evil : {"Assets/bad\xFF\xFE.txt", "Assets/tab\there.txt", "Assets/NUL", "Assets/aux.png", "Assets/COM1.txt", "Assets/x.", "Assets/x /y.txt"})
+      CHECK(unity_package_target(evil, into).empty());
+    CHECK(unity_package_target("Assets/Ünïcode ✓.png", into) == "Assets/Imported/Kit/Ünïcode ✓.png");
+    CHECK(unity_package_folder("..") == "Package" && unity_package_folder("...") == "Package" && unity_package_folder("CON") == "Package" &&
+          unity_package_folder(" My Kit. ") == "My Kit" && unity_package_folder("a/b:c") == "a_b_c");
+    CHECK(unity_path_key("Assets/Imported/K/Case.TXT") == unity_path_key("assets/imported/k/case.txt.") && valid_utf8("plain") && !valid_utf8("\xC0\xAF"));
+    /* A size the trailer lies about: inflating stops at the limit, refused - 5000 bytes against a limit of 1000. */
+    std::string big = gzip_stored(std::string(5000, 'z'), false);
+    for (int k = 0; k < 4; k++) big[big.size() - 4 + k] = k == 0 ? 10 : 0;  // (ISIZE 10)
+    CHECK(!gunzip(big, out, why, 1000) && why == "too large to unpack");
+    CHECK(!gunzip(big, out, why) && why.find("doesn't match") != std::string::npos);
+  });
+  test("Unity packages (round 369): import <file>.unitypackage unpacks into Assets/Imported/<package>/ with Unity's folders - a model, a texture, a script kept as it is, a folder - the GUIDs kept beside them; paths that would leave the folder never written", [] {
+    using namespace r369;
+    const std::string dir = fs::join(test_dir(), "r369");
+    fs::make_dirs(dir);
+    const std::string png_path = fs::join(dir, "red.png");
+    std::vector<uint32_t> red(4, 0xFFFF0000u);
+    CHECK(write_png(png_path, red.data(), 2, 2, 2));
+    std::string png, obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", cs = "using UnityEngine;\npublic class Spin : MonoBehaviour { }\n", evil = "escaped";
+    CHECK(fs::read_file(png_path, png));
+    std::string tar;
+    asset(tar, "11111111111111111111111111111111", "Assets/Kit Models", nullptr, true);
+    asset(tar, "22222222222222222222222222222222", "Assets/Kit Models/tri.obj", &obj);
+    asset(tar, "33333333333333333333333333333333", "Assets/Textures/red.png", &png);
+    asset(tar, "44444444444444444444444444444444", "Assets/Scripts/Spin.cs", &cs);
+    asset(tar, "55555555555555555555555555555555", "Assets/../../r369_evil.txt", &evil);
+    asset(tar, "66666666666666666666666666666666", "C:/r369_evil.txt", &evil);
+    std::string first = "first", second = "second", bad = "bad";
+    asset(tar, "77777777777777777777777777777777", "Assets/Notes/Case.txt", &first);
+    asset(tar, "88888888888888888888888888888888", "Assets/Notes/case.txt", &second);  // (one file on Windows: the second left out)
+    asset(tar, "99999999999999999999999999999999", "Assets/bad\xFF.txt", &bad);  // (not UTF-8: left out, no crash)
+    asset(tar, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Assets/Notes/twice.txt", &first);
+    asset(tar, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Assets/Notes/twice2.txt", &second);  // (one GUID twice: neither trusted)
+    const std::string pkg = fs::join(dir, "R369 Kit.unitypackage");
+    CHECK(fs::write_file(pkg, gzip_stored(tar, true)));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string root = resolve_asset_path("Assets/Imported/R369 Kit");
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    ed.command("import " + pkg);
+    const Editor::PackageJob *job = ed.last_package_for_test();
+    std::string guids, got_cs;
+    fs::read_file(fs::join(root, ".unity-guids"), guids);
+    fs::read_file(fs::join(root, "Scripts/Spin.cs"), got_cs);
+    std::printf("    models %d, textures %d, scripts %d, folders %d, left out %zu; why '%s'\n", job ? job->counts[0] : -1, job ? job->counts[1] : -1,
+                job ? job->counts[2] : -1, job ? job->folders : -1, job ? job->skipped.size() : 0, job ? job->why.c_str() : "-");
+    CHECK(job && job->why.empty() && job->counts[0] == 1 && job->counts[1] == 1 && job->counts[2] == 1 && job->folders == 1 && job->skipped.size() == 5);
+    std::string case_txt;
+    fs::read_file(fs::join(root, "Notes/Case.txt"), case_txt);
+    CHECK(case_txt == "first" && !fs::exists(fs::join(root, "Notes/twice.txt")) && !fs::exists(fs::join(root, "Notes/twice2.txt")));
+    CHECK(guids.find("88888888888888888888888888888888") == std::string::npos && guids.find("aaaaaaaa") == std::string::npos);
+    CHECK(fs::exists(fs::join(root, "Kit Models/tri.obj")) && fs::exists(fs::join(root, "Textures/red.png")) && got_cs == cs);
+    CHECK(guids.find("22222222222222222222222222222222\tAssets/Kit Models/tri.obj\tAssets/Imported/R369 Kit/Kit Models/tri.obj") != std::string::npos);
+    for (const char *where : {"r369_evil.txt", "Assets/r369_evil.txt", "Assets/Imported/r369_evil.txt"})  // (where a careless join would land)
+      CHECK(!fs::exists(resolve_asset_path(where)));
+    /* The unpacked model imports as any file does. */
+    ed.command("import " + fs::join(root, "Kit Models/tri.obj"));
+    bool tri = false;
+    ed.scene().for_each([&](GameObject &g) { tri = tri || (g.get<MeshFilter>() && g.get<MeshFilter>()->mesh && g.get<MeshFilter>()->mesh->face_count() == 1); });
+    CHECK(tri);
+    /* Not a package: refused with why, nothing made. */
+    const std::string junk = fs::join(dir, "junk.unitypackage");
+    CHECK(fs::write_file(junk, "not gzip"));
+    ed.command("import " + junk);
+    CHECK(ed.last_package_for_test() && ed.last_package_for_test()->why == "not a gzip file");
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(resolve_asset_path("Assets/Imported/junk"), ec);
+  });
+  test("the lesson's Try-it (round 369): window Project - where an unpacked package lands; import of a package that isn't there refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("window Project");
+    ed.command("import Assets/none.unitypackage");
+    CHECK(ed.last_package_for_test() == nullptr);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -8669,4 +8825,5 @@ void run_assets_tests() {
   tests_round365();
   tests_round366();
   tests_round367();
+  tests_round369();
 }

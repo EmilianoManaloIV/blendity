@@ -414,6 +414,7 @@ screens themselves.
 | Render Animation in the dependency-free build ended with PNGs and a note to install FFmpeg, though Blender's libraries (with FFmpeg) were a click away. | The finish message names the folder and why, with a Fix that downloads the libraries (or turns them back on) (round 366). |
 | Small frictions from round 350's productions: no Capsule; a typo'd kind made an empty; two objects named Sphere; Join refused after Select All; Walk Cycle off; a new camera facing +Z; the console couldn't save, open, rotate or scale, and help listed a tenth of it. | A Capsule, refused typos, "Sphere (1)", Join on the last mesh, Walk Cycle on, a camera aligned to the view, and the console's save / open / new / rotate / scale / set Transform.* / saverender <path> with a full help (round 367). |
 | Sculpting ignored the pen beyond its pressure: its eraser end did nothing there, its tilt nothing, and pressure mapped straight. | The eraser end inverts the brush, Use Tilt turns the plane brushes and the alpha, and a Pressure Curve shared with Paint (round 368). |
+| A Unity asset pack (.unitypackage) couldn't be opened without Unity. | Import Unity Package unpacks it into Assets/Imported/<package> on a worker, models and textures ready to use, scripts kept, GUIDs kept (round 369). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing

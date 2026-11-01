@@ -2,6 +2,35 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 369): Phase E begins - Unity packages unpacked into the project
+
+**Asked:** "Is it possible to import Unity packages and prefab packs related to VRChat into Blendity ... So I can work
+on VRChat worlds & avatars & games using a game engine as a refinement and finishing touch phase?"
+
+**Added (task 0346)**
+- **Import Unity Package:** a .unitypackage (gzip, tar, one GUID folder per asset) read in-house and unpacked into
+  Assets/Imported/<package>/ with Unity's own folders, on a worker shown in the job tray with Cancel.
+  - Where: File > Import Unity Package..., a drop on the window, or `import <file>.unitypackage`.
+  - Models and textures become ordinary project files; scripts, shaders, prefabs and materials are kept as they are.
+  - Each asset's GUID is kept in .unity-guids for the way back.
+  - Paths that would leave the package's folder (.., absolute, drives) are left out and named.
+- **The Opus review's fixes (the attack cases):**
+  - a non-UTF-8 path no longer closes Blendity;
+  - the inflate is capped, so a lying size can't fill memory;
+  - the package is held once in memory;
+  - Windows device names, trailing dots and spaces, control characters, duplicates and case collisions are refused or
+    left out;
+  - the folder's name is made safe;
+  - quitting waits for the job;
+  - .unity-guids lists only what was written.
+
+**Checked:** `tests_round369`:
+- gzip with a name, tar with ustar's prefix and GNU's long names, .meta GUIDs;
+- package paths kept inside;
+- a package of a folder, a model, a texture, a script and two escaping paths unpacked, and the model imported;
+- a non-package refused;
+- the Try-it.
+
 ## 2026-10-31 (round 368): the pen in sculpting - the eraser end, tilt, a pressure curve
 
 **Asked:** the plan's last Phase A round (from round 350's comparison: sculpting ignored the pen's eraser end and tilt).
