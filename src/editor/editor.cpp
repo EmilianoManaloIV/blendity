@@ -4446,6 +4446,11 @@ void Editor::load_prefs() {
     if (!v.empty() && v.back() == '\r') v.pop_back();
     if (moonray_pref(k, v)) continue;
     if (assist_pref(k, v)) continue;
+    if (k == "pen_curve") {  // (round 368)
+      std::vector<Vec2> pts;
+      if (curve_from_text(v, pts) && pts.size() >= 2) pen_curve_ = pts;
+      continue;
+    }
     if (ai_pref(k, v)) continue;
     if (livelink_pref(k, v)) continue;
     if (sketch_brush_pref(k, v)) continue;  // (task 0297)
@@ -4606,6 +4611,7 @@ void Editor::save_prefs() {
   s += sketch_brush_prefs_text();  // (task 0297)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
+  s += "pen_curve=" + curve_to_text(pen_curve_) + "\n";  // (round 368)
   s += ai_prefs_text();
   s += livelink_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,

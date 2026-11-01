@@ -162,7 +162,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       /* Task 0261: one brush grammar - the active brush (Sculpt, Paint, Weight Paint, Strokes, Scatter) answers the same keys. */
       {"brush.smaller", "Brush Smaller", "Brushes", CTX_SCENE},
       {"brush.larger", "Brush Larger", "Brushes", CTX_SCENE},
-      {"brush.erase", "Eraser On / Off", "Brushes", CTX_SCENE},  // (Paint's; unbound outside the Adobe preset)
+      {"brush.erase", "Eraser On / Off (Sculpt: Carve)", "Brushes", CTX_SCENE},  // (Paint's eraser, Sculpt's Carve; unbound outside the Adobe preset)
       {"mode.vertex", "Vertex Select Mode", "Modes", CTX_SCENE_EDIT},
       {"mode.edge", "Edge Select Mode", "Modes", CTX_SCENE_EDIT},
       {"mode.face", "Face Select Mode", "Modes", CTX_SCENE_EDIT},
@@ -672,8 +672,13 @@ bool Editor::brush_step(int dir) {
 
 /* Task 0261: Paint's eraser (Photoshop's E); in any other mode a toast says whose it is. */
 bool Editor::brush_erase_toggle() {
+  if (sculpt_) {  // (round 368: in Sculpt, E switches Carve - the brush inverted, as the pen's eraser end does)
+    sculpt_brush_.carve = !sculpt_brush_.carve;
+    toast(LogLevel::Info, sculpt_brush_.carve ? "Sculpt: inverted (Carve)" : "Sculpt: not inverted");
+    return true;
+  }
   if (!paint_) {
-    refuse("Eraser: it is Paint Mode's (the pen's eraser end erases in every brush mode)", "paint on", "Paint Mode");
+    refuse("Eraser: Paint Mode's eraser, or Sculpt Mode's Carve (the pen's eraser end erases or inverts there too)", "paint on", "Paint Mode");
     return false;
   }
   paint_brush_.erase = !paint_brush_.erase;

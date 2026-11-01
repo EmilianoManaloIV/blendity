@@ -4110,6 +4110,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Lazy Mouse", paint_brush_.lazy, 1.0f, 0.0f, 200.0f);
   static const char *kPaintPressure[] = {"Nothing", "Opacity", "Size"};
   br.enumeration("Pressure", paint_brush_.pressure, kPaintPressure, 3);
+  draw_pen_curve(br);
   br.field("Erase", paint_brush_.erase);
   br.field("Mirror X", paint_brush_.sym_x);
   br.field("Mirror Y", paint_brush_.sym_y);
@@ -4210,6 +4211,12 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   br.field("Front Faces Only", sculpt_brush_.front_only);
   br.enumeration("Pressure", sculpt_brush_.pressure, kSculptPressure, 3);
   br.help("What a pen's pressure drives: the strength, the size, or nothing.");
+  draw_pen_curve(br);
+  br.field("Use Tilt", sculpt_brush_.tilt);
+  br.field("Tilt Strength", sculpt_brush_.tilt_strength, 0.05f, 0.0f, 1.0f);
+  br.help("Use Tilt: a pen's lean tips Clay Buildup's, Flatten's and Scrape's plane the way the pen leans (by its angle times Tilt Strength, "
+          "at most 60 degrees) and turns the alpha to it. The pen's eraser end inverts Draw, Clay Buildup and Inflate, as Alt does, and "
+          "takes a mask away (E switches Carve).");
   br.field("Mirror X", sculpt_brush_.sym_x);
   br.field("Mirror Y", sculpt_brush_.sym_y);
   br.field("Mirror Z", sculpt_brush_.sym_z);

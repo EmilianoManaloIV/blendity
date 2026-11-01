@@ -7137,6 +7137,13 @@ static void tests_round360() {
     const bool one_slot = std::all_of(m.face_material.begin(), m.face_material.end(), [](int f) { return f == 0; });
     std::printf("    after the atlas: %zu material(s), one slot %d, its albedo map %s\n", mr->materials.size(), (int)one_slot, mr->materials.empty() ? "-" : mr->materials[0]->base_map.path.c_str());
     CHECK(mr->materials.size() == 1 && one_slot && !mr->materials[0]->base_map.empty());
+    /* The baked material and its images out of the scratch project (each run left one more, crowding the Materials
+     * window's grid for the multi-select test). */
+    for (const MaterialPtr &mat : mr->materials) {
+      if (!mat->asset_path.empty()) std::remove(resolve_asset_path(mat->asset_path).c_str());
+      for (const TextureRef *t : {&mat->base_map, &mat->normal_map, &mat->metallic_map, &mat->roughness_map, &mat->emission_map})
+        if (!t->empty()) std::remove(resolve_asset_path(t->path).c_str());
+    }
   });
   test("Eye Tracking (review 360): one Eyes mesh for both eyes skinned to LeftEye and RightEye; a Skin's limit group kept on the eyes; a second avatar's eyes its own; a re-run after an eye moved keeps it; a turned body's blinks on the right sides; the test undone before an edit", [] {
     Editor ed;

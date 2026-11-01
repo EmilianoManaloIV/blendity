@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 368): the pen in sculpting - the eraser end, tilt, a pressure curve
+
+**Asked:** the plan's last Phase A round (from round 350's comparison: sculpting ignored the pen's eraser end and tilt).
+
+**Added (task 0345)**
+- **The eraser end** inverts the brush as Alt does (Draw digs, Clay carves, Inflate deflates), and takes a mask away.
+- **Pen tilt** (Use Tilt, off at first, and Tilt Strength) turns Clay Buildup's, Flatten's and Scrape's plane the way
+  the pen leans, mirrored with symmetry, and turns the alpha to the lean.
+- **The Opus review's fixes:**
+  - the lean is now mirrored with symmetry;
+  - the normal is turned rather than added to, so it never flips;
+  - Use Tilt is off at first;
+  - prefs are saved once after a curve drag;
+  - the help names the inverted brushes.
+- **A test leak:** round 360's atlas test left a baked material and its images in the scratch project on every run,
+  crowding the Materials window's grid until the multi-select test failed. It now removes them.
+- **A Pressure Curve** in Sculpt's and Paint's brush settings, shared and kept in Preferences.
+- **E** (the Adobe keymap's Eraser) switches Carve in Sculpt.
+
+**Checked:** `tests_round368`:
+- a Draw dab raising and eraser dabs digging;
+- a Scrape dab leaning 40 degrees moving along a plane tipped to the view's right;
+- the curve mapping half pressure to 0.1, and a half-pressure dab adding a tenth of a full one;
+- E switching Carve;
+- the Try-it.
+
 ## 2026-10-31 (round 367): the small fixes - Capsule, unique names, Join, Walk Cycle on, the new camera, the console
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 7, 8,

@@ -632,7 +632,7 @@ void Editor::paint_dab(const Recti &view, float x, float y, float pressure) {
   Vec3 hit;
   float dist;
   if (!paint_hit(view, x, y, hit, dist)) return;
-  pressure = std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f;
+  pressure = pen_pressure(std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f);  // (round 368: the pen's curve)
   const float weight = paint_brush_.pressure == 1 ? pressure : 1.0f;
   const float radius = std::max(1.0f, paint_brush_.radius * ui_.scale * (paint_brush_.pressure == 2 ? std::max(0.1f, pressure) : 1.0f));
   paint_erase_ = paint_brush_.erase || ui_.in.eraser;
@@ -839,7 +839,7 @@ bool Editor::paint_dab_uv(float u, float v, float pressure) {
   PaintImages &im = *paint_images_;
   if (!std::isfinite(u) || !std::isfinite(v)) return false;
   u -= std::floor(u), v -= std::floor(v);  // (the UV square, wrapped)
-  pressure = std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f;
+  pressure = pen_pressure(std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f);
   const float weight = paint_brush_.pressure == 1 ? pressure : 1.0f;
   const float radius = std::min((float)std::max(im.w, im.h), std::max(1.0f, paint_brush_.radius * (paint_brush_.pressure == 2 ? std::max(0.1f, pressure) : 1.0f)));
   if (own) paint_erase_ = paint_brush_.erase || ui_.in.eraser;

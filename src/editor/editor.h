@@ -150,6 +150,8 @@ struct SculptBrush {
   std::string alpha;     // (an image's path: its luminance shapes the dab; empty: none)
   bool alpha_turn = true;  // (the alpha turned to the stroke's direction; off: as the image lies)
   int stroke = 0;        // kSculptStrokes: Dots, Drag Dot, Drag Rect, Freehand, Spray
+  bool tilt = false;     // (round 368: a pen's tilt leans Clay / Flatten / Scrape's plane and turns the alpha; off at first, as a resting pen leans)
+  float tilt_strength = 1.0f;  // (how much of the lean: 1 the pen's own angle, capped at 60 degrees)
 };
 extern const char *const kSculptBrushes[11];
 extern const char *const kSculptPressure[3];
@@ -1383,6 +1385,16 @@ class Editor {
   int dialog_kind_for_test() const { return (int)dialog_; }
   void set_ui_scale_for_test(float s) { ui_scale_pref_ = s, apply_ui_scale(); }
   float ui_scale_pref_for_test() const { return ui_scale_pref_; }  // (round 367)
+  /* Round 368: a console dab as the pen would make it - its tilt (degrees) and its eraser end. */
+  void sculpt_pen_for_test(Vec2 tilt, bool eraser) { sculpt_dab_tilt_ = tilt, sculpt_dab_eraser_ = eraser, sculpt_dab_pen_ = true; }
+  std::vector<Vec2> &pen_curve_for_test() { return pen_curve_; }
+  float pen_pressure_for_test(float p) const { return pen_pressure(p); }
+  /* The area normal `n` (object space, the object unmoved) leaned by a pen tilted `tilt` degrees, as a dab would. */
+  Vec3 sculpt_lean_for_test(Vec3 n, Vec2 tilt) {
+    sculpt_tilt_now_ = tilt;
+    sculpt_set_lean(Mat4::identity(), SculptSym{});
+    return sculpt_leaned(n);
+  }
   std::vector<std::string> workspace_names_for_test() const { return workspace_names(); }
   int fb_width_for_test() const { return fb_.width; }
   int fb_height_for_test() const { return fb_.height; }
@@ -1955,6 +1967,19 @@ class Editor {
   void assist_command(const std::vector<std::string> &t);
 
  private:
+  /* Round 368 (sculpt.cpp): the pen's pressure through one curve for Sculpt and Paint (Preferences keep it); a console
+   * dab's pen (sculpt_pen_for_test); the dab's plane lean from the pen's tilt, in the object's space. */
+  std::vector<Vec2> pen_curve_ = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+  float pen_pressure(float p) const;
+  Vec2 sculpt_dab_tilt_{0.0f, 0.0f};
+  bool sculpt_dab_eraser_ = false, sculpt_dab_pen_ = false;
+  Vec2 sculpt_tilt_now_{0.0f, 0.0f};  // (this dab's tilt, 0 with Use Tilt off)
+  Vec3 sculpt_lean_dir_{0.0f, 0.0f, 0.0f};  // (this instance's lean, mirrored with it - review 368)
+  float sculpt_lean_angle_ = 0.0f;
+  bool pen_curve_dirty_ = false;  // (saved once the drag ends - review 368)
+  Vec3 sculpt_leaned(Vec3 n) const;
+  void sculpt_console_dab(float x, float y, float p);
+  void draw_pen_curve(Reflector &br);
   bool assist_[(int)Assist::Count] = {true, true, false, false, false};  // (physics tools and Walk Cycle on - round 367, finding 12; the rest off)
   bool assist_require(Assist a);
   bool assist_pref(const std::string &key, const std::string &value);
@@ -3832,6 +3857,7 @@ class Editor {
     bool identity() const;
   };
   std::vector<SculptSym> sculpt_symmetries() const;
+  void sculpt_set_lean(const Mat4 &inv, const SculptSym &sym);  // (round 368)
   void sculpt_apply_brush(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, int kind, bool carve, Vec2 drag_px);
   size_t sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, bool use_mask, std::vector<uint32_t> &ids,
                         std::vector<float> &w) const;
