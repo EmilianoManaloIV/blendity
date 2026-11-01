@@ -32,6 +32,7 @@
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
 #include "../render/xr.h"
+#include "../render/xr_nav.h"
 #include "../scene/budget.h"
 #include "../scene/unity_package.h"
 #include "../scene/godot_scene.h"
@@ -1016,7 +1017,12 @@ class Editor {
   /* Round 383: VR View on a given runtime (a test's stub), and the session. */
   bool vr_start_for_test(std::unique_ptr<xr::Runtime> rt, std::string &why);
   xr::Session *vr_for_test() { return vr_.get(); }
-  Mat4 vr_stage_for_test() const { return xr::stage_in_world(vr_pivot_, vr_yaw_, vr_scale_, vr_ ? vr_->standing_lift() : 0.0f); }
+  Mat4 vr_stage_for_test() const { return vr_stage_.matrix(); }
+  Mat4 vr_last_view_for_test() const { return vr_last_view_; }
+  const xr::Stage &vr_stage_value_for_test() const { return vr_stage_; }
+  bool vr_tape_for_test() const { return vr_tape_; }
+  float vr_tape_length_for_test() const { return vr_tape_m_; }
+  const xr::Arc &vr_arc_for_test() const { return vr_arc_; }
   bool vr_wants_frames_for_test() const { return wants_continuous_redraw(); }
   std::string livelink_discovery_path() const;  // (task 0274: ~/.blendity/livelink.json, beside the prefs)
   void livelink_autostart();
@@ -2432,9 +2438,41 @@ class Editor {
   /* Round 383: VR View (render/xr.h) - a headset sees the scene at 1:1, its stage at y = 0 below where the Scene view
    * looks, facing as it faces; each eye drawn as the Game view draws (render_deferred, at vr_resolution_). */
   std::unique_ptr<xr::Session> vr_;
-  float vr_resolution_ = 0.5f, vr_scale_ = 1.0f;
-  Vec3 vr_pivot_;
-  float vr_yaw_ = 0.0f;
+  float vr_resolution_ = 0.5f;
+  xr::Stage vr_stage_;  // (where the headset's floor stands in the scene: the Scene view's pivot at start, moved by the hands)
+  /* Round 384: the hands' gestures - a grab (one hand moves the world, two also turn and scale it), the teleport arc
+   * while the right trigger is held, the right stick's snap turn, the tape measure the right primary button toggles. */
+  xr::Grab vr_grab_;
+  int vr_grab_hands_ = 0;
+  xr::Arc vr_arc_;
+  bool vr_aiming_ = false, vr_tape_ = false, vr_primary_was_ = false, vr_turned_ = false;
+  float vr_tape_m_ = 0.0f;
+  double vr_last_tick_ = 0.0;
+  void vr_hands(double dt);
+  bool vr_segment_hit(Vec3 a, Vec3 b, Vec3 &hit, Vec3 &normal);
+  /* The arc's hit test: a segment BVH per mesh, made on a worker on its first aim and again when the mesh changes
+   * (review 384: every triangle of the scene had been tested 60 times a frame; a 180,000-triangle mesh's BVH takes
+   * 80 ms to make). Until it lands the arc passes through that mesh, or uses its last one. */
+  struct VrBvh {
+    uint64_t version = 0, deform = 0, seen = 0;  // (the mesh's version and deform_version it was made for; the arc that last asked)
+    size_t tris = 0;
+    std::shared_ptr<const xr::SegmentBvh> bvh;
+    std::future<std::shared_ptr<const xr::SegmentBvh>> job;
+  };
+  std::unordered_map<uint64_t, VrBvh> vr_bvh_;  // (by Mesh::uid: a freed mesh's address reused never finds its BVH - re-check 384)
+  /* An arc's meshes, gathered once per arc (re-check 384: every segment had walked the scene). */
+  struct VrTarget {
+    Mat4 inv;
+    const xr::SegmentBvh *bvh;
+  };
+  std::vector<VrTarget> vr_targets_;
+  uint64_t vr_arc_stamp_ = 0;
+  void vr_gather_targets();
+  xr::Grab vr_grab_begin(int held, const xr::Hand &l, const xr::Hand &r) const;
+  Mat4 vr_last_view_;  // (the view the last eye was drawn with: the tests' check that the hands move it on their own frame)
+  float vr_render_aspect();
+  const xr::SegmentBvh *vr_bvh_of(const Mesh &m, int &building);
+  void vr_overlay(const Mat4 &view, const Mat4 &proj, int width, int height);
   Image vr_img_;
   RenderTarget vr_rt_;
   Renderer3D vr_r3d_;

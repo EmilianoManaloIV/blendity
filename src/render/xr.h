@@ -34,10 +34,6 @@ struct Fov {
 /* OpenXR's point and turn in Blendity's axes (Z mirrored). */
 Vec3 to_blendity(Vec3 p);
 Quat to_blendity(Quat q);
-/* Where the headset's stage (its floor's origin, facing -Z in OpenXR) sits in the scene: at y = 0 below `pivot`, facing
- * `yaw` degrees (the Scene view's yaw), at `scale` (1: life size; 2: the scene looks half as big); `lift` raises it (a
- * seated runtime's origin is the head: 1.6 m puts the eyes at a standing height). */
-Mat4 stage_in_world(Vec3 pivot, float yaw_deg, float scale = 1.0f, float lift = 0.0f);
 /* An eye's view matrix in Blendity's convention, from its pose in the stage. */
 Mat4 eye_view(const Mat4 &world_from_stage, const Pose &eye);
 /* An eye's world position. */
@@ -45,6 +41,16 @@ Vec3 eye_position(const Mat4 &world_from_stage, const Pose &eye);
 /* An off-centre projection from the four angles: left-handed, depth 0..1, as Mat4::perspective (which it equals for a
  * symmetric field). */
 Mat4 eye_projection(const Fov &fov, float znear, float zfar);
+
+/* A hand as the runtime tracks it (OpenXR's space: the stage's) and what its controller says. */
+struct Hand {
+  bool tracked = false;
+  Pose aim;   // the pointing ray: from position along -Z
+  Pose grip;  // where the hand holds the controller
+  float trigger = 0.0f, squeeze = 0.0f;  // 0..1
+  Vec2 stick;                            // -1..1 each way (+y forward)
+  bool primary = false;                  // A / X (or the menu button)
+};
 
 /* One eye of a frame: where it looks from, what it sees, how big its image is. */
 struct Eye {
@@ -72,6 +78,11 @@ class Runtime {
   /* Eye `i`'s image (width x height, 0xAARRGGBB rows top down, sRGB-encoded) into its swapchain; false when it wasn't
    * taken (the frame then ends without the layer). */
   virtual bool submit_eye(int i, const uint32_t *pixels, int width, int height) = 0;
+  /* Round 384: the hands at the frame's display time, after the controllers' input is read (false: none tracked). */
+  virtual bool locate_hands(Hand hands[2]) {
+    (void)hands;
+    return false;
+  }
   /* The frame shown (with the eyes' layer when `rendered`). */
   virtual bool end_frame(bool rendered) = 0;
   virtual std::string name() const = 0;
@@ -96,13 +107,21 @@ class Session {
   ~Session() { stop(); }
   bool start(std::string &why);
   void stop();
-  /* Events, then a frame when running: each eye drawn by `draw` and submitted. */
-  void tick(const Mat4 &world_from_stage, const DrawEye &draw);
+  /* Events, then a frame when running: the hands found, then `stage` asked where the stage stands now (the hands may
+   * have moved it - review 384: the world had lagged the controllers a frame), then each eye drawn by `draw`. */
+  using StageNow = std::function<Mat4()>;
+  void tick(const StageNow &stage, const DrawEye &draw);
+  void tick(const Mat4 &world_from_stage, const DrawEye &draw) {
+    tick([&] { return world_from_stage; }, draw);
+  }
   State state() const { return state_; }
   const std::string &why() const { return why_; }
   uint64_t frames() const { return frames_; }      // frames ended (drawn or not)
   uint64_t rendered() const { return rendered_; }  // frames whose eyes were drawn
   const std::vector<Eye> &last_eyes() const { return eyes_; }
+  /* Round 384: the hands as the last frame found them (left, right), and the head (the eyes' middle) in the stage. */
+  const Hand &hand(int i) const { return hands_[i & 1]; }
+  Pose head() const;
   std::string runtime_name() const { return rt_ ? rt_->name() : std::string(); }
   float standing_lift() const { return rt_ ? rt_->standing_lift() : 0.0f; }
   float znear = 0.05f, zfar = 1000.0f;  // metres (a hand's length in front of the eyes, a kilometre away)
@@ -112,13 +131,14 @@ class Session {
 
  private:
   void events();
-  void frame(const Mat4 &world_from_stage, const DrawEye &draw);
+  void frame(const StageNow &stage, const DrawEye &draw);
   std::unique_ptr<Runtime> rt_;
   State state_ = State::Off;
   std::string why_;
   uint64_t frames_ = 0, rendered_ = 0;
   std::vector<Eye> eyes_;
   std::vector<uint32_t> pixels_;
+  Hand hands_[2];
 };
 
 const char *state_name(Session::State s);

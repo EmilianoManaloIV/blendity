@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 384): moving around in VR, and scale
+
+**Asked:** Phase C's second round: teleport, smooth move, grab the world to move, turn and scale it, a 1:1 snap, a tape
+measure, the camera's frame and the controllers in view.
+
+**Added (task 0361)**
+- **`render/xr_nav.h`:** the stage (origin, yaw, scale), the teleport arc and landing, smooth move, snap turn, one- and
+  two-hand grabs (about the hands' middle; 1:1 snaps), and the tape.
+- **The controllers through OpenXR actions:** aim and grip poses, trigger, squeeze, stick and primary button, with
+  bindings for Touch, Index, Vive, Windows Mixed Reality and the simple controller.
+- **The gestures:**
+  - squeeze to grab (both: turn and scale);
+  - the right trigger for the arc, let go to teleport;
+  - the left stick to walk, the right stick to snap-turn 30 degrees;
+  - A for the tape.
+- **The eyes show** the controllers, their rays, the arc and its ring, the render camera's frame, the tape and the
+  scale.
+
+**The Opus review's fixes:**
+- a seated runtime's lift now goes through every path (the eyes, the arc, the grabs, the turns, the teleport);
+- Touch's tape button on each hand (A and X), refused bindings logged;
+- the arc's hit test through a segment BVH per mesh, made on a worker (it had tried every triangle 60 times a frame);
+- no stand-on-walls (a landing needs a floor's normal);
+- grabs with hands close together or one above the other, and the scale kept within 1:0.01 to 1:100;
+- a teleport only on a tracked release with nothing squeezed;
+- the hands move the world on their own frame (not the next);
+- the camera frame at the final render's aspect, without an orthographic camera's lines;
+- the stage's old helper `stage_in_world` gone (`Stage::matrix`), the constants named;
+- the re-check's: the BVHs keyed by the mesh's id and made again after a sculpt or deform, two at a time, let go when no
+  longer asked for; the meshes gathered once per arc; no jump when one hand goes over the other mid-turn; `vr scale` kept
+  to 1:0.01-1:100; tests of the drawn view's frame, a deform and a stretched ramp.
+
+**Checked:** recorded hand poses through the maths (1:2 about a fixed middle, a quarter turn, the arc against a throw and
+onto a box, the lift, the grabs' edges, the BVH against every triangle on 180,000); the gestures in the editor on a stub
+runtime (cancels, the same-frame grab, the head over the landing, the arc on a box).
+
 ## 2026-11-01 (round 383): VR View
 
 **Asked:** Phase C's first round: the scene in a headset at 1:1, standing where the Scene view looks (OpenXR: SteamVR,

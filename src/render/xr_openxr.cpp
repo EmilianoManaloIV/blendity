@@ -7,6 +7,8 @@
 
 #include "xr.h"
 
+#include "../core/core.h"
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -68,7 +70,50 @@ struct Fns {
   PFN_xrBeginFrame BeginFrame = nullptr;
   PFN_xrEndFrame EndFrame = nullptr;
   PFN_xrLocateViews LocateViews = nullptr;
+  /* Round 384: the controllers. */
+  PFN_xrStringToPath StringToPath = nullptr;
+  PFN_xrCreateActionSet CreateActionSet = nullptr;
+  PFN_xrCreateAction CreateAction = nullptr;
+  PFN_xrSuggestInteractionProfileBindings SuggestBindings = nullptr;
+  PFN_xrAttachSessionActionSets AttachActionSets = nullptr;
+  PFN_xrSyncActions SyncActions = nullptr;
+  PFN_xrGetActionStateFloat GetFloat = nullptr;
+  PFN_xrGetActionStateBoolean GetBoolean = nullptr;
+  PFN_xrGetActionStateVector2f GetVector2f = nullptr;
+  PFN_xrCreateActionSpace CreateActionSpace = nullptr;
+  PFN_xrLocateSpace LocateSpace = nullptr;
 };
+
+/* Round 384: the controllers' bindings, per interaction profile - (action, path under each hand). A profile the runtime
+ * doesn't know is refused and skipped. */
+struct Binding {
+  int action;  // Act
+  const char *path;
+  int hands = 3;  // 1: the left only, 2: the right only, 3: both (Touch's A is on the right, X on the left - review 384)
+};
+enum Act { kAim, kGrip, kTrigger, kSqueeze, kStick, kPrimary, kActs };
+struct Profile {
+  const char *path;
+  std::vector<Binding> bindings;
+};
+const std::vector<Profile> &profiles() {
+  static const std::vector<Profile> p = {
+      {"/interaction_profiles/khr/simple_controller", {{kAim, "input/aim/pose"}, {kGrip, "input/grip/pose"}, {kTrigger, "input/select/click"}, {kPrimary, "input/menu/click"}}},
+      {"/interaction_profiles/oculus/touch_controller",
+       {{kAim, "input/aim/pose"}, {kGrip, "input/grip/pose"}, {kTrigger, "input/trigger/value"}, {kSqueeze, "input/squeeze/value"}, {kStick, "input/thumbstick"},
+        {kPrimary, "input/x/click", 1}, {kPrimary, "input/a/click", 2}}},
+      {"/interaction_profiles/valve/index_controller",
+       {{kAim, "input/aim/pose"}, {kGrip, "input/grip/pose"}, {kTrigger, "input/trigger/value"}, {kSqueeze, "input/squeeze/value"}, {kStick, "input/thumbstick"},
+        {kPrimary, "input/a/click"}}},
+      {"/interaction_profiles/htc/vive_controller",
+       {{kAim, "input/aim/pose"}, {kGrip, "input/grip/pose"}, {kTrigger, "input/trigger/value"}, {kSqueeze, "input/squeeze/click"}, {kStick, "input/trackpad"},
+        {kPrimary, "input/menu/click"}}},
+      {"/interaction_profiles/microsoft/motion_controller",
+       {{kAim, "input/aim/pose"}, {kGrip, "input/grip/pose"}, {kTrigger, "input/trigger/value"}, {kSqueeze, "input/squeeze/click"}, {kStick, "input/thumbstick"},
+        {kPrimary, "input/menu/click"}}},
+  };
+  return p;
+}
 
 template <class F>
 bool get(PFN_xrGetInstanceProcAddr gipa, XrInstance inst, const char *name, F &out) {
@@ -106,6 +151,7 @@ class OpenXR final : public Runtime {
       destroy();
       return false;
     }
+    actions();  // (without them VR still shows the scene, only without hands)
     if (!swapchains(scale, why)) {
       destroy();
       return false;
@@ -142,6 +188,9 @@ class OpenXR final : public Runtime {
   }
 
   void destroy() override {
+    for (XrSpace &h : hand_spaces_)
+      if (h != XR_NULL_HANDLE) f_.DestroySpace(h), h = XR_NULL_HANDLE;
+    hands_ready_ = false;
     for (EyeChain &e : chains_)
       if (e.chain != XR_NULL_HANDLE) f_.DestroySwapchain(e.chain);
     chains_.clear();
@@ -222,6 +271,19 @@ class OpenXR final : public Runtime {
   }
 
   std::string name() const override { return name_; }
+
+  /* Round 384: the controllers' input read for this frame, and where each hand's aim and grip are at its display time. */
+  bool locate_hands(Hand hands[2]) override {
+    if (!hands_ready_) return false;
+    XrActiveActionSet active{set_, XR_NULL_PATH};
+    XrActionsSyncInfo si{XR_TYPE_ACTIONS_SYNC_INFO};
+    si.countActiveActionSets = 1;
+    si.activeActionSets = &active;
+    if (XR_FAILED(f_.SyncActions(session_, &si))) return false;
+    bool any = false;
+    for (int i = 0; i < 2; i++) any = hand(i, hands[i]) || any;
+    return any;
+  }
   float standing_lift() const override { return local_ ? 1.6f : 0.0f; }
 
  private:
@@ -236,6 +298,100 @@ class OpenXR final : public Runtime {
     if (f_.ResultToString && inst_ != XR_NULL_HANDLE) f_.ResultToString(inst_, r, text);
     why = std::string(what) + " failed: " + (text[0] ? text : std::to_string((int)r));
     return false;
+  }
+
+  /* Round 384: an action set of the hands' aim and grip poses, trigger, squeeze, stick and primary button, its bindings
+   * suggested for each known controller, attached to the session; each hand's poses as spaces. Without it VR still
+   * shows the scene, only without hands. */
+  void actions() {
+    if (!hands_ok_) return;
+    XrActionSetCreateInfo si{XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(si.actionSetName, "blendity", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+    std::strncpy(si.localizedActionSetName, "Blendity", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+    if (XR_FAILED(f_.CreateActionSet(inst_, &si, &set_))) return;
+    f_.StringToPath(inst_, "/user/hand/left", &hand_paths_[0]);
+    f_.StringToPath(inst_, "/user/hand/right", &hand_paths_[1]);
+    const struct {
+      const char *name;
+      XrActionType type;
+    } defs[kActs] = {{"aim", XR_ACTION_TYPE_POSE_INPUT},       {"grip", XR_ACTION_TYPE_POSE_INPUT},     {"trigger", XR_ACTION_TYPE_FLOAT_INPUT},
+                     {"squeeze", XR_ACTION_TYPE_FLOAT_INPUT}, {"stick", XR_ACTION_TYPE_VECTOR2F_INPUT}, {"primary", XR_ACTION_TYPE_BOOLEAN_INPUT}};
+    for (int a = 0; a < kActs; a++) {
+      XrActionCreateInfo ci{XR_TYPE_ACTION_CREATE_INFO};
+      std::strncpy(ci.actionName, defs[a].name, XR_MAX_ACTION_NAME_SIZE - 1);
+      std::strncpy(ci.localizedActionName, defs[a].name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+      ci.actionType = defs[a].type;
+      ci.countSubactionPaths = 2;
+      ci.subactionPaths = hand_paths_;
+      if (XR_FAILED(f_.CreateAction(set_, &ci, &acts_[a]))) return;
+    }
+    for (const Profile &p : profiles()) suggest(p);
+    XrSessionActionSetsAttachInfo ai{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    ai.countActionSets = 1;
+    ai.actionSets = &set_;
+    if (XR_FAILED(f_.AttachActionSets(session_, &ai))) return;
+    for (int i = 0; i < 2; i++) {
+      hand_spaces_[i * 2] = action_space(acts_[kAim], hand_paths_[i]);
+      hand_spaces_[i * 2 + 1] = action_space(acts_[kGrip], hand_paths_[i]);
+    }
+    hands_ready_ = true;
+  }
+
+  void suggest(const Profile &p) {
+    std::vector<XrActionSuggestedBinding> b;
+    const char *sides[2] = {"/user/hand/left/", "/user/hand/right/"};
+    for (const Binding &bd : p.bindings)
+      for (int s = 0; s < 2; s++) {
+        XrPath path = XR_NULL_PATH;
+        if (!(bd.hands & (1 << s))) continue;
+        if (XR_SUCCEEDED(f_.StringToPath(inst_, (std::string(sides[s]) + bd.path).c_str(), &path))) b.push_back({acts_[bd.action], path});
+      }
+    XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    if (XR_FAILED(f_.StringToPath(inst_, p.path, &sb.interactionProfile))) return;
+    sb.countSuggestedBindings = (uint32_t)b.size();
+    sb.suggestedBindings = b.data();
+    const XrResult r = f_.SuggestBindings(inst_, &sb);  // (a profile the runtime doesn't know: refused, the others stand)
+    if (XR_FAILED(r)) Log::info("VR View: %s refused %s's bindings (%d)", name_.c_str(), p.path, (int)r);
+  }
+
+  XrSpace action_space(XrAction action, XrPath hand) {
+    XrActionSpaceCreateInfo ci{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    ci.action = action;
+    ci.subactionPath = hand;
+    ci.poseInActionSpace.orientation.w = 1.0f;
+    XrSpace s = XR_NULL_HANDLE;
+    f_.CreateActionSpace(session_, &ci, &s);
+    return s;
+  }
+
+  static Pose pose_of(const XrPosef &p) {
+    return {Quat(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w), Vec3(p.position.x, p.position.y, p.position.z)};
+  }
+
+  bool locate(XrSpace s, Pose &out) const {
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (s == XR_NULL_HANDLE || XR_FAILED(f_.LocateSpace(s, space_, time_, &loc))) return false;
+    if (!(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) || !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) return false;
+    out = pose_of(loc.pose);
+    return true;
+  }
+
+  bool hand(int i, Hand &h) const {
+    XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+    gi.subactionPath = hand_paths_[i];
+    XrActionStateFloat f{XR_TYPE_ACTION_STATE_FLOAT};
+    XrActionStateBoolean b{XR_TYPE_ACTION_STATE_BOOLEAN};
+    XrActionStateVector2f v{XR_TYPE_ACTION_STATE_VECTOR2F};
+    gi.action = acts_[kTrigger];
+    h.trigger = XR_SUCCEEDED(f_.GetFloat(session_, &gi, &f)) && f.isActive ? f.currentState : 0.0f;
+    gi.action = acts_[kSqueeze];
+    h.squeeze = XR_SUCCEEDED(f_.GetFloat(session_, &gi, &f)) && f.isActive ? f.currentState : 0.0f;
+    gi.action = acts_[kStick];
+    h.stick = XR_SUCCEEDED(f_.GetVector2f(session_, &gi, &v)) && v.isActive ? Vec2(v.currentState.x, v.currentState.y) : Vec2();
+    gi.action = acts_[kPrimary];
+    h.primary = XR_SUCCEEDED(f_.GetBoolean(session_, &gi, &b)) && b.isActive && b.currentState;
+    h.tracked = locate(hand_spaces_[i * 2], h.aim) && locate(hand_spaces_[i * 2 + 1], h.grip);
+    return h.tracked;
   }
 
   bool instance(std::string &why) {
@@ -264,6 +420,12 @@ class OpenXR final : public Runtime {
               get(f_.gipa, inst_, "xrBeginFrame", f_.BeginFrame) && get(f_.gipa, inst_, "xrEndFrame", f_.EndFrame) &&
               get(f_.gipa, inst_, "xrLocateViews", f_.LocateViews);
     if (!ok) return fail(why, "the OpenXR runtime lacks a function a session needs");
+    hands_ok_ = get(f_.gipa, inst_, "xrStringToPath", f_.StringToPath) && get(f_.gipa, inst_, "xrCreateActionSet", f_.CreateActionSet) &&
+                get(f_.gipa, inst_, "xrCreateAction", f_.CreateAction) && get(f_.gipa, inst_, "xrSuggestInteractionProfileBindings", f_.SuggestBindings) &&
+                get(f_.gipa, inst_, "xrAttachSessionActionSets", f_.AttachActionSets) && get(f_.gipa, inst_, "xrSyncActions", f_.SyncActions) &&
+                get(f_.gipa, inst_, "xrGetActionStateFloat", f_.GetFloat) && get(f_.gipa, inst_, "xrGetActionStateBoolean", f_.GetBoolean) &&
+                get(f_.gipa, inst_, "xrGetActionStateVector2f", f_.GetVector2f) && get(f_.gipa, inst_, "xrCreateActionSpace", f_.CreateActionSpace) &&
+                get(f_.gipa, inst_, "xrLocateSpace", f_.LocateSpace);
     XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
     if (XR_SUCCEEDED(f_.GetInstanceProperties(inst_, &ip))) name_ = ip.runtimeName;
     return true;
@@ -408,6 +570,11 @@ class OpenXR final : public Runtime {
   uint8_t linear_[256] = {};
   bool linear_ready_ = false, local_ = false;
   std::vector<XrVector3f> last_positions_;
+  bool hands_ok_ = false, hands_ready_ = false;
+  XrActionSet set_ = XR_NULL_HANDLE;
+  XrAction acts_[kActs] = {};
+  XrPath hand_paths_[2] = {XR_NULL_PATH, XR_NULL_PATH};
+  XrSpace hand_spaces_[4] = {XR_NULL_HANDLE, XR_NULL_HANDLE, XR_NULL_HANDLE, XR_NULL_HANDLE};  // (left aim, left grip, right aim, right grip)
   std::string name_ = "the OpenXR runtime";
 };
 

@@ -13,12 +13,6 @@ std::unique_ptr<Runtime> make_openxr_runtime(std::string &why);  // xr_openxr.cp
 Vec3 to_blendity(Vec3 p) { return {p.x, p.y, -p.z}; }
 Quat to_blendity(Quat q) { return {-q.x, -q.y, q.z, q.w}; }  // (the turn mirrored with the space: z kept, x and y negated)
 
-Mat4 stage_in_world(Vec3 pivot, float yaw_deg, float scale, float lift) {
-  const float s = std::isfinite(scale) && scale > 0.0f ? scale : 1.0f;
-  const float up = std::isfinite(lift) ? lift * s : 0.0f;
-  return Mat4::trs(Vec3(pivot.x, up, pivot.z), Quat::euler({0.0f, yaw_deg, 0.0f}), Vec3(s, s, s));
-}
-
 Mat4 eye_view(const Mat4 &world_from_stage, const Pose &eye) {
   const Mat4 stage_from_eye = Mat4::trs(to_blendity(eye.position), to_blendity(eye.orientation), Vec3(1, 1, 1));
   return (world_from_stage * stage_from_eye).inverse();
@@ -37,6 +31,13 @@ Mat4 eye_projection(const Fov &fov, float znear, float zfar) {
   m.m[11] = 1.0f;
   m.m[14] = -znear * zfar / (zfar - znear);
   return m;
+}
+
+Pose Session::head() const {
+  if (eyes_.empty()) return {};
+  Vec3 p;
+  for (const Eye &e : eyes_) p = p + e.pose.position;
+  return {eyes_[0].pose.orientation, p / (float)eyes_.size()};
 }
 
 const char *state_name(Session::State s) {
@@ -86,10 +87,10 @@ void Session::stop() {
   state_ = State::Off;
 }
 
-void Session::tick(const Mat4 &world_from_stage, const DrawEye &draw) {
+void Session::tick(const StageNow &stage, const DrawEye &draw) {
   if (!rt_ || state_ == State::Off || state_ == State::Lost) return;
   events();
-  if (state_ == State::Running) frame(world_from_stage, draw);
+  if (state_ == State::Running) frame(stage, draw);
 }
 
 /* The runtime's events, as OpenXR's session states move: Ready begins the session, Stopping ends it, Exiting or a loss
@@ -121,14 +122,16 @@ void Session::events() {
   }
 }
 
-void Session::frame(const Mat4 &world_from_stage, const DrawEye &draw) {
+void Session::frame(const StageNow &stage, const DrawEye &draw) {
   bool should_render = false;
   if (!rt_->wait_frame(should_render) || !rt_->begin_frame()) {
     why_ = "the VR runtime stopped answering";
     state_ = State::Lost;
     return;
   }
+  if (!rt_->locate_hands(hands_)) hands_[0].tracked = hands_[1].tracked = false;  // (round 384)
   bool render = should_render && rt_->locate_eyes(eyes_) && !eyes_.empty();
+  const Mat4 world_from_stage = stage();
   for (int i = 0; render && i < (int)eyes_.size(); i++) {
     const Eye &e = eyes_[(size_t)i];
     pixels_.assign((size_t)e.width * (size_t)e.height, 0xFF000000u);

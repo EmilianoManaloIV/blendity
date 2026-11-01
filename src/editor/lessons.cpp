@@ -616,6 +616,12 @@ With a headset connected (SteamVR, the Oculus app with Quest Link, or Windows Mi
 ! cmd:vr status | VR View's state, and why it's off when it is
 ? You want to judge whether a doorway is tall enough. What do you set? | Nothing - VR View is 1:1 by default: a 2 m doorway looks 2 m tall from your own eye height.
 ? VR View is choppy. What helps first? | vr start 0.35 - smaller eyes to draw; the runtime's reprojection fills in between frames.
+# VR View: moving around and scale
+In VR View your controllers move you: squeeze one grip and drag to move the world with your hand; squeeze both and pull them apart or together to scale the world (it snaps to life size at 1:1) or twist them to turn it. Hold the right trigger to throw an arc, let go to stand where it lands. The left stick walks where you look, the right stick snap-turns 30 degrees. The A button (or X) shows a tape measure between your hands, in the world's metres. The render camera's frame floats in front of it so you can see what a render will show.
+> docs/tasks/0361-vr-navigation.md: Built
+! cmd:vr status | VR View's state; with a headset, try the grips, the trigger and the sticks
+? You pulled both hands together to half their distance. How big does the world look? | Half as big - the world at 1:2 (the readout says so); pull them apart again and it snaps back at 1:1.
+? You want to know how wide a doorway is in VR. What do you do? | Press A (or X) and hold your controllers at its sides - the tape shows the distance in metres.
 # Imported animations: a model's clips
 A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
 ! cmd:window Animation | Open the Animation window: an imported model's clips play on its root

@@ -920,6 +920,14 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **VR View** (round 383): Edit > VR View (`vr start [resolution]`) shows the scene in an OpenXR headset (SteamVR, the Oculus app with Quest Link, Windows Mixed Reality) at life size, standing on the ground (y = 0) below where the Scene view looks and facing as it faces; the editor draws every frame while it runs, paced by the headset. `vr scale <s>` shows the world at 1:s (2: half size), `vr here` moves you to where the Scene view looks now, `vr status` says how it runs or why it doesn't, `vr stop` ends it. Each eye is drawn as the Game view draws, at half the headset's size each way by default (`vr start 0.35` for smaller, faster eyes); `vr start` waits for the runtime, so starting with SteamVR closed launches it and takes a few seconds. It needs the build with Blender's libraries and the OpenXR SDK in their lib folder (`openxr/include`, `openxr/bin/openxr_loader.dll`), on Windows.
 
+**Moving in VR** (round 384):
+- **Squeeze a grip and drag** to move the world with your hand.
+- **Squeeze both grips** and pull them apart or together to scale it (it snaps to 1:1 within 5%), or twist them to turn it about the vertical.
+- **Hold the right trigger** to throw an arc; let go to stand where it lands.
+- **The left stick** walks where you look (2 m/s at life size); **the right stick** snap-turns 30 degrees.
+- **A** (or X on the left Touch controller) shows a tape measure between the controllers, in the world's metres.
+- **In view:** the controllers as boxes with their rays, the render camera's frame (1 m in front of it), and the scale when it isn't 1:1.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and
