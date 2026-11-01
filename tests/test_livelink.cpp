@@ -1085,6 +1085,48 @@ static void tests_round318() {
       GameObject *late = make_cube(ed, "Late");
       if (late) late->set_local_position(Vec3(0, 5, 0));
       run(1.5);
+      /* Round 382: everything that flows since round 376, live - fog from 5 to 40 m; a 4x4 checker as the Box's Base Map;
+       * "Arm" skinned to the rig with a Smile key at 0.5; the rig's clip "Wave"; "Crate" with three levels and a 1 x 2 x 1
+       * Box Collider. */
+      EnvironmentSettings &env = ed.scene().environment;
+      env.fog = true, env.fog_start = 5.0f, env.fog_end = 40.0f;
+      std::vector<uint32_t> tile(16);
+      for (int i = 0; i < 16; i++) tile[(size_t)i] = ((i / 4 + i % 4) % 2) ? 0xFFFFFFFFu : 0xFF2040C0u;
+      fs::make_dirs(fs::parent(resolve_asset_path("Assets/Textures/live382_tile.png")));  // (a short test folder, Unreal's, has none yet)
+      write_png(resolve_asset_path("Assets/Textures/live382_tile.png"), tile.data(), 4, 4, 4);
+      texture_cache_forget(resolve_asset_path("Assets/Textures/live382_tile.png"));
+      mat.base_map = TextureRef{"Assets/Textures/live382_tile.png", false};
+      mat.touch();
+      GameObject *arm = ed.scene().create("Arm");
+      arm->add<MeshFilter>()->mesh = primitives::cylinder(0.2f, 2.0f, 8);
+      arm->add<MeshRenderer>();
+      arm->set_local_position(Vec3(3, 0, 0));
+      SkinModifier *skin = arm->add<SkinModifier>();
+      skin->object = "Rig";
+      Mesh &am = *mesh_make_mutable(arm->get<MeshFilter>()->mesh);
+      std::string why;
+      if (!skin_bind_automatic(*skin, am, &why)) std::printf("    the Arm's bind failed: %s\n", why.c_str());
+      ShapeKey smile;
+      smile.name = "Smile";
+      smile.delta.assign(am.vert_count(), Vec3(0.0f, 0.0f, 0.1f));
+      am.shape_keys.push_back(smile);
+      am.touch();
+      arm->get<MeshRenderer>()->set_shape_weight("Smile", 0.5f);
+      AnimationClipPtr wave = create_clip_asset("Assets/Animations/live382_wave.anim", "Wave");
+      wave->track("Upper", "Rotation", 2).set_key(0.0f, 0.0f);
+      wave->track("Upper", "Rotation", 2).set_key(60.0f, 60.0f);
+      wave->length = 60.0f;
+      wave->touch();
+      Animation *an = root->add<Animation>();
+      an->clip = "Assets/Animations/live382_wave.anim";
+      an->play_automatically = false;
+      if (GameObject *crate = make_cube(ed, "Crate")) {
+        crate->set_local_position(Vec3(0, 0, -3));
+        crate->add<LODGroupComponent>();
+        ColliderComponent *col = crate->add<ColliderComponent>();
+        col->fit = false, col->size = Vec3(1, 2, 1);
+      }
+      run(2.0);
       const MeshPtr base = dense->mesh_filter()->mesh;
       for (int k = 1; k <= 10; k++) {  // (every vertex moves: a deform of the whole dense mesh each time, the last at radius 1.2)
         MeshPtr d = std::make_shared<Mesh>(*base);
@@ -1096,10 +1138,14 @@ static void tests_round318() {
       run(2.0);
     }
     const livelink::Stats st = ed.livelink_for_test()->stats();
-    std::printf("    sent: %llu objects, %llu transforms, %llu meshes, %llu deforms, %llu materials, %llu deletes, %llu poses; the dense mesh %zu vertices\n",
+    std::printf("    sent: %llu objects, %llu transforms, %llu meshes, %llu deforms, %llu materials, %llu deletes, %llu poses, %llu textures (%llu the same); the dense mesh %zu vertices\n",
                 (unsigned long long)st.objects, (unsigned long long)st.transforms, (unsigned long long)st.meshes, (unsigned long long)st.deforms,
-                (unsigned long long)st.materials, (unsigned long long)st.deletes, (unsigned long long)st.poses, dense_verts);
+                (unsigned long long)st.materials, (unsigned long long)st.deletes, (unsigned long long)st.poses, (unsigned long long)st.textures, (unsigned long long)st.textures_same, dense_verts);
     ed.livelink_stop();  // (the discovery file goes: the bridge checks its scene and writes its report)
+    fs::remove_file(resolve_asset_path("Assets/Textures/live382_tile.png"));
+    texture_cache_forget(resolve_asset_path("Assets/Textures/live382_tile.png"));
+    fs::remove_file(resolve_asset_path("Assets/Animations/live382_wave.anim"));
+    forget_clip_assets("Assets/Animations/live382_wave.anim");
     for (int i = 0; i < 1200 && !done->load(); i++) run(0.1);  // (the engine writes its report and quits: 2 minutes at most)
     const bool ended = done->load();
     if (ended) engine.join();
@@ -1767,6 +1813,178 @@ static void tests_round381() {
   });
 }
 
+/* A Live Link line that is `id`'s transform. */
+static bool is_transform_of(const std::string &line, uint64_t id) {
+  return line.find("\"transform\"") != std::string::npos && line.find(strprintf("\"id\":%llu,", (unsigned long long)id)) != std::string::npos;
+}
+
+static void tests_round382() {
+  test("Live Link never pauses the editor (round 382): four clients connected, 200 objects, a 100,000-vertex mesh deformed and a 50-bone rig posed every frame, a clip keyed - the main thread's tick stays short, and everything goes", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    for (int i = 0; i < 200; i++)
+      if (GameObject *c = make_cube(ed, strprintf("Prop %d", i).c_str())) c->set_local_position(Vec3((float)(i % 20), 0, (float)(i / 20)));
+    GameObject *dense = ed.scene().create("Dense");
+    dense->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 400, 250);
+    dense->add<MeshRenderer>();
+    GameObject *rig = ed.scene().create("Rig");
+    rig->add<Armature>();
+    std::vector<GameObject *> bones;
+    GameObject *parent = rig;
+    for (int b = 0; b < 50; b++) {
+      parent = ed.scene().create(strprintf("Bone %d", b), parent);
+      parent->add<Bone>();
+      bones.push_back(parent);
+    }
+    /* A clip on the rig, keyed as it plays. */
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/r382_clip.anim", "Stress");
+    for (int b = 0; b < 50; b++)
+      for (int f = 0; f <= 600; f += 10) clip->track(strprintf("Bone %d", b), "Rotation", 2).set_key((float)f, (float)(f % 90));
+    clip->touch();
+    rig->add<Animation>()->clip = "Assets/Animations/r382_clip.anim";
+    const bool started = ed.livelink_start(0);
+    CHECK(started);
+    if (!started) return;
+    ed.livelink_for_test()->set_interval_for_test(0);
+    std::vector<std::unique_ptr<net::LineClient>> clients;
+    for (int k = 0; k < 4; k++) {
+      clients.push_back(std::make_unique<net::LineClient>());
+      CHECK(clients.back()->connect(ed.livelink_for_test()->port()));
+    }
+    for (auto &c : clients) (void)until(ed, *c, "sync_end");
+    const size_t verts = dense->mesh_filter()->mesh->vert_count();
+    MeshPtr base = dense->mesh_filter()->mesh;
+    double total = 0.0, worst = 0.0;
+    const int frames = 120;
+    for (int f = 0; f < frames; f++) {
+      MeshPtr d = mesh_make_mutable(dense->mesh_filter()->mesh);
+      const float s = 1.0f + 0.001f * (float)(f % 10);
+      for (size_t v = 0; v < verts; v++) d->positions[v] = base->positions[v] * s;
+      d->deform_version++;
+      for (GameObject *b : bones) b->set_local_rotation(Quat::euler(Vec3(0, 0, (float)(f % 30))));
+      clip->track("Bone 0", "Rotation", 2).set_key((float)(f % 600), (float)f);
+      clip->touch();
+      ed.livelink_for_test()->tick(ed.scene(), false, 1e7 + f / 60.0);  // (a clock past any real one: the suite may have run for minutes)
+      const double ms = ed.livelink_for_test()->stats().tick_ms;
+      total += ms;
+      worst = std::max(worst, ms);
+      std::string line, bin;
+      for (auto &c : clients)
+        while (c->read(line, bin, 0)) {}
+    }
+    const livelink::Stats st = ed.livelink_for_test()->stats();
+    std::printf("    %d frames, 4 clients, %zu-vertex deforms: the tick %.2f ms on average, %.2f ms at most; %llu deforms, %llu poses sent\n", frames, verts,
+                total / frames, worst, (unsigned long long)st.deforms, (unsigned long long)st.poses);
+    /* A topology change on the dense mesh: its copy for the mesh worker is the main thread's part. */
+    dense->mesh_filter()->mesh = primitives::uv_sphere(1.0f, 401, 250);
+    ed.livelink_for_test()->tick(ed.scene(), false, 1e7 + 100.0);
+    const double topo = ed.livelink_for_test()->stats().tick_ms;
+    std::printf("    with a clip keyed each frame: %llu clips sent; a topology change of the dense mesh: %.2f ms\n", (unsigned long long)st.clips, topo);
+    CHECK(total / frames < 8.0 && worst < 25.0);  // (the time: generous for slower machines and debug builds - this one ran about 1.5 and 3)
+    CHECK(topo < 40.0);
+    CHECK(st.deforms >= (uint64_t)frames && st.poses >= (uint64_t)frames - 1 && st.clips >= 6);  // (everything went: a cheap tick that sent nothing would pass the times)
+    ed.livelink_stop();
+    fs::remove_file(resolve_asset_path("Assets/Animations/r382_clip.anim"));
+    forget_clip_assets("Assets/Animations/r382_clip.anim");
+  });
+  test("Live Link with a surface painted dab after dab (review 382): the paint tool's own strokes - each a new texture - go at most 4 a second while the tick stays short", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("create Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    g->set_local_scale(Vec3(6.0f));
+    ed.mark_changed_for_test("a big sphere");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.command("surface new PaintSurf");
+    ed.command("meshmaps 512 4");
+    for (int i = 0; i < 4000 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    ed.command("surface maps");
+    ed.command("paint on");
+    Vec2 px;
+    const bool ready = ed.paint_for_test() && ed.project_for_test(ed.scene().find(gid)->world_position(), px);
+    CHECK(ready);
+    if (!ready) return;
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    ed.command("paint size 20");
+    const bool started = ed.livelink_start(0);
+    CHECK(started);
+    if (!started) return;
+    ed.livelink_for_test()->set_interval_for_test(0);
+    std::vector<std::unique_ptr<net::LineClient>> clients;
+    for (int k = 0; k < 4; k++) {
+      clients.push_back(std::make_unique<net::LineClient>());
+      CHECK(clients.back()->connect(ed.livelink_for_test()->port()));
+    }
+    for (auto &c : clients) (void)until(ed, *c, "sync_end");
+    const uint64_t before = ed.livelink_for_test()->stats().textures;
+    double clock = 1e7, total = 0.0, worst = 0.0;  // (past any real clock: the suite may have run for minutes)
+    const int frames = 120;
+    for (int f = 0; f < frames; f++) {
+      ed.command(strprintf("paint dab %g %g", px.x + (float)((f * 7) % 60) - 30.0f, px.y + (float)((f * 11) % 60) - 30.0f));
+      clock += 1.0 / 60.0;
+      ed.set_clock_for_test(clock);
+      ed.step_frame_headless();
+      const double ms = ed.livelink_for_test()->stats().tick_ms;
+      total += ms;
+      worst = std::max(worst, ms);
+      std::string line, bin;
+      for (auto &c : clients)
+        while (c->read(line, bin, 0)) {}
+    }
+    ed.livelink_for_test()->wait_meshes_for_test();
+    const uint64_t sent = ed.livelink_for_test()->stats().textures - before;
+    std::printf("    %d dabs over 2 s with 4 clients: %llu texture sends; the tick %.2f ms on average, %.2f ms at most\n", frames, (unsigned long long)sent, total / frames,
+                worst);
+    CHECK(sent >= 4 && sent <= 12 && total / frames < 8.0 && worst < 40.0);  // (about 4 a second: what each dab's new texture costs the tick)
+    ed.livelink_stop();
+  });
+  test("the lesson's Try-it (round 382): window Live Link - what Live Link sent, and how long it took", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("window Live Link");
+    CHECK(ed.window_docked_for_test(WindowKind::LiveLink));
+  });
+  test("Live Link keeps going while a long job runs (round 382): a skin bind of a 100,000-vertex mesh on a worker - a Box moved meanwhile reaches the client before the bind lands", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *box = make_cube(ed, "Box");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.set_skin_async_min_verts_for_test(0);
+    GameObject *body = ed.scene().create("Body");
+    body->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 400, 250);
+    body->add<MeshRenderer>();
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    const bool started = box && ed.livelink_start(0);
+    CHECK(started);
+    if (!started) return;
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    (void)until(ed, c, "sync_end");
+    (void)drain(ed, c);
+    ed.command("skin bind");
+    const bool running = !ed.jobs_for_test().empty();
+    box->set_local_position(Vec3(4, 0, 0));
+    bool moved_during = false;
+    int frames = 0;
+    for (; frames < 2000 && !ed.jobs_for_test().empty(); frames++) {
+      ed.step_frame_headless();
+      const bool still = !ed.jobs_for_test().empty();  // (a move sent on the frame the bind lands proves nothing - review 382)
+      std::string line, bin;
+      while (c.read(line, bin, 0)) moved_during = moved_during || (still && is_transform_of(line, box->id));
+    }
+    std::printf("    the bind ran on a worker: %d; the Box's move sent while it ran: %d (%d frames until it landed)\n", (int)running, (int)moved_during, frames);
+    CHECK(running && moved_during);
+    ed.livelink_stop();
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -1781,4 +1999,5 @@ void run_livelink_tests() {
   tests_round379();
   tests_round380();
   tests_round381();
+  tests_round382();
 }

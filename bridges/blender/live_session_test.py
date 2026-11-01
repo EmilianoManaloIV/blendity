@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import blendity_livelink as addon  # noqa: E402
-from blendity_livelink import discovery  # noqa: E402
+from blendity_livelink import apply, discovery  # noqa: E402
 
 LINES = []
 
@@ -83,6 +83,26 @@ def check_scene():
     dense = bpy.data.objects.get("Dense")
     r = max((v.co.length for v in dense.data.vertices), default=0.0) if dense is not None and dense.type == "MESH" else 0.0
     check(abs(r - 1.2) < 1e-3, "the dense mesh's last deform: radius %.4f, %d vertices" % (r, len(dense.data.vertices) if dense is not None else 0))
+    check_flows()
+
+
+def check_flows():
+    """Round 382: what flows since round 376, live - the fog, the Box's checker by its pixels, the skinned Arm's Smile at
+    0.5, the rig's Wave, the Crate's levels and collider."""
+    world = bpy.context.scene.world
+    check(world is not None and abs(world.mist_settings.start - 5.0) < 1e-4, "the fog from 5 m")
+    box = bpy.data.objects.get("Box")
+    mat = box.data.materials[0] if box is not None and box.data.materials else None
+    images = [nd.image for nd in mat.node_tree.nodes if nd.bl_idname == "ShaderNodeTexImage" and nd.image is not None] if mat else []
+    check(any(tuple(im.size) == (4, 4) for im in images), "the Box's 4 x 4 checker: %s" % [tuple(im.size) for im in images])
+    arm = bpy.data.objects.get("Arm")
+    keys = arm.data.shape_keys if arm is not None and arm.type == "MESH" else None
+    check(arm is not None and arm.modifiers.get(apply.SKIN_MODIFIER) is not None, "the Arm skinned on the rig")
+    check(keys is not None and len(keys.key_blocks) == 2 and abs(keys.key_blocks[1].value - 0.5) < 1e-5, "the Arm's Smile at 0.5")
+    check(any(a.get("blendity_clip") == "Wave" for a in bpy.data.actions), "the rig's Wave as an Action")
+    crate = bpy.data.objects.get("Crate")
+    levels = [c for c in crate.children if c.get("blendity_lod_level")] if crate is not None else []
+    check(len(levels) == 2 and crate is not None and "blendity_collider" in crate, "the Crate's two levels and its collider")
 
 
 def addon_vector(x, y, z):

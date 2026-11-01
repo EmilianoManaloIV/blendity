@@ -916,6 +916,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Live Link and VRChat** (round 381): with VRChat's Avatars SDK in the Unity project, each armature that is an avatar (eye bones, vrc.v_* visemes on a mesh skinned to it, or a humanoid Head) gets its VRC Avatar Descriptor filled on the avatar root (the object above the armature and all its meshes - parent them under one) - the view between the eyes, Lip Sync on the 15 visemes, Eye Look with the eyes and the blink, each written when Blendity's values change - and a VRC Phys Bone per spring chain under a child "Blendity PhysBones" (Pull from Stiffness, Spring from 1 - Damping, Gravity and Radius as they are: what importing a PhysBone does, turned round). With the Worlds SDK the Live Link root gets a VRC Scene Descriptor when the scene has none. Meshes with Contribute GI get Unity's static flags, SDK or not. Without the SDK nothing of VRChat's is added.
 
+**Live Link's cost** (round 382): with four engines connected, a 100,000-vertex mesh changing and a 50-bone rig posing every frame, Live Link takes a millisecond or two of a frame (measured on a Windows release build); meshes, levels, textures and clips are built on its workers. Jobs that run on workers don't stop it: what you change during a skin bind or a bake reaches the engines the next frame. Work done on the main thread (an import's busy step) holds it like everything else.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

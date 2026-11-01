@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 382): Live Link never pauses, and a live test of everything that flows
+
+**Asked:** Phase B's last round: no stalls while working with engines connected, Live Link going on during long jobs,
+and everything Phase B made flow shown to work with the installed engines.
+
+**Added (task 0359)**
+- **`tests_round382`** (four clients each, Windows release build):
+  - 200 objects, a 100,000-vertex mesh deformed, a 50-bone rig posed and a clip keyed every frame: the tick is 1.1 to
+    1.9 ms on average and at most 3.2 ms, with everything sent;
+  - a 100,000-vertex topology change costs about 4 ms;
+  - a surface painted with the paint tool costs 0.1 ms a tick on average, its texture sent about 4 a second;
+  - a Box moved during a 100,000-vertex skin bind reaches the client while the bind still runs.
+- **The live test with the installed engines** now also takes the fog, a 4 x 4 checker, a skinned Arm with Smile at
+  0.5, the clip, and a crate with three levels and a box collider. Blender 5.2, Godot 4.7.2, Unity 6000.6.7f1 and
+  Unreal 5.8 all report LIVE OK. Godot failed its "followed until stopped" check in two runs of eight; it now says why.
+- **The Opus review's fixes:**
+  - painting is measured with the paint tool (hand-written texels were almost never seen);
+  - the long-job test counts only moves sent while the bind runs;
+  - the Try-it opens the window by its title;
+  - stricter checks;
+  - the docs say what was measured.
+- **Found by it:**
+  - Godot's and Unity's live tests expected linear colours (the bridges have converted them since round 377);
+  - Unity's read URP's `_BaseColor` only;
+  - a short test folder had no texture folder.
+
 ## 2026-11-01 (round 381): VRChat's setup in Unity through Live Link
 
 **Asked:** Phase B: with VRChat's SDK in the Unity project, the avatar's Avatar Descriptor (view, lip sync, eye look)

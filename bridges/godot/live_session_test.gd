@@ -49,7 +49,8 @@ func check_scene(client) -> void:
 		check(box.position.is_equal_approx(Vector3(-1, 2, 3)), "the Box moved to %s" % str(box.position))
 		var mat := box.get_surface_override_material(0) as StandardMaterial3D
 		var c: Color = mat.albedo_color if mat != null else Color.BLACK
-		check(absf(c.r - 0.9) < 1e-3 and absf(c.g - 0.4) < 1e-3 and absf(c.b - 0.2) < 1e-3, "the Box recolored: %s" % str(c))
+		var want := Color(0.9, 0.4, 0.2).linear_to_srgb()  # (Live Link's colours are linear; Godot's albedo sRGB - round 377)
+		check(c.is_equal_approx(want), "the Box recolored: %s" % str(c))
 		var moved := []
 		for i in box.mesh.get_surface_count():
 			for v in box.mesh.surface_get_arrays(i)[Mesh.ARRAY_VERTEX]:
@@ -64,6 +65,33 @@ func check_scene(client) -> void:
 	var dense := find(client, "Dense") as MeshInstance3D
 	var r := radius(dense) if dense != null and dense.mesh != null else 0.0
 	check(absf(r - 1.2) < 1e-3, "the dense mesh's last deform: radius %.4f" % r)
+	check_flows(client)
+
+
+## Round 382: what flows since round 376, live - the fog, the Box's checker by its pixels, the skinned Arm's Smile at
+## 0.5, the rig's Wave, the Crate's levels and collider.
+func check_flows(client) -> void:
+	var we := find(client, "Blendity World") as WorldEnvironment
+	var env: Environment = we.environment if we != null else null
+	check(env != null and env.fog_enabled and (not ("fog_depth_begin" in env) or absf(float(env.get("fog_depth_begin")) - 5.0) < 1e-4), "the fog from 5 m")
+	var box := find(client, "Box") as MeshInstance3D
+	var mat := box.get_surface_override_material(0) as StandardMaterial3D if box != null else null
+	var tex := mat.albedo_texture if mat != null else null
+	check(tex != null and tex.get_width() == 4, "the Box's 4 x 4 checker")
+	var arm := find(client, "Arm") as MeshInstance3D
+	check(arm != null and arm.skin != null, "the Arm skinned on the rig")
+	check(arm != null and arm.mesh != null and arm.mesh.get_blend_shape_count() == 1 and absf(arm.get_blend_shape_value(0) - 0.5) < 1e-5, "the Arm's Smile at 0.5")
+	var rig := find(client, "Rig")
+	var player := rig.get_node_or_null("Blendity Animation") as AnimationPlayer if rig != null else null
+	check(player != null and player.has_animation("blendity/Wave"), "the rig's Wave as an Animation")
+	var crate := find(client, "Crate")
+	var levels := 0
+	var collider := false
+	if crate != null:
+		for c in crate.get_children():
+			levels += 1 if c.get_meta("blendity_part", "") == "lod" else 0
+			collider = collider or c.get_meta("blendity_part", "") == "collider"
+	check(levels == 2 and collider, "the Crate's two levels and its collider (%d levels)" % levels)
 
 
 func _initialize() -> void:
@@ -97,7 +125,8 @@ func _initialize() -> void:
 			ended = true
 			break
 		OS.delay_msec(5)
-	check(ended, "followed until Blendity stopped Live Link (%d messages)" % client.messages)
+	check(ended, "followed until Blendity stopped Live Link (%d messages; after %d ms, ready %s, connected %s, the discovery file %s)" % [
+		client.messages, Time.get_ticks_msec() - start, str(ready), str(client.connected()), str(Discovery.read())])
 	check_scene(client)
 	lines.append("app: Godot %s; the longest poll once the dense mesh was in: %.1f ms" % [Engine.get_version_info().string, longest])
 	lines.append("LIVE OK" if failures == 0 else "LIVE FAILED: %d problem(s)" % failures)

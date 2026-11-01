@@ -604,6 +604,12 @@ With VRChat's SDK in your Unity project, Live Link sets your avatar up as you wo
 ! cmd:window Avatar | The Avatar window: Eye Tracking and Create Visemes make what the Avatar Descriptor takes
 ? Where does Unity's VRC Avatar Descriptor put the view after Live Link sets it up? | Between the LeftEye and RightEye bones at rest (a little above the Head without eyes).
 ? Your spring chain's Damping is 0.2. What is its PhysBone's Spring? | 0.8 - what the damping leaves.
+# Live Link: working while the engines follow
+Live Link costs the editor a millisecond or two a frame with four engines connected, even with a 100,000-vertex mesh changing and a rig posing every frame: meshes, levels, textures and clips are built on its own workers. Jobs that run on workers (a skin bind, a bake, a render) don't stop it - what you change meanwhile still reaches the engines. Its window shows what went: messages, meshes, deforms, clips.
+> docs/LIVELINK.md: What it costs the editor
+! cmd:window Live Link | The Live Link window: what was sent, and how long building it took
+? You bind a heavy mesh's skin and move a prop while it works. When does Unity see the prop move? | The next frame: the bind runs on a worker, Live Link's tick goes on.
+? Where are a mesh's glTF bytes made? | On Live Link's mesh worker: the main thread only copies the mesh when its topology changes.
 # Imported animations: a model's clips
 A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
 ! cmd:window Animation | Open the Animation window: an imported model's clips play on its root

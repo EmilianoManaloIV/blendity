@@ -12,6 +12,11 @@
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
+#include "Engine/ExponentialHeightFog.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Engine/Texture2D.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "UObject/UObjectIterator.h"
 #include "EngineUtils.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
@@ -63,6 +68,8 @@ UStaticMesh* MeshOf(AActor* A)
 	return M ? M->GetStaticMeshComponent()->GetStaticMesh().Get() : nullptr;
 }
 
+void CheckFlows(FLiveSession& S);
+
 void CheckWorld(FLiveSession& S)
 {
 	S.Check(FindLabelled(TEXT("Sphere")) == nullptr, TEXT("the Sphere deleted"));
@@ -96,6 +103,33 @@ void CheckWorld(FLiveSession& S)
 	const bool bCollision = DenseActor && DenseActor->GetStaticMeshComponent()->GetCollisionEnabled() == ECollisionEnabled::QueryAndPhysics;
 	S.Check(bCollision, FString::Printf(TEXT("the dense mesh has its collision back once the deforms stopped (collision %d)"),
 									  DenseActor ? (int32)DenseActor->GetStaticMeshComponent()->GetCollisionEnabled() : -1));
+	CheckFlows(S);
+}
+
+/* Round 382: what flows since round 376, live, as Unreal takes it - the fog, the Box's checker by its pixels, the skinned
+ * Arm (its posed vertices), the Crate's LODs and box collider (no clips in Unreal yet). */
+void CheckFlows(FLiveSession& S)
+{
+	bool bFog = false;
+	for (TActorIterator<AExponentialHeightFog> It(GEditor->GetEditorWorldContext().World()); It; ++It)
+		bFog = bFog || FMath::IsNearlyEqual(It->GetComponent()->StartDistance, 500.0f, 1e-2f);
+	S.Check(bFog, TEXT("the fog from 5 m"));
+	AStaticMeshActor* Box = Cast<AStaticMeshActor>(FindLabelled(TEXT("Box")));
+	UMaterialInstanceDynamic* Mid = Box ? Cast<UMaterialInstanceDynamic>(Box->GetStaticMeshComponent()->GetMaterial(0)) : nullptr;
+	UTexture* BaseMap = nullptr;
+	const bool bParam = Mid && Mid->GetTextureParameterValue(FName(TEXT("BaseMap")), BaseMap);
+	UTexture2D* Tex2 = Cast<UTexture2D>(BaseMap);
+	int32 Small = 0;  // (4 x 4 textures anywhere: did the checker arrive at all)
+	for (TObjectIterator<UTexture2D> It; It; ++It)
+		Small += It->GetSizeX() == 4 && It->GetSizeY() == 4;
+	S.Check(bParam && Tex2 && Tex2->GetSizeX() == 4,
+			FString::Printf(TEXT("the Box's checker by its pixels (material %s, BaseMap %d: %s %dx%d; 4x4 textures %d)"), Mid ? *Mid->GetName() : TEXT("none"),
+							(int32)bParam, BaseMap ? *BaseMap->GetName() : TEXT("none"), Tex2 ? Tex2->GetSizeX() : 0, Tex2 ? Tex2->GetSizeY() : 0, Small));
+	S.Check(MeshOf(FindLabelled(TEXT("Arm"))) != nullptr, TEXT("the skinned Arm (its posed vertices)"));
+	UStaticMesh* Crate = MeshOf(FindLabelled(TEXT("Crate")));
+	UBodySetup* Body = Crate ? Crate->GetBodySetup() : nullptr;
+	S.Check(Crate && Crate->GetNumLODs() == 3 && Body && Body->AggGeom.BoxElems.Num() == 1,
+			FString::Printf(TEXT("the Crate's LODs and box collider (%d LODs)"), Crate ? Crate->GetNumLODs() : 0));
 }
 
 /* A frame of the editor: the ready file once the Box is in, the longest frame once the dense mesh is, the checks when

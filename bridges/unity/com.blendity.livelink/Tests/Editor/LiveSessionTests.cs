@@ -9,6 +9,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.TestTools;
 
@@ -100,8 +101,9 @@ namespace Blendity.LiveLink.Tests
                 var p = box.transform.localPosition;  // (Unity's axes are Blendity's)
                 Check(Vector3.Distance(p, new Vector3(1, 2, 3)) < 1e-4f, "the Box moved to " + p.ToString("F4"));
                 var r = box.GetComponent<Renderer>();
-                var c = r != null && r.sharedMaterial != null ? r.sharedMaterial.GetColor("_BaseColor") : Color.black;
-                Check(Mathf.Abs(c.r - 0.9f) < 1e-3f && Mathf.Abs(c.g - 0.4f) < 1e-3f && Mathf.Abs(c.b - 0.2f) < 1e-3f, "the Box recolored: " + c);
+                var c = r != null && r.sharedMaterial != null ? r.sharedMaterial.color : Color.black;  // (the shader's main colour: _Color or URP's _BaseColor)
+                var want = new Color(0.9f, 0.4f, 0.2f).gamma;  // (Live Link's colours are linear; the material's gamma - round 377)
+                Check(Mathf.Abs(c.r - want.r) < 1e-3f && Mathf.Abs(c.g - want.g) < 1e-3f && Mathf.Abs(c.b - want.b) < 1e-3f, "the Box recolored: " + c);
                 var moved = new HashSet<float>();
                 foreach (var v in box.GetComponent<MeshFilter>().sharedMesh.vertices)
                     if (Mathf.Abs(Mathf.Abs(v.x) - 0.5f) > 1e-4f)
@@ -121,6 +123,28 @@ namespace Blendity.LiveLink.Tests
                 foreach (var v in mf.sharedMesh.vertices)
                     radius = Mathf.Max(radius, v.magnitude);
             Check(Mathf.Abs(radius - 1.2f) < 1e-3f, "the dense mesh's last deform: radius " + radius.ToString("0.0000"));
+            CheckFlows(box);
+        }
+
+        /* Round 382: what flows since round 376, live - the fog, the Box's checker by its pixels, the skinned Arm's Smile
+         * at 0.5, the rig's Wave, the Crate's levels and collider. */
+        void CheckFlows(GameObject box)
+        {
+            Check(RenderSettings.fog && Mathf.Abs(RenderSettings.fogStartDistance - 5f) < 1e-4f, "the fog from 5 m");
+            var boxRenderer = box != null ? box.GetComponent<Renderer>() : null;
+            var tex = boxRenderer != null && boxRenderer.sharedMaterial != null ? boxRenderer.sharedMaterial.mainTexture : null;
+            Check(tex != null && tex.width == 4, "the Box's 4 x 4 checker");
+            var arm = GameObject.Find("Arm");
+            var smr = arm != null ? arm.GetComponent<SkinnedMeshRenderer>() : null;
+            Check(smr != null && smr.bones.Length > 0, "the Arm skinned on the rig");
+            Check(smr != null && smr.sharedMesh != null && smr.sharedMesh.blendShapeCount == 1 && Mathf.Abs(smr.GetBlendShapeWeight(0) - 50f) < 1e-3f, "the Arm's Smile at 0.5");
+            const string wave = LiveLinkApplier.ClipFolder + "/live382_wave.anim";
+            Check(AssetDatabase.LoadAssetAtPath<AnimationClip>(wave) != null, "the rig's Wave as an AnimationClip");
+            AssetDatabase.DeleteAsset(wave);  // (the test's own: never the folder)
+            var crate = GameObject.Find("Crate");
+            var group = crate != null ? crate.GetComponent<LODGroup>() : null;
+            var col = crate != null ? crate.GetComponentInChildren<BoxCollider>() : null;
+            Check(group != null && group.lodCount == 3 && col != null && Vector3.Distance(col.size, new Vector3(1, 2, 1)) < 1e-4f, "the Crate's levels and collider");
         }
     }
 }

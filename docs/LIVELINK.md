@@ -182,6 +182,18 @@ An armature's VRChat setup:
 Both are sent at a sync (after every object) and when they change; an armature that stops being one (its Armature taken
 off) sends `none` and `"chains":[]`. An armature is looked at once a second, a few a frame.
 
+### What it costs the editor (round 382)
+- **Messages built on Live Link's workers:** meshes, level meshes, textures and clips. The main thread copies what
+  changed and sends the small messages.
+- **Measured** on a Windows release build with four clients:
+  - with 200 objects, a 100,000-vertex mesh deformed, a 50-bone rig posed and a clip keyed every frame, the tick is
+    1.1 to 1.9 ms on average and at most 3.2 ms;
+  - a topology change of that mesh costs about 4 ms;
+  - painting a surface dab after dab costs 0.1 ms on average and 2.8 ms at most, its texture sent about 4 times a
+    second.
+- **Jobs on workers** (a skin bind, a bake, a render) leave the tick going every frame (`tests_round382`). Work done
+  on the main thread, such as an import's busy step, holds it like everything else.
+
 ### deform
 `{"t":"deform","id":7,"topology":42,"verts":24,"bin":N}` + N = 12 x verts bytes: float32 x, y, z per mesh vertex
 (little-endian, in the object's space and glTF's axes). Sent instead of a whole mesh when only vertices moved (a drag
