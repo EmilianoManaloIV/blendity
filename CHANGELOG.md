@@ -2,6 +2,46 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 381): VRChat's setup in Unity through Live Link
+
+**Asked:** Phase B: with VRChat's SDK in the Unity project, the avatar's Avatar Descriptor (view, lip sync, eye look)
+and PhysBones; a world's Scene Descriptor and static flags; nothing VRChat-specific without the SDK.
+
+**Added (task 0358)**
+- **New messages:**
+  - `avatar`: an armature's view between its eyes, its visemes and blink meshes and keys, and its eye bones.
+  - `springs`: the armature's spring chains.
+  - The object message's `static` (Contribute GI).
+- **Unity:**
+  - The Avatar Descriptor, PhysBones (on "Blendity PhysBones") and the Scene Descriptor, made through reflection when
+    VRChat's SDK types are there.
+  - Static flags set for static objects either way.
+- The recorded session's rig gets eyes, a Face with the 15 visemes and a blink, a static Box and a spring chain.
+- **The Opus review's fixes:**
+  - **Main-thread cost:** a once-a-second spike with many rigs is gone (the skinned meshes are indexed, a few rigs a
+    tick, the humanoid analysis cached).
+  - **Where the descriptor goes:** on the avatar root, the object above the rig and its meshes.
+  - **Scene Descriptors:** one only, and only when the scene has none.
+  - **PhysBones:** their holder is marked; a hair rig's chains are not doubled; the mapping is the importer's turned
+    round.
+  - **Armatures that stop being one** say so.
+  - **Errors:** reflection or a missing eye no longer stops the link.
+  - **The user's own settings:** descriptor fields are written on change and cleared when gone; static flags are
+    cleared only where the link set them.
+  - **Tests:** the SDK stand-ins and their runner are in the repository.
+- **Found on Linux:**
+  - Two same-named materials found their keys again in hash-map order after Play/Stop, so Linux swapped them. The
+    smallest key now wins.
+  - Messages made on workers (meshes, textures, clips) are compared in any order.
+  - The recorded session makes its texture folder (a run of that test alone had none).
+
+**Checked:**
+- `tests_round381` (and the review's cases);
+- Unity's built-in project with stand-ins of VRChat's avatar types: the descriptor and PhysBone set;
+- the URP project as a world project: one Scene Descriptor and nothing of an avatar's;
+- the Godot, Blender and Unreal replays.
+- The real SDK isn't installed here; the spec gives the check for your own VRChat project.
+
 ## 2026-11-01 (round 380): LODs and colliders in Live Link
 
 **Asked:** Phase B: "LOD and Collider components arrive as an LOD Group and colliders".

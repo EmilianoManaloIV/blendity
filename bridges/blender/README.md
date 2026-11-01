@@ -38,6 +38,7 @@ date (and removes what Blendity deleted meanwhile).
 | armatures and bones | empties posed as the bones; a skinned mesh (round 378) has an armature whose bones copy them, vertex groups and an Armature modifier, its keys as shape keys |
 | clips (round 379) | an Action named for the clip, a slot per object (location, rotation_quaternion, scale), kept with a fake user, not assigned |
 | LODs and colliders (round 380) | the group and collider as custom properties; levels as hidden children `<name>_LOD<n>`; a wire empty for a box or sphere collider |
+| VRChat setup (round 381) | not taken (VRChat is Unity's) |
 
 ## Send to Blendity (round 374)
 

@@ -80,6 +80,7 @@ thread). A client that connects later gets its own sync; the others are not sent
 - `parent`: the parent's id, 0 for a root.
 - `kind`: `mesh`, `light`, `camera`, `armature` or `empty`.
 - `bone_of`: present on a bone, the id of its armature's object.
+- `static`: present (true) on a mesh whose renderer has Contribute GI on (round 381).
 - `materials`: on objects with a renderer, the material key of each slot, as the renderer draws it (an empty slot is
   the default material, sent like any other).
 Sent when an object appears, and again whole when its name, parent, kind, active state or material slots change.
@@ -153,6 +154,33 @@ mesh decimated to its ratio on Blendity's mesh worker. Sent at a sync, when the 
 screen size or Cull alone sends only `lod`), and when the mesh has changed and then stood still for half a second (a
 stroke doesn't decimate every tick). A level the latest `lod` doesn't have is ignored: one built before the group
 shrank or went may still arrive.
+
+### avatar and springs (round 381)
+```
+{"t":"avatar","id":5,"root":3,"view":[0,1.5,0.05],"visemes":{"mesh":9,"shapes":["vrc.v_sil",...]},
+ "blink":{"mesh":9,"shapes":["vrc.blink_left","vrc.blink_right","vrc.lowerlid_left","vrc.lowerlid_right"]},
+ "eyes":{"left":12,"right":13}}
+```
+An armature's VRChat setup:
+- **When an armature has one:** when it has LeftEye and RightEye bones, a mesh skinned to it with vrc.v_* keys, or a
+  humanoid Head.
+- **`root`:** the avatar root - the nearest object above the armature and every mesh skinned to it (VRChat's descriptor
+  goes there, the meshes in its hierarchy); the armature itself when there is none (Blendity's log says to parent them
+  under one object).
+- **`view`:** where VRChat's view sits, in the root's space and glTF's axes - between the eyes at rest, else a little
+  above the Head.
+- **`visemes` and `blink`:** the mesh skinned to the armature carrying the most of those keys (`mesh` 0: none), with
+  VRChat's names in its order.
+- **`eyes`:** the eye bones' ids (0: none).
+- **No longer an avatar:** `{"t":"avatar","id":5,"none":true}`.
+
+`{"t":"springs","id":5,"chains":[{"root":7,"label":0,"stiffness":0.4,"damping":0.15,"gravity":1,"radius":0.02,"bend":0}]}`:
+- each spring chain (a SpringBone on its first bone) under the armature, not under an armature inside it (a hair rig
+  has its own);
+- `"chains":[]` when the last goes.
+
+Both are sent at a sync (after every object) and when they change; an armature that stops being one (its Armature taken
+off) sends `none` and `"chains":[]`. An armature is looked at once a second, a few a frame.
 
 ### deform
 `{"t":"deform","id":7,"topology":42,"verts":24,"bin":N}` + N = 12 x verts bytes: float32 x, y, z per mesh vertex

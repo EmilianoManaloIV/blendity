@@ -37,6 +37,7 @@ and scales come across as the same numbers.
 | armatures and bones | empty GameObjects posed as the bones; a skinned mesh (round 378) is a SkinnedMeshRenderer on them, its keys as blend shapes |
 | clips (round 379) | an AnimationClip asset in Assets/Blendity Live Link/Clips (localPosition, localRotation, localScale curves) |
 | LODs and colliders (round 380) | an LOD Group (the renderer, then `<name>_LOD<n>` children); Box, Sphere, Capsule and Mesh Colliders |
+| VRChat setup (round 381) | with VRChat's SDK: the Avatar Descriptor on the avatar root (view, lip sync, eye look), PhysBones under "Blendity PhysBones", a Scene Descriptor when the scene has none; static flags for Contribute GI either way. Tested with stand-ins (`VrcStandIns`, `run_replay_tests.py`) |
 
 ## Test
 

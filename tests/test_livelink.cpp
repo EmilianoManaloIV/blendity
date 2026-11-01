@@ -4,6 +4,8 @@
 #include "test_common.h"
 #include "../src/scene/snapshot.h"
 #include "../src/scene/animation.h"
+#include "../src/scene/spring_bones.h"
+#include "../src/scene/visemes.h"
 #include "../src/render/canvas.h"
 #include "../src/image/image.h"
 #include <chrono>
@@ -80,6 +82,34 @@ GameObject *make_cube(Editor &ed, const char *name) {
   return g;
 }
 
+/* Round 381: LeftEye and RightEye bones 6 cm apart at `at` under the armature `root` (their rests set where they stand). */
+void add_eyes(Editor &ed, GameObject &root, Vec3 at) {
+  for (int side = 0; side < 2; side++) {
+    GameObject *eye = ed.scene().create(side ? "RightEye" : "LeftEye", &root);
+    eye->set_local_position(at + Vec3(side ? -0.03f : 0.03f, 0, 0));
+    eye->add<Bone>()->set_rest(eye->local());
+  }
+}
+/* A small cube skinned (to nothing yet) carrying VRChat's 15 visemes and a left blink, all at 0. */
+GameObject *add_face(Editor &ed, const char *name, Vec3 at) {
+  GameObject *face = make_cube(ed, name);
+  if (!face) return nullptr;
+  face->set_local_position(at);
+  face->set_local_scale(Vec3(0.1f, 0.1f, 0.1f));
+  face->add<SkinModifier>();
+  Mesh &m = *mesh_make_mutable(face->get<MeshFilter>()->mesh);
+  std::vector<std::string> keys = vrchat_viseme_names();
+  keys.push_back("vrc.blink_left");
+  for (const std::string &k : keys) {
+    ShapeKey sk;
+    sk.name = k;
+    sk.delta.assign(m.vert_count(), Vec3(0, 0.01f, 0));
+    m.shape_keys.push_back(sk);
+  }
+  m.touch();
+  return face;
+}
+
 /* The scripted session behind tests/fixtures/livelink_stream.bin: every byte the client received, and the messages. */
 struct Session {
   std::string raw;
@@ -128,6 +158,11 @@ Session record_session() {
     an->clip = "Assets/Animations/livelink_wave.anim";
     an->play_automatically = false;
   }
+  /* Round 381: the rig an avatar's - eyes 6 cm apart at 1.5 m (their rests; the view between them), a Face skinned to it
+   * with VRChat's 15 visemes and a blink (all at 0); the Box static (Contribute GI). */
+  add_eyes(ed, *root, Vec3(0, 1.5f, 0.05f));
+  if (GameObject *face = add_face(ed, "Face", Vec3(0, 1.5f, 0))) face->get<SkinModifier>()->object = "Rig";
+  if (box) box->mesh_renderer()->contribute_gi = true;
   /* Round 380: a crate with an LOD Group (three levels) and a Box Collider off its centre, 1 x 2 x 1. */
   if (GameObject *crate = make_cube(ed, "Crate")) {
     crate->set_local_position(Vec3(0, 0, -3));
@@ -143,6 +178,7 @@ Session record_session() {
   /* Round 377: a 4x4 checker as the Base Map, sent as PNG bytes (the bridges load it from them, not the path). */
   std::vector<uint32_t> tile(16);
   for (int i = 0; i < 16; i++) tile[(size_t)i] = ((i / 4 + i % 4) % 2) ? 0xFFFFFFFFu : 0xFF2040C0u;  // (white and a blue: 0xAARRGGBB)
+  fs::make_dirs(fs::parent(resolve_asset_path("Assets/Textures/livelink_tile.png")));  // (a run of this test alone has no such folder yet)
   write_png(resolve_asset_path("Assets/Textures/livelink_tile.png"), tile.data(), 4, 4, 4);
   texture_cache_forget(resolve_asset_path("Assets/Textures/livelink_tile.png"));
   mat.base_map = TextureRef{"Assets/Textures/livelink_tile.png", false};
@@ -188,6 +224,10 @@ Session record_session() {
   GameObject *rig = ed.scene().find_by_name("Rig");  // (Stop put the scene back: the objects are new)
   if (wave && rig) apply_clip(*wave, *rig, 30.0f);  // (round 379: the pose the bridges' clips must give at frame 30)
   take(drain(ed, c));
+  /* Round 381: a spring chain on Lower (after Play, which would have swung it): VRChat's PhysBone in Unity. */
+  if (GameObject *lw = ed.scene().find_by_name("Lower")) lw->add<SpringBone>()->stiffness = 0.4f;
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // (an armature's setup is looked at once a second)
+  take(drain(ed, c));
   fs::remove_file(resolve_asset_path("Assets/Textures/livelink_tile.png"));
   fs::remove_file(resolve_asset_path("Assets/Animations/livelink_wave.anim"));
   forget_clip_assets("Assets/Animations/livelink_wave.anim");
@@ -205,7 +245,8 @@ std::vector<std::string> outline(const std::vector<Message> &ms) {
       meshes.push_back("lodmesh|" + std::to_string((long long)m.j["id"].number()) + "|" + std::to_string((long long)m.j["level"].number()));
       continue;
     }
-    (m.type() == "mesh" ? meshes : order).push_back(s);
+    const bool worker = m.type() == "mesh" || m.type() == "texture" || m.type() == "clip";  // (made on workers: when they land varies)
+    (worker ? meshes : order).push_back(s);
   }
   std::sort(meshes.begin(), meshes.end());
   order.insert(order.end(), meshes.begin(), meshes.end());
@@ -559,17 +600,18 @@ static void livelink_fixture_tests() {
     std::printf("    %zu messages, %zu bytes; types:", s.ms.size(), s.raw.size());
     for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture", "weights", "clip"})
       std::printf(" %s %d", t, count_of(s.ms, t));
-    for (const char *t : {"lod", "lodmesh", "collider"}) std::printf(" %s %d", t, count_of(s.ms, t));
+    for (const char *t : {"lod", "lodmesh", "collider", "avatar", "springs"}) std::printf(" %s %d", t, count_of(s.ms, t));
     std::printf("\n");
     for (const char *t : {"transform", "delete"}) CHECK(count_of(s.ms, t) == 1);
     CHECK(count_of(s.ms, "pose") == 2);    // (a bone turned; round 379: the clip's frame 30)
-    CHECK(count_of(s.ms, "deform") == 4);  // (the Box's vertex, and round 378's skinned Arm: at rest built, posed, posed by the clip - this client doesn't skin)
+    CHECK(count_of(s.ms, "deform") == 7);  // (the Box's vertex; round 378's skinned Arm and round 381's Face, each at rest built, posed, posed by the clip - this client doesn't skin)
     CHECK(count_of(s.ms, "clip") == 1);    // (round 379: Wave at the sync)
     CHECK(count_of(s.ms, "lod") == 1 && count_of(s.ms, "lodmesh") == 2 && count_of(s.ms, "collider") == 1);  // (round 380: the crate's, at the sync)
     CHECK(count_of(s.ms, "play") == 2 && count_of(s.ms, "material") >= 3);
     CHECK(count_of(s.ms, "world") == 2 && count_of(s.ms, "render") == 2 && count_of(s.ms, "filters") == 2);  // (round 376: at the sync and once changed)
     CHECK(count_of(s.ms, "texture") == 1);  // (round 377: the tile once, at the sync)
-    CHECK(count_of(s.ms, "weights") == 1);  // (round 378: the arm's Smile at the sync)
+    CHECK(count_of(s.ms, "weights") == 2);  // (round 378: the Arm's Smile at the sync; round 381: the Face's keys)
+    CHECK(count_of(s.ms, "avatar") == 1 && count_of(s.ms, "springs") == 1);  // (round 381: the rig's at the sync; its chain at the end)
     const std::string path = "tests/fixtures/livelink_stream.bin";
     if (std::getenv("BLENDITY_LIVELINK_RECORD")) {
       CHECK(fs::write_file(path, s.raw));
@@ -739,7 +781,7 @@ static void tests_round297() {
     }
     std::printf("    %d messages framed, %zu bytes left; %d meshes, %d vertices outside their mesh; normals worked out again agree at %zu of %zu; %d of %d deforms applied\n",
                 n, st.pending(), meshes, bad_vert, agree, total, deformed, deforms);
-    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 4 && deformed == 4);  // (the Box's, since round 378 the skinned Arm's: built and posed, and round 379's clip pose - the recorder doesn't skin)
+    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 7 && deformed == 7);  // (the Box's; the skinned Arm's (round 378) and Face's (round 381): built, posed, posed by the clip - the recorder doesn't skin)
     /* The Box moved to Blendity's (1, 2, 3): glTF (-1, 2, 3), Unreal (300 cm forward, 100 cm right, 200 cm up). */
     std::printf("    the Box in Unreal: (%.1f, %.1f, %.1f) cm\n", box.x, box.y, box.z);
     CHECK(box_name == "Box" && std::fabs(box.x - 300) < 1e-6 && std::fabs(box.y - 100) < 1e-6 && std::fabs(box.z - 200) < 1e-6);
@@ -1572,7 +1614,8 @@ static void tests_round380() {
     CHECK(count_of(screen_only, "lod") == 1 && count_of(screen_only, "lodmesh") == 0 && count_of(renamed, "lod") + count_of(renamed, "lodmesh") == 0);
     CHECK(level2 == 0);
     crate->remove_component(lod);
-    const Message *gone = last_for(drain(ed, c), "lod", crate->id);
+    const std::vector<Message> gone_ms = drain(ed, c);
+    const Message *gone = last_for(gone_ms, "lod", crate->id);
     CHECK(gone && gone->j["screen"].size() == 0);
     ed.livelink_stop();
   });
@@ -1606,6 +1649,124 @@ static void tests_round380() {
   });
 }
 
+static void tests_round381() {
+  test("Live Link's VRChat setup (round 381): an armature with eyes sends an avatar message - the view between the eyes at rest, the mesh with the 15 visemes, the blink, the eye bones; nothing again while unchanged; a SpringBone sends its chain; the eyes deleted fall back to the Head or none; Contribute GI marks the object static", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *rig = ed.scene().create("Rig");
+    rig->add<Armature>();
+    GameObject *chain = ed.scene().create("Tail", rig);
+    chain->add<Bone>();
+    add_eyes(ed, *rig, Vec3(0, 1.6f, 0.08f));
+    GameObject *face = add_face(ed, "Face", Vec3(0, 1.6f, 0));
+    CHECK(face != nullptr);
+    if (!face) return;
+    face->get<SkinModifier>()->object = "Rig";
+    GameObject *floor = make_cube(ed, "Floor");
+    floor->mesh_renderer()->contribute_gi = true;
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> s = until(ed, c, "sync_end");
+    for (const Message &m : drain(ed, c)) s.push_back(m);
+    const Message *av = last_for(s, "avatar", rig->id);
+    CHECK(av != nullptr);
+    if (!av) return;
+    const Json &v = av->j["view"];
+    std::printf("    the view (glTF axes, the rig's space): %.3f %.3f %.3f; visemes on %lld, %zu names; blink on %lld\n", v[0].number(), v[1].number(), v[2].number(),
+                (long long)av->j["visemes"]["mesh"].number(), av->j["visemes"]["shapes"].size(), (long long)av->j["blink"]["mesh"].number());
+    CHECK(std::fabs(v[0].number()) < 1e-5 && std::fabs(v[1].number() - 1.6) < 1e-5 && std::fabs(v[2].number() - 0.08) < 1e-5);
+    CHECK(av->j["visemes"]["mesh"].number() == (double)face->id && av->j["visemes"]["shapes"].size() == 15 && av->j["visemes"]["shapes"][10].str == "vrc.v_aa");
+    CHECK(av->j["blink"]["mesh"].number() == (double)face->id && av->j["eyes"]["left"].number() == (double)ed.scene().find_by_name("LeftEye")->id);
+    const Message *fl = last_for(s, "object", floor->id);
+    CHECK(fl && fl->j["static"].b && !last_for(s, "object", face->id)->j["static"].b);
+    CHECK(count_of(s, "springs") == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    CHECK(count_of(drain(ed, c), "avatar") == 0);  // (unchanged: nothing)
+    chain->add<SpringBone>()->stiffness = 0.3f;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    const std::vector<Message> sp = drain(ed, c);
+    const Message *springs = last_for(sp, "springs", rig->id);
+    CHECK(springs && springs->j["chains"].size() == 1 && springs->j["chains"][0]["root"].number() == (double)chain->id &&
+          std::fabs(springs->j["chains"][0]["stiffness"].number() - 0.3) < 1e-6);
+    ed.scene().destroy(ed.scene().find_by_name("LeftEye"));
+    ed.scene().destroy(ed.scene().find_by_name("RightEye"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    const std::vector<Message> after_ms = drain(ed, c);
+    const Message *after = last_for(after_ms, "avatar", rig->id);
+    std::printf("    the eyes deleted: %s\n", !after ? "nothing sent" : after->j["none"].b ? "none" : "the view from the visemes' rig");
+    CHECK(after && !after->j["none"].b && after->j["eyes"]["left"].number() == 0);  // (still an avatar: its visemes)
+    ed.livelink_stop();
+  });
+  test("Live Link's VRChat setup as it changes (review 381): the avatar root is the object above the rig and its meshes, the view in its space; a blink on its own mesh; a hair rig's chains only in its own springs; a chain taken off sends an empty list; the Armature taken off sends none", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *avatar = ed.scene().create("Avatar");
+    avatar->set_local_position(Vec3(5, 0, 0));
+    GameObject *rig = ed.scene().create("Rig", avatar);
+    rig->add<Armature>();
+    add_eyes(ed, *rig, Vec3(0, 1.6f, 0.08f));
+    GameObject *face = add_face(ed, "Face", Vec3(0, 1.6f, 0));
+    GameObject *lids = make_cube(ed, "Lids");
+    CHECK(face && lids);
+    if (!face || !lids) return;
+    ed.scene().set_parent(face, avatar);
+    face->get<SkinModifier>()->object = "Rig";
+    Mesh &lm = *mesh_make_mutable(lids->get<MeshFilter>()->mesh);
+    for (const char *k : {"vrc.blink_left", "vrc.blink_right"}) {
+      ShapeKey sk;
+      sk.name = k;
+      sk.delta.assign(lm.vert_count(), Vec3(0, 0.01f, 0));
+      lm.shape_keys.push_back(sk);
+    }
+    lm.touch();
+    lids->add<SkinModifier>()->object = "Rig";
+    ed.scene().set_parent(lids, avatar);
+    GameObject *tail = ed.scene().create("Tail", rig);
+    tail->add<Bone>();
+    tail->add<SpringBone>();
+    GameObject *hair = ed.scene().create("Hair Rig", tail);
+    hair->add<Armature>();
+    GameObject *strand = ed.scene().create("Strand", hair);
+    strand->add<Bone>();
+    strand->add<SpringBone>();
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> s = until(ed, c, "sync_end");
+    for (const Message &m : drain(ed, c)) s.push_back(m);
+    const Message *av = last_for(s, "avatar", rig->id), *sp = last_for(s, "springs", rig->id), *hp = last_for(s, "springs", hair->id);
+    CHECK(av && sp && hp);
+    if (!av || !sp || !hp) return;
+    std::printf("    the root %lld (the Avatar %llu), the view y %.3f; the blink on %lld (Lids %llu); the rig's chains %zu, the hair rig's %zu\n",
+                (long long)av->j["root"].number(), (unsigned long long)avatar->id, av->j["view"][1].number(), (long long)av->j["blink"]["mesh"].number(),
+                (unsigned long long)lids->id, sp->j["chains"].size(), hp->j["chains"].size());
+    CHECK(av->j["root"].number() == (double)avatar->id && std::fabs(av->j["view"][1].number() - 1.6) < 1e-5 && std::fabs(av->j["view"][0].number()) < 1e-5);
+    CHECK(av->j["blink"]["mesh"].number() == (double)lids->id && av->j["visemes"]["mesh"].number() == (double)face->id);
+    CHECK(sp->j["chains"].size() == 1 && sp->j["chains"][0]["root"].number() == (double)tail->id && hp->j["chains"].size() == 1);
+    tail->remove_component(tail->get<SpringBone>());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    const std::vector<Message> emptied_ms = drain(ed, c);
+    const Message *emptied = last_for(emptied_ms, "springs", rig->id);
+    CHECK(emptied && emptied->j["chains"].size() == 0);
+    rig->remove_component(rig->get<Armature>());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    const std::vector<Message> none_ms = drain(ed, c);
+    const Message *none = last_for(none_ms, "avatar", rig->id);
+    std::printf("    the chain taken off: %zu chains; the Armature taken off: %s\n", emptied ? emptied->j["chains"].size() : 99, none && none->j["none"].b ? "none" : "-");
+    CHECK(none && none->j["none"].b);
+    ed.livelink_stop();
+  });
+  test("the lesson's Try-it (round 381): window Avatar - the setup VRChat's SDK in Unity takes", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("window Avatar");
+    CHECK(ed.window_docked_for_test(WindowKind::Avatar));
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -1619,4 +1780,5 @@ void run_livelink_tests() {
   tests_round378();
   tests_round379();
   tests_round380();
+  tests_round381();
 }

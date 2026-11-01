@@ -46,7 +46,7 @@ namespace Blendity.LiveLink
             var j = m.Json;
             switch (t)
             {
-                case "sync": seen = new HashSet<long>(); Playing = j.GetBool("playing"); break;
+                case "sync": seen = new HashSet<long>(); Playing = j.GetBool("playing"); EnsureSceneDescriptor(); break;
                 case "sync_end": EndSync(); break;
                 case "play": Playing = j.GetBool("playing"); break;
                 case "object": OnObject(j); break;
@@ -62,6 +62,8 @@ namespace Blendity.LiveLink
                 case "lod": OnLod(j); break;  // (round 380: LiveLinkWorld.cs)
                 case "lodmesh": OnLodMesh(j, m.Bin); break;
                 case "collider": OnCollider(j); break;
+                case "avatar": OnAvatar(j); break;  // (round 381: LiveLinkVRChat.cs)
+                case "springs": OnSprings(j); break;
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
                 case "world": OnWorld(j); break;  // (round 376: LiveLinkLook.cs)
@@ -130,6 +132,7 @@ namespace Blendity.LiveLink
             SetParentId(id, j.GetId("parent"));
             SetTrs(go.transform, j.GetFloats("position", 0, 0, 0), j.GetFloats("rotation", 0, 0, 0, 1), j.GetFloats("scale", 1, 1, 1));
             Reparent(id);
+            SetStatic(id, go, j.GetBool("static"));  // (round 381: Contribute GI)
             HashSet<long> kids;
             if (children.TryGetValue(id, out kids))
                 foreach (var child in kids)
@@ -215,6 +218,9 @@ namespace Blendity.LiveLink
             lodCull.Remove(id);
             colliderMsgs.Remove(id);
             colliderStale.Remove(id);
+            avatarMsgs.Remove(id);
+            avatarWritten.Remove(id);
+            madeStatic.Remove(id);
         }
 
         /* A deleted object's child: one the bridge made for it (an LOD level, its collider) goes with it; any other - one
@@ -261,6 +267,7 @@ namespace Blendity.LiveLink
                 topology[id] = j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts");
                 AssignMaterials(id);
                 ApplyWeights(id);
+                AvatarsAgain(id);  // (round 381: its visemes or blink on an avatar)
                 return;
             }
             var mf = Unskin(go);  // (review 378: a rig no more - its MeshFilter and MeshRenderer back)

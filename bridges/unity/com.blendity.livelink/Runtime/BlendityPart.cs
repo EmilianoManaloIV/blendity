@@ -8,8 +8,8 @@ namespace Blendity.LiveLink
     [DisallowMultipleComponent]
     public sealed class BlendityPart : MonoBehaviour
     {
-        public const string Level = "lod", ColliderRole = "collider";
-        [Tooltip("What the bridge made it for: lod or collider.")]
+        public const string Level = "lod", ColliderRole = "collider", PhysBonesRole = "physbones";
+        [Tooltip("What the bridge made it for: lod, collider or physbones.")]
         public string Role = Level;
         [Tooltip("An LOD level's number (1 and up).")]
         public int Number;

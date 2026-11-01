@@ -36,6 +36,7 @@ The objects appear under a node "Blendity Live Link" of the edited scene, each w
 | armatures and bones | plain nodes posed as the bones; a skinned mesh (round 378) has a Skeleton3D posed from them and a Skin, its keys as blend shapes |
 | clips (round 379) | an Animation in the "blendity" library of an AnimationPlayer ("Blendity Animation") under the animated object |
 | LODs and colliders (round 380) | `<name>_LOD<n>` MeshInstance3D children switched by visibility range; a StaticBody3D "Blendity Collider" with the shape |
+| VRChat setup (round 381) | not taken (VRChat is Unity's); meshes count for GI by default |
 
 ## Test
 

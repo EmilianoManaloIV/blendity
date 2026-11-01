@@ -10,6 +10,9 @@
 #include "../scene/animation.h"
 #include "../scene/export.h"
 #include "../scene/lod.h"
+#include "../scene/humanoid.h"
+#include "../scene/spring_bones.h"
+#include "../scene/visemes.h"
 #include "../scene/scene.h"
 
 #include <algorithm>
@@ -140,6 +143,7 @@ struct Sent {
   std::string name, kind;
   uint64_t parent = 0, armature = 0;
   bool active = true, seen = false;
+  bool is_static = false;     // (round 381: Contribute GI - Unity's static flags)
   Trs trs{};
   std::vector<int> materials;
   uint64_t light = 0, camera = 0;
@@ -155,7 +159,8 @@ struct Sent {
   double lod_since = 0.0;
   uint64_t weights = 0;       // (...its shape weights' hash)
   bool structure_equal(const Sent &o) const {
-    return name == o.name && kind == o.kind && parent == o.parent && armature == o.armature && active == o.active && materials == o.materials;
+    return name == o.name && kind == o.kind && parent == o.parent && armature == o.armature && active == o.active && materials == o.materials &&
+           is_static == o.is_static;
   }
 };
 
@@ -201,6 +206,139 @@ std::string lod_message(const GameObject &g) {
   JsonWriter w;
   w.obj().key("t").str("lod").key("id").integer((int64_t)g.id).key("screen").nums(l ? l->screen : nullptr, n).key("ratio").nums(l ? l->ratio : nullptr, n);
   w.key("cull").boolean(l && l->cull).end();
+  return w.out;
+}
+
+/* Round 381: VRChat's setup. An armature is an avatar's when it has eyes (the Avatar window's LeftEye / RightEye), a
+ * mesh skinned to it with vrc.v_* keys, or a humanoid Head. Its avatar root is the nearest object above both it and
+ * every mesh skinned to it (VRChat's descriptor sits there, the meshes in its hierarchy); the view - between the eyes
+ * at rest, else a little above the Head - in that root's space and glTF's axes. "" when it is none of these. */
+constexpr const char *kBlinkNames[] = {"vrc.blink_left", "vrc.blink_right", "vrc.lowerlid_left", "vrc.lowerlid_right"};
+constexpr double kAvatarEvery = 1.0;       // (seconds between looks at an armature's avatar setup)
+constexpr int kAvatarLooksPerTick = 4;     // (armatures looked at in one tick: many rigs spread over frames - review 381)
+const Vec3 kViewAboveHead{0, 0.1f, 0.05f};  // (the view without eyes: this far above and in front of the Head, metres)
+const Vec3 kViewNoHead{0, 1.6f, 0.05f};     // (...without a Head either: a standing person's eyes)
+
+/* The meshes each armature's Skin names, by the armature's name: filled as the objects are met. */
+using SkinIndex = std::unordered_map<std::string, std::vector<GameObject *>>;
+void index_skin(SkinIndex &ix, GameObject &g) {
+  const SkinModifier *sk = g.get<SkinModifier>();
+  if (sk && sk->enabled && !sk->object.empty() && g.mesh_filter() && g.mesh_filter()->mesh) ix[sk->object].push_back(&g);
+}
+GameObject *named_below(GameObject &root, const std::string &name) {
+  for (GameObject *c : root.children) {
+    if (c->name == name) return c;
+    if (GameObject *d = named_below(*c, name)) return d;
+  }
+  return nullptr;
+}
+/* The armature's bones' names, ids and parents: what its humanoid analysis reads (cached by it). */
+void mix_structure(uint64_t &h, const GameObject &g) {
+  mix_key(h, &g.id, sizeof(g.id));
+  mix_key(h, g.name.data(), g.name.size());
+  const size_t n = g.children.size();
+  mix_key(h, &n, sizeof(n));
+  for (const GameObject *c : g.children) mix_structure(h, *c);
+}
+/* The mesh among `meshes` with the most of `names` among its keys (nullptr: none). */
+GameObject *keyed_mesh(const std::vector<GameObject *> &meshes, const std::vector<std::string> &names) {
+  std::pair<GameObject *, int> best{nullptr, 0};
+  for (GameObject *g : meshes) {
+    int n = 0;
+    for (const ShapeKey &k : g->mesh_filter()->mesh->shape_keys) n += std::find(names.begin(), names.end(), k.name) != names.end();
+    if (n > best.second) best = {g, n};
+  }
+  return best.first;
+}
+/* The nearest object above (or at) the armature that every mesh sits under; nullptr when there is none. */
+GameObject *avatar_root(GameObject &arm, const std::vector<GameObject *> &meshes) {
+  std::vector<GameObject *> up;
+  for (GameObject *g = &arm; g; g = g->parent) up.push_back(g);
+  size_t at = 0;
+  for (GameObject *m : meshes) {
+    GameObject *g = m;
+    while (g && std::find(up.begin(), up.end(), g) == up.end()) g = g->parent;
+    if (!g) return nullptr;
+    at = std::max(at, (size_t)(std::find(up.begin(), up.end(), g) - up.begin()));
+  }
+  return up[at];
+}
+/* Where `bone` rests in `root`'s space (a bone's rest - relative to the armature's parent - or where any other object
+ * stands now). */
+Vec3 rest_in(const GameObject &root, const GameObject &arm, const std::vector<ArmatureBone> &bones, const GameObject &bone) {
+  const Mat4 to_root = root.world_matrix().inverse();
+  for (const ArmatureBone &b : bones)
+    if (b.object == &bone) return (to_root * armature_base(arm) * b.rest).point(Vec3());
+  return (to_root * bone.world_matrix()).point(Vec3());
+}
+void write_keys(JsonWriter &w, const char *key, GameObject *mesh, const std::vector<std::string> &names) {
+  w.key(key).obj().key("mesh").integer(mesh ? (int64_t)mesh->id : 0).key("shapes").arr();
+  for (const std::string &n : names) w.str(n);
+  w.end().end();
+}
+/* The armature's spring chains (SpringBone on each chain's first bone) - not those of an armature inside it (a hair
+ * rig has its own message: review 381). */
+void spring_chains(GameObject &g, JsonWriter &w, int &n) {
+  for (GameObject *c : g.children) {
+    if (c->get<Armature>()) continue;
+    if (const SpringBone *s = c->get<SpringBone>(); s && s->enabled) {
+      w.obj().key("root").integer((int64_t)c->id).key("label").integer(s->label).key("stiffness").num(s->stiffness).key("damping").num(s->damping);
+      w.key("gravity").num(s->gravity).key("radius").num(s->radius).key("bend").num(s->bend).end();
+      n++;
+    }
+    spring_chains(*c, w, n);
+  }
+}
+std::string springs_message(GameObject &arm) {
+  JsonWriter w;
+  int n = 0;
+  w.obj().key("t").str("springs").key("id").integer((int64_t)arm.id).key("chains").arr();
+  spring_chains(arm, w, n);
+  w.end().end();
+  return n ? w.out : std::string();
+}
+/* What an armature last sent of its VRChat setup, and its humanoid Head found for a skeleton (looked for again only
+ * when the skeleton changes: the analysis is the costly part - review 381). */
+struct AvatarSent {
+  uint64_t avatar = 0, springs = 0;  // (the messages' hashes; 0 none sent)
+  uint64_t skeleton = 0, head = 0;   // (the skeleton's key and its Head's id)
+  double last = -1e9;
+  bool seen = false, warned = false;
+};
+GameObject *avatar_head(Scene &scene, GameObject &arm, AvatarSent &as) {
+  if (GameObject *h = named_below(arm, "Head")) return h;
+  uint64_t key = 1469598103934665603ull;
+  mix_structure(key, arm);
+  if (key != as.skeleton) {
+    as.skeleton = key;
+    GameObject *h = humanoid::map(scene, arm).part[humanoid::Head];
+    as.head = h ? h->id : 0;
+  }
+  return as.head ? scene.find(as.head) : nullptr;
+}
+std::string avatar_message(Scene &scene, GameObject &arm, const std::vector<GameObject *> &meshes, AvatarSent &as) {
+  GameObject *left = named_below(arm, "LeftEye"), *right = named_below(arm, "RightEye");
+  const bool eyes = left && right;
+  GameObject *visemes = keyed_mesh(meshes, vrchat_viseme_names());
+  const std::vector<std::string> blinks(std::begin(kBlinkNames), std::end(kBlinkNames));
+  GameObject *blink = keyed_mesh(meshes, blinks);
+  GameObject *head = eyes ? nullptr : avatar_head(scene, arm, as);
+  if (!eyes && !visemes && !head) return "";
+  GameObject *root = avatar_root(arm, meshes);
+  if (!root && !as.warned) Log::warn("Live Link: %s's meshes aren't under one object with it - VRChat's avatar needs one root (parent them under one)", arm.name.c_str());
+  as.warned = !root;
+  root = root ? root : &arm;
+  std::vector<ArmatureBone> bones;
+  armature_bones(arm, bones);
+  const Vec3 view = eyes ? (rest_in(*root, arm, bones, *left) + rest_in(*root, arm, bones, *right)) * 0.5f
+                    : head ? rest_in(*root, arm, bones, *head) + kViewAboveHead : kViewNoHead;
+  const float v[3] = {-view.x, view.y, view.z};
+  JsonWriter w;
+  w.obj().key("t").str("avatar").key("id").integer((int64_t)arm.id).key("root").integer((int64_t)root->id).key("view").nums(v, 3);
+  write_keys(w, "visemes", visemes, vrchat_viseme_names());
+  write_keys(w, "blink", blink, blinks);
+  w.key("eyes").obj().key("left").integer(left ? (int64_t)left->id : 0).key("right").integer(right ? (int64_t)right->id : 0).end();
+  w.end();
   return w.out;
 }
 
@@ -602,6 +740,18 @@ struct Link::Impl {
   void request_mesh(const std::vector<int> &to, bool all, GameObject &g, const Mesh *m);
   void materials_of(GameObject &g, const std::vector<int> &to, bool all, std::vector<int> &keys, bool only_changed, bool record);
 
+  /* Round 381: VRChat's setup, by armature id. */
+  std::unordered_map<uint64_t, AvatarSent> avatars;
+  void send_avatar(Scene &scene, GameObject &arm, const std::vector<GameObject *> &meshes, const std::vector<int> &to, bool all);
+  void forget_avatar(Scene &scene, uint64_t id, const AvatarSent &as);
+  void send_text(const std::vector<int> &to, bool all, const std::string &line, bool count = true) {  // (no coalescing key: the 4 bits are taken, and these are rare)
+    JsonWriter w;
+    w.out = line;
+    send(to, all, w);
+    if (count) stats.avatars++;
+  }
+  static std::string avatar_none(uint64_t id) { return strprintf("{\"t\":\"avatar\",\"id\":%lld,\"none\":true}", (long long)id); }
+  static std::string springs_none(uint64_t id) { return strprintf("{\"t\":\"springs\",\"id\":%lld,\"chains\":[]}", (long long)id); }
   /* Round 380: colliders and LOD Groups. */
   void send_collider(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   void send_lod(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
@@ -854,9 +1004,10 @@ void Link::Impl::request_mesh(const std::vector<int> &to, bool all, GameObject &
 /* ------------------------------------------------------------ Messages */
 
 int Link::Impl::expired_key(const std::string &name) const {
+  int best = 0;  // (the smallest such key: two materials of one name - Undo, Play's restore - find theirs again the same way on every platform)
   for (auto &[k, ms] : materials)
-    if (ms.ptr.expired() && ms.name == name) return k;
-  return 0;
+    if (ms.ptr.expired() && ms.name == name && (!best || k < best)) best = k;
+  return best;
 }
 
 int Link::Impl::material_key_of(const MaterialPtr &m) {
@@ -913,6 +1064,7 @@ void Link::Impl::materials_of(GameObject &g, const std::vector<int> &to, bool al
 }
 
 Sent Link::Impl::capture(GameObject &g) {
+  const MeshRenderer *mr = g.mesh_renderer();
   Sent s;
   s.name = g.name;
   s.kind = kind_of(g);
@@ -922,6 +1074,7 @@ Sent Link::Impl::capture(GameObject &g) {
   s.trs = trs_of(g);
   if (Light *l = g.light()) s.light = hash_component(*l);
   if (Camera *c = g.camera()) s.camera = hash_component(*c);
+  s.is_static = mr && mr->contribute_gi;
   return s;
 }
 
@@ -930,6 +1083,7 @@ void Link::Impl::send_object(const std::vector<int> &to, bool all, GameObject &g
   w.obj().key("t").str("object").key("id").integer((int64_t)g.id).key("name").str(s.name).key("parent").integer((int64_t)s.parent);
   w.key("kind").str(s.kind).key("active").boolean(s.active);
   if (s.armature) w.key("bone_of").integer((int64_t)s.armature);
+  if (s.is_static) w.key("static").boolean(true);  // (round 381)
   write_trs(w, s.trs);
   if (g.mesh_renderer()) {
     w.key("materials").arr();
@@ -1096,7 +1250,12 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     clips.clear();
   }
   std::vector<GameObject *> animated;  // (round 379: their clips after every object - a clip names its root's children)
+  std::vector<GameObject *> armatures;  // (round 381)
+  SkinIndex skinned;
+  if (!others) avatars.clear();
   scene.for_each_ordered([&](GameObject &g, int) {
+    if (g.get<Armature>()) armatures.push_back(&g);
+    index_skin(skinned, g);
     Sent s = capture(g);
     materials_of(g, fresh, false, s.materials, false, !others);
     send_object(fresh, false, g, s);
@@ -1113,6 +1272,7 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     if (!others) sent[g.id] = std::move(s);  // (with clients already there, `sent` is what they have: compare() moves it)
   });
   for (GameObject *g : animated) send_clip(*g, fresh, false);
+  for (GameObject *a : armatures) send_avatar(scene, *a, skinned[a->name], fresh, false);  // (round 381: after the objects they name)
   JsonWriter end;
   end.obj().key("t").str("sync_end").end();
   send(fresh, false, end);
@@ -1215,8 +1375,13 @@ void Link::Impl::compare(Scene &scene, double now) {
   std::vector<uint64_t> moved;
   for (auto &[id, c] : clips) c.seen = false;
   std::vector<GameObject *> animated;  // (round 379: compared after every object - a clip names its root's children)
+  std::vector<GameObject *> armatures;  // (round 381)
+  SkinIndex skinned;
+  for (auto &[id, a] : avatars) a.seen = false;
   scene.for_each_ordered([&](GameObject &g, int) {
     if (g.get<Animation>()) animated.push_back(&g);
+    if (g.get<Armature>()) armatures.push_back(&g);
+    index_skin(skinned, g);
     const bool bone_moved = compare_object(g);
     const uint64_t arm = sent[g.id].armature;
     if (!arm) return;
@@ -1226,6 +1391,23 @@ void Link::Impl::compare(Scene &scene, double now) {
   for (uint64_t arm : moved)
     if (GameObject *a = scene.find(arm)) send_pose(*a, bones[arm]);
   for (GameObject *g : animated) compare_clip(*g, now);
+  int looks = 0;
+  for (GameObject *a : armatures) {  // (round 381: each armature's VRChat setup looked at once a second, a few a tick)
+    AvatarSent &as = avatars[a->id];
+    as.seen = true;
+    if (now - as.last < kAvatarEvery || looks >= kAvatarLooksPerTick) continue;
+    as.last = now;
+    looks++;
+    send_avatar(scene, *a, skinned[a->name], {}, true);
+  }
+  for (auto it = avatars.begin(); it != avatars.end();) {
+    if (it->second.seen) {
+      ++it;
+      continue;
+    }
+    forget_avatar(scene, it->first, it->second);
+    it = avatars.erase(it);
+  }
   for (auto it = clips.begin(); it != clips.end();) it = it->second.seen ? std::next(it) : clips.erase(it);
   for (auto it = sent.begin(); it != sent.end();) {
     if (it->second.seen) {
@@ -1244,6 +1426,28 @@ void Link::Impl::compare(Scene &scene, double now) {
   stats.tick_ms = t.ms();
   stats.tick_ms_max = std::max(stats.tick_ms_max, stats.tick_ms);
   stats.tick_ms_total += stats.tick_ms;
+}
+
+/* Round 381: an armature's avatar and springs messages, each when it changed (or to new clients); an avatar no more
+ * sends {"none":true}, a chain list emptied {"chains":[]}. */
+void Link::Impl::send_avatar(Scene &scene, GameObject &arm, const std::vector<GameObject *> &meshes, const std::vector<int> &to, bool all) {
+  AvatarSent &as = avatars[arm.id];
+  as.seen = true;
+  const bool record = all || server.ready_clients().empty();
+  const std::string m = avatar_message(scene, arm, meshes, as), sp = springs_message(arm);
+  const uint64_t h = m.empty() ? 0 : std::hash<std::string>()(m) | 1, sh = sp.empty() ? 0 : std::hash<std::string>()(sp) | 1;
+  if (all ? h != as.avatar : h != 0) send_text(to, all, m.empty() ? avatar_none(arm.id) : m);
+  if (all ? sh != as.springs : sh != 0) send_text(to, all, sp.empty() ? springs_none(arm.id) : sp);
+  if (!record) return;
+  as.avatar = h;
+  as.springs = sh;
+}
+
+/* An armature no longer one (its Armature taken off): its avatar and chains, if it had them, said gone. */
+void Link::Impl::forget_avatar(Scene &scene, uint64_t id, const AvatarSent &as) {
+  if (!scene.find(id)) return;  // (deleted: the delete takes what the bridges made for it)
+  if (as.avatar) send_text({}, true, avatar_none(id));
+  if (as.springs) send_text({}, true, springs_none(id));
 }
 
 /* Round 380: a collider to `to` (or everyone); recorded when it goes to everyone or no one else is there. */

@@ -41,6 +41,7 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
 | armatures and bones | empty actors posed as the bones (skinned meshes come across as moving vertices: the bridge doesn't say "skins") |
 | clips (round 379) | not yet: the poses keep streaming |
 | LODs and colliders (round 380) | the static mesh's own LODs (LOD i from Blendity's screen[i-1]); simple collision (box, sphere, sphyl, convex), Mesh as complex |
+| VRChat setup (round 381) | not taken (VRChat is Unity's) |
 
 ## Test
 

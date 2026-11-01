@@ -125,12 +125,12 @@ def main():
             ap.apply(*arm_mesh)
             ap.apply({"t": "weights", "id": arm_id, "weights": [0.25]})
         mods = [m for m in arm.modifiers if m.type == "ARMATURE"]
-        rigs = [o for o in bpy.data.objects if o.type == "ARMATURE"]
-        check(len(mods) == 1 and len(rigs) == 1 and mods[0].object == rigs[0] and len(rigs[0].data.bones) == 3,
+        rigs = [o for o in arm.children if o.type == "ARMATURE"]  # (the Arm's own: since round 381 the Face has one too)
+        check(len(mods) == 1 and len(rigs) == 1 and mods[0].object == rigs[0] and len(rigs[0].data.bones) == 5,  # (the rig, Upper, Lower and since round 381 its eyes)
               "the Arm's armature (mesh %d): %d modifier(s), %d armature(s)" % (again + 1, len(mods), len(rigs)))
         keys = arm.data.shape_keys
         check(keys is not None and len(keys.key_blocks) == 2 and abs(keys.key_blocks[1].value - 0.25) < 1e-5, "the Arm's Smile at 0.25")
-        check(len([g for g in arm.vertex_groups if g.name.startswith(apply.JOINT_GROUP)]) == 3, "the Arm's vertex groups")
+        check(len([g for g in arm.vertex_groups if g.name.startswith(apply.JOINT_GROUP)]) == 5, "the Arm's vertex groups")
         dg = bpy.context.evaluated_depsgraph_get()
         ev = arm.evaluated_get(dg).to_mesh()
         got = np.zeros(len(ev.vertices) * 3, np.float32)

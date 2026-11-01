@@ -170,11 +170,11 @@ func _initialize() -> void:
 		check(absf(env.tonemap_exposure - pow(2.0, 0.5)) < 1e-4, "the exposure arrived: %f" % env.tonemap_exposure)
 		check(env.glow_enabled and absf(env.glow_intensity - 0.8) < 1e-4, "the Bloom arrived as glow")
 	check(cam_obj != null and str(cam_obj.get_meta("blendity_filters", "")).contains("Vignette"), "the camera keeps its filters")
-	# Round 378: the Arm skinned on the rig's three bones, its Smile at 0.25; skinned on the CPU here from the skeleton's
+	# Round 378: the Arm skinned on the rig's five bones (two of them its eyes since round 381), its Smile at 0.25; skinned on the CPU here from the skeleton's
 	# poses and the skin's binds, every vertex where Blendity's deform put it.
 	var arm_mi := find(live, "Arm") as MeshInstance3D
 	var skel: Skeleton3D = arm_mi.get_node_or_null("Blendity Skeleton") if arm_mi != null else null
-	check(arm_mi != null and skel != null and arm_mi.skin != null and arm_mi.skin.get_bind_count() == 3 and skel.get_bone_count() == 3, "the Arm's skin and skeleton")
+	check(arm_mi != null and skel != null and arm_mi.skin != null and arm_mi.skin.get_bind_count() == 5 and skel.get_bone_count() == 5, "the Arm's skin and skeleton")
 	if arm_mi != null and skel != null and arm_mi.skin != null:
 		check(arm_mi.mesh.get_blend_shape_count() == 1 and absf(arm_mi.get_blend_shape_value(0) - 0.25) < 1e-5, "the Arm's Smile at 0.25")
 		var worst := 0.0
