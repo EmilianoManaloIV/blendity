@@ -1338,6 +1338,7 @@ static void tests_round145_to_round163() {
     ed.mark_changed_for_test("Add the rig");
     ed.command("select " + rig->name);
     ed.step_frame_headless();
+    ed.command("assist off walk");  // (round 367: on at first now - switched off to see the refusal)
     ed.command("walk cycle walk");  // (off: refused)
     const bool refused = ed.anim_clip_for_test() == nullptr;
     ed.command("assist on walk");
@@ -5740,6 +5741,7 @@ static void tests_round354() {
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
     ed.set_skin_async_min_verts_for_test(0);  // (the bind on a worker, as a 5000-vertex mesh's is)
     ed.command("create Sphere");  // (unbound: no weights until the bind lands)
+    const std::string sphere = ed.active_object_for_test() ? ed.active_object_for_test()->name : "";  // (round 367: "Sphere (1)" beside another)
     ed.command("component SkinModifier");
     ed.command("set SkinModifier.Armature Armature");
     ed.command("skin bind");
@@ -5764,7 +5766,7 @@ static void tests_round354() {
         for (float w : vg.weights) bone += vg.name == "Bone" ? w : 0.0f;
     }
     std::printf("    when the bind landed: the file holds %s, the Bone's weights sum %.2f\n", names.c_str(), bone);
-    CHECK(names == "Sphere " && bone > 1.0f);
+    CHECK(names == sphere + " " && bone > 1.0f);
   });
   test("Export waits (review 354): the tray's Export Now writes at once with a warning, Cancel drops the export, two exports both wait, New Scene drops them", [] {
     Editor ed;
@@ -5860,6 +5862,7 @@ static void tests_round354() {
     ed.command("create Armature");
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
     ed.command("create Sphere");
+    const std::string sphere = ed.active_object_for_test() ? ed.active_object_for_test()->name : "";  // (round 367: unique names)
     ed.command("shape add Puff");
     ed.command("component SkinModifier");
     ed.command("set SkinModifier.Armature Armature");
@@ -5890,7 +5893,7 @@ static void tests_round354() {
     bool on_sphere = false;  // (the weights channel on the Sphere's own node)
     for (size_t c = 0; c < j["animations"][0]["channels"].size(); c++) {
       const Json &ch = j["animations"][0]["channels"][c];
-      if (ch["target"]["path"].str == "weights") on_sphere = j["nodes"][(size_t)ch["target"]["node"].number()]["name"].str == "Sphere";
+      if (ch["target"]["path"].str == "weights") on_sphere = j["nodes"][(size_t)ch["target"]["node"].number()]["name"].str == sphere;
     }
     CHECK(on_sphere);
     ImportResult r;
@@ -8127,6 +8130,157 @@ static void tests_round366() {
   });
 }
 
+/* ---------------------------------------------------------------- round 367: the small fixes (task 0344) */
+static void tests_round367() {
+  test("create (round 367): a Capsule 2 m tall and 1 m across; a second one named \"Capsule (1)\" as Unity names it; an unknown kind refused, making nothing; a kind in any case", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    size_t before = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("create Capsule");
+    GameObject *a = ed.active_object_for_test();
+    const std::string first = a ? a->name : "";
+    ed.command("create Capsule");
+    GameObject *b = ed.active_object_for_test();
+    const Mesh *m = a && a->get<MeshFilter>() ? a->get<MeshFilter>()->mesh.get() : nullptr;
+    AABB box;
+    for (const Vec3 &p : m ? m->positions : std::vector<Vec3>()) box.add(p);
+    std::printf("    %s and %s; the capsule %.3f tall, %.3f across, %zu faces\n", first.c_str(), b ? b->name.c_str() : "-", box.max.y - box.min.y, box.max.x - box.min.x,
+                m ? m->face_count() : 0);
+    CHECK(m && std::fabs(box.max.y - box.min.y - 2.0f) < 1e-4f && std::fabs(box.max.x - box.min.x - 1.0f) < 1e-3f);
+    CHECK(b && b != a && b->name == first + " (1)");
+    size_t mid = 0;
+    ed.scene().for_each([&](GameObject &) { mid++; });
+    ed.command("create Capsul");  // (a typo: refused, nothing made - it made an empty object named "Capsul")
+    ed.command("create point light");
+    size_t after = 0;
+    bool typo = false, light = false;
+    ed.scene().for_each([&](GameObject &g) {
+      after++;
+      typo = typo || g.name == "Capsul";
+      light = light || (g.get<Light>() && g.name.rfind("Point Light", 0) == 0);
+    });
+    CHECK(mid == before + 2 && after == mid + 1 && !typo && light);
+    ed.command("create armature");  // (review 367: the special kinds in any case too)
+    GameObject *rig = ed.active_object_for_test();
+    CHECK(rig && (rig->get<Bone>() || rig->get<Armature>()));
+  });
+  test("Join (round 367): after the selection ends on a light (Select All's way), the last mesh selected keeps the result instead of a refusal", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    const std::string cube = ed.active_object_for_test()->name;
+    ed.command("create Sphere");
+    GameObject *sphere = ed.active_object_for_test();
+    const std::string sname = sphere->name;
+    const size_t faces = sphere->get<MeshFilter>()->mesh->face_count();
+    ed.command("create Point Light");
+    const std::string lname = ed.active_object_for_test()->name;
+    ed.command("select " + cube);
+    ed.command("selectadd " + sname);
+    ed.command("selectadd " + lname);  // (the active one: a light)
+    ed.command("join");
+    GameObject *kept = ed.scene().find_by_name(sname);
+    const bool cube_gone = ed.scene().find_by_name(cube) == nullptr;
+    const size_t now = kept && kept->get<MeshFilter>() ? kept->get<MeshFilter>()->mesh->face_count() : 0;
+    std::printf("    %s kept: %zu faces (was %zu); %s joined into it: %s\n", sname.c_str(), now, faces, cube.c_str(), cube_gone ? "yes" : "no");
+    CHECK(kept && cube_gone && now == faces + 6);
+  });
+  test("a new Camera (round 367): where the Scene view is, looking where it looks (it faced +Z at the pivot)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("camera 30 -20 8 1 0 2");
+    ed.command("create Camera");
+    GameObject *c = ed.active_object_for_test();
+    const Quat q = Quat::euler({-20.0f, 30.0f, 0.0f});
+    const Vec3 fwd = q.rotate({0, 0, 1}), eye = Vec3(1, 0, 2) - fwd * 8.0f;
+    const Vec3 got = c ? c->world_rotation().rotate({0, 0, 1}) : Vec3(0.0f);
+    std::printf("    the camera at (%.2f %.2f %.2f), the view's eye (%.2f %.2f %.2f); facing dot %.4f\n", c ? c->world_position().x : 0.0f,
+                c ? c->world_position().y : 0.0f, c ? c->world_position().z : 0.0f, eye.x, eye.y, eye.z, dot(got, fwd));
+    CHECK(c && c->get<Camera>() && length(c->world_position() - eye) < 1e-3f && dot(got, fwd) > 0.9999f);
+  });
+  test("the console (round 367): help lists every command; rotate, scale and set Transform.*; ui scale is the UI's; save to a path, new, open it again; saverender to a path", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::vector<LogEntry> lines;
+    const size_t from = Log::fetch(0, lines);
+    ed.command("help");
+    lines.clear();
+    Log::fetch(from, lines);
+    std::string all;
+    for (const LogEntry &e : lines) all += e.text + "\n";
+    CHECK(all.find("zfight") != std::string::npos && all.find("wpstroke") != std::string::npos && all.find("rotate") != std::string::npos);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    const std::string name = g->name;
+    ed.command("rotate 0 90 0");
+    ed.command("scale 2");
+    ed.command("set Transform.Position 1 2 3");
+    const Vec3 e = g->local().euler_hint, s = g->local().scale, p = g->local().position;
+    std::printf("    rotation (%g %g %g), scale (%g %g %g), position (%g %g %g)\n", e.x, e.y, e.z, s.x, s.y, s.z, p.x, p.y, p.z);
+    CHECK(std::fabs(e.y - 90.0f) < 1e-4f && s.x == 2.0f && s.z == 2.0f && p.x == 1.0f && p.y == 2.0f && p.z == 3.0f);
+    ed.command("scale 1 3 1");
+    CHECK(g->local().scale.y == 3.0f && g->local().scale.x == 1.0f);
+    ed.command("scale 0");  // (refused: a flat matrix)
+    CHECK(g->local().scale.y == 3.0f);
+    ed.command("ui scale 1.25");
+    CHECK(std::fabs(ed.ui_scale_pref_for_test() - 1.25f) < 1e-6f);
+    ed.command("ui scale 0");
+    /* A save that can't be written (a folder under a file) leaves the scene's path and name, and no file. */
+    const std::string blocker = fs::join(test_dir(), "r367_blocker");
+    CHECK(fs::write_file(blocker, "x"));
+    const std::string path_before = ed.scene().path, name_before = ed.scene().name;
+    ed.command("save " + fs::join(blocker, "x"));
+    CHECK(ed.scene().path == path_before && ed.scene().name == name_before && !fs::exists(fs::join(blocker, "x.scene")));
+    std::remove(blocker.c_str());
+    /* A bare name goes to Assets/Scenes, as Save As puts it; open takes the same word. */
+    const std::string bare = resolve_asset_path("Assets/Scenes/R367Bare.scene");
+    std::remove(bare.c_str());
+    ed.command("save R367Bare");
+    const bool in_scenes = fs::exists(bare);
+    ed.command("open R367Bare");
+    CHECK(in_scenes && ed.scene().path == bare);
+    std::remove(bare.c_str());
+    /* save <path> / new / open <path>, in the scratch project. */
+    const std::string rel = "Assets/Scenes/R367 Console.scene";
+    std::remove(resolve_asset_path(rel).c_str());
+    ed.command("save Assets/Scenes/R367 Console");
+    const bool saved = fs::exists(resolve_asset_path(rel));
+    ed.command("new");
+    const bool emptied = ed.scene().find_by_name(name) == nullptr;
+    ed.command("open " + rel);
+    GameObject *back = ed.scene().find_by_name(name);
+    std::printf("    saved %s, gone after new %s, back after open %s\n", saved ? "yes" : "no", emptied ? "yes" : "no", back ? "yes" : "no");
+    CHECK(saved && emptied && back && back->local().scale.y == 3.0f);
+    ed.command("open Assets/Scenes/none.scene");  // (refused: no file)
+    /* saverender <path>: no question asked. */
+    ed.command("engine raster");
+    ed.scene().render.width = 32, ed.scene().render.height = 18;
+    ed.command("render");
+    const std::string png = resolve_asset_path("Renders/r367 still.png");
+    std::remove(png.c_str());
+    ed.command("saverender Renders/r367 still.png");
+    CHECK(fs::exists(png));
+    std::remove(png.c_str());
+    /* No extension: the format's; a type it doesn't write: refused, nothing written (review 367). */
+    const std::string noext = resolve_asset_path("Renders/r367 plain"), bmp = resolve_asset_path("Renders/r367 still.bmp");
+    ed.command("saverender Renders/r367 plain");
+    ed.command("saverender Renders/r367 still.bmp");
+    CHECK(fs::exists(noext + ".png") && !fs::exists(bmp));
+    std::remove((noext + ".png").c_str());
+    std::remove(resolve_asset_path(rel).c_str());
+  });
+  test("the lesson's Try-it (round 367): create Capsule, then rotate and scale it from the console", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Capsule");
+    ed.command("rotate 0 0 90");
+    ed.command("scale 0.5");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->name.rfind("Capsule", 0) == 0 && std::fabs(g->local().euler_hint.z - 90.0f) < 1e-4f && g->local().scale.x == 0.5f);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -8507,4 +8661,5 @@ void run_assets_tests() {
   tests_round364();
   tests_round365();
   tests_round366();
+  tests_round367();
 }

@@ -941,7 +941,7 @@ void Editor::draw_menubar(const Recti &r) {
     /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
     /* Task 0267: in every layout - the walkthrough's first step (add a cube) failed in the other layouts. */
     u.submenu("3D Object", u.px(170), [this] {
-        for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+        for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
     if (shows(FocusReference)) {
@@ -3452,7 +3452,30 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
   if (rig && rig != armature && !scene_->is_ancestor(armature, rig)) scene_->set_parent(armature, rig, -1, true);
 }
 
+/* The kind as create knows it, matched without case ("sphere", "point light"); "" when there's none. */
+std::string Editor::known_create_kind(const std::string &kind) {
+  static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
+                                       "Directional Light", "Point Light", "Spot Light", "Area Light", "Camera", "Armature", "Lattice"};
+  for (const char *k : kKinds)
+    if (to_lower(kind) == to_lower(k)) return k;
+  for (const char *prefix : {"Curve:", "Shape:"})  // (review 367: "curve: path" too; the rest is matched where it's made)
+    if (to_lower(kind).rfind(to_lower(prefix), 0) == 0) return prefix + kind.substr(6);
+  return "";
+}
+
+/* Unity's way: "Sphere", then "Sphere (1)", "Sphere (2)" - a name no other object has, so select-by-name finds it. */
+std::string Editor::unique_object_name(const std::string &base) const {
+  if (!scene_->find_by_name(base)) return base;
+  for (int k = 1; k < 100000; k++) {
+    const std::string n = strprintf("%s (%d)", base.c_str(), k);
+    if (!scene_->find_by_name(n)) return n;
+  }
+  return base;
+}
+
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
+  const std::string canonical = known_create_kind(kind);  // (any case: "armature", "point light")
+  if (!canonical.empty() && canonical != kind) return create_object(canonical, as_child);
   GameObject *parent = as_child ? active_object() : nullptr;
   if (kind == "Armature") {
     /* Blender's Add > Armature: a root and one bone, a metre long. A selected mesh gets a Skin modifier bound to it
@@ -3567,10 +3590,18 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     mark_changed("Create " + std::string(kShapeNames[k]));
     return g;
   }
-  GameObject *g = kind == "Empty" ? scene_->create("GameObject", parent) : create_primitive(*scene_, kind, parent);
-  if (kind == "Directional Light" || kind == "Point Light" || kind == "Spot Light" || kind == "Area Light" || kind == "Camera") g->name = kind;
-  /* At the view's centre; spot and area lights 3 m above it, pointing down at it. */
-  if (!parent) g->set_world_position(cam_.pivot + (kind == "Spot Light" || kind == "Area Light" ? Vec3(0, 3, 0) : Vec3(0.0f)));
+  if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
+    Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
+              "Spot / Area Light, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>", kind.c_str());
+    return nullptr;
+  }
+  const std::string name = unique_object_name(kind == "Empty" ? "GameObject" : kind);  // (finding 8: Unity's "Sphere (1)")
+  GameObject *g = kind == "Empty" ? scene_->create(name, parent) : create_primitive(*scene_, kind, parent);
+  g->name = name;
+  /* At the view's centre; spot and area lights 3 m above it, pointing down at it; a camera where the view is, looking
+   * where it looks (round 367: it faced +Z wherever the view was). */
+  if (!parent && kind == "Camera") g->set_world_position(cam_.position()), g->set_world_rotation(cam_.rotation());
+  else if (!parent) g->set_world_position(cam_.pivot + (kind == "Spot Light" || kind == "Area Light" ? Vec3(0, 3, 0) : Vec3(0.0f)));
   if (parent) expanded_.insert(parent->id);
   select(g->id);
   mark_changed("Create " + kind);

@@ -1382,6 +1382,7 @@ class Editor {
   void open_dialog_for_test(int k) { dialog_ = (Dialog)k; }
   int dialog_kind_for_test() const { return (int)dialog_; }
   void set_ui_scale_for_test(float s) { ui_scale_pref_ = s, apply_ui_scale(); }
+  float ui_scale_pref_for_test() const { return ui_scale_pref_; }  // (round 367)
   std::vector<std::string> workspace_names_for_test() const { return workspace_names(); }
   int fb_width_for_test() const { return fb_.width; }
   int fb_height_for_test() const { return fb_.height; }
@@ -1834,7 +1835,7 @@ class Editor {
   uint64_t camera_render_hash(const GameObject *owner, Camera *cam, uint64_t scene_hash);
   void draw_camera_preview(const Recti &view);  // Unity's Camera Preview inset
   void step_final_render();
-  void save_render();
+  void save_render(const std::string &to = "");
   uint64_t scene_render_hash(bool memo = true);
   uint64_t object_render_hash(GameObject &g, bool memo);
   bool camera_for_render(Mat4 &view, Mat4 &proj, float aspect);
@@ -1954,7 +1955,7 @@ class Editor {
   void assist_command(const std::vector<std::string> &t);
 
  private:
-  bool assist_[(int)Assist::Count] = {true, false, false, false, false};  // (physics tools as before; the rest off)
+  bool assist_[(int)Assist::Count] = {true, true, false, false, false};  // (physics tools and Walk Cycle on - round 367, finding 12; the rest off)
   bool assist_require(Assist a);
   bool assist_pref(const std::string &key, const std::string &value);
   std::string assist_prefs_text() const;
@@ -2905,6 +2906,12 @@ class Editor {
   void new_scene();
   bool open_scene(const std::string &path);
   void save_scene_cmd(bool save_as);
+  void save_scene_to(const std::string &path);  // (round 367: the console's save / open / rotate / scale / help)
+  void open_scene_cmd(const std::string &path);
+  std::string scene_file_path(const std::string &path) const;
+  void transform_command(const std::string &what, const std::vector<std::string> &v);
+  void log_all_commands();
+  bool round367_command(const std::string &c, const std::vector<std::string> &t, const std::string &line);
   void import_obj_file(const std::string &path);
   /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
   std::string export_model(const ExportOptions &o, const std::string &path = "");
@@ -3130,6 +3137,8 @@ class Editor {
   MaterialPtr animemat_command(const std::string &preset);
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
+  static std::string known_create_kind(const std::string &kind);  // (round 367)
+  std::string unique_object_name(const std::string &base) const;
   void duplicate_selected();
   void delete_selected();
   void add_component_to_selection(const std::string &name);
@@ -3220,6 +3229,7 @@ class Editor {
   void update_camera_focus();  // cameras keeping a picked point in focus
   void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
   void join_selected();
+  GameObject *join_target();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
   uint64_t boolean_kept_ = 0;  // (the Boolean dialog's choice: task 0255)
   int export_packing_ = 0;  // (the Export Textures dialog: task 0257)

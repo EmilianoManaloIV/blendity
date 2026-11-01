@@ -1261,14 +1261,14 @@ static void tests_round139_to_round172() {
     CHECK(sb && sb->label == 2 && std::fabs(sb->stiffness - 0.42f) < 1e-6f && ear && ear->get<Bone>()->spring_ignored);
   });
   /* ---------------------------------------------------------------- round 144: animation assistants and the rig read for walking (task 0124) */
-  test("assistants: the physics tools on and the rest off at first; a switched-off one does nothing and says how to turn it on; kept in the preferences", [] {
+  test("assistants: the physics tools and Walk Cycle on and the rest off at first (round 367); a switched-off one does nothing and says how to turn it on; kept in the preferences", [] {
     const std::string prefs = fs::join(test_dir(), "r144_prefs.txt");
     fs::remove_file(prefs);
     {
       Editor ed;
       ed.init_headless(1200, 800);
       ed.prefs_for_test(prefs);
-      const bool first = ed.assist_on(Editor::Assist::Physics) && !ed.assist_on(Editor::Assist::Walk) && !ed.assist_on(Editor::Assist::Footsteps) &&
+      const bool first = ed.assist_on(Editor::Assist::Physics) && ed.assist_on(Editor::Assist::Walk) && !ed.assist_on(Editor::Assist::Footsteps) &&
                          !ed.assist_on(Editor::Assist::Locomotion) && !ed.assist_on(Editor::Assist::Ai);
       ed.command("assist off physics");
       ed.command("body show on");     // (refused: off)
@@ -1278,7 +1278,7 @@ static void tests_round139_to_round172() {
       ed.command("assist on walk");
       ed.command("assist on nonsense");  // (warned, nothing changes)
       ed.save_prefs_for_test();
-      std::printf("    at first: physics on, the rest off: %s; physics off refuses body / autopose: %s\n", first ? "yes" : "no", refused ? "yes" : "no");
+      std::printf("    at first: physics and Walk Cycle on, the rest off: %s; physics off refuses body / autopose: %s\n", first ? "yes" : "no", refused ? "yes" : "no");
       CHECK(first && refused);
     }
     {

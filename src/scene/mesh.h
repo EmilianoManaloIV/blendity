@@ -393,6 +393,8 @@ MeshPtr quad(float size = 1.0f);
 MeshPtr uv_sphere(float radius = 0.5f, int segments = 24, int rings = 16);
 MeshPtr ico_sphere(float radius = 0.5f, int subdivisions = 2);
 MeshPtr cylinder(float radius = 0.5f, float height = 2.0f, int segments = 24);
+/* Unity's Capsule (round 367): a cylinder capped by half spheres, `height` tall overall (2 m, 1 m across). */
+MeshPtr capsule(float radius = 0.5f, float height = 2.0f, int segments = 24, int rings = 16);
 MeshPtr cone(float radius = 0.5f, float height = 1.0f, int segments = 24);
 MeshPtr torus(float major = 0.5f, float minor = 0.2f, int major_seg = 32, int minor_seg = 16);
 MeshPtr grid(float size, int nx, int nz);

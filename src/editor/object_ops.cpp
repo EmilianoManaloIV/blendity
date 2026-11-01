@@ -43,14 +43,25 @@ static std::vector<GameObject *> other_mesh_objects(const std::vector<GameObject
   return out;
 }
 
+/* The object Join keeps: the active one when it's a mesh, else the last mesh selected (round 367, finding 15: after
+ * Select All the active one could be a light, and Join refused). */
+GameObject *Editor::join_target() {
+  auto mesh_of = [](GameObject *g) { return g && g->get<MeshFilter>() && g->get<MeshFilter>()->mesh; };
+  GameObject *a = active_object();
+  if (mesh_of(a)) return a;
+  GameObject *last = nullptr;
+  for (GameObject *g : selected_objects(false)) last = mesh_of(g) ? g : last;
+  return last;
+}
+
 void Editor::join_selected() {
   if (edit_mode_) {
     Log::warn("Join combines objects: leave Edit Mode first (Tab)");
     return;
   }
-  GameObject *a = active_object();
-  if (!a || !a->get<MeshFilter>() || !a->get<MeshFilter>()->mesh) {
-    Log::warn("Join: the active object (selected last) must have a mesh; it keeps the result");
+  GameObject *a = join_target();
+  if (!a) {
+    Log::warn("Join: select two or more mesh objects; the last mesh selected keeps the result");
     return;
   }
   std::vector<GameObject *> others = other_mesh_objects(selected_objects(false), a);

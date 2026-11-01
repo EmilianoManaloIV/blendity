@@ -447,7 +447,7 @@ static void first_tests() {
     ed.step_frame_headless();
     GameObject *cube = nullptr;
     ed.scene().for_each([&](GameObject &g) {
-      if (g.name == "Cube" && (!cube || g.id > cube->id)) cube = &g;
+      if (g.name.rfind("Cube", 0) == 0 && (!cube || g.id > cube->id)) cube = &g;  // (round 367: "Cube (1)")
     });
     CHECK(cube != nullptr);
     if (!cube) return;
@@ -544,7 +544,7 @@ static void first_tests() {
     ed.step_frame_headless();
     GameObject *cube = nullptr;
     ed.scene().for_each([&](GameObject &g) {
-      if (g.name == "Cube" && (!cube || g.id > cube->id)) cube = &g;
+      if (g.name.rfind("Cube", 0) == 0 && (!cube || g.id > cube->id)) cube = &g;  // (round 367: "Cube (1)")
     });
     CHECK(cube != nullptr);
     if (!cube) return;

@@ -1534,7 +1534,19 @@ void Editor::apply_trace_alpha(const std::vector<float> &lin, bool filtered) {
   (void)filtered;  // (a filtered render's alpha comes from its two pass runs, in resolve_final_render)
 }
 
-void Editor::save_render() {
+/* saverender's path (review 367): a folder (a trailing slash, or one that's there) gets the render's own name in it; no
+ * extension, the format's; an extension it can't write is refused rather than written with another type's bytes. */
+static std::string typed_render_path(const std::string &to, const std::string &own_name) {
+  const std::string abs = resolve_asset_path(to);
+  if (to.back() == '/' || to.back() == '\\' || fs::is_dir(abs)) return fs::join(abs, own_name);
+  const std::string ext = fs::extension(to);
+  if (ext.empty()) return abs + fs::extension(own_name);
+  if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".hdr" || (ext == ".exr" && exr_available())) return abs;
+  Log::warn("saverender: Blendity doesn't write %s files - use .png, .jpg, .hdr%s", ext.c_str(), exr_available() ? " or .exr" : "");
+  return "";
+}
+
+void Editor::save_render(const std::string &to) {
   if (!render_has_result_ || render_img_.width == 0) {
     Log::warn("Nothing rendered yet - press Render Image (F12) first");
     return;
@@ -1560,8 +1572,12 @@ void Editor::save_render() {
   std::vector<platform::FileFilter> filters = {{"PNG", {".png"}}, {"JPEG", {".jpg", ".jpeg"}}, {"Radiance HDR", {".hdr"}}};
   if (exr_available()) filters.push_back({"OpenEXR", {".exr"}});
   int filter = std::min(fmt, (int)filters.size() - 1);
-  std::string chosen;
-  switch (pick_save_path("Save Render", path, filters, chosen, &filter)) {
+  /* A path given (round 367: `saverender <path>`, project-relative or absolute): no question; the type by its name. */
+  std::string chosen = to.empty() ? std::string() : typed_render_path(to, std::string(buf) + exts[fmt]);
+  if (!to.empty() && chosen.empty()) return;  // (said why)
+  const PathPick pick = to.empty() ? pick_save_path("Save Render", path, filters, chosen, &filter) : PathPick::Chosen;
+  if (!to.empty()) fs::make_dirs(fs::parent(chosen));
+  switch (pick) {
     case PathPick::Cancelled: return;
     case PathPick::Unavailable: break;
     case PathPick::Chosen: {

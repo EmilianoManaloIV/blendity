@@ -618,6 +618,10 @@ void Editor::ui_file_command(const std::vector<std::string> &t, const std::strin
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
   const std::string v = to_lower(arg(1, ""));
   const std::string path = console_rest(line, 2);
+  if (v == "scale") {  // (round 367: `scale` is the selection's now)
+    ui_scale_pref_ = (float)std::atof(arg(2, "0").c_str());
+    return apply_ui_scale();
+  }
   if ((v == "save" || v == "load") && path.empty()) return Log::warn("ui %s: a path is needed", v.c_str());
   if (v == "save") {
     const std::string file = path.size() > 12 && path.substr(path.size() - 12) == ".blendity-ui" ? path : path + ".blendity-ui";
@@ -633,7 +637,7 @@ void Editor::ui_file_command(const std::vector<std::string> &t, const std::strin
     ui_file_apply(text);
     return Log::info("UI loaded: %s", path.c_str());
   }
-  Log::info("usage: ui save <path> | ui load <path>|blender|zbrush");
+  Log::info("usage: ui save <path> | ui load <path>|blender|zbrush | ui scale <s> (0: the DPI's)");
 }
 
 /* Preferences > UI file: a path, Save and Load, the two built-ins. */

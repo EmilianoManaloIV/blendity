@@ -53,7 +53,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Create Empty")) create_object("Empty", child);
     u.submenu("3D Object", u.px(170), [this, child] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
     u.submenu("Shapes (Parametric)", u.px(190), [this, child] {

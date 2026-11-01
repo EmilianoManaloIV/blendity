@@ -886,6 +886,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **No MP4?** (round 366): the dependency-free build has no video maker of its own. Render Animation's finish message offers Blender's libraries for this build (Get Blender's Libraries..., `update libs`; or Use Blender's Libraries, `update libson`, when they were turned off), and an ffmpeg program on the PATH or set in Preferences works too. The build with the libraries makes the MP4 itself.
 
+**Objects and the console** (round 367): create makes a Capsule too, refuses a kind it doesn't know, and names a second object as Unity does ("Sphere (1)"); a new Camera is placed at the view, looking its way; Join keeps the last mesh selected when the active object isn't one. Console: `save [path]`, `open <path>`, `new`, `rotate <x y z>`, `scale <s | x y z>`, `set Transform.Position|Rotation|Scale <x y z>`, `saverender [path]`, `ui scale <s>` (was `scale`), and `help` lists every command.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

@@ -80,7 +80,7 @@ void Editor::draw_tools_window(const Recti &r) {
   auto grid = [&](const std::vector<GridButton> &bs, int per) { button_grid(lay, bs, per); };
   if (section("Create", FocusCreate)) {
     std::vector<GridButton> prims, shapes;
-    for (const char *k : {"Cube", "Sphere", "Cylinder", "Plane"})
+    for (const char *k : {"Cube", "Sphere", "Capsule", "Cylinder", "Plane"})
       prims.push_back({k, std::string("GameObject > 3D Object > ") + k, true, [this, k] { create_object(k); }});
     for (int k = 0; k < kShapeCount; k++)
       shapes.push_back({kShapeNames[k], "A parametric shape: its settings stay in the Inspector until you edit the mesh.", true,

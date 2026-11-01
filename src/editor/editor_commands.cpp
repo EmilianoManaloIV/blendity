@@ -26,9 +26,106 @@
 
 namespace bl {
 
-static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "where", "window", "world", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight"};
+static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "where", "window", "world", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate"};
 // (The names above: the sketch families dispatched before the chain, then this file's `c == "..."` cases as generated by
 // round 280's patch; regenerate when commands change - nothing checks the list against the dispatcher yet.)
+
+namespace {
+/* The rest of a console line from word `from` (a path or a name with spaces), trimmed. */
+std::string line_rest(const std::string &line, size_t from) {
+  size_t at = line.find_first_not_of(' ');
+  for (size_t i = 0; i < from && at != std::string::npos; i++) {
+    at = line.find(' ', at);
+    if (at != std::string::npos) at = line.find_first_not_of(' ', at);
+  }
+  if (at == std::string::npos) return "";
+  std::string out = line.substr(at);
+  while (!out.empty() && out.back() == ' ') out.pop_back();
+  return out;
+}
+}  // namespace
+
+/* help's first lines (round 367, finding 13: it listed about 25 of some 200): every command, in rows. */
+void Editor::log_all_commands() {
+  std::vector<std::string> names(std::begin(kConsoleCommands), std::end(kConsoleCommands));
+  std::sort(names.begin(), names.end());
+  names.erase(std::unique(names.begin(), names.end()), names.end());
+  Log::info("All %zu commands (each says how it's used when given too little; the Manual's Console section has them all):", names.size());
+  std::string row;
+  for (const std::string &n : names) {
+    if (row.size() + n.size() > 110) Log::info("  %s", row.c_str()), row.clear();
+    row += (row.empty() ? "" : ", ") + n;
+  }
+  if (!row.empty()) Log::info("  %s", row.c_str());
+  Log::info("Examples:");
+}
+
+/* save [path] (round 367): the scene - to a path when given (project-relative or absolute; .scene added), else where it
+ * was saved (a new scene asks, as Ctrl+S does). */
+void Editor::save_scene_to(const std::string &path) {
+  if (path.empty() || playing_) return save_scene_cmd(false);  // (Play: refused there, with its Fix)
+  const std::string p = scene_file_path(path);
+  fs::make_dirs(fs::parent(p));
+  const bool made = !fs::exists(p);
+  if (made && !fs::write_file(p, ""))  // (review 367: a path that can't be written leaves the scene's own as it was)
+    return Log::warn("save: can't write %s; the scene keeps %s", p.c_str(), scene_->path.empty() ? "no file yet" : scene_->path.c_str());
+  const std::string old_path = scene_->path, old_name = scene_->name;
+  scene_->path = p, scene_->name = fs::stem(p);
+  save_scene_cmd(false);
+  std::string head;
+  if (fs::read_prefix(p, 1, head) && !head.empty()) return;
+  scene_->path = old_path, scene_->name = old_name;  // (not written: nothing changed, no empty file left)
+  if (made) fs::remove_file(p);
+}
+
+/* A scene file named on the console: a bare name in Assets/Scenes (where Save As puts it, and the Project window shows
+ * it), a path the project's or absolute; .scene added (review 367). */
+std::string Editor::scene_file_path(const std::string &path) const {
+  const bool bare = path.find('/') == std::string::npos && path.find('\\') == std::string::npos;
+  std::string p = bare ? fs::join(fs::join(assets_dir_, "Scenes"), path) : resolve_asset_path(path);
+  if (fs::extension(p) != ".scene") p += ".scene";
+  return p;
+}
+
+/* open <path> (round 367): a scene file, asking first when this one has unsaved changes. */
+void Editor::open_scene_cmd(const std::string &path) {
+  const std::string p = path.empty() ? path : scene_file_path(path);
+  if (p.empty() || !fs::exists(p)) return Log::warn("open <file.scene>: no file %s", path.empty() ? "given" : p.c_str());
+  open_scene_asked(p);
+}
+
+/* rotate <x> <y> <z> | scale <s> or <x> <y> <z> | set Transform.Position|Rotation|Scale <x> <y> <z> (round 367): the
+ * selected objects' own (local) transform, as the Inspector's Transform shows it - degrees for rotation. */
+void Editor::transform_command(const std::string &what, const std::vector<std::string> &v) {
+  auto num = [&](size_t i, float d) { return v.size() > i ? (float)std::atof(v[i].c_str()) : d; };
+  const float x = num(0, 0.0f);
+  const Vec3 p(x, num(1, what == "scale" ? x : 0.0f), num(2, what == "scale" ? x : 0.0f));  // (one number: a uniform scale)
+  if (what != "position" && what != "rotation" && what != "scale") return Log::warn("set Transform.Position, Transform.Rotation or Transform.Scale <x> <y> <z>");
+  const std::vector<GameObject *> sel = selected_objects(false);
+  if (v.empty() || !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+    return Log::warn("%s <x> <y> <z>%s", what.c_str(), what == "scale" ? " (or one number for all three)" : "");
+  if (sel.empty()) return Log::warn("%s: select an object", what.c_str());
+  if (what == "scale" && (p.x == 0.0f || p.y == 0.0f || p.z == 0.0f))  // (review 367: a flat object's matrix has no inverse - Join's NaNs)
+    return Log::warn("scale: not 0 (a tiny scale, like 0.001, flattens it)");
+  for (GameObject *g : sel) {
+    if (what == "position") g->set_local_position(p);
+    if (what == "rotation") g->set_local_euler(p);
+    if (what == "scale") g->set_local_scale(p);
+  }
+  mark_changed(what == "position" ? "Position" : what == "rotation" ? "Rotation" : "Scale");
+}
+
+/* Round 367's verbs (finding 13): the scene's file, and the selection's transform (`scale` was the UI's: ui scale). */
+bool Editor::round367_command(const std::string &c, const std::vector<std::string> &t, const std::string &line) {
+  const std::string field = t.size() > 1 ? to_lower(t[1]) : std::string();
+  if (c == "new") return new_scene_asked(), true;  // (asking first, as File > New does)
+  if (c == "save") return save_scene_to(line_rest(line, 1)), true;
+  if (c == "open") return open_scene_cmd(line_rest(line, 1)), true;
+  if (c == "rotate" || c == "scale") return transform_command(c == "scale" ? "scale" : "rotation", std::vector<std::string>(t.begin() + 1, t.end())), true;
+  if (c != "set" || field.rfind("transform.", 0) != 0) return false;
+  transform_command(field.substr(10), std::vector<std::string>(t.begin() + 2, t.end()));
+  return true;
+}
 
 /* Up to three known commands - the console's own names, then the palette's console lines' first words - that start with
  * what was typed, then those that contain it (task 0260: an unknown command points at the nearest known ones). */
@@ -892,6 +989,7 @@ void Editor::run_console_command(const std::string &line) {
     shortcut_command(t, line);
     return;
   }
+  if (round367_command(c, t, line)) return;  // (save, open, new, rotate, scale, set Transform.*: before the long chain)
   if (c == "ui") {  // ui save <path> | load <path>|blender|zbrush (task 0231: the UI file)
     ui_file_command(t, line);
     return;
@@ -1193,8 +1291,10 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (c == "help") {
+    log_all_commands();
     Log::info("Commands: help, clear, create <Cube|Sphere|...> [count], stress <count> [Cube|Sphere|Icosphere|Torus], select <name>,");
-    Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
+    Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, ui scale <1.0>,");
+    Log::info("  save [path], open <path>, new, rotate <x y z>, scale <s | x y z>, set Transform.Position|Rotation|Scale <x y z>, saverender [path]");
     Log::info("  screenshot [file.png], bench [frames], lesson <n>, references, window <name>, tool <move|rotate|...>,");
     Log::info("  edit [vertex|edge|face|off] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
     Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation), gpu list,");
@@ -1250,7 +1350,6 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "play") enter_play();
   else if (c == "stop") exit_play();
-  else if (c == "scale") { ui_scale_pref_ = (float)std::atof(arg(1, "0").c_str()); apply_ui_scale(); }
   else if (c == "screenshot") screenshot(t.size() > 1 ? line.substr(line.find(' ') + 1) : "");
   else if (c == "lesson") { lesson_ = std::atoi(arg(1, "0").c_str()); dock_open(WindowKind::Learn); }
   else if (c == "research" || c == "references") open_references();  // (the Research window is retired: task 0034)
@@ -1837,7 +1936,7 @@ void Editor::run_console_command(const std::string &line) {
     else if (w == "clear") bake_clear();
     else bake_start();
   }
-  else if (c == "saverender") save_render();
+  else if (c == "saverender") save_render(line_rest(line, 1));  // (round 367: a path, or ask)
   else if (c == "lighting") {
     /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) | lighting markstatic (round 362) */
     const std::string sub = to_lower(arg(1, "update"));

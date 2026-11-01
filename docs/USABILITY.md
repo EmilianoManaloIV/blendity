@@ -412,6 +412,7 @@ screens themselves.
 | An animatic couldn't be cut in Blendity: the Sequencer held animation clips only - no storyboard pictures, no camera cuts. | Cards (an image or a paper held full-frame over the Game view and the rendered frames) and camera cuts on the Sequencer's lanes (round 364). |
 | The short film had no sound: nothing on the timeline played or rendered a sound. | WAV sound bars on the Sequencer's lanes, played in step with the playhead and mixed into Render Animation's sound.wav and MP4 (round 365). |
 | Render Animation in the dependency-free build ended with PNGs and a note to install FFmpeg, though Blender's libraries (with FFmpeg) were a click away. | The finish message names the folder and why, with a Fix that downloads the libraries (or turns them back on) (round 366). |
+| Small frictions from round 350's productions: no Capsule; a typo'd kind made an empty; two objects named Sphere; Join refused after Select All; Walk Cycle off; a new camera facing +Z; the console couldn't save, open, rotate or scale, and help listed a tenth of it. | A Capsule, refused typos, "Sphere (1)", Join on the last mesh, Walk Cycle on, a camera aligned to the view, and the console's save / open / new / rotate / scale / set Transform.* / saverender <path> with a full help (round 367). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing

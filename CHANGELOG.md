@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 367): the small fixes - Capsule, unique names, Join, Walk Cycle on, the new camera, the console
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 7, 8,
+12, 13 and 15, and the camera that faced +Z).
+
+**Changed (task 0344)**
+- **create:**
+  - a Capsule primitive (Unity's: 2 m tall, 1 m across);
+  - an unknown kind is refused with the list (it made an empty object named for the typo);
+  - kinds in any case;
+  - new objects named as Unity names them ("Sphere (1)").
+- **Join:** when the active object isn't a mesh (Select All ending on a light), the last mesh selected keeps the
+  result.
+- **Walk Cycle** is on from the start.
+- **A new Camera** is where the Scene view is, looking where it looks.
+- **The console:**
+  - `help` lists every command;
+  - `save [path]`, `open <path>`, `new`;
+  - `rotate <x y z>`, `scale <s | x y z>` and `set Transform.Position|Rotation|Scale` on the selection;
+  - `saverender [path]`;
+  - the UI's scale moved from `scale` to `ui scale` (a user's own shortcut or Wheel slice holding `scale 1.5` now
+    scales the selection).
+- **Existing preferences** keep Walk Cycle as they were saved (Preferences > Animation Assistants turns it on).
+- **The Opus review's fixes:**
+  - a failed `save <path>` no longer takes the path;
+  - Capsule is in the Tools window;
+  - special kinds work in any case;
+  - `saverender` handles folders, no extension and unknown types;
+  - bare names go to Assets/Scenes;
+  - `scale 0` is refused;
+  - a short capsule gets one rim.
+
+**Checked:** `tests_round367`:
+- the capsule's size, a second one's name, a typo refused, a kind in lower case;
+- Join kept on the last mesh after a light;
+- the new camera at the view's eye, facing its way;
+- help, rotate, scale, set Transform.*, save, new, open, saverender;
+- the Try-it.
+
 ## 2026-10-31 (round 366): no MP4 says how to get one, and round 350's report corrected
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 6:

@@ -1778,9 +1778,9 @@ static void coverage_tests() {
     CHECK(ed.scene().environment.mode == 3);
     ed.command("world gradient");
     CHECK(ed.scene().environment.mode == 0);
-    ed.command("scale 1.5");
+    ed.command("ui scale 1.5");
     ed.step_frame_headless();
-    ed.command("scale 0");  // (0: follow the DPI, the default)
+    ed.command("ui scale 0");  // (0: follow the DPI, the default)
     ed.command("threads 2");
     CHECK(JobSystem::global().thread_limit() == 2);
     ed.command("threads 0");
