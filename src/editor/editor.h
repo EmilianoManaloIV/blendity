@@ -32,6 +32,7 @@
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
 #include "../scene/budget.h"
+#include "../scene/avatar_eyes.h"
 #include "../scene/avatar_fix.h"
 #include "../scene/avatar_tools.h"
 #include "../scene/visemes.h"
@@ -2956,6 +2957,15 @@ class Editor {
   bool budget_fix_triangles(int rank, const std::vector<GameObject *> &objs, int target);  // (review 356: the avatar's own objects)
   bool decimate_to(const std::vector<GameObject *> &cut_from, const std::vector<GameObject *> &fixed, double limit, const std::string &what, bool drop_keys = false);
   void avatar_decimate(GameObject &root, const std::vector<std::string> &t);
+  /* Round 360: CATS' Eye Tracking and the Texture Atlas (avatar_eyes_ui.cpp). */
+  bool avatar_eyes_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  bool avatar_eyes(GameObject &root);
+  void avatar_eye_test(GameObject &root, const std::vector<std::string> &t);
+  bool avatar_atlas(GameObject &root, int size);
+  void draw_eyes_section(ui::Layout &lay, GameObject *root);
+  EyeOptions eye_options_;
+  uint64_t eye_test_root_ = 0;  // (the avatar whose eyes the test has turned: undone before anything is kept)
+  void eye_test_off();
   void budget_report(const BudgetCounts &counts, const char *what);
   void export_wait_poll();
   void export_waits_drop(const char *why);

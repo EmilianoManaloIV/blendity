@@ -9,6 +9,7 @@
 #include "../src/scene/budget.h"
 #include "../src/scene/visemes.h"
 #include "../src/scene/humanoid.h"
+#include "../src/scene/avatar_eyes.h"
 #include "../src/scene/avatar_optimize.h"
 #include "../src/scene/spring_bones.h"
 #include "../src/scene/avatar_tools.h"
@@ -7007,6 +7008,258 @@ static void tests_round359() {
   });
 }
 
+/* ---------------------------------------------------------------- round 360: Eye Tracking, Texture Atlas */
+static void tests_round360() {
+  test("Eye Tracking (round 360): two eye meshes on a humanoid become LeftEye (the rig's -X) and RightEye under Head at their middles, each eye following its bone; a Blink key splits into vrc.blink_left / right by side; the test turns and shuts them, Reset puts them back", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!body || !rig || !head) return;
+    const Vec3 hp = head->world_position();
+    GameObject *eye[2] = {};
+    for (int i = 0; i < 2; i++) {
+      ed.command("create Sphere");
+      eye[i] = ed.active_object_for_test();
+      eye[i]->name = i == 0 ? "Eye_L" : "Eye_R";
+      eye[i]->set_local_scale(Vec3(0.02f));
+      eye[i]->set_world_position(hp + Vec3(i == 0 ? -0.03f : 0.03f, 0.08f, 0.08f));
+      s.set_parent(eye[i], head, -1, true);
+    }
+    /* The body's Blink: every vertex 1 cm down. */
+    {
+      Mesh &m = *mesh_make_mutable(body->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"Blink", std::vector<Vec3>(m.vert_count(), Vec3(0, -0.01f, 0))}};
+      m.touch();
+    }
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar eyes");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *le = s.find_by_name("LeftEye"), *re = s.find_by_name("RightEye");
+    CHECK(le && re && le->parent == head && re->parent == head);
+    if (!le || !re) return;
+    std::printf("    LeftEye at (%.3f %.3f %.3f), RightEye at (%.3f %.3f %.3f); the eyes' parents %s, %s\n", le->world_position().x, le->world_position().y, le->world_position().z,
+                re->world_position().x, re->world_position().y, re->world_position().z, eye[0]->parent->name.c_str(), eye[1]->parent->name.c_str());
+    CHECK(length(le->world_position() - eye[0]->world_position()) < 0.005f && length(re->world_position() - eye[1]->world_position()) < 0.005f);
+    CHECK(eye[0]->parent == le && eye[1]->parent == re);
+    const Mesh &bm = *body->get<MeshFilter>()->mesh;
+    const int bl = bm.find_shape("vrc.blink_left"), br = bm.find_shape("vrc.blink_right");
+    CHECK(bl >= 0 && br >= 0);
+    if (bl < 0 || br < 0) return;
+    const float side_x = body->world_matrix().inverse().point(hp).x;
+    bool sides = true;
+    for (size_t i = 0; i < bm.vert_count(); i++) {
+      const bool left = bm.positions[i].x < side_x;
+      sides = sides && (length(bm.shape_keys[(size_t)bl].delta[i]) > 0.0f) == left && (length(bm.shape_keys[(size_t)br].delta[i]) > 0.0f) == !left;
+    }
+    CHECK(sides);
+    /* The test: turned and shut, then back. */
+    const Quat rest = le->get<Bone>()->rest_rotation;
+    ed.command("avatar eyetest 25 0 1");
+    const float shut = body->get<MeshRenderer>()->shape_weight("vrc.blink_left");
+    const bool turned = std::fabs(r358_qdot(le->local().rotation, rest)) < 0.999f;
+    ed.command("avatar eyetest reset");
+    std::printf("    the test: turned %d, the blink at %.1f; after Reset the blink at %.1f\n", (int)turned, shut, body->get<MeshRenderer>()->shape_weight("vrc.blink_left"));
+    CHECK(turned && shut == 1.0f && body->get<MeshRenderer>()->shape_weight("vrc.blink_left") == 0.0f && std::fabs(r358_qdot(le->local().rotation, rest)) > 0.9999f);
+    /* The checklist's eye item passes now. */
+    bool eyes_ok = false;
+    for (const AvatarCheck &c : avatar_check(s, *rig)) eyes_ok = eyes_ok || (c.item == "Eye bones (Eye Look)" && c.ok);
+    CHECK(eyes_ok);
+  });
+  test("Eye Tracking (round 360): nothing to set up on a bare rig is said; split_key_by_side keeps each side's offsets; the checklist's eye item has its Fix", [] {
+    Mesh m = *primitives::cube();
+    m.shape_keys = {{"Blink", std::vector<Vec3>(m.vert_count(), Vec3(0, -0.1f, 0))}};
+    CHECK(split_key_by_side(m, "Blink", 0.0f, "L", "R") && !split_key_by_side(m, "Nope", 0.0f, "L", "R"));
+    const int l = m.find_shape("L"), r = m.find_shape("R");
+    float ls = 0.0f, rs = 0.0f;
+    for (size_t i = 0; l >= 0 && r >= 0 && i < m.vert_count(); i++) ls += length(m.shape_keys[(size_t)l].delta[i]), rs += length(m.shape_keys[(size_t)r].delta[i]);
+    CHECK(l >= 0 && r >= 0 && std::fabs(ls - rs) < 1e-5f && ls > 0.0f);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    if (!rig) return;
+    std::string fix;
+    for (const AvatarCheck &c : avatar_check(ed.scene(), *rig)) fix = c.item == "Eye bones (Eye Look)" ? c.fix : fix;
+    CHECK(fix == "avatar eyes");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("avatar eyes");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("Eye Tracking: no eyes") != std::string::npos;
+    CHECK(said && !ed.scene().find_by_name("LeftEye"));
+  });
+  test("Texture Atlas (round 360): a mesh with two materials baked into one texture set, one material, one slot, its UVs laid out anew", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    if (!rig || !cube) return;
+    MeshRenderer *mr = cube->get<MeshRenderer>();
+    mr->materials = {std::make_shared<Material>(), std::make_shared<Material>()};
+    mr->materials[0]->base_color = Vec3(1, 0, 0);
+    mr->materials[1]->base_color = Vec3(0, 0, 1);
+    {
+      Mesh &m = *mesh_make_mutable(cube->get<MeshFilter>()->mesh);
+      m.face_material.assign(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f += 2) m.face_material[f] = 1;
+      m.touch();
+    }
+    cube->add<SkinModifier>()->object = rig->name;
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar atlas 256");
+    const Mesh &m = *cube->get<MeshFilter>()->mesh;
+    const bool one_slot = std::all_of(m.face_material.begin(), m.face_material.end(), [](int f) { return f == 0; });
+    std::printf("    after the atlas: %zu material(s), one slot %d, its albedo map %s\n", mr->materials.size(), (int)one_slot, mr->materials.empty() ? "-" : mr->materials[0]->base_map.path.c_str());
+    CHECK(mr->materials.size() == 1 && one_slot && !mr->materials[0]->base_map.empty());
+  });
+  test("Eye Tracking (review 360): one Eyes mesh for both eyes skinned to LeftEye and RightEye; a Skin's limit group kept on the eyes; a second avatar's eyes its own; a re-run after an eye moved keeps it; a turned body's blinks on the right sides; the test undone before an edit", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!rig || !head) return;
+    const Vec3 hp = head->world_position();
+    /* One "Eyes" mesh holding both: two small spheres joined. */
+    ed.command("create Sphere");
+    GameObject *eyes = ed.active_object_for_test();
+    {
+      Mesh both = *primitives::uv_sphere();
+      Mesh &m = *mesh_make_mutable(eyes->get<MeshFilter>()->mesh);
+      m = both;
+      for (Vec3 &p : m.positions) p = p * 0.02f + Vec3(-0.03f, 0.08f, 0.08f);
+      Mesh right = both;
+      for (Vec3 &p : right.positions) p = p * 0.02f + Vec3(0.03f, 0.08f, 0.08f);
+      meshops::append_mesh(m, right, Mat4::identity(), {});
+      m.touch();
+    }
+    eyes->name = "Eyes";
+    eyes->set_world_position(hp);
+    s.set_parent(eyes, head, -1, true);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar eyes");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *le = s.find_by_name("LeftEye"), *re = s.find_by_name("RightEye");
+    const SkinModifier *es = eyes->get<SkinModifier>();
+    std::printf("    the Eyes mesh: skinned %d, its parent %s, LeftEye x %.3f, RightEye x %.3f\n", (int)(es != nullptr), eyes->parent ? eyes->parent->name.c_str() : "-",
+                le ? le->world_position().x - hp.x : 0.0f, re ? re->world_position().x - hp.x : 0.0f);
+    CHECK(le && re && es && eyes->parent == rig && le->world_position().x < hp.x && re->world_position().x > hp.x);
+    /* The test is undone by the next edit (its pose and blinks aren't kept). */
+    const Quat lrest = le ? le->get<Bone>()->rest_rotation : Quat();
+    ed.command("avatar eyetest 30 0 1");
+    ed.command("avatar eyetest nan 0 0");  // (refused)
+    ed.command("create Cube");
+    CHECK(le && std::fabs(r358_qdot(le->local().rotation, lrest)) > 0.9999f);
+    /* A second avatar: its own eye bones (by the rig, not the first found by name). */
+    ed.command("rig humanoid");
+    GameObject *rig2 = ed.active_object_for_test();
+    GameObject *head2 = nullptr;
+    std::vector<GameObject *> bones2;
+    s.for_each([&](GameObject &g) { head2 = g.name == "Head" && rig2 && s.is_ancestor(rig2, &g) ? &g : head2; });
+    if (!rig2 || !head2) return;
+    rig2->set_world_position(Vec3(3, 0, 0));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *e2[2] = {};
+    for (int i = 0; i < 2; i++) {
+      ed.command("create Sphere");
+      e2[i] = ed.active_object_for_test();
+      e2[i]->name = i == 0 ? "Eye_L" : "Eye_R";
+      e2[i]->set_local_scale(Vec3(0.02f));
+      e2[i]->set_world_position(head2->world_position() + Vec3(i == 0 ? -0.03f : 0.03f, 0.08f, 0.08f));
+      s.set_parent(e2[i], head2, -1, true);
+    }
+    ed.select_for_test(rig2->id, false);
+    ed.command("avatar eyes");
+    CHECK(e2[0]->parent && e2[0]->parent->name == "LeftEye" && s.is_ancestor(rig2, e2[0]->parent) && e2[0]->parent != le);
+    /* A re-run after the left eye moved 1 cm: the bone at the eye, the eye where it was put. */
+    const Vec3 moved = e2[0]->world_position() + Vec3(0, 0.01f, 0);
+    e2[0]->set_world_position(moved);
+    ed.command("avatar eyes");
+    std::printf("    the re-run: the eye %.4f from where it was put, the bone %.4f from it\n", length(e2[0]->world_position() - moved), length(e2[0]->parent->world_position() - moved));
+    CHECK(length(e2[0]->world_position() - moved) < 1e-4f && length(e2[0]->parent->world_position() - moved) < 1e-3f);
+  });
+  test("Eye Tracking (review 360): a Skin's limit group stays on the eye vertices; a body turned half round blinks each eye on its own side; the atlas lists a mesh it couldn't bake", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    if (!body || !rig) return;
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Vec3 hp = ed.scene().find_by_name("Head")->world_position();
+    body->set_local_rotation(Quat::axis_angle(Vec3(0, 1, 0), 3.14159265f));  // (turned half round: its own X is the rig's -X)
+    {
+      Mesh &m = *mesh_make_mutable(body->get<MeshFilter>()->mesh);
+      const Mat4 inv = body->world_matrix().inverse();
+      std::vector<float> l(m.vert_count(), 0.0f), r(m.vert_count(), 0.0f);
+      l[0] = 1.0f, r[1] = 1.0f;
+      m.positions[0] = inv.point(hp + Vec3(-0.03f, 0.08f, 0.08f));
+      m.positions[1] = inv.point(hp + Vec3(0.03f, 0.08f, 0.08f));
+      m.vertex_groups.push_back({"Eye_L", l});
+      m.vertex_groups.push_back({"Eye_R", r});
+      m.vertex_groups.push_back({"Deform", std::vector<float>(m.vert_count(), 1.0f)});
+      m.shape_keys = {{"Blink", std::vector<Vec3>(m.vert_count(), Vec3(0, -0.01f, 0))}};
+      m.touch();
+    }
+    body->get<SkinModifier>()->vertex_group = "Deform";
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar eyes");
+    const Mesh &m = *body->get<MeshFilter>()->mesh;
+    const int deform = m.find_group("Deform"), bl = m.find_shape("vrc.blink_left");
+    CHECK(deform >= 0 && m.vertex_groups[(size_t)deform].weights[0] == 1.0f && m.vertex_groups[(size_t)m.find_group("LeftEye")].weights[0] == 1.0f);
+    /* vrc.blink_left moves the vertices on the rig's left (world x below the head's), whatever the body's turn. */
+    bool sides = bl >= 0;
+    for (size_t i = 0; sides && i < m.vert_count(); i++)
+      sides = (length(m.shape_keys[(size_t)bl].delta[i]) > 0.0f) == (body->world_matrix().point(m.positions[i]).x < hp.x);
+    CHECK(sides);
+    /* The atlas: a two-material mesh with a Mirror can't be baked - said, by name. */
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    cube->get<MeshRenderer>()->materials = {std::make_shared<Material>(), std::make_shared<Material>()};
+    cube->add<SkinModifier>()->object = rig->name;
+    ed.select_for_test(cube->id, false);
+    ed.command("component MirrorModifier");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar atlas 256");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.text.find("not baked") != std::string::npos && e.text.find(cube->name) != std::string::npos);
+    CHECK(said);
+  });
+  test("the lesson's Try-it (round 360): rig humanoid, then avatar eyes - no eyes on a bare rig, said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    ed.command("avatar eyes");
+    CHECK(!ed.scene().find_by_name("LeftEye"));
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -7380,4 +7633,5 @@ void run_assets_tests() {
   tests_round357();
   tests_round358();
   tests_round359();
+  tests_round360();
 }

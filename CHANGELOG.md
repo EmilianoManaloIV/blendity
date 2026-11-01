@@ -2,6 +2,48 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 360): the VRChat avatar module, part 5 - Eye Tracking, the Texture Atlas
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0337)**
+- **Eye Tracking** (Window > Avatar, `avatar eyes`), as the CATS plugin's:
+  - LeftEye and RightEye bones under the head at the eyes' middles (a vertex group or a mesh named for an eye);
+  - the eyes follow them;
+  - a Blink key, and LowerLid, split into VRChat's left and right keys;
+  - Eye Movement and Eye Blinking options;
+  - the Test buttons (`avatar eyetest <yaw> <pitch> <blink>|reset`);
+  - the checklist's eye item has its Fix.
+- **The Texture Atlas** (`avatar atlas [size]`): each of the avatar's meshes baked into one texture set, one
+  material and one slot, as CATS' Material Combiner.
+
+**The Opus review's fixes:**
+- only the rig's bone groups are zeroed on the eyes (a Skin's limit group kept);
+- one mesh for both eyes is skinned to the two;
+- bones are looked up within the rig (two avatars);
+- a re-run keeps the eyes where they are;
+- blinks are split in the rig's frame;
+- the bones point the rig's forward;
+- the left is read from the rig;
+- the eye test is undone before an edit, save or export;
+- the atlas names what it couldn't bake.
+
+**Checked:** `tests_round360`:
+- one Eyes mesh skinned;
+- the test undone by an edit;
+- two avatars;
+- a re-run after a nudge;
+- the limit group;
+- a turned body's blinks;
+- the atlas' refusal named;
+- two eye meshes' bones at their middles, and the eyes following;
+- the Blink split by side;
+- the test and Reset;
+- the checklist's eye item and its Fix;
+- nothing found on a bare rig, said;
+- two materials baked to one;
+- the Try-it.
+
 ## 2026-10-31 (round 359): the VRChat avatar module, part 4 - Decimation, Bone Root, Bone Merging
 
 **Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).

@@ -205,7 +205,8 @@ std::vector<AvatarCheck> avatar_check(Scene &scene, GameObject &armature) {
   out.push_back(item("Visemes", have == 15, strprintf("%zu of 15 vrc.v_* keys", have), face ? "visemes" : "", face ? face->id : 0));
   bool eyes = false;
   scene.for_each([&](GameObject &g) { eyes = eyes || (g.get<Bone>() && scene.is_ancestor(&armature, &g) && to_lower(g.name).find("eye") != std::string::npos); });
-  out.push_back(item("Eye bones (Eye Look)", eyes, eyes ? "found" : "none (optional: the Avatar Descriptor's Eye Look needs LeftEye / RightEye)"));
+  out.push_back(item("Eye bones (Eye Look)", eyes, eyes ? "found" : "none (optional: the Avatar Descriptor's Eye Look needs LeftEye / RightEye)", eyes ? "" : "avatar eyes",
+                     armature.id));  // (round 360: Eye Tracking sets them up)
   const BudgetTarget &pc = budget_targets()[0];
   const BudgetResult r = budget_rank(pc, budget_count(avatar_objects(scene, armature)));
   out.push_back(item("VRChat PC rank", r.rank < (int)pc.ranks.size(), budget_rank_name(pc, r.rank), "avatar decimate", armature.id));

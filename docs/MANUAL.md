@@ -872,6 +872,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Decimation, Bone Root and Bone Merging** (round 359, the Avatar window, as the CATS plugin's): Decimation cuts the avatar to a triangle count with a Decimate modifier on each mesh its mode allows - Smart every mesh (keys kept), Safe meshes without keys, Half meshes under 4 keys, Full every mesh (keys dropped) - Exclude naming meshes never cut; Bone Root groups spring chains that share a parent and a name under a RootBone_ bone (one PhysBone in VRChat, counted so by the budget); Bone Merging merges a share of each chain's bones into their parents. Console: `avatar decimate [smart|safe|half|full] [triangles] [names]`, `avatar boneroot`, `avatar mergebones <percent>`.
 
+**Eye Tracking and the Texture Atlas** (round 360, the Avatar window, as the CATS plugin's): Set Up Eyes finds the eyes (a vertex group or a mesh named for an eye), puts LeftEye and RightEye bones under the head at their middles, makes the eyes follow them, and splits a Blink key (and LowerLid) into vrc.blink_left / right; Eye Movement and Eye Blinking choose which; the Test buttons turn and shut the eyes, Reset puts them back. Make Atlas bakes each of the avatar's meshes into one texture set, one material and one slot. Console: `avatar eyes`, `avatar eyetest <yaw> <pitch> <blink>|reset`, `avatar atlas [size]`.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

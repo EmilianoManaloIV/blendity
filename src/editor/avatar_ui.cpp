@@ -55,6 +55,7 @@ void Editor::avatar_command(const std::vector<std::string> &t) {
   if (verb == "fixmodel") return avatar_fix_model(*root);
   if (avatar_tool_command(verb, t, *root)) return;
   if (avatar_optimize_command(verb, t, *root)) return;
+  if (avatar_eyes_command(verb, t, *root)) return;
   const std::vector<AvatarCheck> list = avatar_check(*scene_, *root);
   if (verb == "fix") {
     const int n = t.size() > 2 ? std::atoi(t[2].c_str()) : 0;
@@ -169,6 +170,7 @@ void Editor::draw_avatar_window(const Recti &r) {
   draw_model_options_section(lay, root);  // (round 358)
   draw_pose_shape_section(lay, root);
   draw_optimize_section(lay, root);  // (round 359)
+  draw_eyes_section(lay, root);      // (round 360)
   draw_avatar_section(lay, root);
   u.pop_id();
   content_h = lay.y + off - r.y + u.px(20);

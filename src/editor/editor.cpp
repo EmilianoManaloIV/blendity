@@ -1874,6 +1874,7 @@ void Editor::prune_selection() {
 /* ===================================================================== */
 
 void Editor::mark_changed(const std::string &label) {
+  eye_test_off();  // (round 360: the eye test's pose isn't an edit - kept out of the step)
   scene_dirty_ = true;
   /* Another frame: a change made by a panel drawn after the Scene view (the Inspector's Set Origin > Apply)
    * would otherwise wait for the next input to show, the gizmo still on the old origin (task 0030). Not
@@ -2126,6 +2127,7 @@ bool Editor::open_scene(const std::string &path) {
 }
 
 void Editor::save_scene_cmd(bool save_as) {
+  eye_test_off();  // (round 360: the eye test's pose isn't written)
   anim_set_preview(false);  // (the scene is saved in its own pose, not the one previewed)
   seq_set_preview(false);
   save_dirty_clip_assets();
@@ -2810,6 +2812,7 @@ std::string Editor::export_path_for(const ExportOptions &o, const std::string &p
 }
 
 std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
+  eye_test_off();  // (round 360: the eye test's pose isn't written)
   const std::vector<GameObject *> objects = export_candidates(o);
   const std::string path = export_path_for(o, path_in);
   /* Round 354: a job still working on one of these meshes - the export waits for it rather than take the old mesh;
