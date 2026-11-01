@@ -8,6 +8,12 @@ assets, and cinematic renders."
 
 This round changes no product code. Its findings are ranked at the end for the user to choose from.
 
+**Corrected in round 366 (2026-10-31):** the video finding (6) was wrong for the usual build. The build with
+Blender's libraries already encodes MP4s in-process through FFmpeg (`render/video_encode.cpp`, task 0077). The
+"FFmpeg: none found" line came from `renderanim ffmpeg`, which looks for an external program, and only the
+dependency-free build lacks video. That build's message now offers Blender's libraries in a click (task 0343).
+Since round 365 the MP4 also carries the Sequencer's sound. The rows below are corrected to match.
+
 ## Method
 
 - **Blendity was used for real.** Each production was made in Blendity 0.12.0 with rounds 337-349, in a scratch project
@@ -35,7 +41,7 @@ other programs' times are what their documentation describes, not measured sessi
 |---|---|---|---|---|
 | A. VRChat avatar | 9 (board and papers, blocking, sculpt + remesh, UVs + texture set + toon, rig + skin + spring bones, visemes, checks, renders, export) | 75 | 9 on the first pass, 2 after an expert's corrections | `Avatar.glb`: 76,796 triangles (PC Good is 70,000; Quest Good 10,000), 4 meshes, 1 skinned, 4 material slots, 27 bones, 0 textures, 0 shape keys, 0 animations |
 | B. VRChat world | 7 (mood board, a modular kit with real-size textures, scatter + grass + sky + fog, lightmaps + an emissive sign, optimization, a 1200 x 900 thumbnail, export) | 51 | 4 | `World.glb`: 8 meshes; the thumbnail render showed only the sky; the lightmap bake took 0 objects |
-| C. Short film | 6 (beats + boards + animatic, layout with lenses, a walk and an acting beat, lights + fog + the anime filter, renders, the cut and a video) | 42 | 2 | A pose keyed at frame 30 by Puppet Posing; 24 frames path-traced as PNG; no video (no FFmpeg) |
+| C. Short film | 6 (beats + boards + animatic, layout with lenses, a walk and an acting beat, lights + fog + the anime filter, renders, the cut and a video) | 42 | 2 | A pose keyed at frame 30 by Puppet Posing; 24 frames path-traced as PNG; no video in that run (the libraries' build makes the MP4 - corrected in round 366) |
 
 Screenshots: `scratchpad/hci/A1.png` ... `C6.png` (the Artifact shows the key ones).
 
@@ -91,7 +97,7 @@ program's users make that stage in Blender or Maya and import it: the hand-off i
 | C3 Animation | Humanoid Rig, Puppet Posing (a drag poses the body), keys (5) | Rigify, IK, keying (10+) | Animation window (8) | AnimationPlayer (8) | Control Rig (8) | **Walk Cycle is off by default** (Preferences > Animation Assistants) - its refusal does give a Fix button. Puppet Posing: a whole-body pose in one drag, which none of the four has |
 | C4 Lighting, look | Spot light, fog, the Anime filter on the camera (5) | Lights, volume, compositor (8) | URP/HDRP volume (8) | Environment + shaders (8) | Post Process Volume (6) | - |
 | C5 Rendering | Path tracer, samples, Render Animation (4) | Cycles, Ctrl+F12 (3) | Recorder (9) | Movie Maker (2) | MRQ (6) [R1] | Renders run on a worker: fine in the GUI |
-| C6 Edit, deliver | Sequencer clips, Render Camera Sequence; **video needs FFmpeg on the PATH** (5 + an install) | Video Sequencer, FFmpeg built in (5) | Timeline + Recorder Movie (H.264) [U3] | Movie Maker AVI (2) [G1] | MRQ + an encoder (6) | **No video without installing FFmpeg** (Blender, Unity and Godot write video themselves) |
+| C6 Edit, deliver | Sequencer clips, Render Camera Sequence; an MP4 made in-process with Blender's libraries (5; the dependency-free build offers them - corrected in round 366) | Video Sequencer, FFmpeg built in (5) | Timeline + Recorder Movie (H.264) [U3] | Movie Maker AVI (2) [G1] | MRQ + an encoder (6) | Same as Blender with the libraries; the dependency-free build needs them or an ffmpeg program (corrected in round 366) |
 
 ## KLM: ten tasks in five programs
 
@@ -105,7 +111,7 @@ Seconds by the operators (rules in `klm.md`); "-" where the program doesn't do i
 | 4 | Add a shape key (blend shape) | M, P, BB (Add Shape Key) | 2.65 | M, P, BB (Object Data), P, BB, BB (+ twice: Basis, then the key) | 4.15 | - | - | - | - | - | - |
 | 5 | Key the selected object's transform | M, H, 2K (Shift+K) | 2.15 | M, H, K (I) | 1.95 | M, H, K (K, the Animation window focused) | 1.95 | M, P, BB (the key icon beside the property) | 2.65 | M, H, K (S in Sequencer) | 1.95 |
 | 6 | Render a still from the camera | M, H, K (F12) | 1.95 | M, H, K (F12) | 1.95 | M, P, BB (Window), P (General), P (Recorder), P, BB (Recorder Window), P, BB (Add Recorder), P, BB (Image Sequence), P, BB (Start Recording) | 10.05 | - | - | M, P, BB (the viewport menu), P, BB (High Resolution Screenshot), P, BB (Capture) | 5.25 |
-| 7 | Render the animation to a video file | M, H, 2K (Ctrl+F12; FFmpeg must be installed first) | 2.15 | M, P, BB (Output Properties), P, BB (File Format), P, BB (FFmpeg Video), M, H, 2K (Ctrl+F12) | 7.4 | M, P, BB (Window), P (General), P (Recorder), P, BB (Recorder Window), P, BB (Add Recorder), P, BB (Movie), P, BB (Start Recording) | 10.05 | M, P, BB (Movie Maker), M, H, K (F5) | 4.6 | M, P, BB (Render), P, BB (Movie Render Queue), P, BB (+ Setting), P, BB (an encoder), P, BB (Render (Local)) | 7.85 |
+| 7 | Render the animation to a video file | M, H, 2K (Ctrl+F12; an MP4 in the libraries' build) | 2.15 | M, P, BB (Output Properties), P, BB (File Format), P, BB (FFmpeg Video), M, H, 2K (Ctrl+F12) | 7.4 | M, P, BB (Window), P (General), P (Recorder), P, BB (Recorder Window), P, BB (Add Recorder), P, BB (Movie), P, BB (Start Recording) | 10.05 | M, P, BB (Movie Maker), M, H, K (F5) | 4.6 | M, P, BB (Render), P, BB (Movie Render Queue), P, BB (+ Setting), P, BB (an encoder), P, BB (Render (Local)) | 7.85 |
 | 8 | Bake the level's lightmaps (one object marked) | M, P, BB (Contribute GI), M, P, BB (Window), P, BB (Lighting), P, BB (Generate Lighting) | 7.9 | - | - | M, P, BB (Static), M, P, BB (Window), P (Rendering), P, BB (Lighting), P, BB (Generate Lighting) | 9 | M, P, BB (Static Lightmaps), P, BB (Reimport), M, H, 2K (Ctrl+A), M, 9K (LightmapGI), K (Enter), H, P, BB (Bake Lightmaps) | 11.15 | M, P, BB (Build), P, BB (Build Lighting Only) | 3.95 |
 | 9 | Export the character as FBX | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export) | 6.35 | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export FBX) | 6.35 | - | - | - | - | - | - |
 | 10 | Find any command by name | M, H, 2K (Ctrl+K), 6K (a word), K (Enter) | 3.55 | M, H, K (F3), 6K, K (Enter) | 3.35 | M, H, 2K (Ctrl+K), 6K, K (Enter) | 3.55 | M, H, 3K (Ctrl+Shift+P), 6K, K (Enter) | 3.75 | - | - |
@@ -113,13 +119,13 @@ Seconds by the operators (rules in `klm.md`); "-" where the program doesn't do i
 **Reading it:** where both do the task, Blendity is within 0.2 s of Blender on the modeling and keying rows (1, 3,
 5, 9, 10) and faster where Blender goes through a properties tab (2, 4, 7). Against the engines it matches Unity's
 drag-and-drop (2) and beats Unity's and Unreal's stills and videos (6, 7) - the engines render through a recorder.
-Unreal's one-menu lighting build (8) is the fastest of all. Row 7's 2.15 s holds only once FFmpeg is installed.
+Unreal's one-menu lighting build (8) is the fastest of all. Row 7's 2.15 s holds in the build with Blender's libraries (corrected in round 366).
 
 ## Verdict per audience
 
 | Coming from | Modeling, sculpting, UVs, texturing | Rigging and animation | Rendering | Getting it into the engine |
 |---|---|---|---|---|
-| Blender | Same: the operators and many shortcuts match (Blender preset) | Easier: Puppet Posing, Motion Check, FK / IK matched | Same; harder for video (FFmpeg) | **Harder**: no shape keys or painted textures in the export |
+| Blender | Same: the operators and many shortcuts match (Blender preset) | Easier: Puppet Posing, Motion Check, FK / IK matched | Same (video: the libraries' build, corrected in round 366) | **Harder**: no shape keys or painted textures in the export |
 | Unity | Easier than Unity alone (it has none); the Unity preset keeps its keys | Easier than Unity's Animation window | Easier (F12 vs the Recorder) | **Harder for avatars** (visemes lost); same for props |
 | Godot | Easier (Godot models nothing beyond CSG) | Easier | Easier | Same (glTF is Godot's own route) |
 | Unreal | Easier than Modeling Mode for organic work | Same as Control Rig for posing; easier for a first walk | Same | Harder for worlds: Unreal makes LODs and collision on import, Blendity hands neither over |
@@ -135,7 +141,7 @@ Severity 0-4 by how many users it stops and how often. Audiences: B Blender, U U
 | 3 | No VRChat (or any) performance check: triangles, materials, bones, shape-key names against a chosen budget | 7 Flexibility | 3 | U | - | New task: a Budget panel with VRChat PC / Quest presets |
 | 4 | No viseme preset: the 15 `vrc.v_*` names typed by hand, nothing says one is missing or moves nothing (VRChat's `pp` missing breaks lip sync) | 6 Recognition over recall | 3 | U | `panels.cpp:3875` | New task |
 | 5 | An export taken while a remesh still runs on its worker says nothing (the old mesh went out) | 1 Visibility / 5 Error prevention | 3 | all | job tray, export | New task: export waits or warns |
-| 6 | No video without installing FFmpeg | 7 Flexibility | 3 | B U G | `render_animation.cpp` | New task (bundle or a download offer) |
+| 6 | No video in the dependency-free build (the libraries' build has it - corrected; severity and audiences as first scored) | 7 Flexibility | 3 | B U G | `render_animation.cpp` | Done in round 366: the message offers the libraries |
 | 7 | `create <unknown>` makes an empty object without a word (`create Capsule`); no Capsule primitive | 9 Error recovery | 2 | U | `editor.cpp:3276` | Small fix |
 | 8 | New objects take names already in the scene (two "Sphere"s); `select` then finds the old one | 4 Consistency (Unity: "Sphere (1)") | 2 | U R | `editor.cpp` create | Small fix |
 | 9 | Generate Lighting with nothing marked says "0 objects, 0 texels" and no reason | 9 Help users recognize errors | 2 | U G | `lighting.cpp:296` | Small fix: name Contribute GI, with a Fix |

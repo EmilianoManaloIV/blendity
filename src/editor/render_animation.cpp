@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Render > Render Animation (task 0074): every frame of the scene's sequence (or the selected object's clip) through
-// the F12 render, as numbered PNGs in Renders/<scene>_<time>/, then an MP4 (H.264) made by FFmpeg when there is one:
-// the program set in Preferences or found on the PATH. Blender renders an animation the same way (Ctrl+F12) and
-// writes video through FFmpeg too; Blendity doesn't link FFmpeg, it runs it, so without it the frames are the result.
+// the F12 render, as numbered PNGs in Renders/<scene>_animation_<time>/, then an MP4 (H.264): made here through
+// Blender's FFmpeg in the build with Blender's libraries (task 0077), else by an ffmpeg program set in Preferences or
+// found on the PATH, else the frames are the result and the finish offers the libraries (task 0343). Blender renders
+// an animation the same way (Ctrl+F12).
 #include "editor.h"
 #include "../render/canvas.h"
+#include "../core/launch.h"
 #include "../render/video_encode.h"
 
 #include <cmath>
@@ -190,11 +192,7 @@ void Editor::finish_render_animation() {
   if (!frames) return;
   if (video::available()) return encode_render_video(std::move(sound));
   const std::string ffmpeg = ffmpeg_program();
-  if (ffmpeg.empty()) {
-    Log::info("Render Animation: no FFmpeg, so the frames are the result. For an MP4, install FFmpeg (ffmpeg.org) on the "
-              "PATH or set its path in Preferences, or open the frames in Blender's Video Sequencer.");
-    return;
-  }
+  if (ffmpeg.empty()) return offer_video_libraries();
   auto job = std::make_shared<VideoJob>();
   ranim_.encode = job;
   ranim_.encode_video = ranim_.video;
@@ -202,6 +200,31 @@ void Editor::finish_render_animation() {
   std::thread([args, job] { job->code.store(sys::run_program(args)); }).detach();
   render_status_ += "  |  making the MP4...";
   Log::info("Render Animation: FFmpeg is making %s", ranim_.video.c_str());
+}
+
+/* No video maker (round 366, task 0343: the comparison's finding 6): only the dependency-free build lacks one, so the
+ * message says how to get one in a click - Blender's libraries (FFmpeg among them), downloaded for this build or
+ * turned back on - beside an ffmpeg program on the PATH or in Preferences. The frames are the result meanwhile. */
+void Editor::offer_video_libraries() {
+  const std::string head = "Render Animation: the frames are in " + ranim_.dir + "; no MP4, ";
+  const std::string program = " - or put an ffmpeg program on the PATH or in Preferences.";
+  const launch::Status &st = launch::status();
+  if (st.full)  // (review 366: the libraries are running; this one was built without their FFmpeg)
+    return refuse(head + "because this build was made without FFmpeg: put an ffmpeg program on the PATH or in Preferences.", "preferences", "Open Preferences");
+  if (st.why == launch::Status::Chosen && use_libs_)  // (--no-libs, or turned on since this start)
+    return refuse(head + "because this start ran without Blender's libraries (--no-libs, or turned on since): start Blendity again without --no-libs" + program,
+                  "preferences", "Open Preferences");
+  if (!use_libs_ && full_build_installed())
+    return refuse(head + "because Blender's libraries (FFmpeg) are turned off: turn them on, from the next start" + program, "update libson", "Use Blender's Libraries");
+  refuse(head + "because this build runs without Blender's libraries (FFmpeg): download them for this build, and MP4s are made here" + program,
+         "update libs", "Get Blender's Libraries...");
+}
+
+/* The full build there to run: beside this one, or downloaded (its probe is for the next start: here only the file). */
+bool Editor::full_build_installed() const {
+  for (const std::string &dir : {fs::executable_dir(), launch::user_libs_dir()})
+    if (fs::exists(fs::join(dir, launch::full_program_name()))) return true;
+  return false;
 }
 
 /* Built with FFmpeg's libraries (task 0077): the MP4 is encoded here, on a background thread, as Blender does. */
@@ -272,8 +295,11 @@ void Editor::set_ffmpeg_path(const std::string &path) {
   ffmpeg_looked_ = false;
   save_prefs();
   const std::string found = ffmpeg_program();
-  if (found.empty()) Log::warn("FFmpeg: none found%s; Render Animation writes PNG frames only", path.empty() ? " on the PATH" : (" at " + path).c_str());
-  else Log::info("FFmpeg: %s", found.c_str());
+  const std::string where = path.empty() ? " on the PATH" : " at " + path;
+  if (!found.empty()) return Log::info("FFmpeg: %s", found.c_str());
+  if (video::available())  // (review 366: the program isn't needed here - round 350 read this line as "no video")
+    return Log::info("FFmpeg: no program found%s; none is needed - Render Animation makes MP4s itself (%s)", where.c_str(), video::description().c_str());
+  Log::warn("FFmpeg: none found%s; Render Animation writes PNG frames only (its finish offers Blender's libraries, which make MP4s)", where.c_str());
 }
 
 /* Render Animation as the Render window's fields say (task 0288): its button, the Render menu and Ctrl+F12 alike. */
@@ -314,10 +340,12 @@ void Editor::draw_render_animation_button(ui::Layout &lay) {
     start_render_animation_from_fields();  // (task 0288: the range below)
   draw_render_range(lay);
   if (!u.hovered(r)) return;  // (the PATH is searched only for the tooltip)
-  const std::string ffmpeg = ffmpeg_program();
+  const std::string ffmpeg = video::available() ? std::string() : ffmpeg_program();
+  const std::string maker = video::available() ? "made here by " + video::description() + "."
+                            : !ffmpeg.empty()  ? "made by " + ffmpeg + "."
+                                               : std::string("once there's a video maker (this build has none: its finish offers Blender's libraries).");
   u.tooltip("Every frame of the scene's sequence (or the selected object's clip) through this render, as\n"
-            "Renders/<scene>_animation_<time>/0001.png..., then an MP4 next to them " +
-            (ffmpeg.empty() ? std::string("once FFmpeg is installed (none found: frames only).") : "made by " + ffmpeg + "."));
+            "Renders/<scene>_animation_<time>/0001.png..., then an MP4 next to them " + maker);
 }
 
 }  // namespace bl

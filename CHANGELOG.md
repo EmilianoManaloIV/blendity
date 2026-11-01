@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 366): no MP4 says how to get one, and round 350's report corrected
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 6:
+"no video without installing FFmpeg").
+
+**Changed (task 0343)**
+- **The finding was wrong for the usual build:** the build with Blender's libraries already makes MP4s itself.
+  Only the dependency-free build has no video maker.
+- **That build's finish message** now names the frames' folder and the reason, with a Fix:
+  - Get Blender's Libraries... (`update libs`) downloads them for this build;
+  - Use Blender's Libraries (`update libson`) when they were turned off;
+  - an ffmpeg program on the PATH or in Preferences still works.
+- **docs/hci/compare-2026-10.md** is corrected: the C row, C6, KLM row 7, the Blender comparison and finding 6.
+- **The Opus review's fixes:**
+  - the Render Animation tooltip and Preferences' FFmpeg path still said "frames only" in the libraries' build;
+  - the message now fits each state (built without FFmpeg, `--no-libs`, turned off, missing);
+  - "nothing to download" now shows a toast instead of only a log line.
+
+**Checked:** `tests_round366`:
+- the message and its Fix, both ways;
+- a render's finish shows the offer exactly when there's no video maker;
+- the Try-it.
+
 ## 2026-10-31 (round 365): the Sequencer's sound - WAV bars played in step and mixed into the video
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 11:

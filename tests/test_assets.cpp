@@ -13,6 +13,8 @@
 #include "../src/scene/lod.h"
 #include "../src/scene/audio.h"
 #include "../src/core/audio_out.h"
+#include "../src/deps/deps.h"
+#include "../src/core/launch.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/avatar_merge.h"
 #include "../src/scene/avatar_eyes.h"
@@ -8050,6 +8052,81 @@ static void tests_round365() {
   });
 }
 
+/* ---------------------------------------------------------------- round 366: no MP4 says how to get one (task 0343) */
+static void tests_round366() {
+  test("Render Animation without a video maker (round 366): the message names the frames' folder and why, with a Fix that gets Blender's libraries (FFmpeg) - or turns them back on when they were turned off", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.step_frame_headless();  // (the toasts' first look takes the log so far as history)
+    /* Which Fix goes with which state (review 366): a full build without FFmpeg points to an ffmpeg program;
+     * libraries off with the full build there turns them on; otherwise they're downloaded. */
+    const bool full = launch::status().full, installed = ed.full_build_installed_for_test();
+    auto offer = [&](const std::string &dir) {
+      ed.clear_toasts_for_test();
+      ed.offer_video_libraries_for_test(dir);
+      ed.step_frame_headless();
+      const Editor::Toast *found = nullptr;
+      for (const Editor::Toast &x : ed.toasts_for_test()) found = x.text.find("Render Animation") != std::string::npos ? &x : found;
+      return found ? *found : Editor::Toast{};
+    };
+    const Editor::Toast on = offer("Renders/R366_animation_1");
+    std::printf("    the toast: %s\n    its Fix: %s (%s)\n", on.text.c_str(), on.fix_label.c_str(), on.fix_cmd.c_str());
+    CHECK(on.text.find("Renders/R366_animation_1") != std::string::npos && on.text.find("ffmpeg program") != std::string::npos);
+    CHECK(on.fix_cmd == (full ? "preferences" : "update libs") && !on.fix_label.empty());
+    ed.command("update libsoff");
+    const Editor::Toast off = offer("Renders/R366_animation_2");
+    std::printf("    turned off (the full build %s): %s (%s)\n", installed ? "there" : "not there", off.fix_label.c_str(), off.fix_cmd.c_str());
+    CHECK(off.fix_cmd == (full ? "preferences" : installed ? "update libson" : "update libs"));
+    CHECK(full || !installed || off.text.find("turned off") != std::string::npos);
+    ed.command("update libson");
+  });
+  test("Render Animation without a video maker (round 366): a render's finish in the dependency-free build with no ffmpeg program ends in that message (the libraries' build makes the MP4 instead)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("engine raster");
+    ed.scene().render.width = 32, ed.scene().render.height = 18;
+    ed.command("seq new R366 Video");
+    const std::string png = fs::join(test_dir(), "r366_board.png");
+    std::vector<uint32_t> px(4, 0xFF336699u);
+    CHECK(write_png(png, px.data(), 2, 2, 2));
+    ed.command("seq image " + png + " 0 0 3");  // (a 3-frame card: something to render)
+    SequencePtr seq = ed.seq_for_test_sequence();
+    ed.step_frame_headless();
+    ed.clear_toasts_for_test();
+    ed.command("renderanim 0 2");
+    for (int i = 0; i < 100 && ed.render_animation_for_test().active; i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    const auto &ra = ed.render_animation_for_test();
+    bool offered = false;
+    for (const Editor::Toast &x : ed.toasts_for_test()) offered = offered || (x.text.find("no MP4") != std::string::npos && x.fix_cmd.rfind("update libs", 0) == 0);
+    const bool maker = video::available() || !ed.ffmpeg_program().empty();
+    std::printf("    %zu frame(s); a video maker here: %s; the offer shown: %s\n", ra.written.size(), maker ? "yes" : "no", offered ? "yes" : "no");
+    CHECK(ra.written.size() == 3 && offered == !maker);
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    for (const std::string &f : ra.written) std::remove(f.c_str());
+    std::remove(ra.video.c_str());
+    std::error_code ec;
+    std::filesystem::remove(ra.dir, ec);
+    if (seq) std::remove(resolve_asset_path(seq->asset_path).c_str());
+    std::remove(png.c_str());
+  });
+  test("the lesson's Try-it (round 366): libs lists Blender's libraries this build uses - FFmpeg among them or not", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::vector<LogEntry> before;
+    const size_t from = Log::fetch(0, before);
+    ed.command("libs");  // (the lesson's Try-it line)
+    std::vector<LogEntry> lines;
+    Log::fetch(from, lines);
+    bool row = false;
+    for (const LogEntry &e : lines) row = row || e.text.rfind("FFmpeg", 0) == 0;  // (its row: in use, or "not built in")
+    CHECK(row);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -8429,4 +8506,5 @@ void run_assets_tests() {
   tests_round363();
   tests_round364();
   tests_round365();
+  tests_round366();
 }

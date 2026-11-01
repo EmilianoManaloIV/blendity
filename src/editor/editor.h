@@ -1062,6 +1062,11 @@ class Editor {
   bool seq_audio_for_test(double &pos, bool &active);  // (round 365: false before any sound played)
   void seq_audio_pull_for_test(float *out, size_t frames);
   void seq_audio_tick_for_test() { seq_audio_tick(); }
+  void offer_video_libraries_for_test(const std::string &dir) {  // (round 366)
+    ranim_.dir = dir;
+    offer_video_libraries();
+  }
+  bool full_build_installed_for_test() const { return full_build_installed(); }
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
   std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
@@ -2644,6 +2649,8 @@ class Editor {
   void step_render_animation();
   void finish_render_animation();
   void encode_render_video(std::vector<float> sound = {});
+  void offer_video_libraries();  // (round 366)
+  bool full_build_installed() const;
   void cancel_render_video();
   void poll_render_video();
   void set_ffmpeg_path(const std::string &path);
@@ -5617,7 +5624,7 @@ class Editor {
   void cancel_update_download();
   bool use_libs_ = true, libs_never_ask_ = false;  // Preferences > Libraries (read by the launcher too, task 0080)
   void check_libraries_at_start();
-  bool offer_libraries();
+  bool offer_libraries(bool manual = false);
   void offer_after_check(bool manual, bool updates);  // (task 0261: MoonRay, AI, the libraries, a newer build - once no dialog is open)
   void draw_libraries_dialog(const std::function<void()> &close);
   void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray = false, bool ai = false);
