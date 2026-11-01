@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 380): LODs and colliders in Live Link
+
+**Asked:** Phase B: "LOD and Collider components arrive as an LOD Group and colliders".
+
+**Added (task 0357)**
+- **New messages:**
+  - `collider`: the shape, its centre and sizes; `none` when the Collider is taken off.
+  - `lod`: each level's screen size and ratio, and whether the group culls.
+  - `lodmesh`: each level past 0, decimated on the mesh worker. Levels are made again once an edited mesh has stood
+    still for half a second.
+- **The bridges:**
+  - Unity: an LOD Group of child renderers, and Box, Sphere, Capsule and Mesh Colliders.
+  - Godot: levels switched by visibility range, and a StaticBody3D with the shape.
+  - Unreal: the static mesh's own LODs, and simple collision.
+  - Blender: the group and the collider as properties, hidden level objects, and a wire empty for a box or sphere.
+- The recorded session adds a crate with three levels and a box collider.
+- **The Opus review's fixes:**
+  - **Stale levels:** levels built before a group shrank are dropped.
+  - **Marked children:** the bridge's own children are found by marker, so renames are safe. The user's children and
+    colliders are left alone.
+  - **Mesh colliders:** made again after deforms stop.
+  - **Kind changes:** the collider and group are sent again.
+  - **Fewer resends:** a screen size alone doesn't resend levels. Unreal rebuilds once per batch, and only the body for
+    a collider change.
+  - **Godot:** its switch distances use the world size and follow transform changes.
+  - **One-level groups:** a one-level group that culls is kept.
+
+**Checked:**
+- `tests_round380` (and the review's cases: screen only, rename, fewer levels, the group taken off, a kind change);
+- each bridge's replay against the crate's levels and collider.
+
 ## 2026-11-01 (round 379): clips in Live Link
 
 **Asked:** Phase B's fourth round: clips go to the engines when keyed. (The plan's round "clips, LODs, colliders and

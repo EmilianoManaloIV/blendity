@@ -128,6 +128,13 @@ Session record_session() {
     an->clip = "Assets/Animations/livelink_wave.anim";
     an->play_automatically = false;
   }
+  /* Round 380: a crate with an LOD Group (three levels) and a Box Collider off its centre, 1 x 2 x 1. */
+  if (GameObject *crate = make_cube(ed, "Crate")) {
+    crate->set_local_position(Vec3(0, 0, -3));
+    crate->add<LODGroupComponent>();
+    ColliderComponent *col = crate->add<ColliderComponent>();
+    col->fit = false, col->center = Vec3(0.1f, 0, 0), col->size = Vec3(1, 2, 1);
+  }
   if (!box || !ed.livelink_start(0)) return s;
   Material &mat = *box->mesh_renderer()->materials[0];
   mat.name = "Cel";
@@ -194,6 +201,10 @@ std::vector<std::string> outline(const std::vector<Message> &ms) {
   for (const Message &m : ms) {
     const std::string s = m.type() + "|" + std::to_string((long long)m.j["id"].number()) + "|" + std::to_string((long long)m.j["key"].number()) + "|" +
                           m.j["name"].str + "|" + std::to_string((long long)m.j["verts"].number());
+    if (m.type() == "lodmesh") {  // (round 380: built on the worker; its vertex count depends on whether this build decimates)
+      meshes.push_back("lodmesh|" + std::to_string((long long)m.j["id"].number()) + "|" + std::to_string((long long)m.j["level"].number()));
+      continue;
+    }
     (m.type() == "mesh" ? meshes : order).push_back(s);
   }
   std::sort(meshes.begin(), meshes.end());
@@ -548,11 +559,13 @@ static void livelink_fixture_tests() {
     std::printf("    %zu messages, %zu bytes; types:", s.ms.size(), s.raw.size());
     for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture", "weights", "clip"})
       std::printf(" %s %d", t, count_of(s.ms, t));
+    for (const char *t : {"lod", "lodmesh", "collider"}) std::printf(" %s %d", t, count_of(s.ms, t));
     std::printf("\n");
     for (const char *t : {"transform", "delete"}) CHECK(count_of(s.ms, t) == 1);
     CHECK(count_of(s.ms, "pose") == 2);    // (a bone turned; round 379: the clip's frame 30)
     CHECK(count_of(s.ms, "deform") == 4);  // (the Box's vertex, and round 378's skinned Arm: at rest built, posed, posed by the clip - this client doesn't skin)
     CHECK(count_of(s.ms, "clip") == 1);    // (round 379: Wave at the sync)
+    CHECK(count_of(s.ms, "lod") == 1 && count_of(s.ms, "lodmesh") == 2 && count_of(s.ms, "collider") == 1);  // (round 380: the crate's, at the sync)
     CHECK(count_of(s.ms, "play") == 2 && count_of(s.ms, "material") >= 3);
     CHECK(count_of(s.ms, "world") == 2 && count_of(s.ms, "render") == 2 && count_of(s.ms, "filters") == 2);  // (round 376: at the sync and once changed)
     CHECK(count_of(s.ms, "texture") == 1);  // (round 377: the tile once, at the sync)
@@ -1498,6 +1511,101 @@ static void tests_round379() {
   });
 }
 
+static void tests_round380() {
+  test("Live Link's LODs and colliders (round 380): a collider and an LOD Group go at the sync, the levels past 0 as lodmesh; a collider changed or taken off sends it again (\"none\"); the ratios changed send the group and its levels; the mesh edited sends its levels once it has stood still half a second", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *crate = make_cube(ed, "Crate");
+    CHECK(crate != nullptr);
+    if (!crate) return;
+    LODGroupComponent *lod = crate->add<LODGroupComponent>();
+    ColliderComponent *col = crate->add<ColliderComponent>();
+    col->fit = false, col->shape = 2, col->center = Vec3(0.25f, 0, 0), col->radius = 0.4f, col->height = 1.5f;
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> s = until(ed, c, "sync_end");
+    for (const Message &m : drain(ed, c)) s.push_back(m);
+    const Message *cm = last_for(s, "collider", crate->id), *lm = last_for(s, "lod", crate->id);
+    CHECK(cm && cm->j["shape"].str == "capsule" && std::fabs(cm->j["center"][0].number() + 0.25) < 1e-6 && std::fabs(cm->j["radius"].number() - 0.4) < 1e-6);
+    CHECK(lm && lm->j["screen"].size() == 3 && !lm->j["cull"].b);
+    int levels = 0;
+    for (const Message &m : s) levels += m.type() == "lodmesh" && m.j["id"].number() == (double)crate->id;
+    std::printf("    at the sync: a %s collider, %zu levels, %d lodmesh\n", cm ? cm->j["shape"].str.c_str() : "-", lm ? lm->j["screen"].size() : 0, levels);
+    CHECK(levels == 2);
+    CHECK(count_of(drain(ed, c), "collider") == 0);  // (unchanged: nothing)
+    col->radius = 0.6f;
+    const std::vector<Message> changed = drain(ed, c);
+    CHECK(count_of(changed, "collider") == 1 && count_of(changed, "lod") == 0);
+    lod->ratio[1] = 0.3f;
+    const std::vector<Message> ratios = drain(ed, c);
+    CHECK(count_of(ratios, "lod") == 1 && count_of(ratios, "lodmesh") == 2);
+    /* The mesh edited: no levels while it changes; both once it has stood still. */
+    MeshPtr m = std::make_shared<Mesh>(*crate->mesh_filter()->mesh);
+    m->positions[0] = m->positions[0] + Vec3(0.2f, 0, 0);
+    m->touch();
+    crate->mesh_filter()->mesh = m;
+    const int at_once = count_of(drain(ed, c), "lodmesh");
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    const int settled = count_of(drain(ed, c), "lodmesh");
+    std::printf("    the mesh edited: %d lodmesh at once, %d after it stood still\n", at_once, settled);
+    CHECK(at_once == 0 && settled == 2);
+    crate->remove_component(col);
+    const std::vector<Message> off = drain(ed, c);
+    const Message *none = last_for(off, "collider", crate->id);
+    CHECK(none && none->j["shape"].str == "none");
+    /* Review 380: a screen size or Cull changed sends the group, not its levels; a rename sends neither; three levels to
+     * two sends no level 2 after; the group taken off, an empty "screen". */
+    lod->screen[1] = 0.2f;
+    const std::vector<Message> screen_only = drain(ed, c);
+    crate->name = "Crate Renamed";
+    const std::vector<Message> renamed = drain(ed, c);
+    lod->levels = 2;
+    std::vector<Message> fewer = drain(ed, c);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (const Message &m : drain(ed, c)) fewer.push_back(m);
+    int level2 = 0;
+    for (const Message &m : fewer) level2 += m.type() == "lodmesh" && m.j["level"].number() == 2;
+    std::printf("    a screen size changed: %d lod, %d lodmesh; renamed: %d lod, %d lodmesh; three levels to two: %d level-2 mesh(es)\n", count_of(screen_only, "lod"),
+                count_of(screen_only, "lodmesh"), count_of(renamed, "lod"), count_of(renamed, "lodmesh"), level2);
+    CHECK(count_of(screen_only, "lod") == 1 && count_of(screen_only, "lodmesh") == 0 && count_of(renamed, "lod") + count_of(renamed, "lodmesh") == 0);
+    CHECK(level2 == 0);
+    crate->remove_component(lod);
+    const Message *gone = last_for(drain(ed, c), "lod", crate->id);
+    CHECK(gone && gone->j["screen"].size() == 0);
+    ed.livelink_stop();
+  });
+  test("Live Link's world kit as objects change (review 380): an empty with a Box Collider given a mesh (made again in the bridges) sends its collider again", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *wall = ed.scene().create("Wall");
+    ColliderComponent *col = wall->add<ColliderComponent>();
+    col->fit = false;
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> s = until(ed, c, "sync_end");
+    CHECK(last_for(s, "collider", wall->id) != nullptr);
+    (void)drain(ed, c);
+    wall->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    wall->add<MeshRenderer>();
+    const std::vector<Message> made = drain(ed, c);
+    const Message *again = last_for(made, "collider", wall->id);
+    std::printf("    the empty given a mesh: %d object message(s), the collider %s\n", count_of(made, "object"), again ? "sent again" : "not sent");
+    CHECK(again && again->j["shape"].str == "box");
+    ed.livelink_stop();
+  });
+  test("the lesson's Try-it (round 380): create Cube; component Collider; component LODGroup - a crate the engines get with its collision and levels", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    for (const char *cmd : {"create Cube", "component Collider", "component LODGroup"}) ed.command(cmd);
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<ColliderComponent>() && g->get<LODGroupComponent>());
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -1510,4 +1618,5 @@ void run_livelink_tests() {
   tests_round377();
   tests_round378();
   tests_round379();
+  tests_round380();
 }

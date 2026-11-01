@@ -135,6 +135,25 @@ the clip of object `id`'s Animation component, baked.
 - **A client keeps it** as its engine's clip, one per `asset` (found again after a reconnect); Live Link goes on posing
   the objects itself.
 
+### collider (round 380)
+`{"t":"collider","id":7,"shape":"box","center":[-0.1,0,0],"size":[1,2,1],"radius":0.5,"height":2}`: the object's
+Collider - `box`, `sphere`, `capsule` (up Y, `height` end to end), `convex` or `mesh` (the object's own mesh, which the
+client has; build it again when the mesh comes, and when its deforms have stopped for half a second) - its centre in
+glTF's axes, sizes in metres; `"shape":"none"` when it is taken off or turned off. Sent at a sync, when it changes, and
+again when the object's kind changes (a client makes the object again then).
+
+### lod and lodmesh (round 380)
+`{"t":"lod","id":7,"screen":[0.5,0.25,0.1],"ratio":[1,0.5,0.25],"cull":false}`: the object's LOD Group. Level i shows
+while the object stands at least `screen[i]` of the view's height (the first that fits); below the last, the last
+level, or nothing when `cull`. `"screen":[]` when the group goes. A mesh that deforms every frame (a skin, shape
+weights) has none.
+
+`{"t":"lodmesh","id":7,"level":1,"topology":42,"verts":120,"bin":N}`: level 1 or more, a glTF binary like `mesh`'s, the
+mesh decimated to its ratio on Blendity's mesh worker. Sent at a sync, when the level count or a ratio changes (a
+screen size or Cull alone sends only `lod`), and when the mesh has changed and then stood still for half a second (a
+stroke doesn't decimate every tick). A level the latest `lod` doesn't have is ignored: one built before the group
+shrank or went may still arrive.
+
 ### deform
 `{"t":"deform","id":7,"topology":42,"verts":24,"bin":N}` + N = 12 x verts bytes: float32 x, y, z per mesh vertex
 (little-endian, in the object's space and glTF's axes). Sent instead of a whole mesh when only vertices moved (a drag

@@ -22,6 +22,9 @@ var tex_by_key := {} # (round 377) a texture key -> ImageTexture, from its PNG b
 var material_msgs := {}  # (round 377) a material key -> its last message (built again when its texture arrives)
 var skins := {}          # (round 378) a skinned mesh's id -> its joints' ids
 var shape_weights := {}  # (round 378) a keyed mesh's id -> its last weights (they can come before its mesh)
+var lods := {}           # (round 380) an object's id -> its last lod message
+var collider_msgs := {}  # (round 380) an object's id -> its last collider message (made again with its mesh)
+var collider_stale := {} # (review 380) a deformed mesh's id -> when it was last deformed (its shape made again after)
 var skins_dirty := false # (review 378: the skins posed once after a batch of messages, not after each)
 var seen = null      # ids met during a sync (null: not in one)
 var playing := false
@@ -97,10 +100,17 @@ func apply(j: Dictionary, bin: PackedByteArray) -> void:
 			_on_weights(j)
 		"clip":
 			_on_clip(j, bin)
+		"lod":
+			_on_lod(j)
+		"lodmesh":
+			_on_lodmesh(j, bin)
+		"collider":
+			_on_collider(j)
 
 
 ## After a batch of messages: the skins posed from their bones, once (review 378).
 func flush() -> void:
+	_settle_colliders()  # (review 380)
 	if skins_dirty:
 		skins_dirty = false
 		_update_skins()
@@ -204,6 +214,8 @@ func _on_transform(j: Dictionary) -> void:
 	var n := _alive(int(j.get("id", 0)))
 	if n != null:
 		_set_trs(n, j.get("position"), j.get("rotation"), j.get("scale"))
+	if lods.has(int(j.get("id", 0))):
+		_lod_ranges(int(j.get("id", 0)))  # (review 380: the switch distances follow the object's scale)
 
 
 func _on_pose(j: Dictionary) -> void:
@@ -234,6 +246,9 @@ func _remove(id: int) -> void:
 	topology.erase(id)
 	skins.erase(id)
 	shape_weights.erase(id)
+	lods.erase(id)
+	collider_msgs.erase(id)
+	collider_stale.erase(id)
 
 
 func _on_mesh(j: Dictionary, bin: PackedByteArray) -> void:
@@ -250,6 +265,8 @@ func _on_mesh(j: Dictionary, bin: PackedByteArray) -> void:
 	_assign_materials(id)
 	_set_skin(id, n, g, j.get("skin", {}))
 	_apply_weights(id)
+	if collider_msgs.has(id):
+		_on_collider(collider_msgs[id])  # (round 380: a Convex or Mesh collider is the mesh's)
 
 
 func _on_deform(j: Dictionary, bin: PackedByteArray) -> void:
@@ -266,6 +283,7 @@ func _on_deform(j: Dictionary, bin: PackedByteArray) -> void:
 		return
 	n.mesh = g.build()
 	_assign_materials(id)
+	_collider_deformed(id)  # (review 380: a convex or trimesh shape made again once it stands still)
 
 
 func _assign_materials(id: int) -> void:
@@ -278,6 +296,7 @@ func _assign_materials(id: int) -> void:
 		var slot: int = g.slots[s] if g != null and s < g.slots.size() else s
 		var key := keys[clampi(slot, 0, keys.size() - 1)] if keys.size() > 0 else 0
 		n.set_surface_override_material(s, materials.get(key))
+	_lod_materials(id)  # (round 380: its levels wear the same)
 
 
 func _on_material(j: Dictionary) -> void:
@@ -687,3 +706,162 @@ func _clip_library(r: Node3D) -> AnimationLibrary:
 	if not player.has_animation_library(LIBRARY):
 		player.add_animation_library(LIBRARY, AnimationLibrary.new())
 	return player.get_animation_library(LIBRARY)
+
+
+# ------------------------------------------------------------------ LODs and colliders (round 380)
+
+const LOD_FOV := 75.0               # (the view a screen size is made a distance for: Godot's levels switch by distance)
+const COLLIDER_NAME := "Blendity Collider"
+const COLLIDER_SETTLE := 0.5        # (seconds a deforming mesh stands still before its convex or trimesh shape is made again)
+const PART := "blendity_part"       # (meta on the nodes the bridge makes for an object: "lod" or "collider" - review 380)
+
+
+## The bridge's own child of `n` for `role` (and an LOD level's number), found by its meta, not its name.
+static func _part(n: Node, role: String, level := 0) -> Node:
+	for c in n.get_children():
+		if c.get_meta(PART, "") == role and int(c.get_meta("blendity_level", 0)) == level:
+			return c
+	return null
+
+
+## An LOD Group: its levels past 0 MeshInstance3D children of the object, each shown by a visibility range - the
+## distance at which the object stands its level's screen size of a 75 degree view; levels the group no longer has
+## dropped.
+func _on_lod(j: Dictionary) -> void:
+	var id := int(j.get("id", 0))
+	lods[id] = j
+	var n := _alive(id)
+	if n == null:
+		return
+	var levels: int = (j.get("screen", []) as Array).size()
+	for c in n.get_children():
+		if c.get_meta(PART, "") == "lod" and int(c.get_meta("blendity_level", 0)) >= max(levels, 1):
+			n.remove_child(c)
+			c.free()
+	_lod_ranges(id)
+
+
+func _on_lodmesh(j: Dictionary, bin: PackedByteArray) -> void:
+	var id := int(j.get("id", 0))
+	var n := _alive(id)
+	var level := int(j.get("level", 0))
+	if n == null or level < 1 or level >= (lods.get(id, {}).get("screen", []) as Array).size():
+		return  # (a level the group no longer has: built before it shrank or went - review 380)
+	var g := Glb.new()
+	if not g.read(bin):
+		return
+	var lv := _part(n, "lod", level) as MeshInstance3D
+	if lv == null:
+		lv = MeshInstance3D.new()
+		lv.set_meta(PART, "lod")
+		lv.set_meta("blendity_level", level)
+		n.add_child(lv)
+		_own(lv)
+	lv.name = "%s_LOD%d" % [n.name, level]
+	lv.mesh = g.build()
+	_lod_materials(id)
+	_lod_ranges(id)
+
+
+## The object's size as Blendity's LOD Group measures it: the largest side of its bounds in the world (its scale in).
+static func _world_size(n: Node3D) -> float:
+	if not (n is MeshInstance3D) or n.mesh == null:
+		return 1.0
+	var box: AABB = SkinFollow.chain(n) * n.mesh.get_aabb()
+	return max(max(box.size.x, box.size.y), max(box.size.z, 0.001))
+
+
+## Each level's distances, as Blendity's lod_level picks: level i from where the object stands screen[i-1] of the view
+## (level 0 from the camera) out to where it stands screen[i]; the last to nowhere unless it culls (0: Godot's "no end").
+## A single level that culls keeps its end.
+func _lod_ranges(id: int) -> void:
+	var n := _alive(id)
+	if not (n is GeometryInstance3D):
+		return
+	var j: Dictionary = lods.get(id, {})
+	var screen: Array = j.get("screen", [])
+	var cull := bool(j.get("cull", false))
+	(n as GeometryInstance3D).visibility_range_begin = 0.0
+	(n as GeometryInstance3D).visibility_range_end = 0.0
+	var size := _world_size(n)
+	var at := func(s: float) -> float: return size / (2.0 * tan(deg_to_rad(LOD_FOV) * 0.5) * max(s, 0.0001))
+	for level in screen.size():
+		var gi: GeometryInstance3D = n if level == 0 else _part(n, "lod", level) as GeometryInstance3D
+		if gi == null:
+			continue
+		var last := level + 1 >= screen.size()
+		gi.visibility_range_begin = 0.0 if level == 0 else at.call(float(screen[level - 1]))
+		gi.visibility_range_end = at.call(float(screen[level])) if not last or cull else 0.0
+
+
+func _lod_materials(id: int) -> void:
+	var n := _alive(id)
+	if not (n is MeshInstance3D):
+		return
+	for c in n.get_children():
+		if c is MeshInstance3D and c.get_meta(PART, "") == "lod" and c.mesh != null:
+			for s in mini(c.mesh.get_surface_count(), n.get_surface_override_material_count()):
+				c.set_surface_override_material(s, n.get_surface_override_material(s))
+
+
+## A collider: a StaticBody3D child with a CollisionShape3D - a box, sphere or capsule at its centre, or the mesh's
+## convex hull or triangles; none for "none".
+func _on_collider(j: Dictionary) -> void:
+	var id := int(j.get("id", 0))
+	collider_msgs[id] = j
+	collider_stale.erase(id)
+	var n := _alive(id)
+	if n == null:
+		return
+	var old := _part(n, "collider")
+	if old != null:
+		n.remove_child(old)
+		old.free()
+	var shape := _collider_shape(n, j)
+	if shape == null:
+		return
+	var body := StaticBody3D.new()
+	body.name = COLLIDER_NAME
+	body.set_meta(PART, "collider")
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	cs.position = _vec(j.get("center"), Vector3.ZERO)
+	body.add_child(cs)
+	n.add_child(body)
+	_own_tree(body)
+
+
+## A mesh deformed: its convex or trimesh shape made again once it has stood still (flush).
+func _collider_deformed(id: int) -> void:
+	if str(collider_msgs.get(id, {}).get("shape", "")) in ["convex", "mesh"]:
+		collider_stale[id] = Time.get_ticks_msec() / 1000.0
+
+
+func _settle_colliders() -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	for id in collider_stale.keys():
+		if now - float(collider_stale[id]) >= COLLIDER_SETTLE:
+			_on_collider(collider_msgs[id])
+
+
+static func _collider_shape(n: Node3D, j: Dictionary) -> Shape3D:
+	var mesh: Mesh = n.mesh if n is MeshInstance3D else null
+	match str(j.get("shape", "none")):
+		"box":
+			var b := BoxShape3D.new()
+			b.size = _vec(j.get("size"), Vector3.ONE)
+			return b
+		"sphere":
+			var s := SphereShape3D.new()
+			s.radius = float(j.get("radius", 0.5))
+			return s
+		"capsule":
+			var c := CapsuleShape3D.new()
+			c.radius = float(j.get("radius", 0.5))
+			c.height = max(float(j.get("height", 2.0)), 2.0 * c.radius)  # (Godot's height is end to end, as Blendity's)
+			return c
+		"convex":
+			return mesh.create_convex_shape() if mesh != null else null
+		"mesh":
+			return mesh.create_trimesh_shape() if mesh != null else null
+	return null

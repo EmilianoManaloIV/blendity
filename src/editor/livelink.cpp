@@ -9,6 +9,7 @@
 #include "../render/shading.h"
 #include "../scene/animation.h"
 #include "../scene/export.h"
+#include "../scene/lod.h"
 #include "../scene/scene.h"
 
 #include <algorithm>
@@ -28,7 +29,7 @@ namespace {
 
 /* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
  * own (the world, the render's look) are keyed on id 0, which no object has. */
-enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights, kClip };
+enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights, kClip, kCollider, kLod };
 uint64_t ckey(uint64_t id, Kind k) { return id << 4 | (uint64_t)k; }
 
 /* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
@@ -147,11 +148,61 @@ struct Sent {
   MeshStamp base;             // (...the rest mesh it was built from)
   uint64_t rig_key = 0;       // (...its armature, skeleton and Skin settings)
   Mat4 rig_rel;               // (...where the rig sits from the mesh)
+  uint64_t collider = 0;      // (round 380: its collider message's hash; 0 none sent)
+  uint64_t lod = 0;           // (...its LOD Group's; 0 none sent)
+  uint64_t lod_levels = 0;    // (...what its levels are made from: their count and ratios - review 380)
+  MeshStamp lod_base, lod_seen;  // (...the mesh its levels were made from; the mesh last seen, and since when)
+  double lod_since = 0.0;
   uint64_t weights = 0;       // (...its shape weights' hash)
   bool structure_equal(const Sent &o) const {
     return name == o.name && kind == o.kind && parent == o.parent && armature == o.armature && active == o.active && materials == o.materials;
   }
 };
+
+/* Round 380: the world kit. A collider as its message - its shape, centre (X mirrored) and sizes; "none" with no
+ * Collider on (Convex and Mesh name the object's own mesh, which the client has). */
+constexpr const char *kColliderShapes[] = {"box", "sphere", "capsule", "convex", "mesh"};
+constexpr double kLodSettle = 0.5;  // (seconds a mesh stands still before its levels are made again: a stroke doesn't decimate each tick)
+const ColliderComponent *live_collider(const GameObject &g) {
+  const ColliderComponent *c = g.get<ColliderComponent>();
+  return c && c->enabled ? c : nullptr;
+}
+std::string collider_message(const GameObject &g) {
+  const ColliderComponent *c = live_collider(g);
+  JsonWriter w;
+  w.obj().key("t").str("collider").key("id").integer((int64_t)g.id).key("shape").str(c ? kColliderShapes[std::max(0, std::min(4, c->shape))] : "none");
+  if (c) {
+    const float center[3] = {-c->center.x, c->center.y, c->center.z}, size[3] = {c->size.x, c->size.y, c->size.z};
+    w.key("center").nums(center, 3).key("size").nums(size, 3).key("radius").num(c->radius).key("height").num(c->height);
+  }
+  w.end();
+  return w.out;
+}
+/* An LOD Group as its message: each level's screen size and triangle ratio, whether it culls; "screen":[] with none on.
+ * A mesh that deforms every frame has none (its levels would be decimated a frame each, as the Game view says). */
+const LODGroupComponent *live_lod(const GameObject &g) {
+  const LODGroupComponent *l = g.get<LODGroupComponent>();
+  return l && l->enabled && !lod_deforms(g) ? l : nullptr;
+}
+int lod_levels(const LODGroupComponent &l) { return std::max(1, std::min(LODGroupComponent::kMax, l.levels)); }
+/* What the levels are made from: their count and ratios (a screen size or Cull changed sends no levels - review 380). */
+uint64_t lod_levels_key(const GameObject &g) {
+  const LODGroupComponent *l = live_lod(g);
+  if (!l) return 0;
+  uint64_t h = 1469598103934665603ull;
+  const int n = lod_levels(*l);
+  mix_key(h, &n, sizeof(n));
+  mix_key(h, l->ratio, sizeof(float) * (size_t)n);
+  return h | 1;
+}
+std::string lod_message(const GameObject &g) {
+  const LODGroupComponent *l = live_lod(g);
+  const int n = l ? lod_levels(*l) : 0;
+  JsonWriter w;
+  w.obj().key("t").str("lod").key("id").integer((int64_t)g.id).key("screen").nums(l ? l->screen : nullptr, n).key("ratio").nums(l ? l->ratio : nullptr, n);
+  w.key("cull").boolean(l && l->cull).end();
+  return w.out;
+}
 
 /* Round 379: clips. What a bake needs, taken on the main thread - each keyed object's id, its local transform now (an
  * axis the clip doesn't key keeps it) and copies of its Position, Rotation and Scale tracks - baked and sent on the clip
@@ -341,7 +392,17 @@ struct MeshJob {
   bool rig = false;
   std::vector<int> clients;  // besides every ready client when `broadcast`
   bool broadcast = false;
+  int level = 0;         // (round 380: an LOD level past 0 - the mesh decimated to `ratio` on the worker, sent as `lodmesh`)
+  float ratio = 1.0f;
+  uint64_t queue_key() const { return level ? (id << 3 | (uint64_t)level) | (1ull << 63) : id; }
 };
+
+/* Round 380: a copy of `m` at `ratio` of its triangles (the copy itself where this build can't decimate). */
+std::shared_ptr<Mesh> decimated(const Mesh &m, float ratio) {
+  auto out = std::make_shared<Mesh>(m);
+  if (meshops::decimate_available()) meshops::decimate(*out, std::isfinite(ratio) ? std::clamp(ratio, 0.01f, 1.0f) : 1.0f);
+  return out;
+}
 
 /* A reflector that takes nothing: the collectors below override what they want. */
 struct NoOpReflector : Reflector {
@@ -541,6 +602,12 @@ struct Link::Impl {
   void request_mesh(const std::vector<int> &to, bool all, GameObject &g, const Mesh *m);
   void materials_of(GameObject &g, const std::vector<int> &to, bool all, std::vector<int> &keys, bool only_changed, bool record);
 
+  /* Round 380: colliders and LOD Groups. */
+  void send_collider(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
+  void send_lod(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
+  void send_lod_levels(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
+  void compare_kit(GameObject &g, Sent &s);
+  void drop_levels(uint64_t id, int levels);
   /* Round 379: clips, by the animated root's id; baked and sent on the clip worker. */
   std::unordered_map<uint64_t, ClipSent> clips;
   void send_clip(GameObject &root, const std::vector<int> &to, bool all);
@@ -711,6 +778,7 @@ void Link::Impl::worker_loop() {
     }
     ScopedTimer t;
     if (job.joints) skin_weights(*job.joints, *job.mesh, *job.joints->skin), job.skin = job.joints->skin;  // (review 378: off the main thread)
+    if (job.level) job.mesh = decimated(*job.mesh, job.ratio);  // (round 380: an LOD level)
     ExportOptions o = export_defaults((int)ExportFormat::GLB);
     o.materials = false;  // (the materials go as their own messages; each primitive names its slot)
     o.vertex_ids = true;
@@ -721,7 +789,8 @@ void Link::Impl::worker_loop() {
     item.name = job.name, item.mesh = job.mesh.get(), item.world = Mat4::identity(), item.skin = job.skin, item.shape_weights = job.shape_weights;
     const std::string glb = export_gltf({item}, o, true, "", nullptr);
     JsonWriter w;
-    w.obj().key("t").str("mesh").key("id").integer((int64_t)job.id).key("topology").integer((int64_t)job.stamp.topology);
+    w.obj().key("t").str(job.level ? "lodmesh" : "mesh").key("id").integer((int64_t)job.id).key("topology").integer((int64_t)job.stamp.topology);
+    if (job.level) w.key("level").integer(job.level);
     w.key("verts").integer((int64_t)job.mesh->positions.size());
     if (job.rig && job.skin) {  // (round 378: the joints are these objects - the bones Live Link already sends)
       w.key("skin").obj().key("armature").integer((int64_t)job.armature).key("joints").arr();
@@ -738,7 +807,7 @@ void Link::Impl::worker_loop() {
     encode_us += (uint64_t)(t.ms() * 1000.0);
     built++;
     std::lock_guard<std::mutex> lk(wm);
-    done.push_back({job.id, job.rig ? MeshStamp() : job.stamp});  // (a rig went at rest: its posed vertices always follow, to who needs them)
+    if (!job.level) done.push_back({job.id, job.rig ? MeshStamp() : job.stamp});  // (a rig went at rest: its posed vertices always follow, to who needs them)
     busy--;
     wcv.notify_all();
   }
@@ -755,10 +824,11 @@ static void merge_targets(MeshJob &job, const MeshJob &older) {
 void Link::Impl::queue_mesh(MeshJob job) {
   {
     std::lock_guard<std::mutex> lk(wm);
-    auto it = pending.find(job.id);
+    const uint64_t key = job.queue_key();
+    auto it = pending.find(key);
     if (it == pending.end()) {
-      order.push_back(job.id);
-      pending.emplace(job.id, std::move(job));
+      order.push_back(key);
+      pending.emplace(key, std::move(job));
     }
     else {
       merge_targets(job, it->second);
@@ -1036,6 +1106,8 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     s.mesh = stamp_of(m);
     send_mesh(fresh, false, g, s, m);  // (round 378: a rig at rest with its skin; its weights after)
     if (s.rig) send_weights(g, rig_of(g), s, fresh, false);
+    if (live_collider(g)) send_collider(fresh, false, g, s);  // (round 380)
+    if (live_lod(g)) send_lod(fresh, false, g, s);
     if (const Animation *a = g.get<Animation>(); a && !a->clip.empty()) animated.push_back(&g);
     s.seen = true;
     if (!others) sent[g.id] = std::move(s);  // (with clients already there, `sent` is what they have: compare() moves it)
@@ -1098,10 +1170,14 @@ bool Link::Impl::compare_object(GameObject &g) {
     if (!fresh) {  // (what the clients hold of its mesh: a rename or a material doesn't send a rig's skin again - review 378)
       const Sent &was = it->second;
       now.mesh = was.mesh, now.rig = was.rig, now.base = was.base, now.rig_key = was.rig_key, now.rig_rel = was.rig_rel, now.weights = was.weights;
+      const bool same_kind = was.kind == now.kind;  // (a kind change makes the object again in the bridges: its collider and levels go again - review 380)
+      now.collider = same_kind ? was.collider : 0, now.lod = same_kind ? was.lod : 0, now.lod_levels = same_kind ? was.lod_levels : 0;
+      now.lod_base = was.lod_base, now.lod_seen = was.lod_seen, now.lod_since = was.lod_since;
     }
     it->second = std::move(now);
     it->second.seen = true;
     compare_mesh(g, it->second);
+    compare_kit(g, it->second);
     return false;
   }
   Sent &s = it->second;
@@ -1113,6 +1189,7 @@ bool Link::Impl::compare_object(GameObject &g) {
   if (s.camera != now.camera && g.camera()) send_camera({}, true, g);
   s.light = now.light, s.camera = now.camera;
   compare_mesh(g, s);
+  compare_kit(g, s);
   return moved && s.armature;
 }
 
@@ -1167,6 +1244,78 @@ void Link::Impl::compare(Scene &scene, double now) {
   stats.tick_ms = t.ms();
   stats.tick_ms_max = std::max(stats.tick_ms_max, stats.tick_ms);
   stats.tick_ms_total += stats.tick_ms;
+}
+
+/* Round 380: a collider to `to` (or everyone); recorded when it goes to everyone or no one else is there. */
+void Link::Impl::send_collider(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
+  JsonWriter w;
+  w.out = collider_message(g);
+  const uint64_t h = live_collider(g) ? std::hash<std::string>()(w.out) | 1 : 0;
+  if (all || server.ready_clients().empty()) s.collider = h;
+  send(to, all, w, ckey(g.id, kCollider));
+  stats.colliders++;
+}
+
+/* An LOD Group to `to` (or everyone): its message, then each level past 0 built on the mesh worker. */
+void Link::Impl::send_lod(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
+  JsonWriter w;
+  w.out = lod_message(g);
+  const uint64_t h = live_lod(g) ? std::hash<std::string>()(w.out) | 1 : 0;
+  const uint64_t levels = lod_levels_key(g);
+  const bool record = all || server.ready_clients().empty();
+  const bool new_levels = !all || levels != s.lod_levels;
+  if (record) s.lod = h, s.lod_levels = levels;
+  drop_levels(g.id, live_lod(g) ? lod_levels(*live_lod(g)) : 0);
+  send(to, all, w, ckey(g.id, kLod));
+  stats.lods++;
+  if (h && new_levels) send_lod_levels(to, all, g, s);
+}
+
+/* Level jobs still waiting for levels the group no longer has: dropped, so none arrives after the group shrank or went
+ * (review 380). */
+void Link::Impl::drop_levels(uint64_t id, int levels) {
+  std::lock_guard<std::mutex> lk(wm);
+  for (int level = std::max(1, levels); level < LODGroupComponent::kMax; level++) {
+    MeshJob probe;
+    probe.id = id, probe.level = level;
+    pending.erase(probe.queue_key());
+  }
+  deferred.erase(std::remove_if(deferred.begin(), deferred.end(), [&](const MeshJob &j) { return j.id == id && j.level >= std::max(1, levels); }), deferred.end());
+}
+
+void Link::Impl::send_lod_levels(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
+  const LODGroupComponent *l = live_lod(g);
+  const Mesh *m = l && s.kind == "mesh" ? g.evaluated_mesh(0) : nullptr;
+  if (!m || !m->face_count()) return;
+  s.lod_base = s.lod_seen = stamp_of(m);
+  auto copy = std::make_shared<Mesh>(*m);  // (one copy: each level decimates its own from it on the worker)
+  for (int level = 1; level < lod_levels(*l); level++) {
+    MeshJob job;
+    job.id = g.id, job.name = g.name, job.mesh = copy, job.stamp = s.lod_base, job.clients = to, job.broadcast = all;
+    job.level = level, job.ratio = l->ratio[level];
+    if (batching) deferred.push_back(std::move(job));
+    else queue_mesh(std::move(job));
+  }
+}
+
+/* A collider or an LOD Group added, changed or taken off; an LOD Group's levels again once its mesh has stood still
+ * kLodSettle seconds after changing. */
+void Link::Impl::compare_kit(GameObject &g, Sent &s) {
+  if (live_collider(g) || s.collider) {
+    const std::string m = collider_message(g);
+    const uint64_t h = live_collider(g) ? std::hash<std::string>()(m) | 1 : 0;
+    if (h != s.collider) send_collider({}, true, g, s);
+  }
+  if (live_lod(g) || s.lod) {
+    const uint64_t h = live_lod(g) ? std::hash<std::string>()(lod_message(g)) | 1 : 0;
+    if (h != s.lod) return send_lod({}, true, g, s);
+  }
+  if (!s.lod || s.mesh == s.lod_base) return;
+  if (!(s.mesh == s.lod_seen)) {
+    s.lod_seen = s.mesh, s.lod_since = last_compare;
+    return;
+  }
+  if (last_compare - s.lod_since >= kLodSettle) send_lod_levels({}, true, g, s);
 }
 
 /* Round 379: a clip to `to` (or everyone): its tracks copied here, baked and sent on the clip worker. With no clients

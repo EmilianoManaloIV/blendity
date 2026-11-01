@@ -912,6 +912,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Live Link's clips** (round 379): the clip on an object's Animation component goes to the engines baked - each animated object's local place, turn and scale at every frame - at a sync and whenever it's keyed (at most four times a second while it keeps changing). Unity saves it as an AnimationClip in Assets/Blendity Live Link/Clips, Godot adds it to a "blendity" library on an AnimationPlayer under the object, Blender makes an Action (with a fake user, not assigned). Only Position, Rotation and Scale tracks go. Unreal doesn't take clips yet.
 
+**Live Link's LODs and colliders** (round 380): an object's Collider and LOD Group go to the engines at a sync and whenever they change; the levels past 0 are decimated on a worker, and after the mesh is edited they're made again once it has stood still for half a second. Unity builds an LOD Group from child renderers <name>_LOD1, _LOD2... and the matching Box, Sphere, Capsule or Mesh Collider; Godot switches its <name>_LOD<n> children by visibility range (a 75-degree view) and adds a StaticBody3D; Unreal gives the static mesh its own LODs and simple collision; Blender keeps both as properties (and hidden level objects) for export. A mesh that deforms every frame sends no levels.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

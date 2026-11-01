@@ -92,6 +92,23 @@ namespace Blendity.LiveLink.Tests
             Assert.That(worst, Is.LessThan(1e-3f));
             var lower = GameObject.Find("Lower");
             Assert.That(Quaternion.Angle(lower.transform.localRotation, Quaternion.identity), Is.EqualTo(30f).Within(1e-3f));
+            // Round 380: the crate's LOD Group (its renderer down to 0.5 of the view's height, Crate_LOD1 to 0.25, Crate_LOD2
+            // to nothing - Blendity's lod_level) and its Box Collider, 1 x 2 x 1, 0.1 m off centre in X.
+            var crate = GameObject.Find("Crate");
+            var group = crate.GetComponent<LODGroup>();
+            Assert.NotNull(group);
+            var lods = group.GetLODs();
+            Assert.AreEqual(3, lods.Length);
+            Assert.AreEqual(crate.GetComponent<MeshRenderer>(), lods[0].renderers[0]);
+            Assert.AreEqual("Crate_LOD2", lods[2].renderers[0].name);
+            Assert.NotNull(lods[2].renderers[0].GetComponent<MeshFilter>().sharedMesh);
+            Assert.That(lods[0].screenRelativeTransitionHeight, Is.EqualTo(0.5f).Within(1e-5f));
+            Assert.That(lods[1].screenRelativeTransitionHeight, Is.EqualTo(0.25f).Within(1e-5f));
+            Assert.That(lods[2].screenRelativeTransitionHeight, Is.EqualTo(0f).Within(1e-5f));
+            var crateBox = crate.GetComponentInChildren<BoxCollider>();  // (on the bridge's own child: the user's colliders are left alone)
+            Assert.NotNull(crateBox);
+            Assert.That(Vector3.Distance(crateBox.center, new Vector3(0.1f, 0, 0)), Is.LessThan(1e-5f));
+            Assert.That(Vector3.Distance(crateBox.size, new Vector3(1, 2, 1)), Is.LessThan(1e-5f));
             // Round 379: the rig's "Wave" an AnimationClip asset; sampled at frame 30 it poses Upper as Blendity did last.
             var rig = GameObject.Find("Rig");
             var upper = GameObject.Find("Upper").transform;

@@ -59,6 +59,19 @@ func _initialize() -> void:
 		n += 1
 		m = s.next_message()
 	ap.flush()
+	# Round 380: the crate's levels (Crate_LOD1, Crate_LOD2 by visibility range) and its box collider, 1 x 2 x 1, its
+	# centre -0.1 m in X (Godot's axes are glTF's: X mirrored from Blendity's).
+	var crate: Node3D = null
+	for id in ap.objects.keys():
+		if ap.objects[id].name == "Crate":
+			crate = ap.objects[id]
+	var lod2 := ap._part(crate, "lod", 2) as MeshInstance3D if crate != null else null
+	check(lod2 != null and lod2.mesh != null and lod2.visibility_range_begin > 0.0 and lod2.visibility_range_end == 0.0, "the crate's last level")
+	var lod1 := ap._part(crate, "lod", 1) as MeshInstance3D if crate != null else null
+	check(crate != null and lod1 != null and (crate as GeometryInstance3D).visibility_range_end > 0.0 and is_equal_approx((crate as GeometryInstance3D).visibility_range_end, lod1.visibility_range_begin) and is_equal_approx(lod1.visibility_range_end, lod2.visibility_range_begin), "the crate's levels meet")
+	var body := crate.get_node_or_null(ap.COLLIDER_NAME) if crate != null else null
+	var cs := body.get_child(0) as CollisionShape3D if body != null and body.get_child_count() > 0 else null
+	check(cs != null and cs.shape is BoxShape3D and (cs.shape as BoxShape3D).size.is_equal_approx(Vector3(1, 2, 1)) and cs.position.is_equal_approx(Vector3(-0.1, 0, 0)), "the crate's box collider")
 	# Round 379: the rig's "Wave" an Animation on its AnimationPlayer; at frame 30 it poses Upper as Blendity did last.
 	var rig_node: Node3D = null
 	var upper_node: Node3D = null

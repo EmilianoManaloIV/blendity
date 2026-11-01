@@ -7,6 +7,7 @@ a headless Blender and checks the scene it leaves.
 The default stream is tests/fixtures/livelink_stream.bin (the C++ suite records it: BLENDITY_LIVELINK_RECORD=1).
 The session: Blendity's sample scene, a toon cube "Box", a rig of two bones; then the Box moved to (1, 2, 3), its
 material recoloured, one vertex moved, a bone turned 30 degrees, the Sphere deleted, Play and Stop."""
+import json
 import math
 import os
 import sys
@@ -139,6 +140,15 @@ def main():
         arm.evaluated_get(dg).to_mesh_clear()
         print("the skinned Arm (mesh %d) against Blendity's posed vertices: at most %g m apart" % (again + 1, worst))
         check(worst < 1e-3, "the Arm's skinning doesn't match Blendity's (%g m)" % worst)
+
+    # Round 380: the crate's levels as hidden children Crate_LOD1 and Crate_LOD2, its box collider a wire empty 1 x 2 x 1
+    # (Blender's Z up: 2 tall) 0.1 m off centre in X.
+    crate = bpy.data.objects["Crate"]
+    levels = sorted(c.name for c in crate.children if c.get("blendity_lod_level"))
+    check(levels == ["Crate_LOD1", "Crate_LOD2"] and json.loads(crate["blendity_lod"])["screen"] == [0.5, 0.25, 0.1], "the crate's levels: %s" % levels)
+    crate_box = next((c for c in crate.children if c.get("blendity_collider")), None)
+    check(crate_box is not None and crate_box.empty_display_type == "CUBE" and (crate_box.scale - Vector((0.5, 0.5, 1.0))).length < 1e-5
+          and (crate_box.location - Vector((-0.1, 0.0, 0.0))).length < 1e-5, "the crate's box collider")
 
     # Round 379: the rig's "Wave" an Action with a slot for Upper; at frame 30 its curves give Upper as Blendity posed it.
     wave = next((a for a in bpy.data.actions if a.get("blendity_clip") == "Wave"), None)

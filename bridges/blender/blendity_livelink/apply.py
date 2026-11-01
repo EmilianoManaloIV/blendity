@@ -269,6 +269,7 @@ class Applier:
         if obj is None:
             return
         self._unskin(obj)  # (review 378: its armature with it)
+        self._drop_kit(obj)  # (round 380: its levels and collider)
         data = obj.data
         bpy.data.objects.remove(obj)
         if data is None or data.users:
@@ -338,6 +339,7 @@ class Applier:
         me.materials.clear()
         for m in mats:
             me.materials.append(m)
+        self._lod_materials(obj)  # (round 380: its levels wear the same)
 
     def on_material(self, msg, att):
         key = int(msg["key"])
@@ -584,6 +586,76 @@ class Applier:
         rot[1:] *= np.cumprod(flips)[:, None]
         return loc, rot, scale
 
+    # -------------------------------------------------------------- LODs and colliders (round 380)
+
+    def on_lod(self, msg, att):
+        """An LOD Group: kept as a custom property; levels past those it has now dropped (Blender has no LODs: its
+        levels are hidden children named as an export to Unity names them)."""
+        obj = self._get(int(msg["id"]))
+        if obj is None:
+            return
+        levels = len(msg.get("screen", []))
+        obj["blendity_lod"] = json.dumps({"screen": msg.get("screen", []), "ratio": msg.get("ratio", []), "cull": bool(msg.get("cull", False))})
+        for child in [c for c in obj.children if c.get("blendity_lod_level", 0) >= max(levels, 1)]:
+            _drop_object(child)
+
+    def on_lodmesh(self, msg, att):
+        obj = self._get(int(msg["id"]))
+        level = int(msg.get("level", 0))
+        if obj is None or obj.type != "MESH" or level < 1:
+            return
+        if level >= len(json.loads(obj.get("blendity_lod", "{}")).get("screen", [])):
+            return  # (a level the group no longer has: built before it shrank or went - review 380)
+        me = bpy.data.meshes.new("%s_LOD%d" % (obj.name, level))
+        fill_mesh(me, MeshData(att, int(msg["verts"])))
+        lv = next((c for c in obj.children if c.get("blendity_lod_level") == level), None)
+        if lv is None:
+            lv = bpy.data.objects.new("%s_LOD%d" % (obj.name, level), me)
+            lv["blendity_lod_level"] = level
+            self.collection.objects.link(lv)
+            lv.parent = obj
+            lv.hide_set(True)
+            lv.hide_render = True
+        else:
+            old, lv.data = lv.data, me
+            if old.users == 0:
+                bpy.data.meshes.remove(old)
+        self._lod_materials(obj)
+
+    @staticmethod
+    def _lod_materials(obj):
+        for lv in [c for c in obj.children if c.get("blendity_lod_level")]:
+            lv.data.materials.clear()
+            for m in obj.data.materials:
+                lv.data.materials.append(m)
+
+    def on_collider(self, msg, att):
+        """A collider: a custom property (for an export) and, for a box or sphere, a wire empty where it is."""
+        obj = self._get(int(msg["id"]))
+        if obj is None:
+            return
+        for child in [c for c in obj.children if c.get("blendity_collider")]:
+            _drop_object(child)
+        shape = str(msg.get("shape", "none"))
+        if shape == "none":
+            obj.pop("blendity_collider", None)
+            return
+        obj["blendity_collider"] = json.dumps({k: msg[k] for k in ("shape", "center", "size", "radius", "height") if k in msg})
+        if shape not in ("box", "sphere"):
+            return
+        empty = bpy.data.objects.new(obj.name + " Collider", None)
+        empty["blendity_collider"] = True
+        empty.empty_display_type = "CUBE" if shape == "box" else "SPHERE"
+        empty.location = to_location(msg.get("center", [0.0, 0.0, 0.0]))
+        empty.scale = to_scale([v * 0.5 for v in msg.get("size", [1.0, 1.0, 1.0])]) if shape == "box" else Vector([float(msg.get("radius", 0.5))] * 3)
+        empty.hide_render = True
+        self.collection.objects.link(empty)
+        empty.parent = obj
+
+    def _drop_kit(self, obj):
+        for child in [c for c in obj.children if c.get("blendity_lod_level") or c.get("blendity_collider")]:
+            _drop_object(child)
+
     def restore_look(self):
         """The scene's own world and compositor back (the link stopped)."""
         restore_look(self.scene)
@@ -613,6 +685,13 @@ def _quat_mul(a, b):
 
 def _matrix(column_major):
     return Matrix([column_major[c * 4:c * 4 + 4] for c in range(4)]).transposed()
+
+
+def _drop_object(obj):
+    data = obj.data
+    bpy.data.objects.remove(obj)
+    if isinstance(data, bpy.types.Mesh) and data.users == 0:
+        bpy.data.meshes.remove(data)
 
 
 def _drop_armature(arm):

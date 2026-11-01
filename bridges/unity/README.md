@@ -36,6 +36,7 @@ and scales come across as the same numbers.
 | the look (round 376) | RenderSettings (Trilight ambient, the procedural or panoramic skybox, linear fog); colours made gamma; a Blendity Look object keeping the scene's own lighting (Restore Scene Lighting in its menu); in a URP project a global Volume with ColorAdjustments, Tonemapping, Bloom and Vignette (turn Post Processing on for the camera) |
 | armatures and bones | empty GameObjects posed as the bones; a skinned mesh (round 378) is a SkinnedMeshRenderer on them, its keys as blend shapes |
 | clips (round 379) | an AnimationClip asset in Assets/Blendity Live Link/Clips (localPosition, localRotation, localScale curves) |
+| LODs and colliders (round 380) | an LOD Group (the renderer, then `<name>_LOD<n>` children); Box, Sphere, Capsule and Mesh Colliders |
 
 ## Test
 

@@ -59,6 +59,9 @@ namespace Blendity.LiveLink
                 case "texture": OnTexture(j, m.Bin); break;  // (round 377)
                 case "weights": OnWeights(j); break;  // (round 378)
                 case "clip": OnClip(j, m.Bin); break;  // (round 379: LiveLinkClips.cs)
+                case "lod": OnLod(j); break;  // (round 380: LiveLinkWorld.cs)
+                case "lodmesh": OnLodMesh(j, m.Bin); break;
+                case "collider": OnCollider(j); break;
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
                 case "world": OnWorld(j); break;  // (round 376: LiveLinkLook.cs)
@@ -208,6 +211,22 @@ namespace Blendity.LiveLink
             meshes.Remove(id);
             topology.Remove(id);
             shapeWeights.Remove(id);
+            lodScreens.Remove(id);
+            lodCull.Remove(id);
+            colliderMsgs.Remove(id);
+            colliderStale.Remove(id);
+        }
+
+        /* A deleted object's child: one the bridge made for it (an LOD level, its collider) goes with it; any other - one
+         * of Blendity's, or the user's own - waits at the root (review 380: the user's children had been deleted). */
+        void MoveOrDrop(Transform child)
+        {
+            if (child.GetComponent<BlendityPart>() != null)
+            {
+                DestroyPart(child.gameObject);
+                return;
+            }
+            child.SetParent(root, true);
         }
 
         void Destroy(GameObject go)
@@ -222,7 +241,7 @@ namespace Blendity.LiveLink
             foreach (Transform child in go.transform)
                 kids.Add(child);
             foreach (var child in kids)
-                child.SetParent(root, true);  // (its children have their own deletes or parents)
+                MoveOrDrop(child);
             Object.DestroyImmediate(go);
         }
 
@@ -235,19 +254,7 @@ namespace Blendity.LiveLink
             if (!Objects.TryGetValue(id, out go) || go == null || (go.GetComponent<MeshFilter>() == null && go.GetComponent<SkinnedMeshRenderer>() == null))
                 return;  // (a mesh for an object already gone)
             var gm = GlbReader.ReadMesh(bin);
-            var mesh = new Mesh { name = go.name };
-            if (gm.VertexCount > 65535)
-                mesh.indexFormat = IndexFormat.UInt32;
-            mesh.vertices = ToVectors(gm.Positions);
-            mesh.normals = ToVectors(gm.Normals);
-            var uv = new Vector2[gm.VertexCount];
-            for (int i = 0; i < uv.Length; i++)
-                uv[i] = new Vector2(gm.Uvs[i * 2], gm.Uvs[i * 2 + 1]);
-            mesh.uv = uv;
-            mesh.subMeshCount = gm.Submeshes.Count;
-            for (int i = 0; i < gm.Submeshes.Count; i++)
-                mesh.SetTriangles(gm.Submeshes[i], i);
-            mesh.RecalculateBounds();
+            var mesh = BuildMesh(gm, go.name);
             meshes[id] = gm;
             if (Skin(go, j, gm, mesh))  // (round 378: a skinned or keyed mesh: a SkinnedMeshRenderer on the bones Live Link sent)
             {
@@ -262,6 +269,25 @@ namespace Blendity.LiveLink
             mf.sharedMesh = mesh;
             topology[id] = j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts");
             AssignMaterials(id);
+            ColliderAgain(id);  // (round 380: a Mesh or Convex collider is the mesh's)
+        }
+
+        static Mesh BuildMesh(GlbMesh gm, string name)
+        {
+            var mesh = new Mesh { name = name };
+            if (gm.VertexCount > 65535)
+                mesh.indexFormat = IndexFormat.UInt32;
+            mesh.vertices = ToVectors(gm.Positions);
+            mesh.normals = ToVectors(gm.Normals);
+            var uv = new Vector2[gm.VertexCount];
+            for (int i = 0; i < uv.Length; i++)
+                uv[i] = new Vector2(gm.Uvs[i * 2], gm.Uvs[i * 2 + 1]);
+            mesh.uv = uv;
+            mesh.subMeshCount = gm.Submeshes.Count;
+            for (int i = 0; i < gm.Submeshes.Count; i++)
+                mesh.SetTriangles(gm.Submeshes[i], i);
+            mesh.RecalculateBounds();
+            return mesh;
         }
 
         /* Round 378: a mesh Live Link sent at rest with its skin ("skin": its joints the bone objects) or shape keys
@@ -401,6 +427,7 @@ namespace Blendity.LiveLink
             mesh.vertices = ToVectors(into);
             mesh.normals = ToVectors(GlbReader.SmoothNormals(gm, into));  // (not RecalculateNormals: UV seams stay smooth)
             mesh.RecalculateBounds();
+            ColliderDeformed(id);  // (review 380: a Mesh or Convex collider cooked again once it stands still)
         }
 
         // ------------------------------------------------------------ materials
@@ -439,6 +466,7 @@ namespace Blendity.LiveLink
                 bt = go.AddComponent<BlendityToon>();
             if (bt != null)
                 bt.SlotFields = toon;
+            SetLods(id, go);  // (round 380: its levels wear the same)
         }
 
         static Shader LitShader()

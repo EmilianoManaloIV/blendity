@@ -5,6 +5,9 @@
 //   UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests Blendity.LiveLink.Replay; Quit" -unattended -nullrhi
 #include "BlendityLinkApplier.h"
 #include "Engine/StaticMeshActor.h"
+#include "Engine/StaticMesh.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "StaticMeshResources.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Components/ExponentialHeightFogComponent.h"
@@ -43,6 +46,7 @@ bool FBlendityLinkReplayTest::RunTest(const FString&)
 		Applier.Apply(M);
 		N++;
 	}
+	Applier.Flush();  // (round 380: what LOD and collider messages changed, once - as the client does each tick)
 	TestTrue(FString::Printf(TEXT("the stream framed whole (%d messages)"), N), N > 20 && S.pending() == 0);
 	for (const TCHAR* Want : {TEXT("Main Camera"), TEXT("Directional Light"), TEXT("Plane"), TEXT("Box"), TEXT("Rig"), TEXT("Upper"), TEXT("Lower")})
 		TestNotNull(FString::Printf(TEXT("the object %s"), Want), Applier.FindByName(Want));
@@ -58,6 +62,20 @@ bool FBlendityLinkReplayTest::RunTest(const FString&)
 		UTexture* BaseMap = nullptr;
 		TestTrue(TEXT("the Base Map came from its bytes"), Mid && Mid->GetTextureParameterValue(FName(TEXT("BaseMap")), BaseMap) && BaseMap && Cast<UTexture2D>(BaseMap) &&
 		                                                  Cast<UTexture2D>(BaseMap)->GetSizeX() == 4);
+	}
+	/* Round 380: the crate's three LODs and its box collider, 1 x 2 x 1 m (Unreal: 100 x 100 x 200 cm), centred -0.1 m in
+	 * glTF's X (Unreal's Y: +10 cm, as -100x). */
+	AStaticMeshActor* Crate = Cast<AStaticMeshActor>(Applier.FindByName(TEXT("Crate")));
+	if (TestNotNull(TEXT("the Crate"), Crate))
+	{
+		UStaticMesh* Mesh = Crate->GetStaticMeshComponent()->GetStaticMesh().Get();
+		TestTrue(FString::Printf(TEXT("the Crate's LODs: %d"), Mesh ? Mesh->GetNumLODs() : 0), Mesh && Mesh->GetNumLODs() == 3);
+		if (Mesh && Mesh->GetRenderData() && Mesh->GetNumLODs() == 3)
+			TestTrue(TEXT("LOD 1 from half the screen"), FMath::IsNearlyEqual(Mesh->GetRenderData()->ScreenSize[1].Default, 0.5f, 1e-5f));
+		UBodySetup* Body = Mesh ? Mesh->GetBodySetup() : nullptr;
+		const FKBoxElem* Box2 = Body && Body->AggGeom.BoxElems.Num() == 1 ? &Body->AggGeom.BoxElems[0] : nullptr;
+		TestTrue(TEXT("the Crate's box collider"), Box2 && FMath::IsNearlyEqual(Box2->Z, 200.0, 1e-3) && FMath::IsNearlyEqual(Box2->X, 100.0, 1e-3) &&
+		                                             Box2->Center.Equals(FVector(0, 10, 0), 1e-3));
 	}
 	/* Round 376: the look - fog from 5 m, half a stop up, Bloom 0.8 and a Vignette 0.3. */
 	if (AExponentialHeightFog* Fg = Cast<AExponentialHeightFog>(Applier.GetFog()))

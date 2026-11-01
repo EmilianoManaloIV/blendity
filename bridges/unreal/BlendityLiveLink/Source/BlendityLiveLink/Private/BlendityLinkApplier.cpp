@@ -31,6 +31,7 @@
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Modules/ModuleManager.h"
 #include "MeshDescription.h"
+#include "StaticMeshResources.h"
 #include "StaticMeshAttributes.h"
 
 namespace
@@ -98,6 +99,9 @@ void FBlendityLinkApplier::Apply(const blendity_link::Message& M)
 	else if (T == TEXT("world")) OnWorld(J);
 	else if (T == TEXT("render")) OnRender(J);
 	else if (T == TEXT("filters")) OnFilters(J);
+	else if (T == TEXT("lod")) OnLod(J);  // (round 380)
+	else if (T == TEXT("lodmesh")) OnLodMesh(J, Bin);
+	else if (T == TEXT("collider")) OnCollider(J);
 }
 
 void FBlendityLinkApplier::EndSync()
@@ -248,6 +252,9 @@ void FBlendityLinkApplier::Remove(int64 Id)
 	Topology.Remove(Id);
 	Descriptions.Remove(Id);
 	Deforming.Remove(Id);
+	LodMsgs.Remove(Id);
+	LodDescs.Remove(Id);
+	ColliderMsgs.Remove(Id);
 	Parts.Remove(Id);
 }
 
@@ -344,13 +351,160 @@ void FBlendityLinkApplier::OnMesh(const blendity_link::Json& J, const TArray<uin
 		return;
 	TSharedRef<FMeshDescription> Desc = MakeShared<FMeshDescription>();
 	FillDescription(G, *Desc);
-	A->GetStaticMeshComponent()->SetStaticMesh(BuildMesh(*Desc, (int32)G.sections.size(), A->GetActorLabel()));
 	Descriptions.Add(Id, Desc);
-	A->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Deforming.Remove(Id);
 	Meshes.Add(Id, MoveTemp(G));
 	Topology.Add(Id, FString::Printf(TEXT("%.17g/%.17g"), J["topology"].number(0), J["verts"].number(0)));
+	LodDescs.Remove(Id);  // (review 380: levels of the old mesh - its slots may differ; the new ones follow it)
+	Rebuild(Id);
+}
+
+/* Round 380: the actor's static mesh made from its description and, with an LOD Group whose levels have all come, those
+ * levels as its LODs; its collider as the body's simple collision. */
+void FBlendityLinkApplier::Rebuild(int64 Id)
+{
+	AStaticMeshActor* A = Cast<AStaticMeshActor>(Alive(Id));
+	const TSharedPtr<FMeshDescription>* Desc = Descriptions.Find(Id);
+	const blendity_link::GlbMesh* G = Meshes.Find(Id);
+	if (!A || !Desc || !G)
+		return;
+	TArray<const FMeshDescription*> Levels{Desc->Get()};
+	const blendity_link::Json* Lod = LodMsgs.Find(Id);
+	const TMap<int32, TSharedPtr<FMeshDescription>>* More = LodDescs.Find(Id);
+	const int32 N = Lod ? (int32)(*Lod)["screen"].size() : 0;
+	for (int32 L = 1; L < N && More && More->Contains(L); L++)
+		Levels.Add((*More)[L].Get());
+	if (Levels.Num() < N)
+		Levels.SetNum(1);  // (a level still on its way: the mesh alone until it comes)
+	UStaticMesh* Mesh = NewObject<UStaticMesh>(GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UStaticMesh::StaticClass(), FName(*A->GetActorLabel())), RF_Transient);
+	for (int32 S = 0; S < (int32)G->sections.size(); S++)
+		Mesh->GetStaticMaterials().Add(FStaticMaterial());
+	UStaticMesh::FBuildMeshDescriptionsParams Params;
+	Params.bBuildSimpleCollision = false;
+	Params.bFastBuild = true;
+	Params.bAllowCpuAccess = true;  // (collision reads the triangles on the CPU: traces and clicks in Play)
+	Params.bMarkPackageDirty = false;
+	Mesh->BuildFromMeshDescriptions(Levels, Params);
+	for (int32 L = 1; L < Levels.Num() && Mesh->GetRenderData(); L++)  // (LOD L from where the object stands Blendity's screen[L-1])
+		Mesh->GetRenderData()->ScreenSize[L].Default = (float)(*Lod)["screen"][L - 1].number(0);
+	ApplyCollision(Id, Mesh);
+	DirtyMesh.Remove(Id);
+	DirtyCollision.Remove(Id);
+	A->GetStaticMeshComponent()->SetStaticMesh(Mesh);
+	A->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	AssignMaterials(Id);
+}
+
+/* The collider as the body's simple collision: a box, sphere or capsule (Unreal's sphyl, up Z as Blendity's is up Y) at
+ * its centre, or the mesh's convex hull; a Mesh collider is the triangles themselves (complex as simple). */
+void FBlendityLinkApplier::ApplyCollision(int64 Id, UStaticMesh* Mesh) const
+{
+	const blendity_link::Json* C = ColliderMsgs.Find(Id);
+	if (!C)
+		return;
+	const FString Shape = FString(UTF8_TO_TCHAR((*C)["shape"].string().c_str()));
+	Mesh->CreateBodySetup();
+	UBodySetup* Body = Mesh->GetBodySetup();
+	Body->AggGeom.EmptyElements();
+	Body->CollisionTraceFlag = CTF_UseDefault;
+	if (Shape == TEXT("none"))
+	{
+		Body->InvalidatePhysicsData();
+		Body->CreatePhysicsMeshes();
+		return;
+	}
+	const FVector Center = Vec(blendity_link::position_to_unreal((*C)["center"]));
+	const FVector Size = Vec(blendity_link::scale_to_unreal((*C)["size"])) * 100.0;
+	const double Radius = (*C)["radius"].number(0.5) * 100.0, Height = (*C)["height"].number(2.0) * 100.0;
+	if (Shape == TEXT("box"))
+	{
+		FKBoxElem Box((float)Size.X, (float)Size.Y, (float)Size.Z);
+		Box.Center = Center;
+		Body->AggGeom.BoxElems.Add(Box);
+	}
+	else if (Shape == TEXT("sphere"))
+	{
+		FKSphereElem Sphere((float)Radius);
+		Sphere.Center = Center;
+		Body->AggGeom.SphereElems.Add(Sphere);
+	}
+	else if (Shape == TEXT("capsule"))
+	{
+		FKSphylElem Capsule((float)Radius, (float)FMath::Max(0.0, Height - 2.0 * Radius));
+		Capsule.Center = Center;
+		Body->AggGeom.SphylElems.Add(Capsule);
+	}
+	else if (Shape == TEXT("convex"))
+	{
+		FKConvexElem Hull;
+		for (const blendity_link::Vec3& P : Meshes.FindChecked(Id).positions)
+			Hull.VertexData.Add(Vec(P));
+		Hull.UpdateElemBox();
+		Body->AggGeom.ConvexElems.Add(Hull);
+	}
+	Body->CollisionTraceFlag = Shape == TEXT("mesh") ? CTF_UseComplexAsSimple : CTF_UseDefault;
+	Body->InvalidatePhysicsData();
+	Body->CreatePhysicsMeshes();
+}
+
+void FBlendityLinkApplier::OnLod(const blendity_link::Json& J)
+{
+	const int64 Id = J["id"].id();
+	LodMsgs.Add(Id, J);
+	if (TMap<int32, TSharedPtr<FMeshDescription>>* More = LodDescs.Find(Id))
+		for (auto It = More->CreateIterator(); It; ++It)
+			if (It.Key() >= (int32)J["screen"].size())
+				It.RemoveCurrent();
+	DirtyMesh.Add(Id);
+}
+
+/* Review 380: the actors LOD and collider messages changed, once for the batch - a full rebuild for their levels, the
+ * body alone for a collider. */
+void FBlendityLinkApplier::Flush()
+{
+	for (int64 Id : DirtyMesh.Array())
+		if (!Deforming.Contains(Id))  // (a mesh still deforming is rebuilt whole when it settles)
+			Rebuild(Id);
+	for (int64 Id : DirtyCollision.Array())
+		if (!Deforming.Contains(Id))
+			UpdateCollision(Id);
+	for (int64 Id : DirtyCollision.Array())
+		if (!Deforming.Contains(Id))
+			DirtyCollision.Remove(Id);
+}
+
+void FBlendityLinkApplier::UpdateCollision(int64 Id)
+{
+	AStaticMeshActor* A = Cast<AStaticMeshActor>(Alive(Id));
+	UStaticMesh* Mesh = A ? A->GetStaticMeshComponent()->GetStaticMesh().Get() : nullptr;
+	if (!Mesh || !Meshes.Contains(Id))
+		return;
+	ApplyCollision(Id, Mesh);
+	A->GetStaticMeshComponent()->RecreatePhysicsState();
+	DirtyCollision.Remove(Id);
+}
+
+void FBlendityLinkApplier::OnLodMesh(const blendity_link::Json& J, const TArray<uint8>& Bin)
+{
+	const int64 Id = J["id"].id();
+	const int32 Level = (int32)J["level"].number(0);
+	blendity_link::GlbMesh G;
+	const blendity_link::Json* Lod = LodMsgs.Find(Id);
+	if (Level < 1 || !Lod || Level >= (int32)(*Lod)["screen"].size())
+		return;  // (a level the group no longer has: built before it shrank or went - review 380)
+	if (!Alive(Id) || !blendity_link::read_glb(Bin.GetData(), Bin.Num(), G))
+		return;
+	TSharedPtr<FMeshDescription> Desc = MakeShared<FMeshDescription>();
+	FillDescription(G, *Desc);
+	LodDescs.FindOrAdd(Id).Add(Level, Desc);
+	DirtyMesh.Add(Id);
+}
+
+void FBlendityLinkApplier::OnCollider(const blendity_link::Json& J)
+{
+	const int64 Id = J["id"].id();
+	ColliderMsgs.Add(Id, J);
+	DirtyCollision.Add(Id);
 }
 
 void FBlendityLinkApplier::OnDeform(const blendity_link::Json& J, const TArray<uint8>& Bin)
@@ -388,10 +542,9 @@ void FBlendityLinkApplier::Settle()
 		const TSharedPtr<FMeshDescription>* Desc = Descriptions.Find(Id);
 		if (!A || !G || !Desc)
 			continue;
-		A->GetStaticMeshComponent()->SetStaticMesh(BuildMesh(**Desc, (int32)G->sections.size(), A->GetActorLabel()));
-		A->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		AssignMaterials(Id);
+		Rebuild(Id);  // (round 380: its LODs and collider with it)
 	}
+	Flush();  // (round 380)
 }
 
 void FBlendityLinkApplier::AssignMaterials(int64 Id)
