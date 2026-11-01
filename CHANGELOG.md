@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 373): Godot scenes in and back
+
+**Asked:** Phase E's fifth round: a Godot project's scenes brought in for the art and layout, code kept in Godot.
+
+**Added (task 0350)**
+- **Godot's text formats** (`scene/godot_scene`): .tscn and .tres sections, values and references, Godot 4's and
+  Godot 3's with each one's defaults; transforms with X mirrored both ways, as glTF's and Live Link's (ADR 0055),
+  lights and cameras turned 180 degrees about Y.
+- **Import** (`import <file>.tscn`, a drop, File > Import Model...): the nodes under one root, as one Undo step:
+  - Node3D, MeshInstance3D with Godot's primitives and StandardMaterial3D (colours made linear, maps, transparency,
+    cull, unshaded), lights, Camera3D, CollisionShape3D;
+  - instanced scenes and models (res:// from the project.godot above the file); a scene instancing itself stopped;
+  - scripts and every other node kept as Engine Components with their lines as Godot wrote them;
+  - GodotOrigin on each object (its file and node path).
+- **Export Godot Scene** (File menu, `export tscn [out]`): the scene with the objects' transforms and visibility
+  written into their own lines, every other byte as it was, to Exports/ or where asked.
+- `objects_from_model` moved into the scene layer, shared by the Unity and Godot imports; `count_notes` and
+  `forward_slashes` shared from core.
+- **The Opus review's fixes:**
+  - X mirrored, not Z flipped (instanced models had come in turned);
+  - an inherited scene's overrides edit its nodes instead of copying them;
+  - Godot 3's defaults;
+  - each .tres's ids in its own table;
+  - a cap on instancing, with normalized loop keys;
+  - material_override first;
+  - unchanged instances' lines left alone;
+  - black default emission;
+  - one-pass parsing;
+  - numbers that aren't finite refused.
+
+**Checked:** `tests_round373`:
+- the parser (a multi-line value, escapes, both reference forms, the file given back whole);
+- a transform's Z flip and its way back;
+- a Godot 4 project imported (the box and its material, a hidden lamp, a camera, a collision box, an instanced
+  scene, an AnimationPlayer and a script kept, a self-instancing scene stopped), moved and written back with exactly
+  two lines changed;
+- a Godot 3 scene;
+- the review's cases (an inherited scene's overrides, a .tres's own ids, Godot 3's defaults, a built-in script, an
+  instanced OBJ mirrored as the scene, CRLF and Godot 3 written back, the object cap);
+- the Try-it.
+
 ## 2026-11-01 (round 372): the way back to Unity - Export Unity Package
 
 **Asked:** Phase E's fourth round: work done in Blendity goes back to Unity for the finishing touches, scripts intact.

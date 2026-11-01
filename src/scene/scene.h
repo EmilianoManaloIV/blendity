@@ -743,6 +743,17 @@ struct UnityOrigin : ComponentBase<UnityOrigin> {
   void reflect(Reflector &r) override;
 };
 
+/* Where an imported object came from in Godot (round 373, task 0350): its .tscn (project-relative) and its node's
+ * path from the scene's root ("." the root) - what Export Godot Scene writes its transform and visibility back into;
+ * its transform as Godot's text when it came in (unchanged: its line left alone), and whether it or its parent is a
+ * light or camera (turned 180 degrees about Y against Godot's -Z). */
+struct GodotOrigin : ComponentBase<GodotOrigin> {
+  static constexpr const char *kName = "GodotOrigin";
+  std::string file, path, transform;
+  bool turned = false, parent_turned = false;
+  void reflect(Reflector &r) override;
+};
+
 /* Unity's LOD Group (round 363, task 0340): the mesh at a few triangle ratios, the Game view showing the level its
  * height on screen calls for, exports writing <name>_LOD<n> (scene/lod.h). */
 struct LODGroupComponent : ComponentBase<LODGroupComponent> {

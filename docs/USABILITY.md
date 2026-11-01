@@ -418,6 +418,7 @@ screens themselves.
 | A package's prefabs and scenes - the work arranged in Unity - couldn't be brought in, only their loose models. | import <file>.prefab / .unity brings the objects, transforms, meshes, lights, cameras, colliders and nested prefabs in, scripts kept as Engine Components (round 370). |
 | An imported avatar came in grey: its Unity materials (lilToon, Poiyomi) unread, its PhysBones lost. | Unity materials converted by shader (gamma colours made linear), toon outlines on the objects, PhysBones' settings kept as spring bones - they move once the skin's bones are bound (round 371). |
 | Work done on an imported package couldn't go back to the Unity project without breaking its references. | Export Unity Package writes it back under the same GUIDs, edits in the prefabs' own lines, scripts untouched (round 372). |
+| A Godot project's scenes couldn't be opened here, or their layout changes taken back. | import <file>.tscn brings the nodes in (scripts kept as Engine Components); Export Godot Scene writes the moves into the nodes' own lines (round 373). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing

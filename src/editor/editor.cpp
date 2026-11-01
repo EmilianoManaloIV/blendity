@@ -883,6 +883,8 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("A .unitypackage unpacked into Assets/Imported/<package>: models and textures to use, scripts kept as they are.");
     if (u.menu_item("Export Unity Package...")) export_package_of_selection();  // (round 372)
     u.tooltip("The selected object's package folder back to Unity: the same GUIDs, your edits in its prefabs and scenes, scripts as they were.");
+    if (u.menu_item("Export Godot Scene")) export_godot_scene();  // (round 373)
+    u.tooltip("The selected object's Godot scene (.tscn) to Exports: your transforms and visibility in its nodes' lines, scripts and every other line as they were.");
     u.submenu("Export", u.px(290), [this] {
       /* Blender's File > Export list (the mesh formats). */
       for (int f = 0; f < (int)ExportFormat::Count; f++)
@@ -1477,6 +1479,7 @@ void Editor::handle_drop() {
     }
     else if (ext == ".unitypackage") import_unity_package(path);  // (round 369)
     else if (ext == ".prefab" || ext == ".unity") import_unity_scene(path);  // (round 370)
+    else if (ext == ".tscn") import_godot_scene(path);  // (round 373)
     else if (ext == ".pdf" || ext == ".txt" || ext == ".md" || ext == ".tex" || ext == ".bib" || ext == ".docx" ||
              ext == ".html" || ext == ".htm" || ext == ".epub" || ext == ".ps" || ext == ".djvu") {
       /* (The Research window that collected papers is retired, task 0034.) */
@@ -2196,7 +2199,7 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 void Editor::import_dialog() {
   defer([this] {
     std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}},
-                                                 {"Unity prefabs and scenes", {".prefab", ".unity"}}};  // (round 370)
+                                                 {"Unity prefabs and scenes", {".prefab", ".unity"}}, {"Godot scenes", {".tscn"}}};  // (rounds 370, 373)
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
     switch (pick_open_path("Import Model or Motion", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {

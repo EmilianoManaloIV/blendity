@@ -990,6 +990,8 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (round367_command(c, t, line)) return;
+  if (c == "export" && to_lower(arg(1, "")) == "tscn") return (void)export_godot_scene(t.size() > 2 ? line_rest(line, 2) : "");  // (round 373: export tscn [out])
+  if (c == "import" && to_lower(fs::extension(line_rest(line, 1))) == ".tscn") return import_model_file(line_rest(line, 1), true);  // (round 373)
   if (c == "export" && to_lower(arg(1, "")) == "unitypackage") {  // (round 372: export unitypackage <folder> [out.unitypackage])
     if (t.size() < 3) return export_package_of_selection();  // (no folder: the selection's package)
     const std::string rest = line_rest(line, 2);  // (both may hold spaces: the folder is the longest part that is one - review 372)

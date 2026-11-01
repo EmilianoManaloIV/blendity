@@ -33,6 +33,7 @@
 #include "../render/gpu_raster.h"
 #include "../scene/budget.h"
 #include "../scene/unity_package.h"
+#include "../scene/godot_scene.h"
 #include "../scene/unity_scene.h"
 #include "../scene/avatar_eyes.h"
 #include "../scene/avatar_fix.h"
@@ -1276,6 +1277,9 @@ class Editor {
   bool export_unity_package(const std::string &folder, const std::string &out = "");  // (round 372: the way back)
   std::map<std::string, std::vector<UnityEdit>> unity_edits(const std::string &folder_rel, int &nested, int &copies);
   void export_package_of_selection();
+  bool import_godot_scene(const std::string &path);  // (round 373: a .tscn's nodes)
+  bool export_godot_scene(const std::string &out = "");  // (round 373: the selection's .tscn with its edits)
+  std::vector<GodotEdit> godot_edits(const std::string &file, bool format4, int &copies);
   /* Round 372 (unity_export_ui.cpp): the export on a worker, a file at a time. */
   struct UnityExportItem {
     std::string abs, guid, pathname, meta;

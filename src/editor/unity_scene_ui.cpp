@@ -156,25 +156,6 @@ const ImportedNode *pick_part(const ImportResult &r, const std::string &name, co
   return first;
 }
 
-/* A model placed as a prefab: its nodes as objects (their hierarchy, transforms, meshes and materials) under one. */
-GameObject *model_objects(const ImportResult &r, const std::string &name, Scene &scene) {
-  GameObject *root = scene.create(name);
-  std::vector<GameObject *> made;
-  for (const ImportedNode &n : r.nodes) {
-    GameObject *g = scene.create(n.name.empty() ? name : n.name);
-    Transform t;
-    t.position = n.position, t.rotation = n.rotation, t.scale = n.scale, t.euler_hint = n.rotation.to_euler();
-    g->set_local(t);
-    if (n.mesh) g->add<MeshFilter>()->mesh = n.mesh, g->add<MeshRenderer>()->materials = n.materials;
-    made.push_back(g);
-  }
-  for (size_t i = 0; i < r.nodes.size(); i++) {
-    const int p = r.nodes[i].parent;
-    scene.set_parent(made[i], p >= 0 && p < (int)made.size() ? made[(size_t)p] : root, -1, false);
-  }
-  return root;
-}
-
 MeshPtr builtin_mesh(int64_t file_id) {
   const char *kind = unity_builtin_mesh(file_id);
   if (!kind) return nullptr;
@@ -185,17 +166,6 @@ MeshPtr builtin_mesh(int64_t file_id) {
   if (k == "Capsule") return primitives::capsule();
   if (k == "Plane") return primitives::plane();
   return primitives::quad();
-}
-
-/* The notes, each once with how many times it came up (review 370: 500 objects missing one mesh said it 500 times). */
-std::vector<std::pair<std::string, int>> count_notes(const std::vector<std::string> &notes) {
-  std::vector<std::pair<std::string, int>> out;
-  for (const std::string &n : notes) {
-    auto it = std::find_if(out.begin(), out.end(), [&](const std::pair<std::string, int> &e) { return e.first == n; });
-    if (it == out.end()) out.push_back({n, 1});
-    else it->second++;
-  }
-  return out;
 }
 
 }  // namespace
@@ -254,7 +224,7 @@ bool Editor::import_unity_scene(const std::string &path) {
   };
   ctx.model = [&](const std::string &guid, Scene &scene) -> GameObject * {
     const std::string p = model_path(guid);
-    return p.empty() ? nullptr : model_objects(model_of(cache, p), fs::stem(p), scene);
+    return p.empty() ? nullptr : objects_from_model(model_of(cache, p), fs::stem(p), scene);
   };
   commit_undo();
   std::set<uint64_t> before;

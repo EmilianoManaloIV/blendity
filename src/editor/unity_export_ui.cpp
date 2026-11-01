@@ -44,11 +44,6 @@ std::string fresh_meta(const std::string &guid, bool folder) {
   return "fileFormatVersion: 2\nguid: " + guid + "\n" + (folder ? "folderAsset: yes\nDefaultImporter:\n  externalObjects: {}\n  userData: \n  assetBundleName: \n  assetBundleVariant: \n" : "");
 }
 
-std::string slashes(std::string p) {
-  std::replace(p.begin(), p.end(), '\\', '/');
-  return p;
-}
-
 }  // namespace
 
 /* The worker: each file read, patched and compressed in turn; the file written whole at the end (none on Cancel). */
@@ -111,10 +106,10 @@ std::map<std::string, std::vector<UnityEdit>> Editor::unity_edits(const std::str
 bool Editor::export_unity_package(const std::string &folder_in, const std::string &out_in) {
   if (export_job_) return Log::warn("Export Unity Package: %s is still being written", fs::filename(export_job_->out).c_str()), false;
   const std::string abs_folder = fs::normalize(resolve_asset_path(folder_in));
-  const std::string folder_rel = slashes(make_asset_relative(abs_folder));
+  const std::string folder_rel = forward_slashes(make_asset_relative(abs_folder));
   if (!fs::is_dir(abs_folder)) return Log::warn("Export Unity Package: no folder %s", folder_in.c_str()), false;
   const std::string out = fs::normalize(!out_in.empty() ? resolve_asset_path(out_in) : fs::join(fs::join(project_root_, "Exports"), fs::filename(abs_folder) + ".unitypackage"));
-  if (slashes(out).rfind(slashes(abs_folder) + "/", 0) == 0) return Log::warn("Export Unity Package: not into the package's own folder (the next export would carry it)"), false;
+  if (forward_slashes(out).rfind(forward_slashes(abs_folder) + "/", 0) == 0) return Log::warn("Export Unity Package: not into the package's own folder (the next export would carry it)"), false;
   if (fs::exists(out) && fs::extension(out) != ".unitypackage") return Log::warn("Export Unity Package: %s is another kind of file - not written over", out.c_str()), false;
   auto job = std::make_shared<ExportJob>();
   job->out = out, job->folder = folder_rel;
@@ -123,7 +118,7 @@ bool Editor::export_unity_package(const std::string &folder_in, const std::strin
   std::function<void(const std::string &, const std::string &, int)> walk = [&](const std::string &dir, const std::string &unity_dir, int depth) {
     if (depth > 16) return (void)job->skipped.push_back(unity_dir + " (deeper than 16 folders)");
     for (const DirEntry &de : fs::list(dir)) {
-      const std::string abs = fs::join(dir, de.name), key = slashes(folder_rel + abs.substr(abs_folder.size()));
+      const std::string abs = fs::join(dir, de.name), key = forward_slashes(folder_rel + abs.substr(abs_folder.size()));
       const auto k = known.find(key);
       UnityExportItem it;
       it.abs = abs, it.folder = de.is_dir;

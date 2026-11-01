@@ -220,6 +220,8 @@ void register_builtin_components() {
                          "Unity's LOD Group; Unreal's LOD settings; Blender has none (a Decimate per level, by hand)");
   reg<UnityOrigin>("Scripts", "Where an object imported from Unity came from: Export Unity Package writes its edits back there (round 372).",
                    "Unity's fileIDs in a prefab or scene; Blender has none");
+  reg<GodotOrigin>("Scripts", "Where an object imported from Godot came from: Export Godot Scene writes its transform and visibility back there (round 373).",
+                   "Godot's node paths in a .tscn; Blender has none");
   reg<EngineComponent>("Scripts", "A component of another engine, kept as it is: a Unity script (C# or UdonSharp), VRChat's components - written back unchanged, never run here (round 370).",
                        "Unity's MonoBehaviour and built-in components; Blender has no counterpart (its add-ons' data is custom properties)");
   reg<ColliderComponent>("Physics", "The object's collision shape: Box, Sphere, Capsule, Convex or its Mesh - Jolt's in Play, written into exports for Unity, Unreal and Godot (round 362).",
@@ -1649,6 +1651,16 @@ void LODGroupComponent::reflect(Reflector &r) {
   }
   r.help("A level shows while the object's height on screen is at least its share of the view (Unity's LOD Group transitions).");
   r.field("Cull Below Last", cull);
+}
+
+void GodotOrigin::reflect(Reflector &r) {
+  r.text("File", file);
+  r.help("The Godot scene this object came from; Export Godot Scene writes its transform and visibility back there.");
+  r.text("Node Path", path);
+  r.text("Imported Transform", transform);
+  r.help("Its transform in Godot's text as it came in: an unchanged object's line is left as it is.");
+  r.field("Turned", turned);
+  r.field("Parent Turned", parent_turned);
 }
 
 void UnityOrigin::reflect(Reflector &r) {

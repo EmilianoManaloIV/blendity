@@ -477,6 +477,24 @@ std::string patch_unity_objects(const std::string &text, const std::vector<Unity
   return out;
 }
 
+GameObject *objects_from_model(const ImportResult &r, const std::string &name, Scene &scene) {
+  GameObject *root = scene.create(name);
+  std::vector<GameObject *> made;
+  for (const ImportedNode &n : r.nodes) {
+    GameObject *g = scene.create(n.name.empty() ? name : n.name);
+    Transform t;
+    t.position = n.position, t.rotation = n.rotation, t.scale = n.scale, t.euler_hint = n.rotation.to_euler();
+    g->set_local(t);
+    if (n.mesh) g->add<MeshFilter>()->mesh = n.mesh, g->add<MeshRenderer>()->materials = n.materials;
+    made.push_back(g);
+  }
+  for (size_t i = 0; i < r.nodes.size(); i++) {
+    const int p = r.nodes[i].parent;
+    scene.set_parent(made[i], p >= 0 && p < (int)made.size() ? made[(size_t)p] : root, -1, false);
+  }
+  return root;
+}
+
 std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> &docs, Scene &scene, GameObject *parent, UnityImport &ctx) {
   if (!ctx.building) ctx.building = std::make_shared<std::set<std::string>>();
   if (!ctx.total) ctx.total = std::make_shared<int>(0);

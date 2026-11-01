@@ -12,6 +12,7 @@
 #include "../src/scene/colliders.h"
 #include "../src/scene/lod.h"
 #include "../src/scene/audio.h"
+#include "../src/scene/godot_scene.h"
 #include "../src/scene/unity_package.h"
 #include "../src/scene/unity_scene.h"
 #include "../src/scene/unity_material.h"
@@ -9067,6 +9068,229 @@ static void tests_round372() {
   });
 }
 
+static void tests_round373() {
+  test("Godot's text (round 373): sections, attributes with spaces and brackets, a value over several lines, strings, numbers, Godot 3's and 4's references; a Transform3D into Blendity's (X mirrored, as glTF) and back, a light's turn its own inverse", [] {
+    const std::string text = "[gd_scene load_steps=2 format=3 uid=\"uid://abc\"]\n\n[ext_resource type=\"Script\" path=\"res://a b.gd\" id=\"1_x\"]\n\n"
+                             "[node name=\"My Root\" type=\"Node3D\"]\nscript = ExtResource(\"1_x\")\nmetadata/notes = {\n\"a\": [1, 2],\n\"b\": \"x = y\"\n}\n"
+                             "; a comment\n[node name=\"Kid\" type=\"Node3D\" parent=\".\" instance=ExtResource( 1 )]\nname_text = \"q\\\"uote\\n\"\n";
+    std::vector<GodotSection> s;
+    std::string why;
+    CHECK(parse_godot_text(text, s, why) && s.size() == 4);
+    if (s.size() != 4) return;
+    CHECK(s[0].tag == "gd_scene" && s[0].attr("format") == "3" && godot_string(s[1].attr("path")) == "res://a b.gd" && godot_string(s[2].attr("name")) == "My Root");
+    CHECK(s[2].prop("metadata/notes").find("\"b\": \"x = y\"") != std::string::npos && godot_ref(s[2].prop("script")) == "1_x" && godot_ref(s[3].attr("instance")) == "1");
+    CHECK(godot_string(s[3].prop("name_text")) == "q\"uote\n" && godot_string(s[3].attr("parent")) == ".");
+    std::string joined;
+    for (const GodotSection &x : s) joined += x.text;
+    CHECK(joined == text);  // (every byte kept with its section)
+    std::vector<GodotSection> none;
+    CHECK(!parse_godot_text("PK\x03\x04 binary", none, why) && !why.empty());
+    /* Review 373: a BOM, an escaped quote and bracket inside a header's string, \u escapes, a line with no " = ". */
+    const std::string odd = "\xEF\xBB\xBF[gd_scene format=3]\n\n[node name=\"a\\\"] b\" type=\"Node3D\"]\nodd line\nlabel = \"\\u00e9\"\n";
+    std::vector<GodotSection> o;
+    CHECK(parse_godot_text(odd, o, why) && o.size() == 2 && o.size() == 2 && godot_string(o[1].attr("name")) == "a\"] b" && godot_string(o[1].attr("type")) == "Node3D");
+    if (o.size() == 2) CHECK(o[0].text + o[1].text == odd && godot_string(o[1].prop("label")) == "\xC3\xA9");
+    /* Godot's +90 degrees about Y at (1, 2, 3), X mirrored as glTF's (ADR 0055): at (-1, 2, 3), its +Z axis along -X. */
+    const std::string g = "Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, 1, 2, 3)";
+    const Transform t = godot_transform(g);
+    const Mat4 m = Mat4::rotate(t.rotation);
+    const Vec3 fwd(m.at(0, 2), m.at(1, 2), m.at(2, 2));
+    std::printf("    %s -> position (%g, %g, %g), +Z (%g, %g, %g)\n", g.c_str(), t.position.x, t.position.y, t.position.z, fwd.x, fwd.y, fwd.z);
+    CHECK(length(t.position - Vec3(-1, 2, 3)) < 1e-5f && length(fwd - Vec3(-1, 0, 0)) < 1e-4f && length(t.scale - Vec3(1.0f)) < 1e-5f);
+    const Transform turned = godot_turn(godot_turn(t, true, true), true, true);  // (its own inverse)
+    CHECK(length(turned.position - t.position) < 1e-5f && std::fabs(std::fabs(turned.rotation.y * t.rotation.y + turned.rotation.w * t.rotation.w + turned.rotation.x * t.rotation.x + turned.rotation.z * t.rotation.z) - 1.0f) < 1e-5f);
+    CHECK(godot_path_key("C:/A/./b/../Loop.tscn") == godot_path_key("c:/a/loop.tscn"));
+    const std::vector<double> a = godot_numbers(g), b = godot_numbers(godot_transform_text(t, true));
+    CHECK(a.size() == 12 && b.size() == 12);
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) CHECK(std::fabs(a[i] - b[i]) < 1e-5);
+    CHECK(godot_transform_text(Transform(), false) == "Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 )");
+  });
+  test("Godot scenes in and back (round 373): a project's .tscn imported under one root - a box with its red material, a hidden lamp, a camera, a body's collision box, an instanced scene, an AnimationPlayer and the root's script kept as Godot nodes, a scene instancing itself stopped; export tscn writes the moved box's transform and the lamp's visibility into their lines, every other byte as it was; a Godot 3 scene too", [] {
+    const std::string dir = fs::join(test_dir(), "r373 godot");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, "props"));
+    const std::string main_tscn = "[gd_scene load_steps=6 format=3 uid=\"uid://main\"]\n\n"
+        "[ext_resource type=\"Script\" path=\"res://level.gd\" id=\"1_lv\"]\n[ext_resource type=\"PackedScene\" path=\"res://props/prop.tscn\" id=\"2_pr\"]\n"
+        "[ext_resource type=\"PackedScene\" path=\"res://loop.tscn\" id=\"3_lp\"]\n\n"
+        "[sub_resource type=\"StandardMaterial3D\" id=\"Mat_red\"]\nresource_name = \"Red\"\nalbedo_color = Color(1, 0, 0, 1)\nroughness = 0.25\n\n"
+        "[sub_resource type=\"BoxMesh\" id=\"Box_1\"]\nmaterial = SubResource(\"Mat_red\")\nsize = Vector3(4, 0.5, 4)\n\n"
+        "[sub_resource type=\"BoxShape3D\" id=\"Shape_1\"]\nsize = Vector3(2, 2, 2)\n\n"
+        "[node name=\"Level\" type=\"Node3D\"]\nscript = ExtResource(\"1_lv\")\nmetadata/kept = {\n\"x\": 1\n}\n\n"
+        "[node name=\"Floor\" type=\"MeshInstance3D\" parent=\".\"]\nmesh = SubResource(\"Box_1\")\n\n"
+        "[node name=\"Lamp\" type=\"OmniLight3D\" parent=\".\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0)\nvisible = false\nlight_energy = 2.0\nomni_range = 7.0\n\n"
+        "[node name=\"Cam\" type=\"Camera3D\" parent=\".\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 5)\nfov = 60.0\n\n"
+        "[node name=\"Body\" type=\"StaticBody3D\" parent=\".\"]\n\n"
+        "[node name=\"Shape\" type=\"CollisionShape3D\" parent=\"Body\"]\nshape = SubResource(\"Shape_1\")\n\n"
+        "[node name=\"Anim\" type=\"AnimationPlayer\" parent=\".\"]\nautoplay = \"idle\"\n\n"
+        "[node name=\"Prop\" parent=\".\" instance=ExtResource(\"2_pr\")]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0, 0)\n\n"
+        "[node name=\"Loop\" parent=\".\" instance=ExtResource(\"3_lp\")]\n";
+    const std::string prop = "[gd_scene load_steps=2 format=3]\n\n[sub_resource type=\"SphereMesh\" id=\"S\"]\n\n[node name=\"PropRoot\" type=\"Node3D\"]\n\n"
+                             "[node name=\"Ball\" type=\"MeshInstance3D\" parent=\".\"]\nmesh = SubResource(\"S\")\n";
+    const std::string loop = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"PackedScene\" path=\"res://loop.tscn\" id=\"1\"]\n\n"
+                             "[node name=\"LoopRoot\" type=\"Node3D\"]\n\n[node name=\"Again\" parent=\".\" instance=ExtResource(\"1\")]\n";
+    CHECK(fs::write_file(fs::join(dir, "project.godot"), "config_version=5\n") && fs::write_file(fs::join(dir, "main.tscn"), main_tscn) &&
+          fs::write_file(fs::join(dir, "props/prop.tscn"), prop) && fs::write_file(fs::join(dir, "loop.tscn"), loop) && fs::write_file(fs::join(dir, "level.gd"), "extends Node3D\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("import " + fs::join(dir, "main.tscn"));
+    Scene &sc = ed.scene();
+    GameObject *root = sc.find_by_name("main"), *level = sc.find_by_name("Level"), *floor = sc.find_by_name("Floor"), *lamp = sc.find_by_name("Lamp");
+    GameObject *cam = sc.find_by_name("Cam"), *shape = sc.find_by_name("Shape"), *anim = sc.find_by_name("Anim"), *ball = sc.find_by_name("Ball");
+    CHECK(root && level && floor && lamp && cam && shape && anim && ball && ed.selected_object() == root && level->parent == root);
+    if (!root || !level || !floor || !lamp || !cam || !shape || !anim || !ball) return;
+    const MeshFilter *mf = floor->get<MeshFilter>();
+    const MeshRenderer *mr = floor->get<MeshRenderer>();
+    float wide = 0.0f;
+    for (const Vec3 &p : mf && mf->mesh ? mf->mesh->positions : std::vector<Vec3>()) wide = std::max(wide, p.x);
+    std::printf("    the floor: half width %g, %zu material(s)\n", wide, mr ? mr->materials.size() : 0);
+    CHECK(std::fabs(wide - 2.0f) < 1e-4f && mr && mr->materials.size() == 1 && mr->materials[0] && mr->materials[0]->name == "Red");
+    if (mr && !mr->materials.empty() && mr->materials[0]) CHECK(std::fabs(mr->materials[0]->base_color.x - 1.0f) < 1e-4f && mr->materials[0]->base_color.y < 1e-4f && std::fabs(mr->materials[0]->roughness - 0.25f) < 1e-5f);
+    const Light *l = lamp->get<Light>();
+    CHECK(!lamp->active && l && l->type == 1 && std::fabs(l->intensity - 2.0f) < 1e-5f && std::fabs(l->range - 7.0f) < 1e-5f && length(lamp->local().position - Vec3(0, 3, 0)) < 1e-5f);
+    const Vec3 cam_fwd = cam->local().rotation.rotate(Vec3(0, 0, 1));  // (Godot's camera looks down -Z: Blendity's along +Z - turned)
+    CHECK(cam->get<Camera>() && std::fabs(cam->get<Camera>()->fov - 60.0f) < 1e-4f && length(cam->local().position - Vec3(0, 1.6f, 5)) < 1e-5f && length(cam_fwd - Vec3(0, 0, -1)) < 1e-4f);
+    const ColliderComponent *col = shape->get<ColliderComponent>();
+    CHECK(col && col->shape == 0 && length(col->size - Vec3(2.0f)) < 1e-5f && shape->parent && shape->parent->name == "Body" && shape->get<GodotOrigin>() && shape->get<GodotOrigin>()->path == "Body/Shape");
+    const EngineComponent *ae = anim->get<EngineComponent>(), *le = level->get<EngineComponent>();
+    CHECK(ae && ae->engine == "Godot" && ae->type == "AnimationPlayer" && ae->data.find("autoplay = \"idle\"") != std::string::npos);
+    CHECK(le && le->script == "res://level.gd" && le->type == "level (Node3D)" && le->data.find("metadata/kept") != std::string::npos);
+    CHECK(ball->get<MeshFilter>() && ball->parent && ball->parent->name == "Prop" && !ball->get<GodotOrigin>() && length(ball->parent->local().position - Vec3(-2, 0, 0)) < 1e-5f);
+    int agains = 0;
+    sc.for_each([&](GameObject &g) { agains += g.name == "Again"; });
+    CHECK(agains == 1);  // (the loop stopped at its second appearance)
+    /* Moved and shown here; written back. */
+    Transform ft = floor->local();
+    ft.position = Vec3(1.5f, 0.0f, -3.0f);
+    floor->set_local(ft);
+    lamp->active = true;
+    const std::string out = fs::join(dir, "main back.tscn");
+    ed.select_object(floor->id);
+    ed.command("export tscn " + out);
+    std::string back;
+    CHECK(fs::read_file(out, back));
+    std::string expect = main_tscn;
+    const std::string floor_head = "[node name=\"Floor\" type=\"MeshInstance3D\" parent=\".\"]\n";
+    expect.insert(expect.find(floor_head) + floor_head.size(), "transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 0, -3)\n");
+    expect.erase(expect.find("visible = false\n"), std::string("visible = false\n").size());
+    std::printf("    written back: %s\n", back == expect ? "the two lines only" : "something else");
+    CHECK(back == expect);
+    std::string source;
+    CHECK(fs::read_file(fs::join(dir, "main.tscn"), source) && source == main_tscn);  // (the Godot project's file as it was)
+    /* Godot 3: Spatial, MeshInstance, CubeMesh (2 m), SpatialMaterial unshaded, Transform( ... ), numeric ids. */
+    const std::string old = "[gd_scene load_steps=3 format=2]\n\n[sub_resource type=\"CubeMesh\" id=1]\n\n[sub_resource type=\"SpatialMaterial\" id=2]\n"
+                            "albedo_color = Color( 0.5, 0.5, 0.5, 1 )\nflags_unshaded = true\n\n[node name=\"Old\" type=\"Spatial\"]\n\n"
+                            "[node name=\"Box3\" type=\"MeshInstance\" parent=\".\"]\ntransform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -2 )\nmesh = SubResource( 1 )\nmaterial/0 = SubResource( 2 )\n";
+    CHECK(fs::write_file(fs::join(dir, "old.tscn"), old));
+    ed.command("import " + fs::join(dir, "old.tscn"));
+    GameObject *box3 = sc.find_by_name("Box3");
+    CHECK(box3 && box3->get<MeshFilter>() && box3->get<MeshRenderer>() && length(box3->local().position - Vec3(0, 1, -2)) < 1e-5f);
+    if (!box3 || !box3->get<MeshRenderer>() || box3->get<MeshRenderer>()->materials.empty()) return;
+    const MaterialPtr &m3 = box3->get<MeshRenderer>()->materials[0];
+    float wide3 = 0.0f;
+    for (const Vec3 &p : box3->get<MeshFilter>()->mesh->positions) wide3 = std::max(wide3, p.x);
+    CHECK(m3 && m3->unlit && std::fabs(m3->base_color.x - srgb_to_linear(0.5f)) < 1e-4f && std::fabs(wide3 - 1.0f) < 1e-4f);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Godot scenes, the review's cases (round 373): an inherited scene's overrides edit its nodes (no copies; material_override first); a Godot 3 scene with ids shared between its .tres and itself, a 1 m default sphere and cylinder, a built-in script; an instanced OBJ mirrored as the scene; CRLF and Godot 3 written back; the object cap", [] {
+    const std::string dir = fs::join(test_dir(), "r373 review");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    const std::string base = "[gd_scene load_steps=2 format=3]\n\n[sub_resource type=\"SphereMesh\" id=\"S\"]\n\n[node name=\"Base\" type=\"Node3D\"]\n\n"
+                             "[node name=\"Orb\" type=\"MeshInstance3D\" parent=\".\"]\nmesh = SubResource(\"S\")\n";
+    const std::string inh = "[gd_scene load_steps=4 format=3]\n\n[ext_resource type=\"PackedScene\" path=\"res://base.tscn\" id=\"1\"]\n\n"
+                            "[sub_resource type=\"StandardMaterial3D\" id=\"Red\"]\nalbedo_color = Color(1, 0, 0, 1)\n\n"
+                            "[sub_resource type=\"StandardMaterial3D\" id=\"Green\"]\nalbedo_color = Color(0, 1, 0, 1)\n\n"
+                            "[node name=\"Inh\" instance=ExtResource(\"1\")]\n\n"
+                            "[node name=\"Orb\" parent=\".\" index=\"0\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)\n"
+                            "surface_material_override/0 = SubResource(\"Green\")\nmaterial_override = SubResource(\"Red\")\n";
+    /* Godot 3: ext 1 a script, ext 2 a .tres whose own ext 1 is its texture; sub 1 a sphere, sub 2 a cylinder, sub 3 a built-in script. */
+    const std::string tres = "[gd_resource type=\"SpatialMaterial\" load_steps=2 format=2]\n\n[ext_resource path=\"res://wood.png\" type=\"Texture\" id=1]\n\n"
+                             "[resource]\nalbedo_texture = ExtResource( 1 )\n";
+    const std::string g3 = "[gd_scene load_steps=6 format=2]\r\n\r\n[ext_resource path=\"res://player.gd\" type=\"Script\" id=1]\r\n"
+                           "[ext_resource path=\"res://mat.tres\" type=\"Material\" id=2]\r\n[ext_resource path=\"res://post.obj\" type=\"PackedScene\" id=3]\r\n\r\n"
+                           "[sub_resource type=\"SphereMesh\" id=1]\r\n\r\n[sub_resource type=\"CylinderMesh\" id=2]\r\n\r\n[sub_resource type=\"GDScript\" id=3]\r\nscript/source = \"extends Spatial\"\r\n\r\n"
+                           "[node name=\"G3\" type=\"Spatial\"]\r\nscript = ExtResource( 1 )\r\n\r\n"
+                           "[node name=\"Globe\" type=\"MeshInstance\" parent=\".\"]\r\nmesh = SubResource( 1 )\r\nmaterial/0 = ExtResource( 2 )\r\n\r\n"
+                           "[node name=\"Can\" type=\"MeshInstance\" parent=\".\"]\r\nmesh = SubResource( 2 )\r\nscript = SubResource( 3 )\r\n\r\n"
+                           "[node name=\"Mark\" type=\"Position3D\" parent=\".\"]\r\ntransform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 )\r\n\r\n"
+                           "[node name=\"Post\" parent=\".\" instance=ExtResource( 3 )]\r\n";
+    CHECK(fs::write_file(fs::join(dir, "project.godot"), "config_version=4\n") && fs::write_file(fs::join(dir, "base.tscn"), base) && fs::write_file(fs::join(dir, "inh.tscn"), inh) &&
+          fs::write_file(fs::join(dir, "mat.tres"), tres) && fs::write_file(fs::join(dir, "wood.png"), "not read here") && fs::write_file(fs::join(dir, "player.gd"), "extends Spatial\n") &&
+          fs::write_file(fs::join(dir, "g3.tscn"), g3) && fs::write_file(fs::join(dir, "post.obj"), "v 1 0 0\nv 1 1 0\nv 1 0 1\nf 1 2 3\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    Scene &sc = ed.scene();
+    ed.command("import " + fs::join(dir, "inh.tscn"));
+    int orbs = 0;
+    GameObject *orb = nullptr;
+    sc.for_each([&](GameObject &g) { orbs += g.name == "Orb", orb = g.name == "Orb" ? &g : orb; });
+    CHECK(orbs == 1 && orb && length(orb->local().position - Vec3(0, 2, 0)) < 1e-5f && orb->get<GodotOrigin>() && orb->get<GodotOrigin>()->path == "Orb");
+    const MeshRenderer *orb_r = orb ? orb->get<MeshRenderer>() : nullptr;
+    CHECK(orb_r && orb_r->materials.size() == 1 && orb_r->materials[0] && orb_r->materials[0]->base_color.x > 0.99f && orb_r->materials[0]->base_color.y < 0.01f);
+    float orb_h = 0.0f;
+    for (const Vec3 &p : orb && orb->get<MeshFilter>() ? orb->get<MeshFilter>()->mesh->positions : std::vector<Vec3>()) orb_h = std::max(orb_h, p.y);
+    CHECK(std::fabs(orb_h - 0.5f) < 1e-3f);  // (Godot 4's default sphere: 1 m tall)
+    ed.command("import " + fs::join(dir, "g3.tscn"));
+    GameObject *globe = sc.find_by_name("Globe"), *can = sc.find_by_name("Can"), *mark = sc.find_by_name("Mark"), *g3root = sc.find_by_name("G3"), *post = sc.find_by_name("Post");
+    CHECK(globe && can && mark && g3root && post);
+    if (!globe || !can || !mark || !g3root || !post) return;
+    auto widest = [](const GameObject *g) {
+      float w = 0.0f;
+      for (const Vec3 &p : g->get<MeshFilter>() ? g->get<MeshFilter>()->mesh->positions : std::vector<Vec3>()) w = std::max(w, p.x);
+      return w;
+    };
+    const MeshRenderer *gr = globe->get<MeshRenderer>();
+    CHECK(std::fabs(widest(globe) - 1.0f) < 1e-3f && std::fabs(widest(can) - 1.0f) < 1e-3f);  // (Godot 3's defaults: 1 m radii)
+    CHECK(gr && gr->materials.size() == 1 && gr->materials[0] && fs::filename(gr->materials[0]->base_map.path) == "wood.png");  // (the .tres's own id 1, not the scene's script)
+    CHECK(g3root->get<EngineComponent>() && g3root->get<EngineComponent>()->script == "res://player.gd" && can->get<EngineComponent>() &&
+          can->get<EngineComponent>()->type == "built-in script (MeshInstance)");
+    float post_x = 0.0f;  // (the instanced OBJ's vertices at Godot's x = 1: Blendity's -1, as Mark's)
+    std::function<void(GameObject *)> walk = [&](GameObject *g) {
+      if (g->get<MeshFilter>()) post_x = g->get<MeshFilter>()->mesh->positions[0].x;
+      for (GameObject *c : g->children) walk(c);
+    };
+    walk(post);
+    std::printf("    the OBJ's vertex x %g, the marker's %g\n", post_x, mark->local().position.x);
+    CHECK(std::fabs(post_x + 1.0f) < 1e-4f && std::fabs(mark->local().position.x + 1.0f) < 1e-4f);
+    /* Godot 3 and CRLF written back: the marker moved to Blendity's x = 2 (Godot's -2). */
+    Transform mt = mark->local();
+    mt.position = Vec3(2.0f, 0.0f, 0.0f);
+    mark->set_local(mt);
+    const std::string out = fs::join(dir, "g3 back.tscn");
+    ed.select_object(mark->id);
+    ed.command("export tscn " + out);
+    std::string back, expect = g3;
+    CHECK(fs::read_file(out, back));
+    const std::string old_line = "transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 )\r\n";
+    expect.replace(expect.find(old_line), old_line.size(), "transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, 0 )\r\n");
+    CHECK(back == expect);
+    /* The cap: three instances of a 30-node scene, at most 50 objects. */
+    std::string many = "[gd_scene format=3]\n\n[node name=\"M\" type=\"Node3D\"]\n";
+    for (int i = 0; i < 29; i++) many += "\n[node name=\"N" + std::to_string(i) + "\" type=\"Node3D\" parent=\".\"]\n";
+    const std::string three = "[gd_scene format=3]\n\n[ext_resource type=\"PackedScene\" path=\"res://many.tscn\" id=\"1\"]\n\n[node name=\"T\" type=\"Node3D\"]\n\n"
+                              "[node name=\"A\" parent=\".\" instance=ExtResource(\"1\")]\n\n[node name=\"B\" parent=\".\" instance=ExtResource(\"1\")]\n\n[node name=\"C\" parent=\".\" instance=ExtResource(\"1\")]\n";
+    CHECK(fs::write_file(fs::join(dir, "many.tscn"), many));
+    std::vector<GodotSection> secs;
+    std::string why;
+    CHECK(parse_godot_text(three, secs, why));
+    GodotImport capped;
+    capped.res_root = dir, capped.max_objects = 50;
+    build_godot_scene(secs, sc, nullptr, capped);
+    std::printf("    capped: %d object(s) made\n", *capped.total);
+    CHECK(*capped.total <= 51 && *capped.total >= 40 && std::any_of(capped.notes.begin(), capped.notes.end(), [](const std::string &n) { return n.find("passed 50") != std::string::npos; }));
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("the lesson's Try-it (round 373): export tscn with nothing from Godot selected is refused, writing nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const int before = (int)fs::list(resolve_asset_path("Exports")).size();
+    ed.command("export tscn");
+    CHECK((int)fs::list(resolve_asset_path("Exports")).size() == before);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -9452,4 +9676,5 @@ void run_assets_tests() {
   tests_round370();
   tests_round371();
   tests_round372();
+  tests_round373();
 }

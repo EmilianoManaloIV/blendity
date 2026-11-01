@@ -5,6 +5,7 @@
 // component (scripts, Udon, VRChat's) an EngineComponent with its YAML kept as it was.
 #pragma once
 
+#include "import.h"
 #include "scene.h"
 #include "unity_yaml.h"
 
@@ -64,6 +65,10 @@ std::string unity_shader_name(const UnityGuidIndex &index, const std::string &gu
 /* The material loader for Unity .mat files (set_foreign_material_loader): its textures and shader through the
  * project's index. */
 bool load_unity_material(const std::string &text, const std::string &path, Material &m);
+
+/* A model's nodes as objects (their hierarchy, transforms, meshes and materials) under one named `name` - a model
+ * placed in a Unity prefab, or instanced in a Godot scene (round 373). */
+GameObject *objects_from_model(const ImportResult &r, const std::string &name, Scene &scene);
 
 /* Round 372: an imported object's edits in its Unity file - its name and active state on its GameObject, its local
  * transform on its Transform. */
