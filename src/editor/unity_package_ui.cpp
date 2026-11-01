@@ -6,6 +6,7 @@
 #include "editor.h"
 
 #include "../scene/unity_package.h"
+#include "../scene/unity_scene.h"
 #include "../scene/material.h"
 #include "../core/core.h"
 
@@ -116,6 +117,7 @@ void Editor::poll_unity_package() {
   const std::shared_ptr<PackageJob> job = std::move(pkg_job_);
   pkg_last_ = job;
   project_listed_ = -100;
+  unity_guid_index_cached(assets_dir_, project_root_, true);  // (round 371: the new GUIDs known before its materials load)
   image_assets_time_ = -100;
   for (const std::string &p : job->skipped) Log::warn("Import Unity Package: %s was left out (its path leaves the package's folder, or it couldn't be written)", p.c_str());
   if (!job->why.empty()) return Log::warn("Import Unity Package: %s - %s", fs::filename(job->path).c_str(), job->why.c_str());

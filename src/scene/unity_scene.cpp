@@ -2,8 +2,10 @@
 // Unity prefabs and scenes into Blendity's objects (round 370, task 0347): see unity_scene.h.
 #include "unity_scene.h"
 
+#include "spring_bones.h"
 #include "../core/core.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <set>
@@ -221,13 +223,45 @@ void add_mesh(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) {
   ctx.meshes++;
 }
 
-void add_renderer(const UnityDoc &d, GameObject *g, Build &b) {
+/* The renderer's slots: each Unity material converted (round 371), else the model's own for that slot. */
+std::vector<MaterialPtr> renderer_materials(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) {
+  const auto own = b.model_materials.find(g);
+  const std::vector<MaterialPtr> model = own == b.model_materials.end() ? std::vector<MaterialPtr>() : own->second;
+  const YamlNode *list = d.body.get("m_Materials");
+  std::vector<MaterialPtr> out;
+  for (const YamlNode &ref : list ? list->seq : std::vector<YamlNode>()) {
+    MaterialPtr m = ctx.material && !ref.str("guid").empty() ? ctx.material(ref.str("guid")) : nullptr;
+    ctx.materials += m != nullptr;
+    out.push_back(m ? m : out.size() < model.size() ? model[out.size()] : nullptr);  // (a slot left empty stays empty: the default material - review 371)
+  }
+  const bool any = std::any_of(out.begin(), out.end(), [](const MaterialPtr &m) { return m != nullptr; });
+  return any ? out : model;
+}
+
+/* A toon material's outline on the object that wears it (Blendity's outline is the object's). */
+void add_outline(GameObject *g, const std::vector<MaterialPtr> &mats, UnityImport &ctx) {
+  const MaterialPtr *line = nullptr;
+  int outlined = 0;
+  for (const MaterialPtr &m : mats) {
+    line = !line && m && m->import_outline > 0.0f ? &m : line;
+    outlined += m && m->import_outline > 0.0f;
+  }
+  if (!line || g->get<Outline>()) return;
+  if (outlined < (int)mats.size())  // (Blendity's outline is the object's: one width for all its slots)
+    ctx.notes.push_back(g->name + ": an outline from " + std::to_string(outlined) + " of its " + std::to_string(mats.size()) + " materials now outlines all of it");
+  Outline *o = g->add<Outline>();
+  o->thickness = (*line)->import_outline, o->color = (*line)->import_outline_color, o->world_space = true;
+  ctx.outlines++;
+}
+
+void add_renderer(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) {
   if (!g->get<MeshFilter>()) return;
   MeshRenderer *r = g->get<MeshRenderer>() ? g->get<MeshRenderer>() : g->add<MeshRenderer>();
   r->enabled = d.body.num("m_Enabled", 1.0) != 0.0;
   if (d.class_id == 137 && d.body.get("m_Bones") && !d.body.get("m_Bones")->seq.empty()) b.skinned++;
-  const auto mats = b.model_materials.find(g);
-  if (mats != b.model_materials.end() && !mats->second.empty()) r->materials = mats->second;  // (the .mat files: task 0348)
+  const std::vector<MaterialPtr> mats = renderer_materials(d, g, ctx, b);
+  if (!mats.empty()) r->materials = mats;
+  add_outline(g, mats, ctx);
 }
 
 void add_light(const UnityDoc &d, GameObject *g) {
@@ -279,6 +313,34 @@ void add_collider(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
   c->height = (float)d.body.num("m_Height", 2.0);
 }
 
+/* VRChat's components by their fields (their scripts sit in DLLs: the GUID names the DLL, not the class). */
+std::string vrchat_type(const YamlNode &b) {
+  if (b.get("VisemeBlendShapes") || b.get("ViewPosition")) return "VRCAvatarDescriptor";
+  if (b.get("pull") && b.get("spring") && b.get("rootTransform")) return "VRCPhysBone";
+  if (b.get("shapeType") && b.get("rootTransform") && (b.get("insideBounds") || b.get("bonesAsSpheres"))) return "VRCPhysBoneCollider";
+  if (b.get("shapeType") && b.get("rootTransform") && b.get("collisionTags")) return b.get("allowSelf") ? "VRCContactReceiver" : "VRCContactSender";
+  if (b.get("spawns") && b.get("RespawnHeightY")) return "VRCSceneDescriptor";
+  if (b.get("serializedProgramAsset") || b.get("programSource")) return "UdonBehaviour";
+  return "";
+}
+
+/* A VRChat PhysBone as Blendity's spring bone settings on its root (round 371): Pull (and Stiffness, in Advanced
+ * integration) hold the chain, Spring is its bounce (less damping), Gravity (-1..1, VRChat's ratio to Pull) and Radius
+ * as they are. The PhysBone stays too, for Unity. The settings move nothing until the skin's bones come in (review
+ * 371: the import makes no Bone components yet). */
+void add_physbone(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) {
+  GameObject *root = object_at(b.by_fid, d.body.file_id("rootTransform"));
+  GameObject *on = root ? root : g;
+  if (on->get<SpringBone>()) return;
+  SpringBone *s = on->add<SpringBone>();
+  const bool advanced = d.body.num("integrationType", 0.0) > 0.5;
+  s->stiffness = (float)std::clamp(advanced ? d.body.num("pull", 0.2) * 0.5 + d.body.num("stiffness", 0.2) * 0.5 : d.body.num("pull", 0.2), 0.0, 1.0);
+  s->damping = (float)std::clamp(1.0 - d.body.num("spring", 0.2), 0.0, 1.0);
+  s->gravity = (float)std::clamp(d.body.num("gravity", 0.0), -1.0, 1.0);
+  s->radius = (float)std::max(0.0, d.body.num("radius", 0.02));
+  ctx.springs++;
+}
+
 /* Anything Blendity doesn't hold: kept as it is. */
 void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
   EngineComponent *e = g->add<EngineComponent>();
@@ -286,20 +348,24 @@ void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
   e->script = d.class_id == 114 ? d.body.guid("m_Script") : std::string();
   const std::string name = !e->script.empty() && ctx.script_name ? ctx.script_name(e->script) : std::string();
   const std::string script_fid = std::to_string(d.body.file_id("m_Script"));  // (a DLL's scripts: one GUID, a fileID each)
-  e->type = !name.empty() ? name : d.class_id == 114 ? "MonoBehaviour (" + e->script + ":" + script_fid + ")" : d.type;
+  const std::string vrc = d.class_id == 114 ? vrchat_type(d.body) : std::string();
+  e->type = !name.empty() ? name : !vrc.empty() ? vrc : d.class_id == 114 ? "MonoBehaviour (" + e->script + ":" + script_fid + ")" : d.type;
   e->data = d.header + d.text;  // (the document as written, its header line and line ends unchanged)
   ctx.engine++;
 }
 
 void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) {
   switch (d.class_id) {
-    case 23: return add_renderer(d, g, b);
+    case 23: return add_renderer(d, g, ctx, b);
     case 108: return add_light(d, g), (void)ctx.lights++;
     case 20: return add_camera(d, g), (void)ctx.cameras++;
     case 64: case 65: case 135: case 136: return add_collider(d, g, ctx), (void)ctx.colliders++;
     case 33: return;  // (meshes: before)
-    case 137: return add_renderer(d, g, b);
-    default: return add_engine(d, g, ctx);
+    case 137: return add_renderer(d, g, ctx, b);
+    default:
+      if (d.class_id == 114 && vrchat_type(d.body) == "VRCPhysBone" && (!ctx.script_name || ctx.script_name(d.body.guid("m_Script")).empty()))
+        add_physbone(d, g, ctx, b);  // (and kept below, for Unity; a project's own script with such fields isn't one)
+      return add_engine(d, g, ctx);
   }
 }
 

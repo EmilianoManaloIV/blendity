@@ -894,6 +894,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Unity prefabs and scenes** (round 370): `import <file>.prefab` or `<file>.unity` (or a drop) brings the file's objects in under one root named for it: hierarchy, transforms, meshes (by GUID; an FBX's part by its .meta's fileID; Unity's built-in meshes), lights, cameras, Box / Sphere / Capsule / Mesh Colliders, and nested prefabs with their transform, name and active overrides. Other overrides stay Unity's. Every other component - scripts, Udon, VRChat's - is an Engine Component with its data as Unity wrote it. One Undo step.
 
+**Unity materials and VRChat** (round 371): a Unity .mat loads as a Blendity material by its shader - Standard and URP Lit / Unlit as PBR, lilToon / Poiyomi / MToon / UTS2 as Toon with their shade and outline (the outline on the objects), others by their main texture and colour (said). Unity's file is never written over. VRChat's PhysBones leave their settings as spring bones on their roots (moving once the skin's bones are bound - not yet by an import); the PhysBone, Avatar Descriptor, PhysBone Collider, Scene Descriptor and Udon Behaviour stay as named Engine Components.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

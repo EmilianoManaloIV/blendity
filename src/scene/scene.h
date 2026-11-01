@@ -729,6 +729,7 @@ struct EngineComponent : ComponentBase<EngineComponent> {
   std::string type;              // (the script's class, or Unity's component type: "Spin", "VRC_AvatarDescriptor", "AudioSource")
   std::string script;            // (the script's GUID, when it is one)
   std::string data;              // (the engine's own text of it: Unity's YAML document)
+  bool unique() const override { return false; }  // (an object holds many: an avatar its descriptor and its PhysBones)
   void reflect(Reflector &r) override;
 };
 
@@ -1749,6 +1750,10 @@ std::string export_obj(const std::vector<std::pair<const Mesh *, Mat4>> &meshes)
 std::string save_material_text(Material &m);
 bool load_material_text(const std::string &text, Material &m);
 MaterialPtr material_asset(const std::string &path);  // cached; null when the file is missing
+/* Round 371: a material file in another engine's format (a Unity .mat) read through this; the material is `foreign`,
+ * and save_dirty_material_assets leaves its file alone. */
+using ForeignMaterialLoader = std::function<bool(const std::string &text, const std::string &path, Material &m)>;
+void set_foreign_material_loader(ForeignMaterialLoader loader);
 MaterialPtr create_material_asset(const Material &src, const std::string &path);  // writes it, returns the shared instance
 size_t save_dirty_material_assets();  // writes the assets changed since they were saved
 /* The material assets loaded so far (path, shared instance). */

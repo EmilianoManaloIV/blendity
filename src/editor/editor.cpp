@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "../scene/curve.h"
+#include "../scene/unity_scene.h"
 #include "editor.h"
 #include "../texture/surface.h"
 #include "learn.h"
@@ -136,6 +137,7 @@ void Editor::resolve_project_paths(const std::string &near) {
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
+  set_foreign_material_loader(load_unity_material);  // (round 371: a Unity .mat loads converted)
   clear_material_assets();  // assets belong to one project
   clear_texture_assets();
   clear_clip_assets();

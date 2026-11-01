@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 371): Unity materials and VRChat's components
+
+**Asked:** Phase E's third round ("Mesh, Materials, Lights, no-code" from VRChat's Unity packages).
+
+**Added (task 0348)**
+- **Unity .mat files load as Blendity materials** (`scene/unity_material`), read by their shader:
+  - Standard and URP Lit / Unlit to PBR: colour and alpha, the main map with its tiling, normal, metal,
+    smoothness, HDR emission, Cutout / Fade / Transparent, Cull Off;
+  - lilToon, Poiyomi, MToon and UTS2 to Toon: the shade colour and texture, and the outline on the objects;
+  - Unity 5's first/second layout too;
+  - an unknown shader keeps its main texture and colour, said in the Console.
+- **Renderers wear their Unity materials** (a slot without one keeps the model's).
+- **Unity's .mat is never written over** (the material is `foreign`); edits last the session.
+- **VRChat's components by their fields** (their scripts sit in DLLs): Avatar Descriptor, PhysBone, PhysBone
+  Collider, Scene Descriptor, Udon Behaviour named as such. A PhysBone also leaves its settings as a spring bone on
+  its root (it moves once the skin's bones are bound, which an import doesn't do yet).
+- **The Opus review's fixes:**
+  - a Duplicate / Save As of a converted material is Blendity's own, so its edits are saved;
+  - Unity's gamma colours are made linear;
+  - a metallic map no longer turns metal off;
+  - only lilToon's outline shaders draw outlines;
+  - MToon's and lilToon's blend and cull modes are read;
+  - empty material slots stay in place;
+  - contacts aren't taken for colliders;
+  - a shader not in the project is said;
+  - the docs no longer claim PhysBone hair moves.
+- **Fixed from round 370:** an object held one Engine Component only, so a second script replaced the first.
+
+**Checked:** `tests_round371`:
+- Standard, URP Lit, MToon, lilToon, Unity 5's layout and an unknown shader converted;
+- an avatar with a lilToon material (Toon, its outline on the object, its .mat unchanged after a save), a PhysBone
+  as a spring bone and kept, the descriptor and Udon named;
+- the Try-it.
+
 ## 2026-10-31 (round 370): Unity prefabs and scenes into the scene
 
 **Asked:** Phase E's second round ("import Unity packages and prefab packs related to VRChat into Blendity (Mesh,

@@ -1072,6 +1072,15 @@ std::string follow_redirects(std::string key) {
 }
 }  // namespace
 
+namespace {
+ForeignMaterialLoader &foreign_loader() {
+  static ForeignMaterialLoader f;
+  return f;
+}
+}  // namespace
+
+void set_foreign_material_loader(ForeignMaterialLoader loader) { foreign_loader() = std::move(loader); }
+
 MaterialPtr material_asset(const std::string &path_in) {
   if (path_in.empty()) return nullptr;
   const std::string path = follow_redirects(asset_key(path_in));
@@ -1083,7 +1092,9 @@ MaterialPtr material_asset(const std::string &path_in) {
   if (!fs::read_file(resolve_asset_path(path), text)) return nullptr;
   auto m = std::make_shared<Material>();
   m->name = fs::stem(path);
-  if (!load_material_text(text, *m)) return nullptr;
+  const bool own = load_material_text(text, *m);
+  m->foreign = !own && foreign_loader() && foreign_loader()(text, path, *m);  // (round 371: a Unity .mat)
+  if (!own && !m->foreign) return nullptr;
   m->name = fs::stem(path);  // Unity: the file's name is the material's name (a copied file keeps the old one inside)
   m->asset_path = path;
   lib[path] = {m, m->version};
@@ -1094,6 +1105,7 @@ MaterialPtr create_material_asset(const Material &src, const std::string &path_i
   const std::string path = asset_key(path_in);
   auto m = std::make_shared<Material>(src);
   m->asset_path = path;
+  m->foreign = false, m->import_outline = 0.0f;  // (review 371: a copy of a Unity material is Blendity's own - its edits are saved)
   if (m->name.empty() || m->name == "Material") m->name = fs::stem(path);
   const std::string file = resolve_asset_path(path);
   fs::make_dirs(fs::parent(file));
@@ -1246,6 +1258,7 @@ size_t save_dirty_material_assets() {
   for (auto &kv : asset_library()) {
     AssetEntry &e = kv.second;
     if (!e.m || e.m->version == e.saved_version) continue;
+    if (e.m->foreign) continue;  // (round 371: Unity's own file stays Unity's - an edit lasts the session; Save As keeps it)
     if (fs::write_file(resolve_asset_path(kv.first), save_material_text(*e.m))) {
       e.saved_version = e.m->version;
       n++;

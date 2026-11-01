@@ -416,6 +416,7 @@ screens themselves.
 | Sculpting ignored the pen beyond its pressure: its eraser end did nothing there, its tilt nothing, and pressure mapped straight. | The eraser end inverts the brush, Use Tilt turns the plane brushes and the alpha, and a Pressure Curve shared with Paint (round 368). |
 | A Unity asset pack (.unitypackage) couldn't be opened without Unity. | Import Unity Package unpacks it into Assets/Imported/<package> on a worker, models and textures ready to use, scripts kept, GUIDs kept (round 369). |
 | A package's prefabs and scenes - the work arranged in Unity - couldn't be brought in, only their loose models. | import <file>.prefab / .unity brings the objects, transforms, meshes, lights, cameras, colliders and nested prefabs in, scripts kept as Engine Components (round 370). |
+| An imported avatar came in grey: its Unity materials (lilToon, Poiyomi) unread, its PhysBones lost. | Unity materials converted by shader (gamma colours made linear), toon outlines on the objects, PhysBones' settings kept as spring bones - they move once the skin's bones are bound (round 371). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing

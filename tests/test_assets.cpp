@@ -14,6 +14,7 @@
 #include "../src/scene/audio.h"
 #include "../src/scene/unity_package.h"
 #include "../src/scene/unity_scene.h"
+#include "../src/scene/unity_material.h"
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -8763,6 +8764,163 @@ static void tests_round370() {
   });
 }
 
+/* ---------------------------------------------------------------- round 371: Unity materials and VRChat's components (task 0348) */
+namespace r371 {
+std::string mat(const std::string &shader, const std::string &tex, const std::string &floats, const std::string &colors, const std::string &keywords = "") {
+  return "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  serializedVersion: 6\n  m_Name: Skin\n  m_Shader: " + shader + "\n  m_ShaderKeywords: " + keywords +
+         "\n  m_SavedProperties:\n    serializedVersion: 3\n    m_TexEnvs:\n" + tex + "    m_Floats:\n" + floats + "    m_Colors:\n" + colors;
+}
+const std::function<std::string(const std::string &)> kTex = [](const std::string &g) { return g.empty() ? std::string() : "Assets/T/" + g + ".png"; };
+std::function<std::string(const std::string &, int64_t)> shader(const std::string &name) {
+  return [name](const std::string &, int64_t) { return name; };
+}
+}  // namespace r371
+
+static void tests_round371() {
+  test("Unity materials (round 371): Standard's colour, alpha, tiled main map, normal, metal, smoothness, Cutout and HDR emission; URP Lit's transparent, double-sided; MToon's shade and outline; lilToon by name; Unity 5's first/second layout; an unknown shader keeping its main texture", [] {
+    using namespace r371;
+    Material m;
+    UnityMaterialInfo info;
+    const std::string standard = mat("{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}",
+        "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: albedo, type: 3}\n        m_Scale: {x: 2, y: 3}\n        m_Offset: {x: 0.5, y: 0}\n"
+        "    - _BumpMap:\n        m_Texture: {fileID: 2800000, guid: normal, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n",
+        "    - _Metallic: 0.7\n    - _Glossiness: 0.8\n    - _Mode: 1\n    - _Cutoff: 0.3\n    - _BumpScale: 0.5\n",
+        "    - _Color: {r: 1, g: 0.5, b: 0.25, a: 0.75}\n    - _EmissionColor: {r: 2, g: 0, b: 0, a: 1}\n", "_EMISSION _NORMALMAP");
+    CHECK(unity_material(standard, kTex, shader("Standard"), m, info) && info.shader == "Standard" && info.known);
+    std::printf("    Standard: colour (%g %g %g) alpha %g, map %s x(%g %g) +(%g), normal %s %g, metal %g rough %.2f, surface %d clip %g, emission (%g %g %g) x %g\n",
+                m.base_color.x, m.base_color.y, m.base_color.z, m.alpha, m.base_map.path.c_str(), m.tiling.x, m.tiling.y, m.offset.x, m.normal_map.path.c_str(),
+                m.normal_strength, m.metallic, m.roughness, m.surface, m.alpha_clip, m.emission.x, m.emission.y, m.emission.z, m.emission_strength);
+    CHECK(m.name == "Skin" && std::fabs(m.base_color.y - srgb_to_linear(0.5f)) < 1e-5f && m.alpha == 0.75f && m.base_map.path == "Assets/T/albedo.png" && m.tiling.x == 2.0f && m.tiling.y == 3.0f && m.offset.x == 0.5f);
+    CHECK(m.normal_map.path == "Assets/T/normal.png" && m.normal_strength == 0.5f && std::fabs(m.metallic - 0.7f) < 1e-6f && std::fabs(m.roughness - 0.2f) < 1e-5f);
+    CHECK(m.surface == (int)MaterialSurface::Cutout && std::fabs(m.alpha_clip - 0.3f) < 1e-6f && m.emission.x == 1.0f && std::fabs(m.emission_strength - std::pow(2.0f, 2.2f)) < 1e-4f &&
+          m.shading_model == 0);  // (Unity's colours are gamma: linear here, an HDR 2 by the same curve - review 371)
+    /* Review 371: a metallic map - metal from its red, the slider (0 in the file) ignored; smoothness by _GlossMapScale. */
+    Material mm;
+    CHECK(unity_material(mat("{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}", "    - _MetallicGlossMap:\n        m_Texture: {fileID: 2800000, guid: metal, type: 3}\n",
+                             "    - _Metallic: 0\n    - _Glossiness: 0.5\n    - _GlossMapScale: 0.9\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex, shader("Standard"), mm, info));
+    CHECK(mm.metallic == 1.0f && mm.metallic_map.path == "Assets/T/metal.png" && std::fabs(mm.roughness - 0.1f) < 1e-5f);
+    Material u;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: 933532a4fcc9baf4fa0491de14d08ed7, type: 3}", "    - _BaseMap:\n        m_Texture: {fileID: 2800000, guid: base, type: 3}\n",
+                             "    - _Smoothness: 0.25\n    - _Surface: 1\n    - _Cull: 0\n", "    - _BaseColor: {r: 0.2, g: 0.4, b: 0.6, a: 0.5}\n"),
+                         kTex, shader("Lit"), u, info) && info.shader == "URP Lit");
+    CHECK(u.base_map.path == "Assets/T/base.png" && std::fabs(u.roughness - 0.75f) < 1e-5f && u.surface == (int)MaterialSurface::Transparent && u.double_sided && u.alpha == 0.5f);
+    Material t;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: whatever, type: 3}", "    - _ShadeTexture:\n        m_Texture: {fileID: 2800000, guid: shade, type: 3}\n",
+                             "    - _OutlineWidth: 0.5\n    - _OutlineWidthMode: 1\n", "    - _ShadeColor: {r: 0.6, g: 0.5, b: 0.7, a: 1}\n    - _OutlineColor: {r: 0.1, g: 0, b: 0, a: 1}\n"),
+                         kTex, shader("MToon"), t, info) && info.shader == "MToon");
+    CHECK(t.shading_model == 1 && std::fabs(t.toon_shadow.z - srgb_to_linear(0.7f)) < 1e-5f && t.shade_map.path == "Assets/T/shade.png" && std::fabs(info.outline_width - 0.005f) < 1e-6f &&
+          std::fabs(info.outline_color.x - srgb_to_linear(0.1f)) < 1e-5f);
+    /* MToon's blend and cull modes (review 371), and no outline without its mode. */
+    Material mt;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _BlendMode: 1\n    - _Cutoff: 0.4\n    - _CullMode: 0\n    - _OutlineWidth: 0.5\n",
+                             "    - _ShadeColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}\n"), kTex, shader("VRM/MToon"), mt, info));
+    CHECK(mt.surface == (int)MaterialSurface::Cutout && std::fabs(mt.alpha_clip - 0.4f) < 1e-6f && mt.double_sided && info.outline_width == 0.0f);
+    Material l;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _OutlineWidth: 0.08\n", "    - _ShadowColor: {r: 0.8, g: 0.7, b: 0.9, a: 1}\n"),
+                         kTex, shader("Hidden/lilToonOutline"), l, info) && info.shader == "lilToon" && l.shading_model == 1 && std::fabs(info.outline_width - 0.0008f) < 1e-7f);
+    CHECK(std::fabs(l.toon_shadow.x - std::min(1.0f, srgb_to_linear(0.8f) / l.base_color.x)) < 1e-5f);  // (no shade texture: the ratio to the lit colour)
+    Material plain;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _OutlineWidth: 0.08\n    - _lilToonVersion: 40\n", ""), kTex, shader("lilToon"), plain, info) &&
+          info.shader == "lilToon" && info.outline_width == 0.0f);  // (review 371: only lilToon's outline shaders draw one)
+    /* A copy of a converted Unity material is Blendity's own (review 371): its edits are saved. */
+    auto foreign = std::make_shared<Material>(plain);
+    foreign->foreign = true;
+    const std::string copy_path = "Assets/Materials/R371 Copy.mat";
+    MaterialPtr copy = create_material_asset(*foreign, copy_path);
+    CHECK(copy && !copy->foreign);
+    if (copy) {
+      copy->base_color = Vec3(0.1f, 0.2f, 0.3f);
+      copy->touch();
+      save_dirty_material_assets();
+      std::string text;
+      fs::read_file(resolve_asset_path(copy_path), text);
+      Material back;
+      CHECK(load_material_text(text, back) && std::fabs(back.base_color.z - 0.3f) < 1e-5f);
+      std::remove(resolve_asset_path(copy_path).c_str());
+    }
+    const std::string old = "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Old\n  m_Shader: {fileID: 46, guid: 0000000000000000f000000000000000, type: 0}\n"
+                            "  m_SavedProperties:\n    m_TexEnvs:\n    - first:\n        name: _MainTex\n      second:\n        m_Texture: {fileID: 2800000, guid: oldtex, type: 3}\n"
+                            "        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n    m_Floats:\n    - first:\n        name: _Metallic\n      second: 0.4\n"
+                            "    m_Colors:\n    - first:\n        name: _Color\n      second: {r: 0, g: 1, b: 0, a: 1}\n";
+    Material o;
+    CHECK(unity_material(old, kTex, shader("Standard"), o, info) && o.base_map.path == "Assets/T/oldtex.png" && std::fabs(o.metallic - 0.4f) < 1e-6f && o.base_color.y == 1.0f);
+    Material x;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: main, type: 3}\n", "", "    - _Color: {r: 1, g: 0, b: 0, a: 1}\n"),
+                         kTex, shader("Custom/MyWater"), x, info) && !info.known && x.base_map.path == "Assets/T/main.png" && x.base_color.x == 1.0f);
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _SomethingElse: 1\n", ""), kTex, shader(""), x, info) && !info.known);  // (not in the project: said)
+    CHECK(!unity_material("blendity_material 1\n", kTex, shader(""), x, info));
+  });
+  test("Unity materials and VRChat (round 371): an avatar's renderer wears its Unity .mat converted (lilToon's outline shader: Toon with its outline on the object), the .mat never written over; a PhysBone's settings kept as a spring bone on its root and the PhysBone kept for Unity; the Avatar Descriptor and an Udon behaviour named and kept", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R371");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    std::vector<uint32_t> px(4, 0xFFFFCCAAu);
+    CHECK(write_png(fs::join(dir, "skin.png"), px.data(), 2, 2, 2));
+    const std::string mat_text = r371::mat("{fileID: 4800000, guid: cccc0000cccc0000cccc0000cccc0005, type: 3}",
+        "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: cccc0000cccc0000cccc0000cccc0002, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n",
+        "    - _OutlineWidth: 0.1\n    - _lilToonVersion: 40\n", "    - _Color: {r: 1, g: 0.9, b: 0.8, a: 1}\n    - _OutlineColor: {r: 0.2, g: 0.1, b: 0.1, a: 1}\n");
+    CHECK(fs::write_file(fs::join(dir, "Skin.mat"), mat_text));
+    CHECK(fs::write_file(fs::join(dir, "lts_o.shader"), "Shader \"Hidden/lilToonOutline\" {}\n"));
+    const std::string scene = std::string("%YAML 1.1\n") +
+        "--- !u!1 &1\nGameObject:\n  m_Name: Avatar\n--- !u!4 &2\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n"
+        "--- !u!33 &3\nMeshFilter:\n  m_GameObject: {fileID: 1}\n  m_Mesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}\n"
+        "--- !u!23 &4\nMeshRenderer:\n  m_GameObject: {fileID: 1}\n  m_Materials:\n  - {fileID: 2100000, guid: cccc0000cccc0000cccc0000cccc0001, type: 2}\n"
+        "--- !u!114 &5\nMonoBehaviour:\n  m_GameObject: {fileID: 1}\n  m_Script: {fileID: 542108242, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}\n"
+        "  ViewPosition: {x: 0, y: 1.6, z: 0.05}\n  lipSync: 3\n  VisemeBlendShapes:\n  - vrc.v_sil\n  - vrc.v_pp\n"
+        "--- !u!1 &10\nGameObject:\n  m_Name: Hair\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 2}\n"
+        "--- !u!114 &12\nMonoBehaviour:\n  m_GameObject: {fileID: 1}\n  m_Script: {fileID: -1427037861, guid: 2a2c05204084d904aa4945ccff20d8e5, type: 3}\n"
+        "  rootTransform: {fileID: 11}\n  pull: 0.4\n  spring: 0.3\n  stiffness: 0.2\n  gravity: 0.5\n  radius: 0.03\n"
+        "--- !u!114 &13\nMonoBehaviour:\n  m_GameObject: {fileID: 10}\n  m_Script: {fileID: 1, guid: 45115577ef41a5b4ca741ed302693907, type: 3}\n"
+        "  serializedProgramAsset: {fileID: 11400000, guid: abc, type: 2}\n";
+    CHECK(fs::write_file(fs::join(dir, "R371Kit.prefab"), scene));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"),
+                         "cccc0000cccc0000cccc0000cccc0001\tAssets/Skin.mat\tAssets/Imported/R371/Skin.mat\n"
+                         "cccc0000cccc0000cccc0000cccc0002\tAssets/skin.png\tAssets/Imported/R371/skin.png\n"
+                         "cccc0000cccc0000cccc0000cccc0005\tAssets/lts_o.shader\tAssets/Imported/R371/lts_o.shader\n"));
+    ed.command("import " + fs::join(dir, "R371Kit.prefab"));
+    GameObject *avatar = ed.scene().find_by_name("Avatar"), *hair = ed.scene().find_by_name("Hair");
+    CHECK(avatar && hair);
+    if (!avatar || !hair) return;
+    const MeshRenderer *r = avatar->get<MeshRenderer>();
+    const MaterialPtr skin = r && !r->materials.empty() ? r->materials[0] : nullptr;
+    const Outline *line = avatar->get<Outline>();
+    std::printf("    the skin: %s, Toon %d, map %s, foreign %d; outline %s %.4f m\n", skin ? skin->name.c_str() : "-", skin ? skin->shading_model : -1,
+                skin ? skin->base_map.path.c_str() : "-", skin ? (int)skin->foreign : -1, line ? "on" : "off", line ? line->thickness : 0.0f);
+    CHECK(skin && skin->foreign && skin->shading_model == 1 && skin->base_map.path == "Assets/Imported/R371/skin.png" && std::fabs(skin->base_color.y - srgb_to_linear(0.9f)) < 1e-5f);
+    CHECK(line && std::fabs(line->thickness - 0.001f) < 1e-6f && std::fabs(line->color.x - srgb_to_linear(0.2f)) < 1e-5f);
+    if (!skin) return;
+    /* An edit to the converted material never goes into Unity's file. */
+    skin->base_color = Vec3(0.0f, 0.0f, 1.0f);
+    skin->touch();
+    save_dirty_material_assets();
+    std::string after;
+    fs::read_file(fs::join(dir, "Skin.mat"), after);
+    CHECK(after == mat_text);
+    /* VRChat's components: the PhysBone a spring bone on Hair (and kept), the descriptor and the Udon behaviour named. */
+    const SpringBone *spring = hair->get<SpringBone>();
+    std::vector<std::string> kinds;
+    for (GameObject *g : {avatar, hair})
+      for (const auto &c : g->components)
+        if (const EngineComponent *e = dynamic_cast<const EngineComponent *>(c.get())) kinds.push_back(e->type);
+    std::string all;
+    for (const std::string &k : kinds) all += k + " ";
+    std::printf("    spring bone on Hair: %s (stiffness %.2f, damping %.2f, gravity %.2f, radius %.3f); kept: %s\n", spring ? "yes" : "no", spring ? spring->stiffness : 0.0f,
+                spring ? spring->damping : 0.0f, spring ? spring->gravity : 0.0f, spring ? spring->radius : 0.0f, all.c_str());
+    CHECK(spring && std::fabs(spring->stiffness - 0.4f) < 1e-5f && std::fabs(spring->damping - 0.7f) < 1e-5f && spring->gravity == 0.5f && std::fabs(spring->radius - 0.03f) < 1e-6f);
+    CHECK(all.find("VRCAvatarDescriptor") != std::string::npos && all.find("VRCPhysBone") != std::string::npos && all.find("UdonBehaviour") != std::string::npos);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("the lesson's Try-it (round 371): window Materials - where a package's converted Unity materials are listed", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("window Materials");
+    CHECK(load_unity_material("not yaml", "x.mat", *std::make_shared<Material>()) == false);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -9146,4 +9304,5 @@ void run_assets_tests() {
   tests_round367();
   tests_round369();
   tests_round370();
+  tests_round371();
 }

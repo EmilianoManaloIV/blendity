@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Unity materials into Blendity's (round 371, task 0348): see unity_material.h. The property names are the shaders'
+// own: Unity's Standard (_Color, _MainTex, _BumpMap, _Metallic, _Glossiness, _Mode, _Cutoff, _EmissionColor), URP Lit
+// (_BaseColor, _BaseMap, _Smoothness, _Surface, _AlphaClip), MToon (_ShadeColor, _ShadeTexture, _OutlineWidth,
+// _OutlineColor), lilToon (_ShadowColor, _OutlineWidth, _OutlineColor), Poiyomi (_ShadowColor, _LineWidth) and UTS2
+// (_1st_ShadeColor, _1st_ShadeMap, _Outline_Width, _Outline_Color).
+#include "unity_material.h"
+
+#include "unity_yaml.h"
+#include "../image/image.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <map>
+
+namespace bl {
+
+namespace {
+
+/* Unity writes material colours in gamma (sRGB), whatever the project's colour space; Blendity's are linear (review
+ * 371). An HDR channel past 1 by the same curve's power. */
+float linear_of(float c) { return c <= 1.0f ? srgb_to_linear(std::max(0.0f, c)) : std::pow(c, 2.2f); }
+Vec3 linear_of(Vec3 c) { return Vec3(linear_of(c.x), linear_of(c.y), linear_of(c.z)); }
+
+struct TexEnv {
+  std::string guid;
+  Vec3 scale{1, 1, 1}, offset{0, 0, 0};
+};
+
+/* The saved properties, whichever way Unity wrote them: "- _MainTex: {...}" (2017.3+) or "- first: {name: _MainTex}
+ * second: {...}" (5.x). */
+struct Props {
+  std::map<std::string, TexEnv> tex;
+  std::map<std::string, double> floats;
+  std::map<std::string, Vec3> colors;
+  std::map<std::string, double> alphas;
+  std::vector<std::string> names;
+};
+
+void for_each_prop(const YamlNode *list, const std::function<void(const std::string &, const YamlNode &)> &f) {
+  for (const YamlNode &e : list ? list->seq : std::vector<YamlNode>()) {
+    if (const YamlNode *first = e.get("first")) {
+      const YamlNode *second = e.get("second");
+      if (second) f(first->str("name"), *second);
+      continue;
+    }
+    for (const auto &[k, v] : e.map) f(k, v);
+  }
+}
+
+Props read_props(const YamlNode &body) {
+  Props p;
+  const YamlNode *saved = body.get("m_SavedProperties");
+  if (!saved) return p;
+  for_each_prop(saved->get("m_TexEnvs"), [&](const std::string &n, const YamlNode &v) {
+    TexEnv t;
+    t.guid = v.guid("m_Texture");
+    if (const YamlNode *s = v.get("m_Scale")) t.scale = Vec3((float)s->num("x", 1.0), (float)s->num("y", 1.0), 1.0f);
+    if (const YamlNode *o = v.get("m_Offset")) t.offset = Vec3((float)o->num("x"), (float)o->num("y"), 0.0f);
+    p.tex[n] = t, p.names.push_back(n);
+  });
+  for_each_prop(saved->get("m_Floats"), [&](const std::string &n, const YamlNode &v) {
+    p.floats[n] = std::atof(v.value.c_str()), p.names.push_back(n);
+  });
+  for_each_prop(saved->get("m_Colors"), [&](const std::string &n, const YamlNode &v) {
+    p.colors[n] = linear_of(Vec3((float)v.num("r", 1.0), (float)v.num("g", 1.0), (float)v.num("b", 1.0)));
+    p.alphas[n] = v.num("a", 1.0);
+    p.names.push_back(n);
+  });
+  return p;
+}
+
+double prop(const Props &p, const char *name, double def) {
+  const auto it = p.floats.find(name);
+  return it == p.floats.end() ? def : it->second;
+}
+
+/* The first of `names` that's there: a colour (and its alpha), or a texture's project path. */
+bool color_of(const Props &p, std::initializer_list<const char *> names, Vec3 &c, double *alpha = nullptr) {
+  for (const char *n : names) {
+    const auto it = p.colors.find(n);
+    if (it == p.colors.end()) continue;
+    c = it->second;
+    if (alpha) *alpha = p.alphas.at(n);
+    return true;
+  }
+  return false;
+}
+
+const TexEnv *tex_of(const Props &p, std::initializer_list<const char *> names) {
+  for (const char *n : names) {
+    const auto it = p.tex.find(n);
+    if (it != p.tex.end() && !it->second.guid.empty()) return &it->second;
+  }
+  return nullptr;
+}
+
+void set_tex(TextureRef &ref, const TexEnv *t, const std::function<std::string(const std::string &)> &texture) {
+  if (!t) return;
+  const std::string path = texture(t->guid);
+  if (!path.empty()) ref = TextureRef{path, false};
+}
+
+bool has(const std::vector<std::string> &v, const char *s) { return std::find(v.begin(), v.end(), s) != v.end(); }
+
+/* The shader keywords on, both ways Unity keeps them (m_ShaderKeywords text; m_ValidKeywords, 2021+). */
+std::string shader_keywords(const YamlNode &body) {
+  std::string s = body.str("m_ShaderKeywords") + " ";
+  const YamlNode *valid = body.get("m_ValidKeywords");
+  for (const YamlNode &k : valid ? valid->seq : std::vector<YamlNode>()) s += k.value + " ";
+  return s;
+}
+
+/* The colour, its texture and tiling, normal, metal, smoothness, emission, surface: every family's base. */
+void read_base(const Props &p, const YamlNode &body, const std::function<std::string(const std::string &)> &texture, Material &m) {
+  double alpha = 1.0;
+  Vec3 c;
+  if (color_of(p, {"_BaseColor", "_Color"}, c, &alpha)) m.base_color = c, m.alpha = (float)alpha;
+  const TexEnv *main = tex_of(p, {"_BaseMap", "_MainTex"});
+  set_tex(m.base_map, main, texture);
+  if (main) m.tiling = main->scale, m.offset = main->offset;
+  set_tex(m.normal_map, tex_of(p, {"_BumpMap", "_NormalMap"}), texture);
+  m.normal_strength = (float)prop(p, "_BumpScale", 1.0);
+  m.metallic = (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
+  m.roughness = (float)std::clamp(1.0 - prop(p, "_Smoothness", prop(p, "_Glossiness", 0.5)), 0.0, 1.0);
+  /* A metallic map: Unity takes metal from its red and ignores the slider (left at 0 in the file); smoothness from its
+   * alpha times _GlossMapScale (Standard) or _Smoothness (URP) - review 371. The alpha's smoothness isn't carried. */
+  const TexEnv *metal = tex_of(p, {"_MetallicGlossMap"});
+  set_tex(m.metallic_map, metal, texture);
+  if (metal) m.metallic = 1.0f, m.roughness = (float)std::clamp(1.0 - prop(p, "_GlossMapScale", prop(p, "_Smoothness", 1.0)), 0.0, 1.0);
+  /* Emission: on when its keyword is (Unity always keeps a colour); HDR colour as a colour and a strength. */
+  const std::string keywords = shader_keywords(body);
+  Vec3 e;
+  const TexEnv *emap = tex_of(p, {"_EmissionMap"});
+  if ((keywords.find("_EMISSION") != std::string::npos || emap) && color_of(p, {"_EmissionColor"}, e)) {
+    const float s = std::max({e.x, e.y, e.z});
+    m.emission = s > 0.0f ? e / s : Vec3(1.0f), m.emission_strength = s;
+    set_tex(m.emission_map, emap, texture);
+  }
+  /* The surface: Standard's _Mode (Opaque, Cutout, Fade, Transparent), URP's _Surface and _AlphaClip. */
+  const int mode = (int)prop(p, "_Mode", -1.0);
+  const bool urp_transparent = prop(p, "_Surface", 0.0) > 0.5, clip = prop(p, "_AlphaClip", 0.0) > 0.5 || mode == 1;
+  m.surface = clip ? (int)MaterialSurface::Cutout : mode >= 2 || urp_transparent ? (int)MaterialSurface::Transparent : (int)MaterialSurface::Opaque;
+  m.alpha_clip = (float)prop(p, "_Cutoff", 0.5);
+  m.double_sided = prop(p, "_Cull", 2.0) < 0.5 || prop(p, "_CullMode", 2.0) < 0.5;  // (Cull Off; MToon's and UTS2's _CullMode)
+}
+
+/* MToon's, lilToon's and UTS2's own blend modes (review 371: cutout lashes came in as solid quads). */
+void read_blend(const Props &p, const std::string &family, Material &m) {
+  const int blend = (int)prop(p, family == "lilToon" ? "_TransparentMode" : "_BlendMode", 0.0);
+  if (family != "MToon" && family != "lilToon") return;
+  if (blend == 1) m.surface = (int)MaterialSurface::Cutout, m.alpha_clip = (float)prop(p, "_Cutoff", 0.5);
+  else if (blend >= 2) m.surface = (int)MaterialSurface::Transparent;
+}
+
+void read_outline(const Props &p, const std::string &family, UnityMaterialInfo &info);
+
+/* The toon families: the shade colour and texture, the outline. */
+void read_toon(const Props &p, const std::string &family, const std::function<std::string(const std::string &)> &texture, Material &m, UnityMaterialInfo &info) {
+  m.shading_model = 1;
+  /* The shade colour: the shadow side's own colour - with a shade texture its tint, without one Blendity's toon shadow
+   * as its ratio to the lit colour (review 371; as the VRM reader does). MToon's toony and shift as its edge. */
+  Vec3 shade;
+  set_tex(m.shade_map, tex_of(p, {"_ShadeTexture", "_1st_ShadeMap", "_ShadowColorTex"}), texture);
+  const bool shade_found = color_of(p, {"_ShadeColor", "_1st_ShadeColor", "_ShadowColor"}, shade);
+  for (int k = 0; k < 3 && shade_found; k++)
+    m.toon_shadow[k] = !m.shade_map.empty() ? shade[k] : m.base_color[k] > 1e-3f ? std::clamp(shade[k] / m.base_color[k], 0.0f, 1.0f) : 1.0f;
+  if (family == "MToon") {
+    m.toon_softness = (float)std::clamp(1.0 - prop(p, "_ShadeToony", 0.9), 0.005, 0.5);
+    m.toon_threshold = (float)std::clamp(-prop(p, "_ShadeShift", 0.0), 0.0, 0.9);
+  }
+  read_blend(p, family, m);
+  read_outline(p, family, info);
+}
+
+/* The outline (an Outline on the objects that wear it), in metres:
+ * - MToon: by _OutlineWidthMode (0 none, 1 world centimetres, 2 screen: 3 mm, as the VRM reader takes it); MToon10
+ *   (VRM 1.0) gives metres;
+ * - lilToon: only its outline shaders draw one (lts_o, "Hidden/lilToonOutline"; its other materials keep the width
+ *   unused - review 371), in centimetres;
+ * - UTS2: _Outline_Width in millimetres;
+ * - Poiyomi: _LineWidth taken as centimetres (an approximation). */
+void read_outline(const Props &p, const std::string &family, UnityMaterialInfo &info) {
+  std::string name = info.shader_name;
+  for (char &c : name) c = (char)std::tolower((unsigned char)c);
+  const int mode = (int)prop(p, "_OutlineWidthMode", 0.0);
+  const bool mtoon10 = name.find("mtoon10") != std::string::npos;
+  double metres = 0.0;
+  if (family == "MToon") metres = mode == 1 ? prop(p, "_OutlineWidth", 0.0) * (mtoon10 ? 1.0 : 0.01) : mode == 2 ? 0.003 : 0.0;
+  if (family == "lilToon" && (name.find("outline") != std::string::npos || (name.size() > 2 && name.compare(name.size() - 2, 2, "_o") == 0)))
+    metres = prop(p, "_OutlineWidth", 0.0) * 0.01;
+  if (family == "UTS2") metres = prop(p, "_Outline_Width", 0.0) * 0.001;
+  if (family == "Poiyomi") metres = prop(p, "_LineWidth", 0.0) * 0.01;
+  if (metres <= 0.0) return;
+  info.outline_width = (float)metres;
+  Vec3 oc;
+  if (color_of(p, {"_OutlineColor", "_Outline_Color"}, oc)) info.outline_color = oc;
+}
+
+}  // namespace
+
+std::string unity_shader_family(const std::string &shader_name, const std::vector<std::string> &properties) {
+  std::string n = shader_name;
+  for (char &c : n) c = (char)std::tolower((unsigned char)c);
+  if (n.find("liltoon") != std::string::npos || has(properties, "_lilToonVersion")) return "lilToon";
+  if (n.find("poiyomi") != std::string::npos || has(properties, "_ShaderOptimizerEnabled")) return "Poiyomi";
+  if (n.find("mtoon") != std::string::npos || (has(properties, "_ShadeColor") && has(properties, "_ShadeTexture"))) return "MToon";
+  if (n.find("toonshader") != std::string::npos || n.find("uts") == 0 || has(properties, "_1st_ShadeColor")) return "UTS2";
+  if (n.find("unlit") != std::string::npos) return "Unlit";
+  if (n == "standard" || n == "standard (specular setup)") return "Standard";
+  if (n == "lit" || n == "simplelit" || n == "simple lit" || n.find("universal render pipeline/lit") != std::string::npos) return "URP Lit";
+  /* A shader not in the project (Poiyomi installed apart, say): Standard only when its properties are Standard's -
+   * else unknown, and said (review 371). */
+  if (shader_name.empty() && (has(properties, "_Glossiness") || has(properties, "_Mode"))) return "Standard";
+  return shader_name.empty() ? std::string("(a shader not in the project)") : shader_name;
+}
+
+bool unity_material(const std::string &yaml, const std::function<std::string(const std::string &guid)> &texture,
+                    const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, Material &m, UnityMaterialInfo &info) {
+  info = UnityMaterialInfo{};  // (a fresh account each material)
+  std::vector<UnityDoc> docs;
+  std::string why;
+  if (!parse_unity_yaml(yaml, docs, why)) return false;
+  const UnityDoc *mat = nullptr;
+  for (const UnityDoc &d : docs) mat = d.class_id == 21 && !mat ? &d : mat;
+  if (!mat) return false;
+  const Props p = read_props(mat->body);
+  info.shader_name = shader_name(mat->body.guid("m_Shader"), mat->body.file_id("m_Shader"));
+  info.shader = unity_shader_family(info.shader_name, p.names);
+  const std::string name = mat->body.str("m_Name");
+  if (!name.empty()) m.name = name;
+  read_base(p, mat->body, texture, m);
+  const bool toon = info.shader == "lilToon" || info.shader == "Poiyomi" || info.shader == "MToon" || info.shader == "UTS2";
+  if (toon) read_toon(p, info.shader, texture, m, info);
+  m.unlit = info.shader == "Unlit";
+  info.known = toon || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit";
+  m.touch();
+  return true;
+}
+
+}  // namespace bl
