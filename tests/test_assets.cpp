@@ -8921,6 +8921,152 @@ static void tests_round371() {
   });
 }
 
+/* ---------------------------------------------------------------- round 372: the way back to Unity (task 0349) */
+static void tests_round372() {
+  test("Unity packages written (round 372): deflate round-trips text (smaller) and random bytes (stored), gzip's CRC is CRC-32's, tar keeps a 300-byte name and folders; Unity's string quoting", [] {
+    std::string text;
+    for (int i = 0; i < 2000; i++) text += "--- !u!4 &" + std::to_string(400 + i) + "\nTransform:\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n";
+    std::string random(70000, '\0');
+    uint32_t s = 12345;
+    for (char &c : random) s = s * 1664525u + 1013904223u, c = (char)(s >> 24);
+    for (const std::string *d : {&text, &random}) {
+      std::string back, why;
+      const std::string gz = gzip(*d);
+      CHECK(gunzip(gz, back, why) && back == *d);
+      std::printf("    %zu bytes -> %zu gzip'd\n", d->size(), gz.size());
+    }
+    std::string empty_back, why;
+    CHECK(gunzip(gzip(""), empty_back, why) && empty_back.empty());
+    CHECK(gzip(text).size() < text.size() / 4 && gzip(random).size() < random.size() + 64);
+    CHECK(crc32("123456789") == 0xCBF43926u);
+    std::string tar;
+    const std::string longname = "aaaa/" + std::string(140, 'b') + "/" + std::string(150, 'c') + ".txt";
+    tar_append(tar, "guid/", "", true);
+    tar_append(tar, longname, "long");
+    tar_append(tar, "guid/pathname", "Assets/x.png");
+    std::vector<TarEntry> e;
+    CHECK(read_tar(tar + std::string(1024, '\0'), e, why) && e.size() == 3 && e[0].dir && e[1].name == longname && e[1].data == "long" && e[2].data == "Assets/x.png");
+    const std::string g1 = stable_unity_guid("Assets/Imported/K", "Assets/a.png");
+    CHECK(g1.size() == 32 && g1 == stable_unity_guid("Assets/Imported/K", "Assets/a.png") && g1 != stable_unity_guid("Assets/Imported/K", "Assets/b.png"));
+    /* Review 372: past a megabyte, several blocks in one bit stream - compressible, and text, random and text again. */
+    std::string big, mixed;
+    while (big.size() < (3u << 20)) big += "--- !u!4 &" + std::to_string(big.size()) + "\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n";
+    mixed = big.substr(0, 1300000) + random + random + random.substr(0, 50000) + std::string(900000, 'z') + big.substr(0, 1200000);
+    for (const std::string *d : {&big, &mixed}) {
+      std::string back, w2;
+      const std::string gz = gzip(*d);
+      std::printf("    %zu bytes in %zu block(s) -> %zu gzip'd\n", d->size(), d->size() / (1u << 20) + 1, gz.size());
+      CHECK(gunzip(gz, back, w2) && back == *d);
+      if (const char *dump = std::getenv("BLENDITY_DUMP_GZIP")) {  // (opt-in: an independent reader - Python's gzip - checks these)
+        fs::write_file(fs::join(dump, d == &big ? "big.gz" : "mixed.gz"), gz);
+        fs::write_file(fs::join(dump, d == &big ? "big.raw" : "mixed.raw"), *d);
+      }
+    }
+    CHECK(unity_yaml_string("Cube (1)") == "Cube (1)" && unity_yaml_string("a: b") == "\"a: b\"" && unity_yaml_string("- x") == "\"- x\"");
+    CHECK(unity_yaml_string("\xE7\x9C\x8B\xE6\x9D\xBF") == "\"\\u770B\\u677F\"" && unity_yaml_string("\xF0\x9F\x98\x80") == "\"\\uD83D\\uDE00\"");
+    CHECK(parse_yaml("m_Name: " + unity_yaml_string("\xE7\x9C\x8B\xE6\x9D\xBF: sign") + "\n").str("m_Name") == "\xE7\x9C\x8B\xE6\x9D\xBF: sign");
+  });
+  test("the way back to Unity (round 372): a package imported, its prefab brought in, an object moved and renamed, a file added - export unitypackage writes the same GUIDs, the changed lines only (CRLF kept), the script byte for byte, the new file under a GUID its path always gives; a duplicate doesn't overwrite its original; the project's prefab untouched", [] {
+    const std::string kit = std::string("%YAML 1.1\r\n%TAG !u! tag:unity3d.com,2011:\r\n") +
+        "--- !u!1 &100\r\nGameObject:\r\n  m_Component:\r\n  - component: {fileID: 400}\r\n  - component: {fileID: 11400}\r\n  m_Name: Board\r\n  m_IsActive: 1\r\n"
+        "--- !u!4 &400\r\nTransform:\r\n  m_GameObject: {fileID: 100}\r\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\r\n  m_LocalPosition: {x: 0, y: 0, z: 0}\r\n"
+        "  m_LocalScale: {x: 1, y: 1, z: 1}\r\n  m_Children: []\r\n  m_Father: {fileID: 0}\r\n"
+        "--- !u!114 &11400\r\nMonoBehaviour:\r\n  m_GameObject: {fileID: 100}\r\n  m_Script: {fileID: 11500000, guid: dddd0000dddd0000dddd0000dddd0003, type: 3}\r\n  speed: 2\r\n";
+    std::vector<UnityAsset> in(3);
+    in[0].guid = "dddd0000dddd0000dddd0000dddd0001", in[0].pathname = "Assets/Kit", in[0].folder = true;
+    in[0].meta = "fileFormatVersion: 2\nguid: dddd0000dddd0000dddd0000dddd0001\nfolderAsset: yes\n";
+    in[1].guid = "dddd0000dddd0000dddd0000dddd0002", in[1].pathname = "Assets/Kit/Sign.prefab", in[1].data = kit, in[1].has_data = true;
+    in[1].meta = "fileFormatVersion: 2\nguid: dddd0000dddd0000dddd0000dddd0002\nPrefabImporter:\n  userData: kept\n";
+    in[2].guid = "dddd0000dddd0000dddd0000dddd0003", in[2].pathname = "Assets/Kit/Spin.cs", in[2].data = "class Spin {}\n", in[2].has_data = true;
+    in[2].meta = "fileFormatVersion: 2\nguid: dddd0000dddd0000dddd0000dddd0003\nMonoImporter:\n  userData: \n";
+    const std::string dir = fs::join(test_dir(), "r372");
+    fs::make_dirs(dir);
+    const std::string pkg = fs::join(dir, "R372.unitypackage"), out = fs::join(dir, "R372 back.unitypackage");
+    CHECK(fs::write_file(pkg, write_unity_package(in)));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string root = resolve_asset_path("Assets/Imported/R372");
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::remove(out.c_str());
+    struct Cleanup {  // (on every way out: the scratch project left as it was)
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(root, e2);
+      std::remove(out.c_str());
+      std::remove(resolve_asset_path("Exports/R372.unitypackage").c_str());
+    }};
+    ed.command("import " + pkg);
+    ed.command("import " + fs::join(root, "Kit/Sign.prefab"));
+    ed.command("export unitypackage");  // (no folder: the selection's - the import's root, selected after the import)
+    std::printf("    the selection's export: %s\n", ed.last_export_for_test() ? ed.last_export_for_test()->out.c_str() : "-");
+    CHECK(ed.last_export_for_test() && ed.last_export_for_test()->why.empty() && fs::filename(ed.last_export_for_test()->out) == "R372.unitypackage");
+    GameObject *sign = ed.scene().find_by_name("Board");
+    CHECK(sign && sign->get<UnityOrigin>() && sign->get<UnityOrigin>()->transform == "400");
+    if (!sign) return;
+    Transform t = sign->local();
+    t.position = Vec3(1.5f, 0.25f, -3.0f);
+    sign->set_local(t);
+    sign->name = "\xE7\x9C\x8B\xE6\x9D\xBF";  // (a Japanese name: written back as \u escapes)
+    /* A copy of it, moved elsewhere: its UnityOrigin is the original's - the original's edits go, the copy's are left. */
+    ed.select_object(sign->id);
+    ed.command("duplicate");
+    GameObject *copy = ed.selected_object();
+    if (copy && copy != sign) {
+      Transform ct = copy->local();
+      ct.position = Vec3(5.0f, 0.0f, 0.0f);
+      copy->set_local(ct);
+      copy->name = "Copy";
+    }
+    CHECK(fs::write_file(fs::join(root, "Kit/Notes.txt"), "a new file\n"));
+    ed.command("export unitypackage Assets/Imported/R372 " + out);
+    std::string bytes, why;
+    std::vector<UnityAsset> back;
+    CHECK(fs::read_file(out, bytes) && read_unity_package(bytes, back, why));
+    const UnityAsset *prefab = nullptr, *script = nullptr, *notes = nullptr, *folder = nullptr;
+    for (const UnityAsset &a : back) {
+      prefab = a.pathname == "Assets/Kit/Sign.prefab" ? &a : prefab;
+      script = a.pathname == "Assets/Kit/Spin.cs" ? &a : script;
+      notes = a.pathname == "Assets/Kit/Notes.txt" ? &a : notes;
+      folder = a.pathname == "Assets/Kit" ? &a : folder;
+    }
+    std::printf("    %zu asset(s) back; the prefab %s, the script %s, the new file %s (GUID %s)\n", back.size(), prefab ? prefab->guid.c_str() : "-",
+                script ? script->guid.c_str() : "-", notes ? "there" : "-", notes ? notes->guid.c_str() : "-");
+    CHECK(prefab && script && notes && folder && prefab->guid == in[1].guid && script->guid == in[2].guid && folder->guid == in[0].guid && folder->folder);
+    if (!prefab || !script || !notes) return;
+    CHECK(prefab->meta == in[1].meta && script->data == in[2].data && script->meta == in[2].meta);
+    CHECK(notes->guid.size() == 32 && notes->guid != in[1].guid && notes->meta.find("guid: " + notes->guid) != std::string::npos && notes->data == "a new file\n");
+    const std::string &p = prefab->data;
+    std::printf("    the prefab's edited lines: %s", p.substr(p.find("  m_Name:"), p.find('\n', p.find("  m_Name:")) - p.find("  m_Name:") + 1).c_str());
+    CHECK(p.find("  m_Name: \"\\u770B\\u677F\"\r\n") != std::string::npos && p.find("  m_LocalPosition: {x: 1.5, y: 0.25, z: -3}\r\n") != std::string::npos);
+    CHECK(p.find("--- !u!114 &11400\r\nMonoBehaviour:\r\n  m_GameObject: {fileID: 100}\r\n  m_Script: {fileID: 11500000, guid: dddd0000dddd0000dddd0000dddd0003, type: 3}\r\n  speed: 2\r\n") !=
+          std::string::npos);
+    CHECK(p.find("m_IsActive: 1\r\n") != std::string::npos && p.find("  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\r\n") != std::string::npos &&
+          p.find("  m_LocalScale: {x: 1, y: 1, z: 1}\r\n") != std::string::npos);  // (unchanged values: their lines as Unity wrote them)
+    CHECK(p.find("Copy") == std::string::npos && p.find("x: 5") == std::string::npos && ed.last_export_for_test() && ed.last_export_for_test()->copies == 1);
+    std::string project_copy;
+    fs::read_file(fs::join(root, "Kit/Sign.prefab"), project_copy);
+    CHECK(project_copy == kit);  // (never written over: the package carries the edits)
+    /* Exported again: the new file under the same GUID (its path's). */
+    const std::string first_notes = notes->guid;
+    ed.command("export unitypackage Assets/Imported/R372 " + out);
+    std::vector<UnityAsset> again;
+    bytes.clear();
+    CHECK(fs::read_file(out, bytes) && read_unity_package(bytes, again, why));
+    std::string notes_again;
+    for (const UnityAsset &a : again) notes_again = a.pathname == "Assets/Kit/Notes.txt" ? a.guid : notes_again;
+    CHECK(notes_again == first_notes);
+  });
+  test("the lesson's Try-it (round 372): export unitypackage of a folder that isn't there is refused, writing nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("export unitypackage Assets/Imported/NoSuchPackage");
+    CHECK(!fs::exists(resolve_asset_path("Exports/NoSuchPackage.unitypackage")));
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -9305,4 +9451,5 @@ void run_assets_tests() {
   tests_round369();
   tests_round370();
   tests_round371();
+  tests_round372();
 }

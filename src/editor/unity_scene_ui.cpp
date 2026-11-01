@@ -214,6 +214,14 @@ bool Editor::import_unity_scene(const std::string &path) {
     return it != index.end() && model_extension_supported(fs::extension(it->second.path)) ? it->second.path : std::string();
   };
   UnityImport ctx;
+  ctx.source = make_asset_relative(path);  // (round 372: each object's UnityOrigin)
+  std::replace(ctx.source.begin(), ctx.source.end(), '\\', '/');
+  ctx.path_of = [&](const std::string &guid) {
+    const auto it = index.find(guid);
+    std::string p = it == index.end() ? std::string() : make_asset_relative(it->second.path);
+    std::replace(p.begin(), p.end(), '\\', '/');
+    return p;
+  };
   ctx.mesh = [&](const std::string &guid, int64_t fid, const std::string &object, std::vector<MaterialPtr> &mats) -> MeshPtr {
     if (guid == kUnityBuiltinGuid) return builtin_mesh(fid);
     const std::string p = model_path(guid);

@@ -36,6 +36,8 @@ struct UnityImport {
   /* A material by its GUID (round 371: a Unity .mat converted; nullptr when not in the project). */
   std::function<MaterialPtr(const std::string &guid)> material;
   int depth = 0;
+  std::string source;  // (round 372: the file the documents came from, project-relative - each object's UnityOrigin)
+  std::function<std::string(const std::string &guid)> path_of;  // (a GUID's project-relative path: a nested prefab's source)
   /* Shared down the nesting (review 370): the prefabs being built (one instancing itself is refused) and the objects
    * made so far against a cap. */
   std::shared_ptr<std::set<std::string>> building;
@@ -62,6 +64,24 @@ std::string unity_shader_name(const UnityGuidIndex &index, const std::string &gu
 /* The material loader for Unity .mat files (set_foreign_material_loader): its textures and shader through the
  * project's index. */
 bool load_unity_material(const std::string &text, const std::string &path, Material &m);
+
+/* Round 372: an imported object's edits in its Unity file - its name and active state on its GameObject, its local
+ * transform on its Transform. */
+struct UnityEdit {
+  int64_t file_id = 0;
+  bool transform = false;
+  std::string name;
+  bool active = true;
+  Vec3 position, scale{1, 1, 1}, euler;  // (euler: the Inspector's angles - m_LocalEulerAnglesHint when the rotation changes)
+  Quat rotation;
+};
+/* `text` (a .prefab or .unity) with the edits written into their documents' lines - m_Name, m_IsActive,
+ * m_LocalPosition / Rotation / Scale (and the Euler hint) - only where the value differs from the file's (review 372:
+ * untouched objects were rewritten with float noise); every other byte as it was, line ends too; `changed` how many
+ * lines changed. */
+std::string patch_unity_objects(const std::string &text, const std::vector<UnityEdit> &edits, int *changed = nullptr);
+/* A string as Unity's YAML writes it: plain when it can be, else double-quoted with non-ASCII as \uXXXX. */
+std::string unity_yaml_string(const std::string &s);
 
 /* The documents' objects made in `scene` under `parent`, by their GameObject's and Transform's fileIDs. */
 std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> &docs, Scene &scene, GameObject *parent, UnityImport &ctx);

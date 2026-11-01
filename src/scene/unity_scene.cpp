@@ -66,6 +66,10 @@ void make_objects(const std::vector<UnityDoc> &docs, Scene &scene, UnityImport &
     if (++*ctx.total > ctx.max_objects) return ctx.notes.push_back("stopped at " + std::to_string(ctx.max_objects) + " objects");
     GameObject *g = scene.create(d.body.str("m_Name", "GameObject"), nullptr);
     g->active = d.body.num("m_IsActive", 1.0) != 0.0;
+    if (!ctx.source.empty()) {  // (round 372: where it came from, for the way back)
+      UnityOrigin *o = g->add<UnityOrigin>();
+      o->file = ctx.source, o->game_object = std::to_string(d.file_id), o->nested = ctx.depth > 0;
+    }
     b.by_fid[d.file_id] = g;
     ctx.objects++;
   }
@@ -82,6 +86,7 @@ void place_objects(const std::vector<UnityDoc> &docs, Build &b) {
     t.scale = vec3_of(d.body, "m_LocalScale", Vec3(1.0f));
     t.euler_hint = t.rotation.to_euler();
     g->set_local(t);
+    if (UnityOrigin *o = g->get<UnityOrigin>()) o->transform = std::to_string(d.file_id);
     b.fathers.push_back({g, d.body.file_id("m_Father")});
   }
 }
@@ -155,6 +160,7 @@ void instantiate(const UnityDoc &d, Scene &scene, UnityImport &ctx, Build &b) {
   UnityImport inner;
   inner.mesh = ctx.mesh, inner.script_name = ctx.script_name, inner.prefab = ctx.prefab, inner.model = ctx.model, inner.depth = ctx.depth + 1;
   inner.building = ctx.building, inner.total = ctx.total, inner.max_objects = ctx.max_objects;
+  inner.path_of = ctx.path_of, inner.source = ctx.path_of ? ctx.path_of(guid) : std::string();
   ctx.building->insert(guid);
   ObjectMap m = build_unity_objects(docs, scene, nullptr, inner);
   ctx.building->erase(guid);
@@ -372,6 +378,104 @@ void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b)
 bool structural(const UnityDoc &d) { return d.class_id == 1 || is_transform(d) || d.class_id == 1001 || d.stripped; }
 
 }  // namespace
+
+namespace {
+/* The shortest text that reads back as the same float (Unity's own way: 0.1, not 0.100000001). */
+std::string fmt(float v) {
+  std::string s;
+  for (int digits = 6; digits <= 9; digits++) {
+    s = strprintf("%.*g", digits, (double)v);
+    if ((float)std::strtod(s.c_str(), nullptr) == v) break;
+  }
+  return s == "-0" ? "0" : s;
+}
+
+bool near(double a, double b) { return std::fabs(a - b) <= 1e-6 * std::max(1.0, std::fabs(a)); }
+
+/* The document's body (past its header and type lines) as YAML: the values an edit is compared with. */
+YamlNode doc_body(const std::string &doc) {
+  const YamlNode n = parse_yaml(doc.substr(std::min(doc.size(), doc.find('\n') + 1)));
+  return n.kind == YamlNode::Map && !n.map.empty() ? n.map[0].second : YamlNode{};
+}
+
+bool same3(const YamlNode &b, const char *key, Vec3 v) {
+  const YamlNode *n = b.get(key);
+  return n && near(n->num("x"), v.x) && near(n->num("y"), v.y) && near(n->num("z"), v.z);
+}
+
+/* A document's line for `key` at the body's indent ("  key: ..."): the new value, the line's own end kept. */
+bool replace_line(std::string &doc, const std::string &key, const std::string &value) {
+  const std::string head = "\n  " + key + ": ";
+  size_t at = doc.find(head);
+  if (at == std::string::npos) return false;
+  at += 1;
+  size_t end = doc.find('\n', at);
+  if (end == std::string::npos) end = doc.size();
+  const bool cr = end > at && doc[end - 1] == '\r';
+  doc.replace(at, end - at, "  " + key + ": " + value + (cr ? "\r" : ""));
+  return true;
+}
+
+std::string vec3_text(Vec3 v) { return "{x: " + fmt(v.x) + ", y: " + fmt(v.y) + ", z: " + fmt(v.z) + "}"; }
+
+void apply_edit(std::string &doc, const UnityEdit &e, int &changed) {
+  const YamlNode b = doc_body(doc);
+  if (!e.transform) {
+    if (b.str("m_Name") != e.name) changed += replace_line(doc, "m_Name", unity_yaml_string(e.name));
+    if ((b.num("m_IsActive", 1.0) != 0.0) != e.active) changed += replace_line(doc, "m_IsActive", e.active ? "1" : "0");
+    return;
+  }
+  const Quat q = e.rotation;
+  const YamlNode *r = b.get("m_LocalRotation");
+  const bool turned = !r || !((near(r->num("x"), q.x) && near(r->num("y"), q.y) && near(r->num("z"), q.z) && near(r->num("w", 1.0), q.w)) ||
+                              (near(r->num("x"), -q.x) && near(r->num("y"), -q.y) && near(r->num("z"), -q.z) && near(r->num("w", 1.0), -q.w)));
+  if (turned) {
+    changed += replace_line(doc, "m_LocalRotation", "{x: " + fmt(q.x) + ", y: " + fmt(q.y) + ", z: " + fmt(q.z) + ", w: " + fmt(q.w) + "}");
+    changed += replace_line(doc, "m_LocalEulerAnglesHint", vec3_text(e.euler));
+  }
+  if (!same3(b, "m_LocalPosition", e.position)) changed += replace_line(doc, "m_LocalPosition", vec3_text(e.position));
+  if (!same3(b, "m_LocalScale", e.scale)) changed += replace_line(doc, "m_LocalScale", vec3_text(e.scale));
+}
+}  // namespace
+
+std::string unity_yaml_string(const std::string &s) {
+  bool plain = !s.empty() && s.find(": ") == std::string::npos && s.find(":\t") == std::string::npos && s.find(" #") == std::string::npos && s.back() != ' ' &&
+               s.front() != ' ' && s.back() != ':';  // (a trailing colon reads as a mapping - review 372)
+  for (unsigned char c : s) plain = plain && c >= 0x20 && c < 0x7f;
+  plain = plain && std::string("'\"{[&*!|>%@`-?,#~").find(s.front()) == std::string::npos;
+  if (plain) return s;
+  std::string out = "\"";
+  for (size_t i = 0; i < s.size();) {  // (UTF-8 to \uXXXX, surrogate pairs past the BMP, as Unity writes)
+    const unsigned char c = (unsigned char)s[i];
+    const int n = c < 0x80 ? 0 : (c >> 5) == 6 ? 1 : (c >> 4) == 14 ? 2 : 3;
+    uint32_t cp = n == 0 ? c : n == 1 ? (c & 31u) : n == 2 ? (c & 15u) : (c & 7u);
+    for (int k = 1; k <= n && i + k < s.size(); k++) cp = cp << 6 | ((unsigned char)s[i + k] & 63u);
+    i += (size_t)n + 1;
+    if (cp == '"' || cp == '\\') out += '\\', out += (char)cp;
+    else if (cp >= 0x20 && cp < 0x7f) out += (char)cp;
+    else if (cp >= 0x10000) out += strprintf("\\u%04X\\u%04X", 0xD800 + ((cp - 0x10000) >> 10), 0xDC00 + ((cp - 0x10000) & 0x3FF));
+    else out += strprintf("\\u%04X", cp);
+  }
+  return out + "\"";
+}
+
+std::string patch_unity_objects(const std::string &text, const std::vector<UnityEdit> &edits, int *changed) {
+  int n = 0;
+  std::string out;
+  for (size_t at = 0; at < text.size();) {  // (document by document: "--- !u!<class> &<fileID>" to the next)
+    size_t next = text.find("\n--- ", at);
+    next = next == std::string::npos ? text.size() : next + 1;
+    std::string doc = text.substr(at, next - at);
+    at = next;
+    const size_t amp = doc.rfind("--- ", 0) == 0 ? doc.find('&') : std::string::npos;
+    const int64_t fid = amp == std::string::npos || amp > doc.find('\n') ? 0 : std::strtoll(doc.c_str() + amp + 1, nullptr, 10);
+    for (const UnityEdit &e : edits)
+      if (fid && e.file_id == fid && doc.find("stripped") > doc.find('\n')) apply_edit(doc, e, n);
+    out += doc;
+  }
+  if (changed) *changed = n;
+  return out;
+}
 
 std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> &docs, Scene &scene, GameObject *parent, UnityImport &ctx) {
   if (!ctx.building) ctx.building = std::make_shared<std::set<std::string>>();

@@ -79,6 +79,7 @@ Editor::~Editor() {
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
   stop_unity_package();    // (round 369: an unpacking stopped at its next file and waited for)
+  stop_unity_export();     // (round 372: an export likewise, nothing written)
   paint_abort_stroke();    // (task 0245)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
@@ -702,6 +703,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   take_favorite_request();
   poll_skin_job();
   poll_unity_package();  // (round 369)
+  poll_unity_export();   // (round 372)
   anim_tick();
   seq_tick();
   seq_audio_tick();  // (round 365)
@@ -879,6 +881,8 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("OBJ, FBX, glTF (.glb / .gltf), STL, PLY or USD (.usda): the formats Blender exports.");
     if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
     u.tooltip("A .unitypackage unpacked into Assets/Imported/<package>: models and textures to use, scripts kept as they are.");
+    if (u.menu_item("Export Unity Package...")) export_package_of_selection();  // (round 372)
+    u.tooltip("The selected object's package folder back to Unity: the same GUIDs, your edits in its prefabs and scenes, scripts as they were.");
     u.submenu("Export", u.px(290), [this] {
       /* Blender's File > Export list (the mesh formats). */
       for (int f = 0; f < (int)ExportFormat::Count; f++)

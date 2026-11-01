@@ -33,6 +33,7 @@
 #include "../render/gpu_raster.h"
 #include "../scene/budget.h"
 #include "../scene/unity_package.h"
+#include "../scene/unity_scene.h"
 #include "../scene/avatar_eyes.h"
 #include "../scene/avatar_fix.h"
 #include "../scene/avatar_tools.h"
@@ -1272,6 +1273,26 @@ class Editor {
   };
   bool import_unity_package(const std::string &path);
   bool import_unity_scene(const std::string &path);  // (round 370: a .prefab or .unity file's objects)
+  bool export_unity_package(const std::string &folder, const std::string &out = "");  // (round 372: the way back)
+  std::map<std::string, std::vector<UnityEdit>> unity_edits(const std::string &folder_rel, int &nested, int &copies);
+  void export_package_of_selection();
+  /* Round 372 (unity_export_ui.cpp): the export on a worker, a file at a time. */
+  struct UnityExportItem {
+    std::string abs, guid, pathname, meta;
+    bool folder = false;
+    std::vector<UnityEdit> edits;
+  };
+  struct ExportJob {
+    std::vector<UnityExportItem> items;
+    std::string out, folder, why;
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{false}, done{false};
+    int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0;
+    std::vector<std::string> skipped;
+    void run();
+    void finish(const std::string &failure);
+  };
+  const ExportJob *last_export_for_test() const { return export_last_.get(); }
   void import_package_dialog();
   const PackageJob *last_package_for_test() const { return pkg_last_.get(); }
   std::vector<GameObject *> selected_objects_for_test() const { return selected_objects(false); }
@@ -1996,6 +2017,9 @@ class Editor {
   float sculpt_lean_angle_ = 0.0f;
   bool pen_curve_dirty_ = false;  // (saved once the drag ends - review 368)
   std::shared_ptr<PackageJob> pkg_job_, pkg_last_;  // (round 369: the unpacking under way, the last one finished)
+  std::shared_ptr<ExportJob> export_job_, export_last_;  // (round 372)
+  void poll_unity_export();
+  void stop_unity_export();
   void poll_unity_package();
   void stop_unity_package();
   Vec3 sculpt_leaned(Vec3 n) const;

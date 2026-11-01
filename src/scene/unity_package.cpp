@@ -3,6 +3,7 @@
 #include "unity_package.h"
 
 #include "../image/image.h"
+#include "../core/core.h"
 
 #include <algorithm>
 #include <cctype>
@@ -245,6 +246,258 @@ std::string meta_guid(const std::string &meta) {
     return line;
   }
   return "";
+}
+
+/* ------------------------------------------------------------------------------------------- writing (round 372) */
+
+uint32_t crc32(const std::string &data, uint32_t running) {
+  static const std::vector<uint32_t> table = [] {  // (made once, thread-safe: a function-local static)
+    std::vector<uint32_t> t(256);
+    for (uint32_t i = 0; i < 256; i++) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+      t[i] = c;
+    }
+    return t;
+  }();
+  uint32_t crc = running ^ 0xFFFFFFFFu;
+  for (unsigned char b : data) crc = table[(crc ^ b) & 255] ^ (crc >> 8);
+  return crc ^ 0xFFFFFFFFu;
+}
+
+namespace {
+
+/* Bits out, least significant first (deflate's order); Huffman codes reversed before they're written. */
+struct BitWriter {
+  std::string out;
+  uint32_t acc = 0;
+  int n = 0;
+  void bits(uint32_t v, int count) {
+    acc |= v << n;
+    n += count;
+    for (; n >= 8; n -= 8) out += (char)(acc & 255), acc >>= 8;
+  }
+  void code(uint32_t c, int len) {  // (a Huffman code: its bits most significant first)
+    uint32_t r = 0;
+    for (int i = 0; i < len; i++) r |= ((c >> i) & 1u) << (len - 1 - i);
+    bits(r, len);
+  }
+  void align() {
+    if (n > 0) out += (char)(acc & 255);
+    acc = 0, n = 0;
+  }
+};
+
+const uint16_t kLenBase[29] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
+const uint8_t kLenExtra[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+const uint16_t kDistBase[30] = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
+const uint8_t kDistExtra[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
+
+/* A literal (len 0) or a match. */
+struct Token {
+  uint16_t len, dist;  // (literal: dist holds the byte)
+};
+
+int literal_bits(int sym) { return sym < 144 ? 8 : sym < 256 ? 9 : sym < 280 ? 7 : 8; }
+
+void fixed_literal(BitWriter &w, int sym) {
+  if (sym < 144) return w.code(0x30 + sym, 8);
+  if (sym < 256) return w.code(0x190 + sym - 144, 9);
+  if (sym < 280) return w.code(sym - 256, 7);
+  w.code(0xC0 + sym - 280, 8);
+}
+
+int length_index(int len) {
+  int li = 28;
+  while (kLenBase[li] > len) li--;
+  return li;
+}
+int distance_index(int dist) {
+  int di = 29;
+  while (kDistBase[di] > dist) di--;
+  return di;
+}
+
+/* The block's tokens (matches through a hash of three bytes, the last 32 positions a hash) and their fixed-code bits. */
+std::vector<Token> tokenize(const std::string &d, uint64_t &cost) {
+  std::vector<Token> out;
+  std::vector<int32_t> head(1 << 15, -1), prev(d.size(), -1);
+  auto hash = [&](size_t i) { return (((uint8_t)d[i] << 10) ^ ((uint8_t)d[i + 1] << 5) ^ (uint8_t)d[i + 2]) & 0x7FFF; };
+  auto insert = [&](size_t k) {
+    if (k + 3 > d.size()) return;
+    const uint32_t h = hash(k);
+    prev[k] = head[h], head[h] = (int32_t)k;
+  };
+  cost = 7;  // (the end-of-block code)
+  for (size_t i = 0; i < d.size();) {
+    int best = 0, best_dist = 0, tries = 32;
+    for (int32_t c = i + 3 <= d.size() ? head[hash(i)] : -1; c >= 0 && tries-- > 0 && i - (size_t)c <= 32768; c = prev[(size_t)c]) {
+      int l = 0;
+      while (l < 258 && i + l < d.size() && d[(size_t)c + l] == d[i + l]) l++;
+      if (l > best) best = l, best_dist = (int)(i - (size_t)c);
+    }
+    if (best < 3) {
+      out.push_back({0, (uint8_t)d[i]});
+      cost += (uint64_t)literal_bits((uint8_t)d[i]);
+      insert(i++);
+      continue;
+    }
+    const int li = length_index(best), di = distance_index(best_dist);
+    out.push_back({(uint16_t)best, (uint16_t)best_dist});
+    cost += (uint64_t)(literal_bits(257 + li) + kLenExtra[li] + 5 + kDistExtra[di]);
+    for (size_t k = i; k < i + (size_t)best; k++) insert(k);
+    i += (size_t)best;
+  }
+  return out;
+}
+
+void put_tokens(BitWriter &w, const std::vector<Token> &tokens) {
+  for (const Token &t : tokens) {
+    if (!t.len) {
+      fixed_literal(w, t.dist);
+      continue;
+    }
+    const int li = length_index(t.len), di = distance_index(t.dist);
+    fixed_literal(w, 257 + li);
+    w.bits((uint32_t)(t.len - kLenBase[li]), kLenExtra[li]);
+    w.code((uint32_t)di, 5);
+    w.bits((uint32_t)(t.dist - kDistBase[di]), kDistExtra[di]);
+  }
+  fixed_literal(w, 256);
+}
+
+/* Stored blocks of at most 65535 bytes each: their 3 header bits in the stream, then a byte boundary, LEN, NLEN. */
+void put_stored(BitWriter &w, const std::string &d, bool last) {
+  size_t at = 0;
+  do {
+    const size_t n = std::min<size_t>(65535, d.size() - at);
+    w.bits(last && at + n >= d.size() ? 1 : 0, 1), w.bits(0, 2);
+    w.align();
+    w.out += (char)(n & 255), w.out += (char)(n >> 8), w.out += (char)(~n & 255), w.out += (char)((~n >> 8) & 255);
+    w.out.append(d, at, n);
+    at += n;
+  } while (at < d.size());
+}
+
+}  // namespace
+
+struct GzipWriter::Impl {
+  BitWriter w;
+  std::string pending;
+  uint32_t crc = 0;
+  uint64_t size = 0;
+  bool finished = false;
+  /* One block: fixed codes or stored, whichever is fewer bits. */
+  void block(const std::string &d, bool last) {
+    uint64_t cost = 0;
+    const std::vector<Token> tokens = tokenize(d, cost);
+    const uint64_t stored = (uint64_t)d.size() * 8 + 40 * ((d.size() + 65534) / 65535 + 1);
+    if (cost + 3 >= stored || d.empty()) return put_stored(w, d, last);
+    w.bits(last ? 1 : 0, 1), w.bits(1, 2);
+    put_tokens(w, tokens);
+  }
+};
+
+GzipWriter::GzipWriter() : impl_(std::make_unique<Impl>()) {
+  impl_->w.out = std::string{(char)0x1f, (char)0x8b, 8, 0, 0, 0, 0, 0, 0, (char)255};
+}
+GzipWriter::~GzipWriter() = default;
+
+void GzipWriter::write(const std::string &data) {
+  Impl &g = *impl_;
+  g.crc = crc32(data, g.crc), g.size += data.size();
+  g.pending += data;
+  const size_t kBlock = 1 << 20;
+  while (g.pending.size() > kBlock) {  // (full blocks out; the rest waits - the last block is the final one)
+    g.block(g.pending.substr(0, kBlock), false);
+    g.pending.erase(0, kBlock);
+  }
+}
+
+void GzipWriter::finish() {
+  Impl &g = *impl_;
+  if (g.finished) return;
+  g.finished = true;
+  g.block(g.pending, true);
+  g.pending.clear();
+  g.w.align();
+  for (int k = 0; k < 4; k++) g.w.out += (char)(g.crc >> (8 * k) & 255);
+  for (int k = 0; k < 4; k++) g.w.out += (char)(g.size >> (8 * k) & 255);
+}
+
+std::string &GzipWriter::output() { return impl_->w.out; }
+
+std::string gzip(const std::string &data) {
+  GzipWriter g;
+  g.write(data);
+  g.finish();
+  return std::move(g.output());
+}
+
+namespace {
+/* One ustar header block. */
+std::string tar_header(const std::string &name, const std::string &prefix, size_t size, char type) {
+  std::string h(512, '\0');
+  std::copy(name.begin(), name.begin() + (long)std::min<size_t>(100, name.size()), h.begin());
+  const std::string mode = type == '5' ? "0000755" : "0000644", sz = strprintf("%011llo", (unsigned long long)size), zeros = "0000000", mtime = "00000000000";
+  std::copy(mode.begin(), mode.end(), h.begin() + 100);
+  std::copy(zeros.begin(), zeros.end(), h.begin() + 108), std::copy(zeros.begin(), zeros.end(), h.begin() + 116);
+  std::copy(sz.begin(), sz.end(), h.begin() + 124);
+  std::copy(mtime.begin(), mtime.end(), h.begin() + 136);
+  h[156] = type;
+  const std::string magic = "ustar";
+  std::copy(magic.begin(), magic.end(), h.begin() + 257);
+  h[263] = '0', h[264] = '0';
+  std::copy(prefix.begin(), prefix.begin() + (long)std::min<size_t>(155, prefix.size()), h.begin() + 345);
+  std::fill(h.begin() + 148, h.begin() + 156, ' ');
+  unsigned sum = 0;
+  for (char c : h) sum += (uint8_t)c;
+  const std::string chk = strprintf("%06o", sum);
+  std::copy(chk.begin(), chk.end(), h.begin() + 148);
+  h[154] = '\0';
+  return h;
+}
+
+std::string padded(const std::string &data) { return data + std::string((512 - data.size() % 512) % 512, '\0'); }
+
+uint64_t fnv1a(const std::string &s, uint64_t h) {
+  for (unsigned char c : s) h = (h ^ c) * 0x100000001B3ull;
+  return h;
+}
+}  // namespace
+
+void tar_append(std::string &tar, const std::string &name_in, const std::string &data, bool dir) {
+  std::string name = name_in, prefix;
+  const size_t cut = name.size() > 100 ? name.rfind('/', 155) : std::string::npos;
+  if (cut != std::string::npos && name.size() - cut - 1 <= 100) prefix = name.substr(0, cut), name = name.substr(cut + 1);  // (ustar's prefix)
+  if (name.size() > 100) {  // (still too long: GNU's long-name entry first, as the reader takes it)
+    tar += tar_header("././@LongLink", "", name_in.size() + 1, 'L') + padded(name_in + std::string(1, '\0'));
+    name = name_in.substr(0, 100), prefix.clear();
+  }
+  tar += tar_header(name, prefix, dir ? 0 : data.size(), dir ? '5' : '0');
+  if (!dir) tar += padded(data);
+}
+
+std::string unity_asset_entries(const UnityAsset &a) {
+  std::string tar;
+  tar_append(tar, a.guid + "/", "", true);
+  if (a.has_data && !a.folder) tar_append(tar, a.guid + "/asset", a.data);
+  tar_append(tar, a.guid + "/asset.meta", a.meta);
+  tar_append(tar, a.guid + "/pathname", a.pathname);
+  return tar;
+}
+
+std::string write_unity_package(const std::vector<UnityAsset> &assets) {
+  GzipWriter g;
+  for (const UnityAsset &a : assets) g.write(unity_asset_entries(a));
+  g.write(std::string(1024, '\0'));  // (the end: two zero blocks)
+  g.finish();
+  return std::move(g.output());
+}
+
+std::string stable_unity_guid(const std::string &package, const std::string &pathname) {
+  const std::string key = package + "\n" + pathname;
+  return strprintf("%016llx%016llx", (unsigned long long)fnv1a(key, 0xcbf29ce484222325ull), (unsigned long long)fnv1a(key, 0x84222325cbf29ce4ull));
 }
 
 }  // namespace bl

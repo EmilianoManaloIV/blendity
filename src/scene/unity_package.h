@@ -7,6 +7,8 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,33 @@ bool read_unity_package(std::string &bytes, std::vector<UnityAsset> &out, std::s
 std::string unity_package_target(const std::string &pathname, const std::string &into);
 /* The GUID a .meta names ("guid: 0123..."), "" when none. */
 std::string meta_guid(const std::string &meta);
+/* --- writing (round 372, task 0349: the way back to Unity) --------------------------------------------------- */
+uint32_t crc32(const std::string &data, uint32_t crc = 0);  // (crc: the running value, for data in parts)
+/* A gzip member (RFC 1952) written as its data comes, a deflate block a megabyte: LZ77 matches coded with the fixed
+ * Huffman tables, or the block stored when that's fewer bits (an already-compressed PNG). One bit stream across the
+ * blocks (review 372: a block padded to a byte broke every reader past a megabyte). */
+class GzipWriter {
+ public:
+  GzipWriter();
+  ~GzipWriter();
+  void write(const std::string &data);
+  void finish();                     // (the last block and the trailer: CRC-32 and length)
+  std::string &output();             // (what's written so far; the caller may take it as it grows)
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+std::string gzip(const std::string &data);
+/* A ustar entry (a long name split into prefix and name; past 255 bytes a GNU long-name entry first). */
+void tar_append(std::string &tar, const std::string &name, const std::string &data, bool dir = false);
+/* One asset's tar entries: its GUID's folder, asset (unless a folder), asset.meta, pathname. */
+std::string unity_asset_entries(const UnityAsset &a);
+/* A .unitypackage of `assets`. */
+std::string write_unity_package(const std::vector<UnityAsset> &assets);
+/* A GUID for a path that has none: the same every time for the same package and path (review 372: a new one each
+ * export made Unity see another asset at the same place), 32 hex digits. */
+std::string stable_unity_guid(const std::string &package, const std::string &pathname);
+
 /* A package file's name as a folder name: path characters, leading and trailing dots and spaces and device names
  * replaced; "Package" when nothing is left (review 369: "...unitypackage" made the folder "..", Assets itself). */
 std::string unity_package_folder(const std::string &file_stem);

@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 372): the way back to Unity - Export Unity Package
+
+**Asked:** Phase E's fourth round: work done in Blendity goes back to Unity for the finishing touches, scripts intact.
+
+**Added (task 0349)**
+- **Package writing** (`scene/unity_package`): an in-house deflate (LZ77 with the fixed Huffman codes, stored blocks
+  where smaller), gzip with CRC-32, ustar entries with long names.
+- **Export Unity Package** (File > Export Unity Package..., `export unitypackage <folder> [out]`): a package's folder
+  written back under each file's own GUID, Unity path and kept .meta.
+  - New files get new GUIDs.
+  - The prefabs and scenes carry the edits of the objects imported from them (name, active, local transform) in
+    their own lines; every other byte stays as it was (CRLF too), scripts and VRChat's components included.
+  - Objects of nested prefabs are left out (their edits would change every copy).
+  - The project's files are never written over.
+- **UnityOrigin:** each object imported from a prefab or scene records its file and fileIDs.
+- **The Opus review's fixes:**
+  - the deflate stream broke past a megabyte (padded blocks); it's one bit stream now, checked with Python's gzip too;
+  - the export runs as a job, a file at a time;
+  - a duplicate no longer overwrites its original;
+  - new files keep one GUID across exports;
+  - only changed values are written, in their shortest exact text;
+  - the menu works right after an import;
+  - names ending in ':' are quoted.
+
+**Checked:** `tests_round372`:
+- deflate and gzip round trips (127 KB of YAML to 8 KB; random bytes stored; 3 MB in several blocks), CRC-32's check
+  value, a 300-byte tar name;
+- Unity's string quoting with \uXXXX;
+- a package imported, its prefab's object moved and renamed in Japanese, a file added, exported: the same GUIDs and
+  .meta files, the edits in their CRLF lines, the script's document byte for byte, the new file's new GUID, the
+  project's prefab untouched;
+- the Try-it.
+
 ## 2026-11-01 (round 371): Unity materials and VRChat's components
 
 **Asked:** Phase E's third round ("Mesh, Materials, Lights, no-code" from VRChat's Unity packages).

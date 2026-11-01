@@ -93,6 +93,8 @@ std::vector<Editor::JobView> Editor::jobs_running() {
         [this] { bakelight_->cancel.store(true, std::memory_order_relaxed); }, bakelight_->cancel.load(std::memory_order_relaxed));
   if (pkg_job_)  // (round 369)
     add("Unpacking " + fs::filename(pkg_job_->path), pkg_job_->progress.load(), [this] { pkg_job_->cancel.store(true); }, pkg_job_->cancel.load());
+  if (export_job_)  // (round 372)
+    add("Writing " + fs::filename(export_job_->out), export_job_->progress.load(), [this] { export_job_->cancel.store(true); }, export_job_->cancel.load());
   if (surface_job_) add("Surface", -1.0f, nullptr);  // (no Cancel: the stack would be evaluated again at once)
   if (skin_job_) add(skin_job_->label, skin_job_->progress.load(), [this] { skin_job_->cancel = true; }, skin_job_->cancel.load());
   if (baking_) add("Baking lighting", probe_phase_ ? -1.0f : baker_.progress(), [this] { bake_cancel(); });  // (one job through both phases)

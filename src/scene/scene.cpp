@@ -218,6 +218,8 @@ void register_builtin_components() {
                         "No direct equivalent (Blender removed its game engine in 2.80)");
   reg<LODGroupComponent>("Rendering", "The mesh at fewer triangles when it's small on screen in the Game view, as Unity's LOD Group; exports write each level as <name>_LOD<n> for Unity (round 363).",
                          "Unity's LOD Group; Unreal's LOD settings; Blender has none (a Decimate per level, by hand)");
+  reg<UnityOrigin>("Scripts", "Where an object imported from Unity came from: Export Unity Package writes its edits back there (round 372).",
+                   "Unity's fileIDs in a prefab or scene; Blender has none");
   reg<EngineComponent>("Scripts", "A component of another engine, kept as it is: a Unity script (C# or UdonSharp), VRChat's components - written back unchanged, never run here (round 370).",
                        "Unity's MonoBehaviour and built-in components; Blender has no counterpart (its add-ons' data is custom properties)");
   reg<ColliderComponent>("Physics", "The object's collision shape: Box, Sphere, Capsule, Convex or its Mesh - Jolt's in Play, written into exports for Unity, Unreal and Godot (round 362).",
@@ -1647,6 +1649,15 @@ void LODGroupComponent::reflect(Reflector &r) {
   }
   r.help("A level shows while the object's height on screen is at least its share of the view (Unity's LOD Group transitions).");
   r.field("Cull Below Last", cull);
+}
+
+void UnityOrigin::reflect(Reflector &r) {
+  r.text("File", file);
+  r.help("The Unity prefab or scene this object came from; Export Unity Package writes its name, transform and active state back there.");
+  r.text("GameObject", game_object);
+  r.text("Transform", transform);
+  r.field("Nested", nested);
+  r.help("From a prefab inside the file: its edits aren't written back (they'd change every copy of that prefab).");
 }
 
 void EngineComponent::reflect(Reflector &r) {

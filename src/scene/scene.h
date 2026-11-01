@@ -733,6 +733,16 @@ struct EngineComponent : ComponentBase<EngineComponent> {
   void reflect(Reflector &r) override;
 };
 
+/* Where an imported object came from in Unity (round 372, task 0349): its prefab or scene file (project-relative)
+ * and its GameObject's and Transform's fileIDs there - what Export Unity Package writes its edits back into. An
+ * object of a nested prefab is marked: its edits stay Blendity's (they'd change every copy of the prefab). */
+struct UnityOrigin : ComponentBase<UnityOrigin> {
+  static constexpr const char *kName = "UnityOrigin";
+  std::string file, game_object, transform;  // (fileIDs as text: 64-bit and negative)
+  bool nested = false;
+  void reflect(Reflector &r) override;
+};
+
 /* Unity's LOD Group (round 363, task 0340): the mesh at a few triangle ratios, the Game view showing the level its
  * height on screen calls for, exports writing <name>_LOD<n> (scene/lod.h). */
 struct LODGroupComponent : ComponentBase<LODGroupComponent> {

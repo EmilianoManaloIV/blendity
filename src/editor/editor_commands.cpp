@@ -989,7 +989,15 @@ void Editor::run_console_command(const std::string &line) {
     shortcut_command(t, line);
     return;
   }
-  if (round367_command(c, t, line)) return;  // (save, open, new, rotate, scale, set Transform.*: before the long chain)
+  if (round367_command(c, t, line)) return;
+  if (c == "export" && to_lower(arg(1, "")) == "unitypackage") {  // (round 372: export unitypackage <folder> [out.unitypackage])
+    if (t.size() < 3) return export_package_of_selection();  // (no folder: the selection's package)
+    const std::string rest = line_rest(line, 2);  // (both may hold spaces: the folder is the longest part that is one - review 372)
+    if (fs::is_dir(resolve_asset_path(rest))) return (void)export_unity_package(rest, "");
+    for (size_t gap = rest.rfind(' '); gap != std::string::npos && gap > 0; gap = rest.rfind(' ', gap - 1))
+      if (fs::is_dir(resolve_asset_path(rest.substr(0, gap)))) return (void)export_unity_package(rest.substr(0, gap), rest.substr(gap + 1));
+    return (void)export_unity_package(rest, "");
+  }  // (save, open, new, rotate, scale, set Transform.*: before the long chain)
   if (c == "ui") {  // ui save <path> | load <path>|blender|zbrush (task 0231: the UI file)
     ui_file_command(t, line);
     return;
