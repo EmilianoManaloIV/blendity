@@ -75,6 +75,7 @@ std::vector<MaterialPtr> Editor::scene_materials() {
 
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (fs::extension(path) == ".unitypackage") return (void)import_unity_package(path);  // (round 369: import <file>.unitypackage)
+  if (fs::extension(path) == ".prefab" || fs::extension(path) == ".unity") return (void)import_unity_scene(path);  // (round 370)
   if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion: onto a character)
   if (import_preview_pref_ && (ipv_force_ || !headless_) && begin_import_preview(path, copy_into_assets)) return;  // (task 0152: the dialog first)
   ScopedTimer t;

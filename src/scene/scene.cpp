@@ -218,6 +218,8 @@ void register_builtin_components() {
                         "No direct equivalent (Blender removed its game engine in 2.80)");
   reg<LODGroupComponent>("Rendering", "The mesh at fewer triangles when it's small on screen in the Game view, as Unity's LOD Group; exports write each level as <name>_LOD<n> for Unity (round 363).",
                          "Unity's LOD Group; Unreal's LOD settings; Blender has none (a Decimate per level, by hand)");
+  reg<EngineComponent>("Scripts", "A component of another engine, kept as it is: a Unity script (C# or UdonSharp), VRChat's components - written back unchanged, never run here (round 370).",
+                       "Unity's MonoBehaviour and built-in components; Blender has no counterpart (its add-ons' data is custom properties)");
   reg<ColliderComponent>("Physics", "The object's collision shape: Box, Sphere, Capsule, Convex or its Mesh - Jolt's in Play, written into exports for Unity, Unreal and Godot (round 362).",
                          "Unity's Box / Sphere / Capsule / Mesh Collider; Blender's Rigid Body > Collisions > Shape");
   reg<Rigidbody>("Physics", "Gravity, bounciness and simple sphere collisions in Play mode.",
@@ -1645,6 +1647,18 @@ void LODGroupComponent::reflect(Reflector &r) {
   }
   r.help("A level shows while the object's height on screen is at least its share of the view (Unity's LOD Group transitions).");
   r.field("Cull Below Last", cull);
+}
+
+void EngineComponent::reflect(Reflector &r) {
+  r.text("Engine", engine);
+  r.text("Type", type);
+  r.help("What it is in its engine: a script's class or the engine's own component.");
+  r.text("Script", script);
+  r.help("The script's GUID in the engine's project (empty for the engine's own components).");
+  if (r.all_fields()) return r.text("Data", data);  // (files, undo, hashing: the whole of it)
+  std::string shown = std::to_string(std::count(data.begin(), data.end(), '\n')) + " lines, kept as the engine wrote them";  // (review 370: not editable here)
+  r.text("Data", shown);
+  r.help("Its fields as the engine wrote them - kept as they are for the way back. Blendity doesn't run engine code, and doesn't change this.");
 }
 
 void ColliderComponent::reflect(Reflector &r) {

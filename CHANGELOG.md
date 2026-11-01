@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 370): Unity prefabs and scenes into the scene
+
+**Asked:** Phase E's second round ("import Unity packages and prefab packs related to VRChat into Blendity (Mesh,
+Materials, Lights, no-code, etc.)").
+
+**Added (task 0347)**
+- **A YAML reader for Unity's files** (`scene/unity_yaml`): documents by class and fileID, stripped ones, Unity's
+  sequences at their key's indent, flow references, quoted and wrapped strings.
+- **`import <file>.prefab|.unity`** (and a drop): the objects under one root named for the file, one Undo step.
+  - GameObjects and Transforms (no axis flip: Unity and Blendity share Y-up and handedness).
+  - MeshFilter / MeshRenderer / SkinnedMeshRenderer meshes, found by GUID through the packages' `.unity-guids`
+    and `.meta` files; an FBX's part by the fileID its `.meta` names; Unity's built-in meshes as Blendity's.
+  - Lights, Cameras, Box / Sphere / Capsule / Mesh Colliders.
+  - Nested prefabs with their position, rotation, scale, name and active overrides.
+- **Engine Components:** every other component (scripts, Udon, VRChat's) is kept with its YAML as Unity wrote it.
+- **Package unpacking keeps each asset's `.meta`** (hidden in `.unity-meta`), for the submeshes' names.
+- **The Opus review's fixes:**
+  - a prefab holding itself no longer grows without end;
+  - a model placed as a prefab (a VRChat avatar's root) comes in, with its added components;
+  - nothing lands outside the import's root;
+  - multi-mesh models get the right parts;
+  - \u names are decoded;
+  - the kept data is byte for byte and read-only in the Inspector;
+  - lights' and colliders' remaining fields are read;
+  - Unity's child order is kept;
+  - notes are said once.
+
+**Checked:** `tests_round370`:
+- the YAML reader on Unity's own layout;
+- a level with a built-in Plane and a Box Collider, an OBJ part by its `.meta`, a script with its fields, a
+  Camera, and a nested Lamp prefab moved and renamed by overrides;
+- one Undo;
+- the Try-it.
+
 ## 2026-10-31 (round 369): Phase E begins - Unity packages unpacked into the project
 
 **Asked:** "Is it possible to import Unity packages and prefab packs related to VRChat into Blendity ... So I can work

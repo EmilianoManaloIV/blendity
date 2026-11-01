@@ -13,6 +13,7 @@
 #include "../src/scene/lod.h"
 #include "../src/scene/audio.h"
 #include "../src/scene/unity_package.h"
+#include "../src/scene/unity_scene.h"
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -8444,6 +8445,324 @@ static void tests_round369() {
   });
 }
 
+/* ---------------------------------------------------------------- round 370: Unity prefabs and scenes (task 0347) */
+namespace r370 {
+const char *kLamp = R"(%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &100
+GameObject:
+  m_ObjectHideFlags: 0
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 400}
+  - component: {fileID: 10800}
+  m_Layer: 0
+  m_Name: Lamp
+  m_IsActive: 1
+--- !u!4 &400
+Transform:
+  m_GameObject: {fileID: 100}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 2, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!108 &10800
+Light:
+  m_GameObject: {fileID: 100}
+  m_Enabled: 1
+  serializedVersion: 10
+  m_Type: 2
+  m_Color: {r: 1, g: 0.5, b: 0.25, a: 1}
+  m_Intensity: 3
+  m_Range: 7.5
+  m_SpotAngle: 30
+)";
+const char *kLevel = R"(%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &1
+GameObject:
+  m_Component:
+  - component: {fileID: 2}
+  - component: {fileID: 3}
+  - component: {fileID: 4}
+  - component: {fileID: 5}
+  m_Name: Floor
+  m_IsActive: 1
+--- !u!4 &2
+Transform:
+  m_GameObject: {fileID: 1}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 2, y: 1, z: 2}
+  m_Children:
+  - {fileID: 22}
+  - {fileID: 902}
+  m_Father: {fileID: 0}
+--- !u!33 &3
+MeshFilter:
+  m_GameObject: {fileID: 1}
+  m_Mesh: {fileID: 10209, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!23 &4
+MeshRenderer:
+  m_GameObject: {fileID: 1}
+  m_Enabled: 1
+  m_Materials:
+  - {fileID: 10303, guid: 0000000000000000f000000000000000, type: 0}
+--- !u!65 &5
+BoxCollider:
+  m_GameObject: {fileID: 1}
+  m_IsTrigger: 0
+  serializedVersion: 2
+  m_Size: {x: 10, y: 0.1, z: 10}
+  m_Center: {x: 0, y: -0.05, z: 0}
+--- !u!1 &21
+GameObject:
+  m_Component:
+  - component: {fileID: 22}
+  - component: {fileID: 23}
+  - component: {fileID: 24}
+  - component: {fileID: 25}
+  - component: {fileID: 26}
+  m_Name: Tri
+  m_IsActive: 1
+--- !u!4 &22
+Transform:
+  m_GameObject: {fileID: 21}
+  m_LocalRotation: {x: 0, y: 0.70710677, z: 0, w: 0.70710677}
+  m_LocalPosition: {x: 1, y: 0.5, z: -2}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 2}
+--- !u!33 &23
+MeshFilter:
+  m_GameObject: {fileID: 21}
+  m_Mesh: {fileID: 4300000, guid: aaaa0000aaaa0000aaaa0000aaaa0001, type: 3}
+--- !u!23 &24
+MeshRenderer:
+  m_GameObject: {fileID: 21}
+  m_Enabled: 1
+--- !u!114 &25
+MonoBehaviour:
+  m_GameObject: {fileID: 21}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: aaaa0000aaaa0000aaaa0000aaaa0002, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  speed: 2
+  axis: {x: 0, y: 1, z: 0}
+  message: 'It''s spinning: fast'
+  targets:
+  - {fileID: 2}
+  - {fileID: 0}
+--- !u!20 &26
+Camera:
+  m_GameObject: {fileID: 21}
+  m_Enabled: 1
+  near clip plane: 0.1
+  far clip plane: 500
+  field of view: 45
+  orthographic: 0
+--- !u!1001 &900
+PrefabInstance:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Modification:
+    serializedVersion: 3
+    m_TransformParent: {fileID: 2}
+    m_Modifications:
+    - target: {fileID: 400, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 3
+      objectReference: {fileID: 0}
+    - target: {fileID: 100, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+      propertyPath: m_Name
+      value: Porch Lamp
+      objectReference: {fileID: 0}
+    - target: {fileID: 10800, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+      propertyPath: m_Intensity
+      value: 5
+      objectReference: {fileID: 0}
+    m_RemovedComponents: []
+  m_SourcePrefab: {fileID: 100100000, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+--- !u!4 &902 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 400, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+  m_PrefabInstance: {fileID: 900}
+  m_PrefabAsset: {fileID: 0}
+)";
+}  // namespace r370
+
+static void tests_round370() {
+  test("Unity YAML (round 370): documents by class and fileID, a stripped one; Unity's sequences at their key's indent; flow references; quoted strings; a mapping in a sequence item", [] {
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(r370::kLevel, docs, why));
+    CHECK(docs.size() == 13);
+    const UnityDoc *mono = nullptr, *pi = nullptr, *stripped = nullptr;
+    for (const UnityDoc &d : docs) {
+      mono = d.class_id == 114 ? &d : mono;
+      pi = d.class_id == 1001 ? &d : pi;
+      stripped = d.stripped ? &d : stripped;
+    }
+    CHECK(mono && mono->type == "MonoBehaviour" && mono->file_id == 25 && mono->body.guid("m_Script") == "aaaa0000aaaa0000aaaa0000aaaa0002");
+    CHECK(mono && mono->body.num("speed") == 2.0 && mono->body.str("message") == "It's spinning: fast" && mono->body.get("targets") &&
+          mono->body.get("targets")->seq.size() == 2 && mono->body.get("targets")->seq[0].str("fileID") == "2");
+    const YamlNode *mods = pi && pi->body.get("m_Modification") ? pi->body.get("m_Modification")->get("m_Modifications") : nullptr;
+    CHECK(mods && mods->seq.size() == 3 && mods->seq[0].str("propertyPath") == "m_LocalPosition.x" && mods->seq[1].str("value") == "Porch Lamp" &&
+          mods->seq[0].file_id("target") == 400);
+    CHECK(stripped && stripped->file_id == 902 && stripped->class_id == 4 && stripped->body.file_id("m_PrefabInstance") == 900);
+    CHECK(!parse_unity_yaml("\x01\x02 binary", docs, why));
+    const YamlNode meta = parse_yaml("fileFormatVersion: 2\nguid: abc\nModelImporter:\n  fileIDToRecycleName:\n    4300000: Tri\n    100000: //RootNode\n");
+    CHECK(meta.get("ModelImporter") && meta.get("ModelImporter")->get("fileIDToRecycleName") && meta.get("ModelImporter")->get("fileIDToRecycleName")->str("4300000") == "Tri");
+  });
+  test("Unity scenes (round 370): import Level.unity - the hierarchy and transforms, Unity's built-in Plane, a BoxCollider, an OBJ's mesh by its .meta's fileID, a script kept as an Engine Component with its fields, a Camera, a nested Lamp prefab with its overrides; one Undo step takes it all away", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R370");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    CHECK(fs::write_file(fs::join(dir, "tri.obj"), "o Tri\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"));
+    CHECK(fs::write_file(fs::join(dir, "Spin.cs"), "public class Spin : UnityEngine.MonoBehaviour {}\n"));
+    CHECK(fs::write_file(fs::join(dir, "Lamp.prefab"), r370::kLamp));
+    CHECK(fs::write_file(fs::join(dir, "Level.unity"), r370::kLevel));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/aaaa0000aaaa0000aaaa0000aaaa0001.meta"),
+                         "fileFormatVersion: 2\nguid: aaaa0000aaaa0000aaaa0000aaaa0001\nModelImporter:\n  fileIDToRecycleName:\n    100000: //RootNode\n    4300000: Tri\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"),
+                         "aaaa0000aaaa0000aaaa0000aaaa0001\tAssets/tri.obj\tAssets/Imported/R370/tri.obj\n"
+                         "aaaa0000aaaa0000aaaa0000aaaa0002\tAssets/Spin.cs\tAssets/Imported/R370/Spin.cs\n"
+                         "aaaa0000aaaa0000aaaa0000aaaa0003\tAssets/Lamp.prefab\tAssets/Imported/R370/Lamp.prefab\n"));
+    size_t before = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("import " + fs::join(dir, "Level.unity"));
+    GameObject *root = ed.scene().find_by_name("Level"), *floor = ed.scene().find_by_name("Floor"), *tri = ed.scene().find_by_name("Tri");
+    GameObject *lamp = ed.scene().find_by_name("Porch Lamp");
+    CHECK(root && floor && tri && lamp && floor->parent == root && tri->parent == floor && lamp->parent == floor);
+    if (!root || !floor || !tri || !lamp) return;
+    const Mesh *plane = floor->get<MeshFilter>() ? floor->get<MeshFilter>()->mesh.get() : nullptr;
+    const ColliderComponent *box = floor->get<ColliderComponent>();
+    std::printf("    Floor: %zu faces, scale (%g %g %g), collider shape %d size (%g %g %g)\n", plane ? plane->face_count() : 0, floor->local().scale.x,
+                floor->local().scale.y, floor->local().scale.z, box ? box->shape : -1, box ? box->size.x : 0.0f, box ? box->size.y : 0.0f, box ? box->size.z : 0.0f);
+    CHECK(plane && plane->face_count() == primitives::plane()->face_count() && floor->get<MeshRenderer>() && floor->local().scale.x == 2.0f);
+    CHECK(box && box->shape == 0 && std::fabs(box->size.x - 10.0f) < 1e-5f && std::fabs(box->center.y + 0.05f) < 1e-5f && !box->fit);
+    const Mesh *tm = tri->get<MeshFilter>() ? tri->get<MeshFilter>()->mesh.get() : nullptr;
+    const Vec3 e = tri->local().rotation.to_euler();
+    std::printf("    Tri: %zu face(s), at (%g %g %g), turned (%g %g %g)\n", tm ? tm->face_count() : 0, tri->local().position.x, tri->local().position.y,
+                tri->local().position.z, e.x, e.y, e.z);
+    CHECK(tm && tm->face_count() == 1 && tri->local().position.z == -2.0f && std::fabs(std::fabs(e.y) - 90.0f) < 0.01f);
+    const EngineComponent *spin = tri->get<EngineComponent>();
+    CHECK(spin && spin->type == "Spin" && spin->script == "aaaa0000aaaa0000aaaa0000aaaa0002" && spin->data.find("speed: 2") != std::string::npos &&
+          spin->data.find("--- !u!114 &25") == 0);
+    const Camera *cam = tri->get<Camera>();
+    CHECK(cam && cam->fov == 45.0f && cam->near_clip == 0.1f && cam->far_clip == 500.0f);
+    const Light *light = lamp->get<Light>();
+    std::printf("    Porch Lamp: at (%g %g %g), light type %d, range %g, intensity %g (the override isn't held: Unity keeps it)\n", lamp->local().position.x,
+                lamp->local().position.y, lamp->local().position.z, light ? light->type : -1, light ? light->range : 0.0f, light ? light->intensity : 0.0f);
+    CHECK(light && light->type == 1 && light->range == 7.5f && lamp->local().position.x == 3.0f && lamp->local().position.y == 2.0f);
+    /* One Undo step. */
+    ed.command("undo");
+    size_t after = 0;
+    ed.scene().for_each([&](GameObject &) { after++; });
+    CHECK(after == before && !ed.scene().find_by_name("Level"));
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Unity scenes (round 370, review): a prefab holding itself stops; a model placed as a prefab with a script added; names escaped as u+hex; a 2019 .meta's table and a part by its object's name; a parent loop under the root; a rotation override; the console's path match; the kept data byte for byte", [] {
+    const YamlNode names = parse_yaml("m_Name: \"\\u9AEA\\u306E\\U0001F600 \\uD83D\\uDE00\"\n");
+    CHECK(names.str("m_Name") == "\xE9\xAB\xAA\xE3\x81\xAE\xF0\x9F\x98\x80 \xF0\x9F\x98\x80");
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R370b"), dot_unity = fs::join(dir, "com.unity.r370");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    fs::make_dirs(dot_unity);
+    CHECK(fs::write_file(fs::join(dir, "two.obj"), "o A\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\no B\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 4 5 6\nf 4 6 7\n"));
+    CHECK(fs::write_file(fs::join(dot_unity, "tri.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/bbbb0000bbbb0000bbbb0000bbbb0001.meta"),
+                         "fileFormatVersion: 2\nguid: bbbb0000bbbb0000bbbb0000bbbb0001\nModelImporter:\n  internalIDToNameTable:\n  - first:\n      43: -2432090755550338912\n    second: B\n"));
+    const std::string self = "%YAML 1.1\n--- !u!1 &1\nGameObject:\n  m_Name: Selfie\n--- !u!4 &2\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n"
+                             "--- !u!1001 &3\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 2}\n    m_Modifications: []\n"
+                             "  m_SourcePrefab: {fileID: 100100000, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n";
+    CHECK(fs::write_file(fs::join(dir, "Selfie.prefab"), self));
+    /* The scene, CRLF as Unity writes on Windows. */
+    std::string scene = std::string("%YAML 1.1\n") +
+        "--- !u!1 &10\nGameObject:\n  m_Name: PartB\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+        "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: -2432090755550338912, guid: bbbb0000bbbb0000bbbb0000bbbb0001, type: 3}\n"
+        "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n"
+        "--- !u!1 &20\nGameObject:\n  m_Name: A\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+        "--- !u!33 &22\nMeshFilter:\n  m_GameObject: {fileID: 20}\n  m_Mesh: {fileID: 777, guid: bbbb0000bbbb0000bbbb0000bbbb0001, type: 3}\n"
+        "--- !u!1 &30\nGameObject:\n  m_Name: LoopOne\n--- !u!4 &31\nTransform:\n  m_GameObject: {fileID: 30}\n  m_Father: {fileID: 41}\n"
+        "--- !u!1 &40\nGameObject:\n  m_Name: LoopTwo\n--- !u!4 &41\nTransform:\n  m_GameObject: {fileID: 40}\n  m_Father: {fileID: 31}\n"
+        "--- !u!1001 &50\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 0}\n    m_Modifications: []\n"
+        "  m_SourcePrefab: {fileID: 100100000, guid: bbbb0000bbbb0000bbbb0000bbbb0003, type: 3}\n"
+        "--- !u!1 &51 stripped\nGameObject:\n  m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: bbbb0000bbbb0000bbbb0000bbbb0003, type: 3}\n"
+        "  m_PrefabInstance: {fileID: 50}\n"
+        "--- !u!114 &52\nMonoBehaviour:\n  m_GameObject: {fileID: 51}\n  m_Script: {fileID: 542108242, guid: bbbb0000bbbb0000bbbb0000bbbb0004, type: 3}\n  Name: \"\\u30A2\"\n"
+        "--- !u!1001 &60\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 0}\n    m_Modifications:\n"
+        "    - target: {fileID: 2, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n      propertyPath: m_LocalRotation.x\n      value: 0.70710677\n"
+        "    - target: {fileID: 2, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n      propertyPath: m_LocalRotation.w\n      value: 0.70710677\n"
+        "    - target: {fileID: 2, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n      propertyPath: m_LocalEulerAnglesHint.x\n      value: 90\n"
+        "  m_SourcePrefab: {fileID: 100100000, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n";
+    std::string crlf;
+    for (char ch : scene) crlf += ch == '\n' ? std::string("\r\n") : std::string(1, ch);
+    CHECK(fs::write_file(fs::join(dir, "Mixed.unity"), crlf));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"),
+                         "bbbb0000bbbb0000bbbb0000bbbb0001\tAssets/two.obj\tAssets/Imported/R370b/two.obj\n"
+                         "bbbb0000bbbb0000bbbb0000bbbb0002\tAssets/Selfie.prefab\tAssets/Imported/R370b/Selfie.prefab\n"
+                         "bbbb0000bbbb0000bbbb0000bbbb0003\tAssets/tri.obj\tAssets/Imported/R370b/com.unity.r370/tri.obj\n"
+                         "bbbb0000bbbb0000bbbb0000bbbb0004\tAssets/VRCSDK3A.dll\tAssets/Imported/R370b/VRCSDK3A.dll\n"));
+    size_t before = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("import " + fs::join(dir, "Mixed.unity"));
+    GameObject *root = ed.scene().find_by_name("Mixed");
+    size_t made = 0, selfies = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      made++;
+      selfies += g.name == "Selfie";
+    });
+    CHECK(root != nullptr);
+    if (!root) return;
+    /* Every new object under the root. */
+    size_t top_new = 0;
+    for (GameObject *g : ed.scene().roots) top_new += g != root && g->name != "Main Camera" && g->name != "Directional Light" && g->name != "Cube" && g->name != "Plane";
+    GameObject *b = ed.scene().find_by_name("PartB"), *a = ed.scene().find_by_name("A"), *l1 = ed.scene().find_by_name("LoopOne"), *l2 = ed.scene().find_by_name("LoopTwo");
+    const size_t fb = b && b->get<MeshFilter>() ? b->get<MeshFilter>()->mesh->face_count() : 0, fa = a && a->get<MeshFilter>() ? a->get<MeshFilter>()->mesh->face_count() : 0;
+    std::printf("    %zu objects made, %zu Selfie(s); PartB %zu face(s) (B's 2), A %zu (A's 1); loop parents %s / %s; new top-level besides the root %zu\n",
+                made - before, selfies, fb, fa, l1 && l1->parent ? l1->parent->name.c_str() : "-", l2 && l2->parent ? l2->parent->name.c_str() : "-", top_new);
+    CHECK(selfies >= 1 && selfies <= 3 && made - before < 40);  // (the self-holding prefab stops at its second appearance)
+    CHECK(fb == 2 && fa == 1);
+    CHECK(l1 && l2 && (l1->parent == root || l2->parent == root) && l1->parent != nullptr && l2->parent != nullptr);
+    /* The model placed as a prefab: its mesh, and the script added to it on its root. */
+    GameObject *tri = ed.scene().find_by_name("tri");
+    const EngineComponent *sdk = tri ? tri->get<EngineComponent>() : nullptr;
+    std::printf("    the placed model: %s, its added component %s\n", tri ? "made" : "missing", sdk ? sdk->type.c_str() : "-");
+    CHECK(tri && sdk && sdk->type == "MonoBehaviour (bbbb0000bbbb0000bbbb0000bbbb0004:542108242)" && sdk->data.find("--- !u!114 &52\r\n") == 0 &&
+          sdk->data.find("Name: \"\\u30A2\"\r\n") != std::string::npos);
+    /* The rotation override, made whole: 90 degrees about X. */
+    GameObject *turned = nullptr;
+    ed.scene().for_each([&](GameObject &g) { turned = g.name == "Selfie" && std::fabs(g.local().rotation.w - 0.70710677f) < 1e-4f ? &g : turned; });
+    CHECK(turned && std::fabs(turned->local().rotation.to_euler().x - 90.0f) < 0.01f);
+    /* The console: ".unity" in a folder's name doesn't make an .obj a Unity scene. */
+    const size_t objs_before = made;
+    ed.command("import " + fs::join(dot_unity, "tri.obj"));
+    size_t now = 0;
+    ed.scene().for_each([&](GameObject &) { now++; });
+    CHECK(now > objs_before);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("the lesson's Try-it (round 370): import of a .prefab that isn't there says so, making nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    size_t before = 0, after = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("window Project");
+    ed.command("import Assets/none.prefab");
+    ed.scene().for_each([&](GameObject &) { after++; });
+    CHECK(after == before);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -8826,4 +9145,5 @@ void run_assets_tests() {
   tests_round366();
   tests_round367();
   tests_round369();
+  tests_round370();
 }

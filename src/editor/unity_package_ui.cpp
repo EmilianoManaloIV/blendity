@@ -69,6 +69,10 @@ void Editor::PackageJob::unpack() {
       continue;
     }
     guids += a.guid + "\t" + a.pathname + "\t" + rel + "\n";  // (only what was made - review 369)
+    if (!a.meta.empty()) {  // (round 370: the .meta kept - a model's names its submeshes' fileIDs; hidden, as Unity hides them)
+      fs::make_dirs(fs::join(fs::join(project_root, into_rel), ".unity-meta"));
+      fs::write_file(fs::join(fs::join(fs::join(project_root, into_rel), ".unity-meta"), a.guid + ".meta"), a.meta);
+    }
     std::string().swap(a.data);
   }
   fs::make_dirs(fs::join(project_root, into_rel));

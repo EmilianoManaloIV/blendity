@@ -1470,6 +1470,7 @@ void Editor::handle_drop() {
       open_scene_asked(path);  // (task 0254)
     }
     else if (ext == ".unitypackage") import_unity_package(path);  // (round 369)
+    else if (ext == ".prefab" || ext == ".unity") import_unity_scene(path);  // (round 370)
     else if (ext == ".pdf" || ext == ".txt" || ext == ".md" || ext == ".tex" || ext == ".bib" || ext == ".docx" ||
              ext == ".html" || ext == ".htm" || ext == ".epub" || ext == ".ps" || ext == ".djvu") {
       /* (The Research window that collected papers is retired, task 0034.) */
@@ -2188,7 +2189,8 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 
 void Editor::import_dialog() {
   defer([this] {
-    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}}};
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}},
+                                                 {"Unity prefabs and scenes", {".prefab", ".unity"}}};  // (round 370)
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
     switch (pick_open_path("Import Model or Motion", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {

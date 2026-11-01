@@ -719,6 +719,19 @@ struct ColliderComponent : ComponentBase<ColliderComponent> {
   void reflect(Reflector &r) override;
 };
 
+/* A component of another engine that Blendity keeps but doesn't run (round 370, task 0347): a Unity script (C#,
+ * UdonSharp), VRChat's components and anything else Unity puts on an object - its type, its script's GUID and its
+ * data as the engine wrote it, saved with the scene and written back unchanged (task 0349). The engine is where code
+ * is written; Blendity carries it. */
+struct EngineComponent : ComponentBase<EngineComponent> {
+  static constexpr const char *kName = "EngineComponent";
+  std::string engine = "Unity";  // (Unity; Godot, Unreal and Blender later)
+  std::string type;              // (the script's class, or Unity's component type: "Spin", "VRC_AvatarDescriptor", "AudioSource")
+  std::string script;            // (the script's GUID, when it is one)
+  std::string data;              // (the engine's own text of it: Unity's YAML document)
+  void reflect(Reflector &r) override;
+};
+
 /* Unity's LOD Group (round 363, task 0340): the mesh at a few triangle ratios, the Game view showing the level its
  * height on screen calls for, exports writing <name>_LOD<n> (scene/lod.h). */
 struct LODGroupComponent : ComponentBase<LODGroupComponent> {

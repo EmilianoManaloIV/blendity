@@ -1271,6 +1271,7 @@ class Editor {
     void finish(const std::string &failure);
   };
   bool import_unity_package(const std::string &path);
+  bool import_unity_scene(const std::string &path);  // (round 370: a .prefab or .unity file's objects)
   void import_package_dialog();
   const PackageJob *last_package_for_test() const { return pkg_last_.get(); }
   std::vector<GameObject *> selected_objects_for_test() const { return selected_objects(false); }
