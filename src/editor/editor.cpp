@@ -232,7 +232,8 @@ bool Editor::wants_continuous_redraw() const {
          seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
          body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
          !deferred_.empty() ||
-         (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
+         (cam_preview_pt_hash_ != 0 && !cam_preview_done_) ||
+         vr_running();  // (round 383: the headset wants every frame - idle, the editor would draw one a second - review 383)
 }
 
 double Editor::frame_wait_seconds(double now, double last_frame) const {
@@ -375,7 +376,7 @@ int Editor::run() {
     /* The cap holds for input too: mouse moves arriving sooner are gathered
      * into the next frame instead of each drawing one. The pacer (task 0084) keeps the waits from
      * oversleeping the frame's turn by a timer tick. */
-    if (!first && max_fps_ > 0)
+    if (!first && max_fps_ > 0 && !vr_running())  // (VR View: xrWaitFrame paces the frames, at the headset's rate)
       pacer_.wait_until(now + frame_wait_seconds(now, last_frame), now_seconds, [&](double s) {
         more.clear();
         poll_events_for(window_, more, s);
@@ -712,6 +713,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   update_realtime_lightmaps();
   lighting_update_step();
   livelink_tick();  // (task 0172: what changed this frame goes out; nothing without a client)
+  vr_tick();        // (round 383: the headset's frame, when VR View runs)
   trail_refresh();  // (task 0282: a few more of the trails' frames, before the views draw them)
   if (window_) set_cursor(window_, ui_.cursor);
 
@@ -934,6 +936,9 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item(playing_ ? "Stop" : "Play", key("play.toggle").c_str())) { if (playing_) exit_play(); else enter_play(); }
     if (u.menu_item("Pause", key("play.pause").c_str(), paused_, playing_)) paused_ = !paused_;
     if (u.menu_item("Step", key("play.step").c_str(), false, playing_)) step_requested_ = true;
+    if (u.menu_item(vr_ ? "Stop VR View" : "VR View")) command(vr_ ? "vr stop" : "vr start");  // (round 383)
+    u.tooltip(vr_why_.empty() ? std::string("The scene in a headset at 1:1 (OpenXR: SteamVR, the Oculus app, Windows Mixed Reality), standing where the Scene view looks.")
+                              : "The scene in a headset at 1:1. Last time: " + vr_why_);
     u.menu_separator();
     if (u.menu_item("Preferences...")) dialog_ = Dialog::Preferences;
   });

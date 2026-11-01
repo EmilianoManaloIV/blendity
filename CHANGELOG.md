@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 383): VR View
+
+**Asked:** Phase C's first round: the scene in a headset at 1:1, standing where the Scene view looks (OpenXR: SteamVR,
+Quest Link, Windows Mixed Reality).
+
+**Added (task 0360)**
+- **`render/xr.h`:**
+  - the stereo maths (OpenXR's poses in Blendity's axes, off-centre projections, the stage below the Scene view's
+    pivot at a scale);
+  - a session state machine on a `Runtime` (Ready, frames, Stopping, Exiting, Lost, each with its reason).
+- **`render/xr_openxr.cpp`:**
+  - the OpenXR loader loaded at run time;
+  - a Direct3D 11 device on the headset's adapter, the stage space, a swapchain per eye;
+  - each eye's pixels uploaded into it.
+- **The editor:**
+  - `vr start [resolution] | stop | status | here | scale <s>`, and Edit > VR View;
+  - each eye drawn as the Game view draws (CPU), at half the headset's size by default.
+- **The OpenXR SDK:** its loader package 1.1.65 (Apache-2.0 OR MIT) goes in Blender's lib folder as `openxr/`. The
+  build finds it and copies `openxr_loader.dll` beside Blendity (ADR 0096, licenses/README.md).
+- **The Opus review's fixes:**
+  - the editor draws every frame while VR runs (idle, it had dropped the headset to one frame a second);
+  - the session resumes after Stopping;
+  - the user's stop no longer calls xrEndSession outside Stopping;
+  - a failed eye ends the frame without its layer;
+  - brief tracking loss doesn't blank the headset;
+  - plain swapchain formats get linear values;
+  - a local space is raised to standing height;
+  - the loader is searched for only beside Blendity;
+  - odd numbers are refused.
+
+**Checked:**
+- the maths;
+- the state machine on a stub runtime;
+- a stereo frame of a red cube 3 m ahead: 5.52 px apart between the eyes (5.46 expected), level, up in the picture;
+- a frame with both eyes at 1008 x 1120 costs 10.9 ms in the default scene;
+- the verbs.
+- The live headset check is the spec's "Your own check with the headset" (SteamVR is this machine's runtime; the suite
+  never starts it).
+
 ## 2026-11-01 (round 382): Live Link never pauses, and a live test of everything that flows
 
 **Asked:** Phase B's last round: no stalls while working with engines connected, Live Link going on during long jobs,

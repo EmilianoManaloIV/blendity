@@ -610,6 +610,12 @@ Live Link costs the editor a millisecond or two a frame with four engines connec
 ! cmd:window Live Link | The Live Link window: what was sent, and how long building it took
 ? You bind a heavy mesh's skin and move a prop while it works. When does Unity see the prop move? | The next frame: the bind runs on a worker, Live Link's tick goes on.
 ? Where are a mesh's glTF bytes made? | On Live Link's mesh worker: the main thread only copies the mesh when its topology changes.
+# VR View: the scene at life size
+With a headset connected (SteamVR, the Oculus app with Quest Link, or Windows Mixed Reality), Edit > VR View puts you in the scene at 1:1: you stand on the ground (y = 0) below where the Scene view looks, facing the way it faces, and your head moves the view. vr scale 2 makes the world look half size; vr here moves you to wherever the Scene view looks now; vr stop ends it. Each eye is drawn at half the headset's size each way - vr start 0.35 draws smaller eyes if it's slow. Without a headset or runtime, VR View says why.
+> docs/tasks/0360-vr-view.md: Your own check with the headset
+! cmd:vr status | VR View's state, and why it's off when it is
+? You want to judge whether a doorway is tall enough. What do you set? | Nothing - VR View is 1:1 by default: a 2 m doorway looks 2 m tall from your own eye height.
+? VR View is choppy. What helps first? | vr start 0.35 - smaller eyes to draw; the runtime's reprojection fills in between frames.
 # Imported animations: a model's clips
 A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
 ! cmd:window Animation | Open the Animation window: an imported model's clips play on its root

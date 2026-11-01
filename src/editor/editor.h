@@ -31,6 +31,7 @@
 #include "../render/realtime_lightmap.h"
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
+#include "../render/xr.h"
 #include "../scene/budget.h"
 #include "../scene/unity_package.h"
 #include "../scene/godot_scene.h"
@@ -1012,6 +1013,11 @@ class Editor {
   bool livelink_start(int port);
   void livelink_stop();
   livelink::Link *livelink_for_test() { return livelink_.get(); }
+  /* Round 383: VR View on a given runtime (a test's stub), and the session. */
+  bool vr_start_for_test(std::unique_ptr<xr::Runtime> rt, std::string &why);
+  xr::Session *vr_for_test() { return vr_.get(); }
+  Mat4 vr_stage_for_test() const { return xr::stage_in_world(vr_pivot_, vr_yaw_, vr_scale_, vr_ ? vr_->standing_lift() : 0.0f); }
+  bool vr_wants_frames_for_test() const { return wants_continuous_redraw(); }
   std::string livelink_discovery_path() const;  // (task 0274: ~/.blendity/livelink.json, beside the prefs)
   void livelink_autostart();
   bool livelink_autostart_pref_for_test() const { return livelink_autostart_; }
@@ -2423,6 +2429,22 @@ class Editor {
   void livelink_command(const std::vector<std::string> &t);
   void livelink_status();
   void livelink_tick();  // once a frame, after the scene's changes
+  /* Round 383: VR View (render/xr.h) - a headset sees the scene at 1:1, its stage at y = 0 below where the Scene view
+   * looks, facing as it faces; each eye drawn as the Game view draws (render_deferred, at vr_resolution_). */
+  std::unique_ptr<xr::Session> vr_;
+  float vr_resolution_ = 0.5f, vr_scale_ = 1.0f;
+  Vec3 vr_pivot_;
+  float vr_yaw_ = 0.0f;
+  Image vr_img_;
+  RenderTarget vr_rt_;
+  Renderer3D vr_r3d_;
+  std::string vr_why_;  // (why VR isn't running, for the status line and the button's tooltip)
+  void vr_command(const std::vector<std::string> &t);
+  bool vr_start(std::unique_ptr<xr::Runtime> rt, std::string &why);
+  void vr_stop();
+  void vr_tick();  // once a frame, after Live Link's
+  bool vr_running() const { return vr_ && vr_->state() != xr::Session::State::Off && vr_->state() != xr::Session::State::Lost; }
+  void vr_draw_eye(const Mat4 &view, const Mat4 &proj, Vec3 eye, int width, int height, uint32_t *pixels);
   void livelink_write_discovery();
   void livelink_remove_discovery();
   bool livelink_pref(const std::string &k, const std::string &v);

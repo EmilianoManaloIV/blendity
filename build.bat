@@ -75,6 +75,8 @@ rem Video files (task 0077): Blender's FFmpeg, whose DLLs sit in its lib folder 
 call :lib ffmpeg           BL_WITH_FFMPEG      "ffmpeg\include"                                "ffmpeg\lib\avformat.lib ffmpeg\lib\avcodec.lib ffmpeg\lib\swscale.lib ffmpeg\lib\avutil.lib"
 rem GPU rendering: the Vulkan headers (the loader comes with the GPU driver) and shaderc.
 if exist "%L%\vulkan\include" call :lib shaderc BL_WITH_VULKAN "shaderc\include vulkan\include" "shaderc\lib\shaderc_shared.lib"
+rem VR (round 383): the OpenXR SDK's headers; its loader DLL (bin\) is loaded at run time and copied beside Blendity.
+call :lib openxr           BL_WITH_OPENXR      "openxr\include"                                ""
 rem ABI settings the libraries were built with (blender\build_files\build_environment\cmake).
 set LIBDEFS=%LIBDEFS% /DIMATH_DLL /DOPENEXR_DLL /DMANIFOLD_PAR=1 /DJPH_SHARED_LIBRARY /DJPH_FLOATING_POINT_EXCEPTIONS_ENABLED /DJPH_DOUBLE_PRECISION /DJPH_CROSS_PLATFORM_DETERMINISTIC /DJPH_USE_CPU_COMPUTE /DJPH_OBJECT_STREAM /DJPH_USE_SSE4_1 /DJPH_USE_SSE4_2
 :libs_done
