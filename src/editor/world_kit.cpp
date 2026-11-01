@@ -4,10 +4,24 @@
 #include "editor.h"
 
 #include "../scene/colliders.h"
+#include "../scene/lod.h"
 #include "../scene/export.h"
 #include "../core/core.h"
 
 namespace bl {
+
+/* An LOD Group's mesh for the Game view: its height on screen (its bounds' height over the distance, by the focal term)
+ * picks the level; nullptr when the group culls it. Every other view, and an object without a group, draws `m`. */
+const Mesh *Editor::lod_for_view(const GameObject &g, const Mesh &m) {
+  const LODGroupComponent *lg = g.get<LODGroupComponent>();
+  if (!lg || !lg->enabled || !lod_view_.on || lod_deforms(g)) return &m;
+  const AABB b = m.render_mesh().bounds.transformed(g.world_matrix());  // (the mesh this view draws - review 363: not another evaluation)
+  const float height = b.valid() ? std::max(b.max.y - b.min.y, std::max(b.max.x - b.min.x, b.max.z - b.min.z)) : 0.0f;
+  const float dist = std::max(1e-3f, length(b.center() - lod_view_.eye));
+  const float screen = height * lod_view_.half_focal / (lod_view_.ortho ? 1.0f : dist);
+  const int level = lod_level(*lg, screen);
+  return level < 0 ? nullptr : lod_mesh(*lg, m, level);
+}
 
 /* Fit to Mesh ticked (or a collider just added): the collider sized to its mesh, the tick cleared - part of the step
  * that ticked it, never a step of its own (a loaded or undone state asking for it is fitted quietly). */
@@ -55,7 +69,9 @@ void Editor::draw_colliders() {
  * skin: engines hide and collide it). */
 void Editor::add_collider_item(GameObject &g, const Mesh &m, const ExportItem &it, const ExportOptions &o, std::vector<ExportItem> &items, std::vector<std::shared_ptr<Mesh>> &keep) {
   const ColliderComponent *c = g.get<ColliderComponent>();
-  const std::string name = c && c->enabled ? collider_export_name(o.collider_names, c->shape, g.name) : "";
+  /* (review 363: with its LODs exported, the collider follows LOD0's name - Unreal's UCX_ names the render mesh) */
+  const std::string object = exports_lods(g, o) ? lod_export_name(g.name, 0) : g.name;
+  const std::string name = c && c->enabled ? collider_export_name(o.collider_names, c->shape, object) : "";
   if (name.empty()) return;
   std::shared_ptr<Mesh> shape = collider_mesh(*c, m);
   if (!shape) return;
@@ -91,6 +107,28 @@ static bool moves(const GameObject &g) {
   for (const GameObject *a = &g; a; a = a->parent)
     if (a->get<Rigidbody>() || a->get<Animation>() || a->get<Oscillator>() || a->get<PlayerController>()) return true;
   return false;
+}
+
+/* An export's LOD levels: the object's own item renamed <name>_LOD0, each next level a decimated copy beside it (its
+ * skin made again for its vertices) - Unity's and Unreal's import read the suffix. Nothing without an LOD Group. */
+bool Editor::exports_lods(const GameObject &g, const ExportOptions &o) {
+  const LODGroupComponent *lg = g.get<LODGroupComponent>();
+  return o.lods && lg && lg->enabled && lg->levels >= 2 && meshops::decimate_available();  // (review 363: no full copies where nothing decimates)
+}
+
+void Editor::add_lod_items(GameObject &g, const Mesh &m, std::vector<ExportItem> &items, size_t index, const ExportOptions &o, GameObject *arm, const SkinModifier *skm) {
+  if (!exports_lods(g, o) || index >= items.size()) return;
+  const LODGroupComponent *lg = g.get<LODGroupComponent>();
+  ExportItem &base = items[index];
+  base.name = lod_export_name(g.name, 0);
+  const ExportItem copy = base;
+  for (int level = 1; level < std::clamp(lg->levels, 1, LODGroupComponent::kMax); level++) {
+    ExportItem li = copy;
+    li.name = lod_export_name(g.name, level);
+    li.mesh = lod_mesh(*lg, m, level);
+    if (arm && skm) li.skin = export_skin_of(*arm, *li.mesh, g, *skm);
+    items.push_back(li);
+  }
 }
 
 /* lighting markstatic: Contribute GI on every mesh that stays still - no Rigidbody, no Skin, no Animation of its own

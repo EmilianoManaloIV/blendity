@@ -10,6 +10,7 @@
 #include "../src/scene/visemes.h"
 #include "../src/scene/humanoid.h"
 #include "../src/scene/colliders.h"
+#include "../src/scene/lod.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/avatar_merge.h"
 #include "../src/scene/avatar_eyes.h"
@@ -7632,6 +7633,87 @@ static void tests_round362() {
   });
 }
 
+/* ---------------------------------------------------------------- round 363: the world kit - LOD Groups */
+static void tests_round363() {
+  test("LOD Groups (round 363): the level by height on screen - LOD0 near, the next ones as it shrinks, the last (or nothing, Cull) when tiny; the levels' triangles at their ratios", [] {
+    LODGroupComponent g;
+    g.levels = 3;
+    CHECK(lod_level(g, 0.9f) == 0 && lod_level(g, 0.3f) == 1 && lod_level(g, 0.15f) == 2 && lod_level(g, 0.01f) == 2);
+    g.cull = true;
+    CHECK(lod_level(g, 0.01f) == -1 && lod_level(g, 0.12f) == 2);
+    CHECK(lod_export_name("Tree", 2) == "Tree_LOD2");
+    if (!meshops::decimate_available()) return;  // (the levels' meshes: meshoptimizer)
+    const MeshPtr sphere = primitives::uv_sphere(0.5f, 48, 32);
+    auto tris = [](const Mesh &m) { return (double)m.render_mesh().indices.size() / 3.0; };
+    const double full = tris(*sphere);
+    const double l1 = tris(*lod_mesh(g, *sphere, 1)), l2 = tris(*lod_mesh(g, *sphere, 2));
+    std::printf("    a sphere's levels: %.0f, %.0f, %.0f triangles (ratios 1, 0.5, 0.25)\n", full, l1, l2);
+    CHECK(l1 < full * 0.6 && l1 > full * 0.4 && l2 < full * 0.35 && l2 > full * 0.15);
+    CHECK(lod_mesh(g, *sphere, 1) == lod_mesh(g, *sphere, 1));  // (kept, not made a frame)
+  });
+  test("LOD Groups (round 363): the Game view draws a far tree's LOD2 and a near one's LOD0; an export writes Tree_LOD0.._LOD2", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Sphere");
+    GameObject *tree = ed.active_object_for_test();
+    if (!tree) return;
+    tree->name = "Tree";
+    tree->set_local_position(Vec3(20, 0, 0));  // (away from the scene's Cube at the origin)
+    ed.command("component LODGroup");
+    LODGroupComponent *lg = tree->get<LODGroupComponent>();
+    CHECK(lg != nullptr);
+    if (!lg) return;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Mat4 proj = Mat4::perspective(60.0f * 3.14159265f / 180.0f, 1.0f, 0.1f, 1000.0f);
+    auto drawn = [&](Vec3 eye) -> size_t {  // (the tree's triangles as the Game view draws it)
+      const Mat4 view = Mat4::look_at(eye, tree->world_position(), Vec3(0, 1, 0));
+      for (const DrawItem &it : ed.collect_items_for_test(true, view, proj, eye))
+        if (length(it.model.translation() - tree->world_position()) < 1e-5f) return it.mesh ? it.mesh->indices.size() / 3 : 0;
+      return 0;
+    };
+    /* 1 m away the 1 m tree stands 0.87 of the view (LOD0); 60 m away 0.014 (below LOD2's 0.1: the last level). */
+    const size_t near_faces = drawn(tree->world_position() + Vec3(0, 0, 1)), far_faces = drawn(tree->world_position() + Vec3(0, 0, 60));
+    const Mesh &base = *tree->evaluated_mesh(1);
+    const size_t base_tris = base.render_mesh().indices.size() / 3, lod2_tris = lod_mesh(*lg, base, 2)->render_mesh().indices.size() / 3;
+    std::printf("    the tree's triangles drawn near %zu (its mesh %zu), far %zu (LOD2 %zu)\n", near_faces, base_tris, far_faces, lod2_tris);
+    CHECK(near_faces == base_tris && far_faces == lod2_tris);
+    if (meshops::decimate_available()) CHECK(far_faces < base_tris / 2);
+    /* A skinned or keyed tree deforms: the Game view draws it whole (its levels would freeze at their first pose). */
+    {
+      Mesh &km = *mesh_make_mutable(tree->get<MeshFilter>()->mesh);
+      km.shape_keys = {{"Sway", std::vector<Vec3>(km.vert_count(), Vec3(0.01f, 0, 0))}};
+      km.touch();
+    }
+    tree->get<MeshRenderer>()->set_shape_weight("Sway", 0.5f);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const size_t keyed_far = drawn(tree->world_position() + Vec3(0, 0, 60));
+    CHECK(keyed_far == tree->evaluated_mesh(1)->render_mesh().indices.size() / 3);
+    tree->get<MeshRenderer>()->shape_weights.clear();
+    tree->get<MeshFilter>()->mesh->shape_keys.clear();
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::string dir = fs::join(test_dir(), "r363");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "tree.glb");
+    ed.select_for_test(tree->id, false);
+    ed.command("export glb " + path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    std::string names;
+    for (size_t i = 0; i < j["nodes"].size(); i++) names += j["nodes"][i]["name"].str + ";";
+    std::printf("    exported: %s\n", names.c_str());
+    CHECK(meshops::decimate_available() ? names == "Tree_LOD0;Tree_LOD1;Tree_LOD2;" : names == "Tree;");  // (no copies where nothing decimates)
+  });
+  test("the lesson's Try-it (round 363): create Sphere, component LODGroup - three levels", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Sphere");
+    ed.command("component LODGroup");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<LODGroupComponent>() && g->get<LODGroupComponent>()->levels == 3);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -8008,4 +8090,5 @@ void run_assets_tests() {
   tests_round360();
   tests_round361();
   tests_round362();
+  tests_round363();
 }

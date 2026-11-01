@@ -60,6 +60,9 @@ void ExportOptions::reflect(Reflector &r) {
   }
   r.help("Export the meshes as the modifier stack makes them (Blender: Apply Modifiers).");
   if (f == ExportFormat::GLB || f == ExportFormat::GLTF || f == ExportFormat::FBX) {
+    r.field("LOD Levels", lods);
+    r.help("An LOD Group's levels written as <name>_LOD0, _LOD1...: Unity's model import builds its LOD Group from them\n"
+           "(round 363; Unreal's import wants an FBX LOD Group node - not written yet). Off: the mesh alone.");
     static const char *const kEngines[] = {"None", "Unity (_Collider)", "Unreal (UCX_)", "Godot (-colonly)"};
     r.enumeration("Colliders", collider_names, kEngines, 4);
     r.help("Each object's Collider as its own mesh, named as the engine reads it: the Unity bridge's postprocessor makes a MeshCollider\n"

@@ -82,6 +82,7 @@ struct ExportOptions {
   bool skins = true;            // glTF: skinned meshes with their armature, weights and clip (task 0268; Blender: Armature, Skinning, Animation)
   bool shape_keys = true;       // glTF morph targets / FBX blend shapes (round 351; Blender: Shape Keys)
   bool lightmap_uvs = false;    // (round 353) glTF TEXCOORD_1 / FBX's second UV map, laid out for lightmaps (Unity: UV2)
+  bool lods = true;              // (round 363) an LOD Group's levels written as <name>_LOD0.._LODn (Unity, Unreal)
   int collider_names = 0;       // (round 362) colliders as meshes named for an engine: 0 none, 1 Unity, 2 Unreal, 3 Godot
   bool ascii = false;           // STL / PLY: ASCII instead of binary
   /* Bake Textures (task 0036, OBJ / FBX / glTF): each object's look baked on a copy into one set of images beside

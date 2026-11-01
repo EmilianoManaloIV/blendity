@@ -1353,8 +1353,10 @@ class Editor {
    * Scene view's (game false: never flattened). */
   std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0) {
     if (game) set_flatten_view(view, proj, eye, role);
+    if (game) lod_view_ = {true, eye, 0.5f * proj.m[5], proj.m[15] == 1.0f};
     std::vector<DrawItem> items = collect_items(game, false);
     flatten_view_.on = false;
+    lod_view_.on = false;
     return items;
   }
   /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
@@ -1732,6 +1734,14 @@ class Editor {
     float px_per_m = 0.0f;
     bool ortho = false;  // an orthographic view: the width on screen doesn't depend on the distance
   } outline_view_;
+  /* Round 363: the Game view's eye and focal term, for the LOD Groups (off: every view and render draws LOD0). */
+  struct LodView {
+    bool on = false;
+    Vec3 eye;
+    float half_focal = 1.0f;  // a 1 m object at 1 m stands this much of the view's height
+    bool ortho = false;
+  } lod_view_;
+  bool game_view_drawing_ = false;
   /* Round 334: the camera the Game view or a render flattens toward (Camera Flatten); off for the Scene view, bakes,
    * exports and MoonRay, which keep the true shape. */
   struct FlattenView {
@@ -2971,6 +2981,9 @@ class Editor {
   /* Round 362: the world kit (world_kit.cpp). */
   void update_collider_fits();
   void draw_colliders();
+  const Mesh *lod_for_view(const GameObject &g, const Mesh &m);
+  void add_lod_items(GameObject &g, const Mesh &m, std::vector<ExportItem> &items, size_t index, const ExportOptions &o, GameObject *arm, const SkinModifier *skm);
+  bool exports_lods(const GameObject &g, const ExportOptions &o);
   struct ColliderWire {
     uint64_t key = 0;
     std::shared_ptr<Mesh> mesh;

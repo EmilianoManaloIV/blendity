@@ -2865,7 +2865,9 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
     if (arm) it.skin = export_skin_of(*arm, *m, g, *skm);
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
     items.push_back(it);
-    add_collider_item(g, *m, it, o, items, keep);  // (round 362)
+    const size_t index = items.size() - 1;
+    add_collider_item(g, *m, it, o, items, keep);   // (round 362)
+    add_lod_items(g, *m, items, index, o, arm, skm);  // (round 363)
     /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
      * back faces, as glTF's single-sided default asks, show the silhouette line). */
     if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {

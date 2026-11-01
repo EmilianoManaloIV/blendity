@@ -2690,9 +2690,11 @@ void Editor::draw_game_view(const Recti &r) {
     if (hit && !cache_verify_) prof_.view_cache_hits++;
     else if (!hit && hold_other_views() && view_cache_show(game_cache_, img)) prof_.views_held++;  // (task 0103: drawn on release)
     else {
+      game_view_drawing_ = true;  // (round 363: the LOD Groups switch here only)
       render_scaled(game_r3d_, game_rt_, game_vs_, v, p, [&](RenderTarget &t) {
         render_camera(game_r3d_, t, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain
       }, owner, false, false);  // (nothing picks in the Game view: no full-size depth and ids)
+      game_view_drawing_ = false;
       game_stats_ = game_r3d_.stats();
       prof_.view_renders++;
       if (hit) view_cache_verify(game_cache_, img, "Game view");

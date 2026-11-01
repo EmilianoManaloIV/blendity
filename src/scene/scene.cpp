@@ -216,6 +216,8 @@ void register_builtin_components() {
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
                         "No direct equivalent (Blender removed its game engine in 2.80)");
+  reg<LODGroupComponent>("Rendering", "The mesh at fewer triangles when it's small on screen in the Game view, as Unity's LOD Group; exports write each level as <name>_LOD<n> for Unity (round 363).",
+                         "Unity's LOD Group; Unreal's LOD settings; Blender has none (a Decimate per level, by hand)");
   reg<ColliderComponent>("Physics", "The object's collision shape: Box, Sphere, Capsule, Convex or its Mesh - Jolt's in Play, written into exports for Unity, Unreal and Godot (round 362).",
                          "Unity's Box / Sphere / Capsule / Mesh Collider; Blender's Rigid Body > Collisions > Shape");
   reg<Rigidbody>("Physics", "Gravity, bounciness and simple sphere collisions in Play mode.",
@@ -1630,6 +1632,19 @@ void PlayerController::update(PlayContext &ctx) {
     Vec3 dir = owner->local().rotation.rotate({0, 0, 1});
     owner->set_local_position(owner->local().position + dir * (fwd * move_speed * ctx.dt));
   }
+}
+
+void LODGroupComponent::reflect(Reflector &r) {
+  r.field("Levels", levels, 1, kMax);
+  r.help("How many levels: LOD0 is the mesh itself, each next one a Decimate of it (meshoptimizer: the libraries' build).");
+  static const char *const kRatio[] = {"LOD0 Triangles", "LOD1 Triangles", "LOD2 Triangles", "LOD3 Triangles"};
+  static const char *const kScreen[] = {"LOD0 Screen Height", "LOD1 Screen Height", "LOD2 Screen Height", "LOD3 Screen Height"};
+  for (int i = 0; i < std::clamp(levels, 1, kMax); i++) {
+    if (i > 0) r.field(kRatio[i], ratio[i], 0.01f, 0.01f, 1.0f);
+    r.field(kScreen[i], screen[i], 0.005f, 0.0f, 1.0f);
+  }
+  r.help("A level shows while the object's height on screen is at least its share of the view (Unity's LOD Group transitions).");
+  r.field("Cull Below Last", cull);
 }
 
 void ColliderComponent::reflect(Reflector &r) {

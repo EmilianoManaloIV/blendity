@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 363): the VRChat world kit, part 2 - LOD Groups
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 9:
+no LODs for a world's engine).
+
+**Added (task 0340)**
+- **The LOD Group component**, as Unity's: up to four levels, each a Decimate of the mesh, with a Screen Height and
+  Cull Below Last.
+- **The Game view** shows the level the object's height on screen calls for.
+- **Exports** write `<name>_LOD0.._LODn` (the Export dialog's LOD Levels, on by default), which Unity's import makes
+  an LOD Group.
+
+**The Opus review's fixes:**
+- the test made true in the libraries' build;
+- deforming objects drawn whole;
+- only the Game view switches (not F12's raster or the camera previews);
+- levels cached per base mesh by its id and versions;
+- bounds from the mesh drawn;
+- no full copies where nothing decimates;
+- UCX_ following LOD0;
+- NaN ratios;
+- the Unreal claim withdrawn.
+
+**Checked:** `tests_round363`:
+- the levels by screen height, and Cull;
+- the levels' triangles at their ratios, kept between frames (the libraries' build);
+- a near tree drawn whole and a far one at LOD2;
+- a keyed tree drawn whole;
+- the three names in a .glb;
+- the Try-it.
+
 ## 2026-10-31 (round 362): the VRChat world kit, part 1 - Colliders, and Generate Lighting's Fix
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 9

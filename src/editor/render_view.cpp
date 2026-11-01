@@ -194,6 +194,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const bool shaped_keys = !editing && set_view_shapes(g, *mr, *mf->mesh);
     const bool view_shaped = shaped_keys || (!editing && view_lattice_on(g, game));  // (round 342: a camera-aligned lattice too)
     const Mesh *m = g.evaluated_mesh(editing ? 2 : (game ? 1 : 0) + (view_shaped ? 3 + 2 * flatten_view_.role : 0));
+    if (game && m) m = lod_for_view(g, *m);  // (round 363: an LOD Group's level for its height on screen; nullptr culled)
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
     DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
@@ -690,9 +691,11 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
+  if (game && game_view_drawing_) lod_view_ = {true, eye, 0.5f * p.m[5], p.m[15] == 1.0f};  // (round 363: the LOD Groups' levels, the Game view's alone)
   if (game) set_flatten_view(v, p, eye, 0, cam);  // (round 334: Camera Flatten in the Game view and renders, not the Scene view)
   std::vector<DrawItem> items = collect_items(game, true);
   outline_view_.on = false;
+  lod_view_.on = false;
   flatten_view_.on = false;
   /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
   const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);

@@ -719,6 +719,25 @@ struct ColliderComponent : ComponentBase<ColliderComponent> {
   void reflect(Reflector &r) override;
 };
 
+/* Unity's LOD Group (round 363, task 0340): the mesh at a few triangle ratios, the Game view showing the level its
+ * height on screen calls for, exports writing <name>_LOD<n> (scene/lod.h). */
+struct LODGroupComponent : ComponentBase<LODGroupComponent> {
+  static constexpr const char *kName = "LODGroup";  // (Unity's "LOD Group"; one word for the console)
+  static constexpr int kMax = 4;
+  int levels = 3;
+  float ratio[kMax] = {1.0f, 0.5f, 0.25f, 0.1f};    // each level's share of the triangles (level 0: the mesh)
+  float screen[kMax] = {0.5f, 0.25f, 0.1f, 0.03f};  // shown while the object stands at least this much of the view's height
+  bool cull = false;                                // below the last level's: not drawn (Unity's Culled)
+  void reflect(Reflector &r) override;
+  /* (Runtime: the decimated levels of a base mesh, made on first use and again when that mesh or the ratios change;
+   * a few bases kept - scene/lod.cpp.) */
+  struct Levels {
+    uint64_t uid = 0, version = 0, deform = 0, ratios = 0;
+    std::vector<std::shared_ptr<Mesh>> meshes;
+  };
+  mutable std::vector<Levels> cache;
+};
+
 struct Rigidbody : ComponentBase<Rigidbody> {
   static constexpr const char *kName = "Rigidbody";
   float mass = 1.0f;
