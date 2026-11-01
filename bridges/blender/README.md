@@ -34,6 +34,7 @@ date (and removes what Blendity deleted meanwhile).
 | Toon materials | a cel setup (Shader to RGB, a constant ramp of Toon Bands, the shadow colour): EEVEE; every toon field is in the material's custom property `blendity_toon` |
 | lights | sun, point, spot and area lights; strength as Blendity's path tracer gives it (a sun of intensity 1 is pi W/m2) |
 | cameras | the same vertical field of view, clipping, orthographic size, physical lens |
+| the look (round 376) | a "Blendity Live Link" world (the Gradient as a ColorRamp, the sky, an HDRI; fog as the mist pass), the scene's exposure and view transform, a compositor node group for the fog, Bloom, Color Grading and a Vignette; the scene's own world and compositor kept and put back when the link stops |
 | armatures and bones | empties posed as the bones (skinned meshes come across as moving vertices) |
 
 ## Send to Blendity (round 374)

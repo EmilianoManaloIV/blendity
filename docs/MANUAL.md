@@ -904,6 +904,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Keep Transforms** (round 375, glTF): the Export dialog's option (or `export glb [all] transforms <file>`) writes each object's position, rotation and scale on its own node with its vertices around its own pivot, as Blender's glTF export does - a .blend brought in and sent back keeps its objects' origins. Off (the default), the vertices carry the transforms. Skinned meshes are written as before. Each object is a top-level node (parents aren't kept), and a sheared or mirrored object is baked, as glTF's nodes can't hold those.
 
+**Live Link's look** (round 376): with a bridge connected, the world (Gradient, Sky, HDRI, colour, strength), the distance fog, the render's exposure and view transform, and the render camera's Camera Filters are sent as you change them - Blender builds its world and compositor, Unity its RenderSettings (and a global URP Volume in a URP project; a Blendity Look object keeps them otherwise), Godot a WorldEnvironment, Unreal a SkyLight, an Exponential Height Fog and an unbound Post Process Volume. Bloom, Vignette and Color Grading are drawn; other filters travel as data. The engine's own lighting comes back: Blender's world and compositor when the link stops, Unity's with Blendity Look's Restore Scene Lighting. In URP, turn Post Processing on for the camera to see the Volume.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

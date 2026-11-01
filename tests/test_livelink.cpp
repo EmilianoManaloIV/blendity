@@ -114,6 +114,16 @@ Session record_session() {
   mat.base_color = Vec3(0.9f, 0.4f, 0.2f);
   mat.touch();
   take(drain(ed, c));
+  /* Round 376: the look - a gradient sky with fog from 5 to 40 m, half a stop up, Bloom and a Vignette on the camera. */
+  EnvironmentSettings &env = ed.scene().environment;
+  env.mode = 0, env.sky = Vec3(0.2f, 0.4f, 0.8f), env.fog = true, env.fog_start = 5.0f, env.fog_end = 40.0f, env.fog_color = Vec3(0.7f, 0.6f, 0.5f);
+  ed.scene().render.exposure = 0.5f;
+  if (GameObject *cam = ed.scene().find_by_name("Main Camera")) {
+    CameraFilters *f = cam->get<CameraFilters>() ? cam->get<CameraFilters>() : cam->add<CameraFilters>();
+    if (BloomEffect *b = static_cast<BloomEffect *>(f->add("Bloom"))) b->intensity = 0.8f;
+    if (VignetteEffect *v = static_cast<VignetteEffect *>(f->add("Vignette"))) v->intensity = 0.3f;
+  }
+  take(drain(ed, c));
   MeshPtr m = std::make_shared<Mesh>(*box->mesh_filter()->mesh);
   m->positions[0] = m->positions[0] + Vec3(0.25f, 0, 0);
   m->touch();
@@ -489,11 +499,12 @@ static void livelink_fixture_tests() {
     const std::vector<std::string> now = outline(s.ms);
     CHECK(now.size() > 20);
     std::printf("    %zu messages, %zu bytes; types:", s.ms.size(), s.raw.size());
-    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play"})
+    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters"})
       std::printf(" %s %d", t, count_of(s.ms, t));
     std::printf("\n");
     for (const char *t : {"transform", "deform", "pose", "delete"}) CHECK(count_of(s.ms, t) == 1);
     CHECK(count_of(s.ms, "play") == 2 && count_of(s.ms, "material") >= 3);
+    CHECK(count_of(s.ms, "world") == 2 && count_of(s.ms, "render") == 2 && count_of(s.ms, "filters") == 2);  // (round 376: at the sync and once changed)
     const std::string path = "tests/fixtures/livelink_stream.bin";
     if (std::getenv("BLENDITY_LIVELINK_RECORD")) {
       CHECK(fs::write_file(path, s.raw));
@@ -993,6 +1004,89 @@ static void tests_round318() {
   });
 }
 
+static const Message *last_of(const std::vector<Message> &ms, const char *type) {
+  const Message *found = nullptr;
+  for (const Message &m : ms) found = m.type() == type ? &m : found;
+  return found;
+}
+
+static void tests_round376() {
+  test("Live Link's look (round 376): the world, the render's look and a camera's filters go at the sync; a fog switched on, an HDRI chosen, the exposure and view transform changed, Bloom added then the stack removed each go once - nothing while unchanged", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    const std::vector<Message> sync = until(ed, c, "sync_end");
+    const Message *w0 = last_of(sync, "world"), *r0 = last_of(sync, "render"), *f0 = last_of(sync, "filters");
+    CHECK(w0 && r0 && w0->j["mode"].str == "gradient" && w0->j["fog"]["enabled"].type == Json::Bool && w0->j["fields"].type == Json::Obj);
+    CHECK(f0 && f0->j["effects"].size() == 0);  // (always at a sync, empty without a stack: a reconnecting engine drops an old one)
+    CHECK(count_of(drain(ed, c), "world") == 0);  // (unchanged: nothing)
+    Scene &sc = ed.scene();
+    sc.environment.fog = true, sc.environment.fog_start = 3.0f, sc.environment.fog_end = 30.0f;
+    const std::vector<Message> fog = drain(ed, c);
+    const Message *w1 = last_of(fog, "world");
+    CHECK(count_of(fog, "world") == 1 && w1 && w1->j["fog"]["enabled"].b && std::fabs(w1->j["fog"]["end"].number() - 30.0) < 1e-6);
+    sc.environment.mode = 2, sc.environment.hdri = TextureRef{"Assets/Textures/sky.hdr", false};
+    const std::vector<Message> hdri = drain(ed, c);
+    const Message *w2 = last_of(hdri, "world");
+    std::printf("    the HDRI sent as %s\n", w2 ? w2->j["hdri"].str.c_str() : "-");
+    CHECK(w2 && w2->j["mode"].str == "hdri" && w2->j["hdri"].str == resolve_asset_path("Assets/Textures/sky.hdr"));
+    sc.render.exposure = -1.0f, sc.render.view_transform = 2;
+    const std::vector<Message> look = drain(ed, c);
+    const Message *r1 = last_of(look, "render");
+    CHECK(count_of(look, "render") == 1 && r1 && std::fabs(r1->j["exposure"].number() + 1.0) < 1e-6 && r1->j["view_transform"].str == "ACES" && count_of(look, "world") == 0);
+    GameObject *cam = sc.find_by_name("Main Camera");
+    CHECK(cam);
+    if (!cam) return;
+    /* Another camera's stack isn't the look: only the render camera's goes (review 376: two stacks fought over one). */
+    GameObject *side = sc.create("Side Camera");
+    side->add<Camera>();
+    side->add<CameraFilters>()->add("Vignette");
+    CHECK(count_of(drain(ed, c), "filters") == 0);
+    CameraFilters *f = cam->add<CameraFilters>();
+    static_cast<BloomEffect *>(f->add("Bloom"))->intensity = 1.5f;
+    const std::vector<Message> bloom = drain(ed, c);
+    const Message *f1 = last_of(bloom, "filters");
+    CHECK(count_of(bloom, "filters") == 1 && f1 && (uint64_t)f1->j["id"].number() == cam->id && f1->j["effects"].size() == 1 &&
+          f1->j["effects"][0]["type"].str == "Bloom" && std::fabs(f1->j["effects"][0]["fields"]["Intensity"].number() - 1.5) < 1e-6);
+    CHECK(count_of(drain(ed, c), "filters") == 0);
+    /* A second client joins while the first is connected: it gets the whole look; the first gets nothing again. */
+    net::LineClient c2;
+    CHECK(c2.connect(ed.livelink_for_test()->port()));
+    const std::vector<Message> second = until(ed, c2, "sync_end");
+    const Message *f3 = last_of(second, "filters");
+    CHECK(last_of(second, "world") && last_of(second, "render") && f3 && f3->j["effects"].size() == 1);
+    CHECK(count_of(drain(ed, c), "world") == 0);
+    cam->remove_component(f);
+    const std::vector<Message> gone = drain(ed, c);
+    const Message *f2 = last_of(gone, "filters");
+    CHECK(count_of(gone, "filters") == 1 && f2 && f2->j["effects"].size() == 0);  // (removed: an empty stack)
+    /* The render camera deleted: the next camera's stack (the side camera's Vignette) is the look now. */
+    cam->add<CameraFilters>()->add("Bloom");
+    drain(ed, c);
+    sc.destroy(cam);
+    const std::vector<Message> deleted = drain(ed, c);
+    const Message *f4 = last_of(deleted, "filters");
+    std::printf("    the render camera deleted: filters for %s with %zu effect(s)\n", f4 && (uint64_t)f4->j["id"].number() == side->id ? "the side camera" : "?",
+                f4 ? f4->j["effects"].size() : 0);
+    CHECK(f4 && (uint64_t)f4->j["id"].number() == side->id && f4->j["effects"].size() == 1 && f4->j["effects"][0]["type"].str == "Vignette");
+    sc.destroy(side);
+    const Message *f5 = last_of(drain(ed, c), "filters");
+    CHECK(f5 && f5->j["id"].number() == 0 && f5->j["effects"].size() == 0);  // (no camera: no look)
+    const livelink::Stats &st = ed.livelink_for_test()->stats();
+    std::printf("    sent: %llu world, %llu render, %llu filters\n", (unsigned long long)st.worlds, (unsigned long long)st.renders, (unsigned long long)st.filters);
+    ed.livelink_stop();
+  });
+  test("the lesson's Try-it (round 376): window Lighting - the world and fog Live Link sends as they change", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("window Lighting");
+    CHECK(ed.window_docked_for_test(WindowKind::Lighting));
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -1001,4 +1095,5 @@ void run_livelink_tests() {
   tests_round297();
   tests_round298();
   tests_round318();
+  tests_round376();
 }

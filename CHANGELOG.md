@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 376): the world and the look in Live Link
+
+**Asked:** Phase B's first round, "lighting, modeling, and everything in between while bridges are running": the
+world, the render's look and the camera's filters, live in every engine.
+
+**Added (task 0353)**
+- **Live Link's `world`, `render` and `filters` messages** (docs/LIVELINK.md): the world (gradient, sky, HDRI,
+  colour, strength, fog), exposure and view transform, and a camera's filter stack. They're sent at the sync and
+  whenever they change.
+- **Blender:** the world (a ColorRamp gradient, sky, HDRI, fog), exposure and view transform, and the compositor
+  (Bloom, Color Grading, Vignette).
+- **Unity:**
+  - RenderSettings (Trilight ambient, skybox, linear fog);
+  - a Blendity Look object;
+  - in URP, a global Volume (ColorAdjustments, Tonemapping, Bloom, Vignette).
+- **Godot:** a WorldEnvironment (sky, depth fog, tone mapping, glow, adjustments).
+- **Unreal:** a SkyLight, an ExponentialHeightFog and an unbound PostProcessVolume.
+- The recorded session now carries the look, and each bridge's replay checks it.
+- **The Opus review's fixes:**
+  - Blender's fog is the mist pass in the compositor (a world volume had blacked out Cycles);
+  - Unreal adopts its look actors on reconnect;
+  - only the render camera's filters are sent, at every sync and when it changes or goes;
+  - colours are converted for Godot and Unity;
+  - the scene's own world, compositor and lighting are kept and restorable;
+  - Godot's depth fog is opaque by its end;
+  - skies are rebuilt only on a mode change.
+
+**Checked:**
+- `tests_round376`;
+- the recording's counts;
+- Blender's and Godot's smoke tests;
+- Unity's replay in a built-in and a URP project;
+- Unreal's replay in 5.8.
+
 ## 2026-11-01 (round 375): the round trip as a production
 
 **Asked:** Phase E's last round: a VRChat avatar package and a world kit through Blendity and back into Unity, then

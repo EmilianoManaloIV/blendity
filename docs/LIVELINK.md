@@ -136,6 +136,55 @@ parent may come before its children); a delete for an id the client no longer ha
 `{"t":"play","playing":true}`: Play mode started or stopped. In Play the objects move as the game runs; Stop puts the
 scene back as it was, and the changes back go out as ordinary messages.
 
+### world (round 376)
+```
+{"t":"world","mode":"gradient|sky|hdri|color","sky":[r,g,b],"equator":[r,g,b],"ground":[r,g,b],"color":[r,g,b],
+ "hdri":"C:/project/Assets/Textures/sky.hdr","strength":1,"rotation":0,"turbidity":3,
+ "fog":{"enabled":true,"start":10,"end":60,"color":[r,g,b],"color_far":[r,g,b]},"fields":{...}}
+```
+- **The world** (Window > Lighting > Environment):
+  - the Gradient's three colours (Unity's Trilight);
+  - the Sky's turbidity;
+  - an HDRI as a path on this computer, with its rotation in degrees about Y;
+  - a plain colour;
+  - its strength.
+- **Fog:** distance fog from `start` to `end` metres, toward `color` (and `color_far`).
+- **`fields`:** every field by its Inspector name.
+- **When it's sent:** after `sync`, before the objects, and whenever any of it changes.
+
+### render (round 376)
+`{"t":"render","exposure":0,"view_transform":"Filmic"}`: the render's exposure in stops and its view transform by
+name ("Standard", "Filmic", "ACES", or an OpenColorIO view's). Sent at the sync and when either changes.
+
+### filters (round 376)
+`{"t":"filters","id":6,"effects":[{"type":"Bloom","enabled":true,"fields":{"Intensity":0.6,...}},...]}`: the render
+camera's Camera Filters, top to bottom, each with its fields by Inspector name.
+- **The render camera** is the one the Game view and F12 use: the scene's Active Camera, else "Main Camera", else
+  the first camera. `id` names it.
+- **Only that camera's stack is the look,** since each engine has one post-processing of its own. Another camera's
+  stack isn't sent.
+- **When it's sent:**
+  - at every sync;
+  - when the stack changes;
+  - when another camera becomes the render camera;
+  - when the camera is deleted.
+- **`effects` is empty** when the camera has no stack. `id` is 0 when there is no camera. A reconnecting engine
+  therefore never keeps an old one.
+
+**What each bridge does with the look:**
+
+| | Blender | Unity | Godot | Unreal |
+|---|---|---|---|---|
+| Gradient | a ColorRamp on the world's Z | Trilight ambient | a procedural sky | a SkyLight captured from the level, tinted; the ground as its lower hemisphere |
+| Sky, HDRI | the Hosek-Wilkie sky; an Environment Texture | the procedural skybox; a panoramic one (PNG/JPG) | a physical sky; a panorama | the SkyLight (no HDRI) |
+| Fog | the mist pass mixed in by the compositor | linear fog | depth fog | ExponentialHeightFog (approximate) |
+| Exposure, view transform | the scene's | a URP Volume (kept on Blendity Look without URP) | tonemap exposure and mode | the exposure bias (Unreal's tone mapper kept) |
+| Bloom, Vignette, Color Grading | the compositor | the URP Volume | glow and adjustments (no vignette) | an unbound PostProcessVolume |
+| The scene's own | its world and compositor kept (a fake user), back when the link stops | RenderSettings kept on Blendity Look: Restore Scene Lighting | a second WorldEnvironment is warned about | look actors adopted on reconnect |
+
+**Colours:** Live Link's are linear. Godot's and Unity's RenderSettings colours are sRGB, so those bridges convert;
+Blender's and Unreal's are linear.
+
 ## Timing and what can be skipped
 
 The editor compares the scene with what it has sent at most 60 times a second, and only while a client is connected.

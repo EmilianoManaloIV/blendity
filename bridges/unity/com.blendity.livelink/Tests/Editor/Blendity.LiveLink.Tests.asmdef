@@ -1,8 +1,28 @@
 {
   "name": "Blendity.LiveLink.Tests",
-  "references": ["Blendity.LiveLink", "Blendity.LiveLink.Editor", "UnityEngine.TestRunner", "UnityEditor.TestRunner"],
-  "includePlatforms": ["Editor"],
+  "references": [
+    "Blendity.LiveLink",
+    "Blendity.LiveLink.Editor",
+    "UnityEngine.TestRunner",
+    "UnityEditor.TestRunner",
+    "Unity.RenderPipelines.Core.Runtime",
+    "Unity.RenderPipelines.Universal.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
   "overrideReferences": true,
-  "precompiledReferences": ["nunit.framework.dll"],
-  "defineConstraints": ["UNITY_INCLUDE_TESTS"]
+  "precompiledReferences": [
+    "nunit.framework.dll"
+  ],
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.render-pipelines.universal",
+      "expression": "",
+      "define": "BLENDITY_URP"
+    }
+  ]
 }

@@ -100,6 +100,8 @@ class _Link:
         self.status = "Connected to Blendity (%s)" % scene_name if scene_name else "Connected to 127.0.0.1:%d" % port
 
     def disconnect(self, why="Not connected"):
+        if self.applier is not None:  # (round 376: the scene's own world and compositor back)
+            self.applier.restore_look()
         for s in (self.sock, self.pending[0] if self.pending else None):
             if s is None:
                 continue

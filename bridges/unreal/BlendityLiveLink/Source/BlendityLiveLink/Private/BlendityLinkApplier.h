@@ -25,6 +25,11 @@ public:
 	int32 ObjectCount() const { return Objects.Num(); }
 	bool IsPlaying() const { return bPlaying; }
 	AActor* FindByName(const FString& Name) const;
+	/* Round 376: the look's own actors (a SkyLight, an ExponentialHeightFog, an unbound PostProcessVolume), made as the
+	 * world, render and filters messages first come. */
+	AActor* GetSky() const { return Sky.Get(); }
+	AActor* GetFog() const { return Fog.Get(); }
+	AActor* GetPost() const { return Post.Get(); }
 	const TMap<int64, TWeakObjectPtr<AActor>>& GetObjects() const { return Objects; }
 	/* Each tick (round 318): a mesh whose deforms have stopped for half a second is built once more with its CPU data
 	 * and gets its collision back - while it deforms it has neither, as cooking it each time cost 259 ms a frame on a
@@ -40,6 +45,12 @@ private:
 	void OnMaterial(const blendity_link::Json& J);
 	void OnLight(const blendity_link::Json& J);
 	void OnCamera(const blendity_link::Json& J);
+	void OnWorld(const blendity_link::Json& J);
+	void OnRender(const blendity_link::Json& J);
+	void OnFilters(const blendity_link::Json& J);
+	AActor* LookActor(TWeakObjectPtr<AActor>& Slot, UClass* Class, const TCHAR* Label);
+	void AdoptLook(AActor* A);
+	void ApplyPost();
 	void Remove(int64 Id);
 	void EndSync();
 	void Reparent(int64 Id);
@@ -65,4 +76,7 @@ private:
 	TSet<int64>* Seen = nullptr;
 	TSet<int64> SeenStorage;
 	bool bPlaying = false;
+	TWeakObjectPtr<AActor> Sky, Fog, Post;
+	double ExposureStops = 0, GradeStops = 0;
+	blendity_link::Json Effects;  // (the last filters message's effects)
 };

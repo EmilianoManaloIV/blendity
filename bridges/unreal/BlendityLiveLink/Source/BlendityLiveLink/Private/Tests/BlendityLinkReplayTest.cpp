@@ -5,6 +5,9 @@
 //   UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests Blendity.LiveLink.Replay; Quit" -unattended -nullrhi
 #include "BlendityLinkApplier.h"
 #include "Engine/StaticMeshActor.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Engine/ExponentialHeightFog.h"
+#include "Engine/PostProcessVolume.h"
 #include "Engine/World.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/AutomationTest.h"
@@ -48,6 +51,21 @@ bool FBlendityLinkReplayTest::RunTest(const FString&)
 		// Blendity (1, 2, 3) -> glTF (-1, 2, 3) -> Unreal (300, 100, 200) cm
 		TestTrue(FString::Printf(TEXT("the Box at %s"), *Box->GetActorLocation().ToString()), Box->GetActorLocation().Equals(FVector(300, 100, 200), 1e-3));
 		TestNotNull(TEXT("the Box has a mesh"), Box->GetStaticMeshComponent()->GetStaticMesh().Get());
+	}
+	/* Round 376: the look - fog from 5 m, half a stop up, Bloom 0.8 and a Vignette 0.3. */
+	if (AExponentialHeightFog* Fg = Cast<AExponentialHeightFog>(Applier.GetFog()))
+		TestTrue(TEXT("the fog starts at 5 m"), FMath::IsNearlyEqual(Fg->GetComponent()->StartDistance, 500.0f, 1e-2f) && Fg->GetComponent()->IsVisible());
+	else
+		AddError(TEXT("no fog"));
+	if (APostProcessVolume* V = Cast<APostProcessVolume>(Applier.GetPost()))
+		TestTrue(TEXT("the exposure, Bloom and Vignette"), V->bUnbound && FMath::IsNearlyEqual(V->Settings.AutoExposureBias, 0.5f, 1e-4f) &&
+		                                                    FMath::IsNearlyEqual(V->Settings.BloomIntensity, 0.8f, 1e-4f) && FMath::IsNearlyEqual(V->Settings.VignetteIntensity, 0.3f, 1e-4f));
+	else
+		AddError(TEXT("no post-process volume"));
+	TestNotNull(TEXT("the sky light"), Applier.GetSky());
+	{  // (a reconnect: a new applier takes the look's actors back instead of making more - review 376)
+		FBlendityLinkApplier Again(World);
+		TestTrue(TEXT("the look's actors adopted on reconnect"), Again.GetSky() == Applier.GetSky() && Again.GetFog() == Applier.GetFog() && Again.GetPost() == Applier.GetPost());
 	}
 	GEngine->DestroyWorldContext(World);
 	World->DestroyWorld(false);

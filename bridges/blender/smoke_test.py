@@ -74,6 +74,30 @@ def main():
     sun = bpy.data.objects["Directional Light"]
     check(sun.type == "LIGHT" and sun.data.type == "SUN" and abs(sun.data.energy - math.pi) < 1e-4, "the sun's strength isn't pi")
 
+    # Round 376: the look - a gradient world with fog 5-40 m, half a stop up, Bloom 0.8 and a Vignette on the camera.
+    world = bpy.context.scene.world
+    check(world is not None and world.name == apply.WORLD, "the world isn't Blendity's")
+    check(abs(world.mist_settings.start - 5.0) < 1e-4 and abs(world.mist_settings.depth - 35.0) < 1e-4, "the fog didn't arrive")
+    check(not world.node_tree.nodes.get("BL Output").inputs["Volume"].is_linked, "the fog is a world volume (it blacks out Cycles)")
+    ramp = [nd for nd in world.node_tree.nodes if nd.bl_idname == "ShaderNodeValToRGB"]
+    check(len(ramp) == 1 and abs(ramp[0].color_ramp.elements[-1].color[2] - 0.8) < 1e-4, "the gradient's sky colour didn't arrive")
+    check(abs(bpy.context.scene.view_settings.exposure - 0.5) < 1e-5, "the exposure didn't arrive")
+    comp = bpy.context.scene.compositing_node_group
+    glare = [nd for nd in comp.nodes if nd.bl_idname == "CompositorNodeGlare"] if comp else []
+    check(len(glare) == 1 and abs(glare[0].inputs["Strength"].default_value - 0.8) < 1e-5, "the Bloom didn't reach the compositor")
+    check(any(nd.bl_idname == "CompositorNodeEllipseMask" for nd in comp.nodes), "the Vignette didn't reach the compositor")
+    check("Bloom" in cam.get("blendity_filters", ""), "the camera doesn't keep its filters")
+    check(any(nd.bl_idname == "ShaderNodeMix" and nd.blend_type == "MIX" for nd in comp.nodes), "the fog isn't drawn by the compositor")
+    # The link stops: the scene's own world and compositor back.
+    prev = bpy.data.worlds.new("Mine")
+    scene2 = bpy.data.scenes.new("Restore")
+    scene2.world = prev
+    a2 = apply.Applier(scene2)
+    a2.apply({"t": "world", "mode": "color", "color": [0.1, 0.1, 0.1], "fog": {"enabled": True, "start": 1, "end": 9}})
+    check(scene2.world.name == apply.WORLD and prev.use_fake_user, "the scene's own world isn't kept while Blendity's is on")
+    a2.restore_look()
+    check(scene2.world == prev and not prev.use_fake_user and scene2.compositing_node_group is None, "the scene's own world and compositor didn't come back")
+
     lower = bpy.data.objects["Lower"]
     check(lower.parent is not None and lower.parent.name == "Upper", "the bone hierarchy is lost")
     check(abs(math.degrees(lower.rotation_quaternion.angle) - 30.0) < 1e-3, "the posed bone isn't turned 30 degrees: %.4f" % math.degrees(lower.rotation_quaternion.angle))

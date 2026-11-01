@@ -9,7 +9,7 @@ using UnityEngine.Rendering;
 
 namespace Blendity.LiveLink
 {
-    public sealed class LiveLinkApplier
+    public sealed partial class LiveLinkApplier
     {
         public const string RootName = "Blendity Live Link";
         public readonly Dictionary<long, GameObject> Objects = new Dictionary<long, GameObject>();
@@ -56,6 +56,9 @@ namespace Blendity.LiveLink
                 case "material": OnMaterial(j); break;
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
+                case "world": OnWorld(j); break;  // (round 376: LiveLinkLook.cs)
+                case "render": OnRender(j); break;
+                case "filters": OnFilters(j); break;
                 default: break;  // (unknown messages are ignored: the protocol grows by adding)
             }
         }

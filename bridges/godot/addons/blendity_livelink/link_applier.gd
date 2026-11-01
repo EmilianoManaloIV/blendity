@@ -78,6 +78,12 @@ func apply(j: Dictionary, bin: PackedByteArray) -> void:
 			_on_light(j)
 		"camera":
 			_on_camera(j)
+		"world":
+			_on_world(j)
+		"render":
+			_on_render(j)
+		"filters":
+			_on_filters(j)
 
 
 func _end_sync() -> void:
@@ -348,3 +354,139 @@ func _on_camera(j: Dictionary) -> void:
 		cam.size = float(j.get("ortho_size", 5.0)) * 2.0  # (Unity's half-height, Godot's height)
 	else:
 		cam.projection = Camera3D.PROJECTION_PERSPECTIVE
+
+
+# ------------------------------------------------------------------ the look (round 376)
+
+const WORLD_NAME := "Blendity World"
+var exposure_stops := 0.0   # (the render's; a Color Grading's exposure adds to it)
+var grade_stops := 0.0
+var sky_key := ""           # (the sky's mode and HDRI: made again only when they change - review 376)
+
+
+## The scene's WorldEnvironment (made under the Live Link root): Blendity's world, look and a camera's filters on it.
+func environment() -> Environment:
+	var we := root.get_node_or_null(WORLD_NAME) as WorldEnvironment
+	if we == null:
+		we = WorldEnvironment.new()
+		we.name = WORLD_NAME
+		we.environment = Environment.new()
+		root.add_child(we)
+		_own(we)
+		_warn_other_world(root.get_tree().root if root.is_inside_tree() else null, we)
+	return we.environment
+
+
+## Godot draws one WorldEnvironment: a scene's own one besides Blendity's is said (review 376).
+func _warn_other_world(n: Node, ours: WorldEnvironment) -> void:
+	if n == null:
+		return
+	for c in n.get_children():
+		if c is WorldEnvironment and c != ours:
+			push_warning("Blendity Live Link: the scene has its own WorldEnvironment (%s); Godot draws only one - delete or disable one of them" % c.name)
+		_warn_other_world(c, ours)
+
+
+## Live Link's colours are linear; Godot's Color properties are as edited, sRGB (review 376).
+static func _col(a, d: Color) -> Color:
+	return Color(float(a[0]), float(a[1]), float(a[2])).linear_to_srgb() if a is Array and a.size() >= 3 else d.linear_to_srgb()
+
+
+## Blendity's world: the Gradient as a procedural sky (sky above, equator at the horizon, ground below), the Sky as a
+## physical one, an HDRI as a panorama, else a plain colour; its strength; the distance fog as Godot's depth fog.
+func _on_world(j: Dictionary) -> void:
+	var env := environment()
+	var mode := str(j.get("mode", "gradient"))
+	env.background_energy_multiplier = float(j.get("strength", 1.0))
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	if mode == "color":
+		env.background_mode = Environment.BG_COLOR
+		env.background_color = _col(j.get("color"), Color(0.05, 0.05, 0.05))
+		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		env.ambient_light_color = env.background_color
+	else:
+		env.background_mode = Environment.BG_SKY
+		_set_sky(env, mode, j)
+	var fog: Dictionary = j.get("fog", {})
+	env.fog_enabled = bool(fog.get("enabled", false))
+	env.fog_light_color = _col(fog.get("color"), Color(0.6, 0.65, 0.75))
+	env.fog_sky_affect = 0.0  # (Blendity's fog is on the surfaces, by their distance)
+	if "fog_mode" in env:  # (Godot 4.3+: a fog from a distance to a distance, as Blendity's; density = the opacity at its end)
+		env.set("fog_mode", 1)
+		env.set("fog_depth_begin", float(fog.get("start", 10.0)))
+		env.set("fog_depth_end", float(fog.get("end", 60.0)))
+		env.fog_density = 1.0
+	else:
+		env.fog_density = 3.0 / maxf(float(fog.get("end", 60.0)), 0.1)
+	env.set_meta("blendity_world", JSON.stringify(j.get("fields", {})))
+
+
+## The sky: made again only when the mode or the HDRI changes (an HDRI is read once), its values set in place.
+func _set_sky(env: Environment, mode: String, j: Dictionary) -> void:
+	var key := mode + "|" + (str(j.get("hdri", "")) if mode == "hdri" else "")
+	if key != sky_key or env.sky == null:
+		env.sky = Sky.new()
+		env.sky.sky_material = _sky_material(mode, j)
+		sky_key = key
+	var m := env.sky.sky_material
+	if m is PhysicalSkyMaterial:
+		m.turbidity = float(j.get("turbidity", 3.0))
+	if m is ProceduralSkyMaterial:
+		m.sky_top_color = _col(j.get("sky"), Color(0.45, 0.52, 0.62))
+		m.sky_horizon_color = _col(j.get("equator"), Color(0.32, 0.34, 0.36))
+		m.ground_horizon_color = m.sky_horizon_color
+		m.ground_bottom_color = _col(j.get("ground"), Color(0.16, 0.15, 0.14))
+
+
+func _sky_material(mode: String, j: Dictionary) -> Material:
+	if mode == "sky":
+		return PhysicalSkyMaterial.new()
+	if mode == "hdri" and str(j.get("hdri", "")) != "":
+		var img := Image.load_from_file(str(j.get("hdri")))
+		if img != null:
+			var pano := PanoramaSkyMaterial.new()
+			pano.panorama = ImageTexture.create_from_image(img)
+			return pano
+	return ProceduralSkyMaterial.new()
+
+
+## The render's look: the exposure in stops (Godot's is a multiplier) and the tone mapper by name.
+func _on_render(j: Dictionary) -> void:
+	var env := environment()
+	exposure_stops = float(j.get("exposure", 0.0))
+	env.tonemap_exposure = pow(2.0, exposure_stops + grade_stops)
+	var view := str(j.get("view_transform", "Standard"))
+	var agx: bool = view == "AgX" and int(Engine.get_version_info().get("minor", 0)) >= 4  # (AgX from Godot 4.4)
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC if view == "Filmic" else Environment.TONE_MAPPER_ACES if view.begins_with("ACES") else 4 if agx else Environment.TONE_MAPPER_LINEAR
+
+
+static func _effect(effects: Array, name: String):
+	for e in effects:
+		if e is Dictionary and str(e.get("type", "")) == name and bool(e.get("enabled", true)):
+			return e
+	return null
+
+
+## A camera's filters on the environment: Bloom as glow, Color Grading's exposure, contrast and saturation as Godot's
+## adjustments; the others (Godot's environment has no vignette) kept on the camera's node as metadata.
+func _on_filters(j: Dictionary) -> void:
+	var env := environment()
+	var effects: Array = j.get("effects", [])
+	var n := _alive(int(j.get("id", 0)))
+	if n != null:
+		n.set_meta("blendity_filters", JSON.stringify(effects))
+	var bloom = _effect(effects, "Bloom")
+	env.glow_enabled = bloom != null
+	if bloom != null:
+		var f: Dictionary = bloom.get("fields", {})
+		env.glow_intensity = float(f.get("Intensity", 0.6))
+		env.glow_hdr_threshold = float(f.get("Threshold", 1.0))
+	var grade = _effect(effects, "Color Grading")
+	env.adjustment_enabled = grade != null
+	grade_stops = 0.0
+	if grade != null:
+		var f: Dictionary = grade.get("fields", {})
+		grade_stops = float(f.get("Exposure", 0.0))
+		env.adjustment_contrast = 1.0 + float(f.get("Contrast", 0.0))
+		env.adjustment_saturation = 1.0 + float(f.get("Saturation", 0.0))
+	env.tonemap_exposure = pow(2.0, exposure_stops + grade_stops)

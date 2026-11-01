@@ -6,6 +6,11 @@
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/DirectionalLightComponent.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Components/SkyLightComponent.h"
+#include "Engine/ExponentialHeightFog.h"
+#include "Engine/PostProcessVolume.h"
+#include "Engine/SkyLight.h"
 #include "Components/PointLightComponent.h"
 #include "Components/SpotLightComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -35,6 +40,7 @@ FBlendityLinkApplier::FBlendityLinkApplier(UWorld* InWorld) : World(InWorld)
 		return;
 	for (TActorIterator<AActor> It(InWorld); It; ++It)  // (actors of an earlier session: found again by their ids)
 	{
+		AdoptLook(*It);
 		for (const FName& Tag : It->Tags)
 		{
 			const FString S = Tag.ToString();
@@ -80,6 +86,9 @@ void FBlendityLinkApplier::Apply(const blendity_link::Message& M)
 	else if (T == TEXT("material")) OnMaterial(J);
 	else if (T == TEXT("light")) OnLight(J);
 	else if (T == TEXT("camera")) OnCamera(J);
+	else if (T == TEXT("world")) OnWorld(J);
+	else if (T == TEXT("render")) OnRender(J);
+	else if (T == TEXT("filters")) OnFilters(J);
 }
 
 void FBlendityLinkApplier::EndSync()
@@ -486,4 +495,120 @@ void FBlendityLinkApplier::OnCamera(const blendity_link::Json& J)
 	const double V = FMath::DegreesToRadians(J["fov"].number(60));
 	C->SetFieldOfView(FMath::RadiansToDegrees(2.0 * FMath::Atan(FMath::Tan(V * 0.5) * 16.0 / 9.0)));
 	C->SetAspectRatio(16.0f / 9.0f);
+}
+
+/* ------------------------------------------------------------------ the look (round 376) */
+
+static FLinearColor Col(const blendity_link::Json& C, float R, float G, float B)
+{
+	return FLinearColor(C[0].number(R), C[1].number(G), C[2].number(B));
+}
+
+/* A look actor of an earlier session (a reconnect): taken back by its class, not made again (review 376: three more
+ * actors every reconnect, two SkyLights fighting, the fog doubled). */
+void FBlendityLinkApplier::AdoptLook(AActor* A)
+{
+	if (!A || !A->ActorHasTag(FName(TEXT("BlendityKind:look"))))
+		return;
+	if (A->IsA<ASkyLight>())
+		Sky = A;
+	if (A->IsA<AExponentialHeightFog>())
+		Fog = A;
+	if (A->IsA<APostProcessVolume>())
+		Post = A;
+}
+
+/* One of the look's actors: made once (transient, in the Live Link folder, tagged as Blendity's), found after. */
+AActor* FBlendityLinkApplier::LookActor(TWeakObjectPtr<AActor>& Slot, UClass* Class, const TCHAR* Label)
+{
+	UWorld* W = World.Get();
+	if (Slot.IsValid() || !W)
+		return Slot.Get();
+	FActorSpawnParameters P;
+	P.ObjectFlags |= RF_Transient;
+	AActor* A = W->SpawnActor<AActor>(Class, P);
+	if (!A)
+		return nullptr;
+	A->Tags.Add(IdTag);
+	A->Tags.Add(FName(TEXT("BlendityKind:look")));
+	A->SetActorLabel(Label);
+	A->SetFolderPath(FolderName);
+	Slot = A;
+	return A;
+}
+
+/* The world: its strength on a SkyLight captured from the level, tinted by the sky colour (a plain colour's), the
+ * Gradient's ground as its lower hemisphere (Unreal draws no gradient sky of its own); the distance fog as an
+ * ExponentialHeightFog starting where Blendity's starts, its density within Unreal's range and thinner the longer the
+ * fog (an approximation: Unreal's fog is exponential). An HDRI isn't loaded here. */
+void FBlendityLinkApplier::OnWorld(const blendity_link::Json& J)
+{
+	const FString Mode(UTF8_TO_TCHAR(J["mode"].string().c_str()));
+	if (ASkyLight* S = Cast<ASkyLight>(LookActor(Sky, ASkyLight::StaticClass(), TEXT("Blendity Sky Light"))))
+	{
+		USkyLightComponent* L = S->GetLightComponent();
+		L->SetMobility(EComponentMobility::Movable);
+		L->SetIntensity(J["strength"].number(1));
+		L->SetLightColor(Mode == TEXT("color") ? Col(J["color"], 0.05f, 0.05f, 0.05f) : Col(J["sky"], 0.45f, 0.52f, 0.62f));
+		L->bLowerHemisphereIsBlack = false;
+		L->SetLowerHemisphereColor(Col(J["ground"], 0.16f, 0.15f, 0.14f));
+		L->RecaptureSky();
+	}
+	const blendity_link::Json& F = J["fog"];
+	AExponentialHeightFog* Fg = Cast<AExponentialHeightFog>(LookActor(Fog, AExponentialHeightFog::StaticClass(), TEXT("Blendity Fog")));
+	if (!Fg)
+		return;
+	UExponentialHeightFogComponent* C = Fg->GetComponent();
+	const double Start = F["start"].number(10), End = F["end"].number(60);
+	C->SetVisibility(F["enabled"].boolean());
+	C->SetStartDistance(Start * 100.0);
+	C->SetFogDensity(FMath::Clamp(0.5 / FMath::Max(End - Start, 0.1), 0.0, 0.05));  // (Unreal's slider tops at 0.05)
+	C->SetFogInscatteringColor(Col(F["color"], 0.6f, 0.65f, 0.75f));
+}
+
+void FBlendityLinkApplier::OnRender(const blendity_link::Json& J)
+{
+	ExposureStops = J["exposure"].number(0);
+	ApplyPost();
+}
+
+void FBlendityLinkApplier::OnFilters(const blendity_link::Json& J)
+{
+	Effects = J["effects"];
+	GradeStops = 0;
+	for (size_t i = 0; i < Effects.size(); i++)
+		if (Effects[i]["type"].string() == "Color Grading" && Effects[i]["enabled"].boolean(true))
+			GradeStops = Effects[i]["fields"]["Exposure"].number(0);
+	ApplyPost();
+}
+
+/* An unbound PostProcessVolume: the exposure (the render's and a Color Grading's) as the exposure bias, Bloom, Vignette
+ * and the grading's contrast and saturation. Unreal's tone mapper is its own: the view transform isn't changed. */
+void FBlendityLinkApplier::ApplyPost()
+{
+	APostProcessVolume* V = Cast<APostProcessVolume>(LookActor(Post, APostProcessVolume::StaticClass(), TEXT("Blendity Look")));
+	if (!V)
+		return;
+	V->bUnbound = true;
+	FPostProcessSettings& S = V->Settings;
+	S.bOverride_AutoExposureBias = true;
+	S.AutoExposureBias = ExposureStops + GradeStops;
+	S.bOverride_BloomIntensity = S.bOverride_BloomThreshold = S.bOverride_VignetteIntensity = true;
+	S.bOverride_ColorContrast = S.bOverride_ColorSaturation = true;
+	S.BloomIntensity = 0, S.VignetteIntensity = 0;
+	S.ColorContrast = FVector4(1, 1, 1, 1), S.ColorSaturation = FVector4(1, 1, 1, 1);
+	for (size_t i = 0; i < Effects.size(); i++)
+	{
+		const blendity_link::Json& E = Effects[i];
+		const blendity_link::Json& Fd = E["fields"];
+		const std::string& Type = E["type"].string();
+		if (!E["enabled"].boolean(true))
+			continue;
+		if (Type == "Bloom")
+			S.BloomIntensity = Fd["Intensity"].number(0.6), S.BloomThreshold = Fd["Threshold"].number(1);
+		if (Type == "Vignette")
+			S.VignetteIntensity = Fd["Intensity"].number(0.4);
+		if (Type == "Color Grading")
+			S.ColorContrast = FVector4(1, 1, 1, 1 + Fd["Contrast"].number(0)), S.ColorSaturation = FVector4(1, 1, 1, 1 + Fd["Saturation"].number(0));
+	}
 }

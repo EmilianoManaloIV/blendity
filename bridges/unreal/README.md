@@ -37,6 +37,7 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
 | materials | dynamic instances of the engine's BasicShapeMaterial with the base colour (textures, metallic and roughness not yet) |
 | lights | directional, point and spot lights attached to their objects |
 | cameras | camera actors, Blendity's vertical field of view turned into Unreal's horizontal one at 16:9 |
+| the look (round 376) | a SkyLight captured from the level (tinted, the ground as its lower hemisphere), an Exponential Height Fog (approximating Blendity's linear fog) and an unbound Post Process Volume (exposure bias, Bloom, Vignette, contrast, saturation); adopted again on a reconnect |
 | armatures and bones | empty actors posed as the bones (skinned meshes come across as moving vertices) |
 
 ## Test

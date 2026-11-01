@@ -56,6 +56,7 @@ def _output(node, kind):
 class Applier:
     def __init__(self, scene):
         self.scene = scene
+        self.fog, self.effects = {}, []  # (round 376: the look the compositor draws)
         self.objects = {}     # id -> bpy object
         self.parents = {}     # id -> its parent's id (0: a root)
         self.children = {}    # id -> the ids naming it as their parent
@@ -352,6 +353,230 @@ class Applier:
         if obj is None or obj.type != "CAMERA":
             return
         apply_camera(obj.data, msg)
+
+    # -------------------------------------------------------------- the look (round 376)
+
+    def on_world(self, msg, att):
+        apply_world(self.scene, msg)
+        self.fog = msg.get("fog", {})
+        apply_compositor(self.scene, self.fog, self.effects)
+
+    def on_render(self, msg, att):
+        vs = self.scene.view_settings
+        vs.exposure = float(msg.get("exposure", 0.0))
+        for name in (_VIEWS.get(msg.get("view_transform", ""), msg.get("view_transform", "")), "AgX"):
+            try:
+                vs.view_transform = name
+                return
+            except TypeError:  # (not one of this Blender's views: the next)
+                continue
+
+    def on_filters(self, msg, att):
+        """The render camera's stack (Live Link sends only that one): drawn by the compositor, kept on the camera."""
+        obj = self._get(int(msg.get("id", 0)))
+        self.effects = msg.get("effects", [])
+        if obj is not None:
+            obj["blendity_filters"] = json.dumps(self.effects)
+        apply_compositor(self.scene, self.fog, self.effects)
+
+    def restore_look(self):
+        """The scene's own world and compositor back (the link stopped)."""
+        restore_look(self.scene)
+
+
+# ------------------------------------------------------------------ the look (round 376)
+
+WORLD = "Blendity Live Link"
+_VIEWS = {"ACES": "ACES 1.3"}  # (Blendity's built-in ACES; Standard and Filmic are Blender's names too)
+
+
+def _take_over(scene, key, current):
+    """The scene's own world or compositor, kept the first time Blendity's goes on (a fake user: saved with the file
+    even while unused), so restore_look() can put it back (review 376: it was lost on save)."""
+    if key in scene.keys() or (current is not None and current.name == WORLD):
+        return
+    if current is None:  # (none of its own: none back)
+        scene[key] = ""
+        return
+    scene[key] = current.name
+    scene[key + "_fake"] = bool(current.use_fake_user)
+    current.use_fake_user = True
+
+
+def restore_look(scene):
+    """The scene's own world and compositor back, as they were before Live Link's look (the link stopped)."""
+    for key, coll, attr in (("blendity_prev_world", bpy.data.worlds, "world"), ("blendity_prev_compositor", bpy.data.node_groups, "compositing_node_group")):
+        if key not in scene.keys():
+            continue
+        prev = coll.get(scene[key]) if scene[key] else None
+        setattr(scene, attr, prev)
+        if prev is not None:
+            prev.use_fake_user = bool(scene.get(key + "_fake", False))
+        del scene[key]
+        if key + "_fake" in scene.keys():
+            del scene[key + "_fake"]
+
+
+def _node(nt, kind, name):
+    n = nt.nodes.get(name)
+    if n is None:
+        n = nt.nodes.new(kind)
+        n.name = name
+    return n
+
+
+def _world_key(msg):
+    return msg.get("mode", "gradient") + "|" + (msg.get("hdri", "") if msg.get("mode") == "hdri" else "")
+
+
+def _build_world(nt, msg):
+    """The world's nodes for its mode (made again only when the mode or the HDRI changes: review 376)."""
+    nt.nodes.clear()
+    out = _node(nt, "ShaderNodeOutputWorld", "BL Output")
+    bg = _node(nt, "ShaderNodeBackground", "BL Background")
+    nt.links.new(bg.outputs["Background"], out.inputs["Surface"])
+    mode = msg.get("mode", "gradient")
+    if mode == "gradient":
+        coord, xyz, half = _node(nt, "ShaderNodeTexCoord", "BL Coord"), _node(nt, "ShaderNodeSeparateXYZ", "BL XYZ"), _node(nt, "ShaderNodeMath", "BL Half")
+        half.operation = "MULTIPLY_ADD"
+        half.inputs[1].default_value, half.inputs[2].default_value = 0.5, 0.5
+        ramp = _node(nt, "ShaderNodeValToRGB", "BL Ramp")
+        ramp.color_ramp.elements.new(0.5)
+        nt.links.new(coord.outputs["Generated"], xyz.inputs["Vector"])
+        nt.links.new(xyz.outputs["Z"], half.inputs[0])
+        nt.links.new(half.outputs["Value"], ramp.inputs["Fac"])
+        nt.links.new(ramp.outputs["Color"], bg.inputs["Color"])
+    elif mode == "sky":
+        sky = _node(nt, "ShaderNodeTexSky", "BL Sky")
+        sky.sky_type = "HOSEK_WILKIE"  # (Blendity's own)
+        nt.links.new(sky.outputs["Color"], bg.inputs["Color"])
+    elif mode == "hdri" and msg.get("hdri"):
+        env = _node(nt, "ShaderNodeTexEnvironment", "BL Environment")
+        try:
+            env.image = bpy.data.images.load(msg["hdri"], check_existing=True)
+        except RuntimeError:  # (a file this Blender can't open: the sky stays plain)
+            return
+        coord, mapping = _node(nt, "ShaderNodeTexCoord", "BL Coord"), _node(nt, "ShaderNodeMapping", "BL Mapping")
+        nt.links.new(coord.outputs["Generated"], mapping.inputs["Vector"])
+        nt.links.new(mapping.outputs["Vector"], env.inputs["Vector"])
+        nt.links.new(env.outputs["Color"], bg.inputs["Color"])
+
+
+def _set_world(nt, msg):
+    """The values on the world's nodes as they are: a colour or the strength moving rebuilds nothing."""
+    bg = nt.nodes.get("BL Background")
+    bg.inputs["Strength"].default_value = float(msg.get("strength", 1.0))
+    bg.inputs["Color"].default_value = (*msg.get("color", [0.05, 0.05, 0.05]), 1.0)
+    ramp, sky, mapping = nt.nodes.get("BL Ramp"), nt.nodes.get("BL Sky"), nt.nodes.get("BL Mapping")
+    if ramp is not None:
+        els = ramp.color_ramp.elements
+        els[0].color = (*msg.get("ground", [0.16, 0.15, 0.14]), 1.0)
+        els[1].color = (*msg.get("equator", [0.32, 0.34, 0.36]), 1.0)
+        els[-1].color = (*msg.get("sky", [0.45, 0.52, 0.62]), 1.0)
+    if sky is not None:
+        sky.turbidity = float(msg.get("turbidity", 3.0))
+    if mapping is not None:
+        mapping.inputs["Rotation"].default_value[2] = -math.radians(float(msg.get("rotation", 0.0)))  # (about Y in Blendity: Z here, mirrored)
+
+
+def apply_world(scene, msg):
+    """Blendity's world as a "Blendity Live Link" world (the scene's own kept for restore_look). Its fog - distance fog on
+    the surfaces, as Blendity's, not a volume (review 376: a world volume swallowed the sky and the sun) - is Blender's
+    mist, drawn by the compositor (apply_compositor)."""
+    _take_over(scene, "blendity_prev_world", scene.world)
+    w = bpy.data.worlds.get(WORLD) or bpy.data.worlds.new(WORLD)
+    scene.world = w
+    w.use_nodes = True
+    if w.get("blendity_key") != _world_key(msg) or w.node_tree.nodes.get("BL Background") is None:
+        _build_world(w.node_tree, msg)
+        w["blendity_key"] = _world_key(msg)
+    _set_world(w.node_tree, msg)
+    fog = msg.get("fog", {})
+    w.mist_settings.start = float(fog.get("start", 10.0))
+    w.mist_settings.depth = max(float(fog.get("end", 60.0)) - w.mist_settings.start, 0.01)
+    w.mist_settings.falloff = "LINEAR"
+    w["blendity_world"] = json.dumps(msg.get("fields", {}))
+
+
+def _effect(effects, name):
+    return next((e for e in effects if e.get("type") == name and e.get("enabled", True)), None)
+
+
+def _comp_mix(g, image, other, factor, blend):
+    mix = g.nodes.new("ShaderNodeMix")
+    mix.data_type, mix.blend_type = "RGBA", blend
+    if isinstance(factor, float):
+        mix.inputs[0].default_value = factor
+    else:
+        g.links.new(factor, mix.inputs[0])
+    g.links.new(image, mix.inputs[6])
+    if isinstance(other, tuple):
+        mix.inputs[7].default_value = other
+    else:
+        g.links.new(other, mix.inputs[7])
+    return mix.outputs[2]
+
+
+def apply_compositor(scene, fog, effects):
+    """The look on the image as the scene's compositor: Render Layers > the fog (toward its colour by the mist pass) >
+    Glare (Bloom) > Exposure > Bright/Contrast > Hue/Saturation (Color Grading) > a vignette > the output. Without fog
+    or filters the scene's own compositor is put back."""
+    if not fog.get("enabled") and not effects:
+        restore_look_compositor(scene)
+        return
+    _take_over(scene, "blendity_prev_compositor", scene.compositing_node_group)
+    g = bpy.data.node_groups.get(WORLD) or bpy.data.node_groups.new(WORLD, "CompositorNodeTree")
+    g.nodes.clear()
+    if not any(s.item_type == "SOCKET" and s.in_out == "OUTPUT" for s in g.interface.items_tree):
+        g.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+    scene.compositing_node_group = g
+    layers = g.nodes.new("CompositorNodeRLayers")
+    image = layers.outputs["Image"]
+    if fog.get("enabled"):
+        bpy.context.view_layer.use_pass_mist = True
+        image = _comp_mix(g, image, (*fog.get("color", [0.6, 0.65, 0.75]), 1.0), layers.outputs["Mist"], "MIX")
+    bloom, grade, vig = _effect(effects, "Bloom"), _effect(effects, "Color Grading"), _effect(effects, "Vignette")
+    if bloom:
+        f = bloom.get("fields", {})
+        glare = g.nodes.new("CompositorNodeGlare")
+        glare.inputs["Type"].default_value = "Bloom"
+        glare.inputs["Strength"].default_value = float(f.get("Intensity", 0.6))
+        glare.inputs["Threshold"].default_value = float(f.get("Threshold", 1.0))
+        g.links.new(image, glare.inputs["Image"])
+        image = glare.outputs["Image"]
+    if grade:
+        f = grade.get("fields", {})
+        exp, bc, hs = g.nodes.new("CompositorNodeExposure"), g.nodes.new("CompositorNodeBrightContrast"), g.nodes.new("CompositorNodeHueSat")
+        exp.inputs["Exposure"].default_value = float(f.get("Exposure", 0.0))
+        bc.inputs["Contrast"].default_value = 100.0 * float(f.get("Contrast", 0.0))
+        hs.inputs["Saturation"].default_value = 1.0 + float(f.get("Saturation", 0.0))
+        for node in (exp, bc, hs):
+            g.links.new(image, node.inputs["Image"])
+            image = node.outputs["Image"]
+    if vig:
+        f = vig.get("fields", {})
+        soft = float(f.get("Smoothness", 0.5))
+        mask = g.nodes.new("CompositorNodeEllipseMask")
+        mask.inputs["Size"].default_value = (1.0 - 0.5 * soft, 1.0 - 0.5 * soft)
+        blur = g.nodes.new("CompositorNodeBlur")
+        r = scene.render
+        side = min(r.resolution_x, r.resolution_y) * r.resolution_percentage / 100.0
+        blur.inputs["Size"].default_value = (0.3 * side, 0.3 * side)  # (a share of the frame, whatever its size: review 376)
+        g.links.new(mask.outputs["Mask"], blur.inputs["Image"])
+        image = _comp_mix(g, image, blur.outputs["Image"], float(f.get("Intensity", 0.4)), "MULTIPLY")
+    g.links.new(image, g.nodes.new("NodeGroupOutput").inputs[0])
+
+
+def restore_look_compositor(scene):
+    if "blendity_prev_compositor" not in scene.keys():
+        return
+    prev = bpy.data.node_groups.get(scene["blendity_prev_compositor"]) if scene["blendity_prev_compositor"] else None
+    scene.compositing_node_group = prev
+    if prev is not None:
+        prev.use_fake_user = bool(scene.get("blendity_prev_compositor_fake", False))
+    del scene["blendity_prev_compositor"]
+    if "blendity_prev_compositor_fake" in scene.keys():
+        del scene["blendity_prev_compositor_fake"]
 
 
 # ------------------------------------------------------------------ meshes

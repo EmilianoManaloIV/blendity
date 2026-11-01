@@ -4,6 +4,7 @@
 
 #include "../core/core.h"
 #include "../core/json.h"
+#include "../render/shading.h"
 #include "../scene/export.h"
 #include "../scene/scene.h"
 
@@ -21,9 +22,67 @@ namespace bl::livelink {
 
 namespace {
 
-/* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. */
-enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial };
-uint64_t ckey(uint64_t id, Kind k) { return id << 3 | (uint64_t)k; }
+/* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
+ * own (the world, the render's look) are keyed on id 0, which no object has. */
+enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters };
+uint64_t ckey(uint64_t id, Kind k) { return id << 4 | (uint64_t)k; }
+
+/* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
+ * computer), fog - and every field by its Inspector name. */
+std::string world_message(EnvironmentSettings &e) {
+  static const char *modes[] = {"gradient", "sky", "hdri", "color"};
+  JsonWriter w;
+  w.obj().key("t").str("world").key("mode").str(modes[std::clamp(e.mode, 0, 3)]);
+  w.key("sky").nums(&e.sky.x, 3).key("equator").nums(&e.equator.x, 3).key("ground").nums(&e.ground.x, 3).key("color").nums(&e.color.x, 3);
+  w.key("hdri").str(e.hdri.empty() ? std::string() : resolve_asset_path(e.hdri.path)).key("strength").num(e.strength).key("rotation").num(e.rotation);
+  w.key("turbidity").num(e.turbidity);
+  w.key("fog").obj().key("enabled").boolean(e.fog).key("start").num(e.fog_start).key("end").num(e.fog_end);
+  w.key("color").nums(&e.fog_color.x, 3).key("color_far").nums(&e.fog_color_far.x, 3).end();
+  w.key("fields").raw(reflect_to_json([&](Reflector &r) { e.reflect(r); }));
+  w.end();
+  return w.out;
+}
+
+/* Round 376: the scene's render camera as the editor finds it (ADR 0016): the Active Camera, else "Main Camera", else
+ * the first enabled camera. */
+GameObject *render_camera(Scene &scene) {
+  GameObject *chosen = scene.active_camera ? scene.find(scene.active_camera) : nullptr;
+  if (chosen && chosen->camera() && chosen->camera()->enabled && chosen->active_in_hierarchy()) return chosen;
+  GameObject *first = nullptr, *main = nullptr;
+  scene.for_each_ordered([&](GameObject &g, int) {
+    if (!g.camera() || !g.camera()->enabled || !g.active_in_hierarchy()) return;
+    first = first ? first : &g;
+    main = main ? main : g.name == "Main Camera" ? &g : nullptr;
+  });
+  return main ? main : first;
+}
+
+/* Round 376: the render camera's filter stack - each effect by type, on or off, with its fields - as Live Link's
+ * `filters` message; id 0 and no effects when there is no camera. */
+std::string filters_message(Scene &scene) {
+  GameObject *cam = render_camera(scene);
+  JsonWriter w;
+  w.obj().key("t").str("filters").key("id").integer(cam ? (int64_t)cam->id : 0).key("effects").arr();
+  if (CameraFilters *f = cam ? cam->get<CameraFilters>() : nullptr)
+    for (const auto &e : f->effects)
+      w.obj().key("type").str(e->type_name()).key("enabled").boolean(e->enabled).key("fields").raw(reflect_to_json([&](Reflector &r) { e->reflect(r); })).end();
+  w.end().end();
+  return w.out;
+}
+
+/* Round 376: the render's look - exposure in stops and the view transform by name ("Standard", "Filmic", "ACES", or
+ * an OpenColorIO view's). */
+std::string render_message(const RenderSettings &rs) {
+  static const char *builtin[] = {"Standard", "Filmic", "ACES"};
+  const std::vector<std::string> &names = view_transform_names();
+  std::string view = rs.view_transform >= 0 && rs.view_transform < 3 ? builtin[rs.view_transform]
+                     : rs.view_transform < (int)names.size() ? names[(size_t)rs.view_transform] : std::string("Standard");
+  const size_t ocio = view.find(" (OpenColorIO)");
+  if (ocio != std::string::npos) view.resize(ocio);
+  JsonWriter w;
+  w.obj().key("t").str("render").key("exposure").num(rs.exposure).key("view_transform").str(view).end();
+  return w.out;
+}
 
 /* A local transform in glTF's axes: Blendity's left-handed Y up mirrored in X, as the exporter writes meshes. */
 struct Trs {
@@ -128,6 +187,7 @@ struct Link::Impl {
   std::unordered_map<const Material *, int> material_key;
   int next_material = 1;
   std::unordered_map<int, uint64_t> material_hash_now;  // this tick's hashes (a material shared by many objects hashed once)
+  uint64_t world_hash = 0, render_hash = 0, filters_hash = 0;  // (round 376: what every client was last told of the scene's look)
 
   /* The mesh worker. */
   std::thread worker;
@@ -174,6 +234,7 @@ struct Link::Impl {
   void send_object(const std::vector<int> &to, bool all, GameObject &g, const Sent &s);
   void send_light(const std::vector<int> &to, bool all, GameObject &g);
   void send_camera(const std::vector<int> &to, bool all, GameObject &g);
+  void send_look(Scene &scene, const std::vector<int> &to, bool all);
   void send_deform(GameObject &g, const Mesh &m);
   void send_pose(const GameObject &armature, const std::vector<GameObject *> &bones);
   void send_transform(const GameObject &g, const Trs &trs);
@@ -395,6 +456,26 @@ void Link::Impl::send_camera(const std::vector<int> &to, bool all, GameObject &g
   stats.cameras++;
 }
 
+/* Round 376: the world and the render's look, to `to` (a sync) or to everyone when they changed (a comparison). The
+ * filters are the render camera's - the one the Game view and F12 use - since each engine has one post-processing
+ * of its own: another camera made the render camera, its stack changed, or the camera gone (an empty stack, id 0)
+ * each send them (review 376: a deleted camera's Bloom stayed in every engine). */
+void Link::Impl::send_look(Scene &scene, const std::vector<int> &to, bool all) {
+  const std::string world = world_message(scene.environment), render = render_message(scene.render), filters = filters_message(scene);
+  const uint64_t wh = std::hash<std::string>()(world), rh = std::hash<std::string>()(render), fh = std::hash<std::string>()(filters);
+  const bool fresh = !all;
+  const std::pair<const std::string *, Kind> parts[] = {{&world, kWorld}, {&render, kRender}, {&filters, kFilters}};
+  const uint64_t was[] = {world_hash, render_hash, filters_hash}, now[] = {wh, rh, fh};
+  for (int i = 0; i < 3; i++) {
+    if (!fresh && now[i] == was[i]) continue;
+    JsonWriter w;
+    w.out = *parts[i].first;
+    send(to, all, w, ckey(0, parts[i].second));
+    (i == 0 ? stats.worlds : i == 1 ? stats.renders : stats.filters)++;
+  }
+  if (all || server.ready_clients().empty()) world_hash = wh, render_hash = rh, filters_hash = fh;
+}
+
 /* Vertices that moved, the faces the same: the positions in the object's space and glTF's axes (float32 x, y, z per
  * vertex of the mesh; the binary's _VERT attribute says which of its vertices each one is). */
 void Link::Impl::send_deform(GameObject &g, const Mesh &m) {
@@ -439,6 +520,7 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
   JsonWriter head;
   head.obj().key("t").str("sync").key("scene").str(scene.name).key("objects").integer((int64_t)scene.object_count()).key("playing").boolean(playing).end();
   send(fresh, false, head);
+  send_look(scene, fresh, false);  // (round 376: the world and the look before the objects)
   const bool others = !server.ready_clients().empty();
   if (!others) sent.clear();  // (what nobody holds: no deletes for objects that went while no one listened)
   scene.for_each_ordered([&](GameObject &g, int) {
@@ -515,6 +597,7 @@ void Link::Impl::compare(Scene &scene, double now) {
   batching = true;
   material_hash_now.clear();
   for (auto &[id, s] : sent) s.seen = false;
+  send_look(scene, {}, true);  // (round 376: the world and the look, when they changed)
   /* Each rig's bones as they are met; a rig with a moved bone is sent whole, once. */
   std::unordered_map<uint64_t, std::vector<GameObject *>> bones;
   std::vector<uint64_t> moved;

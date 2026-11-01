@@ -90,6 +90,18 @@ func _initialize() -> void:
 		for c in sun.get_children():
 			has_sun = has_sun or c is DirectionalLight3D
 	check(has_sun, "the directional light")
+	# Round 376: the look - a gradient with fog 5-40 m, half a stop up, Bloom 0.8 (as glow), the filters kept on the camera.
+	var we := find(live, "Blendity World") as WorldEnvironment
+	check(we != null and we.environment != null, "the world's environment")
+	if we != null and we.environment != null:
+		var env := we.environment
+		var g := env.sky.sky_material as ProceduralSkyMaterial if env.sky != null else null
+		check(g != null and g.sky_top_color.is_equal_approx(Color(0.2, 0.4, 0.8).linear_to_srgb()), "the gradient's sky colour arrived (sRGB)")
+		check(not ("fog_mode" in env) or absf(env.fog_density - 1.0) < 1e-6, "the depth fog's density is its full opacity at its end")
+		check(env.fog_enabled and (not ("fog_mode" in env) or (absf(float(env.get("fog_depth_begin")) - 5.0) < 1e-4 and absf(float(env.get("fog_depth_end")) - 40.0) < 1e-4)), "the fog arrived")
+		check(absf(env.tonemap_exposure - pow(2.0, 0.5)) < 1e-4, "the exposure arrived: %f" % env.tonemap_exposure)
+		check(env.glow_enabled and absf(env.glow_intensity - 0.8) < 1e-4, "the Bloom arrived as glow")
+	check(cam_obj != null and str(cam_obj.get_meta("blendity_filters", "")).contains("Vignette"), "the camera keeps its filters")
 	var lower := find(live, "Lower") as Node3D
 	check(lower != null and lower.get_parent().name == "Upper", "the bone hierarchy kept")
 	if lower != null:

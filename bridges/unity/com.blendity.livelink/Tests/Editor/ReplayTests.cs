@@ -54,6 +54,29 @@ namespace Blendity.LiveLink.Tests
             Assert.IsNull(GameObject.Find("Sphere"));
             var lower = GameObject.Find("Lower");
             Assert.That(Quaternion.Angle(lower.transform.localRotation, Quaternion.identity), Is.EqualTo(30f).Within(1e-3f));
+            // Round 376: the look - a gradient with fog 5-40 m, half a stop up, Bloom 0.8 and a Vignette.
+            Assert.IsTrue(RenderSettings.fog);
+            Assert.AreEqual(UnityEngine.Rendering.AmbientMode.Trilight, RenderSettings.ambientMode);
+            Assert.That(RenderSettings.fogStartDistance, Is.EqualTo(5f).Within(1e-4f));
+            Assert.That(RenderSettings.fogEndDistance, Is.EqualTo(40f).Within(1e-4f));
+            Assert.That(RenderSettings.ambientSkyColor.b, Is.EqualTo(Mathf.LinearToGammaSpace(0.8f)).Within(1e-4f));  // (linear sent, gamma kept)
+            var look = GameObject.Find(LiveLinkApplier.LookName).GetComponent<BlendityLook>();
+            Assert.That(look.Exposure, Is.EqualTo(0.5f).Within(1e-5f));
+            StringAssert.Contains("Bloom", look.Filters);
+            StringAssert.Contains("Vignette", look.Filters);
+            Assert.IsTrue(look.HasSceneLighting);
+            look.RestoreSceneLighting();  // (the scene's own lighting back: no fog before the session)
+            Assert.IsFalse(RenderSettings.fog);
+#if BLENDITY_URP
+            var profile = look.GetComponent<UnityEngine.Rendering.Volume>().sharedProfile;
+            UnityEngine.Rendering.Universal.Bloom bloom;
+            Assert.IsTrue(profile.TryGet(out bloom) && bloom.active);
+            Assert.That(bloom.intensity.value, Is.EqualTo(0.8f).Within(1e-5f));
+            UnityEngine.Rendering.Universal.ColorAdjustments color;
+            Assert.IsTrue(profile.TryGet(out color));
+            Assert.That(color.postExposure.value, Is.EqualTo(0.5f).Within(1e-5f));
+            Debug.Log("Blendity Live Link: the URP Volume checked (Bloom, exposure)");
+#endif
             Object.DestroyImmediate(GameObject.Find(LiveLinkApplier.RootName));
         }
     }
