@@ -2923,6 +2923,8 @@ class Editor {
   std::string avatar_decimate_exclude_;
   std::string avatar_key_field_ = "Pose";
   void note_avatar_clips(GameObject &root);
+  /* `avatar <verb> <words...>`: the words after the verb as one name (names with spaces; rounds 358, 361). */
+  static std::string avatar_name_arg(const std::vector<std::string> &t);
   bool avatar_merge_weights(GameObject &root);
   bool avatar_zero_weight(GameObject &root);
   bool avatar_join(GameObject &root);
@@ -2966,6 +2968,14 @@ class Editor {
   EyeOptions eye_options_;
   uint64_t eye_test_root_ = 0;  // (the avatar whose eyes the test has turned: undone before anything is kept)
   void eye_test_off();
+  /* Round 361: CATS' Merge Armatures, Attach Mesh, Translate and Export (avatar_merge_ui.cpp). */
+  bool avatar_merge_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  bool avatar_merge_armature(GameObject &root, const std::string &other);
+  bool avatar_attach(GameObject &root, const std::string &bone);
+  bool avatar_translate(GameObject &root);
+  void avatar_export(GameObject &root, const std::string &path);
+  void draw_merge_section(ui::Layout &lay, GameObject *root);
+  std::string avatar_merge_field_;
   void budget_report(const BudgetCounts &counts, const char *what);
   void export_wait_poll();
   void export_waits_drop(const char *why);

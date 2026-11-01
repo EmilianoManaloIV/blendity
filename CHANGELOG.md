@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 361): the VRChat avatar module, part 6 - Merge Armatures, Attach Mesh, Translate, Export
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361: the module's
+last part).
+
+**Added (task 0338)**
+- **Merge Armatures** (`avatar mergearmature <name>`): a hair or outfit armature merged into the avatar's by its
+  bones' names, its meshes skinned to the avatar.
+- **Attach Mesh** (`avatar attach <bone>`): a rigid prop given wholly to one bone.
+- **Translate** (`avatar translate`): Japanese shape key and material names from MMD's common names.
+- **Export for VRChat** (`avatar export [path]`): FBX for Unity, with the checklist and PC rank said first and a
+  warning past Poor or without visemes.
+
+**The Opus review's fixes:**
+- props under the other rig's bones are kept;
+- Attach moves a bone-parented prop to the armature first;
+- Translate copies a material asset under its new name;
+- clips' BlendShape tracks follow translated keys;
+- a refused merge keeps the pose;
+- the avatar's body is refused as a prop;
+- names with spaces work.
+
+**Checked:** `tests_round361`:
+- the dictionary whole and by parts, and an avatar's key, weight and material renamed - its clip's track following,
+  the material asset copied, and Undo;
+- a hair rig resting 2 cm off with a hat kept;
+- a hat under the head attached, turning 30 degrees with a 30-degree head;
+- a hair rig merged: the strand under Head, the hair unmoved at rest and following the head;
+- a ring on a hand;
+- a body through Fix Model and Create Visemes exported: ufbx reads 1 skin, 26 bones and 15 viseme channels;
+- the Try-it.
+
 ## 2026-10-31 (round 360): the VRChat avatar module, part 5 - Eye Tracking, the Texture Atlas
 
 **Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).

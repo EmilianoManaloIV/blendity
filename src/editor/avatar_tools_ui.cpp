@@ -12,6 +12,13 @@
 
 namespace bl {
 
+/* The words after the verb as one name ("avatar basis Smile - Reverted"; review 358: only the first word had been read). */
+std::string Editor::avatar_name_arg(const std::vector<std::string> &t) {
+  std::string out;
+  for (size_t i = 2; i < t.size(); i++) out += (out.empty() ? "" : " ") + t[i];
+  return out;
+}
+
 /* The clips over the avatar, noted for Undo before their tracks move (as a key edit notes them). */
 void Editor::note_avatar_clips(GameObject &root) {
   for (GameObject *p = &root; p; p = p->parent) {
@@ -21,13 +28,6 @@ void Editor::note_avatar_clips(GameObject &root) {
 }
 
 namespace {
-
-/* The words after the verb as one name ("avatar basis Smile - Reverted"; review 358: only the first word had been read). */
-std::string rest_of(const std::vector<std::string> &t) {
-  std::string out;
-  for (size_t i = 2; i < t.size(); i++) out += (out.empty() ? "" : " ") + t[i];
-  return out;
-}
 
 /* The active object when it's one of the avatar's meshes (Separate, Pose to Shape Key and Apply as Basis work on one). */
 GameObject *avatar_mesh(Scene &scene, GameObject &root, GameObject *a) {
@@ -145,7 +145,7 @@ bool Editor::avatar_arms(GameObject &root, bool t_pose) {
  * make their own Undo steps. */
 bool Editor::avatar_tool_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root) {
   const std::string arg = t.size() > 2 ? to_lower(t[2]) : "";
-  const std::string name = t.size() > 2 ? rest_of(t) : avatar_key_field_;
+  const std::string name = t.size() > 2 ? avatar_name_arg(t) : avatar_key_field_;
   if (verb == "separate") {
     if (!avatar_mesh(*scene_, root, active_object())) return Log::warn("Separate: select one of the avatar's meshes"), true;
     separate(arg.empty() ? "material" : arg);

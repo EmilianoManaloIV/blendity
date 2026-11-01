@@ -9,6 +9,7 @@
 #include "../src/scene/budget.h"
 #include "../src/scene/visemes.h"
 #include "../src/scene/humanoid.h"
+#include "../src/scene/avatar_merge.h"
 #include "../src/scene/avatar_eyes.h"
 #include "../src/scene/avatar_optimize.h"
 #include "../src/scene/spring_bones.h"
@@ -7260,6 +7261,193 @@ static void tests_round360() {
   });
 }
 
+/* ---------------------------------------------------------------- round 361: Merge Armatures, Attach Mesh, Translate, Export */
+static void tests_round361() {
+  test("Translate (round 361): MMD's morph and material names from the dictionary - whole names, then by parts; an English or unknown name left", [] {
+    const char *const kIn[] = {"\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", "\xE3\x81\x82", "\xE3\x82\xA6\xE3\x82\xA3\xE3\x83\xB3\xE3\x82\xAF\xE5\x8F\xB3",
+                               "\xE8\x82\x8C", "\xE9\xAB\xAA\xE5\x8F\xB3", "Smile", "\xE6\x9C\xAA\xE7\x9F\xA5"};
+    const char *const kOut[] = {"Blink", "A", "Wink Right", "Skin", "Hair Right", "", ""};
+    for (int i = 0; i < 7; i++) {
+      const std::string got = translate_name(kIn[i]);
+      if (got != kOut[i]) std::printf("    %d: '%s', wanted '%s'\n", i, got.c_str(), kOut[i]);
+      CHECK(got == kOut[i]);
+    }
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *body = ed.active_object_for_test();
+    if (!rig || !body) return;
+    {
+      Mesh &m = *mesh_make_mutable(body->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", std::vector<Vec3>(m.vert_count(), Vec3(0, 0.01f, 0))}};
+      m.touch();
+    }
+    body->get<MeshRenderer>()->materials = {std::make_shared<Material>()};
+    body->get<MeshRenderer>()->materials[0]->name = "\xE8\x82\x8C";
+    body->get<MeshRenderer>()->set_shape_weight("\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", 0.5f);
+    body->add<SkinModifier>()->object = rig->name;
+    /* A clip's track on the Japanese key (as a VMD's morphs come in), and the material an asset. */
+    std::remove(resolve_asset_path("Assets/Animations/R361Blink.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R361Blink.anim", "R361Blink");
+    if (!clip) return;
+    clip->track(anim_path(*rig, *body), "MeshRenderer.BlendShape/\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", 0).set_key(0, 1.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    for (const char *p : {"Assets/Materials/R361/Skin.mat", "Assets/Materials/R361/Skin 2.mat"}) std::remove(resolve_asset_path(p).c_str());
+    Material skin_src;
+    skin_src.name = "\xE8\x82\x8C";
+    MaterialPtr asset = create_material_asset(skin_src, "Assets/Materials/R361/\xE8\x82\x8C.mat");
+    if (asset) body->get<MeshRenderer>()->materials = {asset};
+    ed.mark_changed_for_test("set up the names");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar translate");
+    const Mesh &m = *body->get<MeshFilter>()->mesh;
+    const MaterialPtr now = body->get<MeshRenderer>()->materials[0];
+    std::printf("    translated: the key %d, its weight %.1f, the clip's track %d, the material %s at %s (the original still %s)\n", m.find_shape("Blink"),
+                body->get<MeshRenderer>()->shape_weight("Blink"), (int)(clip->find(anim_path(*rig, *body), "MeshRenderer.BlendShape/Blink", 0) != nullptr), now->name.c_str(),
+                now->asset_path.c_str(), asset ? asset->name.c_str() : "-");
+    CHECK(m.find_shape("Blink") >= 0 && now->name == "Skin" && body->get<MeshRenderer>()->shape_weight("Blink") == 0.5f);
+    CHECK(clip->find(anim_path(*rig, *body), "MeshRenderer.BlendShape/Blink", 0) != nullptr);
+    CHECK(asset && asset->name != "Skin" && now != asset && now->asset_path.find("Skin") != std::string::npos);
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *b2 = ed.scene().find_by_name(body->name);
+    CHECK(b2 && b2->get<MeshFilter>()->mesh->find_shape("Blink") < 0);
+  });
+  test("Merge Armatures and Attach Mesh (round 361): a hair rig with its own Head merged into the avatar's - its strand under the avatar's Head, its mesh skinned to the avatar and following the head; a ring given wholly to a hand", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!rig || !head) return;
+    /* The hair's own rig: a Head where the avatar's is, a strand under it, a mesh skinned to the strand. */
+    GameObject *hrig = s.create("HairRig", nullptr);
+    hrig->add<Armature>();
+    GameObject *hhead = r357_bone(hrig, s, "Head", head->world_position() + Vec3(0, 0.02f, 0));  // (2 cm off the avatar's: the hair still doesn't jump)
+    GameObject *strand = r357_bone(hhead, s, "Strand", Vec3(0, 0.1f, -0.05f));
+    ed.command("create Cube");
+    GameObject *hair = ed.active_object_for_test();
+    if (!hair) return;
+    hair->set_world_position(strand->world_position());
+    hair->set_local_scale(Vec3(0.05f));
+    {
+      Mesh &m = *mesh_make_mutable(hair->get<MeshFilter>()->mesh);
+      m.vertex_groups = {{"Strand", std::vector<float>(m.vert_count(), 1.0f)}};
+      m.touch();
+    }
+    hair->add<SkinModifier>()->object = "HairRig";
+    /* A clip on the hair rig's Head: a hat (not a bone) hanging from it is kept, under the avatar's Head. */
+    ed.command("create Cone");
+    GameObject *clip_hat = ed.active_object_for_test();
+    if (!clip_hat) return;
+    s.set_parent(clip_hat, hhead, -1, true);
+    const uint64_t clip_hat_id = clip_hat->id;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> before = r357_skinned(*hair);
+    const uint64_t strand_id = strand->id, hrig_id = hrig->id;
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar mergearmature HairRig");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *st = s.find(strand_id);
+    std::printf("    merged: the strand under %s, the hair skinned to %s, HairRig %s; the hair moved %.6f at rest\n", st && st->parent ? st->parent->name.c_str() : "-",
+                hair->get<SkinModifier>()->object.c_str(), s.find(hrig_id) ? "kept" : "gone", r358_worst(before, r357_skinned(*hair)));
+    CHECK(st && st->parent == head && hair->get<SkinModifier>()->object == rig->name && !s.find(hrig_id) && r358_worst(before, r357_skinned(*hair)) < 1e-4f);
+    CHECK(s.find(clip_hat_id) && s.find(clip_hat_id)->parent == head);
+    /* The head turned: the hair turns with it. */
+    head->set_local_rotation(head->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 1, 0), 0.6f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(r358_worst(before, r357_skinned(*hair)) > 0.01f);
+    /* Attach Mesh on a hat already under the Head: it turns once with the head, not twice. */
+    head->set_local_rotation(head->get<Bone>()->rest_rotation);
+    ed.command("create Cube");
+    GameObject *hat = ed.active_object_for_test();
+    if (!hat) return;
+    hat->set_world_position(head->world_position() + Vec3(0, 0.2f, 0));
+    s.set_parent(hat, head, -1, true);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(hat->id, false);
+    ed.command("avatar attach Head");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> hat_rest = r357_skinned(*hat);
+    head->set_local_rotation(head->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 1, 0), 0.5236f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> hat_turned = r357_skinned(*hat);
+    /* Its top vertex's turn about the head's axis: 30 degrees, not 60. */
+    Vec3 a = hat_rest.empty() ? Vec3(0.0f) : hat_rest[0] - head->world_position(), b = hat_turned.empty() ? Vec3(0.0f) : hat_turned[0] - head->world_position();
+    a.y = 0.0f, b.y = 0.0f;
+    const float turned = std::acos(std::clamp(dot(normalize(a), normalize(b)), -1.0f, 1.0f)) * 57.29578f;
+    std::printf("    a hat under the head, attached: its parent %s, turned %.1f degrees with a 30-degree head\n", hat->parent ? hat->parent->name.c_str() : "-", turned);
+    CHECK(hat->parent == rig && std::fabs(turned - 30.0f) < 2.0f);
+    head->set_local_rotation(head->get<Bone>()->rest_rotation);
+    /* Attach Mesh: a ring on the left hand. */
+    ed.command("create Torus");
+    GameObject *ring = ed.active_object_for_test();
+    if (!ring) return;
+    ed.command("avatar attach LeftHand");
+    const Mesh &rm = *ring->get<MeshFilter>()->mesh;
+    CHECK(rm.vertex_groups.size() == 1 && rm.vertex_groups[0].name == "LeftHand" && ring->get<SkinModifier>() && ring->get<SkinModifier>()->object == rig->name);
+    ed.command("avatar attach NoSuchBone");
+    CHECK(rm.vertex_groups.size() == 1 && ring->get<MeshFilter>()->mesh->vertex_groups[0].name == "LeftHand");
+  });
+  test("Export for VRChat (round 361): a body with three mouths through Fix Model and Create Visemes goes out as FBX - the checklist and rank said first, its skeleton, skin and 15 visemes read back by ufbx", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    if (!body || !rig) return;
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    for (const char *c : {"shape add AA", "shape add OH", "shape add CH", "visemes"}) ed.command(c);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::string dir = fs::join(test_dir(), "r361");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "avatar.fbx");
+    std::remove(path.c_str());
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar export " + path);
+    log.clear();
+    Log::fetch(since, log);
+    bool summary = false;
+    for (const LogEntry &e : log) summary = summary || e.text.find("Export for VRChat:") != std::string::npos;
+    ufbx_load_opts opts = {};
+    ufbx_error err;
+    ufbx_scene *sc = ufbx_load_file(path.c_str(), &opts, &err);
+    size_t visemes = 0;
+    for (size_t i = 0; sc && i < sc->blend_channels.count; i++) visemes += std::string(sc->blend_channels.data[i]->name.data).rfind("vrc.v_", 0) == 0 ? 1 : 0;
+    std::printf("    the FBX: %s, %zu skin(s), %zu bones, %zu viseme channels; the summary said %d\n", sc ? "read" : err.description.data, sc ? sc->skin_deformers.count : (size_t)0,
+                sc ? sc->bones.count : (size_t)0, visemes, (int)summary);
+    CHECK(sc && sc->skin_deformers.count >= 1 && sc->bones.count >= 15 && visemes == 15 && summary);
+    if (sc) ufbx_free_scene(sc);
+  });
+  test("the lesson's Try-it (round 361): rig humanoid, then avatar translate - nothing to translate, said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("avatar translate");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("none known") != std::string::npos;
+    CHECK(said);
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -7634,4 +7822,5 @@ void run_assets_tests() {
   tests_round358();
   tests_round359();
   tests_round360();
+  tests_round361();
 }

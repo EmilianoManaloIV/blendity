@@ -874,6 +874,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Eye Tracking and the Texture Atlas** (round 360, the Avatar window, as the CATS plugin's): Set Up Eyes finds the eyes (a vertex group or a mesh named for an eye), puts LeftEye and RightEye bones under the head at their middles, makes the eyes follow them, and splits a Blink key (and LowerLid) into vrc.blink_left / right; Eye Movement and Eye Blinking choose which; the Test buttons turn and shut the eyes, Reset puts them back. Make Atlas bakes each of the avatar's meshes into one texture set, one material and one slot. Console: `avatar eyes`, `avatar eyetest <yaw> <pitch> <blink>|reset`, `avatar atlas [size]`.
 
+**Merge Armatures, Attach Mesh, Translate, Export** (round 361, the Avatar window, as the CATS plugin's): Merge Armatures takes a hair or outfit armature into the avatar's by its bones' names (its meshes skinned to the avatar); Attach Mesh gives the selected prop wholly to one bone; Translate renames Japanese shape keys and materials from MMD's common names; Export for VRChat writes FBX for Unity (Y up, metres, skeleton, skin, shape keys), saying the checklist and PC rank first. Console: `avatar mergearmature <name>`, `avatar attach <bone>`, `avatar translate`, `avatar export [path]`.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

@@ -49,6 +49,8 @@ void Editor::avatar_command(const std::vector<std::string> &t) {
   const std::string verb = t.size() > 1 ? to_lower(t[1]) : "check";
   /* (A root's name only after check: fix's argument is the item's number.) */
   GameObject *root = verb == "check" && t.size() > 2 ? scene_->find_by_name(t[2]) : puppet_rig_of(active_object());
+  /* (Attach Mesh: the prop selected isn't the avatar's yet - its rig is the bone's.) */
+  if (!root && verb == "attach" && t.size() > 2) root = puppet_rig_of(scene_->find_by_name(avatar_name_arg(t)));
   if (!root || !root->get<Armature>()) return Log::warn("avatar check [root] | avatar fix <n> | origin | decimate: select the avatar (its mesh, its root or a bone)");
   avatar_cache_.at = -1.0;
   if (verb == "origin") return avatar_origin(*root);
@@ -56,6 +58,7 @@ void Editor::avatar_command(const std::vector<std::string> &t) {
   if (avatar_tool_command(verb, t, *root)) return;
   if (avatar_optimize_command(verb, t, *root)) return;
   if (avatar_eyes_command(verb, t, *root)) return;
+  if (avatar_merge_command(verb, t, *root)) return;
   const std::vector<AvatarCheck> list = avatar_check(*scene_, *root);
   if (verb == "fix") {
     const int n = t.size() > 2 ? std::atoi(t[2].c_str()) : 0;
@@ -171,6 +174,7 @@ void Editor::draw_avatar_window(const Recti &r) {
   draw_pose_shape_section(lay, root);
   draw_optimize_section(lay, root);  // (round 359)
   draw_eyes_section(lay, root);      // (round 360)
+  draw_merge_section(lay, root);     // (round 361)
   draw_avatar_section(lay, root);
   u.pop_id();
   content_h = lay.y + off - r.y + u.px(20);
