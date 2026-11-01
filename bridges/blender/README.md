@@ -36,6 +36,7 @@ date (and removes what Blendity deleted meanwhile).
 | cameras | the same vertical field of view, clipping, orthographic size, physical lens |
 | the look (round 376) | a "Blendity Live Link" world (the Gradient as a ColorRamp, the sky, an HDRI; fog as the mist pass), the scene's exposure and view transform, a compositor node group for the fog, Bloom, Color Grading and a Vignette; the scene's own world and compositor kept and put back when the link stops |
 | armatures and bones | empties posed as the bones; a skinned mesh (round 378) has an armature whose bones copy them, vertex groups and an Armature modifier, its keys as shape keys |
+| clips (round 379) | an Action named for the clip, a slot per object (location, rotation_quaternion, scale), kept with a fake user, not assigned |
 
 ## Send to Blendity (round 374)
 

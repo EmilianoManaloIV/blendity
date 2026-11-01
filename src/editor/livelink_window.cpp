@@ -223,6 +223,8 @@ void Editor::draw_livelink_window(const Recti &r) {
   stat("Objects / transforms / poses", strprintf("%llu / %llu / %llu", (unsigned long long)s.objects, (unsigned long long)s.transforms, (unsigned long long)s.poses));
   stat("Meshes / deforms", strprintf("%llu / %llu (built in %.0f ms)", (unsigned long long)s.meshes, (unsigned long long)s.deforms, s.mesh_encode_ms));
   stat("Materials / lights / cameras", strprintf("%llu / %llu / %llu", (unsigned long long)s.materials, (unsigned long long)s.lights, (unsigned long long)s.cameras));
+  stat("Clips", s.clips_too_big ? strprintf("%llu sent, %llu too big to send (over 32 MB baked)", (unsigned long long)s.clips, (unsigned long long)s.clips_too_big)
+                                : strprintf("%llu sent", (unsigned long long)s.clips));
   stat("Replaced before sending", strprintf("%llu", (unsigned long long)n.coalesced));
   stat("Comparing the scene", strprintf("%.2f ms (most %.2f)", s.tick_ms, s.tick_ms_max));
 }

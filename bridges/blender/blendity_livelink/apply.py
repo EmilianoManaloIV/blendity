@@ -20,6 +20,8 @@ from .glb import MeshData
 COLLECTION = "Blendity Live Link"
 SKIN_MODIFIER = "Blendity Skin"  # (round 378: a skinned mesh's Armature modifier)
 JOINT_GROUP = "joint_"  # (...its bones and vertex groups: joint_0, joint_1...)
+_LINEAR = 1  # (a keyframe's interpolation, as foreach_set takes it: 'LINEAR')
+SAMPLE_FLOATS = 10  # (a clip's sample: position 3, rotation 4, scale 3)
 CONV = Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))  # (glTF's axes to Blender's)
 CONV_INV = CONV.inverted()
 FIX = Matrix(((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0))).to_quaternion()
@@ -529,9 +531,84 @@ class Applier:
             if i + 1 < len(keys.key_blocks):
                 keys.key_blocks[i + 1].value = float(w)
 
+    # -------------------------------------------------------------- clips (round 379)
+
+    def on_clip(self, msg, att):
+        """A clip baked by Blendity: an Action named for it with a slot per object (location, rotation_quaternion and
+        scale curves, a key a frame), kept with a fake user and not assigned - Live Link still poses the objects."""
+        oid = int(msg["id"])
+        tracks = [int(t) for t in msg.get("tracks", [])]
+        frames = int(msg.get("frames", 0))
+        fps = float(msg.get("fps", 60.0))
+        if self._get(oid) is None or frames <= 0 or fps <= 0.0 or len(att) < len(tracks) * frames * SAMPLE_FLOATS * 4:
+            return
+        samples = np.frombuffer(att, dtype="<f4", count=len(tracks) * frames * SAMPLE_FLOATS).reshape(len(tracks), frames, SAMPLE_FLOATS)
+        action = _clip_action(str(msg.get("asset", "")), str(msg.get("name", "Clip")))
+        step = self.scene.render.fps / self.scene.render.fps_base / fps  # (a clip frame in this scene's frames: it plays at Blendity's speed)
+        for slot in list(action.slots):
+            action.slots.remove(slot)
+        layer = action.layers[0] if action.layers else action.layers.new("Blendity")
+        strip = layer.strips[0] if layer.strips else layer.strips.new(type="KEYFRAME")
+        for tid, rows in zip(tracks, samples):
+            obj = self._get(tid)
+            if obj is not None:
+                self._clip_curves(action, strip, tid, obj, rows, step)
+        action.use_frame_range = True
+        action.frame_range = (0.0, max(float(frames - 1) * step, 1.0))
+        action.use_cyclic = bool(msg.get("loop", False))
+        action["blendity_fps"] = fps
+
+    def _clip_curves(self, action, strip, tid, obj, rows, step):
+        slot = action.slots.new(id_type="OBJECT", name=obj.name)
+        bag = strip.channelbag(slot, ensure=True)
+        frames = np.arange(len(rows), dtype=np.float32) * np.float32(step)
+        for path, values in zip(("location", "rotation_quaternion", "scale"), self._trs_rows(tid, obj, rows)):
+            for i in range(values.shape[1]):
+                fc = bag.fcurves.new(path, index=i)
+                fc.keyframe_points.add(len(rows))
+                fc.keyframe_points.foreach_set("co", np.column_stack((frames, values[:, i])).ravel())
+                fc.keyframe_points.foreach_set("interpolation", [_LINEAR] * len(rows))
+                fc.update()
+
+    def _trs_rows(self, oid, obj, rows):
+        """A clip's frames (n, 10: Live Link's position, rotation, scale) as Blender's location, rotation_quaternion
+        (each turned the short way from the last, so the keys between interpolate straight) and scale - as _set_trs."""
+        loc = rows[:, [0, 2, 1]] * np.array([1.0, -1.0, 1.0], np.float32)
+        rot = rows[:, [6, 3, 5, 4]] * np.array([1.0, 1.0, -1.0, 1.0], np.float32)
+        scale = rows[:, [7, 9, 8]]
+        if self._is_turned(obj):
+            rot = _quat_mul(rot, np.array(tuple(FIX), np.float32))
+            scale = rows[:, 7:10]
+        flips = np.sign(np.einsum("ij,ij->i", rot[1:], rot[:-1]))  # (each turned the short way: numpy, not a loop - review 379)
+        flips[flips == 0] = 1.0
+        rot[1:] *= np.cumprod(flips)[:, None]
+        return loc, rot, scale
+
     def restore_look(self):
         """The scene's own world and compositor back (the link stopped)."""
         restore_look(self.scene)
+
+
+def _clip_action(asset, name):
+    """The Action of a Blendity clip: one per clip asset, found again by it - a reconnect or a switch back to an earlier
+    clip reuses it (review 379: each had made "Wave.001", "Wave.002"...)."""
+    key = asset or name
+    action = next((a for a in bpy.data.actions if a.get("blendity_clip_asset") == key), None)
+    if action is not None:
+        return action
+    action = bpy.data.actions.new(name)
+    action["blendity_clip_asset"] = key
+    action["blendity_clip"] = name
+    action.use_fake_user = True
+    return action
+
+
+def _quat_mul(a, b):
+    """Quaternions (n, 4: w x y z) times one (4,)."""
+    w1, x1, y1, z1 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+    w2, x2, y2, z2 = b
+    return np.stack((w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                     w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2), axis=1).astype(np.float32)
 
 
 def _matrix(column_major):

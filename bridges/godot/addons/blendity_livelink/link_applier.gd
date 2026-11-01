@@ -95,6 +95,8 @@ func apply(j: Dictionary, bin: PackedByteArray) -> void:
 			_on_texture(j, bin)
 		"weights":
 			_on_weights(j)
+		"clip":
+			_on_clip(j, bin)
 
 
 ## After a batch of messages: the skins posed from their bones, once (review 378).
@@ -556,6 +558,8 @@ func _on_texture(j: Dictionary, bin: PackedByteArray) -> void:
 # ------------------------------------------------------------------ skins (round 378)
 
 const SKELETON_NAME := "Blendity Skeleton"
+const FOLLOW_NAME := "Blendity Follow"  # (review 379: the modifier posing the bones from their joints - a clip playing too)
+const SkinFollow := preload("link_skin_follow.gd")
 
 
 ## A skinned mesh: a Skeleton3D under it (a flat bone per joint) and a Skin of glTF's inverse bind matrices; each bone
@@ -584,32 +588,31 @@ func _set_skin(id: int, n: MeshInstance3D, g, skin: Dictionary) -> void:
 		s.add_bind(b, g.inverse_binds[b])
 	n.skin = s
 	n.skeleton = NodePath(SKELETON_NAME)
+	if sk.get_node_or_null(FOLLOW_NAME) == null:
+		var follow = SkinFollow.new()
+		follow.name = FOLLOW_NAME
+		sk.add_child(follow)
+		_own(follow)
 	skins[id] = ids
 	_update_skins()
 
 
-## The world transform through the parents (headless too: the nodes needn't be in a tree).
-static func _chain(n: Node) -> Transform3D:
-	var t := Transform3D.IDENTITY
-	while n is Node3D:
-		t = (n as Node3D).transform * t
-		n = n.get_parent()
-	return t
-
-
-## Each skinned mesh's bones posed from its joints' objects, in the mesh's space (its skeleton's).
+## Each skinned mesh's bones posed from its joints' objects, in the mesh's space (its skeleton's): its follower told
+## where the joints are now (a bone reparented moves its path), and run once - Godot runs it each frame after, a clip
+## playing on the joints too.
 func _update_skins() -> void:
 	for id in skins.keys():
 		var n := _alive(id)
 		var sk: Skeleton3D = n.get_node_or_null(SKELETON_NAME) if n != null else null
-		if sk == null:
+		var follow = sk.get_node_or_null(FOLLOW_NAME) if sk != null else null
+		if follow == null:
 			continue
-		var to_mesh := _chain(n).affine_inverse()
-		var ids: Array = skins[id]
-		for b in ids.size():
-			var bone := _alive(int(ids[b]))
-			if bone != null:
-				sk.set_bone_pose(b, to_mesh * _chain(bone))
+		var paths: Array[NodePath] = []
+		for jid in skins[id]:
+			var bone := _alive(int(jid))
+			paths.append(sk.get_path_to(bone) if bone != null else NodePath())
+		follow.joints = paths
+		follow.follow(sk)
 
 
 ## A keyed mesh's shape weights, in its keys' order; kept, set again when its mesh comes.
@@ -625,3 +628,62 @@ func _apply_weights(id: int) -> void:
 	var w: Array = shape_weights[id]
 	for i in mini(w.size(), n.mesh.get_blend_shape_count()):
 		n.set_blend_shape_value(i, float(w[i]))
+
+
+# ------------------------------------------------------------------ clips (round 379)
+
+const PLAYER_NAME := "Blendity Animation"
+const LIBRARY := "blendity"
+
+
+## A clip baked by Blendity: an Animation (position, rotation and scale tracks, a key a frame) in the "blendity"
+## library of an AnimationPlayer under the animated root.
+func _on_clip(j: Dictionary, bin: PackedByteArray) -> void:
+	var r := _alive(int(j.get("id", 0)))
+	var tracks: Array = j.get("tracks", [])
+	var frames := int(j.get("frames", 0))
+	var fps := float(j.get("fps", 60.0))
+	if r == null or frames <= 0 or fps <= 0.0 or bin.size() < tracks.size() * frames * 40:
+		return
+	var f := bin.to_float32_array()
+	var anim := Animation.new()
+	anim.length = max(float(frames - 1) / fps, 0.001)
+	anim.loop_mode = Animation.LOOP_LINEAR if bool(j.get("loop", false)) else Animation.LOOP_NONE
+	for k in tracks.size():
+		_clip_tracks(anim, r, int(tracks[k]), f, k * frames * 10, frames, fps)
+	var lib := _clip_library(r)
+	var name := str(j.get("name", "Clip")).validate_node_name().replace(",", "_").replace("[", "_").replace("]", "_")  # (names AnimationLibrary refuses - review 379)
+	if lib.has_animation(name):
+		lib.remove_animation(name)
+	lib.add_animation(name, anim)
+
+
+func _clip_tracks(anim: Animation, r: Node3D, id: int, f: PackedFloat32Array, at: int, frames: int, fps: float) -> void:
+	var n := _alive(id)
+	if n == null or not (n == r or r.is_ancestor_of(n)):
+		return
+	var path := r.get_path_to(n)
+	var tp := anim.add_track(Animation.TYPE_POSITION_3D)
+	var tr := anim.add_track(Animation.TYPE_ROTATION_3D)
+	var ts := anim.add_track(Animation.TYPE_SCALE_3D)
+	for t in [tp, tr, ts]:
+		anim.track_set_path(t, path)
+	for i in frames:
+		var o := at + i * 10
+		var time := float(i) / fps
+		anim.position_track_insert_key(tp, time, Vector3(f[o], f[o + 1], f[o + 2]))
+		anim.rotation_track_insert_key(tr, time, Quaternion(f[o + 3], f[o + 4], f[o + 5], f[o + 6]).normalized())
+		anim.scale_track_insert_key(ts, time, Vector3(f[o + 7], f[o + 8], f[o + 9]))
+
+
+## The root's AnimationPlayer (its root node the animated root) and its "blendity" library, made the first time.
+func _clip_library(r: Node3D) -> AnimationLibrary:
+	var player := r.get_node_or_null(PLAYER_NAME) as AnimationPlayer
+	if player == null:
+		player = AnimationPlayer.new()
+		player.name = PLAYER_NAME
+		r.add_child(player)
+		player.owner = owner_node
+	if not player.has_animation_library(LIBRARY):
+		player.add_animation_library(LIBRARY, AnimationLibrary.new())
+	return player.get_animation_library(LIBRARY)

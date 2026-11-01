@@ -7,6 +7,7 @@
 #include "../image/image.h"
 #include "../render/canvas.h"
 #include "../render/shading.h"
+#include "../scene/animation.h"
 #include "../scene/export.h"
 #include "../scene/scene.h"
 
@@ -27,7 +28,7 @@ namespace {
 
 /* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
  * own (the world, the render's look) are keyed on id 0, which no object has. */
-enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights };
+enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights, kClip };
 uint64_t ckey(uint64_t id, Kind k) { return id << 4 | (uint64_t)k; }
 
 /* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
@@ -93,9 +94,13 @@ struct Trs {
   bool operator==(const Trs &o) const { return std::memcmp(v, o.v, sizeof(v)) == 0; }
   bool operator!=(const Trs &o) const { return !(*this == o); }
 };
-Trs trs_of(const GameObject &g) {
-  const Transform &t = g.local();
+Trs trs_from(const Transform &t) {
   return {{-t.position.x, t.position.y, t.position.z, t.rotation.x, -t.rotation.y, -t.rotation.z, t.rotation.w, t.scale.x, t.scale.y, t.scale.z}};
+}
+Trs trs_of(const GameObject &g) { return trs_from(g.local()); }
+void mix_key(uint64_t &h, const void *p, size_t n) {
+  const unsigned char *b = static_cast<const unsigned char *>(p);
+  for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
 }
 void write_trs(JsonWriter &w, const Trs &t) {
   w.key("position").nums(t.v, 3);
@@ -148,6 +153,96 @@ struct Sent {
   }
 };
 
+/* Round 379: clips. What a bake needs, taken on the main thread - each keyed object's id, its local transform now (an
+ * axis the clip doesn't key keeps it) and copies of its Position, Rotation and Scale tracks - baked and sent on the clip
+ * worker (review 379: a minute of mocap had cost 60 ms a send on the main thread). */
+constexpr double kClipMinGap = 0.25;          // (seconds between a clip's sends while it keeps changing: at most 4 a second)
+constexpr int kClipFloats = 10;               // (a sample: position 3, rotation 4, scale 3)
+constexpr size_t kMaxClipBytes = 32u << 20;   // (a bigger bake isn't sent: Log::warn says so)
+
+struct ClipTarget {
+  uint64_t id = 0;
+  Transform base;
+  std::vector<AnimTrack> tracks;
+  bool turns = false;  // (a Rotation track: the rotation made from the Euler angles)
+};
+struct ClipJob {
+  uint64_t root = 0;
+  std::string name, asset;
+  float fps = 60.0f;
+  bool loop = true;
+  int frames = 0;
+  std::vector<ClipTarget> targets;
+  std::vector<int> clients;  // besides every ready client when `broadcast`
+  bool broadcast = false;
+};
+/* A clip as it went: its asset and object, its version, and a stamp of what else the bake reads - the objects its
+ * tracks name, their axes the clip doesn't key, the root's kind (review 379) - compared again each tick, sent once
+ * kClipMinGap has passed. */
+struct ClipSent {
+  std::weak_ptr<AnimationClip> clip;
+  std::string asset;
+  uint64_t version = 0, stamp = 0;
+  double last = -1e9;
+  bool seen = false;
+};
+
+/* The objects a clip's transform tracks name below `root`, each with its tracks. */
+struct ClipUse {
+  GameObject *g = nullptr;
+  std::vector<const AnimTrack *> tracks;
+};
+std::vector<ClipUse> clip_uses(const AnimationClip &c, GameObject &root) {
+  std::vector<ClipUse> uses;
+  std::unordered_map<GameObject *, size_t> at;
+  for (const AnimTrack &t : c.tracks) {
+    if (t.keys.empty() || !is_transform_property(t.property)) continue;
+    GameObject *g = anim_target(root, t.path);
+    if (!g) continue;
+    auto [it, fresh] = at.emplace(g, uses.size());
+    if (fresh) uses.push_back({g, {}});
+    uses[it->second].tracks.push_back(&t);
+  }
+  return uses;
+}
+
+/* What of an object a bake reads besides its tracks: the axes they don't key. */
+void mix_unkeyed(uint64_t &h, const ClipUse &u) {
+  bool keyed[9] = {};  // (position, euler, scale: x y z)
+  for (const AnimTrack *k : u.tracks) keyed[(k->property == "Position" ? 0 : k->property == "Rotation" ? 3 : 6) + std::max(0, std::min(2, k->axis))] = true;
+  const Transform &t = u.g->local();
+  const float v[9] = {t.position.x, t.position.y, t.position.z, t.euler_hint.x, t.euler_hint.y, t.euler_hint.z, t.scale.x, t.scale.y, t.scale.z};
+  for (int i = 0; i < 9; i++)
+    if (!keyed[i]) mix_key(h, &v[i], sizeof(float));
+  if (!keyed[3] && !keyed[4] && !keyed[5]) mix_key(h, &t.rotation, sizeof(Quat));
+}
+uint64_t clip_stamp(const std::vector<ClipUse> &uses, const std::string &root_kind) {
+  uint64_t h = 1469598103934665603ull;
+  mix_key(h, root_kind.data(), root_kind.size());
+  for (const ClipUse &u : uses) {
+    mix_key(h, &u.g->id, sizeof(u.g->id));
+    mix_unkeyed(h, u);
+  }
+  return h;
+}
+
+void set_axis(Transform &t, const AnimTrack &k, float v) {
+  const int a = std::max(0, std::min(2, k.axis));
+  if (k.property == "Position") t.position[a] = v;
+  else if (k.property == "Scale") t.scale[a] = v;
+  else t.euler_hint[a] = v;
+}
+/* One object's frames: its local transform at each, kClipFloats floats in Live Link's axes. */
+void bake_target(const ClipTarget &t, int frames, float *out) {
+  for (int f = 0; f < frames; f++, out += kClipFloats) {
+    Transform x = t.base;
+    for (const AnimTrack &k : t.tracks) set_axis(x, k, k.sample((float)f));
+    if (t.turns) x.rotation = Quat::euler(x.euler_hint);
+    const Trs trs = trs_from(x);
+    std::memcpy(out, trs.v, sizeof(trs.v));
+  }
+}
+
 struct MaterialSent {
   std::weak_ptr<Material> ptr;
   std::string name;
@@ -197,10 +292,6 @@ std::vector<float> shape_weights_of(const GameObject &g, const Mesh &base) {
 /* Round 378: what a rig's skin is built from besides its rest mesh - the armature, each joint (its object, name,
  * parent, rest, whether it deforms) and the Skin's settings: a change sends the skin again (review 378). Where the rig
  * sits from the mesh is compared apart, with a tolerance (rig_rel_of). */
-void mix_key(uint64_t &h, const void *p, size_t n) {
-  const unsigned char *b = static_cast<const unsigned char *>(p);
-  for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
-}
 void mix_joint(uint64_t &h, const GameObject &g, int parent) {
   mix_key(h, &g.id, sizeof(g.id));
   mix_key(h, &parent, sizeof(parent));
@@ -402,6 +493,7 @@ struct Link::Impl {
     stats.meshes = built.load();
     stats.mesh_encode_ms = encode_us.load() / 1000.0;
     stats.textures = tex_sent.load(), stats.textures_same = tex_same.load();
+    stats.clips = clips_sent.load();
   }
 
   void start_worker();
@@ -425,6 +517,8 @@ struct Link::Impl {
     outbox.clear();
     for (MeshJob &j : deferred) queue_mesh(std::move(j));
     deferred.clear();
+    for (ClipJob &j : clip_deferred) queue_clip(std::move(j));
+    clip_deferred.clear();
   }
   int material_key_of(const MaterialPtr &m);
   int expired_key(const std::string &name) const;
@@ -447,6 +541,22 @@ struct Link::Impl {
   void request_mesh(const std::vector<int> &to, bool all, GameObject &g, const Mesh *m);
   void materials_of(GameObject &g, const std::vector<int> &to, bool all, std::vector<int> &keys, bool only_changed, bool record);
 
+  /* Round 379: clips, by the animated root's id; baked and sent on the clip worker. */
+  std::unordered_map<uint64_t, ClipSent> clips;
+  void send_clip(GameObject &root, const std::vector<int> &to, bool all);
+  void compare_clip(GameObject &g, double now);
+  std::thread clip_worker;
+  std::mutex cm;
+  std::condition_variable ccv;
+  std::deque<uint64_t> clip_order;
+  std::unordered_map<uint64_t, ClipJob> clip_pending;  // (the newest job per root)
+  std::vector<ClipJob> clip_deferred;                  // (asked for during a comparison: queued after its batch, never before the objects they name)
+  bool clip_quit = false;
+  int clip_busy = 0;
+  std::atomic<uint64_t> clips_sent{0};
+  void queue_clip(ClipJob job);
+  void clip_loop();
+
   void sync(Scene &scene, const std::vector<int> &fresh);
   void compare(Scene &scene, double now);
   bool compare_object(GameObject &g);
@@ -460,6 +570,8 @@ void Link::Impl::start_worker() {
   quit = false, tex_quit = false;
   worker = std::thread([this] { worker_loop(); });
   tex_worker = std::thread([this] { tex_loop(); });
+  clip_quit = false;
+  clip_worker = std::thread([this] { clip_loop(); });
 }
 
 /* ------------------------------------------------------------ Textures (round 377) */
@@ -572,6 +684,14 @@ void Link::Impl::stop_worker() {
   }
   tcv.notify_all();
   if (tex_worker.joinable()) tex_worker.join();
+  {
+    std::lock_guard<std::mutex> lk(cm);
+    clip_quit = true;
+    clip_order.clear();
+    clip_pending.clear();
+  }
+  ccv.notify_all();
+  if (clip_worker.joinable()) clip_worker.join();
 }
 
 void Link::Impl::worker_loop() {
@@ -901,7 +1021,11 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
   send(fresh, false, head);
   send_look(scene, fresh, false);  // (round 376: the world and the look before the objects)
   const bool others = !server.ready_clients().empty();
-  if (!others) sent.clear();  // (what nobody holds: no deletes for objects that went while no one listened)
+  if (!others) {  // (what nobody holds: no deletes for objects that went while no one listened)
+    sent.clear();
+    clips.clear();
+  }
+  std::vector<GameObject *> animated;  // (round 379: their clips after every object - a clip names its root's children)
   scene.for_each_ordered([&](GameObject &g, int) {
     Sent s = capture(g);
     materials_of(g, fresh, false, s.materials, false, !others);
@@ -912,9 +1036,11 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     s.mesh = stamp_of(m);
     send_mesh(fresh, false, g, s, m);  // (round 378: a rig at rest with its skin; its weights after)
     if (s.rig) send_weights(g, rig_of(g), s, fresh, false);
+    if (const Animation *a = g.get<Animation>(); a && !a->clip.empty()) animated.push_back(&g);
     s.seen = true;
     if (!others) sent[g.id] = std::move(s);  // (with clients already there, `sent` is what they have: compare() moves it)
   });
+  for (GameObject *g : animated) send_clip(*g, fresh, false);
   JsonWriter end;
   end.obj().key("t").str("sync_end").end();
   send(fresh, false, end);
@@ -1010,7 +1136,10 @@ void Link::Impl::compare(Scene &scene, double now) {
   /* Each rig's bones as they are met; a rig with a moved bone is sent whole, once. */
   std::unordered_map<uint64_t, std::vector<GameObject *>> bones;
   std::vector<uint64_t> moved;
+  for (auto &[id, c] : clips) c.seen = false;
+  std::vector<GameObject *> animated;  // (round 379: compared after every object - a clip names its root's children)
   scene.for_each_ordered([&](GameObject &g, int) {
+    if (g.get<Animation>()) animated.push_back(&g);
     const bool bone_moved = compare_object(g);
     const uint64_t arm = sent[g.id].armature;
     if (!arm) return;
@@ -1019,6 +1148,8 @@ void Link::Impl::compare(Scene &scene, double now) {
   });
   for (uint64_t arm : moved)
     if (GameObject *a = scene.find(arm)) send_pose(*a, bones[arm]);
+  for (GameObject *g : animated) compare_clip(*g, now);
+  for (auto it = clips.begin(); it != clips.end();) it = it->second.seen ? std::next(it) : clips.erase(it);
   for (auto it = sent.begin(); it != sent.end();) {
     if (it->second.seen) {
       ++it;
@@ -1036,6 +1167,97 @@ void Link::Impl::compare(Scene &scene, double now) {
   stats.tick_ms = t.ms();
   stats.tick_ms_max = std::max(stats.tick_ms_max, stats.tick_ms);
   stats.tick_ms_total += stats.tick_ms;
+}
+
+/* Round 379: a clip to `to` (or everyone): its tracks copied here, baked and sent on the clip worker. With no clients
+ * waiting, or to everyone, it records what went. A bake over kMaxClipBytes isn't sent (recorded, so it's said once). */
+void Link::Impl::send_clip(GameObject &root, const std::vector<int> &to, bool all) {
+  const Animation *a = root.get<Animation>();
+  const AnimationClipPtr c = a ? clip_asset(a->clip) : nullptr;
+  if (!c) return;
+  ClipSent &cs = clips[root.id];
+  cs.seen = true;
+  const std::vector<ClipUse> uses = clip_uses(*c, root);
+  if (all || server.ready_clients().empty()) cs.clip = c, cs.asset = a->clip, cs.version = c->version, cs.stamp = clip_stamp(uses, kind_of(root));
+  ClipJob job;
+  job.root = root.id, job.name = c->name, job.asset = a->clip, job.fps = c->frame_rate, job.loop = c->loop, job.clients = to, job.broadcast = all;
+  job.frames = std::max(1, (int)std::floor(c->end_frame()) + 1);
+  const size_t bytes = uses.size() * (size_t)job.frames * kClipFloats * sizeof(float);
+  if (bytes > kMaxClipBytes) {
+    Log::warn("Live Link: the clip %s is %.0f MB baked (%zu objects, %d frames) - over %zu MB, not sent", a->clip.c_str(), bytes / 1048576.0, uses.size(), job.frames,
+              kMaxClipBytes >> 20);
+    stats.clips_too_big++;
+    return;
+  }
+  for (const ClipUse &u : uses) {
+    ClipTarget t;
+    t.id = u.g->id, t.base = u.g->local();
+    for (const AnimTrack *k : u.tracks) t.tracks.push_back(*k), t.turns = t.turns || k->property == "Rotation";
+    job.targets.push_back(std::move(t));
+  }
+  if (batching) clip_deferred.push_back(std::move(job));
+  else queue_clip(std::move(job));
+}
+
+/* A clip keyed, its keys moved or deleted, another chosen, or what else its bake reads changed: sent again, at most every
+ * kClipMinGap seconds while it keeps changing, its last state after. */
+void Link::Impl::compare_clip(GameObject &g, double now) {
+  const Animation *a = g.get<Animation>();
+  const AnimationClipPtr c = a && !a->clip.empty() ? clip_asset(a->clip) : nullptr;
+  if (!c) return;
+  ClipSent &cs = clips[g.id];
+  cs.seen = true;
+  const bool same_clip = cs.clip.lock() == c && cs.asset == a->clip && cs.version == c->version;
+  if (same_clip && cs.stamp == clip_stamp(clip_uses(*c, g), kind_of(g))) return;
+  if (now - cs.last < kClipMinGap) return;
+  cs.last = now;
+  send_clip(g, {}, true);
+}
+
+void Link::Impl::queue_clip(ClipJob job) {
+  {
+    std::lock_guard<std::mutex> lk(cm);
+    auto it = clip_pending.find(job.root);
+    if (it == clip_pending.end()) clip_order.push_back(job.root);
+    else {
+      for (int c : it->second.clients)
+        if (std::find(job.clients.begin(), job.clients.end(), c) == job.clients.end()) job.clients.push_back(c);
+      job.broadcast = job.broadcast || it->second.broadcast;
+    }
+    clip_pending[job.root] = std::move(job);
+  }
+  ccv.notify_all();
+}
+
+void Link::Impl::clip_loop() {
+  for (;;) {
+    ClipJob job;
+    {
+      std::unique_lock<std::mutex> lk(cm);
+      ccv.wait(lk, [&] { return clip_quit || !clip_order.empty(); });
+      if (clip_quit) return;
+      const uint64_t root = clip_order.front();
+      clip_order.pop_front();
+      auto it = clip_pending.find(root);
+      if (it == clip_pending.end()) continue;
+      job = std::move(it->second);
+      clip_pending.erase(it);
+      clip_busy++;
+    }
+    std::string bin(job.targets.size() * (size_t)job.frames * kClipFloats * sizeof(float), '\0');
+    float *out = reinterpret_cast<float *>(bin.data());
+    for (const ClipTarget &t : job.targets) bake_target(t, job.frames, out), out += (size_t)job.frames * kClipFloats;
+    JsonWriter w;
+    w.obj().key("t").str("clip").key("id").integer((int64_t)job.root).key("name").str(job.name).key("asset").str(job.asset);
+    w.key("fps").num(job.fps).key("frames").integer(job.frames).key("loop").boolean(job.loop).key("tracks").arr();
+    for (const ClipTarget &t : job.targets) w.integer((int64_t)t.id);
+    w.end().key("bin").integer((int64_t)bin.size()).end();
+    server.send_to(job.clients, job.broadcast, w.out, bin, ckey(job.root, kClip));
+    clips_sent++;
+    std::lock_guard<std::mutex> lk(cm);
+    clip_busy--;
+    ccv.notify_all();
+  }
 }
 
 /* A mesh built from a copy older than the scene's mesh now: the positions follow as a deform. */
@@ -1110,8 +1332,12 @@ void Link::wait_meshes_for_test() {
     std::unique_lock<std::mutex> lk(d_->wm);
     d_->wcv.wait(lk, [&] { return d_->order.empty() && d_->busy == 0; });
   }
-  std::unique_lock<std::mutex> lk(d_->tm);  // (round 377: the textures too)
-  d_->tcv.wait(lk, [&] { return d_->tex_order.empty() && d_->tex_busy == 0; });
+  {
+    std::unique_lock<std::mutex> lk(d_->tm);  // (round 377: the textures too)
+    d_->tcv.wait(lk, [&] { return d_->tex_order.empty() && d_->tex_busy == 0; });
+  }
+  std::unique_lock<std::mutex> lk(d_->cm);  // (round 379: and the clips)
+  d_->ccv.wait(lk, [&] { return d_->clip_order.empty() && d_->clip_busy == 0; });
 }
 
 void Link::tick(Scene &scene, bool playing, double now_s) {

@@ -910,6 +910,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Live Link's skins** (round 378): a mesh posed only by its Skin modifier, or carrying shape keys, goes to the engines once at rest with its skin (its joints the bones Live Link already sends) and its keys as blend shapes; then only the bones' poses and the shape weights travel. Unity builds a SkinnedMeshRenderer, Godot a Skeleton3D and a Skin, Blender an armature following the bones; Unreal keeps receiving the posed vertices. Another modifier on the mesh (a Mirror, a Subdivision) streams its vertices as before, and so does a Skin the engines can't match: a Preserve Volume armature, Rest Position, or more than four influences.
 
+**Live Link's clips** (round 379): the clip on an object's Animation component goes to the engines baked - each animated object's local place, turn and scale at every frame - at a sync and whenever it's keyed (at most four times a second while it keeps changing). Unity saves it as an AnimationClip in Assets/Blendity Live Link/Clips, Godot adds it to a "blendity" library on an AnimationPlayer under the object, Blender makes an Action (with a fake user, not assigned). Only Position, Rotation and Scale tracks go. Unreal doesn't take clips yet.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

@@ -59,6 +59,45 @@ func _initialize() -> void:
 		n += 1
 		m = s.next_message()
 	ap.flush()
+	# Round 379: the rig's "Wave" an Animation on its AnimationPlayer; at frame 30 it poses Upper as Blendity did last.
+	var rig_node: Node3D = null
+	var upper_node: Node3D = null
+	for id in ap.objects.keys():
+		var o: Node3D = ap.objects[id]
+		if o.name == "Rig":
+			rig_node = o
+		if o.name == "Upper":
+			upper_node = o
+	var player := rig_node.get_node_or_null(ap.PLAYER_NAME) as AnimationPlayer if rig_node != null else null
+	var wave: Animation = player.get_animation("blendity/Wave") if player != null and player.has_animation("blendity/Wave") else null
+	check(wave != null, "the rig's Wave clip")
+	if wave != null:
+		var at := 30.0 / 60.0
+		var tp := wave.find_track(rig_node.get_path_to(upper_node), Animation.TYPE_POSITION_3D)
+		var tr := wave.find_track(rig_node.get_path_to(upper_node), Animation.TYPE_ROTATION_3D)
+		var off := wave.position_track_interpolate(tp, at).distance_to(upper_node.position)
+		var turn := rad_to_deg(wave.rotation_track_interpolate(tr, at).angle_to(upper_node.quaternion))
+		print("Wave at frame 30 against Blendity's pose: %.7f m and %.5f degrees apart" % [off, turn])
+		check(off < 1e-4 and turn < 0.05, "Wave at frame 30 poses Upper as Blendity did (%.7f m, %.5f degrees)" % [off, turn])
+		# Played back (the link gone): Upper set from the clip at frame 15, the Arm's follower moves its skeleton's bone.
+		var arm_node: MeshInstance3D = null
+		for id in ap.objects.keys():
+			if ap.objects[id].name == "Arm":
+				arm_node = ap.objects[id]
+		var sk: Skeleton3D = arm_node.get_node_or_null(ap.SKELETON_NAME) if arm_node != null else null
+		var follow = sk.get_node_or_null(ap.FOLLOW_NAME) if sk != null else null
+		check(follow != null, "the Arm's skeleton follower")
+		if follow != null:
+			var before: Transform3D = sk.get_bone_pose(1)
+			var kept: Transform3D = upper_node.transform
+			upper_node.quaternion = wave.rotation_track_interpolate(tr, 15.0 / 60.0)
+			upper_node.position = wave.position_track_interpolate(tp, 15.0 / 60.0)
+			follow.follow(sk)
+			var after: Transform3D = sk.get_bone_pose(1)
+			var want: Transform3D = follow.chain(arm_node).affine_inverse() * follow.chain(upper_node)
+			check(not after.is_equal_approx(before) and after.is_equal_approx(want), "the follower poses the Arm's bone from the clip's Upper")
+			upper_node.transform = kept  # (as Blendity left it, for the skinning check below)
+			follow.follow(sk)
 	var arm_glb = load("res://addons/blendity_livelink/link_glb.gd").new()
 	arm_glb.read(arm_mesh)
 	check(n > 20 and s.pending_bytes() == 0, "the stream parsed whole: %d messages, %d bytes left" % [n, s.pending_bytes()])

@@ -12,6 +12,7 @@ import os
 import sys
 
 import bpy
+from mathutils import Quaternion, Vector
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -138,6 +139,31 @@ def main():
         arm.evaluated_get(dg).to_mesh_clear()
         print("the skinned Arm (mesh %d) against Blendity's posed vertices: at most %g m apart" % (again + 1, worst))
         check(worst < 1e-3, "the Arm's skinning doesn't match Blendity's (%g m)" % worst)
+
+    # Round 379: the rig's "Wave" an Action with a slot for Upper; at frame 30 its curves give Upper as Blendity posed it.
+    wave = next((a for a in bpy.data.actions if a.get("blendity_clip") == "Wave"), None)
+    check(wave is not None and wave.use_fake_user, "the rig's Wave action")
+    if wave is not None:
+        upper = bpy.data.objects["Upper"]
+        slot = next((s for s in wave.slots if s.name_display == upper.name), None)
+        bag = wave.layers[0].strips[0].channelbag(slot) if slot is not None else None
+        check(bag is not None, "Wave's slot for Upper")
+        if bag is not None:
+            at = 30.0 * bpy.context.scene.render.fps / bpy.context.scene.render.fps_base / wave["blendity_fps"]  # (frame 30 of a 60 fps clip in this scene's frames)
+            loc = Vector([bag.fcurves.find("location", index=i).evaluate(at) for i in range(3)])
+            rot = Quaternion([bag.fcurves.find("rotation_quaternion", index=i).evaluate(at) for i in range(4)])
+            off = (loc - upper.location).length
+            turn = math.degrees(rot.rotation_difference(upper.rotation_quaternion).angle)
+            print("Wave at frame 30 against Blendity's pose: %g m and %g degrees apart" % (off, turn))
+            check(off < 1e-4 and turn < 0.05, "Wave at frame 30 doesn't pose Upper as Blendity did (%g m, %g degrees)" % (off, turn))
+            # A second session (a reconnect) keeps the one Action.
+            again = apply.Applier(bpy.context.scene)
+            s2 = stream.Stream()
+            s2.feed(data)
+            for msg, att in s2.messages():
+                again.apply(msg, att)
+            waves = [a for a in bpy.data.actions if a.get("blendity_clip") == "Wave"]
+            check(len(waves) == 1, "a reconnect made another Wave action (%d)" % len(waves))
 
     lower = bpy.data.objects["Lower"]
     check(lower.parent is not None and lower.parent.name == "Upper", "the bone hierarchy is lost")

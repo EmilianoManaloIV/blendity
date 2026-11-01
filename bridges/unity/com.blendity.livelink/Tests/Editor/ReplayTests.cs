@@ -6,6 +6,7 @@
 // deleted, Play and Stop.
 using System.IO;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 
 namespace Blendity.LiveLink.Tests
@@ -91,6 +92,35 @@ namespace Blendity.LiveLink.Tests
             Assert.That(worst, Is.LessThan(1e-3f));
             var lower = GameObject.Find("Lower");
             Assert.That(Quaternion.Angle(lower.transform.localRotation, Quaternion.identity), Is.EqualTo(30f).Within(1e-3f));
+            // Round 379: the rig's "Wave" an AnimationClip asset; sampled at frame 30 it poses Upper as Blendity did last.
+            var rig = GameObject.Find("Rig");
+            var upper = GameObject.Find("Upper").transform;
+            AnimationClip wave;
+            Assert.IsTrue(a.Clips.TryGetValue(rig.GetComponent<BlendityLink>().Id, out wave) && wave != null);
+            Assert.AreEqual(LiveLinkApplier.ClipFolder + "/livelink_wave.anim", AssetDatabase.GetAssetPath(wave));
+            Vector3 wantP = upper.localPosition;
+            Quaternion wantR = upper.localRotation;
+            upper.localPosition = Vector3.zero;
+            upper.localRotation = Quaternion.identity;
+            wave.SampleAnimation(rig, 30f / wave.frameRate);
+            float clipOff = Vector3.Distance(upper.localPosition, wantP), clipTurn = Quaternion.Angle(upper.localRotation, wantR);
+            Debug.Log("Blendity Live Link: Wave at frame 30 against Blendity's pose, " + clipOff + " m and " + clipTurn + " degrees apart");
+            Assert.That(clipOff, Is.LessThan(1e-4f));
+            Assert.That(clipTurn, Is.LessThan(0.05f));
+            // ...a quarter of the way between frames 30 and 31, a quarter of the way between their poses (straight, not eased).
+            var t30 = upper.localPosition;
+            wave.SampleAnimation(rig, 31f / wave.frameRate);
+            var t31 = upper.localPosition;
+            wave.SampleAnimation(rig, 30.25f / wave.frameRate);
+            Assert.That(Vector3.Distance(upper.localPosition, Vector3.Lerp(t30, t31, 0.25f)), Is.LessThan(1e-5f));
+            // A second session (a reconnect) keeps the one asset.
+            var again = new LiveLinkApplier();
+            var s2 = new LiveLinkStream();
+            s2.Feed(data, data.Length);
+            for (var m = s2.Next(); m != null; m = s2.Next())
+                again.Apply(m);
+            Assert.AreEqual(1, AssetDatabase.FindAssets("t:AnimationClip", new[] { LiveLinkApplier.ClipFolder }).Length);
+            AssetDatabase.DeleteAsset(LiveLinkApplier.ClipFolder + "/livelink_wave.anim");  // (only the test's own: never the folder)
             // Round 376: the look - a gradient with fog 5-40 m, half a stop up, Bloom 0.8 and a Vignette.
             Assert.IsTrue(RenderSettings.fog);
             Assert.AreEqual(UnityEngine.Rendering.AmbientMode.Trilight, RenderSettings.ambientMode);

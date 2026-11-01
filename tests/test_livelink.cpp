@@ -3,6 +3,7 @@
 // on 127.0.0.1, as a bridge would connect.
 #include "test_common.h"
 #include "../src/scene/snapshot.h"
+#include "../src/scene/animation.h"
 #include "../src/render/canvas.h"
 #include "../src/image/image.h"
 #include <chrono>
@@ -113,6 +114,20 @@ Session record_session() {
   am.shape_keys.push_back(smile);
   am.touch();
   arm->get<MeshRenderer>()->set_shape_weight("Smile", 0.25f);
+  /* Round 379: a clip on the rig - "Wave" turns Upper 60 degrees about Z over 60 frames - sent baked at the sync; at the
+   * end the rig is posed at its frame 30, which the bridges sample their own clip against. */
+  AnimationClipPtr wave = create_clip_asset("Assets/Animations/livelink_wave.anim", "Wave");
+  if (wave) {
+    wave->track("Upper", "Rotation", 2).set_key(0.0f, 0.0f);
+    wave->track("Upper", "Rotation", 2).set_key(60.0f, 60.0f);
+    wave->track("Upper", "Position", 1).set_key(0.0f, 0.0f);
+    wave->track("Upper", "Position", 1).set_key(60.0f, 0.5f);
+    wave->length = 60.0f;
+    wave->touch();
+    Animation *an = root->add<Animation>();
+    an->clip = "Assets/Animations/livelink_wave.anim";
+    an->play_automatically = false;
+  }
   if (!box || !ed.livelink_start(0)) return s;
   Material &mat = *box->mesh_renderer()->materials[0];
   mat.name = "Cel";
@@ -163,7 +178,12 @@ Session record_session() {
   take(drain(ed, c));
   ed.command("stop");
   take(drain(ed, c));
+  GameObject *rig = ed.scene().find_by_name("Rig");  // (Stop put the scene back: the objects are new)
+  if (wave && rig) apply_clip(*wave, *rig, 30.0f);  // (round 379: the pose the bridges' clips must give at frame 30)
+  take(drain(ed, c));
   fs::remove_file(resolve_asset_path("Assets/Textures/livelink_tile.png"));
+  fs::remove_file(resolve_asset_path("Assets/Animations/livelink_wave.anim"));
+  forget_clip_assets("Assets/Animations/livelink_wave.anim");
   return s;
 }
 
@@ -526,11 +546,13 @@ static void livelink_fixture_tests() {
     const std::vector<std::string> now = outline(s.ms);
     CHECK(now.size() > 20);
     std::printf("    %zu messages, %zu bytes; types:", s.ms.size(), s.raw.size());
-    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture", "weights"})
+    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture", "weights", "clip"})
       std::printf(" %s %d", t, count_of(s.ms, t));
     std::printf("\n");
-    for (const char *t : {"transform", "pose", "delete"}) CHECK(count_of(s.ms, t) == 1);
-    CHECK(count_of(s.ms, "deform") == 3);  // (the Box's vertex, and round 378's skinned Arm: at rest built, then posed - this client doesn't skin)
+    for (const char *t : {"transform", "delete"}) CHECK(count_of(s.ms, t) == 1);
+    CHECK(count_of(s.ms, "pose") == 2);    // (a bone turned; round 379: the clip's frame 30)
+    CHECK(count_of(s.ms, "deform") == 4);  // (the Box's vertex, and round 378's skinned Arm: at rest built, posed, posed by the clip - this client doesn't skin)
+    CHECK(count_of(s.ms, "clip") == 1);    // (round 379: Wave at the sync)
     CHECK(count_of(s.ms, "play") == 2 && count_of(s.ms, "material") >= 3);
     CHECK(count_of(s.ms, "world") == 2 && count_of(s.ms, "render") == 2 && count_of(s.ms, "filters") == 2);  // (round 376: at the sync and once changed)
     CHECK(count_of(s.ms, "texture") == 1);  // (round 377: the tile once, at the sync)
@@ -704,7 +726,7 @@ static void tests_round297() {
     }
     std::printf("    %d messages framed, %zu bytes left; %d meshes, %d vertices outside their mesh; normals worked out again agree at %zu of %zu; %d of %d deforms applied\n",
                 n, st.pending(), meshes, bad_vert, agree, total, deformed, deforms);
-    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 3 && deformed == 3);  // (the Box's, and since round 378 the skinned Arm's twice: built and posed - the recorder doesn't skin)
+    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 4 && deformed == 4);  // (the Box's, since round 378 the skinned Arm's: built and posed, and round 379's clip pose - the recorder doesn't skin)
     /* The Box moved to Blendity's (1, 2, 3): glTF (-1, 2, 3), Unreal (300 cm forward, 100 cm right, 200 cm up). */
     std::printf("    the Box in Unreal: (%.1f, %.1f, %.1f) cm\n", box.x, box.y, box.z);
     CHECK(box_name == "Box" && std::fabs(box.x - 300) < 1e-6 && std::fabs(box.y - 100) < 1e-6 && std::fabs(box.z - 200) < 1e-6);
@@ -1341,6 +1363,141 @@ static void tests_round378() {
   });
 }
 
+static void tests_round379() {
+  test("Live Link's clips (round 379): a clip goes baked at the sync - each keyed object's local transform a frame, in Live Link's axes, as apply_clip poses it; a key changed sends it again once, nothing while unchanged; at most 4 a second while it keeps changing", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *rig = ed.scene().create("Rig");
+    GameObject *a = ed.scene().create("A", rig);
+    GameObject *b = ed.scene().create("B", a);
+    b->set_local_position(Vec3(0, 1, 0));
+    AnimationClipPtr c = create_clip_asset("Assets/Animations/r379_clip.anim", "Swing");
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->frame_rate = 30.0f;
+    c->track("A", "Rotation", 0).set_key(0.0f, 0.0f);
+    c->track("A", "Rotation", 0).set_key(20.0f, 90.0f);
+    c->track("A/B", "Scale", 1).set_key(0.0f, 1.0f);
+    c->track("A/B", "Scale", 1).set_key(20.0f, 2.0f);
+    c->track("A/B", "Material Base Color", 0).set_key(0.0f, 0.5f);  // (not a transform: not in the clip)
+    c->length = 20.0f;
+    c->touch();
+    rig->add<Animation>()->clip = "Assets/Animations/r379_clip.anim";
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient cl;
+    CHECK(cl.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> s = until(ed, cl, "sync_end");
+    for (const Message &x : drain(ed, cl)) s.push_back(x);  // (baked on the clip worker: after the sync)
+    const Message *m = last_for(s, "clip", rig->id);
+    CHECK(m && m->j["name"].str == "Swing" && m->j["frames"].number() == 21 && m->j["fps"].number() == 30 && m->j["tracks"].size() == 2);
+    if (!m || m->j["tracks"].size() != 2) return;
+    CHECK(m->bin.size() == 2 * 21 * 10 * sizeof(float));
+    /* Frame 10 against apply_clip on the scene itself. */
+    const float *f = reinterpret_cast<const float *>(m->bin.data());
+    apply_clip(*c, *rig, 10.0f);
+    double worst = 0.0;
+    for (size_t k = 0; k < 2; k++) {
+      GameObject *g = ed.scene().find((uint64_t)m->j["tracks"][k].number());
+      CHECK(g != nullptr);
+      if (!g) return;
+      const Transform &t = g->local();
+      const float want[10] = {-t.position.x, t.position.y, t.position.z, t.rotation.x, -t.rotation.y, -t.rotation.z, t.rotation.w, t.scale.x, t.scale.y, t.scale.z};
+      for (int i = 0; i < 10; i++) worst = std::max(worst, (double)std::fabs(f[(k * 21 + 10) * 10 + i] - want[i]));
+    }
+    std::printf("    Swing: %d frames, %zu tracks; frame 10 against apply_clip: at most %g apart\n", (int)m->j["frames"].number(), m->j["tracks"].size(), worst);
+    CHECK(worst < 1e-5);
+    (void)drain(ed, cl);
+    CHECK(count_of(drain(ed, cl), "clip") == 0);  // (unchanged: nothing)
+    /* A key changed: once; changed again at once: owed, then sent after the gap. */
+    c->track("A", "Rotation", 0).set_key(20.0f, 45.0f);
+    c->touch();
+    CHECK(count_of(drain(ed, cl), "clip") == 1);
+    c->track("A", "Rotation", 0).set_key(20.0f, 30.0f);
+    c->touch();
+    const int at_once = count_of(drain(ed, cl), "clip");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const int later = count_of(drain(ed, cl), "clip");
+    std::printf("    changed twice in a row: %d at once, %d after a quarter second\n", at_once, later);
+    CHECK(at_once == 0 && later == 1);
+    ed.livelink_stop();
+    forget_clip_assets("Assets/Animations/r379_clip.anim");
+  });
+  test("Live Link's clips as things change (review 379): another clip chosen and an axis the clip doesn't key moved send it again; a keyed axis moved (the clip playing) doesn't; a minute of 100 keyed objects costs the main thread little; ten minutes is over the cap and isn't sent", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *rig = ed.scene().create("Rig");
+    GameObject *a = ed.scene().create("A", rig);
+    AnimationClipPtr one = create_clip_asset("Assets/Animations/r379_one.anim", "One"), two = create_clip_asset("Assets/Animations/r379_two.anim", "Two");
+    CHECK(one && two);
+    if (!one || !two) return;
+    for (AnimationClipPtr c : {one, two}) {
+      c->track("A", "Rotation", 0).set_key(0.0f, 0.0f);
+      c->track("A", "Rotation", 0).set_key(10.0f, 90.0f);
+      c->touch();
+    }
+    Animation *an = rig->add<Animation>();
+    an->clip = "Assets/Animations/r379_one.anim";
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient cl;
+    CHECK(cl.connect(ed.livelink_for_test()->port()));
+    (void)until(ed, cl, "sync_end");
+    (void)drain(ed, cl);
+    auto clips_after = [&](const std::function<void()> &change) {
+      change();
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));  // (past the rate limit)
+      const std::vector<Message> ms = drain(ed, cl);
+      const Message *m = last_for(ms, "clip", rig->id);
+      return std::make_pair(count_of(ms, "clip"), m ? m->j["asset"].str : std::string());
+    };
+    const auto chosen = clips_after([&] { an->clip = "Assets/Animations/r379_two.anim"; });
+    const auto moved = clips_after([&] { a->set_local_position(Vec3(0, 0.5f, 0)); });
+    const auto played = clips_after([&] {
+      Transform t = a->local();
+      t.euler_hint.x = 45.0f;
+      t.rotation = Quat::euler(t.euler_hint);
+      a->set_local(t);
+    });
+    std::printf("    another clip chosen: %d (%s); an unkeyed axis moved: %d; a keyed one moved: %d\n", chosen.first, chosen.second.c_str(), moved.first, played.first);
+    CHECK(chosen.first == 1 && chosen.second == "Assets/Animations/r379_two.anim" && moved.first == 1 && played.first == 0);
+    /* A minute of 100 objects keyed every frame at 60 fps: the tick that sends it again only copies the tracks. */
+    AnimationClipPtr big = create_clip_asset("Assets/Animations/r379_big.anim", "Big");
+    for (int o = 0; o < 100; o++) {
+      ed.scene().create(strprintf("Bone%d", o), rig);
+      AnimTrack &t = big->track(strprintf("Bone%d", o), "Rotation", 1);
+      for (int f = 0; f <= 3600; f++) t.keys.push_back({(float)f, (float)(f % 360)});
+      AnimTrack &p = big->track(strprintf("Bone%d", o), "Position", 1);
+      for (int f = 0; f <= 3600; f++) p.keys.push_back({(float)f, 0.01f * (float)f});
+    }
+    big->touch();
+    an->clip = "Assets/Animations/r379_big.anim";
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ed.livelink_for_test()->tick(ed.scene(), false, 1e6);
+    const double ms = ed.livelink_for_test()->stats().tick_ms;
+    const std::vector<Message> bm = drain(ed, cl);
+    const Message *bc = last_for(bm, "clip", rig->id);
+    std::printf("    a minute of 100 keyed objects: the tick %.2f ms on the main thread; %.1f MB baked on the clip worker\n", ms, bc ? bc->bin.size() / 1048576.0 : 0.0);
+    CHECK(bc && bc->j["frames"].number() == 3601 && bc->j["tracks"].size() == 100);
+    CHECK(ms < 40.0);  // (the bake on the main thread had been about 60 ms)
+    /* Ten minutes: 144 MB baked - over the cap, said and not sent. */
+    for (AnimTrack &t : big->tracks) t.set_key(36000.0f, 0.0f);
+    big->touch();
+    ed.livelink_for_test()->tick(ed.scene(), false, 2e6);  // (after the tick above, whose clock ran ahead)
+    const std::vector<Message> tm = drain(ed, cl);
+    std::printf("    ten minutes: %d clip(s) sent, %llu too big\n", count_of(tm, "clip"), (unsigned long long)ed.livelink_for_test()->stats().clips_too_big);
+    CHECK(count_of(tm, "clip") == 0 && ed.livelink_for_test()->stats().clips_too_big == 1);
+    ed.livelink_stop();
+    for (const char *p : {"Assets/Animations/r379_one.anim", "Assets/Animations/r379_two.anim", "Assets/Animations/r379_big.anim"}) forget_clip_assets(p);
+  });
+  test("the lesson's Try-it (round 379): window Animation - a clip keyed there goes to the engines", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("window Animation");
+    CHECK(ed.window_docked_for_test(WindowKind::Animation));
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -1352,4 +1509,5 @@ void run_livelink_tests() {
   tests_round376();
   tests_round377();
   tests_round378();
+  tests_round379();
 }

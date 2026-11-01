@@ -34,6 +34,7 @@ The objects appear under a node "Blendity Live Link" of the edited scene, each w
 | cameras | Camera3D with the same vertical field of view, clipping and orthographic size |
 | the look (round 376) | a WorldEnvironment: a procedural, physical or panorama sky, depth fog, tonemap exposure and mode, glow (Bloom) and adjustments (Color Grading), colours made sRGB; no vignette in Godot; a scene's own WorldEnvironment is warned about (Godot draws one) |
 | armatures and bones | plain nodes posed as the bones; a skinned mesh (round 378) has a Skeleton3D posed from them and a Skin, its keys as blend shapes |
+| clips (round 379) | an Animation in the "blendity" library of an AnimationPlayer ("Blendity Animation") under the animated object |
 
 ## Test
 

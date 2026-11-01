@@ -2,6 +2,36 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 379): clips in Live Link
+
+**Asked:** Phase B's fourth round: clips go to the engines when keyed. (The plan's round "clips, LODs, colliders and
+VRChat in Unity" is split in three: clips now, LODs and colliders next, then the VRChat setup.)
+
+**Added (task 0356)**
+- **A `clip` message:** an Animation component's clip baked - each keyed object's local transform a frame - at a sync
+  (after every object) and when it changes, at most 4 times a second while it keeps changing.
+- **The bridges keep it:**
+  - Unity: an AnimationClip asset in Assets/Blendity Live Link/Clips;
+  - Godot: an Animation in a "blendity" library on an AnimationPlayer under the root;
+  - Blender: an Action with a slot per object, kept with a fake user;
+  - Unreal: not yet.
+- The recorded session adds the rig's "Wave" and its frame-30 pose.
+- **The Opus review's fixes:**
+  - the bake moved to a clip worker (60 ms to 6 ms on the main thread for a minute of 100 bones), with a 32 MB cap;
+  - Unity and Blender reuse one clip per asset across reconnects;
+  - Unity's keys get linear tangents;
+  - Godot's skinned rigs follow a played clip (a SkeletonModifier3D);
+  - a clip is sent again when the objects it names or their unkeyed axes change;
+  - Blender's continuity pass is vectorised and its keys use the scene's frame rate;
+  - Godot refuses no clip names;
+  - the tests no longer delete the user's clip folder.
+
+**Checked:**
+- `tests_round379` (and the review's cases);
+- each bridge's own clip at frame 30 against Blendity's pose: 0 m and 0 degrees in Unity (built-in and URP), Godot and
+  Blender;
+- Unreal's replay.
+
 ## 2026-11-01 (round 378): skins and blend shapes in Live Link
 
 **Asked:** Phase B's third round: a skinned character and its blend shapes once, then only poses and weights; real

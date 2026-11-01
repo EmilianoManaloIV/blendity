@@ -120,6 +120,21 @@ Preserve Volume), posed (not Rest Position), at most four bones a vertex; otherw
 order. Sent at a sync and whenever they change. It can come before the mesh it weights: keep it, and set it when the
 mesh comes.
 
+### clip (round 379)
+`{"t":"clip","id":5,"name":"Wave","asset":"Assets/Animations/Wave.anim","fps":60,"frames":61,"loop":true,"tracks":[6,7],"bin":N}`:
+the clip of object `id`'s Animation component, baked.
+- **The binary:** for each object in `tracks`, for each frame, its local position (3), rotation (4) and scale (3) as
+  float32 - 40 bytes, in the axes a `transform` carries. Frame i is at i / fps seconds.
+- **Baked from** the clip's Position, Rotation and Scale tracks; an axis the clip doesn't key keeps the object's own
+  value. Other tracks (shape keys, components, materials) aren't in it.
+- **Sent** at a sync (after its `sync_end`: baked on a worker, after every object it names) and when it changes - a
+  key set, moved or deleted, another clip chosen, an object it names renamed or made, an axis it doesn't key moved - at
+  most 4 times a second while it keeps changing, its last state after. A bake over 32 MB isn't sent (Blendity's log
+  and the Live Link window say so).
+- **The Animation component's** Speed, Wrap (beyond `loop`) and Hold (on 2s) aren't in it.
+- **A client keeps it** as its engine's clip, one per `asset` (found again after a reconnect); Live Link goes on posing
+  the objects itself.
+
 ### deform
 `{"t":"deform","id":7,"topology":42,"verts":24,"bin":N}` + N = 12 x verts bytes: float32 x, y, z per mesh vertex
 (little-endian, in the object's space and glTF's axes). Sent instead of a whole mesh when only vertices moved (a drag

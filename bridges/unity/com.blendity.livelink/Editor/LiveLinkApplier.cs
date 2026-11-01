@@ -58,6 +58,7 @@ namespace Blendity.LiveLink
                 case "material": OnMaterial(j); break;
                 case "texture": OnTexture(j, m.Bin); break;  // (round 377)
                 case "weights": OnWeights(j); break;  // (round 378)
+                case "clip": OnClip(j, m.Bin); break;  // (round 379: LiveLinkClips.cs)
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
                 case "world": OnWorld(j); break;  // (round 376: LiveLinkLook.cs)
