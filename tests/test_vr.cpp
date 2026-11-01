@@ -5,6 +5,7 @@
 
 #include "../src/render/xr.h"
 #include "../src/render/xr_nav.h"
+#include "../src/scene/stroke_object.h"
 
 #include <chrono>
 #include <cmath>
@@ -609,8 +610,286 @@ static void vr_nav_tests() {
   });
 }
 
+/* A recorded stroke: 7 points 5 cm apart along +X at 1 m up, the pressure rising, the hand turning a quarter about the
+ * path as it goes. */
+static StrokeRibbon recorded_stroke(bool tube) {
+  StrokeRibbon rb;
+  rb.tube = tube, rb.material = 2, rb.width = 0.01f;
+  for (int i = 0; i < 7; i++) {
+    const float a = i / 6.0f * 1.5707963f;
+    rb.points.push_back({i * 0.05f, 1.0f, 0.0f});
+    rb.ups.push_back({0.0f, std::cos(a), std::sin(a)});
+    rb.widths.push_back(0.004f + 0.001f * i);
+  }
+  rb.facing = rb.surface_normal = rb.ups[0];
+  return rb;
+}
+
+static void vr_sketch_tests() {
+  test("VR's strokes as ribbons (round 385): each point's width across the path, centred on it, in the plane its up is the normal of (the hand's turn); the faces on the stroke's material slot; the normals its ups", [] {
+    Strokes s;
+    s.ribbons.push_back(recorded_stroke(false));
+    const MeshPtr m = s.build_mesh();
+    const StrokeRibbon &rb = s.ribbons[0];
+    CHECK(m->positions.size() == 14u && m->face_count() == 12u);
+    float worst_width = 0.0f, worst_centre = 0.0f, worst_plane = 0.0f, worst_normal = 0.0f;
+    for (size_t i = 0; i < 7; i++) {
+      const Vec3 l = m->positions[i * 2], r = m->positions[i * 2 + 1];
+      worst_width = std::max(worst_width, std::fabs(length(r - l) - rb.widths[i]));
+      worst_centre = std::max(worst_centre, length((l + r) * 0.5f - rb.points[i]));
+      worst_plane = std::max(worst_plane, std::fabs(dot(r - l, rb.ups[i])));
+      worst_normal = std::max(worst_normal, length(m->custom_normals[i * 2] - rb.ups[i]));
+    }
+    std::printf("    widths off %.2g, centres off %.2g, across the up %.2g, normals off %.2g\n", worst_width, worst_centre, worst_plane, worst_normal);
+    CHECK(worst_width < 1e-5f && worst_centre < 1e-5f && worst_plane < 1e-5f && worst_normal < 1e-5f);
+    bool all_slot = m->face_material.size() == m->face_count();
+    for (int32_t f : m->face_material) all_slot = all_slot && f == 2;
+    CHECK(all_slot);
+  });
+  test("VR's strokes as tubes (round 385): a ring of 8 a point at half its width from the path, square to it, the normals out from the path; both ends capped, their normals along the path", [] {
+    Strokes s;
+    s.ribbons.push_back(recorded_stroke(true));
+    const MeshPtr m = s.build_mesh();
+    const StrokeRibbon &rb = s.ribbons[0];
+    const size_t ring = kTubeSides + 1;  // (a seam vertex a ring)
+    CHECK(m->positions.size() == 7 * ring + 2 * (1 + kTubeSides) && m->custom_normals.size() == m->positions.size());
+    float worst_r = 0.0f, worst_square = 0.0f, worst_n = 0.0f;
+    for (size_t i = 0; i < 7; i++)
+      for (size_t k = 0; k < ring; k++) {
+        const Vec3 off = m->positions[i * ring + k] - rb.points[i];
+        worst_r = std::max(worst_r, std::fabs(length(off) - rb.widths[i] * 0.5f));
+        worst_square = std::max(worst_square, std::fabs(off.x));
+        worst_n = std::max(worst_n, length(m->custom_normals[i * ring + k] - normalize(off)));
+      }
+    const Vec3 cap0 = m->custom_normals[7 * ring], cap1 = m->custom_normals[7 * ring + 1 + kTubeSides];
+    std::printf("    radii off %.2g, along the path %.2g, normals off %.2g; caps (%.2f, %.2f, %.2f) and (%.2f, %.2f, %.2f); %zu faces\n", worst_r, worst_square, worst_n,
+                cap0.x, cap0.y, cap0.z, cap1.x, cap1.y, cap1.z, m->face_count());
+    CHECK(worst_r < 1e-5f && worst_square < 1e-5f && worst_n < 1e-4f && cap0.x < -0.999f && cap1.x > 0.999f);
+    CHECK(m->face_count() == 6u * kTubeSides + 2u * kTubeSides);
+    /* Every face wound outward (review 385: the sides had faced in): its normal with its corners' normals. */
+    int inward = 0;
+    for (size_t f = 0; f < m->face_count(); f++) {
+      Vec3 avg;
+      for (uint32_t c = m->face_offsets[f]; c < m->face_offsets[f + 1]; c++) avg = avg + m->custom_normals[m->corner_verts[c]];
+      inward += dot(m->face_normal(f), avg) <= 0.0f;
+    }
+    std::printf("    faces wound inward: %d of %zu\n", inward, m->face_count());
+    CHECK(inward == 0);
+  });
+  test("VR's strokes along a hard path (review 385): a vertical stroke drawn with the hand level, its up jittering, and a half roll between two points - the ribbon never folds over (no bow-tie), the tube never twists, the ribbon's normals square to the path", [] {
+    StrokeRibbon rb;
+    rb.width = 0.01f;
+    for (int i = 0; i < 12; i++) {
+      rb.points.push_back({0.0f, 1.0f + i * 0.02f, 0.0f});
+      const float j = 0.03f * std::sin(i * 2.3f);
+      rb.ups.push_back(i == 6 ? Vec3(0.0f, 0.0f, -1.0f) : Vec3(j, 1.0f, i < 6 ? 0.5f + j : -0.5f - j));  // (the up leaning along the path, jittering; a half roll at 6)
+    }
+    rb.facing = rb.surface_normal = Vec3(0, 0, 1);
+    for (bool tube : {false, true}) {
+      rb.tube = tube;
+      Strokes s;
+      s.ribbons.push_back(rb);
+      const MeshPtr m = s.build_mesh();
+      const size_t per = tube ? kTubeSides + 1 : 2;
+      float worst = 1.0f, worst_square = 0.0f;
+      for (size_t i = 1; i < 12; i++) {
+        const Vec3 a = normalize(m->positions[(i - 1) * per + (tube ? 0 : 1)] - rb.points[i - 1]), b = normalize(m->positions[i * per + (tube ? 0 : 1)] - rb.points[i]);
+        worst = std::min(worst, dot(a, b));
+        if (!tube) worst_square = std::max(worst_square, std::fabs(dot(m->custom_normals[i * 2], Vec3(0, 1, 0))));
+      }
+      std::printf("    %s: neighbouring points' frames at least %.3f alike (1: the same); normals along the path %.3f\n", tube ? "tube" : "ribbon", worst, worst_square);
+      CHECK(worst > 0.9f && worst_square < 1e-4f);
+    }
+  });
+  test("VR's tubes round a sharp corner (re-check 385): a V turning 30 degrees a step, the hand's up out of the turn's plane - each ring turns no more than the path does (parallel transport, no pinch)", [] {
+    StrokeRibbon rb;
+    rb.tube = true, rb.width = 0.01f;
+    Vec3 p(0, 1, 0), d(1, 0, 0);
+    for (int i = 0; i < 14; i++) {
+      rb.points.push_back(p);
+      rb.ups.push_back(Vec3(0.0f, 0.71f, 0.71f));
+      if (i >= 5 && i < 10) d = Quat::axis_angle({0, 1, 0}, 0.5235988f).rotate(d);  // (30 degrees a step, five times)
+      p = p + d * 0.0025f;
+    }
+    rb.facing = rb.surface_normal = Vec3(0, 1, 0);
+    Strokes s;
+    s.ribbons.push_back(rb);
+    const MeshPtr m = s.build_mesh();
+    const size_t per = kTubeSides + 1;
+    float worst = 1.0f;
+    for (size_t i = 1; i < rb.points.size(); i++)
+      for (size_t k = 0; k < per; k++) worst = std::min(worst, dot(normalize(m->positions[(i - 1) * per + k] - rb.points[i - 1]), normalize(m->positions[i * per + k] - rb.points[i])));
+    std::printf("    neighbouring rings' points at least %.3f alike (a 30-degree bend: cos 30 = 0.866)\n", worst);
+    CHECK(worst > 0.85f);
+  });
+  test("VR's strokes added one at a time (review 385): the mesh with the last stroke added is the whole list's mesh; 500 tube strokes of 100 points - adding the last against building them all, measured", [] {
+    Strokes s;
+    MeshPtr m = std::make_shared<Mesh>();
+    for (int k = 0; k < 3; k++) {
+      StrokeRibbon rb = recorded_stroke(k == 1);
+      for (Vec3 &p : rb.points) p.z += k * 0.1f;
+      s.ribbons.push_back(rb);
+      m = s.with_last_ribbon(*m);
+    }
+    const MeshPtr whole = s.build_mesh();
+    bool same = m->positions.size() == whole->positions.size() && m->face_count() == whole->face_count() && m->custom_normals.size() == whole->custom_normals.size() &&
+                m->face_material == whole->face_material && m->corner_verts == whole->corner_verts;
+    for (size_t i = 0; same && i < m->positions.size(); i++) same = length(m->positions[i] - whole->positions[i]) < 1e-6f && length(m->custom_normals[i] - whole->custom_normals[i]) < 1e-6f;
+    CHECK(same);
+    Strokes big;
+    for (int k = 0; k < 500; k++) {
+      StrokeRibbon rb;
+      rb.tube = true, rb.width = 0.01f, rb.facing = rb.surface_normal = Vec3(0, 1, 0);
+      for (int i = 0; i < 100; i++) rb.points.push_back({i * 0.01f, std::sin(i * 0.1f + k) * 0.1f, k * 0.02f});
+      big.ribbons.push_back(rb);
+    }
+    const StrokeRibbon last = big.ribbons.back();
+    big.ribbons.pop_back();
+    const MeshPtr before = big.build_mesh();
+    big.ribbons.push_back(last);
+    double t0 = now_seconds();
+    const MeshPtr all = big.build_mesh();
+    const double full = now_seconds() - t0;
+    t0 = now_seconds();
+    const MeshPtr added = big.with_last_ribbon(*before);
+    const double add = now_seconds() - t0;
+    std::printf("    500 tubes, %zu vertices: building them all %.1f ms, adding the last %.1f ms\n", all->positions.size(), full * 1e3, add * 1e3);
+    CHECK(added->positions.size() == all->positions.size());  // (the time is the copy's: VR's object is split past 100,000 vertices to bound it)
+  });
+  test("VR's strokes in the scene file (round 385): a ribbon's widths, ups, tube and slot round-trip; a line from before them still loads", [] {
+    Strokes s;
+    s.ribbons.push_back(recorded_stroke(true));
+    s.ribbons.push_back(recorded_stroke(false));
+    Strokes back;
+    CHECK(strokes_from_text(strokes_to_text(s), back) && back.ribbons.size() == 2u);
+    if (back.ribbons.size() != 2u) return;
+    const StrokeRibbon &a = back.ribbons[0], &b = back.ribbons[1];
+    CHECK(a.tube && !b.tube && a.material == 2 && a.widths.size() == 7u && a.ups.size() == 7u && std::fabs(a.widths[6] - 0.01f) < 1e-6f && length(a.ups[6] - s.ribbons[0].ups[6]) < 1e-5f);
+    Strokes old;
+    CHECK(strokes_from_text("R 0 0 1 0 1 0 0.05 2 0 0 0 1 0 0\n", old) && old.ribbons.size() == 1u && old.ribbons[0].widths.empty() && !old.ribbons[0].tube &&
+          old.ribbons[0].material == 0);
+    /* A group cut short leaves the plain ribbon; a slot past the cap is held at it (review 385). */
+    Strokes cut;
+    CHECK(strokes_from_text("R 0 0 1 0 1 0 0.05 2 0 0 0 1 0 0 W 0.01\nR 0 0 1 0 1 0 0.05 2 0 0 0 1 0 0 M 2000000000\n", cut) && cut.ribbons.size() == 2u);
+    if (cut.ribbons.size() == 2u) CHECK(cut.ribbons[0].widths.empty() && cut.ribbons[1].material == kMaxStrokeSlot);
+  });
+  test("VR sketching in the editor (round 385): with sketching on, the right trigger draws a stroke along the hand's path as it moves - its width the pressure, its colour the palette's; it never teleports; A undoes it; the left stick picks the colour, the right stick the brush; X makes the next a tube", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    auto stub = std::make_unique<StubRuntime>();
+    StubRuntime *rt = stub.get();
+    rt->w = rt->h = 32;
+    std::string why;
+    CHECK(ed.vr_start_for_test(std::move(stub), why));
+    rt->events.push_back(xr::Runtime::Event::Ready);
+    ed.step_frame_headless();
+    ed.command("vr sketch on");
+    ed.command("vr colour 3");
+    CHECK(ed.vr_sketch_for_test() && ed.vr_colour_for_test() == 2);
+    /* A with a desktop edit last: nothing undone (review 385). */
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    const uint64_t cube_id = cube ? cube->id : 0;
+    ed.step_frame_headless();
+    rt->hands[1] = held_at(Vec3(0, 1.0f, -0.4f));
+    rt->hands[1].primary = true;
+    ed.step_frame_headless();
+    rt->hands[1].primary = false;
+    ed.step_frame_headless();
+    CHECK(cube_id && ed.scene().find(cube_id) != nullptr);
+    const Vec3 origin = ed.vr_stage_value_for_test().origin;
+    rt->hands[0] = held_at(Vec3(-0.3f, 1.0f, -0.3f));
+    auto draw_path = [&](float y) {
+      for (int i = 0; i <= 30; i++) {
+        rt->hands[1] = held_at(Vec3(i * 0.01f, y, -0.4f));
+        rt->hands[1].trigger = 0.2f + 0.8f * i / 30.0f;
+        ed.step_frame_headless();
+      }
+      rt->hands[1].trigger = 0.0f;
+      ed.step_frame_headless();
+    };
+    draw_path(1.2f);
+    GameObject *g = ed.vr_sketch_object_for_test();
+    Strokes *s = g ? g->get<Strokes>() : nullptr;
+    CHECK(s && s->ribbons.size() == 1u);
+    if (!s || s->ribbons.empty()) return;
+    const StrokeRibbon &rb = s->ribbons[0];
+    const Mat4 stage = ed.vr_stage_for_test();
+    const Vec3 first = stage.point(xr::to_blendity(Vec3(0, 1.2f, -0.45f))), last = stage.point(xr::to_blendity(Vec3(0.3f, 1.2f, -0.45f)));
+    bool rising = true;
+    for (size_t i = 1; i < rb.widths.size(); i++) rising = rising && rb.widths[i] >= rb.widths[i - 1];
+    MeshRenderer *mr = g->get<MeshRenderer>();
+    const bool coloured = mr && rb.material < (int)mr->materials.size() && mr->materials[(size_t)rb.material]->name == "Sketch 3";
+    std::printf("    a stroke of %zu points from (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f); widths %.4f to %.4f m; slot %d (%s); the stage moved %.4f m\n", rb.points.size(),
+                rb.points.front().x, rb.points.front().y, rb.points.front().z, rb.points.back().x, rb.points.back().y, rb.points.back().z, rb.widths.front(), rb.widths.back(),
+                rb.material, coloured ? "Sketch 3" : "?", length(ed.vr_stage_value_for_test().origin - origin));
+    CHECK(rb.points.size() >= 10u && length(rb.points.front() - first) < 1e-3f && length(rb.points.back() - last) < 1e-3f && rising && rb.widths.front() < rb.widths.back());
+    CHECK(std::fabs(rb.widths.back() - 0.01f) < 1e-4f && coloured && length(ed.vr_stage_value_for_test().origin - origin) < 1e-6f && !rb.tube);
+    CHECK(g->name == "VR Sketch" && s->normals == 0 && ed.strokeobj_object_for_test() != g);  // (VR's own object; the desktop tool's is apart)
+    /* Its id taken by another Stroke object (an undo frees it; the desk's next takes it): the next VR stroke makes its own again. */
+    g->name = "Strokes";
+    const uint64_t taken = g->id;
+    draw_path(1.3f);
+    GameObject *again = ed.vr_sketch_object_for_test();
+    std::printf("    the id taken by \"Strokes\": the next stroke on %s (id %llu, was %llu)\n", again ? again->name.c_str() : "nothing", again ? (unsigned long long)again->id : 0ull,
+                (unsigned long long)taken);
+    CHECK(again && again->id != taken && again->name == "VR Sketch" && g->get<Strokes>()->ribbons.size() == 1u);
+    /* Full (here past 50 vertices - the first stroke has 62; 100,000 by default): the next stroke starts "VR Sketch 2". */
+    ed.vr_sketch_chunk_for_test(50);
+    draw_path(1.35f);
+    GameObject *part = ed.vr_sketch_object_for_test();
+    std::printf("    \"VR Sketch\" past its vertices: the next stroke on %s\n", part ? part->name.c_str() : "nothing");
+    CHECK(part && part != again && part->name == "VR Sketch 2" && part->get<Strokes>()->ribbons.size() == 1u && again->get<Strokes>()->ribbons.size() == 1u);
+    ed.vr_sketch_chunk_for_test(100000);
+    g = part;
+    s = g->get<Strokes>();
+    /* A: undone. */
+    rt->hands[1].primary = true;
+    ed.step_frame_headless();
+    rt->hands[1].primary = false;
+    ed.step_frame_headless();
+    g = ed.vr_sketch_object_for_test();
+    s = g ? g->get<Strokes>() : nullptr;
+    const size_t after_undo = s ? s->ribbons.size() : 0;
+    /* The left stick flicked right then left then right: one colour on; the right stick up: a bigger brush. */
+    for (float x : {1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f}) {
+      rt->hands[0].stick = Vec2(x, 0.0f);
+      ed.step_frame_headless();
+    }
+    const int colour = ed.vr_colour_for_test();
+    rt->hands[1].stick = Vec2(0.0f, 1.0f);
+    ed.step_frame_headless();
+    rt->hands[1].stick = Vec2();
+    ed.step_frame_headless();
+    const float brush = ed.vr_brush_for_test();
+    /* X: tubes; another stroke. */
+    rt->hands[0].primary = true;
+    ed.step_frame_headless();
+    rt->hands[0].primary = false;
+    draw_path(1.4f);
+    g = ed.vr_sketch_object_for_test();
+    s = g ? g->get<Strokes>() : nullptr;
+    std::printf("    after A: %zu strokes; the colour %d; the brush %.4f m; tube %d, the next stroke a tube %d\n", after_undo, colour + 1, brush, (int)ed.vr_tube_for_test(),
+                (int)(s && !s->ribbons.empty() && s->ribbons.back().tube));
+    CHECK(after_undo == 0u && colour == 3 && std::fabs(brush - 0.015f) < 1e-5f && ed.vr_tube_for_test() && s && s->ribbons.size() == 1u && s->ribbons.back().tube);
+    ed.command("vr stop");
+  });
+  test("the lesson's Try-it (round 385): vr sketch - sketching on, its colour and brush", [] {
+    Editor ed;
+    ed.init_headless(320, 240);
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("vr sketch");
+    log.clear();
+    Log::fetch(since, log);
+    CHECK(ed.vr_sketch_for_test());
+    CHECK(!log.empty() && log.back().text.find("VR sketch: on") == 0);
+  });
+}
+
 void run_vr_tests() {
   vr_math_tests();
   vr_session_tests();
   vr_nav_tests();
+  vr_sketch_tests();
 }

@@ -638,6 +638,9 @@ struct PaintBrush {
   float grain_scale = 1.0f;
 };
 
+constexpr int kVrPaletteSize = 8;  // (round 385: VR sketching's colours)
+Vec3 vr_palette_colour(int i);
+
 struct UndoState {
   std::unique_ptr<Scene> scene;
   std::shared_ptr<SculptDelta> delta;  // (set: a delta step; `scene` is empty)
@@ -1019,6 +1022,13 @@ class Editor {
   xr::Session *vr_for_test() { return vr_.get(); }
   Mat4 vr_stage_for_test() const { return vr_stage_.matrix(); }
   Mat4 vr_last_view_for_test() const { return vr_last_view_; }
+  bool vr_sketch_for_test() const { return vr_sketch_; }
+  GameObject *vr_sketch_object_for_test() { return vr_sk_obj_ ? scene_->find(vr_sk_obj_) : nullptr; }
+  void vr_sketch_chunk_for_test(size_t verts) { vr_sk_chunk_ = verts; }
+  bool vr_tube_for_test() const { return vr_tube_; }
+  int vr_colour_for_test() const { return vr_colour_; }
+  float vr_brush_for_test() const { return vr_brush_; }
+  size_t vr_stroke_points_for_test() const { return vr_sk_pts_.size(); }
   const xr::Stage &vr_stage_value_for_test() const { return vr_stage_; }
   bool vr_tape_for_test() const { return vr_tape_; }
   float vr_tape_length_for_test() const { return vr_tape_m_; }
@@ -2470,6 +2480,26 @@ class Editor {
   void vr_gather_targets();
   xr::Grab vr_grab_begin(int held, const xr::Hand &l, const xr::Hand &r) const;
   Mat4 vr_last_view_;  // (the view the last eye was drawn with: the tests' check that the hands move it on their own frame)
+  /* Round 385 (task 0362): sketching in VR - the right trigger draws ribbons or tubes into the Stroke object
+   * (vr_sketch.cpp). */
+  bool vr_sketch_ = false, vr_tube_ = false, vr_sk_drawing_ = false;
+  int vr_colour_ = 0;
+  float vr_brush_ = 0.01f;  // metres, at life size
+  std::vector<Vec3> vr_sk_pts_, vr_sk_ups_;  // the stroke under way (world)
+  std::vector<float> vr_sk_w_;
+  bool vr_sk_flick_colour_ = true, vr_sk_flick_size_ = true, vr_sk_x_was_ = false;
+  uint64_t vr_sk_obj_ = 0;  // (VR's Stroke object)
+  size_t vr_sk_chunk_ = 100000;
+  int vr_sk_parts_ = 1;  // (vertices: past this VR's Stroke object is full and the next stroke starts another)
+  GameObject *vr_sketch_object();
+  Vec3 vr_sketch_tip(const xr::Hand &h) const;
+  void vr_sketch_hands(const xr::Hand &l, const xr::Hand &r, int held);
+  void vr_sketch_sample(const xr::Hand &r);
+  int vr_sketch_slot(GameObject &g, int colour);
+  void vr_sketch_commit();
+  void vr_sketch_undo();
+  void vr_sketch_overlay(const std::function<void(Vec3, Vec3, uint32_t, float)> &line);
+  void vr_sketch_command(const std::vector<std::string> &t);
   float vr_render_aspect();
   const xr::SegmentBvh *vr_bvh_of(const Mesh &m, int &building);
   void vr_overlay(const Mat4 &view, const Mat4 &proj, int width, int height);

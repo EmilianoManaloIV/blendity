@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 385): sketching in VR
+
+**Asked:** Phase C's third round: controller strokes into the Strokes system as 3D ribbons and tubes (Quill, Gravity
+Sketch), pressure from the trigger, a palette on the off hand, undo on a button.
+
+**Added (task 0362)**
+- **Stroke ribbons** gain a width and an up per point, tubes (8 sides, capped) and a material slot. Each is optional,
+  in the scene file too, so older scenes load as they were.
+- **`vr sketch`:**
+  - the right trigger draws, its pressure the width, the brush turning with the hand;
+  - A undoes;
+  - X switches ribbon and tube;
+  - the left stick flicks through 8 colours (each a "Sketch <n>" material);
+  - the right stick sizes the brush.
+- **The eyes show** the stroke under way, the brush at the tip, and the palette round the left hand.
+
+- **The tape** now also toggles with X (the left primary) outside sketching.
+
+**The Opus review's fixes:**
+- tubes wound outward (they had faced in);
+- frames that don't flip or twist: ribbons turned over rather than folded, the last normal carried where the up lies
+  along the path, tubes carried along;
+- a new stroke added to the mesh instead of every stroke built again (459,000 vertices: 46.6 ms to 11.9 ms);
+- slots capped at 255, and a cut-short group dropped;
+- A undoes only a VR stroke;
+- VR's own "VR Sketch" object with Own normals;
+- the tape off while sketching, and bad arguments refused;
+- the re-check's: tubes carried round sharp corners (a V no longer pinches), the appended mesh without the old one's
+  render caches, "VR Sketch" found by its name too, a pending desk change its own undo step, ADR 0084 amended, desk
+  ribbons as they were;
+- found on Linux: appending still copies the mesh (30-47 ms at 459,000 vertices), so VR's object is full at 100,000
+  vertices and the next stroke starts "VR Sketch 2".
+
+**Checked:** a recorded stroke as a ribbon and a tube against its widths, ups and normals, and every face's winding; a
+vertical stroke with a half roll; the scene file round trip; adding one stroke against building all; the editor on a
+stub runtime (a 30 cm stroke with rising pressure, undo, the palette, the brush, a tube, a desktop step left alone).
+
 ## 2026-11-01 (round 384): moving around in VR, and scale
 
 **Asked:** Phase C's second round: teleport, smooth move, grab the world to move, turn and scale it, a 1:1 snap, a tape

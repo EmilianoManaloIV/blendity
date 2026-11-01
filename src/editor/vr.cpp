@@ -64,6 +64,7 @@ bool Editor::vr_start(std::unique_ptr<xr::Runtime> rt, std::string &why) {
 bool Editor::vr_start_for_test(std::unique_ptr<xr::Runtime> rt, std::string &why) { return vr_start(std::move(rt), why); }
 
 void Editor::vr_stop() {
+  if (vr_sk_drawing_) vr_sketch_commit();
   if (vr_) vr_->stop();
   vr_.reset();
   vr_bvh_.clear();
@@ -116,6 +117,7 @@ void Editor::vr_command(const std::vector<std::string> &t) {
     vr_stage_.origin = Vec3(cam_.pivot.x, 0.0f, cam_.pivot.z), vr_stage_.yaw = cam_.yaw;
     return Log::info("VR View: standing at (%.2f, %.2f), facing %.0f degrees", vr_stage_.origin.x, vr_stage_.origin.z, vr_stage_.yaw);
   }
+  if (verb == "sketch" || verb == "tube" || verb == "colour" || verb == "color" || verb == "brush") return vr_sketch_command(t);
   if (verb == "scale" && t.size() > 2) {
     const float s = (float)std::atof(t[2].c_str());
     if (!std::isfinite(s) || s <= 0.0f) return Log::warn("VR View: scale wants a positive number");
@@ -135,7 +137,9 @@ void Editor::vr_command(const std::vector<std::string> &t) {
  * - Right trigger held: the teleport arc; let go: you stand where it landed (only a release with the hand tracked and
  *   nothing squeezed teleports: a squeeze or lost tracking cancels the aim).
  * - Left stick: walk where you look (2 m/s, times the scale); right stick left or right: a 30-degree snap turn.
- * - Right primary (A): the tape measure between the hands, on or off. */
+ * - Either primary (A, or X on Touch): the tape measure between the hands, on or off.
+ * - Sketching (`vr sketch`, vr_sketch.cpp): the right trigger draws instead of the arc, the primaries undo and switch
+ *   the tube, the left stick's sideways picks the colour instead of walking. */
 void Editor::vr_hands(double dt) {
   if (vr_->state() != xr::Session::State::Running) return;
   const xr::Hand &l = vr_->hand(0), &r = vr_->hand(1);
@@ -144,19 +148,22 @@ void Editor::vr_hands(double dt) {
   if (held != vr_grab_hands_) vr_grab_ = vr_grab_begin(held, l, r), vr_grab_hands_ = held;  // (a hand joined or let go: a new grab from here)
   if (held == 3) vr_stage_ = xr::grab_update(vr_grab_, l.grip.position, &r.grip.position);
   else if (held) vr_stage_ = xr::grab_update(vr_grab_, (held == 1 ? l : r).grip.position, nullptr);
-  const bool aiming = r.tracked && r.trigger > kTriggerDown && !held;
-  const bool released = vr_aiming_ && r.tracked && !held && r.trigger <= kTriggerDown;
+  const bool aiming = !vr_sketch_ && r.tracked && r.trigger > kTriggerDown && !held;  // (sketching: the trigger draws)
   if (aiming) vr_gather_targets();
+  const bool released = vr_aiming_ && r.tracked && !held && r.trigger <= kTriggerDown;
+  if (vr_sketch_) vr_sketch_hands(l, r, held);
   if (aiming) vr_arc_ = xr::teleport_arc(vr_stage_, r, [&](Vec3 a, Vec3 b, Vec3 &hit, Vec3 &n) { return vr_segment_hit(a, b, hit, n); });
   if (released && vr_arc_.landed) vr_stage_ = xr::teleport(vr_stage_, head.position, vr_arc_.at);
   if (!aiming) vr_arc_ = {};
   vr_aiming_ = aiming;
-  if (!held && l.tracked && length(l.stick) > kStickDeadZone) vr_stage_ = xr::smooth_move(vr_stage_, head.orientation, l.stick, kWalkSpeed, (float)dt);
+  const Vec2 walk = vr_sketch_ ? Vec2(0.0f, l.stick.y) : l.stick;  // (sketching: the left stick's sideways picks the colour)
+  if (!held && l.tracked && length(walk) > kStickDeadZone) vr_stage_ = xr::smooth_move(vr_stage_, head.orientation, walk, kWalkSpeed, (float)dt);
   const bool turn = r.tracked && std::fabs(r.stick.x) > kStickTurn;
   if (turn && !vr_turned_ && !held) vr_stage_ = xr::snap_turn(vr_stage_, head.position, r.stick.x > 0 ? kSnapTurnDegrees : -kSnapTurnDegrees);
   vr_turned_ = turn;
-  if (r.primary && !vr_primary_was_) vr_tape_ = !vr_tape_;
-  vr_primary_was_ = r.primary;
+  const bool tape_press = !vr_sketch_ && ((r.primary && !vr_primary_was_) || (l.primary && !vr_sk_x_was_));  // (A or X; sketching: undo and tube)
+  if (tape_press) vr_tape_ = !vr_tape_;
+  if (!vr_sketch_) vr_primary_was_ = r.primary, vr_sk_x_was_ = l.primary;
   vr_tape_m_ = vr_tape_ && l.tracked && r.tracked ? xr::measure(vr_stage_, l.grip.position, r.grip.position) : 0.0f;
 }
 
@@ -288,6 +295,7 @@ void Editor::vr_overlay(const Mat4 &view, const Mat4 &proj, int width, int heigh
     const std::string t = strprintf("%.2f m", vr_tape_m_);
     if (to_px((a + b) * 0.5f, mid)) cv.text(ui_.font, (int)mid.x - ui_.font.text_width(t) / 2, (int)mid.y - ui_.font.line_height() - 4, t, 0xFFFFD040u);
   }
+  if (vr_sketch_) vr_sketch_overlay([&](Vec3 a, Vec3 b, uint32_t c, float thick) { line(cv, a, b, c, thick); });
   if (std::fabs(vr_stage_.scale - 1.0f) > 1e-3f) {
     const std::string t = strprintf("1:%.2f", vr_stage_.scale);
     cv.text(ui_.font, width / 2 - ui_.font.text_width(t) / 2, height * 3 / 4, t, 0xFFFFFFFFu);

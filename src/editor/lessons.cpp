@@ -622,6 +622,12 @@ In VR View your controllers move you: squeeze one grip and drag to move the worl
 ! cmd:vr status | VR View's state; with a headset, try the grips, the trigger and the sticks
 ? You pulled both hands together to half their distance. How big does the world look? | Half as big - the world at 1:2 (the readout says so); pull them apart again and it snaps back at 1:1.
 ? You want to know how wide a doorway is in VR. What do you do? | Press A (or X) and hold your controllers at its sides - the tape shows the distance in metres.
+# VR View: sketching in the air
+With `vr sketch on` your right controller draws in VR View: hold the trigger and move your hand - the harder you press, the wider the stroke, and the stroke turns with your hand like a flat brush. Press X to draw tubes instead of ribbons, flick the left stick sideways to pick one of 8 colours (they ring your left hand), and flick the right stick up or down to make the brush bigger or smaller. A undoes the last stroke. The strokes go into a Stroke object of their own, "VR Sketch", each colour a material of its own, so they render and export like any mesh.
+> docs/tasks/0362-vr-sketch.md: Built
+! cmd:vr sketch | Sketching on: with a headset, hold the right trigger and draw
+? You want a thick stroke that tapers to a thin end. How do you draw it? | Start with the trigger pressed hard and ease off as you finish - the width follows the pressure, from 15% of the brush to all of it.
+? You drew a stroke you don't want. What do you press? | A - it undoes the last stroke (only a stroke: a change made at the desk is left for the desk's Undo).
 # Imported animations: a model's clips
 A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
 ! cmd:window Animation | Open the Animation window: an imported model's clips play on its root

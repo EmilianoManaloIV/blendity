@@ -1053,7 +1053,7 @@ void Editor::run_console_command(const std::string &line) {
     dock_command(t, line);
     return;
   }
-  if (c == "vr") {  // vr start [resolution] | stop | status | here | scale <s> (round 383)
+  if (c == "vr") {  // vr start [resolution] | stop | status | here | scale <s> (round 383) | sketch | tube | colour <1-8> | brush <cm> (round 385)
     vr_command(t);
     return;
   }

@@ -928,6 +928,12 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 - **A** (or X on the left Touch controller) shows a tape measure between the controllers, in the world's metres.
 - **In view:** the controllers as boxes with their rays, the render camera's frame (1 m in front of it), and the scale when it isn't 1:1.
 
+**Sketching in VR** (round 385): `vr sketch on`, then:
+- **The right trigger** draws. The harder you press, the wider the stroke, and a ribbon turns with your hand.
+- **X** switches between ribbons and tubes. **A** undoes.
+- **The left stick, flicked sideways,** picks one of 8 colours, shown round your left hand. **The right stick, flicked up or down,** makes the brush bigger or smaller (`vr brush <cm>`).
+- **Strokes** go into a Stroke object of their own, "VR Sketch", each colour its own material, so they render and export like any mesh. A undoes only VR strokes.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and
