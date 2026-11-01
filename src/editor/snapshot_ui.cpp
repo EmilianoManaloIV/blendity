@@ -65,13 +65,15 @@ void apply_snapshot_object(Scene &scene, GameObject *root, const std::string &ro
 }
 
 /* The snapshot's parts on the imported model: the model turned into the snapshot's frame about the pivot, the root
- * named (a lone object named in the snapshot keeps its name), each object's parts. */
+ * named for the snapshot unless it is the model's one object itself (a lone crate stays "Crate": round 375), each
+ * object's parts. */
 void apply_snapshot(Scene &scene, GameObject *root, const Snapshot &snap, int &made, int &applied) {
   const std::string root_was = root->name;
   const Mat4 pivot = Mat4::translate(root->world_position());
   root->set_world_matrix(pivot * Mat4::rotate(snap.model_rotation) * Mat4::translate(-root->world_position()) * root->world_matrix());
   const bool lone_named = std::any_of(snap.objects.begin(), snap.objects.end(), [&](const SnapshotObject &s) { return s.name == root_was || s.path == root_was; });
-  if (!lone_named) root->name = snap.name;
+  const bool lone = root->get<MeshFilter>() || root->light() || root->camera();
+  if (!lone_named && !lone) root->name = snap.name;
   for (const SnapshotObject &s : snap.objects) {
     applied += s.has_light || s.has_camera || !s.engine_class.empty() || !s.props.empty() || s.has_transform;
     apply_snapshot_object(scene, root, root_was, pivot, snap, s, made);
@@ -94,8 +96,11 @@ bool Editor::import_snapshot(const std::string &path_in) {
   ImportResult r;
   if (!import_model(model, r)) return refuse("Import snapshot: " + snap.model + " - " + r.error, "", ""), false;
   int made = 0, applied = 0;
+  const std::string lone = r.nodes.size() == 1 ? r.nodes[0].name : std::string();  // (one object: the root is it, named as the file - round 375)
   finish_import(model, true, r, t, ImportOutline::Keep, 0.0f, false, [&](GameObject *root) {
-    if (root) apply_snapshot(*scene_, root, snap, made, applied);
+    if (!root) return;
+    if (!lone.empty()) root->name = lone;  // (its own name back: a .blend's lone "Crate" isn't "Shed")
+    apply_snapshot(*scene_, root, snap, made, applied);
   });
   Log::info("Import snapshot: %s from %s - %d object(s) given their lights, cameras, classes or properties (%d made from the snapshot alone)",
             snap.name.c_str(), snap.source.empty() ? "another program" : snap.source.c_str(), applied, made);

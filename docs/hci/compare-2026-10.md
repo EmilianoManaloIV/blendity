@@ -99,6 +99,24 @@ program's users make that stage in Blender or Maya and import it: the hand-off i
 | C5 Rendering | Path tracer, samples, Render Animation (4) | Cycles, Ctrl+F12 (3) | Recorder (9) | Movie Maker (2) | MRQ (6) [R1] | Renders run on a worker: fine in the GUI |
 | C6 Edit, deliver | Sequencer clips, Render Camera Sequence; an MP4 made in-process with Blender's libraries (5; the dependency-free build offers them - corrected in round 366) | Video Sequencer, FFmpeg built in (5) | Timeline + Recorder Movie (H.264) [U3] | Movie Maker AVI (2) [G1] | MRQ + an encoder (6) | Same as Blender with the libraries; the dependency-free build needs them or an ffmpeg program (corrected in round 366) |
 
+## D. Round trip: import, refine, back (round 375)
+
+Phase E's import column: an engine's or DCC's work brought into Blendity, refined, and sent back, as round 375's
+production ran it (`tests_round375`). Steps as the other tables count them.
+
+| Route | In (steps) | Kept as it is | Back (steps) | What came back | Friction found and fixed |
+|---|---|---|---|---|---|
+| Unity package (avatar + world kit) | Import Unity Package, then each prefab (3) | Scripts, Udon, VRChat's descriptor and PhysBones, the .mat and shader files | File > Export Unity Package (1) | The same GUIDs; prefabs changed only in the edited lines; the rest byte for byte | None in this run; a prefab file named as its root object gives two objects that name (Unity's naming) |
+| Godot scene | Import the .tscn (1) | Scripts and nodes Blendity doesn't run, every line | Export Godot Scene (1) | Byte for byte when nothing changed; the moved node's transform line otherwise | None |
+| Blender (.blend) | Import the .blend (1; Blender runs in the background) | Custom properties (as an Engine Component) | Export glTF with Keep Transforms (2) | The crate where it was moved, its pivot kept | **A one-object .blend came in named for its file**, and **exports baked transforms** - both fixed |
+| Unreal level | Send to Blendity in the bridge (1) | Blueprint classes (as Engine Components) | Not yet: Live Link streams Blendity's objects as new actors | - | None in this run (no way back onto the sent actors) |
+
+**Against the four:**
+- Each imports the others' work one way: FBX or glTF, or a .blend through the installed Blender (Unity, Godot 4).
+  Scripts and components are left behind.
+- None writes an edited prefab or scene back into another program's file.
+- Blendity's way back keeps that program's own data (GUIDs, Udon, VRChat's components, GDScript) intact.
+
 ## KLM: ten tasks in five programs
 
 Seconds by the operators (rules in `klm.md`); "-" where the program doesn't do it (made in a DCC, or not documented).

@@ -68,6 +68,12 @@ void ExportOptions::reflect(Reflector &r) {
     r.help("Each object's Collider as its own mesh, named as the engine reads it: the Unity bridge's postprocessor makes a MeshCollider\n"
            "of <name>_Collider, Unreal's FBX import takes UCX_<name>_00 as simple collision, Godot's import makes -convcolonly a\n"
            "convex shape and -colonly a trimesh (round 362).");
+    if (f == ExportFormat::GLB || f == ExportFormat::GLTF) {
+      r.field("Keep Transforms", keep_transforms);
+      r.help("Each object's position, rotation and scale on its own node (each a top-level node: parents aren't kept), its\n"
+             "vertices around its own pivot, so a round trip keeps pivots (round 375). A sheared or mirrored object is baked.\n"
+             "Off: the vertices where they are in the world.");
+    }
     r.field("Lightmap UVs", lightmap_uvs);
     r.help("A second UV set laid out for lightmaps (no overlaps, a margin between islands), as Unity's Generate Lightmap\n"
            "UVs and Godot's UV2 import make: the engine bakes its own lighting onto it (round 353).");
@@ -125,6 +131,8 @@ void ExportOptions::reflect(Reflector &r) {
 /* Shared preparation                                                     */
 /* ===================================================================== */
 
+static Mat4 gltf_m(const Mat4 &m, float s);  // (below, with glTF; round 375: Keep Transforms uses it)
+
 namespace {
 
 /* The file a texture slot names when it is an image other programs can open; empty for a generated image or a
@@ -154,6 +162,8 @@ Vec3 to_out(Vec3 v, int up) { return up ? Vec3(-v.x, -v.z, v.y) : Vec3(-v.x, v.y
 
 struct Prepared {
   std::string name;
+  bool has_node = false;  // (round 375: Keep Transforms) the object's world, in the file's space, on its node
+  Mat4 node;
   std::shared_ptr<const ExportSkin> skin;  // (task 0268)
   std::vector<float> shape_weights;  // (round 351) per mesh.shape_keys
   std::vector<Vec2> uv2;             // (round 353) per corner of `mesh`: the lightmap UVs, when asked for
@@ -161,6 +171,21 @@ struct Prepared {
   std::vector<Vec3> normals;  // per corner, output space
   std::vector<MaterialPtr> materials;
 };
+
+
+/* Round 375 (review): whether a world matrix is a translation, a rotation and a positive scale - what glTF lets a
+ * node's matrix be. A sheared one (a turned child under a non-uniformly scaled parent), a mirrored one or one that
+ * isn't finite is baked into the vertices instead. */
+static bool plain_trs(const Mat4 &w) {
+  for (int k = 0; k < 16; k++)
+    if (!std::isfinite(w.m[k])) return false;
+  const Vec3 c[3] = {w.dir(Vec3(1, 0, 0)), w.dir(Vec3(0, 1, 0)), w.dir(Vec3(0, 0, 1))};
+  const float len[3] = {length(c[0]), length(c[1]), length(c[2])};
+  if (len[0] < 1e-8f || len[1] < 1e-8f || len[2] < 1e-8f || dot(cross(c[0], c[1]), c[2]) <= 0.0f) return false;
+  for (int i = 0; i < 3; i++)
+    if (std::fabs(dot(c[i], c[(i + 1) % 3])) > 1e-4f * len[i] * len[(i + 1) % 3]) return false;
+  return true;
+}
 
 /* Per-corner normals the way Blender splits them: flat faces use the face
  * normal; smooth faces average the faces around the vertex that are reached
@@ -260,13 +285,13 @@ std::vector<Vec3> split_normals(const Mesh &m) {
 
 /* Round 351: the item's shape keys onto the prepared mesh, their offsets turned into the file's space as the vertices
  * are (no translation); none when the option is off, a key doesn't fit, or triangulating changed the vertex count. */
-void prepare_shape_keys(const Mesh &src, const ExportItem &it, const ExportOptions &o, int up, Prepared &p) {
+void prepare_shape_keys(const Mesh &src, const ExportItem &it, const Mat4 &bake, const ExportOptions &o, int up, Prepared &p) {
   if (!o.shape_keys || src.shape_keys.empty() || !meshops::shape_keys_fit(src) || p.mesh.positions.size() != src.positions.size()) return;
   for (size_t k = 0; k < src.shape_keys.size(); k++) {
     ShapeKey key;
     key.name = src.shape_keys[k].name;
     key.delta.reserve(src.shape_keys[k].delta.size());
-    for (const Vec3 &d : src.shape_keys[k].delta) key.delta.push_back(finite_bits(d.x) && finite_bits(d.y) && finite_bits(d.z) ? to_out(it.world.dir(d), up) * o.scale : Vec3(0.0f));  // (a NaN offset from a file: none)
+    for (const Vec3 &d : src.shape_keys[k].delta) key.delta.push_back(finite_bits(d.x) && finite_bits(d.y) && finite_bits(d.z) ? to_out(bake.dir(d), up) * o.scale : Vec3(0.0f));  // (a NaN offset from a file: none)
     p.mesh.shape_keys.push_back(std::move(key));
     p.shape_weights.push_back(k < it.shape_weights.size() ? it.shape_weights[k] : 0.0f);
   }
@@ -301,10 +326,16 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     m.custom_normals = src.custom_normals;  // (task 0149: written as they are)
     m.sync_attributes();
     if (o.triangulate) meshops::triangulate(m);
-    for (Vec3 &v : m.positions) v = to_out(it.world.point(v), up) * o.scale;
-    prepare_shape_keys(src, it, o, up, p);
+    /* Keep Transforms (round 375, glTF, unskinned): the vertices mirrored into the file's space in the object's own,
+     * its world (S W S, the translation scaled - the object's own scale kept) on the node; else, and for a world glTF
+     * can't hold on a node (sheared, mirrored, not finite: review 375), the world baked into them. */
+    p.has_node = o.keep_transforms && (o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF) && !it.skin && plain_trs(it.world);
+    const Mat4 bake = p.has_node ? Mat4() : it.world;
+    if (p.has_node) p.node = gltf_m(it.world, o.scale);
+    for (Vec3 &v : m.positions) v = to_out(bake.point(v), up) * o.scale;
+    prepare_shape_keys(src, it, bake, o, up, p);
     if (m.custom_normals.size() == m.positions.size()) {  // (task 0149: turned with the positions, by the inverse transpose)
-      const Mat4 nm = it.world.inverse().transposed();
+      const Mat4 nm = bake.inverse().transposed();
       for (Vec3 &n : m.custom_normals) {
         const Vec3 t = to_out(nm.dir(n), up);
         const float len = length(t);
@@ -317,8 +348,8 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
       std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
       if (uv) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
     }
-    /* A negative-scale (mirrored) object reverses its winding once more. */
-    const Mat4 &w = it.world;
+    /* A negative-scale (mirrored) object reverses its winding once more (on a node, glTF's reader does it). */
+    const Mat4 &w = bake;
     const float det = w.m[0] * (w.m[5] * w.m[10] - w.m[6] * w.m[9]) - w.m[4] * (w.m[1] * w.m[10] - w.m[2] * w.m[9]) +
                       w.m[8] * (w.m[1] * w.m[6] - w.m[2] * w.m[5]);
     if (det < 0)
@@ -1717,7 +1748,9 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     const auto shared = with_skin ? std::find_if(rigs.begin(), rigs.end(), [&](const GltfRig &r) { return p.skin->rig && r.rig == p.skin->rig && r.joints == p.skin->joints.size(); })
                                   : rigs.end();
     roots.push_back((int)nodes.size());
-    nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu", meshes.size() - 1) +
+    std::string matrix;  // (round 375: Keep Transforms - column-major, as glTF's)
+    for (int k = 0; p.has_node && k < 16; k++) matrix += (k ? "," : ",\"matrix\":[") + num(p.node.m[k]) + (k == 15 ? "]" : "");
+    nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu", meshes.size() - 1) + matrix +
                     (with_skin ? strprintf(",\"skin\":%zu}", shared != rigs.end() ? shared->skin : skins.size()) : std::string("}")));
     if (!with_skin) continue;
     if (shared != rigs.end()) {  // (round 354: the rig's skeleton and clip written already: this mesh's weights join the clip)

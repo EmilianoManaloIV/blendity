@@ -1399,8 +1399,8 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("pickfocus: select a Camera or a Light first");
   }
   else if (c == "export") {
-    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [ascii] [lightmap] [path]: the selection (or the whole scene); lightmap:
-     * the second UV set (round 353) */
+    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [ascii] [lightmap] [transforms] [path]: the selection (or the whole
+     * scene); lightmap: the second UV set (round 353); transforms: glTF nodes keep each object's transform (round 375) */
     std::string fmt = to_lower(arg(1, "obj"));
     if (fmt.empty() || fmt[0] != '.') fmt = "." + fmt;
     const int fi = export_format_from_extension(fmt);
@@ -1411,10 +1411,12 @@ void Editor::run_console_command(const std::string &line) {
       o.selection_only = !(t.size() > at && to_lower(t[at]) == "all");
       if (!o.selection_only) at++;
       if (t.size() > at && to_lower(t[at]) == "ascii") o.ascii = true, at++;
-      /* The options in any order: lightmap, colliders=unity|unreal|godot (round 362; a misspelt one said, not taken for the path). */
+      /* The options in any order: lightmap, transforms, colliders=unity|unreal|godot (round 362; a misspelt one said, not taken for the path). */
       for (; t.size() > at; at++) {
         const std::string w = to_lower(t[at]);
+        if (w == "transforms" && fi != (int)ExportFormat::GLB && fi != (int)ExportFormat::GLTF) Log::warn("export: transforms is glTF's only - the transforms are baked");
         if (w == "lightmap") o.lightmap_uvs = true;
+        else if (w == "transforms") o.keep_transforms = true;  // (round 375: glTF, each object's own transform kept)
         else if (w == "colliders=unity" || w == "colliders=unreal" || w == "colliders=godot") o.collider_names = w == "colliders=unity" ? 1 : w == "colliders=unreal" ? 2 : 3;
         else if (w.rfind("colliders=", 0) == 0) Log::warn("export: colliders=unity, unreal or godot (not '%s')", t[at].c_str());
         else break;

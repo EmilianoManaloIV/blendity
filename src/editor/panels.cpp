@@ -2826,6 +2826,7 @@ void Editor::draw_export_options() {
     o.selection_only = before.selection_only;
     o.apply_modifiers = before.apply_modifiers;
     o.scale = before.scale;
+    o.keep_transforms = before.keep_transforms;  // (review 375: GLB and glTF both keep it)
     export_opts_ = o;
   }
   export_panel_h_ = lay.y - area.y + u.px(2);
