@@ -60,6 +60,11 @@ void ExportOptions::reflect(Reflector &r) {
   }
   r.help("Export the meshes as the modifier stack makes them (Blender: Apply Modifiers).");
   if (f == ExportFormat::GLB || f == ExportFormat::GLTF || f == ExportFormat::FBX) {
+    static const char *const kEngines[] = {"None", "Unity (_Collider)", "Unreal (UCX_)", "Godot (-colonly)"};
+    r.enumeration("Colliders", collider_names, kEngines, 4);
+    r.help("Each object's Collider as its own mesh, named as the engine reads it: the Unity bridge's postprocessor makes a MeshCollider\n"
+           "of <name>_Collider, Unreal's FBX import takes UCX_<name>_00 as simple collision, Godot's import makes -convcolonly a\n"
+           "convex shape and -colonly a trimesh (round 362).");
     r.field("Lightmap UVs", lightmap_uvs);
     r.help("A second UV set laid out for lightmaps (no overlaps, a margin between islands), as Unity's Generate Lightmap\n"
            "UVs and Godot's UV2 import make: the engine bakes its own lighting onto it (round 353).");

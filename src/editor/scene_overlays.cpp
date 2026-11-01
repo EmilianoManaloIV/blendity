@@ -262,6 +262,7 @@ void Editor::render_overlays(const Recti &) {
   if (autopose_.on) draw_puppet_handles();  // (task 0281)
   if (show_footprints_) draw_footprint_soles();  // (task 0126)
   draw_ai_overlay();       // (task 0130)
+  draw_colliders();        // (round 362: Unity's green collider wires)
   /* Wireframes. */
   bool all_wire = shading_ == Shading::Wireframe || shading_ == Shading::ShadedWireframe;
   scene_->for_each([&](GameObject &g) {

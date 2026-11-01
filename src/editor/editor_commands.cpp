@@ -1294,7 +1294,14 @@ void Editor::run_console_command(const std::string &line) {
       o.selection_only = !(t.size() > at && to_lower(t[at]) == "all");
       if (!o.selection_only) at++;
       if (t.size() > at && to_lower(t[at]) == "ascii") o.ascii = true, at++;
-      if (t.size() > at && to_lower(t[at]) == "lightmap") o.lightmap_uvs = true, at++;
+      /* The options in any order: lightmap, colliders=unity|unreal|godot (round 362; a misspelt one said, not taken for the path). */
+      for (; t.size() > at; at++) {
+        const std::string w = to_lower(t[at]);
+        if (w == "lightmap") o.lightmap_uvs = true;
+        else if (w == "colliders=unity" || w == "colliders=unreal" || w == "colliders=godot") o.collider_names = w == "colliders=unity" ? 1 : w == "colliders=unreal" ? 2 : 3;
+        else if (w.rfind("colliders=", 0) == 0) Log::warn("export: colliders=unity, unreal or godot (not '%s')", t[at].c_str());
+        else break;
+      }
       std::string path;
       for (size_t k = at; k < t.size(); k++) path += (path.empty() ? "" : " ") + t[k];
       export_model(o, path);
@@ -1832,9 +1839,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "saverender") save_render();
   else if (c == "lighting") {
-    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) */
+    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) | lighting markstatic (round 362) */
     const std::string sub = to_lower(arg(1, "update"));
     if (sub == "update") lighting_update();
+    else if (sub == "markstatic") mark_static_meshes();
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
       mark_changed("Preview Lighting");

@@ -269,6 +269,8 @@ void Editor::bake_start() {
   std::vector<BakeObject> objects;
   std::vector<BakeLight> lights;
   collect_bake_scene(objects, lights);
+  /* Round 362 (the comparison's finding 10): nothing marked had baked "0 objects" without a word of why. */
+  if (objects.empty()) return bake_refuse_empty();
   if (preview_running_) {  // the real bake replaces the preview
     preview_baker_.cancel();
     preview_running_ = false;

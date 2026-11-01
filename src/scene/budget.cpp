@@ -126,7 +126,7 @@ BudgetCounts budget_count_items(const std::vector<ExportItem> &items) {
   std::unordered_set<uint64_t> rigs;
   std::unordered_set<std::string> textures;
   for (const ExportItem &it : items) {
-    if (!it.mesh || !it.mesh->face_count()) continue;
+    if (!it.mesh || !it.mesh->face_count() || it.collider) continue;  // (an engine hides a collider: not drawn, not ranked)
     const bool skinned = it.skin || !it.mesh->shape_keys.empty();
     v[(int)(skinned ? BudgetRow::SkinnedMeshes : BudgetRow::Meshes)] += 1;
     v[(int)BudgetRow::Triangles] += triangles_of(*it.mesh);

@@ -876,6 +876,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Merge Armatures, Attach Mesh, Translate, Export** (round 361, the Avatar window, as the CATS plugin's): Merge Armatures takes a hair or outfit armature into the avatar's by its bones' names (its meshes skinned to the avatar); Attach Mesh gives the selected prop wholly to one bone; Translate renames Japanese shape keys and materials from MMD's common names; Export for VRChat writes FBX for Unity (Y up, metres, skeleton, skin, shape keys), saying the checklist and PC rank first. Console: `avatar mergearmature <name>`, `avatar attach <bone>`, `avatar translate`, `avatar export [path]`.
 
+**Colliders and Mark Static** (round 362, the VRChat world kit): the Collider component gives an object its physics shape apart from its mesh - Box, Sphere, Capsule, Convex (the hull) or Mesh (still objects) - with Fit to Mesh; it is drawn as a green wire, used by Play's physics, and exported as its own mesh named for the engine (Export > Colliders: Unity `<name>_Collider` or `_MeshCollider`, made MeshColliders by the Unity bridge's import postprocessor; Unreal `UCX_<name>_00` for its FBX import; Godot `<name>-convcolonly`, or `-colonly` for a Mesh; `export ... colliders=unity|unreal|godot`). Generate Lighting with no Contribute GI object refuses and offers Mark Static Meshes (`lighting markstatic`).
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

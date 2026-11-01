@@ -407,6 +407,7 @@ screens themselves.
 | Decimate to Good cut every mesh alike, the face's visemes too; nothing grouped hair chains into one PhysBone or thinned their bones. | The Avatar window's Decimation (CATS' Smart, Safe, Half and Full modes, a triangle count, meshes excluded), Bone Root (one PhysBone for a group, counted so) and Bone Merging (round 359). |
 | Eye Look needed eye bones made by hand and blink keys sculpted twice; several materials meant several draw calls. | The Avatar window's Set Up Eyes (the bones at the eyes, the Blink split left and right, a test) and Make Atlas (one texture set and material a mesh), as the CATS plugin's (round 360). |
 | Hair or an outfit on its own armature had to be re-rigged; Japanese names stayed; exporting for VRChat meant choosing the FBX settings and checking the avatar by hand. | The Avatar window's Merge Armatures, Attach Mesh, Translate, and Export for VRChat (Unity's FBX settings, the checklist and rank said first), as the CATS plugin's (round 361). |
+| A world's walls went to the engine without collision, and Generate Lighting with nothing marked baked "0 objects" without saying why. | The Collider component (Box, Sphere, Capsule, Convex, Mesh; Fit to Mesh) drawn, used in Play and exported as each engine names it; Generate Lighting refuses with Mark Static Meshes as its Fix (round 362). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 
 ## Still worth doing

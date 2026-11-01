@@ -708,6 +708,9 @@ void Editor::frame_body(std::vector<Event> &events) {
   trail_refresh();  // (task 0282: a few more of the trails' frames, before the views draw them)
   if (window_) set_cursor(window_, ui_.cursor);
 
+  /* Round 362: a collider's Fit to Mesh, done before the step is kept - so no kept state asks for it (review 362: an undone
+   * state holding the tick had refitted at once, Ctrl+Z stuck). */
+  if (scene_) update_collider_fits();
   /* Undo: commit once the interaction that changed things has finished. */
   if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
 
@@ -2252,7 +2255,7 @@ void Editor::bake_textures_for_export(std::vector<ExportItem> &items, const std:
   ScopedTimer timer;
   int baked = 0;
   for (ExportItem &it : items) {
-    if (!it.mesh || !it.mesh->face_count()) continue;
+    if (!it.mesh || !it.mesh->face_count() || it.collider) continue;  // (a collider has no look)
     const TextureBakeResult r = bake_textures(*it.mesh, it.world, it.materials, s);
     if (!r.texels) continue;
     std::string name = file_safe(it.name);
@@ -2862,6 +2865,7 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
     if (arm) it.skin = export_skin_of(*arm, *m, g, *skm);
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
     items.push_back(it);
+    add_collider_item(g, *m, it, o, items, keep);  // (round 362)
     /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
      * back faces, as glTF's single-sided default asks, show the silhouette line). */
     if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {

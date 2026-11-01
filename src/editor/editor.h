@@ -2968,6 +2968,19 @@ class Editor {
   EyeOptions eye_options_;
   uint64_t eye_test_root_ = 0;  // (the avatar whose eyes the test has turned: undone before anything is kept)
   void eye_test_off();
+  /* Round 362: the world kit (world_kit.cpp). */
+  void update_collider_fits();
+  void draw_colliders();
+  struct ColliderWire {
+    uint64_t key = 0;
+    std::shared_ptr<Mesh> mesh;
+  };
+  std::unordered_map<uint64_t, ColliderWire> collider_wires_;  // (by object id)
+  const Mesh *collider_wire(const GameObject &g, const ColliderComponent &c);
+  void mark_static_meshes();
+  void bake_refuse_empty();
+  uint64_t bake_refused_key_ = 0;
+  void add_collider_item(GameObject &g, const Mesh &m, const ExportItem &it, const ExportOptions &o, std::vector<ExportItem> &items, std::vector<std::shared_ptr<Mesh>> &keep);
   /* Round 361: CATS' Merge Armatures, Attach Mesh, Translate and Export (avatar_merge_ui.cpp). */
   bool avatar_merge_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
   bool avatar_merge_armature(GameObject &root, const std::string &other);

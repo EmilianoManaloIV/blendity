@@ -9,6 +9,8 @@
 #include "../src/scene/budget.h"
 #include "../src/scene/visemes.h"
 #include "../src/scene/humanoid.h"
+#include "../src/scene/colliders.h"
+#include "../src/scene/physics.h"
 #include "../src/scene/avatar_merge.h"
 #include "../src/scene/avatar_eyes.h"
 #include "../src/scene/avatar_optimize.h"
@@ -7448,6 +7450,188 @@ static void tests_round361() {
   });
 }
 
+/* ---------------------------------------------------------------- round 362: the world kit - Colliders, Mark Static */
+static void tests_round362() {
+  test("Colliders (round 362): Fit to Mesh sizes a box, a sphere and a capsule to the mesh; the collider's mesh is that shape where it says", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");  // (radius 0.5, 2 tall)
+    GameObject *g = ed.active_object_for_test();
+    if (!g) return;
+    ed.command("component Collider");
+    ColliderComponent *c = g->get<ColliderComponent>();
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->fit = true;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    the box fitted: size (%.2f %.2f %.2f), center (%.2f %.2f %.2f); Fit unticked %d\n", c->size.x, c->size.y, c->size.z, c->center.x, c->center.y, c->center.z, (int)!c->fit);
+    CHECK(std::fabs(c->size.x - 1.0f) < 0.02f && std::fabs(c->size.y - 2.0f) < 0.02f && !c->fit);
+    const Mesh &m = *g->evaluated_mesh();
+    for (int shape : {0, 1, 2}) {
+      c->shape = shape;
+      fit_collider(*c, m);
+      const std::shared_ptr<Mesh> cm = collider_mesh(*c, m);
+      const AABB b = cm ? cm->bounds() : AABB();
+      const Vec3 size = b.valid() ? b.max - b.min : Vec3(0.0f);
+      std::printf("    %s: its mesh %.2f x %.2f x %.2f\n", shape == 0 ? "Box" : shape == 1 ? "Sphere" : "Capsule", size.x, size.y, size.z);
+      CHECK(cm != nullptr);
+      if (shape == 0) CHECK(std::fabs(size.x - 1.0f) < 0.02f && std::fabs(size.y - 2.0f) < 0.02f);
+      if (shape == 1) CHECK(std::fabs(size.y - 2.0f) < 0.05f);  // (the largest half side: 1)
+      if (shape == 2) CHECK(std::fabs(size.y - 2.0f) < 0.05f && std::fabs(size.x - 1.0f) < 0.05f);
+    }
+    CHECK(collider_export_name(2, 4, "Wall").empty() && collider_export_name(2, 0, "Wall") == "UCX_Wall_00" && collider_export_name(3, 0, "Wall") == "Wall-convcolonly" &&
+          collider_export_name(3, 4, "Wall") == "Wall-colonly" && collider_export_name(1, 0, "Wall") == "Wall_Collider" && collider_export_name(1, 4, "Wall") == "Wall_MeshCollider");
+  });
+  test("Colliders (round 362): an export with colliders=unreal, godot or unity writes the collider as a mesh named for the engine; without, none", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    if (!g) return;
+    g->name = "Wall";
+    ed.command("component Collider");
+    const std::string dir = fs::join(test_dir(), "r362");
+    fs::make_dirs(dir);
+    for (auto [engine, want] : {std::pair<const char *, const char *>{"", ""}, {"colliders=unreal", "UCX_Wall_00"}, {"colliders=godot", "Wall-convcolonly"}, {"colliders=unity", "Wall_Collider"}}) {
+      const std::string path = fs::join(dir, std::string("wall") + (engine[0] ? engine + 10 : "plain") + ".glb");
+      ed.select_for_test(g->id, false);
+      ed.command(std::string("export glb ") + engine + (engine[0] ? " " : "") + path);
+      std::string glb;
+      fs::read_file(path, glb);
+      const Json j = r351_glb_json(glb);
+      std::string names;
+      for (size_t i = 0; i < j["nodes"].size(); i++) names += j["nodes"][i]["name"].str + ";";
+      std::printf("    %s: %s\n", engine[0] ? engine : "no colliders", names.c_str());
+      CHECK(want[0] ? names.find(want) != std::string::npos : names == "Wall;");
+    }
+  });
+  test("Generate Lighting (round 362): nothing with Contribute GI is refused with its Fix; Mark Static marks the still meshes, not a falling one", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("newscene");
+    ed.command("create Cube");
+    GameObject *still = ed.active_object_for_test();
+    ed.command("create Sphere");
+    GameObject *ball = ed.active_object_for_test();
+    if (!still || !ball) return;
+    ed.command("component Rigidbody");
+    ed.scene().for_each([](GameObject &g) {
+      if (MeshRenderer *mr = g.get<MeshRenderer>()) mr->contribute_gi = false;
+    });
+    ed.scene().lighting.baked_gi = true;
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("bake start");
+    log.clear();
+    Log::fetch(since, log);
+    bool refused = false;
+    for (const LogEntry &e : log) refused = refused || e.text.find("no object has Contribute GI on") != std::string::npos;
+    CHECK(refused);
+    ed.command("lighting markstatic");
+    CHECK(still->get<MeshRenderer>()->contribute_gi && !ball->get<MeshRenderer>()->contribute_gi);
+    ed.command("bake cancel");
+  });
+  test("the lesson's Try-it (round 362): create Cube, component Collider - a box its mesh's size", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    ed.command("component Collider");
+    GameObject *g = ed.active_object_for_test();
+    const ColliderComponent *c = g ? g->get<ColliderComponent>() : nullptr;
+    CHECK(c && c->shape == 0 && std::fabs(c->size.x - 1.0f) < 1e-4f);
+  });
+  test("Colliders (review 362): adding one from the Inspector and Ctrl+Z twice takes it away (the fit joins the step); a scaled parent's floor collides at its world size; a switched-off collider doesn't collide; Mark Static leaves an animated parent's child", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *g = ed.active_object_for_test();
+    if (!g) return;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* A collider added and fitted inside one frame's step (as the Inspector's menu does): one Undo takes it away. */
+    g->add<ColliderComponent>();
+    ed.mark_changed_for_test("Add Component");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const ColliderComponent *c = g->get<ColliderComponent>();
+    CHECK(c && !c->fit && std::fabs(c->size.y - 2.0f) < 0.02f);
+    ed.command("undo");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *back = ed.scene().find(g->id);
+    CHECK(back && !back->get<ColliderComponent>());
+    ed.command("redo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    back = ed.scene().find(g->id);
+    CHECK(back && back->get<ColliderComponent>());
+    /* Mark Static: a child of an animated parent moves - not marked. */
+    ed.command("create Empty");
+    GameObject *windmill = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *blade = ed.active_object_for_test();
+    if (!windmill || !blade) return;
+    ed.scene().set_parent(blade, windmill, -1, true);
+    windmill->add<Animation>();
+    blade->get<MeshRenderer>()->contribute_gi = false;
+    ed.command("lighting markstatic");
+    CHECK(!blade->get<MeshRenderer>()->contribute_gi);
+    if (!physics_jolt_available()) return;
+    /* A floor under a parent scaled 2: its box collider 20 m wide in the world; a ball 7 m out still lands on it. */
+    Scene s;
+    GameObject *level = s.create("Level");
+    level->set_local_scale(Vec3(2.0f));
+    GameObject *floor = s.create("Floor", level);
+    floor->add<MeshFilter>()->mesh = primitives::plane(10.0f, 1);
+    floor->add<MeshRenderer>();
+    ColliderComponent *fc = floor->add<ColliderComponent>();
+    fc->fit = false, fc->shape = 0, fc->size = Vec3(10.0f, 0.5f, 10.0f), fc->center = Vec3(0, -0.25f, 0);
+    GameObject *ball = s.create("Ball");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ColliderComponent *bc = ball->add<ColliderComponent>();
+    bc->fit = false, bc->shape = 1, bc->radius = 0.3f;
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({7, 2, 0});
+    /* A second ball over a switched-off collider (a bush): it falls through. */
+    GameObject *bush = s.create("Bush");
+    bush->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    bush->add<MeshRenderer>();
+    bush->set_local_position({-6, 0, -6});
+    bush->add<ColliderComponent>()->enabled = false;
+    GameObject *ball2 = s.create("Ball2");
+    ball2->add<MeshFilter>()->mesh = primitives::cube(0.2f);
+    ball2->add<MeshRenderer>();
+    ball2->add<Rigidbody>()->bounciness = 0.0f;
+    ball2->set_local_position({-6, 3, -6});
+    PlayContext ctx;
+    s.start(ctx);
+    ctx.dt = 1.0f / 60.0f;
+    for (int i = 0; i < 240; i++) s.update(ctx);
+    std::printf("    on the scaled floor 7 m out: y %.3f; over the switched-off bush: y %.3f (the floor's top at 0)\n", ball->world_position().y, ball2->world_position().y);
+    CHECK_NEAR(ball->world_position().y, 0.3f, 0.05f);
+    CHECK(ball2->world_position().y < 0.5f);  // (through the bush, onto the floor)
+  });
+  test("Colliders (round 362): in Play, a ball's Sphere collider rests on a floor's Box collider at their radii (Jolt), the floor's mesh a thin plane", [] {
+    if (!physics_jolt_available()) return;
+    Scene s;
+    GameObject *floor = s.create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(10.0f, 1);
+    floor->add<MeshRenderer>();
+    ColliderComponent *fc = floor->add<ColliderComponent>();
+    fc->shape = 0, fc->size = Vec3(10.0f, 1.0f, 10.0f), fc->center = Vec3(0, -0.5f, 0);  // (a slab under the plane)
+    GameObject *ball = s.create("Ball");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ColliderComponent *bc = ball->add<ColliderComponent>();
+    bc->shape = 1, bc->radius = 0.3f;
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({0, 2, 0});
+    PlayContext ctx;
+    s.start(ctx);
+    ctx.dt = 1.0f / 60.0f;
+    for (int i = 0; i < 240; i++) s.update(ctx);
+    std::printf("    the ball (a cube's mesh, a 0.3 sphere's collider) rests at y %.3f\n", ball->world_position().y);
+    CHECK_NEAR(ball->world_position().y, 0.3f, 0.05f);  // (its sphere on the slab's top at 0, not the cube's half side)
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -7823,4 +8007,5 @@ void run_assets_tests() {
   tests_round359();
   tests_round360();
   tests_round361();
+  tests_round362();
 }

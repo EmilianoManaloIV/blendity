@@ -705,6 +705,20 @@ struct PlayerController : ComponentBase<PlayerController> {
   void update(PlayContext &ctx) override;
 };
 
+/* Unity's Box / Sphere / Capsule / Mesh Collider in one (round 362, task 0339): the object's physics shape, apart from
+ * its mesh - Jolt's in Play, a green wire in the Scene view, a collider mesh in exports (scene/colliders.h). Without
+ * one, a rigid body takes its mesh's hull and a still mesh its triangles, as before. */
+struct ColliderComponent : ComponentBase<ColliderComponent> {
+  static constexpr const char *kName = "Collider";
+  int shape = 0;  // ColliderShape: Box, Sphere, Capsule, Convex, Mesh
+  Vec3 center;
+  Vec3 size{1, 1, 1};     // (Box)
+  float radius = 0.5f;    // (Sphere, Capsule)
+  float height = 2.0f;    // (Capsule, along Y)
+  bool fit = true;        // the Inspector's Fit to Mesh: sized to the mesh's bounds on its next frame (on when added: it fits at once)
+  void reflect(Reflector &r) override;
+};
+
 struct Rigidbody : ComponentBase<Rigidbody> {
   static constexpr const char *kName = "Rigidbody";
   float mass = 1.0f;

@@ -875,7 +875,8 @@ static void round35_tests() {
       for (const Vec3 &t : p.texels) bad += !r35_finite(t);
     CHECK(bad == 0);
     CHECK(r35_luma(r35_game(ed)) > 0);
-    /* Nothing contributes: the bake runs, makes no maps, and the picture is the plain one. */
+    /* Nothing contributes: Generate Lighting refuses (round 362: it had baked "0 objects" without a word), no maps, the
+     * picture the plain one. */
     ed.command("bake clear");
     r34_steps(ed, 3);
     const std::vector<uint32_t> plain = r35_game(ed);
@@ -883,7 +884,8 @@ static void round35_tests() {
     ed.scene().find_by_name("Empty")->get<MeshRenderer>()->contribute_gi = false;
     ed.scene().find_by_name("Flat")->get<MeshRenderer>()->contribute_gi = false;
     ed.commit_change("nothing static");
-    r35_bake(ed);
+    ed.command("bake start");
+    CHECK(!ed.baking_for_test());
     CHECK(ed.lighting_data_for_test().pages.empty() && ed.lighting_data_for_test().entries.empty());
     CHECK(!ed.lighting_out_of_date_for_test());  // no data, so nothing is out of date
     CHECK(r35_game(ed) == plain);

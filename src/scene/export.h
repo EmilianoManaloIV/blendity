@@ -63,6 +63,7 @@ struct ExportItem {
   std::shared_ptr<const ExportSkin> skin;  // (task 0268: glTF writes the skeleton, the weights and the clip; the mesh at rest)
   std::vector<float> shape_weights;  // (round 351) per shape key of `mesh` (the basis, keys unapplied): its weight now
   bool outline = false;              // (review 353) an Outline's shell: no lightmap UVs (no engine lightmaps it)
+  bool collider = false;             // (round 362) a Collider's mesh: no textures baked, not in the budget's counts
 };
 
 enum class ExportFormat { OBJ = 0, FBX, GLB, GLTF, STL, PLY, USD, Count };
@@ -81,6 +82,7 @@ struct ExportOptions {
   bool skins = true;            // glTF: skinned meshes with their armature, weights and clip (task 0268; Blender: Armature, Skinning, Animation)
   bool shape_keys = true;       // glTF morph targets / FBX blend shapes (round 351; Blender: Shape Keys)
   bool lightmap_uvs = false;    // (round 353) glTF TEXCOORD_1 / FBX's second UV map, laid out for lightmaps (Unity: UV2)
+  int collider_names = 0;       // (round 362) colliders as meshes named for an engine: 0 none, 1 Unity, 2 Unreal, 3 Godot
   bool ascii = false;           // STL / PLY: ASCII instead of binary
   /* Bake Textures (task 0036, OBJ / FBX / glTF): each object's look baked on a copy into one set of images beside
    * the file (albedo, roughness, metallic, normal) on new UVs; the copies' materials name them. */

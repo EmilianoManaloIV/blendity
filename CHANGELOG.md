@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 362): the VRChat world kit, part 1 - Colliders, and Generate Lighting's Fix
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 9
+and 10: no collider for a world's engine, and Generate Lighting baking "0 objects" without a word).
+
+**Added (task 0339)**
+- **The Collider component:** Box, Sphere, Capsule, Convex or Mesh, with Fit to Mesh. It is a green wire in the
+  Scene view and the shape Jolt uses in Play.
+- **Exports write colliders** as meshes named for the engine (the Export dialog's Colliders, `export ...
+  colliders=unity|unreal|godot`):
+  - Unity: `<name>_Collider`, which the Unity bridge's new import postprocessor makes a MeshCollider;
+  - Unreal: `UCX_<name>_00` for its FBX import;
+  - Godot: `<name>-convcolonly`.
+- **Generate Lighting with nothing marked** is refused, with Mark Static Meshes (`lighting markstatic`) as its Fix.
+
+**The Opus review's fixes:**
+- Undo after adding a collider (the fit joins its step);
+- a Unity postprocessor that the names now reach;
+- the world scale in Play;
+- Auto Generate's quiet refusal, and its words;
+- Mark Static leaving moving parents' children;
+- the wire cached;
+- disabled and hidden colliders;
+- no keys, bake or budget for colliders;
+- Godot's convex hint.
+
+**Checked:** `tests_round362`:
+- Undo and Redo of an added collider;
+- a scaled level's floor;
+- a switched-off bush;
+- Fit to Mesh for a box, a sphere and a capsule;
+- the names for each engine in a .glb, and none without;
+- the refusal, and Mark Static leaving a falling ball;
+- a ball's sphere resting on a floor's box in Play (Jolt);
+- the Try-it.
+
 ## 2026-10-31 (round 361): the VRChat avatar module, part 6 - Merge Armatures, Attach Mesh, Translate, Export
 
 **Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361: the module's

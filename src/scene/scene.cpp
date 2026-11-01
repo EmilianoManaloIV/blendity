@@ -216,6 +216,8 @@ void register_builtin_components() {
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
                         "No direct equivalent (Blender removed its game engine in 2.80)");
+  reg<ColliderComponent>("Physics", "The object's collision shape: Box, Sphere, Capsule, Convex or its Mesh - Jolt's in Play, written into exports for Unity, Unreal and Godot (round 362).",
+                         "Unity's Box / Sphere / Capsule / Mesh Collider; Blender's Rigid Body > Collisions > Shape");
   reg<Rigidbody>("Physics", "Gravity, bounciness and simple sphere collisions in Play mode.",
                  "Rigid Body physics (blender/source/blender/blenkernel/intern/rigidbody.cc)");
 }
@@ -1628,6 +1630,18 @@ void PlayerController::update(PlayContext &ctx) {
     Vec3 dir = owner->local().rotation.rotate({0, 0, 1});
     owner->set_local_position(owner->local().position + dir * (fwd * move_speed * ctx.dt));
   }
+}
+
+void ColliderComponent::reflect(Reflector &r) {
+  static const char *const kShapes[] = {"Box", "Sphere", "Capsule", "Convex", "Mesh"};
+  r.enumeration("Shape", shape, kShapes, 5);
+  r.help("Box, Sphere and Capsule are what engines collide fastest; Convex the mesh's hull; Mesh its triangles (still objects only - a moving one takes its hull).");
+  if (shape <= 2) r.field("Center", center);  // (Convex and Mesh are the mesh's own)
+  if (shape == 0) r.field("Size", size);
+  if (shape == 1 || shape == 2) r.field("Radius", radius, 0.01f, 0.0f, 1e4f);
+  if (shape == 2) r.field("Height", height, 0.01f, 0.0f, 1e4f);
+  r.field("Fit to Mesh", fit);
+  r.help("Tick it: the shape is sized to the mesh's bounds (and unticks itself).");
 }
 
 void Rigidbody::reflect(Reflector &r) {
