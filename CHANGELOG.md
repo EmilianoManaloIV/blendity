@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 377): textures by content in Live Link
+
+**Asked:** Phase B's second round: painted, procedural and generated textures reach the engines as you work, every
+map, and Unity's cache by path no more.
+
+**Added (task 0354)**
+- **Live Link's `texture` message** (docs/LIVELINK.md): a PNG of a texture's pixels, keyed per path and colour space,
+  named by the materials' maps.
+  - It's stamped cheaply each comparison, hashed and encoded on a worker, and sent only when the pixels changed.
+  - A painted surface goes when each stroke ends. An image that keeps changing (a procedural drag) goes at most 4
+    times a second, with the last state after.
+  - Textures go at most 2048 a side.
+- **The bridges load textures from the bytes:**
+  - Blender (temporary file, reloaded);
+  - Godot (ImageTexture, updated in place);
+  - Unity (a texture per key);
+  - Unreal (a transient texture on a material made in code with a BaseMap parameter).
+- **More maps:** Emission (Blender, Godot, Unity), Metallic (Godot, Unity) and Roughness (Godot).
+- **Godot's and Unity's material and light colours** are converted from linear (round 376's follow-up).
+- **The Opus review's fixes:**
+  - no main-thread copy of every texture at each change;
+  - the painting claim corrected;
+  - float colour maps made sRGB;
+  - emission maps multiplied as Blendity's (Godot, Blender);
+  - Unreal's textures updated in place;
+  - a new client no longer takes another's owed change;
+  - textures no material names aren't watched;
+  - Unity's built-in metallic keyword;
+  - maps taken off are cleared.
+
+**Checked:**
+- `tests_round377`: the sync, a repaint, the same pixels, a stroke's throttle;
+- the recording's texture;
+- Blender's and Godot's smoke tests;
+- Unity's replay (built-in and URP);
+- Unreal's replay.
+
 ## 2026-11-01 (round 376): the world and the look in Live Link
 
 **Asked:** Phase B's first round, "lighting, modeling, and everything in between while bridges are running": the

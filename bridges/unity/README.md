@@ -29,7 +29,7 @@ and scales come across as the same numbers.
 | objects, hierarchy, transforms | GameObjects with the same parents and local transforms |
 | meshes, modifiers applied | Meshes (a submesh per material slot; 32-bit indices past 65,535 vertices) |
 | vertices moving (Edit Mode drags, skinning, physics) | the mesh's vertices moved in place, normals worked out again (hard edges stay hard) |
-| PBR materials and their base and normal maps | URP Lit, or Standard in the built-in pipeline, opaque, cutout or transparent, culled or double-sided |
+| PBR materials and their maps | URP Lit, or Standard in the built-in pipeline (colours made gamma), opaque, cutout or transparent, culled or double-sided; Base, Normal, Metallic and Emission maps from the pixels Live Link sends (round 377) |
 | Toon materials | the same Lit material, and a `BlendityToon` component holding every toon field per slot for your own toon shader |
 | lights | Directional, Point, Spot, Rectangle and Disc lights with the same intensity, range and angles (Unity's area lights are baked only: they light nothing until you bake) |
 | cameras | Cameras (disabled, so the Game view keeps yours) with the same field of view, clipping and physical lens |

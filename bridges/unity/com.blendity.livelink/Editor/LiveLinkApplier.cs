@@ -24,6 +24,8 @@ namespace Blendity.LiveLink
         readonly Dictionary<int, Material> materials = new Dictionary<int, Material>();
         readonly Dictionary<int, string> toonFields = new Dictionary<int, string>();
         readonly Dictionary<string, Texture2D> textures = new Dictionary<string, Texture2D>();
+        readonly Dictionary<int, Texture2D> texByKey = new Dictionary<int, Texture2D>();  // (round 377: from PNG bytes)
+        readonly Dictionary<int, Dictionary<string, object>> materialMsgs = new Dictionary<int, Dictionary<string, object>>();
         HashSet<long> seen;
         readonly Transform root;
 
@@ -54,6 +56,7 @@ namespace Blendity.LiveLink
                 case "mesh": OnMesh(j, m.Bin); break;
                 case "deform": OnDeform(j, m.Bin); break;
                 case "material": OnMaterial(j); break;
+                case "texture": OnTexture(j, m.Bin); break;  // (round 377)
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
                 case "world": OnWorld(j); break;  // (round 376: LiveLinkLook.cs)
@@ -327,10 +330,12 @@ namespace Blendity.LiveLink
                 materials[key] = m;
             }
             m.name = j.GetString("name", "Material");
+            materialMsgs[key] = j;
             var gltf = j.GetDict("gltf") ?? new Dictionary<string, object>();
             var pbr = gltf.GetDict("pbrMetallicRoughness") ?? new Dictionary<string, object>();
             var c = pbr.GetFloats("baseColorFactor", 0.8f, 0.8f, 0.8f, 1f);
-            var color = new Color(c[0], c[1], c[2], c[3]);
+            var color = new Color(c[0], c[1], c[2]).gamma;  // (Live Link's colours are linear; a material's are set as gamma)
+            color.a = c[3];
             float metallic = (float)pbr.GetNumber("metallicFactor", 0), smooth = 1f - (float)pbr.GetNumber("roughnessFactor", 0.5);
             m.SetColor("_BaseColor", color);
             m.SetColor("_Color", color);
@@ -341,7 +346,7 @@ namespace Blendity.LiveLink
             var ext = gltf.GetDict("extensions");
             float strength = ext != null && ext.GetDict("KHR_materials_emissive_strength") != null
                                  ? (float)ext.GetDict("KHR_materials_emissive_strength").GetNumber("emissiveStrength", 1) : 1f;
-            var emission = new Color(e[0], e[1], e[2]) * strength;
+            var emission = (new Color(e[0], e[1], e[2]) * strength).gamma;
             m.SetColor("_EmissionColor", emission);
             if (emission.maxColorComponent > 0)
                 m.EnableKeyword("_EMISSION");
@@ -351,6 +356,11 @@ namespace Blendity.LiveLink
             var maps = j.GetDict("maps");
             SetTexture(m, maps, "Base Map", "_BaseMap", "_MainTex", false);
             SetTexture(m, maps, "Normal Map", "_BumpMap", "_BumpMap", true);
+            bool metal = SetTexture(m, maps, "Metallic Map", "_MetallicGlossMap", "_MetallicGlossMap", false);  // (round 377: every map Unity's Lit has)
+            SetKeyword(m, "_METALLICSPECGLOSSMAP", metal);  // (URP's)
+            SetKeyword(m, "_METALLICGLOSSMAP", metal);      // (the built-in Standard's - review 377)
+            if (SetTexture(m, maps, "Emission Map", "_EmissionMap", "_EmissionMap", false))
+                m.EnableKeyword("_EMISSION");
             var toon = ext != null ? ext.GetDict("BLENDITY_toon") : null;
             toonFields[key] = toon != null ? Serialize(toon) : "";
             foreach (var kv in slots)
@@ -384,18 +394,62 @@ namespace Blendity.LiveLink
                 m.DisableKeyword(k);
         }
 
-        void SetTexture(Material m, Dictionary<string, object> maps, string slot, string urp, string builtin, bool normal)
+        /* A map's texture: the one Live Link sent its bytes for (round 377: no stale copy cached by path), else the file
+         * at its path. True when one was set. */
+        bool SetTexture(Material m, Dictionary<string, object> maps, string slot, string urp, string builtin, bool normal)
         {
             var entry = maps != null ? maps.GetDict(slot) : null;
             if (entry == null)
-                return;
-            var tex = LoadTexture(entry.GetString("path"), normal || entry.GetBool("non_color"));
+            {
+                m.SetTexture(urp, null);  // (a map taken off in Blendity: not kept - review 377)
+                m.SetTexture(builtin, null);
+                return false;
+            }
+            Texture2D tex;
+            if (!texByKey.TryGetValue((int)entry.GetNumber("texture", 0), out tex) || tex == null)
+                tex = LoadTexture(entry.GetString("path"), normal || entry.GetBool("non_color"));
             if (tex == null)
-                return;
+                return false;
             m.SetTexture(urp, tex);
             m.SetTexture(builtin, tex);
             if (normal)
                 m.EnableKeyword("_NORMALMAP");
+            return true;
+        }
+
+        /* Round 377: a texture's pixels as PNG bytes (painted, generated or a file's), loaded into a texture of its own
+         * (the same one when it comes again); the materials naming its key built again. */
+        void OnTexture(Dictionary<string, object> j, byte[] png)
+        {
+            int key = (int)j.GetNumber("key");
+            bool linear = j.GetBool("non_color");
+            Texture2D tex;
+            if (!texByKey.TryGetValue(key, out tex) || tex == null || tex.isDataSRGB == linear)
+            {
+                tex = new Texture2D(2, 2, TextureFormat.RGBA32, true, linear);
+                texByKey[key] = tex;
+            }
+            tex.name = j.GetString("name", "Texture");
+            if (png == null || !tex.LoadImage(png))
+                return;
+            var again = new List<Dictionary<string, object>>();
+            foreach (var kv in materialMsgs)
+            {
+                var maps = kv.Value.GetDict("maps");
+                if (maps == null)
+                    continue;
+                foreach (var entry in maps.Values)
+                {
+                    var e = entry as Dictionary<string, object>;
+                    if (e != null && (int)e.GetNumber("texture", 0) == key)
+                    {
+                        again.Add(kv.Value);
+                        break;
+                    }
+                }
+            }
+            foreach (var msg in again)
+                OnMaterial(msg);
         }
 
         Texture2D LoadTexture(string path, bool linear)
@@ -453,7 +507,7 @@ namespace Blendity.LiveLink
             l.type = type == "directional" ? LightType.Directional : type == "spot" ? LightType.Spot
                    : type == "area" ? (j.GetBool("disc") ? LightType.Disc : RectangleLight) : LightType.Point;
             var c = j.GetFloats("color", 1, 1, 1);
-            l.color = new Color(c[0], c[1], c[2]);
+            l.color = new Color(c[0], c[1], c[2]).gamma;  // (Live Link's colours are linear)
             l.intensity = (float)j.GetNumber("intensity", 1);  // (Blendity's intensity is Unity's)
             l.range = (float)j.GetNumber("range", 10);
             l.spotAngle = (float)j.GetNumber("spot_angle", 30);

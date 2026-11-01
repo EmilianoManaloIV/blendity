@@ -34,7 +34,7 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
 | objects, hierarchy, transforms | actors attached as the objects are parented |
 | meshes, modifiers applied | transient static meshes, a section per material slot |
 | vertices moving | the mesh rebuilt with the moved positions, normals worked out again |
-| materials | dynamic instances of the engine's BasicShapeMaterial with the base colour (textures, metallic and roughness not yet) |
+| materials | dynamic instances of a material made in code (a Color times a BaseMap texture, round 377) with the base colour and the Base Map from its bytes (metallic and roughness not yet) |
 | lights | directional, point and spot lights attached to their objects |
 | cameras | camera actors, Blendity's vertical field of view turned into Unreal's horizontal one at 16:9 |
 | the look (round 376) | a SkyLight captured from the level (tinted, the ground as its lower hemisphere), an Exponential Height Fog (approximating Blendity's linear fog) and an unbound Post Process Volume (exposure bias, Bloom, Vignette, contrast, saturation); adopted again on a reconnect |

@@ -4,6 +4,8 @@
 
 #include "../core/core.h"
 #include "../core/json.h"
+#include "../image/image.h"
+#include "../render/canvas.h"
 #include "../render/shading.h"
 #include "../scene/export.h"
 #include "../scene/scene.h"
@@ -13,6 +15,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -24,7 +27,7 @@ namespace {
 
 /* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
  * own (the world, the render's look) are keyed on id 0, which no object has. */
-enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters };
+enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture };
 uint64_t ckey(uint64_t id, Kind k) { return id << 4 | (uint64_t)k; }
 
 /* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
@@ -156,10 +159,8 @@ struct MeshJob {
   bool broadcast = false;
 };
 
-/* The texture slots of a material by their Inspector names, as paths a client on this computer can open. */
-struct MapCollector : Reflector {
-  JsonWriter &w;
-  explicit MapCollector(JsonWriter &w_) : w(w_) {}
+/* A reflector that takes nothing: the collectors below override what they want. */
+struct NoOpReflector : Reflector {
   bool all_fields() const override { return true; }
   void field(const char *, float &, float, float, float) override {}
   void field(const char *, int &, int, int) override {}
@@ -169,11 +170,99 @@ struct MapCollector : Reflector {
   void enumeration(const char *, int &, const char *const *, int) override {}
   void text(const char *, std::string &) override {}
   void mesh(const char *, MeshPtr &) override {}
+};
+
+/* The texture slots of a material by their Inspector names, as paths a client on this computer can open, and since
+ * round 377 the key of the `texture` message carrying their pixels. */
+struct MapCollector : NoOpReflector {
+  JsonWriter &w;
+  std::function<int(const TextureRef &)> key_of;
+  MapCollector(JsonWriter &w_, std::function<int(const TextureRef &)> k) : w(w_), key_of(std::move(k)) {}
   void texture(const char *n, TextureRef &t) override {
     if (t.empty()) return;
-    w.key(n).obj().key("path").str(resolve_asset_path(t.path)).key("non_color").boolean(t.non_color).end();
+    w.key(n).obj().key("path").str(resolve_asset_path(t.path)).key("non_color").boolean(t.non_color).key("texture").integer(key_of(t)).end();
   }
 };
+
+/* A material's texture slots, collected (round 377: their pixels are looked at each comparison). */
+struct RefCollector : NoOpReflector {
+  std::vector<TextureRef> refs;
+  void texture(const char *, TextureRef &t) override {
+    if (!t.empty()) refs.push_back(t);
+  }
+};
+
+constexpr uint64_t kFnvOffset = 1469598103934665603ull, kFnvPrime = 1099511628211ull;
+constexpr double kTextureMinGap = 0.25;  // (seconds between a texture's sends while it keeps changing: at most 4 a second)
+constexpr size_t kStampSamples = 1024;   // (texels a stamp looks at)
+constexpr int kMaxTextureSide = 2048;    // (a bigger texture goes at most this size: a connect's copies stay small)
+
+/* Round 377: a texture's look now, cheaply - which image, its size and date, and 1,024 texels spread over it (an image
+ * changed in place changes them; the worker's full hash then says whether the pixels really changed). Not the
+ * textures' global generation: one texture's change would send every texture again (review 377). */
+uint64_t texture_stamp(const Texture *t) {
+  if (!t || t->levels.empty()) return 0;
+  const Texture::Level &l = t->levels[0];
+  uint64_t h = kFnvOffset ^ (uint64_t)(uintptr_t)t ^ ((uint64_t)l.w << 32) ^ (uint64_t)l.h ^ (uint64_t)t->mtime * 31;
+  const size_t n = l.px8.empty() ? l.pxf.size() : l.px8.size();
+  const size_t step = std::max<size_t>(1, n / kStampSamples);
+  for (size_t i = 0; i < n; i += step) {
+    const uint64_t v = l.px8.empty() ? (uint64_t)std::hash<float>()(l.pxf[i].x + 2 * l.pxf[i].y + 3 * l.pxf[i].z) : l.px8[i];
+    h = (h ^ v) * kFnvPrime;
+  }
+  return h;
+}
+
+/* What every client was last told of one texture slot (a path in a colour space). */
+struct TexSent {
+  int key = 0;
+  TextureRef ref;
+  uint64_t stamp = 0;
+  double last = -1e30;  // (when it was last sent: at most 4 a second while it keeps changing)
+  bool live = false;    // (named by a material now: only those are looked at and sent - review 377)
+};
+
+/* A texture's first level copied as it is (at most kMaxTextureSide a side, every n-th texel past it) for the worker,
+ * which turns it into PNG pixels: the main thread only copies (review 377). */
+struct TexJob {
+  int key = 0;
+  std::string name;
+  bool non_color = false, force = false;  // (force: a new client - sent whatever its hash)
+  int w = 0, h = 0;
+  std::vector<uint32_t> px8;  // (R | G<<8 | B<<16 | A<<24) - or, for a float image:
+  std::vector<Vec4> pxf;      // (linear)
+  std::vector<int> clients;
+  bool broadcast = false;
+};
+
+/* The PNG's pixels (0xAARRGGBB) on the worker: 8-bit as they are, a float image's colour made sRGB unless the slot is
+ * non-colour data (review 377: an EXR colour map went linear, too dark), clamped, a NaN black. */
+std::vector<uint32_t> png_pixels(const TexJob &j) {
+  std::vector<uint32_t> out((size_t)j.w * j.h);
+  auto byte = [&](float v, bool colour) {
+    const float c = std::isfinite(v) ? std::clamp(colour ? linear_to_srgb(v) : v, 0.0f, 1.0f) : 0.0f;
+    return (uint32_t)std::lround(c * 255.0f);
+  };
+  for (size_t i = 0; i < out.size(); i++) {
+    if (!j.px8.empty()) {
+      const uint32_t p = j.px8[i];
+      out[i] = (p & 0xFF00FF00u) | ((p & 0xFFu) << 16) | ((p >> 16) & 0xFFu);
+      continue;
+    }
+    const Vec4 &f = j.pxf[i];
+    out[i] = byte(f.x, !j.non_color) << 16 | byte(f.y, !j.non_color) << 8 | byte(f.z, !j.non_color) | byte(f.w, false) << 24;
+  }
+  return out;
+}
+
+/* A level's texels into the job, every `step`-th along each side (1: a plain copy). */
+template <class T>
+void copy_texels(const std::vector<T> &src, int w, int step, int ow, int oh, std::vector<T> &out) {
+  if (step == 1) return void(out = src);
+  out.resize((size_t)ow * oh);
+  for (int y = 0; y < oh; y++)
+    for (int x = 0; x < ow; x++) out[(size_t)y * ow + x] = src[(size_t)y * step * w + (size_t)x * step];
+}
 
 }  // namespace
 
@@ -189,6 +278,22 @@ struct Link::Impl {
   std::unordered_map<int, uint64_t> material_hash_now;  // this tick's hashes (a material shared by many objects hashed once)
   uint64_t world_hash = 0, render_hash = 0, filters_hash = 0;  // (round 376: what every client was last told of the scene's look)
 
+  /* Round 377: the textures by slot, and their worker (PNG encoding off the main thread; the newest job per texture). */
+  std::unordered_map<std::string, TexSent> textures;
+  int next_texture = 1;
+  std::thread tex_worker;
+  std::mutex tm;
+  std::condition_variable tcv;
+  std::deque<int> tex_order;
+  std::unordered_map<int, TexJob> tex_pending;
+  std::unordered_map<int, uint64_t> tex_hash_sent;  // (by key: the pixels last broadcast - the worker's)
+  bool tex_quit = false;
+  int tex_busy = 0;
+  int texture_key(const TextureRef &t);
+  void queue_texture(TexSent &ts, const std::vector<int> &to, bool all, bool force, double now);
+  void compare_textures(double now);
+  void tex_loop();
+
   /* The mesh worker. */
   std::thread worker;
   std::mutex wm;
@@ -199,9 +304,11 @@ struct Link::Impl {
   int busy = 0;
   bool quit = false;
   std::atomic<uint64_t> built{0}, encode_us{0};  // (the worker's counts, copied into `stats` on the main thread)
+  std::atomic<uint64_t> tex_sent{0}, tex_same{0};  // (round 377: the texture worker's)
   void sync_stats() {
     stats.meshes = built.load();
     stats.mesh_encode_ms = encode_us.load() / 1000.0;
+    stats.textures = tex_sent.load(), stats.textures_same = tex_same.load();
   }
 
   void start_worker();
@@ -251,8 +358,102 @@ struct Link::Impl {
 /* ------------------------------------------------------------ The worker */
 
 void Link::Impl::start_worker() {
-  quit = false;
+  quit = false, tex_quit = false;
   worker = std::thread([this] { worker_loop(); });
+  tex_worker = std::thread([this] { tex_loop(); });
+}
+
+/* ------------------------------------------------------------ Textures (round 377) */
+
+/* A texture slot's key: the same path in the same colour space is one texture, whatever material uses it. */
+int Link::Impl::texture_key(const TextureRef &t) {
+  TexSent &ts = textures[t.path + (t.non_color ? "|data" : "|color")];
+  if (!ts.key) ts.key = next_texture++, ts.ref = t;
+  ts.live = true;
+  return ts.key;
+}
+
+/* Its texels copied for the worker (to everyone, or to `to` only when a client is new). */
+void Link::Impl::queue_texture(TexSent &ts, const std::vector<int> &to, bool all, bool force, double now) {
+  TexturePtr tex = resolve_texture_ref(ts.ref);
+  if (!tex || tex->levels.empty() || tex->levels[0].w <= 0) return;
+  const Texture::Level &l = tex->levels[0];
+  const int step = std::max(1, (std::max(l.w, l.h) + kMaxTextureSide - 1) / kMaxTextureSide);
+  TexJob job;
+  job.key = ts.key, job.name = texture_ref_label(ts.ref), job.non_color = ts.ref.non_color, job.force = force;
+  job.w = (l.w + step - 1) / step, job.h = (l.h + step - 1) / step, job.clients = to, job.broadcast = all;
+  if (!l.px8.empty()) copy_texels(l.px8, l.w, step, job.w, job.h, job.px8);
+  else copy_texels(l.pxf, l.w, step, job.w, job.h, job.pxf);
+  if (all) ts.last = now;
+  {
+    std::lock_guard<std::mutex> lk(tm);
+    auto it = tex_pending.find(job.key);
+    if (it == tex_pending.end()) tex_order.push_back(job.key);
+    else {
+      for (int c : it->second.clients)
+        if (std::find(job.clients.begin(), job.clients.end(), c) == job.clients.end()) job.clients.push_back(c);
+      job.broadcast = job.broadcast || it->second.broadcast, job.force = job.force || it->second.force;
+    }
+    tex_pending[job.key] = std::move(job);
+  }
+  tcv.notify_all();
+}
+
+/* Each comparison: the textures the live materials name now, each one whose stamp changed queued - at most 4 times a
+ * second while it keeps changing (its last state goes after). A texture no material names any more isn't looked at. */
+void Link::Impl::compare_textures(double now) {
+  for (auto &[name, ts] : textures) ts.live = false;
+  RefCollector rc;
+  for (auto &[key, ms] : materials)
+    if (MaterialPtr m = ms.ptr.lock()) m->reflect(rc);
+  for (const TextureRef &r : rc.refs) texture_key(r);
+  for (auto &[name, ts] : textures) {
+    if (!ts.live || now - ts.last < kTextureMinGap) continue;
+    const uint64_t stamp = texture_stamp(resolve_texture_ref(ts.ref).get());
+    if (stamp == ts.stamp) continue;
+    ts.stamp = stamp;
+    queue_texture(ts, {}, true, false, now);
+  }
+}
+
+/* The worker: the PNG's pixels made, hashed, a broadcast whose pixels are the same as the last one's dropped; the PNG
+ * encoded and sent with its key, name, size and hash. */
+void Link::Impl::tex_loop() {
+  for (;;) {
+    TexJob job;
+    {
+      std::unique_lock<std::mutex> lk(tm);
+      tcv.wait(lk, [&] { return tex_quit || !tex_order.empty(); });
+      if (tex_quit) return;
+      const int key = tex_order.front();
+      tex_order.pop_front();
+      auto it = tex_pending.find(key);
+      if (it == tex_pending.end()) continue;
+      job = std::move(it->second);
+      tex_pending.erase(it);
+      tex_busy++;
+    }
+    const std::vector<uint32_t> px = png_pixels(job);
+    uint64_t h = kFnvOffset ^ ((uint64_t)job.w << 32 | (uint32_t)job.h);
+    for (uint32_t p : px) h = (h ^ p) * kFnvPrime;
+    bool same = false;
+    {
+      std::lock_guard<std::mutex> lk(tm);
+      same = job.broadcast && !job.force && tex_hash_sent[job.key] == h;
+      if (job.broadcast) tex_hash_sent[job.key] = h;
+    }
+    if (!same) {
+      const std::string png = encode_png(px.data(), job.w, job.h, job.w, true);
+      JsonWriter w;
+      w.obj().key("t").str("texture").key("key").integer(job.key).key("name").str(job.name).key("width").integer(job.w).key("height").integer(job.h);
+      w.key("non_color").boolean(job.non_color).key("hash").str(strprintf("%016llx", (unsigned long long)h)).end();
+      server.send_to(job.clients, job.broadcast, w.out, png, ckey((uint64_t)job.key, kTexture));
+    }
+    (same ? tex_same : tex_sent)++;
+    std::lock_guard<std::mutex> lk(tm);
+    tex_busy--;
+    tcv.notify_all();
+  }
 }
 
 void Link::Impl::stop_worker() {
@@ -264,6 +465,14 @@ void Link::Impl::stop_worker() {
   }
   wcv.notify_all();
   if (worker.joinable()) worker.join();
+  {
+    std::lock_guard<std::mutex> lk(tm);
+    tex_quit = true;
+    tex_order.clear();
+    tex_pending.clear();
+  }
+  tcv.notify_all();
+  if (tex_worker.joinable()) tex_worker.join();
 }
 
 void Link::Impl::worker_loop() {
@@ -373,7 +582,7 @@ void Link::Impl::send_material(const std::vector<int> &to, bool all, int key, co
   w.obj().key("t").str("material").key("key").integer(key).key("name").str(m->name);
   w.key("gltf").raw(gltf_material_json(*m));
   w.key("maps").obj();
-  MapCollector maps(w);
+  MapCollector maps(w, [&](const TextureRef &t) { return texture_key(t); });
   m->reflect(maps);
   w.end().end();
   send(to, all, w, ckey((uint64_t)key, kMaterial));
@@ -538,6 +747,11 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
   JsonWriter end;
   end.obj().key("t").str("sync_end").end();
   send(fresh, false, end);
+  for (auto &[name, ts] : textures) {  // (round 377: every texture its materials name, to the new clients; encoded on the worker)
+    if (!ts.live) continue;
+    if (!others) ts.stamp = texture_stamp(resolve_texture_ref(ts.ref).get());  // (with others there, compare() still owes them a change - review 377)
+    queue_texture(ts, fresh, false, true, last_compare);
+  }
   for (int c : fresh) server.ready(c);
   stats.syncs++;
 }
@@ -598,6 +812,7 @@ void Link::Impl::compare(Scene &scene, double now) {
   material_hash_now.clear();
   for (auto &[id, s] : sent) s.seen = false;
   send_look(scene, {}, true);  // (round 376: the world and the look, when they changed)
+  compare_textures(now);       // (round 377: a texture painted, baked or reloaded)
   /* Each rig's bones as they are met; a rig with a moved bone is sent whole, once. */
   std::unordered_map<uint64_t, std::vector<GameObject *>> bones;
   std::vector<uint64_t> moved;
@@ -656,6 +871,7 @@ bool Link::start(int port, std::string *error) {
   d_->sent.clear();
   d_->materials.clear();
   d_->material_key.clear();
+  d_->textures.clear(), d_->tex_hash_sent.clear(), d_->next_texture = 1;  // (round 377: a new session's own)
   d_->start_worker();
   return true;
 }
@@ -691,8 +907,12 @@ net::Server::Stats Link::net_stats() const { return d_->server.stats(); }
 void Link::set_interval_for_test(double seconds) { d_->interval = seconds; }
 
 void Link::wait_meshes_for_test() {
-  std::unique_lock<std::mutex> lk(d_->wm);
-  d_->wcv.wait(lk, [&] { return d_->order.empty() && d_->busy == 0; });
+  {
+    std::unique_lock<std::mutex> lk(d_->wm);
+    d_->wcv.wait(lk, [&] { return d_->order.empty() && d_->busy == 0; });
+  }
+  std::unique_lock<std::mutex> lk(d_->tm);  // (round 377: the textures too)
+  d_->tcv.wait(lk, [&] { return d_->tex_order.empty() && d_->tex_busy == 0; });
 }
 
 void Link::tick(Scene &scene, bool playing, double now_s) {

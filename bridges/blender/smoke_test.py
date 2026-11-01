@@ -57,6 +57,13 @@ def main():
     mat = box.data.materials[0] if box.data.materials else None
     check(mat is not None and mat.name.startswith("Cel"), "the Box's material isn't Cel")
     check(bool(mat.get("blendity_toon")), "the toon fields aren't on the material")
+    # Round 377: the Base Map from its PNG bytes - a 4x4 checker of white and a blue.
+    tex = [nd for nd in mat.node_tree.nodes if nd.bl_idname == "ShaderNodeTexImage"]
+    img = tex[0].image if tex else None
+    check(img is not None and tuple(img.size) == (4, 4) and "blendity_texture" in img, "the Base Map didn't come from its bytes")
+    px = list(img.pixels)
+    blue = [px[i:i + 4] for i in range(0, len(px), 4) if px[i + 2] > 0.5 and px[i] < 0.5]
+    check(len(blue) == 8, "the checker's blue texels: %d" % len(blue))
     emit = [nd for nd in mat.node_tree.nodes if nd.bl_idname == "ShaderNodeEmission"]
     check(len(emit) == 1, "no cel setup on the toon material")
     bsdf = [nd for nd in mat.node_tree.nodes if nd.bl_idname == "ShaderNodeBsdfPrincipled"][0]

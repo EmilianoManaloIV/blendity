@@ -9,6 +9,7 @@ one onto the other (its scale stays glTF's own: the turned frame's axes are glTF
 light undo the turn through their parent inverse."""
 import json
 import math
+import os
 
 import bpy
 import numpy as np
@@ -56,6 +57,8 @@ def _output(node, kind):
 class Applier:
     def __init__(self, scene):
         self.scene = scene
+        self.textures = {}  # (round 377: texture key -> image, from its PNG bytes)
+        self.material_msgs = {}  # (round 377: each material key's last message)
         self.fog, self.effects = {}, []  # (round 376: the look the compositor draws)
         self.objects = {}     # id -> bpy object
         self.parents = {}     # id -> its parent's id (0: a root)
@@ -333,10 +336,36 @@ class Applier:
         gltf = msg.get("gltf", {})
         toon = gltf.get("extensions", {}).get("BLENDITY_toon")
         mat["blendity_toon"] = json.dumps(toon) if toon else ""
+        self.material_msgs[key] = msg  # (round 377: built again when one of its textures arrives)
+        TEXTURES.clear()
+        TEXTURES.update(self.textures)  # (this session's keys only: a restarted Blendity numbers them from 1 again - review 377)
         build_material(mat, gltf, msg.get("maps", {}), toon)
         for oid, keys in self.slots.items():
             if key in keys:
                 self._assign_materials(oid)
+
+    def on_texture(self, msg, att):
+        """Round 377: a texture's pixels as PNG bytes (painted, generated or a file's): an image of its own, written to
+        Blender's temporary folder and loaded from there (reloaded when it comes again); the materials naming its key
+        built again."""
+        key = int(msg["key"])
+        path = os.path.join(bpy.app.tempdir or os.environ.get("TEMP", "."), "blendity_texture_%d.png" % key)
+        with open(path, "wb") as f:
+            f.write(att)
+        name = "Blendity %s" % msg.get("name", key)
+        img = self.textures.get(key)
+        if img is None or img.name not in bpy.data.images:
+            img = bpy.data.images.load(path)
+            self.textures[key] = img
+        else:
+            img.filepath = path
+            img.reload()
+        img.name = name
+        img.colorspace_settings.name = "Non-Color" if msg.get("non_color") else "sRGB"
+        img["blendity_texture"] = key
+        for mkey, mmsg in list(self.material_msgs.items()):
+            if any(isinstance(m, dict) and m.get("texture") == key for m in mmsg.get("maps", {}).values()):
+                self.on_material(mmsg, b"")
 
     # -------------------------------------------------------------- lights and cameras
 
@@ -645,11 +674,18 @@ def _image(path, non_color):
     return img
 
 
+TEXTURES = {}  # (round 377: the current session's texture keys -> images; an Applier's own, set while it builds)
+
+
 def _texture(nt, maps, name, x, y):
+    """A map's image: the one Live Link sent its bytes for (round 377), else the file at its path."""
     m = maps.get(name)
     if not m:
         return None
-    img = _image(m.get("path", ""), bool(m.get("non_color", False)))
+    img = TEXTURES.get(m.get("texture"))
+    if img is not None and img.name not in bpy.data.images:
+        img = None
+    img = img or _image(m.get("path", ""), bool(m.get("non_color", False)))
     if img is None:
         return None
     node = nt.nodes.new("ShaderNodeTexImage")
@@ -733,6 +769,12 @@ def build_material(mat, gltf, maps, toon):
     metal = _texture(nt, maps, "Metallic Map", -500, -250)
     if metal is not None:
         nt.links.new(metal.outputs["Color"], bsdf.inputs["Metallic"])
+    emit = _texture(nt, maps, "Emission Map", -500, -750)  # (round 377: every map)
+    if emit is not None and any(e):  # (Blendity's: colour x strength x map - a map alone gives none: review 377)
+        times = _mix(nt, "MULTIPLY", -250, -750)
+        nt.links.new(emit.outputs["Color"], _socket(times, "A", "RGBA"))
+        _socket(times, "B", "RGBA").default_value = (e[0], e[1], e[2], 1.0)
+        nt.links.new(_output(times, "RGBA"), bsdf.inputs["Emission Color"])
     normal = _texture(nt, maps, "Normal Map", -500, -500)
     if normal is not None:
         nm = nt.nodes.new("ShaderNodeNormalMap")

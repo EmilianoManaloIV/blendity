@@ -43,6 +43,7 @@ private:
 	void OnMesh(const blendity_link::Json& J, const TArray<uint8>& Bin);
 	void OnDeform(const blendity_link::Json& J, const TArray<uint8>& Bin);
 	void OnMaterial(const blendity_link::Json& J);
+	void OnTexture(const blendity_link::Json& J, const TArray<uint8>& Bin);
 	void OnLight(const blendity_link::Json& J);
 	void OnCamera(const blendity_link::Json& J);
 	void OnWorld(const blendity_link::Json& J);
@@ -72,6 +73,8 @@ private:
 	TMap<int64, double> Deforming;  // (the time of each deforming mesh's last deform: Settle)
 	TMap<int64, TSharedPtr<FMeshDescription>> Descriptions;  // (round 318: a deform changes the positions in place)
 	TMap<int32, TStrongObjectPtr<UMaterialInstanceDynamic>> Materials;
+	TMap<int32, TStrongObjectPtr<class UTexture2D>> Textures;  // (round 377: by texture key, from PNG bytes)
+	TMap<int32, blendity_link::Json> MaterialMsgs;               // (round 377: each material's last message)
 	TMap<int64, TWeakObjectPtr<AActor>> Parts;  // (a light's or a camera's own actor, attached to its object)
 	TSet<int64>* Seen = nullptr;
 	TSet<int64> SeenStorage;

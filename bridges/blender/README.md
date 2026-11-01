@@ -30,7 +30,7 @@ date (and removes what Blendity deleted meanwhile).
 | objects, hierarchy, transforms | objects with the same parents (Y up turned to Z up, as Blender's glTF importer does) |
 | meshes, modifiers applied | meshes with Blendity's own vertices, triangulated, UVs, custom normals, a material per slot |
 | vertices moving (Edit Mode drags, skinning, physics) | the mesh's vertices moved in place |
-| PBR materials and their texture files | Principled BSDF with image textures |
+| PBR materials and their textures | Principled BSDF with image textures loaded from the pixels Live Link sends (round 377: painted and procedural ones too): Base, Normal, Metallic, Roughness and Emission |
 | Toon materials | a cel setup (Shader to RGB, a constant ramp of Toon Bands, the shadow colour): EEVEE; every toon field is in the material's custom property `blendity_toon` |
 | lights | sun, point, spot and area lights; strength as Blendity's path tracer gives it (a sun of intensity 1 is pi W/m2) |
 | cameras | the same vertical field of view, clipping, orthographic size, physical lens |

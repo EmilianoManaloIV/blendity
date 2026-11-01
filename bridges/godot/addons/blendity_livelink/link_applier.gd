@@ -18,6 +18,8 @@ var meshes := {}     # id -> Glb (for deforms)
 var topology := {}   # id -> "topology/verts" of its last mesh
 var materials := {}  # key -> StandardMaterial3D
 var textures := {}   # path -> Texture2D
+var tex_by_key := {} # (round 377) a texture key -> ImageTexture, from its PNG bytes
+var material_msgs := {}  # (round 377) a material key -> its last message (built again when its texture arrives)
 var seen = null      # ids met during a sync (null: not in one)
 var playing := false
 var counts := {}
@@ -84,6 +86,8 @@ func apply(j: Dictionary, bin: PackedByteArray) -> void:
 			_on_render(j)
 		"filters":
 			_on_filters(j)
+		"texture":
+			_on_texture(j, bin)
 
 
 func _end_sync() -> void:
@@ -261,26 +265,33 @@ func _on_material(j: Dictionary) -> void:
 		m = StandardMaterial3D.new()
 		materials[key] = m
 	m.resource_name = str(j.get("name", "Material"))
+	material_msgs[key] = j
 	var gltf: Dictionary = j.get("gltf", {})
 	var pbr: Dictionary = gltf.get("pbrMetallicRoughness", {})
 	var c = pbr.get("baseColorFactor", [0.8, 0.8, 0.8, 1.0])
-	m.albedo_color = Color(float(c[0]), float(c[1]), float(c[2]), float(c[3]))
+	var albedo := Color(float(c[0]), float(c[1]), float(c[2])).linear_to_srgb()  # (Live Link's colours are linear, Godot's sRGB)
+	m.albedo_color = Color(albedo.r, albedo.g, albedo.b, float(c[3]))
 	m.metallic = float(pbr.get("metallicFactor", 0.0))
 	m.roughness = float(pbr.get("roughnessFactor", 0.5))
 	var e = gltf.get("emissiveFactor", [0.0, 0.0, 0.0])
 	var ext: Dictionary = gltf.get("extensions", {})
 	var strength := float(ext.get("KHR_materials_emissive_strength", {}).get("emissiveStrength", 1.0))
-	var emission := Color(float(e[0]), float(e[1]), float(e[2]))
-	m.emission_enabled = emission.r + emission.g + emission.b > 0.0
+	var emission := Color(float(e[0]), float(e[1]), float(e[2])).linear_to_srgb()
+	var maps: Dictionary = j.get("maps", {})
+	var emit_map := _texture(maps.get("Emission Map", {}))
+	m.emission_enabled = emission.r + emission.g + emission.b > 0.0  # (Blendity's: colour x strength x map - a map alone gives none)
 	m.emission = emission
+	m.emission_texture = emit_map
+	m.emission_operator = BaseMaterial3D.EMISSION_OP_MULTIPLY  # (review 377: Godot's default adds the map to the colour)
 	m.emission_energy_multiplier = strength
 	var mode := str(gltf.get("alphaMode", "OPAQUE"))
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA if mode == "BLEND" else BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR if mode == "MASK" else BaseMaterial3D.TRANSPARENCY_DISABLED
 	m.alpha_scissor_threshold = float(gltf.get("alphaCutoff", 0.5))
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED if bool(gltf.get("doubleSided", false)) else BaseMaterial3D.CULL_BACK
-	var maps: Dictionary = j.get("maps", {})
 	var base := _texture(maps.get("Base Map", {}))
 	m.albedo_texture = base
+	m.metallic_texture = _texture(maps.get("Metallic Map", {}))  # (round 377: every map)
+	m.roughness_texture = _texture(maps.get("Roughness Map", {}))
 	var normal := _texture(maps.get("Normal Map", {}))
 	m.normal_enabled = normal != null
 	m.normal_texture = normal
@@ -290,8 +301,13 @@ func _on_material(j: Dictionary) -> void:
 			_assign_materials(id)
 
 
+## A map's texture: the one Live Link sent its bytes for (round 377), else the file at its path.
 func _texture(entry) -> Texture2D:
-	if not (entry is Dictionary) or not entry.has("path"):
+	if not (entry is Dictionary):
+		return null
+	if tex_by_key.has(int(entry.get("texture", 0))):
+		return tex_by_key[int(entry.get("texture", 0))]
+	if not entry.has("path"):
 		return null
 	var path := str(entry["path"])
 	if textures.has(path):
@@ -331,7 +347,7 @@ func _on_light(j: Dictionary) -> void:
 	var cls: Variant = DirectionalLight3D if type == "directional" else SpotLight3D if type == "spot" else OmniLight3D
 	var l: Light3D = _facing_child(n, cls)
 	var c = j.get("color", [1.0, 1.0, 1.0])
-	l.light_color = Color(float(c[0]), float(c[1]), float(c[2]))
+	l.light_color = Color(float(c[0]), float(c[1]), float(c[2])).linear_to_srgb()
 	l.light_energy = float(j.get("intensity", 1.0))  # (Unity's multiplier, Godot's energy: both 1 for a plain light)
 	if l is OmniLight3D:
 		l.omni_range = float(j.get("range", 10.0))
@@ -490,3 +506,28 @@ func _on_filters(j: Dictionary) -> void:
 		env.adjustment_contrast = 1.0 + float(f.get("Contrast", 0.0))
 		env.adjustment_saturation = 1.0 + float(f.get("Saturation", 0.0))
 	env.tonemap_exposure = pow(2.0, exposure_stops + grade_stops)
+
+
+# ------------------------------------------------------------------ textures (round 377)
+
+## A texture's pixels as PNG bytes (painted, generated or a file's): an ImageTexture of its own (updated in place when
+## it comes again at its size); the materials naming its key built again.
+func _on_texture(j: Dictionary, bin: PackedByteArray) -> void:
+	var key := int(j.get("key", 0))
+	var img := Image.new()
+	if img.load_png_from_buffer(bin) != OK:
+		return
+	img.generate_mipmaps()
+	var tex: ImageTexture = tex_by_key.get(key)
+	if tex != null and tex.get_width() == img.get_width() and tex.get_height() == img.get_height():
+		tex.update(img)
+	else:
+		tex = ImageTexture.create_from_image(img)
+		tex_by_key[key] = tex
+	tex.resource_name = str(j.get("name", ""))
+	for mk in material_msgs.keys():
+		var maps: Dictionary = material_msgs[mk].get("maps", {})
+		for entry in maps.values():
+			if entry is Dictionary and int(entry.get("texture", 0)) == key:
+				_on_material(material_msgs[mk])
+				break

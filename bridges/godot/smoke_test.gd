@@ -65,7 +65,10 @@ func _initialize() -> void:
 		var mat := box.get_surface_override_material(0) as StandardMaterial3D
 		check(mat != null and mat.resource_name.begins_with("Cel"), "the Box's material is Cel")
 		if mat != null:
-			check(mat.albedo_color.is_equal_approx(Color(0.9, 0.4, 0.2, mat.albedo_color.a)), "the recolour arrived: %s" % str(mat.albedo_color))
+			var want := Color(0.9, 0.4, 0.2).linear_to_srgb()
+			check(mat.albedo_color.is_equal_approx(Color(want.r, want.g, want.b, mat.albedo_color.a)), "the recolour arrived (sRGB): %s" % str(mat.albedo_color))
+			# Round 377: the Base Map from its PNG bytes - a 4x4 checker.
+			check(mat.albedo_texture != null and mat.albedo_texture.get_width() == 4 and mat.albedo_texture.get_height() == 4, "the Base Map came from its bytes")
 			check(str(mat.get_meta("blendity_toon", "")).length() > 2, "the toon fields kept on the material")
 		var moved := []
 		for i in box.mesh.get_surface_count():

@@ -22,6 +22,14 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/Texture2D.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialExpressionVectorParameter.h"
+#include "Modules/ModuleManager.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
 
@@ -84,6 +92,7 @@ void FBlendityLinkApplier::Apply(const blendity_link::Message& M)
 	else if (T == TEXT("mesh")) OnMesh(J, Bin);
 	else if (T == TEXT("deform")) OnDeform(J, Bin);
 	else if (T == TEXT("material")) OnMaterial(J);
+	else if (T == TEXT("texture")) OnTexture(J, Bin);
 	else if (T == TEXT("light")) OnLight(J);
 	else if (T == TEXT("camera")) OnCamera(J);
 	else if (T == TEXT("world")) OnWorld(J);
@@ -403,14 +412,89 @@ void FBlendityLinkApplier::AssignMaterials(int64 Id)
 	}
 }
 
+/* Round 377: the base of Live Link's materials - a Color parameter times a BaseMap texture parameter (white until a
+ * texture comes) as the base colour - made once in code (the engine's BasicShapeMaterial has no texture). */
+static TStrongObjectPtr<UMaterial> GTexturedBase;  // (released at the module's shutdown, before UObjects go: review 377)
+
+void BlendityReleaseTexturedBase() { GTexturedBase.Reset(); }
+
+static UMaterialInterface* TexturedBase()
+{
+	TStrongObjectPtr<UMaterial>& Made = GTexturedBase;
+	if (Made.IsValid())
+		return Made.Get();
+	UMaterial* M = NewObject<UMaterial>(GetTransientPackage(), TEXT("BlendityLiveLinkMaterial"), RF_Transient);
+	UMaterialExpressionVectorParameter* Col = NewObject<UMaterialExpressionVectorParameter>(M);
+	Col->ParameterName = TEXT("Color");
+	Col->DefaultValue = FLinearColor::White;
+	UMaterialExpressionTextureSampleParameter2D* Tex = NewObject<UMaterialExpressionTextureSampleParameter2D>(M);
+	Tex->ParameterName = TEXT("BaseMap");
+	Tex->Texture = LoadObject<UTexture2D>(nullptr, TEXT("/Engine/EngineResources/WhiteSquareTexture.WhiteSquareTexture"));
+	UMaterialExpressionMultiply* Mul = NewObject<UMaterialExpressionMultiply>(M);
+	Mul->A.Expression = Col;
+	Mul->B.Expression = Tex;
+	M->GetExpressionCollection().AddExpression(Col);
+	M->GetExpressionCollection().AddExpression(Tex);
+	M->GetExpressionCollection().AddExpression(Mul);
+	M->GetEditorOnlyData()->BaseColor.Expression = Mul;
+	M->PreEditChange(nullptr);
+	M->PostEditChange();
+	Made.Reset(M);
+	return M;
+}
+
+/* Does a material message name this texture key in one of its maps? */
+static bool NamesTexture(const blendity_link::Json& J, int32 Key)
+{
+	for (const auto& Kv : J["maps"].obj)
+		if ((int32)Kv.second["texture"].number(0) == Key)
+			return true;
+	return false;
+}
+
+/* Round 377: a texture's pixels as PNG bytes, decoded into a transient texture of its own; the materials naming its
+ * key take it. */
+void FBlendityLinkApplier::OnTexture(const blendity_link::Json& J, const TArray<uint8>& Bin)
+{
+	const int32 Key = (int32)J["key"].number(0);
+	IImageWrapperModule& Wrappers = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+	TSharedPtr<IImageWrapper> Png = Wrappers.CreateImageWrapper(EImageFormat::PNG);
+	TArray64<uint8> Raw;
+	if (!Png.IsValid() || !Png->SetCompressed(Bin.GetData(), Bin.Num()) || !Png->GetRaw(ERGBFormat::BGRA, 8, Raw))
+		return;
+	/* The key's texture again when its size is the same, its pixels written in place (review 377: a new one each message
+	 * held gigabytes until a garbage collection while a texture was dragged). */
+	const TStrongObjectPtr<UTexture2D>* Had = Textures.Find(Key);
+	UTexture2D* Tex = Had && Had->IsValid() && (*Had)->GetSizeX() == Png->GetWidth() && (*Had)->GetSizeY() == Png->GetHeight() ? Had->Get() : nullptr;
+	if (!Tex)
+		Tex = UTexture2D::CreateTransient(Png->GetWidth(), Png->GetHeight(), PF_B8G8R8A8);
+	if (!Tex)
+		return;
+	Tex->SRGB = !J["non_color"].boolean();
+	void* Data = Tex->GetPlatformData()->Mips[0].BulkData.Lock(LOCK_READ_WRITE);
+	FMemory::Memcpy(Data, Raw.GetData(), FMath::Min<int64>(Raw.Num(), Tex->GetPlatformData()->Mips[0].BulkData.GetBulkDataSize()));
+	Tex->GetPlatformData()->Mips[0].BulkData.Unlock();
+	Tex->UpdateResource();
+	Textures.Add(Key, TStrongObjectPtr<UTexture2D>(Tex));
+	TArray<blendity_link::Json> Again;
+	for (const auto& Kv : MaterialMsgs)
+		if (NamesTexture(Kv.Value, Key))
+			Again.Add(Kv.Value);
+	for (const blendity_link::Json& M : Again)
+		OnMaterial(M);
+}
+
 void FBlendityLinkApplier::OnMaterial(const blendity_link::Json& J)
 {
 	const int32 Key = (int32)J["key"].number(0);
+	MaterialMsgs.Add(Key, J);
 	TStrongObjectPtr<UMaterialInstanceDynamic>* Found = Materials.Find(Key);
 	UMaterialInstanceDynamic* M = Found && Found->IsValid() ? Found->Get() : nullptr;
 	if (!M)
 	{
-		UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+		UMaterialInterface* Base = TexturedBase();
+		if (!Base)
+			Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
 		if (!Base)
 			return;
 		M = UMaterialInstanceDynamic::Create(Base, GetTransientPackage());
@@ -420,6 +504,9 @@ void FBlendityLinkApplier::OnMaterial(const blendity_link::Json& J)
 	const FLinearColor Color(C.size() > 0 ? C[0].number(0.8) : 0.8, C.size() > 1 ? C[1].number(0.8) : 0.8, C.size() > 2 ? C[2].number(0.8) : 0.8,
 							 C.size() > 3 ? C[3].number(1.0) : 1.0);
 	M->SetVectorParameterValue(TEXT("Color"), Color);
+	const TStrongObjectPtr<UTexture2D>* BaseMap = Textures.Find((int32)J["maps"]["Base Map"]["texture"].number(0));
+	UTexture* White = LoadObject<UTexture2D>(nullptr, TEXT("/Engine/EngineResources/WhiteSquareTexture.WhiteSquareTexture"));
+	M->SetTextureParameterValue(TEXT("BaseMap"), BaseMap && BaseMap->IsValid() ? BaseMap->Get() : White);  // (a map taken off: white again)
 	for (const auto& Kv : Slots)
 		if (Kv.Value.Contains(Key))
 			AssignMaterials(Kv.Key);

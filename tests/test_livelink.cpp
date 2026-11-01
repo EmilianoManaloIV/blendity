@@ -3,6 +3,10 @@
 // on 127.0.0.1, as a bridge would connect.
 #include "test_common.h"
 #include "../src/scene/snapshot.h"
+#include "../src/render/canvas.h"
+#include "../src/image/image.h"
+#include <chrono>
+#include <thread>
 #include "../src/core/json.h"
 #include "../src/core/net_server.h"
 /* The Unreal plugin's protocol layer (task 0277): standard C++ only, compiled here so every build replays it. */
@@ -98,6 +102,12 @@ Session record_session() {
   mat.name = "Cel";
   mat.shading_model = 1;
   mat.toon_bands = 2;
+  /* Round 377: a 4x4 checker as the Base Map, sent as PNG bytes (the bridges load it from them, not the path). */
+  std::vector<uint32_t> tile(16);
+  for (int i = 0; i < 16; i++) tile[(size_t)i] = ((i / 4 + i % 4) % 2) ? 0xFFFFFFFFu : 0xFF2040C0u;  // (white and a blue: 0xAARRGGBB)
+  write_png(resolve_asset_path("Assets/Textures/livelink_tile.png"), tile.data(), 4, 4, 4);
+  texture_cache_forget(resolve_asset_path("Assets/Textures/livelink_tile.png"));
+  mat.base_map = TextureRef{"Assets/Textures/livelink_tile.png", false};
   ed.livelink_for_test()->set_interval_for_test(0);
   net::LineClient c;
   if (!c.connect(ed.livelink_for_test()->port())) return s;
@@ -137,6 +147,7 @@ Session record_session() {
   take(drain(ed, c));
   ed.command("stop");
   take(drain(ed, c));
+  fs::remove_file(resolve_asset_path("Assets/Textures/livelink_tile.png"));
   return s;
 }
 
@@ -499,12 +510,13 @@ static void livelink_fixture_tests() {
     const std::vector<std::string> now = outline(s.ms);
     CHECK(now.size() > 20);
     std::printf("    %zu messages, %zu bytes; types:", s.ms.size(), s.raw.size());
-    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters"})
+    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture"})
       std::printf(" %s %d", t, count_of(s.ms, t));
     std::printf("\n");
     for (const char *t : {"transform", "deform", "pose", "delete"}) CHECK(count_of(s.ms, t) == 1);
     CHECK(count_of(s.ms, "play") == 2 && count_of(s.ms, "material") >= 3);
     CHECK(count_of(s.ms, "world") == 2 && count_of(s.ms, "render") == 2 && count_of(s.ms, "filters") == 2);  // (round 376: at the sync and once changed)
+    CHECK(count_of(s.ms, "texture") == 1);  // (round 377: the tile once, at the sync)
     const std::string path = "tests/fixtures/livelink_stream.bin";
     if (std::getenv("BLENDITY_LIVELINK_RECORD")) {
       CHECK(fs::write_file(path, s.raw));
@@ -1087,6 +1099,118 @@ static void tests_round376() {
   });
 }
 
+/* A PNG's width and height from its IHDR (round 377). */
+static bool png_size(const std::string &png, int &w, int &h) {
+  if (png.size() < 24 || png.compare(1, 3, "PNG") != 0) return false;
+  auto be = [&](size_t at) { return (int)((uint8_t)png[at] << 24 | (uint8_t)png[at + 1] << 16 | (uint8_t)png[at + 2] << 8 | (uint8_t)png[at + 3]); };
+  w = be(16), h = be(20);
+  return true;
+}
+
+static void tests_round377() {
+  test("Live Link's textures (round 377): a material's map goes as PNG bytes with its key, named by the material; a rewritten image goes again once; the same pixels looked at again go nowhere; an image changing in place frame after frame (the paint view's preview) at most 4 a second, its last state after; an HDR colour map arrives as sRGB; a map no material names any more isn't sent", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    const std::string file = resolve_asset_path("Assets/Textures/r377_paint.png");
+    std::vector<uint32_t> px(64 * 64, 0xFF808080u);
+    CHECK(write_png(file, px.data(), 64, 64, 64));
+    struct Cleanup {
+      std::string f;
+      ~Cleanup() { fs::remove_file(f); texture_cache_forget(f); }
+    } cleanup{file};
+    GameObject *box = make_cube(ed, "Painted");
+    CHECK(box && ed.livelink_start(0));
+    if (!box) return;
+    MaterialPtr mat = box->mesh_renderer()->materials[0];
+    mat->base_map = TextureRef{"Assets/Textures/r377_paint.png", false};
+    mat->touch();
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> sync = until(ed, c, "sync_end");
+    for (const Message &m : drain(ed, c)) sync.push_back(m);
+    const Message *tex = last_of(sync, "texture");
+    int key = -1;
+    for (const Message &m : sync)
+      if (m.type() == "material" && m.j["maps"]["Base Map"].type == Json::Obj) key = (int)m.j["maps"]["Base Map"]["texture"].number(-1);
+    int w = 0, h = 0;
+    std::printf("    at the sync: %d texture message(s), the material names key %d, %zu PNG bytes\n", count_of(sync, "texture"), key, tex ? tex->bin.size() : 0);
+    CHECK(tex && key > 0 && (int)tex->j["key"].number() == key && png_size(tex->bin, w, h) && w == 64 && h == 64 && tex->j["width"].number() == 64);
+    /* Repainted (the file rewritten): once more. */
+    std::fill(px.begin(), px.end(), 0xFFFF0000u);
+    CHECK(write_png(file, px.data(), 64, 64, 64));
+    texture_cache_forget(file);
+    invalidate_material_textures();
+    const std::vector<Message> again = drain(ed, c);
+    std::printf("    repainted: %d texture message(s)\n", count_of(again, "texture"));
+    CHECK(count_of(again, "texture") == 1 && last_of(again, "texture")->j["hash"].str != tex->j["hash"].str);
+    /* Another texture's change bumps the textures' generation: this one's pixels the same - not even copied again
+     * (review 377: every texture was copied on the main thread at each bump). */
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const livelink::Stats st0 = ed.livelink_for_test()->stats();
+    invalidate_material_textures();
+    const std::vector<Message> bumped = drain(ed, c);
+    const livelink::Stats &st1 = ed.livelink_for_test()->stats();
+    CHECK(count_of(bumped, "texture") == 0 && st1.textures == st0.textures && st1.textures_same == st0.textures_same);
+    /* An image changing in place frame after frame (only the paint view's preview does that; a painted surface itself
+     * changes once a stroke ends, when its outputs are made again) - at most one a quarter second, the last after. */
+    TexturePtr live = resolve_texture_ref(mat->base_map);
+    int during = 0;
+    for (int f = 0; f < 6 && live; f++) {
+      for (size_t i = 0; i < live->levels[0].px8.size(); i += 7) const_cast<Texture &>(*live).levels[0].px8[i] = 0xFF000000u | (uint32_t)(f * 40);
+      during += count_of(drain(ed, c, 1, 20), "texture");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const int after = count_of(drain(ed, c), "texture");
+    std::printf("    changed in place over 6 frames: %d sent during, %d after\n", during, after);
+    CHECK(during <= 2 && after == 1);
+    /* An HDR colour map (0.2 linear grey): its PNG in sRGB, as an 8-bit colour map's is (review 377: it went linear, dark). */
+    const std::string hdr = resolve_asset_path("Assets/Textures/r377_grey.hdr");
+    std::vector<float> grey(8 * 8 * 3, 0.2f);
+    CHECK(write_hdr(hdr, grey.data(), 8, 8));
+    struct Gone {
+      std::string f;
+      ~Gone() { fs::remove_file(f); texture_cache_forget(f); }
+    } gone{hdr};
+    mat->emission_map = TextureRef{"Assets/Textures/r377_grey.hdr", false};
+    mat->touch();
+    std::vector<Message> hdr_msgs = drain(ed, c);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (const Message &m : drain(ed, c)) hdr_msgs.push_back(m);
+    const Message *grey_tex = nullptr;
+    for (const Message &m : hdr_msgs)
+      if (m.type() == "texture" && m.j["name"].str.find("grey") != std::string::npos) grey_tex = &m;
+    int byte = -1;
+    if (grey_tex) {
+      const std::string png_file = test_dir() + "/r377_grey_back.png";
+      fs::write_file(png_file, grey_tex->bin);
+      TexturePtr back = texture_load(png_file, false);
+      byte = back && !back->levels.empty() && !back->levels[0].px8.empty() ? (int)(back->levels[0].px8[0] & 0xFF) : -1;
+      fs::remove_file(png_file);
+    }
+    std::printf("    the HDR's 0.2 grey as PNG byte %d (sRGB 124)\n", byte);
+    CHECK(grey_tex && std::abs(byte - 124) <= 1);
+    /* The map taken off: its image changing isn't sent any more. */
+    mat->emission_map = TextureRef{};
+    mat->touch();
+    drain(ed, c);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    std::fill(grey.begin(), grey.end(), 0.7f);
+    CHECK(write_hdr(hdr, grey.data(), 8, 8));
+    texture_cache_forget(hdr);
+    int grey_again = 0;
+    for (const Message &m : drain(ed, c)) grey_again += m.type() == "texture" && m.j["name"].str.find("grey") != std::string::npos;
+    CHECK(grey_again == 0);
+    ed.livelink_stop();
+  });
+  test("the lesson's Try-it (round 377): window Textures - what you paint there reaches the engines as you paint it", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("window Textures");
+    CHECK(ed.window_docked_for_test(WindowKind::Textures));
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -1096,4 +1220,5 @@ void run_livelink_tests() {
   tests_round298();
   tests_round318();
   tests_round376();
+  tests_round377();
 }

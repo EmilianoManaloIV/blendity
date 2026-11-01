@@ -110,14 +110,33 @@ match is dropped (a newer `mesh` is on its way, and a `deform` follows it when t
 ### material
 ```
 {"t":"material","key":1,"name":"Skin","gltf":{...a glTF material object...},
- "maps":{"Base Map":{"path":"C:/project/Assets/Textures/skin.png","non_color":false},...}}
+ "maps":{"Base Map":{"path":"C:/project/Assets/Textures/skin.png","non_color":false,"texture":3},...}}
 ```
 `key` names the material in objects' `materials`; the same material shared by many objects is one key. `gltf` is
 the material as Blendity's glTF exporter writes it (base colour and alpha, metallic, roughness, emission with
 `KHR_materials_emissive_strength`, alpha mode, double-sided), without textures; a Toon material adds the extension
 `BLENDITY_toon`: every field of the material by its Inspector name (Toon Bands, Shadow Color, ...). `maps` are the
-material's texture slots by Inspector name as absolute paths on this computer. Sent when a material is first used and
-whenever any of its fields changes.
+material's texture slots by Inspector name: an absolute path on this computer, and since round 377 `texture`, the key
+of the `texture` message carrying its pixels (use those: a painted, generated or procedural texture has no file, and a
+file's own may be changing). Sent when a material is first used and whenever any of its fields changes.
+
+### texture (round 377)
+`{"t":"texture","key":3,"name":"skin.png","width":1024,"height":1024,"non_color":false,"hash":"9f2c...","bin":N}`
+followed by N bytes of a PNG.
+- **What it carries:** the pixels of the texture a material's maps name by `key`, whatever made them: an image file,
+  a generated image, a procedural texture's output, or a painted surface. A texture larger than 2048 on a side goes at
+  2048, every n-th texel.
+- **Keys:** the same path in the same colour space is one key across every material.
+- **The PNG:** RGBA, 8 bits, sRGB for colour data (a float image's linear values made sRGB too) and the values as
+  they are for non-colour data (`non_color`).
+- **When it's sent:** at a sync, and whenever the pixels change.
+  - A painted surface goes once each stroke ends, when its outputs are made again.
+  - An image that keeps changing, such as a procedural texture's field being dragged, goes at most 4 times a second,
+    with its last state after.
+  - Pixels looked at again but unchanged aren't sent; `hash` is the content's.
+  - Only the textures some material names now are watched and sent.
+  - It's encoded off Blendity's main thread, so it may arrive after the material naming it. Apply the material then,
+    and again when its texture arrives.
 
 ### light
 `{"t":"light","id":5,"type":"directional|point|spot|area","color":[r,g,b],"intensity":1,"range":10,"spot_angle":30,

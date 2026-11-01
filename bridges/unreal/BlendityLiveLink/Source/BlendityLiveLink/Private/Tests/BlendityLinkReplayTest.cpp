@@ -5,6 +5,8 @@
 //   UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests Blendity.LiveLink.Replay; Quit" -unattended -nullrhi
 #include "BlendityLinkApplier.h"
 #include "Engine/StaticMeshActor.h"
+#include "Engine/Texture2D.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/PostProcessVolume.h"
@@ -51,6 +53,11 @@ bool FBlendityLinkReplayTest::RunTest(const FString&)
 		// Blendity (1, 2, 3) -> glTF (-1, 2, 3) -> Unreal (300, 100, 200) cm
 		TestTrue(FString::Printf(TEXT("the Box at %s"), *Box->GetActorLocation().ToString()), Box->GetActorLocation().Equals(FVector(300, 100, 200), 1e-3));
 		TestNotNull(TEXT("the Box has a mesh"), Box->GetStaticMeshComponent()->GetStaticMesh().Get());
+		/* Round 377: the Base Map from its PNG bytes (a 4x4 checker) on the Box's material. */
+		UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Box->GetStaticMeshComponent()->GetMaterial(0));
+		UTexture* BaseMap = nullptr;
+		TestTrue(TEXT("the Base Map came from its bytes"), Mid && Mid->GetTextureParameterValue(FName(TEXT("BaseMap")), BaseMap) && BaseMap && Cast<UTexture2D>(BaseMap) &&
+		                                                  Cast<UTexture2D>(BaseMap)->GetSizeX() == 4);
 	}
 	/* Round 376: the look - fog from 5 m, half a stop up, Bloom 0.8 and a Vignette 0.3. */
 	if (AExponentialHeightFog* Fg = Cast<AExponentialHeightFog>(Applier.GetFog()))

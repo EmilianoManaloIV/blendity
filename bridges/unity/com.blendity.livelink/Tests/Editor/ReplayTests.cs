@@ -50,6 +50,11 @@ namespace Blendity.LiveLink.Tests
             Assert.AreEqual(36, mesh.triangles.Length);  // (12 triangles)
             var mat = box.GetComponent<MeshRenderer>().sharedMaterial;
             Assert.AreEqual("Cel", mat.name);
+            // Round 377: the Base Map from its PNG bytes (a 4x4 checker), the colour made gamma.
+            var baseMap = mat.GetTexture("_MainTex") as Texture2D;
+            Assert.NotNull(baseMap);
+            Assert.AreEqual(4, baseMap.width);
+            Assert.That(mat.GetColor("_Color").r, Is.EqualTo(Mathf.LinearToGammaSpace(0.9f)).Within(1e-3f));
             Assert.NotNull(box.GetComponent<BlendityToon>());
             Assert.IsNull(GameObject.Find("Sphere"));
             var lower = GameObject.Find("Lower");
