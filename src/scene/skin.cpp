@@ -4,6 +4,7 @@
 // quaternions (Blender: Preserve Volume). Blender: blenkernel/intern/armature_deform.cc (armature_vert_task: weights
 // from deform groups, a matrix per bone of pose x inverse rest, DQ via BLI_math_rotation's dquat functions).
 // Theory: Kavan, Collins, Zara, O'Sullivan, "Skinning with Dual Quaternions" (I3D 2007).
+#include "export.h"
 #include "scene.h"
 #include "skin_weights.h"
 #include "../core/core.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <array>
 #include <unordered_map>
 
 namespace bl {
@@ -396,6 +398,95 @@ bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error) {
   }
   m.touch();
   return true;
+}
+
+
+/* Round 378 (moved from the editor's export, task 0268): an armature's skeleton for a mesh its Skin modifier poses -
+ * the joints from the armature down at rest (each joint's object id kept, Live Link's skins name them), and each
+ * vertex's four strongest deforming bones and weights as the modifier deforms (its Max Influences and vertex group).
+ * The clip is the export's own to add. */
+SkinJoints skin_joints(GameObject &arm, const GameObject &owner, const SkinModifier &skin) {
+  SkinJoints out;
+  out.skin = std::make_shared<ExportSkin>();
+  ExportSkin *sk = out.skin.get();
+  sk->rig = arm.id;
+  sk->base = armature_base(arm);
+  sk->base_name = arm.parent ? arm.parent->name + " Skeleton" : std::string("Skeleton");
+  std::vector<GameObject *> objs;
+  std::vector<std::pair<GameObject *, int>> stack{{&arm, -1}};
+  while (!stack.empty() && objs.size() < 4096) {
+    auto [g, parent] = stack.back();
+    stack.pop_back();
+    ExportSkin::Joint j;
+    j.name = g->name, j.parent = parent;
+    const Bone *b = g->get<Bone>();
+    const Transform &l = g->local();
+    j.t = b ? b->rest_position : l.position, j.r = b ? b->rest_rotation : l.rotation, j.s = b ? b->rest_scale : l.scale;
+    const int me = (int)sk->joints.size();
+    sk->joints.push_back(j);
+    objs.push_back(g);
+    sk->joint_ids.push_back(g->id);
+    for (size_t c = g->children.size(); c-- > 0;) stack.push_back({g->children[c], me});
+  }
+  /* The bones that deform: deforming, with an invertible rest. A vertex that follows none stays at rest in Blendity: in
+   * the file it follows the mesh's own object (a joint when the mesh sits under the rig) or the first joint. */
+  for (size_t k = 0; k < objs.size(); k++) {
+    if (objs[k] == &owner) out.still = (int)k;
+    const Bone *b = objs[k]->get<Bone>();
+    if (!b || !b->deform) continue;
+    const Mat4 rm = b->rest_matrix();
+    const float det = dot(cross(rm.column(0), rm.column(1)), rm.column(2));
+    if (std::fabs(det) > 1e-12f && finite_bits(det)) out.deform.emplace(objs[k]->name, (int)k);
+  }
+  const std::string *limit = skin.limit_group(out.invert);
+  out.limit = limit ? *limit : std::string();
+  out.max_influences = skin.max_influences;
+  return out;
+}
+
+/* One vertex's strongest bones, at most `most`, normalized; false when no bone moves it. */
+static bool vertex_weights(const Mesh &m, const std::vector<int> &group_joint, size_t v, size_t most, std::vector<std::pair<float, int>> &w,
+                           std::array<uint16_t, 4> &joints, std::array<float, 4> &weights) {
+  w.clear();
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    const std::vector<float> &gw = m.vertex_groups[gi].weights;
+    if (group_joint[gi] >= 0 && v < gw.size() && gw[v] > 0.0f && finite_bits(gw[v])) w.push_back({gw[v], group_joint[gi]});
+  }
+  if (w.empty()) return false;
+  std::sort(w.begin(), w.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+  float sum = 0.0f;
+  for (size_t k = 0; k < w.size() && k < most; k++) sum += w[k].first;
+  joints = {0, 0, 0, 0}, weights = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (size_t k = 0; k < w.size() && k < most; k++) joints[k] = (uint16_t)w[k].second, weights[k] = w[k].first / sum;
+  return true;
+}
+
+/* The weights as the Skin modifier deforms: at most its Max Influences (and four, glTF's), its vertex group limiting
+ * which vertices follow; a vertex no bone moves follows `still` with weight 1 - glTF's weights must add up to 1 (all
+ * zeros collapse to the origin in most engines). */
+void skin_weights(const SkinJoints &j, const Mesh &m, ExportSkin &out) {
+  std::vector<int> group_joint(m.vertex_groups.size(), -1);  // (each group's joint looked up once)
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    const auto it = j.deform.find(m.vertex_groups[gi].name);
+    if (it != j.deform.end()) group_joint[gi] = it->second;
+  }
+  const int limit_gi = j.limit.empty() ? -1 : m.find_group(j.limit);
+  const size_t most = (size_t)std::max(1, std::min(4, j.max_influences));
+  out.vjoints.assign(m.vert_count(), {(uint16_t)j.still, 0, 0, 0});
+  out.vweights.assign(m.vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+  std::vector<std::pair<float, int>> w;
+  const std::vector<float> *lw = limit_gi >= 0 ? &m.vertex_groups[(size_t)limit_gi].weights : nullptr;
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    const bool in_group = lw && v < lw->size() && (*lw)[v] > 0.0f;
+    if (lw && in_group == j.invert) continue;  // (left out by the modifier's group: at rest)
+    vertex_weights(m, group_joint, v, most, w, out.vjoints[v], out.vweights[v]);
+  }
+}
+
+std::shared_ptr<ExportSkin> skin_for_export(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin) {
+  SkinJoints j = skin_joints(arm, owner, skin);
+  skin_weights(j, m, *j.skin);
+  return j.skin;
 }
 
 }  // namespace bl

@@ -1270,6 +1270,21 @@ struct ArmatureBone {
 };
 void armature_bones(const GameObject &root, std::vector<ArmatureBone> &out);
 Mat4 armature_base(const GameObject &root);  // the root's parent's world matrix (rest matrices are relative to it)
+struct ExportSkin;  // export.h
+/* Round 378: the armature's skeleton and the mesh's weights as its Skin modifier deforms (skin.cpp; the export adds a
+ * clip). In two halves for Live Link (review 378): the skeleton, read from the scene, and the weights, from a copy of
+ * the mesh on a worker. */
+struct SkinJoints {
+  std::shared_ptr<ExportSkin> skin;            // (its joints; no weights yet)
+  std::unordered_map<std::string, int> deform;  // a deforming bone's name -> its joint
+  int still = 0;                                // the joint a vertex no bone moves follows (the mesh's own, under the rig)
+  int max_influences = 4;
+  std::string limit;  // (the Skin's vertex group: only its vertices follow; `invert`: only the others)
+  bool invert = false;
+};
+SkinJoints skin_joints(GameObject &arm, const GameObject &owner, const SkinModifier &skin);
+void skin_weights(const SkinJoints &j, const Mesh &m, ExportSkin &out);
+std::shared_ptr<ExportSkin> skin_for_export(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin);
 /* Automatic weights: groups named after the bones, from each vertex's distance to them (skin.cpp). */
 bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error = nullptr);
 struct BoneSegment;  // skin_weights.h

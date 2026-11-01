@@ -34,7 +34,7 @@ and scales come across as the same numbers.
 | lights | Directional, Point, Spot, Rectangle and Disc lights with the same intensity, range and angles (Unity's area lights are baked only: they light nothing until you bake) |
 | cameras | Cameras (disabled, so the Game view keeps yours) with the same field of view, clipping and physical lens |
 | the look (round 376) | RenderSettings (Trilight ambient, the procedural or panoramic skybox, linear fog); colours made gamma; a Blendity Look object keeping the scene's own lighting (Restore Scene Lighting in its menu); in a URP project a global Volume with ColorAdjustments, Tonemapping, Bloom and Vignette (turn Post Processing on for the camera) |
-| armatures and bones | empty GameObjects posed as the bones (skinned meshes come across as moving vertices) |
+| armatures and bones | empty GameObjects posed as the bones; a skinned mesh (round 378) is a SkinnedMeshRenderer on them, its keys as blend shapes |
 
 ## Test
 

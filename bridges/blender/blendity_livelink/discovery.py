@@ -30,4 +30,4 @@ def read():
 
 def hello(app):
     """The line a bridge sends first: who it is (Blendity's Live Link window lists it; nothing else reads it)."""
-    return (json.dumps({"t": "client", "app": app, "bridge": BRIDGE_VERSION}) + "\n").encode("utf-8")
+    return (json.dumps({"t": "client", "app": app, "bridge": BRIDGE_VERSION, "caps": ["skins"]}) + "\n").encode("utf-8")  # (round 378: it skins)

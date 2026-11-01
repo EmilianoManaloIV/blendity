@@ -33,6 +33,7 @@ class Server {
   int client_count() const;  // connected now (a closed one leaves when its thread notices: within 100 ms)
   /* Each connected client's first line, "" until it sent one (a bridge's hello: task 0274). Read, never acted on. */
   std::vector<std::string> client_hellos() const;
+  std::string client_hello(int client) const;  // (round 378: one client's, "" when none or gone)
 
   /* Queues `line` (one JSON object, no newline) and its attachment `bin`: the server adds ,"bin":<bytes> to the
    * line's object when there is one, and sends the bytes right after the line's newline. A nonzero `coalesce` key

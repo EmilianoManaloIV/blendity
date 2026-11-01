@@ -30,6 +30,7 @@ struct Stats {
            cameras = 0, deletes = 0;
   uint64_t worlds = 0, renders = 0, filters = 0;  // (round 376: the world, the render's look, a camera's filters)
   uint64_t textures = 0, textures_same = 0;       // (round 377: images sent; looked at again but their pixels the same)
+  uint64_t rigs = 0, weights = 0;                 // (round 378: skinned / keyed meshes sent with their skin; shape weights)
   uint64_t ticks = 0;          // ticks that compared the scene (at most 60 a second, none without a client)
   double tick_ms = 0;          // the last one's time on the main thread
   double tick_ms_max = 0;

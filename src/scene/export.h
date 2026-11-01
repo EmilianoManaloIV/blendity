@@ -42,6 +42,7 @@ struct ExportSkin {
   uint64_t rig = 0;  // (review 352) the armature's id: meshes on one rig share its skeleton in FBX (0: their own)
   Mat4 base;  // the skeleton's parent's world matrix
   std::vector<Joint> joints;
+  std::vector<uint64_t> joint_ids;  // (round 378) each joint's object, in order (Live Link's skin names them)
   std::vector<std::array<uint16_t, 4>> vjoints;  // per mesh vertex: its four strongest joints
   std::vector<std::array<float, 4>> vweights;     // ...their weights, summing to 1 (all 0: no joint)
   struct Anim {

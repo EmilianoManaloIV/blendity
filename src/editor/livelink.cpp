@@ -27,7 +27,7 @@ namespace {
 
 /* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
  * own (the world, the render's look) are keyed on id 0, which no object has. */
-enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture };
+enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights };
 uint64_t ckey(uint64_t id, Kind k) { return id << 4 | (uint64_t)k; }
 
 /* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
@@ -138,6 +138,11 @@ struct Sent {
   std::vector<int> materials;
   uint64_t light = 0, camera = 0;
   MeshStamp mesh;
+  bool rig = false;           // (round 378: sent at rest with its skin / keys)
+  MeshStamp base;             // (...the rest mesh it was built from)
+  uint64_t rig_key = 0;       // (...its armature, skeleton and Skin settings)
+  Mat4 rig_rel;               // (...where the rig sits from the mesh)
+  uint64_t weights = 0;       // (...its shape weights' hash)
   bool structure_equal(const Sent &o) const {
     return name == o.name && kind == o.kind && parent == o.parent && armature == o.armature && active == o.active && materials == o.materials;
   }
@@ -149,12 +154,100 @@ struct MaterialSent {
   uint64_t hash = 0;
 };
 
+/* Round 378: a mesh posed only by its Skin (and normal-only modifiers), or carrying shape keys: it goes at rest, its
+ * skin and blend shapes with it, and moves by its bones' poses and its shape weights - not its vertices every frame. */
+struct Rig {
+  const Mesh *base = nullptr;          // (the mesh before the Skin: its keys unapplied)
+  GameObject *armature = nullptr;
+  const SkinModifier *skin = nullptr;
+  bool on() const { return base != nullptr; }
+};
+bool normals_only_modifier(const Component &c) {
+  return std::strcmp(c.type_name(), NormalTransferModifier::kName) == 0 || std::strcmp(c.type_name(), SmoothNormalsModifier::kName) == 0;
+}
+/* What the engines' skins do as Blendity's Skin does: linear blending (not Dual Quaternion - Preserve Volume), posed
+ * (not shown at Rest Position), at most four bones a vertex. Anything else streams its vertices (review 378). */
+bool engines_skin_like(const Armature &a, const SkinModifier &s) { return a.deform == 0 && !a.rest_position && s.max_influences <= 4; }
+Rig rig_of(GameObject &g) {
+  Rig r;
+  const MeshFilter *mf = g.mesh_filter();
+  const Mesh *base = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  if (!base || !base->face_count()) return r;
+  const SkinModifier *skin = nullptr;
+  for (const auto &c : g.components) {
+    if (!c->enabled || !c->is_modifier() || normals_only_modifier(*c)) continue;
+    if (std::strcmp(c->type_name(), SkinModifier::kName) != 0 || skin) return r;  // (another modifier changes the mesh: its vertices go)
+    skin = static_cast<const SkinModifier *>(c.get());
+  }
+  GameObject *arm = skin && g.scene && !skin->object.empty() ? g.scene->find_by_name(skin->object) : nullptr;
+  if (arm && !arm->get<Armature>()) arm = nullptr;
+  if (arm && !engines_skin_like(*arm->get<Armature>(), *skin)) return r;  // (review 378: its vertices go)
+  const bool keyed = !base->shape_keys.empty() && meshops::shape_keys_fit(*base);
+  if (!arm && !keyed) return r;
+  r.base = base, r.armature = arm, r.skin = arm ? skin : nullptr;
+  return r;
+}
+std::vector<float> shape_weights_of(const GameObject &g, const Mesh &base) {
+  std::vector<float> w;
+  const MeshRenderer *mr = g.mesh_renderer();
+  for (const ShapeKey &k : base.shape_keys) w.push_back(mr ? mr->shape_weight(k.name) : 0.0f);
+  return w;
+}
+
+/* Round 378: what a rig's skin is built from besides its rest mesh - the armature, each joint (its object, name,
+ * parent, rest, whether it deforms) and the Skin's settings: a change sends the skin again (review 378). Where the rig
+ * sits from the mesh is compared apart, with a tolerance (rig_rel_of). */
+void mix_key(uint64_t &h, const void *p, size_t n) {
+  const unsigned char *b = static_cast<const unsigned char *>(p);
+  for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+}
+void mix_joint(uint64_t &h, const GameObject &g, int parent) {
+  mix_key(h, &g.id, sizeof(g.id));
+  mix_key(h, &parent, sizeof(parent));
+  mix_key(h, g.name.data(), g.name.size());
+  const Bone *b = g.get<Bone>();
+  const Transform &l = g.local();
+  const float rest[10] = {b ? b->rest_position.x : l.position.x, b ? b->rest_position.y : l.position.y, b ? b->rest_position.z : l.position.z,
+                          b ? b->rest_rotation.x : l.rotation.x, b ? b->rest_rotation.y : l.rotation.y, b ? b->rest_rotation.z : l.rotation.z,
+                          b ? b->rest_rotation.w : l.rotation.w, b ? b->rest_scale.x : l.scale.x,       b ? b->rest_scale.y : l.scale.y,
+                          b ? b->rest_scale.z : l.scale.z};
+  mix_key(h, rest, sizeof(rest));
+  const uint8_t d = b && b->deform ? 1 : 0;
+  mix_key(h, &d, 1);
+}
+uint64_t rig_key_of(const Rig &r) {
+  uint64_t h = 1469598103934665603ull;
+  if (!r.armature) return h;
+  const int skin[2] = {r.skin->max_influences, r.skin->invert_group ? 1 : 0};
+  mix_key(h, skin, sizeof(skin));
+  mix_key(h, r.skin->vertex_group.data(), r.skin->vertex_group.size());
+  std::vector<std::pair<const GameObject *, int>> stack{{r.armature, -1}};  // (skin_joints' order)
+  for (int n = 0; !stack.empty() && n < 4096; n++) {
+    auto [g, parent] = stack.back();
+    stack.pop_back();
+    mix_joint(h, *g, parent);
+    for (size_t c = g->children.size(); c-- > 0;) stack.push_back({g->children[c], n});
+  }
+  return h;
+}
+Mat4 rig_rel_of(GameObject &g, const Rig &r) { return r.armature ? g.world_matrix().inverse() * armature_base(*r.armature) : Mat4::identity(); }
+bool rel_close(const Mat4 &a, const Mat4 &b) {
+  for (int i = 0; i < 16; i++)
+    if (!(std::fabs(a.m[i] - b.m[i]) <= 1e-4f * (1.0f + std::fabs(a.m[i])))) return false;
+  return true;
+}
+
 /* A glTF binary to build off the main thread: the mesh is a copy, so the scene can go on changing. */
 struct MeshJob {
   uint64_t id = 0;
   std::shared_ptr<Mesh> mesh;
   std::string name;
   MeshStamp stamp;
+  std::shared_ptr<SkinJoints> joints;      // (round 378: a rig's skeleton, read on the main thread; its weights made on the worker)
+  std::shared_ptr<const ExportSkin> skin;  // (...the skin then: its joints' objects in skin->joint_ids)
+  std::vector<float> shape_weights;        // (round 378: a keyed mesh's, its keys written as morph targets)
+  uint64_t armature = 0;
+  bool rig = false;
   std::vector<int> clients;  // besides every ready client when `broadcast`
   bool broadcast = false;
 };
@@ -342,7 +435,13 @@ struct Link::Impl {
   void send_light(const std::vector<int> &to, bool all, GameObject &g);
   void send_camera(const std::vector<int> &to, bool all, GameObject &g);
   void send_look(Scene &scene, const std::vector<int> &to, bool all);
-  void send_deform(GameObject &g, const Mesh &m);
+  void send_deform(GameObject &g, const Mesh &m, const std::vector<int> *only = nullptr);
+  /* Round 378: skins. */
+  std::unordered_map<int, int> skin_caps;  // (a client's hello said "skins": it takes a rig's skin and needs no deforms of it)
+  bool skins(int client);
+  std::vector<int> deform_clients();
+  void send_mesh(const std::vector<int> &to, bool all, GameObject &g, Sent &s, const Mesh *m);
+  void send_weights(GameObject &g, const Rig &r, Sent &s, const std::vector<int> &to, bool all);
   void send_pose(const GameObject &armature, const std::vector<GameObject *> &bones);
   void send_transform(const GameObject &g, const Trs &trs);
   void request_mesh(const std::vector<int> &to, bool all, GameObject &g, const Mesh *m);
@@ -491,20 +590,35 @@ void Link::Impl::worker_loop() {
       busy++;
     }
     ScopedTimer t;
+    if (job.joints) skin_weights(*job.joints, *job.mesh, *job.joints->skin), job.skin = job.joints->skin;  // (review 378: off the main thread)
     ExportOptions o = export_defaults((int)ExportFormat::GLB);
     o.materials = false;  // (the materials go as their own messages; each primitive names its slot)
     o.vertex_ids = true;
-    o.shape_keys = false;  // (round 351: the evaluated mesh has its weights applied; the keys stream as deforms - round 364 sends them as blend shapes)
+    o.shape_keys = job.rig;  // (round 378: a rig's keys as morph targets; otherwise the evaluated mesh has its weights applied)
+    o.skins = job.rig && job.skin;
     o.triangulate = false;
-    const std::string glb = export_gltf({ExportItem{job.name, job.mesh.get(), Mat4::identity(), {}}}, o, true, "", nullptr);
+    ExportItem item;
+    item.name = job.name, item.mesh = job.mesh.get(), item.world = Mat4::identity(), item.skin = job.skin, item.shape_weights = job.shape_weights;
+    const std::string glb = export_gltf({item}, o, true, "", nullptr);
     JsonWriter w;
     w.obj().key("t").str("mesh").key("id").integer((int64_t)job.id).key("topology").integer((int64_t)job.stamp.topology);
-    w.key("verts").integer((int64_t)job.mesh->positions.size()).end();
+    w.key("verts").integer((int64_t)job.mesh->positions.size());
+    if (job.rig && job.skin) {  // (round 378: the joints are these objects - the bones Live Link already sends)
+      w.key("skin").obj().key("armature").integer((int64_t)job.armature).key("joints").arr();
+      for (uint64_t j : job.skin->joint_ids) w.integer((int64_t)j);
+      w.end().end();
+    }
+    if (job.rig && !job.mesh->shape_keys.empty()) {
+      w.key("shapes").arr();
+      for (const ShapeKey &k : job.mesh->shape_keys) w.str(k.name);
+      w.end();
+    }
+    w.end();
     server.send_to(job.clients, job.broadcast, w.out, glb);  // (no key: a barrier, so no newer deform goes ahead of it)
     encode_us += (uint64_t)(t.ms() * 1000.0);
     built++;
     std::lock_guard<std::mutex> lk(wm);
-    done.push_back({job.id, job.stamp});
+    done.push_back({job.id, job.rig ? MeshStamp() : job.stamp});  // (a rig went at rest: its posed vertices always follow, to who needs them)
     busy--;
     wcv.notify_all();
   }
@@ -687,7 +801,62 @@ void Link::Impl::send_look(Scene &scene, const std::vector<int> &to, bool all) {
 
 /* Vertices that moved, the faces the same: the positions in the object's space and glTF's axes (float32 x, y, z per
  * vertex of the mesh; the binary's _VERT attribute says which of its vertices each one is). */
-void Link::Impl::send_deform(GameObject &g, const Mesh &m) {
+/* Round 378: the ready clients that move a rig's vertices themselves from deforms - all but those whose hello says
+ * {"caps":["skins"]} (a hello read late: deforms until then, which a skinning bridge ignores). */
+bool Link::Impl::skins(int client) {
+  int &known = skin_caps[client];  // (0 not yet said, 1 plain, 2 skins: each hello read once - review 378)
+  if (known) return known == 2;
+  const std::string h = server.client_hello(client);
+  if (h.empty()) return false;
+  JsonParser p{h.data(), h.data() + h.size()};
+  const Json j = p.value();
+  known = 1;
+  for (const Json &cap : j["caps"].arr) known = cap.str == "skins" ? 2 : known;
+  return known == 2;
+}
+std::vector<int> Link::Impl::deform_clients() {
+  std::vector<int> out;
+  for (int c : server.ready_clients())
+    if (!skins(c)) out.push_back(c);
+  return out;
+}
+
+/* A mesh to `to` (or everyone): a rig at rest with its skin and keys (round 378), any other mesh as it is evaluated. */
+void Link::Impl::send_mesh(const std::vector<int> &to, bool all, GameObject &g, Sent &s, const Mesh *m) {
+  const Rig r = rig_of(g);
+  s.rig = r.on() && m && r.base->positions.size() == m->positions.size();
+  if (!s.rig) return request_mesh(to, all, g, m);
+  MeshJob job;
+  job.id = g.id, job.name = g.name, job.clients = to, job.broadcast = all, job.rig = true;
+  job.mesh = std::make_shared<Mesh>(*r.base);
+  job.stamp = stamp_of(m);  // (its topology: the evaluated mesh's, which the deforms carry)
+  job.shape_weights = shape_weights_of(g, *r.base);
+  if (r.armature) {
+    job.joints = std::make_shared<SkinJoints>(skin_joints(*r.armature, g, *r.skin));
+    job.joints->skin->base = g.world_matrix().inverse() * job.joints->skin->base;  // (the joints from the mesh: its vertices are in its own space)
+    job.armature = r.armature->id;
+  }
+  s.base = stamp_of(r.base), s.rig_key = rig_key_of(r), s.rig_rel = rig_rel_of(g, r);
+  stats.rigs++;
+  if (batching) deferred.push_back(std::move(job));
+  else queue_mesh(std::move(job));
+}
+
+/* Round 378: a keyed mesh's shape weights, in its keys' order (the mesh message's "shapes"). */
+void Link::Impl::send_weights(GameObject &g, const Rig &r, Sent &s, const std::vector<int> &to, bool all) {
+  if (r.base->shape_keys.empty()) return;  // (a skin without keys: nothing to weigh - review 378)
+  const std::vector<float> w = shape_weights_of(g, *r.base);
+  uint64_t h = 1469598103934665603ull;
+  for (float f : w) h = (h ^ std::hash<float>()(f)) * 1099511628211ull;
+  if (all && h == s.weights) return;
+  if (all || server.ready_clients().empty()) s.weights = h;  // (a sync with no one else: what everyone holds)
+  JsonWriter m;
+  m.obj().key("t").str("weights").key("id").integer((int64_t)g.id).key("weights").nums(w.data(), w.size()).end();
+  send(to, all, m, ckey(g.id, kWeights));
+  stats.weights++;
+}
+
+void Link::Impl::send_deform(GameObject &g, const Mesh &m, const std::vector<int> *only) {
   std::string bin(m.positions.size() * 12, '\0');
   float *f = reinterpret_cast<float *>(&bin[0]);
   for (size_t i = 0; i < m.positions.size(); i++) {
@@ -698,7 +867,8 @@ void Link::Impl::send_deform(GameObject &g, const Mesh &m) {
   JsonWriter w;
   w.obj().key("t").str("deform").key("id").integer((int64_t)g.id).key("topology").integer((int64_t)m.topology_serial());
   w.key("verts").integer((int64_t)m.positions.size()).end();
-  send({}, true, w, ckey(g.id, kDeform), bin);
+  if (only) send(*only, false, w, ckey(g.id, kDeform), bin);
+  else send({}, true, w, ckey(g.id, kDeform), bin);
   stats.deforms++;
 }
 
@@ -740,7 +910,8 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     if (g.camera()) send_camera(fresh, false, g);
     const Mesh *m = s.kind == "mesh" ? g.evaluated_mesh(0) : nullptr;
     s.mesh = stamp_of(m);
-    request_mesh(fresh, false, g, m);
+    send_mesh(fresh, false, g, s, m);  // (round 378: a rig at rest with its skin; its weights after)
+    if (s.rig) send_weights(g, rig_of(g), s, fresh, false);
     s.seen = true;
     if (!others) sent[g.id] = std::move(s);  // (with clients already there, `sent` is what they have: compare() moves it)
   });
@@ -758,13 +929,33 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
 
 void Link::Impl::compare_mesh(GameObject &g, Sent &s) {
   const Mesh *m = s.kind == "mesh" ? g.evaluated_mesh(0) : nullptr;
+  const Rig r = s.kind == "mesh" ? rig_of(g) : Rig{};
+  if (r.on() && m) {  // (round 378: its rest mesh again only when it or its rig changed; its weights; deforms to who needs them)
+    if (!s.rig || !(stamp_of(r.base) == s.base) || rig_key_of(r) != s.rig_key || !rel_close(rig_rel_of(g, r), s.rig_rel)) {
+      s.mesh = stamp_of(m);
+      return send_mesh({}, true, g, s, m);
+    }
+    send_weights(g, r, s, {}, true);
+    const MeshStamp now = stamp_of(m);
+    if (now == s.mesh) return;
+    s.mesh = now;
+    const std::vector<int> need = deform_clients();
+    if (!need.empty()) send_deform(g, *m, &need);
+    return;
+  }
+  if (s.rig) {  // (review 378: a rig no more - the engines' skin taken off by a whole mesh, never a deform they'd ignore)
+    s.mesh = stamp_of(m);
+    if (m) send_mesh({}, true, g, s, m);
+    s.rig = false;
+    return;
+  }
   const MeshStamp now = stamp_of(m);
   if (now == s.mesh) return;
   const bool same_faces = m && s.mesh.topology == now.topology && s.mesh.verts == now.verts;
   s.mesh = now;
   if (!m) return;
   if (same_faces) send_deform(g, *m);
-  else request_mesh({}, true, g, m);
+  else send_mesh({}, true, g, s, m);
 }
 
 /* Sends what changed about one object; true when it is a bone that moved (its rig's pose is sent once, after). */
@@ -778,7 +969,10 @@ bool Link::Impl::compare_object(GameObject &g) {
     if (g.camera()) send_camera({}, true, g);
     const bool fresh = it == sent.end();
     if (fresh) it = sent.emplace(g.id, Sent()).first;
-    now.mesh = fresh ? MeshStamp() : it->second.mesh;
+    if (!fresh) {  // (what the clients hold of its mesh: a rename or a material doesn't send a rig's skin again - review 378)
+      const Sent &was = it->second;
+      now.mesh = was.mesh, now.rig = was.rig, now.base = was.base, now.rig_key = was.rig_key, now.rig_rel = was.rig_rel, now.weights = was.weights;
+    }
     it->second = std::move(now);
     it->second.seen = true;
     compare_mesh(g, it->second);
@@ -856,6 +1050,11 @@ void Link::Impl::finished_meshes(Scene &scene) {
     GameObject *g = scene.find(id);
     if (it == sent.end() || !g || it->second.mesh == built) continue;
     const Mesh *m = it->second.kind == "mesh" ? g->evaluated_mesh(0) : nullptr;
+    if (m && it->second.rig) {  // (round 378: a rig went at rest - its posed vertices to the clients that move them by deforms)
+      const std::vector<int> need = deform_clients();
+      if (!need.empty()) send_deform(*g, *m, &need);
+      continue;
+    }
     if (m && m->topology_serial() == built.topology && m->positions.size() == built.verts) send_deform(*g, *m);
   }
 }

@@ -20,6 +20,9 @@ var materials := {}  # key -> StandardMaterial3D
 var textures := {}   # path -> Texture2D
 var tex_by_key := {} # (round 377) a texture key -> ImageTexture, from its PNG bytes
 var material_msgs := {}  # (round 377) a material key -> its last message (built again when its texture arrives)
+var skins := {}          # (round 378) a skinned mesh's id -> its joints' ids
+var shape_weights := {}  # (round 378) a keyed mesh's id -> its last weights (they can come before its mesh)
+var skins_dirty := false # (review 378: the skins posed once after a batch of messages, not after each)
 var seen = null      # ids met during a sync (null: not in one)
 var playing := false
 var counts := {}
@@ -66,8 +69,10 @@ func apply(j: Dictionary, bin: PackedByteArray) -> void:
 			_on_object(j)
 		"transform":
 			_on_transform(j)
+			skins_dirty = true
 		"pose":
 			_on_pose(j)
+			skins_dirty = true
 		"delete":
 			_remove(int(j.get("id", 0)))
 		"mesh":
@@ -88,6 +93,15 @@ func apply(j: Dictionary, bin: PackedByteArray) -> void:
 			_on_filters(j)
 		"texture":
 			_on_texture(j, bin)
+		"weights":
+			_on_weights(j)
+
+
+## After a batch of messages: the skins posed from their bones, once (review 378).
+func flush() -> void:
+	if skins_dirty:
+		skins_dirty = false
+		_update_skins()
 
 
 func _end_sync() -> void:
@@ -216,6 +230,8 @@ func _remove(id: int) -> void:
 	slots.erase(id)
 	meshes.erase(id)
 	topology.erase(id)
+	skins.erase(id)
+	shape_weights.erase(id)
 
 
 func _on_mesh(j: Dictionary, bin: PackedByteArray) -> void:
@@ -226,10 +242,12 @@ func _on_mesh(j: Dictionary, bin: PackedByteArray) -> void:
 	var g := Glb.new()
 	if not g.read(bin):
 		return
-	n.mesh = g.build()
+	n.mesh = g.build(j.get("shapes", []))
 	meshes[id] = g
 	topology[id] = "%s/%s" % [str(j.get("topology", 0)), str(j.get("verts", 0))]
 	_assign_materials(id)
+	_set_skin(id, n, g, j.get("skin", {}))
+	_apply_weights(id)
 
 
 func _on_deform(j: Dictionary, bin: PackedByteArray) -> void:
@@ -239,6 +257,8 @@ func _on_deform(j: Dictionary, bin: PackedByteArray) -> void:
 		return
 	if topology.get(id, "") != "%s/%s" % [str(j.get("topology", 0)), str(j.get("verts", 0))]:
 		return  # (a newer mesh is on its way; a deform follows it)
+	if skins.has(id) or (n is MeshInstance3D and n.mesh != null and n.mesh.get_blend_shape_count() > 0):
+		return  # (round 378: it moves by its skin and shapes itself)
 	var g = meshes[id]
 	if not g.deform(bin):
 		return
@@ -531,3 +551,77 @@ func _on_texture(j: Dictionary, bin: PackedByteArray) -> void:
 			if entry is Dictionary and int(entry.get("texture", 0)) == key:
 				_on_material(material_msgs[mk])
 				break
+
+
+# ------------------------------------------------------------------ skins (round 378)
+
+const SKELETON_NAME := "Blendity Skeleton"
+
+
+## A skinned mesh: a Skeleton3D under it (a flat bone per joint) and a Skin of glTF's inverse bind matrices; each bone
+## posed from its joint's object (the bones Live Link sends) as they move.
+func _set_skin(id: int, n: MeshInstance3D, g, skin: Dictionary) -> void:
+	var ids: Array = skin.get("joints", [])
+	var old := n.get_node_or_null(SKELETON_NAME)
+	if ids.is_empty() or g.inverse_binds.size() != ids.size():
+		skins.erase(id)
+		n.skin = null
+		n.skeleton = NodePath()
+		if old != null:
+			n.remove_child(old)
+			old.free()
+		return
+	var sk: Skeleton3D = old if old is Skeleton3D else null
+	if sk == null:
+		sk = Skeleton3D.new()
+		sk.name = SKELETON_NAME
+		n.add_child(sk)
+		_own(sk)
+	sk.clear_bones()
+	var s := Skin.new()
+	for b in ids.size():
+		sk.add_bone("joint_%d" % b)
+		s.add_bind(b, g.inverse_binds[b])
+	n.skin = s
+	n.skeleton = NodePath(SKELETON_NAME)
+	skins[id] = ids
+	_update_skins()
+
+
+## The world transform through the parents (headless too: the nodes needn't be in a tree).
+static func _chain(n: Node) -> Transform3D:
+	var t := Transform3D.IDENTITY
+	while n is Node3D:
+		t = (n as Node3D).transform * t
+		n = n.get_parent()
+	return t
+
+
+## Each skinned mesh's bones posed from its joints' objects, in the mesh's space (its skeleton's).
+func _update_skins() -> void:
+	for id in skins.keys():
+		var n := _alive(id)
+		var sk: Skeleton3D = n.get_node_or_null(SKELETON_NAME) if n != null else null
+		if sk == null:
+			continue
+		var to_mesh := _chain(n).affine_inverse()
+		var ids: Array = skins[id]
+		for b in ids.size():
+			var bone := _alive(int(ids[b]))
+			if bone != null:
+				sk.set_bone_pose(b, to_mesh * _chain(bone))
+
+
+## A keyed mesh's shape weights, in its keys' order; kept, set again when its mesh comes.
+func _on_weights(j: Dictionary) -> void:
+	shape_weights[int(j.get("id", 0))] = j.get("weights", [])
+	_apply_weights(int(j.get("id", 0)))
+
+
+func _apply_weights(id: int) -> void:
+	var n := _alive(id)
+	if not (n is MeshInstance3D) or n.mesh == null or not shape_weights.has(id):
+		return
+	var w: Array = shape_weights[id]
+	for i in mini(w.size(), n.mesh.get_blend_shape_count()):
+		n.set_blend_shape_value(i, float(w[i]))

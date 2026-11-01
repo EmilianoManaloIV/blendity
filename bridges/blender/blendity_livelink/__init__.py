@@ -145,6 +145,7 @@ class _Link:
                 return None
             if not got:
                 break  # (nothing more for now)
+        self.applier.flush_skins()  # (review 378: skins that waited for Object Mode)
         return self.INTERVAL
 
 

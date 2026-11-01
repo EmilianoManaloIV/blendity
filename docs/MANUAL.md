@@ -908,6 +908,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Live Link's textures** (round 377): each texture a material uses - an image file, a generated image, a procedural texture's output, a surface being painted - is sent by its pixels (a PNG, at most 2048 a side) whenever they change - a painted surface each time a stroke ends, a texture that keeps changing (a procedural field dragged) at most 4 times a second and once more when it stops; the same pixels aren't sent twice. The bridges load them from the bytes and put every map their materials take: Blender, Godot and Unity the Base, Normal, Metallic and Emission maps (Godot the Roughness map too), Unreal the Base Map.
 
+**Live Link's skins** (round 378): a mesh posed only by its Skin modifier, or carrying shape keys, goes to the engines once at rest with its skin (its joints the bones Live Link already sends) and its keys as blend shapes; then only the bones' poses and the shape weights travel. Unity builds a SkinnedMeshRenderer, Godot a Skeleton3D and a Skin, Blender an armature following the bones; Unreal keeps receiving the posed vertices. Another modifier on the mesh (a Mirror, a Subdivision) streams its vertices as before, and so does a Skin the engines can't match: a Preserve Volume armature, Rest Position, or more than four influences.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

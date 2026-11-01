@@ -92,11 +92,27 @@ Session record_session() {
   GameObject *box = make_cube(ed, "Box");
   GameObject *root = ed.scene().create("Rig");
   root->add<Armature>();
+  root->set_local_scale(Vec3(2, 2, 2));  // (review 378: a scaled rig - an FBX armature at 0.01 - skins as Blendity does)
   GameObject *upper = ed.scene().create("Upper", root);
   upper->add<Bone>();
   GameObject *lower = ed.scene().create("Lower", upper);
   lower->add<Bone>();
   lower->set_local_position(Vec3(0, 1, 0));
+  /* Round 378: a skinned cylinder on the rig with a "Smile" shape key: it goes at rest with its skin and keys. */
+  GameObject *arm = ed.scene().create("Arm");
+  arm->add<MeshFilter>()->mesh = primitives::cylinder(0.2f, 2.0f, 8);
+  arm->add<MeshRenderer>();
+  arm->set_local_position(Vec3(3, 0, 0));
+  SkinModifier *skin = arm->add<SkinModifier>();
+  skin->object = "Rig";
+  Mesh &am = *mesh_make_mutable(arm->get<MeshFilter>()->mesh);
+  skin_bind_automatic(*skin, am);
+  ShapeKey smile;
+  smile.name = "Smile";
+  smile.delta.assign(am.vert_count(), Vec3(0.0f, 0.0f, 0.1f));
+  am.shape_keys.push_back(smile);
+  am.touch();
+  arm->get<MeshRenderer>()->set_shape_weight("Smile", 0.25f);
   if (!box || !ed.livelink_start(0)) return s;
   Material &mat = *box->mesh_renderer()->materials[0];
   mat.name = "Cel";
@@ -510,13 +526,15 @@ static void livelink_fixture_tests() {
     const std::vector<std::string> now = outline(s.ms);
     CHECK(now.size() > 20);
     std::printf("    %zu messages, %zu bytes; types:", s.ms.size(), s.raw.size());
-    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture"})
+    for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture", "weights"})
       std::printf(" %s %d", t, count_of(s.ms, t));
     std::printf("\n");
-    for (const char *t : {"transform", "deform", "pose", "delete"}) CHECK(count_of(s.ms, t) == 1);
+    for (const char *t : {"transform", "pose", "delete"}) CHECK(count_of(s.ms, t) == 1);
+    CHECK(count_of(s.ms, "deform") == 3);  // (the Box's vertex, and round 378's skinned Arm: at rest built, then posed - this client doesn't skin)
     CHECK(count_of(s.ms, "play") == 2 && count_of(s.ms, "material") >= 3);
     CHECK(count_of(s.ms, "world") == 2 && count_of(s.ms, "render") == 2 && count_of(s.ms, "filters") == 2);  // (round 376: at the sync and once changed)
     CHECK(count_of(s.ms, "texture") == 1);  // (round 377: the tile once, at the sync)
+    CHECK(count_of(s.ms, "weights") == 1);  // (round 378: the arm's Smile at the sync)
     const std::string path = "tests/fixtures/livelink_stream.bin";
     if (std::getenv("BLENDITY_LIVELINK_RECORD")) {
       CHECK(fs::write_file(path, s.raw));
@@ -686,7 +704,7 @@ static void tests_round297() {
     }
     std::printf("    %d messages framed, %zu bytes left; %d meshes, %d vertices outside their mesh; normals worked out again agree at %zu of %zu; %d of %d deforms applied\n",
                 n, st.pending(), meshes, bad_vert, agree, total, deformed, deforms);
-    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 1 && deformed == 1);
+    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 3 && deformed == 3);  // (the Box's, and since round 378 the skinned Arm's twice: built and posed - the recorder doesn't skin)
     /* The Box moved to Blendity's (1, 2, 3): glTF (-1, 2, 3), Unreal (300 cm forward, 100 cm right, 200 cm up). */
     std::printf("    the Box in Unreal: (%.1f, %.1f, %.1f) cm\n", box.x, box.y, box.z);
     CHECK(box_name == "Box" && std::fabs(box.x - 300) < 1e-6 && std::fabs(box.y - 100) < 1e-6 && std::fabs(box.z - 200) < 1e-6);
@@ -1211,6 +1229,118 @@ static void tests_round377() {
   });
 }
 
+static const Message *last_for(const std::vector<Message> &ms, const char *type, uint64_t id) {
+  const Message *found = nullptr;
+  for (const Message &m : ms) found = m.type() == type && (uint64_t)m.j["id"].number() == id ? &m : found;
+  return found;
+}
+
+static void tests_round378() {
+  test("Live Link's skins and blend shapes (round 378): a skinned, keyed mesh goes once at rest with its skin (its joints the bone objects) and its keys as morph targets; a bone turned sends its pose, and its vertices only to a client that didn't say it skins; a shape weight changed sends one weights message to both", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *body = ed.scene().create("Body");
+    body->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+    body->add<MeshRenderer>();
+    ed.command("create Armature");
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    CHECK(arm && !arm->children.empty());
+    if (!arm || arm->children.empty()) return;
+    SkinModifier *sk = body->add<SkinModifier>();
+    sk->object = arm->name;
+    Mesh &mm = *mesh_make_mutable(body->get<MeshFilter>()->mesh);
+    std::string why;
+    CHECK(skin_bind_automatic(*sk, mm, &why));
+    ShapeKey smile;
+    smile.name = "Smile";
+    smile.delta.assign(mm.vert_count(), Vec3(0.0f, 0.1f, 0.0f));
+    mm.shape_keys.push_back(smile);
+    mm.touch();
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient plain, skins;
+    CHECK(plain.connect(ed.livelink_for_test()->port()) && skins.connect(ed.livelink_for_test()->port()));
+    CHECK(skins.send("{\"t\":\"client\",\"app\":\"Skinning test\",\"bridge\":\"1.2\",\"caps\":[\"skins\"]}"));
+    std::vector<Message> a = until(ed, plain, "sync_end"), b = until(ed, skins, "sync_end");
+    for (const Message &m : drain(ed, plain)) a.push_back(m);
+    for (const Message &m : drain(ed, skins)) b.push_back(m);
+    const Message *mesh = last_for(b, "mesh", body->id);
+    CHECK(mesh && mesh->j["skin"]["armature"].number() == (double)arm->id && mesh->j["skin"]["joints"].size() >= 1 && mesh->j["shapes"].size() == 1 &&
+          mesh->j["shapes"][0].str == "Smile");
+    if (!mesh) return;
+    const Json g = glb_json(mesh->bin);
+    std::printf("    the rest mesh: %zu joint(s), %zu skin(s), %zu morph target(s)\n", mesh->j["skin"]["joints"].size(), g["skins"].size(),
+                g["meshes"][0]["primitives"][0]["targets"].size());
+    CHECK(g["skins"].size() == 1 && g["meshes"][0]["primitives"][0]["targets"].size() == 1 && g["meshes"][0]["primitives"][0]["attributes"]["JOINTS_0"].type == Json::Num);
+    bool joints_are_bones = mesh->j["skin"]["joints"].size() > 0;
+    for (const Json &id : mesh->j["skin"]["joints"].arr) joints_are_bones = joints_are_bones && ed.scene().find((uint64_t)id.number()) != nullptr;
+    CHECK(joints_are_bones);
+    /* A bone turned: its pose to both; the body's vertices only to the plain client. */
+    GameObject *bone = arm->children[0];
+    bone->set_local_rotation(Quat::euler(Vec3(0, 0, 30.0f)));
+    const std::vector<Message> pa = drain(ed, plain), pb = drain(ed, skins);
+    std::printf("    a bone turned: the plain client %d deform(s), the skinning one %d deform(s) and %d pose(s)\n", (int)(last_for(pa, "deform", body->id) != nullptr),
+                (int)(last_for(pb, "deform", body->id) != nullptr), count_of(pb, "pose"));
+    CHECK(last_for(pa, "deform", body->id) && !last_for(pb, "deform", body->id) && count_of(pb, "pose") >= 1 && count_of(pb, "mesh") == 0);
+    /* A shape weight: one weights message each. */
+    body->get<MeshRenderer>()->set_shape_weight("Smile", 0.5f);
+    const std::vector<Message> wa = drain(ed, plain), wb = drain(ed, skins);
+    const Message *w = last_for(wb, "weights", body->id);
+    CHECK(count_of(wb, "weights") == 1 && count_of(wa, "weights") == 1 && w && std::fabs(w->j["weights"][0].number() - 0.5) < 1e-6 && !last_for(wb, "deform", body->id));
+    CHECK(count_of(drain(ed, skins), "weights") == 0);  // (unchanged: nothing)
+    std::printf("    rigs %llu, weights %llu\n", (unsigned long long)ed.livelink_for_test()->stats().rigs, (unsigned long long)ed.livelink_for_test()->stats().weights);
+    ed.livelink_stop();
+  });
+  test("Live Link's rigs as they change (review 378): a rename sends no mesh; Max Influences or a bone's rest sends the skin again; Preserve Volume, Rest Position or the armature deleted sends a plain mesh, and the skin again after", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *body = ed.scene().create("Body");
+    body->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+    body->add<MeshRenderer>();
+    ed.command("create Armature");
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    CHECK(arm && !arm->children.empty());
+    if (!arm || arm->children.empty()) return;
+    SkinModifier *sk = body->add<SkinModifier>();
+    sk->object = arm->name;
+    CHECK(skin_bind_automatic(*sk, *mesh_make_mutable(body->get<MeshFilter>()->mesh)));
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    CHECK(c.send("{\"t\":\"client\",\"app\":\"Skinning test\",\"bridge\":\"1.2\",\"caps\":[\"skins\"]}"));
+    std::vector<Message> s = until(ed, c, "sync_end");
+    for (const Message &m : drain(ed, c)) s.push_back(m);
+    CHECK(last_for(s, "mesh", body->id) && last_for(s, "mesh", body->id)->j["skin"]["joints"].size() >= 1 && count_of(s, "weights") == 0);  // (no keys: no weights)
+    auto step = [&](const char *what, const std::function<void()> &change) {
+      change();
+      const std::vector<Message> ms = drain(ed, c);
+      const Message *m = last_for(ms, "mesh", body->id);
+      const int r = !m ? 0 : m->j["skin"].type == Json::Obj ? 2 : 1;  // (0 no mesh, 1 a plain one, 2 with its skin)
+      std::printf("    %s: %s\n", what, r == 0 ? "no mesh" : r == 1 ? "a plain mesh" : "the mesh with its skin");
+      return r;
+    };
+    CHECK(step("renamed", [&] { body->name = "Body Renamed"; }) == 0);
+    CHECK(step("Max Influences 4 -> 2", [&] { sk->max_influences = 2; }) == 2);
+    CHECK(step("a bone's rest moved", [&] {
+            Bone *b = arm->children[0]->get<Bone>();
+            if (b) b->rest_position = b->rest_position + Vec3(0, 0.1f, 0);
+          }) == 2);
+    CHECK(step("Preserve Volume on", [&] { arm->get<Armature>()->deform = 1; }) == 1);
+    CHECK(step("Preserve Volume off", [&] { arm->get<Armature>()->deform = 0; }) == 2);
+    CHECK(step("Rest Position on", [&] { arm->get<Armature>()->rest_position = true; }) == 1);
+    CHECK(step("Rest Position off", [&] { arm->get<Armature>()->rest_position = false; }) == 2);
+    CHECK(step("the armature deleted", [&] { ed.scene().destroy(arm); }) == 1);
+    ed.livelink_stop();
+  });
+  test("the lesson's Try-it (round 378): window Rigging - a skinned character goes to the engines with its skin", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("window Rigging");
+    CHECK(ed.window_docked_for_test(WindowKind::Rigging));
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -1221,4 +1351,5 @@ void run_livelink_tests() {
   tests_round318();
   tests_round376();
   tests_round377();
+  tests_round378();
 }

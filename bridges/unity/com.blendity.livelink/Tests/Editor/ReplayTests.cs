@@ -39,8 +39,18 @@ namespace Blendity.LiveLink.Tests
             s.Feed(data, data.Length);
             var a = new LiveLinkApplier();
             int n = 0;
+            long armId = 0;
+            byte[] armMesh = null, armPosed = null;  // (round 378: the Arm at rest, and posed as Blendity deformed it for the recorder)
             for (var m = s.Next(); m != null; m = s.Next(), n++)
+            {
+                if (m.Type == "object" && m.Json.GetString("name") == "Arm")
+                    armId = m.Json.GetId("id");
+                if (m.Type == "mesh" && armId != 0 && m.Json.GetId("id") == armId)
+                    armMesh = m.Bin;
+                if (m.Type == "deform" && armId != 0 && m.Json.GetId("id") == armId)
+                    armPosed = m.Bin;
                 a.Apply(m);
+            }
             Assert.Greater(n, 20);
             Assert.AreEqual(0, s.PendingBytes);
             var box = GameObject.Find("Box");
@@ -57,6 +67,28 @@ namespace Blendity.LiveLink.Tests
             Assert.That(mat.GetColor("_Color").r, Is.EqualTo(Mathf.LinearToGammaSpace(0.9f)).Within(1e-3f));
             Assert.NotNull(box.GetComponent<BlendityToon>());
             Assert.IsNull(GameObject.Find("Sphere"));
+            // Round 378: the Arm skinned on the rig's bones, its Smile a blend shape at 25.
+            var arm = GameObject.Find("Arm").GetComponent<SkinnedMeshRenderer>();
+            Assert.NotNull(arm);
+            Assert.AreEqual(3, arm.bones.Length);
+            Assert.AreEqual("Upper", arm.bones[1].name);
+            Assert.AreEqual(1, arm.sharedMesh.blendShapeCount);
+            Assert.That(arm.GetBlendShapeWeight(0), Is.EqualTo(25f).Within(1e-3f));
+            Assert.AreEqual(arm.sharedMesh.vertexCount, arm.sharedMesh.boneWeights.Length);
+            // ...and Unity's skinning puts every vertex where Blendity's did (the turned bone, the smile at 25).
+            var rest = GlbReader.ReadMesh(armMesh);
+            var baked = new Mesh();
+            arm.BakeMesh(baked, true);
+            var bv = baked.vertices;
+            float worst = 0f;
+            for (int i = 0; i < bv.Length; i++)
+            {
+                int v = rest.VertexOf[i] * 12;
+                var want = new Vector3(-System.BitConverter.ToSingle(armPosed, v), System.BitConverter.ToSingle(armPosed, v + 4), System.BitConverter.ToSingle(armPosed, v + 8));
+                worst = Mathf.Max(worst, Vector3.Distance(bv[i], want));
+            }
+            Debug.Log("Blendity Live Link: the skinned Arm against Blendity's posed vertices, at most " + worst + " m apart");
+            Assert.That(worst, Is.LessThan(1e-3f));
             var lower = GameObject.Find("Lower");
             Assert.That(Quaternion.Angle(lower.transform.localRotation, Quaternion.identity), Is.EqualTo(30f).Within(1e-3f));
             // Round 376: the look - a gradient with fog 5-40 m, half a stop up, Bloom 0.8 and a Vignette.

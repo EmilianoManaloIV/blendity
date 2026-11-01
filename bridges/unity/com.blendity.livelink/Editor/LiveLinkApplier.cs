@@ -57,6 +57,7 @@ namespace Blendity.LiveLink
                 case "deform": OnDeform(j, m.Bin); break;
                 case "material": OnMaterial(j); break;
                 case "texture": OnTexture(j, m.Bin); break;  // (round 377)
+                case "weights": OnWeights(j); break;  // (round 378)
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
                 case "world": OnWorld(j); break;  // (round 376: LiveLinkLook.cs)
@@ -205,6 +206,7 @@ namespace Blendity.LiveLink
             slots.Remove(id);
             meshes.Remove(id);
             topology.Remove(id);
+            shapeWeights.Remove(id);
         }
 
         void Destroy(GameObject go)
@@ -212,6 +214,9 @@ namespace Blendity.LiveLink
             var mf = go.GetComponent<MeshFilter>();
             if (mf != null && mf.sharedMesh != null)
                 Object.DestroyImmediate(mf.sharedMesh);
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            if (smr && smr.sharedMesh != null)
+                Object.DestroyImmediate(smr.sharedMesh);  // (review 378: a skinned mesh's too)
             var kids = new List<Transform>();
             foreach (Transform child in go.transform)
                 kids.Add(child);
@@ -226,7 +231,7 @@ namespace Blendity.LiveLink
         {
             long id = j.GetId("id");
             GameObject go;
-            if (!Objects.TryGetValue(id, out go) || go == null || go.GetComponent<MeshFilter>() == null)
+            if (!Objects.TryGetValue(id, out go) || go == null || (go.GetComponent<MeshFilter>() == null && go.GetComponent<SkinnedMeshRenderer>() == null))
                 return;  // (a mesh for an object already gone)
             var gm = GlbReader.ReadMesh(bin);
             var mesh = new Mesh { name = go.name };
@@ -242,13 +247,130 @@ namespace Blendity.LiveLink
             for (int i = 0; i < gm.Submeshes.Count; i++)
                 mesh.SetTriangles(gm.Submeshes[i], i);
             mesh.RecalculateBounds();
-            var mf = go.GetComponent<MeshFilter>();
+            meshes[id] = gm;
+            if (Skin(go, j, gm, mesh))  // (round 378: a skinned or keyed mesh: a SkinnedMeshRenderer on the bones Live Link sent)
+            {
+                topology[id] = j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts");
+                AssignMaterials(id);
+                ApplyWeights(id);
+                return;
+            }
+            var mf = Unskin(go);  // (review 378: a rig no more - its MeshFilter and MeshRenderer back)
             if (mf.sharedMesh != null)
                 Object.DestroyImmediate(mf.sharedMesh);
             mf.sharedMesh = mesh;
-            meshes[id] = gm;
             topology[id] = j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts");
             AssignMaterials(id);
+        }
+
+        /* Round 378: a mesh Live Link sent at rest with its skin ("skin": its joints the bone objects) or shape keys
+         * ("shapes"): its MeshFilter and MeshRenderer give way to a SkinnedMeshRenderer, the bones its joints' objects, the
+         * bind poses glTF's inverse bind matrices in Unity's axes (X mirrored on both sides), each key a blend shape.
+         * False for a mesh with neither. */
+        bool Skin(GameObject go, Dictionary<string, object> j, GlbMesh gm, Mesh mesh)
+        {
+            var skin = j.GetDict("skin");
+            var shapes = j.GetList("shapes");
+            if ((skin == null || gm.Joints == null || gm.InverseBinds == null) && (shapes == null || shapes.Count == 0))
+                return false;
+            var joints = skin != null && gm.Joints != null && gm.InverseBinds != null ? skin.GetList("joints") : null;
+            int jn = joints != null ? joints.Count : 0;
+            var bones = new Transform[jn];
+            var binds = new Matrix4x4[jn];
+            for (int b = 0; b < jn; b++)
+            {
+                GameObject bone;
+                bones[b] = Objects.TryGetValue(System.Convert.ToInt64(joints[b]), out bone) && bone != null ? bone.transform : go.transform;
+                binds[b] = BindPose(gm, b);
+            }
+            if (jn > 0)
+            {
+                mesh.boneWeights = BoneWeights(gm);
+                mesh.bindposes = binds;
+            }
+            for (int t = 0; shapes != null && t < shapes.Count && t < gm.Targets.Count; t++)
+                mesh.AddBlendShapeFrame(System.Convert.ToString(shapes[t]), 100f, ToVectors(gm.Targets[t]), null, null);
+            var mf = go.GetComponent<MeshFilter>();
+            if (mf != null)
+                Object.DestroyImmediate(mf);
+            var mr = go.GetComponent<MeshRenderer>();
+            if (mr != null)
+                Object.DestroyImmediate(mr);
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            if (!smr)  // (not ??: a destroyed Unity object isn't null to it)
+                smr = go.AddComponent<SkinnedMeshRenderer>();
+            if (smr.sharedMesh != null)
+                Object.DestroyImmediate(smr.sharedMesh);
+            smr.sharedMesh = mesh;
+            smr.bones = bones;
+            smr.rootBone = jn > 0 ? bones[0] : go.transform;
+            smr.updateWhenOffscreen = true;
+            return true;
+        }
+
+        /* Joint b's inverse bind matrix (column-major) in Unity's axes: X mirrored on both sides. */
+        static Matrix4x4 BindPose(GlbMesh gm, int b)
+        {
+            var m = new Matrix4x4();
+            for (int i = 0; i < 16; i++)
+                m[i % 4, i / 4] = gm.InverseBinds[b * 16 + i] * ((i % 4 == 0) != (i / 4 == 0) ? -1f : 1f);
+            return m;
+        }
+
+        static BoneWeight[] BoneWeights(GlbMesh gm)
+        {
+            var weights = new BoneWeight[gm.VertexCount];
+            for (int v = 0; v < weights.Length; v++)
+            {
+                int o = v * 4;
+                weights[v] = new BoneWeight
+                {
+                    boneIndex0 = (int)gm.Joints[o], weight0 = gm.Weights[o], boneIndex1 = (int)gm.Joints[o + 1], weight1 = gm.Weights[o + 1],
+                    boneIndex2 = (int)gm.Joints[o + 2], weight2 = gm.Weights[o + 2], boneIndex3 = (int)gm.Joints[o + 3], weight3 = gm.Weights[o + 3]
+                };
+            }
+            return weights;
+        }
+
+        /* A mesh that is no longer a rig: its SkinnedMeshRenderer (and the mesh it held) gives way to a MeshFilter and a
+         * MeshRenderer again. */
+        static MeshFilter Unskin(GameObject go)
+        {
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            if (smr)
+            {
+                if (smr.sharedMesh != null)
+                    Object.DestroyImmediate(smr.sharedMesh);
+                Object.DestroyImmediate(smr);
+            }
+            var mf = go.GetComponent<MeshFilter>();
+            if (!mf)
+                mf = go.AddComponent<MeshFilter>();
+            if (!go.GetComponent<MeshRenderer>())
+                go.AddComponent<MeshRenderer>();
+            return mf;
+        }
+
+        /* Round 378: a keyed mesh's shape weights (0-1, Unity's 0-100), in its keys' order; kept, since they can come
+         * before the mesh (built off Blendity's main thread) and are set when it does. */
+        readonly Dictionary<long, List<object>> shapeWeights = new Dictionary<long, List<object>>();
+
+        void OnWeights(Dictionary<string, object> j)
+        {
+            long id = j.GetId("id");
+            shapeWeights[id] = j.GetList("weights");
+            ApplyWeights(id);
+        }
+
+        void ApplyWeights(long id)
+        {
+            GameObject go;
+            List<object> w;
+            if (!Objects.TryGetValue(id, out go) || go == null || !shapeWeights.TryGetValue(id, out w) || w == null)
+                return;
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            for (int i = 0; smr && smr.sharedMesh && i < w.Count && i < smr.sharedMesh.blendShapeCount; i++)
+                smr.SetBlendShapeWeight(i, 100f * System.Convert.ToSingle(w[i]));
         }
 
         static Vector3[] ToVectors(float[] f)
@@ -269,6 +391,8 @@ namespace Blendity.LiveLink
                 return;
             if (topo != j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts"))
                 return;  // (a newer mesh is on its way; a deform follows it)
+            if (go.GetComponent<SkinnedMeshRenderer>() != null)
+                return;  // (round 378: it skins itself on its bones)
             var into = new float[gm.Positions.Length];
             if (!GlbReader.Deform(gm, bin, into))
                 return;
@@ -286,7 +410,9 @@ namespace Blendity.LiveLink
             int[] keys;
             if (!Objects.TryGetValue(id, out go) || go == null || !slots.TryGetValue(id, out keys))
                 return;
-            var mr = go.GetComponent<MeshRenderer>();
+            Renderer mr = go.GetComponent<MeshRenderer>();
+            if (mr == null)
+                mr = go.GetComponent<SkinnedMeshRenderer>();  // (round 378)
             if (mr == null)
                 return;
             GlbMesh gm;

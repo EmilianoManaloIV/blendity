@@ -5,7 +5,7 @@
 # which a "deform" message moves.
 extends RefCounted
 
-const COUNT := {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
+const COUNT := {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 
 # What a mesh keeps for its deforms, surface by surface.
 var positions: Array[PackedVector3Array] = []
@@ -16,6 +16,10 @@ var gltf_tris: Array[PackedInt32Array] = []   # glTF's order (the face normals' 
 var vertex_of: Array[PackedInt32Array] = []
 var normal_group: Array[PackedInt32Array] = []
 var slots: PackedInt32Array = PackedInt32Array()
+var joints: Array[PackedInt32Array] = []       # (round 378) four per vertex, when the mesh is skinned
+var weights: Array[PackedFloat32Array] = []
+var targets: Array = []                        # (round 378) [target][surface] -> PackedVector3Array of offsets
+var inverse_binds: Array[Transform3D] = []     # (round 378) one per joint (glTF's axes are Godot's)
 
 
 static func _parse(glb: PackedByteArray) -> Array:
@@ -49,8 +53,9 @@ static func _floats(doc: Dictionary, bin: PackedByteArray, index: int) -> Array:
 	var start := int(view.get("byteOffset", 0)) + int(a.get("byteOffset", 0))
 	var r := PackedFloat32Array()
 	r.resize(count * n)
-	for i in count * n:
-		r[i] = bin.decode_float(start + i * 4) if type == 5126 else float(bin.decode_u32(start + i * 4))
+	for i in count * n:  # (round 378: bytes and shorts too - a skin's joints)
+		r[i] = bin.decode_float(start + i * 4) if type == 5126 else float(bin.decode_u32(start + i * 4)) if type == 5125 \
+			else float(bin.decode_u16(start + i * 2)) if type == 5123 else float(bin.decode_u8(start + i))
 	return [r, n]
 
 
@@ -64,6 +69,13 @@ func read(glb: PackedByteArray) -> bool:
 	var prims: Array = doc["meshes"][0]["primitives"]
 	for prim in prims:
 		_read_primitive(doc, bin, prim)
+	var skins: Array = doc.get("skins", [])
+	if not skins.is_empty():
+		var m: PackedFloat32Array = _floats(doc, bin, int(skins[0]["inverseBindMatrices"]))[0]
+		for b in m.size() / 16:
+			var o := b * 16  # (column-major: each column the basis's x, y, z, then the origin)
+			inverse_binds.append(Transform3D(Basis(Vector3(m[o], m[o + 1], m[o + 2]), Vector3(m[o + 4], m[o + 5], m[o + 6]), Vector3(m[o + 8], m[o + 9], m[o + 10])),
+				Vector3(m[o + 12], m[o + 13], m[o + 14])))
 	return true
 
 
@@ -108,6 +120,31 @@ func _read_primitive(doc: Dictionary, bin: PackedByteArray, prim: Dictionary) ->
 	normal_group.append(_normal_groups(vof, nrm))
 	var extras: Dictionary = prim.get("extras", {})
 	slots.append(int(extras.get("slot", slots.size())))
+	_read_skin_and_targets(doc, bin, prim, at, verts)
+
+
+## Round 378: a primitive's joints and weights, and its morph targets' offsets.
+func _read_skin_and_targets(doc: Dictionary, bin: PackedByteArray, prim: Dictionary, at: Dictionary, verts: int) -> void:
+	var jt := PackedInt32Array()
+	var wt := PackedFloat32Array()
+	if at.has("JOINTS_0") and at.has("WEIGHTS_0"):
+		var jf: PackedFloat32Array = _floats(doc, bin, int(at["JOINTS_0"]))[0]
+		jt.resize(jf.size())
+		for i in jf.size():
+			jt[i] = int(jf[i])
+		wt = _floats(doc, bin, int(at["WEIGHTS_0"]))[0]
+	joints.append(jt)
+	weights.append(wt)
+	var list: Array = prim.get("targets", [])
+	for t in list.size():
+		var d: PackedFloat32Array = _floats(doc, bin, int(list[t]["POSITION"]))[0]
+		var offs := PackedVector3Array()
+		offs.resize(verts)
+		for i in verts:
+			offs[i] = Vector3(d[i * 3], d[i * 3 + 1], d[i * 3 + 2])
+		if targets.size() <= t:
+			targets.append([])
+		targets[t].append(offs)
 
 
 ## Each vertex's group: the first vertex with its mesh vertex and its normal (a split by UV alone stays smooth across;
@@ -132,8 +169,13 @@ func vertex_count() -> int:
 
 
 ## The surfaces as an ArrayMesh.
-func build() -> ArrayMesh:
+func build(shape_names: Array = []) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
+	var keyed := not targets.is_empty() and shape_names.size() == targets.size()
+	if keyed:  # (round 378: blend shapes as whole positions - normalized - so no mode's offsets are guessed)
+		mesh.blend_shape_mode = Mesh.BLEND_SHAPE_MODE_NORMALIZED
+		for name in shape_names:
+			mesh.add_blend_shape(StringName(str(name)))
 	for s in positions.size():
 		var arrays := []
 		arrays.resize(Mesh.ARRAY_MAX)
@@ -141,7 +183,21 @@ func build() -> ArrayMesh:
 		arrays[Mesh.ARRAY_NORMAL] = normals[s]
 		arrays[Mesh.ARRAY_TEX_UV] = uvs[s]
 		arrays[Mesh.ARRAY_INDEX] = indices[s]
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		if s < joints.size() and joints[s].size() == positions[s].size() * 4:  # (round 378: the skin's four joints and weights)
+			arrays[Mesh.ARRAY_BONES] = joints[s]
+			arrays[Mesh.ARRAY_WEIGHTS] = weights[s]
+		var shapes := []
+		for t in targets.size() if keyed else 0:
+			var shape := []
+			shape.resize(Mesh.ARRAY_MAX)
+			var p := PackedVector3Array(positions[s])
+			var offs: PackedVector3Array = targets[t][s]
+			for i in p.size():
+				p[i] += offs[i]
+			shape[Mesh.ARRAY_VERTEX] = p
+			shape[Mesh.ARRAY_NORMAL] = normals[s]
+			shapes.append(shape)
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, shapes)
 	return mesh
 
 

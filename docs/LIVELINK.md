@@ -28,7 +28,8 @@ bridge with Auto Connect on reads it every 2 seconds while not connected and con
 Decisions: [ADR 0086](decisions/0086-livelink-discovery.md). `tools/livelink_fake_server.py` is a stand-in that
 serves the recorded session and writes the file, for a bridge's tests.
 
-A bridge may send one line first, its **hello**: `{"t":"client","app":"Unity 6000.0","bridge":"1.1"}`. Blendity's
+A bridge may send one line first, its **hello**: `{"t":"client","app":"Unity 6000.0","bridge":"1.1","caps":["skins"]}`
+(`caps` since round 378: "skins" - it skins a rig's mesh itself, so Blendity sends it no deforms of one). Blendity's
 Live Link window lists the client by it. Nothing else a client sends is read.
 
 ## The connection
@@ -99,6 +100,25 @@ each primitive's `extras.slot` names the slot (index into the object's `material
 binary splits a mesh vertex where its faces' normals or UVs differ. `topology` is an id of the mesh's faces, UVs and
 materials; `verts` the mesh's vertex count. The binary has no materials: they come as `material` messages. A `mesh`
 for an id the client doesn't know is ignored.
+
+**A rig's mesh (round 378).** A mesh posed only by its Skin (normal-only modifiers aside), or carrying shape keys, goes
+at rest - before the Skin, its keys unapplied. Its Skin must deform as the engines' skins do: a linear blend (not
+Preserve Volume), posed (not Rest Position), at most four bones a vertex; otherwise its vertices go as any mesh's.
+- **The binary** carries its skin (`JOINTS_0`, `WEIGHTS_0`, a `skins` entry whose inverse bind matrices are in the
+  mesh's own space) and its keys as morph targets.
+- **The message** adds `"skin":{"armature":5,"joints":[5,6,7]}`, where each joint is the object of that index (the
+  bones Live Link already sends), and `"shapes":["Smile",...]`, the keys' names in the targets' order.
+- **Then** it moves by its bones' `pose` messages and a `weights` message (a mesh with keys only). The rest mesh goes
+  again only when it changes, or its rig does: the armature, a joint's rest, name or parent, which bones deform, the
+  Skin's settings, the mesh's place from the armature. A rename or a material doesn't send it.
+- **A rig no more** (its armature deleted, Preserve Volume on, another modifier added) goes as a plain `mesh` with no
+  `skin` or `shapes`: a client takes its skin off then.
+- **A client that didn't say `"skins"`** still gets the posed vertices as deforms, which map onto the same vertices.
+
+### weights (round 378)
+`{"t":"weights","id":7,"weights":[0.25,...]}`: a keyed mesh's shape weights (0 to 1), in its `mesh` message's `shapes`
+order. Sent at a sync and whenever they change. It can come before the mesh it weights: keep it, and set it when the
+mesh comes.
 
 ### deform
 `{"t":"deform","id":7,"topology":42,"verts":24,"bin":N}` + N = 12 x verts bytes: float32 x, y, z per mesh vertex

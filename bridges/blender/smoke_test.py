@@ -12,6 +12,7 @@ import os
 import sys
 
 import bpy
+import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -36,7 +37,14 @@ def main():
     s.feed(data)
     ap = apply.Applier(bpy.context.scene)
     n = 0
+    arm_id, arm_posed, arm_mesh = None, b"", None  # (round 378: the Arm's vertices as Blendity posed them for the recorder)
     for msg, att in s.messages():
+        if msg.get("t") == "object" and msg.get("name") == "Arm":
+            arm_id = msg["id"]
+        if msg.get("t") == "deform" and msg.get("id") == arm_id:
+            arm_posed = att
+        if msg.get("t") == "mesh" and msg.get("id") == arm_id:
+            arm_mesh = (msg, att)
         ap.apply(msg, att)
         n += 1
     check(n > 20 and s.pending_bytes() == 0, "the stream didn't parse whole (%d messages, %d bytes left)" % (n, s.pending_bytes()))
@@ -104,6 +112,32 @@ def main():
     check(scene2.world.name == apply.WORLD and prev.use_fake_user, "the scene's own world isn't kept while Blendity's is on")
     a2.restore_look()
     check(scene2.world == prev and not prev.use_fake_user and scene2.compositing_node_group is None, "the scene's own world and compositor didn't come back")
+
+    # Round 378: the Arm skinned on the rig's bones (an armature copying them), its Smile at 0.25; Blender's evaluated
+    # vertices where Blendity's deform put them.
+    # The rig is scaled x2 (review 378: a scaled armature). The Arm's mesh sent twice more (a reconnect, a stroke) leaves
+    # one armature and one modifier, skinning the same.
+    arm = bpy.data.objects["Arm"]
+    for again in range(3):
+        if again:
+            ap.apply(*arm_mesh)
+            ap.apply({"t": "weights", "id": arm_id, "weights": [0.25]})
+        mods = [m for m in arm.modifiers if m.type == "ARMATURE"]
+        rigs = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+        check(len(mods) == 1 and len(rigs) == 1 and mods[0].object == rigs[0] and len(rigs[0].data.bones) == 3,
+              "the Arm's armature (mesh %d): %d modifier(s), %d armature(s)" % (again + 1, len(mods), len(rigs)))
+        keys = arm.data.shape_keys
+        check(keys is not None and len(keys.key_blocks) == 2 and abs(keys.key_blocks[1].value - 0.25) < 1e-5, "the Arm's Smile at 0.25")
+        check(len([g for g in arm.vertex_groups if g.name.startswith(apply.JOINT_GROUP)]) == 3, "the Arm's vertex groups")
+        dg = bpy.context.evaluated_depsgraph_get()
+        ev = arm.evaluated_get(dg).to_mesh()
+        got = np.zeros(len(ev.vertices) * 3, np.float32)
+        ev.vertices.foreach_get("co", got)
+        want = apply.to_blender(np.frombuffer(arm_posed, dtype="<f4").reshape(-1, 3))
+        worst = float(np.abs(got.reshape(-1, 3) - want).max()) if len(want) == len(ev.vertices) else 1e9
+        arm.evaluated_get(dg).to_mesh_clear()
+        print("the skinned Arm (mesh %d) against Blendity's posed vertices: at most %g m apart" % (again + 1, worst))
+        check(worst < 1e-3, "the Arm's skinning doesn't match Blendity's (%g m)" % worst)
 
     lower = bpy.data.objects["Lower"]
     check(lower.parent is not None and lower.parent.name == "Upper", "the bone hierarchy is lost")

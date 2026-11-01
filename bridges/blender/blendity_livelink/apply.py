@@ -18,6 +18,10 @@ from mathutils import Matrix, Quaternion, Vector
 from .glb import MeshData
 
 COLLECTION = "Blendity Live Link"
+SKIN_MODIFIER = "Blendity Skin"  # (round 378: a skinned mesh's Armature modifier)
+JOINT_GROUP = "joint_"  # (...its bones and vertex groups: joint_0, joint_1...)
+CONV = Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))  # (glTF's axes to Blender's)
+CONV_INV = CONV.inverted()
 FIX = Matrix(((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0))).to_quaternion()
 FIX_INV = FIX.to_matrix().to_4x4().inverted()
 
@@ -58,6 +62,8 @@ class Applier:
     def __init__(self, scene):
         self.scene = scene
         self.textures = {}  # (round 377: texture key -> image, from its PNG bytes)
+        self.shape_weights = {}  # (round 378: a keyed mesh's last weights)
+        self.pending_skins = {}  # (review 378: id -> (mesh data, joints) of a skin waiting for Object Mode)
         self.material_msgs = {}  # (round 377: each material key's last message)
         self.fog, self.effects = {}, []  # (round 376: the look the compositor draws)
         self.objects = {}     # id -> bpy object
@@ -260,6 +266,7 @@ class Applier:
         self.objects.pop(oid, None)
         if obj is None:
             return
+        self._unskin(obj)  # (review 378: its armature with it)
         data = obj.data
         bpy.data.objects.remove(obj)
         if data is None or data.users:
@@ -280,6 +287,8 @@ class Applier:
         self.active.pop(oid, None)
         self.slots.pop(oid, None)
         self.lights.pop(oid, None)
+        self.shape_weights.pop(oid, None)
+        self.pending_skins.pop(oid, None)
 
     # -------------------------------------------------------------- meshes
 
@@ -298,6 +307,8 @@ class Applier:
         obj["blendity_topology"] = str(msg.get("topology", ""))
         obj["blendity_verts"] = int(msg["verts"])
         self._assign_materials(oid)
+        self._skin(obj, md, msg)  # (round 378)
+        self._apply_weights(oid)
 
     def on_deform(self, msg, att):
         obj = self._get(int(msg["id"]))
@@ -306,6 +317,8 @@ class Applier:
         same = obj.get("blendity_topology") == str(msg.get("topology")) and obj.get("blendity_verts") == int(msg["verts"])
         if not same or len(obj.data.vertices) != int(msg["verts"]):
             return  # (a newer mesh is on its way; a deform follows it)
+        if obj.modifiers.get(SKIN_MODIFIER) is not None or obj.data.shape_keys is not None:
+            return  # (round 378: it moves by its skin and shape keys)
         co = to_blender(np.frombuffer(att, dtype="<f4").reshape(-1, 3))
         obj.data.vertices.foreach_set("co", co.ravel())
         obj.data.update()  # (normals follow: smooth faces, the binary's hard edges marked sharp)
@@ -408,9 +421,139 @@ class Applier:
             obj["blendity_filters"] = json.dumps(self.effects)
         apply_compositor(self.scene, self.fog, self.effects)
 
+    # -------------------------------------------------------------- skins (round 378)
+
+    def _skin(self, obj, md, msg):
+        """A skinned mesh: an armature under it (its bones at the joints' rest, each following its joint's object - the
+        bone empties Live Link sends), vertex groups of the joints' weights and an Armature modifier; each key a shape
+        key on a Basis. A mesh sent again, or no longer a rig, loses what the last one made first (review 378)."""
+        oid = int(obj.get("blendity_id", 0))
+        self._unskin(obj)
+        self.pending_skins.pop(oid, None)
+        joints = msg.get("skin", {}).get("joints", [])
+        if joints and md.joints is not None and md.inverse_binds is not None and len(md.inverse_binds) == len(joints):
+            self._armature_when_possible(oid, obj, md, joints)
+        shapes = msg.get("shapes", [])
+        if shapes and len(md.targets) == len(shapes):
+            obj.shape_key_add(name="Basis", from_mix=False)
+            base = to_blender(md.co)
+            for name, delta in zip(shapes, md.targets):
+                kb = obj.shape_key_add(name=str(name), from_mix=False)
+                kb.data.foreach_set("co", (base + to_blender(delta)).ravel())
+
+    def _unskin(self, obj):
+        for mod in [m for m in obj.modifiers if m.type == "ARMATURE" and m.name.startswith(SKIN_MODIFIER)]:
+            _drop_armature(mod.object)
+            obj.modifiers.remove(mod)
+        for child in [c for c in obj.children if c.type == "ARMATURE" and c.get("blendity_skin")]:
+            _drop_armature(child)
+        for vg in [g for g in obj.vertex_groups if g.name.startswith(JOINT_GROUP)]:
+            obj.vertex_groups.remove(vg)
+
+    def _armature_when_possible(self, oid, obj, md, joints):
+        """The bones are made in Edit Mode: a user in another mode (sculpting, editing) isn't taken out of it - the skin
+        waits for Object Mode (flush_skins)."""
+        if bpy.context.mode != "OBJECT":
+            self.pending_skins[oid] = (md, joints)
+            return
+        self._armature(obj, md, joints)
+
+    def flush_skins(self):
+        """The skins that waited for Object Mode, once it's back."""
+        if not self.pending_skins or bpy.context.mode != "OBJECT":
+            return
+        waiting, self.pending_skins = self.pending_skins, {}
+        for oid, (md, joints) in waiting.items():
+            obj = self._get(oid)
+            if obj is not None and obj.type == "MESH" and len(obj.data.vertices) == len(md.co):
+                self._armature(obj, md, joints)
+
+    def _armature(self, obj, md, joints):
+        arm = bpy.data.objects.new(obj.name + " Skin", bpy.data.armatures.new(obj.name + " Skin"))
+        arm["blendity_skin"] = True
+        arm.parent = obj  # (at the mesh, unturned: the armature's space is the mesh's, as the inverse binds are)
+        rests = [CONV @ _matrix(md.inverse_binds[b]).inverted() @ CONV_INV for b in range(len(joints))]
+        self._bones(arm, rests)
+        self.collection.objects.link(arm)
+        arm.hide_set(True)  # (hidden in the view, still evaluated: hide_viewport would stop its constraints)
+        arm.hide_render = True
+        for b, jid in enumerate(joints):
+            self._follow(arm.pose.bones[JOINT_GROUP + str(b)], self._get(int(jid)), rests[b])
+        for b in range(len(joints)):
+            _weigh(obj.vertex_groups.new(name=JOINT_GROUP + str(b)), md, b)
+        mod = obj.modifiers.new(SKIN_MODIFIER, "ARMATURE")
+        mod.object = arm
+
+    def _bones(self, arm, rests):
+        """The bones at the joints' rest (their scale apart: a bone's rest holds none), made in Edit Mode through the
+        scene's own collection - shown whatever the user hid of Live Link's."""
+        self.scene.collection.objects.link(arm)
+        layer = bpy.context.view_layer
+        was = layer.objects.active
+        layer.objects.active = arm  # (only ever in Object Mode: _armature_when_possible)
+        bpy.ops.object.mode_set(mode="EDIT")
+        for b, rest in enumerate(rests):
+            eb = arm.data.edit_bones.new(JOINT_GROUP + str(b))
+            eb.head, eb.tail = (0.0, 0.0, 0.0), (0.0, 0.1, 0.0)
+            eb.matrix = rest.normalized()
+        bpy.ops.object.mode_set(mode="OBJECT")
+        layer.objects.active = was
+        self.scene.collection.objects.unlink(arm)
+
+    @staticmethod
+    def _follow(pb, target, rest):
+        """A bone following its joint's object: its place and turn copied, its scale the object's over the joint's at rest
+        (review 378: a scaled rig - an FBX armature at 0.01 - deforms as Blendity's)."""
+        if target is None:
+            return
+        for kind in ("COPY_LOCATION", "COPY_ROTATION"):
+            c = pb.constraints.new(kind)
+            c.target = target
+        s = rest.to_scale()
+        pb.scale = (1.0 / s[0], 1.0 / s[1], 1.0 / s[2])
+        c = pb.constraints.new("COPY_SCALE")
+        c.target, c.owner_space, c.use_offset = target, "POSE", True
+
+    def on_weights(self, msg, att):
+        """A keyed mesh's shape weights, in its keys' order; kept, set again when its mesh comes."""
+        oid = int(msg["id"])
+        self.shape_weights[oid] = msg.get("weights", [])
+        self._apply_weights(oid)
+
+    def _apply_weights(self, oid):
+        obj = self._get(oid)
+        keys = obj.data.shape_keys if obj is not None and obj.type == "MESH" else None
+        if keys is None or oid not in self.shape_weights:
+            return
+        for i, w in enumerate(self.shape_weights[oid]):
+            if i + 1 < len(keys.key_blocks):
+                keys.key_blocks[i + 1].value = float(w)
+
     def restore_look(self):
         """The scene's own world and compositor back (the link stopped)."""
         restore_look(self.scene)
+
+
+def _matrix(column_major):
+    return Matrix([column_major[c * 4:c * 4 + 4] for c in range(4)]).transposed()
+
+
+def _drop_armature(arm):
+    if arm is None:
+        return
+    data = arm.data
+    bpy.data.objects.remove(arm)
+    if data is not None and data.users == 0:
+        bpy.data.armatures.remove(data)
+
+
+def _weigh(vg, md, b):
+    """Joint b's weights into its vertex group: one add per distinct weight, not per vertex."""
+    for k in range(4):
+        rows = np.nonzero((md.joints[:, k] == b) & (md.weights[:, k] > 0.0))[0]
+        values = md.weights[rows, k]
+        for w in np.unique(values):
+            vg.add(rows[values == w].tolist(), float(w), "ADD")
 
 
 # ------------------------------------------------------------------ the look (round 376)

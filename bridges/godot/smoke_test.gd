@@ -43,11 +43,24 @@ func _initialize() -> void:
 	s.feed(data)
 	var ap = Applier.new(holder)
 	var n := 0
+	var arm_id := -1
+	var arm_mesh := PackedByteArray()
+	var arm_posed := PackedByteArray()  # (round 378: the Arm's rest mesh, and its vertices posed as Blendity deformed them)
 	var m = s.next_message()
 	while m != null:
+		var j: Dictionary = m[0]
+		if j.get("t") == "object" and j.get("name") == "Arm":
+			arm_id = int(j.get("id", -1))
+		if j.get("t") == "mesh" and int(j.get("id", -2)) == arm_id:
+			arm_mesh = m[1]
+		if j.get("t") == "deform" and int(j.get("id", -2)) == arm_id:
+			arm_posed = m[1]
 		ap.apply(m[0], m[1])
 		n += 1
 		m = s.next_message()
+	ap.flush()
+	var arm_glb = load("res://addons/blendity_livelink/link_glb.gd").new()
+	arm_glb.read(arm_mesh)
 	check(n > 20 and s.pending_bytes() == 0, "the stream parsed whole: %d messages, %d bytes left" % [n, s.pending_bytes()])
 	var live: Node = ap.root
 	for want in ["Main Camera", "Directional Light", "Plane", "Box", "Rig", "Upper", "Lower"]:
@@ -105,6 +118,31 @@ func _initialize() -> void:
 		check(absf(env.tonemap_exposure - pow(2.0, 0.5)) < 1e-4, "the exposure arrived: %f" % env.tonemap_exposure)
 		check(env.glow_enabled and absf(env.glow_intensity - 0.8) < 1e-4, "the Bloom arrived as glow")
 	check(cam_obj != null and str(cam_obj.get_meta("blendity_filters", "")).contains("Vignette"), "the camera keeps its filters")
+	# Round 378: the Arm skinned on the rig's three bones, its Smile at 0.25; skinned on the CPU here from the skeleton's
+	# poses and the skin's binds, every vertex where Blendity's deform put it.
+	var arm_mi := find(live, "Arm") as MeshInstance3D
+	var skel: Skeleton3D = arm_mi.get_node_or_null("Blendity Skeleton") if arm_mi != null else null
+	check(arm_mi != null and skel != null and arm_mi.skin != null and arm_mi.skin.get_bind_count() == 3 and skel.get_bone_count() == 3, "the Arm's skin and skeleton")
+	if arm_mi != null and skel != null and arm_mi.skin != null:
+		check(arm_mi.mesh.get_blend_shape_count() == 1 and absf(arm_mi.get_blend_shape_value(0) - 0.25) < 1e-5, "the Arm's Smile at 0.25")
+		var worst := 0.0
+		var arrays := arm_mi.mesh.surface_get_arrays(0)
+		var shape: Array = arm_mi.mesh.surface_get_blend_shape_arrays(0)[0]
+		var pos: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var smile: PackedVector3Array = shape[Mesh.ARRAY_VERTEX]
+		var bones: PackedInt32Array = arrays[Mesh.ARRAY_BONES]
+		var weights: PackedFloat32Array = arrays[Mesh.ARRAY_WEIGHTS]
+		var g = arm_glb
+		for i in pos.size():
+			var p: Vector3 = pos[i].lerp(smile[i], 0.25)
+			var out := Vector3.ZERO
+			for k in 4:
+				out += weights[i * 4 + k] * (skel.get_bone_pose(bones[i * 4 + k]) * arm_mi.skin.get_bind_pose(bones[i * 4 + k]) * p)
+			var v: int = g.vertex_of[0][i]
+			var want := Vector3(arm_posed.decode_float(v * 12), arm_posed.decode_float(v * 12 + 4), arm_posed.decode_float(v * 12 + 8))
+			worst = maxf(worst, out.distance_to(want))
+		print("the skinned Arm against Blendity's posed vertices: at most %.7f m apart" % worst)
+		check(worst < 1e-3, "the Arm's skinning matches Blendity's (%.7f m)" % worst)
 	var lower := find(live, "Lower") as Node3D
 	check(lower != null and lower.get_parent().name == "Upper", "the bone hierarchy kept")
 	if lower != null:

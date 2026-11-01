@@ -2620,69 +2620,9 @@ std::vector<std::pair<MaterialPtr, bool>> Editor::texture_followers(const std::s
  * where it stands), the mesh's vertex groups as each vertex's four strongest joints, and the clip of the Animation
  * component above the armature sampled at every frame (the scene's pose put back after). */
 std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin) {
-  auto sk = std::make_shared<ExportSkin>();
-  sk->rig = arm.id;
-  sk->base = armature_base(arm);
-  sk->base_name = arm.parent ? arm.parent->name + " Skeleton" : std::string("Skeleton");
+  auto sk = skin_for_export(arm, m, owner, skin);  // (round 378: the bones and weights in the scene layer, Live Link's too)
   std::vector<GameObject *> objs;
-  std::vector<std::pair<GameObject *, int>> stack{{&arm, -1}};
-  while (!stack.empty() && objs.size() < 4096) {
-    auto [g, parent] = stack.back();
-    stack.pop_back();
-    ExportSkin::Joint j;
-    j.name = g->name, j.parent = parent;
-    const Bone *b = g->get<Bone>();
-    const Transform &l = g->local();
-    j.t = b ? b->rest_position : l.position, j.r = b ? b->rest_rotation : l.rotation, j.s = b ? b->rest_scale : l.scale;
-    const int me = (int)sk->joints.size();
-    sk->joints.push_back(j);
-    objs.push_back(g);
-    for (size_t c = g->children.size(); c-- > 0;) stack.push_back({g->children[c], me});
-  }
-  /* The weights as the Skin modifier deforms: deforming bones with an invertible rest, at most its Max Influences (and
-   * four, glTF's), its vertex group limiting which vertices follow. A vertex that follows no bone stays at rest in
-   * Blendity: in the file it follows the mesh's own object (a joint when the mesh sits under the rig) or the first
-   * joint, with weight 1 - glTF's weights must add up to 1 (all zeros collapse to the origin in most engines). */
-  std::unordered_map<std::string, int> by_name;
-  int still = 0;
-  for (size_t k = 0; k < objs.size(); k++) {
-    if (objs[k] == &owner) still = (int)k;
-    const Bone *b = objs[k]->get<Bone>();
-    if (!b || !b->deform) continue;
-    const Mat4 rm = b->rest_matrix();
-    const float det = dot(cross(rm.column(0), rm.column(1)), rm.column(2));
-    if (std::fabs(det) > 1e-12f && finite_bits(det)) by_name.emplace(objs[k]->name, (int)k);
-  }
-  std::vector<int> group_joint(m.vertex_groups.size(), -1);  // (each group's joint looked up once)
-  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
-    const auto it = by_name.find(m.vertex_groups[gi].name);
-    if (it != by_name.end()) group_joint[gi] = it->second;
-  }
-  bool invert = false;
-  const std::string *limit = skin.limit_group(invert);
-  const int limit_gi = limit && !limit->empty() ? m.find_group(*limit) : -1;
-  const size_t most = (size_t)std::max(1, std::min(4, skin.max_influences));
-  sk->vjoints.assign(m.vert_count(), {(uint16_t)still, 0, 0, 0});
-  sk->vweights.assign(m.vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
-  std::vector<std::pair<float, int>> w;
-  for (size_t v = 0; v < m.vert_count(); v++) {
-    if (limit_gi >= 0) {
-      const std::vector<float> &lw = m.vertex_groups[(size_t)limit_gi].weights;
-      const bool in_group = v < lw.size() && lw[v] > 0.0f;
-      if (in_group == invert) continue;  // (left out by the modifier's group: at rest)
-    }
-    w.clear();
-    for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
-      const std::vector<float> &gw = m.vertex_groups[gi].weights;
-      if (group_joint[gi] >= 0 && v < gw.size() && gw[v] > 0.0f && finite_bits(gw[v])) w.push_back({gw[v], group_joint[gi]});
-    }
-    if (w.empty()) continue;
-    std::sort(w.begin(), w.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-    float sum = 0.0f;
-    for (size_t k = 0; k < w.size() && k < most; k++) sum += w[k].first;
-    sk->vjoints[v] = {0, 0, 0, 0}, sk->vweights[v] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (size_t k = 0; k < w.size() && k < most; k++) sk->vjoints[v][k] = (uint16_t)w[k].second, sk->vweights[v][k] = w[k].first / sum;
-  }
+  for (uint64_t id : sk->joint_ids) objs.push_back(scene_->find(id));
   /* The clip: the Animation component on the armature or above it. */
   GameObject *root = &arm;
   while (root && !(root->get<Animation>() && !root->get<Animation>()->clip.empty())) root = root->parent;

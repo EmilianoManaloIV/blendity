@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 378): skins and blend shapes in Live Link
+
+**Asked:** Phase B's third round: a skinned character and its blend shapes once, then only poses and weights; real
+skinned meshes in the engines.
+
+**Added (task 0355)**
+- **A rig's mesh** (posed only by its Skin, or keyed) goes at rest with its skin and morph targets, naming its joints'
+  objects and its keys. A new `weights` message carries shape weights. Deforms go only to clients that don't say
+  `"caps":["skins"]`.
+- **`skin_for_export`** moved into the scene layer, so the export and Live Link share it.
+- **The bridges:**
+  - Unity: a SkinnedMeshRenderer with blend shapes;
+  - Godot: a Skeleton3D and a Skin with blend shapes;
+  - Blender: an armature copying the bone empties, vertex groups and shape keys;
+  - Unreal: keeps the deforms.
+- The recorded session adds a skinned, keyed Arm; its rig is scaled x2.
+- **The Opus review's fixes:**
+  - a rig no more (armature deleted, Preserve Volume, Rest Position) sent as a plain mesh, and Unity's skin taken off;
+  - Blender's Armature modifiers stacking on each resend, and armatures left behind;
+  - skeleton and Skin setting changes now resend the skin;
+  - Preserve Volume, Rest Position and more than four influences stream vertices;
+  - Blender's scaled joints;
+  - Godot's skins posed once per batch;
+  - a rename or material change no longer resends a rig;
+  - the mesh's place from the rig compared with a tolerance;
+  - the weights made on the mesh worker;
+  - leaks on delete;
+  - Blender waits for Object Mode;
+  - each client's hello read once;
+  - no empty weights messages.
+
+**Checked:**
+- `tests_round378` (a skinning client and a plain one; the rig as it changes);
+- the recording's counts;
+- the Unity, Godot and Blender replays, skinned against Blendity's posed vertices: within 1.2×10⁻⁷ m, 3.0×10⁻⁵ m and
+  1.2×10⁻⁷ m (Blender's for each of three sends);
+- Unreal's replay.
+
 ## 2026-11-01 (round 377): textures by content in Live Link
 
 **Asked:** Phase B's second round: painted, procedural and generated textures reach the engines as you work, every
