@@ -880,6 +880,8 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **LOD Groups** (round 363): the LOD Group component (Add Component > Rendering), as Unity's - up to four levels, LOD0 the mesh and each next one a Decimate of it at its Triangles share, shown while the object's height on screen is at least its Screen Height (Cull Below Last hides it below the last); the Game view switches them; exports write `<name>_LOD0.._LODn` (Export > LOD Levels), which Unity's model import makes an LOD Group. The levels need meshoptimizer (Blender's libraries); a skinned or keyed object is drawn whole in the Game view.
 
+**Cards and camera cuts** (round 364, the Sequencer): an image or a paper dropped onto a lane is a card - held full-frame over the Game view (letterboxed) and over Render Animation's frames for its bar's length; a camera cut switches the scene's camera for its length, in Play and in Preview (the camera given back when Preview ends); the topmost track's card or cut wins. Console: `seq image|paper <file> <track> <start> [frames]`, `seq cut <camera> <track> <start> [frames]`.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

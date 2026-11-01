@@ -465,6 +465,8 @@ struct SeqEditorState {
   int drag_track = 0, drag_x = 0, drag_y = 0;
   std::vector<std::pair<uint64_t, Transform>> saved_pose;  // as the Animation window's Preview
   std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;
+  uint64_t saved_camera = 0;  // (round 364: the scene's camera before Preview's cuts)
+  bool cut_on = false;        // (a cut's camera is on: out of it, saved_camera again)
   Recti lanes{0, 0, 0, 0};  // where the lanes were last drawn and the frames across them (drops, tests)
   int lane_h = 1;
   float end = 60.0f;
@@ -1055,6 +1057,7 @@ class Editor {
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
+  void composite_render_card_for_test(Image &img, float frame) { composite_render_card(img, frame); }  // (round 364)
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
   std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
@@ -2978,6 +2981,27 @@ class Editor {
   EyeOptions eye_options_;
   uint64_t eye_test_root_ = 0;  // (the avatar whose eyes the test has turned: undone before anything is kept)
   void eye_test_off();
+  /* Round 364: the Sequencer's cards and camera cuts (seq_cards.cpp). */
+  const Image *card_picture(const SeqInstance &i, uint64_t *stamp = nullptr);
+  void card_trim_pictures(const Sequence &s);
+  bool seq_card_there(const SeqInstance &i);
+  float sequence_frame_now(SequencePtr &seq);
+  void draw_sequence_card(const Recti &img);
+  void composite_render_card(Image &frame_img, float frame);
+  void seq_camera_cut();
+  bool seq_add_card(int kind, const std::string &media, int track, float start, float frames);
+  bool seq_drop_card(const std::string &abs_path, int mx, int my);
+  struct CardPicture {
+    Image img;
+    std::shared_ptr<BoardPicture> paper;  // (a paper's: rebuilt when the Board's picture of it changes)
+    int64_t mtime = -1;                   // (an image's file time when read, looked at once a second)
+    double checked = -1e9;
+    uint64_t made = 0;  // (a stamp: the Game view's fitted copy redone when it changes)
+  };
+  std::unordered_map<std::string, CardPicture> card_pictures_;  // (by kind and path; review 364: never kept stale)
+  uint64_t card_stamp_ = 0;
+  Image card_view_;                                       // (the Game view's card, fitted to it)
+  std::string card_view_key_;
   /* Round 362: the world kit (world_kit.cpp). */
   void update_collider_fits();
   void draw_colliders();

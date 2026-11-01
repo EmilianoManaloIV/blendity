@@ -2702,6 +2702,7 @@ void Editor::draw_game_view(const Recti &r) {
     }
     prof_.ms_game += rt.ms();
   }
+  draw_sequence_card(img);  // (round 364: an animatic's held picture over the Game view)
   /* Composition guides over the camera's frame: the image, or a filter's letterboxed frame inside it. */
   {
     Recti frame = img;

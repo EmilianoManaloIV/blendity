@@ -18,16 +18,17 @@ namespace bl {
 /* ---------------------------------------------------------------- the timeline */
 
 float SeqInstance::clip_out(const AnimationClip *c) const {
+  if (kind != (int)SeqKind::Clip) return trim_out > trim_in ? trim_out : trim_in + 60.0f;  // (a card: its own length, no clip's end)
   const float end = c ? c->end_frame() : 60.0f;
   return trim_out >= 0.0f ? std::min(trim_out, end) : end;
 }
 
 float SeqInstance::duration(const AnimationClip *c) const {
-  const float s = std::fabs(speed) > 1e-3f ? std::fabs(speed) : 1e-3f;
+  const float s = kind != (int)SeqKind::Clip ? 1.0f : std::fabs(speed) > 1e-3f ? std::fabs(speed) : 1e-3f;  // (a card or a cut has no speed - review 364)
   return std::max(1.0f, (clip_out(c) - trim_in) / s);
 }
 
-float SeqInstance::clip_frame(float seq_frame) const { return trim_in + (seq_frame - start) * std::fabs(speed); }
+float SeqInstance::clip_frame(float seq_frame) const { return trim_in + (seq_frame - start) * (kind != (int)SeqKind::Clip ? 1.0f : std::fabs(speed)); }
 
 void SeqTrack::sort() {
   std::stable_sort(items.begin(), items.end(), [](const SeqInstance &a, const SeqInstance &b) { return a.start < b.start; });
@@ -73,8 +74,13 @@ std::string save_sequence_text(const Sequence &s) {
   os << "blendity_seq 1\nname " << s.name << "\nrate " << s.frame_rate << "\n";
   for (const SeqTrack &t : s.tracks) {
     os << "track " << t.name << "\n";
-    for (const SeqInstance &i : t.items)
+    for (const SeqInstance &i : t.items) {
+      if (i.kind != (int)SeqKind::Clip) {  // (round 364: an older reader skips the line)
+        os << "card " << i.kind << " " << i.start << " " << i.trim_in << " " << i.trim_out << "\t" << i.name << "\t" << i.media << "\n";
+        continue;
+      }
       os << "clip " << i.start << " " << i.trim_in << " " << i.trim_out << " " << i.speed << "\t" << i.name << "\t" << i.clip << (i.target.empty() ? "" : "\t" + i.target) << "\n";
+    }
   }
   for (const SeqTrigger &g : s.triggers) os << "trigger " << g.blend << "\t" << g.key << "\t" << g.instance << "\n";
   return os.str();
@@ -125,6 +131,16 @@ bool load_sequence_text(const std::string &text, Sequence &s) {
       i.speed = std::fabs(i.speed) < 1e-3f ? 1.0f : std::min(10.0f, std::fabs(i.speed));  // (no reverse play: forwards)
       i.name = f[1], i.clip = f[2];
       if (f.size() > 3) i.target = f[3];  // (task 0070; older files: none)
+      s.tracks.back().items.push_back(std::move(i));
+    }
+    else if (word == "card" && !s.tracks.empty()) {  // (round 364: a picture or a camera cut)
+      const std::vector<std::string> f = tab_fields(line);
+      SeqInstance i;
+      std::istringstream nums(f[0].substr(4));
+      if (f.size() < 3 || !(nums >> i.kind >> i.start >> i.trim_in >> i.trim_out)) continue;
+      if (!finite_all({i.start, i.trim_in, i.trim_out}) || i.kind < 1 || i.kind > 3 || f[2].empty()) continue;
+      i.start = std::max(0.0f, i.start), i.trim_in = std::max(0.0f, i.trim_in);
+      i.name = f[1], i.media = f[2];
       s.tracks.back().items.push_back(std::move(i));
     }
     else if (word == "trigger") {
@@ -346,6 +362,7 @@ void covering(const SeqTrack &t, float frame, std::vector<std::pair<const SeqIns
   out.clear();
   for (const SeqInstance &i : t.items) {
     if (i.start > frame) break;
+    if (i.kind != (int)SeqKind::Clip) continue;  // (round 364: a card animates nothing)
     if (frame >= i.start + i.duration(clip_asset(i.clip).get())) continue;
     auto it = std::find_if(out.begin(), out.end(), [&](const auto &p) { return p.second->target == i.target; });
     if (it == out.end()) out.push_back({nullptr, &i});
@@ -356,6 +373,23 @@ void covering(const SeqTrack &t, float frame, std::vector<std::pair<const SeqIns
 }  // namespace
 
 static void sample_pair(const SeqInstance *a, const SeqInstance *b, float frame, AnimValues &out, const Scene *scene, AnimValues &va, AnimValues &vb);
+
+/* The topmost track's bar of `kinds` covering `frame`. */
+static const SeqInstance *top_bar_at(const Sequence &s, float frame, std::initializer_list<SeqKind> kinds) {
+  for (auto t = s.tracks.rbegin(); t != s.tracks.rend(); ++t)
+    for (const SeqInstance &i : t->items) {
+      const bool kind = std::find(kinds.begin(), kinds.end(), (SeqKind)i.kind) != kinds.end();
+      if (kind && frame >= i.start && frame < i.start + i.duration(nullptr)) return &i;
+    }
+  return nullptr;
+}
+
+const SeqInstance *sequence_card_at(const Sequence &s, float frame) { return top_bar_at(s, frame, {SeqKind::Image, SeqKind::Paper}); }
+
+std::string sequence_camera_at(const Sequence &s, float frame) {
+  const SeqInstance *i = top_bar_at(s, frame, {SeqKind::Camera});
+  return i ? i->media : std::string();
+}
 
 void sample_sequence(const Sequence &s, float frame, AnimValues &out, const Scene *scene) {
   static thread_local AnimValues va, vb;  // (kept warm: no allocation a frame)
@@ -488,6 +522,8 @@ void Sequencer::start(PlayContext &ctx) {
   blend_left = blend_total = 0.0f;
   blend_from.clear();
   was_down.clear();
+  base_camera = ctx.scene ? ctx.scene->active_camera : 0;  // (round 364: given back when a cut ends)
+  cut_on = false;
 }
 
 float Sequencer::frame() const {
@@ -534,6 +570,16 @@ void Sequencer::update(PlayContext &ctx) {
       if (const float *from = blend_from.get(v.key)) v.value = blend_anim_value(v.track->property, *from, v.value, t);
   }
   apply_anim_values(scratch, owner);
+  /* Round 364: a camera cut - the scene's camera the one the cut names (Unreal's Camera Cut track). */
+  const std::string cut = sequence_camera_at(*s, hold_frame(frame(), hold));
+  GameObject *cam = cut.empty() || !scene_ ? nullptr : scene_->find_by_name(cut);
+  if (cam && cam->get<Camera>()) {
+    scene_->active_camera = cam->id;
+    cut_on = true;
+    return;
+  }
+  if (cut_on && scene_) scene_->active_camera = base_camera;  // (out of the cut: the camera before it - review 364)
+  cut_on = false;
 }
 
 }  // namespace bl

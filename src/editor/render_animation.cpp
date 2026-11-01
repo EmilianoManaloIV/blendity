@@ -152,6 +152,7 @@ void Editor::step_render_animation() {
     return;
   }
   const std::string path = frame_file(ranim_.dir, k);
+  if (ranim_.source == 1) composite_render_card(render_img_, seqr_.frame);  // (round 364: the card at this frame over the render)
   if (!write_png(path, render_img_.pixels.data(), render_img_.width, render_img_.height, render_img_.width, render_transparent_)) {
     Log::error("Render Animation: could not write %s; stopped (a gap would end the video there)", path.c_str());
     return stop_render_animation();

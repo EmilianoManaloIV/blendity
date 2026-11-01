@@ -115,6 +115,7 @@ void Editor::seq_apply() {
   AnimValues v;
   sample_sequence(*s, seqr_.frame, v, scene_.get());
   apply_anim_values(v, root);
+  seq_camera_cut();  // (round 364)
   solve_constraints(*scene_);
   scene_dirty_ = true;
 }
@@ -179,6 +180,8 @@ void Editor::seq_set_preview(bool on) {
   if (on) {
     anim_set_preview(false);
     seq_save_pose(root);
+    seqr_.saved_camera = scene_->active_camera;  // (round 364: a cut's camera put back after)
+    seqr_.cut_on = false;
     seqr_.preview = true;
     seqr_.root = root ? root->id : 0;  // (none selected: bars play on their own objects only)
     seq_apply();
@@ -192,6 +195,7 @@ void Editor::seq_set_preview(bool on) {
     if (GameObject *g = scene_->find(id)) write_anim_value(*g, prop, axis, v);
   seqr_.saved_pose.clear();
   seqr_.saved_values.clear();
+  scene_->active_camera = seqr_.saved_camera;
   solve_constraints(*scene_);
   stable_ = scene_->clone();
   scene_dirty_ = true;
@@ -287,8 +291,9 @@ bool Editor::seq_trim(const std::string &name, float trim_in, float trim_out, fl
   SequencePtr s = seq_sequence();
   SeqInstance *i = s ? s->find(name) : nullptr;
   if (!i || !std::isfinite(trim_in) || !std::isfinite(trim_out) || !std::isfinite(start)) return false;
-  const float end = clip_asset(i->clip) ? clip_asset(i->clip)->end_frame() : 60.0f;
-  return seq_edit("Trim Clip", [&](Sequence &q) {
+  const bool card = i->kind != (int)SeqKind::Clip;  // (a card or a cut: as long as it's made - review 364)
+  const float end = card ? 1e6f : clip_asset(i->clip) ? clip_asset(i->clip)->end_frame() : 60.0f;
+  return seq_edit(card ? "Trim Card" : "Trim Clip", [&](Sequence &q) {
     SeqInstance *x = q.find(name);
     x->trim_in = std::max(0.0f, std::min(std::round(trim_in), end - 1.0f));
     x->trim_out = trim_out < 0.0f ? -1.0f : std::max(x->trim_in + 1.0f, std::min(std::round(trim_out), end));
@@ -421,10 +426,14 @@ void Editor::draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &l
       const AnimationClipPtr c = clip_asset(i.clip);
       const int x0 = seq_x_of(lanes, i.start, end), x1 = seq_x_of(lanes, i.start + i.duration(c.get()), end);
       const Recti b{x0, ly + u.px(3), std::max(u.px(4), x1 - x0), lane_h - u.px(6)};
-      u.canvas.fill_rect(b, c ? bar_colour(i.clip) : Color::hex(0x7A6A2A));
+      const bool card = i.kind != (int)SeqKind::Clip;  // (round 364: a picture or a camera cut)
+      static const uint32_t kCardColour[] = {0, Color::hex(0x3F6E8C), Color::hex(0x6E5A8C), Color::hex(0x3C7A52)};
+      u.canvas.fill_rect(b, card ? kCardColour[std::clamp(i.kind, 1, 3)] : c ? bar_colour(i.clip) : Color::hex(0x7A6A2A));
       if (i.name == seqr_.selected_name) u.canvas.rect_outline(b, u.theme.focus, u.px(2));
-      const std::string who = i.target.empty() ? std::string(" -> (no object)") : " -> " + i.target;  // (the clip, then what it plays on)
-      u.label({b.x + u.px(4), b.y, b.w - u.px(6), b.h}, (c ? i.name : i.name + " (missing)") + who, u.theme.text_bright);
+      static const char *const kCardWhat[] = {"", " [image]", " [paper]", " [camera cut]"};
+      const std::string who = card ? std::string(kCardWhat[std::clamp(i.kind, 1, 3)]) : i.target.empty() ? std::string(" -> (no object)") : " -> " + i.target;  // (the clip, then what it plays on)
+      const bool there = card ? seq_card_there(i) : c != nullptr;  // (review 364: a moved file or a renamed camera said)
+      u.label({b.x + u.px(4), b.y, b.w - u.px(6), b.h}, (there ? i.name : i.name + " (missing)") + who, u.theme.text_bright);
       if (u.record_buttons) u.button_rects["seq_bar:" + i.name] = b;  // (tests)
       if (k == 0) continue;
       /* The overlap with the one before: a cross over it (Premiere's cross dissolve). */
@@ -456,7 +465,8 @@ bool Editor::seq_drag_result(const Sequence &s, const Recti &lanes, int lane_h, 
   track = seqr_.drag_track;
   const float df = std::round(seq_frame_at(lanes, mx, end) - seq_frame_at(lanes, seqr_.drag_x, end));
   const AnimationClipPtr c = clip_asset(i->clip);
-  const float clip_end = c ? c->end_frame() : 60.0f, sp = std::max(1e-3f, std::fabs(i->speed));
+  const bool card = i->kind != (int)SeqKind::Clip;  // (review 364: no clip's end, no speed)
+  const float clip_end = card ? 1e6f : c ? c->end_frame() : 60.0f, sp = card ? 1.0f : std::max(1e-3f, std::fabs(i->speed));
   if (seqr_.drag == 2) {
     out.start = std::max(0.0f, i->start + df);
     track = std::max(0, std::min((int)s.tracks.size() - 1, (my - lanes.y) / std::max(1, lane_h)));
@@ -538,17 +548,26 @@ void Editor::draw_seq_details(Sequence &s, const Recti &r) {
   u.text_field(u.id("seq_name"), {x, y, u.px(120), h}, name, &committed);
   x += u.px(126);
   if (committed && name != before.name && !name.empty()) seq_rename(before.name, name);
-  label("Object", u.px(50));
-  std::string target = i->target;
-  if (object_field("seq_target", {x, y, u.px(170), h}, target, nullptr))
-    seq_edit("Clip Object", [&](Sequence &q) {
-      if (SeqInstance *k = q.find(before.name)) k->target = target;
-    });
-  x += u.px(176);
+  const bool clip_bar = before.kind == (int)SeqKind::Clip;  // (review 364: a card or a cut has no object or speed)
   float speed = i->speed, tin = i->trim_in, tout = i->clip_out(clip_asset(i->clip).get());
-  label("Speed", u.px(44));
-  const bool sp = u.float_field(u.id("seq_speed"), {x, y, u.px(56), h}, speed, 0.01f, 0.05f, 10.0f);
-  x += u.px(62);
+  bool sp = false;
+  if (!clip_bar) {
+    label("Shows", u.px(50));
+    u.label({x, y, u.px(270), h}, before.media, u.theme.text);
+    x += u.px(282);
+  }
+  if (clip_bar) {
+    label("Object", u.px(50));
+    std::string target = i->target;
+    if (object_field("seq_target", {x, y, u.px(170), h}, target, nullptr))
+      seq_edit("Clip Object", [&](Sequence &q) {
+        if (SeqInstance *k = q.find(before.name)) k->target = target;
+      });
+    x += u.px(176);
+    label("Speed", u.px(44));
+    sp = u.float_field(u.id("seq_speed"), {x, y, u.px(56), h}, speed, 0.01f, 0.05f, 10.0f);
+    x += u.px(62);
+  }
   label("In", u.px(22));
   const bool ti = u.float_field(u.id("seq_in"), {x, y, u.px(56), h}, tin, 1.0f, 0.0f, 1e6f, "%.0f");
   x += u.px(62);
@@ -695,7 +714,7 @@ void Editor::draw_sequencer_window(const Recti &r) {
     const float start = i->start;
     if (ui_.menu_item("Go To")) seq_set_frame(start);
     for (float sp : {0.5f, 1.0f, 2.0f})
-      if (ui_.menu_item(strprintf("Speed %gx", sp), nullptr, std::fabs(i->speed - sp) < 1e-4f))
+      if (i->kind == (int)SeqKind::Clip && ui_.menu_item(strprintf("Speed %gx", sp), nullptr, std::fabs(i->speed - sp) < 1e-4f))
         seq_edit("Clip Speed", [&](Sequence &x) { x.find(name)->speed = sp; });
     ui_.menu_separator();
     if (ui_.menu_item("Delete", "Del")) seq_delete_selected();
@@ -714,6 +733,19 @@ bool Editor::seq_drop_clip(const std::string &abs_path, int mx, int my) {
     return seq_add_clip(make_asset_relative(abs_path), track, seq_frame_at(seqr_.lanes, mx, seqr_.end));
   }
   return false;  // (dropped elsewhere: a drag let go of)
+}
+
+/* An image or a paper dropped from the Project window onto a lane (round 364): a card there, two seconds long. False
+ * when it fell elsewhere. */
+bool Editor::seq_drop_card(const std::string &abs_path, int mx, int my) {
+  for (const auto &[rect, track] : drop_seq_tracks_) {
+    if (!rect.contains(mx, my)) continue;
+    const int kind = fs::extension(abs_path) == ".paper" ? (int)SeqKind::Paper : (int)SeqKind::Image;
+    SequencePtr s = seq_sequence();
+    const float frames = s ? std::max(1.0f, std::round(2.0f * s->frame_rate)) : 60.0f;
+    return seq_add_card(kind, make_asset_relative(abs_path), track, seq_frame_at(seqr_.lanes, mx, seqr_.end), frames);
+  }
+  return false;
 }
 
 /* ---------------------------------------------------------------- console */
@@ -742,6 +774,9 @@ void Editor::seq_command(const std::vector<std::string> &t) {
   SequencePtr s = seq_sequence();
   if (!s) return Log::warn("seq %s: the scene has no sequence (seq new)", verb.c_str());
   if (verb == "add" && t.size() >= 5) return (void)seq_add_clip(t[2], index(3), num(4, 0), arg(5, ""));
+  /* seq image|paper|cut <file or camera> <track> <start> [frames] (round 364). */
+  if ((verb == "image" || verb == "paper" || verb == "cut") && t.size() >= 5)
+    return (void)seq_add_card(verb == "image" ? (int)SeqKind::Image : verb == "paper" ? (int)SeqKind::Paper : (int)SeqKind::Camera, t[2], index(3), num(4, 0), num(5, 60.0f));
   if (verb == "object" && t.size() >= 4 && s->find(t[2])) {  // seq object <clip> <object>: what it plays on
     seq_edit("Clip Object", [&](Sequence &q) { q.find(t[2])->target = t[3]; });
     return;
@@ -775,7 +810,7 @@ void Editor::seq_command(const std::vector<std::string> &t) {
     seq_edit("Add Trigger", [&](Sequence &q) { q.triggers.push_back({t[2], t[3], std::isfinite(blend) ? blend : 0.25f}); });
     return;
   }
-  Log::warn("seq new [name] | add <clip.anim> <track> <start> [object] | object <name> <object> | move <name> <track> <start> | trim <name> <in> <out> | "
+  Log::warn("seq new [name] | add <clip.anim> <track> <start> [object] | image|paper|cut <file or camera> <track> <start> [frames] | object <name> <object> | move <name> <track> <start> | trim <name> <in> <out> | "
             "speed <name> <s> | rename <name> <new> | remove <name> | track | trigger <key> <name> [blend] | jump <name> [blend] | "
             "frame <n> | preview on|off | play | stop");
 }

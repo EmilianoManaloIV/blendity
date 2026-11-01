@@ -7714,6 +7714,115 @@ static void tests_round363() {
   });
 }
 
+/* ---------------------------------------------------------------- round 364: the Sequencer's cards and camera cuts */
+static void tests_round364() {
+  test("Sequencer cards (round 364): Image, Paper and Camera bars saved and read back; the topmost card and cut at a frame; a card animates nothing and has its own length", [] {
+    Sequence s;
+    s.tracks.resize(3);
+    SeqInstance img, cut, top;
+    img.kind = (int)SeqKind::Image, img.media = "Assets/Textures/a.png", img.name = "Board1", img.start = 0, img.trim_out = 120;
+    top.kind = (int)SeqKind::Paper, top.media = "Assets/Papers/b.paper", top.name = "Board2", top.start = 100, top.trim_out = 40;
+    cut.kind = (int)SeqKind::Camera, cut.media = "CamB", cut.name = "Cut CamB", cut.start = 30, cut.trim_out = 50;
+    s.tracks[0].items = {img};
+    s.tracks[1].items = {cut};
+    s.tracks[2].items = {top};
+    Sequence back;
+    CHECK(load_sequence_text(save_sequence_text(s), back));
+    CHECK(back.tracks.size() == 3 && back.tracks[0].items.size() == 1 && back.tracks[0].items[0].kind == (int)SeqKind::Image && back.tracks[0].items[0].media == "Assets/Textures/a.png");
+    const SeqInstance *at50 = sequence_card_at(back, 50.0f), *at110 = sequence_card_at(back, 110.0f), *at200 = sequence_card_at(back, 200.0f);
+    std::printf("    card at 50: %s, at 110: %s, at 200: %s; cut at 40: '%s', at 90: '%s'\n", at50 ? at50->name.c_str() : "-", at110 ? at110->name.c_str() : "-",
+                at200 ? at200->name.c_str() : "-", sequence_camera_at(back, 40.0f).c_str(), sequence_camera_at(back, 90.0f).c_str());
+    CHECK(at50 && at50->name == "Board1" && at110 && at110->name == "Board2" && !at200);
+    CHECK(sequence_camera_at(back, 40.0f) == "CamB" && sequence_camera_at(back, 90.0f).empty());
+    CHECK(std::fabs(back.tracks[0].items[0].duration(nullptr) - 120.0f) < 1e-3f);  // (not a clip's 60)
+    AnimValues v;
+    sample_sequence(back, 50.0f, v);
+    CHECK(v.values.empty());
+  });
+  test("Sequencer cards (round 364): seq image puts a picture on the timeline, fitted over a render's frame with black bars; seq cut switches the camera in Preview and gives the old one back after; in Play the Sequencer cuts too", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Animatic");
+    /* A 4 x 2 red picture: fitted over an 8 x 8 frame, a 8 x 4 band of red between black bars. */
+    const std::string dir = fs::join(test_dir(), "r364");
+    fs::make_dirs(dir);
+    const std::string png = fs::join(dir, "board1.png");
+    std::vector<uint32_t> red(8, 0xFFFF0000u);
+    CHECK(write_png(png, red.data(), 4, 2, 4));
+    ed.command("seq image " + png + " 0 0 48");
+    Image frame;
+    frame.resize(8, 8);
+    ed.composite_render_card_for_test(frame, 10.0f);
+    std::printf("    the frame's pixels: top 0x%08X, middle 0x%08X\n", frame.pixels[0], frame.pixels[4 * 8 + 4]);
+    CHECK(frame.pixels[0] == 0xFF000000u && frame.pixels[4 * 8 + 4] == 0xFFFF0000u);
+    Image after;
+    after.resize(8, 8);
+    std::fill(after.pixels.begin(), after.pixels.end(), 0xFF336699u);
+    ed.composite_render_card_for_test(after, 60.0f);  // (past the card: the render as it was)
+    CHECK(after.pixels[0] == 0xFF336699u);
+    /* Review 364: a card trimmed past 60 frames keeps its length (no clip's end to clamp to); speed doesn't change it. */
+    ed.command("seq trim board1 0 200");
+    ed.command("seq speed board1 2");
+    SequencePtr anim = ed.seq_for_test_sequence();
+    const SeqInstance *board = anim ? anim->find("board1") : nullptr;
+    std::printf("    the card trimmed to 0..200: %g frames long\n", board ? board->duration(nullptr) : -1.0f);
+    CHECK(board && std::fabs(board->duration(nullptr) - 200.0f) < 1e-3f);
+    /* Two cameras; a cut to the second from frame 10 to 40. */
+    ed.command("create Camera");
+    GameObject *a = ed.active_object_for_test();
+    ed.command("create Camera");
+    GameObject *b = ed.active_object_for_test();
+    if (!a || !b) return;
+    a->name = "CamA", b->name = "CamB";
+    ed.scene().active_camera = a->id;
+    ed.command("seq cut CamB 1 10 30");
+    ed.command("seq preview on");
+    ed.command("seq frame 20");
+    const uint64_t during = ed.scene().active_camera;
+    ed.command("seq frame 60");  // (review 364: scrubbed out of the cut, still in Preview)
+    const uint64_t scrubbed_out = ed.scene().active_camera;
+    ed.command("seq preview off");
+    std::printf("    the camera during the cut %s, scrubbed past it %s, after Preview %s\n", during == b->id ? "CamB" : "not CamB",
+                scrubbed_out == a->id ? "CamA" : "not CamA", ed.scene().active_camera == a->id ? "CamA" : "not CamA");
+    CHECK(during == b->id && scrubbed_out == a->id && ed.scene().active_camera == a->id);
+    /* In Play: the Sequencer component cuts. */
+    Scene s;
+    GameObject *c1 = s.create("C1"), *c2 = s.create("C2"), *dir_obj = s.create("Director");
+    c1->add<Camera>(), c2->add<Camera>();
+    s.active_camera = c1->id;
+    std::remove(resolve_asset_path("Assets/Animations/R364Cuts.seq").c_str());
+    SequencePtr seq = create_sequence_asset("Assets/Animations/R364Cuts.seq", "R364Cuts");
+    if (!seq) return;
+    seq->tracks.resize(2);
+    SeqInstance cut, hold;
+    cut.kind = (int)SeqKind::Camera, cut.media = "C2", cut.name = "Cut C2", cut.start = 0, cut.trim_out = 120;
+    hold.kind = (int)SeqKind::Image, hold.media = "Assets/Textures/none.png", hold.name = "Hold", hold.start = 0, hold.trim_out = 300;
+    seq->tracks[0].items = {cut};
+    seq->tracks[1].items = {hold};  // (the sequence runs on past the cut)
+    Sequencer *sq = dir_obj->add<Sequencer>();
+    sq->sequence = seq->asset_path;
+    PlayContext ctx;
+    ctx.scene = &s;
+    ctx.dt = 1.0f / 60.0f;
+    sq->start(ctx);
+    sq->update(ctx);
+    const uint64_t in_cut = s.active_camera;
+    sq->time = 3.0f;  // (frame 180: past the cut)
+    sq->update(ctx);
+    std::printf("    Play: the cut's camera %s, past the cut %s\n", in_cut == c2->id ? "C2" : "not C2", s.active_camera == c1->id ? "C1" : "not C1");
+    CHECK(in_cut == c2->id && s.active_camera == c1->id);
+  });
+  test("the lesson's Try-it (round 364): seq new Animatic, window Sequencer - a sequence to lay cards and cuts on; a cut to no camera refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Animatic");
+    ed.command("window Sequencer");
+    ed.command("seq cut NoCamera 0 0 30");
+    SequencePtr s = ed.seq_for_test_sequence();
+    CHECK(s && (s->tracks.empty() || s->tracks[0].items.empty()));
+  });
+}
+
 /* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
 static void tests_round337() {
   test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
@@ -8091,4 +8200,5 @@ void run_assets_tests() {
   tests_round361();
   tests_round362();
   tests_round363();
+  tests_round364();
 }

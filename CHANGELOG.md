@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-31 (round 364): the Sequencer for animatics and cinematics - cards and camera cuts
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 11:
+the Sequencer held animation clips only - no storyboard pictures, no camera cuts).
+
+**Added (task 0341)**
+- **Cards:** an image or a paper on a Sequencer lane, held full-frame over the Game view and Render Animation's frames
+  (letterboxed on black). Drop one from the Project window, or `seq image|paper <file> <track> <start> [frames]`.
+- **Camera cuts:** `seq cut <camera> <track> <start> [frames]` switches the scene's camera in Play and in Preview, with
+  the old camera given back after Preview.
+- **The bars** are coloured and labelled by kind.
+- **Files:** cards are kept in the .seq file as `card` lines, which older readers skip.
+- **The Opus review's fixes:**
+  - a card's trim was clamped to 60 frames;
+  - a cut never gave the camera back after the playhead left it (in Preview or Play);
+  - pictures were cached forever (a paper card now follows its drawing, an image card its file);
+  - moved files and renamed cameras now show "(missing)";
+  - .hdr and .exr cards are refused;
+  - paths are kept relative;
+  - the first playing Sequencer is the one shown;
+  - no Speed or Object field on cards.
+
+**Checked:** `tests_round364`:
+- the cards saved and read back;
+- the topmost card and cut at a frame;
+- cards animating nothing;
+- a red picture fitted over a frame between black bars, and gone after its bar;
+- a card trimmed to 200 frames;
+- a cut in Preview, scrubbed out of and the camera given back;
+- a cut in Play, and the camera given back past it;
+- the Try-it.
+
 ## 2026-10-31 (round 363): the VRChat world kit, part 2 - LOD Groups
 
 **Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 9:

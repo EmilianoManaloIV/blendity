@@ -206,6 +206,7 @@ void Editor::update_asset_drag() {
         board_add_paper(d.path, board_from_screen({(float)in.mx, (float)in.my}));  // (task 0305)
       else if (fs::extension(d.path) == ".ptex") drop_texture_asset(d.path, in.mx, in.my);
       else if (fs::extension(d.path) == ".anim") seq_drop_clip(d.path, in.mx, in.my);
+      else if ((fs::extension(d.path) == ".paper" || (image_extension_supported(fs::extension(d.path)) && !d.mat)) && seq_drop_card(d.path, in.mx, in.my)) {}  // (round 364)
       else if (d.mat || fs::extension(d.path) == ".mat" || image_extension_supported(fs::extension(d.path)))
         drop_asset(d.path, in.mx, in.my, d.mat);
     }

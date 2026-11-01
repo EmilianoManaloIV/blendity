@@ -182,7 +182,7 @@ everything):
   switch in Preferences: hand animation never changes.
 
 Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2 (shape keys go out as
-glTF morph targets and FBX blend shapes, round 351; FBX carries the skeleton, skin and clip as glTF does, round 352; the texture set and lightmap UVs go along, round 353; an export waits for a remesh or bind still running on it, round 354; the Profiler ranks a scene or avatar against VRChat's PC and Quest limits, round 355; the Avatar window makes VRChat's 15 visemes and checks an avatar, after the CATS plugin, round 356, and its Fix Model readies an imported character for Unity's Humanoid in one step, round 357, with CATS' Model Options and Pose and Shape tools, round 358, and its Decimation modes, Bone Root and Bone Merging, round 359, Eye Tracking and the Texture Atlas, round 360, Merge Armatures, Attach Mesh, Translate and Export for VRChat, round 361; a Collider component written for Unity, Unreal and Godot, round 362, and LOD Groups switched in the Game view and exported as _LOD0.._LODn for Unity, round 363); **Live Link** sends the
+glTF morph targets and FBX blend shapes, round 351; FBX carries the skeleton, skin and clip as glTF does, round 352; the texture set and lightmap UVs go along, round 353; an export waits for a remesh or bind still running on it, round 354; the Profiler ranks a scene or avatar against VRChat's PC and Quest limits, round 355; the Avatar window makes VRChat's 15 visemes and checks an avatar, after the CATS plugin, round 356, and its Fix Model readies an imported character for Unity's Humanoid in one step, round 357, with CATS' Model Options and Pose and Shape tools, round 358, and its Decimation modes, Bone Root and Bone Merging, round 359, Eye Tracking and the Texture Atlas, round 360, Merge Armatures, Attach Mesh, Translate and Export for VRChat, round 361; a Collider component written for Unity, Unreal and Godot, round 362, and LOD Groups switched in the Game view and exported as _LOD0.._LODn for Unity, round 363); the Sequencer holds storyboard cards and camera cuts for animatics and cinematics (round 364); **Live Link** sends the
 scene as you change it to Blender, Unity, Godot or Unreal on the same computer (`docs/LIVELINK.md`). The keymap starts
 from Unity, Unreal, Blender, Maya, 3ds Max or SketchUp, and **Edit > Editor Feel** switches the keys and the Scene view's
 mouse navigation together to Unity's, Unreal's, Blender's or Maya's. Any tab can have a window of its own, on any
@@ -302,7 +302,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (14503 unit checks in 1372 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (14516 unit checks in 1375 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).
