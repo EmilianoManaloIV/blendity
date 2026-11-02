@@ -705,6 +705,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   poll_skin_job();
   poll_unity_package();  // (round 369)
   poll_unity_export();   // (round 372)
+  poll_unity_model_ids();  // (round 395)
   anim_tick();
   seq_tick();
   seq_audio_tick();  // (round 365)
@@ -1483,7 +1484,8 @@ void Editor::handle_drop() {
       open_scene_asked(path);  // (task 0254)
     }
     else if (ext == ".unitypackage") import_unity_package(path);  // (round 369)
-    else if (ext == ".prefab" || ext == ".unity") import_unity_scene(path);  // (round 370)
+    else if (ext == ".unity") open_unity_scene_asked(path);  // (round 395: a scene opens as one, as in Unity)
+    else if (ext == ".prefab") import_unity_scene(path);  // (round 370)
     else if (ext == ".tscn") import_godot_scene(path);  // (round 373)
     else if (ext == ".blend") import_blend(path);  // (round 374)
     else if (ext == ".blendity-snapshot") import_snapshot(path);  // (round 374: a bridge's Send to Blendity, dropped)
@@ -2236,11 +2238,12 @@ void Editor::open_scene_dialog() {
   defer([this] {
     std::string path;
     switch (pick_open_path("Open Scene", scene_->path.empty() ? fs::join(assets_dir_, "Scenes") : fs::parent(scene_->path),
-                           {{"Blendity Scene", {".scene"}}}, path)) {
+                           {{"Blendity Scene", {".scene"}}, {"Unity Scene", {".unity"}}}, path)) {
       case PathPick::Cancelled: return;
       case PathPick::Unavailable: dialog_ = Dialog::OpenScene; return;
       case PathPick::Chosen: break;
     }
+    if (to_lower(fs::extension(path)) == ".unity") return (void)open_unity_scene(path);  // (round 395: asked about unsaved changes already)
     open_scene(path);
   });
 }

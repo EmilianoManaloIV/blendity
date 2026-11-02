@@ -4,6 +4,7 @@
 
 #include "spring_bones.h"
 #include "../core/core.h"
+#include "../image/image.h"
 
 #include <algorithm>
 #include <cmath>
@@ -54,7 +55,8 @@ bool is_transform(const UnityDoc &d) { return d.class_id == 4 || d.class_id == 2
 struct Build {
   ObjectMap by_fid;
   std::vector<std::pair<GameObject *, int64_t>> fathers;  // (each object and its parent's transform fileID; 0: none)
-  std::map<int64_t, ObjectMap> instances;                 // (a PrefabInstance's fileID: its objects by their source fileIDs)
+  UnityTargets targets;                                   // (round 395: every document's object and class - what overrides name)
+  std::map<int64_t, UnityTargets> instances;              // (a PrefabInstance's fileID: its objects by their source fileIDs)
   std::map<int64_t, GameObject *> instance_roots;         // (...and its root: what a stripped object of a model falls back to)
   std::map<GameObject *, std::vector<MaterialPtr>> model_materials;
   int skinned = 0;
@@ -71,6 +73,7 @@ void make_objects(const std::vector<UnityDoc> &docs, Scene &scene, UnityImport &
       o->file = ctx.source, o->game_object = std::to_string(d.file_id), o->nested = ctx.depth > 0;
     }
     b.by_fid[d.file_id] = g;
+    b.targets[d.file_id] = {g, 1};
     ctx.objects++;
   }
 }
@@ -80,6 +83,7 @@ void place_objects(const std::vector<UnityDoc> &docs, Build &b) {
     GameObject *g = is_transform(d) && !d.stripped ? object_at(b.by_fid, d.body.file_id("m_GameObject")) : nullptr;
     if (!g) continue;
     b.by_fid[d.file_id] = g;
+    b.targets[d.file_id] = {g, d.class_id};
     Transform t;
     t.position = vec3_of(d.body, "m_LocalPosition", Vec3(0.0f));
     t.rotation = quat_of(d.body);
@@ -91,19 +95,83 @@ void place_objects(const std::vector<UnityDoc> &docs, Build &b) {
   }
 }
 
-/* One override of a nested prefab: its transform, name or active state; false for what Blendity doesn't hold. */
-bool apply_override(const YamlNode &e, ObjectMap &m, std::set<GameObject *> &turned) {
-  GameObject *g = object_at(m, e.file_id("target"));
+bool is_renderer(int class_id) { return class_id == 23 || class_id == 137; }
+
+/* A renderer's material slot (m_Materials.Array.data[n]) or slot count (.size): the .mat converted, or the slot
+ * emptied (Unity's default material). False when the material isn't in the project: left to Unity. */
+bool material_override(const YamlNode &e, GameObject *g, UnityImport &ctx) {
+  MeshRenderer *r = g->get<MeshRenderer>();
   const std::string prop = e.str("propertyPath"), value = e.str("value");
-  if (!g) return false;
+  if (!r) return false;
+  if (prop == "m_Materials.Array.size") {
+    const long n = std::atol(value.c_str());
+    if (n < 0 || n > 256) return false;
+    return r->materials.resize((size_t)n), true;
+  }
+  const size_t open = prop.find('[');
+  const long slot = open == std::string::npos ? -1 : std::atol(prop.c_str() + open + 1);
+  if (prop.rfind("m_Materials.Array.data[", 0) != 0 || slot < 0 || slot > 255) return false;
+  const std::string guid = e.guid("objectReference");
+  MaterialPtr m = guid.empty() || !ctx.material ? nullptr : ctx.material(guid);
+  if (!m && !guid.empty()) return false;
+  if (r->materials.size() <= (size_t)slot) r->materials.resize((size_t)slot + 1);
+  r->materials[(size_t)slot] = m;
+  ctx.materials += m != nullptr;
+  return true;
+}
+
+/* A renderer's switches: on or off, its shadows, its lightmap scale. */
+bool renderer_override(const std::string &prop, double v, GameObject *g) {
+  MeshRenderer *r = g->get<MeshRenderer>();
+  if (!r) return false;
+  if (prop == "m_Enabled") return r->enabled = v != 0.0, true;
+  if (prop == "m_CastShadows") return r->cast_shadows = v != 0.0, true;  // (Off 0; On, Two Sided, Shadows Only cast)
+  if (prop == "m_ReceiveShadows") return r->receive_shadows = v != 0.0, true;
+  if (prop == "m_ScaleInLightmap") return std::isfinite(v) && v >= 0.0 && (r->scale_in_lightmap = (float)v, true);
+  return false;
+}
+
+bool light_override(const std::string &prop, double v, GameObject *g) {
+  Light *l = g->get<Light>();
+  if (!l || !std::isfinite(v)) return false;
+  if (prop == "m_Enabled") return l->enabled = v != 0.0, true;
+  if (prop == "m_Color.r" || prop == "m_Color.g" || prop == "m_Color.b") return l->color[prop.back() == 'r' ? 0 : prop.back() == 'g' ? 1 : 2] = (float)v, true;
+  if (prop == "m_Color.a") return true;  // (a light's alpha does nothing in Unity either)
+  if (prop == "m_Intensity") return l->intensity = (float)v, true;
+  if (prop == "m_Range") return l->range = (float)v, true;
+  if (prop == "m_SpotAngle") return l->spot_angle = (float)v, true;
+  if (prop == "m_InnerSpotAngle") return l->inner_spot_angle = (float)v, true;
+  if (prop == "m_Lightmapping") return l->mode = v == 2.0 ? 2 : v == 1.0 ? 1 : 0, true;
+  return false;
+}
+
+/* Contribute GI (StaticEditorFlags' first bit) is a renderer's in Blendity. */
+void set_static_flags(GameObject *g, double flags) {
+  if (MeshRenderer *r = g->get<MeshRenderer>()) r->contribute_gi = ((long long)flags & 1) != 0;
+}
+
+/* One override of a nested prefab or a model: its transform, name, active state, a renderer's materials and switches,
+ * a light's; false for what Blendity doesn't hold. */
+bool apply_override(const YamlNode &e, const UnityTargets &m, std::set<GameObject *> &turned, UnityImport &ctx) {
+  const auto at = m.find(e.file_id("target"));
+  const std::string prop = e.str("propertyPath"), value = e.str("value");
+  if (at == m.end() || !at->second.object) return false;
+  GameObject *g = at->second.object;
+  const int cls = at->second.class_id;
+  const double v = std::atof(value.c_str());
+  if (prop.rfind("m_Materials.Array.", 0) == 0) return (cls == 0 || is_renderer(cls)) && material_override(e, g, ctx);
+  if (is_renderer(cls)) return renderer_override(prop, v, g);
+  if (cls == 108) return light_override(prop, v, g);
+  if (cls != 0 && cls != 1 && cls != 4 && cls != 224) return false;  // (another component's field: Unity's)
   if (prop == "m_Name") return g->name = value, true;
-  if (prop == "m_IsActive") return g->active = std::atof(value.c_str()) != 0.0, true;
+  if (prop == "m_IsActive") return g->active = v != 0.0, true;
+  if (prop == "m_StaticEditorFlags") return set_static_flags(g, v), true;
   if (prop == "m_RootOrder" || prop.rfind("m_LocalEulerAnglesHint.", 0) == 0) return true;  // (Unity's bookkeeping: the rotation itself says it)
   const size_t dot = prop.rfind('.');
   if (dot == std::string::npos || dot + 2 != prop.size()) return false;
   const std::string field = prop.substr(0, dot);
   const char axis = prop.back();
-  const float v = (float)std::atof(value.c_str());
+  const float f = (float)v;
   Transform t = g->local();
   float *slot = nullptr;
   if (field == "m_LocalPosition" || field == "m_LocalScale") {
@@ -111,21 +179,23 @@ bool apply_override(const YamlNode &e, ObjectMap &m, std::set<GameObject *> &tur
     slot = axis == 'x' ? &vec.x : axis == 'y' ? &vec.y : axis == 'z' ? &vec.z : nullptr;
   }
   if (field == "m_LocalRotation") slot = axis == 'x' ? &t.rotation.x : axis == 'y' ? &t.rotation.y : axis == 'z' ? &t.rotation.z : axis == 'w' ? &t.rotation.w : nullptr;
-  if (!slot || !std::isfinite(v)) return false;
-  *slot = v;
+  if (!slot || !std::isfinite(f)) return false;
+  *slot = f;
   if (field == "m_LocalRotation") turned.insert(g);
   g->set_local(t);
   return true;
 }
 
-void apply_overrides(const YamlNode &instance, ObjectMap &m, UnityImport &ctx) {
+void apply_overrides(const YamlNode &instance, const UnityTargets &m, UnityImport &ctx) {
   const YamlNode *mod = instance.get("m_Modification");
   const YamlNode *list = mod ? mod->get("m_Modifications") : nullptr;
   const YamlNode *removed = mod ? mod->get("m_RemovedComponents") : nullptr;
   if (removed && !removed->seq.empty()) ctx.notes.push_back("a nested prefab's removed components came back (Unity removes them again)");
   std::set<GameObject *> turned;
-  for (const YamlNode &e : list ? list->seq : std::vector<YamlNode>())
-    if (!apply_override(e, m, turned)) ctx.overrides_kept++;
+  for (const YamlNode &e : list ? list->seq : std::vector<YamlNode>()) {
+    const bool done = apply_override(e, m, turned, ctx);
+    ctx.overrides_applied += done, ctx.overrides_kept += !done;
+  }
   for (GameObject *g : turned) {  // (a rotation's parts set one by one: made whole once all are in)
     Transform t = g->local();
     t.rotation = unit(t.rotation);
@@ -134,19 +204,60 @@ void apply_overrides(const YamlNode &instance, ObjectMap &m, UnityImport &ctx) {
   }
 }
 
-/* A nested prefab: its own objects made (by its own fileIDs), its overrides applied, its roots placed under the
- * transform the instance names. */
-/* A model placed as a prefab: its nodes as objects under one root; stripped objects and added components fall to it. */
-void instantiate_model(const UnityDoc &d, GameObject *root, UnityImport &ctx, Build &b) {
+/* Properties only a renderer has: an override of one on a model with a single renderer can only be that renderer's. */
+bool renderer_only(const std::string &prop) {
+  return prop.rfind("m_Materials.Array.", 0) == 0 || prop == "m_CastShadows" || prop == "m_ReceiveShadows" || prop == "m_ScaleInLightmap" ||
+         prop == "m_ProbeAnchor" || prop == "m_LightProbeUsage" || prop == "m_ReflectionProbeUsage" || prop == "m_LightmapParameters";
+}
+
+/* What apply_override can hold (review 395: an override of anything else waits for nothing - Unity's numbers wouldn't
+ * bring it in). */
+bool holdable(const std::string &prop) {
+  static const char *const kFields[] = {"m_Name", "m_IsActive", "m_StaticEditorFlags", "m_Enabled", "m_CastShadows", "m_ReceiveShadows", "m_ScaleInLightmap",
+                                        "m_Intensity", "m_Range", "m_SpotAngle", "m_InnerSpotAngle", "m_Lightmapping"};
+  for (const char *f : kFields)
+    if (prop == f) return true;
+  for (const char *p : {"m_Materials.Array.", "m_LocalPosition.", "m_LocalRotation.", "m_LocalScale.", "m_Color."})
+    if (prop.rfind(p, 0) == 0) return true;
+  return false;
+}
+
+/* The model's one renderer, or nullptr (none, or several). */
+GameObject *lone_renderer(GameObject *root) {
+  GameObject *found = nullptr;
+  int n = 0;
+  std::function<void(GameObject *)> walk = [&](GameObject *g) {
+    if (g->get<MeshRenderer>()) found = g, n++;
+    for (GameObject *c : g->children) walk(c);
+  };
+  walk(root);
+  return n == 1 ? found : nullptr;
+}
+
+/* A model placed as a prefab: its nodes as objects under one root, its overrides applied to the parts whose fileIDs
+ * are known (round 395; the rest wait for Unity's numbers, counted); stripped objects and added components fall to the
+ * part they name, else the root. */
+void instantiate_model(const UnityDoc &d, const std::string &guid, GameObject *root, UnityTargets &parts, UnityImport &ctx, Build &b) {
   ctx.prefabs++;
   const YamlNode *mod = d.body.get("m_Modification");
   b.fathers.push_back({root, mod ? mod->file_id("m_TransformParent") : 0});
   b.instance_roots[d.file_id] = root;
-  b.instances[d.file_id];
   const YamlNode *list = mod ? mod->get("m_Modifications") : nullptr;
-  ctx.overrides_kept += list ? (int)list->seq.size() : 0;  // (its nodes' fileIDs are Unity's own hashes: the overrides stay Unity's)
+  GameObject *lone = lone_renderer(root);
+  for (const YamlNode &e : list ? list->seq : std::vector<YamlNode>()) {
+    const int64_t fid = e.file_id("target");
+    const bool own = e.guid("target") == guid;
+    if (lone && own && !parts.count(fid) && renderer_only(e.str("propertyPath"))) parts[fid] = {lone, 23};
+    if (parts.count(fid) || !own || !holdable(e.str("propertyPath"))) continue;
+    ctx.model_overrides_waiting++;
+    ctx.models_waiting.insert(guid);
+  }
+  apply_overrides(d.body, parts, ctx);
+  b.instances[d.file_id] = parts;
 }
 
+/* A nested prefab: its own objects made (by its own fileIDs), its overrides applied, its roots placed under the
+ * transform the instance names. */
 void instantiate(const UnityDoc &d, Scene &scene, UnityImport &ctx, Build &b) {
   const std::string guid = d.body.guid("m_SourcePrefab");
   std::vector<UnityDoc> docs;
@@ -154,27 +265,33 @@ void instantiate(const UnityDoc &d, Scene &scene, UnityImport &ctx, Build &b) {
   if (ctx.building->count(guid)) return ctx.notes.push_back("a prefab that holds itself (GUID " + guid + ") was left out at its second appearance");
   if (*ctx.total > ctx.max_objects) return;
   const bool yaml = ctx.prefab && ctx.prefab(guid, docs);
-  GameObject *model = !yaml && ctx.model ? ctx.model(guid, scene) : nullptr;
-  if (model) return instantiate_model(d, model, ctx, b);
+  UnityTargets parts;
+  GameObject *model = !yaml && ctx.model ? ctx.model(guid, scene, parts) : nullptr;
+  if (model) return instantiate_model(d, guid, model, parts, ctx, b);
   if (docs.empty()) return ctx.notes.push_back("a nested prefab (GUID " + guid + ") isn't in the project, or isn't one Blendity reads");
   UnityImport inner;
   inner.mesh = ctx.mesh, inner.script_name = ctx.script_name, inner.prefab = ctx.prefab, inner.model = ctx.model, inner.depth = ctx.depth + 1;
+  inner.material = ctx.material;  // (round 395: a nested prefab's .mat files had come in as its model's own)
   inner.building = ctx.building, inner.total = ctx.total, inner.max_objects = ctx.max_objects;
   inner.path_of = ctx.path_of, inner.source = ctx.path_of ? ctx.path_of(guid) : std::string();
   ctx.building->insert(guid);
-  ObjectMap m = build_unity_objects(docs, scene, nullptr, inner);
+  UnityTargets m;
+  build_unity_objects(docs, scene, nullptr, inner, &m);
   ctx.building->erase(guid);
   ctx.dropped += inner.dropped;
   ctx.objects += inner.objects, ctx.meshes += inner.meshes, ctx.missing_meshes += inner.missing_meshes, ctx.lights += inner.lights;
   ctx.cameras += inner.cameras, ctx.colliders += inner.colliders, ctx.engine += inner.engine, ctx.prefabs += inner.prefabs + 1;
-  ctx.overrides_kept += inner.overrides_kept;
+  ctx.overrides_kept += inner.overrides_kept, ctx.overrides_applied += inner.overrides_applied;
+  ctx.materials += inner.materials, ctx.outlines += inner.outlines, ctx.springs += inner.springs;
+  ctx.model_overrides_waiting += inner.model_overrides_waiting;
+  ctx.models_waiting.insert(inner.models_waiting.begin(), inner.models_waiting.end());
   ctx.notes.insert(ctx.notes.end(), inner.notes.begin(), inner.notes.end());
   apply_overrides(d.body, m, ctx);
   const YamlNode *mod = d.body.get("m_Modification");
   const int64_t parent = mod ? mod->file_id("m_TransformParent") : 0;
   std::set<GameObject *> roots;
-  for (const auto &[fid, g] : m)
-    if (!g->parent) roots.insert(g);
+  for (const auto &[fid, t] : m)
+    if (t.object && !t.object->parent) roots.insert(t.object);
   for (GameObject *g : roots) b.fathers.push_back({g, parent});
   b.instances[d.file_id] = std::move(m);
 }
@@ -185,9 +302,12 @@ void map_stripped(const std::vector<UnityDoc> &docs, Build &b) {
     if (!d.stripped) continue;
     const int64_t pi = d.body.file_id("m_PrefabInstance");
     const auto inst = b.instances.find(pi);
-    GameObject *g = inst == b.instances.end() ? nullptr : object_at(inst->second, d.body.file_id("m_CorrespondingSourceObject"));
+    const auto src = inst == b.instances.end() ? UnityTargets::const_iterator() : inst->second.find(d.body.file_id("m_CorrespondingSourceObject"));
+    GameObject *g = inst != b.instances.end() && src != inst->second.end() ? src->second.object : nullptr;
     if (!g) g = object_at(b.instance_roots, pi);  // (a model's: its root takes what was added to it)
-    if (g) b.by_fid[d.file_id] = g;
+    if (!g) continue;
+    b.by_fid[d.file_id] = g;
+    b.targets[d.file_id] = {g, d.class_id};
   }
 }
 
@@ -264,6 +384,9 @@ void add_renderer(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) 
   if (!g->get<MeshFilter>()) return;
   MeshRenderer *r = g->get<MeshRenderer>() ? g->get<MeshRenderer>() : g->add<MeshRenderer>();
   r->enabled = d.body.num("m_Enabled", 1.0) != 0.0;
+  r->cast_shadows = d.body.num("m_CastShadows", 1.0) != 0.0;  // (round 395)
+  r->receive_shadows = d.body.num("m_ReceiveShadows", 1.0) != 0.0;
+  r->scale_in_lightmap = (float)std::max(0.0, d.body.num("m_ScaleInLightmap", 1.0));
   if (d.class_id == 137 && d.body.get("m_Bones") && !d.body.get("m_Bones")->seq.empty()) b.skinned++;
   const std::vector<MaterialPtr> mats = renderer_materials(d, g, ctx, b);
   if (!mats.empty()) r->materials = mats;
@@ -477,7 +600,7 @@ std::string patch_unity_objects(const std::string &text, const std::vector<Unity
   return out;
 }
 
-GameObject *objects_from_model(const ImportResult &r, const std::string &name, Scene &scene) {
+GameObject *objects_from_model(const ImportResult &r, const std::string &name, Scene &scene, std::vector<GameObject *> *made_out) {
   GameObject *root = scene.create(name);
   std::vector<GameObject *> made;
   for (const ImportedNode &n : r.nodes) {
@@ -492,10 +615,118 @@ GameObject *objects_from_model(const ImportResult &r, const std::string &name, S
     const int p = r.nodes[i].parent;
     scene.set_parent(made[i], p >= 0 && p < (int)made.size() ? made[(size_t)p] : root, -1, false);
   }
+  if (made_out) *made_out = made;
   return root;
 }
 
-std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> &docs, Scene &scene, GameObject *parent, UnityImport &ctx) {
+int64_t unity_hashed_file_id(const std::string &type, const std::string &name, int occurrence) {
+  const std::string s = "Type:" + type + "->" + name + std::to_string(occurrence);
+  return (int64_t)xxh64(s.data(), s.size());
+}
+
+namespace {
+
+/* Unity's numbers for a model's root, the same in every model: persistent (2019.3+) and legacy. */
+const struct {
+  int64_t file_id;
+  int class_id;
+} kModelRootIds[] = {{919132149155446097LL, 1}, {-8679921383154817045LL, 4}, {-7511558181221131132LL, 23}, {-5754084199372789682LL, 33},
+                     {100000, 1}, {400000, 4}, {2300000, 23}, {3300000, 33}};
+
+/* A legacy table's entry: its class from the number (Unity's class times 100000, plus twice the index). */
+void add_legacy(int64_t fid, const std::string &name, UnityModelIds &out) {
+  const int cls = (int)(fid / 100000);
+  if (fid <= 0 || (cls != 1 && cls != 4 && cls != 23 && cls != 33 && cls != 137)) return;
+  out[fid] = {cls, name == "//RootNode" ? std::string() : name};
+}
+
+}  // namespace
+
+void unity_model_ids_from_meta(const YamlNode &meta, UnityModelIds &out) {
+  for (const auto &r : kModelRootIds) out[r.file_id] = {r.class_id, std::string()};
+  const YamlNode *importer = meta.get("ModelImporter");
+  if (!importer) return;
+  if (const YamlNode *recycle = importer->get("fileIDToRecycleName"))
+    for (const auto &[k, name] : recycle->map) add_legacy(std::strtoll(k.c_str(), nullptr, 10), name.value, out);
+  const YamlNode *table = importer->get("internalIDToNameTable");
+  for (const YamlNode &e : table ? table->seq : std::vector<YamlNode>()) {
+    const YamlNode *first = e.get("first");
+    for (const auto &[cls, id] : first ? first->map : std::vector<std::pair<std::string, YamlNode>>()) add_legacy(std::strtoll(id.value.c_str(), nullptr, 10), e.str("second"), out);
+  }
+}
+
+void parse_unity_model_ids(const std::string &text, std::map<std::string, UnityModelIds> &out) {
+  for (size_t at = 0; at < text.size();) {
+    size_t end = text.find('\n', at);
+    if (end == std::string::npos) end = text.size();
+    std::string line = text.substr(at, end - at);
+    at = end + 1;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+    const size_t t3 = t2 == std::string::npos ? t2 : line.find('\t', t2 + 1);
+    if (t3 == std::string::npos || t1 != 32) continue;  // (a GUID is 32 hex digits)
+    const int64_t fid = std::strtoll(line.c_str() + t1 + 1, nullptr, 10);
+    const int cls = std::atoi(line.c_str() + t2 + 1);
+    if (fid != 0 && cls > 0) out[line.substr(0, 32)][fid] = {cls, line.substr(t3 + 1)};
+  }
+}
+
+void unity_model_targets(const ImportResult &r, GameObject *root, const std::vector<GameObject *> &made, const UnityModelIds &ids, UnityTargets &out) {
+  const size_t n = std::min(made.size(), r.nodes.size());
+  int tops = 0, top = -1;
+  for (size_t i = 0; i < n; i++)
+    if (r.nodes[i].parent < 0 || r.nodes[i].parent >= (int)n) tops++, top = (int)i;
+  const int collapsed = tops == 1 ? top : -1;  // (one top node: Unity's root is that node)
+  std::map<std::string, GameObject *> by_path;
+  std::map<std::string, int> name_count;
+  std::map<std::string, GameObject *> by_name;
+  for (size_t i = 0; i < n; i++) {
+    std::string path;
+    int guard = 0;
+    for (int k = (int)i; k >= 0 && k < (int)n && k != collapsed && guard++ < 256; k = r.nodes[(size_t)k].parent)
+      path = path.empty() ? r.nodes[(size_t)k].name : r.nodes[(size_t)k].name + "/" + path;
+    by_path.emplace(path, made[i]);
+    name_count[r.nodes[i].name]++;
+    by_name[r.nodes[i].name] = made[i];
+  }
+  for (const auto &[fid, part] : ids) {
+    GameObject *g = nullptr;
+    if (part.path.empty()) g = collapsed >= 0 ? made[(size_t)collapsed] : root;  // (review 395: its transform is the one the instance overrides)
+    if (!g && by_path.count(part.path)) g = by_path[part.path];
+    if (!g && name_count[part.path] == 1) g = by_name[part.path];  // (a legacy table names the node, not its path)
+    if (g) out[fid] = {g, part.class_id};
+  }
+}
+
+/* Unity's RenderSettings: AmbientMode 0 Skybox, 1 Trilight, 3 Flat, 4 Custom; FogMode 1 Linear, 2 Exponential,
+ * 3 Exponential Squared. Colours are gamma, as a material's. */
+bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes) {
+  const UnityDoc *rs = nullptr;
+  for (const UnityDoc &d : docs) rs = !rs && d.class_id == 104 ? &d : rs;
+  if (!rs) return false;
+  auto linear = [](double c) { return c <= 1.0 ? srgb_to_linear((float)std::max(0.0, c)) : (float)std::pow(c, 2.2); };  // (HDR past 1 by the same curve)
+  auto color = [&](const char *key, Vec3 def) {
+    const YamlNode *c = rs->body.get(key);
+    return c ? Vec3(linear(c->num("r")), linear(c->num("g")), linear(c->num("b"))) : def;
+  };
+  const int ambient = (int)rs->body.num("m_AmbientMode", 0.0);
+  if (ambient == 1) env.mode = 0, env.sky = color("m_AmbientSkyColor", env.sky), env.equator = color("m_AmbientEquatorColor", env.equator), env.ground = color("m_AmbientGroundColor", env.ground);
+  if (ambient == 3) env.mode = 3, env.color = color("m_AmbientSkyColor", env.color);
+  if (ambient == 1 || ambient == 3) env.strength = 1.0f;  // (review 395: Unity's Intensity Multiplier is a Skybox source's; a colour is as it is)
+  if (ambient == 0 && rs->body.file_id("m_SkyboxMaterial")) notes.push_back("the scene's ambient is its skybox material's: Blendity's sky stays (set it in the Lighting window)");
+  env.fog = rs->body.num("m_Fog", 0.0) != 0.0;
+  const int fog = (int)rs->body.num("m_FogMode", 3.0);
+  const double density = std::max(1e-6, rs->body.num("m_FogDensity", 0.01));
+  env.fog_color = env.fog_color_far = color("m_FogColor", env.fog_color);
+  env.fog_start = fog == 1 ? (float)std::max(0.0, rs->body.num("m_LinearFogStart", 0.0)) : 0.0f;
+  env.fog_end = fog == 1 ? (float)std::max((double)env.fog_start + 0.1, rs->body.num("m_LinearFogEnd", 300.0))
+                         : (float)std::min(10000.0, (fog == 2 ? 3.0 : std::sqrt(3.0)) / density);  // (where 1 - e^-(d x) reaches 95%)
+  if (env.fog && fog != 1) notes.push_back("the scene's exponential fog came in as linear fog reaching 95% at the same distance");
+  return true;
+}
+
+std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> &docs, Scene &scene, GameObject *parent, UnityImport &ctx,
+                                                    UnityTargets *targets) {
   if (!ctx.building) ctx.building = std::make_shared<std::set<std::string>>();
   if (!ctx.total) ctx.total = std::make_shared<int>(0);
   Build b;
@@ -513,9 +744,14 @@ std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> 
   for (const UnityDoc &d : docs) {
     if (structural(d)) continue;
     GameObject *g = object_at(b.by_fid, d.body.file_id("m_GameObject"));
-    if (g) add_component(d, g, ctx, b);
+    if (g) add_component(d, g, ctx, b), b.targets[d.file_id] = {g, d.class_id};
     else ctx.dropped++;  // (review 370: never silently - counted, said)
   }
+  for (const UnityDoc &d : docs) {  // (round 395: Contribute GI - a static flag on the GameObject, a renderer's in Blendity)
+    GameObject *g = d.class_id == 1 && !d.stripped ? object_at(b.by_fid, d.file_id) : nullptr;
+    if (g && d.body.get("m_StaticEditorFlags")) set_static_flags(g, d.body.num("m_StaticEditorFlags"));
+  }
+  if (targets) *targets = b.targets;
   if (b.skinned) ctx.notes.push_back("skinned meshes come in unbound to their bones (the bind is a later round)");
   return b.by_fid;
 }

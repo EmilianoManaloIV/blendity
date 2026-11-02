@@ -8882,9 +8882,9 @@ static void tests_round370() {
     const Camera *cam = tri->get<Camera>();
     CHECK(cam && cam->fov == 45.0f && cam->near_clip == 0.1f && cam->far_clip == 500.0f);
     const Light *light = lamp->get<Light>();
-    std::printf("    Porch Lamp: at (%g %g %g), light type %d, range %g, intensity %g (the override isn't held: Unity keeps it)\n", lamp->local().position.x,
+    std::printf("    Porch Lamp: at (%g %g %g), light type %d, range %g, intensity %g (round 395: its override applied)\n", lamp->local().position.x,
                 lamp->local().position.y, lamp->local().position.z, light ? light->type : -1, light ? light->range : 0.0f, light ? light->intensity : 0.0f);
-    CHECK(light && light->type == 1 && light->range == 7.5f && lamp->local().position.x == 3.0f && lamp->local().position.y == 2.0f);
+    CHECK(light && light->type == 1 && light->range == 7.5f && light->intensity == 5.0f && lamp->local().position.x == 3.0f && lamp->local().position.y == 2.0f);
     /* One Undo step. */
     ed.command("undo");
     size_t after = 0;
@@ -8959,7 +8959,8 @@ static void tests_round370() {
     CHECK(fb == 2 && fa == 1);
     CHECK(l1 && l2 && (l1->parent == root || l2->parent == root) && l1->parent != nullptr && l2->parent != nullptr);
     /* The model placed as a prefab: its mesh, and the script added to it on its root. */
-    GameObject *tri = ed.scene().find_by_name("tri");
+    GameObject *tri = nullptr;  // (round 395: on the model's one node - Unity's root - under the placed model's object, both named tri)
+    ed.scene().for_each([&](GameObject &g) { tri = g.name == "tri" && g.get<EngineComponent>() ? &g : tri; });
     const EngineComponent *sdk = tri ? tri->get<EngineComponent>() : nullptr;
     std::printf("    the placed model: %s, its added component %s\n", tri ? "made" : "missing", sdk ? sdk->type.c_str() : "-");
     CHECK(tri && sdk && sdk->type == "MonoBehaviour (bbbb0000bbbb0000bbbb0000bbbb0004:542108242)" && sdk->data.find("--- !u!114 &52\r\n") == 0 &&
@@ -9142,6 +9143,202 @@ static void tests_round371() {
     ed.init_headless(1200, 900);
     ed.command("window Materials");
     CHECK(load_unity_material("not yaml", "x.mat", *std::make_shared<Material>()) == false);
+  });
+}
+
+namespace r395 {
+const char *kGuidTwo = "cccc0000cccc0000cccc0000cccc0001", *kGuidOne = "cccc0000cccc0000cccc0000cccc0002";
+std::string color_mat(const std::string &name, const std::string &rgb) {
+  return "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: " + name + "\n  m_Shader: {fileID: 46, guid: 0000000000000000f000000000000000, type: 0}\n"
+         "  m_SavedProperties:\n    m_TexEnvs: []\n    m_Floats: []\n    m_Colors:\n    - _Color: {" + rgb + ", a: 1}\n";
+}
+std::string mod(const std::string &fid, const std::string &guid, const std::string &prop, const std::string &value, const std::string &ref = "{fileID: 0}") {
+  return "    - target: {fileID: " + fid + ", guid: " + guid + ", type: 3}\n      propertyPath: " + prop + "\n      value: " + value + "\n      objectReference: " + ref + "\n";
+}
+std::string instance(int fid, const std::string &guid, const std::string &mods) {
+  return "--- !u!1001 &" + std::to_string(fid) + "\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 0}\n    m_Modifications:" +
+         (mods.empty() ? std::string(" []\n") : "\n" + mods) + "  m_SourcePrefab: {fileID: 100100000, guid: " + guid + ", type: 3}\n";
+}
+std::string mat_ref(int n) { return "{fileID: 2100000, guid: cccc0000cccc0000cccc0000cccc000" + std::to_string(n) + ", type: 2}"; }
+std::string material_name(GameObject *g, size_t slot = 0) {
+  const MeshRenderer *r = g ? g->get<MeshRenderer>() : nullptr;
+  return r && r->materials.size() > slot && r->materials[slot] ? r->materials[slot]->name : std::string("-");
+}
+}  // namespace r395
+
+static void tests_round395() {
+  test("Unity model IDs (round 395): xxh64 against the reference and Unity's own numbers; a model's parts by a .unity-model-ids table, Unity's root numbers and a legacy table; a single top node is Unity's root; the scene's ambient and fog", [] {
+    CHECK(xxh64("", 0) == 0xEF46DB3751D8E999ull && xxh64("a", 1) == 0xD24EC4F1A98C6E5Bull);
+    CHECK(unity_hashed_file_id("Mesh", "mesh") == (int64_t)9776592800496368506ull);  // (the forum's own example)
+    /* Unity's numbers for a model of the SideRail package, read from Unity (a short and a 32-byte-plus string). */
+    CHECK(unity_hashed_file_id("Mesh", "BarCounte_Collider") == -6972724895998368232LL && unity_hashed_file_id("Material", "concrete_worn_scratched") == -3391495598767469375LL);
+    std::map<std::string, UnityModelIds> tables;
+    parse_unity_model_ids("cccc0000cccc0000cccc0000cccc0001\t-42\t23\tBody/Arm\r\nshort\t1\t1\tX\ncccc0000cccc0000cccc0000cccc0001\t7\t1\t\n", tables);
+    const UnityModelIds &t = tables["cccc0000cccc0000cccc0000cccc0001"];
+    CHECK(tables.size() == 1 && t.size() == 2 && t.at(-42).class_id == 23 && t.at(-42).path == "Body/Arm" && t.at(7).path.empty());
+    UnityModelIds legacy;
+    unity_model_ids_from_meta(parse_yaml("ModelImporter:\n  fileIDToRecycleName:\n    100000: //RootNode\n    100002: Arm\n    2300002: Arm\n    4300000: Arm\n"), legacy);
+    CHECK(legacy.at(100002).class_id == 1 && legacy.at(100002).path == "Arm" && legacy.at(2300002).class_id == 23 && !legacy.count(4300000) &&
+          legacy.at(919132149155446097LL).class_id == 1 && legacy.at(-7511558181221131132LL).class_id == 23);
+    /* One top node (Body, with the mesh): Unity's root is it - the root's numbers are Body's (review 395: its transform the one
+     * the instance overrides, its static flags its renderer's). */
+    Scene scene;
+    ImportResult r;
+    r.nodes.resize(3);
+    r.nodes[0].name = "Body", r.nodes[0].mesh = primitives::cube();
+    r.nodes[1].name = "Arm", r.nodes[1].parent = 0, r.nodes[1].mesh = primitives::cube();
+    r.nodes[2].name = "Hand", r.nodes[2].parent = 1;
+    std::vector<GameObject *> made;
+    GameObject *root = objects_from_model(r, "Model", scene, &made);
+    UnityModelIds ids;
+    unity_model_ids_from_meta(YamlNode(), ids);
+    ids[-1] = {23, "Arm"}, ids[-2] = {1, "Arm/Hand"}, ids[-3] = {1, "Nowhere"};
+    UnityTargets parts;
+    unity_model_targets(r, root, made, ids, parts);
+    CHECK(made.size() == 3 && parts.at(919132149155446097LL).object == made[0] && parts.at(-8679921383154817045LL).object == made[0] &&
+          parts.at(-7511558181221131132LL).object == made[0]);
+    CHECK(parts.at(-1).object == made[1] && parts.at(-1).class_id == 23 && parts.at(-2).object == made[2] && !parts.count(-3));
+    /* RenderSettings: a Trilight ambient and exponential fog (95% at 3 / density). */
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml("%YAML 1.1\n--- !u!104 &2\nRenderSettings:\n  m_Fog: 1\n  m_FogColor: {r: 0.5, g: 0.5, b: 1, a: 1}\n  m_FogMode: 2\n  m_FogDensity: 0.02\n"
+                           "  m_AmbientSkyColor: {r: 1, g: 0, b: 0, a: 1}\n  m_AmbientEquatorColor: {r: 0, g: 1, b: 0, a: 1}\n  m_AmbientGroundColor: {r: 0, g: 0, b: 1, a: 1}\n"
+                           "  m_AmbientIntensity: 1.5\n  m_AmbientMode: 1\n", docs, why));
+    EnvironmentSettings env;
+    std::vector<std::string> notes;
+    CHECK(unity_render_settings(docs, env, notes) && env.mode == 0 && env.sky.x == 1.0f && env.equator.y == 1.0f && env.ground.z == 1.0f && env.strength == 1.0f);  // (review 395: the multiplier is a Skybox's)
+    std::printf("    fog: %s, %g to %g m, colour (%g %g %g); %zu note(s)\n", env.fog ? "on" : "off", env.fog_start, env.fog_end, env.fog_color.x, env.fog_color.y, env.fog_color.z, notes.size());
+    CHECK(env.fog && env.fog_start == 0.0f && std::fabs(env.fog_end - 150.0f) < 1e-3f && std::fabs(env.fog_color.x - srgb_to_linear(0.5f)) < 1e-5f && notes.size() == 1);
+  });
+  test("Unity Filamented (round 395): Silent's four setups by name - Metallic as Standard, Roughness's _Glossiness and roughness map, Specular's colour as metal, Cloth's sheen; the occlusion map said", [] {
+    using namespace r371;
+    UnityMaterialInfo info;
+    CHECK(unity_shader_family("Silent/Filamented", {}) == "Filamented" && unity_shader_family("Silent/Filamented (Roughness setup)", {}) == "Filamented (Roughness setup)");
+    CHECK(unity_shader_family("Silent/Filamented (Specular setup)", {}) == "Filamented (Specular setup)" &&
+          unity_shader_family("Silent/Filamented (Cloth setup)", {}) == "Filamented (Cloth setup)" &&
+          unity_shader_family("Silent/Filamented Extras/Simple Triplanar Filamented", {}) == "Filamented");
+    const std::string ao = "    - _OcclusionMap:\n        m_Texture: {fileID: 2800000, guid: ao, type: 3}\n";
+    Material metal;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", ao, "    - _Metallic: 0.6\n    - _Glossiness: 0.7\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"),
+                         kTex, shader("Silent/Filamented"), metal, info));
+    CHECK(info.known && info.shader == "Filamented" && std::fabs(metal.metallic - 0.6f) < 1e-6f && std::fabs(metal.roughness - 0.3f) < 1e-5f && info.notes.size() == 1);
+    Material rough;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "    - _SpecGlossMap:\n        m_Texture: {fileID: 2800000, guid: rough, type: 3}\n",
+                             "    - _Metallic: 0.2\n    - _Glossiness: 0.8\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex, shader("Silent/Filamented (Roughness setup)"), rough, info));
+    CHECK(info.known && rough.roughness_map.path == "Assets/T/rough.png" && rough.roughness == 1.0f && std::fabs(rough.metallic - 0.2f) < 1e-6f);
+    Material rough_slider;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "    - _Glossiness: 0.8\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex,
+                         shader("Silent/Filamented (Roughness setup)"), rough_slider, info));
+    CHECK(std::fabs(rough_slider.roughness - 0.8f) < 1e-6f && rough_slider.roughness_map.empty());  // (_Glossiness is the roughness here, not 1 - it)
+    Material spec;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "    - _Glossiness: 0.5\n", "    - _Color: {r: 0, g: 0, b: 0, a: 1}\n    - _SpecColor: {r: 1, g: 1, b: 1, a: 1}\n"),
+                         kTex, shader("Silent/Filamented (Specular setup)"), spec, info));
+    CHECK(info.known && spec.metallic == 1.0f && spec.base_color.x == 1.0f);  // (a white specular: a metal of that colour)
+    Material dielectric;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "", "    - _Color: {r: 1, g: 0, b: 0, a: 1}\n    - _SpecColor: {r: 0.2, g: 0.2, b: 0.2, a: 1}\n"),
+                         kTex, shader("Silent/Filamented (Specular setup)"), dielectric, info));
+    CHECK(dielectric.metallic < 0.01f && dielectric.base_color.x > 0.99f);  // (Unity's 0.2 gamma is about 3% linear: under the 4% of plastic)
+    Material cloth;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "    - _Metallic: 1\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n    - _SpecColor: {r: 1, g: 0, b: 0, a: 1}\n"),
+                         kTex, shader("Silent/Filamented (Cloth setup)"), cloth, info));
+    CHECK(info.known && cloth.metallic == 0.0f && cloth.sheen == 1.0f && cloth.sheen_tint.x == 1.0f && cloth.sheen_tint.y == 0.0f);
+  });
+  test("Unity scene overrides (round 395): a model's materials, a part turned off and its shadows by Unity's numbers; a lone renderer's; one waiting for Unity; a variant of a variant's material; a nested prefab's own .mat; a light's intensity, colour and switch; Contribute GI; a relative path; open as a scene", [] {
+    using namespace r395;
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R395"), table = resolve_asset_path("Assets/.unity-model-ids");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    CHECK(fs::write_file(fs::join(dir, "two.obj"), "o A\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\no B\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 4 5 6\nf 4 6 7\n"));
+    CHECK(fs::write_file(fs::join(dir, "one.obj"), "o Solo\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"));
+    for (const auto &[n, rgb] : std::vector<std::pair<int, std::string>>{{5, "r: 1, g: 0, b: 0"}, {6, "r: 0, g: 0, b: 1"}, {7, "r: 0, g: 1, b: 0"}})
+      CHECK(fs::write_file(fs::join(dir, std::string(n == 5 ? "Red" : n == 6 ? "Blue" : "Green") + ".mat"), color_mat(n == 5 ? "Red" : n == 6 ? "Blue" : "Green", rgb)));
+    const std::string g3 = "cccc0000cccc0000cccc0000cccc0003", g4 = "cccc0000cccc0000cccc0000cccc0004", g8 = "cccc0000cccc0000cccc0000cccc0008";
+    CHECK(fs::write_file(fs::join(dir, "Shelf.prefab"),
+                         "%YAML 1.1\n--- !u!1 &1\nGameObject:\n  m_Name: Shelf\n--- !u!4 &4\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &33\nMeshFilter:\n  m_GameObject: {fileID: 1}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &2300\nMeshRenderer:\n  m_GameObject: {fileID: 1}\n  m_Materials:\n  - " + mat_ref(5) + "\n"));
+    CHECK(fs::write_file(fs::join(dir, "Shelf2.prefab"), "%YAML 1.1\n" + instance(10, g3, mod("2300", g3, "m_Materials.Array.data[0]", "", mat_ref(6))) +
+                         "--- !u!23 &20 stripped\nMeshRenderer:\n  m_CorrespondingSourceObject: {fileID: 2300, guid: " + g3 + ", type: 3}\n  m_PrefabInstance: {fileID: 10}\n"));
+    CHECK(fs::write_file(fs::join(dir, "Lamp3.prefab"),
+                         "%YAML 1.1\n--- !u!1 &1\nGameObject:\n  m_Name: Lamp3\n--- !u!4 &4\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!108 &10800\nLight:\n  m_GameObject: {fileID: 1}\n  m_Enabled: 1\n  m_Type: 2\n  m_Color: {r: 1, g: 1, b: 1, a: 1}\n  m_Intensity: 1\n"));
+    const std::string scene = "%YAML 1.1\n--- !u!104 &2\nRenderSettings:\n  m_Fog: 1\n  m_FogMode: 1\n  m_LinearFogStart: 5\n  m_LinearFogEnd: 40\n  m_AmbientMode: 3\n"
+        "  m_AmbientSkyColor: {r: 1, g: 1, b: 1, a: 1}\n" +
+        instance(100, kGuidTwo, mod("111", kGuidTwo, "m_Materials.Array.data[0]", "", mat_ref(5)) + mod("222", kGuidTwo, "m_IsActive", "0") +
+                                    mod("333", kGuidTwo, "m_CastShadows", "0") + mod("999", kGuidTwo, "m_Materials.Array.data[0]", "", mat_ref(7))) +
+        instance(200, kGuidOne, mod("5555", kGuidOne, "m_Materials.Array.data[0]", "", mat_ref(6)) + mod("-8679921383154817045", kGuidOne, "m_LocalPosition.x", "4") +
+                                    mod("919132149155446097", kGuidOne, "m_StaticEditorFlags", "1")) +
+        instance(300, g4, mod("20", g4, "m_Materials.Array.data[0]", "", mat_ref(7))) + instance(400, g3, "") +
+        instance(500, g8, mod("10800", g8, "m_Intensity", "4") + mod("10800", g8, "m_Color.g", "0.25") + mod("10800", g8, "m_Enabled", "0")) +
+        "--- !u!1 &600\nGameObject:\n  m_Name: Static\n  m_StaticEditorFlags: 4294967295\n--- !u!4 &601\nTransform:\n  m_GameObject: {fileID: 600}\n  m_Father: {fileID: 0}\n"
+        "--- !u!33 &602\nMeshFilter:\n  m_GameObject: {fileID: 600}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+        "--- !u!23 &603\nMeshRenderer:\n  m_GameObject: {fileID: 600}\n  m_CastShadows: 0\n  m_ReceiveShadows: 0\n  m_ScaleInLightmap: 2\n";
+    CHECK(fs::write_file(fs::join(dir, "Ovr.unity"), scene));
+    std::string guids, meta;
+    for (const auto &[n, file] : std::vector<std::pair<int, std::string>>{{1, "two.obj"}, {2, "one.obj"}, {3, "Shelf.prefab"}, {4, "Shelf2.prefab"},
+                                                                          {5, "Red.mat"}, {6, "Blue.mat"}, {7, "Green.mat"}, {8, "Lamp3.prefab"}}) {
+      const std::string g = "cccc0000cccc0000cccc0000cccc000" + std::to_string(n);
+      guids += g + "\tAssets/" + file + "\tAssets/Imported/R395/" + file + "\n";
+      CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + g + ".meta"), "fileFormatVersion: 2\nguid: " + g + "\n" + (n <= 2 ? "ModelImporter:\n  externalObjects: {}\n" : "")));
+    }
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), guids));
+    /* Unity's numbers for two.obj's parts (as `unity modelids` writes them): A's renderer, B's GameObject and renderer. */
+    CHECK(fs::write_file(table, std::string(kGuidTwo) + "\t111\t23\tA\n" + kGuidTwo + "\t222\t1\tB\n" + kGuidTwo + "\t333\t23\tB\n"));
+    ed.command("import Assets/Imported/R395/Ovr.unity");  // (round 395: a path in the project, as typed)
+    GameObject *root = ed.scene().find_by_name("Ovr"), *a = ed.scene().find_by_name("A"), *b = ed.scene().find_by_name("B"), *solo = ed.scene().find_by_name("Solo");
+    GameObject *lamp = ed.scene().find_by_name("Lamp3"), *stat = ed.scene().find_by_name("Static");
+    CHECK(root && a && b && solo && lamp && stat);
+    if (!root || !a || !b || !solo || !lamp || !stat) return;
+    std::vector<std::string> shelves;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name == "Shelf") shelves.push_back(material_name(&g));
+    });
+    std::sort(shelves.begin(), shelves.end());
+    const Light *l = lamp->get<Light>();
+    const MeshRenderer *sr = stat->get<MeshRenderer>();
+    std::printf("    A wears %s; B %s, casts shadows %d; Solo wears %s; shelves %s / %s; lamp intensity %g, green %g, on %d; Static: GI %d, shadows %d/%d, lightmap scale %g\n",
+                material_name(a).c_str(), b->active ? "on" : "off", b->get<MeshRenderer>() ? (int)b->get<MeshRenderer>()->cast_shadows : -1, material_name(solo).c_str(),
+                shelves.size() > 0 ? shelves[0].c_str() : "-", shelves.size() > 1 ? shelves[1].c_str() : "-", l ? l->intensity : 0.0f, l ? l->color.y : 0.0f,
+                l ? (int)l->enabled : -1, sr ? (int)sr->contribute_gi : -1, sr ? (int)sr->cast_shadows : -1, sr ? (int)sr->receive_shadows : -1, sr ? sr->scale_in_lightmap : 0.0f);
+    CHECK(material_name(a) == "Red" && !b->active && b->get<MeshRenderer>() && !b->get<MeshRenderer>()->cast_shadows);
+    CHECK(material_name(solo) == "Blue");  // (one renderer: an override on any renderer number is its)
+    /* Review 395: one top node is Unity's root - the instance's position replaces its own (not added over it), its static flags its renderer's. */
+    CHECK(solo->local().position.x == 4.0f && solo->parent && solo->parent->local().position.x == 0.0f && solo->get<MeshRenderer>()->contribute_gi);
+    CHECK(shelves == std::vector<std::string>({"Green", "Red"}));  // (the variant's Blue under the scene's Green; the plain one's own .mat)
+    CHECK(l && l->intensity == 4.0f && l->color.y == 0.25f && !l->enabled);
+    CHECK(sr && sr->contribute_gi && !sr->cast_shadows && !sr->receive_shadows && sr->scale_in_lightmap == 2.0f);
+    CHECK(ed.scene().find_by_name("Main Camera") != nullptr && ed.scene().environment.fog == false);  // (an import adds to the scene: its lighting stays)
+    /* Opened as a scene: a new one - no starter objects, the objects at the top, the scene's fog and ambient, nothing to undo. */
+    ed.command("newscene");
+    ed.command("open Assets/Imported/R395/Ovr.unity");
+    GameObject *a2 = ed.scene().find_by_name("A"), *two = ed.scene().find_by_name("two");
+    const EnvironmentSettings &env = ed.scene().environment;
+    std::printf("    opened: Main Camera %s, 'two' at the top %d, fog %d %g-%g, ambient mode %d, undo steps %zu\n", ed.scene().find_by_name("Main Camera") ? "there" : "gone",
+                two && !two->parent, (int)env.fog, env.fog_start, env.fog_end, env.mode, ed.undo_depth_for_test());
+    CHECK(!ed.scene().find_by_name("Main Camera") && !ed.scene().find_by_name("Ovr") && two && !two->parent && a2 && material_name(a2) == "Red");
+    CHECK(env.fog && env.fog_start == 5.0f && env.fog_end == 40.0f && env.mode == 3 && env.color.x == 1.0f && ed.undo_depth_for_test() == 0);
+    /* Without Unity's table: A's material waits (two renderers: no guess), B stays on. */
+    fs::remove_file(table);
+    ed.command("newscene");
+    ed.command("import " + fs::join(dir, "Ovr.unity"));
+    GameObject *a3 = nullptr, *b3 = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      a3 = g.name == "A" ? &g : a3, b3 = g.name == "B" ? &g : b3;
+    });
+    CHECK(a3 && b3 && material_name(a3) != "Red" && b3->active);
+    /* Review 395: a .unity that isn't there leaves the scene as it is. */
+    const size_t kept = ed.scene().roots.size();
+    ed.command("open Assets/Imported/R395/Nope.unity");
+    CHECK(ed.open_unity_scene(fs::join(dir, "Nope.unity")) == false && ed.scene().roots.size() == kept && ed.scene().find_by_name("A"));
+    /* No Unity (BLENDITY_UNITY names none): `unity modelids` refuses, starting nothing. */
+    set_env("BLENDITY_UNITY", fs::join(dir, "no-unity.exe"));
+    ed.command("unity modelids");
+    CHECK(!ed.unity_ids_job_ && ed.unity_editor_program().empty());
+    set_env("BLENDITY_UNITY", "");
+    std::filesystem::remove_all(dir, ec);
   });
 }
 
@@ -10374,6 +10571,7 @@ void run_assets_tests() {
   tests_round369();
   tests_round370();
   tests_round371();
+  tests_round395();
   tests_round372();
   tests_round373();
   tests_round374();

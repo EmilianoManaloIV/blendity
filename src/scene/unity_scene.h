@@ -22,6 +22,35 @@ namespace bl {
 const char *unity_builtin_mesh(int64_t file_id);
 constexpr const char *kUnityBuiltinGuid = "0000000000000000e000000000000000";
 
+/* Round 395: what a prefab override's target is - its object and the class of its document (1 GameObject,
+ * 4 Transform, 23 MeshRenderer, 137 SkinnedMeshRenderer, 108 Light, ...; 0 unknown). */
+struct UnityTarget {
+  GameObject *object = nullptr;
+  int class_id = 0;
+};
+using UnityTargets = std::map<int64_t, UnityTarget>;
+
+/* Round 395: a model's sub-objects by their fileIDs (an FBX's nodes as Unity numbers them): the class and the node's
+ * path below the model's root ("" the root; names joined by '/'; a legacy table's entries hold the node's name). */
+struct UnityModelPart {
+  int class_id = 0;
+  std::string path;
+};
+using UnityModelIds = std::map<int64_t, UnityModelPart>;
+/* A model's sub-asset as Unity 2019.3+ numbers it: xxh64 of "Type:<type>-><name><n>" read as signed (n: the name's
+ * occurrence, 0 first) - its meshes and materials. (Its nodes' numbers come from Unity: .unity-model-ids.) */
+int64_t unity_hashed_file_id(const std::string &type, const std::string &name, int occurrence = 0);
+/* What a model's .meta and Unity's constants say without Unity: the root's GameObject, Transform, renderer and filter
+ * (the same numbers in every model, the persistent ones and the legacy 100000s) and a legacy table's names
+ * (fileIDToRecycleName, internalIDToNameTable). */
+void unity_model_ids_from_meta(const YamlNode &meta, UnityModelIds &out);
+/* A .unity-model-ids file (written by Unity through Blendity: "<guid>\t<fileID>\t<class>\t<path>" a line), by GUID. */
+void parse_unity_model_ids(const std::string &text, std::map<std::string, UnityModelIds> &out);
+/* A model's objects (objects_from_model's: `made` its nodes' objects in r.nodes' order, under `root`) as override
+ * targets by `ids`. A model with one top node: Unity makes that node its root - the root's numbers are that node's,
+ * its transform the one the instance overrides (review 395: placed over the node's own, it had turned twice). */
+void unity_model_targets(const ImportResult &r, GameObject *root, const std::vector<GameObject *> &made, const UnityModelIds &ids, UnityTargets &out);
+
 /* What the builder asks for and what it counts. */
 struct UnityImport {
   /* A mesh by its asset's GUID and the fileID within it (an FBX's submesh), for the object of that name (Unity names
@@ -33,7 +62,7 @@ struct UnityImport {
   std::function<bool(const std::string &guid, std::vector<UnityDoc> &docs)> prefab;
   /* A model placed as a prefab (an FBX dragged into a scene: a VRChat avatar's usual root): its nodes made as objects
    * under one, returned; nullptr when the GUID isn't a model. */
-  std::function<GameObject *(const std::string &guid, Scene &scene)> model;
+  std::function<GameObject *(const std::string &guid, Scene &scene, UnityTargets &parts)> model;  // (round 395: `parts` its nodes by fileID, as far as known)
   /* A material by its GUID (round 371: a Unity .mat converted; nullptr when not in the project). */
   std::function<MaterialPtr(const std::string &guid)> material;
   int depth = 0;
@@ -46,6 +75,8 @@ struct UnityImport {
   int max_objects = 200000;
   int objects = 0, meshes = 0, missing_meshes = 0, lights = 0, cameras = 0, colliders = 0, engine = 0, prefabs = 0, overrides_kept = 0;
   int dropped = 0;  // (components whose object couldn't be found)
+  int overrides_applied = 0, model_overrides_waiting = 0;  // (round 395: overrides on a model's parts whose fileIDs aren't known yet)
+  std::set<std::string> models_waiting;                    // (...their models' GUIDs: what Unity is asked for)
   int materials = 0, outlines = 0, springs = 0;  // (round 371)
   std::vector<std::string> notes;
 };
@@ -68,7 +99,11 @@ bool load_unity_material(const std::string &text, const std::string &path, Mater
 
 /* A model's nodes as objects (their hierarchy, transforms, meshes and materials) under one named `name` - a model
  * placed in a Unity prefab, or instanced in a Godot scene (round 373). */
-GameObject *objects_from_model(const ImportResult &r, const std::string &name, Scene &scene);
+GameObject *objects_from_model(const ImportResult &r, const std::string &name, Scene &scene, std::vector<GameObject *> *made = nullptr);
+
+/* Round 395: a Unity scene's RenderSettings into the environment - its ambient (flat or gradient) and its fog (Unity's
+ * exponential fog as the linear distance it reaches 95% at); what doesn't map said in `notes`. False: none there. */
+bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes);
 
 /* Round 372: an imported object's edits in its Unity file - its name and active state on its GameObject, its local
  * transform on its Transform. */
@@ -89,6 +124,7 @@ std::string patch_unity_objects(const std::string &text, const std::vector<Unity
 std::string unity_yaml_string(const std::string &s);
 
 /* The documents' objects made in `scene` under `parent`, by their GameObject's and Transform's fileIDs. */
-std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> &docs, Scene &scene, GameObject *parent, UnityImport &ctx);
+std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> &docs, Scene &scene, GameObject *parent, UnityImport &ctx,
+                                                    UnityTargets *targets = nullptr);
 
 }  // namespace bl

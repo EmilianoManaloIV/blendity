@@ -3,7 +3,9 @@
 // own: Unity's Standard (_Color, _MainTex, _BumpMap, _Metallic, _Glossiness, _Mode, _Cutoff, _EmissionColor), URP Lit
 // (_BaseColor, _BaseMap, _Smoothness, _Surface, _AlphaClip), MToon (_ShadeColor, _ShadeTexture, _OutlineWidth,
 // _OutlineColor), lilToon (_ShadowColor, _OutlineWidth, _OutlineColor), Poiyomi (_ShadowColor, _LineWidth) and UTS2
-// (_1st_ShadeColor, _1st_ShadeMap, _Outline_Width, _Outline_Color).
+// (_1st_ShadeColor, _1st_ShadeMap, _Outline_Width, _Outline_Color); Silent's Filamented (round 395: Standard's names,
+// with _Glossiness its roughness and _SpecGlossMap's red its roughness map in the Roughness setup, _SpecColor and
+// _SpecGlossMap the specular colour in the Specular setup and the sheen in the Cloth setup - its UnityStandardInput).
 #include "unity_material.h"
 
 #include "unity_yaml.h"
@@ -156,6 +158,35 @@ void read_blend(const Props &p, const std::string &family, Material &m) {
 
 void read_outline(const Props &p, const std::string &family, UnityMaterialInfo &info);
 
+/* Filamented's setups over the Standard base (round 395). Metallic: Standard's own. Roughness: _Glossiness is the
+ * roughness, the map its red (1 - its red is the smoothness). Specular: the specular colour as a metal estimate (F0
+ * over the dielectric 4%) and the base mixed toward it. Cloth: the specular colour is the sheen's. The occlusion map
+ * has no slot in Blendity: said. */
+void read_filamented(const Props &p, const std::string &family, const std::function<std::string(const std::string &)> &texture, Material &m, UnityMaterialInfo &info) {
+  const TexEnv *spec_map = tex_of(p, {"_SpecGlossMap"});
+  Vec3 spec(0.04f);
+  const bool has_spec = color_of(p, {"_SpecColor"}, spec);
+  if (family == "Filamented (Roughness setup)") {
+    m.roughness = (float)std::clamp(prop(p, "_Glossiness", 0.5), 0.0, 1.0);
+    if (!tex_of(p, {"_MetallicGlossMap"})) m.metallic = (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
+    set_tex(m.roughness_map, spec_map, texture);
+    if (spec_map) m.roughness = 1.0f;  // (the map is the roughness: Blendity scales it by the slider)
+  }
+  if (family == "Filamented (Specular setup)" && has_spec) {
+    const float f0 = std::max({spec.x, spec.y, spec.z});
+    const float metal = std::clamp((f0 - 0.04f) / 0.96f, 0.0f, 1.0f);
+    m.metallic = metal;
+    m.base_color = m.base_color * (1.0f - metal) + spec * metal;
+    if (spec_map) info.notes.push_back("its specular map came in as one specular colour");
+  }
+  if (family == "Filamented (Cloth setup)") {
+    m.metallic = 0.0f, m.sheen = 1.0f;
+    if (has_spec) m.sheen_tint = spec;
+    if (spec_map) info.notes.push_back("its sheen map came in as one sheen colour");
+  }
+  if (tex_of(p, {"_OcclusionMap"})) info.notes.push_back("its occlusion map isn't carried (Blendity's materials have no occlusion slot)");
+}
+
 /* The toon families: the shade colour and texture, the outline. */
 void read_toon(const Props &p, const std::string &family, const std::function<std::string(const std::string &)> &texture, Material &m, UnityMaterialInfo &info) {
   m.shading_model = 1;
@@ -207,6 +238,12 @@ std::string unity_shader_family(const std::string &shader_name, const std::vecto
   if (n.find("poiyomi") != std::string::npos || has(properties, "_ShaderOptimizerEnabled")) return "Poiyomi";
   if (n.find("mtoon") != std::string::npos || (has(properties, "_ShadeColor") && has(properties, "_ShadeTexture"))) return "MToon";
   if (n.find("toonshader") != std::string::npos || n.find("uts") == 0 || has(properties, "_1st_ShadeColor")) return "UTS2";
+  if (n.find("filamented") != std::string::npos) {  // (Silent's: "Silent/Filamented" and its setups; its Extras are Metallic templates)
+    for (const char *setup : {"roughness", "specular", "cloth"})
+      if (n.find(std::string("(") + setup + " setup)") != std::string::npos)
+        return std::string("Filamented (") + (char)std::toupper((unsigned char)setup[0]) + (setup + 1) + " setup)";
+    return "Filamented";
+  }
   if (n.find("unlit") != std::string::npos) return "Unlit";
   if (n == "standard" || n == "standard (specular setup)") return "Standard";
   if (n == "lit" || n == "simplelit" || n == "simple lit" || n.find("universal render pipeline/lit") != std::string::npos) return "URP Lit";
@@ -233,8 +270,10 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   read_base(p, mat->body, texture, m);
   const bool toon = info.shader == "lilToon" || info.shader == "Poiyomi" || info.shader == "MToon" || info.shader == "UTS2";
   if (toon) read_toon(p, info.shader, texture, m, info);
+  const bool filamented = info.shader.rfind("Filamented", 0) == 0;
+  if (filamented) read_filamented(p, info.shader, texture, m, info);
   m.unlit = info.shader == "Unlit";
-  info.known = toon || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit";
+  info.known = toon || filamented || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit";
   m.touch();
   return true;
 }

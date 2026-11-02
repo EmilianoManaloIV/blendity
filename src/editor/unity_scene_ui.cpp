@@ -125,6 +125,14 @@ std::string meta_mesh_name(const YamlNode &root, int64_t file_id) {
   return "";
 }
 
+/* Every .unity-model-ids table in the project's Assets (round 395: Unity's numbers for models' parts), by GUID. */
+std::map<std::string, UnityModelIds> read_model_id_tables(const std::string &path) {
+  std::map<std::string, UnityModelIds> out;
+  std::string text;
+  if (fs::read_file(path, text)) parse_unity_model_ids(text, out);
+  return out;
+}
+
 /* What one import reads once (review 370: a prefab used a hundred times was read a hundred times). */
 struct ImportCache {
   std::map<std::string, ImportResult> models;          // (by path)
@@ -141,12 +149,16 @@ const ImportResult &model_of(ImportCache &c, const std::string &path) {
   return m->second;
 }
 
-/* A model's part for a MeshFilter: the one its .meta names for the fileID, else the node or mesh named as the object
- * (Unity names a model's objects after its nodes; 2019+ .meta files often list nothing), else the first - counted. */
-const ImportedNode *pick_part(const ImportResult &r, const std::string &name, const std::string &object, int &fallbacks) {
+/* A model's part for a MeshFilter: the one whose mesh Unity numbers with the fileID (round 395: its name hashed, a
+ * name's second mesh "...1"), else the one its .meta names, else the node or mesh named as the object (Unity names a
+ * model's objects after its nodes), else the first - counted. */
+const ImportedNode *pick_part(const ImportResult &r, int64_t fid, const std::string &name, const std::string &object, int &fallbacks) {
   const ImportedNode *first = nullptr, *by_meta = nullptr, *by_object = nullptr;
+  std::map<std::string, int> seen;
   for (const ImportedNode &n : r.nodes) {
     if (!n.mesh) continue;
+    const std::string &mesh_name = n.mesh->name.empty() ? n.name : n.mesh->name;
+    if (unity_hashed_file_id("Mesh", mesh_name, seen[mesh_name]++) == fid || unity_hashed_file_id("Mesh", n.name) == fid) return &n;
     first = first ? first : &n;
     by_meta = by_meta ? by_meta : !name.empty() && (n.mesh->name == name || n.name == name) ? &n : nullptr;
     by_object = by_object ? by_object : n.name == object || n.mesh->name == object ? &n : nullptr;
@@ -170,12 +182,24 @@ MeshPtr builtin_mesh(int64_t file_id) {
 
 }  // namespace
 
-/* import <file>.prefab|.unity: its objects under one root named for the file, selected; one Undo step. */
-bool Editor::import_unity_scene(const std::string &path) {
+/* A Unity file's path as typed: as it is, else under the project's folder or Assets (round 395: the console's
+ * `import Assets/Imported/.../Scene.unity` had read nothing). */
+std::string Editor::unity_scene_path(const std::string &path) const {
+  if (path.empty() || fs::exists(path)) return path;
+  const std::string in_project = fs::join(project_root_, path);
+  return fs::exists(in_project) ? in_project : resolve_asset_path(path);
+}
+
+/* import <file>.prefab|.unity: its objects under one root named for the file, selected; one Undo step. As the scene
+ * (round 395: a .unity opened): its objects at the top, its ambient and fog the scene's. */
+bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::vector<UnityDoc> *read) {
+  const std::string path = unity_scene_path(typed);
   std::string text, why;
   std::vector<UnityDoc> docs;
-  if (!fs::read_file(path, text)) return Log::warn("Import Unity %s: can't read %s", fs::extension(path).c_str(), path.c_str()), false;
-  if (!parse_unity_yaml(text, docs, why)) return Log::warn("Import Unity %s: %s - %s", fs::extension(path).c_str(), fs::filename(path).c_str(), why.c_str()), false;
+  if (read) docs = std::move(*read);  // (re-check 395: an opened scene's documents, read once)
+  if (!read && !fs::read_file(path, text)) return Log::warn("Import Unity %s: can't read %s", fs::extension(path).c_str(), path.c_str()), false;
+  if (!read && !parse_unity_yaml(text, docs, why))
+    return Log::warn("Import Unity %s: %s - %s", fs::extension(path).c_str(), fs::filename(path).c_str(), why.c_str()), false;
   const std::shared_ptr<const GuidIndex> kept = unity_guid_index_cached(assets_dir_, project_root_, true);
   const GuidIndex &index = *kept;
   ImportCache cache;
@@ -198,7 +222,7 @@ bool Editor::import_unity_scene(const std::string &path) {
     if (p.empty()) return nullptr;
     auto meta = cache.metas.find(guid);
     if (meta == cache.metas.end()) meta = cache.metas.emplace(guid, parse_yaml(index.at(guid).meta)).first;
-    const ImportedNode *pick = pick_part(model_of(cache, p), meta_mesh_name(meta->second, fid), object, cache.first_mesh_fallbacks);
+    const ImportedNode *pick = pick_part(model_of(cache, p), fid, meta_mesh_name(meta->second, fid), object, cache.first_mesh_fallbacks);
     if (pick) mats = pick->materials;
     return pick ? pick->mesh : nullptr;
   };
@@ -222,16 +246,32 @@ bool Editor::import_unity_scene(const std::string &path) {
     const auto it = index.find(guid);
     return it == index.end() || fs::extension(it->second.path) != ".mat" ? nullptr : material_asset(make_asset_relative(it->second.path));
   };
-  ctx.model = [&](const std::string &guid, Scene &scene) -> GameObject * {
+  const std::map<std::string, UnityModelIds> tables = read_model_id_tables(unity_model_ids_path());
+  ctx.model = [&](const std::string &guid, Scene &scene, UnityTargets &parts) -> GameObject * {
     const std::string p = model_path(guid);
-    return p.empty() ? nullptr : objects_from_model(model_of(cache, p), fs::stem(p), scene);
+    if (p.empty()) return nullptr;
+    const ImportResult &r = model_of(cache, p);
+    std::vector<GameObject *> made;
+    GameObject *root = objects_from_model(r, fs::stem(p), scene, &made);
+    auto meta = cache.metas.find(guid);
+    if (meta == cache.metas.end()) meta = cache.metas.emplace(guid, parse_yaml(index.at(guid).meta)).first;
+    UnityModelIds ids;
+    unity_model_ids_from_meta(meta->second, ids);
+    if (const auto t = tables.find(guid); t != tables.end()) ids.insert(t->second.begin(), t->second.end());
+    unity_model_targets(r, root, made, ids, parts);
+    return root;
   };
   commit_undo();
   std::set<uint64_t> before;
   scene_->for_each([&](GameObject &g) { before.insert(g.id); });
   GameObject *root = scene_->create(fs::stem(path));
-  root->set_world_position(cam_.pivot);
+  if (!as_scene) root->set_world_position(cam_.pivot);
   build_unity_objects(docs, *scene_, root, ctx);
+  if (as_scene && unity_render_settings(docs, scene_->environment, ctx.notes)) Log::info("Import Unity: the scene's ambient and fog came in");
+  int probes = 0, lightmapped = 0;
+  for (const UnityDoc &d : docs) probes += d.class_id == 220 || d.class_id == 215, lightmapped += d.class_id == 157 && d.body.file_id("m_LightingDataAsset") != 0;
+  if (probes) ctx.notes.push_back(std::to_string(probes) + " light / reflection probe(s) kept as Unity's (Blendity bakes its own: the Lighting window)");
+  if (lightmapped) ctx.notes.push_back("the scene's baked lightmaps stay Unity's (made with Unity's UVs): written back unchanged");
   std::vector<GameObject *> strays;  // (review 370: a variant's base, a parent loop - anything left at the top goes under the root)
   scene_->for_each([&](GameObject &g) {
     if (!g.parent && &g != root && !before.count(g.id)) strays.push_back(&g);
@@ -241,18 +281,32 @@ bool Editor::import_unity_scene(const std::string &path) {
     scene_->destroy(root);
     return Log::warn("Import Unity: %s has no objects", fs::filename(path).c_str()), false;
   }
-  expanded_.insert(root->id);
-  select(root->id);
+  if (as_scene) {  // (a scene's objects at the top, as Unity's Hierarchy shows them)
+    const std::vector<GameObject *> kids = root->children;
+    for (GameObject *g : kids) scene_->set_parent(g, nullptr, -1, true);
+    scene_->destroy(root), root = nullptr;
+  }
+  if (root) expanded_.insert(root->id), select(root->id);
   mark_changed("Import " + fs::filename(path));
+  unity_ids_waiting_ = ctx.models_waiting;
+  unity_ids_last_import_ = typed, unity_ids_last_opened_ = as_scene;
   if (cache.first_mesh_fallbacks) ctx.notes.push_back(std::to_string(cache.first_mesh_fallbacks) + " mesh part(s) not named by their model's .meta or object: the model's first mesh used");
   if (ctx.dropped) ctx.notes.push_back(std::to_string(ctx.dropped) + " component(s) on objects that weren't found (a nested prefab not in the project) were left out");
+  if (ctx.model_overrides_waiting) {  // (round 395: the parts' numbers are Unity's: asked of it once)
+    const std::string what = strprintf("Import Unity: %d override(s) on %zu model(s)' parts (materials, shadows, parts turned off) wait for Unity's numbers for those parts",
+                                       ctx.model_overrides_waiting, ctx.models_waiting.size());
+    const char *again = as_scene ? "open the scene again" : "import it again";
+    if (unity_editor_program().empty()) Log::warn("%s - install Unity (Unity Hub) and run: unity modelids, then %s", what.c_str(), again);
+    else refuse(what + ": Unity is installed - number them, then " + again, "unity modelids", "Number Parts with Unity");
+  }
   if (ctx.materials || ctx.outlines || ctx.springs)
     Log::info("Import Unity: %d Unity material(s) converted, %d outline(s), %d PhysBone setting(s) kept as spring bones", ctx.materials, ctx.outlines, ctx.springs);
   for (const auto &[n, count] : count_notes(ctx.notes)) Log::warn("Import Unity: %s%s", n.c_str(), count > 1 ? strprintf(" (x%d)", count).c_str() : "");
   Log::info("Import Unity: %s - %d object(s), %d mesh(es)%s, %d light(s), %d camera(s), %d collider(s), %d nested prefab(s), %d engine "
             "component(s) kept as they are (scripts, VRChat's)%s", fs::filename(path).c_str(), ctx.objects, ctx.meshes,
             ctx.missing_meshes ? strprintf(" (%d not found)", ctx.missing_meshes).c_str() : "", ctx.lights, ctx.cameras, ctx.colliders, ctx.prefabs, ctx.engine,
-            ctx.overrides_kept ? strprintf(", %d prefab override(s) Blendity doesn't hold left to Unity", ctx.overrides_kept).c_str() : "");
+            ctx.overrides_kept ? strprintf(", %d prefab override(s) applied, %d Blendity doesn't hold left to Unity", ctx.overrides_applied, ctx.overrides_kept).c_str()
+                               : ctx.overrides_applied ? strprintf(", %d prefab override(s) applied", ctx.overrides_applied).c_str() : "");
   return true;
 }
 

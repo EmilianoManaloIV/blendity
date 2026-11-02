@@ -743,6 +743,7 @@ class Editor {
   void board_export_wait_for_test();  // (round 326: an export's threads done)
   size_t board_pictures_for_test() const { return board_pics_.size(); }
   int board_undo_depth_for_test() const { return (int)board_undo_.size(); }
+  size_t undo_depth_for_test() const { return undo_.size(); }  // (round 395: a scene opened has nothing to undo)
   bool board_dirty_for_test() const { return board_dirty_; }
   std::shared_ptr<BoardPicture> paper_thumb_for_test(const std::string &path) { return board_paper_picture(path); }
   std::string paper_rel_for_test(const std::string &name) const { return paper_rel(name); }
@@ -1333,7 +1334,29 @@ class Editor {
     void finish(const std::string &failure);
   };
   bool import_unity_package(const std::string &path);
-  bool import_unity_scene(const std::string &path);  // (round 370: a .prefab or .unity file's objects)
+  bool import_unity_scene(const std::string &path, bool as_scene = false, std::vector<UnityDoc> *read = nullptr);  // (round 370: a .prefab or .unity file's objects; 395: as the scene)
+  /* Round 395 (unity_model_ids_ui.cpp): a .unity opened as a new scene, and a model's part numbers asked of Unity. */
+  void open_unity_scene_asked(const std::string &path);
+  std::string unity_scene_path(const std::string &path) const;
+  bool open_unity_scene(const std::string &path);
+  struct UnityIdsJob {
+    struct IdsFile {
+      std::string from, meta, to;  // (the model, its .meta's text, its place in the scratch project)
+    };
+    std::atomic<int> code{-1000000};  // (running till then)
+    std::string project, why;
+    std::vector<IdsFile> files;
+    int models = 0;
+    void run(const std::string &unity);
+  };
+  std::shared_ptr<UnityIdsJob> unity_ids_job_;
+  std::set<std::string> unity_ids_waiting_;  // (the models whose parts the last import's overrides named without numbers)
+  std::string unity_ids_last_import_;
+  bool unity_ids_last_opened_ = false;  // (review 395: an opened scene is opened again, not imported on top of itself)
+  std::string unity_editor_program() const;
+  std::string unity_model_ids_path() const;
+  void read_unity_model_ids(bool all, bool wait = false);
+  void poll_unity_model_ids();
   bool export_unity_package(const std::string &folder, const std::string &out = "");  // (round 372: the way back)
   std::map<std::string, std::vector<UnityEdit>> unity_edits(const std::string &folder_rel, int &nested, int &copies);
   void export_package_of_selection();
